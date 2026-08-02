@@ -1,0 +1,13 @@
+// TEST: Compound Wildcard Scattered (rejects)
+// ERROR: BL4003
+// The scattered-pin wildcard form B((_, 0)) (free leading axis) rejects on a
+// compound: partial/wildcard reads are a SparseIdx feature since the flat-
+// subscript conversion. Its positive semantics live in the sparse block
+// (176_sparse_partial_scattered).
+type Lat = Idx<2>
+type Lon = Idx<3>
+let dense: Array<Float64 like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let r = B((_, 0))
+// EXPECT: typecheck failure - wildcard reads on a compound axis moved to SparseIdx.

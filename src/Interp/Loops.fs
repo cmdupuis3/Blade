@@ -199,7 +199,7 @@ let private raggedFamilyOrCompound (ix: IRIndexType) : bool =
     | IxKRagged | IxKRaggedInline | IxKRaggedOpaque
     | IxKDep | IxKDepInner | IxKDepOuter
     | IxKGroupOuter | IxKGroupMember
-    | IxKCompound | IxKCompoundDynamic -> true
+    | IxKCompound | IxKCompoundDynamic | IxKSparse -> true
     | _ -> false
 
 let private gateInputs (info: ApplyInfo) : unit =
@@ -749,8 +749,14 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     match tryCompoundRangeMap info0 with
     | Some (maskExpr, leadRank) -> materializeCompoundRangeMap st env info0 wrappers maskExpr leadRank
     | None ->
+    match trySparseRangeMap info0 with
+    | Some (src, leadRank) -> materializeSparseRangeMap st env info0 wrappers src leadRank
+    | None ->
     if tryGroupedMap info0 then materializeGroupedMap st env info0 wrappers
     else
+    match tryWreathApply info0 with
+    | Some tie -> materializeWreathApply st env info0 wrappers tie
+    | None ->
     gateInputs info0
     let info = applyFunctorWrappers st info0 wrappers
     let arrayNames = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
@@ -812,6 +818,118 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
 and private nodeTypeName (ty: IRType) : string =
     let case, _ = Microsoft.FSharp.Reflection.FSharpValue.GetUnionFields(ty, typeof<IRType>)
     case.Name
+
+// ============================================================================
+//  Deduced OrbIdx (iterated-wreath) output — the interpreter's traversal nest
+//  docs/plan-orbit-index-types.md §9 step 4; plan-orbidx-bijections.md §2
+// ============================================================================
+//
+//  The interpreter's twin of CodeGen.genWreathApply, and it must produce the
+//  SAME cells in the SAME order — the corpus harness diffs the two. Both are
+//  driven by the verified reference emitter rather than by a hand-rolled peeled
+//  nest: C++ instantiates `orb_visit<Levels...>`, and this walks
+//  `OrbRank.visitStream`, which `blade test orbwreath` diffs cell-for-cell
+//  against that very template on every run. Two independent hand-written nests
+//  is the one thing this feature must not have.
+//
+//  Like the compiled path, it bypasses `buildLoopNestCodeGen` entirely: that
+//  builder refuses a wreath INPUT (the depth >= 3 shape) and has no concept of
+//  segment peeling for the depth-2 one.
+
+/// Is this application a deduced wreath tie? Same predicate, same arguments as
+/// `deduceOutputType`'s and codegen's, so all three agree by construction.
+and private tryWreathApply (info: ApplyInfo) : WreathTie option =
+    match resolveKernel info.Kernel with
+    | Some rk ->
+        deduceWreathTie info.ArrayTypes info.Identities
+                        (rk.Callable.CommGroups @ rk.Callable.AntisymGroups)
+                        (if info.HasReynolds then [] else rk.Callable.AntisymGroups)
+                        info.KernelTDims
+                        (info.KernelInputRanks |> List.exists (fun r -> r > 0))
+                        info.HasReynolds
+    | None -> None
+
+/// Read one tied argument at a CANONICAL sub-key of the traversal stream.
+/// Depth-1 inner classes go through `readCompact` — the interpreter's own
+/// canonical reader, the same one every SymIdx/AntisymIdx read uses, so the
+/// value comes from exactly the cell the compiled `arr[c0][c1-c0]` subscript
+/// names. A wreath inner class (depth >= 3) goes through `orbRank` on the pool.
+/// Neither is the mirrored read: the sub-key is canonical by construction, so
+/// no character is ever applied and nothing folds.
+and private wreathArgValue (arr: BladeArray) (innerLevels: (int * bool) list)
+                           (n: int64) (subKey: int list) : Value =
+    if List.length innerLevels >= 2 then
+        A.wreathReadCanonical arr innerLevels n subKey
+    else
+        A.readCompact arr (subKey |> List.map int64)
+
+and private materializeWreathApply
+        (st: InterpState) (env: Env) (info0: ApplyInfo) (wrappers: IRExpr list)
+        (tie: WreathTie) : Value =
+    if not (List.isEmpty wrappers) then
+        raise (InterpUnsupported "functor-map wrapper over an OrbIdx (iterated-wreath) application")
+    gateInputs info0
+    match resolveKernel info0.Kernel with
+    | None -> raise (InterpUnsupported "OrbIdx application: the kernel does not resolve to a callable")
+    | Some rk ->
+    let (elemTy, outIdxTys) =
+        match info0.OutputType with
+        | ArrayElem arr -> (arr.ElemType, arr.IndexTypes)
+        | other -> raise (InterpUnsupported (sprintf "OrbIdx application output type %s" (nodeTypeName other)))
+    let n =
+        match tie.BaseExtent with
+        | IRLit (IRLitInt v) -> v
+        | _ -> raise (InterpUnsupported "OrbIdx application: a wreath class needs a compile-time extent")
+    // Every tied position holds the SAME object (that is what earned the tie),
+    // so one resolve serves them all; resolving per position would force a
+    // deferred source k times.
+    let src =
+        match resolveArraySource st env (List.head info0.Arrays) with
+        | SReal a -> a
+        | _ -> raise (InterpUnsupported "OrbIdx application: the tied argument is not a materialized array")
+    let out = A.allocWreath elemTy outIdxTys tie.OutputLevels n
+    // Kernel env: captures by reference + one reusable cell per param, exactly
+    // as interpretNest builds them.
+    let kenv = envChild env
+    for c in rk.Callable.Captures do
+        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    let paramCells = Dictionary<IRId, ValueRef>()
+    for p in rk.Callable.Params do
+        let cell = { V = VUnit }
+        paramCells.[p.VarId] <- cell
+        envBindRef kenv p.VarId cell
+    let innerAxes = tie.InnerLevels |> List.fold (fun a (r, _) -> a * r) 1
+    let k = List.length tie.Positions
+    let stream =
+        match Blade.OrbRank.visitStreamChecked (orbRankLevels tie.OutputLevels) (int n) with
+        | Ok s -> s
+        | Error detail ->
+            raise (InterpUnsupported (sprintf "OrbIdx%s at extent %d: %s"
+                                              (ppOrbitLevels tie.OutputLevels) n detail))
+    let mutable pos = 0L
+    for tuple in stream do
+        let t = List.toArray tuple
+        for j in 0 .. k - 1 do
+            let subKey = [ for a in 0 .. innerAxes - 1 -> t.[j * innerAxes + a] ]
+            let v = wreathArgValue src tie.InnerLevels n subKey
+            let p = tie.Positions.[j]
+            if p < rk.Callable.Params.Length then
+                match paramCells.TryGetValue rk.Callable.Params.[p].VarId with
+                | true, cell -> cell.V <- v
+                | _ -> ()
+        A.wreathWriteAt out pos (force st kenv (Core.evalExpr st kenv rk.Callable.Body))
+        pos <- pos + 1L
+    // The stream length and the §4 fold are INDEPENDENT computations of the same
+    // number (`visitStream`'s enumeration vs `cellCountChecked`'s iterated
+    // binomial). Pin them against each other, as the emitted C++ pins
+    // `orb_cell_count` against the same fold: a short stream would leave the
+    // tail of the pool at its zero-initialized value, which prints as plausible
+    // data, and a long one would already have thrown on the write.
+    if pos <> int64 (A.wreathCellCount out) then
+        failwithf "OrbIdx%s at extent %d: the traversal visited %d cells but the class's fold says %d"
+                  (ppOrbitLevels tie.OutputLevels) n pos (A.wreathCellCount out)
+    st.Cells <- st.Cells + pos
+    VArray out
 
 /// Detect a `method_for(range<CompoundIdx<m>>) <@> kernel` map: the sole input
 /// is a range whose sole index type is a compound mask. Returns (maskExpr,
@@ -886,6 +1004,85 @@ and private materializeCompoundRangeMap
           LeadExtents = leadExtents
           Mask = maskBits
           Table = table
+          RankOf = rankOf
+          Cardinality = card
+          TrailingStride = 1L
+          Data = A.storeOfValues elemTy results }
+
+/// Detect a `method_for(range<SparseIdx<keys>>) <@> kernel` map: the sole
+/// input is a range whose sole index type is a sparse key set. Returns
+/// (keys source, leadRank) — the sparse twin of tryCompoundRangeMap.
+and private trySparseRangeMap (info: ApplyInfo) : (SparseKeysSource * int) option =
+    match info.Arrays with
+    | [ IRRange (idxTys, _) ] ->
+        (match idxTys with
+         | [ ix ] when ix.IxKind = IxKSparse ->
+             (match ix.Extent with IRSparseKeys src -> Some (src, ix.Rank) | _ -> None)
+         | _ -> None)
+    | _ -> None
+
+/// Resolve a SparseKeysSource to its concrete key list (given order):
+/// SkStatic entries are baked; SkRuntime forces the keys array and unpacks
+/// its tuple elements (or bare integers for a rank-1 sparse).
+and private resolveSparseKeys (st: InterpState) (env: Env) (src: SparseKeysSource) (leadRank: int) : int64[][] =
+    match src with
+    | SkStatic entries ->
+        entries |> List.map Array.ofList |> Array.ofList
+    | SkRuntime keysExpr ->
+        let keysArr =
+            match force st env (Core.evalExpr st env keysExpr) with
+            | VArray a -> a
+            | _ -> raise (InterpUnsupported "SparseIdx: keys operand is not an array")
+        if keysArr.Extents.Length <> 1 then
+            raise (InterpUnsupported "SparseIdx: keys array is not rank 1")
+        Array.init (int keysArr.Extents.[0]) (fun i ->
+            match A.readCell keysArr [ int64 i ] with
+            | VTuple comps -> comps |> Array.map toI64
+            | scalar when leadRank = 1 -> [| toI64 scalar |]
+            | _ -> raise (InterpUnsupported "SparseIdx: keys array elements are not tuples"))
+
+/// Materialize a range<SparseIdx<keys>> map to a Sparse VALUE: iterate the
+/// keys IN GIVEN ORDER, binding each kernel param to its tuple COORDINATE, and
+/// store the kernel result into the compact buffer at that rank — the sparse
+/// twin of materializeCompoundRangeMap (same param plan; the only differences
+/// are the key source and the absence of a mask/grid).
+and private materializeSparseRangeMap
+        (st: InterpState) (env: Env) (info0: ApplyInfo) (wrappers: IRExpr list)
+        (src: SparseKeysSource) (leadRank: int) : Value =
+    if not (List.isEmpty wrappers) then
+        raise (InterpUnsupported "functor-map wrapper over a range<SparseIdx> map")
+    let keys = resolveSparseKeys st env src leadRank
+    let (rankOf, card) = A.buildSparseIndex keys
+    let arrayNames = info0.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
+    let cg = buildLoopNestCodeGen info0 arrayNames "out" st.Builder
+    let (elemTy, outIdxTys) =
+        match cg.OutputType with
+        | ArrayElem arr -> (arr.ElemType, arr.IndexTypes)
+        | other -> raise (InterpUnsupported (sprintf "range<SparseIdx> map output type %s" (nodeTypeName other)))
+    let kenv = envChild env
+    for c in cg.Captures do
+        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    let paramCells = Dictionary<IRId, ValueRef>()
+    for p in cg.KernelParams do
+        let cell = { V = VUnit }
+        paramCells.[p.VarId] <- cell
+        envBindRef kenv p.VarId cell
+    let paramCoord =
+        cg.Bindings |> List.collect (fun b -> b.Elements |> List.map (fun e -> (e.ParamVarId, e.RankComponent)))
+    st.Cells <- st.Cells + card
+    let results = Array.create (int card) VUnit
+    for r in 0 .. int card - 1 do
+        let key = keys.[r]
+        for (pv, rc) in paramCoord do
+            match paramCells.TryGetValue pv with
+            | true, cell -> cell.V <- VInt key.[rc]
+            | _ -> ()
+        results.[r] <- force st kenv (Core.evalExpr st kenv cg.KernelExpr)
+    VSparse
+        { ElemType = elemTy
+          IndexTypes = outIdxTys
+          LeadRank = leadRank
+          Keys = keys
           RankOf = rankOf
           Cardinality = card
           TrailingStride = 1L
@@ -1021,6 +1218,35 @@ and materializeCompoundBinding
         VCompound cv
     | _ -> raise (InterpUnsupported "compound() binding is not an array type")
 
+/// Build a Sparse VALUE for a `let S = sparse(values, keys)` binding (recorded
+/// in IRModule.SparseInits). The keys source rides the binding TYPE's
+/// IRSparseKeys extent; the values' LEADING dim is the key axis and any
+/// remaining dims fold into the trailing stride (buildSparse), copied straight
+/// into the compact buffer in key order — no scatter. A |values| != |keys|
+/// mismatch panics (BL8001), mirroring genSparseInitBinding's runtime guard.
+and materializeSparseBinding
+        (st: InterpState) (env: Env) (binding: IRBinding) (valuesExpr: IRExpr) : Value =
+    match binding.Type with
+    | ArrayElem arrTy ->
+        let sparseIx =
+            arrTy.IndexTypes
+            |> List.tryFind (fun ix -> ix.IxKind = IxKSparse)
+            |> Option.defaultWith (fun () -> raise (InterpUnsupported "sparse() binding is not a SparseIdx array type"))
+        let src =
+            match sparseIx.Extent with
+            | IRSparseKeys src -> src
+            | _ -> raise (InterpUnsupported "sparse() binding: keys source is not a SparseIdx extent")
+        let keys = resolveSparseKeys st env src sparseIx.Rank
+        let (rankOf, card) = A.buildSparseIndex keys
+        let values =
+            match force st env (Core.evalExpr st env valuesExpr) with
+            | VArray a -> a
+            | _ -> raise (InterpUnsupported "sparse() values operand is not an array")
+        let sv = A.buildSparse arrTy values keys rankOf card
+        st.Cells <- st.Cells + sv.Cardinality * sv.TrailingStride
+        VSparse sv
+    | _ -> raise (InterpUnsupported "sparse() binding is not an array type")
+
 /// Resolve one `info.Arrays.[pos]` to an ArraySource. Virtual sources
 /// (range/reverse/blocked) carry no store. A deferred `IRVar` input is forced
 /// AND its cell overwritten with the materialized array (forceDeferredArrayInput's
@@ -1033,31 +1259,36 @@ and private resolveArraySource (st: InterpState) (env: Env) (arr: IRExpr) : Arra
         | Some cell ->
             match cell.V with
             | VArray a -> SReal a
-            // A compound operand of an eager op (sort/reduce/set-op over a
-            // `compound(...)`) walks its compact present-cell buffer as a plain
-            // dense rank-1 array (§4.1 compound-operand path).
+            // A compound/sparse operand of an eager op (sort/reduce/set-op)
+            // walks its compact present-cell buffer as a plain dense rank-1
+            // array (§4.1 compound-operand path; sparse in key order).
             | VCompound cv -> SReal (A.compoundToDense cv)
+            | VSparse sv -> SReal (A.sparseToDense sv)
             | VDeferred _ as d ->
                 let fv = force st env d
                 cell.V <- fv   // memoize once (a second consumer sees the array)
                 (match fv with
                  | VArray a -> SReal a
                  | VCompound cv -> SReal (A.compoundToDense cv)
+                 | VSparse sv -> SReal (A.sparseToDense sv)
                  | _ -> raise (InterpUnsupported "deferred array input did not force to an array"))
             | other ->
                 (match other with
                  | VArray a -> SReal a
                  | VCompound cv -> SReal (A.compoundToDense cv)
+                 | VSparse sv -> SReal (A.sparseToDense sv)
                  | _ -> raise (InterpUnsupported "array input var is not an array"))
         | None ->
             match Core.evalExpr st env arr with
             | VArray a -> SReal a
             | VCompound cv -> SReal (A.compoundToDense cv)
+            | VSparse sv -> SReal (A.sparseToDense sv)
             | _ -> raise (InterpUnsupported "array input var unbound")
     | _ ->
         match force st env (Core.evalExpr st env arr) with
         | VArray a -> SReal a
         | VCompound cv -> SReal (A.compoundToDense cv)
+        | VSparse sv -> SReal (A.sparseToDense sv)
         | _ -> raise (InterpUnsupported "array input expression is not an array")
 
 // ============================================================================
@@ -1397,6 +1628,9 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             // reduce over a compound walks its compact present-cell buffer
             // (genReduceBinding compound arm, CodeGen.fs:1934-1938).
             A.compoundReduce cv (resolveBinaryFold st kernel) initV
+        | VSparse sv ->
+            // reduce over a sparse walks its compact buffer in key order.
+            A.sparseReduce sv (resolveBinaryFold st kernel) initV
         | _ -> raise (InterpUnsupported "reduce over a non-array value")
     | IRReduceCompute (comp, kernel, seedExpr) ->
         let seed = Core.evalExpr st env seedExpr
@@ -1428,6 +1662,7 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         (match force st env (Core.evalExpr st env arrExpr) with
          | VArray a -> A.indexArray a (idxExprs |> List.map (Core.evalExpr st env))
          | VCompound cv -> compoundIndexRead st env cv idxExprs
+         | VSparse sv -> sparseIndexRead st env sv idxExprs
          | _ -> raise (InterpUnsupported "IRIndex on non-array value"))
     | IRCurry (arrExpr, idxExpr, _) ->
         (match force st env (Core.evalExpr st env arrExpr) with
@@ -1446,6 +1681,7 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             match force st env (Core.evalExpr st env arrExpr) with
             | VArray a -> Some a
             | VCompound cv -> Some (A.compoundToDense cv)
+            | VSparse sv -> Some (A.sparseToDense sv)
             | _ -> None
         (match arrOpt with
          | Some a ->
@@ -1561,10 +1797,38 @@ and private compoundIndexRead (st: InterpState) (env: Env) (cv: CompoundValue) (
                 A.compoundFullScalar cv coordVals (toI64 (Core.evalExpr st env (List.head concreteTrail)))
             else
                 A.compoundRow cv coordVals
+        | CompoundPartial _ ->
+            // Unreachable since the flat-subscript conversion: typecheck packs
+            // full k-tuples for compound heads and rejects wildcard/partial
+            // forms (they moved to SparseIdx). Mirror codegen's backstop.
+            raise (InterpUnsupported "internal: a partial compound index tuple reached the interpreter — partial/wildcard reads on CompoundIdx were removed (use SparseIdx)")
+    | _ -> raise (InterpUnsupported "compound index without a tuple head")
+
+/// Sparse index read — the sparse twin of compoundIndexRead, mirroring the
+/// same C++ read emission (full scalar / trailing row / gather partial). The
+/// classification is shared (classifyCompoundIndexTuple is shape-only).
+and private sparseIndexRead (st: InterpState) (env: Env) (sv: SparseValue) (idxExprs: IRExpr list) : Value =
+    let idxExprs =
+        match sv.LeadRank, idxExprs with
+        | 1, first :: rest when (match first with IRTuple _ -> false | _ -> true) -> IRTuple [ first ] :: rest
+        | _ -> idxExprs
+    match idxExprs with
+    | (IRTuple coords) :: trailingIdxs ->
+        match classifyCompoundIndexTuple sv.LeadRank coords with
+        | CompoundFull ->
+            let coordVals = coords |> List.map (fun c -> toI64 (Core.evalExpr st env c)) |> Array.ofList
+            let concreteTrail =
+                trailingIdxs |> List.filter (function IRLit IRLitUnit -> false | _ -> true)
+            if sv.TrailingStride = 1L then
+                A.sparseFullScalar sv coordVals 0L
+            elif not (List.isEmpty concreteTrail) then
+                A.sparseFullScalar sv coordVals (toI64 (Core.evalExpr st env (List.head concreteTrail)))
+            else
+                A.sparseRow sv coordVals
         | CompoundPartial (pinned, freePos) ->
             let pinnedVals = pinned |> List.map (fun (pos, c) -> (pos, toI64 (Core.evalExpr st env c)))
-            A.compoundPartial cv pinnedVals freePos
-    | _ -> raise (InterpUnsupported "compound index without a tuple head")
+            A.sparsePartial sv pinnedVals freePos
+    | _ -> raise (InterpUnsupported "sparse index without a tuple head")
 
 /// Structural value equality for `contains` (numeric-aware).
 and private valuesEqual (a: Value) (b: Value) : bool =

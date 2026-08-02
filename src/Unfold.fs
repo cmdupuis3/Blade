@@ -100,6 +100,7 @@ let rec mapExprPre (f: Expr -> Expr option) (e: Expr) : Expr =
         | ExprKind.ExprRank x -> re (ExprRank (g x))
         | ExprKind.ExprMask (a, p) -> re (ExprMask (g a, g p))
         | ExprKind.ExprCompound (d, m) -> re (ExprCompound (g d, g m))
+        | ExprKind.ExprSparse (v, k) -> re (ExprSparse (g v, g k))
         | ExprKind.ExprIntersect (a, b) -> re (ExprIntersect (g a, g b))
         | ExprKind.ExprUnion (a, b) -> re (ExprUnion (g a, g b))
         | ExprKind.ExprUnique a -> re (ExprUnique (g a))

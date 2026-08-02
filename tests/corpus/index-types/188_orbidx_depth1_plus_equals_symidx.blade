@@ -1,0 +1,18 @@
+// TEST: OrbIdx Depth-1 Plus Equals SymIdx
+// docs/plan-orbit-index-types.md §3: `SymIdx<r,n>` IS `OrbIdx<[(r,+)],n>`. The
+// v1 lowering makes that an identity rather than a resemblance --
+// orbitIndexRecord CALLS symPowerIndexRecord for a single '+' level -- so the
+// two annotations must accept the SAME computed value, allocate the SAME
+// triangular pool, print the SAME cells, and read back the SAME element.
+// This is the test that makes depth-1 support structural instead of lucky.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let s1: Array<Float64 like SymIdx<2, 3>> = L <@> reynolds(g) |> compute
+let s2: Array<Float64 like OrbIdx<[(2,+)], 3>> = L <@> reynolds(g) |> compute
+let mirrored = s2(2, 1)
+let canonical = s2(1, 2)
+// EXPECT: s1 = [6, 9, 12, 12, 15, 18]
+// EXPECT: s2 = [6, 9, 12, 12, 15, 18]
+// EXPECT: mirrored = 15
+// EXPECT: canonical = 15

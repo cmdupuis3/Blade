@@ -74,20 +74,59 @@ present cells return their dense value; cardinality is the pass count.
 - The **static** type-annotation form `CompoundIdx<mask>` exists (v10 §4.4–4.5)
   and is the reserved compile-time path; the runtime `compound()` builder is the
   exercised route in v7. Both denote the same index semantics.
-- **Partial indexing / residual compounds**: fixing some coordinates of a
-  compound (including interior and trailing wildcards) yields either a plain
-  index (1 free dim) or a **residual compound** (≥ 2 free dims) — the residual of
-  a mask is itself a mask. This is pinned by `corpus/index-types` 001–017
-  including the reject cases (all-free, short wildcard, interior hole in trailing
-  form). The executable semantics of the residual is the proofs-layer
-  `has_completion` (BladeCompound); the arrow enumerates exactly the in-bounds
-  mask-true tuples, each once, in lexicographic order (BladeLex).
+- **No partial indexing**: fixing SOME coordinates while freeing others
+  (wildcards, short prefixes, residual reads) is a **SparseIdx** feature —
+  build the valid tuples as a `SparseIdx<keys>` and index `S((lat, _))` there.
+  A compound axis is full-arity only; the reject cases are pinned by
+  `corpus/index-types` 002–014. The arrow still enumerates exactly the
+  in-bounds mask-true tuples, each once, in lexicographic order (BladeLex).
 
-Canonical application form: ONE tuple per compound axis — `B((lat, lon))`, wildcards inside the tuple `B((lat, _))`; rank-1 compounds take a bare scalar. The flat form `B(lat, lon)` is rejected with a steering diagnostic (a compound is one slot filled by one joint tuple; formalism §3.2).
+Canonical application form: FLAT positional subscripts like SymIdx — `B(lat, lon)`,
+with trailing regular dims appended (`B(lat, lon, t)`; omitting the trailing
+index yields the contiguous trailing-row sub-view). The historical tuple
+spelling `B((lat, lon))` and every wildcard form are rejected with a steering
+diagnostic pointing at SparseIdx.
 
-v7: `TypeCheck.fs compoundViewType`, IR `IRCompoundMask`/`IRCompoundProject`,
-index kinds `IxKCompound`/`IxKCompoundDynamic`. Tests: `sql-masks/001`,
-`index-types/001–017`.
+v7: `TypeCheck.fs compoundViewType`, IR `IRCompoundMask`, index kinds
+`IxKCompound`/`IxKCompoundDynamic`. (`IRCompoundProject` is the residual
+carrier, now reached only from a SparseIdx head.) Tests: `sql-masks/001`,
+`index-types/001–017`; the sparse counterparts are `index-types/171–184`.
+
+## 2b. `sparse(values, keys)` — bundle values with an explicit key set
+
+```blade
+sparse : Array<T like Idx<n>, Rest...> × keys -> Sparse<T>
+```
+
+The `SparseIdx` sibling of `compound`. Where a compound derives validity from
+a **mask over a grid**, a sparse takes the valid tuples **explicitly**: `keys`
+is a rank-1 array of Nat tuples — a `let static` list (baked at compile time)
+or a runtime tuple-array — and `values` supplies one cell per key, already
+**in key order**, so construction is a straight copy with no scatter.
+
+- The **leading** `values` dimension is the key axis; any remaining dimensions
+  become regular trailing slots whose product is the trailing stride — the
+  direct analogue of the mask's leading-prefix rule in `compound`. So
+  `sparse(vals, keys)` with `vals : Array<T like E, T2>` gives
+  `Array<T like SparseIdx<keys>, T2>`: each key owns a contiguous block, read
+  as a row sub-view (`S((i, j))`) or a scalar (`S((i, j), t)`).
+
+- Keys keep their **given order**: iteration and the compact buffer follow it,
+  never a sorted order. Duplicate keys are a construction error;
+  `|values| ≠ |keys|` panics (BL8001). Rank is implicit from the tuple arity.
+- Indexing is tuple-form with wildcards: `S((i, j))` is an O(1) hash lookup
+  (a missing key is a runtime error), and `S((i, _))` / short prefixes gather
+  the matching entries in key order — with no sorted table there is no
+  window/prefix family, so every partial costs one pass.
+- `range<SparseIdx<keys>>` is the iteration-side builder (visit the key set,
+  compute a value per key).
+
+Choose `CompoundIdx` when validity comes from data over a rectilinear grid
+(its lex-sorted table buys contiguous layout); choose `SparseIdx` for an
+arbitrary enumerated key set (edge lists, CG triples) or when you need
+partial reads.
+
+Tests: `index-types/171–184`.
 
 ## 3. `intersect(A, B)` / `union(A, B)` — set operations
 

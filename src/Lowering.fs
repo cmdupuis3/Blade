@@ -116,6 +116,11 @@ type TypedLowerEnv = {
     /// at module assembly and consumed at codegen (P0 index materialization +
     /// scatter). Mirrors RandomInits.
     CompoundInits: Map<IRId, IRExpr * IRExpr>
+    /// Deferred sparse-construction constructors (sparse(values, keys)),
+    /// keyed by the receiving binding's IRId. Value is the lowered values
+    /// expr (keys ride the binding type's IRSparseKeys extent). Copied into
+    /// IRModule.SparseInits at module assembly. Mirrors CompoundInits.
+    SparseInits: Map<IRId, IRExpr>
     /// Lifted lambda callables accumulated during lowering of the current
     /// module. Each lambda-construction site (lowerTypedLambda,
     /// lowerTypedSection, lowerTypedPartialApp, binop-kernel synthesis)
@@ -158,6 +163,7 @@ let emptyTypedEnv () : TypedLowerEnv = {
     ProviderWrites = Map.empty
     RandomInits = Map.empty
     CompoundInits = Map.empty
+    SparseInits = Map.empty
     LiftedCallables = ResizeArray<IRCallable>()
     MutableArrayLets = ResizeArray<IRId>()
 }
@@ -559,6 +565,11 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // fill_random). Reaching here means it was used inline / in a nested let,
         // which the compound-construction codegen path does not handle.
         failwith "compound(dense, mask) is only valid as a top-level let-binding value (let B = compound(dense, mask))"
+
+    | TExprSparse _ ->
+        // Same top-level-let-only discipline as compound(dense, mask): the
+        // TDeclLet loop intercepts and records the values expr in SparseInits.
+        failwith "sparse(values, keys) is only valid as a top-level let-binding value (let S = sparse(values, keys))"
     
     | TExprGuard (cond, body) ->
         IRGuard (lowerTypedExpr env cond, lowerTypedExpr env body)
@@ -1905,6 +1916,28 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             bindings <- bindings @ [bd]
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with CompoundInits = Map.add binding.VarId (denseIR, maskIR) currentEnv.CompoundInits }
+        | TDeclLet binding when (match binding.Value.Kind with TExprSparse _ -> true | _ -> false) ->
+            // Sparse-construction constructor (`let S = sparse(values, keys)`):
+            // the binding holds a SparseIdx-typed compact array, materialized in
+            // codegen via the sparse index build + a straight pool copy (values
+            // are already in key order — no scatter). Value is a unit
+            // placeholder; the type carries the keys source in its IRSparseKeys
+            // extent. Mirrors the compound arm above.
+            let valuesIR =
+                match binding.Value.Kind with
+                | TExprSparse (v, _) -> lowerTypedExpr currentEnv v
+                | _ -> IRLit IRLitUnit  // unreachable: guarded by the `when` above
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = binding.Type
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = binding.IsMutable
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with SparseInits = Map.add binding.VarId valuesIR currentEnv.SparseInits }
         | TDeclLet binding when isProviderCall currentEnv binding.Value ->
             match tryInvokeProvider currentEnv binding with
             | Some (providerTypes, bd, env') ->
@@ -1993,6 +2026,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
         ProviderWrites = currentEnv.ProviderWrites
         RandomInits = currentEnv.RandomInits
         CompoundInits = currentEnv.CompoundInits
+        SparseInits = currentEnv.SparseInits
         MutableArrayLets = Set.ofSeq currentEnv.MutableArrayLets
     }
     (irModule, moduleExport)

@@ -1,0 +1,43 @@
+// TEST: Memfree Compound Parent Epilogue Ordering
+// ============================================================================
+// Free-hazard guard: a compound read out of a FUNCTION must never free the
+// module-level parent's buffers. vstep reads B four times per call via flat
+// full-tuple reads (the partial-view forms this test historically exercised
+// moved to SparseIdx; the epilogue-ordering property it pins is unchanged),
+// and the recursion calls vstep five times - so five function epilogues run
+// over reads of the same parent. B is read once more AFTER the recursion
+// (bpar / brow0 / brow1) to prove the epilogues left the parent intact.
+// The arithmetic is byte-identical to the historical version: the same four
+// present cells enter with the same weights.
+// ============================================================================
+type Lat = Idx<2>
+type Lon = Idx<3>
+type Steps = Idx<5>
+let DENSE: Array<Float like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let M: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(DENSE, M)
+function vstep(n: Int64) -> Float = {
+    let mid = B(0, 0) + B(0, 2)
+    let mid1 = B(1, 0) + B(1, 1)
+    let late = B(0, 2) + B(1, 0)
+    let par = B(1, 1)
+    mid * 0.1 + mid1 * 0.01 + late * 0.001 + par * 0.0001 + 1.0 * n
+}
+let rec acc: Array<Float like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + vstep(n)
+let sfinal = acc(4)
+let bpar = B(0, 2)
+let brow0 = B(1, 0)
+let brow1 = B(1, 1)
+let brsum = brow0 + brow1
+// EXPECT: DENSE = [10, 20, 30, 40, 50, 60]
+// EXPECT: M = [true, false, true, true, true, false]
+// EXPECT: acc = [0, 5.975, 12.95, 20.925, 29.9]
+// EXPECT: sfinal = 29.9
+// EXPECT: bpar = 30
+// EXPECT: brow0 = 40
+// EXPECT: brow1 = 50
+// EXPECT: brsum = 90

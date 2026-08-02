@@ -1,0 +1,15 @@
+// TEST: Sparse Partial Chained Residual
+// Rank-3 sparse: pinning the MIDDLE axis with a full-arity wildcard tuple
+// leaves a rank-2 residual SPARSE (gathered sub-key table in parent key
+// order), which is itself full-key indexable. S((_, 7, _)) over keys
+// [(1,7,0),(0,7,2),(1,0,1),(2,7,0)] keeps [(1,0),(0,2),(2,0)]; the chained
+// read r((0, 2)) recovers the cell of parent key (0,7,2) = 72. The short
+// PREFIX tuple S((1, 7)) pins the leading two axes -> rank-1 dense gather
+// of the matching values in key order.
+let static K = [(1, 7, 0), (0, 7, 2), (1, 0, 1), (2, 7, 0)]
+let S = method_for(range<SparseIdx<K>>) <@> lambda(i, j, k) -> i * 100 + j * 10 + k |> compute
+let r = S((_, 7, _))
+let x = r((0, 2))
+let p = S((1, 7))
+// EXPECT: x = 72
+// EXPECT: p = [170]

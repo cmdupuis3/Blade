@@ -70,12 +70,13 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | Symmetric index type | `SymIdx<r:Nat, n:Nat>` | Core | `r` mutually symmetric dimensions of length `n` |
 | Antisymmetric index type | `AntisymIdx<r, n>` | Core | `r` sign-tracked mutually antisymmetric dimensions |
 | Hermitian index type | `HermitianIdx<n>` | Core | 2-D Hermitian index type. `A(i,j) = conj(A(j,i))` |
-| Compound index type | `CompoundIdx<mask: bool^r>` | Core | `r`-dimensional sorted sparse index type ideal for relatively dense grids. Inherits dimensions from static `mask` array. |
+| Compound index type | `CompoundIdx<mask: bool^r>` | Core | `r`-dimensional sorted (lex-enumerated) semi-dense index type ideal for relatively dense grids; inherits dimensions from the `mask` array. Flat full-arity indexing like SymIdx (`B(i, j)`); partial/wildcard reads are a `SparseIdx` feature |
 | Ragged index type | `RaggedIdx<lengths>` | Core |  |
 | Dependent index type | `DepIdx<I, f: Nat -> Idx<N>>` | Core |  Static function `f` maps each index of `I` to a new `Idx` |
 | Equivariant index type | `EquivIdx<n, G, ρ>` | Planned? | group-representation-annotated indices |
-| Sparse index type | `SparseIdx<entries>` | Planned | explicit valid-entry enumeration with hash-table storage; partly overlaps with `CompoundIdx` in practice |
-| Nested/mixed symmetry | `NestedSymIdx` (elasticity),<br> `RiemannIdx` (curvature) | Speculative | v10 §4.15.2–4.15.3; cardinality formulas specified |
+| Sparse index type | `SparseIdx<keys>` | Core | explicit valid-key enumeration (rank-1 array of Nat tuples; `let static` list or runtime tuple-array) with hash-table lookup. Keys keep their GIVEN order (never sorted — iteration order is key order); rank is implicit from the tuple arity. Tuple indexing with wildcards (all partials gather); built via `range<SparseIdx<keys>>` or `sparse(values, keys)` |
+| Orbit (iterated-wreath) index type | `OrbIdx<[(r₁,s₁), ..., (r_d,s_d)], n>` | Partial | flat list of `(rank, ±)` levels, OUTERMOST-LAST, over one extent; group `S_{r₁} ≀ ... ≀ S_{r_d}` on `∏rᵢ` raw axes, character the product of the level signs. **Depth ≤ 1 is fully supported and is not a new type**: `[]` normalizes to `Idx<n>`, `[(r,+)]` to `SymIdx<r,n>`, `[(r,-)]` to `AntisymIdx<r,n>` — the same records, so the same storage, iteration and printing. Rank-1 levels drop at either sign. **Depth ≥ 2 declares and type-checks but has no storage yet** (cardinality is closed-form — the iterated binomial — but no allocator, traversal nest, compact read, printer or provider I/O): refused with BL4003. See [plan-orbit-index-types.md](plan-orbit-index-types.md) |
+| Nested/mixed symmetry | `NestedSymIdx` (elasticity),<br> `RiemannIdx` (curvature) | Speculative | v10 §4.15.2–4.15.3; cardinality formulas specified. The `RiemannIdx` shape is spellable today as `OrbIdx<[(2,-), (2,+)], n>` (declarable; storage deferred) |
 
 ### 5a. Index type features
 

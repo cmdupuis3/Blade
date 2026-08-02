@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**748 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**798 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -31,8 +31,8 @@ Rules of this document:
 | 3: symmetry | BladeCore, BladeLowering, BladeCompleteness, BladeFusionDuality | group law both halves, H-and-Stab soundness AND exactness, sign-tracked variant, fusion ⇒ duality |
 | Trinity | BladeTrinity, BladeTrinityAsym | `<*>` = shape concatenation; generators + forced closure |
 | Computation | BladeCompute, BladeMonad, BladeSafety | materialized semantics, V∘P = id, 12.x laws, MonadPlus, verified offsets + bounds safety + buffer-elimination fusion |
-| Storage split | BladeCauchy | the r = 2 Cauchy split |
-| Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
+| Storage split | BladeCauchy, BladeDichotomy | the r = 2 Cauchy split; the r ≥ 3 dichotomy — witness, width-2 refutation over any ring, the r! isotypic repair |
+| Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage, exactness enumerated at r = 2 and r = 3; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
 
@@ -436,10 +436,67 @@ copy. Checked:
 Consequence (v11 §12.4): single-identity-group r = 2 (covariance class)
 regains exact per-dimension product-STRUCTURED storage via SymIdx⊗SymIdx plus
 sign-tracked AntisymIdx⊗AntisymIdx; the "flattening is forced" conclusion is
-amended at r = 2. Honest scope: r = 2 only (r ≥ 3 has mixed Schur components
-— genuinely open); totals equal the joint count (the win is structure, not
-cells); each read costs two lookups plus a halving; the bridge to concrete
-lj/alj layouts is mechanical and not done.
+amended at r = 2. Honest scope: r = 2 only — and that boundary is now a
+theorem, not an assumption: BladeDichotomy.v closes r ≥ 3 negatively and
+shows this split optimal, not merely correct. Totals equal the joint count
+(the win is structure, not cells); each read costs two lookups plus a
+halving; the bridge to concrete lj/alj layouts is mechanical and not done.
+
+## BladeDichotomy.v (26 theorems) — the r ≥ 3 storage dichotomy
+
+Closes BladeCauchy's boundary in both directions at r = 3, following the
+rank-dichotomy development (2026-08-02). The general theorem: the minimal
+width of a scalar-access per-dimension-canonical scheme is **r!** — the fiber
+over a free canonical cell carries the REGULAR representation of S_r, scalar
+weights invert only 1×1 blocks, and S_r has exactly two linear characters;
+2 = r! iff r ≤ 2. Self-contained, division-free (the factors 2 and 6
+exhibited, never divided).
+
+- **The witness** (`witness_symmetric`, `witness_nonzero`,
+  `witness_components_vanish`, packaged as
+  `naive_split_confuses_witness_with_zero`): an explicit integer tensor at
+  extent 2 — value −2 on the diagonal orbit {(0,0),(0,0),(1,1)}, +1 on
+  {(0,0),(0,1),(1,0)} — slot-pair symmetric, nonzero, and its sym AND alt
+  components vanish at every index. Any access rule reading only those two
+  components confuses it with the zero tensor: the natural r = 3
+  generalization of `cauchy_split_access` is refuted by computed pin, in the
+  register of BladeCounting's `witness_not_in_image`. (This is the
+  S^{(2,1)} ⊗ S^{(2,1)} obstruction made concrete: 20 = 16 + 4 at extent 2.)
+- **The width-2 refutation** (`width2_scalar_access_refuted`; ℤ instance
+  `width2_refuted_over_Z`): over ANY commutative ring with 1 ≠ 0, no two
+  weight functions ε₁, ε₂ : S₃ × S₃ → R reconstruct every symmetric tensor
+  from two scalars per canonical cell. Three indicator tensors evaluate to
+  the identity matrix at three fiber points of the free cell; soundness
+  forces those rows into the span of two fixed vectors; the 3×3 determinant
+  (`det3_span2`, a ring identity) vanishes on any such span but equals 1 on
+  the identity. Storage is an arbitrary per-tensor function — not even
+  linearity is assumed; the entire constraint lives in the weight span.
+  Section-local `Add Ring` over an abstract `ring_theory`, so ℚ/ℝ instances
+  are immediate.
+- **The positive half** (`six_component_access`): the m = 3! = 6 scheme —
+  store T(a, μ·b) for the six μ — reconstructs any slot-pair-symmetric
+  tensor at EVERY index, tied or free, values in an arbitrary type; pure
+  index algebra generated by the transposition and 3-cycle relations.
+- **The isotypic access rule** (`isotypic_access_r3`, with `stdmat_is_rep`
+  and the division-free column orthogonality `fourier_orthogonality_S3`):
+  INTEGER matrices for the standard representation on the root-lattice
+  basis; 6·g_μ = p_triv + sgn(μ)·p_sgn + 2·tr(ρ(μ⁻¹)·P_std) — 1 + 1 + 4 =
+  6 = 3! numbers per cell (Wedderburn), the 6 exhibited exactly as
+  BladeCauchy's 2. BladeCauchy's sort-parity product is the ρ^{(1,1)}
+  instance of the same rule — the r = 2 and r ≥ 3 stories are one statement.
+- **Cell accounting** (`cell_accounting_2_2`, `cell_accounting_3_3`): the
+  repaired store is exactly lossless in count — the double-coset sum
+  Σ_{(a,b)} |Stab(a) \ S₃ / Stab(b)| equals the diagonal-orbit count equals
+  C(LM+2, 3): 20 at extent (2,2), 165 at (3,3) — the generalization of
+  `cauchy_cell_count`, pinned from the live enumerations.
+
+Honest scope: r = 3 — the load-bearing rank, where mixed Schur components
+first exist. The general-r statement (minimal width r!, and a genuine
+tie-breaking exception at (r,L,M) = (3,2,2), where exactly 4 of 4096
+tie-breaking rules admit width 2 — so the general theorem must quantify over
+tie-breaks) is the prose development; a general-r mechanization needs a
+ℚ[S_r] development, exactly as BladeWreath's general-r exactness. Schemes
+with wider stores or multi-cell reads are a different class, not refuted.
 
 ## BladeMonad.v — monad and combinator laws
 
@@ -839,7 +896,7 @@ functions, orthogonality, Clebsch–Gordan/fusion multiplicity (the CG-copy inde
 is §3.6's 5b-iii deferral) and any group off the roster are likewise absent:
 nothing here is quantified over "all point groups".
 
-## BladeWreath.v (61 theorems) — the wreath group for input-side product symmetry
+## BladeWreath.v (85 theorems) — the wreath group for input-side product symmetry
 
 The input-side companion to BladeCore's output-side refutations (formalism
 3.4/12.5): two rank-r symmetric tensors combined by a pointwise kernel
@@ -911,18 +968,85 @@ KERNEL-RELATIVE — the additive analogue collapses to full S_4 under
 detect the collapse from the input alone; licensing must be by identity and
 declaration, not by value inspection.
 
+**Exactness at r = 3 — one rank past the seed.** r = 2 is a thin margin:
+the wreath group has order 8 inside S_4's 24, and there every generator is
+a transposition, so a reader may reasonably suspect the exactness is an
+artifact of how little room S_4 leaves. Section 10 removes that doubt by
+re-running the whole enumeration at r = 3, where 648 of the 720
+permutations of S_6 must fail — including 6-cycles and every way of
+interleaving the two index blocks — against all 3⁶ = 729 index tuples
+(`perms720_card`, `cells_r3_card`). Nothing is assumed about which
+permutations could work: the permutation list is GENERATED rather than
+written out as data (720 six-lists is past the point where a literal table
+is auditable) and then certified to be all of S_6 — 720 entries, pairwise
+distinct, each a bijection of the 6 slots (`perms720_are_bijections`,
+`perms720_distinct`). The two candidate groups are likewise DEFINED by the
+block-preserving predicate and then shown to have the right orders and to
+be composition-closed (`block36_card`, `wreath72_card`, `block36_is_group`,
+`wreath72_is_group`, `block36_subgroup_of_wreath72`), rather than asserted
+as tables. The rank-3 symmetric accessor reaches its table through
+(min, median, max), so full S_3 input symmetry is definitional rather than
+a property of the particular witness (`symtab3_perm`, `symtab3_S3`); table
+entries are kept in 1..4 deliberately, since coincidences are cheapest at
+small values, making exactness there the stronger result, not the weaker.
+
+The four regimes come out exactly as sections 2, 3, 5 and 7 predict:
+
+```
+repeated + commutative      72 = 2·(3!)²   exactly the wreath group
+distinct inputs             36 = (3!)²     exactly the block group
+repeated + NONcommutative   36 = (3!)²     the swap dies
+rank-one (degenerate)      720 = |S_6|     total collapse
+```
+
+`repeated_r3_stabilizer_is_wreath` is the headline — the stabilizer of a
+repeated symmetric argument under a commutative kernel is EXACTLY the
+72-element S_3 wr S_2, not a lower bound and not a sample — and
+`repeated_r3_add_stabilizer_is_wreath` reproves it under `Nat.add`, so the
+wreath answer is a property of the regime rather than of multiplication.
+`distinct_r3_stabilizer_is_block_group` is section 5's refutation at r = 3
+(exactly 36 = (3!)²). The sharpest of the four is
+`noncomm_r3_loses_the_swap`: same repeated symmetric input, same
+enumeration, and the only change is that the kernel (x²y) stops
+commuting — whereupon exactly the 36 swap-containing permutations drop
+out. That isolates the Z₂ factor of the wreath product as precisely the
+commutativity license of section 3, and nothing else. The strict chain
+`block36_lt_wreath72_lt_s6` (36 < 72 < 720) is derived from those
+theorems rather than re-enumerated.
+
+Three named permutations that S_6 allows and the wreath group forbids are
+pinned with the exact tuple where the output disagrees
+(`r3_pinned_are_not_wreath` plus `r3_cross_one_violates`,
+`r3_interleave_violates`, `r3_sixcycle_violates`): a 6-cycle, a full
+interleaving of the two blocks, and a single cross-block exchange — the
+last being the MINIMAL departure from the wreath group, moving just one
+slot across. `rank1_r3_admits_the_pinned_refutations` is the degenerate
+control: at rank one (U3 = u_i·u_j·u_k, whose repeated product is a 6-fold
+product of u-values) all three turn back into symmetries, so exactness at
+72 genuinely depends on the witness being off the degenerate locus, exactly
+as at r = 2 — and, as there, a compiler cannot license the extra symmetry
+from the DECLARATION, since U3 and A3 satisfy the identical rank-3
+symmetric declaration.
+
 Honest scope (in-file generalization notes, BladeWreath.v §§2–3 and the
 closing remarks): the invariance halves
 (`block_product_symmetry_soundness`, `wreath_full_invariance`) are proved
-at GENERAL r; the exact group orders (r!)² and 2·(r!)² are the classical
-orders of S_r × S_r and S_r wr S_2 and are cited beyond r = 2, not
-proved — the file computes them exactly only at r = 2 (extents 2 and 6, by
-enumeration). A general-r order proof needs a factorial-counting
-development over `permutes`; a general-r exactness proof needs a
-BladeCompleteness-style detection argument with the degeneracy locus
-excluded by hypothesis rather than by computation. k-block and
-antisymmetric-input generalizations are noted in-file but not mechanized.
-Reproducible enumeration outside Coq: `proofs/OrbitEnum.fsx` (dotnet fsi).
+at GENERAL r; the exact group orders (r!)² and 2·(r!)² are computed by
+COMPLETE ENUMERATION at r = 2 (extents 2 and 6) and r = 3 (extent 3), and
+beyond that are the classical orders of S_r × S_r and S_r wr S_2, cited
+rather than proved. Past r = 3 the enumeration leaves Coq's reach — r = 4
+is 40320 permutations × 3⁸ tuples — and the orders 2·(r!)² have been
+confirmed at r = 4 and r = 5 only EXTERNALLY, by exhaustive exact-integer
+witness enumeration outside this development (every non-wreath permutation
+refuted by a concrete counterexample). That is evidence, not a Coq proof,
+and the file records it as such. **General-r exactness remains open**: it
+needs a BladeCompleteness-style detection argument (a maximally symmetric
+probe kernel plus free data witnessing every violation) with the degeneracy
+locus excluded by hypothesis rather than by computation, and a general-r
+order proof needs a factorial-counting development over `permutes`.
+k-block and antisymmetric-input generalizations are noted in-file but not
+mechanized. Reproducible enumeration outside Coq: `proofs/OrbitEnum.fsx`
+(dotnet fsi).
 
 ## BladeLayout.v (163 theorems) — striding parity and the layout group
 
@@ -1002,7 +1126,9 @@ vectorization — and no claim about cache hardware is made anywhere.
 
 Still open: surface-calculus progress/preservation (the one missing species —
 deliberately sequenced after the rewrite settles surface syntax), general-r
-verified offsets, r ≥ 3 storage splits, k-slot structure, typed-path
+verified offsets, the storage dichotomy at general r (r = 3 closed in both
+directions by BladeDichotomy; the general minimal-width-r! statement and its
+(3,2,2) tie-breaking exception are prose), k-slot structure, typed-path
 combinator laws, the adjunction proper, and the general-r Jacobian transfer /
 accumulation multiplicities (rank-2 forms: BladeJacobian).
 

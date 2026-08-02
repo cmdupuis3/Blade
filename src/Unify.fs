@@ -38,11 +38,31 @@ type TypeError =
     /// Covers pg-vs-pg AND the cross-member pair (an irreps space is never a
     /// pg-irreps space, whatever their extents).
     | BlockSpecArgMismatch of pos: int * expected: string * actual: string
-    | CompoundBareWildcard of rank: int
-    | CompoundWildcardArity of rank: int * tupleLen: int
-    | CompoundAllFree of rank: int
+    // CompoundIdx flat-subscript application errors. A compound axis consumes
+    // k FLAT positional subscripts like SymIdx (B(i, j, t)) — the historical
+    // tuple form B((i, j)) and all wildcard/partial forms moved to SparseIdx.
+    /// A tuple or wildcard reached a compound axis: the tuple spelling is
+    /// retired and partial/wildcard reads are a SparseIdx feature.
+    | CompoundTupleForm of rank: int
+    /// Fewer than k subscripts supplied for the rank-k compound axis.
+    | CompoundUnderSupplied of rank: int * got: int
+    /// More subscripts than the compound axis + trailing dims can consume.
     | CompoundOverSupplied of rank: int * got: int
-    | CompoundNeedsTuple of rank: int
+    // The SparseIdx application-form errors: the one-tuple-per-tabulated-axis
+    // rules (validateTabulatedIndex) with wildcard currying (formalism 3.5).
+    | SparseBareWildcard of rank: int
+    | SparseWildcardArity of rank: int * tupleLen: int
+    | SparseAllFree of rank: int
+    | SparseOverSupplied of rank: int * got: int
+    | SparseNeedsTuple of rank: int
+    /// v1's HARD REFUSAL at the OrbIdx storage boundary
+    /// (docs/plan-orbit-index-types.md §9): a depth >= 2 iterated-wreath class
+    /// is declarable and type-checks, but no allocator, traversal nest, compact
+    /// read, printer or provider path emits it. `levels` is the rendered level
+    /// list ("[(2,-), (2,+)]") and `where_` names the seam that refused. An
+    /// index-type violation (BL4003): the type is legal, the STORAGE it names
+    /// is not available.
+    | OrbitStorageUnsupported of levels: string * where_: string
     | RaggedIdxNeedsPrior of func: string
     | IrrepsIdxSpec of detail: string
     | IrrepsIdxSpecFn of func: string * detail: string
@@ -528,9 +548,42 @@ let indexRankDiffers (i1: IRIndexType) (i2: IRIndexType) : bool =
 ///     are structural and never gate unification.
 ///   - Extents are NOT compared (runtime values, not template parameters).
 ///   - Symmetry classes must be compatible (SymNone is a wildcard).
+///   - WREATH LEVEL LISTS are compared, and are the one thing here that is read
+///     OUT of the extent slot — see the dedicated arm below for why that is not
+///     a contradiction of the line above.
 let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     let isSyntheticTag (t: string) = t.StartsWith("__")
+    // The wreath arm, ahead of everything but the rank check.
+    //
+    // Rank + Symmetry are NOT sufficient here, and the failure is silent:
+    // OrbIdx<[(2,+),(2,+)], n> and OrbIdx<[(2,-),(2,-)], n> are both Rank 4,
+    // both SymWreath, and both carry the same "__orbidx" synthetic tag (which
+    // the tag arm below exempts by design), so every existing test in this
+    // function says "compatible" -- while the two have DIFFERENT cell counts
+    // (55 vs 15 at n = 4) and different zero sets. The level list is the type.
+    //
+    // It lives in the Extent slot, and this function's contract says extents are
+    // never compared. That contract is about EXTENTS -- runtime values that are
+    // not template parameters. A level list is neither: it is compile-time
+    // syntax, part of the class's identity, and it rides the extent slot only
+    // because IRIndexTypeG has no field for it (the IRSparseKeys precedent).
+    // Comparing it is therefore consistent with the rule, not an exception to
+    // it; the BASE extent inside the marker is still not compared.
+    let wreathLevels (ix: IRIndexType) =
+        match ix.Extent with
+        | IROrbitClass (levels, _) -> Some levels
+        | _ -> None
+    let wreathMismatch =
+        match wreathLevels i1, wreathLevels i2 with
+        | Some l1, Some l2 -> l1 <> l2
+        // A wreath record against a non-wreath one: the Symmetry test at the
+        // bottom already separates them UNLESS the other side is SymNone (the
+        // wildcard). A plain Idx flowing into a wreath slot is adoption, the
+        // same permissiveness every anonymous index gets, so leave it to that
+        // arm rather than hard-refusing here.
+        | _ -> false
     indexRankDiffers i1 i2 ||
+    wreathMismatch ||
     match i1.Tag, i2.Tag with
     | Some (BlockSpecTag (s1, n1)), Some (BlockSpecTag (s2, n2)) ->
         s1 <> s2 || (match n1, n2 with

@@ -1,0 +1,25 @@
+// TEST: OrbIdx Wreath Untied Apply (rejects)
+// ERROR: BL4003
+// A wreath array can be an APPLY INPUT only when the apply produces a wreath
+// OUTPUT, because the only nest that walks a wreath pool is the segment-peeled
+// `orb_visit` one and it is driven by the output class. A unary elementwise map
+// has no output class to drive it: `buildLoopLevelStructure` would have to
+// emit prod(ri) ordinary levels over the raw axes, which walks a dense cell set
+// in the wrong order and writes the wrong number of cells.
+//
+// 202 shows the shape that DOES work -- two occurrences of the same wreath
+// array under one comm clause, which appends a third level. The difference is
+// not the input type; it is whether a tie is earned.
+//
+// (The loop builder refuses this too, as a `failwith` backstop. That surfaces
+// as BL9001 "internal compiler error, please report it", which is the wrong
+// story: this is a language limitation. The front-end gate here is what makes
+// it BL4003. Both layers stay -- the backstop is what keeps a future internal
+// producer loud instead of wrong.)
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+let U = method_for(W) <@> lambda(u) -> u * 2.0 |> compute
+// EXPECT: typecheck failure — only a comm tie over every argument can iterate a wreath array.

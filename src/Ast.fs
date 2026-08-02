@@ -200,8 +200,30 @@ type TypeExpr =
     // the second argument may be.
     | TySymIdx of rank: int * baseIdx: SymIdxBase
     | TyAntisymIdx of rank: int * baseIdx: SymIdxBase
+    // OrbIdx<[(r1,s1), ..., (rd,sd)], n> -- the flat ITERATED-WREATH class
+    // (docs/plan-orbit-index-types.md §2). Levels are OUTERMOST-LAST; each is a
+    // (rank, sign) pair with `true` = '+' (invariant) and `false` = '-' (sgn).
+    // The empty list `OrbIdx<[], n>` is legal and is the trivial class Idx<n>.
+    //
+    // The levels are PURE SYNTAX -- integer literals and sign tokens, no Expr --
+    // so they are stored as data, not as expressions to evaluate. Only the
+    // extent is an expression, and it accepts exactly what `SymIdx<k, _>`'s
+    // second argument accepts (SymIdxBase), so `OrbIdx<[(2,+)], n>` and
+    // `SymIdx<2, n>` share one extent grammar and one lowering.
+    //
+    // NORMALIZED AT LOWERING (§7.2, and OrbRank.normalizeLevels is the
+    // reference): rank-1 levels drop at EITHER sign; [] becomes the plain Idx
+    // record; a single surviving level becomes the SymIdx / AntisymIdx record
+    // verbatim. Only depth >= 2 produces the new SymWreath representation.
+    | TyOrbIdx of levels: (int * bool) list * baseIdx: SymIdxBase
     | TyBoundedIdx of lower: Expr * upper: Expr
     | TyCompoundIdx of mask: Expr
+    // SparseIdx<keys> — explicit valid-tuple enumeration (formalism 3.5).
+    // `keys` is a rank-1 array of Nat tuples (edge lists, CG triples); rank is
+    // implicit from the tuple arity. Keys keep their GIVEN order (never
+    // sorted); lookups go through the tuple hash. Static: the entry set is
+    // fixed at construction.
+    | TySparseIdx of keys: Expr
     // Dormant scaffolding for a GENERAL group-parameterized rep index. For
     // O(3)/SO(3) the transforms-as feature shipped (2026-07-18) on
     // IrrepsIdx + the `where ml.equiv(G)` function constraint
@@ -425,6 +447,7 @@ and ExprKind =
     | ExprRank of Expr                     // rank(A) - get rank of array
     | ExprMask of array: Expr * pred: Expr // mask(A, pred) - filter array by predicate
     | ExprCompound of dense: Expr * mask: Expr // compound(dense, mask) - scatter dense array into a CompoundIdx-typed compact array via a bool mask (formalism 4.5)
+    | ExprSparse of values: Expr * keys: Expr  // sparse(values, keys) - bundle a rank-1 values array (in key order) with an explicit key list into a SparseIdx-typed array (formalism 3.5); no scatter, values are already in key order
     | ExprIntersect of Expr * Expr         // intersect(A, B) - elements in both
     | ExprUnion of Expr * Expr             // union(A, B) - elements in either
     | ExprUnique of array: Expr            // unique(A) - dedup, first-occurrence order

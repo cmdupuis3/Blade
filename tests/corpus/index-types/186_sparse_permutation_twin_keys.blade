@@ -1,0 +1,19 @@
+// TEST: Sparse Permutation Twin Keys
+// The sparse key table is hashed STRUCTURALLY on the tuple, so permutation
+// twins - (1,2) vs (2,1), (0,3) vs (3,0) - must be distinct keys with
+// distinct ranks. This pins the interpreter's TupleKeyComparer (.NET int64[]
+// hashes by REFERENCE; an order-insensitive combine would collide these) and
+// the C++ array_hasher against each other via the differential.
+let static K = [(1, 2), (2, 1), (0, 3), (3, 0)]
+let S = method_for(range<SparseIdx<K>>) <@> lambda(i, j) -> i * 10 + j |> compute
+let a = S((1, 2))
+let b = S((2, 1))
+let c = S((0, 3))
+let d = S((3, 0))
+// A wildcard partial must also separate the twins: only (1,2) has axis-1 == 2.
+let g = S((_, 2))
+// EXPECT: a = 12
+// EXPECT: b = 21
+// EXPECT: c = 3
+// EXPECT: d = 30
+// EXPECT: g = [12]

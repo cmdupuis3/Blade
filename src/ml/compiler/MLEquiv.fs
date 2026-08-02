@@ -396,7 +396,41 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
         // aggregate), so it may not scale a rep.
         | None when isBuiltinScalarName n -> Ok (Inv InvScalar)
         | None -> Ok (Inv InvShapeUnknown)
+    // A builtin scalar name carrying ARGUMENTS is still that scalar. Every
+    // argument TypeCheck resolves in this position is a refinement of a
+    // 0-dimensional type and not a change of shape — a unit (`Float<meters>`)
+    // or, on an integer base, a nominal index tag (`Nat<LatIdx>`) — and an
+    // argument it cannot resolve as either is ignored outright, so all three
+    // readings lower to a scalar (TypeCheck.lowerTypeExpr, the `tryResolveTagArg`
+    // arms). Reading the name only through the argument-FREE form let a unit
+    // annotation decide an equivariance verdict: `rep * s` was refused for an
+    // `s` that is a scalar in every sense the group action can see, since the
+    // unit grading is a separate discipline that erases entirely at codegen.
+    // The typed twin never had the bug — it classifies the LOWERED type and
+    // sees through `IRTUnitAnnotated`/`IRTIdxTagged` (DeduceRep.classifyTypeR).
+    | TyNamed (n, _) when isBuiltinScalarName n -> Ok (Inv InvScalar)
     | TyNamed (_, _) -> Ok (Inv InvShapeUnknown)
+    // A bounded primitive is its base type. `min=`/`max=` are a REFINEMENT of
+    // the base (Ast.fs's TyBounded contract) — a predicate on the VALUE, not on
+    // coordinates — so they add no axis, carry no basis, and erase entirely
+    // before codegen: `Float<min=0, max=1>` lowers exactly as `Float`
+    // (TypeCheck.lowerTypeExpr). Two annotations that lower to the same runtime
+    // type must get the same verdict, or an equivariance judgment about how a
+    // buffer transforms under g is deciding on something that is not there at
+    // run time. There is also no bound that COULD name a representation: the
+    // parser admits only `min=`/`max=`, whose arguments are value-world Exprs,
+    // never spec expressions.
+    //
+    // Without this arm a single bounded parameter hit the catch-all, and an
+    // Error in signature position is a REFUSAL that skips the whole function —
+    // the same cross-lattice leak a unit annotation had, and the reason the
+    // typed twin never had either: `DeduceRep.classifyTypeR` reads the LOWERED
+    // type, where bounds are already gone.
+    //
+    // Chasing the base composes with the unit reading rather than competing
+    // with it: `Float<meters, min=0, max=1>` keeps the unit as a POSITIONAL
+    // argument on the inner `TyNamed` node, so this lands on the arms above.
+    | TyBounded (baseTy, _, _) -> statusOfType g aliases statics baseTy
     | TyIrrepsIdx specExpr ->
         // alias body position (`type X = IrrepsIdx<s>` chased above)
         match g with
@@ -1540,6 +1574,17 @@ let rec private sigFamilies (aliases: Map<string, TypeExpr>) (t: TypeExpr) : boo
         | None -> (false, Set.empty)
     | TyIrrepsIdx _ -> (true, Set.empty)
     | TyPgIrrepsIdx (gn, _) -> (false, Set.singleton gn)
+    // NO TyBounded arm, deliberately, even though `statusOfType` grew one. The
+    // only signature where a bound hides an index family from this scan is a
+    // bound on an INDEX-TYPE ALIAS (`v: A<min=0, max=1>`, `type A =
+    // IrrepsIdx<S>`), and that form is already broken: the bare `v: A` is
+    // refused outright as an index type in parameter position, the bounded
+    // spelling only slips past that check because it does not look through
+    // TyBounded, and what it lowers to is the tagged SCALAR `Nat<A>` — so every
+    // call site dies on a rank mismatch. Chasing the bound here would make the
+    // channel propose `where ml.equiv(O3)` for a program that cannot type-check
+    // at all. The scan's failure direction is to propose nothing, which is the
+    // harmless one; a bogus proposal on a dead program is not.
     | _ -> (false, Set.empty)
 
 /// Candidate groups for a signature, STRONGEST FIRST.

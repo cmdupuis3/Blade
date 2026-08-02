@@ -209,8 +209,8 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
         match b.Value with
         | IRIndex (a, (IRTuple coords) :: _, _) ->
             (match Blade.IR.typeOf a with
-             | ArrayElem at when Blade.CodeGen.isCompoundArrayType at ->
-                 let k = at.IndexTypes |> List.tryFind (fun ix -> ix.IxKind = IxKCompound)
+             | ArrayElem at when Blade.CodeGen.isCompoundArrayType at || Blade.CodeGen.isSparseArrayType at ->
+                 let k = at.IndexTypes |> List.tryFind (fun ix -> ix.IxKind = IxKCompound || ix.IxKind = IxKSparse)
                          |> Option.map (fun ix -> ix.Rank) |> Option.defaultValue coords.Length
                  (match Blade.IR.classifyCompoundIndexTuple k coords with
                   | Blade.IR.CompoundFull -> true | Blade.IR.CompoundPartial _ -> false)
@@ -219,7 +219,7 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
 
     let printArrayBinding (b: IRBinding) (arrType: IRArrayType) : unit =
         let rank = Blade.CodeGen.arrayRank arrType
-        if Blade.CodeGen.isCompoundArrayType arrType then
+        if Blade.CodeGen.isCompoundArrayType arrType || Blade.CodeGen.isSparseArrayType arrType then
             ()   // CodeGen emits a diagnostic C++ comment only -> zero stdout.
         elif isCompoundRowSubview b then
             ()   // raw trailing-row T* view: not auto-printed.
@@ -396,6 +396,12 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
                 match elemThrough inner with
                 | Some et -> emitScalar b et
                 | None -> ()
+            | IRTNat _ ->
+                // Type-level natural in value position (a Nat tuple component
+                // from destructuring, a `Nat<unit>` scalar after stripUnits) —
+                // genPrintStatements renders it as size_t and prints; mirror
+                // with the int scalar path.
+                emitScalar b ETInt64
             | ArrayElem arrType ->
                 // M2: dense-array print (dispatch mirrors genPrintStatements).
                 printArrayBinding b arrType

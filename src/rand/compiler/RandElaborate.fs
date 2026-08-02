@@ -176,6 +176,8 @@ let rec private rewriteExpr (statics: StaticEnv) (aliases: Set<string>) (e: Expr
         r a |> Result.bind (fun a' -> r p |> Result.map (fun p' -> inheritSpan e (ExprMask (a', p'))))
     | ExprKind.ExprCompound (d, m) ->
         r d |> Result.bind (fun d' -> r m |> Result.map (fun m' -> inheritSpan e (ExprCompound (d', m'))))
+    | ExprKind.ExprSparse (v, k) ->
+        r v |> Result.bind (fun v' -> r k |> Result.map (fun k' -> inheritSpan e (ExprSparse (v', k'))))
     | ExprKind.ExprIntersect (a, b) ->
         r a |> Result.bind (fun a' -> r b |> Result.map (fun b' -> inheritSpan e (ExprIntersect (a', b'))))
     | ExprKind.ExprUnion (a, b) ->

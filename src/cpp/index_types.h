@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <functional>
 #include <utility>
+#include <stdexcept>
 
 /* array_hasher: a std::hash-style functor for std::array<size_t, RANK>.
  *
@@ -304,5 +305,56 @@ private:
 			if (t[d] > target[d]) return 1;
 		}
 		return 0;
+	}
+};
+
+/* Sparse index type: an explicit valid-tuple enumeration (formalism 3.5).
+ *
+ * Models the "arbitrary key set" regime -- edge lists, CG triples: a rank-k
+ * index whose valid tuples are handed over as an explicit list rather than
+ * derived from a mask over a product space. There are no per-axis extents and
+ * no grid; the entry list IS the type's whole content.
+ *
+ * Derives from abstract_hashed_idx_t (NOT abstract_sorted_hashed_idx_t):
+ * the keys are kept in GIVEN order, never sorted. A CompoundIdx earns its
+ * sorted table for free from lex-enumerating its mask, which is what makes
+ * contiguous prefix slicing possible; a sparse key set has no such structure
+ * to exploit, so it keeps the caller's order (iteration order == key order)
+ * and answers every lookup through the tuple hash. Consequently there is no
+ * prefix_range here -- partial (wildcard) indexing is always a gather over
+ * the entry list.
+ *
+ * Static: the entry set is fixed at construction (this type never calls the
+ * base's insert()). Duplicate keys are a construction error -- the rank<->
+ * tuple bijection would be ill-defined. hash() is discharged as a no-op
+ * because the tables are built directly in the constructor from the given
+ * list; there is nothing to enumerate.
+ */
+template<size_t RANK>
+struct sparse_index_t : abstract_hashed_idx_t<RANK> {
+	using base = abstract_hashed_idx_t<RANK>;
+	using IDX = typename base::IDX;
+
+	sparse_index_t(std::string name_in, std::vector<IDX> keys)
+		: base(name_in, keys.size()) {
+		this->rank_to_tuple = std::move(keys);
+		this->tuple_to_rank.reserve(this->rank_to_tuple.size());
+		for (size_t r = 0; r < this->rank_to_tuple.size(); r++) {
+			this->tuple_to_rank[this->rank_to_tuple[r]] = r;
+		}
+		if (this->tuple_to_rank.size() != this->rank_to_tuple.size()) {
+			throw std::runtime_error("SparseIdx '" + this->name + "': duplicate key tuple");
+		}
+		this->cardinality = this->rank_to_tuple.size();
+	}
+
+	// Tables are built in the constructor from the explicit key list; the
+	// inherited pure-virtual build hook has nothing to do.
+	void hash() override {}
+
+	// Presence query (allocated-fallback / membership): does the key set
+	// contain this full tuple? Hash probe, no grid to consult.
+	bool present(const IDX& t) const {
+		return this->tuple_to_rank.count(t) != 0;
 	}
 };

@@ -269,6 +269,7 @@ and TypedExprKind =
     // Filtered array
     | TExprMask of array: TypedExpr * pred: TypedExpr
     | TExprCompound of dense: TypedExpr * mask: TypedExpr
+    | TExprSparse of values: TypedExpr * keys: TypedExpr
     | TExprIntersect of TypedExpr * TypedExpr
     | TExprUnion of TypedExpr * TypedExpr
     | TExprUnique of array: TypedExpr

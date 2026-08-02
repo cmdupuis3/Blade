@@ -1,0 +1,10 @@
+// TEST: OrbIdx Level Missing Sign (rejects)
+// ERROR: BL1001
+// A level is `( INT , + | - )` and the sign is not optional: the character is
+// half the class's identity (§6 -- the ranks fix the group, the sign list
+// selects among the 2^d characters it admits), so there is no sensible
+// default to supply. The dedicated sub-parser demands the comma, then the
+// sign token.
+type R = OrbIdx<[(2)], 4>
+let x = 1
+// EXPECT: parse failure -- expected ',' after the level rank.

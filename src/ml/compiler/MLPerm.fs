@@ -275,6 +275,11 @@ and private statusOfType (depth: int) (n: int) (aliases: Map<string, TypeExpr>) 
         statusOfType (depth - 1) n aliases statics (Map.find nm aliases)
     | TyNamed (_, _) -> Ok (Pow 0) // scalar primitives and non-index named types
     | TyIdx _ -> statusOfIndex depth n aliases statics t
+    // The equiv classifier's arm, for the same reason: `min=`/`max=` refine the
+    // VALUE and erase before codegen, so they cannot move an extent, which is
+    // the only thing this classifier keys on. `depth` is not spent — a bound is
+    // a wrapper on one node, not an alias hop, and the parser cannot nest them.
+    | TyBounded (baseTy, _, _) -> statusOfType depth n aliases statics baseTy
     | TyInt32 | TyInt64 | TyFloat32 | TyFloat64 | TyBool | TyComplex128 -> Ok (Pow 0)
     | _ ->
         Error (sprintf "cannot classify this annotation in a perm-certified signature (supported: scalars and `Array<_ like Idx<M>>`). %s" v2Note)

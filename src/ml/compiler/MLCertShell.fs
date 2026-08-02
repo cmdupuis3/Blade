@@ -144,7 +144,7 @@ let rec freeVars (bound: Set<string>) (e: Expr) : Set<string> =
     | ExprKind.ExprBinOp (_, _, l, r) | ExprKind.ExprDotDot (l, r)
     | ExprKind.ExprTupleIndex (l, r) | ExprKind.ExprGuard (l, r)
     | ExprKind.ExprReplicate (l, r) | ExprKind.ExprMask (l, r)
-    | ExprKind.ExprCompound (l, r) | ExprKind.ExprIntersect (l, r)
+    | ExprKind.ExprCompound (l, r) | ExprKind.ExprSparse (l, r) | ExprKind.ExprIntersect (l, r)
     | ExprKind.ExprUnion (l, r) | ExprKind.ExprContains (l, r)
     | ExprKind.ExprGroupBy (l, r) | ExprKind.ExprSort (l, r)
     | ExprKind.ExprGram (l, r) | ExprKind.ExprAssign (l, r) -> Set.union (fv l) (fv r)

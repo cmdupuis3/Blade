@@ -187,6 +187,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprGuard (c, b) -> TExprGuard (z c, z b)
         | TExprMask (a, p) -> TExprMask (z a, z p)
         | TExprCompound (d, m) -> TExprCompound (z d, z m)
+        | TExprSparse (v, k) -> TExprSparse (z v, z k)
         | TExprIntersect (a, b) -> TExprIntersect (z a, z b)
         | TExprUnion (a, b) -> TExprUnion (z a, z b)
         | TExprUnique a -> TExprUnique (z a)

@@ -15,6 +15,26 @@ type SymmetryClass =
     | SymSymmetric     // Symmetric (i <= j)
     | SymAntisymmetric // Antisymmetric (i < j, negate on swap)
     | SymHermitian     // Hermitian (conjugate on swap)
+    /// ITERATED WREATH (`OrbIdx<[(r1,s1),...,(rd,sd)], n>`, d >= 2 after
+    /// normalization -- docs/plan-orbit-index-types.md §2). The group is
+    /// S_r1 wr ... wr S_rd acting on prod(ri) raw axes and the character is the
+    /// product of the per-level signs, so this is NOT reducible to any of the
+    /// four cases above: it is compact (a `Symmetry <> SymNone` guard answers
+    /// TRUE, correctly) but its placement is the §4 iterated-binomial fold, not
+    /// a single combinadic.
+    ///
+    /// A nullary case DELIBERATELY: the level list rides the record's Extent
+    /// slot as an `IROrbitClass` marker, exactly the IRSparseKeys/IRCompoundMask
+    /// pattern, so `SymmetryClass` stays a comparable nullary enum (Set/distinct
+    /// over it, ~8 `<> SymNone` compact guards, and every `=`-comparison keep
+    /// working) while every EXHAUSTIVE match over it is forced to decide.
+    ///
+    /// DEPTH 1 NEVER GETS HERE. `OrbIdx<[(r,+)],n>` lowers to the SymSymmetric
+    /// record `SymIdx<r,n>` produces and `OrbIdx<[(r,-)],n>` to the
+    /// SymAntisymmetric one, byte for byte; the empty class lowers to the plain
+    /// `Idx<n>` record. That normalization is what bounds this case's blast
+    /// radius to genuinely new storage.
+    | SymWreath
 
 /// Placement (membership + ranking) class for index types -- the Level-1 axis,
 /// orthogonal to the symmetry-transform axis (SymmetryClass). It answers "which
@@ -43,6 +63,12 @@ type PlacementClass =
 let placementClassOf (sym: SymmetryClass) : PlacementClass =
     match sym with
     | SymNone -> PlaceDense
+    // A wreath class IS closed-form placed -- §4's iterated binomial, one C(.,.)
+    // per level -- so it is Combinatorial, not Tabulated. What it is NOT is a
+    // SINGLE combinadic over `Rank`, so every consumer of this verdict has to
+    // read the level list off the record's Extent marker rather than assume
+    // C(n+r-1, r); `bufferGroupCardinality` is the one live consumer and does.
+    | SymWreath -> PlaceCombinatorial SymWreath
     | SymSymmetric | SymAntisymmetric | SymHermitian -> PlaceCombinatorial sym
 
 /// ---------------------------------------------------------------------------
@@ -149,6 +175,13 @@ type IxKind =
     | IxKPlain              // ordinary index type (user-named or anonymous)
     | IxKCompound           // "__compoundidx": masked product space
     | IxKCompoundDynamic    // "__compoundidx_dynamic": mask known only at runtime
+    | IxKSparse             // "__sparseidx": explicit key enumeration, hash lookup
+    | IxKOrbit              // "__orbidx": iterated-wreath (OrbIdx) class of depth
+                            // >= 2. The (rank, sign) level list rides the Extent
+                            // slot as IROrbitClass; Rank is the product of the
+                            // level ranks. Always paired with Symmetry =
+                            // SymWreath -- depth <= 1 normalizes to the legacy
+                            // Sym/Antisym/plain records and never carries this kind
     | IxKDep                // "__depidx": dependent-extent head marker
     | IxKDepInner           // "__depidx_inner": the dependent inner dimension
     | IxKDepOuter           // "__depidx_outer": the outer dim a DepIdx depends on
@@ -179,6 +212,8 @@ let ixKindSentinel (k: IxKind) : string option =
     | IxKPlain -> None
     | IxKCompound -> Some "__compoundidx"
     | IxKCompoundDynamic -> Some "__compoundidx_dynamic"
+    | IxKSparse -> Some "__sparseidx"
+    | IxKOrbit -> Some "__orbidx"
     | IxKDep -> Some "__depidx"
     | IxKDepInner -> Some "__depidx_inner"
     | IxKDepOuter -> Some "__depidx_outer"
@@ -350,6 +385,8 @@ let ixKindOfTag (tag: string option) : IxKind =
     match tag with
     | Some "__compoundidx" -> IxKCompound
     | Some "__compoundidx_dynamic" -> IxKCompoundDynamic
+    | Some "__sparseidx" -> IxKSparse
+    | Some "__orbidx" -> IxKOrbit
     | Some "__depidx" -> IxKDep
     | Some "__depidx_inner" -> IxKDepInner
     | Some "__depidx_outer" -> IxKDepOuter

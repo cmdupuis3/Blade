@@ -86,8 +86,8 @@ type AliasEnv = Map<string, TypeExpr>
 /// True iff `ty` is an index type, directly or via alias resolution.
 let rec isIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
     match ty with
-    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
-    | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _
+    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _
+    | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _ | TySparseIdx _
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque
     | TyIrrepsIdx _ | TyPgIrrepsIdx _
     | TyEquivIdx _ -> true
@@ -96,22 +96,30 @@ let rec isIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
         | Some body -> isIndexType env body
         | None -> false
     | TyConstrained (inner, _) -> isIndexType env inner
+    // `A<min=e1, max=e2>` (Ast.TyBounded) is the SAME type as `A` for every
+    // purpose this validator cares about — TypeCheck.lowerTypeExpr discards the
+    // bounds and lowers the base (TypeCheck.fs:290). Without this arm a bound
+    // shields an index type from every position rule below, and the mistake
+    // resurfaces at the call site as an unrelated BL3001 rank mismatch.
+    | TyBounded (inner, _, _) -> isIndexType env inner
     | _ -> false
 
 /// True iff `ty` is an aliased index type (a TyNamed resolving to an index).
-let isAliasedIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
+/// Bounds are transparent: `A<min=.., max=..>` is as aliased as `A` is.
+let rec isAliasedIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
     match ty with
     | TyNamed (n, _) ->
         match Map.tryFind n env with
         | Some body -> isIndexType env body
         | None -> false
+    | TyBounded (inner, _, _) -> isAliasedIndexType env inner
     | _ -> false
 
 /// True iff `ty` is an anonymous (raw) index type, not aliased.
 let isAnonymousIndexType (ty: TypeExpr) : bool =
     match ty with
-    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
-    | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _
+    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _
+    | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _ | TySparseIdx _
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque
     | TyIrrepsIdx _ | TyPgIrrepsIdx _
     | TyEquivIdx _ -> true
@@ -134,7 +142,23 @@ let rec isKnownStatic (env: AliasEnv) (ty: TypeExpr) : bool =
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
     | TyBoundedIdx _ | TyEnumIdx _ | TyEquivIdx _ -> true
     | TyIrrepsIdx _ | TyPgIrrepsIdx _ -> true  // spec is static by definition; extent folds to a literal
-    | TyRaggedIdx _ | TyRaggedIdxOpaque | TyCompoundIdx _ -> false
+    // OrbIdx is STATIC, and unlike SparseIdx that verdict is available HERE.
+    // The split for SparseIdx is honest ignorance: its payload is an
+    // expression, and this validator sees only the surface type with no value
+    // env, so it cannot tell a `let static` key list from a runtime array. An
+    // OrbIdx's payload is not an expression at all -- the level list is integer
+    // literals and sign tokens parsed straight into data (Ast.TyOrbIdx), so it
+    // is compile-time-known by CONSTRUCTION, and the remaining argument is the
+    // same extent expression TySymIdx carries and is trusted for on the line
+    // above. Saying `false` here would be the conservative-looking answer and
+    // the wrong one: it would exclude OrbIdx from every static-context position
+    // SymIdx is allowed in, for a payload that cannot be dynamic.
+    | TyOrbIdx _ -> true
+    // SparseIdx joins the runtime family here even though a `let static` key
+    // list folds at compile time: this validator sees only the surface TYPE
+    // (no value env), so it cannot tell a static key list from a runtime keys
+    // array. The static/runtime split is made at lowering (SkStatic/SkRuntime).
+    | TyRaggedIdx _ | TyRaggedIdxOpaque | TyCompoundIdx _ | TySparseIdx _ -> false
     | TyDepIdx (outer, _, body) ->
         isKnownStatic env outer && isKnownStatic env body
     | TyNamed (n, _) ->
@@ -142,6 +166,7 @@ let rec isKnownStatic (env: AliasEnv) (ty: TypeExpr) : bool =
         | Some body -> isKnownStatic env body
         | None -> false  // unknown — assume runtime
     | TyConstrained (inner, _) -> isKnownStatic env inner
+    | TyBounded (inner, _, _) -> isKnownStatic env inner
     | _ -> false
 
 // ============================================================================
@@ -294,6 +319,15 @@ and validateChildren (env: AliasEnv) (declName: string) (span: Span)
 
     | TyPoly inner ->
         validateTypeExpr env declName span parentPos inner
+
+    | TyBounded _ ->
+        // Deliberately NOT recursing. The bound is transparent to isIndexType /
+        // isAliasedIndexType / isKnownStatic, so validateTypeExpr already applied
+        // this position's rules to the TyBounded node itself — recursing here
+        // would report the same violation twice. The base is always the
+        // `TyNamed (name, positionals)` the parser wrapped (Parser.fs:818), and
+        // TyNamed's own arm below is `[]` too, so nothing is skipped.
+        []
 
     | TyFunc _ ->
         // Function types as type expressions (higher-order). Out of scope

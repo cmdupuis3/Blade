@@ -1,0 +1,27 @@
+// TEST: OrbIdx Deduced Depth 3
+// The rule COMPOSES: a wreath array is itself a compact class, so tying two
+// occurrences of one appends a third level. docs/plan-orbit-index-types.md
+// §7.1 row 2 (`let P = f(A,A) in P [*] P`, |G| = 128 = S_2 wr S_2 wr S_2) is
+// this shape, and it is why the type is a LIST rather than a fixed pair --
+// a (r,s,k,t) quadruple caps the design at depth 2 and cannot type this.
+//
+// It also exercises the one thing depth 2 does not: reading a WREATH input.
+// The traversal nest hands out canonical sub-keys, so each read is
+// `orb_rank<inner>(subkey, n)` into the input pool (C++) / `orbRank` (interp)
+// -- the same arithmetic that laid that pool out. That is a CANONICAL read,
+// not the mirrored one 206 pins as still refused.
+//
+// §4's fold at n = 2:  2 -> C(3,2) = 3 -> C(4,2) = 6 -> C(7,2) = 21. Dense
+// would be 2^8 = 256. Extent 2 keeps the hand-checkable cell lists short;
+// §7.2's table says depth 3 is the realistic ceiling anyway (at n >= 100 the
+// int64 cell wall bites at depth 4).
+let A = [1.0, 2.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+let k = lambda(u, v) where comm(u, v) -> u + v
+let V = method_for(W, W) <@> k |> compute
+// EXPECT: S = [1, 2, 4]
+// EXPECT: W = [2, 3, 5, 4, 6, 8]
+// EXPECT: V = [4, 5, 7, 6, 8, 10, 6, 8, 7, 9, 11, 10, 9, 11, 13, 8, 10, 12, 12, 14, 16]

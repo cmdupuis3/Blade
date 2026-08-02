@@ -35,6 +35,11 @@
 //    validateLevels    the ONE structural gate (level ranks >= 1) every entry
 //                      point above shares; visitStreamChecked is the
 //                      Error-typed door to the stream for API consumers.
+//    orbRead           docs/plan-orbidx-decompaction.md §2's storage read,
+//    orbWriteCanonical dense[t] = chi(t) * pool[rank(canon(t))] (0 on the zero
+//                      set), and its canonical-only inverse. The reference
+//                      semantics the interp/codegen decompaction paths of that
+//                      plan's §4 must agree with, cell for cell.
 //
 //  INVARIANT (§3, "the one hard constraint"): rank order = the §2 nest's visit
 //  order = ascending lex. tests/Test_OrbRank.fs asserts it directly against a
@@ -552,3 +557,132 @@ let orbSuccessor (levels: Level list) (n: int) (t: int list) : int list option =
         match canonOrb levels t with
         | Some (c, _) when c = t -> orbSuccessorRec levels n t
         | _ -> None
+
+// -----------------------------------------------------------------------------
+// The storage read/write path (docs/plan-orbidx-decompaction.md §2)
+// -----------------------------------------------------------------------------
+//
+//     dense[t] = 0                                   if canon(t) is zero-set
+//              = chi(t) * pool[orbRank(canon(t))]    otherwise
+//
+// This is the REFERENCE SEMANTICS: the thing the interp `decompactOrb` and the
+// C++ streaming scatter of that plan's §4 must agree with cell for cell, and
+// the thing a held-out table can pin. So the cells are int64 and the
+// arithmetic is exact -- no float, no rounding, no "close enough". A generic
+// `orbRead<'T>` over an arbitrary numeric cell type is FUTURE WORK: it needs a
+// negation that is total for the cell type (see the Int64.MinValue case
+// below), which is a per-type decision, not an inlined `~-`. Complex cells
+// additionally need the conjugation character the plan §2 rules out of the
+// +-1 system entirely.
+//
+// Note what is NOT here: nothing walks `visitStream`. Both entry points go
+// canonOrb -> orbRank, so the read cost is the arithmetic rank's, and a stream
+// / rank disagreement would be a bug in the pair these two inherit (pinned
+// against brute force in tests/Test_OrbRank.fs), not a second order convention
+// invented here.
+
+/// A raw tuple, for message text: `(0,1,2,3)`.
+let private showTuple (t: int list) =
+    "(" + (t |> List.map string |> String.concat ",") + ")"
+
+/// The shared structural gate of the storage path: the class and the extent
+/// (through `cellCountChecked`, hence through `validateLevels` -- still the
+/// ONE structural door, per the 2026-08-01 unification), then the pool size,
+/// the tuple's axis rank, and its digit range. Returns the class's cell count.
+///
+/// Every one of these is a REFUSAL, never a repair: an out-of-range digit or a
+/// short tuple canonicalizes perfectly happily into some other class's cell,
+/// so letting either through would produce a plausible number read from the
+/// wrong offset -- the silent aliased read this gate exists to make
+/// impossible. `who` prefixes the messages this function raises itself; the
+/// malformed-class verdict is passed through UNPREFIXED so that a bad class
+/// still draws the identical string from every door in the file.
+let private storageGate (who: string) (levels: Level list) (n: int) (poolLen: int) (t: int list)
+                        : Result<int64, string> =
+    match cellCountChecked levels (int64 n) with
+    | Error e -> Error e
+    | Ok m ->
+        if int64 poolLen <> m then
+            Error(sprintf "%s: pool has %d cells, %s at n=%d needs %d"
+                          who poolLen (showLevels levels) n m)
+        else
+            let axes = axisRank levels
+            let len = List.length t
+            if len <> axes then
+                Error(sprintf "%s: tuple %s has length %d, %s acts on %d axes"
+                              who (showTuple t) len (showLevels levels) axes)
+            else
+                match t |> List.tryFind (fun d -> d < 0 || d >= n) with
+                | Some d -> Error(sprintf "%s: coordinate %d outside [0,%d)" who d n)
+                | None -> Ok m
+
+/// §2's read: the value of the dense tensor at ANY raw tuple `t`, served out
+/// of the canonical pool. Zero on the zero set, `chi(t) * pool[rank]`
+/// otherwise -- so a mirrored tuple is a legal read that returns the signed
+/// cell, and only MALFORMED input is refused (bad class, negative extent,
+/// wrong pool size, wrong axis rank, digit outside [0,n)).
+let orbRead (levels: Level list) (n: int) (pool: int64[]) (t: int list) : Result<int64, string> =
+    match storageGate "orbRead" levels n (Array.length pool) t with
+    | Error e -> Error e
+    | Ok _ ->
+        // The gate has established length = axisRank and every level rank >= 1,
+        // so canonOrb's three `failwithf` guards are all unreachable here.
+        match canonOrb levels t with
+        | None -> Ok 0L
+        | Some (c, chi) ->
+            match orbRank levels n c with
+            | Error e -> Error e
+            | Ok r ->
+                if r < 0L || r >= int64 pool.Length then
+                    // Unreachable while rank < cellCount = pool.Length; kept so
+                    // a future rank bug is a diagnosis, not an IndexOutOfRange.
+                    Error(sprintf "orbRead: rank %d outside the pool [0,%d)" r pool.Length)
+                else
+                    let v = pool.[int r]
+                    if chi >= 0 then Ok v
+                    elif v = Int64.MinValue then
+                        // The one value whose negation leaves int64. §7.2's rule
+                        // applies to the read too: wraparound must diagnose.
+                        Error(sprintf "int64 overflow: -(%d)" v)
+                    else Ok(-v)
+
+/// §2's read inverted, and ONLY at a canonical cell: `t` must be a canonOrb
+/// fixed point (which forces character +1, since a fixed point sorts with no
+/// inversions at every level), in range, with a correctly sized pool. A
+/// mirrored, zero-set, out-of-range, wrong-length or wrong-pool argument is
+/// refused with its own message shape, and the pool is left untouched.
+///
+/// Mirrored write-through (solving `chi * pool[rank] = v` by dividing out the
+/// character) is DELIBERATELY not provided: it would make one pool cell
+/// writable under all |orbit| spellings of its tuple, turning an ordinary
+/// scatter into silent last-writer-wins aliasing that no after-the-fact
+/// well-definedness check can reconstruct -- and on the zero set the equation
+/// has no solution at all for v <> 0, so the "obvious" generalization is
+/// partial as well as unsafe. Callers that mean to fill a pool should
+/// canonicalize first (canonOrb) and write the canonical cell once.
+let orbWriteCanonical (levels: Level list) (n: int) (pool: int64[]) (t: int list) (v: int64)
+                      : Result<unit, string> =
+    match storageGate "orbWriteCanonical" levels n (Array.length pool) t with
+    | Error e -> Error e
+    | Ok _ ->
+        match canonOrb levels t with
+        | None ->
+            Error(sprintf "orbWriteCanonical: tuple %s is in the zero set of %s -- it has no pool cell"
+                          (showTuple t) (showLevels levels))
+        | Some (c, chi) when c <> t ->
+            Error(sprintf "orbWriteCanonical: tuple %s is not canonical for %s (canonical form %s, character %+d)"
+                          (showTuple t) (showLevels levels) (showTuple c) chi)
+        | Some (_, chi) when chi <> 1 ->
+            // Unreachable: a canonOrb fixed point sorts with zero inversions at
+            // every level, so its character is +1. Kept as a loud invariant.
+            Error(sprintf "orbWriteCanonical: canonical tuple %s of %s carries character %+d, expected +1"
+                          (showTuple t) (showLevels levels) chi)
+        | Some _ ->
+            match orbRank levels n t with
+            | Error e -> Error e
+            | Ok r ->
+                if r < 0L || r >= int64 pool.Length then
+                    Error(sprintf "orbWriteCanonical: rank %d outside the pool [0,%d)" r pool.Length)
+                else
+                    pool.[int r] <- v
+                    Ok()

@@ -312,9 +312,20 @@ let private sortWithParity (coords: int64[]) : int64[] * int =
 ///   SymSymmetric  → (sorted, parity, false)
 ///   SymHermitian  → (sorted, parity, false)  (parity drives conjugate-on-swap)
 ///   SymAntisym    → (sorted, parity, isZero) (isZero when any index repeats)
+///   SymWreath    → REFUSED. §5's canonicalization for a wreath class is a FOLD
+///                  OF PER-LEVEL SORTS (innermost first), not one flat sort:
+///                  sorting all prod(ri) coordinates together maps distinct
+///                  orbits onto the same canonical tuple and computes a
+///                  meaningless parity. The reference implementation is
+///                  OrbRank.canonOrb, which also needs the level list this
+///                  signature does not carry. Refusing keeps the failure loud;
+///                  the alternative is a plausible tuple read from the wrong
+///                  cell.
 let canonFold (sym: SymmetryClass) (coords: int64[]) : int64[] * int * bool =
     match sym with
     | SymNone -> (Array.copy coords, 0, false)
+    | SymWreath ->
+        failwith (Blade.IR.orbitStorageUnsupported "compact read (canonFold)" [])
     | SymSymmetric
     | SymHermitian ->
         let sorted, parity = sortWithParity coords
@@ -379,6 +390,71 @@ let allocCompact (elemTy: IRType) (idxTys: IRIndexType list) (extents: int64[])
         else build 0 0L
     { ElemType = elemTy; IndexTypes = idxTys; Extents = extents; Data = data }
 
+// ----------------------------------------------------------------------------
+// OrbIdx (iterated-wreath) pools — docs/plan-orbit-index-types.md §4, §9 step 4
+// ----------------------------------------------------------------------------
+//
+// A wreath array is a FLAT pool of exactly `OrbRank.cellCountChecked levels n`
+// cells in `visitStream` order (== the C++ `orb_visit` order == ascending-lex
+// canonical), which is the plan's one hard invariant. Deliberately NOT the
+// shrinking-row SNested skeleton `allocCompact` builds: a wreath's rows shrink
+// per LEVEL, so no single simplex describes them, and a skeleton shaped like one
+// would put every cell at a plausible-but-wrong offset.
+//
+// The record keeps its honest RAW-AXIS Extents (prod(ri) copies of n) so that a
+// consumer asking for the logical shape gets the truth; only the Data layout is
+// flat. Every path that would navigate `Extents` as a nested store is refused
+// (indexArray / readCompact / forEachStorageCell / emitSymAware).
+
+/// True iff any slot of this record list is a depth >= 2 OrbIdx class.
+let hasWreath (idxTys: IRIndexType list) : bool =
+    idxTys |> List.exists (fun ix -> ix.Symmetry = SymWreath)
+
+/// Allocate a zeroed wreath pool: `cellCountChecked` cells, flat, in stream
+/// order. The count comes from the SAME checked fold `IR.classifyOutputStorage`
+/// sized the compiled pool with, so the two backends cannot allocate differently
+/// (§7.2: the failure to guard is a silent wraparound, and a second independent
+/// computation is how you get one).
+let allocWreath (elemTy: IRType) (idxTys: IRIndexType list)
+                (levels: (int * bool) list) (n: int64) : BladeArray =
+    let cells =
+        match Blade.OrbRank.cellCountChecked (Blade.IR.orbRankLevels levels) n with
+        | Ok c -> c
+        | Error detail ->
+            raise (ArrayOpUnsupported
+                     (sprintf "OrbIdx%s at extent %d: cell count -- %s"
+                              (Blade.IR.ppOrbitLevels levels) n detail))
+    let axes = levels |> List.fold (fun a (r, _) -> a * r) 1
+    { ElemType = elemTy
+      IndexTypes = idxTys
+      Extents = Array.create axes n
+      Data = storeOfElemType elemTy (int cells) }
+
+/// Number of stored cells of a wreath pool (its flat store length).
+let wreathCellCount (arr: BladeArray) : int = storeLen arr.Data
+
+/// Read the pool cell at a CANONICAL tuple, by its `orbRank` position. This is
+/// the read the traversal nest performs on a wreath INPUT (the depth >= 3
+/// shape): the tuple comes straight out of `visitStream`, so it is canonical by
+/// construction and carries character +1. The MIRRORED read -- an arbitrary
+/// tuple, folded through `canonOrb` and signed -- stays refused (readCompact).
+let wreathReadCanonical (arr: BladeArray) (levels: (int * bool) list) (n: int64)
+                        (tuple: int list) : Value =
+    match Blade.OrbRank.orbRank (Blade.IR.orbRankLevels levels) (int n) tuple with
+    | Error detail ->
+        raise (ArrayOpUnsupported
+                 (sprintf "OrbIdx%s canonical read at (%s): %s"
+                          (Blade.IR.ppOrbitLevels levels)
+                          (tuple |> List.map string |> String.concat ",") detail))
+    | Ok r -> readCell arr [ r ]
+
+/// Write the pool cell at stream position `k` (the traversal nest's own
+/// counter). Position-addressed rather than tuple-addressed precisely because
+/// the nest already knows the position: `visitStream` yields cells in order, so
+/// the writer bumps a counter exactly as the C++ visitor's `linear_index` does.
+let wreathWriteAt (arr: BladeArray) (k: int64) (v: Value) : unit =
+    writeCell arr [ k ] v
+
 // ============================================================================
 // §2 General indexing (IRIndex, plain dense) + poly-index
 // ============================================================================
@@ -419,6 +495,13 @@ let private applyReadTransform (sym: SymmetryClass) (parity: int) (v: Value) : V
 /// CodeGen.renderIndexExpr's lazyCompactRead (CodeGen.fs:1463-1538) +
 /// nested_array_utilities. Plain (SymNone) slots pass their index through.
 let readCompact (arr: BladeArray) (logicalCoords: int64 list) : Value =
+    // Ahead of the loop so the message names the actual class. canonFold below
+    // refuses SymWreath too, but its signature carries no level list, so it can
+    // only say "[]" -- this is the door that knows.
+    arr.IndexTypes |> List.iter (fun ix ->
+        if ix.Symmetry = SymWreath then
+            failwith (Blade.IR.orbitStorageUnsupported "compact read (readCompact)"
+                                                       (Blade.IR.orbitLevelsOf ix)))
     let coords = Array.ofList logicalCoords
     let storage = ResizeArray<int64>()
     let mutable transforms = []          // (parity, sym) per compact group, slot order
@@ -448,7 +531,20 @@ let readCompact (arr: BladeArray) (logicalCoords: int64 list) : Value =
 /// to the canonical reader (readCompact); a partial (sub-array) compact read is
 /// still gated (M3+).
 let indexArray (arr: BladeArray) (indices: Value list) : Value =
-    if hasSymmetry arr.IndexTypes then
+    // A wreath pool answers TRUE to "is this compact", but its store is FLAT and
+    // `hasSymmetry` (Sym/Antisym/Herm only) is FALSE for it -- so without this
+    // arm the dense peel below would walk `Extents` as if the store were nested
+    // and read a plausible cell from the wrong place, or panic with a shape
+    // message that names nothing. Subscripting a wreath array at an arbitrary
+    // tuple is the MIRRORED READ that v1 does not implement (it needs canonOrb's
+    // per-level fold and the signed cell), so refuse here with the message that
+    // says so. The canonical read the traversal nest performs goes through
+    // `wreathReadCanonical`, never through this door.
+    if hasWreath arr.IndexTypes then
+        let ix = arr.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
+        failwith (Blade.IR.orbitStorageUnsupported "array subscript (indexArray)"
+                                                   (Blade.IR.orbitLevelsOf ix))
+    elif hasSymmetry arr.IndexTypes then
         let totalRank = arr.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
         if indices.Length = totalRank then
             readCompact arr (indices |> List.map toI64v)
@@ -884,6 +980,13 @@ let private forEachStorageCell (idxTys: IRIndexType list) (extents: int64[])
     let mutable dimIdx = 0
     for ix in idxTys do
         let a = max 1 ix.Rank
+        // A wreath group's stored cells are NOT a shrinking-row simplex: the
+        // per-dim bound below (extent minus prior storage coords) describes one
+        // triangle, and a wreath's rows shrink per LEVEL. Walking it that way
+        // would visit the wrong cell set, silently.
+        if ix.Symmetry = SymWreath then
+            failwith (Blade.IR.orbitStorageUnsupported "storage-cell walk (forEachStorageCell)"
+                                                       (Blade.IR.orbitLevelsOf ix))
         let isSym =
             ix.Symmetry = SymSymmetric || ix.Symmetry = SymAntisymmetric || ix.Symmetry = SymHermitian
         let strictConst = if ix.Symmetry = SymAntisymmetric then 1 else 0
@@ -994,11 +1097,12 @@ let gramArray (left: BladeArray) (right: BladeArray) (outType: IRType) : BladeAr
 // rank<->tuple bijection over a masked product space with a compact backing
 // buffer holding only the present cells (each followed by its trailing block).
 // Every read/reduce mirrors a specific C++ helper byte-for-byte (§4.7 pin-points):
-//   full scalar   C((i,j))       -> data[linearize(coords)*trail + t]
-//   trailing row  C((i,j), _)    -> the trailing block (Array<T,1|2>)
-//   partial       C((i,_)) etc.  -> residual dense window / gather OR residual
-//                                   Compound (make_partial_* family)
-//   reduce/sort/…                -> walk the compact buffer (.data)
+//   full scalar   C(i, j)     -> data[linearize(coords)*trail + t]  (flat
+//                                subscripts; typecheck packs them into the
+//                                one IR-level tuple this section consumes)
+//   trailing row  C(i, j)     -> the trailing block when trailing dims exist
+//   reduce/sort/…              -> walk the compact buffer (.data)
+// (partial/wildcard reads moved to SparseIdx — §7b's sparsePartial)
 
 /// Flatten a rank-N Bool mask array to row-major bits — the presence vector a
 /// compound_index_t enumerates (pool_base flatten, genCompoundIndexFromMask).
@@ -1114,91 +1218,11 @@ let compoundRow (cv: CompoundValue) (coords: int64[]) : Value =
           Extents = [| cv.TrailingStride |]
           Data = storeOfValues cv.ElemType vs }
 
-/// Row-major unflatten of `flat` over `extents` (into `out`).
-let private unflatten (extents: int64[]) (flat: int64) (out: int64[]) : unit =
-    let mutable rem = flat
-    for d = extents.Length - 1 downto 0 do
-        out.[d] <- rem % extents.[d]
-        rem <- rem / extents.[d]
-
-/// Partial (residual) compound indexing (formalism 4.5): pinning some axes and
-/// leaving `freePos` free. Unifies the four C++ reconstitution helpers
-/// (make_partial_window / _compound / _gather*) — the residual's lex enumeration
-/// over the free axes, gathered from the parent via linearize, agrees cell-for-
-/// cell with the shared-window slice, so ONE gather covers prefix + scattered.
-///   residual rank 1  -> dense Array<T,1> (trail 1) or Array<T,2> (trail>1)
-///   residual rank>=2 -> residual Compound<T,RR> (its own materialized index)
-let compoundPartial (cv: CompoundValue) (pinned: (int * int64) list) (freePos: int list) : Value =
-    let rr = List.length freePos
-    let itrail = int cv.TrailingStride
-    let freeArr = Array.ofList freePos
-    let freeExtents = freeArr |> Array.map (fun p -> cv.LeadExtents.[p])
-    // Recombine a free-axis coordinate tuple with the pinned axes into a full
-    // parent tuple.
-    let recombine (freeCoords: int64[]) : int64[] =
-        let full = Array.zeroCreate cv.LeadRank
-        pinned |> List.iter (fun (pos, v) -> full.[pos] <- v)
-        Array.iteri (fun d p -> full.[p] <- freeCoords.[d]) freeArr
-        full
-    if rr = 1 then
-        // Dense residual over the ONE free axis: gather present cells in
-        // free-axis order (make_partial_window / _gather_dense[_trail]).
-        let freeAxis = freeArr.[0]
-        let ranks = ResizeArray<int>()
-        let mutable v = 0L
-        while v < cv.LeadExtents.[freeAxis] do
-            let full = recombine [| v |]
-            let off = compoundMaskOffset cv.LeadExtents full
-            if cv.Mask.[int off] then ranks.Add(compoundLinearize cv full)
-            v <- v + 1L
-        if itrail = 1 then
-            let vs = ranks.ToArray() |> Array.map (fun r -> compactCell cv.Data r)
-            VArray
-                { ElemType = cv.ElemType
-                  IndexTypes = trailingIndexTypes cv
-                  Extents = [| int64 vs.Length |]
-                  Data = storeOfValues cv.ElemType vs }
-        else
-            // rank-2 dense {present cells, trailing extent}: each present cell's
-            // whole trailing block (make_partial_window_trail / _gather_dense_trail).
-            let rows =
-                ranks.ToArray()
-                |> Array.map (fun r ->
-                    let vs = Array.init itrail (fun t -> compactCell cv.Data (r * itrail + t))
-                    storeOfValues cv.ElemType vs)
-            VArray
-                { ElemType = cv.ElemType
-                  IndexTypes = []
-                  Extents = [| int64 rows.Length; cv.TrailingStride |]
-                  Data = SNested rows }
-    else
-        // Residual COMPOUND: build a fresh sub-index over the free axes, gather
-        // each present residual cell's trailing block from the parent.
-        let subtotal = freeExtents |> Array.fold (*) 1L
-        let submask = Array.zeroCreate (int subtotal)
-        let fc = Array.zeroCreate rr
-        for flat in 0 .. int subtotal - 1 do
-            unflatten freeExtents (int64 flat) fc
-            let full = recombine fc
-            submask.[flat] <- cv.Mask.[int (compoundMaskOffset cv.LeadExtents full)]
-        let (subTable, subRankOf, subCard) = buildCompoundIndex freeExtents submask
-        let compact = Array.create (int subCard * itrail) VUnit
-        for r in 0 .. int subCard - 1 do
-            let full = recombine subTable.[r]
-            let prank = compoundLinearize cv full
-            for t in 0 .. itrail - 1 do
-                compact.[r * itrail + t] <- compactCell cv.Data (prank * itrail + t)
-        VCompound
-            { ElemType = cv.ElemType
-              IndexTypes = cv.IndexTypes
-              LeadRank = rr
-              LeadExtents = freeExtents
-              Mask = submask
-              Table = subTable
-              RankOf = subRankOf
-              Cardinality = subCard
-              TrailingStride = cv.TrailingStride
-              Data = storeOfValues cv.ElemType compact }
+// (compoundPartial — the interpreter's partial-compound gather — was removed
+// with the flat-subscript conversion: partial/wildcard reads are a SparseIdx
+// feature now (sparsePartial in §7b below). A CompoundPartial classification
+// on a compound head is an internal invariant break, backstopped at the read
+// sites in Loops.fs / CodeGen's compoundRead.)
 
 /// The compact present values of a compound as a plain rank-1 dense array
 /// (cardinality*trailing_stride cells, buffer order) — the operand form the
@@ -1231,6 +1255,149 @@ let fallbackCompoundLeft (cvS: CompoundValue) (d: BladeArray) : BladeArray =
             let coords = if itrail = 1 then lead else lead @ [ int64 tr ]
             writeCell result coords (compactCell cvS.Data (r * itrail + tr))
     result
+
+// ============================================================================
+// §7b Sparse (explicit key enumeration, formalism 3.5) — construction + reads
+// ============================================================================
+// The value-space twin of runtime `Sparse<T,RANK>` + `sparse_index_t`
+// (cpp/nested_array_types.hpp, index_types.h). The compound §7 machinery MINUS
+// the grid: keys stay in GIVEN order (iteration order == key order), the
+// reverse map keys structurally on the tuple (TupleKeyComparer — no grid
+// offset exists), and every partial read is a gather over the entry list
+// (make_partial_sparse_gather / make_sparse_gather_dense[_trail]).
+
+/// Build the rank<->tuple bijection from an explicit key list in GIVEN order.
+/// Duplicate keys panic (sparse_index_t's ctor throws — the bijection would be
+/// ill-defined); InterpDiff parity requires the same failure here.
+let buildSparseIndex (keys: int64[][]) : Dictionary<int64[], int> * int64 =
+    let rankOf = Dictionary<int64[], int>(TupleKeyComparer())
+    keys |> Array.iteri (fun r key ->
+        if rankOf.ContainsKey key then
+            raise (InterpPanic ("BL8005", "SparseIdx: duplicate key tuple", None, 0))
+        rankOf.[key] <- r)
+    (rankOf, int64 keys.Length)
+
+/// Build a Sparse VALUE from a values array + an explicit key list (the
+/// sparse() constructor). `arrType` is the sparse view type (its IxKSparse slot
+/// carries the key tuple arity). The values' LEADING dimension is the key axis
+/// (one cell per key, in key order); any remaining dims fold into the trailing
+/// stride, mirroring buildCompound's leading/trailing split. No scatter: the
+/// flattened values pool IS the compact buffer's key-major layout, so this is a
+/// straight copy (genSparseInitBinding's pool_base loop).
+let buildSparse (arrType: IRArrayType) (values: BladeArray) (keys: int64[][])
+                (rankOf: Dictionary<int64[], int>) (card: int64) : SparseValue =
+    let leadRank =
+        arrType.IndexTypes
+        |> List.tryFind (fun ix -> ix.IxKind = IxKSparse)
+        |> Option.map (fun ix -> ix.Rank)
+        |> Option.defaultValue (if keys.Length > 0 then keys.[0].Length else 1)
+    if values.Extents.Length < 1 || values.Extents.[0] <> card then
+        raise (InterpPanic ("BL8001", "sparse(values, keys): values length does not match key count", None, 0))
+    let trail =
+        [ 1 .. values.Extents.Length - 1 ]
+        |> List.fold (fun acc d -> acc * values.Extents.[d]) 1L
+    let valueCells = flatLeaves values
+    { ElemType = arrType.ElemType
+      IndexTypes = arrType.IndexTypes
+      LeadRank = leadRank
+      Keys = keys
+      RankOf = rankOf
+      Cardinality = card
+      TrailingStride = trail
+      Data = storeOfValues arrType.ElemType (Array.sub valueCells 0 (int card * int trail)) }
+
+/// linearize(tuple) -> rank via the structural hash (sparse_index_t::linearize
+/// = tuple_to_rank.at). A missing key is a program error (C++ .at() throws).
+let sparseLinearize (sv: SparseValue) (coords: int64[]) : int =
+    match sv.RankOf.TryGetValue coords with
+    | true, r -> r
+    | _ -> raise (InterpPanic ("BL8003", "sparse read: key tuple not present in key set", None, 0))
+
+let private sparseTrailingIndexTypes (sv: SparseValue) : IRIndexType list =
+    match sv.IndexTypes with _ :: t -> t | [] -> []
+
+/// Full-key SCALAR read (Sparse::operator()).
+let sparseFullScalar (sv: SparseValue) (coords: int64[]) (trailOffset: int64) : Value =
+    let r = sparseLinearize sv coords
+    compactCell sv.Data (r * int sv.TrailingStride + int trailOffset)
+
+/// Trailing-ROW sub-view for a resolved key (Sparse::row).
+let sparseRow (sv: SparseValue) (coords: int64[]) : Value =
+    let r = sparseLinearize sv coords
+    let itrail = int sv.TrailingStride
+    let vs = Array.init itrail (fun t -> compactCell sv.Data (r * itrail + t))
+    VArray
+        { ElemType = sv.ElemType
+          IndexTypes = sparseTrailingIndexTypes sv
+          Extents = [| sv.TrailingStride |]
+          Data = storeOfValues sv.ElemType vs }
+
+/// Partial (residual) sparse indexing: ALWAYS a gather — one pass over Keys in
+/// key order keeping the entries whose pinned axes match. Residual keys are the
+/// matches' free-axis coordinates (automatically distinct, parent key order).
+///   residual rank 1  -> dense Array<T,1> (trail 1) or Array<T,2> (trail>1)
+///   residual rank>=2 -> residual Sparse (its own key table, key order)
+let sparsePartial (sv: SparseValue) (pinned: (int * int64) list) (freePos: int list) : Value =
+    let rr = List.length freePos
+    let itrail = int sv.TrailingStride
+    let freeArr = Array.ofList freePos
+    let matches =
+        [| for r in 0 .. int sv.Cardinality - 1 do
+             let key = sv.Keys.[r]
+             if pinned |> List.forall (fun (pos, v) -> key.[pos] = v) then
+                 yield (r, freeArr |> Array.map (fun p -> key.[p])) |]
+    if rr = 1 then
+        if itrail = 1 then
+            let vs = matches |> Array.map (fun (r, _) -> compactCell sv.Data r)
+            VArray
+                { ElemType = sv.ElemType
+                  IndexTypes = sparseTrailingIndexTypes sv
+                  Extents = [| int64 vs.Length |]
+                  Data = storeOfValues sv.ElemType vs }
+        else
+            // rank-2 dense {matches, trailing extent}: each match's whole
+            // trailing block (make_sparse_gather_dense_trail).
+            let rows =
+                matches
+                |> Array.map (fun (r, _) ->
+                    let vs = Array.init itrail (fun t -> compactCell sv.Data (r * itrail + t))
+                    storeOfValues sv.ElemType vs)
+            VArray
+                { ElemType = sv.ElemType
+                  IndexTypes = []
+                  Extents = [| int64 rows.Length; sv.TrailingStride |]
+                  Data = SNested rows }
+    else
+        // Residual SPARSE: sub-key table in parent key order, gathered blocks.
+        let subKeys = matches |> Array.map snd
+        let (subRankOf, subCard) = buildSparseIndex subKeys
+        let compact = Array.create (int subCard * itrail) VUnit
+        matches |> Array.iteri (fun i (r, _) ->
+            for t in 0 .. itrail - 1 do
+                compact.[i * itrail + t] <- compactCell sv.Data (r * itrail + t))
+        VSparse
+            { ElemType = sv.ElemType
+              IndexTypes = sv.IndexTypes
+              LeadRank = rr
+              Keys = subKeys
+              RankOf = subRankOf
+              Cardinality = subCard
+              TrailingStride = sv.TrailingStride
+              Data = storeOfValues sv.ElemType compact }
+
+/// The compact values of a sparse as a plain rank-1 dense array (buffer/key
+/// order) — the operand form the eager ops consume, mirroring compoundToDense.
+let sparseToDense (sv: SparseValue) : BladeArray =
+    let n = int sv.Cardinality * int sv.TrailingStride
+    let vs = Array.init n (fun i -> compactCell sv.Data i)
+    { ElemType = sv.ElemType
+      IndexTypes = []
+      Extents = [| int64 n |]
+      Data = storeOfValues sv.ElemType vs }
+
+/// reduce over a sparse's cells (key order; init drives the empty guard).
+let sparseReduce (sv: SparseValue) (fold: Value -> Value -> Value) (init: Value option) : Value =
+    reduceArray (sparseToDense sv) fold init
 
 // ============================================================================
 // §8 group_keys / group_by (CSR grouping) — build + read
@@ -1461,6 +1628,12 @@ let private emitSymAware (sb: StringBuilder) (name: string) (arr: BladeArray) (e
     let mutable dimIdx = 0
     for ix in arr.IndexTypes do
         let a = max 1 ix.Rank
+        // The interpreter print path must byte-match the compiled one; neither
+        // has a wreath walk, and a triangular walk here would print a cell set
+        // that no other path agrees with.
+        if ix.Symmetry = SymWreath then
+            failwith (Blade.IR.orbitStorageUnsupported "compact print (interp emitSymAware)"
+                                                       (Blade.IR.orbitLevelsOf ix))
         let isSym =
             ix.Symmetry = SymSymmetric || ix.Symmetry = SymAntisymmetric || ix.Symmetry = SymHermitian
         let strictConst = if ix.Symmetry = SymAntisymmetric then 1 else 0
@@ -1533,7 +1706,22 @@ let printArrayBinding (b: IRBinding) (arr: BladeArray) (sb: StringBuilder) : uni
                 sb.Append("]").Append('\n') |> ignore
             | _ ->
                 let rank = arr.Extents.Length
-                if hasSymmetry arrType.IndexTypes && rank >= 2 && rank <= 8 then
+                // An OrbIdx (iterated-wreath) binding prints its POOL CELLS in
+                // storage order -- `visitStream` order, the same ascending-lex
+                // canonical sequence the compiled printer walks with
+                // orb_cell_count -- with the framing every other array printer
+                // uses. Checked FIRST: a wreath record is "compact" at every
+                // predicate below, but its store is flat and neither emitSymAware
+                // (a single shrinking simplex) nor the dense emitters (a nested
+                // row walk over Extents) describe it.
+                if hasWreath arrType.IndexTypes then
+                    sb.Append(b.Name).Append(" = [") |> ignore
+                    let cells = wreathCellCount arr
+                    for k in 0 .. cells - 1 do
+                        if k > 0 then sb.Append(", ") |> ignore
+                        sb.Append(formatCell et (readCell arr [ int64 k ])) |> ignore
+                    sb.Append("]").Append('\n') |> ignore
+                elif hasSymmetry arrType.IndexTypes && rank >= 2 && rank <= 8 then
                     emitSymAware sb b.Name arr et
                 elif rank < 1 then
                     sb.Append(b.Name).Append(" = <rank-0>").Append('\n') |> ignore

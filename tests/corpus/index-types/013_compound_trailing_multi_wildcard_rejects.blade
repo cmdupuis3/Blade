@@ -1,0 +1,16 @@
+// TEST: Compound Trailing Multi-Wildcard (rejects)
+// ERROR: BL4003
+// The residual-compound form B((0, _, _)) on a compound with a trailing dim
+// rejects since the flat-subscript conversion; residual reads are a SparseIdx
+// feature.
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+type T = Idx<2>
+let dense: Array<Float64 like X, Y, Z, T> = [
+    [[[0.0, 1.0], [10.0, 11.0]], [[20.0, 21.0], [30.0, 31.0]]],
+    [[[40.0, 41.0], [50.0, 51.0]], [[60.0, 61.0], [70.0, 71.0]]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, _, _))
+// EXPECT: typecheck failure - wildcard reads on a compound axis moved to SparseIdx.

@@ -185,23 +185,17 @@ positions) defining:
 | `CompoundIdx<mask>` | rank(mask) | mask-true tuples | hash of valid tuples |
 
 Indexing is function application with `()`; `A(i, j, k) ≡ A(i)(j)(k)`; `[]` is
-reserved for poly-tuple structural access. A COMPOUND axis is one slot whose
-domain is k-tuples, so it is applied with ONE tuple value: `B((lat, lon))`,
-wildcards inside the tuple (`B((lat, _))`), short tuples pinning a leading
-prefix; a rank-1 compound takes a bare scalar (1-tuples collapse in the
-parser). The flat form `B(lat, lon)` is a type error with a steering
-diagnostic 
-—
- under the `A(i, j) 
-≡
- A(i)(j)` sugar it would claim two slots,
-and it is ambiguous once wildcards meet trailing dims. (Resolves the v10
-§
-4.5-vs-
-§
-5.3 inconsistency in favor of 
-§
-4.5's tuple form.)
+reserved for poly-tuple structural access. A COMPOUND axis indexes FLAT and
+full-arity like SymIdx: a rank-k compound consumes k positional subscripts
+(`B(lat, lon)`), with trailing regular dims appended. A SPARSE axis is one
+slot whose domain is k-tuples, applied with ONE tuple value: `S((lat, lon))`,
+wildcards inside the tuple (`S((lat, _))`), short tuples pinning a leading
+prefix; a rank-1 sparse takes a bare scalar (1-tuples collapse in the
+parser). On a compound, the tuple spelling and every wildcard form are type
+errors steering to SparseIdx — partial reads over an irregular valid set are
+the hash-based sparse type's regime. (Supersedes the earlier tuple-form
+compound convention: with full-arity-only reads, the two-slots ambiguity that
+motivated it is gone.)
 
 ### 3.3 Base index types
 
@@ -256,11 +250,12 @@ implicit zero) and `transform` (value adjustment on non-canonical access).
 ### 3.5 Compound and sparse index types
 
 **`CompoundIdx<mask>`** — for mutually-dependent sparsity (ocean points, not a
-product of valid lats × valid lons). Signature matches mask rank, so currying
-passes through the compound. Identity = whole-mask hash (O(1) type equality);
-storage is contiguous over mask-true tuples; per-element hash gives O(1)
-coordinate lookup. Enumeration = exactly the in-bounds mask-true tuples, each
-once, in lex order (proofs.md §Compound).
+product of valid lats × valid lons). Identity = whole-mask hash (O(1) type
+equality); storage is contiguous over mask-true tuples in lex order — the
+rectilinear mask makes the valid-tuple table **sorted by construction**, which
+is what buys contiguous layout and device-friendly slices; per-element hash
+gives O(1) coordinate lookup. Enumeration = exactly the in-bounds mask-true
+tuples, each once, in lex order (proofs.md §Compound).
 
 Two construction routes:
 
@@ -269,23 +264,37 @@ type OceanIdx = CompoundIdx<ocean_mask>    // static type route
 let view = compound(dense, mask)           // runtime builder route (§15, sql.md)
 ```
 
-**Partial indexing and residual compounds.** Fixing coordinates (including
-wildcards, interior or trailing) yields:
+**Indexing is flat and full-arity, like SymIdx.** A rank-k compound axis
+consumes k positional subscripts — `B(lat, lon)`, with trailing regular dims
+appended (`B(lat, lon, t)`; omitting the trailing index yields the contiguous
+trailing-row sub-view). Reading an absent (mask-false) tuple is a runtime
+error; the storage-keyed fallback is `<|:>`. The historical tuple spelling
+`B((lat, lon))` and every wildcard/partial form (short prefixes, interior
+holes, residual reads) are **type errors steering to SparseIdx** — partial
+indexing over an irregular valid set is the hash-based sparse type's regime,
+where every wildcard position costs the same gather. The residual currying
+table below lives on SparseIdx.
 
-| Free dims remaining | Result index |
-|---------------------|--------------|
-| 1 | plain `Idx<n>` (n = count of valid completions) |
-| ≥ 2 | **residual CompoundIdx** — the residual of a mask is a mask |
+**`SparseIdx<keys>`** — explicit enumeration of valid tuples (CG triples,
+edge lists). `keys` is a rank-1 array of Nat tuples: a `let static` tuple list
+(entries baked at compile time — desync-proof) or a runtime tuple-array
+variable (index built at runtime, mirroring the compound mask). Rank is
+implicit from the tuple arity; there is no rank parameter and no per-axis
+extents — lookup hashes the tuple directly. Keys keep their **given order**
+(never sorted): iteration visits |keys| entries in key order, and the compact
+buffer is laid out in that order. Duplicate keys are a construction error.
 
-Cost is O(valid combinations) to reconstitute (must enumerate completions);
-the curried identity derives from (mask hash, fixed coordinates). Executable
-semantics of the residual: `has_completion` (proofs.md §Compound). Reject
-cases (all-free wildcard application, arity-short wildcard tuples, interior
-holes in trailing windows) are type errors.
-
-**`SparseIdx<entries>`** — explicit enumeration of valid tuples (CG triples,
-edge lists). Tuple indexing only; wildcards return matching entries; iteration
-visits |entries|. Prefer `CompoundIdx` when validity derives from data.
+Tuple indexing with wildcards: a full key is an O(1) hash lookup (a missing
+key is a runtime error); a wildcard/short-prefix partial returns the matching
+entries **by gather** — with no sorted table there is no contiguous-window
+family, so every partial (prefix or scattered alike) is one pass over the
+entry list in key order. Residuals follow the compound currying table: one
+free axis → dense `Idx`, ≥ 2 → a **residual SparseIdx** (the residual of a
+key set is a key set). Construction routes: `range<SparseIdx<keys>>`
+(iterate the key set) and `sparse(values, keys)` (bundle rank-1 values, in
+key order — no scatter). Prefer `CompoundIdx` when validity derives from a
+mask over a rectilinear grid: its lex-sorted table is what buys contiguous
+prefix windows and device-friendly layout.
 
 ### 3.6 Bounded and dependent index types
 

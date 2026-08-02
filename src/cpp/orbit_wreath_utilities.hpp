@@ -8,8 +8,9 @@
 //  docs/plan-orbidx-bijections.md (`§4 Implementation sketch, phased`).  It is
 //  not yet wired into codegen: nothing in src/ includes it.  Its job is to make
 //  the four `OrbIdx` bijections *exist and be checkable* --
-//  proofs/OrbWreathTest.cpp is the checker, and it validates every function
-//  here against brute-force ground truth built in the same translation unit.
+//  src/cpp/orb_wreath_tests.cpp is the checker (run via `blade test
+//  orbwreath`), and it validates every function here against brute-force
+//  ground truth built in the same translation unit.
 //
 //  THE CLASS (docs/plan-orbit-index-types.md §2).  An OrbIdx class is a flat
 //  list of levels over one extent `n`:
@@ -44,6 +45,13 @@
 //    orb_rank<Levels...>(canonical, n)     §3 of plan-orbidx-bijections.md
 //    orb_unrank<Levels...>(r, n, out)      §3, the greedy inverse
 //
+//  ... and the STORAGE LAYER built on top of those five (§1 of
+//  plan-orbidx-bijections.md, "two access paths, dual views"):
+//    orb_read_checked<T,Levels...>         §2 of plan-orbidx-decompaction.md
+//    orb_read<T,Levels...>                 the same, with a precondition
+//    orb_write_canonical<T,Levels...>      canonical-cell store
+//    orb_skeleton<T,Levels...>             the nested-pointer dual view
+//
 //  HOUSE CONVENTIONS FOLLOWED
 //    * Storage order is ascending-lex DFS, exactly as `build_skeleton`
 //      (nested_array_utilities.hpp:217-264) lays out the pool: the traversal
@@ -69,11 +77,23 @@
 //      loop cannot wrap even TRANSIENTLY.  An overflow report here means the
 //      true value exceeds int64, never that an intermediate did.
 //
-//  C++20, header-only, no dependency beyond <cstdint>/<cstddef>.
+//  C++20, header-only, no dependency beyond <cstdint>/<cstddef>/<cassert>.
 // =============================================================================
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+
+/// Diagnostic hook for the ONE precondition this header states (orb_read's
+/// in-domain tuple; see "THE DOMAIN CONTRACT" below).  Defined only if the
+/// translation unit has not already supplied one, so a harness that must
+/// EXERCISE the violation path -- or an embedded build with no <cassert> --
+/// can substitute its own without patching the header.  The default is a plain
+/// assert: diagnostic in a checked build, gone under NDEBUG.  Whichever it is,
+/// the violating call still returns T(0) without ever indexing the pool.
+#ifndef ORB_ASSERT
+#  define ORB_ASSERT(cond, msg) assert((cond) && (msg))
+#endif
 
 namespace orbit_wreath_utilities {
 
@@ -662,5 +682,470 @@ namespace orbit_wreath_utilities {
     inline bool orb_unrank(int64_t r, int n, int* out) {
         return detail::rnk<detail::make_list<Levels...>>::unrank(r, static_cast<int64_t>(n), out);
     }
+
+    // =========================================================================
+    //  STORAGE LAYER -- the read/write path and the nested-pointer dual view
+    //  docs/plan-orbidx-bijections.md §1 ("two access paths, dual views")
+    //  docs/plan-orbidx-decompaction.md §2 (the read semantics)
+    // =========================================================================
+    //
+    //  §1 of the bijections plan names TWO access paths over ONE pool, and both
+    //  are built here on the five functions above -- nothing below re-derives an
+    //  offset formula:
+    //
+    //    RANDOM ACCESS (the cold path: decompaction, provider block maps,
+    //      partial reads).  orb_read / orb_read_checked / orb_write_canonical
+    //      realize decompaction §2 literally,
+    //
+    //          dense[t] = 0                                    if canon(t) = 0
+    //                   = chi(t) * pool[orb_rank(canon(t), n)]  otherwise
+    //
+    //      i.e. canonicalize, rank, apply the character.  The composition IS
+    //      the definition.
+    //
+    //    TRAVERSAL (the hot path).  orb_skeleton is the nested-pointer half of
+    //      the dual view: the same pool served through pointer rows so a
+    //      consumer walks it by pointer-chasing with no stride arithmetic
+    //      anywhere, exactly as build_skeleton (nested_array_utilities.hpp:
+    //      217-264) does for the rectangular / simplex index types.  The
+    //      contiguous half of the dual view is the pool itself -- `base()` is
+    //      the pool_base analog (:54-87), and walking it linearly IS the
+    //      orb_visit stream, because rank order == visit order (§3's invariant).
+    //
+    //  THE DOMAIN CONTRACT (design point; adversarial-review lineage).  A raw
+    //  tuple can fail in two completely different ways and conflating them is
+    //  the bug this section is shaped to avoid:
+    //
+    //    * ZERO SET -- orb_canon returns character 0 (two equal sub-blocks at a
+    //      '-' level).  This is a VALUE, not an error.  The dense tensor
+    //      genuinely holds 0 there, no cell is stored, and every consumer wants
+    //      T(0).  It is IN the domain.
+    //    * OUT OF DOMAIN -- a digit outside [0,n), a negative extent, or an
+    //      arithmetic overflow.  This is a CONTRACT VIOLATION.  Answering it
+    //      with T(0) would alias it onto the zero set and make an off-by-one
+    //      indistinguishable from a structural zero -- and an off-by-one here is
+    //      exactly the failure `rnk<orb_list<>>::rank`'s bounds check exists to
+    //      stop (coordinate == n used to strictify onto the alphabet-size symbol
+    //      and rank to a VALID NEIGHBOURING cell: a silent wrong offset).
+    //
+    //  So the domain check is not folded into the value.  `orb_read_checked` is
+    //  the total function -- bool success plus an out parameter, `out` left
+    //  untouched on failure -- and is the entry point for any tuple whose
+    //  provenance is not already trusted.  `orb_read` is the convenience wrapper
+    //  whose PRECONDITION is an in-domain tuple; violating it trips ORB_ASSERT
+    //  and then returns T(0) WITHOUT EVER INDEXING THE POOL.  The value is
+    //  unspecified; the memory access is not.  Out-of-range can never read a
+    //  valid cell, in any build, with any ORB_ASSERT.
+    //
+    //  Why an assert rather than a total orb_read: a read that silently reports
+    //  "structural zero" for a corrupt index is the same class of bug as the
+    //  rank off-by-one -- it survives every roundtrip test, because a roundtrip
+    //  writes and reads through the same wrong door.  The two-function split
+    //  makes the caller say which one it wants, and the assert makes the wrong
+    //  one loud in the build where loudness is affordable.
+    //
+    //  The explicit digit check below is DELIBERATELY REDUNDANT with orb_rank's
+    //  bounds check.  The rank check is the backstop that keeps the
+    //  memory-safety claim true even if this one is ever weakened; this one is
+    //  what makes the zero-set/out-of-domain distinction exact (a tuple like
+    //  (5,5) at n=3 under a '-' level canonicalizes to the zero set BEFORE any
+    //  rank arithmetic could object, so without a digit check it would be
+    //  reported as an in-domain zero).
+    //
+    //  SIGN APPLICATION AND T.  chi is in {-1, 0, +1}.  T must be constructible
+    //  from 0 (the zero set) and -- only when the class has at least one '-'
+    //  level -- must support unary minus.  `orb_has_minus_level` makes that an
+    //  `if constexpr`, so a '+'-only class (SymIdx-like: every character is +1)
+    //  instantiates cleanly over a T that has no negation at all.  Conjugation
+    //  is NOT handled: Hermitian stays depth-1-only, outside the +-1 character
+    //  system (decompaction §2 / plan-orbit-index-types.md §3).
+    // =========================================================================
+
+    /// True iff the class admits a -1 character, i.e. has at least one '-'
+    /// level.  Empty pack folds to false -- OrbIdx<[],n> == Idx<n> is '+'-only.
+    template<class... Levels>
+    inline constexpr bool orb_has_minus_level = (... || (!Levels::pos));
+
+    /// decompaction §2 read, total.  Writes chi(t) * pool[rank(canon(t))] --
+    /// or T(0) on the zero set, with no pool access -- into `out` and returns
+    /// true.  Returns false, leaving `out` UNTOUCHED, iff the tuple is out of
+    /// domain: `n` negative, some digit outside [0,n), or rank overflow.
+    ///
+    /// `tuple` is ANY raw tuple: digits need not be canonical or even ordered.
+    /// `pool` may be null when the caller only wants the domain verdict; it is
+    /// dereferenced only on the true-and-nonzero path.
+    template<class T, class... Levels>
+    inline bool orb_read_checked(const T* pool, const int* tuple, int n, T& out) {
+        constexpr int A = orb_axes<Levels...>;
+        if (n < 0) return false;
+        for (int k = 0; k < A; ++k)
+            if (tuple[k] < 0 || tuple[k] >= n) return false;
+
+        int can[A];
+        const int chi = orb_canon<Levels...>(tuple, can);
+        if (chi == 0) {                 // zero set: a VALUE, and no stored cell
+            out = T(0);
+            return true;
+        }
+        const int64_t r = orb_rank<Levels...>(can, n);
+        // Reached only when the rank arithmetic leaves int64 (§7.2's wall, an
+        // extent far past anything allocatable); the off-by-one case the rank
+        // bounds check also guards is already refused by the digit check above.
+        if (r == ORB_OVERFLOW) return false;
+
+        if constexpr (orb_has_minus_level<Levels...>) {
+            out = (chi < 0) ? static_cast<T>(-pool[r]) : pool[r];
+        } else {
+            // chi is +1 for every canonical tuple of a '+'-only class, so T is
+            // never required to have unary minus here.
+            out = pool[r];
+        }
+        return true;
+    }
+
+    /// decompaction §2 read, with a PRECONDITION: every digit of `tuple` is in
+    /// [0,n) and `n` >= 0.  The zero set is in the domain and yields T(0).
+    ///
+    /// Violating the precondition trips ORB_ASSERT and returns T(0) without
+    /// indexing `pool`.  That T(0) is UNSPECIFIED, not a promise: it aliases
+    /// the zero set on purpose-free grounds (there is no other total answer),
+    /// which is exactly why a caller that cannot vouch for its tuple must use
+    /// orb_read_checked instead of comparing against 0.
+    template<class T, class... Levels>
+    inline T orb_read(const T* pool, const int* tuple, int n) {
+        T v = T(0);
+        const bool ok = orb_read_checked<T, Levels...>(pool, tuple, n, v);
+        ORB_ASSERT(ok, "orb_read: tuple out of domain -- use orb_read_checked");
+        return ok ? v : T(0);
+    }
+
+    /// Store `v` at `tuple`, which must be EXACTLY the canonical representative
+    /// of its orbit: an orb_canon fixed point with character +1, digits in
+    /// [0,n).  Returns false -- writing nothing -- otherwise, i.e. for an
+    /// out-of-domain tuple, a zero-set tuple (chi == 0), a mirrored tuple
+    /// (chi == -1), a non-canonical tuple that happens to sit at an EVEN
+    /// permutation (chi == +1 but not a fixed point: e.g. the 3-cycle
+    /// (1,2,0) under a single (3,-) level), or a rank overflow.
+    ///
+    /// The fixed-point test is therefore load-bearing and separate from the
+    /// character test -- chi == +1 does NOT imply canonical.  The converse
+    /// direction is redundant on purpose: chi == -1 needs an odd sort
+    /// permutation, so a mirrored tuple is never a fixed point either and the
+    /// two tests overlap there.  The character test's UNIQUE job is the zero
+    /// set, which IS a fixed point (canon leaves `out` unspecified at chi == 0,
+    /// so the tests are ordered character-first for that reason too).
+    ///
+    /// NO MIRRORED WRITES IN v1.  Storing through a non-canonical tuple would
+    /// mean solving chi * pool[r] = v for pool[r], i.e. DIVIDING by the
+    /// character.  That is well defined for signed arithmetic types and not for
+    /// the general T this layer is otherwise agnostic about (unsigned, modular,
+    /// saturating, monoid accumulators), and it silently loses the "the caller
+    /// knew which cell it was touching" property that makes a compaction
+    /// well-definedness check possible (decompaction §5).  Deferred, on purpose.
+    template<class T, class... Levels>
+    inline bool orb_write_canonical(T* pool, const int* tuple, int n, T v) {
+        constexpr int A = orb_axes<Levels...>;
+        if (n < 0) return false;
+        for (int k = 0; k < A; ++k)
+            if (tuple[k] < 0 || tuple[k] >= n) return false;
+
+        int can[A];
+        if (orb_canon<Levels...>(tuple, can) != 1) return false;  // 0 or -1
+        for (int k = 0; k < A; ++k)
+            if (can[k] != tuple[k]) return false;                 // not a fixed point
+
+        const int64_t r = orb_rank<Levels...>(can, n);
+        if (r == ORB_OVERFLOW) return false;
+        pool[r] = v;
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    //  orb_skeleton<T, Levels...> -- the NESTED-POINTER dual view
+    //
+    //  The wreath generalization of build_skeleton (nested_array_utilities.hpp:
+    //  217-264), which lays a pointer skeleton over ONE contiguous pool so that
+    //  `arr[i][j][k]` costs no offset arithmetic and the DFS traversal order IS
+    //  the allocation order.  Same substrate, same promise: the caller owns the
+    //  pool (already laid out in orb_visit order), this adds ONE arena
+    //  allocation of node records, and navigation walks the canonical
+    //  coordinate space axis by axis by chasing pointers.
+    //
+    //  WHERE THE CHILD COUNTS COME FROM.  Not from a second bound formula --
+    //  from the §2 nest itself.  `build` RUNS orb_visit and records, at each
+    //  node, the span of coordinate values the nest establishes there.  That is
+    //  the §2 peeling bound as realized: every base-case loop in the nest is
+    //  `for (x = lo; x < n; ++x)`, and a peeled segment's pinned coordinate
+    //  contributes the single value that the neighbouring free segment's lower
+    //  bound sits one above -- so the values a node serves are one contiguous
+    //  ascending run, and a node is (first value, length, where the children
+    //  start).  There is no bound logic in this class that could drift from the
+    //  traversal, because there is no bound logic in this class at all.
+    //
+    //  The contiguous-run property is CHECKED, not assumed: a gap, a descent,
+    //  or a leaf row that is not contiguous in the pool fails the build.
+    //
+    //  DIVERGENCE FROM build_skeleton, stated rather than hidden.
+    //  build_skeleton allocates the FORMULA trip count `extents[d] - lastIndex`
+    //  and so keeps trailing zero-length rows (strict rank-2 storage keeps row
+    //  n-1, which holds nothing).  This skeleton materializes only what the
+    //  nest visits, so a child whose entire subtree is empty is not built;
+    //  `navigate` answers nullptr for that coordinate, which is what a
+    //  zero-length row answers too.  The two agree -- count == n - lo -- at
+    //  EVERY leaf row of EVERY class (the last axis is never a pinned
+    //  coordinate, its loop runs to n, and every iteration emits a cell) and at
+    //  every node of a '+'-only class (every value extends: the all-equal
+    //  completion is always canonical).  They differ only where a deeper
+    //  level's emptiness truncates the tail: `2-` at n = 4 serves i in [0,3) at
+    //  the root, not [0,4), because i = 3 has no partner.
+    //
+    //  ARENA LAYOUT.  ONE `new node[N]`, carved into AXES regions by depth:
+    //  region k holds every depth-k node in ascending-lex order of its prefix.
+    //  Children of a depth-k node are therefore a CONTIGUOUS run inside region
+    //  k+1 (consecutive prefixes have consecutive children), which is why a
+    //  node stores one child pointer instead of a pointer array, and why the
+    //  whole skeleton is one allocation and one delete[].  Depth-(AXES-1) nodes
+    //  are the leaf rows: `row` points into the CALLER's pool at the rank of
+    //  their first cell, and their `count` cells are contiguous from there --
+    //  the same "leaf rows are slices of the pool, not heap blocks of their own"
+    //  invariant build_skeleton's teardown contract rests on.
+    //
+    //  N = sum over k of (number of distinct canonical prefixes of length k),
+    //  reported as node_count(); arena_bytes() is N * sizeof(node).
+    //
+    //  LIFETIME.  Copy is deleted (a copy would double-free the arena); the
+    //  destructor frees, and `free()` is public for explicit release.  The pool
+    //  is NOT owned: freeing the skeleton leaves it untouched, and destroying
+    //  the pool first dangles every leaf row -- the caller sequences the two,
+    //  exactly as with allocate<>/deallocate.
+    // -------------------------------------------------------------------------
+
+    template<class T, class... Levels>
+    class orb_skeleton {
+    public:
+        /// Raw axes of the class == depth of the node tree.
+        static constexpr int AXES = orb_axes<Levels...>;
+
+        /// One skeleton node.  Depth < AXES-1: `kids` is a run of `count`
+        /// child nodes, `row` is null.  Depth == AXES-1 (a leaf row): `row`
+        /// points into the pool at this row's first cell, `kids` is null.
+        /// `lo` is the first coordinate value this node serves, so child index
+        /// == coordinate - lo.  (build_skeleton stores no lo/count because its
+        /// consumers recompute the bound by formula at every use site; this one
+        /// caches the nest's own bounds so that `navigate` needs no bound logic
+        /// whatsoever.  Two ints per node buys a pointer-chase-only accessor.)
+        struct node {
+            int   lo;
+            int   count;
+            node* kids;
+            T*    row;
+        };
+
+        orb_skeleton() = default;
+        ~orb_skeleton() { free(); }
+        /// Copy is deleted -- two owners would double-free the arena.  Move
+        /// transfers it, so a skeleton can be returned or stored by value.
+        orb_skeleton(const orb_skeleton&)            = delete;
+        orb_skeleton& operator=(const orb_skeleton&) = delete;
+        orb_skeleton(orb_skeleton&& o) noexcept
+            : arena_(o.arena_), root_(o.root_), pool_(o.pool_),
+              nodes_(o.nodes_), cells_(o.cells_), n_(o.n_) {
+            o.arena_ = nullptr; o.root_ = nullptr; o.pool_ = nullptr;
+            o.nodes_ = 0; o.cells_ = 0; o.n_ = 0;
+        }
+        orb_skeleton& operator=(orb_skeleton&& o) noexcept {
+            if (this != &o) {
+                free();
+                arena_ = o.arena_; root_ = o.root_; pool_ = o.pool_;
+                nodes_ = o.nodes_; cells_ = o.cells_; n_ = o.n_;
+                o.arena_ = nullptr; o.root_ = nullptr; o.pool_ = nullptr;
+                o.nodes_ = 0; o.cells_ = 0; o.n_ = 0;
+            }
+            return *this;
+        }
+
+        /// Build over an EXISTING pool of orb_cell_count<Levels...>(n) cells,
+        /// already in (or about to be filled in) orb_visit order.  Releases any
+        /// previous build first, so rebuilding is safe.
+        ///
+        /// Returns false -- owning nothing -- iff `n` is negative (the same
+        /// verdict orb_visit and orb_cell_count give) or the contiguity
+        /// invariants above are violated.  A class with zero cells (n == 0, or
+        /// a strict level wider than the extent) builds successfully into an
+        /// EMPTY skeleton: no arena, null root, navigate always null.
+        /// Throws whatever `new` throws; nothing is leaked if it does.
+        bool build(int n, T* pool) {
+            free();
+            if (n < 0) return false;
+
+            int     prev[AXES];
+            int64_t per[AXES];
+            for (int k = 0; k < AXES; ++k) { per[k] = 0; prev[k] = 0; }
+            bool    firstCell = true;
+            bool    dup       = false;
+            int64_t cells     = 0;
+
+            // Pass 1 -- how many nodes per depth.  A depth-k node IS a distinct
+            // canonical prefix of length k; the stream is ascending lex, so
+            // prefixes change exactly at the first differing axis and every
+            // depth strictly below it starts a new node.
+            const bool okv = orb_visit<Levels...>(n, [&](const int* t, int64_t) {
+                int d = -1;
+                if (!firstCell) {
+                    d = 0;
+                    while (d < AXES && t[d] == prev[d]) ++d;
+                    if (d >= AXES) dup = true;      // stream repeated a tuple
+                }
+                for (int k = d + 1; k < AXES; ++k) ++per[k];
+                for (int k = 0; k < AXES; ++k) prev[k] = t[k];
+                firstCell = false;
+                ++cells;
+            });
+            if (!okv || dup) return false;
+
+            if (cells == 0) {                       // well-formed empty skeleton
+                pool_  = pool;
+                n_     = n;
+                return true;
+            }
+
+            int64_t total = 0;
+            for (int k = 0; k < AXES; ++k) total += per[k];
+            // The ONE allocation.  Nothing is committed to `this` until it
+            // succeeds, so a throwing `new` leaves the skeleton empty rather
+            // than half-built.
+            node* const fresh = new node[static_cast<size_t>(total)];
+            arena_ = fresh;
+            nodes_ = total;
+            pool_  = pool;
+            n_     = n;
+            cells_ = cells;
+
+            node*   region[AXES];
+            int64_t bump[AXES];
+            {
+                int64_t off = 0;
+                for (int k = 0; k < AXES; ++k) {
+                    region[k] = arena_ + off;
+                    off      += per[k];
+                    bump[k]   = 0;
+                }
+            }
+
+            node* cur[AXES];
+            for (int k = 0; k < AXES; ++k) cur[k] = nullptr;
+            firstCell = true;
+            bool ok   = true;
+
+            // Pass 2 -- place the nodes.  Same walk, so placement order is the
+            // stream order by construction.
+            const bool okv2 = orb_visit<Levels...>(n, [&](const int* t, int64_t r) {
+                if (!ok) return;
+                int d = -1;
+                if (!firstCell) {
+                    d = 0;
+                    while (d < AXES && t[d] == prev[d]) ++d;
+                }
+                for (int k = d + 1; k < AXES; ++k) {
+                    node* nd = region[k] + bump[k]++;
+                    nd->lo    = t[k];
+                    nd->count = 0;
+                    nd->kids  = nullptr;
+                    nd->row   = nullptr;
+                    if (k > 0) {
+                        node* p = cur[k - 1];
+                        if (p->count == 0) {
+                            if (t[k - 1] != p->lo) { ok = false; return; }
+                            p->kids = nd;                       // first child
+                        } else if (t[k - 1] != p->lo + p->count) {
+                            ok = false; return;                 // gap or descent
+                        }
+                        ++p->count;
+                    }
+                    cur[k] = nd;
+                }
+                node* lf = cur[AXES - 1];
+                if (lf->count == 0) {
+                    if (t[AXES - 1] != lf->lo) { ok = false; return; }
+                    lf->row = pool + r;                         // slice of the pool
+                } else if (t[AXES - 1] != lf->lo + lf->count) {
+                    ok = false; return;                         // gap or descent
+                } else if (lf->row + lf->count != pool + r) {
+                    ok = false; return;                         // row not contiguous
+                }
+                ++lf->count;
+                for (int k = 0; k < AXES; ++k) prev[k] = t[k];
+                firstCell = false;
+            });
+
+            if (!okv2 || !ok) { free(); return false; }
+            root_ = region[0];                                  // per[0] is always 1
+            return true;
+        }
+
+        /// Release the arena.  The pool is not touched (not owned).  Safe on an
+        /// unbuilt or already-freed skeleton, and safe to call before rebuild.
+        void free() {
+            delete[] arena_;
+            arena_ = nullptr;
+            root_  = nullptr;
+            pool_  = nullptr;
+            nodes_ = 0;
+            cells_ = 0;
+            n_     = 0;
+        }
+
+        /// Pointer to the cell of a CANONICAL tuple -- pure pointer-chasing, one
+        /// subtract and one bounds test per axis, no stride and no rank
+        /// arithmetic.  Equals base() + orb_rank<Levels...>(tuple, n) whenever
+        /// the tuple has a stored cell.
+        ///
+        /// Returns nullptr for any tuple with NO stored cell under this
+        /// skeleton: out of range at some axis, in the zero set, or off the
+        /// canonical set entirely (a non-canonical tuple leaves the visited span
+        /// at the first axis where it stops being canonical, so it cannot land
+        /// on some other orbit's cell).  It does NOT canonicalize -- a mirrored
+        /// tuple is not silently redirected to its representative; that is
+        /// orb_read's job, and keeping the two separate is what makes this the
+        /// zero-arithmetic path.
+        T* navigate(const int* canonicalTuple) const {
+            const node* nd = root_;
+            if (!nd) return nullptr;
+            for (int k = 0; k < AXES - 1; ++k) {
+                const int c = canonicalTuple[k] - nd->lo;
+                if (c < 0 || c >= nd->count) return nullptr;
+                nd = nd->kids + c;
+            }
+            const int c = canonicalTuple[AXES - 1] - nd->lo;
+            if (c < 0 || c >= nd->count) return nullptr;
+            return nd->row + c;
+        }
+
+        /// The contiguous half of the dual view: the pool base, exactly what
+        /// pool_base (nested_array_utilities.hpp:54-87) recovers from a
+        /// build_skeleton skeleton.  Here it needs no recovery -- the caller
+        /// supplied it -- and `base()[0 .. cells())` is the orb_visit stream in
+        /// order, ready for a linear walk or one cudaMemcpy.
+        T* base() const { return pool_; }
+
+        /// Root node (depth 0), or null for an empty / unbuilt skeleton.
+        const node* root() const { return root_; }
+
+        /// Nodes in the arena, and its size in bytes.
+        int64_t node_count()  const { return nodes_; }
+        size_t  arena_bytes() const { return static_cast<size_t>(nodes_) * sizeof(node); }
+
+        /// Cells reachable through the skeleton == orb_cell_count(n).
+        int64_t cells()  const { return cells_; }
+        int     extent() const { return n_; }
+
+    private:
+        node*   arena_ = nullptr;
+        node*   root_  = nullptr;
+        T*      pool_  = nullptr;
+        int64_t nodes_ = 0;
+        int64_t cells_ = 0;
+        int     n_     = 0;
+    };
 
 } // namespace orbit_wreath_utilities

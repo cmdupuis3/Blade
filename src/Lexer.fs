@@ -88,6 +88,8 @@ and Keyword =
     | KwAntisymIdx
     | KwHermitianIdx
     | KwCompoundIdx
+    | KwSparseIdx
+    | KwOrbIdx
     | KwEnumIdx
     | KwDepIdx
     | KwRaggedIdx
@@ -118,6 +120,7 @@ and Keyword =
     | KwRank
     | KwMask
     | KwCompound
+    | KwSparse
     | KwIntersect
     | KwUnion
     | KwUnique
@@ -197,6 +200,8 @@ let keywords =
       "AntisymIdx", KwAntisymIdx
       "HermitianIdx", KwHermitianIdx
       "CompoundIdx", KwCompoundIdx
+      "SparseIdx", KwSparseIdx
+      "OrbIdx", KwOrbIdx
       "EnumIdx", KwEnumIdx
       "DepIdx", KwDepIdx
       "RaggedIdx", KwRaggedIdx
@@ -225,6 +230,7 @@ let keywords =
       "rank", KwRank
       "mask", KwMask
       "compound", KwCompound
+      "sparse", KwSparse
       "intersect", KwIntersect
       "union", KwUnion
       "unique", KwUnique

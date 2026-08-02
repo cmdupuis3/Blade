@@ -1,0 +1,9 @@
+// TEST: Sparse Partial All Free (rejects)
+// ERROR: BL4003
+// All coordinates free pins nothing -- the "residual" would be the array
+// itself. Rejected at typecheck (SparseAllFree, the sparse twin of the
+// compound rule).
+let static K = [(2, 1), (0, 3)]
+let S = method_for(range<SparseIdx<K>>) <@> lambda(i, j) -> i * 10 + j |> compute
+let r = S((_, _))
+// EXPECT: typecheck failure — all coordinates free pins nothing.

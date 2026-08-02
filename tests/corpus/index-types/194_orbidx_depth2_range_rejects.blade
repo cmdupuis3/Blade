@@ -1,0 +1,9 @@
+// TEST: OrbIdx Depth-2 Range Slot (rejects)
+// ERROR: BL4003
+// The SECOND front-end door. `range<>` names an iteration space and carries no
+// annotation, so without its own gate this program would sail past the
+// let-binding check and hit the loop builder's backstop -- which fails closed
+// but reports BL9001 "internal compiler error", accurate about the failure and
+// wrong about whose fault it is. Same BL4003, same sentence, correct blame.
+let W = method_for(range<OrbIdx<[(2,+), (2,+)], 3>>) <@> lambda(i, j, k, l) -> 1.0 |> compute
+// EXPECT: typecheck failure — depth-2 OrbIdx storage is not emitted yet.

@@ -1,0 +1,9 @@
+// TEST: OrbIdx Unclosed Level List (rejects)
+// ERROR: BL1001
+// The level list is a bracketed, comma-separated run. A missing ']' leaves the
+// extent argument sitting where the next `(rank, sign)` level must start, so
+// the sub-parser refuses there rather than silently reading the extent as a
+// level or swallowing the rest of the type.
+type R = OrbIdx<[(2,+), 4>
+let x = 1
+// EXPECT: parse failure -- expected '(' to start the next level.

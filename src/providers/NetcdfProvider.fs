@@ -371,6 +371,7 @@ let ncFileToModule
         ProviderWrites = Map.empty
         RandomInits = Map.empty
         CompoundInits = Map.empty
+        SparseInits = Map.empty
         MutableArrayLets = Set.empty
     }
 

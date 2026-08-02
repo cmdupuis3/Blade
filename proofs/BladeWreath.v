@@ -1,7 +1,8 @@
 (* ===================================================================== *)
 (* BladeWreath.v -- product symmetry over DECLARED-SYMMETRIC inputs:     *)
 (*                  the sound joint form is the WREATH product, and at   *)
-(*                  r = 2 the licensed group is computed EXACTLY.        *)
+(*                  r = 2 and r = 3 the licensed group is computed       *)
+(*                  EXACTLY.                                             *)
 (*                                                                       *)
 (* Setting (formalism 3.4 / 12.5, the declared-symmetric-data row).  A    *)
 (* and B are rank-r tensors over one extent, each invariant under         *)
@@ -60,6 +61,16 @@
 (* -- the additive analogue u (+) u degenerates under f = addition while  *)
 (* staying exactly wreath under f = multiplication.                       *)
 (*                                                                       *)
+(* r = 2 is ALSO a thin margin -- only 16 of the 24 permutations have to  *)
+(* fail -- so section 10 re-runs the whole enumeration one rank up, at    *)
+(* r = 3, where the wreath group of order 72 sits inside S_6 of order     *)
+(* 720 and 648 permutations must fail.  The four regimes come out at      *)
+(* exactly 72 / 36 / 36 / 720 (repeated-comm / distinct / repeated-       *)
+(* NONcomm / rank-one).  The third is the sharp one: only the KERNEL      *)
+(* changes between it and the first, so it isolates the Z_2 factor of     *)
+(* the wreath product as precisely the commutativity license of section   *)
+(* 3, and nothing else.                                                   *)
+(*                                                                       *)
 (* Sections:                                                             *)
 (*   1. PermMachinery      -- permutes with an explicit two-sided         *)
 (*                            inverse; id and composition; a genuinely    *)
@@ -78,6 +89,10 @@
 (*   9. Extent6Exactness   -- fact 5 re-enumerated over extent 6, with    *)
 (*                            the kernel a parameter; degeneracy scales   *)
 (*                            and is kernel-relative                      *)
+(*  10. RankThreeExactness -- fact 5 at r = 3: all 720 permutations of    *)
+(*                            the 6 slots against all 3^6 tuples, the     *)
+(*                            four regimes (72 / 36 / 36 / 720) and the   *)
+(*                            noncommutative kernel isolating the Z_2     *)
 (*                                                                       *)
 (* Self-contained (stdlib only), like BladeCore and BladeLowering; no     *)
 (* Blade file is required, so build order is unconstrained.  The          *)
@@ -205,8 +220,8 @@ Qed.
 (* a submonoid, and finiteness of the position permutations supplies      *)
 (* inverses (the same remark as BladeLowering's licensed_* closure).      *)
 (* The ORDER itself is pinned by enumeration at r = 2 in section 7        *)
-(* (|stab| = 4); at general r the factorial count is classical and is     *)
-(* cited, not proved here.                                               *)
+(* (|stab| = 4) and at r = 3 in section 10 (|stab| = 36); at general r    *)
+(* the factorial count is classical and is cited, not proved here.        *)
 (* ===================================================================== *)
 
 Section BlockProduct.
@@ -888,20 +903,343 @@ Theorem additive_locus_is_kernel_relative :
 Proof. vm_compute. reflexivity. Qed.
 
 (* ===================================================================== *)
+(* 10. FACT 5 AT r = 3 -- EXACTNESS ONE RANK PAST THE SEED.               *)
+(*                                                                       *)
+(* Sections 7 and 9 close the question at r = 2, where the wreath group   *)
+(* has order 8 and the ambient group S_4 has order 24.  That is a thin    *)
+(* margin: only 16 permutations have to fail, and at r = 2 the block      *)
+(* swap and the within-block swaps are all transpositions, so a reader     *)
+(* may reasonably suspect the exactness is an artifact of how little      *)
+(* room S_4 leaves.  This section removes that doubt by re-running the    *)
+(* whole enumeration at r = 3, where the margin is wide: the wreath       *)
+(* group has order 2 (3!)^2 = 72 inside S_6 of order 720, so 648          *)
+(* permutations must fail, including 6-cycles and every way of            *)
+(* interleaving the two index blocks.                                    *)
+(*                                                                       *)
+(* The enumeration is complete, not sampled: all 720 permutations of the  *)
+(* 6 output slots are tried against all 3^6 = 729 index tuples.  The      *)
+(* four regimes come out exactly as sections 2, 3, 5 and 7 predict:       *)
+(*                                                                       *)
+(*   repeated + commutative     72 = 2 (3!)^2   exactly the wreath group  *)
+(*   distinct inputs            36 = (3!)^2     exactly the block group   *)
+(*   repeated + NONcommutative  36 = (3!)^2     the swap dies             *)
+(*   rank-one (degenerate)     720 = |S_6|      total collapse            *)
+(*                                                                       *)
+(* The third line is the sharpest: SAME repeated symmetric input, SAME    *)
+(* enumeration, and the only change is that the kernel stops commuting    *)
+(* -- whereupon exactly the 36 swap-containing permutations drop out.     *)
+(* That isolates the Z_2 factor of the wreath product as precisely the    *)
+(* commutativity license of section 3, and nothing else.                  *)
+(*                                                                       *)
+(* Two design notes.  (a) The permutation list is GENERATED (list_perms)  *)
+(* rather than written out as data -- 720 six-lists is past the point     *)
+(* where a literal table is auditable -- and is then certified to be all  *)
+(* of S_6 by three checks: 720 entries, pairwise distinct, each a         *)
+(* bijection of the 6 slots.  720 distinct bijections of a 6-element set  *)
+(* IS S_6, so nothing is assumed about which permutations could work.     *)
+(* (b) The candidate groups are likewise DEFINED by the block-preserving  *)
+(* predicate and then shown to have the right orders and to be closed     *)
+(* under composition, rather than asserted as tables.                     *)
+(* ===================================================================== *)
+
+(* --- generating S_6 ---------------------------------------------------- *)
+
+Fixpoint insert_everywhere (x : nat) (l : list nat) : list (list nat) :=
+  match l with
+  | [] => [[x]]
+  | y :: t => (x :: y :: t) :: map (fun u => y :: u) (insert_everywhere x t)
+  end.
+
+Fixpoint list_perms (l : list nat) : list (list nat) :=
+  match l with
+  | [] => [[]]
+  | x :: t => flat_map (insert_everywhere x) (list_perms t)
+  end.
+
+Definition perms720 : list (list nat) := list_perms (upto 6).
+
+Definition is_perm6 (p : list nat) : bool :=
+  Nat.eqb (length p) 6 && forallb (fun k => existsb (Nat.eqb k) p) (upto 6).
+
+(* The three checks that make the enumeration exhaustive: 720 entries,    *)
+(* pairwise distinct, every one a bijection of the 6 slots.               *)
+Theorem perms720_card : length perms720 = 720.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem perms720_are_bijections : forallb is_perm6 perms720 = true.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem perms720_distinct :
+  length (nodup (list_eq_dec Nat.eq_dec) perms720) = 720.
+Proof. vm_compute. reflexivity. Qed.
+
+(* --- the two candidate groups, by predicate ---------------------------- *)
+(* A slot permutation preserves the block structure iff the first block    *)
+(* {0,1,2} lands wholly inside itself or wholly inside {3,4,5}.            *)
+
+Definition first_block_stays (p : list nat) : bool :=
+  forallb (fun x => Nat.ltb x 3) (firstn 3 p).
+Definition first_block_moves (p : list nat) : bool :=
+  forallb (fun x => Nat.leb 3 x) (firstn 3 p).
+Definition preserves_blocks (p : list nat) : bool :=
+  first_block_stays p || first_block_moves p.
+
+Definition block36 : list (list nat) := filter first_block_stays perms720.
+Definition wreath72 : list (list nat) := filter preserves_blocks perms720.
+
+Theorem block36_card : length block36 = 36.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem wreath72_card : length wreath72 = 72.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem block36_is_group : closed_under_pcomp block36 = true.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem wreath72_is_group : closed_under_pcomp wreath72 = true.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem block36_subgroup_of_wreath72 : incl block36 wreath72.
+Proof.
+  unfold block36, wreath72, incl. intros p Hp.
+  apply filter_In in Hp. destruct Hp as [Hin Hstays].
+  apply filter_In. split; [exact Hin | ].
+  unfold preserves_blocks. rewrite Hstays. reflexivity.
+Qed.
+
+(* --- rank-3 declared-symmetric accessor -------------------------------- *)
+(* symtab reached a symmetric 2-index table through (min, max); the rank-3 *)
+(* analogue goes through (min, median, max).  The median is recovered      *)
+(* arithmetically, which keeps the accessor symmetric BY CONSTRUCTION --   *)
+(* the input declaration is definitional here, exactly as at r = 2, not a  *)
+(* property of the particular table below.                                 *)
+
+Definition med3 (i j k : nat) : nat :=
+  i + j + k - Nat.min i (Nat.min j k) - Nat.max i (Nat.max j k).
+
+Definition symtab3 (rows : list (list (list nat))) (i j k : nat) : nat :=
+  nth (Nat.max i (Nat.max j k))
+      (nth (med3 i j k) (nth (Nat.min i (Nat.min j k)) rows []) []) 0.
+
+(* symtab3 sees its three indices only through min, sum and max, all of    *)
+(* which are symmetric -- so ANY reordering of the indices reads the same  *)
+(* cell.                                                                  *)
+Lemma symtab3_perm : forall rows i j k a b c,
+  Nat.min i (Nat.min j k) = Nat.min a (Nat.min b c) ->
+  Nat.max i (Nat.max j k) = Nat.max a (Nat.max b c) ->
+  i + j + k = a + b + c ->
+  symtab3 rows i j k = symtab3 rows a b c.
+Proof.
+  intros rows i j k a b c Hmin Hmax Hsum.
+  unfold symtab3, med3. rewrite Hmin, Hmax, Hsum. reflexivity.
+Qed.
+
+(* Full S_3 invariance of the input: the five non-identity reorderings.    *)
+Corollary symtab3_S3 : forall rows i j k,
+  symtab3 rows i j k = symtab3 rows j i k /\
+  symtab3 rows i j k = symtab3 rows i k j /\
+  symtab3 rows i j k = symtab3 rows j k i /\
+  symtab3 rows i j k = symtab3 rows k i j /\
+  symtab3 rows i j k = symtab3 rows k j i.
+Proof. intros. repeat split; apply symtab3_perm; lia. Qed.
+
+(* --- the r = 3 witnesses ----------------------------------------------- *)
+(* Entries are kept in 1..4 deliberately: nat is unary, so the enumeration *)
+(* cost is driven by the size of the products, and 4 * 4 = 16 keeps 720 x  *)
+(* 729 permutation-tuple pairs cheap.  Small entries are also the HOSTILE  *)
+(* choice -- coincidences are cheapest there (section 7's degeneracy       *)
+(* locus) -- so exactness at these values is a stronger result than        *)
+(* exactness at generic large ones, not a weaker one.                      *)
+
+Definition A3rows : list (list (list nat)) :=
+  [
+    [ [4;2;1]; [2;4;4]; [1;4;3] ];
+    [ [2;4;4]; [4;3;2]; [4;2;4] ];
+    [ [1;4;3]; [4;2;4]; [3;4;1] ]
+  ].
+
+Definition B3rows : list (list (list nat)) :=
+  [
+    [ [4;4;2]; [4;2;2]; [2;2;2] ];
+    [ [4;2;2]; [2;2;1]; [2;1;3] ];
+    [ [2;2;2]; [2;1;3]; [2;3;4] ]
+  ].
+
+(* The DEGENERATE control: U3 i j k = u i * u j * u k with u = (1, 2, 2),  *)
+(* the rank-one symmetric tensor.  Its repeated product is a 6-fold        *)
+(* product of u-values, which is symmetric under ALL of S_6 -- the r = 3   *)
+(* analogue of section 7's a c = b^2 locus.                               *)
+Definition U3rows : list (list (list nat)) :=
+  [
+    [ [1;2;2]; [2;4;4]; [2;4;4] ];
+    [ [2;4;4]; [4;8;8]; [4;8;8] ];
+    [ [2;4;4]; [4;8;8]; [4;8;8] ]
+  ].
+
+Definition A3 : nat -> nat -> nat -> nat := symtab3 A3rows.
+Definition B3 : nat -> nat -> nat -> nat := symtab3 B3rows.
+Definition U3 : nat -> nat -> nat -> nat := symtab3 U3rows.
+
+(* --- the r = 3 enumerator ---------------------------------------------- *)
+
+Definition cells_r3 : list (list nat) :=
+  flat_map (fun a => flat_map (fun b => flat_map (fun c =>
+  flat_map (fun d => flat_map (fun e =>
+    map (fun f => [a;b;c;d;e;f]) (upto 3)) (upto 3)) (upto 3))
+    (upto 3)) (upto 3)) (upto 3).
+
+Theorem cells_r3_card : length cells_r3 = 729.
+Proof. vm_compute. reflexivity. Qed.
+
+Definition evalT3 (f : nat -> nat -> nat)
+  (Atab Btab : nat -> nat -> nat -> nat) (c : list nat) : nat :=
+  match c with
+  | i1 :: i2 :: i3 :: j1 :: j2 :: j3 :: nil =>
+      f (Atab i1 i2 i3) (Btab j1 j2 j3)
+  | _ => 0
+  end.
+
+(* The bridge, as in sections 4 and 9: the enumerated object IS the       *)
+(* pointwise-kernel output T[I,J] = f(A[I], B[J]) at r = 3.               *)
+Lemma evalT3_is_kernel : forall f Atab Btab i1 i2 i3 j1 j2 j3,
+  evalT3 f Atab Btab [i1; i2; i3; j1; j2; j3]
+  = f (Atab i1 i2 i3) (Btab j1 j2 j3).
+Proof. intros. reflexivity. Qed.
+
+Definition stab_r3 (f : nat -> nat -> nat)
+  (Atab Btab : nat -> nat -> nat -> nat) (p : list nat) : bool :=
+  forallb (fun c => Nat.eqb (evalT3 f Atab Btab (apply_perm p c))
+                            (evalT3 f Atab Btab c)) cells_r3.
+
+Definition stabilizer_r3 (f : nat -> nat -> nat)
+  (Atab Btab : nat -> nat -> nat -> nat) : list (list nat) :=
+  filter (stab_r3 f Atab Btab) perms720.
+
+(* --- exactness at r = 3 ------------------------------------------------- *)
+
+(* THE THEOREM.  Repeated symmetric argument, commutative kernel: the      *)
+(* stabilizer is EXACTLY the 72-element wreath group S_3 wr S_2 -- not a   *)
+(* lower bound, not a sample.  648 permutations of S_6 fail.               *)
+Theorem repeated_r3_stabilizer_is_wreath :
+  stabilizer_r3 Nat.mul A3 A3 = wreath72.
+Proof. vm_compute. reflexivity. Qed.
+
+Corollary repeated_r3_stabilizer_count :
+  length (stabilizer_r3 Nat.mul A3 A3) = 72.
+Proof. rewrite repeated_r3_stabilizer_is_wreath. exact wreath72_card. Qed.
+
+(* Same witness, ADDITIVE kernel: as at r = 2 (section 9), the wreath      *)
+(* answer is a property of the regime, not of multiplication.              *)
+Theorem repeated_r3_add_stabilizer_is_wreath :
+  stabilizer_r3 Nat.add A3 A3 = wreath72.
+Proof. vm_compute. reflexivity. Qed.
+
+(* Distinct symmetric inputs, commutative kernel: EXACTLY the block group, *)
+(* order 36 = (3!)^2.  Section 5's refutation at r = 3.                    *)
+Theorem distinct_r3_stabilizer_is_block_group :
+  stabilizer_r3 Nat.mul A3 B3 = block36.
+Proof. vm_compute. reflexivity. Qed.
+
+Corollary distinct_r3_stabilizer_count :
+  length (stabilizer_r3 Nat.mul A3 B3) = 36.
+Proof. rewrite distinct_r3_stabilizer_is_block_group. exact block36_card. Qed.
+
+(* The Z_2 factor IS the commutativity license, isolated.  Repeated        *)
+(* argument as above -- so the input side is untouched -- but the kernel   *)
+(* f x y = x * x * y does not commute, and the stabilizer drops from 72    *)
+(* to exactly the 36 block-preserving permutations.  Compare section 3:    *)
+(* the swap was bought by f_comm and by nothing else.                      *)
+Theorem noncomm_r3_loses_the_swap :
+  stabilizer_r3 (fun x y => x * x * y) A3 A3 = block36.
+Proof. vm_compute. reflexivity. Qed.
+
+(* The strict chain block < wreath < S_6, i.e. 36 < 72 < 720.              *)
+(* Derived from the three theorems above rather than re-enumerated: each  *)
+(* stabilizer_r3 call is a fresh 720-permutation sweep, so recomputing    *)
+(* here would double the cost of the section for no extra content.        *)
+Theorem block36_lt_wreath72_lt_s6 :
+  length (stabilizer_r3 Nat.mul A3 B3)
+    < length (stabilizer_r3 Nat.mul A3 A3) /\
+  length (stabilizer_r3 Nat.mul A3 A3) < length perms720.
+Proof.
+  rewrite distinct_r3_stabilizer_is_block_group,
+          repeated_r3_stabilizer_is_wreath,
+          block36_card, wreath72_card, perms720_card.
+  split; lia.
+Qed.
+
+(* --- pinned refutations ------------------------------------------------ *)
+(* Three named permutations that S_6 allows and the wreath group forbids,  *)
+(* each with the exact index tuple where the output disagrees.  These are  *)
+(* the r = 3 analogues of s4_orbit_not_licensed: a 6-cycle, a full         *)
+(* interleaving of the two blocks, and a single cross-block exchange.      *)
+(* The cross-block exchange is the interesting one -- it is the MINIMAL    *)
+(* departure from the wreath group, moving just one slot across.           *)
+
+Definition r3_cross_one : list nat := [3;1;2;0;4;5].
+Definition r3_interleave : list nat := [0;3;1;4;2;5].
+Definition r3_sixcycle : list nat := [1;2;3;4;5;0].
+Definition r3_probe : list nat := [0;0;0;1;0;1].
+
+Theorem r3_pinned_are_not_wreath :
+  existsb (lst_eqb r3_cross_one) wreath72 = false /\
+  existsb (lst_eqb r3_interleave) wreath72 = false /\
+  existsb (lst_eqb r3_sixcycle) wreath72 = false.
+Proof. repeat split; vm_compute; reflexivity. Qed.
+
+(* ... and each one is refuted at the SAME probe tuple, by 4 <> 16. *)
+Theorem r3_cross_one_violates :
+  evalT3 Nat.mul A3 A3 (apply_perm r3_cross_one r3_probe)
+  <> evalT3 Nat.mul A3 A3 r3_probe.
+Proof. vm_compute. discriminate. Qed.
+
+Theorem r3_interleave_violates :
+  evalT3 Nat.mul A3 A3 (apply_perm r3_interleave r3_probe)
+  <> evalT3 Nat.mul A3 A3 r3_probe.
+Proof. vm_compute. discriminate. Qed.
+
+Theorem r3_sixcycle_violates :
+  evalT3 Nat.mul A3 A3 (apply_perm r3_sixcycle r3_probe)
+  <> evalT3 Nat.mul A3 A3 r3_probe.
+Proof. vm_compute. discriminate. Qed.
+
+(* --- the degeneracy locus at r = 3 -------------------------------------- *)
+(* At rank one the three pinned refutations turn into symmetries: the      *)
+(* output is a 6-fold product of u-values and all of S_6 stabilizes it.    *)
+(* So exactness at 72 genuinely depends on the witness being off the       *)
+(* degenerate locus, exactly as at r = 2 -- and, as there, a compiler      *)
+(* cannot license the extra symmetry from the DECLARATION, since U3 and    *)
+(* A3 satisfy the identical rank-3 symmetric declaration.                  *)
+
+Theorem rank1_r3_admits_the_pinned_refutations :
+  stab_r3 Nat.mul U3 U3 r3_cross_one = true /\
+  stab_r3 Nat.mul U3 U3 r3_interleave = true /\
+  stab_r3 Nat.mul U3 U3 r3_sixcycle = true.
+Proof. repeat split; vm_compute; reflexivity. Qed.
+
+(* ===================================================================== *)
 (* Generalization notes (not mechanized here).                            *)
 (*                                                                       *)
 (*  - GROUP ORDERS at general r.  (r!)^2 and 2 (r!)^2 are the classical   *)
 (*    orders of S_r x S_r and S_r wr S_2; this file proves the            *)
 (*    INVARIANCE at general r (sections 2, 3) and computes the ORDERS     *)
-(*    exactly at r = 2 (section 7).  A general-r order proof needs a      *)
-(*    factorial-counting development over the permutes predicate.         *)
+(*    exactly at r = 2 (section 7) and r = 3 (section 10).  A general-r   *)
+(*    order proof needs a factorial-counting development over the         *)
+(*    permutes predicate.                                                 *)
 (*                                                                       *)
 (*  - EXACTNESS at general r.  Sections 7 and 9 are exactness at r = 2    *)
-(*    (extents 2 and 6) by enumeration.  A general-r statement would need *)
-(*    a detection argument in BladeCompleteness's style (a maximally      *)
-(*    symmetric probe kernel plus free data witnessing every violation),  *)
-(*    with the degeneracy locus (rank-one inputs) excluded by hypothesis  *)
-(*    rather than by computation.                                        *)
+(*    (extents 2 and 6) and section 10 is exactness at r = 3 (extent 3),  *)
+(*    all by complete enumeration.  Beyond r = 3 the enumeration leaves   *)
+(*    Coq's reach -- r = 4 is 40320 permutations x 3^8 tuples -- and the  *)
+(*    orders 2 (r!)^2 have been confirmed at r = 4 and r = 5 only         *)
+(*    EXTERNALLY, by exhaustive exact-integer witness enumeration outside *)
+(*    this development (every non-wreath permutation refuted by a         *)
+(*    concrete counterexample).  That is evidence, not a Coq proof, and   *)
+(*    is recorded as such.  A general-r statement would need a detection  *)
+(*    argument in BladeCompleteness's style (a maximally symmetric probe  *)
+(*    kernel plus free data witnessing every violation), with the         *)
+(*    degeneracy locus (rank-one inputs) excluded by hypothesis rather    *)
+(*    than by computation.                                               *)
 (*                                                                       *)
 (*  - k BLOCKS.  Nothing in sections 2 and 3 is special to two blocks:    *)
 (*    k distinct symmetric inputs of ranks r_1..r_k give the block-wise   *)

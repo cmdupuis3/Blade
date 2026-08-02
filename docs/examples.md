@@ -129,21 +129,40 @@ The kernel receives three separate neighbor arguments; boundary policy
 
 ## 8. Ocean-only data with a compound index
 
-*Features: CompoundIdx, partial indexing, residual compounds.
-Corpus: `index-types` 001–017.*
+*Features: CompoundIdx (mask-derived, lex-sorted), flat indexing.
+Corpus: `index-types` 001, 010, 015–017 (002–014 are the reject cases).*
 
 ```blade
 let ocean_mask: Array<Bool like LatIdx, LonIdx> = read(...)
 let sst = compound(sst_dense, ocean_mask)   // only ocean points stored
 
-sst((lat, lon))    // coordinate-based read (valid points only)
-sst((lat, _))      // all valid lons at this lat  : plain Idx<n_valid>
+sst(lat, lon)      // coordinate-based read (valid points only)
 extents(sst)       // cardinality = number of ocean points
 ```
 
-Fixing some coordinates of a higher-rank compound leaves a *residual
-compound* — the residual of a mask is a mask. Iteration over compound views
-is lexicographic over mask-true cells, matching dense scan order.
+A compound axis indexes flat and full-arity, like `SymIdx`. Iteration over
+compound views is lexicographic over mask-true cells, matching dense scan
+order — the mask makes the valid-tuple table sorted by construction, which is
+what keeps the layout contiguous.
+
+## 8b. Edge lists with a sparse index
+
+*Features: SparseIdx, partial indexing with wildcards, residual sparse.
+Corpus: `index-types` 171–184.*
+
+```blade
+let static edges = [(0, 3), (2, 1), (1, 0)]   // key order is iteration order
+let w = sparse(weights, edges)                // one value per key, in key order
+
+w((2, 1))          // O(1) hash lookup on the full key
+w((_, 1))          // every edge INTO node 1  : plain Idx<n_matching>
+w((0, _, _))       // rank-3: residual SparseIdx over the free axes
+```
+
+Where a compound's validity derives from a mask over a grid, a sparse index
+takes the valid tuples *explicitly* — and because its table is hashed rather
+than sorted, pinning any subset of coordinates costs the same single gather
+over the entries. The residual of a key set is a key set.
 
 ## 9. Fused multi-statistic pass
 

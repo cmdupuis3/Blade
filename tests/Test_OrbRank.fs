@@ -23,6 +23,12 @@
 // peeling written as literal loop nests), so the general recursion in
 // OrbRank.keysFrom is checked against the hand-unrolled shape the plan §2
 // specifies, not only against the brute-force set.
+//
+// The last section pins the STORAGE path on top of all of that
+// (docs/plan-orbidx-decompaction.md §2, `orbRead`/`orbWriteCanonical`):
+// dense[t] = chi(t)*pool[rank(canon(t))], zero on the zero set. Its oracle is
+// again independent — canonOrb for the character, the visitStream position for
+// the offset — because a read->write roundtrip cancels a pool shift exactly.
 module Blade.Tests.OrbRankReview
 
 open System.Collections.Generic
@@ -539,6 +545,166 @@ let runOrbRankTests () : BlockResult =
     check "chi-oracle: canon(g.t) = chi(g)*canon(t), full wreath group, 9 sweeps (incl. depth-3 mixed signs)"
           chiOk (if chiOk then sprintf "%d (g,t) pairs, 0 violations" chiPairs else chiBad)
 
+    // -------------------------------------------------------------------------
+    // The storage read/write path (docs/plan-orbidx-decompaction.md §2):
+    //
+    //     dense[t] = chi(t) * pool[orbRank(canon(t))],  0 on the zero set.
+    //
+    // The pool is filled pool[i] = i + 1 IN STREAM ORDER, so every cell's value
+    // names its own offset: a read served from a neighbouring cell shows up as
+    // a wrong NUMBER, not as a plausible one. And the expected value is
+    // recomputed here from `canonOrb` plus the cell's position in `visitStream`
+    // — never from orbRead's own canon/rank calls — because a read->write
+    // roundtrip cancels exactly the pool-shift bug this is looking for (the
+    // antisym storage post-mortem). The write side is pinned the same way: fill
+    // a zeroed pool one canonical cell at a time and require the result to be
+    // the stream-order fill, cell for cell.
+    // -------------------------------------------------------------------------
+    let mutable rwOk = true
+    let mutable rwBad = ""
+    let mutable rwCells = 0
+    let mutable rwProbes = 0L
+    let mutable rwZero = 0
+    let mutable rwNeg = 0
+    for (lv, n) in [ [], 5                                       // the trivial class
+                     [ (2, OPlus) ], 4
+                     [ (2, OMinus) ], 5
+                     [ (3, OMinus) ], 5
+                     [ (3, OPlus) ], 4
+                     [ (2, OMinus); (2, OPlus) ], 4              // the Riemann shape
+                     [ (2, OPlus); (2, OMinus) ], 4
+                     [ (2, OMinus); (2, OMinus); (2, OPlus) ], 3 // depth 3, mixed signs
+                     [ (2, OPlus); (2, OPlus); (2, OPlus) ], 3 ] do
+        let stream = visitStream lv n |> List.ofSeq
+        let pos = Dictionary<int list, int>()
+        stream |> List.iteri (fun i t -> pos.[t] <- i)
+        let pool = Array.init stream.Length (fun i -> int64 i + 1L)
+        rwCells <- rwCells + stream.Length
+        // (a) the dense sweep: EVERY raw tuple of [0,n)^axes, not only the
+        // canonical ones — the mirrors and the zero set are the whole point.
+        let mutable readOk = true
+        let mutable readBad = ""
+        for t in allRawTuples lv n do
+            if readOk then
+                rwProbes <- rwProbes + 1L
+                let want =
+                    match canonOrb lv t with
+                    | None ->
+                        rwZero <- rwZero + 1
+                        Ok 0L
+                    | Some (c, chi) ->
+                        if chi < 0 then rwNeg <- rwNeg + 1
+                        Ok(int64 chi * (int64 pos.[c] + 1L))
+                let got = orbRead lv n pool t
+                if got <> want then
+                    readOk <- false
+                    readBad <- sprintf "read %A = %A, want %A" t got want
+        // (b) the write round trip, on every canonical cell.
+        let wpool = Array.zeroCreate<int64> stream.Length
+        let mutable writeOk = true
+        let mutable writeBad = ""
+        for i in 0 .. stream.Length - 1 do
+            if writeOk then
+                match orbWriteCanonical lv n wpool stream.[i] (int64 i + 1L) with
+                | Ok() -> ()
+                | Error e -> writeOk <- false; writeBad <- sprintf "write %A: %s" stream.[i] e
+        if writeOk && wpool <> pool then
+            writeOk <- false
+            writeBad <- "the written pool differs from the stream-order fill"
+        if rwOk && not (readOk && writeOk) then
+            rwOk <- false
+            rwBad <- sprintf "%s n=%d: %s%s" (showLevels lv) n readBad writeBad
+    check "storage: orbRead = chi*pool[rank] over every raw tuple, orbWriteCanonical round-trips (9 classes)"
+          rwOk
+          (if rwOk then
+               sprintf "%d raw probes, %d cells, %d zero-set, %d mirrored-negative"
+                       rwProbes rwCells rwZero rwNeg
+           else rwBad)
+
+    // Hand pins, so the sweep's oracle is not the only witness. [(2,-),(2,+)]
+    // at n = 4, pool[i] = i+1: the inner '-' keys are [0;1]->0 ... [2;3]->5, so
+    // [0;1;2;3] is the outer weak pair (0,5) at rank 0*6 + 5 = 5 and its cell
+    // holds 6. Each single mirror negates it; the double mirror restores it;
+    // the block swap is in the '+' level and changes nothing.
+    let poolR21 = Array.init 21 (fun i -> int64 i + 1L)
+    let lvR = [ (2, OMinus); (2, OPlus) ]
+    check "storage: the signed reads of one Riemann orbit, by hand"
+          (orbRead lvR 4 poolR21 [ 0; 1; 2; 3 ] = Ok 6L
+           && orbRead lvR 4 poolR21 [ 1; 0; 2; 3 ] = Ok(-6L)
+           && orbRead lvR 4 poolR21 [ 0; 1; 3; 2 ] = Ok(-6L)
+           && orbRead lvR 4 poolR21 [ 1; 0; 3; 2 ] = Ok 6L
+           && orbRead lvR 4 poolR21 [ 2; 3; 0; 1 ] = Ok 6L
+           && orbRead lvR 4 poolR21 [ 0; 1; 0; 1 ] = Ok 1L      // first cell
+           && orbRead lvR 4 poolR21 [ 0; 0; 1; 2 ] = Ok 0L      // zero set
+           && orbRead lvR 4 poolR21 [ 3; 3; 0; 1 ] = Ok 0L) ""
+    let poolA10 = Array.init 10 (fun i -> int64 i + 1L)
+    check "storage: [(3,-)] at n=5 reads the S_3 orbit with the alternating character"
+          (orbRead [ (3, OMinus) ] 5 poolA10 [ 0; 1; 2 ] = Ok 1L
+           && orbRead [ (3, OMinus) ] 5 poolA10 [ 1; 2; 0 ] = Ok 1L        // 3-cycle: even
+           && orbRead [ (3, OMinus) ] 5 poolA10 [ 2; 0; 1 ] = Ok 1L
+           && orbRead [ (3, OMinus) ] 5 poolA10 [ 0; 2; 1 ] = Ok(-1L)      // transposition
+           && orbRead [ (3, OMinus) ] 5 poolA10 [ 1; 0; 2 ] = Ok(-1L)
+           && orbRead [ (3, OMinus) ] 5 poolA10 [ 2; 1; 0 ] = Ok(-1L)
+           && orbRead [ (3, OMinus) ] 5 poolA10 [ 1; 1; 2 ] = Ok 0L        // repeat: zero set
+           && orbRead [ (3, OMinus) ] 5 poolA10 [ 4; 3; 2 ] = Ok(-10L)) "" // last cell, mirrored
+
+    // ---- storage refusals: malformed input is never a silent aliased read ---
+    // Each of these canonicalizes perfectly happily into SOME cell — a short
+    // tuple into a smaller class's, an out-of-range digit into whatever the
+    // combinadic makes of it — which is exactly why the refusal has to be a
+    // gate and not a downstream accident.
+    check "orbRead refuses digit=n, negative digit, wrong length, wrong pool size, bad class, bad extent"
+          (isError (orbRead lvR 4 poolR21 [ 0; 1; 2; 4 ])
+           && isError (orbRead lvR 4 poolR21 [ 0; 1; 2; -1 ])
+           && isError (orbRead lvR 4 poolR21 [ 0; 1; 2 ])
+           && isError (orbRead lvR 4 poolR21 [ 0; 1; 2; 3; 0 ])
+           && isError (orbRead lvR 4 (Array.zeroCreate 20) [ 0; 1; 2; 3 ])
+           && isError (orbRead lvR 4 (Array.zeroCreate 22) [ 0; 1; 2; 3 ])
+           && isError (orbRead [ (0, OPlus) ] 4 poolR21 [ 0 ])
+           && isError (orbRead lvR -1 [||] [ 0; 1; 2; 3 ])) ""
+    // §7.2's wall applies to the read too: the one int64 whose negation leaves
+    // int64 diagnoses on a mirrored read instead of wrapping back to itself.
+    let poolMin = Array.create 6 System.Int64.MinValue
+    check "orbRead: a mirrored read of Int64.MinValue diagnoses, it does not wrap"
+          (orbRead [ (2, OMinus) ] 4 poolMin [ 0; 1 ] = Ok System.Int64.MinValue
+           && isError (orbRead [ (2, OMinus) ] 4 poolMin [ 1; 0 ])) ""
+
+    let wPool = Array.init 21 (fun i -> int64 i + 1L)
+    let wBefore = Array.copy wPool
+    let wRefusals =
+        [ orbWriteCanonical lvR 4 wPool [ 1; 0; 2; 3 ] 99L                    // mirrored, chi = -1
+          orbWriteCanonical lvR 4 wPool [ 0; 0; 1; 2 ] 99L                    // zero set
+          orbWriteCanonical lvR 4 wPool [ 0; 1; 2; 4 ] 99L                    // digit = n
+          orbWriteCanonical lvR 4 wPool [ 0; 1; 2; -1 ] 99L                   // negative digit
+          orbWriteCanonical lvR 4 wPool [ 0; 1; 2 ] 99L                       // wrong length
+          orbWriteCanonical lvR 4 (Array.zeroCreate 20) [ 0; 1; 2; 3 ] 99L    // wrong pool size
+          orbWriteCanonical [ (0, OPlus) ] 4 wPool [ 0 ] 99L                  // malformed class
+          // Non-canonical with character +1 (two mirrors cancel): the gate is a
+          // canonical FIXED POINT test, not a sign test, and this row is the
+          // one that tells the two apart.
+          orbWriteCanonical [ (2, OMinus); (2, OMinus); (2, OPlus) ] 3 (Array.zeroCreate 6)
+                            [ 1; 0; 0; 2; 1; 2; 0; 1 ] 99L ]
+    check "orbWriteCanonical refuses mirrored / zero-set / out-of-range / malformed writes"
+          (wRefusals |> List.forall isError) (sprintf "%d refusals" (List.length wRefusals))
+    check "storage: a refused write leaves the pool untouched, and each refusal has its own message"
+          (wPool = wBefore
+           && (wRefusals
+               |> List.map (fun r -> match r with Error e -> e | Ok() -> "!accepted")
+               |> List.distinct
+               |> List.length) = List.length wRefusals) ""
+    // validateLevels is still the ONE structural gate: the two storage doors do
+    // not merely also-fail on a malformed class, they fail with the IDENTICAL
+    // string the other doors produce (they reach it through cellCountChecked,
+    // and pass it through unprefixed for exactly this reason).
+    let badClass = [ (0, OPlus) ]
+    let gateMsg = match validateLevels badClass with Error e -> e | Ok() -> "!accepted"
+    check "storage: the malformed-class verdict is the same string at the storage doors as everywhere else"
+          (orbRead badClass 4 [||] [ 0 ] = Error gateMsg
+           && orbWriteCanonical badClass 4 [||] [ 0 ] 0L = Error gateMsg
+           && cellCountChecked badClass 4L = Error gateMsg
+           && orbRank badClass 4 [ 0 ] = Error gateMsg) gateMsg
+
     printFooter "OrbIdx bijections" [ sprintf "%d passed" passed; sprintf "%d failed" failed
-                                      sprintf "%d cells swept" (sweptCells + bigCells + nestCells) ]
+                                      sprintf "%d cells swept" (sweptCells + bigCells + nestCells)
+                                      sprintf "%d storage reads" rwProbes ]
     { Block = "OrbIdx Bijections"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

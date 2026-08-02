@@ -1,0 +1,37 @@
+// TEST: Sparse Edge List Demo
+// Demo: an unsorted edge-list SparseIdx exercising every read shape.
+// Keys are deliberately out of lex order so a sorted implementation diverges.
+let static edges = [(2, 1), (0, 3), (1, 0), (2, 4)]
+
+// Iteration-side builder: visit the key set in GIVEN order, value = 10*i + j.
+let W = method_for(range<SparseIdx<edges>>) <@> lambda(i, j) -> i * 10 + j |> compute
+
+// Full-key hash lookups.
+let a = W((2, 1))
+let b = W((0, 3))
+let c = W((2, 4))
+
+// Wildcard partial: every edge OUT OF node 2, gathered in key order.
+let out2 = W((2, _))
+
+// Wildcard partial: every edge INTO node 0.
+let into0 = W((_, 0))
+
+// Value-side builder: values supplied in key order, no scatter.
+let vals: Array<Float64 like Idx<4>> = [1.5, 2.5, 3.5, 4.5]
+let V = sparse(vals, edges)
+let v0 = V((2, 1))
+let v3 = V((2, 4))
+
+// Order-sensitive fold pins that the compact buffer kept the given order:
+// values [21, 3, 10, 24] -> (((21*100+3)*100+10)*100+24 = 21031024
+let ord = reduce(W, lambda(x, y) -> x * 100 + y)
+
+// EXPECT: a = 21
+// EXPECT: b = 3
+// EXPECT: c = 24
+// EXPECT: out2 = [21, 24]
+// EXPECT: into0 = [10]
+// EXPECT: v0 = 1.5
+// EXPECT: v3 = 4.5
+// EXPECT: ord = 21031024

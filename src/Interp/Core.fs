@@ -438,7 +438,8 @@ let private isDenseCopyableArray (ba: BladeArray) : bool =
     && ba.IndexTypes |> List.forall (fun ix ->
         not (isRaggedRowKind ix.IxKind)
         && ix.IxKind <> IxKCompound
-        && ix.IxKind <> IxKCompoundDynamic)
+        && ix.IxKind <> IxKCompoundDynamic
+        && ix.IxKind <> IxKSparse)
 
 // ============================================================================
 // The evaluator
@@ -734,6 +735,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         (match forceValue st env (evalExpr st env arrExpr) with
          | VArray ba when dim >= 0 && dim < ba.Extents.Length -> VInt ba.Extents.[dim]
          | VCompound cv -> VInt cv.Cardinality
+         | VSparse sv -> VInt sv.Cardinality
          | _ -> raise (InterpUnsupported "IRExtent"))
 
     // ---- Compound-halo window read `w(o)`: the COORDINATE of the present cell at

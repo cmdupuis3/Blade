@@ -1,0 +1,9 @@
+// TEST: OrbIdx Bad Sign Token (rejects)
+// ERROR: BL1999
+// Only '+' and '-' are characters. The sub-parser is DEDICATED (it does not
+// route through parseSimpleExpr), so `*` cannot be read as the start of some
+// expression and produce a confusing downstream error -- it is refused right
+// at the sign slot, naming the two spellings.
+type R = OrbIdx<[(2,*)], 4>
+let x = 1
+// EXPECT: parse failure -- expected a character sign '+' or '-'.

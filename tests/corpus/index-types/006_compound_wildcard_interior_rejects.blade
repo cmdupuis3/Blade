@@ -1,0 +1,13 @@
+// TEST: Compound Interior Wildcard (rejects)
+// ERROR: BL4003
+// The interior-wildcard form B((0, _, 0)) (free middle axis) rejects on a
+// compound: partial/wildcard reads are a SparseIdx feature since the flat-
+// subscript conversion.
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+let dense: Array<Float64 like X, Y, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, _, 0))
+// EXPECT: typecheck failure - wildcard reads on a compound axis moved to SparseIdx.

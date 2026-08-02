@@ -618,6 +618,7 @@ let private builtinCallOf (te: TypedExpr) : (string * TypedExpr list) option =
     | TExprReduce (a, k, i) -> Some ("reduce", [a; k] @ Option.toList i)
     | TExprMask (a, p) -> Some ("mask", [a; p])
     | TExprCompound (d, m) -> Some ("compound", [d; m])
+    | TExprSparse (v, k) -> Some ("sparse", [v; k])
     | TExprZip es -> Some ("zip", es)
     | TExprStack es -> Some ("stack", es)
     | TExprSort (a, k) -> Some ("sort", [a; k])

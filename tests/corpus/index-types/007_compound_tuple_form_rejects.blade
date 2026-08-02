@@ -1,0 +1,14 @@
+// TEST: Compound Tuple Form (rejects)
+// ERROR: BL4003
+// The historical full-tuple spelling B((x, y, z)) rejects since the flat-
+// subscript conversion: a compound axis consumes flat positional subscripts
+// like SymIdx - write B(x, y, z). (Chained residual reads, the old use for
+// the tuple machinery, live on SparseIdx: 177_sparse_partial_chained.)
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+let dense: Array<Float64 like X, Y, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, 1, 0))
+// EXPECT: typecheck failure - the tuple spelling moved to flat subscripts B(0, 1, 0).

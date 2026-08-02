@@ -1,0 +1,10 @@
+// TEST: Sparse Partial Scattered Gather
+// Wildcard partial on a sparse head is ALWAYS a gather (unsorted key table —
+// no prefix-window family): S((_, 1)) keeps the entries whose axis-1
+// coordinate is 1, in KEY order, yielding a dense rank-1 copy of their
+// values. Keys [(2,1),(0,3),(1,0),(4,1)] -> matches (2,1) and (4,1) ->
+// values [21, 41] (key order, not sorted by the free axis).
+let static K = [(2, 1), (0, 3), (1, 0), (4, 1)]
+let S = method_for(range<SparseIdx<K>>) <@> lambda(i, j) -> i * 10 + j |> compute
+let g = S((_, 1))
+// EXPECT: g = [21, 41]

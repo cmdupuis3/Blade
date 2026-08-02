@@ -1,0 +1,11 @@
+// TEST: Declared tuple-element array executes (SparseIdx keys probe)
+// De-risking probe for the SparseIdx runtime-keys branch: a DECLARED
+// tuple-element array (`Array<(Nat, Nat) like ...>`) parses and lowers today
+// but was never executed by the corpus (only kernel-OUTPUT tuple arrays are,
+// loops/070). SparseIdx<keys> with runtime keys is load-bearing on this form,
+// so this pins construction + tuple-element read before anything depends on it.
+type K = Idx<3>
+let keys: Array<(Nat, Nat) like K> = [(2, 1), (0, 3), (1, 0)]
+let (a, b) = keys((1 : K))
+let x = a + b
+// EXPECT: x = 3

@@ -109,13 +109,20 @@ and formatBladeIndex (ix: IRIndexType) : string =
     // wraps it in `SymIdx<k, ...>` when the record is a symmetric power of it.
     | IrrepsIdxLike _ -> Blade.IR.ppIndexType ix
     | _ ->
-    let n = formatExtent ix.Extent
+    // A wreath record's extent lives inside the IROrbitClass marker, so read it
+    // through orbitBaseExtent (the identity on every other record).
+    let n = formatExtent (Blade.IR.orbitBaseExtent ix)
     match ix.Rank, ix.Symmetry with
     | 0, _ -> "_"                                            // rank hole in a pattern
     | 1, SymNone -> sprintf "Idx<%s>" n
     | r, SymSymmetric -> sprintf "SymIdx<%d, %s>" r n
     | r, SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" r n
     | 2, SymHermitian -> sprintf "HermitianIdx<%s>" n
+    // The LEVEL LIST is the type here — a rank-only rendering would name a
+    // different class — so it is what gets printed. (The SparseIdx addition
+    // skipped this function and the compiler's own printers; not repeated.)
+    | _, SymWreath ->
+        sprintf "OrbIdx<%s, %s>" (Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix)) n
     // Defensive fallbacks: shapes the canonical syntax doesn't define (e.g. a
     // non-symmetric group of arity > 1, or a non-rank-2 Hermitian). Surface the
     // anomaly rather than mis-rendering it as a well-formed type.
@@ -756,6 +763,179 @@ let private test_compose_apply_output_type () =
         "result"
         (arrOf (IRTScalar ETBool) [idx])
 
+// ---- OrbIdx lowering: the RECORD, not a pattern ----------------------------
+//
+// These five deliberately bypass `assertBindingType`. matchesTypePattern is a
+// permissive relation — it ignores extent, and it would ignore a level list
+// living in the extent slot — while the entire claim v1 rests on is that a
+// depth-1 OrbIdx lowers to the SAME RECORD the legacy spelling produces, field
+// for field. That is an equality question, not a matching question, so these
+// compare records directly.
+//
+// Id is excluded from every comparison: every occurrence of an index type gets
+// a fresh Id (env.Builder.FreshId()), so two spellings of the same type can
+// never share one, and comparing it would make every test here vacuously fail.
+
+// (The array-binding accessor these use is `indexRecordsOf`, already defined
+// above for the IxKind assertions.)
+
+/// The index record a `type X = <index type>` alias registers. The route a
+/// DEPTH >= 2 class has to take: it is refused the moment it names storage, so
+/// there is no array binding to read it off.
+let private aliasIndexRecord (src: string) (aliasName: string) : Result<IRIndexType, string> =
+    match lower src with
+    | Error e -> Error (sprintf "lower failed: %s" e)
+    | Ok prog ->
+        match prog.Modules
+              |> List.collect (fun m -> m.Types)
+              |> List.tryPick (function
+                               | IRTDIndexType (n, ix) when n = aliasName -> Some ix
+                               | _ -> None) with
+        | Some ix -> Ok ix
+        | None -> Error (sprintf "no index-type alias named '%s' in lowered program" aliasName)
+
+let private withoutId (ix: IRIndexType) = { ix with Id = 0 }
+
+/// Depth-1 '+': `OrbIdx<[(2,+)], 3>` must lower to the record `SymIdx<2, 3>`
+/// lowers to — the same Rank, Symmetry, Extent, Tag, IxKind, Kind and
+/// Dependencies. Not "a symmetric record of rank 2": THAT record.
+let private test_orbidx_depth1_plus_is_symidx_record () =
+    let name = "OrbIdx [(2,+)] lowers to the SymIdx<2,n> record"
+    let src =
+        "let s1: Array<Int64 like SymIdx<2, 3>> = fill_random(10)\n" +
+        "let s2: Array<Int64 like OrbIdx<[(2,+)], 3>> = fill_random(10)\n"
+    match indexRecordsOf src "s1", indexRecordsOf src "s2" with
+    | Error e, _ | _, Error e -> (name, false, e)
+    | Ok [a], Ok [b] ->
+        if withoutId a = withoutId b then (name, true, formatBladeIndex b)
+        else (name, false, sprintf "records differ:\n  SymIdx: %A\n  OrbIdx: %A" (withoutId a) (withoutId b))
+    | Ok a, Ok b ->
+        (name, false, sprintf "expected one index record each, got %d and %d" a.Length b.Length)
+
+/// Depth-1 '-': the AntisymIdx twin of the above. Independently asserted
+/// because a lowering that ignored the sign would pass the '+' test.
+let private test_orbidx_depth1_minus_is_antisym_record () =
+    let name = "OrbIdx [(2,-)] lowers to the AntisymIdx<2,n> record"
+    let src =
+        "let a1: Array<Int64 like AntisymIdx<2, 3>> = fill_random(10)\n" +
+        "let a2: Array<Int64 like OrbIdx<[(2,-)], 3>> = fill_random(10)\n"
+    match indexRecordsOf src "a1", indexRecordsOf src "a2" with
+    | Error e, _ | _, Error e -> (name, false, e)
+    | Ok [a], Ok [b] ->
+        if withoutId a = withoutId b then (name, true, formatBladeIndex b)
+        else (name, false, sprintf "records differ:\n  AntisymIdx: %A\n  OrbIdx: %A" (withoutId a) (withoutId b))
+    | Ok a, Ok b ->
+        (name, false, sprintf "expected one index record each, got %d and %d" a.Length b.Length)
+
+/// §7.2's normalization: a rank-1 level is the trivial group at EITHER sign and
+/// is dropped, so `[(2,+), (1,-)]` is `[(2,+)]` — the SymIdx<2,3> record — and
+/// NOT a depth-2 wreath. This is the safeguard that makes the depth-1/depth-2
+/// case split at lowering exhaustive; without it an AST could append trivial
+/// levels forever at fixed rank.
+let private test_orbidx_rank1_level_drops () =
+    let name = "OrbIdx [(2,+),(1,-)] normalizes to the SymIdx<2,n> record"
+    let src =
+        "let s1: Array<Int64 like SymIdx<2, 3>> = fill_random(10)\n" +
+        "let s2: Array<Int64 like OrbIdx<[(2,+), (1,-)], 3>> = fill_random(10)\n"
+    match indexRecordsOf src "s1", indexRecordsOf src "s2" with
+    | Error e, _ | _, Error e -> (name, false, e)
+    | Ok [a], Ok [b] ->
+        if withoutId a = withoutId b && b.Symmetry = SymSymmetric && b.Rank = 2 then
+            (name, true, formatBladeIndex b)
+        else (name, false, sprintf "records differ:\n  SymIdx: %A\n  OrbIdx: %A" (withoutId a) (withoutId b))
+    | Ok a, Ok b ->
+        (name, false, sprintf "expected one index record each, got %d and %d" a.Length b.Length)
+
+/// The empty class: `OrbIdx<[], 3>` is the plain `Idx<3>` record (§3's normal
+/// form), including Tag = None and IxKind = IxKPlain — a wreath marker left on
+/// a trivial class would route it into the compact machinery for nothing.
+let private test_orbidx_empty_is_plain_idx_record () =
+    let name = "OrbIdx [] lowers to the plain Idx<n> record"
+    let src =
+        "let d1: Array<Int64 like Idx<3>> = [1, 2, 3]\n" +
+        "let d2: Array<Int64 like OrbIdx<[], 3>> = [4, 5, 6]\n"
+    match indexRecordsOf src "d1", indexRecordsOf src "d2" with
+    | Error e, _ | _, Error e -> (name, false, e)
+    | Ok [a], Ok [b] ->
+        if withoutId a = withoutId b && b.Symmetry = SymNone && b.IxKind = IxKPlain && b.Tag = None then
+            (name, true, formatBladeIndex b)
+        else (name, false, sprintf "records differ:\n  Idx: %A\n  OrbIdx: %A" (withoutId a) (withoutId b))
+    | Ok a, Ok b ->
+        (name, false, sprintf "expected one index record each, got %d and %d" a.Length b.Length)
+
+/// Depth 2 — the only case that is new machinery. Asserts the whole record
+/// shape (Rank = the PRODUCT of the level ranks, Symmetry = SymWreath, the
+/// level list on the Extent marker in outermost-last order, IxKOrbit + its
+/// "__orbidx" sentinel so the IR validator's Tag<->IxKind agreement holds) AND
+/// the §4 cardinality: the Riemann shape at n = 4 folds 4 -> C(4,2) = 6 ->
+/// C(7,2) = 21, the 21 formalism §3.4 states. That last number is the one a
+/// wrong `PlaceCombinatorial _` fallthrough would silently get wrong (it would
+/// compute C(4+16-1, 16) over the raw axis count instead).
+let private test_orbidx_depth2_record_and_cardinality () =
+    let name = "OrbIdx [(2,-),(2,+)] depth-2 record: rank 4, SymWreath, 21 cells at n=4"
+    let src = "type Riemann = OrbIdx<[(2,-), (2,+)], 4>\nlet x = 1\n"
+    match aliasIndexRecord src "Riemann" with
+    | Error e -> (name, false, e)
+    | Ok ix ->
+        let levels = orbitLevelsOf ix
+        let card =
+            try
+                match bufferGroupCardinality { Rank = ix.Rank; Extent = ix.Extent
+                                               Symmetry = ix.Symmetry; Kind = ix.Kind
+                                               Dependencies = ix.Dependencies } with
+                | IRLit (IRLitInt n) -> Ok n
+                | other -> Error (sprintf "cardinality did not fold to a literal: %A" other)
+            with e -> Error e.Message
+        let problems =
+            [ if ix.Rank <> 4 then yield sprintf "Rank = %d, expected 4 (= 2 * 2)" ix.Rank
+              if ix.Symmetry <> SymWreath then yield sprintf "Symmetry = %A, expected SymWreath" ix.Symmetry
+              if ix.IxKind <> IxKOrbit then yield sprintf "IxKind = %A, expected IxKOrbit" ix.IxKind
+              if ix.Tag <> Some "__orbidx" then yield sprintf "Tag = %A, expected Some \"__orbidx\"" ix.Tag
+              if ixKindOfTag ix.Tag <> ix.IxKind then yield "Tag/IxKind disagree (the IR validator would reject)"
+              if levels <> [ (2, false); (2, true) ] then
+                  yield sprintf "levels = %s, expected [(2,-), (2,+)] outermost-last" (ppOrbitLevels levels)
+              match ix.Extent with
+              | IROrbitClass (_, IRLit (IRLitInt 4L)) -> ()
+              | other -> yield sprintf "base extent = %A, expected IROrbitClass (_, 4)" other
+              match card with
+              | Ok 21L -> ()
+              | Ok n -> yield sprintf "cell count = %d, expected 21 (4 -> C(4,2)=6 -> C(7,2)=21)" n
+              | Error e -> yield sprintf "cell count failed: %s" e ]
+        if List.isEmpty problems then (name, true, sprintf "%s, 21 cells" (formatBladeIndex ix))
+        else (name, false, String.concat "; " problems)
+
+/// The level list is TYPE IDENTITY, not decoration: `[(2,+),(2,+)]` and
+/// `[(2,-),(2,-)]` are both Rank 4, both SymWreath, and both carry the same
+/// synthetic "__orbidx" Tag (which indexPairIncompatible's tag arm exempts by
+/// design), so every pre-existing test in that function calls them compatible —
+/// while their cell counts at n = 4 are 55 and 15. This pins both halves.
+let private test_orbidx_level_lists_are_identity () =
+    let name = "OrbIdx level lists are type identity (same rank, different class)"
+    let src =
+        "type Tied = OrbIdx<[(2,+), (2,+)], 4>\n" +
+        "type Anti = OrbIdx<[(2,-), (2,-)], 4>\n" +
+        "let x = 1\n"
+    match aliasIndexRecord src "Tied", aliasIndexRecord src "Anti" with
+    | Error e, _ | _, Error e -> (name, false, e)
+    | Ok t, Ok a ->
+        let cardOf (ix: IRIndexType) =
+            match bufferGroupCardinality { Rank = ix.Rank; Extent = ix.Extent
+                                           Symmetry = ix.Symmetry; Kind = ix.Kind
+                                           Dependencies = ix.Dependencies } with
+            | IRLit (IRLitInt n) -> Some n
+            | _ -> None
+        let problems =
+            [ if t.Rank <> a.Rank then yield "the two classes should share Rank 4 (that is the point)"
+              if not (Blade.Unify.indexPairIncompatible t a) then
+                  yield "unification treats [(2,+),(2,+)] and [(2,-),(2,-)] as COMPATIBLE"
+              if Blade.Unify.indexPairIncompatible t t then
+                  yield "unification treats a class as incompatible with itself"
+              match cardOf t, cardOf a with
+              | Some 55L, Some 15L -> ()
+              | ct, ca -> yield sprintf "cell counts %A / %A, expected 55 / 15 at n = 4" ct ca ]
+        if List.isEmpty problems then (name, true, "55 vs 15 cells, unification separates them")
+        else (name, false, String.concat "; " problems)
+
 // ---- Runner ----------------------------------------------------------------
 
 let runTypeStructureTests () : Blade.Tests.TestHarness.BlockResult =
@@ -788,7 +968,13 @@ let runTypeStructureTests () : Blade.Tests.TestHarness.BlockResult =
           test_fused_output_irreps_x_irreps
           test_outer_let_identity_fuses
           test_outer_inline_stays_dense
-          test_compose_apply_output_type ]
+          test_compose_apply_output_type
+          test_orbidx_depth1_plus_is_symidx_record
+          test_orbidx_depth1_minus_is_antisym_record
+          test_orbidx_rank1_level_drops
+          test_orbidx_empty_is_plain_idx_record
+          test_orbidx_depth2_record_and_cardinality
+          test_orbidx_level_lists_are_identity ]
     Blade.Tests.TestHarness.printHeader "Type-Structure"
     let mutable passed = 0
     let mutable failed = 0

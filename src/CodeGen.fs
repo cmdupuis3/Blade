@@ -79,6 +79,9 @@ type CodeGenContext = {
     /// Consumed by genBinding to emit P0 index materialization + a dense->compact
     /// scatter. Value is (loweredDense, loweredMask).
     CompoundInits: Map<IRId, IRExpr * IRExpr>
+    /// Deferred sparse-construction constructors (sparse(values, keys)),
+    /// keyed by the receiving binding's IRId, lifted from IRModule.SparseInits.
+    SparseInits: Map<IRId, IRExpr>
     /// Map from grouped-array C++ name to its source GroupKeys C++ name.
     /// Populated by genBinding for IRGroupBy; consulted by method_for codegen
     /// when peeling a ragged outer dimension (Tag = "__group_outer").
@@ -243,6 +246,18 @@ let private emitAllocRhs
         let strictName = hoistSymmDecl (sprintf "%s_strict" extentsName) strictVec
         Ok (sprintf "{ allocate_strict<typename promote<%s, %d>::type, %s, %s>(%s), %s }"
                 elemType rank symmArg strictName extentsName extentsName)
+    | AllocWreath (levels, _, _) ->
+        // A wreath pool is NOT an `Array<T,N>`: `allocate<>`'s recurrence builds
+        // one shrinking simplex, and a wreath's rows shrink per LEVEL. The
+        // dedicated emitter (`genWreathApply`) declares a flat `T*` sized from
+        // `orb_cell_count<Levels...>(n)` instead and never calls this function.
+        // Reaching here means some OTHER site tried to put a wreath class into
+        // an Array wrapper (a copy, a negate, a materializer) -- refuse, so the
+        // TU fails loudly rather than allocating a pool of the wrong size.
+        Error (sprintf "Blade codegen: an OrbIdx%s (iterated-wreath) pool cannot be allocated as an \
+Array<T,N>: allocate<> builds ONE shrinking simplex and a wreath's rows shrink per level. Only a \
+deduced wreath OUTPUT of a comm-tied apply has an emitter (a flat orb_cell_count pool)."
+                      (ppOrbitLevels levels))
     | AllocUnsupported reason ->
         Error (sprintf "Blade codegen: unsupported antisymmetric output storage â€” %s" reason)
 
@@ -573,6 +588,7 @@ let emptyContext () = {
     StreamedArrays = Map.empty
     RandomInits = Map.empty
     CompoundInits = Map.empty
+    SparseInits = Map.empty
     GroupedArrays = Map.empty
     MutableArrayLets = Set.empty
     Warnings = ref []
@@ -1201,13 +1217,22 @@ let isCompoundArrayType (arrTy: IRArrayType) : bool =
     arrTy.IndexTypes |> List.exists (fun idx ->
         idx.IxKind = IxKCompound)
 
+/// Detect whether an IRArrayType is a SparseIdx<keys> array -- an explicit
+/// valid-tuple enumeration (formalism 3.5) rendered as `Sparse<T, RANK>`,
+/// accessed by whole-tuple hash lookup. Twin of isCompoundArrayType over the
+/// sparse kind.
+let isSparseArrayType (arrTy: IRArrayType) : bool =
+    arrTy.IndexTypes |> List.exists (fun idx ->
+        idx.IxKind = IxKSparse)
+
 /// Array types whose storage is the plain dense pool + pointer skeleton that
 /// `deallocate` walks. Ragged, compound and dep-idx layouts carry side tables
 /// (lens/offsets/row pointers, compound_index_t) with their own ownership rules.
 /// (Declared here rather than in the deallocation registry below because Phase
 /// M's eligibility analysis and the registry both need it.)
 let isFreeableDenseArrayType (at: IRArrayType) : bool =
-    not (isCompoundArrayType at) && not (isRaggedArrayType at) && not (isDepIdxArrayType at)
+    not (isCompoundArrayType at) && not (isSparseArrayType at)
+    && not (isRaggedArrayType at) && not (isDepIdxArrayType at)
 
 // ----------------------------------------------------------------------------
 // Phase M cell (analysis lives with the deallocation block further down)
@@ -1274,6 +1299,16 @@ let cppArrayTypeStr (arr: IRArrayType) : string =
             |> Option.map (fun idx -> idx.Rank)
             |> Option.defaultValue (arrayRank arr)
         sprintf "Compound<%s, %d>" (elemTypeToCpp arr.ElemType) rank
+    elif isSparseArrayType arr then
+        // Sparse<T, RANK>: an explicit key enumeration. RANK is the key tuple
+        // arity, carried on the sparse index type's Rank -- same read-off
+        // discipline as the compound arm above.
+        let rank =
+            arr.IndexTypes
+            |> List.tryFind (fun idx -> idx.IxKind = IxKSparse)
+            |> Option.map (fun idx -> idx.Rank)
+            |> Option.defaultValue (arrayRank arr)
+        sprintf "Sparse<%s, %d>" (elemTypeToCpp arr.ElemType) rank
     elif isRaggedArrayType arr || isDepIdxArrayType arr then
         if arr.IndexTypes.Length = 1 then
             sprintf "RaggedRow<%s>" (elemTypeToCpp arr.ElemType)
@@ -1322,6 +1357,44 @@ let genCompoundIndexFromMask (maskName: string) (rank: int) (idxName: string) : 
           sprintf "compound_index_t<%d>* %s = new compound_index_t<%d>(\"%s\", %s_extents, %s_maskvec);"
                   rank idxName rank idxName idxName idxName ]
     (lines, idxName)
+
+/// Emit the construction of a standalone `sparse_index_t<RANK>` — the sparse
+/// twin of genCompoundIndexFromMask, keyed on the SparseKeysSource branch:
+///
+///   SkStatic entries — the key table is a compile-time constant; emit it as a
+///       braced vector literal. No runtime array is consulted (desync-proof).
+///   SkRuntime keys   — loop the named keys array (rank-1, std::tuple elements
+///       for arity >= 2, plain integers for a rank-1 sparse) into the vector.
+///       `keysName` is the resolved C++ name of that array.
+///
+/// Key order is preserved verbatim in both branches (given order == iteration
+/// order). The index is heap-allocated; duplicate keys throw at construction
+/// (sparse_index_t's ctor). Caller owns dealloc registration.
+let genSparseIndexFromKeys (source: SparseKeysSource) (keysName: string option) (rank: int) (idxName: string) : string list =
+    match source with
+    | SkStatic entries ->
+        let rows =
+            entries
+            |> List.map (fun e -> sprintf "{ %s }" (e |> List.map string |> String.concat ", "))
+            |> String.concat ", "
+        [ sprintf "std::vector<std::array<size_t, %d>> %s_keys = { %s };" rank idxName rows
+          sprintf "sparse_index_t<%d>* %s = new sparse_index_t<%d>(\"%s\", std::move(%s_keys));"
+                  rank idxName rank idxName idxName ]
+    | SkRuntime _ ->
+        match keysName with
+        | Some kn ->
+            let entryInit =
+                if rank = 1 then sprintf "{ (size_t)(%s[__r]) }" kn
+                else
+                    [ for c in 0 .. rank - 1 -> sprintf "(size_t)std::get<%d>(%s[__r])" c kn ]
+                    |> String.concat ", "
+                    |> sprintf "{ %s }"
+            [ sprintf "std::vector<std::array<size_t, %d>> %s_keys(%s.extents[0]);" rank idxName kn
+              sprintf "for (size_t __r = 0; __r < %s.extents[0]; __r++) %s_keys[__r] = %s;" kn idxName entryInit
+              sprintf "sparse_index_t<%d>* %s = new sparse_index_t<%d>(\"%s\", std::move(%s_keys));"
+                      rank idxName rank idxName idxName ]
+        | None ->
+            [ "#error \"SparseIdx: runtime keys variable not found in scope at codegen\"" ]
 
 /// Resolve a capture to the C++ identifier that names it in the SCOPE
 /// where the forwarding closure is emitted. A capture's `Name` is the
@@ -1618,7 +1691,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // bound = cardinality, elements via .data[i]. Dense stays .extents/[].
         let isR1Compound =
             match inferExprType arrExpr with
-            | ArrayElem at -> isCompoundArrayType at && at.IndexTypes.Length = 1
+            | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
             | _ -> false
         let bound = if isR1Compound then sprintf "%s.idx->cardinality" arrStr else sprintf "%s.extents[0]" arrStr
         let elemAt = if isR1Compound then sprintf "%s.data[__ci]" arrStr else sprintf "%s[__ci]" arrStr
@@ -1813,6 +1886,13 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                             match beh.Canonicalize () with
                             | CanonSortStrict -> "true"
                             | CanonSort | CanonNone -> "false"
+                            // canon_fold<r> is ONE flat sort with a strict flag;
+                            // it has no spelling for a per-level fold, and
+                            // emitting "false" here would silently canonicalize
+                            // a wreath tuple as a plain multiset.
+                            | CanonWreathFold ->
+                                failwith (orbitStorageUnsupported "lazy compact read (canon_fold emission)"
+                                                                  (orbitLevelsOf s))
                         let tf =
                             match beh.ReadTransform () with
                             | TfIdentity -> "nested_array_utilities::ReadTransform::Identity"
@@ -1868,8 +1948,14 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
     //     dims combined with a partial read remain gated (hard error).
     let compoundRead () : string option =
         match inferExprType arr with
-        | ArrayElem arrTy when isCompoundArrayType arrTy ->
-            // Rank-1 compound scalar sugar: `C(i)` on a rank-1 compound
+        | ArrayElem arrTy when isCompoundArrayType arrTy || isSparseArrayType arrTy ->
+            // Tabulated-head read: CompoundIdx and SparseIdx share the tuple
+            // application form and the full-read emission; they differ ONLY in
+            // the partial-index reconstitution (compound has the zero-copy
+            // prefix/window family; sparse is always a gather).
+            let isSparse = isSparseArrayType arrTy
+            let headKind ix = ix.IxKind = IxKCompound || ix.IxKind = IxKSparse
+            // Rank-1 tabulated scalar sugar: `C(i)` on a rank-1 head
             // (the filtered-set case) is the 1-tuple read `C((i))` --
             // there is no way to even WRITE a 1-tuple literal at the
             // surface, so the scalar spelling is the canonical one.
@@ -1877,7 +1963,7 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
             // raw-subscript peel (`C[i]`), which Compound cannot compile.
             let k1 =
                 arrTy.IndexTypes
-                |> List.tryFind (fun ix -> ix.IxKind = IxKCompound)
+                |> List.tryFind headKind
                 |> Option.map (fun ix -> ix.Rank)
             let indices =
                 match k1, indices with
@@ -1888,7 +1974,7 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
             | (IRTuple coords) :: trailingIdxs ->
                 let k =
                     arrTy.IndexTypes
-                    |> List.tryFind (fun ix -> ix.IxKind = IxKCompound)
+                    |> List.tryFind headKind
                     |> Option.map (fun ix -> ix.Rank)
                     |> Option.defaultValue coords.Length
                 let trailingDims =
@@ -1897,37 +1983,24 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                     | [] -> []
                 match classifyCompoundIndexTuple k coords with
                 | CompoundPartial (pinned, freePos) ->
-                    // Partial compound indexing (formalism 4.5). The pinned
-                    // coordinates (a leading prefix for a short tuple;
-                    // arbitrary axes for a full-arity wildcard tuple with
-                    // `IRLit IRLitUnit` sentinels at the free positions)
-                    // are removed; the residual spans the free axes. Four
-                    // reconstitution shapes, all pure expressions:
-                    //   prefix,    rank >= 2 : make_partial_compound --
-                    //     contiguous shared-window residual, no data copy.
-                    //   prefix,    rank == 1 : make_partial_window --
-                    //     dense Idx window sharing the parent data
-                    //     (Array<T,1> with a heap-allocated extent).
-                    //   scattered, rank >= 2 : make_partial_compound_gather
-                    //     -- deep-copy gather into a fresh Compound<T,RR>.
-                    //   scattered, rank == 1 : make_partial_gather_dense --
-                    //     deep-copy gather into a fresh Array<T,1>.
+                    // Partial (wildcard/short-tuple) indexing — a SPARSE-only
+                    // feature since the compound flat-subscript conversion:
+                    // sparse partials are ALWAYS gathers (the key table is
+                    // insertion-ordered; there is no lex-sorted contiguity for
+                    // a prefix window to share), keyed on residual rank +
+                    // trail. A COMPOUND head can no longer produce a partial
+                    // tuple (validateTabulatedIndex rejects the forms and the
+                    // flat path packs full k-tuples), so reaching the compound
+                    // arm here is an internal invariant break, not a user error.
                     let j = pinned.Length
                     let residualRank = freePos.Length
-                    if not (List.isEmpty trailingIdxs) then
-                        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "Partial compound indexing combined with a SUPPLIED trailing index is not yet supported; leave the trailing dim free (omit it or write `_`), or index the residual separately (let r = B((...)); r(...)).")))
+                    if not isSparse then
+                        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan "internal: a partial compound index tuple reached codegen — partial/wildcard reads on CompoundIdx were removed (use SparseIdx); the typecheck flat-subscript packing should have made this unreachable"))
+                    elif not (List.isEmpty trailingIdxs) then
+                        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "Partial sparse indexing combined with a SUPPLIED trailing index is not yet supported; leave the trailing dim free (omit it or write `_`), or index the residual separately (let r = S((...)); r(...)).")))
                     elif trailingDims.Length > 1 then
-                        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "Partial compound indexing with %d trailing dimensions is not supported (multi-trailing compounds are unsupported throughout: the wrapper stores only the trailing-stride product, not per-dim extents)." trailingDims.Length)))
+                        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "Partial sparse indexing with %d trailing dimensions is not supported (multi-trailing is unsupported throughout: the wrapper stores only the trailing-stride product, not per-dim extents)." trailingDims.Length)))
                     else
-                        // One free trailing dim rides along at zero data cost
-                        // on the shared paths: the compact layout is lex-
-                        // sorted with the trailing block innermost, so a
-                        // residual COMPOUND (rank >= 2) keeps the parent's
-                        // trailing_stride through the SAME helpers, and a
-                        // rank-1 prefix residual becomes a contiguous rank-2
-                        // window (make_partial_window_trail: shared data,
-                        // fresh row table only). Scattered pins still
-                        // gather, now copying whole trailing blocks.
                         let hasTrail = not (List.isEmpty trailingDims)
                         let elemStr = elemTypeToCpp arrTy.ElemType
                         // (size_t) casts: coordinate exprs are int64-typed at
@@ -1936,25 +2009,16 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                         // error (literals are exempt as constant exprs).
                         let pinnedVals = pinned |> List.map (fun (_, c) -> sprintf "(size_t)(%s)" (exprToCppCore subst names c))
                         let pinnedArr = sprintf "std::array<size_t, %d>{%s}" j (String.concat ", " pinnedVals)
-                        let isPrefix = (pinned |> List.map fst) = [0 .. j - 1]
-                        if isPrefix && residualRank >= 2 then
-                            Some (sprintf "nested_array_utilities::make_partial_compound<%s, %d, %d>(%s, %s)"
-                                          elemStr k j arrStr pinnedArr)
-                        elif isPrefix then
-                            let fn = if hasTrail then "make_partial_window_trail" else "make_partial_window"
-                            Some (sprintf "nested_array_utilities::%s<%s, %d, %d>(%s, %s)"
-                                          fn elemStr k j arrStr pinnedArr)
+                        let posArr =
+                            sprintf "std::array<size_t, %d>{%s}" j
+                                (pinned |> List.map (fst >> string) |> String.concat ", ")
+                        if residualRank >= 2 then
+                            Some (sprintf "nested_array_utilities::make_partial_sparse_gather<%s, %d, %d>(%s, %s, %s)"
+                                          elemStr k j arrStr pinnedArr posArr)
                         else
-                            let posArr =
-                                sprintf "std::array<size_t, %d>{%s}" j
-                                    (pinned |> List.map (fst >> string) |> String.concat ", ")
-                            if residualRank >= 2 then
-                                Some (sprintf "nested_array_utilities::make_partial_compound_gather<%s, %d, %d>(%s, %s, %s)"
-                                              elemStr k j arrStr pinnedArr posArr)
-                            else
-                                let fn = if hasTrail then "make_partial_gather_dense_trail" else "make_partial_gather_dense"
-                                Some (sprintf "nested_array_utilities::%s<%s, %d, %d>(%s, %s, %s)"
-                                              fn elemStr k j arrStr pinnedArr posArr)
+                            let fn = if hasTrail then "make_sparse_gather_dense_trail" else "make_sparse_gather_dense"
+                            Some (sprintf "nested_array_utilities::%s<%s, %d, %d>(%s, %s, %s)"
+                                          fn elemStr k j arrStr pinnedArr posArr)
                 | CompoundFull ->
                     // j = k: full index. Build the coord array literal.
                     // (size_t) casts, same rationale as the partial path:
@@ -2232,7 +2296,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     // mask). cardinality is a runtime value, so the empty guard always emits.
     let isCompound =
         match inferExprType arrExpr with
-        | ArrayElem at -> isCompoundArrayType at
+        | ArrayElem at -> isCompoundArrayType at || isSparseArrayType at
         | _ -> false
     // A reduce operand can also be a peeled ragged/dep-idx row, which lowers
     // to RaggedRow<T>. RaggedRow exposes its length as `.len` (a bare size_t),
@@ -2444,7 +2508,7 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
             // axis's runtime extent is the compact index's cardinality.
             // (Multi-rank compound extents are rejected at typecheck,
             // same ill-posedness rule as ragged slots.)
-            let isRank1Compound = isCompoundArrayType at && at.IndexTypes.Length = 1
+            let isRank1Compound = (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
             if isRaggedRow && dim = 0 then
                 sprintf "(int64_t)(%s.len)" arrName
             elif isRank1Compound && dim = 0 then
@@ -2731,7 +2795,7 @@ and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
     // operands keep .extents/operator[].
     let isR1Compound =
         match inferExprType arrExpr with
-        | ArrayElem at -> isCompoundArrayType at && at.IndexTypes.Length = 1
+        | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
         | _ -> false
     let srcBound = if isR1Compound then sprintf "%s.idx->cardinality" arrName else sprintf "%s.extents[0]" arrName
     let srcAt (i: string) = if isR1Compound then sprintf "%s.data[%s]" arrName i else sprintf "%s[%s]" arrName i
@@ -3544,8 +3608,9 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
             sprintf "const std::array<size_t, 1>* %s = &%s_cidx->rank_to_tuple[%s];"
                 elem.ParamName elem.ArrayName centerExpr
         (code, elem.ParamName)
-    | VirtualRange _ when (match level.Extent with IRCompoundMask _ -> true | _ -> false) ->
-        // range<CompoundIdx<m>>: ONE loop level over the present cells; each
+    | VirtualRange _ when (match level.Extent with IRCompoundMask _ | IRSparseKeys _ -> true | _ -> false) ->
+        // range<CompoundIdx<m>> / range<SparseIdx<keys>>: ONE loop level over
+        // the present cells (compound: lex order; sparse: given key order); each
         // kernel param binds one COORDINATE of the current cell's tuple via
         // the materialized index's O(1) unhash (rank_to_tuple lookup). The
         // index variable `<name>_cidx` is emitted by the caller's
@@ -3625,8 +3690,8 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
                     elemTypeStr resultRank newName currentName coordName currentName
         let code = sprintf "%ssize_t %s = %s; %s" pAbsDecl coordName coordExpr peel
         (code, newName)
-    | RealArray when (match level.Extent with IRCompoundMask _ -> true | _ -> false) ->
-        // Compound axis: peel the present-cell index `r` against the COMPACT
+    | RealArray when (match level.Extent with IRCompoundMask _ | IRSparseKeys _ -> true | _ -> false) ->
+        // Tabulated (compound/sparse) axis: peel the present-cell index `r` against the COMPACT
         // buffer (.data), not the dense .extents grid. A compound axis has no
         // bound-dependency / strict shifts (it is its own group) and the compound
         // level is the array's first level, so the index is just the loop var.
@@ -4005,7 +4070,7 @@ let ompSuppressedMarker (requested: bool) (pragmaEmitted: bool) (reason: string)
 /// non-mask Extent is that compound's trailing dim (bound = trailing_stride).
 let compoundArrayNamesOf (bindings: LoopIndexBinding list) : Set<string> =
     bindings
-    |> List.choose (fun b -> match b.Extent with IRCompoundMask _ -> Some b.ExtentArrayRef | _ -> None)
+    |> List.choose (fun b -> match b.Extent with IRCompoundMask _ | IRSparseKeys _ -> Some b.ExtentArrayRef | _ -> None)
     |> Set.ofList
 
 /// The C++ expression for a loop level's (un-subtracted) upper bound. Shared
@@ -4022,7 +4087,10 @@ let genLoopBoundExpr (compoundArrays: Set<string>) (binding: LoopIndexBinding) :
     // compound source (range<CompoundIdx<m>>) has no Compound value to hang
     // `.idx` off; its bound is the standalone materialized index
     // `<name>_cidx->cardinality` (see genCompoundIndexFromMask).
-    | IRCompoundMask _ ->
+    // IRSparseKeys rides the same arm: a sparse axis also iterates its
+    // cardinality, its virtual driver uses the same `_cidx` name suffix, and
+    // the Sparse wrapper exposes the same `.idx->cardinality` shape.
+    | IRCompoundMask _ | IRSparseKeys _ ->
         let isVirtualCompound =
             binding.Elements
             |> List.exists (fun e ->
@@ -4260,7 +4328,7 @@ let genKernelExprWithReynolds
 /// trailing dim (the realistic load_compound shape); multi-trailing needs a
 /// strided sum and is deferred. All-dims (no trailing) -> .data[r].
 let compoundOutputSubscript (bindings: LoopIndexBinding list) (outName: string) : string =
-    let isComp (b: LoopIndexBinding) = match b.Extent with IRCompoundMask _ -> true | _ -> false
+    let isComp (b: LoopIndexBinding) = match b.Extent with IRCompoundMask _ | IRSparseKeys _ -> true | _ -> false
     match bindings |> List.tryFind isComp with
     | None -> ""
     | Some cb ->
@@ -4603,9 +4671,9 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     let outputIdx =
         match codeGen.OutputType with
         | IRTScalar _ -> ""
-        // Compound output inherits the input CompoundIdx: write into the compact
-        // buffer (.data[r*stride + t]), not a dense [i][j] slot.
-        | ArrayElem at when isCompoundArrayType at ->
+        // Tabulated (compound/sparse) output inherits the input's index: write
+        // into the compact buffer (.data[r*stride + t]), not a dense [i][j] slot.
+        | ArrayElem at when isCompoundArrayType at || isSparseArrayType at ->
             compoundOutputSubscript codeGen.Bindings codeGen.OutputName
         | _ ->
             codeGen.Bindings
@@ -4847,6 +4915,11 @@ let runtimeHeaderNames : string list =
       // programs (genMpiNestSimplicial), but deployed unconditionally so the
       // deploy/cleanup bookkeeping stays uniform.
       "linearized_storage.hpp"
+      // OrbIdx (iterated-wreath) storage: orb_cell_count / the segment-peeled
+      // orb_visit nest / orb_canon / orb_rank / orb_unrank. Included only by
+      // programs that deduce a wreath class (genWreathApply), but deployed
+      // unconditionally so the deploy/cleanup bookkeeping stays uniform.
+      "orbit_wreath_utilities.hpp"
       // `rand` module runtime (blade_rand::uniform/normal). Deployed
       // unconditionally (header-only, cheap); referenced by every program's
       // include list.
@@ -4884,6 +4957,11 @@ let genIncludesExternal () : string list =
      "#include <omp.h>"
      "#include \"nested_array_utilities.hpp\""
      "#include \"nested_array_types.hpp\""
+     // OrbIdx (iterated-wreath) storage. Header-only and dependency-free
+     // (<cstdint>/<cstddef>/<cassert>), so it is included unconditionally
+     // alongside the other runtime headers rather than gated on whether this
+     // particular program deduced a wreath class.
+     "#include \"orbit_wreath_utilities.hpp\""
      "#include \"rand_runtime.hpp\""
      "#include <exception>"                 // std::exception for main()'s BL8005 catch
      "#include \"blade_runtime.hpp\""        // blade_rt::panic + BLADE_FRAME shadow stack
@@ -5502,6 +5580,12 @@ let deallocArgsFor
     | AllocPerGroupStrict strictVec ->
         let strictName = hoistSymmDecl (sprintf "%s_strict" extentsName) strictVec
         Ok ("deallocate_strict", sprintf "typename promote<%s, %d>::type, %s, %s" elemType rank symmArg strictName)
+    | AllocWreath _ ->
+        // The wreath pool is a plain `new T[cells]`, freed by its own
+        // `delete[]` registration (registerRawArrayData at the emit site), not
+        // by `deallocate`'s skeleton walk -- there is no skeleton to walk.
+        Error "Blade codegen: an OrbIdx (iterated-wreath) pool is a flat new[] buffer; it is freed by \
+delete[] at its emit site, not through the skeleton deallocator"
     | AllocUnsupported reason ->
         Error (sprintf "Blade codegen: unsupported storage has no representable free -- %s" reason)
 
@@ -6107,18 +6191,21 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             | IRApp _ -> true                // function-call returns wrapped Array
             | IRTupleProj _ -> true          // tuple elements carry wrappers (irTypeToCpp IRTTuple)
             | IRIndex (a, (IRTuple coords) :: _, _) ->
-                // A PARTIAL compound read (formalism 4.5) produces a wrapper:
-                // Compound<T, RR> for a residual-rank >= 2 read
-                // (make_partial_compound[_gather]) or Array<T, 1> for a dense
-                // rank-1 residual (make_partial_window / _gather_dense). A
-                // FULL compound read stays on the raw path (scalar, or a
+                // A PARTIAL sparse read (formalism 3.5) produces a wrapper:
+                // Sparse<T, RR> for a residual-rank >= 2 read
+                // (make_partial_sparse_gather) or Array<T, 1|2> for a dense
+                // rank-1 residual (make_sparse_gather_dense[_trail]). A FULL
+                // tabulated read stays on the raw path (scalar, or a
                 // trailing-row T* sub-view via .row()), as does ordinary
-                // positional peeling on non-compound arrays.
+                // positional peeling on non-tabulated arrays. (Compound heads
+                // never classify as partial since the flat-subscript
+                // conversion — the compound arm here is vestigial but
+                // harmless, and keeps the predicate kind-agnostic.)
                 (match inferExprType a with
-                 | ArrayElem at when isCompoundArrayType at ->
+                 | ArrayElem at when isCompoundArrayType at || isSparseArrayType at ->
                      let k =
                          at.IndexTypes
-                         |> List.tryFind (fun ix -> ix.IxKind = IxKCompound)
+                         |> List.tryFind (fun ix -> ix.IxKind = IxKCompound || ix.IxKind = IxKSparse)
                          |> Option.map (fun ix -> ix.Rank)
                          |> Option.defaultValue coords.Length
                      (match classifyCompoundIndexTuple k coords with
@@ -7060,7 +7147,7 @@ let classifyMpiShape (codeGen: LoopNestCodeGen) : MpiShape =
                 match e.Virtual with RealArray -> true | _ -> false))
     let anyCompound =
         bindings |> List.exists (fun b ->
-            match b.Extent with IRCompoundMask _ -> true | _ -> false)
+            match b.Extent with IRCompoundMask _ | IRSparseKeys _ -> true | _ -> false)
     let anyFused = bindings |> List.exists (fun b -> b.FusedRank.IsSome)
     let isRectangular =
         bindings |> List.forall (fun b ->
@@ -7071,8 +7158,8 @@ let classifyMpiShape (codeGen: LoopNestCodeGen) : MpiShape =
         match codeGen.OutputType with
         | IRTScalar _ ->
             MpiIneligible "scalar output is a cross-cell reduction (floating-point reassociation)"
-        | ArrayElem at when isCompoundArrayType at ->
-            MpiIneligible "compound iteration domains are not decomposed (v1)"
+        | ArrayElem at when isCompoundArrayType at || isSparseArrayType at ->
+            MpiIneligible "compound/sparse iteration domains are not decomposed (v1)"
         | ArrayElem at ->
             match at.ElemType with
             | AnyPrimElem et when (mpiDatatypeOf et).IsSome ->
@@ -7086,6 +7173,166 @@ let classifyMpiShape (codeGen: LoopNestCodeGen) : MpiShape =
         | _ -> MpiIneligible "output shape is not a plain array"
 
 /// Generate the complete code for a combinator application (L <@> f)
+// ============================================================================
+//  Deduced OrbIdx (iterated-wreath) output — allocation + the traversal nest
+//  docs/plan-orbit-index-types.md §9 step 4; plan-orbidx-bijections.md §2
+// ============================================================================
+//
+//  A wreath application is `k` occurrences of ONE object, comm-tied, over a
+//  common compact class `L`; the output class is `L ++ [(k,s)]`
+//  (IR.deduceWreathTie). It bypasses the generic loop machinery ENTIRELY, for
+//  two reasons that are not stylistic:
+//
+//    * the nest it needs is the SEGMENT-PEELED one (bijections §2): multiple
+//      straight-line sub-nests per level body, decomposed by equality-prefix
+//      length on SUB-KEYS. `buildLoopLevelStructure` has no such concept and
+//      refuses a wreath slot outright; emitting `Rank` ordinary levels would
+//      walk a dense (or single-simplex) cell set in the wrong order and fill
+//      the wrong number of cells — with no compiler warning anywhere.
+//    * that nest is ALREADY WRITTEN AND CHECKED. `orb_visit<Levels...>` in
+//      orbit_wreath_utilities.hpp is the verified emitter (its own C++ checker,
+//      `blade test orbwreath`, cross-diffed cell-for-cell against
+//      `OrbRank.visitStream`), and the levels are compile-time constants here.
+//      So we INSTANTIATE it rather than re-derive peeled loops in F# strings —
+//      a second emitter is a second thing to drift.
+//
+//  STORAGE ORDER is the plan's one hard invariant (bijections §3): the pool is
+//  a flat `T*` of `orb_cell_count<Levels...>(n)` cells in `orb_visit` order ==
+//  `OrbRank.visitStream` order == ascending lex. A read->write roundtrip cannot
+//  catch an order mismatch (both sides shift together — the antisym storage
+//  post-mortem), so the corpus pins the printed cell SEQUENCE against values
+//  computed by hand, and the interpreter walks `visitStream` for the same
+//  binding, which the differential harness diffs.
+
+/// The `orb_level<...>` template-argument list for a class, in the header's
+/// public (doc) order: OUTERMOST LAST, exactly as `IROrbitClass` carries it.
+/// One spelling, used for the output class, the input class, and the printer --
+/// a level list rendered in the wrong order is a different class that still
+/// compiles.
+let private orbLevelArgs (levels: (int * bool) list) : string =
+    levels
+    |> List.map (fun (r, isPlus) ->
+        sprintf "orbit_wreath_utilities::orb_level<%d,%s>" r (if isPlus then "true" else "false"))
+    |> String.concat ", "
+
+/// Render the C++ subscript that reads ONE tied argument at its canonical
+/// sub-key, given the flat coordinate buffer the visitor hands us.
+///
+///   depth-1 '+' (SymIdx<r,n>)      arr[c0][c1-c0][c2-c1]...
+///   depth-1 '-' (AntisymIdx<r,n>)  arr[c0][c1-c0-1][c2-c1-1]...
+///   depth >= 2 (a wreath input)    arr[orb_rank<Inner...>(coords + off, n)]
+///
+/// The depth-1 forms are the LEFT-JUSTIFIED storage coordinates the existing
+/// triangular writer produces (`canon_left_justify`'s convention: successive
+/// gaps, strict levels one further in), so this reads exactly the cells the
+/// input's own nest wrote — no fold, because `orb_visit` hands out sub-keys
+/// that are already canonical for the inner class.
+///
+/// The wreath form goes through `orb_rank`, which is the SAME arithmetic that
+/// produced the input pool's own order, so the two cannot disagree. It is the
+/// cold-path rank on a warm path, deliberately: a canonical read of a wreath
+/// pool has no cheaper spelling, and depth >= 3 is the only shape that needs it.
+/// This is NOT the mirrored read that stays refused — the tuple is canonical by
+/// construction and no character is ever applied.
+let private wreathArgRead (arrName: string) (innerLevels: (int * bool) list)
+                          (extent: int64) (coordBuf: string) (baseOff: int) : string =
+    let c i = sprintf "%s[%d]" coordBuf (baseOff + i)
+    match innerLevels with
+    | [ (r, isPlus) ] ->
+        let strict = if isPlus then 0 else 1
+        let subs =
+            [ 0 .. r - 1 ] |> List.map (fun a ->
+                if a = 0 then sprintf "[(size_t)%s]" (c 0)
+                else
+                    let off = if strict > 0 then sprintf " - %d" strict else ""
+                    sprintf "[(size_t)(%s - %s%s)]" (c a) (c (a - 1)) off)
+        arrName + String.concat "" subs
+    | _ ->
+        sprintf "%s[orbit_wreath_utilities::orb_rank<%s>(%s + %d, %d)]"
+                arrName (orbLevelArgs innerLevels) coordBuf baseOff extent
+
+/// Emit the whole wreath application: pool allocation + the instantiated
+/// `orb_visit` nest. Returns None when the shape is a wreath tie but something
+/// the emitter cannot render (unresolvable kernel, non-literal extent), so the
+/// caller can fall through to a loud `#error` rather than emit half a nest.
+let private genWreathApply
+        (ctx: CodeGenContext) (ind: string) (name: string)
+        (info: ApplyInfo) (arrayNames: string list) (tie: WreathTie) : string list option =
+    match resolveKernel info.Kernel with
+    | None -> None
+    | Some rk ->
+    let elemCpp =
+        match info.OutputType with
+        | ArrayElem at -> elemTypeToCpp at.ElemType
+        | _ -> "double"
+    // THE ALLOCATION DECISION comes from `classifyOutputStorage`, the same
+    // function every other output shape asks — not from a second fold over the
+    // tie. It reads the level list and extent off the OUTPUT RECORD (which
+    // `mkWreathIndexRecord` built from this tie) and sizes the pool with
+    // `OrbRank.cellCountChecked`, the identical checked fold
+    // `bufferGroupCardinality` uses. So there is one cell count on the F# side,
+    // and the emitted C++ then pins the C++ fold against it at runtime.
+    // AllocWreath also carries the levels the RECORD holds, which is what gets
+    // instantiated below: an emitter that used `tie.OutputLevels` here and the
+    // record elsewhere could drift.
+    match classifyOutputStorage info.OutputType with
+    | AllocWreath (outLevels, n, cells) ->
+    let outArgs = orbLevelArgs outLevels
+    let innerAxes = tie.InnerLevels |> List.fold (fun a (r, _) -> a * r) 1
+    let coordBuf = "__orbc"
+    let cellsName = sprintf "%s__orbcells" name
+    // One local per tied argument, bound to that argument's canonical sub-key
+    // read, then the kernel body rendered against those locals. This mirrors
+    // genLoopNestStreamed's element-binding + nameMap discipline exactly: the
+    // body never sees a coordinate, only a value.
+    let kparams = rk.Callable.Params
+    let binds =
+        tie.Positions |> List.mapi (fun j p ->
+            let arrName =
+                if p < arrayNames.Length then arrayNames.[p] else sprintf "arr%d" p
+            let local = sprintf "__orb_%s_%d" (sanitizeCppName name) j
+            let readExpr = wreathArgRead arrName tie.InnerLevels n coordBuf (j * innerAxes)
+            let vid = if p < kparams.Length then Some kparams.[p].VarId else None
+            (local, readExpr, vid))
+    // Captures are a FALLBACK, never an override — same precedence rule as the
+    // generic nest's nameMap (the emitted spelling in ctx.VarNames wins over the
+    // capture's SOURCE-level name).
+    let nameMap =
+        let withParams =
+            binds |> List.fold (fun acc (local, _, vid) ->
+                match vid with Some v -> Map.add v local acc | None -> acc) ctx.VarNames
+        rk.Callable.Captures
+        |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) withParams
+    let bodyStr = exprToCppCore emptySubst nameMap rk.Callable.Body
+    // The pool is a flat `new T[cells]` in orb_visit order; `delete[]` is the
+    // matching free (RawAlloc), not the skeleton deallocator — there is no
+    // skeleton.
+    registerAlloc (RawAlloc (name, None))
+    Some
+        ([ sprintf "%s// OrbIdx%s over extent %d: %d cells, ascending-lex canonical order"
+                   ind (ppOrbitLevels outLevels) n cells
+           sprintf "%sconst int64_t %s = orbit_wreath_utilities::orb_cell_count<%s>(%d);"
+                   ind cellsName outArgs n
+           // The C++ fold and the F# fold (OrbRank.cellCountChecked, which sized
+           // this very allocation through AllocWreath) are INDEPENDENT
+           // implementations of §4. Pin them against each other at runtime: a
+           // disagreement is a wrong-sized pool, which nothing on the value side
+           // could otherwise notice.
+           sprintf "%sif (%s != %dLL) { blade_rt::panic(\"BL8004\", \"OrbIdx pool size disagreement: orb_cell_count vs the compiler's iterated-binomial fold\", nullptr, 0); }"
+                   ind cellsName cells
+           sprintf "%s%s* %s = new %s[(size_t)%s];" ind elemCpp name elemCpp cellsName
+           sprintf "%sorbit_wreath_utilities::orb_visit<%s>(%d, [&](const int* %s, int64_t __orbk) {"
+                   ind outArgs n coordBuf ]
+         @ (binds |> List.map (fun (local, readExpr, _) ->
+                sprintf "%s    %s %s = %s;" ind elemCpp local readExpr))
+         @ [ sprintf "%s    %s[__orbk] = %s;" ind name bodyStr
+             sprintf "%s});" ind ])
+    // Every other AllocSpec on a tie's output is a contradiction (the tie built
+    // a sole SymWreath record, which classifyOutputStorage answers AllocWreath
+    // for) or an honest refusal (a runtime extent, an overflowing fold). Either
+    // way there is nothing to emit; the caller turns None into a `#error`.
+    | _ -> None
+
 let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (builder: IRBuilder) : string list =
     let ind = indentStr ctx
     
@@ -7377,6 +7624,37 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                  | _ ->
                      preCode <- preCode @ codegenError ctx ind "range<CompoundIdx<m>, ...>: a compound range slot cannot be combined with other index types in one range<> (not yet supported)")
                 (rname, arr)
+            | IRRange (idxTys, _) when idxTys |> List.exists (fun ix -> ix.IxKind = IxKSparse) ->
+                // range<SparseIdx<keys>>: materialize the standalone
+                // sparse_index_t for the driver BEFORE the loop nest — the
+                // sparse twin of the compound arm above. The driver reuses the
+                // `_cidx` name suffix so the shared cardinality/unhash sites
+                // (genLoopBoundExpr, genElementBindingNew, the extents fill)
+                // serve both tabulated kinds unchanged. Iteration visits the
+                // keys in GIVEN order (never sorted).
+                let rname = sprintf "__range%d" i
+                (match idxTys with
+                 | [ix] ->
+                     (match ix.Extent with
+                      | IRSparseKeys (SkStatic _ as src) ->
+                          let idxLines = genSparseIndexFromKeys src None ix.Rank (sprintf "%s_cidx" rname)
+                          preCode <- preCode @ (idxLines |> List.map (fun s -> ind + s))
+                          registerShapedAlloc (sprintf "%s_cidx" rname)
+                              "deallocate_compound_index_only" (sprintf "%s_cidx" rname)
+                      | IRSparseKeys (SkRuntime (IRVar (kid, _)) as src) ->
+                          (match Map.tryFind kid tempCtx.VarNames with
+                           | Some keysName ->
+                               let idxLines = genSparseIndexFromKeys src (Some keysName) ix.Rank (sprintf "%s_cidx" rname)
+                               preCode <- preCode @ (idxLines |> List.map (fun s -> ind + s))
+                               registerShapedAlloc (sprintf "%s_cidx" rname)
+                                   "deallocate_compound_index_only" (sprintf "%s_cidx" rname)
+                           | None ->
+                               preCode <- preCode @ codegenError ctx ind "range<SparseIdx>: keys variable not found in scope at codegen")
+                      | _ ->
+                          preCode <- preCode @ codegenError ctx ind "range<SparseIdx>: the keys must be a `let static` tuple list or a NAMED rank-1 tuple-array variable (inline keys expressions are not supported); let-bind the keys first")
+                 | _ ->
+                     preCode <- preCode @ codegenError ctx ind "range<SparseIdx<keys>, ...>: a sparse range slot cannot be combined with other index types in one range<> (not yet supported)")
+                (rname, arr)
             | IRRange _ -> (sprintf "__range%d" i, arr)
             | IRVirtualReverse _ -> (sprintf "__rev%d" i, arr)
             | IRBlocked _ -> (sprintf "__blk%d" i, arr)
@@ -7433,6 +7711,33 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     if arrayNames.IsEmpty then
         codegenError ctx ind (sprintf "no arrays in method_for for '%s' â€” kernel cannot be applied" name)
     else
+    // A DEDUCED WREATH OUTPUT takes the whole application, ahead of
+    // buildLoopNestCodeGen — which would refuse a wreath INPUT outright (the
+    // depth >= 3 shape) and, for depth 2, would build a two-simplex nest over a
+    // pool that is not two simplices. Same predicate, same arguments as
+    // deduceOutputType's, so codegen and the deduced type cannot disagree about
+    // whether this application is a wreath one.
+    let wreathTie =
+        match resolveKernel info.Kernel with
+        | Some rk ->
+            deduceWreathTie info.ArrayTypes info.Identities
+                            (rk.Callable.CommGroups @ rk.Callable.AntisymGroups)
+                            (if info.HasReynolds then [] else rk.Callable.AntisymGroups)
+                            info.KernelTDims
+                            (info.KernelInputRanks |> List.exists (fun r -> r > 0))
+                            info.HasReynolds
+        | None -> None
+    match wreathTie with
+    | Some tie when mpiRequested ->
+        mpiError "an OrbIdx (iterated-wreath) output is not decomposed (pool slicing by rank ranges is plan-orbidx-bijections Phase 3)"
+    | Some tie ->
+        (match genWreathApply ctx ind name info arrayNames tie with
+         | Some lines -> preCode @ [""] @ lines
+         | None ->
+             preCode @ codegenError ctx ind (sprintf
+                "OrbIdx%s output for '%s': the wreath nest needs a resolvable kernel and a COMPILE-TIME extent (the pool size is the iterated-binomial fold over the level list starting from the extent)"
+                (ppOrbitLevels tie.OutputLevels) name))
+    | None ->
         // Build LoopNestCodeGen (handles both outer product and co-iteration)
         let codeGen = buildLoopNestCodeGen info arrayNames name builder
 
@@ -7698,6 +8003,30 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 // holds: the one compound spot where the wrong routine is
                 // silent corruption.
                 registerShapedAlloc name "deallocate_compound_shared_index" name
+                preCode @ streamPrologue @ [""; compDecl; ""] @ loopCode
+            | ArrayElem at when isSparseArrayType at ->
+                // Sparse output — twin of the compound branch above: fresh
+                // compact buffer (cardinality * stride, written in key order by
+                // the nest), index SHARED from the range driver's standalone
+                // `_cidx` or a sparse VALUE input's `.idx`.
+                let inName = codeGen.InputArrayNames |> List.tryHead |> Option.defaultValue name
+                let leadRank =
+                    at.IndexTypes
+                    |> List.tryFind (fun idx -> idx.IxKind = IxKSparse)
+                    |> Option.map (fun idx -> idx.Rank)
+                    |> Option.defaultValue 1
+                let inputIsSparseRange =
+                    match info.Arrays |> List.tryHead with
+                    | Some (IRRange (its, _)) -> its |> List.exists (fun ix -> ix.IxKind = IxKSparse)
+                    | _ -> false
+                let idxExpr = if inputIsSparseRange then sprintf "%s_cidx" inName else sprintf "%s.idx" inName
+                let strideExpr = if inputIsSparseRange then "1" else sprintf "%s.trailing_stride" inName
+                let compDecl =
+                    sprintf "%snested_array_utilities::Sparse<%s, %d> %s = { new %s[%s->cardinality * %s], %s, %s };"
+                        ind outputElemType leadRank name outputElemType idxExpr strideExpr idxExpr strideExpr
+                // Owns the data buffer ONLY — the idx belongs to the driver or
+                // the input sparse (same silent-corruption hazard as compound).
+                registerShapedAlloc name "deallocate_sparse_shared_index" name
                 preCode @ streamPrologue @ [""; compDecl; ""] @ loopCode
             | _ ->
                 // Deterministic deallocation, site ①: the dense HOST output. This
@@ -8890,7 +9219,9 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         | RandGen _ -> genRandGenBinding ctx binding builder
         | FillModulus _ -> genRandomInitBinding ctx binding builder
     | _ when Map.containsKey binding.Id ctx.CompoundInits ->
-        genCompoundInitBinding ctx binding builder 
+        genCompoundInitBinding ctx binding builder
+    | _ when Map.containsKey binding.Id ctx.SparseInits ->
+        genSparseInitBinding ctx binding
     | IRMask (arrExpr, predExpr) ->
         genMaskBinding ctx binding builder arrExpr predExpr
     | IRIntersect (aExpr, bExpr) ->
@@ -10023,6 +10354,16 @@ and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
             let ctx' = { ctx' with StreamedArrays = Map.add name spec ctx'.StreamedArrays }
             (code |> List.map (fun s -> ind + s), ctx')
     else
+    // A wreath group passes the `Symmetry <> SymNone && Rank >= 2` packed test
+    // (correctly -- it IS packed) and would then take the LINEAR POOL COPY
+    // below, which assumes the on-disk buffer is the canonical pool in
+    // ascending-lex order. The count would come out right (bufferGroupCardinality
+    // folds the levels), and the ORDER would be undefined, which is the failure
+    // a read->write roundtrip cannot see. Refuse before the copy.
+    spec.VarType.IndexTypes |> List.iter (fun ix ->
+        if ix.Symmetry = SymWreath then
+            failwith (orbitStorageUnsupported
+                          (sprintf "provider read of '%s'" spec.VarName) (orbitLevelsOf ix)))
     let isPackedVar =
         spec.VarType.IndexTypes |> List.exists (fun ix -> ix.Symmetry <> SymNone && ix.Rank >= 2)
     if isPackedVar then
@@ -10109,6 +10450,12 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
             match e with
             | IRLit (IRLitInt n) -> sprintf "%d" n
             | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "provider write of '%s' requires literal extents" spec.VarName))))
+    // Same refusal as the provider READ path above, same reason: the pool-order
+    // assumption is the thing a wreath class has not established yet.
+    arrTy.IndexTypes |> List.iter (fun ix ->
+        if ix.Symmetry = SymWreath then
+            failwith (orbitStorageUnsupported
+                          (sprintf "provider write of '%s'" spec.VarName) (orbitLevelsOf ix)))
     let isPacked =
         arrTy.IndexTypes |> List.exists (fun idx -> idx.Symmetry <> SymNone && idx.Rank >= 2)
     if isPacked then
@@ -10355,6 +10702,56 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          (lines, addVarName binding.Id name ctx)
      | _ ->
          ([sprintf "%s#error \"compound() binding '%s' is not a CompoundIdx array type\"" ind name], addVarName binding.Id name ctx))
+
+and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    // Sparse-construction constructor (`let S = sparse(values, keys)`):
+    // materialize the sparse index from the keys source (genSparseIndexFromKeys
+    // — static literal table or runtime tuple-array loop), then copy the values
+    // buffer straight into a compact pool. NO scatter: the values arrive
+    // already in key order — that is the builder's contract, and the reason
+    // this is a flat pool copy where genCompoundInitBinding needs compactScatter.
+    //
+    // Trailing dims (values rank > 1, mirroring the compound builder's
+    // leading-prefix rule): values.extents[0] is the key axis and the REMAINING
+    // extents fold into trailing_stride, so each key owns a contiguous block of
+    // `trail` elements. The copy walks the flattened pool (pool_base), which is
+    // exactly the key-major layout the Sparse wrapper indexes.
+    // A |values| != |keys| mismatch panics at runtime (BL8001).
+    let valuesExpr = ctx.SparseInits.[binding.Id]
+    let valuesName = exprToCpp ctx.VarNames valuesExpr
+    (match binding.Type with
+     | ArrayElem arrTy when isSparseArrayType arrTy ->
+         let sparseIx = arrTy.IndexTypes |> List.find (fun ix -> ix.IxKind = IxKSparse)
+         let leadRank = sparseIx.Rank
+         let elemCpp = elemTypeToCpp arrTy.ElemType
+         // Trailing dim count = slots after the sparse head (the key axis
+         // consumed values dim 0, so these are values dims 1..).
+         let trailingDimCount = arrTy.IndexTypes.Length - 1
+         let idxName = sprintf "%s_idx" name
+         let idxLines =
+             match sparseIx.Extent with
+             | IRSparseKeys (SkStatic _ as src) -> genSparseIndexFromKeys src None leadRank idxName
+             | IRSparseKeys (SkRuntime (IRVar (kid, _)) as src) ->
+                 genSparseIndexFromKeys src (Map.tryFind kid ctx.VarNames) leadRank idxName
+             | _ -> [ sprintf "#error \"sparse() binding '%s': keys source is not a SparseIdx extent\"" name ]
+         let trailTerms =
+             [ for d in 1 .. trailingDimCount -> sprintf "%s.extents[%d]" valuesName d ]
+         let trailExpr = match trailTerms with | [] -> "1" | xs -> String.concat " * " xs
+         let lines =
+             (idxLines |> List.map (fun l -> ind + l))
+             @ [ sprintf "%sif (%s.extents[0] != %s->cardinality) { blade_rt::panic(\"BL8001\", \"sparse(values, keys): values length does not match key count\", nullptr, 0); }" ind valuesName idxName
+                 sprintf "%ssize_t %s_trail = %s;" ind name trailExpr
+                 sprintf "%s%s* %s_valpool = nested_array_utilities::pool_base(%s.data);" ind elemCpp name valuesName
+                 sprintf "%s%s* %s_compact = new %s[%s->cardinality * %s_trail];" ind elemCpp name elemCpp idxName name
+                 sprintf "%sfor (size_t __r = 0; __r < %s->cardinality * %s_trail; __r++) %s_compact[__r] = %s_valpool[__r];" ind idxName name name name
+                 sprintf "%snested_array_utilities::Sparse<%s, %d> %s { %s_compact, %s, %s_trail };" ind elemCpp leadRank name name idxName name ]
+         // Owns BOTH the compact buffer and the freshly built index.
+         registerShapedAlloc name "deallocate_sparse" name
+         (lines, addVarName binding.Id name ctx)
+     | _ ->
+         ([sprintf "%s#error \"sparse() binding '%s' is not a SparseIdx array type\"" ind name], addVarName binding.Id name ctx))
 
 
 /// Rearrangement combinators (group_by, sort, mask, transpose, decompact,
@@ -10741,7 +11138,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     // reduce's compound handling.
     let isCompoundOperand =
         match inferExprType arrExpr with
-        | ArrayElem at -> isCompoundArrayType at
+        | ArrayElem at -> isCompoundArrayType at || isSparseArrayType at
         | _ -> false
     let boundExpr =
         if isRaggedRowOperand then sprintf "%s.len" arrName
@@ -11958,7 +12355,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     resetAllocScopeStack ()
 
     let ctx0 = emptyContext ()
-    let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; MutableArrayLets = modul.MutableArrayLets }
+    let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
 
     // First pass: register ALL names (both bindings and functions) in context
     let ctx0 =
@@ -12054,7 +12451,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
     resetAllocScopeStack ()
     let ctx0 = emptyContext ()
-    let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; MutableArrayLets = modul.MutableArrayLets }
+    let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
     let ctx0 =
         modul.Bindings |> List.fold (fun c b -> addVarName b.Id b.Name c) ctx0
     let ctx0 =
@@ -12253,6 +12650,12 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
     // Expand index types into per-dimension info: (loopVar, dimIdx, offsetVars)
     // offsetVars = list of loop vars to subtract from extent (empty for free dims)
     let loopVarNames = [| "i"; "j"; "k"; "l"; "m"; "n_"; "p"; "q" |]
+    // Same refusal as the interpreter's emitSymAware, for the same reason: the
+    // two printers must byte-match, and neither has a wreath walk. A triangular
+    // walk here would emit C++ that prints a cell set nothing else agrees with.
+    indexTypes |> List.iter (fun idx ->
+        if idx.Symmetry = SymWreath then
+            failwith (orbitStorageUnsupported "compact print (genPrintArraySymAware)" (orbitLevelsOf idx)))
     let dims =
         indexTypes |> List.fold (fun (acc, dimIdx) idx ->
             let idxRank = max 1 idx.Rank
@@ -12314,6 +12717,34 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
                 sprintf "    %s}" (String.replicate d "    ")]
         let finish = [sprintf "    cout << \"]\" << endl;"]
         opens @ loops @ inner @ closes @ finish
+
+/// Print an OrbIdx (iterated-wreath) pool: its cells in STORAGE order, which is
+/// `orb_visit` order == `OrbRank.visitStream` order == ascending-lex canonical.
+/// That is the direct analogue of how a `SymIdx` array prints its triangle —
+/// the stored cells, in the order the writer wrote them, with the same
+/// `name = [c0, c1, ...]` framing every other array printer uses.
+///
+/// The bound is re-derived from the type here (`orb_cell_count` over the
+/// record's own level list and extent) rather than read from the emit site's
+/// `<name>__orbcells`: the printer runs in a different function and must work
+/// for any wreath binding, and re-deriving from the SAME header entry point is
+/// what keeps the count it walks equal to the count that was allocated.
+///
+/// Nothing here folds or transforms: a stored cell is canonical by
+/// construction, so the character is +1 and the mirrored read that would need
+/// one is exactly what stays refused.
+let genPrintArrayWreath (name: string) (levels: (int * bool) list) (extent: int64) : string list =
+    let levelArgs = orbLevelArgs levels
+    let firstVar = sprintf "%s__first" name
+    [ sprintf "    cout << \"%s = [\";" name
+      sprintf "    bool %s = true;" firstVar
+      sprintf "    for (int64_t __ok = 0; __ok < orbit_wreath_utilities::orb_cell_count<%s>(%d); __ok++) {"
+              levelArgs extent
+      sprintf "        if (!%s) cout << \", \";" firstVar
+      sprintf "        %s = false;" firstVar
+      sprintf "        cout << %s[__ok];" name
+      "    }"
+      "    cout << \"]\" << endl;" ]
 
 /// Compute which binding IDs are deferred (no C++ code generated).
 /// A binding is deferred if it's a computation that hasn't been materialized via |> compute.
@@ -12406,6 +12837,24 @@ let genPrintStatements (modul: IRModule) : string list =
             | IRTIdxTagged _ ->
                 // Tagged int prints same as int
                 genPrintScalar b.Name
+            | IRTNat _ ->
+                // Type-level natural in value position (e.g. a Nat tuple
+                // component from destructuring) renders as size_t — streams
+                // like any integer scalar.
+                genPrintScalar b.Name
+            // An OrbIdx (iterated-wreath) binding is a FLAT pool, not an
+            // Array<T,N>: print its cells in storage order. Ahead of every
+            // other array arm because those all reach for `.extents` or a
+            // triangular walk, neither of which a wreath pool has.
+            | ArrayElem arrType when arrType.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
+                (match arrType.IndexTypes with
+                 | [ ix ] ->
+                     (match orbitBaseExtent ix with
+                      | IRLit (IRLitInt n) -> genPrintArrayWreath b.Name (orbitLevelsOf ix) n
+                      | _ ->
+                          [sprintf "    // (OrbIdx array '%s' not auto-printed: a wreath pool needs a compile-time extent to size its cell count)" b.Name])
+                 | _ ->
+                     [sprintf "    // (OrbIdx array '%s' not auto-printed: a wreath group combined with other index groups has no pool layout)" b.Name])
             | ArrayElem arrType when isCompoundArrayType arrType ->
                 // Compound (load_compound) values wrap a compact buffer plus a
                 // compound_index_t pointer; there is no operator<< for
@@ -12413,6 +12862,10 @@ let genPrintStatements (modul: IRModule) : string list =
                 // generated program still compiles -- scalar value-checks via
                 // element access (e.g. data(lead, t)) remain available.
                 [sprintf "    // (compound array '%s' not auto-printed; Compound<T,RANK> has no operator<<)" b.Name]
+            | ArrayElem arrType when isSparseArrayType arrType ->
+                // Same rationale as the compound arm: Sparse<T,RANK> has no
+                // operator<<; value-checks read cells via full-key access.
+                [sprintf "    // (sparse array '%s' not auto-printed; Sparse<T,RANK> has no operator<<)" b.Name]
             | ArrayElem arrType ->
                 // Phase D: arrays of named (struct) types -- cout's operator<<
                 // isn't defined for user types. For rank-1 arrays of structs,
@@ -12500,10 +12953,10 @@ let genPrintStatements (modul: IRModule) : string list =
                     match b.Value with
                     | IRIndex (a, (IRTuple coords) :: _, _) ->
                         (match inferExprType a with
-                         | ArrayElem at when isCompoundArrayType at ->
+                         | ArrayElem at when isCompoundArrayType at || isSparseArrayType at ->
                              let k =
                                  at.IndexTypes
-                                 |> List.tryFind (fun ix -> ix.IxKind = IxKCompound)
+                                 |> List.tryFind (fun ix -> ix.IxKind = IxKCompound || ix.IxKind = IxKSparse)
                                  |> Option.map (fun ix -> ix.Rank)
                                  |> Option.defaultValue coords.Length
                              (match classifyCompoundIndexTuple k coords with
@@ -12817,6 +13270,7 @@ let genProgramFromIR (program: IRProgram) (testName: string) : string =
             ProviderWrites = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.ProviderWrites) Map.empty
             RandomInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.RandomInits) Map.empty
             CompoundInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.CompoundInits) Map.empty
+            SparseInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.SparseInits) Map.empty
             MutableArrayLets = modules |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
         }
         genMainProgram merged testName
@@ -13000,6 +13454,7 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                 ProviderWrites = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.ProviderWrites) Map.empty
                 RandomInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.RandomInits) Map.empty
                 CompoundInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.CompoundInits) Map.empty
+                SparseInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.SparseInits) Map.empty
                 MutableArrayLets = modules |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
             }
             genSelfContainedProgram merged testName

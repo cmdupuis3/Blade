@@ -203,6 +203,46 @@ type IRExpr =
     // residual construction is deferred (phase 2); until then the partial-index
     // path emits an explicit not-yet-implemented error rather than miscompiling.
     | IRCompoundProject of parent: IRExpr * prefixLen: int
+    // Sparse extent marker (formalism 3.5): where this appears as an
+    // IRIndexTypeG<IRExpr>'s Extent, the index type is a SparseIdx -- an
+    // explicit valid-tuple enumeration with hash lookup, keys in GIVEN order
+    // (never sorted). Twin of IRCompoundMask with the mask replaced by the key
+    // source, which comes in two branches:
+    //
+    //   SkStatic entries  -- the key list folded at compile time (a `let
+    //       static` tuple list). Entries are baked; codegen emits the key
+    //       table as literals, and no runtime array is consulted. Desync with
+    //       a mutated source is structurally impossible.
+    //   SkRuntime keys    -- a reference to a runtime rank-1 tuple-element
+    //       array (provider/kernel output); the sparse_index_t is built from
+    //       it at runtime, mirroring the compound mask's deferred build.
+    //
+    // Rank (the key tuple arity) lives on the IRIndexTypeG record. Cardinality
+    // is the key count -- compile-time known for SkStatic, runtime for
+    // SkRuntime. Like IRCompoundMask, this drives PlaceTabulated placement.
+    | IRSparseKeys of source: SparseKeysSource
+    // Orbit (iterated-wreath) class marker: where this appears as an
+    // IRIndexTypeG<IRExpr>'s Extent, the index type is an `OrbIdx` of DEPTH >= 2
+    // (docs/plan-orbit-index-types.md §2). Twin of IRSparseKeys in shape and in
+    // motive: the class's defining payload -- the flat level list
+    // [(r1,s1), ..., (rd,sd)], outermost-last, `true` = '+' -- has nowhere else
+    // to live without adding a field to IRIndexTypeG that every other index
+    // kind would carry as None.
+    //
+    // `extent` is the class's BASE extent n (the fold's M0), kept as an ordinary
+    // extent expression so literal folding, varref collection and substitution
+    // reach it exactly as they reach a plain Idx extent.
+    //
+    // Rank (= the PRODUCT of the level ranks = the number of raw axes) lives on
+    // the IRIndexTypeG record, as it does for every other multi-axis class.
+    // Cardinality is closed-form -- §4's iterated binomial, computed by
+    // `Blade.OrbRank.cellCountChecked` -- so this drives PlaceCombinatorial, NOT
+    // PlaceTabulated; see `bufferGroupCardinality`.
+    //
+    // DEPTH <= 1 NEVER PRODUCES THIS. `OrbIdx<[(r,+)],n>` lowers to the exact
+    // SymIdx record and `OrbIdx<[],n>` to the exact Idx record, so this marker
+    // appears only for classes the legacy machinery genuinely cannot express.
+    | IROrbitClass of levels: (int * bool) list * extent: IRExpr
     // Opaque-extent marker: appears as an IRIndexTypeG<IRExpr>'s Extent when the
     // extent is determined by surrounding context rather than declared up
     // front. The canonical use is a kernel-parameter type `RaggedIdx<_>`
@@ -405,6 +445,14 @@ and AlignSpec = {
     Boundary: BoundaryMode
 }
 
+/// The key source of an IRSparseKeys extent (see that case's doc). SkStatic
+/// carries the compile-time-folded entry list (outer = keys in given order,
+/// inner = one tuple's coordinates); SkRuntime references the runtime keys
+/// array expression.
+and SparseKeysSource =
+    | SkStatic of entries: int64 list list
+    | SkRuntime of keys: IRExpr
+
 
 // Concrete instantiations of the Types.fs generic family at IRExpr —
 // the prototype's extent representation. Everything downstream uses
@@ -417,6 +465,120 @@ type IdxRef = IdxRefG<IRExpr>
 type IRArrowSlot = IRArrowSlotG<IRExpr>
 type LoopType = LoopTypeG<IRExpr>
 
+// ----------------------------------------------------------------------------
+// OrbIdx (iterated-wreath) accessors. The level list rides the Extent slot as
+// an IROrbitClass marker (see that case), so every consumer reads it through
+// these three functions rather than pattern-matching the extent inline -- one
+// place to change if the carrier ever moves to a record field.
+// ----------------------------------------------------------------------------
+
+/// The (rank, isPlus) level list of a wreath class, OUTERMOST-LAST. `[]` for
+/// every non-wreath record, so `not (List.isEmpty (orbitLevelsOf ix))` is
+/// exactly "this is a depth >= 2 OrbIdx".
+let orbitLevelsOf (ix: IRIndexType) : (int * bool) list =
+    match ix.Extent with
+    | IROrbitClass (levels, _) -> levels
+    | _ -> []
+
+/// The BASE extent (the §4 fold's M0) of a wreath class; the record's own
+/// Extent for anything else, so extent-reading code that does not care about
+/// the class can go through here uniformly.
+let orbitBaseExtent (ix: IRIndexType) : IRExpr =
+    match ix.Extent with
+    | IROrbitClass (_, n) -> n
+    | other -> other
+
+/// Render a level list in the surface spelling: `[(2,-), (2,+)]`.
+let ppOrbitLevels (levels: (int * bool) list) : string =
+    "[" + (levels |> List.map (fun (r, plus) -> sprintf "(%d,%s)" r (if plus then "+" else "-"))
+                  |> String.concat ", ") + "]"
+
+/// The ONE text for v1's hard refusal at the storage boundary. Every refusal
+/// site -- the typecheck gates, the allocator, the loop builder, the compact
+/// read/print paths, the providers -- calls this instead of spelling its own
+/// string, so the user sees the same sentence whichever seam their program
+/// reached first, and adding a seam is one call rather than a ninth paraphrase.
+///
+/// `where_` names the seam ("let binding 'R'", "reduce()", ...). It reads as a
+/// prefix, so pass a noun phrase, not a sentence.
+let orbitStorageUnsupported (where_: string) (levels: (int * bool) list) : string =
+    sprintf "%s: OrbIdx<%s, n> is a declarable index class of depth %d, and a DEDUCED one can now be \
+allocated, written and printed -- a comm tie over a repeated compact argument produces the class, \
+`orb_cell_count` sizes its pool and the segment-peeled `orb_visit` nest fills it in canonical order. \
+What is still missing is every path that reads a wreath pool at an ARBITRARY tuple: the mirrored \
+(non-canonical) compact read, decompaction, reduce/prodsum, transpose and provider I/O. So the \
+compiler refuses here rather than compute an address it cannot compute. \
+The depth-1 spellings work through the existing compact machinery instead: OrbIdx<[(r,+)], n> is \
+exactly SymIdx<r, n>, OrbIdx<[(r,-)], n> is exactly AntisymIdx<r, n>, and OrbIdx<[], n> is exactly \
+Idx<n>."
+            where_ (ppOrbitLevels levels) (List.length levels)
+
+/// Bridge to `Blade.OrbRank`'s own level spelling. The two representations are
+/// deliberately different types: OrbRank is a dependency-free module (it opens
+/// no Blade namespace so proofs/ scripts can `#load` it standalone), so it owns
+/// `OrbSign`, and the IR side keeps a bare bool it can put in a comparable
+/// tuple. This is the ONE conversion point.
+let orbRankLevels (levels: (int * bool) list) : Blade.OrbRank.Level list =
+    levels |> List.map (fun (r, plus) ->
+        (r, (if plus then Blade.OrbRank.OPlus else Blade.OrbRank.OMinus)))
+
+/// §7.2's load-bearing normalization, in the IR's `(rank, isPlus)` spelling: a
+/// level with r = 1 is the trivial group S_1 and a no-op at EITHER sign, so it
+/// is dropped. `OrbRank.normalizeLevels` is the reference; this is the same
+/// filter over the other level representation (the ONE conversion point above
+/// exists precisely so the two spellings do not each grow their own rules).
+let normalizeOrbitLevels (levels: (int * bool) list) : (int * bool) list =
+    levels |> List.filter (fun (r, _) -> r <> 1)
+
+/// Which of the three record shapes a normalized level list takes. THE ONE
+/// normalization rule in the compiler: both producers of an OrbIdx class route
+/// through here --
+///   * the SURFACE type (`TypeCheck.orbitIndexRecord`, the `OrbIdx<...>`
+///     annotation), and
+///   * DEDUCTION (`deduceWreathTie`, a comm tie over a repeated compact input).
+/// A second copy of "when does depth collapse" is exactly the drift that would
+/// let an annotation and a deduction disagree about the same class.
+type OrbitNormalForm =
+    /// `[]` -- the trivial class. The plain `Idx<n>` record.
+    | OrbNfTrivial
+    /// `[(r,s)]` -- exactly the `SymIdx<r,n>` / `AntisymIdx<r,n>` record.
+    | OrbNfDepth1 of rank: int * isPlus: bool
+    /// depth >= 2 -- the `SymWreath` record (see `mkWreathIndexRecord`).
+    | OrbNfWreath of levels: (int * bool) list
+
+let orbitNormalForm (levels: (int * bool) list) : OrbitNormalForm =
+    match normalizeOrbitLevels levels with
+    | [] -> OrbNfTrivial
+    | [ (r, s) ] -> OrbNfDepth1 (r, s)
+    | ls -> OrbNfWreath ls
+
+/// Build the depth >= 2 `SymWreath` index record: Rank = the RAW AXIS COUNT
+/// (the product of the level ranks), the level list carried in the Extent slot
+/// as an `IROrbitClass` marker, `IxKOrbit` + the "__orbidx" sentinel Tag (the IR
+/// validator enforces their agreement).
+///
+/// Shared by the surface-type lowering and by deduction so the two cannot build
+/// differently-shaped records for the same class. `levels` must already be
+/// normalized (the caller matched `orbitNormalForm`); passing a rank-1 level
+/// through here would produce a record whose Rank counts an axis the class does
+/// not act on.
+///
+/// The axis fold is bounded before it lands in the record's `int` Rank field:
+/// Rank is a loop count and a subscript arity all over the compiler, and a
+/// wrapped-negative Rank would be a nonsense type rather than an error. The
+/// fold SATURATES at the cap rather than running to completion, so the check
+/// cannot itself overflow.
+let mkWreathIndexRecord (id: IRId) (levels: (int * bool) list) (baseExtent: IRExpr) : IRIndexType =
+    let axes64 = levels |> List.fold (fun a (r, _) -> if a > 65536L then a else a * int64 r) 1L
+    if axes64 > 65536L then
+        failwithf "OrbIdx%s: the class acts on more than 65536 raw axes (the product of its level ranks), which is \
+past what this compiler will build an index record for. An iterated-wreath class's cell count leaves int64 well before \
+its rank does (docs/plan-orbit-index-types.md §7.2), so a class this wide is not storable at any extent."
+                  (ppOrbitLevels levels)
+    { Id = id; Rank = int axes64; Extent = IROrbitClass (levels, baseExtent)
+      Symmetry = SymWreath; Tag = Some "__orbidx"; IxKind = IxKOrbit
+      Kind = SDimension; Dependencies = [] }
+
 /// Level-1 placement classification of a full index type. Today this derives
 /// purely from the symmetry class (placementClassOf); it is the seam where
 /// tabulated detection (CompoundIdx / SparseIdx, from the index type's typedef)
@@ -428,6 +590,7 @@ let placementOf (ix: IRIndexType) : PlacementClass =
     // dense. Everything else derives from symmetry via placementClassOf.
     match ix.Extent with
     | IRCompoundMask _ -> PlaceTabulated
+    | IRSparseKeys _ -> PlaceTabulated
     // A residual (partially-indexed) compound: the residual RANK decides
     // placement. Rank 1 means exactly one free coordinate remains at the pinned
     // prefix -- a single contiguous window [lo,hi) of present cells, iterated as
@@ -1219,12 +1382,29 @@ let indexSpacesMatch (a: IndexSpaceInfo) (b: IndexSpaceInfo) : bool =
 /// CG, ...) add an arm here.
 let (|IxSymmetryLike|IxCompound|IxDep|IxRagged|IxDense|) (ix: IRIndexType) =
     match ix.Symmetry with
-    | SymSymmetric | SymAntisymmetric | SymHermitian -> IxSymmetryLike
+    // A wreath class groups with the symmetry-like family: it IS compact
+    // storage over a permutation group with a +-1 character, so every consumer
+    // that asks "does this slot need canonicalization / compact iteration?"
+    // must answer yes. What it is NOT is a single simplex, so the consumers
+    // reached through this arm each refuse it explicitly (orbitStorageUnsupported)
+    // rather than fall into the depth-1 triangular machinery. Putting it in
+    // IxDense instead would be the silent-miscompile answer: a dense walk over
+    // prod(ri) axes writes n^rank cells into a pool sized for the fold.
+    | SymSymmetric | SymAntisymmetric | SymHermitian | SymWreath -> IxSymmetryLike
     | SymNone ->
         // Kind dispatch reads IxKind, never Tag strings (audit §3.3) — and
         // is exhaustive, so a new IxKind case must decide its family here.
         (match ix.IxKind with
-         | IxKCompound | IxKCompoundDynamic -> IxCompound
+         // IxKSparse groups with the compound family: same tabulated
+         // storage/iteration shape (materialized index, cardinality-bounded
+         // loop). Sites that care about mask-vs-keys split on ix.IxKind.
+         | IxKCompound | IxKCompoundDynamic | IxKSparse -> IxCompound
+         // IxKOrbit with Symmetry = SymNone is a MALFORMED record: the two are
+         // stamped together by the one constructor (lowerIndexType's TyOrbIdx
+         // arm) and validateIR checks Tag/IxKind agreement. Grouping it dense
+         // here would give that malformed record a plausible dense reading, so
+         // it joins the symmetry-like family and gets refused there instead.
+         | IxKOrbit -> IxSymmetryLike
          | IxKDep | IxKDepInner | IxKDepOuter -> IxDep
          | IxKRagged | IxKRaggedInline | IxKRaggedOpaque -> IxRagged
          | IxKPlain | IxKGroupOuter | IxKGroupMember | IxKSeq
@@ -1288,6 +1468,16 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
         let mutable arrLevel = 0
         
         for idx in arr.IndexTypes do
+            // A wreath slot cannot become loop levels here. The nest it needs is
+            // the SEGMENT-PEELED one (plan-orbidx-bijections §2): multiple
+            // straight-line sub-nests per level body, a structural concept this
+            // builder does not have. Emitting `idx.Rank` ordinary levels would
+            // produce a dense (or, worse, a single-simplex) walk over the raw
+            // axes and fill the wrong number of cells in the wrong order --
+            // exactly the silent failure the order invariant exists to prevent.
+            if idx.Symmetry = SymWreath then
+                failwith (orbitStorageUnsupported "loop construction (buildRawLoopLevels)"
+                                                  (orbitLevelsOf idx))
             if idx.Kind = SDimension then
                 // A CompoundIdx is a SINGLE semantic axis -- it iterates its
                 // present cells (cardinality), not a dense grid over the mask's
@@ -1453,6 +1643,17 @@ let rawAxisGroups
             lv.ArrayIndex = prior.ArrayIndex &&
             lv.LocalDimIndex = prior.LocalDimIndex &&
             lv.RankIndex = prior.RankIndex + 1 &&
+            // SymWreath is DELIBERATELY absent, and BYPASSED rather than
+            // accidentally unmatched. Two independent gates keep it out:
+            // `buildRawLoopLevels` refuses a wreath INPUT outright, and a
+            // wreath-producing application never reaches this function at all
+            // (deduceWreathTie fires first, in deduceOutputType and at the
+            // typecheck analyses, and its iteration is the segment-peeled
+            // `orb_visit` nest). If one ever did arrive, the merge below would
+            // flatten its prod(ri) raw axes into ONE triangular group -- and
+            // since this same function drives the STORAGE layout, the result
+            // would be a single simplex where the class is nested: a wrong pool
+            // with no compiler warning anywhere.
             (lv.IndexSpace.Symmetry = SymSymmetric ||
              lv.IndexSpace.Symmetry = SymAntisymmetric ||
              lv.IndexSpace.Symmetry = SymHermitian)
@@ -1561,6 +1762,14 @@ let computeAllSymcomStates
     (commGroups: int list list)
     (sDimsPerArray: int list) : SymcomState list =
     
+    // A WREATH class never reaches here, by three gates rather than by luck:
+    // `deduceWreathTie` fires first at the typecheck seam (which skips this call
+    // entirely for a tied application), an UNTIED wreath input is refused at the
+    // same seam, and `buildLoopLevelStructure` -> `buildRawLoopLevels` refuses
+    // one outright as a last backstop. The two `Symmetry = SymSymmetric ||
+    // SymAntisymmetric` tests below are the same merge rule as
+    // rawAxisGroups.mergesWith.withinType and would go equally wrong on one:
+    // prod(ri) raw axes read as a single shrinking simplex, with no warning.
     let levels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
     if levels.IsEmpty then []
     else
@@ -1848,6 +2057,13 @@ type IRModule = {
     /// consumed at codegen to emit P0 index materialization + a dense->compact
     /// scatter. Value is (loweredDense, loweredMask). Empty for modules with none.
     CompoundInits: Map<IRId, IRExpr * IRExpr>
+    /// Deferred sparse-construction constructors (sparse(values, keys)), keyed
+    /// by the receiving binding's IRId. Populated during lowering and consumed
+    /// at codegen to emit the sparse index materialization + a straight pool
+    /// copy (values arrive in key order — no scatter). Value is the lowered
+    /// values expr; the keys source rides the binding TYPE's IRSparseKeys
+    /// extent. Empty for modules with none.
+    SparseInits: Map<IRId, IRExpr>
     /// Block-level `let mut` bindings of ARRAY type, by binding IRId. IRLet
     /// erases the surface mutability flag, but codegen needs it: a mut binding
     /// initialized from an existing array (`let mut a = Z`) must DEEP-COPY the
@@ -2003,6 +2219,151 @@ let mkLambdaCallable
                isCommutative commGroups parallelism isOmpParallel
                isCudaKernel cudaBlockSize isMpiParallel
 
+// ============================================================================
+// The deduced WREATH TIE (docs/plan-orbit-index-types.md §7 / §9 step 4)
+// ============================================================================
+//
+// §1's motivating gap: `func(A, A)` with `A : SymIdx<2,n>` under `where comm`
+// licenses `S_2 wr S_2` on the output's FOUR raw axes, and before this the type
+// system had no way to say so. It juxtaposed `SymIdx<2,n>` x2 -- sound, but the
+// tie is dropped and the pool is 36 cells where the orbit count is 21. Widening
+// the representative to `SymIdx<4,n>` is the other wrong answer: it claims full
+// S_4 on axes the wreath does not tie.
+//
+// The rule is APPEND A LEVEL. Input class `L`, `k` repeated occurrences tied by
+// a declared clause -> `L ++ [(k, s)]`, `s = '+'` for comm and `'-'` for
+// anticomm. A depth-1 `SymIdx<r,n>` input contributes `[(r,+)]`,
+// `AntisymIdx<r,n>` contributes `[(r,-)]`, and an already-wreath input
+// contributes its own list -- which is what makes depth 3 (`let P = f(A,A) in
+// g(P,P)`, §7.1) fall out of the same rule rather than needing a second one.
+
+/// A deduced wreath tie: `Positions` argument slots holding the SAME object,
+/// tied by one declared comm/anticomm clause, over a common inner class.
+type WreathTie = {
+    /// The tied argument positions, ascending. Length >= 2.
+    Positions: int list
+    /// The class of EACH tied argument (its own level list, outermost-last).
+    InnerLevels: (int * bool) list
+    /// The OUTPUT class: `InnerLevels ++ [(k, OuterIsPlus)]`, normalized.
+    OutputLevels: (int * bool) list
+    /// §4's fold origin M0 -- the extent every tied argument shares.
+    BaseExtent: IRExpr
+    /// The appended level's character: '+' under comm, '-' under anticomm.
+    OuterIsPlus: bool
+}
+
+/// The level list an ARGUMENT contributes to a tie built over it, with its base
+/// extent. `None` for every class that cannot be a wreath sub-block:
+///   * dense (`SymNone`) -- these already tie through `rawAxisGroups`'s
+///     cross-argument rule into a plain `SymIdx<k,n>`, which is the CORRECT
+///     answer (one level, not two); routing them here would double-count.
+///   * Hermitian -- its character is complex conjugation, outside `Hom(G,+-1)`,
+///     so §6's parameterization does not reach it (plan §3's `HermitianIdx`
+///     note) and no sign list describes the result.
+///   * compound / sparse / ragged / dep / irreps and anything multi-record --
+///     not a permutation class over one extent at all.
+///
+/// EXACTLY ONE index record, S-dimensional, is required -- not "exactly one
+/// S-dim record beside whatever else". A wreath pool is a single flat cell
+/// array with nothing to juxtapose a second dimension group against, so an
+/// argument carrying a T-dimension fiber beside its compact block would have
+/// that fiber SILENTLY DROPPED from the deduced output type. Dependencies must
+/// be empty for the same reason: §4's fold starts from one extent, and a
+/// dependent one is not a number the pool can be sized from.
+let private wreathArgContribution (at: IRArrayType) : ((int * bool) list * IRExpr) option =
+    match at.IndexTypes with
+    | [ ix ] when ix.Kind = SDimension && List.isEmpty ix.Dependencies ->
+        (match ix.Symmetry with
+         | SymSymmetric when ix.Rank >= 2 && ix.IxKind = IxKPlain -> Some ([ (ix.Rank, true) ], ix.Extent)
+         | SymAntisymmetric when ix.Rank >= 2 && ix.IxKind = IxKPlain -> Some ([ (ix.Rank, false) ], ix.Extent)
+         | SymWreath ->
+             let ls = orbitLevelsOf ix
+             if List.isEmpty ls then None else Some (ls, orbitBaseExtent ix)
+         | _ -> None)
+    | _ -> None
+
+/// THE deduction rule, in one place. Fires only for the shape the storage layer
+/// can actually lay out: EVERY argument position in ONE tie.
+///
+/// Conditions, all required:
+///   1. `not isReynolds`. Plan §8.1: under `reynolds` the wrapper owns the
+///      output symmetry and a declared clause degrades to an ITERATION LICENSE
+///      over the signed permutation sum. "A license to iterate is not a claim
+///      about the bare kernel, and building a wreath storage class out of one
+///      reads a permission as a proof." Reynolds behavior is unchanged, byte
+///      for byte, by this whole feature.
+///   2. `k = |arguments| >= 2`, and every position holds the SAME IDENTITY
+///      (`sameIdentity` -- §7.1's caveat: identities are stable only for BARE
+///      VARIABLES, so `let P = f(A,A) in g(P,P)` ties and the inline
+///      `g(f(A,A), f(A,A))` does not; there is no CSE).
+///   3. Every position contributes the SAME inner class over the SAME extent
+///      (`wreathArgContribution`).
+///   4. A DECLARED clause spans all of them -- one `commGroups` group (which is
+///      comm ∪ anticomm at the call site) containing every position. The
+///      appended sign is '-' iff a single `antisymGroups` group also contains
+///      every position. Both are required: BladeWreath.v's dichotomy is that a
+///      repeated argument alone gets the block-wise product (order `(r!)^k`)
+///      and only commutativity buys the extra factor
+///      (`noncomm_r3_loses_the_swap`).
+///
+///   5. The kernel contributes NO T-dimensions and consumes no inner dimension.
+///      A wreath pool is a flat cell array with no second dimension group to
+///      juxtapose, and `classifyOutputStorage` refuses the combination anyway;
+///      excluding those shapes here leaves them exactly as they are today
+///      instead of deducing a type nothing can allocate.
+///
+/// Anything else -- distinct inputs, a partial tie, a dense input, a mixed
+/// clause -- returns None and juxtaposes exactly as before.
+///
+/// EVERY consumer calls THIS (deduction, codegen, the interpreter, and the
+/// typecheck guard that keeps the axis-group analyses off a wreath input), with
+/// the same arguments, so "is this a wreath application" has one answer.
+let deduceWreathTie
+    (arrayTypes: IRArrayType list)
+    (identities: ArrayIdentity list)
+    (commGroups: int list list)
+    (antisymGroups: int list list)
+    (kernelTDims: IRIndexType list)
+    (kernelConsumesInner: bool)
+    (isReynolds: bool) : WreathTie option =
+    let k = List.length arrayTypes
+    if isReynolds || k < 2 || List.length identities <> k
+       || not (List.isEmpty kernelTDims) || kernelConsumesInner then None
+    else
+    let spansAll (gs: int list list) =
+        gs |> List.exists (fun g -> [ 0 .. k - 1 ] |> List.forall (fun i -> List.contains i g))
+    if not (spansAll commGroups) then None
+    else
+    match arrayTypes |> List.map wreathArgContribution with
+    | [] -> None
+    | contributions when contributions |> List.exists Option.isNone -> None
+    | contributions ->
+        let (levels0, ext0) = Option.get (List.head contributions)
+        let uniform =
+            contributions |> List.forall (fun c ->
+                match c with
+                | Some (ls, e) -> ls = levels0 && e = ext0
+                | None -> false)
+        let sameObject =
+            identities |> List.forall (fun idn -> sameIdentity idn (List.head identities))
+        if not (uniform && sameObject) then None
+        else
+            let isPlus = not (spansAll antisymGroups)
+            match orbitNormalForm (levels0 @ [ (k, isPlus) ]) with
+            // Only a genuine depth >= 2 class is a tie this layer owns. The
+            // other two normal forms are unreachable here (k >= 2 and levels0 is
+            // non-empty with every rank >= 2), but they route to the LEGACY
+            // record rather than to a malformed wreath one -- the normalization
+            // is shared with the surface type precisely so a collapse is handled
+            // once and identically.
+            | OrbNfWreath outLevels ->
+                Some { Positions = [ 0 .. k - 1 ]
+                       InnerLevels = levels0
+                       OutputLevels = outLevels
+                       BaseExtent = ext0
+                       OuterIsPlus = isPlus }
+            | OrbNfTrivial | OrbNfDepth1 _ -> None
+
 /// Deduce output array type from loop application
 /// According to formalism section 10.9:
 /// 1. Group arrays by identity (consecutive identical arrays)
@@ -2040,6 +2401,23 @@ let deduceOutputType
     
     if arrayTypes.IsEmpty then IRTUnit
     else
+    // Step 1a: THE WREATH TIE, ahead of the axis-group machinery and total when
+    // it fires (docs/plan-orbit-index-types.md §9 step 4). Two reasons it cannot
+    // be a post-pass over `sGroups`:
+    //   * the answer is ONE index record where the group walk would emit k, so
+    //     there is no group to rewrite in place; and
+    //   * `buildLoopLevelStructure` below REFUSES a wreath input outright
+    //     (buildRawLoopLevels), which is exactly the depth-3 case `let P =
+    //     f(A,A) in g(P,P)` -- so the tie has to be decided before any loop
+    //     level is built, not after.
+    // Everything about the wreath output's iteration is the segment-peeled
+    // `orb_visit` nest, so nothing downstream of here wants axis groups for it.
+    match deduceWreathTie arrayTypes identities commGroups antisymGroups
+                          kernelTDims kernelConsumesInner isReynolds with
+    | Some tie ->
+        mkArrayArrow [ mkWreathIndexRecord (builder.FreshId()) tie.OutputLevels tie.BaseExtent ]
+                     elemType None
+    | None ->
         // Step 1+2: Build output S-dim index types from the SINGLE canonical
         // axis grouping (rawAxisGroups) — the same source the iteration thread
         // uses — so output storage and loop iteration cannot disagree. This
@@ -2173,8 +2551,14 @@ let deduceOutputType
                                     (if isReynoldsAntisym then SymAntisymmetric else SymSymmetric)
                                 elif groupIsDeclaredAntisym memberIdxs then SymAntisymmetric
                                 else
+                                    // A wreath REPRESENTATIVE keeps its own class:
+                                    // widening it to a bare SymSymmetric over the
+                                    // group rank would claim full S_R on axes the
+                                    // wreath does not tie (§7's whole point), and
+                                    // there is no deduction in v1 that produces one
+                                    // anyway -- storage refuses it upstream.
                                     (match rep.Symmetry with
-                                     | SymSymmetric | SymAntisymmetric | SymHermitian -> rep.Symmetry
+                                     | SymSymmetric | SymAntisymmetric | SymHermitian | SymWreath -> rep.Symmetry
                                      | SymNone -> SymSymmetric)
                             result <- result @ [{ rep with Rank = groupRank; Symmetry = groupSymmetry; Id = builder.FreshId() }]
                         else
@@ -2450,11 +2834,40 @@ let binomI64 (n: int64) (k: int64) : int64 =
 ///   rectangular (Rank=1)      => extent
 ///   symmetric/hermitian (r>=2) => C(n + r - 1, r)   (multiset combinations)
 ///   antisymmetric (r>=2)       => C(n, r)            (strict combinations)
+///   wreath (OrbIdx, depth d)   => §4's ITERATED binomial over the level list
 /// Symbolic-symmetric counts (binomial of a runtime extent) are deferred; the
 /// first kernel gates on isRectangularConstBuffer so only the literal and the
 /// symbolic-rectangular paths are reachable today.
 let bufferGroupCardinality (g: BufferDimGroup) : IRExpr =
     match g.Extent with
+    // ---- Wreath (OrbIdx) groups, FIRST and total ----------------------------
+    // The count is the §4 fold M0 = n; Mi = C(M + r - 1, r) at '+', C(M, r) at
+    // '-' -- NOT one combinadic over g.Rank. Both of the fall-throughs this arm
+    // pre-empts are wrong in a way nothing downstream could notice:
+    //   * the `| other -> other` tail would return the MARKER as the count
+    //     expression (an extent carrier used as a scalar);
+    //   * PlaceCombinatorial _ over R = prod(ri) would compute C(n+R-1, R),
+    //     which for [(2,+),(2,+)] at n = 4 is C(19,4) = 3876 against the true
+    //     55 -- an over-allocation here, an UNDER-count for other level lists,
+    //     and in both directions a number no test on the value side can see.
+    // Overflow and a non-literal extent are ERRORS, never a fallback: §7.2's
+    // failure mode to guard is silent int64 wraparound in offset arithmetic,
+    // and `cellCountChecked` is the exactly-checked fold that detects it.
+    | IROrbitClass (levels, baseExtent) ->
+        (match baseExtent with
+         | IRLit (IRLitInt n) ->
+             (match Blade.OrbRank.cellCountChecked (orbRankLevels levels) n with
+              | Ok cells -> IRLit (IRLitInt cells)
+              | Error detail ->
+                  failwithf "OrbIdx<%s, %d>: the class's cell count cannot be computed -- %s. \
+An iterated-wreath class grows one binomial per level, so a deep class over a large extent leaves \
+int64 well before its rank does (docs/plan-orbit-index-types.md §7.2); reduce the extent or the depth."
+                            (ppOrbitLevels levels) n detail)
+         | _ ->
+             failwithf "OrbIdx<%s, ?>: a wreath class needs a COMPILE-TIME extent. Its cell count is \
+the iterated binomial fold over the level list starting from the extent, and each level's output is \
+the next level's ground set, so a runtime extent has no closed-form cell count to allocate against."
+                       (ppOrbitLevels levels))
     | IRLit (IRLitInt n) ->
         let r = int64 g.Rank
         let count =
@@ -2467,6 +2880,17 @@ let bufferGroupCardinality (g: BufferDimGroup) : IRExpr =
             match placementClassOf g.Symmetry with
             | PlaceDense -> n
             | PlaceCombinatorial SymAntisymmetric -> binomI64 n r
+            // A wreath group whose extent is a bare literal instead of an
+            // IROrbitClass marker has lost its level list, so there is nothing
+            // to fold. That is a malformed record, not a case to guess at:
+            // C(n+R-1, R) over the raw axis count is the wrong number, and it
+            // is the wrong number silently. (Kept explicit rather than folded
+            // into `PlaceCombinatorial _` so the wildcard below stays honestly
+            // "sym or hermitian".)
+            | PlaceCombinatorial SymWreath ->
+                failwithf "OrbIdx group of rank %d at extent %d has no level list: a wreath record's \
+Extent must be the IROrbitClass marker carrying [(r,s), ...]. This record was built without it."
+                          g.Rank n
             | PlaceCombinatorial _ -> binomI64 (n + r - 1L) r
             // Unreachable: placementClassOf yields only Dense/Combinatorial, and a
             // compound carries an IRCompoundMask extent (taken by `| other` below,
@@ -2514,6 +2938,13 @@ let buildSymmVec (outputType: IRType) : int list =
         let mutable prevSymm = None
         
         for idx in arr.IndexTypes do
+            // A wreath group has no (SYMM) encoding: the vector says "these
+            // adjacent axes form ONE shrinking simplex", and a wreath's axes
+            // shrink per level, not uniformly. The alternative to refusing is a
+            // symmVec that describes a different array than the one the type
+            // names, so refuse.
+            if idx.Symmetry = SymWreath then
+                failwith (orbitStorageUnsupported "storage allocation (buildSymmVec)" (orbitLevelsOf idx))
             for compIdx in 0 .. idx.Rank - 1 do
                 // Hermitian shares the symmetric storage layout: the upper
                 // triangle is stored compactly (same {1,1,..} mask as SymIdx),
@@ -2559,6 +2990,14 @@ let buildSymmVecWithStrict (outputType: IRType) : (int list * int list) =
             let isCompact =
                 (match idx.Symmetry with
                  | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                 // A wreath group is compact, but NOT as one (SYMM, STRICT)
+                 // pair: strictness varies per LEVEL, and the shrinking-row
+                 // skeleton this vector describes is a single simplex. Emitting
+                 // `strict = 0` here would allocate an inclusive triangle over
+                 // prod(ri) axes -- a plausible-looking pool of the wrong size.
+                 | SymWreath ->
+                     failwith (orbitStorageUnsupported "storage allocation (buildSymmVecWithStrict)"
+                                                       (orbitLevelsOf idx))
                  | SymNone -> false) && idx.Rank > 1
             let isStrict = idx.Symmetry = SymAntisymmetric && idx.Rank > 1
             for compIdx in 0 .. idx.Rank - 1 do
@@ -2633,6 +3072,23 @@ type AllocSpec =
                                        // from antisym fission leaving a residual
                                        // antisymmetric sub-group beside a freed
                                        // dense axis (e.g. Idx -> AntisymIdx<2>).
+    /// Iterated-wreath (OrbIdx, depth >= 2) pool: a FLAT array of exactly
+    /// `cells` scalars in `orb_visit` order (== `OrbRank.visitStream` order ==
+    /// ascending-lex canonical), which is the plan's one hard invariant
+    /// (plan-orbidx-bijections §3). NOT a nested skeleton: a wreath's rows
+    /// shrink per LEVEL, so `allocate<>`'s single-simplex recurrence cannot
+    /// describe it. The C++ emitter still SIZES from
+    /// `orb_cell_count<Levels...>(n)` and pins the result against `cells` at
+    /// run time, so the two implementations of §4's fold cannot drift silently.
+    ///
+    /// `cells` is carried rather than recomputed downstream: it comes from
+    /// `OrbRank.cellCountChecked`, the SAME exactly-overflow-checked fold
+    /// `bufferGroupCardinality` uses, so the allocation and the cardinality
+    /// cannot answer differently (§7.2's failure mode is a silent wraparound,
+    /// and a second independent computation is exactly how you get one).
+    /// `levels` is the class as the RECORD holds it — the emitter instantiates
+    /// the nest from this, not from the tie it was deduced through.
+    | AllocWreath of levels: (int * bool) list * extent: int64 * cells: int64
     | AllocUnsupported of reason: string
 
 /// Placement-axis allocator dispatch: which runtime allocator backs an array
@@ -2649,6 +3105,19 @@ let allocRoutineFor (pc: PlacementClass) : AllocSpec =
     match pc with
     | PlaceDense -> AllocDense
     | PlaceCombinatorial SymAntisymmetric -> AllocAntisymmetric
+    // A wreath class DOES have an allocator (AllocWreath: a flat pool of
+    // orb_cell_count cells in orb_visit order), but it cannot be named from the
+    // placement class alone -- the size is the §4 fold over the LEVEL LIST and
+    // the extent, neither of which a bare `PlacementClass` carries.
+    // `classifyOutputStorage` reads them off the record and is the only producer
+    // of AllocWreath. Refusing here (rather than guessing AllocSymmetric, whose
+    // inclusive triangle over prod(ri) axes sizes a pool the fold never agrees
+    // with) keeps this function honest about what it can see.
+    | PlaceCombinatorial SymWreath ->
+        AllocUnsupported "OrbIdx (iterated-wreath) allocation cannot be decided from the placement class \
+alone: the pool size is the iterated-binomial fold over the class's level list and extent \
+(docs/plan-orbit-index-types.md §4), which a bare PlacementClass does not carry. Route through \
+classifyOutputStorage, which reads the level list off the index record."
     | PlaceCombinatorial _ -> AllocSymmetric
     | PlaceTabulated ->
         // Compound storage is runtime-sized from the mask's popcount and is
@@ -2680,10 +3149,20 @@ type TransposeBehavior =
 ///   CanonSortStrict — antisymmetric: sort within the group, track parity, AND
 ///                  return "not stored" (implicit zero) on any repeated index
 ///                  (the dropped diagonal / strict-simplex storage).
+///   CanonWreathFold — iterated wreath (OrbIdx, depth >= 2): the §5 fold of
+///                  per-LEVEL sorts, innermost first, with the character
+///                  accumulated multiplicatively and the zero set taken at any
+///                  '-' level with two equal sub-blocks. Structurally different
+///                  from CanonSort/CanonSortStrict, which sort ONE flat block
+///                  once; the reference implementation is OrbRank.canonOrb.
+///                  NOT EMITTED in v1 — every consumer refuses on this arm
+///                  rather than degrade to a flat sort, which would fold
+///                  distinct orbits onto the same cell.
 type CanonicalizeBehavior =
     | CanonNone
     | CanonSort
     | CanonSortStrict
+    | CanonWreathFold
 
 /// What transform a lazy read applies to the fetched canonical value given the
 /// fold's swap parity — the TRANSFORM phase (formalism 4.16). Backend-neutral.
@@ -2768,11 +3247,52 @@ type private HermitianBehavior() =
         member _.Canonicalize () = CanonSort        // sort within group, diagonal kept (real)
         member _.ReadTransform () = TfConjugateOnSwap  // conjugate on odd parity
 
+/// Iterated wreath (OrbIdx, depth >= 2): compact storage over
+/// S_r1 wr ... wr S_rd with the character the product of the level signs.
+/// Every method here describes the class HONESTLY; what is missing in v1 is the
+/// emission, and the consumers of Canonicalize refuse on CanonWreathFold.
+type private WreathBehavior() =
+    interface IIndexTypeBehavior with
+        member _.ClassName = "Wreath"
+        member _.Symmetry = SymWreath
+        member _.Validate ix =
+            let levels = orbitLevelsOf ix
+            if List.isEmpty levels then
+                Error "Wreath index carries no level list: a SymWreath record's Extent must be the \
+IROrbitClass marker holding [(r,s), ...]"
+            elif List.length levels < 2 then
+                Error (sprintf "Wreath index of depth %d: depth <= 1 normalizes to Idx / SymIdx / \
+AntisymIdx at lowering and must never reach a SymWreath record" (List.length levels))
+            elif levels |> List.exists (fun (r, _) -> r < 2) then
+                Error (sprintf "Wreath index %s: every level rank must be >= 2 after normalization \
+(rank-1 levels are the trivial group and are dropped at either sign)" (ppOrbitLevels levels))
+            else
+                let axes = levels |> List.fold (fun a (r, _) -> a * r) 1
+                if ix.Rank <> axes then
+                    Error (sprintf "Wreath index %s acts on %d raw axes but the record's Rank is %d"
+                                   (ppOrbitLevels levels) axes ix.Rank)
+                else Ok ()
+        // Swapping two axes of a wreath class is a permutation of the raw axes
+        // that need not lie in the group at all (only within-level and
+        // block-exchange permutations do), so there is no whole-array copy that
+        // realizes it. Decompaction first is the only sound answer -- the same
+        // verdict the rectangular-group-internal swap gets.
+        member _.TransposeWithin () =
+            TRequiresDecompaction "an OrbIdx (iterated-wreath) group: a raw-axis swap is generally not \
+an element of S_r1 wr ... wr S_rd, so it is not realizable as a whole-array transform on the compact pool"
+        member _.Canonicalize () = CanonWreathFold
+        // The character is the PRODUCT of the per-level signs, so it is +-1 and
+        // rides the existing negate-on-odd-parity channel -- provided the fold
+        // that produces the parity is the per-level one (CanonWreathFold), not
+        // a flat sort. An all-'+' class simply never reports odd parity.
+        member _.ReadTransform () = TfNegateOnSwap
+
 // Shared stateless singletons (one per class).
 let private rectangularBehavior = RectangularBehavior() :> IIndexTypeBehavior
 let private symmetricBehavior = SymmetricBehavior() :> IIndexTypeBehavior
 let private antisymmetricBehavior = AntisymmetricBehavior() :> IIndexTypeBehavior
 let private hermitianBehavior = HermitianBehavior() :> IIndexTypeBehavior
+let private wreathBehavior = WreathBehavior() :> IIndexTypeBehavior
 
 /// Total, exhaustive resolver from symmetry class to behavior. Adding a new
 /// SymmetryClass case forces a new arm here (compile error otherwise) — the
@@ -2783,6 +3303,7 @@ let behaviorFor (sym: SymmetryClass) : IIndexTypeBehavior =
     | SymSymmetric -> symmetricBehavior
     | SymAntisymmetric -> antisymmetricBehavior
     | SymHermitian -> hermitianBehavior
+    | SymWreath -> wreathBehavior
 
 /// Derived behavior accessor for an index type. Behavior follows Symmetry;
 /// there is no stored Behavior field to fall out of sync.
@@ -2795,7 +3316,11 @@ let behaviorOf (ix: IRIndexType) : IIndexTypeBehavior = behaviorFor ix.Symmetry
 /// the `_` branch.
 let (|SymmetryLike|_|) (sym: SymmetryClass) : SymmetryClass option =
     match sym with
-    | SymSymmetric | SymAntisymmetric | SymHermitian -> Some sym
+    // SymWreath belongs here for the same reason it belongs in IxSymmetryLike:
+    // it IS a compact symmetry class. Call sites that then assume a single
+    // simplex must check the class, not just membership -- and in v1 they
+    // refuse instead.
+    | SymSymmetric | SymAntisymmetric | SymHermitian | SymWreath -> Some sym
     | SymNone -> None
 
 /// Validate an index type against its class's well-formedness rules. Smart
@@ -2813,6 +3338,48 @@ let validateIndexType (ix: IRIndexType) : Result<unit, string> =
 /// property of the array's index-list combination, not of any one class.
 let classifyOutputStorage (outputType: IRType) : AllocSpec =
     match outputType with
+    // A wreath component short-circuits the whole composition question, and now
+    // it can ANSWER it: a SOLE OrbIdx group of depth >= 2 over a compile-time
+    // extent allocates a flat pool of exactly `cellCountChecked levels n` cells
+    // (docs/plan-orbit-index-types.md §4), in orb_visit order. Answering here
+    // (rather than letting buildSymmVec's failwith fire) keeps both the spec and
+    // the refusal on the channel callers already handle.
+    //
+    // The size comes from `OrbRank.cellCountChecked` -- the SAME fold
+    // `bufferGroupCardinality` uses for this record, so the allocator and the
+    // cardinality cannot disagree, and an overflow is a diagnostic rather than
+    // §7.2's silent wraparound.
+    //
+    // COMBINATIONS ARE REFUSED, deliberately. A wreath pool has no nested
+    // skeleton to hang a second dimension group off, and there is no product
+    // layout in the runtime that mixes one with a dense or triangular block.
+    // Deduction never produces the combination (deduceWreathTie requires the tie
+    // to cover every argument and forbids kernel T-dims), so this arm is a
+    // backstop for a future producer, not a reachable user program.
+    | ArrayElem arr when arr.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
+        let ix = arr.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
+        let levels = orbitLevelsOf ix
+        (match arr.IndexTypes with
+         | [ _ ] ->
+             (match orbitBaseExtent ix with
+              | IRLit (IRLitInt n) ->
+                  (match Blade.OrbRank.cellCountChecked (orbRankLevels levels) n with
+                   | Ok cells -> AllocWreath (levels, n, cells)
+                   | Error detail ->
+                       AllocUnsupported (sprintf "OrbIdx<%s, %d>: the class's cell count cannot be \
+computed -- %s. An iterated-wreath class grows one binomial per level, so a deep class over a large \
+extent leaves int64 well before its rank does (docs/plan-orbit-index-types.md §7.2)."
+                                                 (ppOrbitLevels levels) n detail))
+              | _ ->
+                  AllocUnsupported (sprintf "OrbIdx<%s, ?>: a wreath class needs a COMPILE-TIME extent \
+to allocate against. Its cell count is the iterated binomial fold over the level list starting from \
+the extent, and each level's output is the next level's ground set, so a runtime extent has no \
+closed-form pool size." (ppOrbitLevels levels)))
+         | _ ->
+             AllocUnsupported (sprintf "an OrbIdx<%s, n> group combined with %d other index group(s): a \
+wreath pool is a flat cell array with no nested skeleton to juxtapose against, and no runtime layout \
+mixes one with a dense or triangular block."
+                                       (ppOrbitLevels levels) (List.length arr.IndexTypes - 1)))
     | ArrayElem arr ->
         let antisymIdxs =
             arr.IndexTypes |> List.filter (fun ix -> ix.Symmetry = SymAntisymmetric)
@@ -3389,7 +3956,7 @@ let buildLoopNestCodeGen
                 // per-axis coordinates).
                 let elements =
                     let isCompoundLevel =
-                        match levelInfo.IndexSpace.Extent with IRCompoundMask _ -> true | _ -> false
+                        match levelInfo.IndexSpace.Extent with IRCompoundMask _ | IRSparseKeys _ -> true | _ -> false
                     let isVirtualSource =
                         arrayPos < arrays.Length &&
                         (match arrays.[arrayPos] with IRRange _ -> true | _ -> false)
@@ -3505,6 +4072,14 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRRaggedLookup e -> [e], (function [e'] -> IRRaggedLookup e' | _ -> badChildren "IRRaggedLookup")
     | IRCompoundMask e -> [e], (function [e'] -> IRCompoundMask e' | _ -> badChildren "IRCompoundMask")
     | IRCompoundProject (e, plen) -> [e], (function [e'] -> IRCompoundProject (e', plen) | _ -> badChildren "IRCompoundProject")
+    | IRSparseKeys (SkRuntime e) -> [e], (function [e'] -> IRSparseKeys (SkRuntime e') | _ -> badChildren "IRSparseKeys")
+    | IRSparseKeys (SkStatic _) -> [], (function [] -> expr | _ -> badChildren "IRSparseKeys")   // baked entries: no child exprs
+    // The level list is compile-time data, never an expression; the BASE extent
+    // is an ordinary extent expression and is exposed as the one child, so
+    // substitution / varref collection / folding reach it exactly as they reach
+    // a plain Idx extent.
+    | IROrbitClass (levels, n) ->
+        [n], (function [n'] -> IROrbitClass (levels, n') | _ -> badChildren "IROrbitClass")
     | IRUnique e -> [e], (function [e'] -> IRUnique e' | _ -> badChildren "IRUnique")
     | IRBlocked (idxTy, bs) -> [bs], (function [bs'] -> IRBlocked (idxTy, bs') | _ -> badChildren "IRBlocked")
 
@@ -3979,9 +4554,21 @@ let rec canonTypeKey (ty: IRType) : string =
             function
             | SymNone -> "0" | SymSymmetric -> "s"
             | SymAntisymmetric -> "a" | SymHermitian -> "h"
+            // The LEVEL LIST is part of a wreath class's identity, so this
+            // monomorphization key has to carry it: [(2,+),(2,+)] and
+            // [(2,-),(2,-)] are both Rank 4 and would otherwise share a
+            // specialization. Rendered inline (w2p2p) rather than as a bare "w".
+            | SymWreath -> "w"
         let idxKey (idx: IRIndexType) =
-            let ext = match idx.Extent with IRLit (IRLitInt n) -> string n | _ -> "d"
-            sprintf "r%ds%se%s" idx.Rank (symTag idx.Symmetry) ext
+            let ext, levelTag =
+                match idx.Extent with
+                | IRLit (IRLitInt n) -> string n, ""
+                | IROrbitClass (levels, n) ->
+                    (match n with IRLit (IRLitInt v) -> string v | _ -> "d"),
+                    (levels |> List.map (fun (r, p) -> sprintf "%d%s" r (if p then "p" else "m"))
+                            |> String.concat "")
+                | _ -> "d", ""
+            sprintf "r%ds%s%se%s" idx.Rank (symTag idx.Symmetry) levelTag ext
         sprintf "arr_%s__%s" (canonTypeKey arr.ElemType)
             (arr.IndexTypes |> List.map idxKey |> String.concat "_")
     | IRTInfer id -> sprintf "v%d" id
@@ -5132,7 +5719,8 @@ let (|TypeVia|_|) (expr: IRExpr) : IRExpr option =
 let (|IntValued|_|) (expr: IRExpr) : unit option =
     match expr with
     | IRArity _ | IRNth | IRRank _ | IRExtent _ | IRRaggedLookup _
-    | IRCompoundMask _ | IRCompoundProject _ | IROpaqueExtent | IRRange _ ->
+    | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _
+    | IROpaqueExtent | IRRange _ ->
         Some ()
     | _ -> None
 
@@ -5278,15 +5866,21 @@ let rec typeOf (expr: IRExpr) : IRType =
         // partials) at codegen.
         (match typeOf arr with
          | ArrayElem arrTy ->
-             let headCompound =
+             let headTabulated =
                  match arrTy.IndexTypes with
-                 | h :: _ when h.IxKind = IxKCompound -> Some h
+                 | h :: _ when (h.IxKind = IxKCompound || h.IxKind = IxKSparse) -> Some h
                  | _ -> None
-             (match headCompound, indices with
+             (match headTabulated, indices with
               | Some h, (IRTuple coords) :: trailingIdxs ->
                   (match classifyCompoundIndexTuple h.Rank coords with
                    | CompoundPartial (pinned, freePos) ->
                        let rr = freePos.Length
+                       // Residual keeps the PARENT's kind (a partially indexed
+                       // sparse is a sparse), mirroring tabulatedResidualType.
+                       let residualTag, residualKind =
+                           match h.IxKind with
+                           | IxKSparse -> Some "__sparseidx", IxKSparse
+                           | _ -> Some "__compoundidx", IxKCompound
                        let residual =
                            if rr = 1 then
                                { Id = synthSlotIdCompoundResidual; Rank = 1
@@ -5296,7 +5890,7 @@ let rec typeOf (expr: IRExpr) : IRType =
                            else
                                { Id = synthSlotIdCompoundResidual; Rank = rr
                                  Extent = IRCompoundProject (arr, pinned.Length)
-                                 Symmetry = SymNone; Tag = Some "__compoundidx"; IxKind = IxKCompound
+                                 Symmetry = SymNone; Tag = residualTag; IxKind = residualKind
                                  Kind = SDimension; Dependencies = [] }
                        let trailingSlots = List.tail arrTy.IndexTypes
                        let trailingRemaining =
@@ -5425,7 +6019,16 @@ let rec typeOf (expr: IRExpr) : IRType =
                     if d < acc + ar then Some (slotIdx, ar, d - acc, ix)
                     else walk (slotIdx + 1) (acc + ar) rest
             (match walk 0 0 a.IndexTypes with
-             | Some (slot, r, posInSlot, ix) when r >= 2 && ix.Symmetry <> SymNone ->
+             // SymWreath is excluded rather than refused: this is `typeOf`, a
+             // pure shape reconstruction with no error channel, and TypeCheck's
+             // inferDecompact already refuses a wreath decompact with the real
+             // diagnostic — so no IRDecompact over one can exist. Excluding it
+             // means that if one somehow did, this returns the array's shape
+             // UNCHANGED instead of a `{ ix with Rank = ar }` whose Rank no
+             // longer matches its level list (an internally inconsistent type
+             // that would then flow on looking well formed).
+             | Some (slot, r, posInSlot, ix) when r >= 2 && ix.Symmetry <> SymNone
+                                                  && ix.Symmetry <> SymWreath ->
                 let mkRemainder (ar: int) : IRIndexType list =
                     if ar <= 0 then []
                     elif ar = 1 then [ { ix with Rank = 1; Symmetry = SymNone } ]
@@ -5519,7 +6122,8 @@ let rec typeOf (expr: IRExpr) : IRType =
     | IRGuard _ | IRChoice _ | IRFallback _ | IRComposeMeth _ | IRMatch _ ->
         unreachableTyping "TypeVia" expr
     | IRArity _ | IRNth | IRRank _ | IRExtent _ | IRRaggedLookup _
-    | IRCompoundMask _ | IRCompoundProject _ | IROpaqueExtent | IRRange _ ->
+    | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _
+    | IROpaqueExtent | IRRange _ ->
         unreachableTyping "IntValued" expr
 
 /// Predicate: is this an inline form that needs lifting when in a non-blessed
@@ -5961,6 +6565,10 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRRaggedLookup l -> IRRaggedLookup (liftExpr builder l)
     | IRCompoundMask mk -> IRCompoundMask (liftExpr builder mk)
     | IRCompoundProject (parent, plen) -> IRCompoundProject (liftExpr builder parent, plen)
+    | IRSparseKeys (SkRuntime keys) -> IRSparseKeys (SkRuntime (liftExpr builder keys))
+    | IRSparseKeys (SkStatic _) -> expr
+    // Only the base extent can hold a liftable inline form; the level list is data.
+    | IROrbitClass (levels, n) -> IROrbitClass (levels, liftExpr builder n)
     | IRAssign (t, v) -> IRAssign (t, liftExpr builder v)
     | IRConstraintCheck (c, msg, sp) -> IRConstraintCheck (liftExpr builder c, msg, sp)
     | IRForRange (vid, lo, hi, body) ->
@@ -6241,6 +6849,20 @@ and ppIndexType (idx: IRIndexType) =
         | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
         | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
         | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
+        // Round-trippable surface spelling: the level list IS the type, so a
+        // diagnostic that showed only the rank would name a different class.
+        | SymWreath -> sprintf "OrbIdx<%s, %s>" (ppOrbitLevels (orbitLevelsOf idx)) (ppExtentOf (orbitBaseExtent idx))
+
+/// The extent-slot rendering shared by both index printers: the small set of
+/// extent shapes a diagnostic can name, "?" for everything else. Factored out
+/// because a wreath record's extent lives one level down (inside the
+/// IROrbitClass marker) and both printers have to reach it the same way.
+and ppExtentOf (e: IRExpr) =
+    match e with
+    | IRLit (IRLitInt n) -> sprintf "%d" n
+    | IRVar (id, _) -> sprintf "v%d" id
+    | IRParam (name, _, _) -> name
+    | _ -> "?"
 
 /// Render an irreps-identity record whose Symmetry/Rank make it a symmetric
 /// POWER of that irreps space (`SymIdx<k, IrrepsIdx<s>>` — writable since
@@ -6255,6 +6877,11 @@ and ppIrrepsPower (idx: IRIndexType) (renderedBase: string) =
     | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank renderedBase
     | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank renderedBase
     | SymHermitian -> sprintf "HermitianIdx<%s>" renderedBase
+    // No surface spelling takes a block-spec base under a wreath class (the
+    // OrbIdx grammar's second argument is a SymIdxBase, so `OrbIdx<[...],
+    // IrrepsIdx<s>>` parses, but nothing lowers a block-spec base into a
+    // SymWreath record today). Render both halves rather than drop one.
+    | SymWreath -> sprintf "OrbIdx<%s, %s>" (ppOrbitLevels (orbitLevelsOf idx)) renderedBase
     | SymNone -> renderedBase
 
 // (ppElemType removed in Phase B6: unused after ppIRType was made recursive
@@ -6281,12 +6908,10 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
     let extentStr =
         match Map.tryFind idx.Id names with
         | Some name -> name
-        | None ->
-            match idx.Extent with
-            | IRLit (IRLitInt n) -> sprintf "%d" n
-            | IRVar (id, _) -> sprintf "v%d" id
-            | IRParam (name, _, _) -> name
-            | _ -> "?"
+        // A wreath record's extent is one level down, inside the IROrbitClass
+        // marker; `orbitBaseExtent` is the identity on every other record, so
+        // this one call covers both.
+        | None -> ppExtentOf (orbitBaseExtent idx)
     match idx with
     | IrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | PgIrrepsIdxLike rendered -> ppIrrepsPower idx rendered
@@ -6296,6 +6921,7 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
         | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
         | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
         | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
+        | SymWreath -> sprintf "OrbIdx<%s, %s>" (ppOrbitLevels (orbitLevelsOf idx)) extentStr
 
 let ppSymcomState = function
     | SCNeither -> "Neither"

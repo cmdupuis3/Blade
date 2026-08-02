@@ -1,0 +1,12 @@
+// TEST: OrbIdx Empty Class Is Plain Idx
+// §3's normal form: `Idx<n>` IS `OrbIdx<[],n>`. The empty level list is LEGAL
+// syntax (not a parse error) and lowers to the plain dense record field for
+// field -- so an array annotated with it is an ordinary rank-1 dense array,
+// indexable and printable through the untouched dense paths.
+let B: Array<Int64 like OrbIdx<[], 3>> = [7, 8, 9]
+let D: Array<Int64 like Idx<3>> = [7, 8, 9]
+let b2 = B(2)
+let same = B(0) == D(0) && B(1) == D(1) && B(2) == D(2)
+// EXPECT: B = [7, 8, 9]
+// EXPECT: b2 = 9
+// EXPECT: same = true

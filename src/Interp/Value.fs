@@ -67,6 +67,7 @@ type Value =
     | VDeferred of expr: IRExpr * env: Env
     | VGroupKeys of GroupKeysValue
     | VCompound of CompoundValue
+    | VSparse of SparseValue
 
     // Value embeds IRExpr / IRCallable / Env (a Dictionary) — deep structural
     // equality would be surprising and costly, and comparison is undefined for
@@ -189,6 +190,29 @@ and [<ReferenceEquality>] CompoundValue = {
     Data: Store
 }
 
+/// A sparse (explicit key enumeration) index VALUE — formalism 3.5 SparseIdx
+/// (IRSparseKeys) / runtime `Sparse<T,RANK>` + `sparse_index_t`. The compound
+/// twin MINUS the grid: there are no per-axis extents and no mask, so the
+/// reverse map keys STRUCTURALLY on the tuple itself (a grid offset does not
+/// exist), and partial reads scan `Keys` in key order rather than a mask.
+///
+///   Keys           — rank_to_tuple in GIVEN order (never sorted); iteration
+///                    order is this order.
+///   RankOf         — linearize: tuple -> rank, via TupleKeyComparer (int64[]
+///                    has no structural hashing in .NET).
+///   Other fields   — as CompoundValue (compact Data in key order, each cell
+///                    followed by its trailing block).
+and [<ReferenceEquality>] SparseValue = {
+    ElemType: IRType
+    IndexTypes: IRIndexType list
+    LeadRank: int
+    Keys: int64[][]
+    RankOf: Dictionary<int64[], int>
+    Cardinality: int64
+    TrailingStride: int64
+    Data: Store
+}
+
 // ============================================================================
 // Environment
 // ============================================================================
@@ -209,6 +233,20 @@ and [<ReferenceEquality>] Env = {
     Vars: Dictionary<IRId, ValueRef>
     Parent: Env option
 }
+
+/// Structural equality/hash for int64[] key tuples (SparseValue.RankOf).
+/// .NET arrays hash by reference; a Dictionary keyed on raw int64[] would
+/// never find anything. Order-sensitive combine mirrors array_hasher; only
+/// self-consistency matters here.
+type TupleKeyComparer() =
+    interface System.Collections.Generic.IEqualityComparer<int64[]> with
+        member _.Equals(a, b) =
+            a.Length = b.Length && Array.forall2 (=) a b
+        member _.GetHashCode(a) =
+            let mutable h = 17
+            for v in a do
+                h <- h * 31 + int (v ^^^ (v >>> 32))
+            h
 
 // ============================================================================
 // Environment helpers

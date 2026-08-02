@@ -19,6 +19,7 @@ BladeFusionDuality.v
 BladeCompute.v
 BladeDeduce.v
 BladeCauchy.v
+BladeDichotomy.v
 BladeMonad.v
 BladeSafety.v
 BladeJacobian.v

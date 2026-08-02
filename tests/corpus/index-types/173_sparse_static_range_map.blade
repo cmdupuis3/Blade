@@ -1,0 +1,15 @@
+// TEST: Sparse Static Range Map
+// range<SparseIdx<K>> over a `let static` key list (SkStatic branch): one loop
+// level over |K| entries in GIVEN order; the kernel receives one coordinate
+// param per key-tuple component. The output is a Sparse array sharing the
+// materialized driver index. Kernel i*10+j makes each cell's value its own
+// coordinates, so full-key reads pin down exactly which keys were visited.
+// Keys are deliberately NOT in lex order — sparse keys keep their given order.
+let static K = [(2, 1), (0, 3), (1, 0)]
+let R = method_for(range<SparseIdx<K>>) <@> lambda(i, j) -> i * 10 + j |> compute
+let y0 = R((2, 1))
+let y1 = R((0, 3))
+let y2 = R((1, 0))
+// EXPECT: y0 = 21
+// EXPECT: y1 = 3
+// EXPECT: y2 = 10

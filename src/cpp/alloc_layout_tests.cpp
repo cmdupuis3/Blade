@@ -146,6 +146,18 @@ struct counted_cidx : compound_index_t<R> {
     ~counted_cidx() override { g_live_cidx--; }
 };
 
+// Same witness for sparse_index_t: the Sparse wrapper deletes through a
+// `sparse_index_t<RANK>*`, and the derived destructor must run for the same
+// virtual-destructor reason documented on counted_cidx. Shares g_live_cidx —
+// the tests only ever snapshot/compare, never read an absolute, and one
+// counter keeps the balance checks uniform across both index families.
+template<size_t R>
+struct counted_sidx : sparse_index_t<R> {
+    counted_sidx(std::string n, std::vector<std::array<size_t, R>> keys)
+        : sparse_index_t<R>(std::move(n), std::move(keys)) { g_live_cidx++; }
+    ~counted_sidx() override { g_live_cidx--; }
+};
+
 // Closed-form binomial C(a, b) for cardinality expectations.
 static size_t binom(size_t a, size_t b) {
     if (b > a) return 0;
@@ -783,204 +795,173 @@ int main() {
               && live_arrays() == snap && g_live_cidx == csnap);
     }
 
-    // ----- Gather compound (scattered pin, residual rank >= 2): the deep-copy
-    // path, so the residual OWNS both its buffer and its sub-index and takes
-    // the full deallocate_compound.
-    //
-    // Parent 2x3x2 fully present (cardinality 12, rank == i*6 + j*2 + k).
-    // Pinning axis 1 to 1 is NOT a prefix, so the survivors are scattered.
+    // =======================================================================
+    // Sparse (explicit key enumeration): construction order, hash lookups,
+    // duplicate rejection, the gather trio, and teardown balance.
+    // =======================================================================
+
+    // ----- Given-order preservation + linearize/unhash round-trip. The keys
+    // are deliberately NOT in lex order: a sorted implementation would rank
+    // them differently, so every check below pins insertion-order semantics.
     {
-        std::array<size_t, 3> pext = {2, 3, 2};
-        std::vector<bool> pmask(12, true);
         size_t snap = live_arrays();
         size_t csnap = g_live_cidx;
-        auto* pidx = new counted_cidx<3>("parent", pext, pmask);
-        Compound<double, 3> P = { new double[pidx->cardinality], pidx, 1 };
-        for (size_t r = 0; r < pidx->cardinality; r++) P.data[r] = (double)r;
-        auto R = make_partial_compound_gather<double, 3, 1>(
-                     P, std::array<size_t, 1>{1}, std::array<size_t, 1>{1});
-        // Free axes are 0 and 2; the four survivors are parent ranks 2,3,8,9.
-        bool gathered = (R.idx->cardinality == 4)
-                        && R({0,0}) == 2 && R({0,1}) == 3 && R({1,0}) == 8 && R({1,1}) == 9
+        std::vector<std::array<size_t, 2>> keys = { {5,1}, {0,3}, {2,2}, {0,0} };
+        auto* idx = new counted_sidx<2>("order", keys);
+        bool cardOk = (idx->cardinality == 4);
+        bool orderOk = true;
+        for (size_t r = 0; r < keys.size(); r++)
+            if (idx->unhash(r) != keys[r] || idx->linearize(keys[r]) != r) orderOk = false;
+        bool presentOk = idx->present({2,2}) && !idx->present({1,1});
+        // Missing key: unordered_map::at throws — the runtime contract for a
+        // full-tuple read of an absent key.
+        bool throws = false;
+        try { (void)idx->linearize({9,9}); } catch (const std::out_of_range&) { throws = true; }
+        Sparse<double, 2> s = { new double[idx->cardinality], idx, 1 };
+        for (size_t r = 0; r < idx->cardinality; r++) s.data[r] = (double)(r + 1);
+        bool rt = (s({5,1}) == 1 && s({0,3}) == 2 && s({2,2}) == 3 && s({0,0}) == 4);
+        deallocate_sparse(s);
+        check("sparse_given_order_and_lookup",
+              cardOk && orderOk && presentOk && throws && rt
+              && s.data == nullptr && s.idx == nullptr
+              && live_arrays() == snap && g_live_cidx == csnap);
+    }
+
+    // ----- Duplicate key: the rank<->tuple bijection would be ill-defined, so
+    // construction must throw rather than silently drop the second entry.
+    {
+        bool threw = false;
+        try {
+            std::vector<std::array<size_t, 2>> dup = { {1,2}, {0,0}, {1,2} };
+            sparse_index_t<2> bad("dup", std::move(dup));
+        } catch (const std::runtime_error&) { threw = true; }
+        check("sparse_duplicate_key_throws", threw);
+    }
+
+    // ----- Sparse map output: owns its buffer, SHARES the input's index
+    // (identical key set by construction) — mirror of the compound case.
+    {
+        size_t snap = live_arrays();
+        size_t csnap = g_live_cidx;
+        std::vector<std::array<size_t, 2>> keys = { {3,0}, {1,1}, {0,2} };
+        auto* idx = new counted_sidx<2>("sshared", keys);
+        Sparse<double, 2> in = { new double[idx->cardinality], idx, 1 };
+        for (size_t r = 0; r < idx->cardinality; r++) in.data[r] = (double)(r + 1);
+        Sparse<double, 2> out = { new double[in.idx->cardinality * in.trailing_stride], in.idx, in.trailing_stride };
+        for (size_t r = 0; r < out.idx->cardinality; r++) out.data[r] = in.data[r] * 10;
+        bool rt = (out({1,1}) == 20 && out({0,2}) == 30);
+        deallocate_sparse_shared_index(out);
+        bool inputAlive = (live_arrays() == snap + 1) && (g_live_cidx == csnap + 1)
+                          && in({3,0}) == 1 && in.idx->cardinality == 3;
+        deallocate_sparse(in);
+        check("dealloc_sparse_shared_index_keeps_input",
+              rt && inputAlive && out.data == nullptr && out.idx == idx
+              && live_arrays() == snap && g_live_cidx == csnap);
+    }
+
+    // ----- Gather, residual rank >= 2: pin the MIDDLE axis of a rank-3 key
+    // set (never a prefix). Matches must come out in parent KEY order (which
+    // is not lex order here), each keeping its free-axis coordinates, and the
+    // residual owns buffer + sub-index (full deallocate_sparse).
+    {
+        size_t snap = live_arrays();
+        size_t csnap = g_live_cidx;
+        std::vector<std::array<size_t, 3>> keys = {
+            {4,7,1}, {0,7,2}, {4,0,1}, {1,7,0}, {0,0,0}
+        };
+        auto* pidx = new counted_sidx<3>("sgparent", keys);
+        Sparse<double, 3> P = { new double[pidx->cardinality], pidx, 1 };
+        for (size_t r = 0; r < pidx->cardinality; r++) P.data[r] = (double)(r + 10);
+        // Pin axis 1 == 7: survivors are ranks 0, 1, 3 in that order.
+        auto R = make_partial_sparse_gather<double, 3, 1>(
+                     P, std::array<size_t, 1>{7}, std::array<size_t, 1>{1});
+        bool gathered = (R.idx->cardinality == 3)
+                        && R.idx->unhash(0) == std::array<size_t,2>{4,1}
+                        && R.idx->unhash(1) == std::array<size_t,2>{0,2}
+                        && R.idx->unhash(2) == std::array<size_t,2>{1,0}
+                        && R({4,1}) == 10 && R({0,2}) == 11 && R({1,0}) == 13
                         && R.data != P.data;
-        deallocate_compound(R);
-        // Parent buffer untouched by the residual's teardown.
-        bool parentIntact = (P.data[2] == 2 && P.data[9] == 9) && (live_arrays() == snap + 1);
-        deallocate_compound(P);
-        check("dealloc_compound_gather_balanced",
-              gathered && parentIntact && live_arrays() == snap && g_live_cidx == csnap);
-    }
-
-    // ----- Views-only teardown, rank-1 prefix window: data is a SLICE of the
-    // parent buffer; the single heap `size_t[1]` extent is the only thing the
-    // view owns. Freeing `w.data` would be an interior free of the parent.
-    // Prefix {1} selects parent ranks [2,4), i.e. cells (1,1) and (1,2).
-    {
-        std::array<size_t, 2> ext = {3, 4};
-        std::vector<bool> mask(12, false);
-        mask[0] = mask[3] = mask[5] = mask[6] = mask[8] = true;
-        size_t snap = live_arrays();
-        size_t csnap = g_live_cidx;
-        auto* idx = new counted_cidx<2>("winparent", ext, mask);
-        Compound<double, 2> B = { new double[idx->cardinality], idx, 1 };
-        for (size_t r = 0; r < idx->cardinality; r++) B.data[r] = (double)(r + 1);
-
-        size_t vsnap = live_arrays();                 // parent already live
-        Array<double, 1> w = make_partial_window<double, 2, 1>(B, std::array<size_t, 1>{1});
-        bool aliased = (w.data == B.data + 2) && (w.extents[0] == 2)
-                       && w[0] == 3 && w[1] == 4
-                       && (live_arrays() == vsnap + 1);   // ONLY the extent is fresh
-        // Writing through the view must be visible in the parent (it is one buffer).
-        w[0] = 33;
-        bool writesThrough = (B({1,1}) == 33);
-        deallocate_window_view(w);
-        bool parentIntact = (live_arrays() == vsnap) && B({2,0}) == 5 && B({0,0}) == 1;
-        deallocate_compound(B);
-        check("dealloc_window_view_keeps_parent_data",
-              aliased && writesThrough && parentIntact && w.extents == nullptr
+        R({4,1}) = 99;                              // a copy: parent must not move
+        bool isCopy = (P.data[0] == 10);
+        deallocate_sparse(R);
+        bool parentIntact = (live_arrays() == snap + 1) && P({0,0,0}) == 14;
+        deallocate_sparse(P);
+        check("dealloc_sparse_gather_balanced",
+              gathered && isCopy && parentIntact
               && live_arrays() == snap && g_live_cidx == csnap);
     }
 
-    // ----- Views-only teardown, residual-compound window: shares the parent's
-    // data, owns ONLY the freshly materialized sub-index. Prefix {1} on the
-    // 2x3x2 parent gives the contiguous window starting at parent rank 6.
+    // ----- Gather, residual rank == 1: values of the matching entries in key
+    // order; owns buffer + extent (two blocks).
     {
-        std::array<size_t, 3> pext = {2, 3, 2};
-        std::vector<bool> pmask(12, true);
         size_t snap = live_arrays();
         size_t csnap = g_live_cidx;
-        auto* pidx = new counted_cidx<3>("viewparent", pext, pmask);
-        Compound<double, 3> P = { new double[pidx->cardinality], pidx, 1 };
-        for (size_t r = 0; r < pidx->cardinality; r++) P.data[r] = (double)r;
-        auto R = make_partial_compound<double, 3, 1>(P, std::array<size_t, 1>{1});
-        bool shared = (R.data == P.data + 6) && (R.idx->cardinality == 6)
-                      && R({0,0}) == 6 && R({2,1}) == 11
-                      && (const void*)R.idx != (const void*)P.idx;   // distinct RANKs
-        deallocate_compound_view(R);   // sub-index only — data belongs to P
-        bool parentIntact = (P.data[6] == 6 && P.data[11] == 11) && (live_arrays() == snap + 1);
-        deallocate_compound(P);
-        check("dealloc_compound_view_keeps_parent_data",
-              shared && parentIntact && R.idx == nullptr
-              && live_arrays() == snap && g_live_cidx == csnap);
-    }
-
-    // ----- Trailing-dim window view: row table + 2-entry extents are fresh,
-    // the ELEMENTS are the parent's contiguous block. Two owned blocks, zero
-    // copied elements. Parent trailing_stride 3, prefix {1} -> 2 cells at
-    // parent offset 2*3.
-    {
-        std::array<size_t, 2> ext = {3, 4};
-        std::vector<bool> mask(12, false);
-        mask[0] = mask[3] = mask[5] = mask[6] = mask[8] = true;
-        size_t snap = live_arrays();
-        size_t csnap = g_live_cidx;
-        auto* idx = new counted_cidx<2>("trailparent", ext, mask);
-        const size_t trail = 3;
-        Compound<double, 2> B = { new double[idx->cardinality * trail], idx, trail };
-        for (size_t r = 0; r < idx->cardinality * trail; r++) B.data[r] = (double)r;
-
+        std::vector<std::array<size_t, 2>> keys = { {5,1}, {0,3}, {2,1}, {0,0} };
+        auto* idx = new counted_sidx<2>("sgd", keys);
+        Sparse<double, 2> S = { new double[idx->cardinality], idx, 1 };
+        for (size_t r = 0; r < idx->cardinality; r++) S.data[r] = (double)(r + 1);
         size_t vsnap = live_arrays();
-        Array<double, 2> wt = make_partial_window_trail<double, 2, 1>(B, std::array<size_t, 1>{1});
-        bool shape = (wt.extents[0] == 2 && wt.extents[1] == trail)
-                     && (&wt[0][0] == B.data + 6) && (&wt[1][0] == B.data + 9)
-                     && wt[0][0] == 6 && wt[1][2] == 11
-                     && (live_arrays() == vsnap + 2);   // row table + extents only
-        deallocate_window_trail_view(wt);
-        bool parentIntact = (live_arrays() == vsnap) && B.data[6] == 6 && B.data[11] == 11;
-        deallocate_compound(B);
-        check("dealloc_window_trail_view_keeps_parent_data",
-              shape && parentIntact && wt.data == nullptr && wt.extents == nullptr
-              && live_arrays() == snap && g_live_cidx == csnap);
-    }
-
-    // ----- Scattered gather to a dense rank-1 residual: owns its copied buffer
-    // AND its extent (two blocks). Pinning axis 1 to 0 is not a prefix; the
-    // survivors are cells (0,0) and (2,0), parent ranks 0 and 4.
-    {
-        std::array<size_t, 2> ext = {3, 4};
-        std::vector<bool> mask(12, false);
-        mask[0] = mask[3] = mask[5] = mask[6] = mask[8] = true;
-        size_t snap = live_arrays();
-        size_t csnap = g_live_cidx;
-        auto* idx = new counted_cidx<2>("gdparent", ext, mask);
-        Compound<double, 2> B = { new double[idx->cardinality], idx, 1 };
-        for (size_t r = 0; r < idx->cardinality; r++) B.data[r] = (double)(r + 1);
-
-        size_t vsnap = live_arrays();
-        Array<double, 1> gd = make_partial_gather_dense<double, 2, 1>(
-                                  B, std::array<size_t, 1>{0}, std::array<size_t, 1>{1});
-        bool copied = (gd.extents[0] == 2) && gd[0] == 1 && gd[1] == 5
-                      && (gd.data != B.data) && (live_arrays() == vsnap + 2);
-        gd[0] = 99;                                   // a copy: parent must not move
-        bool isCopy = (B.data[0] == 1);
+        // Pin axis 1 == 1: survivors are ranks 0 and 2 -> values 1, 3.
+        Array<double, 1> gd = make_sparse_gather_dense<double, 2, 1>(
+                                  S, std::array<size_t, 1>{1}, std::array<size_t, 1>{1});
+        bool copied = (gd.extents[0] == 2) && gd[0] == 1 && gd[1] == 3
+                      && (gd.data != S.data) && (live_arrays() == vsnap + 2);
         deallocate_gather_dense(gd);
-        bool parentIntact = (live_arrays() == vsnap) && B({2,0}) == 5;
-        deallocate_compound(B);
-        check("dealloc_gather_dense_balanced",
-              copied && isCopy && parentIntact && gd.data == nullptr
+        bool parentIntact = (live_arrays() == vsnap) && S({2,1}) == 3;
+        deallocate_sparse(S);
+        check("dealloc_sparse_gather_dense_balanced",
+              copied && parentIntact && gd.data == nullptr
               && live_arrays() == snap && g_live_cidx == csnap);
     }
 
-    // ----- Scattered gather WITH a trailing dim: fresh pool + row table +
-    // extents (three blocks). The pool is not handed back separately, so the
-    // teardown recovers it as row 0 — the property this check pins.
+    // ----- Gather, residual rank == 1 WITH a trailing dim: each match copies
+    // its whole trailing block; pool + row table + extents (three blocks),
+    // torn down by the same deallocate_gather_dense_trail as the compound
+    // twin (identical result shape).
     {
-        std::array<size_t, 2> ext = {3, 4};
-        std::vector<bool> mask(12, false);
-        mask[0] = mask[3] = mask[5] = mask[6] = mask[8] = true;
         size_t snap = live_arrays();
         size_t csnap = g_live_cidx;
-        auto* idx = new counted_cidx<2>("gdtparent", ext, mask);
+        std::vector<std::array<size_t, 2>> keys = { {5,1}, {0,3}, {2,1}, {0,0} };
+        auto* idx = new counted_sidx<2>("sgdt", keys);
         const size_t trail = 3;
-        Compound<double, 2> B = { new double[idx->cardinality * trail], idx, trail };
-        for (size_t r = 0; r < idx->cardinality * trail; r++) B.data[r] = (double)r;
-
+        Sparse<double, 2> S = { new double[idx->cardinality * trail], idx, trail };
+        for (size_t r = 0; r < idx->cardinality * trail; r++) S.data[r] = (double)r;
         size_t vsnap = live_arrays();
-        Array<double, 2> gt = make_partial_gather_dense_trail<double, 2, 1>(
-                                  B, std::array<size_t, 1>{0}, std::array<size_t, 1>{1});
-        // Survivors are parent ranks 0 and 4; their trailing blocks are
-        // [0,1,2] and [12,13,14].
+        Array<double, 2> gt = make_sparse_gather_dense_trail<double, 2, 1>(
+                                  S, std::array<size_t, 1>{1}, std::array<size_t, 1>{1});
+        // Survivors are ranks 0 and 2; trailing blocks [0,1,2] and [6,7,8].
         bool copied = (gt.extents[0] == 2 && gt.extents[1] == trail)
-                      && gt[0][0] == 0 && gt[0][2] == 2 && gt[1][0] == 12 && gt[1][2] == 14
-                      && (&gt[1][0] == &gt[0][0] + trail)      // one pool, row 0 is its base
-                      && (live_arrays() == vsnap + 3);         // pool + rows + extents
+                      && gt[0][0] == 0 && gt[0][2] == 2 && gt[1][0] == 6 && gt[1][2] == 8
+                      && (&gt[1][0] == &gt[0][0] + trail)
+                      && (live_arrays() == vsnap + 3);
         deallocate_gather_dense_trail(gt);
-        bool parentIntact = (live_arrays() == vsnap) && B.data[12] == 12;
-        deallocate_compound(B);
-        check("dealloc_gather_dense_trail_balanced",
+        bool parentIntact = (live_arrays() == vsnap) && S.data[6] == 6;
+        deallocate_sparse(S);
+        check("dealloc_sparse_gather_dense_trail_balanced",
               copied && parentIntact && gt.data == nullptr
               && live_arrays() == snap && g_live_cidx == csnap);
     }
 
-    // ----- Degenerate EMPTY gather-with-trail: no survivor, so the producer's
-    // 1-slot sentinel pool is unrecoverable (it writes no rows, leaving
-    // `rows[0]` indeterminate) and is leaked BY DESIGN — the same trade
-    // deallocate<> makes for its total == 0 sentinel. Requirement: no crash,
-    // the row table and extents ARE freed, and the leak is that one block.
-    //
-    // Mask has only (0,0) present, so pinning axis 1 to 2 leaves nothing.
+    // ----- Empty gather (no key matches the pin): sentinel-buffer behavior
+    // must match the compound gathers — extent 0, no crash, balanced teardown
+    // for the RR>=2 case (its 1-slot sentinel buffer IS handed to
+    // deallocate_sparse, unlike the trail case's unrecoverable pool).
     {
-        std::array<size_t, 2> ext = {3, 4};
-        std::vector<bool> emptyMask(12, false);
-        emptyMask[0] = true;
         size_t snap = live_arrays();
         size_t csnap = g_live_cidx;
-        auto* eidx = new counted_cidx<2>("emptygather", ext, emptyMask);
-        const size_t trail = 2;
-        Compound<double, 2> E = { new double[eidx->cardinality * trail], eidx, trail };
-        E.data[0] = 7; E.data[1] = 8;
-
-        size_t esnap = live_arrays();
-        Array<double, 2> gz = make_partial_gather_dense_trail<double, 2, 1>(
-                                  E, std::array<size_t, 1>{2}, std::array<size_t, 1>{1});
-        bool empty = (gz.extents[0] == 0) && (live_arrays() == esnap + 3);
-        deallocate_gather_dense_trail(gz);
-        size_t leaked = live_arrays() - esnap;    // the sentinel pool, and only it
-        bool parentIntact = (E.data[0] == 7 && E.data[1] == 8);
-        deallocate_compound(E);
-        check("dealloc_gather_dense_trail_empty_sentinel",
-              empty && parentIntact && leaked == 1
-              && live_arrays() == snap + 1 && g_live_cidx == csnap);
+        std::vector<std::array<size_t, 3>> keys = { {0,0,0}, {1,1,1} };
+        auto* pidx = new counted_sidx<3>("sempty", keys);
+        Sparse<double, 3> P = { new double[pidx->cardinality], pidx, 1 };
+        P.data[0] = 7; P.data[1] = 8;
+        auto R = make_partial_sparse_gather<double, 3, 1>(
+                     P, std::array<size_t, 1>{9}, std::array<size_t, 1>{1});
+        bool empty = (R.idx->cardinality == 0);
+        deallocate_sparse(R);
+        bool parentIntact = (P.data[0] == 7 && P.data[1] == 8) && (live_arrays() == snap + 1);
+        deallocate_sparse(P);
+        check("dealloc_sparse_gather_empty_balanced",
+              empty && parentIntact
+              && live_arrays() == snap && g_live_cidx == csnap);
     }
 
     printf("ALLOC TESTS: %d/%d passed\n", g_pass, g_total);

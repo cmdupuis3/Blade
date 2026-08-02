@@ -115,6 +115,12 @@ let binom (m: int64) (k: int) : int64 =
 
 /// Packed pool cardinality of a group: multiset (sym) or strict (antisym)
 /// combinations.
+/// A wreath (OrbIdx) group has no PackedGroup encoding at all — its cell count
+/// is the iterated binomial over a LEVEL LIST this record cannot hold — and the
+/// two writers that build a PackedGroup already refuse anything but sym/antisym
+/// before reaching here. The `_ -> 0L` tail is therefore unreachable for a
+/// wreath, and deliberately kept as 0 rather than a guess: a zero-sized pool
+/// fails visibly, a wrong-sized one does not.
 let packedCardinality (g: PackedGroup) : int64 =
     match g.Sym with
     | SymSymmetric -> binom (g.Extent + int64 g.Rank - 1L) g.Rank
@@ -1140,6 +1146,7 @@ let zarrStoreToModule
         ProviderWrites = Map.empty
         RandomInits = Map.empty
         CompoundInits = Map.empty
+        SparseInits = Map.empty
         MutableArrayLets = Set.empty
     }
 

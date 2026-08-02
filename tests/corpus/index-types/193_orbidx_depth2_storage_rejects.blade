@@ -1,0 +1,16 @@
+// TEST: OrbIdx Depth-2 Storage (rejects)
+// ERROR: BL4003
+// v1's HARD REFUSAL at the storage boundary. The class is declarable (192) and
+// its cell count is closed-form, but no allocator, traversal nest, compact
+// read, printer or provider path emits it -- so an annotation that would put
+// one into storage is refused at typecheck with a specific diagnostic, not a
+// silent wrong address further down. The message names the depth-1 spellings
+// that DO work.
+//
+// FAIL CLOSED, at several doors: the let annotation (here), the function
+// signature, and a `range<>` iteration slot each refuse in the front end, and
+// the allocator / loop builder / read / print / provider seams refuse again as
+// backstops for a record no surface syntax can produce.
+type Riemann = OrbIdx<[(2,-), (2,+)], 4>
+let R: Array<Float64 like Riemann> = zero |> compute
+// EXPECT: typecheck failure — depth-2 OrbIdx storage is not emitted yet.

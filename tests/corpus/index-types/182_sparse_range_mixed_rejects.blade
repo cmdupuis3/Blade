@@ -1,0 +1,8 @@
+// TEST: Sparse Range Mixed Slots (rejects)
+// ERROR: BL3999
+// A sparse range slot IS the whole iteration space (the key enumeration), so
+// it cannot share a range<> with other index types — same rule as the
+// compound slot (017).
+let static K = [(2, 1), (0, 3)]
+let R = method_for(range<SparseIdx<K>, Idx<2>>) <@> lambda(i, j, t) -> i + j + t |> compute
+// EXPECT: typecheck failure — sparse slot mixed with another index type.

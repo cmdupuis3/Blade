@@ -1,0 +1,17 @@
+// TEST: OrbIdx Depth-2 Class Declares
+// The declarable half of v1 (docs/plan-orbit-index-types.md §9): a depth >= 2
+// iterated-wreath class PARSES, normalizes, lowers to a SymWreath record with
+// Rank = the product of the level ranks, registers as a named index-type
+// alias, and passes IR validation (Tag "__orbidx" round-trips through
+// ixKindOfTag, so Tag<->IxKind agreement holds). Nothing here puts the class
+// into STORAGE -- that is 193's job, and it is refused.
+//
+// The Riemann shape `OrbIdx<[(2,-),(2,+)],4>` is the sharpest declarable case:
+// mixed character, and §4's fold gives it 4 -> C(4,2) = 6 -> C(7,2) = 21 cells,
+// the 21 formalism §3.4 states for n = 4. (The cell count is asserted directly
+// in tests/Test_TypeStructure.fs; a corpus test can only reach the declaration.)
+type Riemann = OrbIdx<[(2,-), (2,+)], 4>
+type Tied = OrbIdx<[(2,+), (2,+)], 4>
+type Deep = OrbIdx<[(2,+), (2,+), (2,+)], 4>
+let x = 1
+// EXPECT: x = 1

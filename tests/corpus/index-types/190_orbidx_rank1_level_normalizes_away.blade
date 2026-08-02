@@ -1,0 +1,24 @@
+// TEST: OrbIdx Rank-1 Levels Normalize Away
+// §7.2's load-bearing normalization: a level with r = 1 is the trivial group
+// S_1 and is dropped at EITHER sign -- a `(1,-)` level zeroes nothing, exactly
+// as a `(1,+)` level ties nothing. Without it a deduction could append trivial
+// levels forever at fixed rank, and the depth-1/depth-2 case split at lowering
+// would not be exhaustive.
+//   [(1,+)]        -> []      -> the plain Idx<3> record
+//   [(1,-)]        -> []      -> likewise (the sign is irrelevant at r = 1)
+//   [(2,+), (1,-)] -> [(2,+)] -> the SymIdx<2,3> record, NOT a depth-2 wreath
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let s: Array<Float64 like OrbIdx<[(2,+), (1,-)], 3>> = L <@> reynolds(g) |> compute
+let dropPlus: Array<Int64 like OrbIdx<[(1,+)], 3>> = [1, 2, 3]
+let dropMinus: Array<Int64 like OrbIdx<[(1,-)], 3>> = [4, 5, 6]
+let e = s(1, 2)
+let p = dropPlus(2)
+let m = dropMinus(0)
+// EXPECT: s = [6, 9, 12, 12, 15, 18]
+// EXPECT: dropPlus = [1, 2, 3]
+// EXPECT: dropMinus = [4, 5, 6]
+// EXPECT: e = 15
+// EXPECT: p = 3
+// EXPECT: m = 4

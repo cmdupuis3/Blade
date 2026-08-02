@@ -486,11 +486,34 @@ let formatTypeError (err: TypeError) : string =
     | IndexTagMismatchAnon expected -> sprintf "Array index tag mismatch: slot expects named tag '%s' but argument is an anonymous index value." expected
     | CrossNominalIndexArith (left, right) -> sprintf "Cross-nominal index-type arithmetic: cannot combine values of distinct index domains '%s' and '%s'." left right
     | CrossAnonIndexArith (left, right) -> sprintf "Cross-nominal index-type arithmetic: cannot combine values of distinct anonymous index domains (#%d vs #%d)." left right
-    | CompoundBareWildcard rank -> sprintf "A bare wildcard `_` cannot index a compound axis: it pins no coordinate (the result would just be the array itself). Index with a full %d-tuple, pinning at least one coordinate." rank
-    | CompoundWildcardArity (rank, tupleLen) -> sprintf "Wildcard compound indexing must use a FULL-arity tuple: this compound axis has rank %d, so write all %d coordinates with `_` marking each free axis (got a %d-tuple). Short tuples (without wildcards) pin a leading prefix instead: B((c0, ..., cj))." rank rank tupleLen
-    | CompoundAllFree rank -> sprintf "Compound index with all %d coordinates free (`_`) pins nothing -- the result is the array itself. Drop the index, or pin at least one coordinate." rank
-    | CompoundOverSupplied (rank, got) -> sprintf "Compound index over-supplied: this array's compound axis has rank %d (mask is %d-dimensional), so it takes at most a %d-tuple like B((c0, ..., c%d)); got a %d-tuple." rank rank rank (rank - 1) got
-    | CompoundNeedsTuple rank -> sprintf "Compound index must be a single tuple: write B((c0, ..., cj)) with inner parentheses, not the flat form B(c0, ..., cj). A CompoundIdx<mask> axis of rank %d is indexed as one joint tuple, full or partial (formalism 4.5 / poly-indexing 5.4)." rank
+    | CompoundTupleForm rank -> sprintf "Compound arrays take FLAT positional subscripts like SymIdx: write B(c0, ..., c%d), not the tuple form B((c0, ..., c%d)) — and wildcards (`_`) are not accepted on a compound axis. Partial/wildcard reads (pinning some coordinates, gathering the matches) are a SparseIdx feature: build the valid tuples as a SparseIdx<keys> and index S((c0, _, ...)) there (formalism 3.5)." (rank - 1) (rank - 1)
+    | CompoundUnderSupplied (rank, got) -> sprintf "Compound index under-supplied: this array's compound axis has rank %d (mask is %d-dimensional), so it needs %d flat subscripts B(c0, ..., c%d); got %d. Partial reads are a SparseIdx feature (formalism 3.5)." rank rank rank (rank - 1) got
+    | CompoundOverSupplied (rank, got) -> sprintf "Compound index over-supplied: this array's compound axis has rank %d (mask is %d-dimensional) and consumes %d flat subscripts (plus one per trailing dim); got %d total." rank rank rank got
+    | SparseBareWildcard rank -> sprintf "A bare wildcard `_` cannot index a sparse axis: it pins no coordinate (the result would just be the array itself). Index with a full %d-tuple, pinning at least one coordinate." rank
+    | SparseWildcardArity (rank, tupleLen) -> sprintf "Wildcard sparse indexing must use a FULL-arity tuple: this sparse axis has rank %d, so write all %d coordinates with `_` marking each free axis (got a %d-tuple). Short tuples (without wildcards) pin a leading prefix instead: S((c0, ..., cj))." rank rank tupleLen
+    | SparseAllFree rank -> sprintf "Sparse index with all %d coordinates free (`_`) pins nothing -- the result is the array itself. Drop the index, or pin at least one coordinate." rank
+    | SparseOverSupplied (rank, got) -> sprintf "Sparse index over-supplied: this array's sparse axis has rank %d (keys are %d-tuples), so it takes at most a %d-tuple like S((c0, ..., c%d)); got a %d-tuple." rank rank rank (rank - 1) got
+    | SparseNeedsTuple rank -> sprintf "Sparse index must be a single tuple: write S((c0, ..., cj)) with inner parentheses, not the flat form S(c0, ..., cj). A SparseIdx<keys> axis of rank %d is indexed as one joint tuple, full or partial (formalism 3.5)." rank
+    // The OrbIdx storage-refusal text, front-end half. Deliberately not routed
+    // through IR.orbitStorageUnsupported: a TypeError carries strings, not IR
+    // structures, so this renderer only has the already-formatted level list --
+    // it cannot recover the depth as a number. That is the ONLY difference
+    // between the two spellings ("depth >= 2" here, "depth d" there); every
+    // other word is identical, and the corpus pins the sentence. KEEP THEM IN
+    // STEP: the wording changed once already (v1 said "no allocator, no
+    // traversal nest", which stopped being true when deduction started
+    // producing storable wreath classes), and a half-updated pair is a user
+    // reading two different stories about the same refusal.
+    | OrbitStorageUnsupported (levels, where_) ->
+        sprintf "%s: OrbIdx<%s, n> is a declarable index class of depth >= 2, and a DEDUCED one can now be \
+allocated, written and printed -- a comm tie over a repeated compact argument produces the class, \
+`orb_cell_count` sizes its pool and the segment-peeled `orb_visit` nest fills it in canonical order. \
+What is still missing is every path that reads a wreath pool at an ARBITRARY tuple: the mirrored \
+(non-canonical) compact read, decompaction, reduce/prodsum, transpose and provider I/O. So the \
+compiler refuses here rather than compute an address it cannot compute. \
+The depth-1 spellings work through the existing compact machinery instead: OrbIdx<[(r,+)], n> is \
+exactly SymIdx<r, n>, OrbIdx<[(r,-)], n> is exactly AntisymIdx<r, n>, and OrbIdx<[], n> is exactly \
+Idx<n>." where_ levels
     | RaggedIdxNeedsPrior func -> sprintf "function '%s': RaggedIdx requires at least one prior index in the array's index list -- the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>." func
     | TagWildcardNotParam where_ -> sprintf "%s: the tag wildcard `_` is legal in PARAMETER position only. A parameter may decline to constrain its argument's index tag or unit, but this position has to PRODUCE one -- a wildcard here would erase the tag rather than relax it. Write the concrete index type (e.g. Nat<LatIdx>) or the bare base type." where_
     | IndexRankMismatch (where_, left, leftRank, right, rightRank) ->
@@ -680,8 +703,14 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | IndexTagMismatchNamed _ | IndexTagMismatchAnon _ | CrossNominalIndexArith _
             | CrossAnonIndexArith _ | IndexTypeArithForbidden _ | IrrepsIdxArgMismatch _
             | BlockSpecArgMismatch _
-            | CompoundBareWildcard _ | CompoundWildcardArity _ | CompoundAllFree _
-            | CompoundOverSupplied _ | CompoundNeedsTuple _ | RaggedIdxNeedsPrior _
+            | CompoundTupleForm _ | CompoundUnderSupplied _ | CompoundOverSupplied _
+            | SparseBareWildcard _ | SparseWildcardArity _ | SparseAllFree _
+            | SparseOverSupplied _ | SparseNeedsTuple _ | RaggedIdxNeedsPrior _
+            // BL4003 is the honest bucket: the index TYPE is well formed and
+            // the program's use of it is what cannot be served. Not BL7001
+            // ("feature not yet supported by THIS BACKEND") -- both backends
+            // refuse, and the refusal happens in the front end.
+            | OrbitStorageUnsupported _
             | IrrepsIdxSpec _ | IrrepsIdxSpecFn _
             | PgIrrepsIdxSpec _ | PgIrrepsIdxSpecFn _ | TagWildcardNotParam _
             | BoundsInverted _ -> "BL4003"

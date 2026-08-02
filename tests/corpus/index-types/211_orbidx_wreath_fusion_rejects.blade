@@ -1,0 +1,20 @@
+// TEST: OrbIdx Wreath Fusion (rejects)
+// ERROR: BL4003
+// `<&!>` (hard fusion) and `<&>` (parallel) MERGE loop nests: they build one
+// LoopNestCodeGen per leaf and emit the bodies under a shared header, which
+// requires the leaves to agree on a LEVEL LIST. A wreath leaf has none -- its
+// nest is the whole-application `orb_visit` traversal, not a level list -- so
+// there is nothing to merge and nothing to share a header with.
+//
+// Left alone, the leaf builder reaches `buildSymmVec`, whose failwith surfaces
+// as BL9001 "internal compiler error, please report it" -- the wrong story for
+// a language limitation. The front-end gate makes it BL4003; the buildSymmVec
+// failwith stays as the backstop for an internal producer.
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let L = method_for(S, S)
+let h = lambda(p, q) where comm(p, q) -> p + q
+let k = lambda(p, q) where comm(p, q) -> p * q
+let (u, v) = (L <@> h) <&!> (L <@> k) |> compute
+// EXPECT: typecheck failure — a wreath leaf has no level list for nest merging.

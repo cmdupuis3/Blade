@@ -19,7 +19,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (748 theorems total)
+## Contents (798 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -95,6 +95,15 @@ run it with `-Check` to verify the numbers below and the headline in
   jointly-symmetric tensor = sym(x)sym + antisym(x)antisym components,
   each per-dim product-canonical, with signed lossless access and
   exact cell accounting (36 + 9 = 45 from live enumerations).
+- BladeDichotomy.v (26): the r >= 3 storage dichotomy, closing
+  BladeCauchy's boundary both ways at r = 3: an explicit nonzero
+  symmetric witness whose sym AND alt components vanish identically;
+  NO width-2 scalar-access scheme over ANY commutative ring (three
+  indicator tensors + a 3x3 determinant, storage not even assumed
+  linear); the m = 3! = 6 scheme reconstructs everywhere; the
+  division-free isotypic access rule through integer S_3 irrep
+  matrices (6T = triv + sgn + 2*trace, Wedderburn 1+1+4 = 6); double-
+  coset cell accounting = C(LM+2,3) pinned at extents 2 and 3.
 - BladeCompute.v (24): the computation model: materialized
   evaluation; V o P = id (counit identity / Theorem 2.1 core);
   non-faithfulness (12.7); compose-apply duality (12.1) via map_map;
@@ -258,7 +267,7 @@ run it with `-Check` to verify the numbers below and the headline in
   subgroup_action_and_representation corollary (the A3/D1 subgroup-meet
   direction's soundness anchor -- not yet a MLEquiv table row).  Opaque
   needs no theorem: it asserts nothing (closing remark in the file).
-- BladeWreath.v (61): NEW -- product symmetry over DECLARED-SYMMETRIC
+- BladeWreath.v (85): NEW -- product symmetry over DECLARED-SYMMETRIC
   inputs (formalism 3.4/12.5), the INPUT-side companion to BladeCore's
   output-side refutations.  Two rank-r symmetric tensors and a pointwise
   kernel T[I,J] = f(A[I], B[J]): block-wise S_r x S_r is licensed at
@@ -300,6 +309,40 @@ run it with `-Check` to verify the numbers below and the headline in
   KERNEL-RELATIVE -- the additive analogue u (+) u collapses to full
   S_4 under f = + while staying exactly wreath under f = *
   (additive_rank1_6_degenerates_to_s4, additive_locus_is_kernel_relative).
+  EXACTNESS ONE RANK PAST THE SEED (section 10): the same question at
+  r = 3, where the margin is wide -- 648 of the 720 permutations of S_6
+  must fail, 6-cycles and block interleavings included -- enumerated
+  completely against all 3^6 = 729 index tuples.  The permutation list is
+  GENERATED and then certified to BE S_6 (720 entries, pairwise distinct,
+  each a bijection: perms720_card, perms720_are_bijections,
+  perms720_distinct), and both candidate groups are DEFINED by the
+  block-preserving predicate and then shown closed and correctly sized
+  (block36_card, wreath72_card, block36_is_group, wreath72_is_group,
+  block36_subgroup_of_wreath72); the rank-3 accessor goes through
+  (min, median, max), so S_3 input symmetry is definitional
+  (symtab3_perm, symtab3_S3).  Four regimes, exactly as predicted:
+  repeated + commutative gives EXACTLY the 72-element wreath group
+  (repeated_r3_stabilizer_is_wreath, also under Nat.add:
+  repeated_r3_add_stabilizer_is_wreath), distinct inputs EXACTLY the
+  36-element block group (distinct_r3_stabilizer_is_block_group),
+  repeated + NONcommutative drops to the same 36
+  (noncomm_r3_loses_the_swap -- same input, same enumeration, kernel
+  x^2 y instead of a commutative one, so exactly the 36
+  swap-containing permutations die: the Z_2 factor IS the commutativity
+  license and nothing else), and rank-one collapses to all 720
+  (rank1_r3_admits_the_pinned_refutations).  Chain
+  block36_lt_wreath72_lt_s6 (36 < 72 < 720) derived, not re-enumerated.
+  Three permutations S_6 allows and the wreath group forbids are pinned
+  with the tuple where the output disagrees -- a 6-cycle, a full
+  interleaving, and the MINIMAL departure of one slot across the block
+  boundary (r3_pinned_are_not_wreath, r3_cross_one_violates,
+  r3_interleave_violates, r3_sixcycle_violates).  SCOPE: the orders are
+  now computed by complete enumeration at r = 2 (extents 2 and 6) and
+  r = 3 (extent 3); past r = 3 the enumeration leaves Coq's reach
+  (r = 4 is 40320 permutations x 3^8 tuples) and r = 4, r = 5 are
+  confirmed only EXTERNALLY by exhaustive exact-integer witness
+  enumeration -- evidence, not a Coq proof.  General-r exactness is
+  still open.
 - BladeLayout.v (163): NEW -- STRIDING PARITY: the layout group and the
   4-element character ceiling the H/Stab framework puts on it.  A layout
   assigns d axes to memory levels and a direction to each, so layouts are

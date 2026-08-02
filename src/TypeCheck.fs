@@ -547,6 +547,14 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         let idx = symPowerIndexRecord env (env.Builder.FreshId()) rank SymAntisymmetric baseIdx
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
 
+    // Same KNOWN-GAP shape as the two arms above, through the same shared
+    // record builder — so the value-position and index-position twins of an
+    // OrbIdx cannot drift, exactly as symPowerIndexRecord guarantees for the
+    // legacy pair.
+    | TyOrbIdx (levels, baseIdx) ->
+        let idx = orbitIndexRecord env (env.Builder.FreshId()) levels baseIdx
+        mkArrayArrow [idx] (IRTScalar ETFloat64) None
+
     | TyHermitianIdx extent ->
         let ext = lowerExtentExpr env extent
         let idx = { Id = env.Builder.FreshId(); Rank = 2; Extent = ext
@@ -573,8 +581,8 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             | _ -> false
         if isAllString then IRTScalar ETString else IRTScalar ETInt64
 
-    | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque | TyIrrepsIdx _ | TyPgIrrepsIdx _ ->
-        // DepIdx/RaggedIdx/IrrepsIdx/PgIrrepsIdx in non-index position — the
+    | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque | TyIrrepsIdx _ | TyPgIrrepsIdx _ | TySparseIdx _ ->
+        // DepIdx/RaggedIdx/IrrepsIdx/PgIrrepsIdx/SparseIdx in non-index position — the
         // pg member takes PARITY with the O(3) one here: same known gap, same
         // treatment. Defensive fallback matching the shape used for
         // TyCompoundIdx, TyEquivIdx, etc. — wrap in a single-index Array so
@@ -628,7 +636,7 @@ and lowerElemType env ty : IRType =
             let underlying = EnumValue.underlyingElemType values
             IRTIdxTagged (IRTScalar underlying, IRefNamed name)
         | _ -> lowerTypeExpr env ty   // struct, sum, alias, type variable, etc.
-    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ ->
+    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _ ->
         // Raw index type syntax in element position (e.g., Array<Idx<3> like ...>)
         // Note: anonymous-tag preservation here is a separate (deferred)
         // refinement — currently collapses to bare int64 like before, losing
@@ -683,6 +691,134 @@ and symPowerIndexRecord env (id: IRId) (rank: int) (symmetry: SymmetryClass)
         let baseRec = lowerIndexType env 0 baseTy
         { baseRec with Id = id; Rank = rank; Symmetry = symmetry }
 
+/// The index record for `OrbIdx<[(r1,s1), ..., (rd,sd)], base>` — the twin of
+/// `symPowerIndexRecord` above, shared by the index-position (`lowerIndexType`)
+/// and value-position (`lowerTypeExpr`) arms for the same reason.
+///
+/// THIS IS WHERE THE BLAST RADIUS IS BOUNDED. Three outcomes, and only the
+/// third is new machinery (docs/plan-orbit-index-types.md §3 and §7.2):
+///
+///   []        the trivial class. Produces the PLAIN `Idx<n>` record, field for
+///             field what `TyIdx` produces — not "something similar".
+///   [(r,+)]   produces exactly the `SymIdx<r, base>` record, by CALLING
+///             symPowerIndexRecord rather than rebuilding it, so depth-1 OrbIdx
+///             is fully supported on day one through the existing compact
+///             machinery (allocation, iteration, canon fold, printing) and
+///             every existing test stays green STRUCTURALLY, not by luck.
+///   [(r,-)]   likewise the `AntisymIdx<r, base>` record.
+///   depth >=2 the new SymWreath representation: Rank = the product of the level
+///             ranks (the raw axis count), the level list carried in the Extent
+///             slot as an IROrbitClass marker, IxKOrbit + its "__orbidx"
+///             sentinel Tag (the IR validator enforces their agreement).
+///
+/// NORMALIZATION FIRST, and at either sign: a rank-1 level is the trivial group
+/// S_1, so `(1,-)` zeroes nothing and `(1,+)` ties nothing. Dropping both is
+/// what makes depth logarithmic in rank (§7.2) and what makes the three cases
+/// above exhaustive rather than a prefix of a longer list. The rule itself is
+/// `IR.orbitNormalForm` -- THE one normalization in the compiler, shared with
+/// the DEDUCTION producer (`IR.deduceWreathTie`), so a written class and a
+/// deduced one can never disagree about when depth collapses.
+///
+/// DEFERRED, deliberately: a BLOCK-SPEC base under a depth >= 2 class
+/// (`OrbIdx<[(2,+),(2,+)], IrrepsIdx<s>>`) parses — the extent slot is a shared
+/// SymIdxBase — but the wreath record's Tag is the "__orbidx" kind sentinel, so
+/// the spec identity is not carried through. Only the base's EXTENT survives.
+/// Depth <= 1 is unaffected: it goes through symPowerIndexRecord, which
+/// re-stamps the base record and keeps the irreps tag.
+and orbitIndexRecord env (id: IRId) (levels: (int * bool) list)
+                     (baseIdx: SymIdxBase) : IRIndexType =
+    match orbitNormalForm levels with
+    | OrbNfTrivial ->
+        (match baseIdx with
+         | SymBaseExtent extent ->
+             { Id = id; Rank = 1; Extent = lowerExtentExpr env extent
+               Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+               Kind = SDimension; Dependencies = [] }
+         | SymBaseIndex baseTy ->
+             // The base index type verbatim (rank 1, no symmetry) — its own
+             // identity, which is what `OrbIdx<[], Idx<n>>` should mean.
+             { lowerIndexType env 0 baseTy with Id = id; Rank = 1; Symmetry = SymNone })
+    | OrbNfDepth1 (r, isPlus) ->
+        symPowerIndexRecord env id r (if isPlus then SymSymmetric else SymAntisymmetric) baseIdx
+    | OrbNfWreath normalized ->
+        // Rank is the RAW AXIS COUNT (the product of the level ranks), bounded
+        // before it lands in the record's int field -- see mkWreathIndexRecord,
+        // which both this producer and DEDUCTION share so the two cannot build
+        // differently-shaped records for the same class.
+        let baseExtent =
+            match baseIdx with
+            | SymBaseExtent extent -> lowerExtentExpr env extent
+            | SymBaseIndex baseTy -> (lowerIndexType env 0 baseTy).Extent
+        mkWreathIndexRecord id normalized baseExtent
+
+/// Resolve a SparseIdx keys expression to its (source, rank). Shared by the
+/// SparseIdx<keys> TYPE form (lowerIndexType, which failwiths on Error) and
+/// the sparse(values, keys) BUILDER (which surfaces Error as a type error).
+///
+///   STATIC:  the keys expression folds under the static contract (a `let
+///            static` tuple list). Entries are validated (uniform arity,
+///            non-negative Nat components, no duplicates) and BAKED
+///            (SkStatic) -- codegen emits the table as literals and no
+///            runtime array is consulted, so a mutated source cannot desync
+///            the index.
+///   RUNTIME: a named variable of rank-1 tuple-element array type
+///            (SkRuntime), mirroring the compound mask's deferred build.
+and resolveSparseKeysSource (env: TypeEnv) (keysExpr: Expr) : Result<SparseKeysSource * int, string> =
+    match evalStaticValueExpr env keysExpr with
+    | Ok sv ->
+        let decodeEntry (e: StaticEval.StaticValue) : Result<int64 list, string> =
+            match e with
+            | StaticEval.SVTuple comps ->
+                comps |> List.fold (fun acc c ->
+                    acc |> Result.bind (fun vs ->
+                        match c with
+                        | StaticEval.SVInt v when v >= 0L -> Ok (vs @ [v])
+                        | StaticEval.SVInt v -> Error (sprintf "SparseIdx: key coordinates must be non-negative; got %d" v)
+                        | other -> Error (sprintf "SparseIdx: key tuple components must be Nat literals; got %A" other))) (Ok [])
+            | StaticEval.SVInt v when v >= 0L -> Ok [v]   // rank-1: bare Nat keys
+            | StaticEval.SVInt v -> Error (sprintf "SparseIdx: key coordinates must be non-negative; got %d" v)
+            | other -> Error (sprintf "SparseIdx: keys must be a static list of Nat tuples; got element %A" other)
+        (match sv with
+         | StaticEval.SVTuple elems when not elems.IsEmpty ->
+             elems |> List.fold (fun acc e ->
+                 acc |> Result.bind (fun es -> decodeEntry e |> Result.map (fun d -> es @ [d]))) (Ok [])
+         | other -> Error (sprintf "SparseIdx: keys must be a non-empty static list of Nat tuples; got %A" other))
+        |> Result.bind (fun entries ->
+            let arity = entries.Head.Length
+            if entries |> List.exists (fun e -> e.Length <> arity) then
+                Error (sprintf "SparseIdx: all key tuples must have the same arity; first is %d-ary" arity)
+            elif (entries |> List.distinct |> List.length) <> entries.Length then
+                Error "SparseIdx: duplicate key tuple in static key list"
+            else Ok (SkStatic entries, arity))
+    | Error _ ->
+        // Runtime branch: named keys variable, rank-1 array of Nat tuples
+        // (or of bare Nats for a rank-1 sparse index).
+        (match keysExpr.Kind with
+         | ExprKind.ExprVar name ->
+             (match lookupVar name env with
+              | Some vi ->
+                  (match vi.Type with
+                   | ArrayElem arr when (arr.IndexTypes |> List.sumBy (fun ix -> ix.Rank)) = 1 ->
+                       (match arr.ElemType with
+                        | IRTTuple ts when ts.Length >= 2 ->
+                            let natLike t =
+                                match t with
+                                | IRTNat _ | IRTScalar ETInt64 | IRTScalar ETInt32 -> true
+                                | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> true
+                                | _ -> false
+                            if ts |> List.forall natLike then Ok (SkRuntime (IRVar (vi.VarId, vi.Type)), ts.Length)
+                            else Error (sprintf "SparseIdx<%s>: key tuple components must be Nat-valued; '%s' has element type %A" name name arr.ElemType)
+                        | IRTNat _ | IRTScalar ETInt64 | IRTScalar ETInt32 ->
+                            Ok (SkRuntime (IRVar (vi.VarId, vi.Type)), 1)
+                        | other ->
+                            Error (sprintf "SparseIdx<%s>: keys must be a rank-1 array of Nat tuples (Array<(Nat, ...) like ...>); '%s' has element type %A" name name other))
+                   | ArrayElem _ ->
+                       Error (sprintf "SparseIdx<%s>: keys array must be rank 1 (one key tuple per entry)" name)
+                   | other ->
+                       Error (sprintf "SparseIdx<%s>: keys must be an array (Array<(Nat, ...) like ...>); '%s' has type %A" name name other))
+              | None -> Ok (SkRuntime (lowerExtentExpr env keysExpr), 1))
+         | _ -> Ok (SkRuntime (lowerExtentExpr env keysExpr), 1))
+
 and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
     let id = env.Builder.FreshId()
     match ty with
@@ -691,6 +827,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
           Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
     | TySymIdx (rank, baseIdx) -> symPowerIndexRecord env id rank SymSymmetric baseIdx
     | TyAntisymIdx (rank, baseIdx) -> symPowerIndexRecord env id rank SymAntisymmetric baseIdx
+    | TyOrbIdx (levels, baseIdx) -> orbitIndexRecord env id levels baseIdx
     | TyHermitianIdx extent ->
         { Id = id; Rank = 2; Extent = lowerExtentExpr env extent
           Symmetry = SymHermitian; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
@@ -839,6 +976,20 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
             | _ -> lowerExtentExpr env maskExpr, 1
         { Id = id; Rank = rank; Extent = IRCompoundMask maskIR
           Symmetry = SymNone; Tag = Some "__compoundidx"; IxKind = IxKCompound
+          Kind = SDimension; Dependencies = [] }
+    | TySparseIdx keysExpr ->
+        // SparseIdx<keys> -- explicit valid-tuple enumeration (formalism 3.5).
+        // Rank is IMPLICIT: the key tuple arity. Keys keep their given order;
+        // lookup is by tuple hash (no grid, no per-axis extents). The
+        // static/runtime branch split lives in resolveSparseKeysSource.
+        // Validation failures are hard errors like the compound-mask arm's
+        // (lowerIndexType has no error channel today).
+        let source, rank =
+            match resolveSparseKeysSource env keysExpr with
+            | Ok sr -> sr
+            | Error msg -> failwith msg
+        { Id = id; Rank = rank; Extent = IRSparseKeys source
+          Symmetry = SymNone; Tag = Some "__sparseidx"; IxKind = IxKSparse
           Kind = SDimension; Dependencies = [] }
     | _ ->
         { Id = id; Rank = 1; Extent = IRParam ("?", 0, IRTNat None); Symmetry = SymNone
@@ -1216,6 +1367,7 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | ExprKind.ExprGuard (c, b) -> Set.union (collectFreeVars bound c) (collectFreeVars bound b)
     | ExprKind.ExprMask (a, p) -> Set.union (collectFreeVars bound a) (collectFreeVars bound p)
     | ExprKind.ExprCompound (d, m) -> Set.union (collectFreeVars bound d) (collectFreeVars bound m)
+    | ExprKind.ExprSparse (v, k) -> Set.union (collectFreeVars bound v) (collectFreeVars bound k)
     | ExprKind.ExprIntersect (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
     | ExprKind.ExprUnion (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
     | ExprKind.ExprUnique a -> collectFreeVars bound a
@@ -1726,9 +1878,20 @@ let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResu
 /// Pulled out as a separate helper so the same logic can run BOTH at the
 /// indexing call site (eager check via dispatchAppOrIndex) AND as a
 /// post-unification pass over a kernel body (revalidateBodyTagChecks).
+/// The index slot each POSITIONAL argument aligns to. One slot per arg —
+/// except a compound head, whose rank-k axis consumes k FLAT subscripts, so
+/// it repeats k times (mirroring the SymIdx-style flat consumption). Sparse
+/// heads stay 1:1 (one tuple arg fills the slot).
+let private slotPerArg (arrTy: IRArrayType) : IRIndexType list =
+    match arrTy.IndexTypes with
+    | h :: rest when h.IxKind = IxKCompound -> List.replicate (max 1 h.Rank) h @ rest
+    | l -> l
+
 let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: TypedExpr list) : TypeResult<unit> =
+    let slots = slotPerArg arrTy
+    let n = min tArgs.Length slots.Length
     let tagMismatch =
-        List.zip tArgs (arrTy.IndexTypes |> List.truncate tArgs.Length)
+        List.zip (tArgs |> List.truncate n) (slots |> List.truncate n)
         |> List.tryPick (fun (tArg, idxType) ->
             match idxType.Tag with
             | Some tagName when not (tagName.StartsWith("__")) ->
@@ -1769,11 +1932,12 @@ let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Type
 /// position-folded. An unknown label is a type error naming the available
 /// labels. Runtime (non-literal) label subscripts stay unsupported.
 let private foldEnumIdxLabels (env: TypeEnv) (arrTy: IRArrayType) (tArgs: TypedExpr list) : TypeResult<TypedExpr list> =
+    let slots = slotPerArg arrTy |> Array.ofList
     tArgs
     |> List.mapi (fun i a ->
-        if i >= arrTy.IndexTypes.Length then Ok a
+        if i >= slots.Length then Ok a
         else
-            match a.Kind, arrTy.IndexTypes.[i].Tag with
+            match a.Kind, slots.[i].Tag with
             | TExprLit (LitString s), Some tagName ->
                 (match Map.tryFind tagName env.TypeDefs with
                  | Some (TDIEnumIdx (_, _, values, _)) ->
@@ -1813,23 +1977,46 @@ let private foldEnumIdxLabels (env: TypeEnv) (arrTy: IRArrayType) (tArgs: TypedE
 /// Rank-1 compound (k = 1): a masked 1-D index. A bare scalar arg `B(i)` is
 /// accepted (the parser collapses a 1-tuple `(i)` to a bare expr anyway), as is
 /// an explicit 1-tuple. k >= 2 requires the tuple form.
-let private validateCompoundIndex (env: TypeEnv) (arrTy: IRArrayType) (tArgs: TypedExpr list) : TypeResult<unit> =
+// Tabulated-head validation, keyed on the head slot's IxKind:
+//
+//   COMPOUND — FLAT positional subscripts like SymIdx: B(c0, ..., c(k-1), t).
+//       Full-arity only; the tuple spelling and every wildcard/partial form
+//       are rejected (they moved to SparseIdx). This validator also owns the
+//       flat-count accounting (under/over-supply), closing the historical
+//       silent fresh-var fallthrough for compound heads.
+//   SPARSE — one TUPLE per sparse axis (formalism 3.5 currying): S((a, b)),
+//       S((a, _)), short prefix tuples; wildcards mark free axes.
+let private validateTabulatedIndex (env: TypeEnv) (arrTy: IRArrayType) (tArgs: TypedExpr list) : TypeResult<unit> =
     match arrTy.IndexTypes with
-    | headSlot :: _ when headSlot.IxKind = IxKCompound ->
+    | headSlot :: trailingSlots when headSlot.IxKind = IxKCompound ->
+        let k = headSlot.Rank
+        (match tArgs with
+         | [] -> Ok ()  // bare array value; nothing to check
+         | args ->
+             let isWild (e: TypedExpr) = match e.Kind with TExprWildcard -> true | _ -> false
+             let firstIsTuple =
+                 (match args.Head.Kind with TExprTuple _ -> true | _ -> false)
+                 || (match env.Subst.Resolve args.Head.Type with IRTTuple _ -> true | _ -> false)
+             if firstIsTuple then Error (CompoundTupleForm k)
+             elif args |> List.exists isWild then Error (CompoundTupleForm k)
+             elif args.Length < k then Error (CompoundUnderSupplied (k, args.Length))
+             elif args.Length > k + trailingSlots.Length then Error (CompoundOverSupplied (k, args.Length))
+             else Ok ())
+    | headSlot :: _ when headSlot.IxKind = IxKSparse ->
         let k = headSlot.Rank
         match tArgs with
         | [] -> Ok ()  // no args consumed here (e.g. bare array value); nothing to check
         | firstArg :: _ ->
-            // Wildcard compound indexing: a FULL-arity tuple (k elements) with
-            // `_` marking FREE axes (formalism 4.5 currying table: B((a, _)),
-            // B((_, b)), B((a, _, _)), B((a, _, c)), ...). The residual rank is
-            // the wildcard count: 1 free axis degenerates to a dense Idx window
-            // (or gather, when non-prefix); >= 2 free axes form a residual
-            // CompoundIdx. Multiple wildcards are deliberately ALLOWED here --
-            // unlike function partial application (6.2.3, single `_` only) --
-            // because the 4.5 table requires them: B((a, _, _)) is the only way
-            // to pin a single leading coordinate of a rank-3 compound, since
-            // the 1-tuple `(a)` collapses to a bare scalar in the parser.
+            // Wildcard sparse indexing: a FULL-arity tuple (k elements) with
+            // `_` marking FREE axes (formalism 3.5 currying: S((a, _)),
+            // S((_, b)), S((a, _, _)), S((a, _, c)), ...). The residual rank is
+            // the wildcard count: 1 free axis degenerates to a dense Idx
+            // gather; >= 2 free axes form a residual SparseIdx. Multiple
+            // wildcards are deliberately ALLOWED here -- unlike function
+            // partial application (6.2.3, single `_` only) -- because the
+            // currying table requires them: S((a, _, _)) is the only way to
+            // pin a single leading coordinate of a rank-3 sparse, since the
+            // 1-tuple `(a)` collapses to a bare scalar in the parser.
             let wildcardPositions =
                 match firstArg.Kind with
                 | TExprTuple elems ->
@@ -1838,36 +2025,35 @@ let private validateCompoundIndex (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Ty
                 | _ -> []
             match firstArg.Kind, wildcardPositions with
             | TExprWildcard, _ ->
-                // Bare `B(_)` (the parser collapses a 1-tuple `(_)` to the bare
-                // hole). It pins nothing: on a rank-1 compound the "residual"
+                // Bare `S(_)` (the parser collapses a 1-tuple `(_)` to the bare
+                // hole). It pins nothing: on a rank-1 head the "residual"
                 // would be the whole array, and on rank >= 2 it is not even a
                 // tuple. Reject rather than let the hole flow as a coordinate.
-                Error (CompoundBareWildcard k)
+                Error (SparseBareWildcard k)
             | _, (_ :: _) ->
                 let tupleLen =
                     match firstArg.Kind with
                     | TExprTuple es -> es.Length
                     | _ -> 0
                 if tupleLen <> k then
-                    Error (CompoundWildcardArity (k, tupleLen))
+                    Error (SparseWildcardArity (k, tupleLen))
                 elif wildcardPositions.Length = k then
-                    Error (CompoundAllFree k)
+                    Error (SparseAllFree k)
                 else Ok ()
             | _, [] ->
               (match env.Subst.Resolve firstArg.Type with
                | IRTTuple tys when tys.Length >= 1 && tys.Length <= k -> Ok ()
                 // 1 <= j <= k: full (j = k) or partial (j < k, leading-prefix)
-                // index. The residual type is computed by compoundResidualType;
-                // codegen reconstitutes it as a shared window (rank >= 2) or a
-                // dense window (rank 1).
+                // index. The residual type is computed by tabulatedResidualType;
+                // codegen reconstitutes it as a gather.
                | IRTTuple tys ->
-                   Error (CompoundOverSupplied (k, tys.Length))
-               | _ when k = 1 -> Ok ()  // rank-1 compound: bare scalar index is fine
+                   Error (SparseOverSupplied (k, tys.Length))
+               | _ when k = 1 -> Ok ()  // rank-1 head: bare scalar index is fine
                | _ ->
                    // k >= 2 but the first arg is not a tuple. This is the flat
-                   // currying form B(c0, c1, ...) or a single scalar -- reject and
+                   // currying form S(c0, c1, ...) or a single scalar -- reject and
                    // point at the canonical tuple form.
-                   Error (CompoundNeedsTuple k))
+                   Error (SparseNeedsTuple k))
     | _ -> Ok ()
 
 /// The residual index-type fragment (formalism 4.5 currying table) that
@@ -1892,24 +2078,32 @@ let private validateCompoundIndex (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Ty
 /// array's IR reference; the pinned coordinate VALUES live at the indexing
 /// site, not in the type. Representation: shared data window, materialized
 /// child index (the O(window) reconstitution is phase-2 codegen).
-let private compoundResidualType (headSlot: IRIndexType) (parentIR: IRExpr) (j: int) (fresh: unit -> IRId) : IRIndexType list =
+let private tabulatedResidualType (headSlot: IRIndexType) (parentIR: IRExpr) (j: int) (fresh: unit -> IRId) : IRIndexType list =
     let k = headSlot.Rank
     let residualRank = k - j
     if residualRank <= 0 then
         []  // j = k: fully consumed
     elif residualRank = 1 then
-        // Dense residual Idx: one free coordinate, a contiguous [lo,hi) window.
+        // Dense residual Idx: one free coordinate. For a compound head this is
+        // a contiguous [lo,hi) window (prefix) or a gather (scattered); for a
+        // sparse head it is always a gathered dense copy in key order.
         [ { Id = fresh (); Rank = 1
             Extent = IRCompoundProject (parentIR, j)
             Symmetry = SymNone; Tag = None; IxKind = IxKPlain
             Kind = SDimension; Dependencies = [] } ]
     else
-        // Residual CompoundIdx over the remaining k-j axes at the pinned prefix.
-        // Tagged __compoundidx so it is treated uniformly with a top-level
-        // compound (further indexable, further partial-indexable).
+        // Residual tabulated head over the remaining k-j axes at the pinned
+        // coordinates. The residual keeps the PARENT's kind -- a partially
+        // indexed compound is a compound, a partially indexed sparse is a
+        // sparse -- so it is treated uniformly with a top-level one (further
+        // indexable, further partial-indexable).
+        let tag, kind =
+            match headSlot.IxKind with
+            | IxKSparse -> Some "__sparseidx", IxKSparse
+            | _ -> Some "__compoundidx", IxKCompound
         [ { Id = fresh (); Rank = residualRank
             Extent = IRCompoundProject (parentIR, j)
-            Symmetry = SymNone; Tag = Some "__compoundidx"; IxKind = IxKCompound
+            Symmetry = SymNone; Tag = tag; IxKind = kind
             Kind = SDimension; Dependencies = [] } ]
 
 /// Rank as CODEGEN will see it — the `k` in the emitted `Array<elem, k>`,
@@ -1966,33 +2160,77 @@ let firstArgRankClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
 
 let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     match tFunc.Type with
-    | ArrayElem arrTy when tArgs.Length <= arrTy.IndexTypes.Length ->
-        validateCompoundIndex env arrTy tArgs
+    // SUBSCRIPTING A WREATH ARRAY, refused FIRST and EXPLICITLY.
+    //
+    // This arm exists because of the catch-all's vacuity, not merely for
+    // tidiness. A depth-2 OrbIdx record is ONE index slot spanning prod(ri) raw
+    // axes, so `W(i,j,k,l)` has 4 args against 1 slot: the arity guard below
+    // (`tArgs.Length <= IndexTypes.Length`) is FALSE, no other arm matches, and
+    // `dispatchAppOrIndex` falls through to a catch-all that mints a fresh
+    // inference variable and returns Ok (see the note at that arm). The read
+    // would then typecheck at a type nothing later contradicts and reach
+    // codegen/interp as a plausible dense subscript into a flat pool.
+    //
+    // What is missing is real, not incidental: a read at an ARBITRARY tuple is
+    // the MIRRORED read -- canonOrb's per-level sort fold, the accumulated
+    // character, the zero set at a '-' level -- and none of that is emitted in
+    // v1. Writes are (the traversal nest only ever visits canonical cells, so
+    // it needs no fold). Refusing here is what keeps the two apart.
+    | ArrayElem arrTy when
+        not (List.isEmpty tArgs)
+        && arrTy.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
+        let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
+        Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "array subscript"))
+    | ArrayElem arrTy when
+        // A compound head takes FLAT subscripts (k for the axis + one per
+        // trailing dim), so its arg budget exceeds the slot count — and it
+        // ALWAYS routes here so validateTabulatedIndex owns the flat-count
+        // accounting (no silent fresh-var fallthrough for compound heads).
+        (match arrTy.IndexTypes with
+         | h :: _ when h.IxKind = IxKCompound -> true
+         | _ -> tArgs.Length <= arrTy.IndexTypes.Length) ->
+        validateTabulatedIndex env arrTy tArgs
         |> Result.bind (fun () ->
         foldEnumIdxLabels env arrTy tArgs
         |> Result.bind (fun tArgs ->
         checkArrayIndexTags env arrTy tArgs
         |> Result.bind (fun () ->
             let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
-            // Compound-head consumption: when the FIRST index slot is a compound
-            // (formalism 4.5), the first argument (a j-tuple, or a scalar for a
-            // rank-1 compound) consumes that ONE slot -- pinning j of its k
-            // coordinates -- and the compound slot is REPLACED by its residual
-            // fragment (compoundResidualType), not skipped positionally. Any
-            // remaining args then consume the trailing regular slots as usual.
-            // This differs from the plain positional path (one arg = one slot):
-            // a compound is one slot of rank k filled by one k-tuple.
-            let headIsCompound =
+            // Tabulated-head consumption: the FIRST index slot is one rank-k
+            // axis filled by ONE k-tuple at the IR level (classify /
+            // compoundRead read the pinned/free split off that tuple).
+            //   COMPOUND: flat surface form B(c0, ..., c(k-1), t...) — pack
+            //       the first k args into a synthetic full tuple here, so the
+            //       IR shape (and everything downstream: typeOf, CompoundFull
+            //       codegen, row views, interp) is unchanged from the
+            //       historical full-tuple read. j = k always (partials are a
+            //       SparseIdx feature; validateTabulatedIndex rejected them).
+            //   SPARSE: tuple surface form S((a, _)) — the tuple arrives
+            //       as-is; wildcards mark free axes and j <= k.
+            // Any remaining args then consume the trailing regular slots.
+            let headIsTabulated =
                 match arrTy.IndexTypes with
-                | h :: _ -> h.IxKind = IxKCompound
+                | h :: _ -> h.IxKind = IxKCompound || h.IxKind = IxKSparse
                 | [] -> false
-            if headIsCompound then
+            if headIsTabulated then
                 let headSlot = List.head arrTy.IndexTypes
                 let trailingSlots = List.tail arrTy.IndexTypes
                 let k = headSlot.Rank
+                // Flat compound packing: first k args -> one synthetic full
+                // tuple (k >= 2; a rank-1 axis keeps its bare scalar arg,
+                // which the existing scalar path already consumes as j = 1).
+                let tArgs =
+                    if headSlot.IxKind = IxKCompound && k >= 2 && tArgs.Length >= k then
+                        let coords = tArgs |> List.truncate k
+                        let packed =
+                            { (List.head coords) with
+                                Kind = TExprTuple coords
+                                Type = IRTTuple (coords |> List.map (fun c -> c.Type)) }
+                        packed :: (tArgs |> List.skip k)
+                    else tArgs
                 let firstArg = List.head tArgs
                 // Wildcard form (full-arity tuple with `_` marking free axes):
-                // validateCompoundIndex has already enforced full arity and at
+                // validateTabulatedIndex has already enforced full arity and at
                 // least one pinned coordinate. CONSUME the holes here by
                 // rewriting each TExprWildcard element to a unit literal:
                 //   * the wildcard-escape scan then correctly sees a consumed
@@ -2048,7 +2286,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 let tArgs = firstArg :: keptRemaining
                 // j = pinned coordinate count: tuple arity minus free axes for
                 // the wildcard form; tuple arity for a short (prefix) tuple; 1
-                // for a scalar (rank-1 compound). validateCompoundIndex already
+                // for a scalar (rank-1 compound). validateTabulatedIndex already
                 // rejected the malformed shapes, so this is well-formed here.
                 let j =
                     if not (List.isEmpty wildPositions) then
@@ -2072,13 +2310,13 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                     | TExprVar (_, vid, _) -> IRVar (vid, tFunc.Type)
                     | _ -> IRLit IRLitUnit
                 let residualFragment =
-                    compoundResidualType headSlot parentIR j (fun () -> env.Builder.FreshId())
+                    tabulatedResidualType headSlot parentIR j (fun () -> env.Builder.FreshId())
                 // Remaining args after the compound tuple consume trailing slots.
                 let remainingArgs = List.tail tArgs
                 let trailingRemaining =
                     if remainingArgs.Length <= List.length trailingSlots then
                         trailingSlots |> List.skip remainingArgs.Length
-                    else trailingSlots  // (validateCompoundIndex/arity guard covers over-supply)
+                    else trailingSlots  // (validateTabulatedIndex/arity guard covers over-supply)
                 let finalSlots = residualFragment @ trailingRemaining
                 if interiorTrailingHole then
                     Error (Other "A wildcard `_` among the trailing indices of a compound array must come AFTER all supplied trailing indices (a free interior trailing dimension would require restructuring the trailing blocks). Reorder, or leave the trailing dims free by omitting them.")
@@ -2318,7 +2556,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprGuard (c, b) -> [c; b]
         | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
         | TExprGroupBy (a, p) | TExprSort (a, p)
-        | TExprCompound (a, p) -> [a; p]
+        | TExprCompound (a, p) | TExprSparse (a, p) -> [a; p]
         | TExprReduce (a, p, i) -> [a; p] @ Option.toList i
         | TExprProdSum args -> args
         | TExprUnique a -> [a]
@@ -2441,15 +2679,34 @@ let stampSynthSpan (src: Expr) (te: TypedExpr) : TypedExpr =
 ///
 /// `argPos` is the kernel parameter position that receives the compact array's
 /// cells; `signParities` / `conjCommutes` are that kernel's per-parameter
-/// summaries, in declaration order.
+/// summaries, in declaration order. `wreathLevels` is the class's level list
+/// when cls = SymWreath (empty otherwise): a wreath's mirror is the PRODUCT of
+/// its per-level characters, so the answer depends on the levels and not on the
+/// class name alone — the one place in this file where that is true.
 let compactClassInheritError
         (cls: SymmetryClass)
+        (wreathLevels: (int * bool) list)
         (argPos: int)
         (paramName: string)
         (signParities: Blade.Deduce.SignParity list)
         (conjCommutes: bool list) : TypeError option =
     match cls with
     | SymNone | SymSymmetric -> None
+    // An all-'+' wreath's mirror is the identity, exactly like SymSymmetric, so
+    // any map preserves it. A single '-' level anywhere makes the mirror carry a
+    // negation, and then the SAME sign-ODD certificate the depth-1
+    // antisymmetric case needs applies — an inner '-' level must not silently
+    // skip BL4015 just because the outer class is spelled differently.
+    // (In v1 a wreath output is refused at the storage boundary before this can
+    // fire; the gate is here so it is RIGHT when that refusal lifts, not so it
+    // fires today.)
+    | SymWreath when wreathLevels |> List.forall snd -> None
+    | SymWreath ->
+        (match List.tryItem argPos signParities with
+         | Some Blade.Deduce.SOdd -> None
+         | Some Blade.Deduce.SEven ->
+             Some (AntisymMapNotOdd (paramName, "provably sign-EVEN (f(-x) = f(x))"))
+         | _ -> Some (AntisymMapNotOdd (paramName, "of UNKNOWN sign parity")))
     | SymAntisymmetric ->
         (match List.tryItem argPos signParities with
          | Some Blade.Deduce.SOdd -> None
@@ -2691,13 +2948,15 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | resolvedArg ->
                 // Unit propagation at scalar position, same table as the
                 // kernel-body walk (unitRulesForUnaryOp): sqrt halves
-                // all-even exponents, floor/ceil preserve, transcendentals
-                // are dimensionless-out.
-                let resTy =
-                    match unitRulesForUnaryOp (OpMath name) (IR.getUnits resolvedArg) with
-                    | Some u -> IRTUnitAnnotated (IRTScalar ETFloat64, u)
-                    | None -> IRTScalar ETFloat64
-                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) resTy))
+                // all-even exponents; floor/ceil and the transcendentals
+                // are not homogeneous and REJECT a dimensioned operand.
+                unitRulesForUnaryOp (OpMath name) (IR.getUnits resolvedArg)
+                |> Result.map (fun resUnits ->
+                    let resTy =
+                        match resUnits with
+                        | Some u -> IRTUnitAnnotated (IRTScalar ETFloat64, u)
+                        | None -> IRTScalar ETFloat64
+                    mkTyped (TExprUnaryOp (OpMath name, tArg)) resTy))
 
     // ---- abs(x): polymorphic numeric intrinsic ----
     // Deliberately NOT in mathIntrinsics (those are real-valued, typed
@@ -3022,8 +3281,24 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         // A SOLE compound slot (idxs.Length = 1) is fine and passes through.
         let hasCompound =
             idxs |> List.exists (fun ix -> (match ix.Extent with IRCompoundMask _ -> true | _ -> false))
+        let hasSparse =
+            idxs |> List.exists (fun ix -> (match ix.Extent with IRSparseKeys _ -> true | _ -> false))
+        // A wreath range slot is the storage refusal's THIRD front-end door
+        // (beside the let annotation and the function signature): `range<...>`
+        // names an ITERATION space and needs no annotation, so without this the
+        // program reaches buildRawLoopLevels' backstop and surfaces as a BL9001
+        // internal error -- accurate about the failure, wrong about whose fault
+        // it is.
+        match idxs |> List.tryFind (fun ix -> ix.Symmetry = SymWreath) with
+        | Some ix ->
+            Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "range<> iteration slot"))
+        | None ->
         if hasCompound && idxs.Length > 1 then
             Error (Other "range<CompoundIdx<m>, ...>: a compound range slot cannot be combined with other index types in one range<> (formalism 4.5)")
+        elif hasSparse && idxs.Length > 1 then
+            // Same whole-iteration-space rule as the compound slot: the key
+            // enumeration IS the space.
+            Error (Other "range<SparseIdx<keys>, ...>: a sparse range slot cannot be combined with other index types in one range<> (formalism 3.5)")
         else
         // Each listed index type becomes one virtual slot; downstream the slots
         // uncurry into nested loop levels. The element type is taken from the
@@ -3127,6 +3402,49 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                      Ok (mkTyped (TExprCompound (tDense, tMask)) compoundTy)
                  | Error msg -> Error (Other msg))
             | _ -> Error (Other "compound(dense, mask) expects two array arguments: a dense array and a bool mask covering its leading dimensions")))
+
+    | ExprKind.ExprSparse (values, keys) ->
+        // sparse(values, keys): bundle a values array whose LEADING dimension
+        // is the key axis (one cell per key, IN KEY ORDER — no scatter) with an
+        // explicit key list into a SparseIdx-typed array (formalism 3.5).
+        //
+        // Shape rule, mirroring compoundViewType's leading-prefix rule: the
+        // FIRST values dimension collapses into the SparseIdx axis; any
+        // remaining dimensions stay as regular trailing index slots (their
+        // product is the trailing stride), giving the
+        // `Array<T like SparseIdx<keys>, Idx<...>>` shape. A rank-1 values
+        // array is the all-dims case (empty trailing -> scalar Sparse).
+        //
+        // Unlike the compound builder there is no leading-PREFIX matching to
+        // do: the key axis is a single dimension by construction (one key per
+        // entry), so exactly one dimension is consumed. The keys resolve as in
+        // the SparseIdx<keys> type form; |values| = |keys| is checked at
+        // runtime, matching the compound builder's runtime guards.
+        inferExpr env values |> Result.bind (fun tValues ->
+        inferExpr env keys |> Result.bind (fun tKeys ->
+            match env.Subst.Resolve tValues.Type with
+            | ArrayElem valuesArr ->
+                (match valuesArr.IndexTypes with
+                 | [] ->
+                     Error (Other "sparse(values, keys): values must be an array whose leading dimension is the key axis (one cell per key, in key order)")
+                 | keyAxis :: trailing when (max 1 keyAxis.Rank) = 1 ->
+                     (match resolveSparseKeysSource env keys with
+                      | Ok (source, rank) ->
+                          let sparseIdx =
+                              { Id = env.Builder.FreshId(); Rank = rank
+                                Extent = IRSparseKeys source
+                                Symmetry = SymNone; Tag = Some "__sparseidx"; IxKind = IxKSparse
+                                Kind = SDimension; Dependencies = [] }
+                          // The key axis is REPLACED by the sparse slot; the
+                          // remaining values dims carry over verbatim as
+                          // trailing slots (same records, so index-space
+                          // identity is preserved for downstream reads).
+                          let sparseTy = mkArrayArrow (sparseIdx :: trailing) valuesArr.ElemType valuesArr.Identity
+                          Ok (mkTyped (TExprSparse (tValues, tKeys)) sparseTy)
+                      | Error msg -> Error (Other msg))
+                 | keyAxis :: _ ->
+                     Error (Other (sprintf "sparse(values, keys): the LEADING values dimension is the key axis and must be a plain rank-1 index; got a rank-%d (compact/tabulated) slot. Trailing dimensions may be any shape." keyAxis.Rank)))
+            | _ -> Error (Other "sparse(values, keys) expects a values array (leading dim = key axis, remaining dims trailing) and a key list (a `let static` tuple list or a rank-1 tuple-array variable)")))
 
     // intersect(A, B) / union(A, B) — set operations on arrays
     | ExprKind.ExprIntersect (a, b) | ExprKind.ExprUnion (a, b) ->
@@ -3577,9 +3895,21 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
             unify env.Subst tArr.Type freshArr |> ignore
          | _ -> ())
         match env.Subst.Resolve(tArr.Type) with
+        // A wreath axis reaches the STORAGE refusal, not the canonical-vs-logical
+        // one: reduce over compact storage is refused for a semantics reason
+        // (which cells does the fold see?), but a wreath array has no cells at
+        // all yet, and naming the ambiguity would suggest `decompact` is the fix
+        // when the class cannot even be allocated.
+        | ArrayElem arrTy when arrTy.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
+            let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
+            Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "reduce()"))
         | ArrayElem arrTy when arrTy.IndexTypes.Length = 1
                                && (match arrTy.IndexTypes.[0].Symmetry with
                                    | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                                   // Unreachable: the wreath arm above ran first.
+                                   // Spelled out so FS0025 keeps auditing this
+                                   // match rather than a wildcard swallowing it.
+                                   | SymWreath -> true
                                    | SymNone -> false) ->
             // Arc 3 hardening: a single SYMMETRY-CLASS record passes the
             // one-record check but is NOT a rank-1 axis — reduce would walk
@@ -3628,13 +3958,71 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
                     | None -> Ok ()
                 kernelUnify |> Result.bind (fun () ->
                 initUnify |> Result.bind (fun () ->
+                reduceKernelUnitCheck env tKernel arrTy.ElemType |> Result.bind (fun () ->
                     // arrTy.ElemType is IRType post-B2; return directly.
+                    // Sound only because the check above established that the
+                    // kernel preserves the element's unit signature.
                     let resultType = arrTy.ElemType
-                    Ok (mkTyped (TExprReduce (tArr, tKernel, tInitOpt)) resultType)))
+                    Ok (mkTyped (TExprReduce (tArr, tKernel, tInitOpt)) resultType))))
         | ArrayElem _ ->
             Error (Other "reduce() currently supports only rank-1 arrays (multi-rank reduction over the innermost dimension is deferred)")
         | _ ->
             Error (Other "reduce() requires an array as first argument"))))
+
+/// Unit soundness of a fold, checked at the rank-1 reduce site.
+///
+/// `reduce` types its result as the array's ELEMENT type. That is right only
+/// when the kernel PRESERVES the element's unit signature. Folding n meters
+/// through `+` gives meters, so the claim holds; folding them through `*`
+/// gives meters^n — a grade that varies with the EXTENT, so no fixed
+/// signature describes it and `Float<meters>` is a false claim, not merely an
+/// imprecise one. `+` and `-` are unit-endomorphic and pass (as is any
+/// hand-written kernel whose body is); `*` and `/` over a dimensioned element
+/// type reject here. Note that the endomorphic class is wider than what Blade
+/// can currently express as a fold kernel: min/max are the textbook other
+/// members, but they exist only as bounded-type keywords, not as sections or
+/// callable functions, so no kernel can name them today.
+/// docs/features/sql.md types
+/// the fold kernel T × T → T, which is exactly this restriction; this is
+/// where units are made to obey it.
+///
+/// The kernel's own ARROW cannot answer the question. Operator sections are
+/// typed as strict endomorphisms `(τ, τ) → τ` (inferExpr's ExprSection arm),
+/// and the caller has just unified those params with the element type — so
+/// every kernel's arrow says "unit-preserving" by construction, which is why
+/// the fold looked sound for as long as it did. Recompute the real signature
+/// instead: a section through the same per-op table the scalar path uses, a
+/// lambda through the kernel-body walk. The lambda case is exactly the state
+/// buildApplyInfo runs that walk in — params already unified with the element
+/// type, so its body vars resolve to the dimensioned type.
+///
+/// A dimensionless (or unannotated) element type is unconstrained: there is
+/// no claim to break. That is the escape hatch for `*`-folds, which stay
+/// legal over plain numbers. A kernel whose form the walk cannot read (a
+/// named function, a captured value) is left alone rather than guessed at.
+and reduceKernelUnitCheck (env: TypeEnv) (tKernel: TypedExpr) (elemTy: IRType) : TypeResult<unit> =
+    match IR.getUnits (env.Subst.Resolve elemTy) with
+    | Some eu when not (Map.isEmpty (unitNormalize eu)) ->
+        let kernelUnits =
+            match (resolveTypedExpr env tKernel).Kind with
+            | TExprSection op -> Some (unitRulesForOp op (Some eu) (Some eu))
+            | TExprLambda info -> Some (kernelBodyUnits env Map.empty info.Body)
+            | _ -> None
+        match kernelUnits with
+        | None -> Ok ()
+        | Some computed ->
+            computed |> Result.bind (fun ku ->
+                let preserves =
+                    match ku with
+                    | Some u -> unitCompatible u eu
+                    | None -> false
+                if preserves then Ok ()
+                else
+                    Error (UnitMismatch (
+                                "reduce kernel (a fold is typed at its element's unit, so the kernel must preserve that unit — `+` and `-` do; `*` and `/` do not, since folding n of them yields a grade that depends on the extent)",
+                                ppUnitSig eu,
+                                (match ku with Some u -> ppUnitSig u | None -> "dimensionless"))))
+    | _ -> Ok ()
 
 and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
     args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
@@ -3648,9 +4036,14 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                  | None -> Error (Other "prodsum() requires at least one array argument"))
             | t :: more ->
                 match env.Subst.Resolve t.Type with
+                // Storage refusal first, for reduce()'s reason (see there).
+                | ArrayElem arrTy when arrTy.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
+                    let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
+                    Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "prodsum()"))
                 | ArrayElem arrTy when arrTy.IndexTypes.Length = 1
                                        && (match arrTy.IndexTypes.[0].Symmetry with
                                            | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                                           | SymWreath -> true   // unreachable: taken above
                                            | SymNone -> false) ->
                     // Same ambiguity as reduce over compact storage: canonical
                     // vs logical cells differ. Mirror its guidance.
@@ -3761,6 +4154,16 @@ and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
                 let ix = arrTy.IndexTypes.[slot]
                 if r < 2 || ix.Symmetry = SymNone then
                     Error (DecompactPlainAxis d)
+                // decompact is a FISSION of one compact group into a peeled
+                // axis plus a residual group of the SAME class. For a wreath
+                // that is not even well-defined without deciding which LEVEL is
+                // being peeled (and the residual of a level-2 peel is not a
+                // wreath class of the same shape). The `mkRemainder` code below
+                // would build `{ ix with Rank = a }` -- a wreath record whose
+                // Rank no longer matches the product of its level list, i.e. an
+                // internally inconsistent type. Refuse.
+                elif ix.Symmetry = SymWreath then
+                    Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "decompact()"))
                 else
                 // Codegen scope: the compact group being decompacted must be
                 // the LAST index slot, with any preceding slots being plain
@@ -4582,10 +4985,10 @@ and inferExtents (env: TypeEnv) array : TypeResult<TypedExpr> =
                         | IxKRagged | IxKRaggedInline | IxKRaggedOpaque
                         | IxKDepInner
                         | IxKGroupOuter | IxKGroupMember
-                        | IxKCompound | IxKCompoundDynamic -> true
+                        | IxKCompound | IxKCompoundDynamic | IxKSparse -> true
                         | _ -> false)
                 if raggedFamilySlot then
-                    Error (Other "extents() on a ragged, grouped, or multi-rank compound array has no scalar answer for the masked/ragged dimensions. Use extents(row) on a peeled or indexed row, the lengths array, or extents on a rank-1 compound (which is its cardinality).")
+                    Error (Other "extents() on a ragged, grouped, or multi-rank compound/sparse array has no scalar answer for the masked/keyed/ragged dimensions. Use extents(row) on a peeled or indexed row, the lengths array, or extents on a rank-1 compound/sparse (which is its cardinality).")
                 else
                 // Multi-rank: tuple of Int64s, one per dimension
                 let n = arrTy.IndexTypes.Length
@@ -4677,6 +5080,30 @@ and warnImplicitOuterProduct (env: TypeEnv) (tLoop: TypedExpr) (rightResult: Typ
                 "implicit method_for: `(A, B) <@> kernel` iterates the OUTER product of its %d operands (structure-first default), not elementwise pairs. For elementwise co-iteration write `for (A, B) in range<...> <@> kernel` or `zip(A, B) <@> kernel`; write `method_for(...)` explicitly to confirm the outer product and silence this note."
                 info.Arrays.Length)
     | _ -> ()
+
+/// Refuse a multi-leaf combinator (`<&!>` hard fusion, `<&>` parallel) whose
+/// leaves include a deduced OrbIdx (iterated-wreath) output.
+///
+/// Both combinators MERGE loop nests: they build one `LoopNestCodeGen` per leaf
+/// and emit their bodies under a shared header. A wreath leaf has no
+/// `LoopNestCodeGen` at all -- its nest is the segment-peeled `orb_visit` one,
+/// which is a whole-application emitter rather than a level list, so there is
+/// nothing to merge and nothing to share a header with. Left alone, the leaf
+/// builder reaches `buildSymmVec`, whose `failwith` surfaces as BL9001
+/// "internal compiler error, please report it" -- the wrong story for a
+/// language limitation. Refuse on the user-facing channel instead; the
+/// `buildSymmVec` backstop stays for internal producers.
+and private wreathLeafRefusal (opName: string) (leaves: TypedExpr list) : TypeError option =
+    let wreathOf (t: IRType) =
+        match (match t with IRTComputation inner -> inner | other -> other) with
+        | ArrayElem at -> at.IndexTypes |> List.tryFind (fun ix -> ix.Symmetry = SymWreath)
+        | _ -> None
+    leaves
+    |> List.tryPick (fun (l: TypedExpr) -> wreathOf l.Type)
+    |> Option.map (fun ix ->
+        OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix),
+                                 sprintf "%s over a wreath-producing leaf (nest merging needs a level \
+list to share, and a wreath's nest is the segment-peeled orb_visit traversal)" opName))
 
 and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     match op with
@@ -4847,12 +5274,16 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     | OpParallel ->
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
-            Ok (mkTyped (TExprParallel (tL, tR)) (IRTTuple [tL.Type; tR.Type]))))
+            match wreathLeafRefusal "<&>" [tL; tR] with
+            | Some e -> Error e
+            | None -> Ok (mkTyped (TExprParallel (tL, tR)) (IRTTuple [tL.Type; tR.Type]))))
 
     | OpFusion ->
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
-            Ok (mkTyped (TExprFusion (tL, tR)) (IRTTuple [tL.Type; tR.Type]))))
+            match wreathLeafRefusal "<&!>" [tL; tR] with
+            | Some e -> Error e
+            | None -> Ok (mkTyped (TExprFusion (tL, tR)) (IRTTuple [tL.Type; tR.Type]))))
 
     | OpFunctor ->
         // <$> : (α → β) × Computation α → Computation β
@@ -4971,6 +5402,13 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                          unify env.Subst tL.Type tR.Type
                          |> Result.map (fun () ->
                              mkTyped (TExprFallback (tL, tR)) tL.Type)
+                     | head :: _ when head.IxKind = IxKSparse ->
+                         // Sparse-left is deferred: <|:>'s compound rule requires
+                         // a dense right operand covering the WHOLE product
+                         // space, which is well-defined for a mask over a grid
+                         // but has no canonical shape for an arbitrary key set
+                         // (the keys' bounding box is not part of the type).
+                         Error (Other "<|:> with a SparseIdx left operand is not yet supported (a sparse key set has no product-space shape for the dense fallback to cover).")
                      | _ ->
                          Error (Other "<|:> left operand must be a plain dense array or a compound(A, mask) array; ragged/dynamic-compound left operands are not supported."))
             | _ ->
@@ -5088,7 +5526,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                             && indexShapesAgree aL.IndexTypes aR.IndexTypes)
                     | _ -> false
                 if zipable then
-                    match unitRulesForOp op (elemUnits lRes) (elemUnits rRes) with
+                    match unitRulesForOpWith op (elemUnits lRes) (elemUnits rRes) (Some tR) with
                     | Error e -> Error e
                     | Ok resUnits ->
                         let sp = mergeSpan left.Span right.Span
@@ -5129,7 +5567,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 let arrU = elemUnits (if arrayOnLeft then lRes else rRes)
                 let scalU = IR.getUnits (if arrayOnLeft then rRes else lRes)
                 let luB, ruB = if arrayOnLeft then (arrU, scalU) else (scalU, arrU)
-                match unitRulesForOp op luB ruB with
+                match unitRulesForOpWith op luB ruB (Some tR) with
                 | Error e -> Error e
                 | Ok resUnits ->
                 let sp = mergeSpan left.Span right.Span
@@ -5164,7 +5602,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // env.Builder: inferArithType mints fresh index-type ids for a
             // synthesized outer-product result (same allocator deduceOutputType
             // uses for the method_for output type).
-            inferArithType env.Builder mode op tL.Type tR.Type |> Result.map (fun resTy ->
+            inferArithType env.Builder mode op tL.Type tR.Type (Some tR) |> Result.map (fun resTy ->
                 mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)))
 
 /// Checker-level Dist operator dispatch (typed-Dist arc phase 4).
@@ -5233,7 +5671,9 @@ and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: I
 /// unit judgment must happen at the synthesis site, where the operand
 /// units are still visible. Returns the RESULT unit signature (None =
 /// no annotation): +/−/comparison require agreement, * and / compose
-/// signatures, everything else (^, &&, ||, ...) drops units.
+/// signatures, `^` scales them by its exponent (unitRulesForCaret — it
+/// needs the exponent's VALUE, so this signature can only reject), and
+/// everything else (&&, ||, ...) drops units.
 and unitRulesForOp (op: BinOp) (lUnits: UnitSig option) (rUnits: UnitSig option) : TypeResult<UnitSig option> =
     match op with
     | OpAdd | OpSub ->
@@ -5259,14 +5699,84 @@ and unitRulesForOp (op: BinOp) (lUnits: UnitSig option) (rUnits: UnitSig option)
         | Some lu, Some ru when not (unitCompatible lu ru) ->
             Error (UnitMismatch ("comparison", ppUnitSig lu, ppUnitSig ru))
         | _ -> Ok None
+    // `^` needs the exponent VALUE, which this signature does not carry.
+    // Reaching the exponent-free form with a dimensioned base is therefore a
+    // rejection, not a silent drop: a call site that can see the right
+    // operand routes through unitRulesForOpWith instead and gets the real
+    // answer. Erring loudly here keeps a future call site from
+    // reintroducing the bug this arm used to be (`^` fell into the catch-all
+    // below, so `d ^ 2` over meters typed as a bare Float).
+    | OpCaret -> unitRulesForCaret lUnits rUnits None
     | _ -> Ok None
+
+/// The static integer exponent of a `^` right operand, when it has one.
+/// Only an integer-valued literal gives the result a unit signature:
+/// `d ^ 2` over meters is meters^2, whereas `d ^ n` for a runtime n has a
+/// grade that is not known until the value is. `x ^ 2.0` counts (same power
+/// as `x ^ 2`); `x ^ 0.5` does not, since meters^(1/2) has no representation
+/// in the integer-exponent grammar UnitSig uses. The bound keeps unitPow's
+/// exponent multiplication away from overflow — past it the answer is "no
+/// static exponent", which the caller treats as a rejection, so the cap
+/// cannot silently drop a signature.
+and staticPowExponent (e: TypedExpr) : int option =
+    match e.Kind with
+    | TExprLit (LitInt n) when n >= -1024L && n <= 1024L -> Some (int n)
+    | TExprLit (LitFloat f) when System.Double.IsFinite f && f = floor f && abs f <= 1024.0 ->
+        Some (int f)
+    | TExprUnaryOp (OpNeg, inner) -> staticPowExponent inner |> Option.map (fun n -> -n)
+    | _ -> None
+
+/// Unit rule for `^`. Split out of unitRulesForOp because it is the one op
+/// whose result signature depends on the right operand's VALUE rather than
+/// its signature: meters ^ 2 is meters^2, which is exactly unitPow — a
+/// function that until now was reachable only from the `Unit area =
+/// meters^2` DECLARATION grammar, never from an expression.
+///
+/// Two rejections. A dimensioned EXPONENT is meaningless at any base
+/// (`x ^ (2.0 : Float<seconds>)`). A dimensioned BASE with no static integer
+/// exponent is rejected rather than silently stripped, because the result's
+/// grade genuinely depends on a runtime value and no signature describes it.
+/// A dimensionless base is unconstrained either way, so `x ^ y` over plain
+/// Floats — including the fractional and variable exponents the AD corpus
+/// leans on — is untouched.
+and unitRulesForCaret (lUnits: UnitSig option) (rUnits: UnitSig option) (powExp: int option) : TypeResult<UnitSig option> =
+    let dimensioned u =
+        match u with
+        | Some s when not (Map.isEmpty (unitNormalize s)) -> Some s
+        | _ -> None
+    match dimensioned rUnits with
+    | Some ru ->
+        Error (UnitMismatch ("exponent of ^ (an exponent must be dimensionless)", "dimensionless", ppUnitSig ru))
+    | None ->
+        match dimensioned lUnits, powExp with
+        | None, _ -> Ok None
+        | Some lu, Some n -> Ok (Some (unitPow lu n))
+        | Some lu, None ->
+            // Phrased as expected-vs-found on the WHOLE power, since the
+            // mismatch is not between two signatures but between a signature
+            // and the absence of one.
+            Error (UnitMismatch (
+                        "^ (a dimensioned base needs a compile-time integer exponent — the grade of the result depends on its value)",
+                        sprintf "%s ^ <integer literal>" (ppUnitSig lu),
+                        sprintf "%s ^ <value known only at run time>" (ppUnitSig lu)))
+
+/// unitRulesForOp for call sites that hold the right operand's TYPED expr.
+/// Only `^` reads it; every other op ignores the extra argument. Sites that
+/// genuinely cannot see the operand (the comparison-only path) keep calling
+/// unitRulesForOp, whose `^` arm rejects a dimensioned base rather than
+/// answering from incomplete information.
+and unitRulesForOpWith (op: BinOp) (lUnits: UnitSig option) (rUnits: UnitSig option) (rExpr: TypedExpr option) : TypeResult<UnitSig option> =
+    match op with
+    | OpCaret -> unitRulesForCaret lUnits rUnits (rExpr |> Option.bind staticPowExponent)
+    | _ -> unitRulesForOp op lUnits rUnits
 
 /// Overwrite the ELEMENT unit annotation of an array-typed result from a
 /// synthesized kernel pipeline with the signature the unit rules computed.
 /// Without this the kernel return type leaks the LEFT operand's unit
 /// through * and / (meters * meters would stay meters). None strips —
-/// comparisons produce Bool elements and ^ drops units like the scalar
-/// path.
+/// comparisons produce Bool elements, and `^` over a dimensionless base
+/// has no signature to stamp (a dimensioned base either composes through
+/// unitPow or rejects; see unitRulesForCaret).
 and stampElemUnits env (resUnits: UnitSig option) (t: TypedExpr) : TypedExpr =
     match env.Subst.Resolve t.Type with
     | ArrayElem arr ->
@@ -5280,26 +5790,56 @@ and stampElemUnits env (resUnits: UnitSig option) (t: TypedExpr) : TypedExpr =
 
 /// Unit rules for the unary and math-intrinsic ops, shared by
 /// scalar-position intrinsic inference (the ExprApp intrinsic arms) and
-/// the kernel-body walk below: negation, abs/floor/ceil and the complex
-/// component projections preserve the signature; sqrt halves the
-/// exponents when they are all even (sqrt(meters^2) = meters — an odd
-/// exponent has no integer-signature representation, so the claim is
-/// dropped); everything else (transcendentals, logical not, phase angle)
-/// is dimensionless-out.
-and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : UnitSig option =
+/// the kernel-body walk below. The split is by HOMOGENEITY, which is what
+/// decides whether a function of a dimensioned quantity has a signature at
+/// all:
+///   - degree 1 (f(cx) = c·f(x)): negation, abs and the complex component
+///     projections PRESERVE the signature.
+///   - degree 1/2: sqrt halves the exponents when they are all even
+///     (sqrt(meters^2) = meters); an odd exponent has no integer-signature
+///     representation, so the claim is dropped.
+///   - degree 0: arg (a phase angle) and logical not are dimensionless-out
+///     for any operand.
+///   - NOT homogeneous: floor/ceil and the transcendentals. These REJECT a
+///     dimensioned operand instead of inventing a signature for the result.
+///     floor used to be lumped with abs, but rounding does not commute with
+///     a change of scale — floor(3.7 m) = 3 m while the same length in
+///     centimetres floors to 370 cm = 3.7 m — so "floor preserves units"
+///     was a claim the value does not satisfy. exp/log/sin/... are worse:
+///     their series add powers of the argument, so a dimensioned argument
+///     is not merely rescaled but meaningless, and returning dimensionless
+///     silently (the old `OpMath _ -> None`) discarded the operand's
+///     signature with no diagnostic.
+/// A dimensionless (or absent) signature is never a rejection: there is no
+/// claim to break, which is what keeps `floor(x)` and `exp(x)` usable on
+/// ordinary numbers.
+and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : TypeResult<UnitSig option> =
+    let dimensioned =
+        match u with
+        | Some s when not (Map.isEmpty (unitNormalize s)) -> Some s
+        | _ -> None
+    let requireDimensionless (context: string) =
+        match dimensioned with
+        | Some s -> Error (UnitMismatch (context, "dimensionless", ppUnitSig s))
+        | None -> Ok None
     match op with
-    | OpNeg | OpConj | OpReal | OpImag -> u
-    | OpNot | OpArg -> None
-    | OpMath ("abs" | "floor" | "ceil") -> u
+    | OpNeg | OpConj | OpReal | OpImag -> Ok u
+    | OpNot | OpArg -> Ok None
+    | OpMath "abs" -> Ok u
     | OpMath "sqrt" ->
         match u with
         | Some s ->
             let n = unitNormalize s
             if n |> Map.forall (fun _ ex -> ex % 2 = 0)
-            then Some (n |> Map.map (fun _ ex -> ex / 2))
-            else None
-        | None -> None
-    | OpMath _ -> None
+            then Ok (Some (n |> Map.map (fun _ ex -> ex / 2)))
+            else Ok None
+        | None -> Ok None
+    | OpMath (("floor" | "ceil") as name) ->
+        requireDimensionless
+            (sprintf "%s() argument (rounding is not scale-invariant: floor(3.7 m) = 3 m, but the same length as 370 cm floors to 370 cm = 3.7 m; divide by a reference quantity to get a dimensionless count first)" name)
+    | OpMath name ->
+        requireDimensionless
+            (sprintf "%s() argument (a transcendental sums powers of its argument, so it is defined only on dimensionless values; divide by a reference quantity first)" name)
 
 /// Unit-only second pass over a KERNEL BODY, run by buildApplyInfo after
 /// parameter unification has bound the parameter types. The body was
@@ -5337,9 +5877,9 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
     | TExprBinOp (_, op, l, r) ->
         kernelBodyUnits env bound l |> Result.bind (fun lu ->
         kernelBodyUnits env bound r |> Result.bind (fun ru ->
-        unitRulesForOp op lu ru))
+        unitRulesForOpWith op lu ru (Some r)))
     | TExprUnaryOp (op, inner) ->
-        kernelBodyUnits env bound inner |> Result.map (unitRulesForUnaryOp op)
+        kernelBodyUnits env bound inner |> Result.bind (unitRulesForUnaryOp op)
     | TExprIf (cond, thenBr, elseBr) ->
         errorsOnly cond |> Result.bind (fun () ->
         kernelBodyUnits env bound thenBr |> Result.bind (fun tu ->
@@ -5373,7 +5913,11 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
     | TExprField _ | TExprTupleIndex _ -> Ok (ofType e.Type)
     | _ -> Ok None
 
-and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRType> =
+/// `rExpr` is the right operand's typed expr, carried only so the `^` unit
+/// rule can read its exponent VALUE (see unitRulesForCaret); every other op
+/// ignores it, and `None` is a safe caller default everywhere except a `^`
+/// over a dimensioned base, which then rejects rather than guessing.
+and inferArithType (builder: IRBuilder) mode op leftTy rightTy (rExpr: TypedExpr option) : TypeResult<IRType> =
     // Result type for an OUTER (bracketed) op over two arrays, shared by the
     // comparison/logical branch (`boolResultTy`) and the arithmetic branch
     // (`bareResult`). Both used to spell this as `mkArrayLike { arrL with ... }`,
@@ -5596,7 +6140,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
                 | _ -> lBare
         // Apply unit rules based on operation (shared with the array
         // kernel-synthesis paths in inferBinOp)
-        unitRulesForOp op lUnits rUnits |> Result.map (function
+        unitRulesForOpWith op lUnits rUnits rExpr |> Result.map (function
             | Some u -> IRTUnitAnnotated (bareResult, u)
             | None -> bareResult)
 
@@ -5633,10 +6177,14 @@ and resolveTypedExpr (env: TypeEnv) (texpr: TypedExpr) : TypedExpr =
 and functorMapInheritError (env: TypeEnv) (tF: TypedExpr) (tC: TypedExpr)
                            : TypeError option =
     match env.Subst.Resolve tC.Type with
+    // SymWreath joins the filter: a wreath class whose mirror negates (any '-'
+    // level) needs the same certificate, and leaving it out would let an inner
+    // '-' level inherit through a `<$>` map uncertified.
     | ArrayElem arr when
             arr.IndexTypes |> List.exists (fun ix ->
                 ix.Rank > 1
-                && (ix.Symmetry = SymAntisymmetric || ix.Symmetry = SymHermitian)) ->
+                && (ix.Symmetry = SymAntisymmetric || ix.Symmetry = SymHermitian
+                    || ix.Symmetry = SymWreath)) ->
         let signResolver (calleeId: IRId) =
             match env.FuncSignParities.TryGetValue calleeId with
             | true, ps -> Some ps
@@ -5663,7 +6211,7 @@ and functorMapInheritError (env: TypeEnv) (tF: TypedExpr) (tC: TypedExpr)
         arr.IndexTypes
         |> List.filter (fun ix -> ix.Rank > 1)
         |> List.tryPick (fun ix ->
-            compactClassInheritError ix.Symmetry 0 fName signParities conjCommutes)
+            compactClassInheritError ix.Symmetry (orbitLevelsOf ix) 0 fName signParities conjCommutes)
     | _ -> None
 
 /// Eta-expand a bare named-function reference used in KERNEL position:
@@ -6520,7 +7068,7 @@ and buildApplyInfo (env: TypeEnv)
             | TExprExtents a | TExprRank a | TExprArrayNegate a
             | TExprArrayConjugate a | TExprUnique a -> walk a
             | TExprMask (a, p) -> walk a || walk p
-            | TExprCompound (a, p) -> walk a || walk p
+            | TExprCompound (a, p) | TExprSparse (a, p) -> walk a || walk p
             | TExprSort (a, k) -> walk a || walk k
             | TExprIf (c, t, e2) -> walk c || walk t || walk e2
             | TExprBlock (_, Some fe) -> walk fe
@@ -6640,13 +7188,56 @@ and buildApplyInfo (env: TypeEnv)
                         if j >= n - irank then { idx with Kind = TDimension } else idx)
                 { at with IndexTypes = retagged })
 
+    // A deduced WREATH TIE (docs/plan-orbit-index-types.md §9 step 4) takes the
+    // whole application off the generic axis-group thread: its iteration is the
+    // segment-peeled `orb_visit` nest, driven from the OUTPUT class, and none of
+    // the three analyses below has a meaning for it. They are skipped rather
+    // than computed-and-ignored because all three funnel into
+    // `buildLoopLevelStructure`, which REFUSES a wreath input outright — the
+    // depth-3 shape `let P = f(A,A) in g(P,P)` would otherwise die here, before
+    // `deduceOutputType` ever ran. Same predicate, same arguments, one rule
+    // (`IR.deduceWreathTie`), so this cannot disagree with what the output type
+    // ends up being.
+    let wreathTie =
+        deduceWreathTie gridArrayTypes identities iterGroups antisymStorageGroups
+                        kernelTDims (kernelInputRanks |> List.exists (fun r -> r > 0)) isReynolds
+    // A wreath INPUT that did NOT earn a tie has no iteration at all: only the
+    // segment-peeled `orb_visit` nest walks a wreath pool, and it is driven by
+    // the OUTPUT class, so an application that does not produce one (a unary
+    // map over a wreath array, a non-comm binary, distinct wreath operands)
+    // cannot be iterated. `buildRawLoopLevels` already refuses it, but as a
+    // `failwith` — which surfaces as BL9001 "internal compiler error, please
+    // report it". This is a language limitation, not a compiler bug, so say so
+    // on the user-facing channel BEFORE the three analyses below reach that
+    // backstop. The backstop stays: it is what makes a future producer that
+    // slips past this gate loud instead of wrong.
+    let wreathInputRefusal =
+        if wreathTie.IsSome then None
+        else
+            gridArrayTypes
+            |> List.tryPick (fun at ->
+                at.IndexTypes |> List.tryFind (fun ix ->
+                    ix.Kind = SDimension && ix.Symmetry = SymWreath))
+            |> Option.map (fun ix ->
+                OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix),
+                                         "kernel application over a wreath-typed argument \
+(only a comm/anticomm tie over EVERY argument produces a wreath output, and only that shape has a traversal nest)"))
+    match wreathInputRefusal with
+    | Some e -> Error e
+    | None ->
     // Grouping/iteration reads `iterGroups` (comm ∪ anticomm): a declared
     // antisymmetric pair fuses its axes and iterates the simplex exactly like
     // a comm pair — only the strictness (IR's StrictOffset) and the stored
     // symmetry class differ, and both of those are decided downstream.
-    let states = computeAllSymcomStates identities gridArrayTypes iterGroups (computeSDimsPerArray gridArrayTypes)
-    let triLevels = computeTriangularLevels gridArrayTypes identities iterGroups (computeSDimsPerArray gridArrayTypes)
-    let speedup = computePartialProductSpeedup gridArrayTypes identities iterGroups (computeSDimsPerArray gridArrayTypes)
+    let states =
+        if wreathTie.IsSome then []
+        else computeAllSymcomStates identities gridArrayTypes iterGroups (computeSDimsPerArray gridArrayTypes)
+    let triLevels =
+        if wreathTie.IsSome then []
+        else computeTriangularLevels gridArrayTypes identities iterGroups (computeSDimsPerArray gridArrayTypes)
+    let speedup =
+        if wreathTie.IsSome then 1L
+        else computePartialProductSpeedup gridArrayTypes identities iterGroups (computeSDimsPerArray gridArrayTypes)
 
     // Phase 2 (Gap 2.5 fix): unify each kernel parameter with the source
     // array's per-row type. This catches mismatches like a String-typed
@@ -6913,9 +7504,14 @@ and buildApplyInfo (env: TypeEnv)
                     | ArrayElem outArr ->
                         let claimed =
                             outArr.IndexTypes
+                            // SymWreath joins the filter for the reason spelled
+                            // out at compactClassInheritError: an inner '-'
+                            // level negates on mirror, so an inherited wreath
+                            // class needs the same BL4015 certificate.
                             |> List.filter (fun ix ->
                                 ix.Rank > 1
-                                && (ix.Symmetry = SymAntisymmetric || ix.Symmetry = SymHermitian))
+                                && (ix.Symmetry = SymAntisymmetric || ix.Symmetry = SymHermitian
+                                    || ix.Symmetry = SymWreath))
                             |> List.map (fun ix -> ix.Symmetry)
                             |> Set.ofList
                         if Set.isEmpty claimed then []
@@ -6930,7 +7526,12 @@ and buildApplyInfo (env: TypeEnv)
                                     |> List.filter (fun ix ->
                                         ix.Kind = SDimension && ix.Rank > 1
                                         && Set.contains ix.Symmetry claimed)
-                                    |> List.map (fun ix -> (i, ix.Symmetry)))
+                                    // The level list travels with the class: two
+                                    // wreath records of the same Symmetry can
+                                    // need DIFFERENT verdicts (all-'+' needs no
+                                    // certificate, any '-' does), so distinct-ing
+                                    // on Symmetry alone would collapse them.
+                                    |> List.map (fun ix -> (i, ix.Symmetry, orbitLevelsOf ix)))
                             |> List.distinct
                     | _ -> []
             if List.isEmpty inheritedClaims then None
@@ -6943,12 +7544,12 @@ and buildApplyInfo (env: TypeEnv)
                     Blade.Deduce.deduceSignParities signResolver lambdaInfo.Params restampedBody
                 let conjCommutes =
                     Blade.Deduce.deduceConjCommutes lambdaInfo.Params restampedBody
-                inheritedClaims |> List.tryPick (fun (i, cls) ->
+                inheritedClaims |> List.tryPick (fun (i, cls, lvls) ->
                     let pname =
                         match List.tryItem i lambdaInfo.Params with
                         | Some (p: TypedParam) -> p.Name
                         | None -> sprintf "argument %d" i
-                    compactClassInheritError cls i pname signParities conjCommutes)
+                    compactClassInheritError cls lvls i pname signParities conjCommutes)
         match compactInheritErr with
         | Some e -> Error e
         | None ->
@@ -7455,6 +8056,47 @@ and irTypeBadPgIrrepsDetail (t: IRType) : string option =
         |> Option.orElseWith (fun () -> irTypeBadPgIrrepsDetail r)
     | _ -> None
 
+/// Detect a depth >= 2 OrbIdx (SymWreath) record anywhere in a type, returning
+/// its rendered level list. The gate on WRITING the class down: consumed at the
+/// let-binding annotation and the function signature, the two places a user
+/// program can name an array type.
+///
+/// STILL REFUSED, deliberately, now that DEDUCTION produces storable wreath
+/// classes. The two are different powers. Deduction reaches a wreath class only
+/// through the one shape that has a traversal nest (a comm tie over every
+/// argument, `IR.deduceWreathTie`), and the value it produces is written once
+/// and printed. An ANNOTATION names the class in the abstract: it admits
+/// `let R: Array<F64 like OrbIdx<[(2,-),(2,+)],4>> = zero |> compute`, a
+/// producer that does not exist, and it makes the binding a value a user will
+/// then subscript — the mirrored read that is exactly what is missing. Opening
+/// the annotation is a separate step that belongs with the read path, not with
+/// the writer.
+///
+/// The seams further down (allocation, loop construction, the compact read and
+/// print paths, providers) each refuse too, but those refusals are BACKSTOPS
+/// with no diagnostic channel — they are `failwith`/AllocUnsupported. Both
+/// layers exist on purpose: this one produces the message a user reads, and the
+/// backstops make "some future producer synthesizes a SymWreath record
+/// internally" a loud failure instead of a wrong address.
+///
+/// Same walker shape as irTypeBadIrrepsDetail — including the deliberate
+/// scanning of a FuncElem's parameter slots, which that helper also does: a
+/// higher-order parameter `f: (Array<F64 like OrbIdx<[...], n>>) -> F64` still
+/// names storage that would have to exist.
+and irTypeWreathLevels (t: IRType) : string option =
+    let levelsOf (ix: IRIndexType) =
+        if ix.Symmetry = SymWreath then Some (ppOrbitLevels (orbitLevelsOf ix)) else None
+    match t with
+    | ArrayElem at ->
+        (at.IndexTypes |> List.tryPick levelsOf)
+        |> Option.orElseWith (fun () -> irTypeWreathLevels at.ElemType)
+    | IRTTuple ts -> ts |> List.tryPick irTypeWreathLevels
+    | FuncElem (ps, r) ->
+        (ps |> List.tryPick irTypeWreathLevels)
+        |> Option.orElseWith (fun () -> irTypeWreathLevels r)
+    | IRTComputation inner -> irTypeWreathLevels inner
+    | _ -> None
+
 /// Detect an unresolved QUALIFIED index-type path (`store.index.y`). Same
 /// consumption-site pattern as the checks above, and self-marking: a path that
 /// resolves yields the registered record verbatim (the provider builds its
@@ -7555,6 +8197,14 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         let badAxis = irTypeUnknownAxisPath annotTy
         if badAxis.IsSome then
             Error (Other (unknownAxisPathMessage badAxis.Value))
+        else
+        let wreath = irTypeWreathLevels annotTy
+        if wreath.IsSome then
+            Error (OrbitStorageUnsupported
+                       (wreath.Value,
+                        (match binding.Pattern.Kind with
+                         | PatVar n -> sprintf "let binding '%s'" n
+                         | _ -> "let binding annotation")))
         else
         // Nested-function desugar (parseNestedFunction): `function f(x) -> T
         // = body` becomes a let of a lambda whose binding annotation is the
@@ -9947,6 +10597,14 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     if badPgIrreps.IsSome then
         Error (PgIrrepsIdxSpecFn (funcDecl.Name, badPgIrreps.Value))
     else
+    // Both parameters AND the return type: either one names an array whose
+    // storage would have to exist. (Unlike the tag wildcard, which is LEGAL in
+    // parameter position, there is no position where a wreath array can be
+    // handled -- a caller would have had to allocate it.)
+    let wreath = (paramTypes @ [retType]) |> List.tryPick irTypeWreathLevels
+    if wreath.IsSome then
+        Error (OrbitStorageUnsupported (wreath.Value, sprintf "function '%s'" funcDecl.Name))
+    else
     let funcType = mkFuncArrow paramTypes retType
     // Reuse pre-pass varId if this function was already pre-registered (static functions)
     // This ensures other functions' bodies reference the same varId
@@ -10097,6 +10755,21 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // result so genuine mismatches surface here rather than
             // exploding at codegen.
             unify env.Subst tBody.Type retType |> Result.bind (fun () ->
+            // The wreath gate again, on the RESOLVED return type. The one at
+            // the signature above sees only DECLARED annotations; an
+            // unannotated function whose body deduces a wreath class (a comm
+            // tie over a repeated compact parameter) gets its return type from
+            // this unify, so the declared-side check never saw it. Returning a
+            // wreath is not supported: the C++ ABI hands arrays back as an
+            // `Array<T,N>` wrapper, and a wreath pool is a flat `T*` with no
+            // extents -- the callee would return a wrapper describing a
+            // skeleton that does not exist. Produce the class at the use site
+            // instead (the corpus's deduced cases all do).
+            match irTypeWreathLevels (env.Subst.Resolve retType) with
+            | Some levels ->
+                Error (OrbitStorageUnsupported
+                         (levels, sprintf "function '%s' returns a deduced wreath class" funcDecl.Name))
+            | None ->
             // Declared-return introduce-site: wrap the body so the joint
             // check fires at the return (the single verification point).
             let wrappedBodyR =
@@ -10406,7 +11079,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             | _ -> body
         let defInfoResult =
             match chasedBody with
-            | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyBoundedIdx _ ->
+            | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _ | TyBoundedIdx _ ->
                 let idx = lowerIndexType env 0 chasedBody
                 // Nominative-alias rule: the alias name BECOMES the identity
                 // tag. Two exceptions, both reachable only from stage 3's
@@ -10424,6 +11097,19 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     | Some (IrrepsTag (_, triples)) ->
                         { idx with Tag = Some (mkIrrepsTag (Some name) triples) }
                     | _ when idx.IxKind = IxKErrorIrrepsBadSpec -> idx
+                    // A depth >= 2 wreath record keeps its "__orbidx" sentinel.
+                    // Here Tag IS the kind channel (the IR validator enforces
+                    // Tag<->IxKind agreement) and there is no parameterized tag
+                    // format for a level list the way mkIrrepsTag has one for a
+                    // spec, so overwriting it with the alias name would break
+                    // agreement and lose the kind. NOMINATIVE aliasing of a
+                    // wreath class is therefore deferred WITH its storage:
+                    // `type R = OrbIdx<[...], n>` names the class for
+                    // readability but mints no distinct identity. Depth <= 1
+                    // normalizes to a Sym/Antisym/plain record and takes the
+                    // ordinary nominative path below, exactly like
+                    // `type S = SymIdx<2, n>`.
+                    | _ when idx.IxKind = IxKOrbit -> idx
                     | _ -> { idx with Tag = Some name; IxKind = ixKindOfTag (Some name) }
                 Ok (TDIIndexType (name, named, chasedBody))
             | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->

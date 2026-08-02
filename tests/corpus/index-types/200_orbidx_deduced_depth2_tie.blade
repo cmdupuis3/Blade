@@ -1,0 +1,26 @@
+// TEST: OrbIdx Deduced Depth-2 Tie
+// THE motivating case of docs/plan-orbit-index-types.md §1, end to end.
+// `S : SymIdx<2,3>` (itself deduced, from a comm product over A) enters BOTH
+// argument positions of a comm kernel. That licenses `S_2 wr S_2` on the four
+// raw axes, and §9 step 4's rule APPENDS A LEVEL: the input class [(2,+)] plus
+// the tie over k = 2 repeated occurrences gives OrbIdx<[(2,+),(2,+)], 3>.
+//
+// The cell count is the §4 fold  3 -> C(4,2) = 6 -> C(7,2) = 21.  Both wrong
+// answers this replaces are visible in that number: juxtaposing the blocks
+// untied (SymIdx<2,3> x2) stores 36 and drops the tie, while widening the
+// representative to SymIdx<4,3> would claim full S_4 and store C(6,4) = 15 --
+// a symmetry the wreath does not license.
+//
+// The cells, in storage order, are the sums of pairs of S's 6 cells taken in
+// ascending-lex canonical order (a <= b): that IS the class's canonical stream,
+// and this line is the pin. It is asserted against hand-computed values, never
+// a read->write roundtrip -- both sides of a roundtrip shift together, so it
+// cannot catch an order mismatch (plan-orbidx-bijections §3, the antisym
+// storage post-mortem).
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+// EXPECT: S = [1, 2, 3, 4, 6, 9]
+// EXPECT: W = [2, 3, 4, 5, 7, 10, 4, 5, 6, 8, 11, 6, 7, 9, 12, 8, 10, 13, 12, 15, 18]

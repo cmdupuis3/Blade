@@ -68,6 +68,9 @@ let rec private resolveTop (aliases: Map<string, TypeExpr>) (fuel: int) (ty: Typ
         match Map.tryFind n aliases with
         | Some body -> resolveTop aliases (fuel - 1) body
         | None -> ty
+    // NO TyBounded arm, deliberately — see SpectraElaborate.resolveTop for why
+    // (a bound on a whole array type is not a supported concept, and admitting
+    // it here only reaches a pre-existing codegen bug).
     | _ -> ty
 
 /// An annotation, alias-resolved, if it denotes an array.
@@ -115,6 +118,9 @@ let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
         // registered by TypeEnv during type CHECKING — after this pass — so the
         // extent comes from the store's metadata instead.
         | None -> providerIndexExtent ctx.Statics name
+    // A bound in an alias body (`type B = A<min=.., max=..>`) does not change
+    // the extent — see the twin arm in SpectraElaborate.resolveExtent.
+    | TyBounded (inner, _, _) -> resolveExtent ctx inner
     | _ -> None
 
 /// The steer appended to every "no declared shape here" rejection.
@@ -493,6 +499,8 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
         r a |> Result.bind (fun a' -> r p |> Result.map (fun p' -> inheritSpan e (ExprMask (a', p'))))
     | ExprKind.ExprCompound (d, m) ->
         r d |> Result.bind (fun d' -> r m |> Result.map (fun m' -> inheritSpan e (ExprCompound (d', m'))))
+    | ExprKind.ExprSparse (v, k) ->
+        r v |> Result.bind (fun v' -> r k |> Result.map (fun k' -> inheritSpan e (ExprSparse (v', k'))))
     | ExprKind.ExprIntersect (a, b) ->
         r a |> Result.bind (fun a' -> r b |> Result.map (fun b' -> inheritSpan e (ExprIntersect (a', b'))))
     | ExprKind.ExprUnion (a, b) ->

@@ -1,0 +1,10 @@
+// TEST: Sparse Iteration Order
+// Iteration (and the compact buffer) follow the GIVEN key order, never a
+// sorted order. The non-commutative fold a*100+b over the cell values pins
+// the order: key order [(2,1),(0,3),(1,0)] gives values [21, 3, 10] ->
+// (21*100 + 3)*100 + 10 = 210310. A lex-sorted implementation would visit
+// [(0,3),(1,0),(2,1)] -> (3*100 + 10)*100 + 21 = 31021 and FAIL here.
+let static K = [(2, 1), (0, 3), (1, 0)]
+let R = method_for(range<SparseIdx<K>>) <@> lambda(i, j) -> i * 10 + j |> compute
+let ord = reduce(R, lambda(a, b) -> a * 100 + b)
+// EXPECT: ord = 210310

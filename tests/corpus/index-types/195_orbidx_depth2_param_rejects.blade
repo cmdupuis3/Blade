@@ -1,0 +1,10 @@
+// TEST: OrbIdx Depth-2 Function Parameter (rejects)
+// ERROR: BL4003
+// The THIRD front-end door: a function signature. Both parameters AND the
+// return type are scanned -- unlike the tag wildcard `_`, which is legal in
+// parameter position precisely because a parameter may decline to constrain,
+// there is no position where a wreath array can be handled: a caller would
+// have had to allocate it.
+function trace4(R: Array<Float64 like OrbIdx<[(2,-), (2,+)], 4>>) -> Float64 = R(0, 1, 0, 1)
+let x = 1
+// EXPECT: typecheck failure — depth-2 OrbIdx storage is not emitted yet.

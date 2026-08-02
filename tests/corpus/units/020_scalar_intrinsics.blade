@@ -1,8 +1,10 @@
 // TEST: Unit Scalar Intrinsics
 // Scalar-position intrinsics use the same unary unit table as the
 // kernel-body walk (unitRulesForUnaryOp): sqrt halves all-even exponents
-// (sqrt(velocity^2) = velocity), abs preserves the annotation (it used to
-// ERROR on a unitful operand), and transcendentals are dimensionless-out.
+// (sqrt(velocity^2) = velocity) and abs preserves the annotation (it used to
+// ERROR on a unitful operand). The non-homogeneous intrinsics — floor/ceil
+// and the transcendentals — REJECT a dimensioned argument rather than
+// returning dimensionless; see units/029 through units/031.
 // Also pins the negative unit exponent grammar: seconds^-1.
 Unit meters
 Unit seconds

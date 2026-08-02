@@ -194,6 +194,15 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
         raise (Core.InterpUnsupported "compound (load_compound) provider read (M2.7 compound family)")
     elif spec.Window.IsSome then
         raise (Core.InterpUnsupported "windowed packed provider read (read_window)")
+    // Ahead of the packed gate (which a wreath group also trips) so the reason
+    // is the storage refusal, not "packed provider read" -- the latter reads as
+    // a milestone the interpreter will reach, and this one is a whole missing
+    // layout. NOT a SKIP either: InterpUnsupported would classify this as
+    // SKIP-UNSUPPORTED and let a divergence hide, so it fails.
+    elif spec.VarType.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) then
+        let ix = spec.VarType.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
+        failwith (Blade.IR.orbitStorageUnsupported
+                      (sprintf "provider read of '%s'" spec.VarName) (Blade.IR.orbitLevelsOf ix))
     elif spec.VarType.IndexTypes |> List.exists (fun ix -> ix.Symmetry <> SymNone && ix.Rank >= 2) then
         raise (Core.InterpUnsupported "packed (symmetric/antisymmetric) provider read")
     else
@@ -282,7 +291,14 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
                     | Some (denseExpr, maskExpr) ->
                         Loops.materializeCompoundBinding state root b denseExpr maskExpr
                     | None ->
-                        Core.evalBinding state root b
+                        // A SparseInits binding (sparse(values, keys)) bundles
+                        // the rank-1 values buffer with the key table here, at
+                        // its position, mirroring genSparseInitBinding.
+                        match Map.tryFind b.Id m.SparseInits with
+                        | Some valuesExpr ->
+                            Loops.materializeSparseBinding state root b valuesExpr
+                        | None ->
+                            Core.evalBinding state root b
             envBind root b.Id v |> ignore
 
     // Resolve a binding id to its computed value for the printer. Print decides

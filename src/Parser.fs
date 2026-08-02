@@ -661,7 +661,13 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     
     | Some (TokKeyword KwCompoundIdx) ->
         parseIndexType tokens
-    
+
+    | Some (TokKeyword KwSparseIdx) ->
+        parseIndexType tokens
+
+    | Some (TokKeyword KwOrbIdx) ->
+        parseIndexType tokens
+
     | Some (TokKeyword KwEnumIdx) ->
         parseIndexType tokens
     
@@ -846,6 +852,73 @@ and parseSymIdxBase (tokens: Token list) : ParseResult<SymIdxBase> =
     | _ ->
         parseSimpleExpr tokens >>= fun extent afterExtent -> success (SymBaseExtent extent) afterExtent
 
+/// ONE level of an `OrbIdx` class: `( INT , + | - )`.
+///
+/// A DEDICATED sub-parser, deliberately NOT a route through `parseSimpleExpr`
+/// (which is what `parseSymIdxBase` falls back to): there are no tuple literals
+/// and no sign literals in the expression grammar (`Literal` is
+/// int/float/bool/string/char/unit, Ast.fs), so `(2,+)` has no parse as an
+/// expression and inventing one would widen the whole grammar to serve one type
+/// argument. `+` and `-` already lex as `TokOp`, so no lexer change is needed
+/// beyond the `OrbIdx` keyword itself.
+///
+/// The rank must be a bare non-negative INT LITERAL — no `let static` name, no
+/// arithmetic. The level list is part of the type's IDENTITY (two classes with
+/// the same total rank and different level lists are different types with
+/// different cardinality), and identity that depends on static evaluation would
+/// have to be compared after folding rather than at the syntax. Rank 0 is
+/// refused here: `S_0` is not a group this class can act with, and OrbRank's
+/// `validateLevels` refuses it too, so the two doors agree.
+and parseOrbLevel (tokens: Token list) : ParseResult<int * bool> =
+    expect TokLParen tokens >>= fun _ afterLP ->
+    match peek afterLP with
+    | Some (TokInt r) ->
+        let afterRank = advance afterLP
+        if r < 1L then
+            let line, col = currentPos afterLP
+            error (sprintf "OrbIdx level (%d, ...): a level rank must be >= 1 (S_0 is not a symmetric group; a rank-1 level is the trivial group and is normalized away)" r) line col
+        elif r > 4096L then
+            // A per-level sanity cap, not the real bound. The real bound is the
+            // class's RAW AXIS COUNT (the product of the level ranks), checked
+            // at lowering where the whole list is in hand -- and in practice
+            // int64 cell-count overflow bites long before either (§7.2). This
+            // only keeps a typo like `(4000000000,+)` from reaching an int
+            // multiply.
+            let line, col = currentPos afterLP
+            error (sprintf "OrbIdx level (%d, ...): a level rank above 4096 is almost certainly a typo. The binding constraint on an OrbIdx class is int64 overflow in its cell count, which is reached at far smaller ranks (docs/plan-orbit-index-types.md §7.2)." r) line col
+        else
+        expect TokComma afterRank >>= fun _ afterComma ->
+        match peek afterComma with
+        | Some (TokOp "+") | Some (TokOp "-") ->
+            let isPlus = (peek afterComma = Some (TokOp "+"))
+            let afterSign = advance afterComma
+            expect TokRParen afterSign >>= fun _ remaining ->
+            success (int r, isPlus) remaining
+        | _ ->
+            let line, col = currentPos afterComma
+            error "OrbIdx level: expected a character sign '+' or '-' after the rank, as in (2,+) or (2,-)" line col
+    | _ ->
+        let line, col = currentPos afterLP
+        error "OrbIdx level: expected an integer rank literal, as in (2,+)" line col
+
+/// The bracketed level list `[(r1,s1), ..., (rd,sd)]`. Empty (`[]`) is LEGAL
+/// and denotes the trivial class (docs/plan-orbit-index-types.md §3: `Idx<n>`
+/// is `OrbIdx<[],n>` in normal form).
+and parseOrbLevels (tokens: Token list) : ParseResult<(int * bool) list> =
+    expect TokLBracket tokens >>= fun _ afterLB ->
+    let rec loop (acc: (int * bool) list) (toks: Token list) : ParseResult<(int * bool) list> =
+        match peek toks with
+        | Some TokRBracket -> success (List.rev acc) (advance toks)
+        | _ ->
+            parseOrbLevel toks >>= fun lvl afterLvl ->
+            match peek afterLvl with
+            | Some TokComma -> loop (lvl :: acc) (advance afterLvl)
+            | Some TokRBracket -> success (List.rev (lvl :: acc)) (advance afterLvl)
+            | _ ->
+                let line, col = currentPos afterLvl
+                error "OrbIdx level list: expected ',' or ']' after a (rank, sign) level" line col
+    loop [] afterLB
+
 // Parse index types specifically - Idx<extent> or SymIdx<arity, extent>
 // These are self-contained with their own < > brackets
 and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
@@ -874,6 +947,18 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         let rank = match rankLit with LitInt n -> int n | _ -> 2
         success (TyAntisymIdx (rank, baseIdx)) remaining
 
+    // OrbIdx<[(r1,s1), ..., (rd,sd)], n> -- the flat iterated-wreath class
+    // (docs/plan-orbit-index-types.md §2). Levels are OUTERMOST-LAST. The
+    // extent slot reuses `parseSymIdxBase` verbatim, so it accepts exactly what
+    // `SymIdx<k, _>`'s second argument accepts and the two forms cannot drift.
+    | Some (TokKeyword KwOrbIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseOrbLevels afterLt >>= fun levels afterLevels ->
+        expect TokComma afterLevels >>= fun _ afterComma ->
+        parseSymIdxBase afterComma >>= fun baseIdx afterBase ->
+        expectGt afterBase >>= fun _ remaining ->
+        success (TyOrbIdx (levels, baseIdx)) remaining
+
     | Some (TokKeyword KwHermitianIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseSimpleExpr afterLt >>= fun extent afterExtent ->
@@ -890,6 +975,17 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         expectGt afterMask >>= fun _ remaining ->
         success (TyCompoundIdx mask) remaining
     
+    // SparseIdx<keys> -- explicit valid-tuple enumeration (formalism 3.5). The
+    // keys expression is a rank-1 array of Nat tuples (a `let static` tuple
+    // list or a runtime array); rank is implicit from the tuple arity, so the
+    // surface form carries only the keys (arity is recovered from the keys'
+    // type at lowering, mirroring CompoundIdx's mask).
+    | Some (TokKeyword KwSparseIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseSimpleExpr afterLt >>= fun keys afterKeys ->
+        expectGt afterKeys >>= fun _ remaining ->
+        success (TySparseIdx keys) remaining
+
     | Some (TokKeyword KwEnumIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseSimpleExpr afterLt >>= fun values afterValues ->
@@ -1895,7 +1991,17 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         parseExprImpl afterComma >>= fun mask afterMask ->
         expect TokRParen afterMask >>= fun _ remaining ->
         success (mkE tokens remaining (ExprCompound (dense, mask))) remaining
-    
+
+    // sparse(values, keys) — bundle rank-1 values (in key order) with an
+    // explicit key list into a SparseIdx-typed array (formalism 3.5).
+    | Some (TokKeyword KwSparse) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun values afterValues ->
+        expect TokComma afterValues >>= fun _ afterComma ->
+        parseExprImpl afterComma >>= fun keys afterKeys ->
+        expect TokRParen afterKeys >>= fun _ remaining ->
+        success (mkE tokens remaining (ExprSparse (values, keys))) remaining
+
     // intersect(A, B)
     | Some (TokKeyword KwIntersect) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->

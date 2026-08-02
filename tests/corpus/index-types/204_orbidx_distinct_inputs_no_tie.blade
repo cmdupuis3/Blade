@@ -1,0 +1,24 @@
+// TEST: OrbIdx Distinct Inputs No Tie
+// BladeWreath.v's dichotomy, on the storage side: distinct symmetric inputs get
+// the BLOCK-WISE PRODUCT for any kernel, and only a REPEATED argument plus
+// commutativity earns the tie (docs/plan-orbit-index-types.md §7, table rows 4
+// and 5; the r = 3 sweep isolates commutativity as the sole extra hypothesis).
+//
+// SA and SB have the same TYPE and the same shape and enter a comm kernel --
+// everything 200 has except the same OBJECT. Shape cannot distinguish them;
+// only identity can (`sameIdentity`, and §7.1's caveat that identities are
+// stable for bare variables). So the answer is the untied juxtaposition,
+// SymIdx<2,3> x SymIdx<2,3> = 36 cells, not the 21 of 200.
+//
+// This is the test that would catch a tie rule keyed on the type instead of on
+// the object -- which would silently fold 36 distinct values into 21 cells.
+let A = [1.0, 2.0, 3.0]
+let B = [1.0, 1.0, 2.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let SA = method_for(A, A) <@> g |> compute
+let SB = method_for(B, B) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let P = method_for(SA, SB) <@> h |> compute
+// EXPECT: SA = [1, 2, 3, 4, 6, 9]
+// EXPECT: SB = [1, 1, 2, 1, 2, 4]
+// EXPECT: P = [2, 2, 3, 2, 3, 5, 3, 3, 4, 3, 4, 6, 4, 4, 5, 4, 5, 7, 5, 5, 6, 5, 6, 8, 7, 7, 8, 7, 8, 10, 10, 10, 11, 10, 11, 13]
