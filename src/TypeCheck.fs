@@ -647,7 +647,7 @@ and lowerElemType env ty : IRType =
         lowerTypeExpr env ty
 
 /// The index record for `SymIdx<k, base>` / `AntisymIdx<k, base>` — seam S2 of
-/// docs/plan-transforms-as-types.md §2.7, shared by the index-position
+/// the retired transforms-as-types plan §2.7, shared by the index-position
 /// (`lowerIndexType`) and value-position (`lowerTypeExpr`) arms.
 ///
 ///   - `SymBaseExtent e` (the legacy `SymIdx<k, n>` surface form): an
@@ -766,7 +766,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                IxKind = IxKErrorIrrepsBadSpec; Kind = SDimension; Dependencies = [] })
     | TyPgIrrepsIdx (groupName, specExpr) ->
         // PgIrrepsIdx<GROUP, spec>: the point-group block-spec member
-        // (docs/plan-transforms-as-types.md §3.6, stage 5b-i). Field for field
+        // (retired transforms-as-types plan §3.6, stage 5b-i). Field for field
         // the shape of the TyIrrepsIdx arm above — rank 1, extent a folded
         // literal, dense (SymNone) with the block structure carried as
         // IDENTITY in the Tag, and the same error-marker channel for a
@@ -2412,6 +2412,54 @@ let providerAliasName (env: TypeEnv) (alias: string) : string option =
 /// Existing spans are never overwritten.
 let stampSynthSpan (src: Expr) (te: TypedExpr) : TypedExpr =
     if te.Span.StartLine = 0 && src.Span.StartLine > 0 then { te with Span = src.Span } else te
+
+/// May an elementwise kernel INHERIT the compact storage class of the array it
+/// maps over? Each compact class stores one triangle and reconstructs the other
+/// through a mirror involution applied to the VALUE, so a map keeps the class
+/// exactly when it COMMUTES with that involution:
+///
+///   SymSymmetric      mirror = identity      -> any map preserves it
+///   SymAntisymmetric  mirror = negation      -> needs a sign-ODD kernel
+///   SymHermitian      mirror = conjugation   -> needs a conj-commuting kernel
+///
+/// Nothing else in the checker asks this question at a UNARY seam: the parity
+/// engine is consulted for binary pair-swap deduction (gated arity >= 2 in
+/// buildApplyInfo), while `deduceOutputType`'s rank-0 elementwise arm and the
+/// `<$>` functor arm copy the input's Symmetry through for ANY kernel. For an
+/// antisymmetric input that is a silent miscompile, not a missed optimization:
+/// the result is stored as a strict upper triangle and every mirrored read
+/// applies NegateOnSwap, so `C <@> (v * v)` reads out(1,0) as -out(0,1) when
+/// the truth is +out(0,1).
+///
+/// There is deliberately no third answer — no "demote to symmetric" or "demote
+/// to dense". The ITERATION is fixed by the INPUT record (buildLoopLevelStructure
+/// reads SharedIndexTypes), so an antisymmetric input drives the STRICT simplex
+/// and writes C(n,r) cells. The symmetric array an even map really produces has
+/// a diagonal, and a dense one has the full square; neither is a shape that nest
+/// can fill. Refusing is the only sound answer available here, so an
+/// unprovable kernel is an error with a decompact-first fix, not a downgrade.
+///
+/// `argPos` is the kernel parameter position that receives the compact array's
+/// cells; `signParities` / `conjCommutes` are that kernel's per-parameter
+/// summaries, in declaration order.
+let compactClassInheritError
+        (cls: SymmetryClass)
+        (argPos: int)
+        (paramName: string)
+        (signParities: Blade.Deduce.SignParity list)
+        (conjCommutes: bool list) : TypeError option =
+    match cls with
+    | SymNone | SymSymmetric -> None
+    | SymAntisymmetric ->
+        (match List.tryItem argPos signParities with
+         | Some Blade.Deduce.SOdd -> None
+         | Some Blade.Deduce.SEven ->
+             Some (AntisymMapNotOdd (paramName, "provably sign-EVEN (f(-x) = f(x))"))
+         | _ -> Some (AntisymMapNotOdd (paramName, "of UNKNOWN sign parity")))
+    | SymHermitian ->
+        (match List.tryItem argPos conjCommutes with
+         | Some true -> None
+         | _ -> Some (HermitianMapNotReal paramName))
 
 /// Entry for every expression: stamps the ambient expression span (for
 /// error location, see TypeEnv.locateError) and back-fills the source span
@@ -4358,6 +4406,14 @@ and inferUnaryOp (env: TypeEnv) op operand : TypeResult<TypedExpr> =
         // materializes a fresh same-shape array with a pool conjugation loop.
         // This is what makes `hermitian(A) = conj(transpose(A,[0,1]))` work,
         // and it fixes surface `conj(wholeArray)` generally.
+        // Both whole-array arms below keep the operand's type — index records,
+        // Symmetry included. Unlike the `<@>` / `<$>` elementwise seams (which
+        // must certify an arbitrary kernel against the storage class's mirror
+        // involution — see compactClassInheritError) these two need no check:
+        // negation and conjugation each commute with BOTH involutions, so every
+        // compact class is genuinely preserved. (-A)(j,i) = -A(j,i) = A(i,j) =
+        // -(-A)(i,j) keeps antisymmetry; -conj(z) = conj(-z) and conj(conj z)
+        // = z keep Hermitian; symmetric is preserved by any map.
         match op, tOp.Type with
         | OpConj, ArrayElem _ ->
             Ok (mkTyped (TExprArrayConjugate tOp) tOp.Type)
@@ -4812,7 +4868,9 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     mkArrayLike { arr with ElemType = IRTScalar et }
                 | FuncElem (_, retTy), _ -> retTy
                 | _ -> tC.Type  // fallback: preserve computation type
-            Ok (mkTyped (TExprFunctorMap (tF, tC)) outputType)))
+            match functorMapInheritError env tF tC with
+            | Some e -> Error e
+            | None -> Ok (mkTyped (TExprFunctorMap (tF, tC)) outputType)))
 
     | OpArrayProd ->
         // <*> : MethodLoop × MethodLoop → MethodLoop (concatenate array lists)
@@ -5556,6 +5614,58 @@ and resolveTypedExpr (env: TypeEnv) (texpr: TypedExpr) : TypedExpr =
         | None -> texpr
     | _ -> texpr
 
+/// The `<$>` half of the compact-class inheritance check (see
+/// compactClassInheritError). `f <$> c` applies f to every element of c, so f
+/// must commute with the mirror involution of c's storage class before the
+/// result may keep that class — and it does keep it: the arms below copy c's
+/// index-type record wholesale, `Symmetry` included, for ANY f.
+///
+/// The question is asked of the MAPPED-OVER computation `tC`, not of the
+/// deduced output type, because the two can disagree. When f's return type is
+/// still an inference variable the arms fall through to `retTy` and the output
+/// carries no records at all at this point; codegen then folds f into the inner
+/// kernel (applyFunctorWrappers / mapKernelInner) and allocates from the INNER
+/// apply's type — which was deduced before f existed and so certified only the
+/// inner kernel's parity. Keying off `tC` covers both routes.
+///
+/// f is unary by construction here (it maps one element), so the law is always
+/// its parameter 0's.
+and functorMapInheritError (env: TypeEnv) (tF: TypedExpr) (tC: TypedExpr)
+                           : TypeError option =
+    match env.Subst.Resolve tC.Type with
+    | ArrayElem arr when
+            arr.IndexTypes |> List.exists (fun ix ->
+                ix.Rank > 1
+                && (ix.Symmetry = SymAntisymmetric || ix.Symmetry = SymHermitian)) ->
+        let signResolver (calleeId: IRId) =
+            match env.FuncSignParities.TryGetValue calleeId with
+            | true, ps -> Some ps
+            | _ -> None
+        // An f that surfaces as neither a lambda nor a summarized top-level
+        // function certifies nothing and lands on the conservative refusal.
+        let (signParities, conjCommutes, fName) =
+            match (resolveTypedExpr env tF).Kind with
+            | TExprLambda li ->
+                (Blade.Deduce.deduceSignParities signResolver li.Params li.Body,
+                 Blade.Deduce.deduceConjCommutes li.Params li.Body,
+                 (match li.Params with
+                  | (p: TypedParam) :: _ -> p.Name
+                  | [] -> "the mapped element"))
+            | TExprVar (name, id, _) ->
+                // A top-level `function` is bound with TypedValue = None, so
+                // resolveTypedExpr can never surface it as a lambda; read its
+                // recorded interprocedural sign summary instead. There is no
+                // conjugation side-channel, so a Hermitian input refuses here.
+                ((match env.FuncSignParities.TryGetValue id with
+                  | true, ps -> ps
+                  | _ -> []), [], name)
+            | _ -> ([], [], "the mapped element")
+        arr.IndexTypes
+        |> List.filter (fun ix -> ix.Rank > 1)
+        |> List.tryPick (fun ix ->
+            compactClassInheritError ix.Symmetry 0 fName signParities conjCommutes)
+    | _ -> None
+
 /// Eta-expand a bare named-function reference used in KERNEL position:
 ///   lkm  ==>  lambda(__k0..__kn) -> lkm(__k0..__kn)
 /// A top-level `function` is bound with TypedValue = None (bindVarSimple),
@@ -5778,16 +5888,22 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 // Right-fold: f1 <$> (f2 <$> (... <$> c))
                 let funcs : TypedExpr list = elems |> List.take (elems.Length - 1)
                 let comp : TypedExpr = elems |> List.last
-                let applyFmap (acc: TypedExpr) (f: TypedExpr) : TypedExpr =
-                    let outputType =
-                        match f.Type, acc.Type with
-                        | FuncElem (_, IRTScalar et), ArrayElem arr ->
-                            mkArrayLike { arr with ElemType = IRTScalar et }
-                        | FuncElem (_, retTy), _ -> retTy
-                        | _ -> acc.Type
-                    mkTyped (TExprFunctorMap (f, acc)) outputType
-                let result : TypedExpr = funcs |> List.rev |> List.fold applyFmap comp
-                Ok result
+                // Same record copy, and so the same compact-class inheritance
+                // check, as the binary `<$>` arm — each fold step is one
+                // `f <$> acc`.
+                let applyFmap (accR: TypeResult<TypedExpr>) (f: TypedExpr) : TypeResult<TypedExpr> =
+                    accR |> Result.bind (fun acc ->
+                        match functorMapInheritError env f acc with
+                        | Some e -> Error e
+                        | None ->
+                            let outputType =
+                                match f.Type, acc.Type with
+                                | FuncElem (_, IRTScalar et), ArrayElem arr ->
+                                    mkArrayLike { arr with ElemType = IRTScalar et }
+                                | FuncElem (_, retTy), _ -> retTy
+                                | _ -> acc.Type
+                            Ok (mkTyped (TExprFunctorMap (f, acc)) outputType))
+                funcs |> List.rev |> List.fold applyFmap (Ok comp)
             | OpChoice ->
                 // object_for(<|>) <@> (c1, c2, ...) → left-fold producing TExprChoice
                 let folder (acc: TypedExpr) (elem: TypedExpr) : TypedExpr =
@@ -6013,32 +6129,58 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
 
     // Composed ObjectLoop: (o1 >>@ o2) <@> A
     | TExprCompose (OpComposeObj, _, _), _ ->
+        // Typed by CHAINING each stage through the same deduction a direct
+        // `stage <@> X` runs (recursive inferApply): stage 1 sees the real
+        // operands (real identities), each later stage sees the previous
+        // stage's OUTPUT TYPE as an anonymous intermediate. Two things this
+        // buys over the old arm (which skipped deduction and parroted the
+        // FIRST input array's type): the composed pipeline carries the right
+        // element/index type out the end, and every per-stage gate runs —
+        // comm surfacing, and BL4015's compact-class inheritance check, which
+        // a composed kernel used to slip past entirely.
+        //
+        // The RESULT keeps the compose shape (Loop = the chain,
+        // IsComposeApply = true): codegen's genComposeApply chases the chain
+        // and emits one fused nest, so only the type and the recorded
+        // identities improve here, not the runtime plan.
         let arrayExprs = match rR.Kind with
                          | TExprTuple elems -> elems
                          | _ -> [tRight]
-        let outputType =
-            match arrayExprs with
-            | first :: _ -> first.Type
-            | [] -> IRTUnit
-        let info : TypedApplyInfo = {
-            Loop = tLeft; Kernel = tRight
-            Arrays = arrayExprs
-            Identities = arrayExprs |> List.map (fun _ -> AIDLiteral (env.Builder.FreshId()))
-            ArrayTypes = arrayExprs |> List.map (fun a ->
-                match a.Type with
-                | ArrayElem at -> at
-                | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
-            SharedIndexTypes = []
-            SymcomStates = []; TriangularLevels = []
-            SDimsPerArray = []
-            KernelInputRanks = []; KernelOutputRank = 0
-            KernelTDims = []
-            SpeedupFactor = 1L; ReynoldsSpeedup = 1L
-            HasReynolds = false; OutputType = outputType
-            IsCoIteration = false
-            IsComposeApply = true
-        }
-        Ok (mkTyped (TExprApply info) outputType)
+        // Left-assoc chain -> ordered stages: Compose(Compose(o1,o2),o3) = [o1;o2;o3].
+        let rec stagesOf (e: TypedExpr) : TypedExpr list =
+            match (resolveTypedExpr env e).Kind with
+            | TExprCompose (OpComposeObj, l, r) -> stagesOf l @ stagesOf r
+            | _ -> [e]
+        let chained =
+            stagesOf rL
+            |> List.fold
+                (fun acc stage -> acc |> Result.bind (fun operand -> inferApply env stage operand))
+                (Ok tRight)
+        chained
+        |> Result.bind (fun finalApplied ->
+            let outputType = finalApplied.Type
+            let info : TypedApplyInfo = {
+                Loop = tLeft; Kernel = tRight
+                Arrays = arrayExprs
+                Identities = arrayExprs |> List.map (fun arr ->
+                    match (resolveTypedExpr env arr).Kind with
+                    | TExprVar (name, _, _) -> AIDVariable name
+                    | _ -> AIDLiteral (env.Builder.FreshId()))
+                ArrayTypes = arrayExprs |> List.map (fun a ->
+                    match a.Type with
+                    | ArrayElem at -> at
+                    | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+                SharedIndexTypes = []
+                SymcomStates = []; TriangularLevels = []
+                SDimsPerArray = []
+                KernelInputRanks = []; KernelOutputRank = 0
+                KernelTDims = []
+                SpeedupFactor = 1L; ReynoldsSpeedup = 1L
+                HasReynolds = false; OutputType = outputType
+                IsCoIteration = false
+                IsComposeApply = true
+            }
+            Ok (mkTyped (TExprApply info) outputType))
 
     | _ ->
         // Name the real culprit. When the LEFT already is a valid
@@ -6746,6 +6888,70 @@ and buildApplyInfo (env: TypeEnv)
         // inner dims — they propagate through the elementwise map.
         let kernelConsumesInner = kernelInputRanks |> List.exists (fun r -> r > 0)
         let outputType = deduceOutputType gridArrayTypes identities iterGroups antisymStorageGroups (computeSDimsPerArray gridArrayTypes) kernelTDims outputElemType isReynolds isReynoldsAntisym kernelConsumesInner env.Builder
+
+        // ---- Compact-class inheritance, checked (stage 3, unary seam) ----
+        // deduceOutputType's rank-0 elementwise arm hands the input group's
+        // compact class to the output VERBATIM. Certify that the kernel
+        // commutes with that class's mirror involution, or refuse — see
+        // compactClassInheritError for why refusal is the only other option.
+        //
+        // Which argument supplied the class: a rank > 1 compact record never
+        // joins a CROSS-argument axis group (rawAxisGroups case (B) admits only
+        // arguments contributing a single S-level), so each such record belongs
+        // to exactly one array, and the law to check is that one parameter's.
+        // A consuming position (kernelInputRanks > 0) is skipped: its record is
+        // re-tagged TDimension and never reaches the output's S-dims.
+        //
+        // Under reynolds the wrapper OWNS the output class (it is not inherited
+        // from any input), and a `where anticomm(...)` pin needs arity >= 2, so
+        // neither producer of an antisymmetric output is in scope here.
+        let compactInheritErr : TypeError option =
+            let inheritedClaims =
+                if isReynolds || lambdaInfo.Params.Length <> gridArrayTypes.Length then []
+                else
+                    match outputType with
+                    | ArrayElem outArr ->
+                        let claimed =
+                            outArr.IndexTypes
+                            |> List.filter (fun ix ->
+                                ix.Rank > 1
+                                && (ix.Symmetry = SymAntisymmetric || ix.Symmetry = SymHermitian))
+                            |> List.map (fun ix -> ix.Symmetry)
+                            |> Set.ofList
+                        if Set.isEmpty claimed then []
+                        else
+                            gridArrayTypes
+                            |> List.indexed
+                            |> List.collect (fun (i, at) ->
+                                if (kernelInputRanks |> List.tryItem i |> Option.defaultValue 0) > 0
+                                then []
+                                else
+                                    at.IndexTypes
+                                    |> List.filter (fun ix ->
+                                        ix.Kind = SDimension && ix.Rank > 1
+                                        && Set.contains ix.Symmetry claimed)
+                                    |> List.map (fun ix -> (i, ix.Symmetry)))
+                            |> List.distinct
+                    | _ -> []
+            if List.isEmpty inheritedClaims then None
+            else
+                let signResolver (calleeId: IRId) =
+                    match env.FuncSignParities.TryGetValue calleeId with
+                    | true, ps -> Some ps
+                    | _ -> None
+                let signParities =
+                    Blade.Deduce.deduceSignParities signResolver lambdaInfo.Params restampedBody
+                let conjCommutes =
+                    Blade.Deduce.deduceConjCommutes lambdaInfo.Params restampedBody
+                inheritedClaims |> List.tryPick (fun (i, cls) ->
+                    let pname =
+                        match List.tryItem i lambdaInfo.Params with
+                        | Some (p: TypedParam) -> p.Name
+                        | None -> sprintf "argument %d" i
+                    compactClassInheritError cls i pname signParities conjCommutes)
+        match compactInheritErr with
+        | Some e -> Error e
+        | None ->
 
         let reynoldsSpeedup =
             if isReynolds then
@@ -10071,7 +10277,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 { p with Type = env.Subst.Resolve(p.Type) } : TypedParam)
             let resolvedRet = env.Subst.Resolve(retType)
             // ================================================================
-            // PHASE B (docs/plan-equivariance-in-types.md, B1+B2): the typed
+            // PHASE B (retired equivariance-in-types plan, B1+B2): the typed
             // REPRESENTATION-STATUS deduction — the fourth lattice, beside the
             // parity deduction above.
             //

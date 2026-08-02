@@ -1,7 +1,7 @@
-/// MEASUREMENT SCAFFOLDING FOR docs/census-perm-layer.md — NOT A SHIPPED
+/// MEASUREMENT SCAFFOLDING FOR THE RETIRED PERM-LAYER CENSUS — NOT A SHIPPED
 /// DISCIPLINE.
 ///
-/// WHAT THIS BLOCK IS. `docs/design-discipline-as-data.md` asks, for each of the
+/// WHAT THIS BLOCK IS. The retired discipline-as-data design note asks, for each of the
 /// three equivariance-family disciplines, where its CHECKING and its DEDUCTION
 /// should live. Equiv answered for itself (three shipped gates); galilean
 /// answered for itself (`blade test gal-layer`) and reached a DIFFERENT answer.
@@ -37,7 +37,7 @@
 ///      a parameter's FLAT EXTENT *relative to N*, and N comes from the
 ///      conjunct. `Idx<16>` is `Pow 4` at N = 2 and `Pow 2` at N = 4 — MEASURED
 ///      by probe (a). So the classifier is `(N, IRType) -> status`, which is
-///      `design-discipline-as-data.md` §4.2's signature-level lifting again, and
+///      the retired discipline-as-data design note §4.2's signature-level lifting again, and
 ///      for INFERENCE it means N must be GUESSED. §6 measures what guessing
 ///      costs, with and without the `__nodepow` tag that would remove the guess.
 ///
@@ -127,7 +127,7 @@ let powNK (n: int) (k: int) : int64 =
 // 1a-0. THE EXTENT READER, and the §0.2 premise it refutes
 // ----------------------------------------------------------------------------
 //
-// `plan-equivariance-in-types.md` §0.2 said perm inference becomes feasible
+// the retired equivariance-in-types plan §0.2 said perm inference becomes feasible
 // because "at typecheck, monomorphized extents make N concrete". MEASURED, by
 // probe (b): they do not. The whole perm surface sizes its weight buffers with
 // `let static W1 = ml.perm_weight_dim(1, 1, 4)` and writes `Idx<W1>`, and at
@@ -449,7 +449,7 @@ let permStatusOf (ctx: PermCtx) : Map<IRId, PStatus> -> TypedExpr -> PStatus =
 
     /// PERM'S OWN RULES — the arms whose soundness argument names the action (a
     /// PERMUTATION MATRIX: monomial, 0/1, moving cells without mixing them).
-    /// Every one of them is the polarity table of design-discipline-as-data.md
+    /// Every one of them is the polarity table of the retired discipline-as-data design note
     /// §3.2, and three of them are the exact inverse of galilean's.
     and ruleArm (env: Map<IRId, PStatus>) (expr: TypedExpr) : PStatus =
         let j = go env
@@ -990,7 +990,7 @@ let coincidentConfigs (maxN: int) : (int * int * int * int) list =
 /// the normalized conjunct name directly in a module that does not import `ml`
 /// reaches the handler and nothing else.
 ///
-/// This is the exact shape `census-galilean-layer.md` S4 family D found one
+/// This is the exact shape the retired galilean-layer census S4 family D found one
 /// discipline over, and it survives a flip for free, needing only a code
 /// assignment (BL3999 `Other` today rather than BL4012).
 let probeHandlerBadN = """
@@ -1036,7 +1036,7 @@ let seamVerdict (source: string) : string =
 // 6c. THE FIRST-EVER PERM INFERENCE, AND ITS GATE
 // ============================================================================
 //
-// Perm has NO incumbent inference (design-discipline-as-data.md 2.5: hypothesis
+// Perm has NO incumbent inference (retired discipline-as-data design note 2.5: hypothesis
 // space "none -- no inference exists"). So there is no seam channel to
 // difference against, and the differential degenerates to its false-positive
 // half. That half is measured THE EXPENSIVE WAY: every proposal is written back

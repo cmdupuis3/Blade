@@ -1,0 +1,24 @@
+// TEST: Hermitian Real Map Preserved
+// A HermitianIdx array's mirror is conjugation, not negation, so its
+// inheritance law is different from the antisymmetric one (163/164): the
+// kernel must satisfy f(conj z) = conj(f z). z*z does — conjugation is a field
+// automorphism, so any map built from the parameter, REAL constants and the
+// four field operations commutes with it — and the Hermitian class survives.
+// The mirrored read is the assertion that matters: out(1,0) must come back
+// conjugated, which is only right because the map is conjugation-linear.
+// (The Complex128 annotations are needed on compact reads of a complex array;
+// without them the binding infers `double` and the emitted C++ will not build.)
+let A: Array<Complex128 like Idx<2>, Idx<3>> = [
+    [complex(1.0, 1.0), complex(2.0, 0.0), complex(0.0, 1.0)],
+    [complex(3.0, -1.0), complex(1.0, 2.0), complex(2.0, 0.0)]
+]
+let H = gram(A, A)
+let out = method_for(H) <@> lambda(v) -> v * v |> compute
+let upper: Complex128 = out(0, 1)
+let lower: Complex128 = out(1, 0)
+// H upper triangle is (0,0)=7, (0,1)=4+2i, (1,1)=19 (see 067), and squaring
+// gives 49, (4+2i)^2 = 12+16i, 361.
+// EXPECT: H = [(7, 0), (4, 2), (19, 0)]
+// EXPECT: out = [(49, 0), (12, 16), (361, 0)]
+// EXPECT: upper = (12, 16)
+// EXPECT: lower = (12, -16)

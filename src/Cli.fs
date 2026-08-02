@@ -1272,7 +1272,7 @@ let private dispatchTest (rest: string list) : int =
         let certSuggest = (Blade.Tests.DiagCorpus.runCertSuggestTests ()).Failed
         if core + corpus + certSuggest = 0 then 0 else 1
     | [ "rep-differential" ] | [ "repdifferential" ] ->
-        // Phase-B3 deduction parity gate (plan-equivariance-in-types.md): the
+        // Phase-B3 deduction parity gate (retired equivariance-in-types plan): the
         // typed rep-status deduction vs the stage-6a seam inference, proposal
         // by proposal over the ml-equiv corpus. In-process, no C++ pipeline;
         // also part of the full suite, where a red differential blocks the run.
@@ -1298,7 +1298,7 @@ let private dispatchTest (rest: string list) : int =
         let failed = (Blade.Tests.RepRejectCensus.runRepRejectCensusTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "gal-layer" ] | [ "gallayer" ] ->
-        // MEASUREMENT ONLY (docs/census-galilean-layer.md): the GALILEAN
+        // MEASUREMENT ONLY (retired galilean-layer census): the GALILEAN
         // discipline's layer question — what would a typecheck-resident walker
         // conclude about every galilean certificate in the corpus, on the
         // programs the seam accepts AND on the programs it refuses. Builds an
@@ -1307,7 +1307,7 @@ let private dispatchTest (rest: string list) : int =
         let failed = (Blade.Tests.GalLayerCensus.runGalLayerCensusTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "perm-layer" ] | [ "permlayer" ] ->
-        // MEASUREMENT ONLY (docs/census-perm-layer.md): the PERM discipline's
+        // MEASUREMENT ONLY (retired perm-layer census): the PERM discipline's
         // layer question, plus the first-ever perm INFERENCE experiment. Perm
         // has no incumbent inference, so the differential degenerates to its
         // false-positive half: every proposal is gated by writing the pin back
@@ -1320,6 +1320,18 @@ let private dispatchTest (rest: string list) : int =
         // Phase 0.2 review block: the differential-harness oracles checked
         // against hand-computed / analytic values. No Blade source pipeline.
         let failed = (Blade.Tests.OracleReview.runOracleTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "orbrank" ] | [ "orb-rank" ] ->
+        // Phase 2 (pure-function layer) of docs/plan-orbidx-bijections.md: the
+        // OrbIdx cardinality fold, canonicalizer, segment-peeled traversal
+        // stream and arithmetic rank/unrank pair (src/OrbRank.fs), pinned
+        // against a brute-force canonicalization of every raw tuple as a SET
+        // and as an ORDER — §3's hard constraint is that rank order = the §2
+        // nest's visit order, and a read->write roundtrip cannot catch an order
+        // mismatch. Plus the hand-unrolled depth-2 E/B/A nest, the depth-1
+        // triangular-offset anchors, and the int64 wall. Pure integer,
+        // in-process, no Blade source pipeline.
+        let failed = (Blade.Tests.OrbRankReview.runOrbRankTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "sympower" ] | [ "sympower-tables" ] ->
         // Stage 2b-i review block: the T_{j,l} Sym-power occurrence tables
@@ -1422,6 +1434,13 @@ let private dispatchTest (rest: string list) : int =
         // shipped headers. Verifies contiguity/cardinality invariants the
         // value-checking Blade tests cannot catch. No Blade source pipeline.
         let failed = (Blade.Tests.AllocTests.runAllocLayoutTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "orbwreath" ] | [ "orb-wreath" ] ->
+        // Standalone C++ wreath-class storage tests: segment-peeled traversal
+        // order, cardinality fold, rank/unrank bijection, canon signs,
+        // overflow walls. Compiles + runs cpp/orb_wreath_tests.cpp against the
+        // shipped orbit_wreath_utilities.hpp. No Blade source pipeline.
+        let failed = (Blade.Tests.OrbWreathTests.runOrbWreathTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "omp-pragma" ] ->
         // Pure codegen-string checks: a `where omp(...)` clause must reach the

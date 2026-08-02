@@ -99,6 +99,8 @@ type TypeError =
     | ChainOpUndecidable of leftDesc: string * rightDesc: string
     | CommContradictsBody of param1: string * param2: string
     | AntisymmContradictsBody of param1: string * param2: string
+    | AntisymMapNotOdd of param: string * proved: string
+    | HermitianMapNotReal of param: string
     | PlaceholderNeedsAllBound of got: int * total: int
     | GroupKeysRank1
     | CumulantOrderPositive of order: int
@@ -443,7 +445,7 @@ let stripTagAnnotation (ty: IRType) : IRType =
 /// which is reserved for the B-flat migration.
 
 /// A BLOCK-SPEC tag, generalized over the two members of the family
-/// (docs/plan-transforms-as-types.md §3.6, stage 5b-i): the O(3) irreps tag
+/// (retired transforms-as-types plan §3.6, stage 5b-i): the O(3) irreps tag
 /// `__irreps:<name>:<l,p,m|...>` and the point-group tag
 /// `__pgirreps:<group>:<name>:<LABEL,mult|...>`. Yields
 /// (member-and-spec identity, alias name option) where the identity string

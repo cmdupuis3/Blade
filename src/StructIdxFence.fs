@@ -1,5 +1,5 @@
 /// The constrained-record INDEX FENCE: the semantic half of
-/// docs/plan-constrained-index-types.md's C1 stage.
+/// the retired constrained-index-types plan's C1 stage.
 ///
 /// This module answers three questions and nothing else:
 ///   1. is this struct STATIC — are all its fields StaticValue-representable

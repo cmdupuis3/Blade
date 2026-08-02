@@ -1,0 +1,22 @@
+// TEST: Antisym Even Kernel (rejects)
+// ERROR: BL4015
+// THE soundness probe for compact-class inheritance. deduceOutputType's rank-0
+// elementwise arm used to hand the input group's storage class to the output
+// VERBATIM, for any kernel — sound only when the kernel commutes with the
+// class's mirror involution. v*v does not: it is sign-EVEN, so the true result
+// is SYMMETRIC (out(j,i) = f(-C(i,j)) = f(C(i,j)) = out(i,j)), while strict
+// antisymmetric storage answers every mirrored read with NegateOnSwap. Before
+// the check this compiled and ran, with out(0,1) = 4 and out(1,0) = -4 where
+// both are +4 — a silent wrong ANSWER, not a wrong shape.
+//
+// The compiler refuses rather than demoting to symmetric or dense: the loop
+// nest's simplex comes from the INPUT record (buildLoopLevelStructure reads
+// SharedIndexTypes), so an antisymmetric input drives the STRICT simplex and
+// writes C(n,2) cells. The symmetric answer needs C(n+1,2) — it has a diagonal
+// this nest cannot fill. 167 shows the decompact-first spelling that works.
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> x - y
+let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let out = method_for(C) <@> lambda(v) -> v * v |> compute
+// EXPECT: typecheck failure — an even map of an antisymmetric array is
+// symmetric, so it cannot inherit the strict-triangular storage.

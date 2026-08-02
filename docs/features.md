@@ -104,7 +104,7 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | Lambdas (`lambda(a, b) -> ...`), where-clauses on lambdas, array captures under nominal index typing | Core | v10 §6.2.1, §17.4; `corpus/functions` |
 | Sectioned operators `(+)`, `(/) x`; single-wildcard partial application `f(_, y)` | Spec-only | v10 §6.2.2–6.2.3; multiple wildcards rejected by design |
 | Nested `function` declarations (desugar to `let const` lambdas) | Core | v10 §17.3 |
-| Reynolds operators — `reynolds(g)`, `reynolds(g, Antisymmetric)`, partial positions | Core (**clarified, arc 2**) | v10 §6.4; `corpus/reynolds` (23 tests incl. SQL composition, antisym cancellation, joint 2D over the fused path). The surface combinator is the VALUE-LEVEL wrapper (permutes kernel arguments; H = Sₙ by construction) — output symmetry still follows H ∩ Stab, so identity is required (dense output for distinct arrays, pinned by reynolds/013). The proof tower's per-dimension INDEX-LEVEL Reynolds (`reynolds_full_product_symmetry`, lossless canonical access) is a distinct prospective operator — future.md |
+| Reynolds operators — `reynolds(g)`, `reynolds(g, Antisymmetric)`, partial positions | Core (**clarified, arc 2**) | v10 §6.4; `corpus/reynolds` (23 tests incl. SQL composition, antisym cancellation, joint 2D over the fused path). The surface combinator is the VALUE-LEVEL wrapper (permutes kernel arguments; H = Sₙ by construction) — output symmetry still follows H ∩ Stab, so identity is required (dense output for distinct arrays, pinned by reynolds/013). The proof tower's per-dimension INDEX-LEVEL Reynolds (`reynolds_full_product_symmetry`, lossless canonical access) is a distinct prospective operator, not currently a surface construct |
 | `gram` — Gram-matrix construction (dense / symmetric / Hermitian) | **v7-only** | `corpus/index-types` 066–069; differential oracle in `tests/Oracles.fs` (Gram-Hermitian was an oracle lesson); not in v10 |
 | `hermitian` — adjoint operator | **v7-only** | `corpus/index-types` 070; not in v10 |
 | `zero` kernel and zero-arity base cases (`f(())` = identity element) | Core | v10 §12.9, §10.4.7; `corpus/zero-combinators` (7 tests) |
@@ -231,8 +231,8 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
 | NetCDF type provider (`NetCDFProvider<"f.nc">` → index types + typed arrays) | Core | v10 §4.9; v7 `providers/`, `NetcdfTests.fs`, `read` keyword, `sample.nc` |
-| HDF5 / Zarr providers | Planned | provider interface slot (audit §4); [future.md](future.md) |
-| Triangular file format (block-aligned symmetric tensor I/O) | Planned | ext §2.7; [future.md](future.md) |
+| HDF5 / Zarr providers | Planned | provider interface slot (audit §4) |
+| Triangular file format (block-aligned symmetric tensor I/O) | Planned | ext §2.7 |
 
 ## 16. Backends and performance
 
@@ -264,7 +264,7 @@ Spec-only; domain rules live in libraries.
 | Norm activation | Near-term | ml-spec §8.2 |
 | Message passing: `scatter` / `gather` | Near-term | ml-spec §9 (expressible today as loops — `ml-e2e/00*` do; dedicated ops pending) |
 | Reynolds applications: symmetric message passing, CG speedups, higher-order interactions, antisymmetric applications | Near-term | ml-spec §14 |
-| Automatic differentiation (`grad`, reverse mode, v1 subset) | Core (v7) | AST-level source transform; module doc §11 has the ABI + subset; corpus `ad/` + `ml-e2e/`; remaining work in [future.md](future.md) §2.1 |
+| Automatic differentiation (`grad`, reverse mode, v1 subset) | Core (v7) | AST-level source transform; module doc §11 has the ABI + subset; corpus `ad/` + `ml-e2e/`; remaining work listed in [features/equivariant-nn.md](features/equivariant-nn.md) §11 |
 
 ## 18. Graphs and trees (planned module)
 
@@ -274,5 +274,5 @@ Design drafts in ext §2.3–2.4; module doc: [features/graphs-trees.md](feature
 |---------|--------|
 | Tree structures (arrays as fixed-depth trees; path indexing) | Planned |
 | Graph types via trace indices | Planned |
-| Symmetric trees (commutative children) | Planned (speculative end; see future.md) |
+| Symmetric trees (commutative children) | Planned (speculative end) |
 

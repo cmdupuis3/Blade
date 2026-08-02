@@ -15,7 +15,6 @@ Hub for most documentation, including guides, formalisms, and proof explanations
 | [features/sql.md](features/sql.md) | SQL-like / relational operations | Relational feature module |
 | [features/equivariant-nn.md](features/equivariant-nn.md) | Equivariant ML: irreps, CG tensor products, spherical harmonics, message passing | ML feature module |
 | [features/graphs-trees.md](features/graphs-trees.md) | Tree structures and graph types via trace indices | Graph/tree feature module sketch |
-| [future.md](future.md) | Future plans: extensions research directions, Coq roadmap open items, speculation | What Blade *could have* |
 
 Related documents that already existed and stay where they are:
 

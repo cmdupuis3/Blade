@@ -1,4 +1,4 @@
-/// B3 of docs/plan-equivariance-in-types.md: the differential gate between
+/// B3 of the retired equivariance-in-types plan: the differential gate between
 /// the typed representation-status deduction (Blade.DeduceRep, producer of
 /// TypedCertProposals) and the elaboration-seam inference (stage 6a,
 /// producer of CertSuggestions/BL4011). Ship criterion for phase B: typed

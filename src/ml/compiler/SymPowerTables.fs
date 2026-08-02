@@ -1,5 +1,5 @@
 /// T_{j,l} tables — the universal occurrence bases of V_L inside Sym^j(V_l)
-/// behind `derive_poly<k>` (plan-transforms-as-types §3.3b, stage 2b-i).
+/// behind `derive_poly<k>` (retired transforms-as-types plan §3.3b, stage 2b-i).
 /// Per (j, l), an exact pipeline with floats appearing only at the very end
 /// (the same status as realCGDense): degree-j monomials over the
 /// divided-power weight basis (lex `symMultisets` order) → integer raising

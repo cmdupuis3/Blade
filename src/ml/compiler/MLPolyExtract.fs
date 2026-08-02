@@ -1,5 +1,5 @@
 /// THE POLYNOMIAL EXTRACTOR AND THE FINITE (WORD-SET) DISCHARGE — the
-/// generator-based certification engine's front half (plan-transforms-as-types
+/// generator-based certification engine's front half (retired transforms-as-types plan
 /// §3.5's uniform rule, §7 stage 6b). MLEquiv checks that a body COMPOSES
 /// equivariance-preserving operations; this module checks that a body IS an
 /// equivariant map, by normalizing it to an exact polynomial and testing the

@@ -32,7 +32,7 @@
 ///
 /// NOTHING GROUP-SPECIFIC BELONGS HERE beyond the group NAME that is passed in.
 /// The message text is equiv's vocabulary; galilean and perm keep their own,
-/// by decision (docs/design-discipline-as-data.md) — this module is shared
+/// by decision (retired discipline-as-data design note) — this module is shared
 /// between two FRONT HALVES of one discipline, not between disciplines.
 module Blade.ML.EquivMessages
 
@@ -93,5 +93,5 @@ let inversionFailureMessage (funcName: string) (f: LD.InversionFailure) : string
 
 /// The cap note appended to the surfacing composition diagnostic.
 let capNote (funcName: string) (why: string) : string =
-    sprintf " [the equivariance engine did not run on '%s': %s (plan-transforms-as-types section 7, stage 6 caps: degree <= %d, <= %d expanded terms); the verdict above is composition's]"
+    sprintf " [the equivariance engine did not run on '%s': %s (retired transforms-as-types plan section 7, stage 6 caps: degree <= %d, <= %d expanded terms); the verdict above is composition's]"
         funcName why PX.maxRepDegree PX.maxTerms

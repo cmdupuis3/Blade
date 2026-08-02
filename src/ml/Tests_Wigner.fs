@@ -94,7 +94,7 @@ module Tests_Wigner =
 
         // Cross-block exchange symmetry (the l1 <> l2 case of the same
         // identity, relied on by the compacted weight space of
-        // docs/plan-transforms-as-types.md 3.2 / 6.2(ii)): the coupling tensor
+        // the retired transforms-as-types plan 3.2 / 6.2(ii)): the coupling tensor
         // of the swapped-degree pair is the transpose of the original times
         // the exchange sign,
         //   realCG(l2,l1,l3)[m2,m1,m3] = (-1)^(l1+l2-l3) realCG(l1,l2,l3)[m1,m2,m3].

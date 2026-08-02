@@ -196,7 +196,7 @@ let private ensure (st: ElabState) (key: string) (make: string -> FunctionDecl) 
 // ============================================================================
 
 // ============================================================================
-// Galilean stamping (docs/plan-equivariance-in-types.md, stage A1)
+// Galilean stamping (retired equivariance-in-types plan, stage A1)
 // ============================================================================
 //
 // The ML twin of this pass (MLElaborate's `equivStamp`) pins `__ml_equiv` on

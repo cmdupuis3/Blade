@@ -1,5 +1,5 @@
 // THE 𝔰𝔬(3) GENERATOR TABLES AND THE RADICAL-VECTOR DISCHARGE — stage 6c of
-// plan-transforms-as-types (§3.5's linearity resolution, §7 stage 6c's oracle
+// the retired transforms-as-types plan (§3.5's linearity resolution, §7 stage 6c's oracle
 // layers). Five layers, keystone first.
 //
 // 1. THE EXP-PIN (the keystone). The shipped exact tables are DERIVED against

@@ -713,6 +713,74 @@ let deduceSignParities (resolver: IRId -> SignParity list option)
     let body = flattenBindings body
     parms |> List.map (fun p -> signParityOf resolver p.VarId body)
 
+// ============================================================================
+// Conjugation-linearity (the Hermitian twin of the sign summaries)
+// ============================================================================
+
+/// Is this p-free subtree a REAL constant of the map — one conjugation fixes?
+/// The element TYPE decides it, with one exception: the kernel-body complex
+/// re-stamp in buildApplyInfo upgrades real literals to the body's complex
+/// element type, so reading the stamp back would reject `H <@> (v * 2.0)`.
+/// Literals (and the field expressions over them) are therefore judged
+/// syntactically; everything else falls back to its stamp, which answers
+/// "not real" for an unresolved type — the conservative direction.
+let rec private isRealConstant (e: TypedExpr) : bool =
+    match e.Kind with
+    | TExprLit (LitInt _ | LitFloat _) -> true
+    | TExprLit _ -> false
+    | TExprUnaryOp (OpNeg, x) -> isRealConstant x
+    | TExprBinOp (_, (OpAdd | OpSub | OpMul | OpDiv), l, r) ->
+        isRealConstant l && isRealConstant r
+    | _ ->
+        match stripUnits e.Type with
+        | IRTScalar (ETComplex64 | ETComplex128) -> false
+        | IRTScalar _ -> true
+        | _ -> false
+
+/// Does a body COMMUTE WITH COMPLEX CONJUGATION in `p` — f(conj z) ≡ conj(f z)
+/// for every z? This is the Hermitian twin of the sign law above. Each compact
+/// storage class stores one triangle and recovers the other through a mirror
+/// involution on the VALUE — negation for AntisymIdx, conjugation for
+/// HermitianIdx, the identity for SymIdx — so a kernel mapped elementwise over
+/// a compact array may keep that class exactly when it commutes with the
+/// class's involution. Antisymmetric asks `signParityOf … = SOdd`; symmetric
+/// asks nothing (its mirror is the identity, which every map commutes with);
+/// Hermitian asks this.
+///
+/// Conjugation is a FIELD AUTOMORPHISM fixing the reals, so the certificate is
+/// syntactic and needs no lattice: a body built from p, real constants, the
+/// four field operations, and the conjugation-commuting unary ops is a "real"
+/// map. Deliberately NOT on the list: a complex constant (`z + i` is not
+/// Hermitian-preserving), `imag` and `arg` (which NEGATE under conjugation),
+/// and `^` / the OpMath intrinsics — `conj(z^w)` and `conj(exp z)` do agree
+/// off the branch cut, but not ON it, and a rule that holds almost everywhere
+/// is not a rule. Unlisted nodes answer FALSE, the same closed-world default
+/// the parity walkers take toward PBottom / SUnknown.
+let rec private conjCommutesIn (p: IRId) (e: TypedExpr) : bool =
+    let cc = conjCommutesIn p
+    match e.Kind with
+    // Base case: a subtree that never mentions p is a constant of the map, and
+    // conj(c) = c holds iff c is real.
+    | _ when not (usesVar p e) -> isRealConstant e
+    | TExprVar (_, id, _) -> id = p   // the identity map trivially commutes
+    | TExprBinOp (_, (OpAdd | OpSub | OpMul | OpDiv), l, r) -> cc l && cc r
+    // conj(−z) = −conj z; conj(conj z) = z = conj(conj z); Re(conj z) = Re z,
+    // which is real, so conj fixes it. (`!` yields a bool; the rest are on the
+    // reject list above.)
+    | TExprUnaryOp ((OpNeg | OpConj | OpReal), inner) -> cc inner
+    // An arm chosen independently of p is the same arm for z and conj z, so
+    // the chosen branch carries its own law.
+    | TExprIf (c, t, f) -> not (usesVar p c) && cc t && cc f
+    | _ -> false
+
+/// Per-parameter conjugation-linearity summary, in declaration order — the
+/// `deduceSignParities` shape, for the Hermitian half of the same question.
+/// Intraprocedural: a call certifies nothing (there is no summary side-channel
+/// for this law), which lands on the conservative FALSE.
+let deduceConjCommutes (parms: TypedParam list) (body: TypedExpr) : bool list =
+    let body = flattenBindings body
+    parms |> List.map (fun p -> conjCommutesIn p.VarId body)
+
 /// Parity of one subtree under σ = (pi pj). A bare occurrence of either
 /// swapped param that no enclosing mirror node accounts for is PBottom.
 /// `resolver` is the sign-summary lookup used by the call rule below.

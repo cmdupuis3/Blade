@@ -1,5 +1,5 @@
 /// The Sₙ permutation-module counting layer — the INTEGER half of stage 5a
-/// (plan-transforms-as-types §3.6, §7 stage 5, sub-stage 5a-i). No floats, no
+/// (retired transforms-as-types plan §3.6, §7 stage 5, sub-stage 5a-i). No floats, no
 /// emission, no certification lattice: 5a-ii adds the loop-nest emission and
 /// the exact-rational Reynolds/Gram oracle, 5a-iii the `ml.perm_equiv(N)`
 /// lattice. This file is the part both of those count against.
@@ -256,7 +256,7 @@ let private certify (m: int) (maxBlocks: int) (parts: int[] list) : unit =
 let permPartitions (m: int) (maxBlocks: int) : int[] list =
     if m < 0 then failwithf "internal: permPartitions with negative position count (%d)" m
     if m > maxPositions then
-        failwithf "internal: permPartitions with %d positions — the S_n surface is capped at K + L <= %d (plan-transforms-as-types §3.6)"
+        failwithf "internal: permPartitions with %d positions — the S_n surface is capped at K + L <= %d (retired transforms-as-types plan §3.6)"
             m maxPositions
     if maxBlocks < 0 then
         failwithf "internal: permPartitions with negative block bound (%d)" maxBlocks
@@ -291,11 +291,11 @@ let checkPermSizing (what: string) (mLabel: string) (m: int) (n: int) : Result<u
     if m < 0 then
         Error (sprintf "%s: %s must be >= 0 (got %d)" what mLabel m)
     elif m > maxPositions then
-        Error (sprintf "%s: %s = %d exceeds the cap of %d — the S_n weight basis is one partition of the %s positions per weight (Bell(%d) = %d at the cap), and the emitted kernel is one loop nest per partition (plan-transforms-as-types §3.6)"
+        Error (sprintf "%s: %s = %d exceeds the cap of %d — the S_n weight basis is one partition of the %s positions per weight (Bell(%d) = %d at the cap), and the emitted kernel is one loop nest per partition (retired transforms-as-types plan §3.6)"
                    what mLabel m maxPositions mLabel maxPositions (partitionCount maxPositions maxPositions))
     elif n < 1 then
         Error (sprintf "%s: N must be a static int >= 1 (got %d) — it is the node-axis extent" what n)
     elif n < m then
-        Error (sprintf "%s: N = %d is smaller than %s = %d. The v1 S_n surface requires a static N >= %s so the weight basis is the FULL partition lattice of the %d positions (Bell(%d) = %d weights); at N = %d the lattice truncates to the partitions with at most N blocks (%d weights) — a different basis, so the count, the weight layout and the emitted kernel all change. That TRUNCATED-BASIS variant is a named deferral (plan-transforms-as-types §3.6, stage 5a), not a silent fallback: raise N, or lower %s"
+        Error (sprintf "%s: N = %d is smaller than %s = %d. The v1 S_n surface requires a static N >= %s so the weight basis is the FULL partition lattice of the %d positions (Bell(%d) = %d weights); at N = %d the lattice truncates to the partitions with at most N blocks (%d weights) — a different basis, so the count, the weight layout and the emitted kernel all change. That TRUNCATED-BASIS variant is a named deferral (retired transforms-as-types plan §3.6, stage 5a), not a silent fallback: raise N, or lower %s"
                    what n mLabel m mLabel m m (partitionCount m m) n (partitionCount m n) mLabel)
     else Ok ()

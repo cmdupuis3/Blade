@@ -160,6 +160,14 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let shape = Blade.Tests.Shape.runShapeTests ()
     // Oracle review: differential-harness oracles vs hand-computed truth (Phase 0.2).
     let oracles = Blade.Tests.OracleReview.runOracleTests ()
+    // The OrbIdx bijection layer (OrbRank.fs, plan-orbidx-bijections Phase 2):
+    // the segment-peeled traversal stream and the arithmetic rank/unrank pair,
+    // pinned against a brute-force canonicalization of every raw tuple — as a
+    // SET and as an ORDER, since §3's hard constraint is that rank order = the
+    // nest's visit order and a read->write roundtrip cannot catch an order
+    // mismatch. Plus the hand-unrolled depth-2 E/B/A nest, the depth-1
+    // triangular-offset anchors, and the int64 wall at depth 3 / n = 1000.
+    let orbRank = Blade.Tests.OrbRankReview.runOrbRankTests ()
     // Compiler-native CG tables (WignerTables.fs) vs closed forms (ML arc).
     let wigner = Blade.Tests.WignerTablesReview.runWignerTablesTests ()
     // Sym^j(V_l) occurrence tables (SymPowerTables.fs, stage 2b-i): exact
@@ -196,7 +204,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // rather than proves (completeness of the orbit basis).
     let permOracle = Blade.Tests.PermOracleReview.runPermOracleTests ()
     // The constrained-record COUNTING layer (StructIdxSpec.fs, stage C1 of
-    // plan-constrained-index-types §7): box enumeration over the per-field
+    // the retired constrained-index-types plan §7): box enumeration over the per-field
     // inclusive bounds with the flat-filter vs arrow-heads certificate (set
     // AND order — order agreement is what catches an offset bug), the CGm112
     // anchor and its 3/7/9 lo-sweep against an independent triple-loop dense
@@ -240,7 +248,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // `// SUGGEST:` pins, strict in both directions so SILENCE is assertable
     // (a warning changes no value, so the value corpus cannot pin it).
     let certSuggest = Blade.Tests.DiagCorpus.runCertSuggestTests ()
-    // B3 of plan-equivariance-in-types.md: the DIFFERENTIAL between the typed
+    // B3 of the retired equivariance-in-types plan: the DIFFERENTIAL between the typed
     // rep-status deduction (DeduceRep/TypedCertProposals) and the same
     // stage-6a seam inference the block above pins, run over the same corpus.
     // Recall in one direction, zero false proposals in the other; engine-only
@@ -267,6 +275,9 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Verifies layout invariants the value-checking source tests cannot catch.
     // Skips cleanly if g++ absent.
     let alloc = runAllocLayoutTests ()
+    // C++ wreath-class storage invariants (segment-peeled traversal order,
+    // rank/unrank bijection): same category as alloc, skips cleanly sans g++.
+    let orbWreath = Blade.Tests.OrbWreathTests.runOrbWreathTests ()
     // OpenMP pragma emission: verifies a `where omp(...)` clause reaches codegen
     // as a pragma for EVERY kernel spelling (named function via either eta site,
     // let-bound lambda, inline lambda) and for no unannotated one. Pure codegen
@@ -343,7 +354,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc
+          yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

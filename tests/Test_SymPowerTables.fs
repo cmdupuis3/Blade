@@ -1,5 +1,5 @@
 // Pins for the Sym^j(V_l) occurrence tables (SymPowerTables.fs) — stage 2b-i
-// of plan-transforms-as-types §3.3b/§7 3b. The exact half re-verifies the
+// of the retired transforms-as-types plan §3.3b/§7 3b. The exact half re-verifies the
 // integer/rational claims from OUTSIDE the builder (E·v = 0, occurrence
 // counts vs the stage-2a weight-peel, the diagonal rational Gram); the float
 // half pins global orthonormality under identity (3)'s /N_I weighting, the

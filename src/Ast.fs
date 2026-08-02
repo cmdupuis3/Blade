@@ -244,7 +244,7 @@ type TypeExpr =
     // The spec is an expression resolved at typecheck via StaticEval.
     | TyIrrepsIdx of spec: Expr
     // PgIrrepsIdx<GROUP, spec> — the SECOND block-spec member
-    // (docs/plan-transforms-as-types.md §3.6, stage 5b-i): a block-structured
+    // (retired transforms-as-types plan §3.6, stage 5b-i): a block-structured
     // dense index over a POINT GROUP's labelled irreducible blocks. GROUP is
     // an identifier resolved against the frozen MLPointSpec registry ({C4,
     // D4}) at lowering time — a bare name in type position, exactly as the
@@ -280,7 +280,7 @@ type TypeExpr =
 ///     identity (extent, nominal tag, index kind) is inherited by the
 ///     symmetric-power record; only Rank and Symmetry are re-stamped.
 ///     This is what makes `Sym^k` of an irreps space a WRITABLE type
-///     (docs/plan-transforms-as-types.md §7 stage 3, seam S1).
+///     (retired transforms-as-types plan §7 stage 3, seam S1).
 and SymIdxBase =
     | SymBaseExtent of Expr
     | SymBaseIndex of TypeExpr
@@ -307,7 +307,7 @@ and WhereClause = {
     // license as a comm group, but the licensed output storage is the STRICT
     // simplex (AntisymIdx<r,n>, C(n,r) cells, negate-on-swap reads) instead of
     // the inclusive triangle. This is the pin spelling for a deduced-PNeg
-    // kernel (docs/plan-implicit-formers-and-deduction.md §4).
+    // kernel (retired implicit-formers-and-deduction plan §4).
     Antisymmetry: Ident list list         // anticomm(a,b)
     // Parallelization strategy assignments. A LIST of per-backend groupings,
     // each carrying its own dimensions (OmpStrategy.Vars / CudaStrategy). Today

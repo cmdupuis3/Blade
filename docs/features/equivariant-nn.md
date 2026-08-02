@@ -52,7 +52,7 @@ same rep data), the shipped surface is:
   Idx<N> -> T` and `SymIdx<2,M> -> SymIdx<2,N> -> T` are the same function;
   the pin permits the compact retyping), and `where ml.equiv(G)` licenses
   the analogous thing for representation-typed signatures. See
-  [plan-equivariance-in-types.md](../plan-equivariance-in-types.md) §0 for
+  the retired equivariance-in-types plan §0 for
   the refinement in full.
 - **Deduction proposes what the checker would accept.** Uncertified
   functions get speculative `where ml.equiv(G)` / `where ml.galilean(...)`
@@ -71,15 +71,14 @@ same rep data), the shipped surface is:
   parameter count is a theorem, not a guess. `ml.derive_perm_linear` is the
   Sₙ (index-action, not representation-action) sibling; `ml.derive_pg_linear`
   is the point-group sibling.
-- Two plan documents carry the authoritative detail this note summarizes:
-  [plan-transforms-as-types.md](../plan-transforms-as-types.md) (the
-  synthesis/certification mechanism — landed through its stage 6c,
-  generator-based deduction, as of 2026-07-27) and
-  [plan-equivariance-in-types.md](../plan-equivariance-in-types.md) (the
-  follow-on round moving the *deduction* lattice itself from the
-  elaboration seam to typecheck-time, without changing what a user writes;
-  phases A+B IN PROGRESS as of 2026-07-28 — see its §6 for the post-A+B API
-  sketch).
+- Two plan documents carried the authoritative detail this note summarizes.
+  Both have since been retired; this note is now the surviving record. The
+  transforms-as-types plan covered the synthesis/certification mechanism —
+  landed through its stage 6c, generator-based deduction, as of 2026-07-27.
+  The equivariance-in-types plan covered the follow-on round moving the
+  *deduction* lattice itself from the elaboration seam to typecheck-time,
+  without changing what a user writes; its phases A+B were in progress as of
+  2026-07-28, phase B being `src/DeduceRep.fs`.
 
 Read Part I §1-4 below as **archival**: it records the design that was
 superseded, not the shipped surface. Part II (§5 onward) mixes landed
@@ -110,7 +109,7 @@ each section's own status markers, some of which this pass also updated.
 > licenses viewing `... -> Idx<M> -> Idx<N> -> T` and
 > `... -> SymIdx<2,M> -> SymIdx<2,N> -> T` as two signatures of the SAME
 > function rather than two functions. Post-restriction (see
-> plan-equivariance-in-types.md stage A3), an `ml.equiv(O3)` claim is meant
+> the retired equivariance-in-types plan stage A3), an `ml.equiv(O3)` claim is meant
 > to license viewing the function at restricted subgroup types the same
 > way. So the claim lives in the signature — it gates call-site discharge
 > and is part of the type in the broad sense — but it is not solved
@@ -122,10 +121,10 @@ each section's own status markers, some of which this pass also updated.
 > symmetry, arity) before equivariance became its fourth instance instead
 > of a bespoke fifth mechanism.
 >
-> Full detail: [plan-transforms-as-types.md](../plan-transforms-as-types.md)
-> §3.5 (the deduction lattice as the continuous twin of `Deduce.fs`) and
-> [plan-equivariance-in-types.md](../plan-equivariance-in-types.md) §0 (the
-> polymorphism-license refinement, review-confirmed 2026-07-28).
+> Full detail lived in the retired transforms-as-types plan §3.5 (the
+> deduction lattice as the continuous twin of `Deduce.fs`) and the retired
+> equivariance-in-types plan §0 (the polymorphism-license refinement,
+> review-confirmed 2026-07-28).
 
 The core language provides the annotation mechanism and inference framework
 only; group-specific rules (which representations exist, what `cross` returns)
@@ -303,7 +302,8 @@ training-time surprise.
   paths vanish" holds only at multiplicity 1 — at mult > 1 the m-antisymmetric
   coupling pairs with the antisymmetric multiplicity component (the Λ²⊗Λ²
   Cauchy term) and survives; measured compaction is 30–42%, not 2–4×. Exact
-  rule and worked counts: [plan-transforms-as-types.md](../plan-transforms-as-types.md) §3.2.
+  rule and worked counts: retired transforms-as-types plan §3.2 (the counts
+  themselves are re-verified in `proofs/BladeSymPower.v`).
 - **Higher-order interactions**: n-body kernels under `reynolds` get n!
   (triangular) × n! (identity collapse) — 36× at n=3, 576× at n=4.
 - **Antisymmetric Reynolds**: determinant-like alternating sums;
@@ -358,11 +358,10 @@ gradient snapshots, and final weights reproduce `ml/TrainingOracle.fs` to
 printed precision — including loss AND gradients invariant under rotated
 inputs.
 
-Remaining (see [future.md](../future.md) §2.1): combinator rules
-(`<@>`/`>>@`/…), triangular-tape exploitation for symmetric intermediates,
-forward mode, wrt-lists, if/match in differentiated code, taping for
-nonlinear loop recurrences, stencil/decomposition interactions, framework
-bindings.
+Remaining: combinator rules (`<@>`/`>>@`/…), triangular-tape exploitation
+for symmetric intermediates, forward mode, wrt-lists, if/match in
+differentiated code, taping for nonlinear loop recurrences,
+stencil/decomposition interactions, framework bindings.
 
 ### 11b. v7 implementation status (ops elaboration)
 
@@ -420,10 +419,9 @@ plain unifies); an annotation or argument with the WRONG spec is a type
 error. Corpus: `ml-ops/005` (accept + values), `ml-ops/006` (reject).
 
 Not yet in v7: dependent records for user-defined `CGPath` (formalism v10
-§17.13.1; the future.md §1.9 pointer was a dangling reference), `y_to`
-above lmax 2, angle-bracket static args, per-edge fused convolution
-elaboration, `for (b, mu, m)` structured iteration over an irreps axis
-(waits on DepIdx iteration codegen).
+§17.13.1), `y_to` above lmax 2, angle-bracket static args, per-edge fused
+convolution elaboration, `for (b, mu, m)` structured iteration over an
+irreps axis (waits on DepIdx iteration codegen).
 
 ### 12. Open items
 
@@ -435,8 +433,8 @@ From ml-spec §13 plus module-level gaps:
 4. Sparse tensor products (compile-time path pruning from weight structure)
 5. Memory layout choice: block-contiguous vs m-contiguous per operation
 6. ~~`poly(...)` × equivariance (arity-polymorphic equivariant kernels)~~ —
-   **CLOSED for the multilinear fragment** (plan-transforms-as-types.md
-   §3.4): `poly(...) + comm + identity group over IrrepsIdx-typed arrays =
+   **CLOSED for the multilinear fragment** (retired transforms-as-types
+   plan §3.4): `poly(...) + comm + identity group over IrrepsIdx-typed arrays =
    derive_poly<k>` — the arity-polymorphic surface and the symmetric power
    are the same object seen from the value side and the type side. No claim
    is made for a non-multilinear comm kernel (e.g. `max(a,b)`).

@@ -2,7 +2,7 @@
 /// disciplines — MLEquiv (`ml.equiv(G)`, O(3)/SO(3)), MLGalilean
 /// (`ml.galilean(u, ...)`, constant boosts) and MLPerm (`ml.perm_equiv(N)`,
 /// Sₙ node relabelling). Extracted at the third copy, not the second
-/// (plan-transforms-as-types §3.6's post-5a cleanup, §7 stage 5c).
+/// (retired transforms-as-types plan §3.6's post-5a cleanup, §7 stage 5c).
 ///
 /// WHAT LIVES HERE is exactly what the three copies had VERBATIM in common:
 /// the SYNTACTIC walk that no discipline gets to disagree about — which names

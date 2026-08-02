@@ -1,0 +1,24 @@
+// TEST: Antisym Even Map Via Decompact
+// The spelling 164's diagnostic steers to, and the VALUE oracle for what an
+// even map of an antisymmetric array really is. decompact materializes the
+// dense mirror first, so the nest iterates the full square and the kernel's
+// pool is a plain dense array carrying no storage claim — which is how the
+// symmetric answer gets its diagonal.
+//
+// The oracle is independent of the compiler's storage machinery:
+//   C(i,j) = reynolds(x-y, Anti) = (A[i]-A[j]) - (A[j]-A[i]) = 2(A[i]-A[j]),
+//   D = dense mirror of C, so D[i][j] = 2(A[i]-A[j]) at EVERY (i,j),
+//   out[i][j] = D[i][j]^2 = 4(A[i]-A[j])^2.
+// Note out[1][0] = out[0][1] = 4 and the diagonal is 0: symmetric WITH a
+// diagonal, the shape 164 refuses to fake in strict storage. Comparing the
+// kernel-produced pool against that closed form (rather than reading cells
+// back out of the array) is deliberate — a read-write roundtrip through the
+// same subscript arithmetic cannot see a pool shift.
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> x - y
+let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let D = decompact(C, 0)
+let out = method_for(D) <@> lambda(v) -> v * v |> compute
+// EXPECT: C = [-2.0, -4.0, -6.0, -2.0, -4.0, -2.0]
+// EXPECT: D = [0.0, -2.0, -4.0, -6.0, 2.0, 0.0, -2.0, -4.0, 4.0, 2.0, 0.0, -2.0, 6.0, 4.0, 2.0, 0.0]
+// EXPECT: out = [0.0, 4.0, 16.0, 36.0, 4.0, 0.0, 4.0, 16.0, 16.0, 4.0, 0.0, 4.0, 36.0, 16.0, 4.0, 0.0]

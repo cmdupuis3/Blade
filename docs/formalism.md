@@ -4,8 +4,8 @@
 `blade_formalism_v10.md` for language semantics. This document deliberately
 contains *only* semantics: proofs live in [proofs.md](proofs.md) (mirroring the
 machine-checked Coq tower), the feature census in [features.md](features.md),
-feature modules under [features/](features/), plans in [future.md](future.md),
-related work in `blade_literature_survey.md`.
+feature modules under [features/](features/), related work in
+`blade_literature_survey.md`.
 
 **Corrections from v10** (details in proofs.md and the doc-set
 [README](README.md)): product symmetry is *joint* per identity group, not
@@ -469,8 +469,8 @@ that buys still follows the H ∩ Stab law (§11.2):
   without `comm` yields dense symmetrized values (corpus reynolds/022–023 pin
   both behaviors). Whether `reynolds` should SELF-license (K = Σ g∘σ has
   H = Sₙ by construction, so the declaration is derivable) is an open design
-  question — future.md. Antisymmetric Reynolds
-  zeroes diagonals and negates on transposes by storage construction.
+  question. Antisymmetric Reynolds zeroes diagonals and negates on transposes
+  by storage construction.
 - **Distinct arrays**: K is commutative but Stab = {id} — the output is DENSE
   and not index-symmetric (`Out(i,j) = g(A(i),B(j)) + g(B(j),A(i))`, which is
   not `Out(j,i)`; pinned by corpus reynolds/013). Reynolds does not substitute
@@ -481,7 +481,7 @@ tower — `R(i₁,i₂,j₁,j₂) = Σ over index swaps` — which genuinely has
 per-dimension product symmetry with lossless canonical access (proofs.md
 §Core, `reynolds_full_product_symmetry`). That is a different, stronger
 operator (it reads every array at every permuted index, n!^d terms) and is
-not currently a surface construct — see future.md.
+not currently a surface construct.
 
 ### 5.4 Static functions and type-level computation
 
@@ -1235,7 +1235,7 @@ library concern.
 - Interfaces: signatures only; `impl I for S { ... }`; interface composition
   `interface P : M, T { ... }`.
 - Modules: `module` groups declarations; `import`/`from`/`as` reserved for
-  multifile (in progress — future.md).
+  multifile (in progress).
 
 ### 15.5 Loops and combinators
 

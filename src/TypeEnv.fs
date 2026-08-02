@@ -233,7 +233,7 @@ type TypeEnv = {
     /// or forward-call misses and lands on SUnknown), so no fixpoint is needed
     /// and no summary proves itself. Shared by reference, like FuncCommGroups.
     FuncSignParities: System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>
-    /// Phase B of docs/plan-equivariance-in-types.md, the CERTIFIED half of the
+    /// Phase B of the retired equivariance-in-types plan, the CERTIFIED half of the
     /// typed equivariance lattice: per-function representation signatures for
     /// the functions that carry an `__ml_equiv` conjunct — a source-written
     /// `where ml.equiv(G)` pin, or an elaborator stamp on a synthesized
@@ -529,6 +529,8 @@ let formatTypeError (err: TypeError) : string =
     | ChainOpUndecidable (leftDesc, rightDesc) -> sprintf "cannot infer the roles of the <@> operands: the left side is %s and the right side is %s, so the arrays/kernel roles are ambiguous. A former is implicit only when one side is decisive: a kernel (lambda, operator section, named function, reynolds(...), zero) or a former. Write it explicitly: method_for(arrays) <@> kernel, or object_for(kernel) <@> (arrays)." leftDesc rightDesc
     | CommContradictsBody (p1, p2) -> sprintf "`where comm(%s, %s)` contradicts the kernel body, which is provably ANTIcommutative under that swap (f(%s, %s) = -f(%s, %s)): triangular storage would silently corrupt half the output. Remove the comm clause, or wrap the kernel in reynolds(...) if a signed iteration license over the permutation sum is what you intend." p1 p2 p2 p1 p1 p2
     | AntisymmContradictsBody (p1, p2) -> sprintf "`where anticomm(%s, %s)` contradicts the kernel body, which is provably COMMUTATIVE under that swap (f(%s, %s) = f(%s, %s)): strict-triangular anticommutative storage would drop the diagonal and negate half the output. Remove the anticomm clause (use `where comm(%s, %s)` for the symmetric triangle), or wrap the kernel in reynolds(..., Antisymmetric) if a signed antisymmetrization is what you intend." p1 p2 p2 p1 p1 p2 p1 p2
+    | AntisymMapNotOdd (param, proved) -> sprintf "mapping this kernel over an ANTISYMMETRIC (AntisymIdx) array would keep the input's strict-triangular storage, and that is only correct for a SIGN-ODD kernel (f(-x) = -f(x)); the deduction says this one is %s in '%s'. An even or unknown-parity map of an antisymmetric array is SYMMETRIC — it has a diagonal, and the strict iteration the input forces cannot produce one — so the compact result would negate every mirrored read. Map over a dense copy instead (`decompact(A, 0)` materializes the full tensor, and the kernel over THAT is symmetric with the right diagonal), or use a sign-odd kernel." proved param
+    | HermitianMapNotReal param -> sprintf "mapping this kernel over a HERMITIAN (HermitianIdx) array would keep the input's Hermitian storage, whose mirrored reads recover H(j,i) as conj(H(i,j)); that is only correct when the kernel commutes with conjugation (f(conj z) = conj(f z)), which is not deducible for '%s'. A kernel built from the parameter, real constants, + - * /, and neg/conj/real qualifies; a complex constant, imag(z), arg(z), `^` and the math intrinsics (exp/log/sqrt/...) do not. Map over a dense copy instead: `decompact(A, 0)` materializes the full conjugate-mirrored matrix, and the kernel over THAT carries no storage claim." param
     | PlaceholderNeedsAllBound (got, total) -> sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." got total
     | GroupKeysRank1 -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
     | FallbackNeedsArrays (leftDesc, rightDesc) -> sprintf "<|:> (allocated-fallback) reads the LEFT array where its storage holds a cell and the right array elsewhere, so both operands must be arrays; got %s and %s. For value-level choice (first nonzero wins) over scalars or computations, use <|>." leftDesc rightDesc
@@ -666,6 +668,11 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // annotation contradicting its own body, with its own fix — drop the
             // clause, or wrap in `reynolds` for the signed iteration license.
             | CommContradictsBody _ | AntisymmContradictsBody _ -> "BL4013"
+            // Same family, other direction: nothing was DECLARED here — the
+            // input array's compact class would be inherited by the output, and
+            // the deduction cannot certify the kernel commutes with that
+            // class's mirror involution.
+            | AntisymMapNotOdd _ | HermitianMapNotReal _ -> "BL4015"
             | StructWhereNotBool _ | StructWhereError _ | WherePredicateUnannotated _
             | PplConstraintNeedsImport _
             | UnknownWhereConstraint _ -> "BL4001"

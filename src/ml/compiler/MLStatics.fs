@@ -44,7 +44,7 @@ let cfgOfStatic (what: string) (v: StaticValue) : Result<TPConfig, string> =
     | _ -> Error (sprintf "%s: expected a static (spec1, spec2, specOut) triple" what)
 
 // ---------------------------------------------------------------------------
-// The POINT-GROUP block-spec member (plan-transforms-as-types §3.6, stage
+// The POINT-GROUP block-spec member (retired transforms-as-types plan §3.6, stage
 // 5b-i). Twins of the two decoders above, deliberately separate: a point-group
 // spec names its blocks by frozen character-table LABEL, not by (l, parity),
 // and every diagnostic wants to say the group and quote its roster.
@@ -188,7 +188,7 @@ let install () =
                 specOfStatic "alt_tp_weight_dim" spec
                 |> Result.map (fun s -> SVInt (int64 (altTpWeightDim s)))
             | _ -> Error "alt_tp_weight_dim: expected one static spec argument")
-        // Symmetric / exterior powers of a spec (plan-transforms-as-types
+        // Symmetric / exterior powers of a spec (retired transforms-as-types plan
         // §3.3): the O(3) irrep decomposition of Sym^K(V) / Λ^K(V) by the
         // integer weight-peel, returned as an ordinary SPEC static — so it
         // composes with total_dim / hom_dim / irreps_* and is writable in an
@@ -197,7 +197,7 @@ let install () =
         // beyond, and body-order expansions live at k <= 4).
         let kArg (name: string) (k: int64) : Result<int, string> =
             if k < 1L || k > 4L then
-                Error (sprintf "%s: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (plan-transforms-as-types §6.5)" name k)
+                Error (sprintf "%s: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan §6.5)" name k)
             else Ok (int k)
         let registerPower (name: string) (kind: PowerKind) =
             registerStaticBuiltin (statName name) (fun args ->
@@ -227,7 +227,7 @@ let install () =
                     SVInt (int64 (polyWeightDim s k so)))))
             | _ -> Error "poly_weight_dim: expected (SPEC, K, SPEC_OUT) static arguments")
         // The Sₙ index-action surface's sizing pair (stage 5a-i,
-        // plan-transforms-as-types §3.6). NO spec argument: a permutation
+        // the retired transforms-as-types plan §3.6). NO spec argument: a permutation
         // module is named by its RANK and the node-axis extent alone, which
         // is the whole reason Sₙ is a sibling registry member rather than a
         // second block-spec family.
@@ -287,7 +287,7 @@ let install () =
         registerBlockAccessor "irreps_dim" (fun s b -> dim s.[b])
         registerBlockAccessor "irreps_offset" (fun s b -> (blockStarts s).[b])
         // ------------------------------------------------------------------
-        // The POINT-GROUP sizing surface (plan-transforms-as-types §3.6,
+        // The POINT-GROUP sizing surface (retired transforms-as-types plan §3.6,
         // stage 5b-i). Every one takes GROUP as its first argument — a static
         // string naming a registered group — and every one returns an INT.
         // NO pg builtin returns a SPEC: §3.6's post-round check defers the
@@ -334,7 +334,7 @@ let install () =
                         else Ok (SVInt (int64 (f g s (int b))))))
                 | _ -> Error (sprintf "%s: expected (GROUP, SPEC, BLOCK) static arguments" name))
         // ------------------------------------------------------------------
-        // RESTRICTION (plan-equivariance-in-types stage A3). The FIRST
+        // RESTRICTION (retired equivariance-in-types plan stage A3). The FIRST
         // spec-valued pg builtin, and the note above earned its exception: the
         // 5b-i round deferred spec-valued pg forms because no pg op consumed a
         // DERIVED spec, and `ml.derive_pg_linear` now does. `pg_restrict` is

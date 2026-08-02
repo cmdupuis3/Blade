@@ -153,8 +153,8 @@ run it with `-Check` to verify the numbers below and the headline in
   (symmetric_accumulation), with n = 3 pins computed.  Rank 2 and one
   transposition; joint swaps only (per_dim_swap_not_symmetry stands);
   nat semiring, so quotient/negation kernels are out of scope.
-- BladeSymPower.v (47): NEW -- the ML elaborator's counting
-  obligations (plan-transforms-as-types 3.2/3.3b).  The S2 partition:
+- BladeSymPower.v (47): NEW -- the ML elaborator's counting obligations
+  (retired transforms-as-types plan, 3.2/3.3b).  The S2 partition:
   a diagonal path's free cells are the tau-triangle (s2_cells_spec),
   the two halves are exhibited division-free as tri_le / tri_lt with
   2*tri_le m = m(m+1) and 2*tri_lt m = m(m-1), and over any kept-path
@@ -166,8 +166,8 @@ run it with `-Check` to verify the numbers below and the headline in
   (alt_copy_splitting) -- the cardinalities MLSpec.powerSpec asserts,
   over an explicit enumeration of the compositions.
 - BladePartition.v (61): NEW -- set partitions as restricted growth
-  strings, the stage 5a-i obligations of plan-transforms-as-types 3.6
-  (MLPermSpec).  The RGS enumeration is an ARROW instance
+  strings, the stage 5a-i obligations of the retired transforms-as-types
+  plan 3.6 (MLPermSpec).  The RGS enumeration is an ARROW instance
   (heads b = seq 0 (S b), step b x = max b (S x)), so sound/complete/
   NoDup/lex-sorted are BladeArrow + BladeLex instantiated.  Counts: the
   block-count fibre is a Stirling number (rgs_enum_block_fibres, via a
@@ -189,8 +189,8 @@ run it with `-Check` to verify the numbers below and the headline in
   computed matrices at m = 2, 3.  Spanning (orbit-basis completeness) is
   cited, not proved (6.1(a)).
 - BladePointGroup.v (58): NEW -- the point-group registry
-  (MLPointSpec.fs) checked by computation, stage 5b-0 of
-  plan-transforms-as-types 3.6/7.  Integer matrices over the two
+  (MLPointSpec.fs) checked by computation, stage 5b-0 of the retired
+  transforms-as-types plan 3.6/7.  Integer matrices over the two
   3.6-canonical tables C4 and D4 (every entry in {-1,0,1}), the word
   sets and Cayley tables FIXED as data: the tables are groups
   (c4/d4_table_is_group), the word set is multiplication-closed in every
@@ -212,12 +212,13 @@ run it with `-Check` to verify the numbers below and the headline in
   (c4/d4_rburnside, _exact).  End-basis completeness (Schur over R) is
   cited per 6.1's closure and oracle-discharged (Test_PgOracle.fs).
 - BladeWordClosure.v (18): NEW -- word closure for the finite
-  equivariance discharge, stage 6b of plan-transforms-as-types 3.5/7 and
-  the discrete row of 8's BladeGenerator split.  A map intertwining the
-  GENERATORS of a finite group intertwines every element: word_closure
-  by induction on word length over arbitrary carriers and arbitrary
-  generator-indexed actions, generators_suffice_on_word_set as the form
-  the discharge uses (a group presented by its word set), wact_app and
+  equivariance discharge, stage 6b of the retired transforms-as-types
+  plan 3.5/7 and the discrete row of 8's BladeGenerator split.  A map
+  intertwining the GENERATORS of a finite group intertwines every
+  element: word_closure by induction on word length over arbitrary
+  carriers and arbitrary generator-indexed actions,
+  generators_suffice_on_word_set as the form the discharge uses (a
+  group presented by its word set), wact_app and
   wact_triv as the word-action algebra.  The same content over an
   ABSTRACT MULTIPLICATION TABLE, no words:
   equivariance_closed_under_product, whose hypotheses are exactly
@@ -235,7 +236,7 @@ run it with `-Check` to verify the numbers below and the headline in
   design -- f is an arbitrary function, so the lemma covers extracted
   normal forms by being indifferent to them.
 - BladeRepStatus.v (18): NEW -- soundness of the typed representation-status
-  transfer table, plan-equivariance-in-types.md stage B4 (src/ml/compiler/
+  transfer table, the retired equivariance-in-types plan stage B4 (src/ml/compiler/
   MLEquiv.fs's `judge`).  Modeled abstractly (no concrete group, no
   concrete representation): a function of a G-set input is INVARIANT if it
   cannot see the action, and TRANSFORMS AS a representation rho if moving
@@ -271,14 +272,15 @@ run it with `-Check` to verify the numbers below and the headline in
   becomes the WREATH product S_r wr S_2 at general r, swap flag and both
   block permutations in one statement (wreath_full_invariance).  The
   wreath group is STRICTLY inside S_{2r}: two tuples in one S_4 orbit
-  carry different values (s4_orbit_not_licensed, same_s4_orbit) --
-  future.md 4b.1's claim that the sound joint form is the wreath
-  product, not S_{2r}.  EXACTNESS AT r = 2 BY ENUMERATION over all 24
-  slot permutations and all 16 index tuples: the distinct-input
-  stabilizer is EXACTLY the 4-element block group and the repeated-input
-  stabilizer EXACTLY the 8-element wreath group
-  (distinct_stabilizer_is_block_group, repeated_stabilizer_is_wreath),
-  both sets checked to be composition-closed permutation groups.  The
+  carry different values (s4_orbit_not_licensed, same_s4_orbit), so the
+  sound joint form for a comm-repeated symmetric argument is the wreath
+  product, not S_{2r} (docs/plan-orbit-index-types.md).  EXACTNESS AT
+  r = 2 BY ENUMERATION over all 24 slot permutations and all 16 index
+  tuples: the distinct-input stabilizer is EXACTLY the 4-element block
+  group and the repeated-input stabilizer EXACTLY the 8-element wreath
+  group (distinct_stabilizer_is_block_group,
+  repeated_stabilizer_is_wreath), both sets checked to be
+  composition-closed permutation groups.  The
   exactness is not witness luck: degeneracy_criterion sweeps every
   symmetric 2x2 table with entries < 5 and shows the stabilizer jumps to
   all of S_4 exactly on the rank-one locus a*c = b^2 (where the output is

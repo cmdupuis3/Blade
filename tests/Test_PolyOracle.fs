@@ -1,4 +1,4 @@
-// The Sym^k label-basis ORACLE — stage 2b-iii of plan-transforms-as-types
+// The Sym^k label-basis ORACLE — stage 2b-iii of the retired transforms-as-types plan
 // (§3.3b's evaluation identity, §7 3b's projector-equality bullet, §6.9(v)'s
 // alignment-table requirement). Deliberately INDEPENDENT of the 2b-i/2b-ii
 // pipeline on the reference side: nothing here calls SymPowerTables' exact

@@ -818,7 +818,7 @@ and buildTypeApp (name: string) (args: TypeArg list) (line: int) (col: int) (rem
             success (TyBounded (TyNamed (name, positionals), pick "min", pick "max")) remaining
 
 /// The second argument of `SymIdx<k, _>` / `AntisymIdx<k, _>` (seam S1 of
-/// docs/plan-transforms-as-types.md §2.7). The slot used to be `parseSimpleExpr`
+/// the retired transforms-as-types plan §2.7). The slot used to be `parseSimpleExpr`
 /// only — an INT expression, so the base space was always an anonymous dense
 /// extent. It now also admits an index TYPE, but only for the two forms that
 /// have a meaning as a symmetric-power base:
@@ -985,7 +985,7 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         success (TyIrrepsIdx specExpr) remaining
 
     // PgIrrepsIdx<GROUP, spec> — the point-group block-spec member
-    // (docs/plan-transforms-as-types.md §3.6, stage 5b-i). GROUP is a BARE
+    // (retired transforms-as-types plan §3.6, stage 5b-i). GROUP is a BARE
     // IDENTIFIER, not an expression: point-group names are frozen registry
     // data ({C4, D4}), so the slot is a NAME the way `Idx<n>`'s slot is a
     // number, and reading it as an expression would only invite an unbound

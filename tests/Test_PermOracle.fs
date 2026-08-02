@@ -1,5 +1,5 @@
 // The coarsening-indicator COMPLETENESS oracle — stage 5a-ii of
-// plan-transforms-as-types §3.6, whose oracle paragraph reads:
+// the retired transforms-as-types plan §3.6, whose oracle paragraph reads:
 //
 //   "exact rational Reynolds — P_ref = (1/n!)Σ_σ σ^{⊗(k+l)} and B(BᵀB)⁻¹Bᵀ
 //    over ℚ with the closed-form integer Gram ⟨B_γ, B_π⟩ = n^{b(γ∨π)};

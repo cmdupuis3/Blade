@@ -156,7 +156,7 @@ module Codes =
             "BL4010", "confirm-and-pin storage suggestion"
             // BL4011 was RESERVED and deliberately unregistered through five
             // stages, held for the certificate-SUGGESTION channel of
-            // plan-transforms-as-types §4b (deduced-rep "propose, don't
+            // the retired transforms-as-types plan §4b (deduced-rep "propose, don't
             // export"); stage 5a's Sₙ lattice took BL4012 rather than
             // double-booking it — the BL4007 lesson. Stage 6a is that channel:
             // MLEquiv runs the shipped checking judgment speculatively on
@@ -206,7 +206,7 @@ module Codes =
             "BL9003", "internal lowering invariant violated"
             // Two independent judgments of the same equivariance theorem — the
             // elaboration-seam checker and the typecheck-resident walker —
-            // reached contradictory verdicts (plan-equivariance-in-types.md C1).
+            // reached contradictory verdicts (retired equivariance-in-types plan C1).
             // The seam has already ACCEPTED the program, so this can never be
             // the user's fault.
             "BL9004", "internal deduction disagreement"

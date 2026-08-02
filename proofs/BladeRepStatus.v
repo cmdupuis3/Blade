@@ -1,6 +1,6 @@
 (* ===================================================================== *)
 (* BladeRepStatus.v -- soundness of the typed representation-status      *)
-(* transfer table (docs/plan-equivariance-in-types.md, Stage B; B4 asks  *)
+(* transfer table (retired equivariance-in-types plan, Stage B; B4 asks  *)
 (* for exactly this file).  src/ml/compiler/MLEquiv.fs's `judge` walks a *)
 (* `where ml.equiv(G)`-certified body bottom-up over TypedAst nodes and  *)
 (* assigns each subexpression a status                                   *)
@@ -54,7 +54,7 @@
 (*                       transform as that rho.                          *)
 (*   equivariance_downward                                               *)
 (*                       the A3/D1 meet direction's soundness anchor     *)
-(*                       (plan-equivariance-in-types.md Stage A3          *)
+(*                       (retired equivariance-in-types plan Stage A3     *)
 (*                       ml.restrict + branching rules, D1 collision     *)
 (*                       = subgroup meet -- NOT YET a MLEquiv table       *)
 (*                       row (A3 is "named-not-shipped" per the plan);    *)
@@ -267,7 +267,7 @@ Section CertifiedCall.
   (* `requireRep` demands every Rep-typed argument already carry the       *)
   (* matching status. The composite F . f is then trusted to transform as  *)
   (* sigma, with no re-derivation of F's body: this is the interprocedural *)
-  (* TRUST the certificate buys (plan-equivariance-in-types.md B2,         *)
+  (* TRUST the certificate buys (retired equivariance-in-types plan B2,    *)
   (* "pinned callee -> declared signature").                                *)
   Theorem certified_call_sound : forall (F : V -> W) (f : X -> V),
     (forall g v, F (rho g v) = sigma g (F v)) ->
@@ -412,7 +412,7 @@ Section SubgroupRestriction.
   (* equivariance claim licenses the SAME claim read only over H's           *)
   (* elements -- the defining property "forall g, .." trivially               *)
   (* specializes to "forall g, H g -> ..".  This is the theorem                *)
-  (* `ml.restrict` + D1's subgroup meet (plan-equivariance-in-types.md         *)
+  (* `ml.restrict` + D1's subgroup meet (retired equivariance-in-types plan    *)
   (* Stage A3/D1) will cite once that walker exists; it is not yet a           *)
   (* MLEquiv.fs table row (A3 is "named-not-shipped" per the plan).            *)
   Theorem equivariance_downward :

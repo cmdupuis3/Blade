@@ -1,5 +1,5 @@
 /// Point groups — the second BLOCK-SPEC member of the transforms-as-types
-/// discipline (plan-transforms-as-types §3.6's 5b subsection, §7 stage 5,
+/// discipline (retired transforms-as-types plan §3.6's 5b subsection, §7 stage 5,
 /// sub-stage 5b-0). This file is the COUNTING half: frozen integer character
 /// tables for {C4, D4}, their load-time integrity certificate, the generic
 /// e-weighted Hom counting core, and the `pg*` sizing wrappers. No emission,
@@ -442,7 +442,7 @@ let certifyPointGroup (grp: PointGroup) : PgIntegrity =
                 failwithf "internal: label %s::%s is of real type (e = 1) but carries a baked J — End is one-dimensional, so a J would be a scalar with J^2 = -Id"
                     grp.Name ir.Name
             | FsQuat, _ ->
-                failwithf "internal: label %s::%s declares FsQuat — the value is RESERVED for double groups (plan-transforms-as-types §3.6); no single point group has a quaternionic label"
+                failwithf "internal: label %s::%s declares FsQuat — the value is RESERVED for double groups (retired transforms-as-types plan §3.6); no single point group has a quaternionic label"
                     grp.Name ir.Name
             | _, None -> None
             | _, Some j ->
@@ -527,7 +527,7 @@ let endBasis (ir: PgIrrep) : int[][] list =
         | None ->
             failwithf "internal: label %s is of complex type but has no baked J" ir.Name
     | FsQuat ->
-        failwithf "internal: label %s is of quaternionic type — FsQuat is a RESERVED counting value (plan-transforms-as-types §3.6: counts are uniform in e, emission is not). The [1, i, j, k] End-basis of a double-group label has no baked table here and no emitter asking for one"
+        failwithf "internal: label %s is of quaternionic type — FsQuat is a RESERVED counting value (retired transforms-as-types plan §3.6: counts are uniform in e, emission is not). The [1, i, j, k] End-basis of a double-group label has no baked table here and no emitter asking for one"
             ir.Name
 
 // ---------------------------------------------------------------------------
@@ -687,8 +687,8 @@ let pgElementMatrix (grp: PointGroup) (spec: PgSpec) (el: PgElement) : int[][] =
 
 // ---------------------------------------------------------------------------
 // RESTRICTION FROM O(3) — THE BRANCHING RULES
-// (docs/plan-equivariance-in-types.md stage A3; the "named-not-shipped"
-// promise of plan-transforms-as-types §3.6, now shipped as a TABLE.)
+// (retired equivariance-in-types plan stage A3; the "named-not-shipped"
+// promise of the retired transforms-as-types plan §3.6, now shipped as a TABLE.)
 // ---------------------------------------------------------------------------
 //
 // WHY AN EMBEDDING IS NEW DATA, AND NOT DERIVABLE FROM ANYTHING ABOVE

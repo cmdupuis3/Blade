@@ -55,7 +55,7 @@ let rec staticValueToIR (v: StaticEval.StaticValue) : IRExpr =
     // existed; IR.inferExprType types it ETString and CodeGen.litToCpp emits
     // std::string). The old IRLitUnit stub silently turned a string-carrying
     // static into `void` — visible the moment a spec's entries became
-    // (LABEL_NAME, mult) tuples (plan-transforms-as-types §3.6's settled
+    // (LABEL_NAME, mult) tuples (retired transforms-as-types plan §3.6's settled
     // point-group surface, stage 5b-i), where `let static SIN = [("A", 1)]`
     // lowered to std::tuple<void, int64_t> and would not compile.
     | StaticEval.SVString s -> IRLit (IRLitString s)

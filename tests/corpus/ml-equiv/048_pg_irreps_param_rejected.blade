@@ -13,7 +13,7 @@ import ml as ml
 // C4-module to an O(3)-module on the same coordinates, so "held fixed" is the
 // only reading available and it is a premise the caller discharges.)
 //
-// WHAT CHANGED AT STAGE A3, AND WHAT DID NOT (plan-equivariance-in-types).
+// WHAT CHANGED AT STAGE A3, AND WHAT DID NOT (retired equivariance-in-types plan).
 // The decomposition itself is no longer deferred: `ml.pg_restrict("C4", SH1)`
 // IS the crystal-field splitting, it is exact integer character theory over the
 // group's declared O(3) embedding, and corpus 096 / 097 pin the whole l <= 4
@@ -32,7 +32,7 @@ import ml as ml
 // until one ships, this signature stays refused. Corpus 099 is the trap that
 // pins the consequence.
 //
-// SHARPENED (exploration-equivariant-bijections.md): the repair EXISTS and is
+// SHARPENED (retired equivariant-bijections exploration): the repair EXISTS and is
 // measured — for both registered groups the signed permutation P satisfying
 // P·D^l(g)·P^T = pgElementMatrix(...) was constructed and verified at every
 // element for every l <= 8 (residual ~1e-16; at l = 1 it is pg[0] <- +O3[1],

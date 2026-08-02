@@ -2,8 +2,8 @@
 import ml as ml
 // ============================================================================
 // RESTRICTION FROM O(3) TO A REGISTERED POINT GROUP — THE BRANCHING TABLE
-// (docs/plan-equivariance-in-types.md stage A3; the "named-not-shipped"
-// promise of plan-transforms-as-types §3.6, now shipped as a TABLE.)
+// (retired equivariance-in-types plan stage A3; the "named-not-shipped"
+// promise of the retired transforms-as-types plan §3.6, now shipped as a TABLE.)
 //
 // `ml.pg_restrict(GROUP, SPEC)` is the crystal-field decomposition: it takes an
 // O(3) irreps spec and answers with the GROUP's own labels, computed by the
@@ -45,7 +45,7 @@ import ml as ml
 // 0 precisely to pin that. Corpus 048 is still a rejection for this reason, and
 // corpus 099 is the trap it sets.
 //
-// SHARPENED (exploration-equivariant-bijections.md): the two layouts differ by
+// SHARPENED (retired equivariant-bijections exploration): the two layouts differ by
 // an exact SIGNED PERMUTATION — constructed and verified against
 // pgElementMatrix at every l <= 8 for both registered groups — so the reading
 // 048/099 refuse is repairable by a zero-copy view, and the decided surface

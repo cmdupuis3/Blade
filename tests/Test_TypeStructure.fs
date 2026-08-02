@@ -502,7 +502,7 @@ let private test_negative_control () =
                  sprintf "relation wrongly matched a dense rank-3 pattern against %s" (formatBladeType actual))
 
 // ---- F10: §2.7's IR-reachability claim, EXECUTED ---------------------------
-// docs/plan-transforms-as-types.md §2.7 asserted — "read, not yet executed" —
+// The retired transforms-as-types plan §2.7 asserted — "read, not yet executed" —
 // that the IR target record for `SymIdx<k, IrrepsIdx<spec>>` is ALREADY what
 // inference produces: deduceOutputType's size-≥2 group path (IR.fs:2126) builds
 // `{ rep with Rank = groupRank; Symmetry = groupSymmetry }`, so the irreps
@@ -657,7 +657,7 @@ let private test_fuse_level_irreps_x_irreps () =
 // predicate was relaxed; SymNone/Rank-1/no-deps are untouched, because a
 // symmetric record stores only canonical cells (extent != cardinality) so the
 // compound index is not a dense row-major product — its sound joint form is the
-// wreath product, deferred (docs/future.md §4b.1). Two levels per copy, no
+// wreath product, deferred (docs/plan-orbit-index-types.md). Two levels per copy, no
 // fusion, means four levels total and no FusedFactors anywhere.
 let private test_symidx_factor_still_does_not_fuse () =
     let name = "stage4 SymIdx factor still excluded from fusion (wreath deferral)"
@@ -713,6 +713,49 @@ let private test_fused_output_irreps_x_irreps () =
          "let result = L <@> f |> compute\n")
         6L
 
+// ---- Outer-product identity and composed-apply typing ----------------------
+
+// `[*]` synthesizes an anonymous array (mkOuterResult: Identity = None), but a
+// LET-BINDING mints the identity from the pattern name, not the RHS type — so
+// a let-bound outer product participates in comm fusion like any named array.
+// This is the positive control pinning that behavior.
+let private test_outer_let_identity_fuses () =
+    checkFusedOutput
+        "outer product through let: identity fuses to SymIdx<2, 4>"
+        ("let A = [1.0, 2.0]\n" +
+         "let B = [3.0, 4.0]\n" +
+         "let Q = A [*] B\n" +
+         "let L = method_for(Q, Q)\n" +
+         "let f = lambda(x, y) where comm(x, y) -> x * y\n" +
+         "let result = L <@> f |> compute\n")
+        4L
+
+// Negative control: the same outer product written INLINE twice has two fresh
+// identities (no CSE — the documented limitation), so no fusion happens and
+// the output stays four dense axes.
+let private test_outer_inline_stays_dense () =
+    assertBindingType
+        "outer product inline twice: no identity, stays dense"
+        ("let A = [1.0, 2.0]\n" +
+         "let B = [3.0, 4.0]\n" +
+         "let f = lambda(x, y) where comm(x, y) -> x * y\n" +
+         "let result = method_for(A [*] B, A [*] B) <@> f |> compute\n")
+        "result"
+        (arrOf f64 [idx; idx; idx; idx])
+
+// `(o1 >>@ o2) <@> A` used to parrot the FIRST input array's type (empty
+// SymcomStates, no deduction). The chained per-stage typing must carry the
+// LAST stage's element type out the end.
+let private test_compose_apply_output_type () =
+    assertBindingType
+        "composed apply carries stage-2 element type (Bool)"
+        ("let A = [1.0, 2.0, 3.0]\n" +
+         "let o1 = object_for(lambda(v) -> v + 1.0)\n" +
+         "let o2 = object_for(lambda(v) -> v > 2.0)\n" +
+         "let result = (o1 >>@ o2) <@> A |> compute\n")
+        "result"
+        (arrOf (IRTScalar ETBool) [idx])
+
 // ---- Runner ----------------------------------------------------------------
 
 let runTypeStructureTests () : Blade.Tests.TestHarness.BlockResult =
@@ -742,7 +785,10 @@ let runTypeStructureTests () : Blade.Tests.TestHarness.BlockResult =
           test_fuse_level_irreps_x_irreps
           test_symidx_factor_still_does_not_fuse
           test_fused_output_plain_x_irreps
-          test_fused_output_irreps_x_irreps ]
+          test_fused_output_irreps_x_irreps
+          test_outer_let_identity_fuses
+          test_outer_inline_stays_dense
+          test_compose_apply_output_type ]
     Blade.Tests.TestHarness.printHeader "Type-Structure"
     let mutable passed = 0
     let mutable failed = 0

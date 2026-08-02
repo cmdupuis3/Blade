@@ -1,5 +1,5 @@
 /// THE TYPED POLYNOMIAL EXTRACTOR — stage C2 of
-/// docs/plan-equivariance-in-types.md ("Engine port: PolyExtract gets a
+/// the retired equivariance-in-types plan ("Engine port: PolyExtract gets a
 /// TypedExpr extractor (discharge — finite elements and the radical-vector Lie
 /// identity — is already IR-agnostic; only extraction walks syntax)").
 ///

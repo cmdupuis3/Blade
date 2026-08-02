@@ -1,7 +1,7 @@
-/// MEASUREMENT SCAFFOLDING FOR docs/census-galilean-layer.md — NOT A SHIPPED
+/// MEASUREMENT SCAFFOLDING FOR THE RETIRED GALILEAN-LAYER CENSUS — NOT A SHIPPED
 /// DISCIPLINE.
 ///
-/// WHAT THIS BLOCK IS. `docs/design-discipline-as-data.md` asks where each of
+/// WHAT THIS BLOCK IS. The retired discipline-as-data design note asks where each of
 /// the three equivariance-family disciplines should CHECK and DEDUCE. Equiv has
 /// three gates answering that question for itself (`rep-differential`,
 /// `rep-check`, `rep-reject`). Galilean has none, and its answer does not follow

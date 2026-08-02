@@ -138,7 +138,7 @@ let anti = compound(A, mask(A, lambda(x) -> !contains(B, x)))
 Multiplicity-preserving (unlike `intersect`). **Performance status**: the
 O(|A|+|B|) hash-set fusion (pre-building a set from B) was attempted, found to be
 a no-op as wired, and removed; every `contains` is currently a linear scan, so the
-idiom is O(|A|·|B|). Re-landing the set-hoist is planned ([future.md](../future.md)).
+idiom is O(|A|·|B|). Re-landing the set-hoist is planned (open item 1 below).
 The `sql-semijoins` tests (7) guard correctness only, including "Pattern Does Not
 Fire On Conjunction" (the fusion must not misfire when the predicate is a
 conjunction).
@@ -276,7 +276,7 @@ Tests: `sql-foreign-keys` (10).
   compounds live on the index level (and the compound arrow inherits
   lex-sortedness, BladeLex).
 
-## Open items (also listed in [future.md](../future.md))
+## Open items
 
 1. Semijoin/antijoin hash fusion (set-hoist) — removed no-op; redesign.
 2. ~~`reduce(A, op, init)` — empty-input identity.~~ **Landed (arc 4)**; see §10.

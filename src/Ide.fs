@@ -1448,7 +1448,7 @@ let ideCheck (filePath: string) : int =
             // name for equiv, the comma-joined velocity parameters for galilean),
             // and DLeft carries the dependency closure the proposal RESTS on,
             // comma-joined. A structured Deps array is deferred (recorded in
-            // plan-equivariance-deduction.md) — flattening keeps this a
+            // the retired equivariance-deduction plan) — flattening keeps this a
             // field-compatible extension of the existing JSON rather than a
             // schema change every consumer must handle.
             let drainDeducedFacts () =

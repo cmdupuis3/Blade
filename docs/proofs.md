@@ -12,8 +12,8 @@ Rules of this document:
   names its Coq artifact. Nothing is `Admitted`; there are no axioms.
 - Scope caveats are stated where the files state them (rank-2 only,
   materialized fragment, do-not-cite, etc.).
-- Remaining open items live in [future.md](future.md) §4 (from the tower's
-  ROADMAP).
+- Remaining open items are collected under "What remains unproved" at the end
+  of this document.
 - The count above is mechanical, on the convention documented in
   [../proofs/README.md](../proofs/README.md): line-initial `Lemma` /
   `Theorem` / `Corollary` / `Example` in the `_CoqProject` files. Run
@@ -32,6 +32,7 @@ Rules of this document:
 | Trinity | BladeTrinity, BladeTrinityAsym | `<*>` = shape concatenation; generators + forced closure |
 | Computation | BladeCompute, BladeMonad, BladeSafety | materialized semantics, V∘P = id, 12.x laws, MonadPlus, verified offsets + bounds safety + buffer-elimination fusion |
 | Storage split | BladeCauchy | the r = 2 Cauchy split |
+| Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
 
@@ -490,17 +491,17 @@ address = the compiler's triangular offset `roff`.
   buffer; results agree. Loop-fusion soundness with a real store, not a
   map_map restatement.
 
-Scope: rank 2 (general-r offset = nested hockey-stick sums — future.md §4);
-surface progress/preservation is the remaining open species (future.md §4.1).
+Scope: rank 2 (the general-r offset is nested hockey-stick sums, still
+unproved); surface progress/preservation is the remaining open species.
 
 ## BladeJacobian.v — the Jacobian symmetry transfer and symmetric accumulation
 
 The AD-seam file: the theorems the AD plan leans on
-([plan-forward-mode-ad-and-nn-module.md](plan-forward-mode-ad-and-nn-module.md)
-§3.3 consequence 2, §6.4/§6.5's symmetric bullets, stage C5), closing
-future.md §2.1's "Jacobian symmetry theorem" and "symmetric gradient
-accumulation" items at rank 2. Formalized at the level the compiler
-actually differentiates (Grad.fs is a syntactic transform): SYMBOLIC
+(the retired AD-module plan's §3.3 consequence 2, §6.4/§6.5's symmetric
+bullets, stage C5), closing the
+"Jacobian symmetry theorem" and "symmetric gradient accumulation" open items
+at rank 2. Formalized at the level the compiler actually differentiates
+(Grad.fs is a syntactic transform): SYMBOLIC
 differentiation on a minimal expression language — variables, constants,
 +, ×, and opaque unary intrinsics with a FORMAL derivative slot (the
 derivRule model; no real analysis anywhere) — with nat-semiring
@@ -566,8 +567,8 @@ model.
 
 ## BladeSymPower.v — the S₂ partition and the copy-splitting counts
 
-The counting obligations of
-[plan-transforms-as-types.md](plan-transforms-as-types.md) §3.2/§3.3b (listed
+The counting obligations of the retired transforms-as-types plan
+§3.2/§3.3b (listed
 in its §8 as the σ-symmetric weight count and the cardinality half of the
 Sym^k monomial-basis bijection), checked so the elaborator's internal asserts
 have a proof behind them. Division-free throughout; no Clebsch–Gordan
@@ -630,8 +631,8 @@ a compiler-side sweep (stage 2a, 15 specs to multiplicity 4).
 
 ## BladePartition.v — set partitions, RGS order, and the witness certificate
 
-The stage 5a-i obligations of
-[plan-transforms-as-types.md](plan-transforms-as-types.md) §3.6 (the Sₙ
+The stage 5a-i obligations of the retired transforms-as-types plan
+§3.6 (the Sₙ
 index-action member; staging item 5). `derive_perm_linear(K, L, N, …)` emits
 one loop nest per **partition of the K + L index positions**, with the basis
 element of a partition γ being its **coarsening indicator** B_γ — 1 on an
@@ -723,8 +724,8 @@ permutation-module tier is character-free.
 
 ## BladePointGroup.v — the point-group registry, checked by computation
 
-The stage 5b-0 obligations of
-[plan-transforms-as-types.md](plan-transforms-as-types.md) §3.6 (point groups
+The stage 5b-0 obligations of the retired transforms-as-types plan
+§3.6 (point groups
 as the second block-spec member) and §7's 5b-0 bullet, whose mandate for this
 file is *all computational over the witnesses: table closure, FS indicators, J
 identities, the e-weighted sum; End-completeness cited, oracle-discharged*.
@@ -838,14 +839,172 @@ functions, orthogonality, Clebsch–Gordan/fusion multiplicity (the CG-copy inde
 is §3.6's 5b-iii deferral) and any group off the roster are likewise absent:
 nothing here is quantified over "all point groups".
 
+## BladeWreath.v (61 theorems) — the wreath group for input-side product symmetry
+
+The input-side companion to BladeCore's output-side refutations (formalism
+3.4/12.5): two rank-r symmetric tensors combined by a pointwise kernel
+`T[I,J] = f(A[I], B[J])`. Where BladeCore refutes per-dimension product
+symmetry for one array's own indices, this file asks what symmetry the
+*declared* symmetry of the inputs licenses on the combined object.
+
+**Block-wise soundness, general r, unconstrained kernel.**
+`block_product_symmetry_soundness`: for ANY `f` — no commutativity,
+associativity, or any other hypothesis — permuting the r indices inside
+block A and independently inside block B (any `s, t` with `permutes r s`,
+`permutes r t`) leaves the output unchanged; the symmetry comes entirely
+from the declared input symmetry of A and B. `left_block_symmetry` /
+`right_block_symmetry` isolate the two generators, and
+`block_product_symmetry_nonvacuous` instantiates the hypotheses at a
+concrete symmetric tensor (`symsum`) to show they are satisfiable at every
+r. `block_canonical_access_general`: reading the output at any per-block
+canonicalization (any map returning a permuted copy of its tuple) recovers
+the true value — the product-simplex store SymIdx<r,n> ⊗ SymIdx<r,n>,
+C(n+r−1,r)² cells (BladeBinomial's closed form, squared), is lossless for
+distinct symmetric inputs. No contradiction with BladeCore's
+`counting_lemma_r2`: that theorem refutes product storage for the
+JOINT-symmetric object of one identity group; this is a different object
+(two identity groups), a different group.
+
+**The wreath upgrade (repeated argument, general r).** With the second
+input equal to the first (one identity group) and `f` commutative, the
+block swap joins the licensed set for free (`wreath_block_swap`:
+`f (A J) (A I) = f (A I) (A J)`), and composing it with the block-wise
+S_r × S_r gives invariance under the full wreath product S_r wr S_2, order
+2·(r!)² — `wreath_full_invariance`, stated for an arbitrary
+`(b : bool, s, t)`, i.e. an arbitrary wreath-group element. The division of
+labour is the doctrinal point: block-internal symmetry comes from the
+input declaration alone; the block swap needs BOTH commutativity of `f`
+AND identity of the two arguments — dropping identity loses it even with
+commutativity retained (`block_swap_not_licensed`, Theorem 9.17 /
+BladeLowering's `shared_units_insufficient` raised from r = 1 to r = 2,
+distinct arguments, comm kernel).
+
+**The wreath group is strictly inside S_{2r}.** `s4_orbit_not_licensed`:
+two index tuples in the same S_4 orbit (`same_s4_orbit`, via
+`s4_orbit_witness`) carry different values — so the sound joint form for a
+comm-repeated symmetric argument is the wreath product, not the full
+symmetric group on all 2r positions
+([plan-orbit-index-types.md](plan-orbit-index-types.md)).
+
+**Exactness at r = 2, by finite enumeration.** Over 24 slot permutations
+and 16 index tuples at extent n = 2: `distinct_stabilizer_is_block_group`
+(the distinct-input stabilizer is EXACTLY the 4-element block group,
+`distinct_stabilizer_count`) and `repeated_stabilizer_is_wreath` (the
+repeated-input stabilizer is EXACTLY the 8-element wreath group,
+`repeated_stabilizer_count`) — both checked to be composition-closed
+permutation groups (`block_group_is_group`, `wreath_group_is_group`,
+`block_subgroup_of_wreath`). `degeneracy_criterion` sweeps every symmetric
+2×2 table with entries < 5: the stabilizer jumps to all of S_4 exactly on
+the rank-one locus a·c = b² (`degenerate_witness_is_full_s4`, where the
+output is a 4-fold tensor power), and is the wreath group everywhere else —
+the exactness result is not witness luck.
+
+**Extent-6 re-enumeration.** The same result at 6×6 (24 permutations ×
+1296 tuples, kernel a parameter): `distinct6_stabilizer_is_block_group`,
+`repeated6_stabilizer_is_wreath` (multiplication),
+`repeated6_add_stabilizer_is_wreath` (addition) reproduce the r = 2 groups
+exactly at a different extent. `rank1_6_degenerates_to_s4` /
+`additive_rank1_6_degenerates_to_s4` scale the degeneracy, and
+`additive_locus_is_kernel_relative` shows the degeneracy locus is
+KERNEL-RELATIVE — the additive analogue collapses to full S_4 under
+`f = +` while staying exactly wreath under `f = *` — so a compiler cannot
+detect the collapse from the input alone; licensing must be by identity and
+declaration, not by value inspection.
+
+Honest scope (in-file generalization notes, BladeWreath.v §§2–3 and the
+closing remarks): the invariance halves
+(`block_product_symmetry_soundness`, `wreath_full_invariance`) are proved
+at GENERAL r; the exact group orders (r!)² and 2·(r!)² are the classical
+orders of S_r × S_r and S_r wr S_2 and are cited beyond r = 2, not
+proved — the file computes them exactly only at r = 2 (extents 2 and 6, by
+enumeration). A general-r order proof needs a factorial-counting
+development over `permutes`; a general-r exactness proof needs a
+BladeCompleteness-style detection argument with the degeneracy locus
+excluded by hypothesis rather than by computation. k-block and
+antisymmetric-input generalizations are noted in-file but not mechanized.
+Reproducible enumeration outside Coq: `proofs/OrbitEnum.fsx` (dotnet fsi).
+
+## BladeLayout.v (163 theorems) — striding parity and the layout group
+
+The physical-layout companion to the H/Stab framework: a layout assigns
+each of d axes to a memory level and a direction, so layouts are the
+hyperoctahedral group B_d = Z₂^d ⋊ S_d, order 2^d·d! (orders 8, 48, 384
+computed; closure, inverses, associativity, and normality of the flip
+subgroup all checked as theorems over the enumerated tables).
+
+**The headline: the licensing vocabulary has exactly 4 elements.**
+BladeLowering's framework has exactly two grant forms (invariant,
+anti-invariant), so the grade of a licensed move composes by XOR
+(`graded_invariant_compose`, `licensed_compose`) — anti composed with anti
+is invariant (`licensed_anti_anti`) — the grade is unique off the
+degenerate locus where `neg` has no non-fixed point (`sign_determined`),
+and there is no third form (`grant_forms_exhausted`). All of that holds at
+arbitrary rank, arbitrary kernel, arbitrary index type. So the licensing
+vocabulary is Hom(B_d, Z₂), and that group has EXACTLY 4 elements: trivial,
+permutation sign, flip parity, and their xor — exhibited, checked pairwise
+distinct, and shown complete by a generator argument. B_d is generated by
+the Coxeter set (all d−1 adjacent transpositions plus one flip;
+`b2_generated_by_coxeter`, `b3_generated_by_coxeter`, with a word carried
+for every element); one transposition plus one flip is NOT enough past
+d = 2 (`tau_phi_does_not_generate_b3`, 8 of 48); conjugacy forces one value
+on all transpositions and one on all flips while keeping the two classes
+apart (`transposition_not_conjugate_to_flip_3`), hence
+`b2_character_classified` / `b3_character_classified`: every character
+equals `chi_of` on its two generator values.
+
+**Forward canonicalization is a quotient, not a restriction.** Direction is
+free gauge exactly when the reduce monoid is commutative AND associative
+(`direction_is_free_gauge`, with both hypotheses separately refuted); Z₂^d
+is normal, and B_d/Z₂^d has d! cosets (`quotient_coset_count` at
+d = 2, 3, 4); the rule-out factor is MULTIPLICATIVE — 2^d from direction
+with no declaration at all, times |G_S| from the declaration
+(`ruleout_no_declaration`, `ruleout_full_symmetry`, with orbit
+representatives proved stable). Exactly the 2 characters trivial on the
+flips descend (`exactly_two_characters_descend`) — they are SymIdx (+1) and
+AntisymIdx (−1), so the whole representation theory needed for forward
+layout selection is already in the type system; the other 2 are the sign a
+backward layout picks up on the way to its forward representative.
+CONTRAST: 2 (resp. 4) characters, constant in d, against #irreps = the
+partition count 1, 2, 3, 5, 7, 11, 15, 22, 30, 42 (resp. the bipartition
+count 2, 5, 10, 20, 36, 65, 110, 185, 300, 481) — both computed here and
+both growing without bound; the irrep classifications themselves are
+classical and cited.
+
+**The guarantee (canonical form).** Reference cost is the Kendall-tau
+inversion count between a reference's memory-axis order and the loop
+order; cost 0 is formalism §9's outermost-slowest ideal and is attained
+(`kendall_self_is_zero`). The licensed search space — every combination of
+licensed moves crossed with every loop order — is enumerated EXHAUSTIVELY,
+and canonical form (minimum cost, lex tie-break) is proved to lie in that
+space and to be a cost minimizer of it, at ANY d, ANY licensed group, ANY
+reference set (`canonical_is_in_space`, `canonical_is_cost_minimal`), with
+uniqueness decided per instance and `is_canonical` the decision
+procedure — the layout analogue of asking whether an index tuple is
+sorted.
+
+**Worked cases.** `C[i,j] = A[i,j]·A[j,i]`: no loop order reaches cost 0
+without the declaration
+(`tpair_zero_unreachable_without_declaration`), and the symmetry rewrite
+does (`tpair_symmetry_reaches_zero`), value-preserving up to the character
+(`canonicalization_preserves_value_up_to_character`) — the declaration is
+load-bearing here. Matrix square is the honest CONTRAST: loop reordering
+alone already reaches 0 (`msq_loop_reordering_suffices`), so it is NOT
+evidence for the declaration. Propagation closes it: characters compose by
+xor along a pipeline (`character_composes`), instantiated on the transpose
+bridge (AB)ᵀ = ε_A·ε_B·(BA)ᵀ in all four sign cases at general n and pinned
+at 3×3 over ℤ.
+
+Honest scope (stated in-file): total cost 0 is NECESSARY but not
+SUFFICIENT for fastest — the metric ranks stride coherence, not reuse or
+vectorization — and no claim about cache hardware is made anywhere.
+
 ## What remains unproved
 
-See [future.md](future.md) §4: surface-calculus progress/preservation (the
-one missing species — deliberately sequenced after the rewrite settles
-surface syntax), general-r verified offsets, r ≥ 3 storage splits, k-slot
-structure, typed-path combinator laws, the adjunction proper, and the
-general-r Jacobian transfer / accumulation multiplicities (rank-2 forms:
-BladeJacobian).
+Still open: surface-calculus progress/preservation (the one missing species —
+deliberately sequenced after the rewrite settles surface syntax), general-r
+verified offsets, r ≥ 3 storage splits, k-slot structure, typed-path
+combinator laws, the adjunction proper, and the general-r Jacobian transfer /
+accumulation multiplicities (rank-2 forms: BladeJacobian).
 
 ---
 

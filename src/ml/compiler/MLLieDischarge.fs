@@ -1,5 +1,5 @@
 /// THE RADICAL-VECTOR LIE DISCHARGER — the generator-based certification
-/// engine's back half (plan-transforms-as-types §3.5's uniform rule and THE
+/// engine's back half (retired transforms-as-types plan §3.5's uniform rule and THE
 /// LINEARITY RESOLUTION, §7 stage 6c). MLPolyExtract normalizes a body to an
 /// exact polynomial and discharges the FINITE half (a word set of integer
 /// matrices, pure ℚ); this module is the SECOND CONSUMER of that same normal

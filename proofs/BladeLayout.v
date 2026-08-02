@@ -1274,7 +1274,7 @@ Proof. repeat split; vm_compute; reflexivity. Qed.
 (*                                                                       *)
 (* This is the repo's standing doctrine that a commutativity annotation   *)
 (* is an ITERATION LICENSE rather than a value claim                      *)
-(* (docs/plan-implicit-formers-and-deduction.md:398, on the Reynolds      *)
+(* (retired implicit-formers-and-deduction plan, on the Reynolds          *)
 (* idiom).  Bitwise floating-point reproducibility is out of scope: the   *)
 (* statement here is about the algebraic license only.                    *)
 (* ===================================================================== *)

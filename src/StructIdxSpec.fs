@@ -1,5 +1,5 @@
 /// The constrained-record COUNTING layer — stage C1 of
-/// docs/plan-constrained-index-types.md §7. No types, no lowering, no
+/// the retired constrained-index-types plan §7. No types, no lowering, no
 /// emission: this file turns a fence-eligible struct declaration into the
 /// LIST OF ITS SOLUTIONS and their count, and nothing else. C2 is the type
 /// (IxKCompound + baked mask + offsets + nominal tag), C3 the ergonomics.
@@ -363,7 +363,7 @@ let private certify
     // offset bug: a wrong shift permutes values without changing the set.
     List.iteri2 (fun i (a: int64 list) (b: int64 list) ->
         if a <> b then
-            failwithf "internal: the two enumerations of %s disagree at POSITION %d — the flat box filter has %s, the arrow heads-filtered enumeration has %s. Set agreement without order agreement is the offset-bug signature (plan-constrained-index-types §7 C1, the 5a-i third-route discipline)"
+            failwithf "internal: the two enumerations of %s disagree at POSITION %d — the flat box filter has %s, the arrow heads-filtered enumeration has %s. Set agreement without order agreement is the offset-bug signature (retired constrained-index-types plan §7 C1, the 5a-i third-route discipline)"
                 label i (render a) (render b)) flat heads
     // Every solution must actually lie in the box, and the list must be
     // strictly lex ascending — the two properties the storage offset depends

@@ -1,5 +1,5 @@
 // Pins for the constrained-record COUNTING layer (src/StructIdxSpec.fs) —
-// stage C1 of docs/plan-constrained-index-types.md §7. No types, no lowering,
+// stage C1 of the retired constrained-index-types plan §7. No types, no lowering,
 // no emission: everything here is a solution-set enumeration or a count, and
 // every number is an integer.
 //

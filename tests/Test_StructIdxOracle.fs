@@ -1,5 +1,5 @@
 // THIRD-ROUTE ORACLE for the constrained-record counting layer
-// (src/StructIdxSpec.fs, stage C1 of docs/plan-constrained-index-types.md).
+// (src/StructIdxSpec.fs, stage C1 of the retired constrained-index-types plan).
 //
 // The 5a-i discipline, applied: this file shares NO CODE with StructIdxSpec.
 // It calls exactly one function from it — `enumerateBox` — and everything it

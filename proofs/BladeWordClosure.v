@@ -1,7 +1,7 @@
 (* ===================================================================== *)
 (* BladeWordClosure.v -- WORD CLOSURE FOR THE FINITE EQUIVARIANCE        *)
 (* DISCHARGE: the stage 6b obligation of                                 *)
-(* docs/plan-transforms-as-types.md 3.5 (the uniform rule) and 7's 6b    *)
+(* the retired transforms-as-types plan 3.5 (uniform rule) and 7's 6b   *)
 (* bullet, whose mandate for this file reads: Coq -- word-closure lemma  *)
 (* (proved).  It is also the discrete row of 8's BladeGenerator split,   *)
 (* the one the design lists in the PROVED column.                        *)

@@ -1,5 +1,5 @@
 // Pins for the Sₙ permutation-module counting layer (MLPermSpec.fs) — stage
-// 5a-i of plan-transforms-as-types §3.6 / §7 stage 5. Everything here is
+// 5a-i of the retired transforms-as-types plan §3.6 / §7 stage 5. Everything here is
 // integer: there is no float, no tolerance and no rank decision anywhere in
 // the Sₙ arc, which is what makes this block a stronger gate than the O(3)
 // oracle blocks beside it.

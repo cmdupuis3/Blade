@@ -1,0 +1,22 @@
+// TEST: Antisym Odd Kernel Mirror
+// The POSITIVE half of the compact-class inheritance check (BL4015): a
+// sign-ODD kernel keeps the antisymmetric class, and keeping it is correct.
+// 161 pins the same kernel's stored POOL; this one pins the two reads the
+// class actually changes — the mirrored cell and the diagonal — because the
+// pool alone is identical whether the output is typed antisymmetric or not.
+// f(x) = 10x is odd, so out(j,i) = f(C(j,i)) = f(-C(i,j)) = -f(C(i,j)), which
+// is exactly what NegateOnSwap returns; and the diagonal reads 0 because
+// C(i,i) = 0 and f(0) = 0.
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> x - y
+let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let out = method_for(C) <@> lambda(v) -> v * 10.0 |> compute
+let upper = out(0, 1)
+let lower = out(1, 0)
+let diag = out(2, 2)
+// C stores strict pairs i < j: (0,1)=-2 (0,2)=-4 (0,3)=-6 (1,2)=-2 (1,3)=-4
+// (2,3)=-2, so out is that times 10.
+// EXPECT: out = [-20.0, -40.0, -60.0, -20.0, -40.0, -20.0]
+// EXPECT: upper = -20.0
+// EXPECT: lower = 20.0
+// EXPECT: diag = 0.0

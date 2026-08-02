@@ -1,4 +1,4 @@
-/// Phase B of docs/plan-equivariance-in-types.md: the typecheck-resident
+/// Phase B of the retired equivariance-in-types plan: the typecheck-resident
 /// representation-status deduction — the fourth lattice made typed. This
 /// module is the typed sibling of Deduce.fs (parity/sign) and the eventual
 /// successor of MLEquiv's elaboration-seam inference (stage 6a), which
@@ -123,7 +123,7 @@ type RepStatusT =
 /// accept/reject in the compiler is byte-for-byte what it was without it.
 type DeclineCause = {
     /// One sentence, in the walker's own vocabulary. Not the seam's message —
-    /// checking stays at the seam (docs/census-rejection-parity.md §7), and
+    /// checking stays at the seam (retired rejection-parity census §7), and
     /// pretending otherwise would invite the two to be compared as if they
     /// were the same text.
     Why: string
@@ -306,7 +306,7 @@ let rec private shapeOfType (resolve: IRType -> IRType) (ty: IRType) : InvShapeT
 /// reading and is what every expression-position caller uses. In a SIGNATURE
 /// position it is a REFUSAL: it skips the whole function, at a specific
 /// parameter, for a specific reason the classifier had in hand and threw away
-/// (docs/census-rejection-parity.md §3 family D). `classifySignature` reads the
+/// (retired rejection-parity census §3 family D). `classifySignature` reads the
 /// reason; nothing else does, and no verdict anywhere depends on it.
 let rec classifyTypeR (g: GroupT) (resolve: IRType -> IRType) (ty: IRType)
     : Result<RepStatusT, string> =
@@ -659,7 +659,7 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
 
     /// Equiv's OWN rules — the arms whose soundness argument names the action.
     /// Every one of them would be wrong for at least one of the other two
-    /// disciplines (docs/design-discipline-as-data.md §3.2's polarity table).
+    /// disciplines (retired discipline-as-data design note §3.2's polarity table).
     and ruleArm (env: Map<IRId, RepStatusT>) (expr: TypedExpr) : RepStatusT =
         let j = go env
         /// Shape read off the node's own (resolved) type — the typed win over

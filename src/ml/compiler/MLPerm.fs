@@ -5,7 +5,7 @@
 /// an abstract interpretation over the surface AST, run by MLElaborate at the
 /// same pass-1/pass-2 seam as the equiv and galilean judgments, where `ml.*`
 /// op calls are still surface-visible and static extents resolve through the
-/// SAME machinery elaboration uses (plan-transforms-as-types §3.6, §7 stage
+/// SAME machinery elaboration uses (retired transforms-as-types plan §3.6, §7 stage
 /// 5a-iii).
 ///
 /// THIS WAS THE THIRD COPY of the abstract-interpretation WALKER SHELL
@@ -230,7 +230,7 @@ let private aliasMapOf (decls: Located<Decl> list) : Map<string, TypeExpr> =
 
 /// The v2 pointer, attached to every signature-shape refusal.
 let private v2Note =
-    "v1 keys node-covariance on the FLAT extent of a SINGLE `Idx<>` axis (the Sn ops consume flat row-major N^k buffers — ml.derive_perm_linear's x is one Idx<N^K> axis), so a certified signature carries one status per VALUE. A multi-axis array needs one status per AXIS: per-axis status vectors are the named v2 shape, and the same upgrade is what unlocks O(3) x Sn dual certificates (plan-transforms-as-types §3.6, the two cross-referencing deferrals). Flatten the buffer, or leave the function uncertified"
+    "v1 keys node-covariance on the FLAT extent of a SINGLE `Idx<>` axis (the Sn ops consume flat row-major N^k buffers — ml.derive_perm_linear's x is one Idx<N^K> axis), so a certified signature carries one status per VALUE. A multi-axis array needs one status per AXIS: per-axis status vectors are the named v2 shape, and the same upgrade is what unlocks O(3) x Sn dual certificates (retired transforms-as-types plan §3.6, the two cross-referencing deferrals). Flatten the buffer, or leave the function uncertified"
 
 /// Alias-chase budget: `type A = B` chains are followed, but never in a cycle.
 let private aliasDepth = 8

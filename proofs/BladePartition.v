@@ -1,7 +1,7 @@
 (* ===================================================================== *)
 (* BladePartition.v -- SET PARTITIONS AS RESTRICTED GROWTH STRINGS: the   *)
 (* counting and triangularity obligations of stage 5a-i                   *)
-(* (docs/plan-transforms-as-types.md 3.6, staging item 5).                *)
+(* (retired transforms-as-types plan, 3.6, staging item 5).               *)
 (*                                                                        *)
 (* What the compiler does, and what this file guards.  `derive_perm_      *)
 (* linear(K, L, N, ...)` emits one loop nest per PARTITION of the K + L    *)

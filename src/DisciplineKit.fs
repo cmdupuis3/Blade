@@ -1,6 +1,6 @@
 /// The DISCIPLINE KIT — a LIBRARY for equivariance-family judgments.
 ///
-/// Stage 0 of docs/design-discipline-as-data.md. That document's finding, in
+/// Stage 0 of the retired discipline-as-data design note. That document's finding, in
 /// one line: the WALKER abstracts across equiv / galilean / perm and the RULES
 /// do not, because the three actions are different algebraic structures (a
 /// linear rep, an affine shift, a permutation matrix) whose arithmetic rules

@@ -98,7 +98,7 @@ let tpWeightDim (cfg: TPConfig) : int =
         cfg.SpecOut.[bo].Mult * cfg.Spec1.[b1].Mult * cfg.Spec2.[b2].Mult)
 
 // ============================================================================
-// The S₂ compaction of the self-tensor-product (plan-transforms-as-types §3.2)
+// The S₂ compaction of the self-tensor-product (retired transforms-as-types plan §3.2)
 // ============================================================================
 
 /// The exchange sign of a CG path: σ = (−1)^(l1 + l2 − lo), the factor the
@@ -321,7 +321,7 @@ let symTpEmbedTable (s: Spec) : (int * int * float) list = snd (s2TpCompaction S
 let altTpEmbedTable (s: Spec) : (int * int * float) list = snd (s2TpCompaction S2Alt s)
 
 /// One FUSED term pair of the arithmetically compacted self-TP kernel
-/// (plan-transforms-as-types §7 stage 1b): one canonical multiplicity cell
+/// (retired transforms-as-types plan §7 stage 1b): one canonical multiplicity cell
 /// (u1, u2) of one kept path, with the dropped dense contribution it absorbs
 /// folded in as a second product.
 ///
@@ -398,7 +398,7 @@ let s2TpCells (comp: S2Component) (s: Spec) : S2TpCell list =
                     PairSign = (if not isMirror && u1 = u2 then 0.0 else float pair) } ]
 
 // ============================================================================
-// Symmetric and exterior powers of a spec (plan-transforms-as-types §3.3)
+// Symmetric and exterior powers of a spec (retired transforms-as-types plan §3.3)
 // ============================================================================
 
 /// Exact binomial coefficient C(n, k) as int64, by the multiplicative formula
@@ -542,7 +542,7 @@ let symMultisets (n: int) (k: int) : int list list =
 
 // ============================================================================
 // The Sym^k label basis — the integer label layer
-// (plan-transforms-as-types §3.3b, stage 2b-ii)
+// (retired transforms-as-types plan §3.3b, stage 2b-ii)
 // ============================================================================
 //
 // THE LABEL CONVENTION (fixed HERE; stage 2b-iii bakes this exact enumeration

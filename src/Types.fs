@@ -46,7 +46,7 @@ let placementClassOf (sym: SymmetryClass) : PlacementClass =
     | SymSymmetric | SymAntisymmetric | SymHermitian -> PlaceCombinatorial sym
 
 /// ---------------------------------------------------------------------------
-/// ORBIT PLACEMENT (design skeleton -- docs/design-unified-orbit-storage.md).
+/// ORBIT PLACEMENT (design skeleton -- retired unified-orbit-storage design note).
 /// NOT WIRED IN: nothing constructs or consumes this yet. It is here because it
 /// is the generalization the two cases above are already instances of, and
 /// stating it in the type system is what keeps the tiers of the design honest.
@@ -238,7 +238,7 @@ let (|IrrepsTag|_|) (tag: string) : (string option * (int * int * int) list) opt
 
 // ----------------------------------------------------------------------------
 // PgIrrepsIdx tag encoding — the SECOND block-spec member
-// (docs/plan-transforms-as-types.md §3.6, stage 5b-i). Same discipline as the
+// (retired transforms-as-types plan §3.6, stage 5b-i). Same discipline as the
 // irreps tag above and a DELIBERATELY SEPARATE format: §3.6's "twin, not
 // reroute" says the O(3) `__irreps:` format is BYTE-FROZEN, so point groups
 // get their own frozen prefix rather than a widened one.

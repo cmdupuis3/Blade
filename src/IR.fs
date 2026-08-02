@@ -1339,7 +1339,7 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
 /// group: every member fuses or none does — a fused level therefore always
 /// finds its partners fused.
 ///
-/// IxKIrreps admitted at stage 4 (docs/plan-transforms-as-types.md §7 stage 4),
+/// IxKIrreps admitted at stage 4 (retired transforms-as-types plan §7 stage 4),
 /// which unlocks `comm` over multi-axis irreps arrays (per-node feature
 /// matrices, batch × IrrepsIdx). Soundness: an irreps axis is DENSE BY DESIGN —
 /// extent = total_dim(spec) = cardinality, every cell stored, no compaction
@@ -1350,7 +1350,7 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
 /// excluded is exactly what was excluded before: a SYMMETRIC (SymIdx-typed)
 /// factor stores only canonical cells, so extent ≠ cardinality and the compound
 /// index is not a dense row-major product — its sound joint form is the wreath
-/// product, not S_r over a flat compound (docs/future.md §4b.1). Widening the
+/// product, not S_r over a flat compound (docs/plan-orbit-index-types.md). Widening the
 /// predicate any further than IxKind is therefore NOT sound.
 let fuseJointSLevels
     (identities: ArrayIdentity list)
@@ -1405,7 +1405,7 @@ let fuseJointSLevels
                 // IxKind = IxKPlain). A batch × irreps product is NOT an irreps
                 // space — the compound coordinate mixes a representation index
                 // with a non-representation one, so no spec describes it
-                // (plan-transforms-as-types §6.3(iii), decided at stage 4).
+                // (retired transforms-as-types plan §6.3(iii), decided at stage 4).
                 [ { rep with
                       LocalDimIndex = 0
                       RankIndex = 0
@@ -6244,7 +6244,7 @@ and ppIndexType (idx: IRIndexType) =
 
 /// Render an irreps-identity record whose Symmetry/Rank make it a symmetric
 /// POWER of that irreps space (`SymIdx<k, IrrepsIdx<s>>` — writable since
-/// stage 3 of plan-transforms-as-types, and what deduceOutputType infers for
+/// stage 3 of the retired transforms-as-types plan, and what deduceOutputType infers for
 /// a comm group over irreps-typed inputs). A plain rank-1 irreps index prints
 /// as its own base form. Shared by both index printers so a diagnostic never
 /// shows the base while hiding the power — and by both BLOCK-SPEC members

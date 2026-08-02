@@ -16,6 +16,15 @@
     <Compile Include="src/Lexer.fs" />
     <Compile Include="src/Parser.fs" />
     <Compile Include="src/Grad.fs" />
+    <!-- OrbIdx storage/indexing bijections (docs/plan-orbidx-bijections.md
+         Phase 2, pure-function layer): the §4 checked cardinality fold, the §5
+         canonicalizer, the §2 segment-peeled traversal stream, and the §3
+         arithmetic rank/unrank pair. Deliberately dependency-free — FSharp.Core
+         only, no Blade module is opened — so proofs/ scripts and external
+         checkers can `#load` the file standalone. Sits here because IR.fs is
+         its eventual consumer (the checked sibling of `binomI64`, IR.fs:2438),
+         and nothing it needs compiles later. -->
+    <Compile Include="src/OrbRank.fs" />
     <Compile Include="src/IR.fs" />
     <!-- Provider registry: the core<->provider seam (ProviderSpec records
          keyed by surface module name). Compiles after IR.fs and before the
@@ -27,7 +36,7 @@
     <Compile Include="src/TypedAst.fs" />
     <Compile Include="src/Deduce.fs" />
     <!-- The generic half of an equivariance-family judgment (C3 stage 0,
-         docs/design-discipline-as-data.md): the structural walker arms whose
+         retired discipline-as-data design note): the structural walker arms whose
          soundness arguments quantify over ANY action. Must PRECEDE DeduceRep,
          which is its first instance. Same dependency set (Ast/Types/IR/
          TypedAst), nothing upward. -->
@@ -46,7 +55,7 @@
          Must follow both NetcdfProvider.fs and StaticEval.fs. -->
     <Compile Include="src/ProviderStatics.fs" />
     <!-- Constrained records as index types, stage C1 — the COUNTING half
-         (docs/plan-constrained-index-types.md §7). Box enumeration over the
+         (retired constrained-index-types plan, §7). Box enumeration over the
          per-field inclusive bounds, the flat-filter vs arrow-heads
          certificate, and the `idx_card(R)` static builtin. A CORE feature,
          not an ml/ one: idx_card folds without `import ml`, so it registers
@@ -125,7 +134,7 @@
          those, which is MLPolyExtractTyped. Depends on nothing else; it is
          string formatting and cap constants. NOT part of BladeML.fsproj. -->
     <Compile Include="src/ml/compiler/MLEquivMessages.fs" />
-    <!-- Stage C2 of docs/plan-equivariance-in-types.md: the TYPED front half of
+    <!-- Stage C2 of the retired equivariance-in-types plan: the TYPED front half of
          the same engine. Needs TypedAst + DeduceRep (both far earlier) and both
          dischargers (immediately above), so this is the earliest point it can
          sit; TypeCheck, which consumes it through DeduceRep's hook, is later
@@ -219,6 +228,13 @@
     <Compile Include="tests/Test_Guards.fs" />
     <Compile Include="tests/Test_Bracketed.fs" />
     <Compile Include="tests/Test_IndexTypes.fs" />
+    <!-- The OrbIdx bijection layer (src/OrbRank.fs): the traversal stream and
+         the rank/unrank pair pinned against a BRUTE-FORCE canonicalization of
+         every raw tuple — content and order — plus the hand-unrolled depth-2
+         E/B/A nest and the depth-1 triangular-offset anchors. Pure integer,
+         in-process, no Blade source pipeline. (Also `blade test orbrank`.) -->
+    <Compile Include="tests/Test_OrbRank.fs" />
+    <Compile Include="tests/OrbWreathTests.fs" />
     <Compile Include="tests/Test_Mutability.fs" />
     <Compile Include="tests/Test_Static.fs" />
     <Compile Include="tests/Test_Units.fs" />
@@ -238,12 +254,12 @@
     <Compile Include="tests/Test_RepDifferential.fs" />
     <Compile Include="tests/Test_RepCheckAgreement.fs" />
     <Compile Include="tests/Test_RepRejectCensus.fs" />
-    <!-- MEASUREMENT SCAFFOLDING for docs/census-galilean-layer.md: the
+    <!-- MEASUREMENT SCAFFOLDING for the retired galilean-layer census: the
          experimental typed GALILEAN judgment and its two censuses. Lives in the
          test assembly deliberately — nothing in src/ may reference it, and it is
          not part of the full suite (verb `blade test gal-layer`). -->
     <Compile Include="tests/Test_GalLayerCensus.fs" />
-    <!-- MEASUREMENT SCAFFOLDING for docs/census-perm-layer.md: the experimental
+    <!-- MEASUREMENT SCAFFOLDING for the retired perm-layer census: the experimental
          typed PERM judgment, its three censuses and the first-ever perm
          inference experiment. Test assembly only - nothing in src/ may
          reference it, and it is not part of the full suite
@@ -316,6 +332,14 @@
     </None>
     <None Include="src/cpp/alloc_layout_tests.cpp">
       <Link>cpp/alloc_layout_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/orbit_wreath_utilities.hpp">
+      <Link>cpp/orbit_wreath_utilities.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/orb_wreath_tests.cpp">
+      <Link>cpp/orb_wreath_tests.cpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="src/cpp/linearized_storage.hpp">

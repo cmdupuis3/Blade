@@ -37,9 +37,9 @@ last tile width 4) → **41.9%**, B=20 (T=5, divides n) → 18.8%, B=10 (T=10)
 writers should warn (or refuse) past a configurable overhead threshold. Builds on the landed triangular store spec
 (`providers/ZarrTriangularSpec.md`, `blade` attribute spec_version 1, whose
 `decomposition.scheme = "flat-ranges"` was designed as the forward-compat
-carrier for exactly this extension). Sources: `docs/future.md` §2.3
-(product-of-simplices decomposition, L^aH^b halving, mixed-radix block paths,
-BSP) and the verified identities from the MPI/domain-decomposition arc.
+carrier for exactly this extension). Sources: the retired future-plans notes
+§2.3 (product-of-simplices decomposition, L^aH^b halving, mixed-radix block
+paths, BSP) and the verified identities from the MPI/domain-decomposition arc.
 
 ## 1. Why flat ranges are not the end state
 
@@ -72,7 +72,7 @@ Fix tile edge B over the index interval [0, n), giving T = ceil(n/B) tiles.
   Off-diagonal blocks (all tiles distinct) are dense boxes of B^r cells;
   the all-in-one-tile block is a B-wide simplex. Closed forms — no sidecar
   index is *required* (see 4).
-- **Recursive halving is the T = 2^k special case.** future.md §2.3's
+- **Recursive halving is the T = 2^k special case.** The retired §2.3 notes'
   "each simplex halves into r+1 valid L^aH^b cells, recursively" produces,
   at depth k, exactly the tile grid with T = 2^k: leaf-block count
   C(2^k + r - 1, r) (NOT (r+1)^k — that's per-split branching). The recursion

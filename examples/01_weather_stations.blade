@@ -55,7 +55,7 @@ let sum_good = reduce(good_temps, (+))
 // (b) Semijoin -- readings that belong to audited stations.
 // mask(A, contains(B, x)) is the semijoin idiom (multiplicity-preserving).
 // Today each contains() is a linear scan, so this is O(|readings|*|audited|);
-// the O(|A|+|B|) hash-set fusion is a planned optimization (future.md 1.1).
+// the O(|A|+|B|) hash-set fusion is a planned optimization.
 // ============================================================================
 let audited = [1, 4, 5]
 let from_audited = mask(r_station, lambda(s) -> contains(audited, s))

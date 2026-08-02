@@ -121,7 +121,7 @@ let private mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl
       IsStatic = false }
 
 // ============================================================================
-// Equivariance stamping (docs/plan-equivariance-in-types.md, stage A1)
+// Equivariance stamping (retired equivariance-in-types plan, stage A1)
 // ============================================================================
 //
 // The functions this elaborator SYNTHESIZES are equivariant BY CONSTRUCTION:
@@ -512,7 +512,7 @@ let private symLiftDecl (name: string) (s: Spec) (k: int) : Result<FunctionDecl,
 /// derive_poly(SPEC, K, SOUT, x, w) for a fixed (spec, K, specOut): the
 /// COMPLETE basis of the degree-K homogeneous equivariant maps V -> W, one
 /// weight per basis map, `polyWeightDim SPEC K SOUT` of them
-/// (plan-transforms-as-types §3.3b construction, §7 stage 2b-iii emission).
+/// (retired transforms-as-types plan §3.3b construction, §7 stage 2b-iii emission).
 /// K = 1 is derive_linear; K = 2 is derive_sym_tp's hom-space seen through the
 /// UNIFORM label convention rather than through the kept-path layout.
 ///
@@ -909,7 +909,7 @@ let private deriveLinearDecl (name: string) (specIn: Spec) (specOut: Spec) : Fun
     |> equivStamp "O3"
 
 // ============================================================================
-// The POINT-GROUP block-spec surface (plan-transforms-as-types §3.6, §7 stage
+// The POINT-GROUP block-spec surface (retired transforms-as-types plan §3.6, §7 stage
 // 5b-i) — `derive_linear`'s SECOND member, and the first place the
 // Frobenius-Schur correction is visible in emitted code.
 // ============================================================================
@@ -1052,7 +1052,7 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
 // them here would be a category error, not conservatism. A `__ml_perm_equiv`
 // twin of this stamping pass is a follow-up, not part of A1.
 //
-// The Sₙ INDEX-ACTION surface (plan-transforms-as-types §3.6, §7 stage 5a-ii)
+// The Sₙ INDEX-ACTION surface (retired transforms-as-types plan §3.6, §7 stage 5a-ii)
 // ============================================================================
 //
 // `ml.derive_perm_linear(K, L, N, x, w)` is deriveLinearDecl's sibling for a
@@ -1352,7 +1352,7 @@ let private sizingNames =
                  "irreps_dim"; "irreps_offset"
                  // The point-group sizing surface (stage 5b-i). All ints
                  // except `pg_restrict`, the restriction table of stage A3
-                 // (plan-equivariance-in-types), which returns a pg SPEC.
+                 // (retired equivariance-in-types plan), which returns a pg SPEC.
                  "pg_total_dim"; "pg_hom_dim"; "pg_irreps_len"
                  "pg_irreps_dim"; "pg_irreps_mult"; "pg_irreps_fs"
                  "pg_irreps_offset"; "pg_restrict" ]
@@ -1549,7 +1549,7 @@ let private elabDerivePoly (st: ElabState) (statics: StaticEnv) (site: Expr)
                 ensure st (fingerprint "derive_poly" (box (s, k, sOut))) (fun n2 -> derivePolyDecl n2 s k sOut)
                 |> Result.map (fun n2 -> inheritSpan site (ExprApp (v n2, [ xE; wE ])))
         | SVInt kk ->
-            Error (err5000 (sprintf "derive_poly: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (plan-transforms-as-types §6.5)" kk))
+            Error (err5000 (sprintf "derive_poly: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan §6.5)" kk))
         | _ -> Error (err5000 "derive_poly: K must be a static int"))))))
 
 /// Shared elaboration for derive_pg_linear (stage 5b-i): resolve the group,
@@ -1825,7 +1825,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                         ensure st (fingerprint "sym_lift" (box (s, int k))) (fun n -> symLiftDecl n s (int k))
                         |> Result.map (fun n -> inheritSpan e (ExprApp (v n, [ xE ])))
                     | SVInt k ->
-                        Error (err5000 (sprintf "sym_lift: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (plan-transforms-as-types §6.5)" k))
+                        Error (err5000 (sprintf "sym_lift: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan §6.5)" k))
                     | _ -> Error (err5000 "sym_lift: K must be a static int"))))
             | "sym_lift", _ -> Error (err5000 "sym_lift: expected sym_lift(SPEC, K, x) with x of type Array<Float like IrrepsIdx<SPEC>>; the result is a plain Idx<C(total_dim(SPEC)+K-1, K)> monomial vector")
             | "tensor_to_irreps", [ gE ] ->

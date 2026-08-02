@@ -1,4 +1,4 @@
-/// Phase C1 of docs/plan-equivariance-in-types.md: the DECLARED-CERTIFICATE
+/// Phase C1 of the retired equivariance-in-types plan: the DECLARED-CERTIFICATE
 /// AGREEMENT gate.
 ///
 /// The typed walker (DeduceRep) now runs a second, independent judgment of
