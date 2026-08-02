@@ -63,6 +63,24 @@ type TypeError =
     /// index-type violation (BL4003): the type is legal, the STORAGE it names
     /// is not available.
     | OrbitStorageUnsupported of levels: string * where_: string
+    /// A wreath subscript at the wrong arity. A depth >= 2 OrbIdx record is ONE
+    /// index slot spanning prod(ri) RAW AXES, so `W(i,j,k,l)` presents 4 args
+    /// against 1 slot and `dispatchAppOrIndex`'s arity guard is false for it --
+    /// with no arm matching, the catch-all mints a fresh inference variable and
+    /// returns Ok. This case is what makes the wrong-arity form an ERROR rather
+    /// than a type nothing later contradicts (§9 step 6's "dispatch must not
+    /// rely on a `when` guard failing"). `got < axes` is also the PARTIAL read,
+    /// which v1 refuses outright: a wreath pool's rows shrink per level, so no
+    /// residual class describes a fibre of it.
+    | OrbitSubscriptArity of levels: string * axes: int * got: int
+    /// `decompact(W, d)` at a `d` other than 0 on a wreath class. v1 implements
+    /// FULL decompaction only; the partial/peel lattice
+    /// (docs/plan-orbidx-decompaction.md §3) is not built.
+    | OrbitDecompactPartial of levels: string * dim: int
+    /// reduce()/prodsum() over a wreath pool. Separate from the generic storage
+    /// refusal because the REMEDY differs: full decompaction now works, so this
+    /// message names it rather than saying the class cannot be touched.
+    | OrbitFoldUnsupported of levels: string * op: string
     | RaggedIdxNeedsPrior of func: string
     | IrrepsIdxSpec of detail: string
     | IrrepsIdxSpecFn of func: string * detail: string
@@ -121,6 +139,12 @@ type TypeError =
     | AntisymmContradictsBody of param1: string * param2: string
     | AntisymMapNotOdd of param: string * proved: string
     | HermitianMapNotReal of param: string
+    // The wreath-tie analog of AntisymMapNotOdd (IR.deduceWreathTie condition
+    // 6): a declared comm/anticomm tie over an input class with a '-' INNER
+    // level needs the kernel provably sign-odd in every tied argument, and the
+    // deduction says parameter `param` is `proved` instead. `levels` renders
+    // the input's class for the message.
+    | WreathTieKernelNotOdd of param: string * proved: string * levels: string
     | PlaceholderNeedsAllBound of got: int * total: int
     | GroupKeysRank1
     | CumulantOrderPositive of order: int
@@ -153,6 +177,15 @@ type TypeError =
     /// A bounded primitive whose bounds cross: `min=` above `max=`, decided
     /// statically. `where_` locates it ("struct R, field 'm'", "let x", ...).
     | BoundsInverted of where_: string * lo: string * hi: string
+    /// A `min=`/`max=` bound applied to an AGGREGATE. `TyBounded` is the
+    /// bounded PRIMITIVE node; the guards `Ast.boundedConjuncts` synthesizes
+    /// are comparisons against the annotated value itself, which an array,
+    /// tuple, struct or arrow has no answer for. `where_` locates it,
+    /// `noun` names what the base resolved to ("an array type", ...), and
+    /// `subject` is the thing being compared ("the annotated value" for an
+    /// annotation, "the field's value" for a struct field, whose bound is
+    /// normalized into FieldDecl.Bound before this check sees it).
+    | BoundsOnAggregate of where_: string * noun: string * subject: string
     // Rank deduction violation (BL3009)
     /// A value flowed into a position demanding rank >= k (a stage-2 rank
     /// deduction LOWER BOUND, accumulated and max-joined across the body's

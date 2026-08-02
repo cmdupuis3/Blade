@@ -1,0 +1,20 @@
+// TEST: Bound On Aggregate In Alias Body
+// ============================================================================
+// The companion to 046: the bound need not sit at the USE site. Written into
+// an alias BODY it is invisible to every annotation that mentions the alias —
+// `x: B` carries no TyBounded at all — so before this rejection the bound was
+// silently dropped and the program ran unguarded. A bound that quietly
+// evaporates is worse than one that is refused, so the alias DECLARATION is
+// the seam that reports it.
+// ============================================================================
+type Y = Idx<4>
+type Field = Array<Float64 like Y>
+type B = Field<min=0.0, max=1.0>
+
+// `B` is deliberately NOT used below: a failed registration makes every
+// annotation mentioning it a cascading BL3001, which would say nothing about
+// this rejection.
+let ok = 1
+// ERROR: BL4003
+// ERROR-CONTAINS: type alias 'B'
+// ERROR-CONTAINS: bounds apply to primitive types, not aggregates

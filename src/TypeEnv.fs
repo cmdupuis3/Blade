@@ -158,6 +158,14 @@ type TypeEnv = {
     /// resolveStatics runs. Best-effort: entries that don't statically
     /// evaluate are simply absent.
     StaticValues: Map<string, StaticEval.StaticValue>
+    /// Ordinary type aliases' SURFACE bodies, by name. `TypeDefs` stores an
+    /// alias as `TDIAlias` of an already-LOWERED IRType, and lowering erases
+    /// `min=`/`max=` — so a bound written inside an alias body
+    /// (`type Field = Array<Float64<min=0.0, max=1.0> like Y>`) is
+    /// unrecoverable from TypeDefs. The element-bound guard synthesis needs the
+    /// bound EXPRESSIONS, so it resolves alias chains through this map instead.
+    /// Populated by registerTypeDecl for every `type X = ...`.
+    SurfaceAliases: Map<string, TypeExpr>
     /// Names declared with `static struct` — the DECLARED static-eligibility
     /// fence. Registration checks every field type against the StaticValue
     /// shapes and records the name here on success, so a later static struct
@@ -298,6 +306,7 @@ let emptyEnv () = {
     ModuleExports = Map.empty
     StaticFunctions = Map.empty
     StaticValues = Map.empty
+    SurfaceAliases = Map.empty
     StaticStructs = Set.empty
     Warnings = ResizeArray<string>()
     Provenance = System.Collections.Generic.Dictionary<IRId, Set<string>>()
@@ -506,14 +515,42 @@ let formatTypeError (err: TypeError) : string =
     // reading two different stories about the same refusal.
     | OrbitStorageUnsupported (levels, where_) ->
         sprintf "%s: OrbIdx<%s, n> is a declarable index class of depth >= 2, and a DEDUCED one can now be \
-allocated, written and printed -- a comm tie over a repeated compact argument produces the class, \
-`orb_cell_count` sizes its pool and the segment-peeled `orb_visit` nest fills it in canonical order. \
-What is still missing is every path that reads a wreath pool at an ARBITRARY tuple: the mirrored \
-(non-canonical) compact read, decompaction, reduce/prodsum, transpose and provider I/O. So the \
+allocated, written, printed, READ at an arbitrary tuple (the per-level canon fold, the accumulated \
+character, the zero set), FULLY DECOMPACTED to its dense tensor, and round-tripped through a Zarr \
+store (the spec_version 2 'orbit' head -- providers/ZarrTriangularSpec.md). What is still missing is every \
+path that would put a wreath pool anywhere but under its own traversal nest: an OrbIdx ANNOTATION \
+(a store is now a producer, but the annotation also admits classes nothing produces), reduce/prodsum \
+over the pool, transpose, PARTIAL (per-level) decompaction, a WINDOWED or distributed store read, and \
+provider I/O outside Zarr (CSV and NetCDF have no pool axis to carry the class on). So the \
 compiler refuses here rather than compute an address it cannot compute. \
 The depth-1 spellings work through the existing compact machinery instead: OrbIdx<[(r,+)], n> is \
 exactly SymIdx<r, n>, OrbIdx<[(r,-)], n> is exactly AntisymIdx<r, n>, and OrbIdx<[], n> is exactly \
 Idx<n>." where_ levels
+    | OrbitSubscriptArity (levels, axes, got) ->
+        sprintf "OrbIdx<%s, n> acts on %d raw axes, so a subscript of it takes exactly %d flat \
+coordinates (W(i0, ..., i%d)) -- the same flat spelling a rank-k SymIdx group takes; got %d. \
+%sA wreath record is ONE index slot spanning all %d axes, not %d slots." levels axes axes (axes - 1) got
+                (if got < axes then
+                    "A PARTIAL subscript has no answer for a wreath class: its rows shrink per LEVEL, \
+so no residual index type describes a fibre of the pool -- decompact(W, 0) first and slice the \
+dense result. "
+                 else "")
+                axes axes
+    | OrbitDecompactPartial (levels, dim) ->
+        sprintf "decompact(W, %d): only FULL decompaction of an OrbIdx<%s, n> class is implemented -- \
+write decompact(W, 0), which produces the complete dense tensor (one plain Idx<n> axis per raw axis, \
+each cell the class's own read: the per-level canon fold, the accumulated character, and 0 on the \
+zero set). For a wreath class the second argument is the number of LEVELS TO KEEP \
+(docs/plan-orbidx-decompaction.md §4.3), not a dimension to free, and the partial/peel lattice of \
+that plan's §3 is not built: peeling level d unties its r_d sub-blocks into a juxtaposition of \
+depth-(d-1) classes, which needs a typed residual nothing produces yet." dim levels
+    | OrbitFoldUnsupported (levels, op) ->
+        sprintf "%s() over OrbIdx<%s, n> compact storage is not supported: folding the canonical POOL \
+cells and folding the logical (mirrored) cells differ. The pool holds one cell per ORBIT, so a fold \
+over it answers for an array of that many elements instead of the n^rank tensor it stands for -- and \
+each cell would need its orbit multiplicity (a Burnside count), with a '-' level's character \
+cancelling terms outright. decompact(W, 0) first for the logical fold: full decompaction of a wreath \
+class IS implemented, and the dense result folds like any other array." op levels
     | RaggedIdxNeedsPrior func -> sprintf "function '%s': RaggedIdx requires at least one prior index in the array's index list -- the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>." func
     | TagWildcardNotParam where_ -> sprintf "%s: the tag wildcard `_` is legal in PARAMETER position only. A parameter may decline to constrain its argument's index tag or unit, but this position has to PRODUCE one -- a wildcard here would erase the tag rather than relax it. Write the concrete index type (e.g. Nat<LatIdx>) or the bare base type." where_
     | IndexRankMismatch (where_, left, leftRank, right, rightRank) ->
@@ -553,6 +590,7 @@ Idx<n>." where_ levels
     | CommContradictsBody (p1, p2) -> sprintf "`where comm(%s, %s)` contradicts the kernel body, which is provably ANTIcommutative under that swap (f(%s, %s) = -f(%s, %s)): triangular storage would silently corrupt half the output. Remove the comm clause, or wrap the kernel in reynolds(...) if a signed iteration license over the permutation sum is what you intend." p1 p2 p2 p1 p1 p2
     | AntisymmContradictsBody (p1, p2) -> sprintf "`where anticomm(%s, %s)` contradicts the kernel body, which is provably COMMUTATIVE under that swap (f(%s, %s) = f(%s, %s)): strict-triangular anticommutative storage would drop the diagonal and negate half the output. Remove the anticomm clause (use `where comm(%s, %s)` for the symmetric triangle), or wrap the kernel in reynolds(..., Antisymmetric) if a signed antisymmetrization is what you intend." p1 p2 p2 p1 p1 p2 p1 p2
     | AntisymMapNotOdd (param, proved) -> sprintf "mapping this kernel over an ANTISYMMETRIC (AntisymIdx) array would keep the input's strict-triangular storage, and that is only correct for a SIGN-ODD kernel (f(-x) = -f(x)); the deduction says this one is %s in '%s'. An even or unknown-parity map of an antisymmetric array is SYMMETRIC — it has a diagonal, and the strict iteration the input forces cannot produce one — so the compact result would negate every mirrored read. Map over a dense copy instead (`decompact(A, 0)` materializes the full tensor, and the kernel over THAT is symmetric with the right diagonal), or use a sign-odd kernel." proved param
+    | WreathTieKernelNotOdd (param, proved, levels) -> sprintf "the declared clause ties every argument over a compact class with a '-' inner level (%s), and that tie is only sound for a kernel SIGN-ODD in each argument separately (h(-p, q) = -h(p, q)): a '-' level claims that mirroring ONE argument's sub-block negates the value, so an even or unknown-parity kernel would store a class whose mirrored reads and decompaction answer with signs the values do not satisfy. The deduction says this kernel is %s in '%s'. Use a per-argument sign-odd kernel (e.g. p * q; note p + q is NOT odd in each argument), or map over dense copies instead: decompact(_, 0) materializes the full tensor, and the kernel over THAT carries no wreath claim." levels proved param
     | HermitianMapNotReal param -> sprintf "mapping this kernel over a HERMITIAN (HermitianIdx) array would keep the input's Hermitian storage, whose mirrored reads recover H(j,i) as conj(H(i,j)); that is only correct when the kernel commutes with conjugation (f(conj z) = conj(f z)), which is not deducible for '%s'. A kernel built from the parameter, real constants, + - * /, and neg/conj/real qualifies; a complex constant, imag(z), arg(z), `^` and the math intrinsics (exp/log/sqrt/...) do not. Map over a dense copy instead: `decompact(A, 0)` materializes the full conjugate-mirrored matrix, and the kernel over THAT carries no storage claim." param
     | PlaceholderNeedsAllBound (got, total) -> sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." got total
     | GroupKeysRank1 -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
@@ -625,6 +663,7 @@ Idx<n>." where_ levels
     | StructBoundScope (structName, field, bad) -> sprintf "struct %s, field '%s': bound references '%s' — bounds may reference only earlier fields and statics" structName field bad
     | StaticStructField (structName, field, why) -> sprintf "static struct %s, field '%s': %s — every field of a `static struct` must have a statically evaluable type (Int, Float, Bool, String, Char, a tuple of those, or another static struct)" structName field why
     | BoundsInverted (where_, lo, hi) -> sprintf "%s: bounds cross — min=%s is greater than max=%s (bounds are inclusive on both ends, so this type has no values)" where_ lo hi
+    | BoundsOnAggregate (where_, noun, subject) -> sprintf "%s: bounds apply to primitive types, not aggregates — the bound is applied to %s. A bound is a runtime comparison against %s itself (formalism 2.4: bounded PRIMITIVES carry runtime-checked bounds), and an aggregate has no such comparison. Write the bound on the ELEMENT type instead — `Array<Float64<min=.., max=..> like I, J>` is checked cell by cell." where_ noun subject
     // Text reproduced VERBATIM from the two `Other` strings this case
     // replaced (Unify.fs rank-bound block) — `got` carries the whole
     // "a scalar" / "a rank-N array" tail, so the sentence is unchanged.
@@ -695,7 +734,13 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // input array's compact class would be inherited by the output, and
             // the deduction cannot certify the kernel commutes with that
             // class's mirror involution.
-            | AntisymMapNotOdd _ | HermitianMapNotReal _ -> "BL4015"
+            // WreathTieKernelNotOdd joins them deliberately: a clause IS
+            // declared there, but what it declares is the SWAP (h(p,q) =
+            // h(q,p)); the failing certificate — per-argument oddness against
+            // the inner class's mirror — is undeclared, exactly this family's
+            // "cannot certify the kernel commutes with the mirror involution".
+            | AntisymMapNotOdd _ | HermitianMapNotReal _
+            | WreathTieKernelNotOdd _ -> "BL4015"
             | StructWhereNotBool _ | StructWhereError _ | WherePredicateUnannotated _
             | PplConstraintNeedsImport _
             | UnknownWhereConstraint _ -> "BL4001"
@@ -710,10 +755,11 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // the program's use of it is what cannot be served. Not BL7001
             // ("feature not yet supported by THIS BACKEND") -- both backends
             // refuse, and the refusal happens in the front end.
-            | OrbitStorageUnsupported _
+            | OrbitStorageUnsupported _ | OrbitSubscriptArity _
+            | OrbitDecompactPartial _ | OrbitFoldUnsupported _
             | IrrepsIdxSpec _ | IrrepsIdxSpecFn _
             | PgIrrepsIdxSpec _ | PgIrrepsIdxSpecFn _ | TagWildcardNotParam _
-            | BoundsInverted _ -> "BL4003"
+            | BoundsInverted _ | BoundsOnAggregate _ -> "BL4003"
             | IndexRankMismatch _
             | DecompactDimRange _ | DecompactPlainAxis _ | DecompactLastSlotOnly _
             | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _

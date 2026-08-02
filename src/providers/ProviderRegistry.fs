@@ -69,6 +69,23 @@ type ProviderSpec = {
     /// buffer. None ⇒ the provider rejects packed reads AND writes loudly.
     /// Args: path, varName, cppVarName, arrType, opts.
     GenReadPacked: (string -> string -> string -> IRArrayType -> PackedReadOpts -> string list) option
+    /// ITERATED-WREATH (OrbIdx depth >= 2) pool capability, and the F#-side
+    /// canonical-pool reader that comes with it.
+    ///
+    /// Presence is the provider's wreath flag at EVERY seam — the emitted C++
+    /// read (which reuses GenReadPacked: a wreath store's pool is the same flat
+    /// leading dimension) and write (GenWriteVar), plus the interpreter's
+    /// in-process materialization, which calls this function. None ⇒ the
+    /// provider refuses wreath arrays loudly wherever one appears, which is the
+    /// state every provider but zarr is in (see
+    /// providers/ZarrTriangularSpec.md's spec_version 2 section for what a
+    /// supporting provider has to store).
+    ///
+    /// The returned DimLengths is `[cardinality]` — the pool as ONE axis, not
+    /// the class's prod(rᵢ) raw axes — and the payload is the pool in
+    /// ascending-lex canonical order, ready for a straight copy into a wreath
+    /// array's flat store. Args: store path, variable name.
+    ReadWreathPool: (string -> string -> Result<ProviderVarData, string>) option
     /// Runtime C++ compound (masked) reader; None means the provider
     /// rejects load_compound (loud error at the codegen intercept).
     /// Args: path, varName, maskName, cppVarName, varArrType, maskArrType.

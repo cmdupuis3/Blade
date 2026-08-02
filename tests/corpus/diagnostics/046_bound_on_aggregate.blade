@@ -1,0 +1,21 @@
+// TEST: Bound On Aggregate
+// ============================================================================
+// `min=`/`max=` is the bounded PRIMITIVE node (Ast.TyBounded, formalism 2.4):
+// the guards `Ast.boundedConjuncts` synthesizes are ordinary comparisons
+// against the annotated value ITSELF. An array has no answer for `0.0 <= x`,
+// so before this rejection existed the annotation typechecked (the comparison
+// read as an elementwise kernel) and the failure surfaced in the GENERATED
+// C++ as an undefined identifier — `BLADE_CODEGEN_ERROR_ARRAY-VALUED_...`.
+//
+// The check lives in TypeCheck, not the parser: `buildTypeApp` sees only
+// `Field<min=..., max=...>`, a bare NAME with named arguments. That `Field`
+// is an array is knowable only after alias resolution, which is what
+// `lowerTypeExpr` does.
+// ============================================================================
+type Y = Idx<4>
+type Field = Array<Float64 like Y>
+
+let mut x: Field<min=0.0, max=1.0> = [1.0, 0.0, 0.0, 0.0]
+// ERROR: BL4003
+// ERROR-CONTAINS: bounds apply to primitive types, not aggregates
+// ERROR-CONTAINS: an array type

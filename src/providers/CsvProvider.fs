@@ -504,6 +504,7 @@ let spec : Blade.ProviderRegistry.ProviderSpec = {
     ReadVarData = readVarData
     GenReadVar = CppCsv.genReadVar
     GenReadPacked = None       // packed groups: not representable in CSV
+    ReadWreathPool = None      // OrbIdx pools: likewise (CSV has no pool axis)
     GenReadCompoundVar = None  // load_compound: rejected loudly
     GenWriteVar = CppCsv.genWriteVar
     GenStreamOpen = None       // streaming: future arc (rejected loudly)

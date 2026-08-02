@@ -1,0 +1,23 @@
+// TEST: OrbIdx Wreath Subscript Arity (rejects)
+// ERROR: BL4003
+// OVER-SUPPLY, and it is the case the dispatch CATCH-ALL would swallow. A
+// depth-2 record is ONE index slot spanning prod(ri) = 4 raw axes, so five args
+// against one slot fails `dispatchAppOrIndex`'s arity guard
+// (`tArgs.Length <= IndexTypes.Length`), and with no arm matching the fall
+// -through mints a fresh inference variable and returns Ok -- a type nothing
+// later contradicts, reaching codegen as a subscript into a flat pool.
+// docs/plan-orbit-index-types.md §9 step 6 names this exactly: "dispatch must
+// not rely on a `when` guard failing". So the wreath arm handles every arity
+// EXPLICITLY -- an Ok at the element type for prod(ri) coordinates, an Error
+// for anything else -- and this probe is what keeps that true.
+//
+// Note the arity is the RAW AXIS COUNT, not the slot count and not the level
+// count: OrbIdx<[(2,+),(2,+)],n> takes 4 coordinates, the same flat spelling a
+// rank-4 SymIdx group takes. 217 is the under-supplied twin.
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+let bad = W(0, 1, 0, 1, 2)
+// EXPECT: typecheck failure — a 4-axis wreath class takes exactly 4 flat subscripts.

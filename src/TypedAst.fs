@@ -60,6 +60,15 @@ type TypedLambdaInfo = {
     /// PNeg body and a declared anticomm on a PInv body are different errors);
     /// the consumers that only care about GROUPING merge the two lists.
     AntisymGroups: int list list
+    /// Per-parameter SIGN parity of the body (`Types.KernelSignParity`, decl
+    /// order), computed by the apply seam via `Deduce.deduceSignParities` —
+    /// the summary `IR.deduceWreathTie`'s soundness gate consumes. Populated
+    /// ONLY when this lambda reaches the seam as a KERNEL (checkApplyCombinator
+    /// rebuilds the info with it); every other construction site leaves it
+    /// empty, which consumers read as all-unknown. Lowering copies it onto the
+    /// lifted `IRCallable` so codegen and the interpreter judge the tie from
+    /// the same values typecheck did.
+    SignParities: KernelSignParity list
     Captures: TypedVarInfo list
     IsCommutative: bool
     // Parallelization strategy assignments (list; see WhereClause.Parallel).

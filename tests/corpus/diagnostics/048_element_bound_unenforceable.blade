@@ -1,0 +1,15 @@
+// TEST: Element Bound Unenforceable
+// ============================================================================
+// The element-bound guard walks a DENSE loop nest. A compact symmetric /
+// antisymmetric / Hermitian axis stores only canonical cells, so "every cell"
+// is ambiguous — folding canonical cells and folding logical (mirrored) cells
+// differ, the same ambiguity `reduce()` refuses over compact storage.
+//
+// The point of this file is that the answer is a REFUSAL, not a skip. Silently
+// dropping the guard is precisely the defect the element-bound work exists to
+// remove: an annotation that reads as a constraint and enforces nothing.
+// ============================================================================
+let y: Array<Float64<min=0.0, max=1.0> like SymIdx<2, 3>> = [0.1, 0.2, 0.3]
+// ERROR: BL3999
+// ERROR-CONTAINS: is not enforced
+// ERROR-CONTAINS: compact symmetric/antisymmetric/Hermitian

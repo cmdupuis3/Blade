@@ -1,0 +1,27 @@
+// TEST: OrbIdx Wreath Tie Even Kernel (rejects)
+// ERROR: BL4015
+// ERROR-CONTAINS: SIGN-ODD in each argument separately
+// ERROR-CONTAINS: provably sign-EVEN
+// The PROVABLE half of the wreath-tie gate's verdict (201 pins the unknown
+// half): declared comm + a kernel provably sign-EVEN per argument + a '-'
+// inner class is the CommContradictsBody analog one level up — the deduction
+// does not merely fail to certify the tie, it PROVES the class's sign claim
+// false. h(p, q) = p*p + q*q is genuinely commutative (the comm clause is
+// TRUE, so depth-1's stage-3 contradiction checks rightly stay quiet), and it
+// is provably even in each argument: h(-p, q) = (-p)(-p) + q*q = h(p, q). The
+// deduced class OrbIdx<[(2,-),(2,+)], 4> would claim R(1,0,2,3) =
+// -R(0,1,2,3), yet both evaluate to B(0,1)^2 + B(2,3)^2 — every mirrored read
+// and every decompacted mirror cell would answer with a sign the values
+// provably do not satisfy.
+//
+// This is exactly the shape of the depth-1 probe 164 (even kernel over one
+// antisymmetric array, refused by the inheritance gate); the tie gate is its
+// wreath analogue, checking the kernel against the INNER level's mirror
+// rather than the inherited class's. The remedy is the same steer:
+// decompact(B, 0) first — the kernel over the dense tensor carries no wreath
+// claim — or use a kernel odd in each argument (213/214's p * q).
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let B = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let h = lambda(p, q) where comm(p, q) -> p * p + q * q
+let R = method_for(B, B) <@> h |> compute

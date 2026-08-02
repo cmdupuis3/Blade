@@ -1,0 +1,29 @@
+// TEST: OrbIdx Wreath Partial Decompact (rejects)
+// ERROR: BL4003
+// FULL decompaction works (207, 214); the PEEL LATTICE of
+// docs/plan-orbidx-decompaction.md §3 does not, and this pins the boundary
+// between them rather than leaving `d` free to mean whatever the generic
+// fission code would make of it.
+//
+// For a wreath class `decompact`'s second argument is the number of LEVELS TO
+// KEEP (§4.3), not a dimension to free, and only 0 is implemented. Peeling
+// level d unties its r_d sub-blocks into a JUXTAPOSITION of depth-(d-1)
+// classes -- `OrbIdx<[(2,-),(2,+)],n>` peeled once is two untied
+// `OrbIdx<[(2,-)],n>` groups, not one group of the same shape -- and the sign
+// accumulated across the peeled level has to be BAKED into the copied values,
+// because after the peel there is no read transform left to apply it. Neither
+// piece exists.
+//
+// What the generic path would otherwise have built is the concrete hazard: its
+// `mkRemainder` produces `{ ix with Rank = a }`, i.e. a wreath record whose
+// Rank no longer matches the product of its level list -- an internally
+// inconsistent type that every downstream cell count reads differently. The
+// wreath arm runs BEFORE the dimension resolution so that code is never
+// reached with a level list in hand.
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+let bad = decompact(W, 1)
+// EXPECT: typecheck failure — only full decompaction, decompact(W, 0), is implemented.

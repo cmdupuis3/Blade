@@ -62,15 +62,26 @@ let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> =
 
 /// Annotations may name a whole-array type alias (`type Field = Array<...>`) —
 /// resolve top-level aliases (cycle-bounded) before matching for TyArray.
+///
+/// TyBounded is TRANSPARENT here, and only for diagnostic ORDER. A bound on an
+/// aggregate is rejected by the checker (BL4003, TypeCheck.boundedAggregateError),
+/// but this pass runs BEFORE the checker: without this arm `A: MA<min=0.0,
+/// max=99.0>` fails to match TyArray and the user is told "'A' has no declared
+/// array shape" about an annotation that plainly declares one. Seeing through
+/// the bound lets the elaborator do its job and lets the checker deliver the
+/// diagnostic that actually explains the mistake. Nothing legitimate changes:
+/// a bound on a SCALAR still resolves to a non-array and is still not a shape.
 let rec private resolveTop (aliases: Map<string, TypeExpr>) (fuel: int) (ty: TypeExpr) =
     match ty with
     | TyNamed (n, []) when fuel > 0 ->
         match Map.tryFind n aliases with
         | Some body -> resolveTop aliases (fuel - 1) body
         | None -> ty
-    // NO TyBounded arm, deliberately — see SpectraElaborate.resolveTop for why
-    // (a bound on a whole array type is not a supported concept, and admitting
-    // it here only reaches a pre-existing codegen bug).
+    // TyBounded resolves through to its base: bounds on AGGREGATE types are now
+    // rejected upstream (boundedAggregateError, the element-bound round), so the
+    // pass-through no longer reaches the old bounded-array codegen bug — the
+    // earlier deliberate omission here is superseded by that guard.
+    | TyBounded (baseTy, _, _) when fuel > 0 -> resolveTop aliases (fuel - 1) baseTy
     | _ -> ty
 
 /// An annotation, alias-resolved, if it denotes an array.

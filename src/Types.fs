@@ -36,6 +36,21 @@ type SymmetryClass =
     /// radius to genuinely new storage.
     | SymWreath
 
+/// Per-parameter SIGN parity of a kernel, as RECORDED on the kernel's callable
+/// for the wreath-tie soundness gate (`IR.deduceWreathTie`). This is the same
+/// three-valued judgment `Deduce.SignParity` computes (SOdd / SEven / SUnknown,
+/// Deduce.fs), mirrored here because the consumers sit BELOW Deduce.fs in the
+/// compile order: `IRCallable` (IR.fs) carries the list so codegen and the
+/// interpreter can hand `deduceWreathTie` exactly the summary the typecheck
+/// seam computed — every seam passes the SAME values, keeping "is this a
+/// wreath application" a one-answer question. TypeCheck is the sole producer
+/// (it maps from `Deduce.SignParity` at the apply seam); an empty list means
+/// "never computed", which every consumer treats as all-KspUnknown.
+type KernelSignParity =
+    | KspOdd      // provably f(.., -x, ..) = -f(.., x, ..) in that parameter
+    | KspEven     // provably f(.., -x, ..) =  f(.., x, ..) in that parameter
+    | KspUnknown  // neither provable
+
 /// Placement (membership + ranking) class for index types -- the Level-1 axis,
 /// orthogonal to the symmetry-transform axis (SymmetryClass). It answers "which
 /// tuples are stored, and how is a tuple ranked to a flat offset", independent

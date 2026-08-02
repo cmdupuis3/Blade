@@ -841,12 +841,21 @@ and private nodeTypeName (ty: IRType) : string =
 and private tryWreathApply (info: ApplyInfo) : WreathTie option =
     match resolveKernel info.Kernel with
     | Some rk ->
-        deduceWreathTie info.ArrayTypes info.Identities
-                        (rk.Callable.CommGroups @ rk.Callable.AntisymGroups)
-                        (if info.HasReynolds then [] else rk.Callable.AntisymGroups)
-                        info.KernelTDims
-                        (info.KernelInputRanks |> List.exists (fun r -> r > 0))
-                        info.HasReynolds
+        match deduceWreathTie info.ArrayTypes info.Identities
+                              (rk.Callable.CommGroups @ rk.Callable.AntisymGroups)
+                              (if info.HasReynolds then [] else rk.Callable.AntisymGroups)
+                              info.KernelTDims
+                              (info.KernelInputRanks |> List.exists (fun r -> r > 0))
+                              info.HasReynolds
+                              rk.Callable.SignParities with
+        | WreathTied t -> Some t
+        | WreathNoTie -> None
+        | WreathKernelNotOdd (argPos, _, _) ->
+            // Unreachable: the typecheck seam runs the same call with the same
+            // arguments (SignParities is the summary it recorded) and refuses
+            // the program before interpretation starts. Loud, not a fallback.
+            failwith (sprintf "internal: interpreter reached a wreath tie whose kernel is not \
+provably sign-odd in tied argument %d; typecheck should have refused this application" argPos)
     | None -> None
 
 /// Read one tied argument at a CANONICAL sub-key of the traversal stream.

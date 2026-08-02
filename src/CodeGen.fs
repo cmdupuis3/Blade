@@ -261,6 +261,20 @@ deduced wreath OUTPUT of a comm-tied apply has an emitter (a flat orb_cell_count
     | AllocUnsupported reason ->
         Error (sprintf "Blade codegen: unsupported antisymmetric output storage â€” %s" reason)
 
+/// The `orb_level<...>` template-argument list for an OrbIdx class, in the
+/// header's public (doc) order: OUTERMOST LAST, exactly as `IROrbitClass`
+/// carries it. ONE spelling, shared by every wreath emitter -- the traversal
+/// nest, the canonical argument read, the arbitrary-tuple `orb_read`, the
+/// decompaction nest and the printer. A level list rendered in the wrong order
+/// is a DIFFERENT CLASS that still compiles, so this must not be re-spelled per
+/// site. (Hoisted this far up the file only so `renderIndexExpr` can reach it;
+/// it depends on nothing.)
+let orbLevelArgs (levels: (int * bool) list) : string =
+    levels
+    |> List.map (fun (r, isPlus) ->
+        sprintf "orbit_wreath_utilities::orb_level<%d,%s>" r (if isPlus then "true" else "false"))
+    |> String.concat ", "
+
 // ----------------------------------------------------------------------------
 // Materializer allocation descriptors (deterministic deallocation, site 7)
 // ----------------------------------------------------------------------------
@@ -1849,6 +1863,65 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
     let rawSubscript () =
         let idxStr = indices |> List.map (fun i -> sprintf "[%s]" (exprToCppCore subst names i)) |> String.concat ""
         sprintf "%s%s" arrStr idxStr
+    // OrbIdx (depth >= 2) subscript -- docs/plan-orbidx-decompaction.md §2's
+    // read at an ARBITRARY raw tuple:
+    //
+    //     dense[t] = 0                                if canon(t) is zero-set
+    //              = chi(t) * pool[orb_rank(canon(t))] otherwise
+    //
+    // Emitted as an instantiation of `orb_read<T, Levels...>`, NOT as an
+    // extension of `canon_fold`. Two reasons, both load-bearing:
+    //   * canon_fold<r> is ONE flat sort with a strict flag. It has no spelling
+    //     for a per-level fold, and sorting all prod(ri) coordinates together
+    //     maps distinct orbits onto the same canonical tuple with a meaningless
+    //     parity. The character a wreath read applies is the PRODUCT of the
+    //     per-level signs, which is `orb_canon`'s job, not a ReadTransform enum
+    //     value.
+    //   * `orb_read` is already written and CHECKED (`blade test orbwreath`
+    //     validates it against brute force in its own translation unit, and
+    //     `blade test orbrank` pins the F# twin against held-out tables). The
+    //     levels are compile-time constants here, so instantiating it costs
+    //     nothing and a second emitter is a second thing to drift.
+    //
+    // The pool is a bare `T*` (genWreathApply's `new T[cells]`), which is
+    // exactly `orb_read`'s first parameter, so nothing is unwrapped.
+    //
+    // Emits ONLY for a sole wreath slot at FULL arity, and RAISES for every
+    // other shape a wreath slot can present rather than returning None. None
+    // would fall through to the fold path -- which declines too, on the arity
+    // test -- and from there to `rawSubscript`, emitting `W[i][j]` into a flat
+    // pool: a plausible address, silently wrong. TypeCheck refuses all of these
+    // (OrbitSubscriptArity / the combined-slots refusal), so reaching here is an
+    // internal routing break and should read as one.
+    let wreathRead () : string option =
+        match inferExprType arr with
+        | ArrayElem arrTy when arrTy.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
+            let bail (why: string) =
+                let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
+                raise (Blade.Diagnostics.BladeDiagnosticException
+                        (Blade.Diagnostics.Codes.iceCodegen
+                            (sprintf "internal: a wreath subscript reached codegen in an unsupported shape (%s) -- OrbIdx%s spans %d raw axes and takes exactly that many flat coordinates; TypeCheck should have refused this"
+                                     why (ppOrbitLevels (orbitLevelsOf ix)) (max 1 ix.Rank))))
+            (match arrTy.IndexTypes with
+             | [ ix ] ->
+                 let axes = max 1 ix.Rank
+                 if indices |> List.exists (function IRTuple _ -> true | _ -> false) then
+                     bail "a tuple index"
+                 elif indices.Length <> axes then
+                     bail (sprintf "%d coordinates" indices.Length)
+                 else
+                     let elemStr = elemTypeToCpp arrTy.ElemType
+                     let levelArgs = orbLevelArgs (orbitLevelsOf ix)
+                     let nStr = exprToCppCore subst names (orbitBaseExtent ix)
+                     let coordBuf = "__orbrd"
+                     let coordInit =
+                         indices
+                         |> List.map (fun i -> sprintf "(int)(%s)" (exprToCppCore subst names i))
+                         |> String.concat ", "
+                     Some (sprintf "([&]() -> %s { int %s[%d] = { %s }; return orbit_wreath_utilities::orb_read<%s, %s>(%s, %s, (int)(%s)); }())"
+                                   elemStr coordBuf axes coordInit elemStr levelArgs arrStr coordBuf nStr)
+             | _ -> bail "a wreath group combined with other index slots")
+        | _ -> None
     let lazyCompactRead () : string option =
         match inferExprType arr with
         | ArrayElem arrTy ->
@@ -1889,7 +1962,12 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                             // canon_fold<r> is ONE flat sort with a strict flag;
                             // it has no spelling for a per-level fold, and
                             // emitting "false" here would silently canonicalize
-                            // a wreath tuple as a plain multiset.
+                            // a wreath tuple as a plain multiset. The real read
+                            // is `wreathRead` above (an `orb_read`
+                            // instantiation), which runs FIRST; reaching here
+                            // means a wreath slot appeared in a shape that read
+                            // declines -- combined with other slots, or at the
+                            // wrong arity -- which TypeCheck refuses. Backstop.
                             | CanonWreathFold ->
                                 failwith (orbitStorageUnsupported "lazy compact read (canon_fold emission)"
                                                                   (orbitLevelsOf s))
@@ -2092,12 +2170,18 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
     match compoundRead () with
     | Some code -> code
     | None ->
-        (match lazyCompactRead () with
+        // The wreath read runs BEFORE the compact fold: a wreath slot passes
+        // lazyCompactRead's `anyCompact` test (it IS packed) and would reach
+        // canon_fold's per-level backstop, which has no spelling for it.
+        (match wreathRead () with
          | Some code -> code
          | None ->
-            match densePartialSubviewExpr () with
+            match lazyCompactRead () with
             | Some code -> code
-            | None -> rawSubscript ())
+            | None ->
+                match densePartialSubviewExpr () with
+                | Some code -> code
+                | None -> rawSubscript ())
 
 
 and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases : string =
@@ -2996,8 +3080,58 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
     //       (rank 4: one group + a degenerate plain residual), two-sided
     //       interior cuts (rank 5: two groups), and the rank-3 interior case
     //       (both residuals degenerate -> fully dense).
+    //   (4) OrbIdx (depth >= 2) FULL decompaction -- see the wreath arm below.
     let arrName = exprToCppCore subst names arrExpr
     (match inferExprType arrExpr with
+     // ----- OrbIdx (iterated-wreath) FULL decompaction -----
+     //
+     // docs/plan-orbidx-decompaction.md §2 + §4, endpoint only: the whole pool
+     // to the dense rank-prod(ri) tensor. `dimArg` is the number of LEVELS TO
+     // KEEP (§4.3) and TypeCheck has already refused every value but 0.
+     //
+     // DENSE-SEQUENTIAL, deliberately, and it is a CHOICE the plan leaves open
+     // (§4.2 sketches the pool-sequential scatter instead). The scatter needs
+     // to enumerate each pool cell's ORBIT -- every group element applied to
+     // the canonical tuple, with its character -- and no verified emitter for
+     // that exists: orb_visit hands out canonical tuples only. orb_read, by
+     // contrast, IS the verified §2 read, so the dense walk is one call per
+     // cell and re-derives nothing. Correctness is the bar here (§4.2's own
+     // "measure, don't assume" applies to the performance claim, and nothing
+     // has been measured), and this way the emitted C++ and the interpreter's
+     // `decompactArray` are the SAME algorithm against the SAME reference, so
+     // the differential harness is comparing implementations, not designs.
+     //
+     // No in-place variant: §5 -- pack and dense share no layout.
+     | ArrayElem arrTy when (match arrTy.IndexTypes with
+                             | [ ix ] -> ix.Symmetry = SymWreath
+                             | _ -> false) ->
+        let ix = List.head arrTy.IndexTypes
+        let axes = max 1 ix.Rank
+        let levelArgs = orbLevelArgs (orbitLevelsOf ix)
+        let nStr = exprToCppCore subst names (orbitBaseExtent ix)
+        let extentsName = sprintf "%s_extents" varName
+        let lv k = sprintf "__odc%s_%d" varName k
+        let coordBuf = sprintf "__odc%s_c" varName
+        let extentDecl =
+            [ sprintf "size_t %s[%d];" extentsName axes ]
+            @ [ for i in 0 .. axes - 1 -> sprintf "%s[%d] = (size_t)(%s);" extentsName i nStr ]
+        let allocDecl =
+            arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = axes; Name = varName
+                         Symm = "nullptr"; Strict = None; Extents = extentsName }
+        let opens =
+            [ for k in 0 .. axes - 1 ->
+                sprintf "%sfor (size_t %s = 0; %s < (size_t)(%s); %s++) {"
+                        (String.replicate k "    ") (lv k) (lv k) nStr (lv k) ]
+        let bodyInd = String.replicate axes "    "
+        let dstSubs = [ for k in 0 .. axes - 1 -> sprintf "[%s]" (lv k) ] |> String.concat ""
+        let coordInit = [ for k in 0 .. axes - 1 -> sprintf "(int)%s" (lv k) ] |> String.concat ", "
+        let body =
+            [ sprintf "%sint %s[%d] = { %s };" bodyInd coordBuf axes coordInit
+              sprintf "%s%s%s = orbit_wreath_utilities::orb_read<%s, %s>(%s, %s, (int)(%s));"
+                      bodyInd varName dstSubs elemTypeStr levelArgs arrName coordBuf nStr ]
+        let closes = [ for k in axes - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate k "    ") ]
+        Some (extentDecl @ [ allocDecl ] @ opens @ body @ closes,
+              [ MatPool (varName, elemTypeStr, axes, "nullptr", None) ])
      | ArrayElem arrTy ->
         // The compact group being decompacted is the LAST index slot
         // (TypeCheck enforces: any preceding slots are plain free Idx
@@ -7204,17 +7338,6 @@ let classifyMpiShape (codeGen: LoopNestCodeGen) : MpiShape =
 //  computed by hand, and the interpreter walks `visitStream` for the same
 //  binding, which the differential harness diffs.
 
-/// The `orb_level<...>` template-argument list for a class, in the header's
-/// public (doc) order: OUTERMOST LAST, exactly as `IROrbitClass` carries it.
-/// One spelling, used for the output class, the input class, and the printer --
-/// a level list rendered in the wrong order is a different class that still
-/// compiles.
-let private orbLevelArgs (levels: (int * bool) list) : string =
-    levels
-    |> List.map (fun (r, isPlus) ->
-        sprintf "orbit_wreath_utilities::orb_level<%d,%s>" r (if isPlus then "true" else "false"))
-    |> String.concat ", "
-
 /// Render the C++ subscript that reads ONE tied argument at its canonical
 /// sub-key, given the flat coordinate buffer the visitor hands us.
 ///
@@ -7717,7 +7840,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     // pool that is not two simplices. Same predicate, same arguments as
     // deduceOutputType's, so codegen and the deduced type cannot disagree about
     // whether this application is a wreath one.
-    let wreathTie =
+    let wreathVerdict =
         match resolveKernel info.Kernel with
         | Some rk ->
             deduceWreathTie info.ArrayTypes info.Identities
@@ -7726,7 +7849,18 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             info.KernelTDims
                             (info.KernelInputRanks |> List.exists (fun r -> r > 0))
                             info.HasReynolds
-        | None -> None
+                            rk.Callable.SignParities
+        | None -> WreathNoTie
+    let wreathTie =
+        match wreathVerdict with
+        | WreathTied t -> Some t
+        | WreathNoTie -> None
+        | WreathKernelNotOdd (argPos, _, _) ->
+            // Unreachable: the typecheck seam runs the same call with the same
+            // arguments (SignParities is the summary it recorded) and refuses
+            // the program before codegen exists. Loud, not a silent fallback.
+            failwith (sprintf "internal: codegen reached a wreath tie whose kernel is not \
+provably sign-odd in tied argument %d; typecheck should have refused this application" argPos)
     match wreathTie with
     | Some tie when mpiRequested ->
         mpiError "an OrbIdx (iterated-wreath) output is not decomposed (pool slicing by rank ranges is plan-orbidx-bijections Phase 3)"
@@ -10355,15 +10489,56 @@ and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
             (code |> List.map (fun s -> ind + s), ctx')
     else
     // A wreath group passes the `Symmetry <> SymNone && Rank >= 2` packed test
-    // (correctly -- it IS packed) and would then take the LINEAR POOL COPY
-    // below, which assumes the on-disk buffer is the canonical pool in
-    // ascending-lex order. The count would come out right (bufferGroupCardinality
-    // folds the levels), and the ORDER would be undefined, which is the failure
-    // a read->write roundtrip cannot see. Refuse before the copy.
-    spec.VarType.IndexTypes |> List.iter (fun ix ->
-        if ix.Symmetry = SymWreath then
+    // (correctly -- it IS packed) but must NOT take the Array<T,N> + pool-copy
+    // materialization below: a wreath array's in-memory storage is a bare flat
+    // `T*` of orb_cell_count cells (IR.classifyOutputStorage's AllocWreath, the
+    // same shape genWreathApply allocates), not a skeleton-backed Array. It gets
+    // its own arm, and a provider that does not store wreath pools
+    // (ReadWreathPool = None -- csv, netcdf) still refuses here.
+    match spec.VarType.IndexTypes |> List.tryFind (fun ix -> ix.Symmetry = SymWreath) with
+    | Some ix when pspec.ReadWreathPool.IsNone ->
+        failwith (orbitStorageUnsupported
+                      (sprintf "provider read of '%s' (provider '%s' stores no OrbIdx pools)" spec.VarName spec.Provider)
+                      (orbitLevelsOf ix))
+    | Some ix ->
+        // The store's pool IS the storage, so the whole read is: assemble the
+        // chunks into `<name>_flat` (the provider's ordinary flat walk, which
+        // knows nothing about wreaths -- the layout attribute already pinned
+        // the class at metadata parse) and adopt that buffer as the array.
+        // No copy, no unlinearize, no reorder: spec_version 2 defines exactly
+        // one on-disk order and it is the one the pool is in.
+        if spec.Window.IsSome then
+            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "z.read_window over an OrbIdx (iterated-wreath) pool ('%s') is not supported: a wreath class has no translated sub-class to window into" spec.VarName)))
+        match classifyOutputStorage binding.Type, pspec.GenReadPacked with
+        | AllocWreath (levels, n, cells), Some gen ->
+            let elemCpp =
+                match binding.Type with
+                | ArrayElem at -> elemTypeToCpp at.ElemType
+                | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.iceCodegen (sprintf "wreath provider read '%s': binding is not array-typed" spec.VarName)))
+            let opts : Blade.ProviderRegistry.PackedReadOpts = { Distribute = false; Window = None }
+            let assemble = gen spec.FilePath spec.VarName name spec.VarType opts
+            // Same runtime pin genWreathApply emits: the C++ §4 fold and the
+            // F# one (OrbRank.cellCountChecked, which is also what validated
+            // the store's pool length at metadata parse) are independent
+            // implementations, and a disagreement is a wrong-sized pool that
+            // nothing on the value side could notice.
+            let pin =
+                [ sprintf "if (orbit_wreath_utilities::orb_cell_count<%s>(%d) != %dLL) { blade_rt::panic(\"BL8004\", \"OrbIdx pool size disagreement: orb_cell_count vs the store's declared cardinality\", nullptr, 0); }"
+                          (orbLevelArgs levels) n cells ]
+            registerAlloc (RawAlloc (name, None))
+            let adopt =
+                [ sprintf "// OrbIdx%s over extent %d: %d pool cells adopted from the store (ascending-lex canonical order)"
+                          (ppOrbitLevels levels) n cells
+                  sprintf "%s* %s = %s_flat;" elemCpp name name ]
+            ((assemble @ pin @ adopt) |> List.map (fun s -> ind + s), addVarName binding.Id name ctx)
+        | AllocWreath _, None ->
             failwith (orbitStorageUnsupported
-                          (sprintf "provider read of '%s'" spec.VarName) (orbitLevelsOf ix)))
+                          (sprintf "provider read of '%s' (provider '%s' emits no packed reader)" spec.VarName spec.Provider)
+                          (orbitLevelsOf ix))
+        | spec_, _ ->
+            failwith (orbitStorageUnsupported
+                          (sprintf "provider read of '%s' (%A)" spec.VarName spec_) (orbitLevelsOf ix))
+    | None ->
     let isPackedVar =
         spec.VarType.IndexTypes |> List.exists (fun ix -> ix.Symmetry <> SymNone && ix.Rank >= 2)
     if isPackedVar then
@@ -10442,6 +10617,39 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     let baseName = sprintf "%s_wr%d" srcCpp (int binding.Id)
     let arrTy = spec.SourceType
     let elemCpp = elemTypeToCpp arrTy.ElemType
+    // The wreath arm runs BEFORE the component-extent fold below: a wreath
+    // record's Extent is the IROrbitClass marker, not an IRLit, so the literal
+    // check would fire first and report "requires literal extents" for a class
+    // whose extent is perfectly literal one level down.
+    match arrTy.IndexTypes |> List.tryFind (fun ix -> ix.Symmetry = SymWreath) with
+    | Some ix when pspec.ReadWreathPool.IsNone ->
+        failwith (orbitStorageUnsupported
+                      (sprintf "provider write of '%s' (provider '%s' stores no OrbIdx pools)" spec.VarName spec.Provider)
+                      (orbitLevelsOf ix))
+    | Some ix ->
+        // The source array IS the flat pool in ascending-lex canonical order,
+        // so the "flatten" is a straight element copy into a buffer the writer
+        // owns -- the depth-1 packed path's linear pool_base copy, minus the
+        // skeleton indirection (a wreath array has no skeleton). The copy is not
+        // elided: the writer's cleanup deletes the buffer it was handed, and
+        // that must not be the array.
+        (match classifyOutputStorage (mkArrayLike arrTy) with
+         | AllocWreath (levels, n, cells) ->
+             let pin =
+                 sprintf "if (orbit_wreath_utilities::orb_cell_count<%s>(%d) != %dLL) { blade_rt::panic(\"BL8004\", \"OrbIdx pool size disagreement: orb_cell_count vs the compiler's iterated-binomial fold\", nullptr, 0); }"
+                         (orbLevelArgs levels) n cells
+             let flatten =
+                 [ sprintf "// Write %s (OrbIdx%s pool, %d cells) to %s" spec.VarName (ppOrbitLevels levels) cells spec.FilePath
+                   pin
+                   sprintf "%s* %s_flat = new %s[%d];" elemCpp baseName elemCpp cells
+                   sprintf "for (size_t __ow_i = 0; __ow_i < %d; __ow_i++) { %s_flat[__ow_i] = %s[__ow_i]; }" cells baseName srcCpp ]
+             let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
+             let cleanup = [ sprintf "delete[] %s_flat;" baseName ]
+             (guardProviderWrite ind (flatten @ writeCode @ cleanup), ctx)
+         | other ->
+             failwith (orbitStorageUnsupported
+                           (sprintf "provider write of '%s' (%A)" spec.VarName other) (orbitLevelsOf ix)))
+    | None ->
     let componentExtents =
         arrTy.IndexTypes |> List.collect (fun idx -> List.replicate idx.Rank idx.Extent)
     let rank = componentExtents.Length
@@ -10450,12 +10658,6 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
             match e with
             | IRLit (IRLitInt n) -> sprintf "%d" n
             | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "provider write of '%s' requires literal extents" spec.VarName))))
-    // Same refusal as the provider READ path above, same reason: the pool-order
-    // assumption is the thing a wreath class has not established yet.
-    arrTy.IndexTypes |> List.iter (fun ix ->
-        if ix.Symmetry = SymWreath then
-            failwith (orbitStorageUnsupported
-                          (sprintf "provider write of '%s'" spec.VarName) (orbitLevelsOf ix)))
     let isPacked =
         arrTy.IndexTypes |> List.exists (fun idx -> idx.Symmetry <> SymNone && idx.Rank >= 2)
     if isPacked then

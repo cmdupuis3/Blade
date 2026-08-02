@@ -1,0 +1,22 @@
+// TEST: OrbIdx Wreath Annotated Read (rejects)
+// ERROR: BL4003
+// WRITING the class down stays refused even though READING one is now
+// implemented -- and this probe exists because the read path is exactly the
+// argument that used to be given for opening the annotation. It is not enough
+// on its own.
+//
+// The two powers differ in what they admit. DEDUCTION reaches a wreath class
+// only through the one shape that has a traversal nest (a comm tie over a
+// repeated compact argument, `IR.deduceWreathTie`), so every wreath value in
+// existence was FILLED by that nest. An ANNOTATION names the class in the
+// abstract and admits bindings no producer can fill -- the binding below wants
+// a 21-cell pool out of `zero`, and there is no writer for it. A readable
+// object that cannot be written is not progress; the missing half is now the
+// WRITE side, which is what the refusal text says.
+//
+// 193 pins the same door with a named type alias; this one pins it INLINE and
+// then subscripts the binding, so the refusal has to come from the annotation
+// rather than from the read (which would now succeed).
+let R: Array<Float64 like OrbIdx<[(2,+), (2,+)], 3>> = zero |> compute
+let cell = R(0, 1, 0, 1)
+// EXPECT: typecheck failure — a written (annotated) OrbIdx class has no producer.

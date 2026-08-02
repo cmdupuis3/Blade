@@ -60,18 +60,34 @@ type ZarrFill =
 type ZarrCodec =
     | CodecIdentity
 
-/// Triangular-decomposed layout (the `blade` attribute, spec_version 1):
-/// the physical array's LEADING dimension is a packed simplex pool —
-/// C(n+r-1, r) cells for "sym", C(n, r) for "antisym" — in canonical
-/// ascending-lex order (== linearized_storage's linearize order == the
-/// allocator's DFS pool order, differentially pinned). Trailing dimensions
-/// are ordinary dense axes. Chunking the pool dimension yields contiguous
-/// flat-cell ranges — exactly the decomposition the MPI backend distributes
-/// (one decomposition block = one chunk). See providers/ZarrTriangularSpec.md.
+/// Triangular-decomposed layout (the `blade` attribute):
+/// the physical array's LEADING dimension is a packed pool in canonical
+/// ascending-lex order. Two head kinds:
+///
+///   * spec_version 1 — a SIMPLEX pool: C(n+r-1, r) cells for "sym", C(n, r)
+///     for "antisym" (== linearized_storage's linearize order == the
+///     allocator's DFS pool order, differentially pinned). Trailing
+///     dimensions are ordinary dense axes. Chunking the pool dimension
+///     yields contiguous flat-cell ranges — exactly the decomposition the
+///     MPI backend distributes (one decomposition block = one chunk).
+///   * spec_version 2 — an ORBIT (iterated-wreath) pool: `Sym = SymWreath`,
+///     `Levels` non-empty, cardinality the §4 iterated fold. No trailing
+///     dense dims (the in-memory representation has none — see the spec).
+///
+/// See providers/ZarrTriangularSpec.md.
 type PackedGroup = {
     Sym: SymmetryClass
+    /// Depth-1: the group's arity r. Wreath: the RAW AXIS COUNT prod(rᵢ),
+    /// matching `mkWreathIndexRecord`'s Rank field.
     Rank: int
+    /// The base extent n (the wreath fold's M₀).
     Extent: int64
+    /// The iterated-wreath level list [(r₁,s₁), …], OUTERMOST-LAST, `true` =
+    /// '+'. NON-EMPTY EXACTLY WHEN `Sym = SymWreath`; `[]` for every simplex
+    /// head. This is deliberately the same carrier convention `IR.orbitLevelsOf`
+    /// uses (empty list ⇔ not a wreath) rather than a second DU, so the two
+    /// sides of the store boundary spell the class the same way.
+    Levels: (int * bool) list
 }
 
 /// Block ordering for the simplex-blocks decomposition: ascending-lex over
@@ -113,19 +129,34 @@ let binom (m: int64) (k: int) : int64 =
             den <- den * int64 (i + 1)
         num / den
 
-/// Packed pool cardinality of a group: multiset (sym) or strict (antisym)
-/// combinations.
-/// A wreath (OrbIdx) group has no PackedGroup encoding at all — its cell count
-/// is the iterated binomial over a LEVEL LIST this record cannot hold — and the
-/// two writers that build a PackedGroup already refuse anything but sym/antisym
-/// before reaching here. The `_ -> 0L` tail is therefore unreachable for a
-/// wreath, and deliberately kept as 0 rather than a guess: a zero-sized pool
-/// fails visibly, a wrong-sized one does not.
-let packedCardinality (g: PackedGroup) : int64 =
+/// Packed pool cardinality of a group, with the failure surfaced: multiset
+/// (sym) or strict (antisym) combinations at depth 1, and the §4 ITERATED fold
+/// over the level list for a wreath head.
+///
+/// The wreath arm goes through `Blade.OrbRank.cellCountChecked` — the SAME
+/// exactly-overflow-checked fold `IR.bufferGroupCardinality` and
+/// `IR.classifyOutputStorage` size the in-memory pool with, and the twin of the
+/// emitted `orb_cell_count`. A second independent implementation of §4 here is
+/// exactly how a store and its consumer end up disagreeing about a pool length,
+/// which is the one thing this format's load-time check exists to catch.
+let packedCardinalityChecked (g: PackedGroup) : Result<int64, string> =
     match g.Sym with
-    | SymSymmetric -> binom (g.Extent + int64 g.Rank - 1L) g.Rank
-    | SymAntisymmetric -> binom g.Extent g.Rank
-    | _ -> 0L
+    | SymSymmetric -> Ok (binom (g.Extent + int64 g.Rank - 1L) g.Rank)
+    | SymAntisymmetric -> Ok (binom g.Extent g.Rank)
+    | SymWreath ->
+        Blade.OrbRank.cellCountChecked (Blade.IR.orbRankLevels g.Levels) g.Extent
+    | s ->
+        Error (sprintf "packed group symmetry %A has no pool cardinality" s)
+
+/// Unchecked cardinality for the depth-1 (simplex) call sites — the
+/// packed-blocks math and the window extraction, neither of which a wreath head
+/// can reach (spec_version 2 defines the flat layout only). A failure answers 0
+/// rather than a guess: a zero-sized pool fails visibly, a wrong-sized one does
+/// not.
+let packedCardinality (g: PackedGroup) : int64 =
+    match packedCardinalityChecked g with
+    | Ok c -> c
+    | Error _ -> 0L
 
 // ============================================================================
 // Simplex-blocks math (decomposition scheme "simplex-blocks")
@@ -409,10 +440,16 @@ let private parseFill (where_: string) (isFloat: bool) (el: JsonElement option) 
              | s, _ -> Error (sprintf "%s: unsupported fill_value '%s'" where_ s))
         | _ -> Error (sprintf "%s: unsupported fill_value kind %A" where_ e.ValueKind)
 
-/// Parse + validate the `blade` layout attribute (spec_version 1) against
+/// Parse + validate the `blade` layout attribute (spec_version 1 or 2) against
 /// the physical shape. `attrs` is the attributes object (the v2 .zattrs
 /// root / v3 `attributes` value); an absent "blade" key is an ordinary
 /// dense array (Ok None). All violations are loud and specific.
+///
+/// spec_version 2 adds ONE thing: the `"orbit"` head, an iterated-wreath
+/// (`OrbIdx` depth >= 2) pool. Under spec_version 1 that kind is rejected BY
+/// NAME with steering — v1's kind set is closed (sym | antisym | dense, herm
+/// reserved), so an old reader cannot silently reinterpret a v2 store, and this
+/// reader keeps that door shut on its own v1 path too.
 let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement option) : Result<BladeLayout option, string> =
     match attrs |> Option.bind (fun a -> tryProp a "blade") with
     | None -> Ok None
@@ -426,8 +463,8 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
             |> Option.map (fun v -> if v.ValueKind = JsonValueKind.Number then v.GetInt32() else -1)
             |> Option.defaultValue -1
         let layoutStr = strOf "layout" ""
-        if specVersion <> 1 then
-            Error (sprintf "%s: blade.spec_version %d is not supported (this reader implements spec_version 1)" where_ specVersion)
+        if specVersion <> 1 && specVersion <> 2 then
+            Error (sprintf "%s: blade.spec_version %d is not supported (this reader implements spec_version 1 and 2)" where_ specVersion)
         elif layoutStr <> "packed" && layoutStr <> "packed-blocks" then
             Error (sprintf "%s: blade.layout '%s' is not supported ('packed' or 'packed-blocks')" where_ layoutStr)
         elif strOf "order" "ascending-lex" <> "ascending-lex" then
@@ -458,11 +495,71 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                     elif extent <= 0L then Error (sprintf "%s: blade.index_types[%d]: packed group needs a positive extent" where_ i)
                     else
                         let sym = if kind = "sym" then SymSymmetric else SymAntisymmetric
-                        Ok (Choice1Of2 { Sym = sym; Rank = rank; Extent = extent })
+                        Ok (Choice1Of2 { Sym = sym; Rank = rank; Extent = extent; Levels = [] })
+                | "orbit" when specVersion < 2 ->
+                    // The v1 door, shut by name. v1's kind set is closed, so an
+                    // orbit head reaching a v1 reader must be a loud refusal —
+                    // never "unknown kind, ignore" and never a reinterpretation
+                    // as some simplex group whose cardinality happens to match.
+                    Error (sprintf "%s: blade.index_types[%d]: kind 'orbit' (an iterated-wreath OrbIdx class) is a spec_version 2 head, but this store declares spec_version %d — see providers/ZarrTriangularSpec.md"
+                               where_ i specVersion)
+                | "orbit" ->
+                    // levels: [[r, "+"|"-"], ...], OUTERMOST-LAST (the surface
+                    // spelling and every internal representation agree on this
+                    // direction; a reader must not reverse it).
+                    let parseLevel (j: int) (le: JsonElement) : Result<int * bool, string> =
+                        if le.ValueKind <> JsonValueKind.Array || le.GetArrayLength() <> 2 then
+                            Error (sprintf "%s: blade.index_types[%d].levels[%d]: each level is a two-element array [rank, \"+\"|\"-\"]" where_ i j)
+                        else
+                            let items = le.EnumerateArray() |> Array.ofSeq
+                            let r = if items.[0].ValueKind = JsonValueKind.Number then items.[0].GetInt32() else -1
+                            let s = if items.[1].ValueKind = JsonValueKind.String then items.[1].GetString() else ""
+                            if r < 2 then
+                                // A rank-1 level is the trivial group S₁ and
+                                // normalizes away (OrbRank.normalizeLevels), so
+                                // admitting it would put TWO spellings of one
+                                // class on disk. Rejected outright: writers never
+                                // emit one, and the depth check below would
+                                // otherwise have to run on a normalized list that
+                                // no longer matches what was written.
+                                Error (sprintf "%s: blade.index_types[%d].levels[%d]: level rank %d is not >= 2 (a rank-1 level is the trivial group and must be omitted, so that one class has one spelling on disk)" where_ i j r)
+                            elif s <> "+" && s <> "-" then
+                                Error (sprintf "%s: blade.index_types[%d].levels[%d]: sign '%s' is not \"+\" or \"-\"" where_ i j s)
+                            else Ok (r, (s = "+"))
+                    match tryProp e "levels" with
+                    | Some ls when ls.ValueKind = JsonValueKind.Array ->
+                        let rec collectLevels j (acc: (int * bool) list) =
+                            let items = ls.EnumerateArray() |> Array.ofSeq
+                            if j >= items.Length then Ok (List.rev acc)
+                            else
+                                match parseLevel j items.[j] with
+                                | Ok lv -> collectLevels (j + 1) (lv :: acc)
+                                | Error err -> Error err
+                        (match collectLevels 0 [] with
+                         | Error err -> Error err
+                         | Ok levels ->
+                             if List.length levels < 2 then
+                                 // THE one-spelling rule. OrbIdx<[(r,+)],n> IS
+                                 // SymIdx<r,n> and OrbIdx<[(r,-)],n> IS
+                                 // AntisymIdx<r,n>, exactly, so a depth-1 orbit
+                                 // head would be a second on-disk spelling of a
+                                 // class that already has one — two code paths
+                                 // that can disagree. Writers emit sym/antisym
+                                 // for depth 1.
+                                 Error (sprintf "%s: blade.index_types[%d]: an 'orbit' head needs depth >= 2 (got %d level(s)). A depth-1 class is written as kind 'sym' / 'antisym' — OrbIdx<[(r,+)],n> IS SymIdx<r,n> and OrbIdx<[(r,-)],n> IS AntisymIdx<r,n>, and one class gets one spelling on disk"
+                                            where_ i (List.length levels))
+                             elif extent <= 0L then
+                                 Error (sprintf "%s: blade.index_types[%d]: orbit head needs a positive extent (the class's base extent n)" where_ i)
+                             else
+                                 let axes = levels |> List.fold (fun a (r, _) -> a * r) 1
+                                 Ok (Choice1Of2 { Sym = SymWreath; Rank = axes; Extent = extent; Levels = levels }))
+                    | _ ->
+                        Error (sprintf "%s: blade.index_types[%d]: orbit head is missing its 'levels' array" where_ i)
                 | "herm" ->
-                    Error (sprintf "%s: blade.index_types[%d]: kind 'herm' is reserved (constraint-coupled cells) and not supported in spec_version 1" where_ i)
+                    Error (sprintf "%s: blade.index_types[%d]: kind 'herm' is reserved (constraint-coupled cells) and not supported" where_ i)
                 | other ->
-                    Error (sprintf "%s: blade.index_types[%d]: unknown kind '%s' (sym | antisym | dense)" where_ i other)
+                    Error (sprintf "%s: blade.index_types[%d]: unknown kind '%s' (sym | antisym | dense%s)"
+                               where_ i other (if specVersion >= 2 then " | orbit" else ""))
             let rec collect i acc =
                 if i >= entries.Length then Ok (List.rev acc)
                 else
@@ -474,18 +571,42 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
             | Ok parsed ->
                 match parsed with
                 | Choice1Of2 group :: rest ->
+                    let isOrbit = (group.Sym = SymWreath)
+                    let headDesc =
+                        if isOrbit then sprintf "orbit %s" (Blade.IR.ppOrbitLevels group.Levels)
+                        elif group.Sym = SymSymmetric then "sym"
+                        else "antisym"
                     if rest |> List.exists (function Choice1Of2 _ -> true | _ -> false) then
-                        Error (sprintf "%s: blade layout supports exactly ONE packed group in spec_version 1 (and it must be leading)" where_)
+                        Error (sprintf "%s: blade layout supports exactly ONE packed group (and it must be leading)" where_)
+                    elif isOrbit && layoutStr <> "packed" then
+                        // 'packed-blocks' decomposes a SIMPLEX by tile multisets
+                        // (the block grid of a rank-r simplex is itself a
+                        // SymIdx<r,T>). A wreath pool's rows shrink per LEVEL, so
+                        // there is no tile multiset to decompose it by, and
+                        // spec_version 2 defines the flat single-pool layout only.
+                        Error (sprintf "%s: blade.layout 'packed-blocks' is not defined for an orbit (iterated-wreath) head — spec_version 2 is the flat single-pool layout only" where_)
+                    elif isOrbit && not (List.isEmpty rest) then
+                        // Documented in the spec: the in-memory side has no
+                        // trailing dims for a wreath array at all
+                        // (classifyOutputStorage refuses any combination, and
+                        // deduceWreathTie refuses kernel T-dims), so this is a
+                        // refusal rather than a mis-shape.
+                        Error (sprintf "%s: blade orbit head with %d trailing dense dim(s) is not yet supported — a wreath array's in-memory representation is a SOLE flat pool (no index group composes with it), so writers never emit trailing dims beside an orbit head"
+                                   where_ (List.length rest))
                     else
+                    match packedCardinalityChecked group with
+                    | Error detail ->
+                        Error (sprintf "%s: blade packed group (%s, extent %d): cardinality cannot be computed — %s"
+                                   where_ headDesc group.Extent detail)
+                    | Ok card ->
                         let denseDims = rest |> List.map (function Choice2Of2 d -> d | _ -> 0L)
-                        let card = packedCardinality group
                         if layoutStr = "packed" then
                             match shape with
                             | pool :: tail when pool = card && tail = denseDims ->
                                 Ok (Some { Group = group; DenseDims = denseDims; Blocks = None })
                             | pool :: _ when pool <> card ->
                                 Error (sprintf "%s: blade packed group (%s, rank %d, extent %d) has cardinality %d but the pool dimension is %d — a corrupt or mislabeled store"
-                                           where_ (if group.Sym = SymSymmetric then "sym" else "antisym") group.Rank group.Extent card (List.head shape))
+                                           where_ headDesc group.Rank group.Extent card (List.head shape))
                             | _ ->
                                 Error (sprintf "%s: blade dense dims %A do not match the physical trailing shape %A" where_ denseDims (List.tail shape))
                         else
@@ -540,7 +661,8 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                                 | _ ->
                                     Error (sprintf "%s: blade decomposition needs positive integer tile and grid" where_)
                 | _ ->
-                    Error (sprintf "%s: blade layout's FIRST index_types entry must be the packed group (sym/antisym) in spec_version 1" where_)
+                    Error (sprintf "%s: blade layout's FIRST index_types entry must be the packed group (sym/antisym%s)"
+                               where_ (if specVersion >= 2 then "/orbit" else ""))
         | _ -> Error (sprintf "%s: blade layout is missing index_types" where_)
 
 // ============================================================================
@@ -1116,15 +1238,30 @@ let zarrStoreToModule
                 match a.Blade with
                 | Some layout ->
                     let g = layout.Group
-                    let packedIdx = {
-                        Id = builder.FreshId()
-                        Rank = g.Rank
-                        Extent = IRLit (IRLitInt g.Extent)
-                        Symmetry = g.Sym
-                        Tag = None; IxKind = IxKPlain
-                        Kind = SDimension
-                        Dependencies = []
-                    }
+                    let packedIdx =
+                        if g.Sym = SymWreath then
+                            // spec_version 2 orbit head. Routed through the SAME
+                            // normalization + constructor the surface type and
+                            // deduction use (IR.orbitNormalForm ->
+                            // IR.mkWreathIndexRecord), so a loaded class and a
+                            // deduced one are the SAME record — one producer, no
+                            // third shape to drift. Depth <= 1 was already refused
+                            // at parse (one spelling per class on disk), which is
+                            // why the other two normal forms are backstops here.
+                            match orbitNormalForm g.Levels with
+                            | OrbNfWreath ls ->
+                                mkWreathIndexRecord (builder.FreshId()) ls (IRLit (IRLitInt g.Extent))
+                            | _ ->
+                                failwithf "Zarr array '%s': orbit head %s normalizes to depth <= 1, which parseBladeLayout rejects — a depth-1 class is stored as kind 'sym'/'antisym'"
+                                          a.Name (ppOrbitLevels g.Levels)
+                        else
+                            { Id = builder.FreshId()
+                              Rank = g.Rank
+                              Extent = IRLit (IRLitInt g.Extent)
+                              Symmetry = g.Sym
+                              Tag = None; IxKind = IxKPlain
+                              Kind = SDimension
+                              Dependencies = [] }
                     packedIdx :: trailingIdx
                 | None -> trailingIdx
             let arrType = {
@@ -1639,6 +1776,35 @@ module CppZarr =
         match meta.Blade with
         | None ->
             failwithf "Zarr codegen: variable '%s' has no blade packed layout but was typed packed (this indicates a typing inconsistency)" varName
+        | Some layout when layout.Group.Sym = SymWreath ->
+            // spec_version 2 orbit head. The store's pool IS the in-memory
+            // representation (a flat T* in orb_visit order), so assembly is the
+            // ordinary flat chunk walk and the "materialization" downstream is a
+            // straight copy. Everything that could go wrong is a MISMATCH
+            // between the declared class and the stored one, and each is checked
+            // here rather than trusted: an off-by-one level list would read the
+            // right number of bytes into the wrong class.
+            let g = layout.Group
+            (match arrType.IndexTypes with
+             | [ lead ] when lead.Symmetry = SymWreath ->
+                 let declLevels = Blade.IR.orbitLevelsOf lead
+                 let declExtent =
+                     match Blade.IR.orbitBaseExtent lead with
+                     | IRLit (IRLitInt n) -> n
+                     | _ -> -1L
+                 if declLevels <> g.Levels || declExtent <> g.Extent then
+                     failwithf "Zarr codegen: variable '%s': declared OrbIdx<%s, %d> does not match the store's orbit head OrbIdx<%s, %d>"
+                               varName (Blade.IR.ppOrbitLevels declLevels) declExtent
+                               (Blade.IR.ppOrbitLevels g.Levels) g.Extent
+             | _ ->
+                 failwithf "Zarr codegen: variable '%s': the store declares an orbit (iterated-wreath) head, so the variable must type as a SOLE OrbIdx group" varName)
+            if opts.Window.IsSome then
+                failwithf "Zarr codegen: variable '%s': z.read_window over an OrbIdx (iterated-wreath) pool is not supported — a wreath class has no translated sub-class to window into" varName
+            if opts.Distribute then
+                failwithf "Zarr codegen: variable '%s': the MPI-distributed read is not defined for an OrbIdx (iterated-wreath) pool (spec_version 2 is the flat single-pool layout only)" varName
+            if layout.Blocks.IsSome then
+                failwithf "Zarr codegen: variable '%s': 'packed-blocks' is not defined for an orbit head" varName
+            genAssembleFlat storePath store meta cppVarName (elemCppOf arrType.ElemType)
         | Some layout ->
             let g = layout.Group
             let expectedLead =
@@ -1847,6 +2013,35 @@ module CppZarr =
             | _ -> failwithf "Zarr write of '%s' requires literal extents (%s)" varName context
         let (shape, bladeAttrJson) =
             match packedLead with
+            | Some lead when lead.Symmetry = SymWreath ->
+                // spec_version 2 orbit head. The array IS the flat pool (the
+                // in-memory storage is a bare T* of orb_cell_count cells in
+                // orb_visit order), so the on-disk shape is [cardinality] and
+                // the caller's buffer is copied verbatim. No trailing dims: a
+                // wreath group never composes with another index group
+                // (IR.classifyOutputStorage), which the reader also enforces.
+                if arrType.IndexTypes.Length <> 1 then
+                    failwithf "Zarr write of '%s': an OrbIdx (iterated-wreath) group is stored as a SOLE flat pool; %d index groups were declared"
+                              varName arrType.IndexTypes.Length
+                let levels = Blade.IR.orbitLevelsOf lead
+                if List.isEmpty levels then
+                    failwithf "Zarr write of '%s': the wreath record carries no level list (its Extent must be the IROrbitClass marker)" varName
+                let n = litExtent "orbit base extent" (Blade.IR.orbitBaseExtent lead)
+                let group = { Sym = SymWreath; Rank = lead.Rank; Extent = n; Levels = levels }
+                let card =
+                    match packedCardinalityChecked group with
+                    | Ok c -> c
+                    | Error detail ->
+                        failwithf "Zarr write of '%s': OrbIdx%s at extent %d — %s"
+                                  varName (Blade.IR.ppOrbitLevels levels) n detail
+                let levelsJson =
+                    levels
+                    |> List.map (fun (r, plus) -> sprintf "[%d, \\\"%s\\\"]" r (if plus then "+" else "-"))
+                    |> String.concat ", "
+                let attr =
+                    sprintf ", \\\"blade\\\": {\\\"spec_version\\\": 2, \\\"layout\\\": \\\"packed\\\", \\\"order\\\": \\\"ascending-lex\\\", \\\"index_types\\\": [{\\\"kind\\\": \\\"orbit\\\", \\\"levels\\\": [%s], \\\"extent\\\": %d}], \\\"decomposition\\\": {\\\"scheme\\\": \\\"flat-ranges\\\"}}"
+                        levelsJson n
+                ([card], attr)
             | Some lead ->
                 (match lead.Symmetry with
                  | SymSymmetric | SymAntisymmetric -> ()
@@ -1856,12 +2051,15 @@ module CppZarr =
                         if ix.Symmetry <> SymNone || ix.Rank <> 1 then
                             failwithf "Zarr write of '%s': only one leading packed group plus dense trailing dims is supported" varName
                         litExtent "trailing dim" ix.Extent)
-                let group = { Sym = lead.Symmetry; Rank = lead.Rank; Extent = litExtent "packed extent" lead.Extent }
+                let group = { Sym = lead.Symmetry; Rank = lead.Rank; Extent = litExtent "packed extent" lead.Extent; Levels = [] }
                 let card = packedCardinality group
                 let kindStr = if group.Sym = SymSymmetric then "sym" else "antisym"
                 let idxEntries =
                     (sprintf "{\\\"kind\\\": \\\"%s\\\", \\\"rank\\\": %d, \\\"extent\\\": %d}" kindStr group.Rank group.Extent)
                     :: (trailing |> List.map (sprintf "{\\\"kind\\\": \\\"dense\\\", \\\"extent\\\": %d}"))
+                // spec_version stays 1 for a depth-1 head: version 2 admits
+                // sym/antisym unchanged, so stamping 2 here would only make
+                // today's stores unreadable by a v1 reader for no gain.
                 let attr =
                     sprintf ", \\\"blade\\\": {\\\"spec_version\\\": 1, \\\"layout\\\": \\\"packed\\\", \\\"order\\\": \\\"ascending-lex\\\", \\\"index_types\\\": [%s], \\\"decomposition\\\": {\\\"scheme\\\": \\\"flat-ranges\\\"}}"
                         (String.concat ", " idxEntries)
@@ -1982,12 +2180,24 @@ module ZarrWrite =
         | FillNone -> "null"
 
     /// The `blade` attribute value for a packed layout (plain JSON — the
-    /// F# writer emits real files, no C++ string escaping).
+    /// F# writer emits real files, no C++ string escaping). spec_version 2 is
+    /// stamped ONLY for an orbit head: version 2 admits sym/antisym unchanged,
+    /// so a depth-1 store stays byte-identical to what version 1 wrote (and
+    /// stays readable by a version-1 reader).
     let private bladeAttrValue (layout: BladeLayout) : string =
-        let kindStr = if layout.Group.Sym = SymSymmetric then "sym" else "antisym"
+        let isOrbit = (layout.Group.Sym = SymWreath)
+        let headEntry =
+            if isOrbit then
+                let levelsJson =
+                    layout.Group.Levels
+                    |> List.map (fun (r, plus) -> sprintf "[%d, \"%s\"]" r (if plus then "+" else "-"))
+                    |> String.concat ", "
+                sprintf "{\"kind\": \"orbit\", \"levels\": [%s], \"extent\": %d}" levelsJson layout.Group.Extent
+            else
+                let kindStr = if layout.Group.Sym = SymSymmetric then "sym" else "antisym"
+                sprintf "{\"kind\": \"%s\", \"rank\": %d, \"extent\": %d}" kindStr layout.Group.Rank layout.Group.Extent
         let idxEntries =
-            (sprintf "{\"kind\": \"%s\", \"rank\": %d, \"extent\": %d}" kindStr layout.Group.Rank layout.Group.Extent)
-            :: (layout.DenseDims |> List.map (sprintf "{\"kind\": \"dense\", \"extent\": %d}"))
+            headEntry :: (layout.DenseDims |> List.map (sprintf "{\"kind\": \"dense\", \"extent\": %d}"))
         let (layoutStr, decompJson) =
             match layout.Blocks with
             | None -> ("packed", "{\"scheme\": \"flat-ranges\"}")
@@ -1995,8 +2205,8 @@ module ZarrWrite =
                 let orderStr = match i.Order with OrderLex -> "ascending-lex" | OrderPath -> "path"
                 ("packed-blocks",
                  sprintf "{\"scheme\": \"simplex-blocks\", \"tile\": %d, \"grid\": %d, \"block_order\": \"%s\"}" i.Tile i.Grid orderStr)
-        sprintf "{\"spec_version\": 1, \"layout\": \"%s\", \"order\": \"ascending-lex\", \"index_types\": [%s], \"decomposition\": %s}"
-            layoutStr (String.concat ", " idxEntries) decompJson
+        sprintf "{\"spec_version\": %d, \"layout\": \"%s\", \"order\": \"ascending-lex\", \"index_types\": [%s], \"decomposition\": %s}"
+            (if isOrbit then 2 else 1) layoutStr (String.concat ", " idxEntries) decompJson
 
     /// Normalize a blocks-layout WriteVar to its physical form: the caller
     /// supplies the LOGICAL view (Shape = [cardinality] @ dense, Data = the
@@ -2177,11 +2387,30 @@ let spec : Blade.ProviderRegistry.ProviderSpec = {
             let store = load path
             match tryFindArray store varName with
             | Some m when m.Blade.IsSome ->
-                Error (sprintf "variable '%s' has a packed (blade: layout=packed) pool layout — triangular variables do not fold at compile time in v1; bind with a plain `let ... |> <alias>.read`" varName)
+                Error (sprintf "variable '%s' has a packed (blade: layout=packed) pool layout — triangular and orbit (iterated-wreath) variables do not fold at compile time; bind with a plain `let ... |> <alias>.read`" varName)
             | _ -> readVarData path varName |> Result.map adaptVarData
         with ex -> Error ex.Message
     GenReadVar = CppZarr.genReadVar
     GenReadPacked = Some CppZarr.genReadPacked
+    // spec_version 2 (orbit heads). Presence is the wreath capability flag at
+    // every seam; the function itself is the F#-side pool reader the
+    // interpreter materializes from. Refuses anything that is not an orbit
+    // head, so a caller that reached here with a depth-1 packed variable gets a
+    // named error rather than a pool typed as the wrong class.
+    ReadWreathPool = Some (fun path varName ->
+        try
+            let store = load path
+            match tryFindArray store varName with
+            | None ->
+                Error (sprintf "variable '%s' not found in Zarr store '%s'" varName path)
+            | Some m ->
+                match m.Blade with
+                | Some l when l.Group.Sym = SymWreath -> readPackedPool m |> Result.map adaptVarData
+                | Some _ ->
+                    Error (sprintf "variable '%s' has a depth-1 packed (sym/antisym) layout, not an orbit head" varName)
+                | None ->
+                    Error (sprintf "variable '%s' is an ordinary dense array, not an orbit (iterated-wreath) pool" varName)
+        with ex -> Error ex.Message)
     GenReadCompoundVar = None  // load_compound: rejected loudly in v1
     GenWriteVar = CppZarr.genWriteVar
     GenStreamOpen = Some CppZarr.genStreamOpen

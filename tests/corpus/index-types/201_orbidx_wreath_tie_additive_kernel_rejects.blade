@@ -1,0 +1,32 @@
+// TEST: OrbIdx Wreath Tie Additive Kernel (rejects)
+// ERROR: BL4015
+// ERROR-CONTAINS: SIGN-ODD in each argument separately
+// ERROR-CONTAINS: of UNKNOWN sign parity
+// THE soundness probe for the wreath-tie gate (IR.deduceWreathTie condition 6),
+// and the SUnknown half of its verdict. This exact program used to PASS as the
+// deduced-Riemann-shape test: comm over two occurrences of an antisymmetric B
+// deduces OrbIdx<[(2,-),(2,+)], 4>, and while only canonical cells were
+// reachable the pool was the same for ANY comm kernel, so pinning the additive
+// pool was sound. The read path (206/213) ended that: the class claims a
+// mirrored read of ONE block is NEGATED, i.e. the kernel is sign-odd in each
+// argument separately (h(-p, q) = -h(p, q)), and p + q is not — R(1,0,2,3)
+// would answer -(B(0,1)+B(2,3)) where the pointwise value is B(0,1)+B(2,3)
+// (B(1,0) = -B(0,1) does NOT negate the sum). A silent wrong VALUE through
+// every mirrored read and decompaction; 213/214 use p * q, which IS odd per
+// argument, for exactly this reason.
+//
+// WHICH verdict this pins: p + q is of UNKNOWN sign parity per argument, not
+// even — h(-p, q) = -p + q is neither +(p+q) nor -(p+q), and the engine's
+// Add rule says exactly that (combineSign: a mixed odd/even pair is ⊥). The
+// gate REFUSES unknown rather than trusting it: unlike a declared `comm`,
+// whose unprovable claim is taken on the user's word (plan §8.1), per-argument
+// oddness is a claim NO clause declares — `where comm(p, q)` says
+// h(p,q) = h(q,p) and nothing about h(-p, q) — so there is no word to trust,
+// and the precedent is BL4015's inheritance gate (164), which refuses UNKNOWN
+// for the same reason and steers to decompact-first. 220 pins the other half:
+// a provably sign-EVEN kernel, the CommContradictsBody analog one level up.
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let B = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let R = method_for(B, B) <@> h |> compute

@@ -194,15 +194,61 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
         raise (Core.InterpUnsupported "compound (load_compound) provider read (M2.7 compound family)")
     elif spec.Window.IsSome then
         raise (Core.InterpUnsupported "windowed packed provider read (read_window)")
-    // Ahead of the packed gate (which a wreath group also trips) so the reason
-    // is the storage refusal, not "packed provider read" -- the latter reads as
-    // a milestone the interpreter will reach, and this one is a whole missing
-    // layout. NOT a SKIP either: InterpUnsupported would classify this as
-    // SKIP-UNSUPPORTED and let a divergence hide, so it fails.
+    // Ahead of the packed gate (which a wreath group also trips) so the wreath
+    // arm owns it: a wreath array is NOT an Array-with-a-skeleton, it is a flat
+    // pool, and `mkDenseArray` at the bottom of this function would shape it as
+    // a dense prod(rᵢ)-axis tensor. Materialized here from the provider's
+    // canonical-pool reader, cell for cell -- the interpreter's twin of
+    // CodeGen's "adopt the assembled buffer" arm. A provider with no wreath
+    // pools (ReadWreathPool = None -- csv, netcdf) still refuses, and it FAILS
+    // rather than SKIPs: InterpUnsupported would classify as SKIP-UNSUPPORTED
+    // and let a divergence hide behind it.
     elif spec.VarType.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) then
         let ix = spec.VarType.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
-        failwith (Blade.IR.orbitStorageUnsupported
-                      (sprintf "provider read of '%s'" spec.VarName) (Blade.IR.orbitLevelsOf ix))
+        let levels = Blade.IR.orbitLevelsOf ix
+        let refuse (why: string) =
+            failwith (Blade.IR.orbitStorageUnsupported
+                          (sprintf "provider read of '%s' (%s)" spec.VarName why) levels)
+        match Blade.ProviderRegistry.tryFind spec.Provider with
+        | None -> refuse (sprintf "provider '%s' is not registered" spec.Provider)
+        | Some pspec ->
+        match pspec.ReadWreathPool with
+        | None -> refuse (sprintf "provider '%s' stores no OrbIdx pools" spec.Provider)
+        | Some readPool ->
+            if spec.VarType.IndexTypes.Length <> 1 then
+                refuse "a wreath group combined with other index groups has no pool layout"
+            let n =
+                match Blade.IR.orbitBaseExtent ix with
+                | IRLit (IRLitInt v) -> v
+                | _ -> refuse "a wreath class needs a compile-time extent"
+            match readPool spec.FilePath spec.VarName with
+            | Error e ->
+                // Unlike the dense arm below, this is NOT a SKIP: the compiled
+                // side reads the same store from the same path, so a failure
+                // here is a real disagreement, not an un-interpreted feature.
+                failwithf "provider read of '%s' from '%s': %s" spec.VarName spec.FilePath e
+            | Ok data ->
+                // The pool arrives as ONE axis of `cardinality` cells; allocWreath
+                // sizes the store from cellCountChecked (the same fold that
+                // validated shape[0] at metadata parse), so a length disagreement
+                // here is the store lying about its own class.
+                let arr = ArrayOps.allocWreath spec.VarType.ElemType spec.VarType.IndexTypes levels n
+                let cells = ArrayOps.wreathCellCount arr
+                let got = data.DimLengths |> List.fold (*) 1
+                if got <> cells then
+                    failwithf "provider read of '%s': the store's pool holds %d cells but OrbIdx%s at extent %d has %d"
+                              spec.VarName got (Blade.IR.ppOrbitLevels levels) n cells
+                let put (i: int) (v: Value) = ArrayOps.wreathWriteAt arr (int64 i) v
+                (match ArrayOps.elemThrough spec.VarType.ElemType, data.Payload with
+                 | Some (ETFloat64 | ETFloat32), Blade.ProviderRegistry.PFloats xs -> xs |> Array.iteri (fun i x -> put i (VFloat x))
+                 | Some (ETFloat64 | ETFloat32), Blade.ProviderRegistry.PInts xs -> xs |> Array.iteri (fun i x -> put i (VFloat (float x)))
+                 | Some (ETInt64 | ETInt32), Blade.ProviderRegistry.PInts xs -> xs |> Array.iteri (fun i x -> put i (VInt x))
+                 | Some (ETInt64 | ETInt32), Blade.ProviderRegistry.PFloats xs -> xs |> Array.iteri (fun i x -> put i (VInt (int64 x)))
+                 | _ ->
+                     raise (Core.InterpUnsupported
+                             (sprintf "provider read of '%s' into a non-numeric element type" spec.VarName)))
+                state.Cells <- state.Cells + int64 cells
+                VArray arr
     elif spec.VarType.IndexTypes |> List.exists (fun ix -> ix.Symmetry <> SymNone && ix.Rank >= 2) then
         raise (Core.InterpUnsupported "packed (symmetric/antisymmetric) provider read")
     else

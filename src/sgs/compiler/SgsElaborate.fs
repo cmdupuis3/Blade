@@ -59,12 +59,18 @@ let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> =
 
 /// Annotations may name a whole-array type alias (`type Field = Array<...>`) —
 /// resolve top-level aliases (cycle-bounded) before matching for TyArray.
+///
+/// TyBounded is TRANSPARENT here, and only for diagnostic ORDER — see the
+/// twin arm in MathElaborate.resolveTop for the reasoning. A bound on an
+/// aggregate is the checker's rejection to make (BL4003); this pass runs
+/// first and must not pre-empt it with "no declared array shape".
 let rec private resolveTop (aliases: Map<string, TypeExpr>) (fuel: int) (ty: TypeExpr) =
     match ty with
     | TyNamed (n, []) when fuel > 0 ->
         match Map.tryFind n aliases with
         | Some body -> resolveTop aliases (fuel - 1) body
         | None -> ty
+    | TyBounded (baseTy, _, _) when fuel > 0 -> resolveTop aliases (fuel - 1) baseTy
     | _ -> ty
 
 /// An annotation, alias-resolved, if it denotes an array.

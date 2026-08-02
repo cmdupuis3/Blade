@@ -336,6 +336,15 @@ and IRCallable = {
     IsArityPoly: bool
     ArityParam: string option
     Captures: CaptureInfo list
+    // Per-parameter SIGN parity of the body (KspOdd / KspEven / KspUnknown, in
+    // declaration order), the summary `deduceWreathTie`'s soundness gate
+    // consumes. Populated by the TypeCheck apply seam for kernel lambdas
+    // (including the eta wrappers over named functions, whose parities resolve
+    // through the callee's FuncSignParities summary) and carried through
+    // Lowering so codegen and the interpreter hand the tie rule the SAME
+    // values typecheck used. Empty ([]) for every non-kernel callable —
+    // consumers treat missing entries as KspUnknown.
+    SignParities: KernelSignParity list
 }
 
 /// IRFuncDef is a semantic-marker alias for IRCallable that names
@@ -503,10 +512,13 @@ let ppOrbitLevels (levels: (int * bool) list) : string =
 /// prefix, so pass a noun phrase, not a sentence.
 let orbitStorageUnsupported (where_: string) (levels: (int * bool) list) : string =
     sprintf "%s: OrbIdx<%s, n> is a declarable index class of depth %d, and a DEDUCED one can now be \
-allocated, written and printed -- a comm tie over a repeated compact argument produces the class, \
-`orb_cell_count` sizes its pool and the segment-peeled `orb_visit` nest fills it in canonical order. \
-What is still missing is every path that reads a wreath pool at an ARBITRARY tuple: the mirrored \
-(non-canonical) compact read, decompaction, reduce/prodsum, transpose and provider I/O. So the \
+allocated, written, printed, READ at an arbitrary tuple (the per-level canon fold, the accumulated \
+character, the zero set), FULLY DECOMPACTED to its dense tensor, and round-tripped through a Zarr \
+store (the spec_version 2 'orbit' head -- providers/ZarrTriangularSpec.md). What is still missing is every \
+path that would put a wreath pool anywhere but under its own traversal nest: an OrbIdx ANNOTATION \
+(a store is now a producer, but the annotation also admits classes nothing produces), reduce/prodsum \
+over the pool, transpose, PARTIAL (per-level) decompaction, a WINDOWED or distributed store read, and \
+provider I/O outside Zarr (CSV and NetCDF have no pool axis to carry the class on). So the \
 compiler refuses here rather than compute an address it cannot compute. \
 The depth-1 spellings work through the existing compact machinery instead: OrbIdx<[(r,+)], n> is \
 exactly SymIdx<r, n>, OrbIdx<[(r,-)], n> is exactly AntisymIdx<r, n>, and OrbIdx<[], n> is exactly \
@@ -2194,6 +2206,10 @@ let mkCallable
         IsArityPoly = opts.IsArityPoly
         ArityParam = opts.ArityParam
         Captures = captures
+        // Like AntisymGroups: grafted on by the one construction site that has
+        // it (Lowering.lowerTypedLambda, from the typechecked kernel's
+        // summary); every other callable-building site carries none.
+        SignParities = []
     }
 
 /// Build a fresh IRCallable for an anonymous inline lambda: synthesized
@@ -2282,6 +2298,28 @@ let private wreathArgContribution (at: IRArrayType) : ((int * bool) list * IRExp
          | _ -> None)
     | _ -> None
 
+/// `deduceWreathTie`'s three-way answer. The tie rule used to be a bare
+/// `WreathTie option`; the soundness gate (condition 6 below) adds an outcome
+/// that is neither "tied" nor "juxtapose as before": the tie WOULD fire, and
+/// firing it would corrupt values, so the application must be REFUSED. `None`
+/// cannot carry that — falling back to the legacy path would silently deduce a
+/// different (also wrong) type instead of erroring.
+///
+/// Only the typecheck seam can surface `WreathKernelNotOdd` to the user
+/// (codegen and the interpreter run downstream of a successful typecheck, so
+/// reaching it there is an internal error and their arms are loud backstops).
+type WreathTieVerdict =
+    /// No tie: distinct inputs, a partial tie, a dense input, a mixed clause.
+    /// The application juxtaposes through the axis-group machinery as before.
+    | WreathNoTie
+    /// The tie fires; the output is the wreath class the payload describes.
+    | WreathTied of WreathTie
+    /// The tie's conditions all hold, but the kernel's recorded sign parity in
+    /// tied argument `argPos` fails the '-'-inner-level oddness requirement
+    /// (condition 6): `KspEven` — the provable contradiction — or `KspUnknown`
+    /// — unprovable, and there is no declaration to trust (see the gate).
+    | WreathKernelNotOdd of argPos: int * parity: KernelSignParity * innerLevels: (int * bool) list
+
 /// THE deduction rule, in one place. Fires only for the shape the storage layer
 /// can actually lay out: EVERY argument position in ONE tie.
 ///
@@ -2312,12 +2350,42 @@ let private wreathArgContribution (at: IRArrayType) : ((int * bool) list * IRExp
 ///      excluding those shapes here leaves them exactly as they are today
 ///      instead of deducing a type nothing can allocate.
 ///
+///   6. SOUNDNESS GATE (docs/plan-orbit-index-types.md §8.1's per-level
+///      extension): when the INNER class carries any '-' level, the kernel
+///      must be recorded provably SIGN-ODD (`KspOdd`) in every tied argument.
+///      A '-' inner level claims that mirroring ONE argument's sub-block
+///      negates the stored value; the tie is sound only when the kernel
+///      commutes with that per-argument negation, h(-p, q) = -h(p, q) — the
+///      wreath analogue of BL4015's compact-class-inheritance certificate
+///      (`compactClassInheritError`'s SymWreath arm applies the identical
+///      per-level rule to elementwise maps). While only canonical cells were
+///      reachable the difference was unobservable; the mirrored read and
+///      `decompact` made it a silent wrong VALUE (corpus 213/214 vs the
+///      refused additive kernel).
+///
+///      The trust model, decided deliberately: `KspEven` is the
+///      `CommContradictsBody` analog one level up (declared comm + provably
+///      even kernel + '-' inner class = the silent-corruption case) and
+///      `KspUnknown` REFUSES TOO — unlike depth-1 `comm`, whose unprovable
+///      declaration is taken on the user's word (§8.1), per-argument oddness
+///      is a claim NO clause declares (`where comm(p, q)` says h(p,q)=h(q,p)
+///      and nothing about h(-p,q)), so there is no user word to trust; the
+///      precedent is BL4015's inheritance gate, which refuses UNKNOWN for the
+///      same reason and steers to decompact-first. All-'+' inner levels need
+///      no certificate (their mirror is the identity), so every previously
+///      sound tie is untouched. The gate reads `argParities` — the summary
+///      the typecheck seam computed and recorded on the kernel's callable
+///      (`IRCallable.SignParities`) — so all four call sites judge from the
+///      same values; a missing entry is `KspUnknown`.
+///
 /// Anything else -- distinct inputs, a partial tie, a dense input, a mixed
-/// clause -- returns None and juxtaposes exactly as before.
+/// clause -- returns WreathNoTie and juxtaposes exactly as before.
 ///
 /// EVERY consumer calls THIS (deduction, codegen, the interpreter, and the
 /// typecheck guard that keeps the axis-group analyses off a wreath input), with
-/// the same arguments, so "is this a wreath application" has one answer.
+/// the same arguments, so "is this a wreath application" has one answer —
+/// which is why the soundness gate lives INSIDE this function rather than at
+/// the typecheck call site.
 let deduceWreathTie
     (arrayTypes: IRArrayType list)
     (identities: ArrayIdentity list)
@@ -2325,18 +2393,19 @@ let deduceWreathTie
     (antisymGroups: int list list)
     (kernelTDims: IRIndexType list)
     (kernelConsumesInner: bool)
-    (isReynolds: bool) : WreathTie option =
+    (isReynolds: bool)
+    (argParities: KernelSignParity list) : WreathTieVerdict =
     let k = List.length arrayTypes
     if isReynolds || k < 2 || List.length identities <> k
-       || not (List.isEmpty kernelTDims) || kernelConsumesInner then None
+       || not (List.isEmpty kernelTDims) || kernelConsumesInner then WreathNoTie
     else
     let spansAll (gs: int list list) =
         gs |> List.exists (fun g -> [ 0 .. k - 1 ] |> List.forall (fun i -> List.contains i g))
-    if not (spansAll commGroups) then None
+    if not (spansAll commGroups) then WreathNoTie
     else
     match arrayTypes |> List.map wreathArgContribution with
-    | [] -> None
-    | contributions when contributions |> List.exists Option.isNone -> None
+    | [] -> WreathNoTie
+    | contributions when contributions |> List.exists Option.isNone -> WreathNoTie
     | contributions ->
         let (levels0, ext0) = Option.get (List.head contributions)
         let uniform =
@@ -2346,7 +2415,7 @@ let deduceWreathTie
                 | None -> false)
         let sameObject =
             identities |> List.forall (fun idn -> sameIdentity idn (List.head identities))
-        if not (uniform && sameObject) then None
+        if not (uniform && sameObject) then WreathNoTie
         else
             let isPlus = not (spansAll antisymGroups)
             match orbitNormalForm (levels0 @ [ (k, isPlus) ]) with
@@ -2357,12 +2426,31 @@ let deduceWreathTie
             // is shared with the surface type precisely so a collapse is handled
             // once and identically.
             | OrbNfWreath outLevels ->
-                Some { Positions = [ 0 .. k - 1 ]
-                       InnerLevels = levels0
-                       OutputLevels = outLevels
-                       BaseExtent = ext0
-                       OuterIsPlus = isPlus }
-            | OrbNfTrivial | OrbNfDepth1 _ -> None
+                // Condition 6. The check keys off the INNER levels only: the
+                // appended (outer) level's sign is the declared clause itself
+                // — comm's inclusive simplex or anticomm's pin spelling — and
+                // both inherit depth-1's existing validation (the stage-3
+                // CommContradictsBody / AntisymmContradictsBody pair checks).
+                // What depth 1 never had is a mirror INSIDE one argument.
+                let innerHasMinus = levels0 |> List.exists (fun (_, plus) -> not plus)
+                let firstNotOdd =
+                    if not innerHasMinus then None
+                    else
+                        [ 0 .. k - 1 ]
+                        |> List.tryPick (fun i ->
+                            match List.tryItem i argParities with
+                            | Some KspOdd -> None
+                            | Some p -> Some (i, p)
+                            | None -> Some (i, KspUnknown))
+                match firstNotOdd with
+                | Some (i, p) -> WreathKernelNotOdd (i, p, levels0)
+                | None ->
+                    WreathTied { Positions = [ 0 .. k - 1 ]
+                                 InnerLevels = levels0
+                                 OutputLevels = outLevels
+                                 BaseExtent = ext0
+                                 OuterIsPlus = isPlus }
+            | OrbNfTrivial | OrbNfDepth1 _ -> WreathNoTie
 
 /// Deduce output array type from loop application
 /// According to formalism section 10.9:
@@ -2397,8 +2485,9 @@ let deduceOutputType
     (isReynolds: bool)
     (isReynoldsAntisym: bool)
     (kernelConsumesInner: bool)
+    (kernelSignParities: KernelSignParity list)
     (builder: IRBuilder) : IRType =
-    
+
     if arrayTypes.IsEmpty then IRTUnit
     else
     // Step 1a: THE WREATH TIE, ahead of the axis-group machinery and total when
@@ -2413,11 +2502,20 @@ let deduceOutputType
     // Everything about the wreath output's iteration is the segment-peeled
     // `orb_visit` nest, so nothing downstream of here wants axis groups for it.
     match deduceWreathTie arrayTypes identities commGroups antisymGroups
-                          kernelTDims kernelConsumesInner isReynolds with
-    | Some tie ->
+                          kernelTDims kernelConsumesInner isReynolds kernelSignParities with
+    | WreathTied tie ->
         mkArrayArrow [ mkWreathIndexRecord (builder.FreshId()) tie.OutputLevels tie.BaseExtent ]
                      elemType None
-    | None ->
+    | WreathKernelNotOdd (argPos, _, _) ->
+        // Unreachable: the typecheck apply seam runs the SAME call with the
+        // SAME arguments first and surfaces this verdict as a user-facing
+        // error before any output type is deduced. Loud rather than a silent
+        // fall-through to the legacy record — that record would be a
+        // DIFFERENT wrong type, with no warning anywhere.
+        failwith (sprintf "internal: deduceOutputType reached a wreath tie whose kernel is not \
+provably sign-odd in tied argument %d; the typecheck seam should have refused this application"
+                          argPos)
+    | WreathNoTie ->
         // Step 1+2: Build output S-dim index types from the SINGLE canonical
         // axis grouping (rawAxisGroups) — the same source the iteration thread
         // uses — so output storage and loop iteration cannot disagree. This
@@ -5590,7 +5688,22 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
           ArityParam = None
           // Specialized clones inherit the original's captures verbatim;
           // arity specialization doesn't introduce new free vars.
-          Captures = func.Captures }
+          Captures = func.Captures
+          // Sign parities are per-PARAMETER, so a pack slot expanding to k
+          // positions replicates its origin's parity across them (each
+          // expanded position receives one component of the pack, and the
+          // body treats every component by the same law the summary proved).
+          // Vacuous today — only apply-seam kernel lambdas carry a summary
+          // and those are fixed-arity — but kept honest for a future producer.
+          SignParities =
+            (if List.isEmpty func.SignParities then []
+             else
+                func.SignParities
+                |> List.mapi (fun idx p ->
+                    match Map.tryFind idx origToNew with
+                    | Some (_, span) -> List.replicate span p
+                    | None -> [p])
+                |> List.concat) }
 
 // ============================================================================
 // Inline-Form Lifting Pass
@@ -6010,6 +6123,30 @@ let rec typeOf (expr: IRExpr) : IRType =
         // Idx / right-remainder. Shape only (codegen reads arity/symmetry off
         // this); Ids reused — authoritative nominal type is set by TypeCheck.
         (match typeOf arr with
+         // FULL decompaction of a wreath class, ahead of the dimension walk:
+         // `d` is the number of LEVELS TO KEEP here, not a dimension to free
+         // (docs/plan-orbidx-decompaction.md §4.3), and TypeCheck's
+         // inferDecompact has already refused every d except 0. The shape is
+         // the dense rank-prod(ri) tensor: one plain Idx<n> axis per raw axis,
+         // extent the class's BASE extent (the §4 fold's M0), which lives one
+         // level down inside the IROrbitClass marker -- reading `ix.Extent`
+         // directly here would put the marker itself on a dense axis.
+         //
+         // Built from scratch rather than `{ ix with ... }` for the same reason
+         // inferDecompact builds it that way: IxKOrbit, the "__orbidx" sentinel
+         // Tag and the IROrbitClass extent are all wreath-specific, and the IR
+         // validator enforces their agreement.
+         | ArrayElem a when (match a.IndexTypes with
+                             | [ ix ] -> ix.Symmetry = SymWreath
+                             | _ -> false) ->
+            let ix = List.head a.IndexTypes
+            let axes = max 1 ix.Rank
+            let baseExtent = orbitBaseExtent ix
+            let denseAxis =
+                { Id = ix.Id; Rank = 1; Extent = baseExtent
+                  Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                  Kind = SDimension; Dependencies = [] }
+            mkArrayLike { a with IndexTypes = List.replicate axes denseAxis }
          | ArrayElem a ->
             let rec walk slotIdx acc remaining =
                 match remaining with
@@ -6019,14 +6156,15 @@ let rec typeOf (expr: IRExpr) : IRType =
                     if d < acc + ar then Some (slotIdx, ar, d - acc, ix)
                     else walk (slotIdx + 1) (acc + ar) rest
             (match walk 0 0 a.IndexTypes with
-             // SymWreath is excluded rather than refused: this is `typeOf`, a
-             // pure shape reconstruction with no error channel, and TypeCheck's
-             // inferDecompact already refuses a wreath decompact with the real
-             // diagnostic — so no IRDecompact over one can exist. Excluding it
-             // means that if one somehow did, this returns the array's shape
-             // UNCHANGED instead of a `{ ix with Rank = ar }` whose Rank no
-             // longer matches its level list (an internally inconsistent type
-             // that would then flow on looking well formed).
+             // A wreath COMBINED with other slots is excluded rather than
+             // refused: this is `typeOf`, a pure shape reconstruction with no
+             // error channel, and TypeCheck's inferDecompact already refuses
+             // that arrangement with the real diagnostic — so no IRDecompact
+             // over one can exist. Excluding it means that if one somehow did,
+             // this returns the array's shape UNCHANGED instead of a
+             // `{ ix with Rank = ar }` whose Rank no longer matches its level
+             // list (an internally inconsistent type that would then flow on
+             // looking well formed).
              | Some (slot, r, posInSlot, ix) when r >= 2 && ix.Symmetry <> SymNone
                                                   && ix.Symmetry <> SymWreath ->
                 let mkRemainder (ar: int) : IRIndexType list =

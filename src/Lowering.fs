@@ -778,7 +778,11 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
         { mkCallable env.Builder lamOpts paramInfos bodyWrapped info.ReturnType
                      captures info.IsCommutative (info.CommGroups @ info.AntisymGroups)
                      lamParallelism lamIsOmp lamIsCuda lamBlock lamIsMpi
-            with AntisymGroups = info.AntisymGroups }
+            with AntisymGroups = info.AntisymGroups
+                 // The apply seam's per-parameter sign summary rides along the
+                 // same way: recorded here so codegen and the interpreter can
+                 // hand IR.deduceWreathTie the values typecheck judged from.
+                 SignParities = info.SignParities }
     // Emit IRVar(callable.Id, funcType) — the callable lives in
     // LiftedCallables → module.Functions; the IRVar carries just the
     // function type for type-inference and consumer dispatch.

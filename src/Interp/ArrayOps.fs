@@ -404,7 +404,20 @@ let allocCompact (elemTy: IRType) (idxTys: IRIndexType list) (extents: int64[])
 // The record keeps its honest RAW-AXIS Extents (prod(ri) copies of n) so that a
 // consumer asking for the logical shape gets the truth; only the Data layout is
 // flat. Every path that would navigate `Extents` as a nested store is refused
-// (indexArray / readCompact / forEachStorageCell / emitSymAware).
+// (forEachStorageCell / emitSymAware); the two READ doors (indexArray and
+// readCompact) go through the flat §2 read instead.
+
+/// Zero value for a scalar element type (implicit-zero of a strict-diagonal
+/// antisymmetric access, and of a wreath zero-set tuple; mirrors `return T()`
+/// in the lazy compact reader). Defined here rather than beside the other
+/// compact-read helpers below because the wreath read needs it first.
+let zeroOfElemTy (elemTy: IRType) : Value =
+    match elemThrough elemTy with
+    | Some (ETFloat64 | ETFloat32) -> VFloat 0.0
+    | Some (ETInt64 | ETInt32) -> VInt 0L
+    | Some (ETComplex64 | ETComplex128) -> VComplex (0.0, 0.0)
+    | Some ETBool -> VBool false
+    | _ -> VFloat 0.0
 
 /// True iff any slot of this record list is a depth >= 2 OrbIdx class.
 let hasWreath (idxTys: IRIndexType list) : bool =
@@ -436,8 +449,10 @@ let wreathCellCount (arr: BladeArray) : int = storeLen arr.Data
 /// Read the pool cell at a CANONICAL tuple, by its `orbRank` position. This is
 /// the read the traversal nest performs on a wreath INPUT (the depth >= 3
 /// shape): the tuple comes straight out of `visitStream`, so it is canonical by
-/// construction and carries character +1. The MIRRORED read -- an arbitrary
-/// tuple, folded through `canonOrb` and signed -- stays refused (readCompact).
+/// construction and carries character +1. It deliberately does NOT fold: a
+/// canonical tuple is a fixed point, so folding would be dead work on the hot
+/// path, and going through the fold here would hide a stream/rank disagreement.
+/// The MIRRORED read is `wreathReadAny` below.
 let wreathReadCanonical (arr: BladeArray) (levels: (int * bool) list) (n: int64)
                         (tuple: int list) : Value =
     match Blade.OrbRank.orbRank (Blade.IR.orbRankLevels levels) (int n) tuple with
@@ -447,6 +462,44 @@ let wreathReadCanonical (arr: BladeArray) (levels: (int * bool) list) (n: int64)
                           (Blade.IR.ppOrbitLevels levels)
                           (tuple |> List.map string |> String.concat ",") detail))
     | Ok r -> readCell arr [ r ]
+
+/// docs/plan-orbidx-decompaction.md §2's read at an ARBITRARY raw tuple:
+///
+///     dense[t] = 0                                if canon(t) is zero-set
+///              = chi(t) * pool[orbRank(canon(t))]  otherwise
+///
+/// The interpreter twin of the emitted `orb_read<T, Levels...>`, and it does
+/// not re-derive the semantics: `OrbRank.orbReadPlan` -- the same core the
+/// reference `OrbRank.orbRead` is built on, pinned against held-out tables by
+/// `blade test orbrank` -- answers WHICH cell and WHICH character, and the only
+/// thing added here is the cell type (a `Value` negate instead of an int64 one,
+/// which is exactly why the plan is factored out rather than orbRead called).
+///
+/// THE TWO FAILURE MODES STAY APART, as the header's DOMAIN CONTRACT insists:
+///   * ZERO SET -> the element type's zero. A VALUE. A '-' level genuinely
+///     stores nothing there and the dense tensor genuinely holds 0.
+///   * OUT OF DOMAIN (digit outside [0,n), wrong axis rank, wrong pool size,
+///     malformed class) -> BL8003. Answering it with 0 would alias an
+///     off-by-one onto a structural zero, which is the one confusion this whole
+///     path is shaped to avoid.
+/// Every out-of-domain case here is unreachable for a tuple the typechecker
+/// admitted EXCEPT an out-of-range coordinate, which is the same unchecked
+/// hazard a SymIdx subscript has (readCell's raw store access); the difference
+/// is that this one diagnoses instead of reading a neighbouring cell.
+let wreathReadAny (arr: BladeArray) (levels: (int * bool) list) (n: int64)
+                  (tuple: int list) : Value =
+    match Blade.OrbRank.orbReadPlan "OrbIdx read" (Blade.IR.orbRankLevels levels)
+                                    (int n) (storeLen arr.Data) tuple with
+    | Error detail ->
+        raise (InterpPanic ("BL8003",
+                            sprintf "OrbIdx%s read at (%s): %s"
+                                    (Blade.IR.ppOrbitLevels levels)
+                                    (tuple |> List.map string |> String.concat ",") detail,
+                            None, 0))
+    | Ok Blade.OrbRank.OrbZeroCell -> zeroOfElemTy arr.ElemType
+    | Ok (Blade.OrbRank.OrbPoolCell (i, chi)) ->
+        let v = readCell arr [ int64 i ]
+        if chi < 0 then N.evalUnaryOp IRNeg v else v
 
 /// Write the pool cell at stream position `k` (the traversal nest's own
 /// counter). Position-addressed rather than tuple-addressed precisely because
@@ -465,16 +518,6 @@ let private hasSymmetry (idxTys: IRIndexType list) : bool =
         idx.Symmetry = SymSymmetric
         || idx.Symmetry = SymAntisymmetric
         || idx.Symmetry = SymHermitian)
-
-/// Zero value for a scalar element type (implicit-zero of a strict-diagonal
-/// antisymmetric access; mirrors `return T()` in the lazy compact reader).
-let private zeroOfElemTy (elemTy: IRType) : Value =
-    match elemThrough elemTy with
-    | Some (ETFloat64 | ETFloat32) -> VFloat 0.0
-    | Some (ETInt64 | ETInt32) -> VInt 0L
-    | Some (ETComplex64 | ETComplex128) -> VComplex (0.0, 0.0)
-    | Some ETBool -> VBool false
-    | _ -> VFloat 0.0
 
 /// Apply a compact read transform at the given swap parity (mirrors
 /// nested_array_utilities::canon_transform + ReadTransform, cpp:573):
@@ -495,12 +538,39 @@ let private applyReadTransform (sym: SymmetryClass) (parity: int) (v: Value) : V
 /// CodeGen.renderIndexExpr's lazyCompactRead (CodeGen.fs:1463-1538) +
 /// nested_array_utilities. Plain (SymNone) slots pass their index through.
 let readCompact (arr: BladeArray) (logicalCoords: int64 list) : Value =
-    // Ahead of the loop so the message names the actual class. canonFold below
-    // refuses SymWreath too, but its signature carries no level list, so it can
-    // only say "[]" -- this is the door that knows.
+    // A SOLE wreath slot is the §2 read, delegated whole -- the per-slot fold
+    // below cannot express it (canonFold is ONE flat sort with a strict flag,
+    // and a wreath pool is flat, not a nest of left-justified rows). Routing it
+    // here rather than at every caller is what makes `decompactArray` work over
+    // a wreath source with no change: it walks the DENSE output's cells and
+    // reads the source at each logical tuple, which is exactly this.
+    //
+    // A wreath COMBINED with other slots still refuses: the mixed case has no
+    // pool layout at all (classifyOutputStorage refuses to allocate one), so
+    // there is nothing to read from and the storage message is the honest one.
+    match arr.IndexTypes with
+    | [ ix ] when ix.Symmetry = SymWreath ->
+        let n = if arr.Extents.Length >= 1 then arr.Extents.[0] else 0L
+        // int64 -> int is the ONE narrowing on this path (coordinates are `int`
+        // through the whole artifact layer, F# and C++ alike). Range-check
+        // BEFORE truncating, not after: 2^32 + 1 truncates to 1, which the
+        // storage gate would then accept as a perfectly good coordinate and
+        // serve a cell from -- the silent aliased read that gate exists to
+        // prevent, sneaking in one conversion upstream of it.
+        (match logicalCoords |> List.tryFind (fun c -> c < 0L || c >= n) with
+         | Some bad ->
+             raise (InterpPanic ("BL8003",
+                                 sprintf "OrbIdx%s read: coordinate %d outside [0,%d)"
+                                         (Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix)) bad n,
+                                 None, 0))
+         | None ->
+             wreathReadAny arr (Blade.IR.orbitLevelsOf ix) n
+                           (logicalCoords |> List.map int))
+    | _ ->
     arr.IndexTypes |> List.iter (fun ix ->
         if ix.Symmetry = SymWreath then
-            failwith (Blade.IR.orbitStorageUnsupported "compact read (readCompact)"
+            failwith (Blade.IR.orbitStorageUnsupported "compact read of a wreath group combined with \
+other index slots (readCompact)"
                                                        (Blade.IR.orbitLevelsOf ix)))
     let coords = Array.ofList logicalCoords
     let storage = ResizeArray<int64>()
@@ -536,14 +606,23 @@ let indexArray (arr: BladeArray) (indices: Value list) : Value =
     // arm the dense peel below would walk `Extents` as if the store were nested
     // and read a plausible cell from the wrong place, or panic with a shape
     // message that names nothing. Subscripting a wreath array at an arbitrary
-    // tuple is the MIRRORED READ that v1 does not implement (it needs canonOrb's
-    // per-level fold and the signed cell), so refuse here with the message that
-    // says so. The canonical read the traversal nest performs goes through
-    // `wreathReadCanonical`, never through this door.
+    // tuple IS the mirrored read, and it is now implemented: route the
+    // FULL-ARITY form to §2 (canonOrb fold + character + rank), which is the
+    // twin of the emitted `orb_read`. A PARTIAL list has no answer -- a wreath
+    // pool has no sub-array views (its rows shrink per level, so no residual
+    // class describes a fibre) -- and the typechecker refuses it before here;
+    // this is the backstop, and it deliberately matches the shape of the
+    // compact-partial refusal one arm down rather than inventing a view.
     if hasWreath arr.IndexTypes then
         let ix = arr.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
-        failwith (Blade.IR.orbitStorageUnsupported "array subscript (indexArray)"
-                                                   (Blade.IR.orbitLevelsOf ix))
+        let totalRank = arr.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+        if indices.Length = totalRank then
+            readCompact arr (indices |> List.map toI64v)
+        else
+            raise (ArrayOpUnsupported
+                     (sprintf "index: OrbIdx%s spans %d raw axes and takes exactly that many flat \
+subscripts; a partial (sub-array) read of a wreath pool has no residual class"
+                              (Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix)) totalRank))
     elif hasSymmetry arr.IndexTypes then
         let totalRank = arr.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
         if indices.Length = totalRank then

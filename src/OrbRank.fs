@@ -35,11 +35,15 @@
 //    validateLevels    the ONE structural gate (level ranks >= 1) every entry
 //                      point above shares; visitStreamChecked is the
 //                      Error-typed door to the stream for API consumers.
-//    orbRead           docs/plan-orbidx-decompaction.md §2's storage read,
-//    orbWriteCanonical dense[t] = chi(t) * pool[rank(canon(t))] (0 on the zero
-//                      set), and its canonical-only inverse. The reference
-//                      semantics the interp/codegen decompaction paths of that
-//                      plan's §4 must agree with, cell for cell.
+//    orbReadPlan       docs/plan-orbidx-decompaction.md §2's storage read,
+//    orbRead           dense[t] = chi(t) * pool[rank(canon(t))] (0 on the zero
+//    orbWriteCanonical set), and its canonical-only inverse. `orbReadPlan` is
+//                      the cell-type-agnostic core (gate + canon + rank +
+//                      character, no pool touched) that the interpreter's
+//                      Value-typed reader shares with `orbRead`'s int64
+//                      reference specialization. The reference semantics the
+//                      interp/codegen decompaction paths of that plan's §4
+//                      must agree with, cell for cell.
 //
 //  INVARIANT (§3, "the one hard constraint"): rank order = the §2 nest's visit
 //  order = ascending lex. tests/Test_OrbRank.fs asserts it directly against a
@@ -616,35 +620,68 @@ let private storageGate (who: string) (levels: Level list) (n: int) (poolLen: in
                 | Some d -> Error(sprintf "%s: coordinate %d outside [0,%d)" who d n)
                 | None -> Ok m
 
+/// Where a §2 read lands, WITHOUT touching a pool: everything about
+/// `dense[t]` that is a function of `(levels, n, t)` alone.
+///
+///   OrbZeroCell        canon(t) is in the zero set. The value is 0 and NO cell
+///                      is stored -- the in-domain zero the header's DOMAIN
+///                      CONTRACT insists is a value, not an error.
+///   OrbPoolCell (i,chi) the value is `chi * pool[i]`, chi in {-1,+1}.
+///
+/// This is the shared core of every §2 reader, and it exists because the cell
+/// type is not universal: the reference `orbRead` below is int64 (exact, so a
+/// held-out table can pin it), while the interpreter's pool holds `Value` and
+/// the compiled path holds `double`. Negation is the only per-type decision in
+/// the read (see the Int64.MinValue case in `orbRead`), so it -- and ONLY it --
+/// is what the callers specialize. Nothing else about the read is re-derived
+/// anywhere: the gate, the canonicalization, the rank and the zero-set/
+/// out-of-domain split all live here, once.
+type OrbReadPlan =
+    | OrbZeroCell
+    | OrbPoolCell of index: int * chi: int
+
+/// The (levels, n, t)-only half of §2's read. `who` prefixes the refusal text,
+/// so each caller's messages name the door the user actually went through;
+/// `poolLen` is the cell count the caller has, checked against the class's fold
+/// exactly as `orbRead`'s own gate does. Only MALFORMED input is refused (bad
+/// class, negative extent, wrong pool size, wrong axis rank, digit outside
+/// [0,n)) -- a MIRRORED tuple is a legal read that returns chi = -1.
+let orbReadPlan (who: string) (levels: Level list) (n: int) (poolLen: int) (t: int list)
+                : Result<OrbReadPlan, string> =
+    match storageGate who levels n poolLen t with
+    | Error e -> Error e
+    | Ok _ ->
+        // The gate has established length = axisRank and every level rank >= 1,
+        // so canonOrb's three `failwithf` guards are all unreachable here.
+        match canonOrb levels t with
+        | None -> Ok OrbZeroCell
+        | Some (c, chi) ->
+            match orbRank levels n c with
+            | Error e -> Error e
+            | Ok r ->
+                if r < 0L || r >= int64 poolLen then
+                    // Unreachable while rank < cellCount = poolLen; kept so a
+                    // future rank bug is a diagnosis, not an IndexOutOfRange.
+                    Error(sprintf "%s: rank %d outside the pool [0,%d)" who r poolLen)
+                else Ok(OrbPoolCell(int r, chi))
+
 /// §2's read: the value of the dense tensor at ANY raw tuple `t`, served out
 /// of the canonical pool. Zero on the zero set, `chi(t) * pool[rank]`
 /// otherwise -- so a mirrored tuple is a legal read that returns the signed
 /// cell, and only MALFORMED input is refused (bad class, negative extent,
 /// wrong pool size, wrong axis rank, digit outside [0,n)).
 let orbRead (levels: Level list) (n: int) (pool: int64[]) (t: int list) : Result<int64, string> =
-    match storageGate "orbRead" levels n (Array.length pool) t with
+    match orbReadPlan "orbRead" levels n (Array.length pool) t with
     | Error e -> Error e
-    | Ok _ ->
-        // The gate has established length = axisRank and every level rank >= 1,
-        // so canonOrb's three `failwithf` guards are all unreachable here.
-        match canonOrb levels t with
-        | None -> Ok 0L
-        | Some (c, chi) ->
-            match orbRank levels n c with
-            | Error e -> Error e
-            | Ok r ->
-                if r < 0L || r >= int64 pool.Length then
-                    // Unreachable while rank < cellCount = pool.Length; kept so
-                    // a future rank bug is a diagnosis, not an IndexOutOfRange.
-                    Error(sprintf "orbRead: rank %d outside the pool [0,%d)" r pool.Length)
-                else
-                    let v = pool.[int r]
-                    if chi >= 0 then Ok v
-                    elif v = Int64.MinValue then
-                        // The one value whose negation leaves int64. §7.2's rule
-                        // applies to the read too: wraparound must diagnose.
-                        Error(sprintf "int64 overflow: -(%d)" v)
-                    else Ok(-v)
+    | Ok OrbZeroCell -> Ok 0L
+    | Ok (OrbPoolCell (i, chi)) ->
+        let v = pool.[i]
+        if chi >= 0 then Ok v
+        elif v = Int64.MinValue then
+            // The one value whose negation leaves int64. §7.2's rule applies to
+            // the read too: wraparound must diagnose.
+            Error(sprintf "int64 overflow: -(%d)" v)
+        else Ok(-v)
 
 /// §2's read inverted, and ONLY at a canonical cell: `t` must be a canonOrb
 /// fixed point (which forces character +1, since a fixed point sorts with no

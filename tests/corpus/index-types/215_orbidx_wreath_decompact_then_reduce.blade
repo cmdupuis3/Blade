@@ -1,0 +1,36 @@
+// TEST: OrbIdx Wreath Decompact Then Reduce
+// The steer in 208's refusal, run end to end. `reduce` over a wreath pool stays
+// refused (the orbit multiplicities are not computed), and the message it
+// prints says "decompact(W, 0) first for the logical fold" -- so that sentence
+// has to be a working program, not advice pointing at another refusal. It is
+// the whole reason the fold refusal carries its own diagnostic instead of the
+// generic storage one.
+//
+// ONE WRINKLE the steer has to survive, and it is the reason this test slices:
+// a wreath acts on prod(ri) >= 4 raw axes, so its dense image is rank >= 4,
+// and `reduce` takes rank-1 arrays only. The remedy is therefore decompact +
+// FIBRE, not decompact + reduce: D(1,1,0) is the dense partial read that peels
+// three axes and leaves a rank-1 row, which folds like any other array. Every
+// step here is an existing feature -- the only new one is the decompaction.
+//
+// n = 2 keeps the dense image at 2^4 = 16 cells so the pinned fibre can be read
+// straight off D's printed rows.
+let A = [1.0, 2.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+let D = decompact(W, 0)
+let fibre = D(1, 1, 0)
+let total = reduce(fibre, lambda(a, b) -> a + b)
+// S(i,j) = A[i]*A[j] = [[1,2],[2,4]]; W(i,j,k,l) = S(i,j) + S(k,l).
+// D[1][1] is S(1,1) + [1,2,2,4] = 4 + [1,2,2,4] = [5,6,6,8], so the k = 0 fibre
+// D(1,1,0) is [5, 6] and its sum is 11.
+// EXPECT: S = [1, 2, 4]
+// EXPECT: W = [2, 3, 5, 4, 6, 8]
+// EXPECT: D[0][0] = [2, 3, 3, 5]
+// EXPECT: D[0][1] = [3, 4, 4, 6]
+// EXPECT: D[1][0] = [3, 4, 4, 6]
+// EXPECT: D[1][1] = [5, 6, 6, 8]
+// EXPECT: fibre = [5, 6]
+// EXPECT: total = 11

@@ -1,0 +1,34 @@
+// TEST: Element Bound Enforced
+// ============================================================================
+// The companion to diagnostics/046: a bound in ELEMENT position is a bound on
+// a PRIMITIVE, which is exactly where formalism 2.4 puts it, so it is CHECKED
+// — every cell, at the let binding. Before this it was accepted and silently
+// ignored, which is the worse half of the same defect the aggregate rejection
+// fixes: the annotation looked like a constraint and enforced nothing.
+//
+// The guard is a hand-built loop nest, NOT `reduce(lo <= x, (&&), true)`.
+// Two measured reasons: `inferReduce`'s rank-k desugar needs LITERAL extents,
+// so the `Idx<n>` axis below would fail to compile outright; and it reads
+// cells with untagged ints, so every rank >= 2 case would earn spurious BL4003
+// tag warnings pointing at a loop the user never wrote.
+//
+// Both arrays here are IN RANGE, so the guards pass and the values print. The
+// violating twin is diagnostics/048.
+// ============================================================================
+let static n = 3
+type Y = Idx<2>
+type Z = Idx<n>
+
+// Rank 1, literal extent.
+let v: Array<Float64<min=0.0, max=1.0> like Z> = [0.25, 0.5, 0.75]
+
+// Rank 2, and the second axis' extent comes from a `let static` rather than a
+// literal — the shape a reduce-based guard could not have compiled.
+let m: Array<Float64<min=0.0, max=1.0> like Y, Z> = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+
+// A one-sided bound is legal and guards only its own endpoint.
+let lo: Array<Float64<min=0.0> like Y> = [7.0, 8.0]
+
+// EXPECT: v = [0.25, 0.5, 0.75]
+// EXPECT: m = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+// EXPECT: lo = [7, 8]

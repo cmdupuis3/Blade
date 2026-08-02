@@ -2160,27 +2160,67 @@ let firstArgRankClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
 
 let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     match tFunc.Type with
-    // SUBSCRIPTING A WREATH ARRAY, refused FIRST and EXPLICITLY.
+    // SUBSCRIPTING A WREATH ARRAY, handled FIRST and EXPLICITLY.
     //
     // This arm exists because of the catch-all's vacuity, not merely for
     // tidiness. A depth-2 OrbIdx record is ONE index slot spanning prod(ri) raw
     // axes, so `W(i,j,k,l)` has 4 args against 1 slot: the arity guard below
     // (`tArgs.Length <= IndexTypes.Length`) is FALSE, no other arm matches, and
     // `dispatchAppOrIndex` falls through to a catch-all that mints a fresh
-    // inference variable and returns Ok (see the note at that arm). The read
-    // would then typecheck at a type nothing later contradicts and reach
-    // codegen/interp as a plausible dense subscript into a flat pool.
+    // inference variable and returns Ok (see the note at that arm). Without an
+    // arm here the read would typecheck at a type nothing later contradicts and
+    // reach codegen/interp as a plausible dense subscript into a flat pool. So
+    // EVERY exit below is explicit: an Ok at the element type, or an Error --
+    // never a fallthrough (§9 step 6, "dispatch must not rely on a `when` guard
+    // failing").
     //
-    // What is missing is real, not incidental: a read at an ARBITRARY tuple is
-    // the MIRRORED read -- canonOrb's per-level sort fold, the accumulated
-    // character, the zero set at a '-' level -- and none of that is emitted in
-    // v1. Writes are (the traversal nest only ever visits canonical cells, so
-    // it needs no fold). Refusing here is what keeps the two apart.
+    // THE RULE. A sole wreath slot takes exactly `Rank` = prod(ri) FLAT scalar
+    // subscripts -- the same spelling a rank-k SymIdx group takes, and the same
+    // one CompoundIdx was converted to -- and yields the ELEMENT type. The
+    // coordinates are arbitrary raw axes, not canonical ones: the read is
+    // docs/plan-orbidx-decompaction.md §2's
+    //     dense[t] = chi(t) * pool[orbRank(canon(t))],  0 on the zero set,
+    // so a mirrored tuple returns the SIGNED cell and a zero-set tuple returns
+    // 0. Both are VALUES, not errors.
+    //
+    // Anything else is an Error, and the two kinds are kept apart because their
+    // remedies differ: a wrong ARITY (including a partial read, which a wreath
+    // pool has no residual class for) is OrbitSubscriptArity; a wreath slot
+    // COMBINED with other index slots has no pool layout at all
+    // (classifyOutputStorage will not allocate one), so it stays the generic
+    // storage refusal.
     | ArrayElem arrTy when
         not (List.isEmpty tArgs)
         && arrTy.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
-        let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
-        Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "array subscript"))
+        (match arrTy.IndexTypes with
+         | [ ix ] when ix.Symmetry = SymWreath ->
+             let levels = ppOrbitLevels (orbitLevelsOf ix)
+             let axes = max 1 ix.Rank
+             if tArgs.Length <> axes then
+                 Error (OrbitSubscriptArity (levels, axes, tArgs.Length))
+             elif tArgs |> List.exists (fun a -> match a.Kind with TExprWildcard -> true | _ -> false) then
+                 // A `_` marks a FREE axis; freeing one axis of a wreath is the
+                 // partial read again, in the other spelling. Same verdict, and
+                 // the arity message's partial-read sentence is the right one:
+                 // a hole is a coordinate not supplied.
+                 Error (OrbitSubscriptArity (levels, axes, axes - (tArgs |> List.filter (fun a -> match a.Kind with TExprWildcard -> true | _ -> false) |> List.length)))
+             else
+                 // The nominal tag check runs for uniformity, not because it
+                 // can currently fire: `mkWreathIndexRecord` stamps the
+                 // "__orbidx" KIND sentinel as the record's Tag, and the check
+                 // skips every "__" tag. It is here so that if a wreath class
+                 // ever carries its base's tag through (§ "DEFERRED: a
+                 // BLOCK-SPEC base under a depth >= 2 class"), this door already
+                 // enforces it instead of being the one subscript form that
+                 // silently does not.
+                 checkArrayIndexTags env arrTy tArgs
+                 |> Result.map (fun () ->
+                     let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
+                     mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType)
+         | _ ->
+             let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
+             Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix),
+                                             "array subscript of a wreath group combined with other index slots")))
     | ArrayElem arrTy when
         // A compound head takes FLAT subscripts (k for the axis + one per
         // trailing dim), so its arg budget exceeds the slot count — and it
@@ -2844,6 +2884,18 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                  match env.Subst.Resolve tE.Type with
                  | ArrayElem at ->
                      (match at.IndexTypes with
+                      // A wreath lead passes the packed test below, but its
+                      // Extent is the IROrbitClass marker (so the literal check
+                      // would report "needs a literal extent" for a class whose
+                      // base extent is perfectly literal one level down), and
+                      // there is no window type to build: a sub-simplex of a
+                      // wreath class is not a wreath class -- every level would
+                      // have to be restricted at once, and the fold's ground set
+                      // at level i is the PREVIOUS level's cell set, not [lo,hi).
+                      // spec_version 2 says the same thing on the store side.
+                      | lead :: _ when lead.Symmetry = SymWreath ->
+                          Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf lead),
+                                                          "z.read_window (a wreath class has no translated sub-class to window into)"))
                       | lead :: rest when lead.Symmetry <> SymNone && lead.Rank >= 2 ->
                           (match lead.Extent with
                            | IRLit (IRLitInt n) when lo >= 0L && lo < hi && hi <= n ->
@@ -3895,14 +3947,16 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
             unify env.Subst tArr.Type freshArr |> ignore
          | _ -> ())
         match env.Subst.Resolve(tArr.Type) with
-        // A wreath axis reaches the STORAGE refusal, not the canonical-vs-logical
-        // one: reduce over compact storage is refused for a semantics reason
-        // (which cells does the fold see?), but a wreath array has no cells at
-        // all yet, and naming the ambiguity would suggest `decompact` is the fix
-        // when the class cannot even be allocated.
+        // A wreath axis reaches the CANONICAL-VS-LOGICAL refusal, in parity with
+        // depth-1 compact storage one arm down -- not the generic storage one.
+        // The distinction is the REMEDY, and it changed when full decompaction
+        // landed: `decompact(W, 0)` now really does produce the dense tensor
+        // this fold wants, so the message names it instead of saying the class
+        // cannot be touched. What is still absent is the orbit MULTIPLICITIES
+        // that would let a pool walk stand in for the dense one.
         | ArrayElem arrTy when arrTy.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
             let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
-            Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "reduce()"))
+            Error (OrbitFoldUnsupported (ppOrbitLevels (orbitLevelsOf ix), "reduce"))
         | ArrayElem arrTy when arrTy.IndexTypes.Length = 1
                                && (match arrTy.IndexTypes.[0].Symmetry with
                                    | SymSymmetric | SymAntisymmetric | SymHermitian -> true
@@ -4036,10 +4090,10 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                  | None -> Error (Other "prodsum() requires at least one array argument"))
             | t :: more ->
                 match env.Subst.Resolve t.Type with
-                // Storage refusal first, for reduce()'s reason (see there).
+                // Fold refusal first, for reduce()'s reason (see there).
                 | ArrayElem arrTy when arrTy.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
                     let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
-                    Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "prodsum()"))
+                    Error (OrbitFoldUnsupported (ppOrbitLevels (orbitLevelsOf ix), "prodsum"))
                 | ArrayElem arrTy when arrTy.IndexTypes.Length = 1
                                        && (match arrTy.IndexTypes.[0].Symmetry with
                                            | SymSymmetric | SymAntisymmetric | SymHermitian -> true
@@ -4132,6 +4186,52 @@ and inferCumulantProj (env: TypeEnv) (dExpr: Expr) (kExpr: Expr) : TypeResult<Ty
 and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
     inferExpr env array |> Result.bind (fun tArr ->
         requireArrayArg env tArr "decompact" |> Result.bind (fun arrTy ->
+            // WREATH DECOMPACTION, ahead of the dimension resolution below --
+            // because for a wreath class `d` does not MEAN a dimension.
+            //
+            // The generic path treats `d` as "which logical dimension to free"
+            // and splits the containing compact slot into left-remainder /
+            // freed Idx / right-remainder, each remainder a fresh group of the
+            // SAME class. Neither half of that is well defined here: a wreath's
+            // fission has to say which LEVEL is being peeled, and the residual
+            // of a level peel is a JUXTAPOSITION of depth-(d-1) classes, not
+            // one group of the same shape. Building `{ ix with Rank = a }`
+            // would produce a wreath record whose Rank no longer matches the
+            // product of its level list -- an internally inconsistent type that
+            // every downstream cell count would read differently.
+            //
+            // v1 implements the ENDPOINT of that lattice and only the endpoint:
+            // FULL decompaction, spelled `decompact(W, 0)`, where the second
+            // argument is the number of LEVELS TO KEEP
+            // (docs/plan-orbidx-decompaction.md §4.3). The result is the dense
+            // rank-prod(ri) tensor -- one plain Idx<n> axis per raw axis -- and
+            // every cell is the class's own §2 read. Any other `d` asks for the
+            // §3 peel lattice and is refused by name.
+            match arrTy.IndexTypes with
+            | [ ix ] when ix.Symmetry = SymWreath ->
+                let levels = ppOrbitLevels (orbitLevelsOf ix)
+                if d <> 0 then Error (OrbitDecompactPartial (levels, d))
+                else
+                    let axes = max 1 ix.Rank
+                    let baseExtent = orbitBaseExtent ix
+                    // The dense record is built from scratch, NOT `{ ix with
+                    // ... }`: a wreath record carries IxKOrbit, the "__orbidx"
+                    // sentinel Tag and an IROrbitClass extent marker, and every
+                    // one of those would be a lie on a plain axis (the IR
+                    // validator enforces the kind/Tag agreement, and
+                    // orbitLevelsOf would keep answering with the level list).
+                    let denseAxis () =
+                        { Id = env.Builder.FreshId(); Rank = 1; Extent = baseExtent
+                          Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                          Kind = SDimension; Dependencies = [] }
+                    let newIndexTypes = List.init axes (fun _ -> denseAxis ())
+                    let resultType = mkArrayArrow newIndexTypes arrTy.ElemType None
+                    Ok (mkTyped (TExprDecompact (tArr, d)) resultType)
+            | _ when arrTy.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
+                let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
+                Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix),
+                                                "decompact() of a wreath group combined with other index slots"))
+            | _ ->
             // Resolve the logical dimension d to (slotIndex, slotArity,
             // posInSlot). A compact slot of arity r spans r consecutive
             // dimensions; posInSlot in [0, r) says which component within
@@ -4154,14 +4254,12 @@ and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
                 let ix = arrTy.IndexTypes.[slot]
                 if r < 2 || ix.Symmetry = SymNone then
                     Error (DecompactPlainAxis d)
-                // decompact is a FISSION of one compact group into a peeled
-                // axis plus a residual group of the SAME class. For a wreath
-                // that is not even well-defined without deciding which LEVEL is
-                // being peeled (and the residual of a level-2 peel is not a
-                // wreath class of the same shape). The `mkRemainder` code below
-                // would build `{ ix with Rank = a }` -- a wreath record whose
-                // Rank no longer matches the product of its level list, i.e. an
-                // internally inconsistent type. Refuse.
+                // Unreachable: the two wreath arms above (sole slot / combined
+                // with others) ran first and between them cover every record
+                // list containing a SymWreath. Kept spelled out so the fission
+                // code below can go on assuming `{ ix with Rank = a }` builds a
+                // consistent record -- for a wreath it would not (the Rank
+                // would stop matching the product of its level list).
                 elif ix.Symmetry = SymWreath then
                     Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "decompact()"))
                 else
@@ -6355,6 +6453,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             ReturnType = paramTy
             CommGroups = if isComm then [[0; 1]] else []
             AntisymGroups = []   // synthesized (operator section): no user clause
+            SignParities = []    // populated at the apply seam, if it gets there
             Captures = []; IsCommutative = isComm
             Parallel = []  // synthesized (operator section): no user clause
             SelfBinding = None  // anonymous: cannot self-reference
@@ -6399,6 +6498,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             ReturnType = paramTy
             CommGroups = []
             AntisymGroups = []
+            SignParities = []
             Captures = []; IsCommutative = true
             Parallel = []  // synthesized (zero kernel): no user clause
             SelfBinding = None  // anonymous: cannot self-reference
@@ -6586,6 +6686,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 ReturnType = paramTy
                 CommGroups = []
                 AntisymGroups = []
+                SignParities = []
                 Captures = []; IsCommutative = true
                 Parallel = []  // synthesized (object_for zero kernel): no clause
                 SelfBinding = None  // anonymous: cannot self-reference
@@ -7198,9 +7299,57 @@ and buildApplyInfo (env: TypeEnv)
     // `deduceOutputType` ever ran. Same predicate, same arguments, one rule
     // (`IR.deduceWreathTie`), so this cannot disagree with what the output type
     // ends up being.
-    let wreathTie =
+    // Per-parameter SIGN parities of the kernel body, for the tie rule's
+    // soundness gate (deduceWreathTie condition 6: a '-' inner level requires
+    // the kernel provably sign-odd in every tied argument). Computed ONCE with
+    // the same resolver checkFunctionDecl uses — an eta wrapper over a named
+    // function resolves through the callee's FuncSignParities summary — and
+    // used three ways: the verdict below, deduceOutputType's identical call,
+    // and recorded on the kernel (resolvedLambdaInfo.SignParities ->
+    // IRCallable.SignParities) so codegen and the interpreter hand the tie
+    // rule the SAME values. Skipped where no tie can fire (reynolds, arity
+    // < 2); the gate reads a missing list as all-unknown.
+    let kernelSignParities : KernelSignParity list =
+        if isReynolds || lambdaInfo.Params.Length < 2 then []
+        else
+            let signResolver (calleeId: IRId) =
+                match env.FuncSignParities.TryGetValue calleeId with
+                | true, ps -> Some ps
+                | _ -> None
+            Blade.Deduce.deduceSignParities signResolver lambdaInfo.Params lambdaInfo.Body
+            |> List.map (function
+                | Blade.Deduce.SOdd -> KspOdd
+                | Blade.Deduce.SEven -> KspEven
+                | Blade.Deduce.SUnknown -> KspUnknown)
+    let wreathVerdict =
         deduceWreathTie gridArrayTypes identities iterGroups antisymStorageGroups
                         kernelTDims (kernelInputRanks |> List.exists (fun r -> r > 0)) isReynolds
+                        kernelSignParities
+    // Surface the gate's refusal HERE — the one seam that can say it to the
+    // user (codegen and the interpreter run downstream of a successful
+    // typecheck; their arms are loud backstops). KspEven is the
+    // CommContradictsBody analog one level up; KspUnknown refuses too, because
+    // per-argument oddness is a claim no clause declares, so there is no user
+    // word to trust — the BL4015 inheritance-gate precedent (the rationale is
+    // spelled out at deduceWreathTie condition 6).
+    let wreathGateErr =
+        match wreathVerdict with
+        | IR.WreathKernelNotOdd (argPos, parity, innerLevels) ->
+            let pname =
+                match List.tryItem argPos lambdaInfo.Params with
+                | Some (p: TypedParam) -> p.Name
+                | None -> sprintf "argument %d" argPos
+            let proved =
+                match parity with
+                | KspEven -> "provably sign-EVEN (h(-p, q) = h(p, q))"
+                | _ -> "of UNKNOWN sign parity"
+            Some (WreathTieKernelNotOdd (pname, proved, ppOrbitLevels innerLevels))
+        | _ -> None
+    match wreathGateErr with
+    | Some e -> Error e
+    | None ->
+    let wreathTie =
+        match wreathVerdict with IR.WreathTied t -> Some t | _ -> None
     // A wreath INPUT that did NOT earn a tie has no iteration at all: only the
     // segment-peeled `orb_visit` nest walks a wreath pool, and it is driven by
     // the OUTPUT class, so an application that does not produce one (a unary
@@ -7478,7 +7627,7 @@ and buildApplyInfo (env: TypeEnv)
         // consumed-dim filter in deduceOutputType must NOT drop ragged/dep
         // inner dims — they propagate through the elementwise map.
         let kernelConsumesInner = kernelInputRanks |> List.exists (fun r -> r > 0)
-        let outputType = deduceOutputType gridArrayTypes identities iterGroups antisymStorageGroups (computeSDimsPerArray gridArrayTypes) kernelTDims outputElemType isReynolds isReynoldsAntisym kernelConsumesInner env.Builder
+        let outputType = deduceOutputType gridArrayTypes identities iterGroups antisymStorageGroups (computeSDimsPerArray gridArrayTypes) kernelTDims outputElemType isReynolds isReynoldsAntisym kernelConsumesInner kernelSignParities env.Builder
 
         // ---- Compact-class inheritance, checked (stage 3, unary seam) ----
         // deduceOutputType's rank-0 elementwise arm hands the input group's
@@ -7577,6 +7726,10 @@ and buildApplyInfo (env: TypeEnv)
                 Params =
                     lambdaInfo.Params |> List.map (fun p ->
                         { p with Type = env.Subst.Resolve p.Type })
+                // Record the seam's sign summary so Lowering stamps it onto
+                // the lifted IRCallable — codegen's and the interpreter's
+                // deduceWreathTie calls then judge from these same values.
+                SignParities = kernelSignParities
                 // The complex re-stamp above must flow into the lifted lambda
                 // too: with a stale Float64 stamp the lifted C++ function
                 // would declare a double return around a std::complex body.
@@ -7737,6 +7890,7 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
             let info : TypedLambdaInfo = {
                 Params = typedParams; Body = tBody; ReturnType = tBody.Type
                 CommGroups = commGroups; AntisymGroups = antisymGroups; Captures = captures
+                SignParities = []  // populated at the apply seam, if it gets there
                 IsCommutative = not (List.isEmpty commGroups)
                 // Propagate the lambda's parallelization strategy (omp/cuda) from
                 // its where-clause so lambda-level omp drives parallelization.
@@ -8139,6 +8293,76 @@ and unknownAxisPathMessage (path: string) : string =
     else
         sprintf "unknown qualified index type '%s'" path
 
+/// Name the AGGREGATE a `min=`/`max=` bound was applied to, or None when the
+/// base is a legitimate bound target. `Ast.TyBounded` is the bounded
+/// PRIMITIVE node (formalism §2.4) and nothing lowers a bounded aggregate:
+/// the guards `Ast.boundedConjuncts` synthesizes are ordinary comparisons
+/// against the annotated value ITSELF, which on an aggregate is either
+/// nonsense that reaches CodeGen as an undefined sentinel identifier (arrays
+/// — `BLADE_CODEGEN_ERROR_ARRAY...`) or a raw C++ type error (tuples).
+///
+/// The base is classified on its LOWERED form, because that is what resolves
+/// alias chains. `type Field = Array<Float64 like Y>` then
+/// `x: Field<min=0.0, max=1.0>` builds `TyBounded (TyNamed ("Field", []), ..)`
+/// — the parser sees only a bare name, so it CANNOT make this call; the
+/// array-ness is knowable only after alias resolution. That is why the
+/// rejection lives here rather than in `buildTypeApp`.
+///
+/// Index and unit tags are stripped first: the unit/tag positional argument
+/// stays on the BASE node (see lowerTypeExpr's TyBounded arm), and a tagged
+/// or unit-annotated scalar is still a scalar — `Float64<velocity, min=0,
+/// max=1>` must keep working.
+and private boundedAggregateNoun (env: TypeEnv) (baseTy: TypeExpr) : string option =
+    let rec strip (t: IRType) =
+        match t with
+        | IRTIdxTagged (inner, _) | IRTUnitAnnotated (inner, _) | IRTComputation inner -> strip inner
+        | _ -> t
+    // ArrayElem / FuncElem are both views of IRTArrow, so the bare IRTArrow
+    // arm below is only the mixed-slot residue (neither uniformly indexed nor
+    // uniformly valued); it is still an aggregate.
+    match strip (lowerTypeExpr env baseTy) with
+    | ArrayElem _ -> Some "an array type"
+    | FuncElem _ -> Some "a function type"
+    | IRTArrow _ -> Some "an array type"
+    | IRTTuple _ -> Some "a tuple type"
+    | IRTDist _ -> Some "a Dist type"
+    | IRTPoly _ -> Some "an arity-polymorphic array type"
+    | IRTGroupKeys _ -> Some "a group-keys type"
+    | IRTNamed n ->
+        match lookupTypeDef n env with
+        | Some (TDIStruct _) -> Some "a struct type"
+        | Some (TDIVariant _) -> Some "a sum type"
+        | _ -> None
+    | _ -> None
+
+/// The consumption-site check: find a bound applied to an aggregate anywhere
+/// in a surface annotation and render the diagnostic. Same
+/// consumption-site pattern as `irTypeHasTagWildcard` and friends, but read
+/// off the SURFACE TypeExpr rather than the lowered IRType — the bounds erase
+/// in `lowerTypeExpr` and never reach `IRType`, so there is nothing left to
+/// scan there.
+///
+/// The walk descends into aggregate COMPONENT positions (element types, tuple
+/// slots, arrow slots) so `Array<Field<min=0.0> like Y>` is caught too; array
+/// INDEX slots are left alone, since a bound there is an index-type question
+/// the BL4003 position rules already own.
+and private boundedAggregateError (env: TypeEnv) (site: string) (ty: TypeExpr) : TypeError option =
+    let rec go (t: TypeExpr) : string option =
+        match t with
+        | TyBounded (b, _, _) ->
+            match boundedAggregateNoun env b with
+            | Some noun -> Some noun
+            | None -> go b
+        | TyArray (elem, _) -> go elem
+        | TyAbstractArray (elem, _, _) -> go elem
+        | TyDist (_, elem, _) -> go elem
+        | TyTuple ts -> ts |> List.tryPick go
+        | TyFunc (args, ret) ->
+            (args |> List.tryPick go) |> Option.orElseWith (fun () -> go ret)
+        | TyConstrained (inner, _) -> go inner
+        | _ -> None
+    go ty |> Option.map (fun noun -> BoundsOnAggregate (site, noun, "the annotated value"))
+
 // inferLetBinding (let-as-expression in function bodies and blocks) and
 // checkDecl/DeclLet (top-level let declarations) share their annotation handling
 // and PatVar binding logic. Extracting them here keeps the two paths in sync;
@@ -8205,6 +8429,15 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
                         (match binding.Pattern.Kind with
                          | PatVar n -> sprintf "let binding '%s'" n
                          | _ -> "let binding annotation")))
+        else
+        let badBound =
+            boundedAggregateError env
+                (match binding.Pattern.Kind with
+                 | PatVar n -> sprintf "let binding '%s'" n
+                 | _ -> "this let binding")
+                annot
+        if badBound.IsSome then
+            Error badBound.Value
         else
         // Nested-function desugar (parseNestedFunction): `function f(x) -> T
         // = body` becomes a let of a lambda whose binding annotation is the
@@ -9707,6 +9940,14 @@ and synthesizeStructChecks (env: TypeEnv) (targetTy: IRType) (targetSurface: Exp
 /// the declared annotation at a site that does not currently carry it
 /// (params/returns at the call boundary, assignment via a name → annotation
 /// map that does not exist). Named deferral, not an oversight.
+///
+/// An ELEMENT-position bound (`Array<Float64<min=0.0, max=1.0> like Y>`) is a
+/// bound on a primitive too, and is guarded by `synthesizeElementBoundChecks`
+/// below — `boundedConjuncts` sees only a TOP-LEVEL TyBounded, so it returns
+/// [] here and the two paths never both fire on the same annotation. The
+/// element guard inherits this same v1 scope: a bound on the element type of a
+/// PARAMETER or a STRUCT FIELD is unguarded for exactly the reason the scalar
+/// bound is in those positions, not for a reason of its own.
 and synthesizeBoundChecks (env: TypeEnv) (annot: TypeExpr option) (subjectName: string) (targetSurface: Expr) : TypeResult<TypedExpr list> =
     match annot with
     | None -> Ok []
@@ -9715,7 +9956,7 @@ and synthesizeBoundChecks (env: TypeEnv) (annot: TypeExpr option) (subjectName: 
         // annotation asserts; the side labels are recovered in parallel from
         // the same node so a one-sided annotation still names its endpoint.
         match boundedConjuncts targetSurface ty with
-        | [] -> Ok []
+        | [] -> synthesizeElementBoundChecks env ty subjectName targetSurface
         | conjs ->
             let sides =
                 match ty with
@@ -9732,6 +9973,127 @@ and synthesizeBoundChecks (env: TypeEnv) (annot: TypeExpr option) (subjectName: 
                     let msg = sprintf "Bound violation in '%s' (%s)" subjectName side
                     mkTypedSpan (TExprConstraintCheck (tCond, msg)) IRTUnit tCond.Span))
             |> sequenceResults
+
+/// Resolve a surface type through ORDINARY alias chains. Distinct from
+/// `lowerTypeExpr`'s resolution, which answers in IRType and has therefore
+/// already thrown the bounds away — this keeps the surface node, which is the
+/// only place the bound EXPRESSIONS survive. Fuel-bounded like the
+/// elaborators' `resolveTop`.
+and private resolveSurfaceAlias (env: TypeEnv) (fuel: int) (ty: TypeExpr) : TypeExpr =
+    if fuel <= 0 then ty else
+    match ty with
+    | TyNamed (n, []) ->
+        match Map.tryFind n env.SurfaceAliases with
+        | Some body -> resolveSurfaceAlias env (fuel - 1) body
+        | None -> ty
+    | TyConstrained (inner, _) -> resolveSurfaceAlias env (fuel - 1) inner
+    | _ -> ty
+
+/// The bound written on an array annotation's ELEMENT type. Returns the two
+/// endpoints plus the DEPTH of array nesting the bound sits under, so the
+/// caller can guard depth 1 and refuse deeper rather than ignore it.
+and private elementBoundOf (env: TypeEnv) (annot: TypeExpr) : (Expr option * Expr option * int) option =
+    let rec go depth (t: TypeExpr) =
+        match resolveSurfaceAlias env 8 t with
+        | TyArray (elem, _) -> go (depth + 1) elem
+        | TyBounded (_, lo, hi) when depth > 0 && (lo.IsSome || hi.IsSome) -> Some (lo, hi, depth)
+        | _ -> None
+    go 0 annot
+
+/// Runtime guards for an ELEMENT-position bound: `Array<Float64<min=0.0,
+/// max=1.0> like Y, Z>` asserts that EVERY cell is in range. Emits an explicit
+/// loop nest with one `TExprConstraintCheck` per endpoint in the innermost
+/// body, so the first offending cell panics with the bound's own message.
+///
+/// WHY A HAND-BUILT NEST rather than the obvious `reduce(lo <= x, (&&), true)`:
+/// both measured, both disqualifying. (1) `inferReduce`'s rank-k desugar
+/// requires LITERAL extents, so `Array<Float64<min=..> like Y, Idx<n>>` with a
+/// `let static n` would fail outright — "reduce() currently supports only
+/// rank-1 arrays" — turning a legal program into a compile error. (2) That same
+/// desugar reads cells with untagged ints, so every rank >= 2 bounded array
+/// would earn two spurious BL4003 tag warnings pointing at a loop the user
+/// never wrote. Building the typed nodes directly avoids both: no inference
+/// runs over synthesized code, so no diagnostic can be attributed to it, and
+/// the extent comes from the array's own index record.
+///
+/// Loop variables are plain int64 and the cell read is a bare `TExprIndex` —
+/// deliberately the same shape `inferReduce`'s rank-k desugar produces after
+/// inference, which is the proven-good lowering path.
+///
+/// REFUSED rather than silently skipped (a bound that evaporates is the bug
+/// this fixes): compact/ragged/grouped/compound axes, whose cell enumeration is
+/// not a dense nest, and bounds nested more than one array deep.
+and private synthesizeElementBoundChecks (env: TypeEnv) (annot: TypeExpr) (subjectName: string) (targetSurface: Expr) : TypeResult<TypedExpr list> =
+    match elementBoundOf env annot with
+    | None -> Ok []
+    | Some (_, _, depth) when depth > 1 ->
+        Error (Other (sprintf "the bound on the element type of '%s' is not enforced: it sits %d array levels deep, and the guard synthesis walks one. Flatten to a single Array<T<min=.., max=..> like I, J, ...> annotation, whose elements ARE checked."
+                              subjectName depth))
+    | Some (lo, hi, _) ->
+        inferExpr env targetSurface |> Result.bind (fun tSubj ->
+        match env.Subst.Resolve tSubj.Type with
+        | ArrayElem arrTy ->
+            let exotic =
+                arrTy.IndexTypes |> List.tryFind (fun ix ->
+                    ix.IxKind <> IxKPlain || ix.Symmetry <> SymNone)
+            match exotic with
+            | Some ix ->
+                Error (Other (sprintf "the bound on the element type of '%s' is not enforced: the array has a %s axis, whose stored cells are not a dense loop nest (folding canonical vs logical cells differs, and ragged/compound axes have no rectangular extent). Bound the element of a dense array, or check the values explicitly."
+                                      subjectName
+                                      (match ix.Symmetry with
+                                       | SymNone -> "ragged, grouped, or compound"
+                                       | _ -> "compact symmetric/antisymmetric/Hermitian")))
+            | None ->
+            let span = targetSurface.Span
+            let mkT k ty = mkTypedSpan k ty span
+            let int64Ty = IRTScalar ETInt64
+            let n = arrTy.IndexTypes.Length
+            // One loop variable per axis. Plain int64 (see docstring); the ids
+            // come from the builder so they cannot collide with user bindings.
+            let idxVars =
+                arrTy.IndexTypes |> List.mapi (fun k _ ->
+                    (sprintf "__ebnd_%s_%d" subjectName k, env.Builder.FreshId()))
+            // Upper bound per axis: the index record's own extent when it has
+            // folded to a literal, else `extents(subject)` — scalar at rank 1,
+            // a tuple to project at higher rank (inferExtents' two shapes).
+            let extentsTy =
+                if n = 1 then int64Ty else IRTTuple (List.replicate n int64Ty)
+            let hiOf k (ix: IRIndexType) =
+                match ix.Extent with
+                | IRLit (IRLitInt v) -> mkT (TExprLit (LitInt v)) int64Ty
+                | _ ->
+                    let ext = mkT (TExprExtents tSubj) extentsTy
+                    if n = 1 then ext
+                    else mkT (TExprTupleIndex (ext, mkT (TExprLit (LitInt (int64 k))) int64Ty)) int64Ty
+            let identity = match tSubj.Kind with TExprVar (_, _, id) -> id | _ -> None
+            let elemRead =
+                let refs = idxVars |> List.map (fun (nm, vid) -> mkT (TExprVar (nm, vid, None)) int64Ty)
+                mkT (TExprIndex (tSubj, refs, identity)) arrTy.ElemType
+            // Bounds are INCLUSIVE on both ends, exactly as in the top-level
+            // path — `Ast.boundedConjuncts`' orientation, one guard per endpoint.
+            let endpoints =
+                (lo |> Option.map (fun l -> ("min", l, true)) |> Option.toList)
+                @ (hi |> Option.map (fun h -> ("max", h, false)) |> Option.toList)
+            endpoints
+            |> List.map (fun (side, bexpr, isLo) ->
+                inferExpr env bexpr |> Result.map (fun tB ->
+                    let cond =
+                        if isLo then mkT (TExprBinOp (Elementwise, OpLe, tB, elemRead)) (IRTScalar ETBool)
+                        else mkT (TExprBinOp (Elementwise, OpLe, elemRead, tB)) (IRTScalar ETBool)
+                    let msg = sprintf "Bound violation in an element of '%s' (%s)" subjectName side
+                    TStmtExpr (mkT (TExprConstraintCheck (cond, msg)) IRTUnit)))
+            |> sequenceResults
+            |> Result.map (fun checkStmts ->
+                let zero = mkT (TExprLit (LitInt 0L)) int64Ty
+                let his = arrTy.IndexTypes |> List.mapi hiOf
+                let nest =
+                    List.foldBack2 (fun (nm, vid) hiE inner -> [TStmtForIn (nm, vid, zero, hiE, inner)])
+                        idxVars his checkStmts
+                [ mkT (TExprBlock (nest, None)) IRTUnit ])
+        // Not an array after all (e.g. the annotation lost to inference) —
+        // nothing to walk. The aggregate REJECTION path owns the other
+        // direction, so this cannot silently swallow a misplaced bound.
+        | _ -> Ok [])
 
 /// Struct checks for an assignment statement/expression: a field mutation
 /// re-checks the OBJECT's constraints; any other target checks the assigned
@@ -10605,6 +10967,19 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     if wreath.IsSome then
         Error (OrbitStorageUnsupported (wreath.Value, sprintf "function '%s'" funcDecl.Name))
     else
+    // Bounded PARAMETERS and RETURNS are unguarded today (synthesizeBoundChecks
+    // is let-annotation-only), so a bounded aggregate here is silently dropped
+    // rather than mis-lowered. Reject it anyway: the annotation is meaningless
+    // in both readings, and a bound that quietly evaporates is worse than one
+    // that is refused.
+    let badBound =
+        (funcDecl.Params |> List.tryPick (fun p ->
+            p.Type |> Option.bind (boundedAggregateError env (sprintf "parameter '%s' of function '%s'" p.Name funcDecl.Name))))
+        |> Option.orElseWith (fun () ->
+            funcDecl.ReturnType |> Option.bind (boundedAggregateError env (sprintf "the return type of function '%s'" funcDecl.Name)))
+    if badBound.IsSome then
+        Error badBound.Value
+    else
     let funcType = mkFuncArrow paramTypes retType
     // Reuse pre-pass varId if this function was already pre-registered (static functions)
     // This ensures other functions' bodies reference the same varId
@@ -11058,6 +11433,10 @@ and private wherePredicateAnnotationCheck (env: TypeEnv) (owner: string) (conjun
 and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
     match typeDecl with
     | TyDeclAlias (name, _typeParams, body) ->
+        // Keep the SURFACE body: TDIAlias below stores a lowered IRType, and
+        // lowering erases min=/max=, so this is the only record of a bound
+        // written inside an alias (see TypeEnv.SurfaceAliases).
+        let env = { env with SurfaceAliases = Map.add name body env.SurfaceAliases }
         // Chase one level of alias indirection: if the body is `TyNamed n`
         // where n is itself a registered TDIIndexType or TDIEnumIdx alias,
         // use n's stored body for our own registration. Each registration
@@ -11179,7 +11558,14 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                         Kind = SDimension; Dependencies = []
                     }
                     Ok (TDIEnumIdx (name, idx, raw, chasedBody))
-            | _ -> Ok (TDIAlias (lowerTypeExpr env body))
+            | _ ->
+                // `type B = Field<min=0.0, max=1.0>` hides the bound in the
+                // alias BODY, where no use site can see it — the annotation
+                // `x: B` carries no TyBounded at all, so today the bound is
+                // silently dropped. Catch it at the declaration.
+                match boundedAggregateError env (sprintf "type alias '%s'" name) body with
+                | Some e -> Error e
+                | None -> Ok (TDIAlias (lowerTypeExpr env body))
         defInfoResult |> Result.map (fun defInfo -> registerTypeDef name defInfo env)
 
     | TyDeclStruct (name, typeParams, fields, constraints, isStatic) ->
@@ -11193,6 +11579,25 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
         // A struct field STORES a value, so its declared type has to name a
         // real tag; a wildcard there would erase the discipline (see
         // irTypeHasTagWildcard).
+        // A field's bounds do NOT survive as a TyBounded — the parser
+        // normalizes BOTH spellings (`f: T<min=a, max=b>` and `f: T in lo ..
+        // hi`) into `FieldDecl.Bound` and leaves `f.Type` bare. So the field
+        // check reads the Bound slot and classifies the field's own type,
+        // rather than walking for a TyBounded that is no longer there.
+        // Without it, `structConjuncts` desugars the bound into a conjunct and
+        // the failure surfaces as "where-constraint must be a boolean
+        // expression, got Array<Bool like ...>" — a constraint the user never
+        // wrote.
+        let boundedAggregateField =
+            fields |> List.tryPick (fun f ->
+                let site = sprintf "struct %s, field '%s'" name f.Name
+                let fromBound =
+                    if f.Bound.IsSome then
+                        boundedAggregateNoun env f.Type
+                        |> Option.map (fun noun -> BoundsOnAggregate (site, noun, "the field's value"))
+                    else None
+                fromBound
+                |> Option.orElseWith (fun () -> boundedAggregateError env site f.Type))
         let wildcardField =
             fields |> List.tryPick (fun f ->
                 if irTypeHasTagWildcard (lowerTypeExpr env f.Type)
@@ -11253,6 +11658,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     | _ -> None
                 | _ -> None)
         match memberMisuse |> Option.orElse wildcardField
+                           |> Option.orElse boundedAggregateField
                            |> Option.orElse staticFieldErr
                            |> Option.orElse invertedBoundErr with
         | Some e -> Error e

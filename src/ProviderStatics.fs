@@ -75,6 +75,7 @@ let netcdfSpec : Blade.ProviderRegistry.ProviderSpec = {
         Blade.NetcdfProvider.readVarData path varName |> Result.map netcdfAdapt
     GenReadVar = Blade.NetcdfProvider.CppNetcdf.genReadVar
     GenReadPacked = None  // packed (SymIdx/AntisymIdx) NetCDF I/O: future arc
+    ReadWreathPool = None // OrbIdx (iterated-wreath) NetCDF I/O: same arc, refused
     GenReadCompoundVar = Some Blade.NetcdfProvider.CppNetcdf.genReadCompoundVar
     GenWriteVar = Blade.NetcdfProvider.CppNetcdf.genWriteVar
     GenStreamOpen = Some Blade.NetcdfProvider.CppNetcdf.genStreamOpen

@@ -1,0 +1,40 @@
+// TEST: OrbIdx Wreath Decompact Riemann
+// Full decompaction of the MIXED-CHARACTER class OrbIdx<[(2,-),(2,+)], 3>: the
+// signed and zero-set half of docs/plan-orbidx-decompaction.md §2 exercised
+// over the whole dense tensor at once, where 207 covers only the '+' case.
+// §6's two named spot checks are structural here rather than sampled -- every
+// negated mirror cell and every zero-set cell in the 3^4 = 81-cell image is
+// pinned, against a 6-cell pool.
+//
+// THE ORACLE IS INDEPENDENT OF THE PACK (§6): the pins are the LOGICAL tensor
+// R(i,j,k,l) = B(i,j) * B(k,l) with B(i,j) = A[i] - A[j], evaluated at every
+// raw tuple -- never read back through the pool or its order. The zero rows are
+// therefore an assertion about B(i,i) = 0, and they agree with the class's zero
+// set only because the deduced class is SOUND for this kernel (multiplication
+// is odd in each argument separately; see 213).
+//
+// CARDINALITY, the cheap §6 invariant: 3 -> C(3,2) = 3 -> C(4,2) = 6 pool cells
+// against 81 dense, and of those 81 exactly 4*4 = 16 are nonzero (the 4
+// off-diagonal (i,j) pairs times the 4 off-diagonal (k,l) pairs), which is what
+// the six orbits of size 2 or 4 sum to.
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let B = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let h = lambda(p, q) where comm(p, q) -> p * q
+let R = method_for(B, B) <@> h |> compute
+let D = decompact(R, 0)
+// B(i,j) = A[i] - A[j] as a full 3x3 = [[0,-1,-2],[1,0,-1],[2,1,0]], so
+// D[i][j] is B(i,j) times the flattened (k,l) plane [0,-1,-2,1,0,-1,2,1,0].
+// Rows i = j are the zero set (B(i,i) = 0); D[1][0] is D[0][1] negated, which
+// is the '-' level's character made visible one row at a time.
+// EXPECT: B = [-1, -2, -1]
+// EXPECT: R = [1, 2, 1, 4, 2, 1]
+// EXPECT: D[0][0] = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+// EXPECT: D[0][1] = [0, 1, 2, -1, 0, 1, -2, -1, 0]
+// EXPECT: D[0][2] = [0, 2, 4, -2, 0, 2, -4, -2, 0]
+// EXPECT: D[1][0] = [0, -1, -2, 1, 0, -1, 2, 1, 0]
+// EXPECT: D[1][1] = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+// EXPECT: D[1][2] = [0, 1, 2, -1, 0, 1, -2, -1, 0]
+// EXPECT: D[2][0] = [0, -2, -4, 2, 0, -2, 4, 2, 0]
+// EXPECT: D[2][1] = [0, -1, -2, 1, 0, -1, 2, 1, 0]
+// EXPECT: D[2][2] = [0, 0, 0, 0, 0, 0, 0, 0, 0]
