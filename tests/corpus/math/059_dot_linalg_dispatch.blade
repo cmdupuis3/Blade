@@ -1,0 +1,41 @@
+// TEST: Dot product through the blade_linalg dispatch layer
+// Phase 5b of docs/plan-cpp-perf-exploitation.md. `reduce(<unforced zip under
+// `*`>, (+))` over two rank-1 f64 arrays IS an inner product, and it is emitted
+// as ONE `blade_linalg::blade_dot` call instead of the fused accumulator loop.
+//
+// Every value is integer-valued in f64 and exact in binary, so the compiled
+// binary, the interpreter and the shim's native fallback must agree BIT for BIT
+// — which is what the `interp math` differential asserts. The shim's native arm
+// is the emitted loop verbatim (one accumulator, seeded from the SAME seed,
+// terms `x[i]*y[i]` added in ascending order), so byte-identity is by
+// construction, not by luck.
+//
+// The three cases pin the three things the pattern is sensitive to:
+//   s   — the plain 2-arg form; seed is `(+)`'s implicit identity 0.0
+//   s3  — the 3-arg form; seed is the user's `init`, carried into the shim
+//   sq  — both operands the SAME array (a self-dot); one pointer, two roles
+//
+//   s  = 1*2 + 2*3 + 3*4 + 4*5 + 5*6 = 2+6+12+20+30 = 70
+//   s3 = 100 + 70 = 170
+//   sq = 1+4+9+16+25 = 55
+//
+// The `sq` case raises BL4010 ("kernel deduces commutative and both positions
+// receive the same array") — EXPECTED and harmless: the advice is about compact
+// symmetric OUTPUT storage, and a rank-1 co-iteration zip has no symmetric
+// output to opt into. The case is here because one array in two operand roles
+// is the shape a naive emitter would try to declare a pointer for twice.
+let x: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let y: Array<Float64 like Idx<5>> = [2.0, 3.0, 4.0, 5.0, 6.0]
+
+let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b
+let s = reduce(P, (+))
+
+let P3 = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b
+let s3 = reduce(P3, (+), 100.0)
+
+let Q = method_for(zip(x, x)) <@> lambda(a: Float64, b: Float64) -> a * b
+let sq = reduce(Q, (+))
+
+// EXPECT: s = 70
+// EXPECT: s3 = 170
+// EXPECT: sq = 55

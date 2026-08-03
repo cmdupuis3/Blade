@@ -3617,20 +3617,23 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // conj_scalar). Use conj_scalar to keep one spelling for real/complex.
         let mulTerm i j =
             sprintf "%s[%s][__gk] * nested_array_utilities::conj_scalar(%s[%s][__gk])" lName i rName j
-        // Phase 5 (docs/plan-cpp-perf-exploitation.md): the dispatch decision is
-        // NOT made here. LinAlgPatterns classifies the node; if it yields a
-        // routed call we emit ONE `blade_linalg::` call and the shim header
-        // decides cblas-vs-native at C++ compile time (driven by Build.fs's
-        // -DBLADE_HAS_BLAS). There is no longer a BLADE_BLAS-sensitive codegen
-        // gate, so the emitted text for a given program is the same on every
-        // machine.
+        // Phase 5 + 5c (docs/plan-cpp-perf-exploitation.md): the dispatch
+        // decision is NOT made here. LinAlgPatterns classifies the node and
+        // `shimEntryPoint` applies the BLAS availability gate; a routed call
+        // emits ONE `blade_linalg::` call, and NO route emits the scalar loops
+        // below.
         //
-        // classify returns None for complex (zherk/zgemm) and float32
-        // (ssyrk/sgemm) operands — exactly the restriction the pre-shim BLAS
-        // lowering carried — and those keep the scalar loops below. Output
-        // allocation/layout is IDENTICAL on both paths (packed symmetric for
-        // same-array, dense otherwise); the shim writes through the row
-        // skeleton, so Blade storage is unchanged either way.
+        // The scalar loops are therefore the DEFAULT path, not a leftover:
+        // BLAS is default-off, so an ordinary build takes them, and they are
+        // the single copy of this arithmetic the interpreter and pinned-oracle
+        // differentials cover. `shimEntry = None` arises from either reason —
+        // gate off, or a shape outside the shim's f64 domain (complex
+        // zherk/zgemm, float32 ssyrk/sgemm — exactly the restriction the
+        // pre-shim BLAS lowering carried) — and both land here.
+        //
+        // Output allocation/layout is IDENTICAL on both paths (packed
+        // symmetric for same-array, dense otherwise); the shim writes through
+        // the row skeleton, so Blade storage is unchanged either way.
         let linalgCall = Blade.LinAlgPatterns.classify (IRGram (lExpr, rExpr, sameArray))
         let shimEntry =
             linalgCall |> Option.bind Blade.LinAlgPatterns.shimEntryPoint
@@ -3713,16 +3716,19 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     // A : m x k, B : k x n -> DENSE m x n. No conjugation, no symmetry claim
     // (A*A is not symmetric), so unlike gram there is exactly one mode.
     //
-    // Phase 5 of docs/plan-cpp-perf-exploitation.md. The typechecker restricts
-    // both operands to real Float64 (inferMatmul), which is exactly the shim's
-    // v1 domain, so LinAlgPatterns.classify always routes — the scalar fallback
-    // below exists only so a future widening of the surface type (f32/complex)
-    // degrades to loops rather than to a wrong emission.
+    // Phase 5 + 5c of docs/plan-cpp-perf-exploitation.md. The typechecker
+    // restricts both operands to real Float64 (inferMatmul), so the shape is
+    // always inside the shim's domain and `shimEntry` is decided purely by the
+    // BLAS AVAILABILITY GATE (`LinAlgPatterns.shimEntryPoint`). Gate off — the
+    // default — emits the triple loop below; gate on emits the dispatch call.
     //
-    // BYTE-IDENTITY: the fallback's accumulation order (t ascending, one local
-    // accumulator seeded from the element zero) is the same order the shim's
-    // native fallback and the interpreter's `matmulArray` use, and the same
-    // order the synthesized Blade triple loop this route replaced used.
+    // BYTE-IDENTITY: the loop's accumulation order (i, j, t all ascending, one
+    // local accumulator per output cell seeded from the element zero) is
+    // exactly the interpreter's `Interp/ArrayOps.matmulArray` order, and the
+    // same order the synthesized Blade triple loop this route replaced used.
+    // Since Phase 5c this is the ONLY copy of that arithmetic in the system —
+    // the shim carries no fallback — so `interp math` tests the very code an
+    // ordinary build runs, rather than a sibling of it.
     let lName = exprToCppCore subst names lExpr
     let rName = exprToCppCore subst names rExpr
     (match inferExprType lExpr, inferExprType rExpr with
@@ -5628,6 +5634,91 @@ let tryGenFlatElementwiseNest
                     ind (indent + 2) + sprintf "%s[__fk] = %s;" (poolOf codeGen.OutputName) body.CppExpr
                     ind indent + "}" ])
         | Some _ -> None
+    | _ -> None
+
+
+/// Phase 5b — L2 dispatch at the apply-combinator site. Consults
+/// `LinAlgPatterns.(|BlasL2|_|)`; on a match AND with the BLAS availability
+/// gate on (`shimEntryPoint`, Phase 5c), emits ONE `blade_linalg::` call in
+/// place of the whole per-row nest. Returns None — for a shape that does not
+/// match OR for a gate that is off — to fall through to the Phase 3 flat path
+/// and then to `genLoopNestStreamed`, both unchanged. The gate-off path is
+/// therefore the ordinary emitted nest, which is what the interpreter
+/// differential already covers.
+///
+/// CodeGen decides NOTHING about the shape here: the pattern owns which nests
+/// are gemv, and this function only turns the resulting descriptor into text —
+/// resolving the vector operand's name through the same map the kernel body
+/// would have used, and computing the two extents the same way the nest's own
+/// bounds are computed.
+///
+/// Test-mode stand-down, for the same reason Phase 3 stands down: the
+/// omp-coverage instrumentation writes a per-thread marker inside the innermost
+/// body and reports ground truth about the nest that RAN. A dispatched call has
+/// no innermost body, so `blade test omp-coverage` keeps measuring exactly the
+/// nest it always has.
+let tryGenLinAlgNest
+        (streamed: Map<string, ProviderReadSpec>)
+        (operandTypes: IRArrayType list)
+        (codeGen: LoopNestCodeGen)
+        (outerNames: Map<int, string>)
+        (indent: int) : string list option =
+    if ompTestModeEnabled () then None
+    elif (planHaloCarousel streamed codeGen outerNames).IsSome then None
+    else
+    match (Map.count streamed, codeGen.OmpRequested, operandTypes, codeGen) with
+    | Blade.LinAlgPatterns.BlasL2 call ->
+        match Blade.LinAlgPatterns.shimEntryPoint call with
+        | None -> None
+        | Some entry ->
+            // Name map: enclosing scope first, captures filling only ids it does
+            // not know — the same precedence rule genLoopNestStreamed and the
+            // flat path use, so the vector resolves to the identifier the
+            // kernel body would have rendered.
+            let nameMap =
+                codeGen.Captures
+                |> List.fold (fun acc (c: CaptureInfo) ->
+                        if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc)
+                   outerNames
+            let resolve src =
+                match src with
+                | Blade.LinAlgPatterns.FromNestArray n
+                | Blade.LinAlgPatterns.FromNestOutput n -> Some n
+                | Blade.LinAlgPatterns.FromKernelRef (IRVar (id, _)) -> Map.tryFind id nameMap
+                | Blade.LinAlgPatterns.FromKernelRef _ -> None
+            let named =
+                call.NestOperands |> List.map (fun (role, src) -> (role, resolve src))
+            let pick role =
+                named |> List.tryPick (fun (r, n) -> if r = role then n else None)
+            match pick Blade.LinAlgPatterns.RoleA,
+                  pick Blade.LinAlgPatterns.RoleB,
+                  pick Blade.LinAlgPatterns.RoleC with
+            | Some aName, Some xName, Some yName ->
+                // m = the row loop's own bound (literal after Phase 4 shape
+                // monomorphization, else the runtime extent read) — byte-for-
+                // byte what the nest would have emitted.
+                let mExtent =
+                    genLoopBoundExpr (compoundArrayNamesOf codeGen.Bindings)
+                                     (List.head codeGen.Bindings)
+                // n = A's TRAILING extent: the peel gives the row
+                // `A.extents + 1`, and prodsum bounds itself by that row's
+                // extents[0]. Rendered from the operand TYPE when literal,
+                // matching how the nest renders its own bounds.
+                let nExtent =
+                    match operandTypes with
+                    | [ aTy ] ->
+                        (match (List.item 1 aTy.IndexTypes).Extent with
+                         | IRLit (IRLitInt n) -> sprintf "%d" n
+                         | _ -> sprintf "%s.extents[1]" aName)
+                    | _ -> sprintf "%s.extents[1]" aName
+                (linalgUsedCell ()).Value <- true
+                // BLOCK comment, not `//`: an inline-form materialization
+                // space-joins its lines into a single-line IIFE, where a line
+                // comment would swallow the rest of the statement.
+                Some [ String.replicate indent "    "
+                       + sprintf "/* linalg dispatch: gemv y = %s * %s (per-row prodsum fiber) */ %s(%s, %s, %s.data, %s.data, %s.data);"
+                             aName xName entry mExtent nExtent aName xName yName ]
+            | _ -> None
     | _ -> None
 
 
@@ -8817,7 +8908,16 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
             // parallel to codeGen.InputArrayNames, which is what lets the
             // detector PROVE per-operand storage-class and extent agreement
             // rather than assume it (Blade's unify does not compare extents).
+            // Phase 5b sits AHEAD of Phase 3 in the same shortcircuit chain: a
+            // recognised BLAS shape is a strictly stronger rewrite than a flat
+            // traversal, and the two cannot both match anyway (gemv's operand
+            // is rank 2 over a depth-1 nest, which is exactly the fiber
+            // argument Phase 3's `ArrayRank = depth` gate rules out).
             let loopCode =
+                match tryGenLinAlgNest streamedMap info.ArrayTypes codeGen
+                                       tempCtx.VarNames tempCtx.Indent with
+                | Some la -> la
+                | None ->
                 match tryGenFlatElementwiseNest streamedMap info.ArrayTypes codeGen
                                                 tempCtx.VarNames tempCtx.Indent with
                 | Some flat -> flat
@@ -12408,10 +12508,60 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                         if chunkable then
                             { cg0 with FoldChunk = Some { ElemCpp = elemStr; Tag = sanitizeCppName name } }
                         else cg0
+                    // Phase 5b — L1 dispatch. `reduce(<unforced zip under *>, (+))`
+                    // over two rank-1 f64 pools IS a dot product; the pattern owns
+                    // the recognition, this site only spells the call. With the
+                    // Phase 5c BLAS gate off (the default) `shimEntryPoint`
+                    // yields None and the fold nest below is emitted unchanged.
+                    //
+                    // PRECEDENCE, enforced by the fact passed in: an `omp`-licensed
+                    // fold kernel keeps Phase 2's chunked parallel fold. The
+                    // pattern declines on `FoldRequestedOmp`, so a licensed fold
+                    // can never be silently serialized by this route.
+                    //
+                    // Stands down in omp test mode for the same reason Phase 3
+                    // does — the coverage instrumentation reports on the nest that
+                    // ran, and a dispatched call has no nest.
+                    let dotCall =
+                        if ompTestModeEnabled () then None
+                        else
+                            let facts : Blade.LinAlgPatterns.DotFoldFacts =
+                                { FoldIsBuiltinAdd = (foldKernelBuiltinOp callable = Some IRAdd)
+                                  FoldRequestedOmp = callable.IsOmpParallel }
+                            match (0, facts, single.ArrayTypes, cg) with
+                            | Blade.LinAlgPatterns.BlasL1 call ->
+                                Blade.LinAlgPatterns.shimEntryPoint call
+                                |> Option.map (fun entry -> (call, entry))
+                            | _ -> None
                     let code =
-                        wrapperLines
-                        @ [sprintf "%s%s %s = %s;" ind elemStr name seedStr]
-                        @ genLoopNest cg ctx.VarNames ctx.Indent
+                        match dotCall with
+                        | Some (call, entry) ->
+                            let nameOf role =
+                                call.NestOperands
+                                |> List.tryPick (fun (r, src) ->
+                                    if r <> role then None
+                                    else match src with
+                                         | Blade.LinAlgPatterns.FromNestArray n -> Some n
+                                         | _ -> None)
+                            match nameOf Blade.LinAlgPatterns.RoleA,
+                                  nameOf Blade.LinAlgPatterns.RoleB with
+                            | Some xName, Some yName ->
+                                (linalgUsedCell ()).Value <- true
+                                let nExtent =
+                                    genLoopBoundExpr (compoundArrayNamesOf cg.Bindings)
+                                                     (List.head cg.Bindings)
+                                // BLOCK comment — see materializeGramForm's note.
+                                [ sprintf "%s/* linalg dispatch: dot(%s, %s) = reduce(%s * %s, (+)) */ %s %s = %s(%s, %s.data, %s.data, %s);"
+                                      ind xName yName xName yName
+                                      elemStr name entry nExtent xName yName seedStr ]
+                            | _ ->
+                                wrapperLines
+                                @ [sprintf "%s%s %s = %s;" ind elemStr name seedStr]
+                                @ genLoopNest cg ctx.VarNames ctx.Indent
+                        | None ->
+                            wrapperLines
+                            @ [sprintf "%s%s %s = %s;" ind elemStr name seedStr]
+                            @ genLoopNest cg ctx.VarNames ctx.Indent
                     (code, ctx')
                 | _ :: _ ->
                     // Fused tree: ONE merged nest, one scalar accumulator per

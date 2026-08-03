@@ -291,21 +291,26 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
                               | None -> sprintf " -L\"%s\" -lnetcdf" (Path.Combine(dir, "lib")))
                      incFlag + linkFlag)
 
-        // Linalg-dispatch programs emit `#include "blade_linalg.hpp"` (Phase 5
-        // of docs/plan-cpp-perf-exploitation.md) and call blade_linalg::* for
-        // gram / matmul. The header is dependency-FREE by default: without the
-        // define it compiles native fallbacks and links nothing extra. BLAS is
-        // opt-in and is turned on HERE, not in codegen — one `-DBLADE_HAS_BLAS`
-        // flips every `#ifdef` in the shim, and the same flag decision carries
-        // the include/link flags, so the two can never disagree.
+        // Linalg-dispatch programs emit `#include "blade_linalg.hpp"` (Phases
+        // 5 / 5b / 5c of docs/plan-cpp-perf-exploitation.md) and call
+        // blade_linalg::* for gram / matmul / dot / gemv.
         //
-        // The gate is the pre-existing one, unchanged in meaning:
-        //   - BLADE_BLAS=1|on   -> force on
-        //   - BLADE_BLAS=0|off  -> force off
-        //   - unset             -> follow OPENBLAS_DIR (set = on)
-        // Default-off for BLAS is deliberate: BLAS may differ in the last ULP
-        // and the interp/oracle differentials demand byte-identical output, so
-        // native remains the verification truth.
+        // SINCE PHASE 5c THE HEADER IS BLAS-ONLY — it has no native fallbacks
+        // and `#error`s without the define. That is safe because CODEGEN now
+        // consults the SAME gate this line does
+        // (`LinAlgPatterns.blasAvailable`, the one definition) and writes the
+        // include only when the gate is on: within one process, "include
+        // present" and "gate on" cannot disagree, so the define is always
+        // there when the header is. An emit in one process and a compile in
+        // another with a different gate WILL fail — loudly, at the `#error`,
+        // which is the intended behaviour and strictly better than silently
+        // compiling different arithmetic than was emitted for.
+        //
+        // Gate semantics (BLADE_BLAS=1|on / 0|off / unset -> follow
+        // OPENBLAS_DIR) live in `blasAvailable`; default-off is deliberate,
+        // because BLAS may differ in the last ULP and the interp/oracle
+        // differentials demand byte-identical output — Blade's own emitted
+        // loops remain the verification truth.
         //
         // Resolution scheme, same as NETCDF_DIR above:
         //   - OPENBLAS_DIR set: add -I<dir>\include, and link the DLL in
@@ -317,14 +322,7 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         //     an MSYS2 pacman install).
         let usesLinalgShim =
             try (File.ReadAllText cppFullPath).Contains "#include \"blade_linalg.hpp\"" with _ -> false
-        let blasGateOn =
-            match System.Environment.GetEnvironmentVariable("BLADE_BLAS") with
-            | "1" | "on" -> true
-            | "0" | "off" -> false
-            | _ ->
-                match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
-                | null | "" -> false
-                | _ -> true
+        let blasGateOn = Blade.LinAlgPatterns.blasAvailable ()
         // Split into a COMPILE half (define + -I, which must precede the source
         // so the shim's `#include <cblas.h>` resolves) and a LINK half (the
         // library, which must FOLLOW the source in linker order).
