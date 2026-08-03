@@ -291,6 +291,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // says what it documents. Pure codegen string checks — no toolchain, no
     // BLAS — so it runs unconditionally. (Also `blade test linalg`.)
     let linalgEmit = Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()
+    // The runtime half of the same layer (Phase 5d): the shim's contiguity
+    // probe must REFUSE the n = 2 packed-symmetric skeleton, whose row starts
+    // are indistinguishable from a dense 2x2's over a pool one cell shorter.
+    // Compiles and runs cpp/linalg_probe_tests.cpp, so it needs g++ and reports
+    // Skipped without it — but needs no BLAS (it includes the BLAS-free
+    // blade_linalg_views.hpp). (Also `blade test linalg`.)
+    let linalgProbe = Blade.Tests.LinAlgTests.runLinAlgProbeTests ()
     // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
     // regions when cores are available. Opt-in (see FullSuiteOptions).
     let omp =
@@ -371,7 +378,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit
+          yield ompPragma; yield linalgEmit; yield linalgProbe
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

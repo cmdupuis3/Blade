@@ -37,17 +37,20 @@
 // is default-OFF and why Blade's own loops remain the verification truth.
 //
 // -------------------------------------------------------------------------
-// LAYOUT CONTRACT
+// LAYOUT / STAGING — see blade_linalg_views.hpp
 // -------------------------------------------------------------------------
-// Blade arrays are row-pointer skeletons over a single contiguous DFS-ordered
-// pool (nested_array_utilities::allocate). For a DENSE rank-2 array that means
-// `rows[i] == pool + i * trailing_extent`, so the pool base can be handed to
-// BLAS directly with `ld = trailing extent` and NO staging copy. That is not
-// universally true (compact/triangular pools, ragged rows, sub-views), so the
-// adapters PROBE for it (`row_major_base`) and stage a copy only when the probe
-// fails. The staging copy reads `rows[i][k]` — the identical subscript Blade's
-// own emission uses — so a staged operand feeds the arithmetic exactly the
-// values the loop path would have consumed, whatever the storage class.
+// The contiguity probe (`row_major_base`) and the two staging views live in
+// `blade_linalg_views.hpp`, which this header includes. They are pure pointer
+// logic with no BLAS dependency, and they are split out for exactly that
+// reason: `cpp/linalg_probe_tests.cpp` exercises them on machines with no BLAS
+// at all, while every ENTRY POINT below stays behind the guard. That header
+// also carries the LAYOUT CONTRACT and the rectangular-rows PRECONDITION, and
+// documents why the probe's `pool_cells` capacity bound is not redundant with
+// its row-major geometry test (Phase 5d).
+//
+// Each adapter below therefore takes, per skeleton operand, that operand's
+// allocated pool leaf count. The emitter supplies it (CodeGen's
+// `denseCellCountExpr`) because nothing reachable from a `double**` can.
 //
 // SCOPE: f64 only. Complex (zherk/zgemm) and f32 (ssyrk/sgemm) keep the
 // compiler's scalar loops. Entry points, by the plan phase that added them:
@@ -60,6 +63,8 @@
 // NATIVE — bandwidth-bound, the Phase 3 flat loop already vectorises them), and
 // LAPACK (Phase 6).
 
+#include "blade_linalg_views.hpp"
+
 #ifndef BLADE_HAS_BLAS
 #error "blade_linalg.hpp requires -DBLADE_HAS_BLAS: the Blade compiler emits native loops when BLAS is unavailable; this call should not have been emitted"
 #endif
@@ -69,87 +74,6 @@
 #include <cblas.h>
 
 namespace blade_linalg {
-
-    // ========================================================================
-    // Skeleton <-> flat resolution
-    // ========================================================================
-
-    /// The contiguity probe. Returns the pool base iff the `m` rows of the
-    /// skeleton are EXACTLY the row-major layout `base + i * ld`; otherwise
-    /// nullptr, which tells the caller to stage a copy. O(m) against an
-    /// O(m*n*k) contraction, so it is free.
-    ///
-    /// Refusing is always safe; accepting is safe because `base[i * ld + k]`
-    /// is then the same object as `rows[i][k]` by construction.
-    template <typename T>
-    inline T* row_major_base(T** rows, size_t m, size_t ld) {
-        if (m == 0 || rows == nullptr) return nullptr;
-        T* base = rows[0];
-        if (base == nullptr) return nullptr;
-        for (size_t i = 1; i < m; i++)
-            if (rows[i] != base + i * ld) return nullptr;
-        return base;
-    }
-
-    /// Copy an m x ld logical window out of a row skeleton into a contiguous
-    /// buffer, reading `rows[i][k]` — the same subscript the pre-shim scalar
-    /// loops used, so a staged operand is value-identical to what those loops
-    /// consumed.
-    template <typename T>
-    inline void stage_in(T** rows, size_t m, size_t ld, T* dst) {
-        for (size_t i = 0; i < m; i++)
-            for (size_t k = 0; k < ld; k++)
-                dst[i * ld + k] = rows[i][k];
-    }
-
-    /// The inverse: scatter a contiguous m x ld buffer back through a row
-    /// skeleton.
-    template <typename T>
-    inline void stage_out(const T* src, size_t m, size_t ld, T** rows) {
-        for (size_t i = 0; i < m; i++)
-            for (size_t k = 0; k < ld; k++)
-                rows[i][k] = src[i * ld + k];
-    }
-
-    /// A read-only operand resolved to contiguous storage. Zero-copy when the
-    /// skeleton is already row-major contiguous.
-    struct in_view {
-        std::vector<double> buf;
-        const double* p;
-        in_view(double** rows, size_t m, size_t ld) {
-            double* base = row_major_base(rows, m, ld);
-            if (base != nullptr) { p = base; return; }
-            buf.resize(m * ld);
-            if (m != 0 && ld != 0) stage_in(rows, m, ld, buf.data());
-            p = buf.data();
-        }
-        in_view(const in_view&) = delete;
-        in_view& operator=(const in_view&) = delete;
-    };
-
-    /// A write-only result resolved to contiguous storage. Zero-copy when the
-    /// skeleton is already row-major contiguous (which every FRESH dense output
-    /// pool is); otherwise a staging buffer that `flush()` scatters back. The
-    /// buffer is NOT read-initialised from the skeleton — the routines below
-    /// all overwrite (beta = 0).
-    struct out_view {
-        std::vector<double> buf;
-        double** rows;
-        size_t m, ld;
-        double* p;
-        out_view(double** rows_, size_t m_, size_t ld_)
-            : rows(rows_), m(m_), ld(ld_) {
-            double* base = row_major_base(rows_, m_, ld_);
-            if (base != nullptr) { p = base; rows = nullptr; return; }
-            buf.resize(m_ * ld_);
-            p = buf.data();
-        }
-        void flush() {
-            if (rows != nullptr && m != 0 && ld != 0) stage_out(buf.data(), m, ld, rows);
-        }
-        out_view(const out_view&) = delete;
-        out_view& operator=(const out_view&) = delete;
-    };
 
     // ========================================================================
     // Level-1 / Level-2 cores — BLAS-shaped, flat pointers
@@ -183,12 +107,14 @@ namespace blade_linalg {
     ///
     /// BLAS needs contiguous storage, so this runs the same contiguity PROBE
     /// the L3 adapters use and stages only if the probe refuses. A fresh dense
-    /// Blade pool always passes, so the common case stages nothing.
+    /// Blade pool always passes, so the common case stages nothing. `Acells` is
+    /// A's allocated pool leaf count (see `row_major_base`); `x` and `y` are
+    /// rank-1 pools handed over directly, with no skeleton and hence no probe.
     inline void blade_gemv(size_t m, size_t n,
-                           double** Arows,
+                           double** Arows, size_t Acells,
                            const double* __restrict__ x,
                            double* __restrict__ y) {
-        in_view A(Arows, m, n);
+        in_view A(Arows, m, n, Acells);
         cblas_dgemv(CblasRowMajor, CblasNoTrans,
                     (blasint)m, (blasint)n, 1.0, A.p, (blasint)n,
                     x, 1, 0.0, y, 1);
@@ -286,8 +212,14 @@ namespace blade_linalg {
     /// inline BLAS branch did; the gate-off path never gets here — it writes
     /// the packed triangle directly from `materializeGramForm`'s own loops,
     /// with no staging at all.)
-    inline void blade_gram_same(size_t m, size_t n, double** Arows, double** Crows) {
-        in_view A(Arows, m, n);
+    ///
+    /// `Acells` is A's allocated pool leaf count (see `row_major_base`). C needs
+    /// none: the packed triangle is written through `Crows[i][jr]` with
+    /// jr < m-i, which is the packed row's own length, so C never goes through
+    /// a view.
+    inline void blade_gram_same(size_t m, size_t n, double** Arows, size_t Acells,
+                                double** Crows) {
+        in_view A(Arows, m, n, Acells);
         std::vector<double> Cfull(m * m);
         blade_syrk(/*upper*/true, /*trans*/false, m, n, 1.0, A.p, n, 0.0, Cfull.data(), m);
         for (size_t i = 0; i < m; i++)
@@ -296,12 +228,15 @@ namespace blade_linalg {
     }
 
     /// gram(A, B) = A * B^T for distinct real operands: A is m x n, B is p x n,
-    /// C is a dense m x p Blade array.
+    /// C is a dense m x p Blade array. The `*cells` arguments are each operand's
+    /// allocated pool leaf count (see `row_major_base`).
     inline void blade_gram_distinct(size_t m, size_t n, size_t p,
-                                    double** Arows, double** Brows, double** Crows) {
-        in_view A(Arows, m, n);
-        in_view B(Brows, p, n);
-        out_view C(Crows, m, p);
+                                    double** Arows, size_t Acells,
+                                    double** Brows, size_t Bcells,
+                                    double** Crows, size_t Ccells) {
+        in_view A(Arows, m, n, Acells);
+        in_view B(Brows, p, n, Bcells);
+        out_view C(Crows, m, p, Ccells);
         blade_gemm(/*transA*/false, /*transB*/true, m, p, n,
                    1.0, A.p, n, B.p, n, 0.0, C.p, p);
         C.flush();
@@ -309,12 +244,15 @@ namespace blade_linalg {
 
     /// matmul(A, B) = A * B for real operands: A is m x k, B is k x n, C is a
     /// dense m x n Blade array. The first-class `math.matmul` intrinsic's one
-    /// emission target.
+    /// emission target. The `*cells` arguments are each operand's allocated pool
+    /// leaf count (see `row_major_base`).
     inline void blade_matmul(size_t m, size_t k, size_t n,
-                             double** Arows, double** Brows, double** Crows) {
-        in_view A(Arows, m, k);
-        in_view B(Brows, k, n);
-        out_view C(Crows, m, n);
+                             double** Arows, size_t Acells,
+                             double** Brows, size_t Bcells,
+                             double** Crows, size_t Ccells) {
+        in_view A(Arows, m, k, Acells);
+        in_view B(Brows, k, n, Bcells);
+        out_view C(Crows, m, n, Ccells);
         blade_gemm(/*transA*/false, /*transB*/false, m, n, k,
                    1.0, A.p, k, B.p, n, 0.0, C.p, n);
         C.flush();

@@ -27,9 +27,21 @@
 // BLADE_BLAS=1 makes codegen emit shim CALLS, which needs no OpenBLAS
 // installation because nothing here is compiled. (Compiling them is the
 // corpus's job, and the corpus stays default-off.)
+//
+// The SECOND block in this file (`runLinAlgProbeTests`, also under `blade test
+// linalg`) is the one thing emitted text cannot show: what the shim's runtime
+// contiguity probe DECIDES. It compiles and runs cpp/linalg_probe_tests.cpp, so
+// it needs g++ and skips without it — but it needs no BLAS, because the probe
+// and the staging views live in `blade_linalg_views.hpp`, the BLAS-free half of
+// the layer (Phase 5d).
 module Blade.Tests.LinAlgTests
 
+open System
+open System.IO
+open System.Diagnostics
+open System.Runtime.InteropServices
 open Blade
+open Blade.Build
 open Blade.Lowering
 open Blade.Tests.TestHarness
 
@@ -81,15 +93,30 @@ let private emissionCases : (string * bool * string * string list * string list)
     [ // gram(A, A) — the symmetric rank-k update. Blade's result is PACKED
       // upper-triangular storage, which is why the route is its own adapter
       // rather than a bare `blade_syrk` call.
+      //
+      // Each positive case also pins the POOL CAPACITY argument that follows
+      // every skeleton operand (Phase 5d). The shim's contiguity probe cannot
+      // derive a pool's cell count from a row skeleton — row pointers give row
+      // starts, not row lengths — so the emitter supplies it, and an emission
+      // that dropped it would restore the n = 2 packed-symmetric false accept
+      // with no runtime symptom. cpp/linalg_probe_tests.cpp proves what the
+      // probe then does with it.
       ("gram_same_array_routes_to_syrk_adapter", true,
        realMat + "let G = gram(A, A)\n",
-       [ shimInclude; "blade_linalg::blade_gram_same("; "linalg dispatch: gram(A, A)" ],
+       [ shimInclude; "blade_linalg::blade_gram_same("; "linalg dispatch: gram(A, A)"
+         "A.data, (A.extents[0] * A.extents[1])" ],
        [ "cblas_"; "#include <cblas.h>" ])
       // gram(A, B) — distinct operands, dense result: C = A * B^T, a gemm with
       // B transposed.
+      // The dense OUTPUT's capacity is not inferred from a type — it is
+      // allocated m x p a few lines above the call, so the emitter states it
+      // directly as the extent product.
       ("gram_distinct_routes_to_gemm_adapter", true,
        realMat + realMatB + "let G = gram(A, B)\n",
-       [ shimInclude; "blade_linalg::blade_gram_distinct("; "linalg dispatch: gram(A, B)" ],
+       [ shimInclude; "blade_linalg::blade_gram_distinct("; "linalg dispatch: gram(A, B)"
+         "A.data, (A.extents[0] * A.extents[1])"
+         "B.data, (B.extents[0] * B.extents[1])"
+         "G.data, (A.extents[0] * B.extents[0])" ],
        [ "cblas_"; "#include <cblas.h>"; "blade_gram_same" ])
       // matmul — the first-class intrinsic. `__math_matmul` must NOT survive
       // into the output (it is a pre-inference marker), and no synthesized
@@ -99,7 +126,10 @@ let private emissionCases : (string * bool * string * string list * string list)
        "let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
        "let B: Array<Float64 like Idx<3>, Idx<2>> = [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]\n" +
        "let C = m.matmul(A, B)\n",
-       [ shimInclude; "blade_linalg::blade_matmul("; "linalg dispatch: matmul(A, B)" ],
+       [ shimInclude; "blade_linalg::blade_matmul("; "linalg dispatch: matmul(A, B)"
+         "A.data, (A.extents[0] * A.extents[1])"
+         "B.data, (B.extents[0] * B.extents[1])"
+         "C.data, (A.extents[0] * B.extents[1])" ],
        [ "cblas_"; "#include <cblas.h>"; "__math_matmul"; "double __math_1" ])
       // COMPLEX gram keeps the scalar loops: the shim's v1 domain is real f64
       // (dsyrk/dgemm), exactly the restriction the pre-shim BLAS lowering had.
@@ -170,8 +200,12 @@ let private emissionCases : (string * bool * string * string list * string list)
        + "let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) -> prodsum(row, xv) |> compute\n",
        [ shimInclude; "blade_linalg::blade_gemv("; "linalg dispatch: gemv y = A * xv"
          // m from the row loop's own bound, n from A's TRAILING extent — both
-         // literal after shape monomorphization, exactly as the nest would.
-         "blade_linalg::blade_gemv(3, 4, A.data, xv.data, yv.data)" ],
+         // literal after shape monomorphization, exactly as the nest would —
+         // and A's pool capacity, because gemv stages A through the same
+         // `in_view` the L3 adapters use (Phase 5d). `xv` and `yv` are rank-1
+         // pools handed over directly: no skeleton, hence no probe, hence no
+         // capacity argument.
+         "blade_linalg::blade_gemv(3, 4, A.data, (A.extents[0] * A.extents[1]), xv.data, yv.data)" ],
        // The NEST is gone: no row peel, no per-row output write. (The lifted
        // kernel lambda itself is still emitted as a now-unused function — it
        // always was, since the nest inlined the body rather than calling it —
@@ -328,3 +362,114 @@ let runLinAlgEmissionTests () : BlockResult =
 
     printFooter "LinAlg Dispatch" [sprintf "%d passed" passed; sprintf "%d failed" failed]
     { Block = "LinAlg Dispatch"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
+
+
+/// Run the standalone C++ contiguity-probe tests (cpp/linalg_probe_tests.cpp).
+///
+/// The emission block above proves gram/matmul/dot/gemv REACH the shim. This one
+/// proves what the shim's `row_major_base` then decides at runtime —
+/// specifically that the degenerate n = 2 packed-symmetric skeleton, whose row
+/// starts are identical to a dense 2x2's over a pool one cell shorter, is
+/// REFUSED rather than handed to BLAS (docs/plan-cpp-perf-exploitation.md,
+/// Phase 5d).
+///
+/// No value test can see this: the probe's accept and refuse arms are
+/// value-identical by construction, so a false accept produces correct output
+/// and an out-of-bounds read. The property is a C++ runtime invariant about
+/// pointer arithmetic, so it is tested in C++ against the SHIPPED headers —
+/// same category and same harness shape as `blade test alloc` (AllocTests.fs).
+///
+/// NEEDS g++, NOT BLAS. The probe test includes `blade_linalg_views.hpp`, the
+/// BLAS-free half of the layer, so it compiles and runs on a machine with no
+/// OpenBLAS — which is the whole point of that split. Returns Skipped = 1 when
+/// g++ is absent; never fails for toolchain reasons.
+let runLinAlgProbeTests () : BlockResult =
+    let blockName = "LinAlg Probe"
+    printHeader "LinAlg Contiguity Probe"
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "linalg_probe_tests.cpp")
+    let caps = capabilities.Value
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile C++ probe tests)."
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    elif not (File.Exists testSrc) then
+        eprintfn "linalg_probe_tests.cpp not found at: %s" testSrc
+        eprintfn "Check that Blade.fsproj copies cpp/linalg_probe_tests.cpp to the output dir."
+        { Block = blockName; Passed = 0; Failed = 1; Skipped = 0
+          FailedNames = ["linalg_probe_tests.cpp missing"] }
+    else
+        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        let exePath = Path.ChangeExtension(testSrc, exeExt)
+        // Compile IN cppDir so the `#include "blade_linalg_views.hpp"` resolves
+        // to the shipped header the codegen path deploys — a stale copy would
+        // defeat the point of running this at all. No -DBLADE_HAS_BLAS and no
+        // -I/-l: the views header needs none.
+        let args = sprintf "-std=c++17 %s -o \"%s\" \"%s\"" (optFlags ()) exePath testSrc
+        let psi = ProcessStartInfo("g++", args)
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        psi.WorkingDirectory <- cppDir
+        use cproc = Process.Start(psi)
+        let cOut = cproc.StandardOutput.ReadToEndAsync()
+        let cErr = cproc.StandardError.ReadToEndAsync()
+        let cExited = cproc.WaitForExit(60000)
+        if not cExited then
+            (try cproc.Kill(true) with _ -> ())
+            printfn "C++ compilation TIMED OUT (60s)"
+            printFooter blockName ["FAILED"]
+            { Block = blockName; Passed = 0; Failed = 1; Skipped = 0; FailedNames = ["<compile timeout>"] }
+        elif cproc.ExitCode <> 0 then
+            printfn "C++ compilation FAILED:"
+            printfn "%s" (cOut.Result + "\n" + cErr.Result)
+            printFooter blockName ["FAILED"]
+            { Block = blockName; Passed = 0; Failed = 1; Skipped = 0; FailedNames = ["<compile failed>"] }
+        else
+            let rpsi = ProcessStartInfo(exePath)
+            rpsi.RedirectStandardOutput <- true
+            rpsi.RedirectStandardError <- true
+            rpsi.UseShellExecute <- false
+            rpsi.CreateNoWindow <- true
+            rpsi.WorkingDirectory <- cppDir
+            use rproc = Process.Start(rpsi)
+            let rOut = rproc.StandardOutput.ReadToEndAsync()
+            let rErr = rproc.StandardError.ReadToEndAsync()
+            let rExited = rproc.WaitForExit(30000)
+            if not rExited then
+                (try rproc.Kill(true) with _ -> ())
+                rproc.WaitForExit(5000) |> ignore
+                printfn "linalg probe test binary TIMED OUT (30s)"
+            printf "%s" rOut.Result
+            if not (String.IsNullOrWhiteSpace rErr.Result) then eprintf "%s" rErr.Result
+            let outText = rOut.Result.Replace("\r\n", "\n")
+            let m =
+                System.Text.RegularExpressions.Regex.Match(
+                    outText, @"LINALG PROBE TESTS:\s*(\d+)/(\d+)\s*passed")
+            let pPassed = if m.Success then int m.Groups.[1].Value else 0
+            let pTotal = if m.Success then int m.Groups.[2].Value else 0
+            let failNames =
+                outText.Split('\n')
+                |> Array.choose (fun l ->
+                    let fm = System.Text.RegularExpressions.Regex.Match(l, @"\[FAIL\]:\s*(.+)$")
+                    if fm.Success then Some (fm.Groups.[1].Value.Trim()) else None)
+                |> Array.toList
+            let pFailed = if pTotal >= pPassed then pTotal - pPassed else failNames.Length
+            // Same doctrine as AllocTests: the summary line must be present
+            // before an exit 0 is read as a pass, so a binary that aborted
+            // before running any check cannot score a vacuous 0/0.
+            if not rExited then
+                printFooter blockName ["FAILED"]
+                { Block = blockName; Passed = 0; Failed = 1; Skipped = 0; FailedNames = ["<run timeout>"] }
+            elif not m.Success then
+                printFooter blockName ["FAILED"]
+                printfn "  no 'LINALG PROBE TESTS: p/n passed' summary in output -- cannot confirm any check ran"
+                { Block = blockName; Passed = 0; Failed = 1; Skipped = 0
+                  FailedNames = ["<no LINALG PROBE TESTS summary line>"] }
+            elif rproc.ExitCode = 0 then
+                printFooter blockName ["all passed"]
+                { Block = blockName; Passed = pPassed; Failed = 0; Skipped = 0; FailedNames = [] }
+            else
+                printFooter blockName ["FAILED"]
+                { Block = blockName; Passed = pPassed; Failed = max 1 pFailed; Skipped = 0
+                  FailedNames = (if failNames.IsEmpty then [sprintf "<exit %d>" rproc.ExitCode] else failNames) }

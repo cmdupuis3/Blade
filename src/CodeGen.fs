@@ -1522,6 +1522,43 @@ let rec evalDepIdxExtent (outerId: IRId) (i: int) (expr: IRExpr) : int option =
     | IRUnaryOp (IRNeg, e) -> evalDepIdxExtent outerId i e |> Option.map (fun n -> -n)
     | _ -> None
 
+/// The number of scalar cells an operand's backing pool is KNOWN to hold, as a
+/// C++ expression — or `"0"` when the storage class does not statically settle
+/// it. Emitted for every skeleton operand of a `blade_linalg::` adapter and
+/// consumed by the shim's `row_major_base` capacity bound (Phase 5d).
+///
+/// Why the emitter has to supply this. The shim's contiguity probe sees only
+/// `double**`, which gives row STARTS and never row LENGTHS, so it cannot tell
+/// a dense 2x2 (4 cells, rows at pool+0 / pool+2) from an n = 2 packed-symmetric
+/// pool (3 cells, rows at pool+0 / pool+2 — the same starts, one cell short).
+/// Both satisfy `rows[i] == base + i*ld` for ld = 2, and handing the packed
+/// pool's base to BLAS reads one element past it. The cell count is the only
+/// thing that separates them, and only the compiler knows the storage class.
+///
+/// `"0"` — refuse — is the deliberate answer for everything not provably dense
+/// rank-2: unknown storage must fall to staging, not to a guessed capacity.
+/// Today only dense operands can reach a linalg route at all (a compact one is
+/// refused at typecheck, BL4004), so this is the conservative arm of a check
+/// that is currently unreachable; it exists so a later widening of the surface
+/// cannot silently inherit the false accept.
+let private denseCellCountOfArray (arr: IRArrayType) (name: string) : string =
+    if arr.IsVirtual then "0" else
+    // Dense rank-2 <=> two stored slots, each a plain dense axis of rank 1.
+    // `IxDense` is the compiler's one classification of "plain dense index";
+    // a symmetry-like, compound, ragged or dependent slot lands in a sibling
+    // arm and yields "0" here.
+    let denseSlot (ix: IRIndexType) =
+        (match ix with IxDense -> true | _ -> false) && ix.Rank <= 1
+    match arr.IndexTypes with
+    | [ i0; i1 ] when denseSlot i0 && denseSlot i1 ->
+        sprintf "(%s.extents[0] * %s.extents[1])" name name
+    | _ -> "0"
+
+let private denseCellCountExpr (ty: IRType) (name: string) : string =
+    match ty with
+    | ArrayElem arr -> denseCellCountOfArray arr name
+    | _ -> "0"
+
 /// Convert IRExpr to C++ expression string
 let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
@@ -3638,6 +3675,12 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         let shimEntry =
             linalgCall |> Option.bind Blade.LinAlgPatterns.shimEntryPoint
         let useShim = shimEntry.IsSome
+        // Pool capacities for the shim's contiguity probe (Phase 5d). See
+        // `denseCellCountExpr`: the probe cannot derive these from the row
+        // skeleton, and without them an n = 2 packed-symmetric operand passes
+        // the row-major geometry over a pool one cell too short.
+        let lCells = denseCellCountExpr lTy lName
+        let rCells = denseCellCountExpr rTy rName
         if useShim then (linalgUsedCell ()).Value <- true
         if sameArray then
             // square m x m, symmetric/Hermitian upper-triangle storage
@@ -3663,8 +3706,8 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // SPACE-JOINED into a single-line IIFE at expression
                     // positions, where a line comment would swallow the rest of
                     // the statement.
-                    [ sprintf "/* linalg dispatch: gram(A, A) = A * A^T -> packed upper triangle */ %s(%s, %s, %s.data, %s.data);"
-                          entry mExtent nExtent lName varName ]
+                    [ sprintf "/* linalg dispatch: gram(A, A) = A * A^T -> packed upper triangle */ %s(%s, %s, %s.data, %s, %s.data);"
+                          entry mExtent nExtent lName lCells varName ]
                 | None ->
                     [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
                       sprintf "    for (size_t __gjr = 0; __gjr < %s - __gi; __gjr++) {" mExtent
@@ -3694,8 +3737,10 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             let loop =
                 match shimEntry with
                 | Some entry ->
-                    [ sprintf "/* linalg dispatch: gram(A, B) = A * B^T -> dense */ %s(%s, %s, %s, %s.data, %s.data, %s.data);"
-                          entry mExtent nExtent pExtent lName rName varName ]
+                    // The output's capacity is not inferred: it is allocated
+                    // dense right above, so its pool is exactly m * p cells.
+                    [ sprintf "/* linalg dispatch: gram(A, B) = A * B^T -> dense */ %s(%s, %s, %s, %s.data, %s, %s.data, %s, %s.data, (%s * %s));"
+                          entry mExtent nExtent pExtent lName lCells rName rCells varName mExtent pExtent ]
                 | None ->
                     [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
                       sprintf "    for (size_t __gj = 0; __gj < %s; __gj++) {" pExtent
@@ -3731,13 +3776,19 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     // ordinary build runs, rather than a sibling of it.
     let lName = exprToCppCore subst names lExpr
     let rName = exprToCppCore subst names rExpr
-    (match inferExprType lExpr, inferExprType rExpr with
+    let lTy = inferExprType lExpr
+    let rTy = inferExprType rExpr
+    (match lTy, rTy with
      | ArrayElem la, ArrayElem _ ->
         let outElemStr = irTypeToCpp la.ElemType
         let mExtent = sprintf "%s.extents[0]" lName
         let kExtent = sprintf "%s.extents[1]" lName
         let nExtent = sprintf "%s.extents[1]" rName
         let extentsName = sprintf "%s_extents" varName
+        // Pool capacities for the shim's contiguity probe — see
+        // `denseCellCountExpr` and the note in materializeGramForm.
+        let lCells = denseCellCountExpr lTy lName
+        let rCells = denseCellCountExpr rTy rName
         let linalgCall = Blade.LinAlgPatterns.classify (IRMatmul (lExpr, rExpr))
         let shimEntry = linalgCall |> Option.bind Blade.LinAlgPatterns.shimEntryPoint
         if shimEntry.IsSome then (linalgUsedCell ()).Value <- true
@@ -3752,8 +3803,10 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
             match shimEntry with
             | Some entry ->
                 // Block comment, not `//` — see the note in materializeGramForm.
-                [ sprintf "/* linalg dispatch: matmul(A, B) = A * B -> dense */ %s(%s, %s, %s, %s.data, %s.data, %s.data);"
-                      entry mExtent kExtent nExtent lName rName varName ]
+                // As in gram-distinct: the output is allocated dense right
+                // above, so its pool is exactly m * n cells.
+                [ sprintf "/* linalg dispatch: matmul(A, B) = A * B -> dense */ %s(%s, %s, %s, %s.data, %s, %s.data, %s, %s.data, (%s * %s));"
+                      entry mExtent kExtent nExtent lName lCells rName rCells varName mExtent nExtent ]
             | None ->
                 [ sprintf "for (size_t __mi = 0; __mi < %s; __mi++) {" mExtent
                   sprintf "    for (size_t __mj = 0; __mj < %s; __mj++) {" nExtent
@@ -5711,13 +5764,22 @@ let tryGenLinAlgNest
                          | IRLit (IRLitInt n) -> sprintf "%d" n
                          | _ -> sprintf "%s.extents[1]" aName)
                     | _ -> sprintf "%s.extents[1]" aName
+                // Pool capacity for the shim's contiguity probe (Phase 5d).
+                // `blade_gemv` stages A through an `in_view`, exactly as the L3
+                // adapters do, so it needs the same bound — the pattern above
+                // already proved A dense rank-2, and this states the cell count
+                // through the one shared derivation rather than restating it.
+                let aCells =
+                    match operandTypes with
+                    | [ aTy ] -> denseCellCountOfArray aTy aName
+                    | _ -> "0"
                 (linalgUsedCell ()).Value <- true
                 // BLOCK comment, not `//`: an inline-form materialization
                 // space-joins its lines into a single-line IIFE, where a line
                 // comment would swallow the rest of the statement.
                 Some [ String.replicate indent "    "
-                       + sprintf "/* linalg dispatch: gemv y = %s * %s (per-row prodsum fiber) */ %s(%s, %s, %s.data, %s.data, %s.data);"
-                             aName xName entry mExtent nExtent aName xName yName ]
+                       + sprintf "/* linalg dispatch: gemv y = %s * %s (per-row prodsum fiber) */ %s(%s, %s, %s.data, %s, %s.data, %s.data);"
+                             aName xName entry mExtent nExtent aName aCells xName yName ]
             | _ -> None
     | _ -> None
 
@@ -5917,7 +5979,12 @@ let runtimeHeaderNames : string list =
       // all — but DEPLOYED unconditionally, like linearized_storage.hpp and
       // orbit_wreath_utilities.hpp, so the deploy/cleanup bookkeeping stays
       // uniform.
-      "blade_linalg.hpp" ]
+      "blade_linalg.hpp"
+      // The BLAS-free half of the same layer (Phase 5d): the contiguity probe
+      // and the two staging views. `blade_linalg.hpp` includes it, so it must
+      // be deployed beside it — and it is separately includable, which is what
+      // lets cpp/linalg_probe_tests.cpp run without BLAS.
+      "blade_linalg_views.hpp" ]
 
 /// Deploy every C++ runtime header next to a generated .cpp so its `#include`s
 /// resolve at g++ time with no -I flag. These are pre-existing static files in

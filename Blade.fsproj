@@ -365,6 +365,20 @@
       <Link>cpp/blade_linalg.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- The BLAS-free half of the linalg layer (contiguity probe + staging
+         views). Included by blade_linalg.hpp, and separately includable by
+         cpp/linalg_probe_tests.cpp so the probe's regression suite runs on
+         machines with no BLAS. -->
+    <None Include="src/cpp/blade_linalg_views.hpp">
+      <Link>cpp/blade_linalg_views.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Runtime tests for the contiguity probe, compiled and run by
+         Blade.Tests.LinAlgTests.runLinAlgProbeTests (`blade test linalg`). -->
+    <None Include="src/cpp/linalg_probe_tests.cpp">
+      <Link>cpp/linalg_probe_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

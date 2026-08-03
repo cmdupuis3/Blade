@@ -1197,12 +1197,20 @@ let private dispatchTest (rest: string list) : int =
         let failed = (runSurfacingTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "linalg" ] ->
-        // LinAlg dispatch emission (Phase 5): gram/matmul route to
-        // `blade_linalg::`, the shim header is included exactly when a route
+        // LinAlg dispatch emission (Phases 5 / 5b / 5c): gram/matmul/dot/gemv
+        // route to `blade_linalg::` when the BLAS gate is on and to Blade's own
+        // loops when it is off, the shim header is included exactly when a route
         // fires, and the routing policy table matches what it documents. Pure
         // codegen string checks; also part of the full suite.
-        let failed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
-        if failed = 0 then 0 else 1
+        //
+        // Plus (Phase 5d) the shim's runtime contiguity probe, which emitted
+        // text cannot reach: cpp/linalg_probe_tests.cpp pins that the n = 2
+        // packed-symmetric skeleton is REFUSED rather than handed to BLAS one
+        // cell past its pool. That arm needs g++ and skips without it, so the
+        // emission arm above stays the toolchain-free part of the verb.
+        let emitFailed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
+        let probeFailed = (Blade.Tests.LinAlgTests.runLinAlgProbeTests ()).Failed
+        if emitFailed + probeFailed = 0 then 0 else 1
     | [ "normalize" ] ->
         // IR-level F# unit tests for the type normalizer. Runs in-process,
         // no Blade source pipeline involved.
