@@ -2655,6 +2655,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprTranspose (a, _, _) -> [a]
         | TExprDecompact (a, _) -> [a]
         | TExprGram (l, r, _) -> [l; r]
+        | TExprMatmul (l, r) -> [l; r]
         | TExprArrayNegate a -> [a]
         | TExprArrayConjugate a -> [a]
         | TExprContains (a, v) -> [a; v]
@@ -3191,6 +3192,19 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // bare `cumulant(...)` no longer resolves (import-gated, not language-wide).
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__ppl_cumulant" }, [dExpr; kExpr]) when (lookupVar "__ppl_cumulant" env).IsNone ->
         inferCumulantProj env dExpr kExpr
+
+    // `math.matmul` as a FIRST-CLASS intrinsic (Phase 5 of
+    // docs/plan-cpp-perf-exploitation.md). The math elaborator rewrites a
+    // qualified `m.matmul(A, B)` to this internal marker after validating the
+    // declared shapes — so every surface-level rejection message is unchanged
+    // and a bare `matmul(...)` still does not resolve (import-gated, like
+    // `__ppl_cumulant` above). What changed is the RIGHT-HAND side: instead of
+    // a synthesized Blade triple loop specialised per (m, k, n), the call
+    // becomes an IR node that codegen emits as one `blade_linalg::blade_matmul`
+    // call. Blocked/microkernel GEMM is the one shape Blade-native loop code
+    // cannot approach, so it earns a first-class node rather than a desugaring.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__math_matmul" }, [aExpr; bExpr]) when (lookupVar "__math_matmul" env).IsNone ->
+        inferMatmul env aExpr bExpr
 
     | ExprKind.ExprApp (func, args) ->
         inferExpr env func |> Result.bind (fun tFunc ->
@@ -4536,6 +4550,57 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
                             mkArrayArrow [s0; s1] outElem None
                     Ok (mkTyped (TExprGram (tL, tR, sameArray)) resultType)))))
 
+
+and inferMatmul (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
+    // matmul(A, B): A is m x k, B is k x n -> DENSE m x n. Phase 5.
+    //
+    // This replaces a SYNTHESIZED Blade function whose signature was
+    // `(a: Array<Float64 like Idx<m>, Idx<k>>, b: Array<Float64 like Idx<k>,
+    // Idx<n>>) -> Array<Float64 like Idx<m>, Idx<n>>`. The checks below are
+    // that signature restated as an intrinsic rule, so a program the old path
+    // accepted is accepted here and produces the same result TYPE:
+    //   * two operands, each rank-2 with two PLAIN axes (the old params were
+    //     two separate Idx slots — a compact/symmetric rank-2 operand could
+    //     never have unified with them);
+    //   * both element types Float64 (the old params were Float64 matrices;
+    //     f32/complex/int failed to unify). It is also the shim's v1 domain:
+    //     blade_gemm is dgemm/native-double only.
+    //   * the contracted extents agree, when both are statically known.
+    // The math elaborator ALREADY rejects a shape mismatch with its own
+    // message before inference runs; these are the backstop for a marker that
+    // reaches the checker some other way.
+    inferExpr env leftE |> Result.bind (fun tL ->
+    inferExpr env rightE |> Result.bind (fun tR ->
+        requireArrayArgMinRank env tL "matmul" 2 |> Result.bind (fun lTy ->
+        requireArrayArgMinRank env tR "matmul" 2 |> Result.bind (fun rTy ->
+            let plainRank2 (a: IRArrayType) =
+                a.IndexTypes.Length = 2 && a.IndexTypes |> List.forall (fun ix -> ix.Rank <= 1)
+            if not (plainRank2 lTy) || not (plainRank2 rTy) then
+                Error (Other "matmul: both arguments must be rank-2 dense matrices (m x k and k x n, two plain index axes each).")
+            else
+            let isFloat64 (t: IRType) = match t with IRTScalar ETFloat64 -> true | _ -> false
+            if not (isFloat64 lTy.ElemType) || not (isFloat64 rTy.ElemType) then
+                Error (Other "matmul: both arguments must have Float64 elements (Array<Float64 like Idx<m>, Idx<k>>).")
+            else
+                let lInner = lTy.IndexTypes.[1].Extent
+                let rOuter = rTy.IndexTypes.[0].Extent
+                let innerMismatch =
+                    match tryEvalIntIR lInner, tryEvalIntIR rOuter with
+                    | Some a, Some b -> a <> b
+                    | _ -> false
+                if innerMismatch then
+                    Error (Other "matmul(A, B): A's trailing dimension and B's leading dimension must match.")
+                else
+                    // Dense m x n: two independent plain axes, exactly the
+                    // shape the synthesized routine's return type declared.
+                    let freshSlot (ext: IRExpr) =
+                        { Id = env.Builder.FreshId(); Rank = 1; Extent = ext
+                          Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                          Kind = SDimension; Dependencies = [] }
+                    let resultType =
+                        mkArrayArrow [ freshSlot lTy.IndexTypes.[0].Extent
+                                       freshSlot rTy.IndexTypes.[1].Extent ] lTy.ElemType None
+                    Ok (mkTyped (TExprMatmul (tL, tR)) resultType)))))
 
 
 // ----------------------------------------------------------------------------

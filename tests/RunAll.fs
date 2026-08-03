@@ -284,6 +284,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // string checks — no toolchain, no threads — so unlike the coverage block
     // below this runs unconditionally. (Also `blade test omp-pragma`.)
     let ompPragma = runOmpPragmaTests ()
+    // LinAlg dispatch emission (Phase 5 of docs/plan-cpp-perf-exploitation.md):
+    // verifies gram/matmul reach `blade_linalg::` rather than an inline loop or
+    // an inline cblas call, that the shim header is included exactly when a
+    // route fires (and NOT otherwise), and that the routing policy table still
+    // says what it documents. Pure codegen string checks — no toolchain, no
+    // BLAS — so it runs unconditionally. (Also `blade test linalg`.)
+    let linalgEmit = Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()
     // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
     // regions when cores are available. Opt-in (see FullSuiteOptions).
     let omp =
@@ -364,7 +371,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma
+          yield ompPragma; yield linalgEmit
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

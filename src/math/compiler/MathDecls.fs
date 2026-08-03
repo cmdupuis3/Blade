@@ -103,22 +103,23 @@ let blockE (stmts, fin) = syn (ExprBlock (stmts, fin))
 let tupleE (xs: Expr list) = syn (ExprTuple xs)
 
 // ============================================================================
-// matmul
+// matmul — REMOVED (Phase 5 of docs/plan-cpp-perf-exploitation.md)
 // ============================================================================
-
-/// matmul for fixed (m, k, n): C(i,j) = Σ_t A(i,t)·B(t,j). Flat mut
-/// accumulator + triple nest; the result is a nested literal of reads.
-let matmulDecl (name: string) (m: int) (k: int) (n: int) : FunctionDecl =
-    let body =
-        blockE (
-            [ sLetMut "c" (zerosLit (m * n))
-              sFor "i" 0 m
-                [ sFor "j" 0 n
-                    [ sFor "t" 0 k
-                        [ sAccum (flat "c" n (v "i") (v "j"))
-                                 (mul (idx2 "a" (v "i") (v "t")) (idx2 "b" (v "t") (v "j"))) ] ] ] ],
-            Some (nestedFromFlat "c" m n))
-    mkFunc name [ ("a", tyFloatMat m k); ("b", tyFloatMat k n) ] (tyFloatMat m n) body
+//
+// `matmulDecl` used to synthesize, per distinct (m, k, n), a Blade function
+//     let mut c = zeros(m*n)
+//     for i, for j, for t: c[i*n + j] += a(i,t) * b(t,j)
+//     -> nested literal of reads over c
+// `math.matmul` is now a FIRST-CLASS intrinsic instead: MathElaborate rewrites
+// the call to the `__math_matmul` marker, TypeCheck.inferMatmul types it, and
+// codegen emits one `blade_linalg::blade_matmul` call. The shim's native
+// fallback reproduces exactly the loop above — i, j, t-ascending, one
+// accumulator seeded at +0.0 — so printed values are byte-identical to what
+// this declaration produced; what changes is that a BLAS-linked build gets a
+// blocked/microkernel dgemm instead, which emitted loop code cannot approach.
+//
+// Every OTHER op in this file stays synthesized. LAPACK routing for
+// svd/eigh/eig is a separate, later decision (plan Phase 6).
 
 // ============================================================================
 // svd (one-sided / Hestenes cyclic Jacobi)

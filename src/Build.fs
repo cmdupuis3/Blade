@@ -44,23 +44,23 @@ type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 //   `off`  -> no -march flag at all (portable binaries / cross-machine repro)
 //   other  -> `-march=<value>` verbatim (e.g. `skylake`, `x86-64-v3`)
 //
-// `-ffp-contract=off` is NOT optional at today's gates, and is the one place
-// this differs from the Phase 0 write-up. GCC defaults to `fast`, so the
-// moment -march exposes FMA the compiler fuses a*b+c into one rounding —
-// which silently breaks tests/InterpDiff.fs, the gate that requires the
-// tree-walking interpreter's stdout to be BYTE-IDENTICAL to the compiled
-// binary's. src/Interp/Numerics.fs is bit-pinned to `g++ -std=c++17 -O2`
-// scalar semantics (its own header says so), so contraction cannot be
-// "re-pinned" the way DiffOracle's binary was; it would mean modelling FMA,
-// per-machine, inside the interpreter. MEASURED on this box (g++ 15.2,
-// ucrt64): `blade test interp math` is 28/42 with contraction on, 42/42 with
-// it off; -O3 alone (BLADE_MARCH=off) is also 42/42, i.e. -march/FMA is the
-// sole cause. Jacobi SVD/eigh/HOSVD amplify a last-ULP delta into printed
-// digits. Turning contraction off keeps everything else -march buys (wider
-// vectors, better scheduling/addressing) and costs only the fused multiply.
-// BLADE_FP_CONTRACT overrides for measurement:
-//   unset  -> `off` (default; keeps the differential gates green)
-//   other  -> `-ffp-contract=<value>` (`fast` restores GCC's default)
+// `-ffp-contract` defaults to `fast` (FMA ON — user decision 2026-08-02,
+// matching GCC's own default once -march exposes FMA). Contraction fuses
+// a*b+c into one rounding, which breaks the BYTE-IDENTITY differential
+// harnesses: src/Interp/Numerics.fs is bit-pinned to non-FMA scalar
+// semantics (MEASURED, g++ 15.2 ucrt64: `blade test interp math` 28/42 with
+// contraction on, 42/42 off; Jacobi SVD/eigh/HOSVD amplify last-ULP deltas
+// into printed digits). Those harnesses therefore PIN `BLADE_FP_CONTRACT=off`
+// for their own runs (tests/InterpDiff.fs, tests/DiffOracle.fs — the oracle
+// subprocess inherits the pin) — byte-identity is a property of the
+// differential gates, not of user builds.
+// BLADE_FP_CONTRACT mirrors g++'s `-ffp-contract=` values exactly:
+//   unset  -> `fast` (default: FMA on)
+//   other  -> `-ffp-contract=<value>` verbatim (`fast` | `on` | `off`)
+//
+// These are FUNCTIONS, not module-level values, so a harness may set the env
+// var mid-process and have it honored by the next compile (a module-level
+// `let` would freeze the default at first touch).
 //
 // NOTE (nvcc): the CUDA paths below stay at -O2 on purpose. nvcc translates
 // host flags for its host compiler (cl.exe on Windows) and -march does not
@@ -68,21 +68,22 @@ type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 // ============================================================================
 
 /// The `-march=` fragment (leading space included, or "" when disabled).
-let private marchFlag =
+let private marchFlag () =
     match System.Environment.GetEnvironmentVariable("BLADE_MARCH") with
     | null | "" -> " -march=native"
     | v when v.Trim().ToLowerInvariant() = "off" -> ""
     | v -> sprintf " -march=%s" (v.Trim())
 
 /// The `-ffp-contract=` fragment (leading space included).
-let private fpContractFlag =
+let private fpContractFlag () =
     match System.Environment.GetEnvironmentVariable("BLADE_FP_CONTRACT") with
-    | null | "" -> " -ffp-contract=off"
+    | null | "" -> " -ffp-contract=fast"
     | v -> sprintf " -ffp-contract=%s" (v.Trim())
 
 /// Host-compiler optimization flags shared by every g++ invocation.
-/// Currently `-O3 -march=native -ffp-contract=off` (see the two env vars above).
-let optFlags = "-O3" + marchFlag + fpContractFlag
+/// Currently `-O3 -march=native -ffp-contract=fast` by default (see the two
+/// env vars above). Re-evaluated per call so harness env pins take effect.
+let optFlags () = "-O3" + marchFlag () + fpContractFlag ()
 
 type HostPlatform = PWindows | PLinux | PMacOS
 
@@ -290,22 +291,48 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
                               | None -> sprintf " -L\"%s\" -lnetcdf" (Path.Combine(dir, "lib")))
                      incFlag + linkFlag)
 
-        // BLAS-backed programs emit `#include <cblas.h>` and call cblas_*
-        // (dsyrk/dgemm lowering of dense contraction-shaped kernels). Same
-        // resolution scheme as NETCDF_DIR above:
+        // Linalg-dispatch programs emit `#include "blade_linalg.hpp"` (Phase 5
+        // of docs/plan-cpp-perf-exploitation.md) and call blade_linalg::* for
+        // gram / matmul. The header is dependency-FREE by default: without the
+        // define it compiles native fallbacks and links nothing extra. BLAS is
+        // opt-in and is turned on HERE, not in codegen — one `-DBLADE_HAS_BLAS`
+        // flips every `#ifdef` in the shim, and the same flag decision carries
+        // the include/link flags, so the two can never disagree.
+        //
+        // The gate is the pre-existing one, unchanged in meaning:
+        //   - BLADE_BLAS=1|on   -> force on
+        //   - BLADE_BLAS=0|off  -> force off
+        //   - unset             -> follow OPENBLAS_DIR (set = on)
+        // Default-off for BLAS is deliberate: BLAS may differ in the last ULP
+        // and the interp/oracle differentials demand byte-identical output, so
+        // native remains the verification truth.
+        //
+        // Resolution scheme, same as NETCDF_DIR above:
         //   - OPENBLAS_DIR set: add -I<dir>\include, and link the DLL in
         //     <dir>\bin DIRECTLY (MinGW links a Windows DLL by reading its
         //     export table — robust against import-lib format drift). Fall
         //     back to -L<dir>\lib -lopenblas if no DLL is found there.
-        //   - OPENBLAS_DIR unset: bare -lopenblas (works when OpenBLAS is on
-        //     the default include/lib paths, e.g. an MSYS2 pacman install).
-        let needsOpenblas =
-            try (File.ReadAllText cppFullPath).Contains "#include <cblas.h>" with _ -> false
-        let openblasFlags =
-            if not needsOpenblas then ""
+        //   - OPENBLAS_DIR unset (but BLADE_BLAS forced on): bare -lopenblas
+        //     (works when OpenBLAS is on the default include/lib paths, e.g.
+        //     an MSYS2 pacman install).
+        let usesLinalgShim =
+            try (File.ReadAllText cppFullPath).Contains "#include \"blade_linalg.hpp\"" with _ -> false
+        let blasGateOn =
+            match System.Environment.GetEnvironmentVariable("BLADE_BLAS") with
+            | "1" | "on" -> true
+            | "0" | "off" -> false
+            | _ ->
+                match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
+                | null | "" -> false
+                | _ -> true
+        // Split into a COMPILE half (define + -I, which must precede the source
+        // so the shim's `#include <cblas.h>` resolves) and a LINK half (the
+        // library, which must FOLLOW the source in linker order).
+        let (blasCompileFlags, blasLinkFlags) =
+            if not (usesLinalgShim && blasGateOn) then ("", "")
             else
                 (match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
-                 | null | "" -> " -lopenblas"
+                 | null | "" -> (" -DBLADE_HAS_BLAS", " -lopenblas")
                  | dir ->
                      let incFlag = sprintf " -I\"%s\"" (Path.Combine(dir, "include"))
                      let binDir = Path.Combine(dir, "bin")
@@ -321,10 +348,10 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
                              (match glob with
                               | Some p -> sprintf " \"%s\"" p
                               | None -> sprintf " -L\"%s\" -lopenblas" (Path.Combine(dir, "lib")))
-                     incFlag + linkFlag)
+                     (" -DBLADE_HAS_BLAS" + incFlag, linkFlag))
 
         let extraFlags = extraLinkInputs |> List.map (fun p -> sprintf " \"%s\"" (Path.GetFullPath p)) |> String.concat ""
-        let args = sprintf "-std=c++17 %s %s %s -o \"%s\" \"%s\"%s%s%s%s" optFlags ompFlag safetyFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags openblasFlags
+        let args = sprintf "-std=c++17 %s %s %s%s -o \"%s\" \"%s\"%s%s%s%s" (optFlags ()) ompFlag safetyFlags blasCompileFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags blasLinkFlags
         
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true

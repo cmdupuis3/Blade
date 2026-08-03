@@ -78,6 +78,7 @@ let printUsage () =
     printfn "  test omp-pragma                   Run the OpenMP pragma-emission block standalone"
     printfn "  test omp-coverage                 Run the OpenMP thread-coverage block standalone"
     printfn "  test omp-reduce                   Run the comm-licensed parallel-reduction block standalone"
+    printfn "  test linalg                       Run the blade_linalg dispatch-emission block standalone"
     printfn "  test cuda                         Run the CUDA kernel block standalone"
     printfn "  test mpi                          Run the MPI decomposition block standalone"
     printfn "  test netcdf                       Run the NetCDF provider block (needs libnetcdf + sample.nc)"
@@ -1194,6 +1195,13 @@ let private dispatchTest (rest: string list) : int =
         // Warning/suggestion surfacing: codes, streams, and survival of the
         // checker's error path. In-process, no toolchain; also in the full suite.
         let failed = (runSurfacingTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "linalg" ] ->
+        // LinAlg dispatch emission (Phase 5): gram/matmul route to
+        // `blade_linalg::`, the shim header is included exactly when a route
+        // fires, and the routing policy table matches what it documents. Pure
+        // codegen string checks; also part of the full suite.
+        let failed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "normalize" ] ->
         // IR-level F# unit tests for the type normalizer. Runs in-process,

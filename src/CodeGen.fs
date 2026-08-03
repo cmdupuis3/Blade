@@ -369,35 +369,29 @@ let setSplitTimingMode (on: bool) : unit =
 let splitTimingModeEnabled () : bool =
     (splitTimingModeCell ()).Value
 
-/// BLAS lowering gate: when enabled, real-Float64 gram() forms lower to
-/// cblas_dsyrk (same-array, symmetric packed output) / cblas_dgemm (distinct
-/// arrays, dense output) instead of scalar loop nests. Opt-in: BLADE_BLAS=1
-/// (or "on") forces it on, BLADE_BLAS=0 (or "off") forces it off, and with
-/// BLADE_BLAS unset it follows OPENBLAS_DIR — the same variable Build.fs
-/// uses to resolve the OpenBLAS install. The emitted `#include <cblas.h>`
-/// is what triggers Build.fs's -I/link flags, so codegen and build stay in
-/// lockstep through the one include line.
-let blasEmissionEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_BLAS") with
-    | "1" | "on" -> true
-    | "0" | "off" -> false
-    | _ ->
-        match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
-        | null | "" -> false
-        | _ -> true
-
-/// Collector: did THIS program assembly actually lower something to cblas?
-/// Set by materializeGramForm during genModule; the program assemblers
-/// append the cblas include after body generation (the cudaKernelDefsCell
-/// collect-then-assemble pattern). AsyncLocal for the parallel test runner.
-let private blasUsedStorage =
+/// Collector: did THIS program assembly emit a `blade_linalg::` dispatch call?
+/// Set by the gram / matmul emitters during genModule; the program assemblers
+/// append the `#include "blade_linalg.hpp"` line after body generation (the
+/// cudaKernelDefsCell collect-then-assemble pattern). AsyncLocal for the
+/// parallel test runner.
+///
+/// Phase 5 (docs/plan-cpp-perf-exploitation.md) retired the old
+/// `blasEmissionEnabled()` codegen gate that used to live here. Codegen no
+/// longer decides BLAS-vs-native at all: a recognised route always emits the
+/// same `blade_linalg::` call text, and the shim header's `#ifdef
+/// BLADE_HAS_BLAS` — driven by Build.fs's OPENBLAS_DIR/BLADE_BLAS resolution —
+/// picks cblas or the native fallback at C++ compile time. The one include
+/// line below is still what keeps codegen and build in lockstep; Build.fs
+/// keys its -D/-I/link flags off it exactly as it used to key off
+/// `#include <cblas.h>`.
+let private linalgUsedStorage =
     System.Threading.AsyncLocal<bool ref>()
 
-let blasUsedCell () : bool ref =
-    let v = blasUsedStorage.Value
+let linalgUsedCell () : bool ref =
+    let v = linalgUsedStorage.Value
     if isNull (box v) then
         let fresh = ref false
-        blasUsedStorage.Value <- fresh
+        linalgUsedStorage.Value <- fresh
         fresh
     else v
 
@@ -407,7 +401,7 @@ let blasUsedCell () : bool ref =
 /// emission (Phase 2) — the manual chunked path computes its own team size — and
 /// read by the program assemblers, which append `#include <omp.h>` after body
 /// generation. Same collect-then-assemble shape and AsyncLocal isolation as
-/// blasUsedCell above.
+/// linalgUsedCell above.
 let private ompApiUsedStorage =
     System.Threading.AsyncLocal<bool ref>()
 
@@ -2738,6 +2732,8 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         materializeNegateConjugateForm subst names varName elemTypeStr form arrExpr
     | IRGram (lExpr, rExpr, sameArray) ->
         materializeGramForm subst names varName elemTypeStr lExpr rExpr sameArray
+    | IRMatmul (lExpr, rExpr) ->
+        materializeMatmulForm subst names varName elemTypeStr lExpr rExpr
     | _ -> None
 
 
@@ -3621,20 +3617,25 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // conj_scalar). Use conj_scalar to keep one spelling for real/complex.
         let mulTerm i j =
             sprintf "%s[%s][__gk] * nested_array_utilities::conj_scalar(%s[%s][__gk])" lName i rName j
-        // BLAS lowering applies to real-double operands only (dsyrk/dgemm);
-        // complex (zherk/zgemm) and float32 are future work — they fall back
-        // to the scalar loops below. Output allocation/layout is IDENTICAL to
-        // the loop path (packed symmetric for same-array, dense otherwise):
-        // BLAS writes a contiguous staging buffer, then a repack copy lands
-        // the values in Blade storage. Staging is O(mn + m^2) against the
-        // O(m^2 n) contraction; nested rows are copied out because Array's
-        // row-pointer layout is not guaranteed BLAS-contiguous.
-        let bothRealDouble =
-            match la.ElemType, ra.ElemType with
-            | IRTScalar ETFloat64, IRTScalar ETFloat64 -> true
-            | _ -> false
-        let useBlas = bothRealDouble && blasEmissionEnabled ()
-        if useBlas then (blasUsedCell ()).Value <- true
+        // Phase 5 (docs/plan-cpp-perf-exploitation.md): the dispatch decision is
+        // NOT made here. LinAlgPatterns classifies the node; if it yields a
+        // routed call we emit ONE `blade_linalg::` call and the shim header
+        // decides cblas-vs-native at C++ compile time (driven by Build.fs's
+        // -DBLADE_HAS_BLAS). There is no longer a BLADE_BLAS-sensitive codegen
+        // gate, so the emitted text for a given program is the same on every
+        // machine.
+        //
+        // classify returns None for complex (zherk/zgemm) and float32
+        // (ssyrk/sgemm) operands — exactly the restriction the pre-shim BLAS
+        // lowering carried — and those keep the scalar loops below. Output
+        // allocation/layout is IDENTICAL on both paths (packed symmetric for
+        // same-array, dense otherwise); the shim writes through the row
+        // skeleton, so Blade storage is unchanged either way.
+        let linalgCall = Blade.LinAlgPatterns.classify (IRGram (lExpr, rExpr, sameArray))
+        let shimEntry =
+            linalgCall |> Option.bind Blade.LinAlgPatterns.shimEntryPoint
+        let useShim = shimEntry.IsSome
+        if useShim then (linalgUsedCell ()).Value <- true
         if sameArray then
             // square m x m, symmetric/Hermitian upper-triangle storage
             let extentDecl =
@@ -3647,21 +3648,21 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                 sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, %s>(%s), %s };"
                     outElemStr varName outElemStr symmArg extentsName extentsName
             let loop =
-                if useBlas then
-                    [ sprintf "{ // BLAS lowering: gram(A, A) = A * A^T via cblas_dsyrk (upper triangle), repacked left-justified"
-                      sprintf "    const size_t __gm = %s, __gn = %s;" mExtent nExtent
-                      sprintf "    double* __gA = new double[__gm * __gn];"
-                      sprintf "    for (size_t __gi = 0; __gi < __gm; __gi++)"
-                      sprintf "        for (size_t __gk = 0; __gk < __gn; __gk++)"
-                      sprintf "            __gA[__gi * __gn + __gk] = %s[__gi][__gk];" lName
-                      sprintf "    double* __gC = new double[__gm * __gm]();"
-                      sprintf "    cblas_dsyrk(CblasRowMajor, CblasUpper, CblasNoTrans, (blasint)__gm, (blasint)__gn, 1.0, __gA, (blasint)__gn, 0.0, __gC, (blasint)__gm);"
-                      sprintf "    for (size_t __gi = 0; __gi < __gm; __gi++)"
-                      sprintf "        for (size_t __gjr = 0; __gjr < __gm - __gi; __gjr++)"
-                      sprintf "            %s[__gi][__gjr] = __gC[__gi * __gm + __gi + __gjr];" varName
-                      sprintf "    delete[] __gA; delete[] __gC;"
-                      sprintf "}" ]
-                else
+                match shimEntry with
+                | Some entry ->
+                    // One dispatch call. The shim owns staging (it probes the
+                    // row skeleton for contiguity and passes the pool base
+                    // straight through when it is contiguous — which a dense
+                    // operand always is), owns the packed-triangular repack,
+                    // and owns the cblas-vs-native choice.
+                    //
+                    // BLOCK comment, not `//`: materializeInlineForm's lines are
+                    // SPACE-JOINED into a single-line IIFE at expression
+                    // positions, where a line comment would swallow the rest of
+                    // the statement.
+                    [ sprintf "/* linalg dispatch: gram(A, A) = A * A^T -> packed upper triangle */ %s(%s, %s, %s.data, %s.data);"
+                          entry mExtent nExtent lName varName ]
+                | None ->
                     [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
                       sprintf "    for (size_t __gjr = 0; __gjr < %s - __gi; __gjr++) {" mExtent
                       sprintf "        size_t __gj = __gi + __gjr;"
@@ -3688,25 +3689,11 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                 sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
                     outElemStr varName outElemStr extentsName extentsName
             let loop =
-                if useBlas then
-                    [ sprintf "{ // BLAS lowering: gram(A, B) = A * B^T via cblas_dgemm"
-                      sprintf "    const size_t __gm = %s, __gp = %s, __gn = %s;" mExtent pExtent nExtent
-                      sprintf "    double* __gA = new double[__gm * __gn];"
-                      sprintf "    for (size_t __gi = 0; __gi < __gm; __gi++)"
-                      sprintf "        for (size_t __gk = 0; __gk < __gn; __gk++)"
-                      sprintf "            __gA[__gi * __gn + __gk] = %s[__gi][__gk];" lName
-                      sprintf "    double* __gB = new double[__gp * __gn];"
-                      sprintf "    for (size_t __gj = 0; __gj < __gp; __gj++)"
-                      sprintf "        for (size_t __gk = 0; __gk < __gn; __gk++)"
-                      sprintf "            __gB[__gj * __gn + __gk] = %s[__gj][__gk];" rName
-                      sprintf "    double* __gC = new double[__gm * __gp]();"
-                      sprintf "    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans, (blasint)__gm, (blasint)__gp, (blasint)__gn, 1.0, __gA, (blasint)__gn, __gB, (blasint)__gn, 0.0, __gC, (blasint)__gp);"
-                      sprintf "    for (size_t __gi = 0; __gi < __gm; __gi++)"
-                      sprintf "        for (size_t __gj = 0; __gj < __gp; __gj++)"
-                      sprintf "            %s[__gi][__gj] = __gC[__gi * __gp + __gj];" varName
-                      sprintf "    delete[] __gA; delete[] __gB; delete[] __gC;"
-                      sprintf "}" ]
-                else
+                match shimEntry with
+                | Some entry ->
+                    [ sprintf "/* linalg dispatch: gram(A, B) = A * B^T -> dense */ %s(%s, %s, %s, %s.data, %s.data, %s.data);"
+                          entry mExtent nExtent pExtent lName rName varName ]
+                | None ->
                     [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
                       sprintf "    for (size_t __gj = 0; __gj < %s; __gj++) {" pExtent
                       sprintf "        %s __gacc = %s();" outElemStr outElemStr
@@ -3718,6 +3705,61 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                       sprintf "}" ]
             Some (extentDecl @ [allocDecl] @ loop,
                   [MatPool (varName, outElemStr, 2, "nullptr", None)])
+     | _ -> None)
+
+
+and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (lExpr: IRExpr) (rExpr: IRExpr) : (string list * MaterializedAlloc list) option =
+    // matmul(A, B) = A * B:  result[i][j] = sum_t A[i][t] * B[t][j].
+    // A : m x k, B : k x n -> DENSE m x n. No conjugation, no symmetry claim
+    // (A*A is not symmetric), so unlike gram there is exactly one mode.
+    //
+    // Phase 5 of docs/plan-cpp-perf-exploitation.md. The typechecker restricts
+    // both operands to real Float64 (inferMatmul), which is exactly the shim's
+    // v1 domain, so LinAlgPatterns.classify always routes — the scalar fallback
+    // below exists only so a future widening of the surface type (f32/complex)
+    // degrades to loops rather than to a wrong emission.
+    //
+    // BYTE-IDENTITY: the fallback's accumulation order (t ascending, one local
+    // accumulator seeded from the element zero) is the same order the shim's
+    // native fallback and the interpreter's `matmulArray` use, and the same
+    // order the synthesized Blade triple loop this route replaced used.
+    let lName = exprToCppCore subst names lExpr
+    let rName = exprToCppCore subst names rExpr
+    (match inferExprType lExpr, inferExprType rExpr with
+     | ArrayElem la, ArrayElem _ ->
+        let outElemStr = irTypeToCpp la.ElemType
+        let mExtent = sprintf "%s.extents[0]" lName
+        let kExtent = sprintf "%s.extents[1]" lName
+        let nExtent = sprintf "%s.extents[1]" rName
+        let extentsName = sprintf "%s_extents" varName
+        let linalgCall = Blade.LinAlgPatterns.classify (IRMatmul (lExpr, rExpr))
+        let shimEntry = linalgCall |> Option.bind Blade.LinAlgPatterns.shimEntryPoint
+        if shimEntry.IsSome then (linalgUsedCell ()).Value <- true
+        let extentDecl =
+            [ sprintf "size_t %s[2];" extentsName
+              sprintf "%s[0] = %s;" extentsName mExtent
+              sprintf "%s[1] = %s;" extentsName nExtent ]
+        let allocDecl =
+            sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
+                outElemStr varName outElemStr extentsName extentsName
+        let loop =
+            match shimEntry with
+            | Some entry ->
+                // Block comment, not `//` — see the note in materializeGramForm.
+                [ sprintf "/* linalg dispatch: matmul(A, B) = A * B -> dense */ %s(%s, %s, %s, %s.data, %s.data, %s.data);"
+                      entry mExtent kExtent nExtent lName rName varName ]
+            | None ->
+                [ sprintf "for (size_t __mi = 0; __mi < %s; __mi++) {" mExtent
+                  sprintf "    for (size_t __mj = 0; __mj < %s; __mj++) {" nExtent
+                  sprintf "        %s __macc = %s();" outElemStr outElemStr
+                  sprintf "        for (size_t __mt = 0; __mt < %s; __mt++) {" kExtent
+                  sprintf "            __macc += %s[__mi][__mt] * %s[__mt][__mj];" lName rName
+                  sprintf "        }"
+                  sprintf "        %s[__mi][__mj] = __macc;" varName
+                  sprintf "    }"
+                  sprintf "}" ]
+        Some (extentDecl @ [allocDecl] @ loop,
+              [MatPool (varName, outElemStr, 2, "nullptr", None)])
      | _ -> None)
 
 /// Convert IRExpr to C++ using context
@@ -5677,7 +5719,7 @@ let genIncludes () : string list =
      // something calls the omp_* RUNTIME API: the test-mode instrumentation
      // (known here) or a comm-licensed parallel fold (only known after body
      // generation, so the assemblers append it via ompApiUsedCell — the
-     // cblas-include pattern).
+     // blade_linalg-include pattern).
      (if ompTestModeEnabled () then "#include <omp.h>  // omp-coverage test-mode instrumentation" else "// #include <omp.h>")
      "#include \"nested_array_utilities.cpp\""
      "#include \"rand_runtime.hpp\""
@@ -5774,7 +5816,17 @@ let runtimeHeaderNames : string list =
       // Runtime error support: blade_rt shadow call stack + panic() and the
       // BLADE_FRAME macro (Stage 6). Header-only, host-only (device passes see
       // no-op stubs); deployed unconditionally and included by every program.
-      "blade_runtime.hpp" ]
+      "blade_runtime.hpp"
+      // Dense linear-algebra dispatch (Phase 5 of
+      // docs/plan-cpp-perf-exploitation.md): blade_gemm / blade_syrk plus the
+      // gram/matmul adapters, resolving to cblas under -DBLADE_HAS_BLAS and to
+      // native fallbacks otherwise. INCLUDED only by programs that actually
+      // emit a `blade_linalg::` call (the linalgUsedCell collector), so a
+      // program using neither gram nor matmul carries no dependency surface at
+      // all — but DEPLOYED unconditionally, like linearized_storage.hpp and
+      // orbit_wreath_utilities.hpp, so the deploy/cleanup bookkeeping stays
+      // uniform.
+      "blade_linalg.hpp" ]
 
 /// Deploy every C++ runtime header next to a generated .cpp so its `#include`s
 /// resolve at g++ time with no -I flag. These are pre-existing static files in
@@ -6039,7 +6091,7 @@ let rec isFreshPoolForm (e: IRExpr) : bool =
     | IRApplyCombinator _ | IRComposeApply _ -> true
     | IRArrayLit _ -> true
     | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
-    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ -> true
+    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRMatmul _ -> true
     | IRArrayNegate _ | IRArrayConjugate _ -> true
     | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
     | IRApp (f, _, _) -> freshReturnOf f = FreshPool
@@ -6104,7 +6156,7 @@ let private isMaterializedFreshArray (v: IRExpr) : bool =
     | IRCompute inner -> isFreshPoolForm inner
     | IRArrayLit _ -> true
     | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _
-    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _
+    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRMatmul _
     | IRArrayNegate _ | IRArrayConjugate _ -> true
     | _ -> false
 
@@ -10127,7 +10179,9 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | IRArrayNegate arrExpr | IRArrayConjugate arrExpr ->
         genArrayNegateConjugateBinding ctx binding builder arrExpr
     | IRGram (_, _, _) ->
-        genGramBinding ctx binding builder 
+        genGramBinding ctx binding builder
+    | IRMatmul (_, _) ->
+        genMatmulBinding ctx binding builder
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         genReduceBinding ctx binding builder arrExpr kernelExpr initExpr
     | IRReduceCompute (compExpr, kernelExpr, seedExpr) ->
@@ -12048,6 +12102,25 @@ and genGramBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     (code, ctx')
 
 
+and genMatmulBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    // matmul(A, B) = A * B. Dense m x n result. Same shape as genGramBinding:
+    // the shared materialize helper emits the statement form (allocation plus
+    // one `blade_linalg::blade_matmul` dispatch call).
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let elemStr =
+        match binding.Type with
+        | ArrayElem at -> irTypeToCpp at.ElemType
+        | _ -> "double"
+    let matStmts =
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
+        | None -> []
+    let code = [sprintf "%s// matmul: A * B (dense matrix product)" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let ctx' = addVarName binding.Id name ctx
+    (code, ctx')
+
+
 
 and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -13011,7 +13084,7 @@ let private genFuncBodyScoped
             let (code, _) = genBinding bodyCtx tempBinding builder
             currentNames <- Map.add id varName currentNames
             code
-        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _
+        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ | IRMatmul _
         | IRStack _ | IRJoin _ ->
             // Phase C lift pass can place an inline form as a let value at
             // function-body level. The same materialization helper used by
@@ -13408,6 +13481,32 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
         if acc' = acc then acc else close acc'
     close direct
 
+/// The bindings-and-functions emission order, as ONE definition shared by
+/// `genModule` and `genModuleSplit` so the two can never drift.
+///
+/// Order is by IRId — a lower id was created earlier in the source — with one
+/// correction: a function a pass SYNTHESIZED from another (an entry in
+/// `IRModule.DerivedFuncOrigins`, e.g. a Phase 4 shape specialization) is keyed
+/// on its ORIGIN's id, not its own. Its own id is freshly minted and therefore
+/// the largest in the module, which would sort it after every call site that
+/// references it. That is fatal for anything `computeMainLocalFuncIds` puts
+/// inside `main()` as a `std::function` local: those get no forward
+/// declaration, so a use before the definition is "'<name>' was not declared in
+/// this scope" rather than a link-time detail.
+///
+/// Producers place the copy immediately after its origin in `Functions`; this
+/// key plus a STABLE sort then reproduces that adjacency in the merged stream,
+/// so the copy is emitted at exactly the origin's program point and is in scope
+/// for precisely the call sites the origin was in scope for.
+let private emissionOrderedItems (modul: IRModule) : (IRId * Choice<IRBinding, IRFuncDef>) list =
+    let orderKey (id: IRId) =
+        match Map.tryFind id modul.DerivedFuncOrigins with
+        | Some originId -> originId
+        | None -> id
+    let bindingItems = modul.Bindings |> List.map (fun b -> (b.Id, Choice1Of2 b))
+    let funcItems = modul.Functions |> List.map (fun f -> (f.Id, Choice2Of2 f))
+    bindingItems @ funcItems |> List.sortBy (fst >> orderKey)
+
 let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list =
     // Phase D / companion-array gap: populate the codegen-side struct fields
     // cache so inferExprType can resolve IRFieldAccess result types.
@@ -13439,20 +13538,18 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     let ctx0 =
         modul.Functions |> List.fold (fun c f -> addVarName f.Id f.Name c) ctx0
 
-    // Build a combined list of items with their "order" based on ID.
-    // Lower IDs were created earlier in the source. Lifted lambdas
-    // live alongside source-level functions in module.Functions and
-    // emit as ordinary top-level C++ functions: genFuncDef appends
-    // captures as reference parameters, and lambda bodies whose top
-    // form is IRApplyCombinator are wrapped in IRCompute at lift
+    // Build a combined list of items in emission order (see
+    // `emissionOrderedItems`: IRId order, with synthesized copies keyed on
+    // their origin). Lifted lambdas live alongside source-level functions in
+    // module.Functions and emit as ordinary top-level C++ functions:
+    // genFuncDef appends captures as reference parameters, and lambda bodies
+    // whose top form is IRApplyCombinator are wrapped in IRCompute at lift
     // time so genFuncBody's return-position handler renders them
     // correctly. Use sites reference the lifted callable through
     // IRVar(callable.Id) and call it through a thin wrapper closure
     // (genCallableWrapper) that hides the capture parameters from
     // consumers expecting the callable's surface arity.
-    let bindingItems = modul.Bindings |> List.map (fun b -> (b.Id, Choice1Of2 b))
-    let funcItems = modul.Functions |> List.map (fun f -> (f.Id, Choice2Of2 f))
-    let allItems = bindingItems @ funcItems |> List.sortBy fst
+    let allItems = emissionOrderedItems modul
 
     // Generate in ID order (approximates source order).
     // First, collect file-scope functions to generate forward declarations.
@@ -13532,9 +13629,8 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
         modul.Bindings |> List.fold (fun c b -> addVarName b.Id b.Name c) ctx0
     let ctx0 =
         modul.Functions |> List.fold (fun c f -> addVarName f.Id f.Name c) ctx0
-    let bindingItems = modul.Bindings |> List.map (fun b -> (b.Id, Choice1Of2 b))
-    let funcItems = modul.Functions |> List.map (fun f -> (f.Id, Choice2Of2 f))
-    let allItems = bindingItems @ funcItems |> List.sortBy fst
+    // Same emission order as genModule, from the same definition.
+    let allItems = emissionOrderedItems modul
     // Transitive main-locality — same rule as genModule; see
     // computeMainLocalFuncIds.
     let mainLocalFuncIds = computeMainLocalFuncIds modul ctx0
@@ -14260,7 +14356,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     (symmDeclsCell ()).Value <- []
     (streamBufDeclsCell ()).Value <- Set.empty
     (forcedDeferredIdsCell ()).Value <- Set.empty
-    (blasUsedCell ()).Value <- false
+    (linalgUsedCell ()).Value <- false
     (ompApiUsedCell ()).Value <- false
     // Deterministic deallocation: clear both cells for this program. genModule
     // reinstalls the facts immediately (it needs the callables table first).
@@ -14285,12 +14381,14 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
               "static int __blade_mpi_size = 1;" ]
         else []
     let (funcDefs, bindCode) = genModule modul builder
-    // cblas include only when a gram actually lowered to BLAS this assembly
-    // (collector fills during genModule; Build.fs keys -I/link flags off the
-    // include line). Appended post-body like the CUDA prototypes below.
-    let includes = if (blasUsedCell ()).Value then includes @ ["#include <cblas.h>"] else includes
+    // blade_linalg.hpp include only when a linalg route (gram / matmul) was
+    // actually emitted this assembly (collector fills during genModule;
+    // Build.fs keys -DBLADE_HAS_BLAS + the -I/link flags off this include
+    // line). Appended post-body like the CUDA prototypes below. A program
+    // using neither gram nor matmul never names the header at all.
+    let includes = if (linalgUsedCell ()).Value then includes @ ["#include \"blade_linalg.hpp\""] else includes
     // <omp.h> only when a comm-licensed parallel fold emitted omp_* runtime
-    // calls this assembly. Same collect-then-append shape as cblas; `#pragma
+    // calls this assembly. Same collect-then-append shape as linalg; `#pragma
     // omp` alone needs no header, so every other program keeps its includes.
     let includes =
         if (ompApiUsedCell ()).Value
@@ -14356,6 +14454,9 @@ let genProgramFromIR (program: IRProgram) (testName: string) : string =
             CompoundInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.CompoundInits) Map.empty
             SparseInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.SparseInits) Map.empty
             MutableArrayLets = modules |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
+            // Ids are module-global (one builder), so the union carries every
+            // copy's origin key across the merge intact.
+            DerivedFuncOrigins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
         }
         genMainProgram merged testName
 
@@ -14400,7 +14501,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // during genModule and genPrintStatements (called AFTER body generation)
     // reads it to auto-print deferred bindings that ended up materialized.
     (forcedDeferredIdsCell ()).Value <- Set.empty
-    (blasUsedCell ()).Value <- false
+    (linalgUsedCell ()).Value <- false
     (ompApiUsedCell ()).Value <- false
     // Deterministic deallocation: see genMainProgram. genModule / genModuleSplit
     // reinstall the facts (both entry points below install).
@@ -14449,10 +14550,11 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
             let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul) testName bodyIndented printCode)
     let (funcDefs, mainBody) = mainFunc
-    // cblas include only when a gram actually lowered to BLAS this assembly
-    // (collector fills during genModule*; Build.fs keys -I/link flags off the
-    // include line). Appended post-body like the CUDA prototypes below.
-    let includes = if (blasUsedCell ()).Value then includes @ ["#include <cblas.h>"] else includes
+    // blade_linalg.hpp include only when a linalg route (gram / matmul) was
+    // actually emitted this assembly (collector fills during genModule*;
+    // Build.fs keys -DBLADE_HAS_BLAS + the -I/link flags off this include
+    // line). Appended post-body like the CUDA prototypes below.
+    let includes = if (linalgUsedCell ()).Value then includes @ ["#include \"blade_linalg.hpp\""] else includes
     // <omp.h>: see genMainProgram — appended only for a comm-licensed fold.
     let includes =
         if (ompApiUsedCell ()).Value
@@ -14498,17 +14600,18 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     // Reset the forced-deferred collector before body generation; the
     // genPrintStatements call below (correctly AFTER genModule) reads it.
     (forcedDeferredIdsCell ()).Value <- Set.empty
-    (blasUsedCell ()).Value <- false
+    (linalgUsedCell ()).Value <- false
     (ompApiUsedCell ()).Value <- false
     // Deterministic deallocation: see genMainProgram.
     (freshReturnFactsCell ()).Value <- Map.empty
     (copyInPlaceMutsCell ()).Value <- Map.empty
     resetAllocScopeStack ()
     let (funcDefs, bindCode) = genModule modul builder
-    // cblas include only when a gram actually lowered to BLAS this assembly
-    // (collector fills during genModule; Build.fs keys -I/link flags off the
-    // include line).
-    let includes = if (blasUsedCell ()).Value then includes @ ["#include <cblas.h>"] else includes
+    // blade_linalg.hpp include only when a linalg route (gram / matmul) was
+    // actually emitted this assembly (collector fills during genModule;
+    // Build.fs keys -DBLADE_HAS_BLAS + the -I/link flags off this include
+    // line).
+    let includes = if (linalgUsedCell ()).Value then includes @ ["#include \"blade_linalg.hpp\""] else includes
     // <omp.h>: see genMainProgram — appended only for a comm-licensed fold.
     let includes =
         if (ompApiUsedCell ()).Value
@@ -14552,6 +14655,9 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                 CompoundInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.CompoundInits) Map.empty
                 SparseInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.SparseInits) Map.empty
                 MutableArrayLets = modules |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
+                // See the genProgramFromIR twin: ids are module-global, so the
+                // union preserves every copy's origin key.
+                DerivedFuncOrigins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
             }
             genSelfContainedProgram merged testName
     (code, cell.Value)

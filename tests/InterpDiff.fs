@@ -309,9 +309,22 @@ let private rejectOnlyCategories = Set.ofList [ "mutability-errors"; "unit-error
 ///     passes. An unmarked reject is either a test that regressed or a negative
 ///     test missing its name marker; both are for a human to resolve, and
 ///     neither is something a differential gate can verify.
+/// This gate requires the interpreter's stdout to be BYTE-IDENTICAL to the
+/// compiled binary's, and src/Interp/Numerics.fs is bit-pinned to non-FMA
+/// scalar semantics — so the compiled side must be built with contraction
+/// off even though the user-facing default is `fast` (Build.fs). The pin is
+/// scoped to this block and restored on exit.
+let private pinFpContractOff () =
+    let prior = System.Environment.GetEnvironmentVariable("BLADE_FP_CONTRACT")
+    System.Environment.SetEnvironmentVariable("BLADE_FP_CONTRACT", "off")
+    { new System.IDisposable with
+        member _.Dispose() =
+            System.Environment.SetEnvironmentVariable("BLADE_FP_CONTRACT", prior) }
+
 let runInterpDiffTests (categories: string list) : BlockResult =
     printHeader "Interpreter Differential (M0)"
     let blockName = "Interp Diff"
+    use _fpPin = pinFpContractOff ()
     if not capabilities.Value.HasGpp then
         printfn "Skipped: requires g++ (the compiled binary is the differential reference)."
         { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }

@@ -126,6 +126,7 @@ type IRExpr =
     | IRTranspose of array: IRExpr * dim1: int * dim2: int
     | IRDecompact of array: IRExpr * dim: int
     | IRGram of left: IRExpr * right: IRExpr * isSameArray: bool  // A * B^H contraction; symmetric/Hermitian when isSameArray
+    | IRMatmul of left: IRExpr * right: IRExpr  // A(m x k) * B(k x n) -> dense m x n; the math package's first-class matmul (Phase 5), emitted through blade_linalg
     | IRArrayNegate of array: IRExpr     // whole-array elementwise negation (eager); type-preserving
     | IRArrayConjugate of array: IRExpr  // whole-array elementwise conjugation (eager); type-preserving
     | IRReverse of array: IRExpr * dim: int
@@ -2084,6 +2085,31 @@ type IRModule = {
     /// lowering (lowerTypedBlock TStmtLet); consumed by CodeGen (fresh alloc +
     /// pool copy) and the interpreter (store deep-copy) at the binding site.
     MutableArrayLets: Set<IRId>
+    /// EMISSION-ORDER PROXY for functions a compiler pass SYNTHESIZED from an
+    /// existing one: `derived id -> origin id`. The single source of truth for
+    /// "where does this copy belong in the program".
+    ///
+    /// Why it has to exist. Codegen emits bindings and functions interleaved in
+    /// IRId order (genModule/genModuleSplit's `allItems`), because a lower id
+    /// means "written earlier in the source". That ordering is load-bearing for
+    /// every function `computeMainLocalFuncIds` classifies as main-local: those
+    /// are emitted as `std::function` LOCALS inside `main()`, which get no
+    /// forward declaration, so a use before the definition is a hard C++ error.
+    /// A pass that mints a copy with `builder.FreshId()` gets the LARGEST id in
+    /// the module and therefore sorts after every call site it just rewrote —
+    /// which is exactly how Phase 4's first cut broke `ml-equiv`/`sgs`.
+    ///
+    /// The contract a producer signs by adding an entry: the derived function
+    /// is placed IMMEDIATELY AFTER its origin in `Functions`, and codegen keys
+    /// its order on the ORIGIN's id (the stable sort then keeps origin-then-copy
+    /// adjacency). A copy is thereby emitted at exactly its origin's program
+    /// point, so it is visible to precisely the call sites the origin was
+    /// visible to — no per-pass reasoning about main-locality required.
+    ///
+    /// Empty for modules with no synthesized copies. Populated by
+    /// `shapeMonomorphizeModule`; any future copy-producing pass should use it
+    /// rather than re-deriving the ordering rule.
+    DerivedFuncOrigins: Map<IRId, IRId>
 }
 
 /// IR Program
@@ -4244,6 +4270,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRConstraintCheck (c, msg, sp) -> [c], (function [c'] -> IRConstraintCheck (c', msg, sp) | _ -> badChildren "IRConstraintCheck")
     | IRCurry (arr, idx, r) -> [arr; idx], (function [arr'; idx'] -> IRCurry (arr', idx', r) | _ -> badChildren "IRCurry")
     | IRGram (l, r, same) -> [l; r], (function [l'; r'] -> IRGram (l', r', same) | _ -> badChildren "IRGram")
+    | IRMatmul (l, r) -> [l; r], (function [l'; r'] -> IRMatmul (l', r') | _ -> badChildren "IRMatmul")
     | IRLet (id, v, b) -> [v; b], (function [v'; b'] -> IRLet (id, v', b') | _ -> badChildren "IRLet")
 
     // -- Three children -------------------------------------------------------
@@ -6235,6 +6262,20 @@ let rec typeOf (expr: IRExpr) : IRType =
                 let s1 = { pOuter with Rank = 1; Symmetry = SymNone }
                 mkArrayLike { la with ElemType = outElem; IndexTypes = [s0; s1] }
          | t, _ -> t)
+    | IRMatmul (l, r) ->
+        // matmul(A, B). A : m x k, B : k x n -> DENSE m x n (two plain axes,
+        // SymNone). No conjugation and no symmetry claim: unlike gram, matmul
+        // over the same array is not symmetric, so there is no same-array mode.
+        // Element type is the left operand's (the checker requires both real
+        // Float64 — the shim's v1 domain).
+        (match typeOf l, typeOf r with
+         | ArrayElem la, ArrayElem ra when la.IndexTypes.Length >= 1 && ra.IndexTypes.Length >= 1 ->
+            let mOuter = la.IndexTypes.[0]
+            let nOuter = List.last ra.IndexTypes
+            let s0 = { mOuter with Rank = 1; Symmetry = SymNone }
+            let s1 = { nOuter with Rank = 1; Symmetry = SymNone }
+            mkArrayLike { la with IndexTypes = [s0; s1] }
+         | t, _ -> t)
     | IRHaloUnhash _ ->
         // A window neighbor read yields the inner index's coordinate: int64.
         IRTScalar ETInt64
@@ -6318,11 +6359,20 @@ let rec typeOf (expr: IRExpr) : IRType =
 /// writing that intermediate `let` by hand would. Note the bare (unwrapped)
 /// IRApplyCombinator is deliberately NOT lifted — that one is genuinely deferred
 /// and has no materialized value.
+/// IRMatmul is included (IRGram deliberately is NOT — it entered the language
+/// through the `gram` KEYWORD, whose only surface position is a let-RHS, so it
+/// has never needed lifting). `matmul` arrives from the math package's
+/// elaborator, which rewrites `m.matmul(A, B)` in place — so it appears in
+/// ordinary EXPRESSION positions: a function argument (`elt00(m.matmul(A,B))`),
+/// an index head, an operand of a binop. Before Phase 5 those all worked
+/// because matmul was a synthesized FUNCTION CALL; as an intrinsic node it must
+/// be hoisted to its own let-RHS, which is the only position codegen can
+/// materialize a fresh pool at.
 let isInlineForm (e: IRExpr) : bool =
     match e with
     | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
     | IRGroupBy _ | IRGroupKeys _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
-    | IRReduceCompute _ -> true
+    | IRReduceCompute _ | IRMatmul _ -> true
     | IRCompute (IRApplyCombinator _) -> true
     | _ -> false
 
@@ -6354,6 +6404,11 @@ let private isNestedLoopComputeArg (e: IRExpr) : bool =
     | IRCompute _ -> true
     | IRApp (IRObjectFor _, _, _) -> true
     | IRApp _ | IRIndex _ -> isArrayTyped ()
+    // Phase 5: `m.matmul(A, B) * 2.0` puts a matmul directly in a loop form's
+    // Arrays list. It used to arrive as an array-typed IRApp (the synthesized
+    // function call) and was hoisted by the line above; as an intrinsic node it
+    // needs its own entry or the nest reads an `arr<i>` it never declared.
+    | IRMatmul _ -> true
     | _ -> false
 
 /// An INLINE array literal sitting directly in a loop form's `Arrays` list —
@@ -6446,6 +6501,27 @@ let liftChildIncludingArrayLit (builder: IRBuilder) (child: IRExpr) : (IRId * IR
         let ty = typeOf e
         (peeled @ [(id, ty, e)], IRVar (id, ty))
     | e -> (peeled, e)
+
+/// Like `liftChild`, but ALSO hoists array-typed applications, partial index
+/// reads and forced computations — i.e. everything `isNestedLoopComputeArg`
+/// covers.
+///
+/// Used for the operands of the LINALG intrinsics (`gram`, `matmul`). Their
+/// emission spells each operand's C++ text more than once — `X.extents[0]`,
+/// `X.extents[1]`, `X.data` — so an unhoisted call operand is re-invoked once
+/// per occurrence, allocating a fresh array each time and handing the
+/// contraction two different (if equal-valued) pools. `matmul` made this live:
+/// as a synthesized FUNCTION CALL its operands were ordinary call arguments,
+/// evaluated exactly once; as an intrinsic node they reach an emitter that
+/// re-spells them.
+let liftChildEvaluatedOnce (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
+    let (peeled, inner) = peelLetChain child
+    if isInlineForm inner || isNestedLoopComputeArg inner || isArrayFieldAccess inner then
+        let id = builder.FreshId()
+        let ty = typeOf inner
+        (peeled @ [(id, ty, inner)], IRVar (id, ty))
+    else
+        (peeled, inner)
 
 /// Lift a list of children, accumulating bindings.
 let liftChildren (builder: IRBuilder) (children: IRExpr list) : (IRId * IRType * IRExpr) list * IRExpr list =
@@ -6579,12 +6655,21 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRHaloUnhash (w, o) ->
         // Scalar coordinate read; the window is a param var — nothing to lift.
         IRHaloUnhash (liftExpr builder w, o)
+    // Both linalg intrinsics use the evaluate-once lift: their emitters spell
+    // each operand several times (extents + data), so a call/index operand has
+    // to arrive as a named binding.
     | IRGram (l, r, s) ->
         let l' = liftExpr builder l
         let r' = liftExpr builder r
-        let (bindsL, lFinal) = liftChild builder l'
-        let (bindsR, rFinal) = liftChild builder r'
+        let (bindsL, lFinal) = liftChildEvaluatedOnce builder l'
+        let (bindsR, rFinal) = liftChildEvaluatedOnce builder r'
         wrapLets (bindsL @ bindsR) (IRGram (lFinal, rFinal, s))
+    | IRMatmul (l, r) ->
+        let l' = liftExpr builder l
+        let r' = liftExpr builder r
+        let (bindsL, lFinal) = liftChildEvaluatedOnce builder l'
+        let (bindsR, rFinal) = liftChildEvaluatedOnce builder r'
+        wrapLets (bindsL @ bindsR) (IRMatmul (lFinal, rFinal))
     | IRArrayNegate arr ->
         let arr' = liftExpr builder arr
         let (binds, arrFinal) = liftChild builder arr'
@@ -6920,6 +7005,476 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     { modul with
         Functions = prunedFuncs
         Bindings = newBindings }
+
+// ============================================================================
+// Shape monomorphization (Phase 4, docs/plan-cpp-perf-exploitation.md)
+// ============================================================================
+//
+// A function declared over a SYMBOLIC extent (`f(A: Array<Float64 like Idx<n>>)`)
+// carries `IRParam ("n", 0, IRTNat None)` as its index records' `Extent` — the
+// cosmetic placeholder `TypeCheck.lowerExtentExpr` mints. Nothing downstream
+// ever turns that into a number: unify deliberately never compares extents
+// (Unify.fs:590,606-612) and HM substitution structurally cannot carry them
+// (`SIdx idx -> SIdx idx`, substTypeInIRType). So `genLoopBoundExpr` falls to
+// its `<arr>.extents[d]` arm inside every such function, and Phase 3's flat
+// elementwise mode — which requires literal extents to compute a compile-time
+// cell count — can never fire there.
+//
+// This pass closes that gap the same way `monomorphizeModule` closes the arity
+// gap: collect call sites, key a spec map by (funcId, extent signature), and
+// emit one specialized copy per unique signature with the placeholders
+// rewritten to `IRLit`. The generic copy stays for every call site that does
+// not pin a literal.
+//
+// What it does NOT change: the runtime ABI. `Array<T,R>` still carries
+// `const size_t* extents`, `extents(A)` in the body still reads it, and every
+// `.extents[d]` expression the pass leaves alone still yields the right
+// number — the literal and the runtime read agree by construction, because the
+// literal came from the ARGUMENT's own type. That is why the rewrite is
+// confined to `IRIndexTypeG.Extent` fields and never touches body expressions.
+//
+// Explosion control (the reason extents were deferred to runtime arguments in
+// the first place — see the plan doc): dedupe by signature, cap at
+// SHAPE_SPEC_CAP copies per function, and decline recursive / mutually
+// recursive functions outright in v1. Unlike C++ template instantiation this
+// is bounded by real call-site diversity and is capped in the compiler.
+
+/// Most specialized copies any one function may earn. Past this, further call
+/// sites keep the generic copy — declines are counted and surfaced under
+/// BLADE_DEBUG_SHAPE_SPEC, never as a user diagnostic (a missed optimization
+/// is not a program defect).
+let private SHAPE_SPEC_CAP = 4
+
+/// `BLADE_DEBUG_SHAPE_SPEC=1` prints the per-module specialize/cap/decline
+/// census. Orchestration/diagnostic aid only; silent by default.
+let private shapeSpecDebug () =
+    match System.Environment.GetEnvironmentVariable("BLADE_DEBUG_SHAPE_SPEC") with
+    | null | "" | "0" -> false
+    | _ -> true
+
+/// The bakeable symbolic extent: the cosmetic placeholder `lowerExtentExpr`
+/// emits for `Idx<n>`. `"?"` is that function's give-up marker (an extent
+/// expression it could not lower) and names nothing, so it never bakes.
+let private (|ShapeSymbolicExtent|_|) (e: IRExpr) =
+    match e with
+    | IRParam (name, _, _) when name <> "?" && name <> "" -> Some name
+    | _ -> None
+
+let private (|ShapeLiteralExtent|_|) (e: IRExpr) =
+    match e with
+    | IRLit (IRLitInt n) when n > 0L -> Some n
+    | _ -> None
+
+/// Rewrite an EXTENT expression under a name->literal substitution.
+/// Deliberately narrow: the placeholder itself, arithmetic built over it
+/// (dependent extents like `n - i` stay correct and get one operand folded),
+/// and an orbit class's base extent (which the ExprShape enumeration already
+/// treats as an ordinary extent). Everything else — compound masks, sparse key
+/// sources, ragged lookups, `extents(A)` reads, opaque extents — is a RUNTIME
+/// value that happens to sit in an Extent slot and must be left alone.
+let rec private shapeRewriteExtent (subst: Map<string, int64>) (e: IRExpr) : IRExpr =
+    match e with
+    | IRParam (name, _, _) when subst.ContainsKey name -> IRLit (IRLitInt subst.[name])
+    | IRBinOp (mode, op, l, r) ->
+        IRBinOp (mode, op, shapeRewriteExtent subst l, shapeRewriteExtent subst r)
+    | IRUnaryOp (op, x) -> IRUnaryOp (op, shapeRewriteExtent subst x)
+    | IROrbitClass (levels, n) -> IROrbitClass (levels, shapeRewriteExtent subst n)
+    | _ -> e
+
+let private shapeRewriteIx (subst: Map<string, int64>) (ix: IRIndexType) : IRIndexType =
+    { ix with Extent = shapeRewriteExtent subst ix.Extent }
+
+/// Rewrite every index record reachable from a type. Structural mirror of
+/// `substTypeInIRType`, but over the Extent axis instead of the IRTInfer axis
+/// — and it must descend into the arrow SLOTS, which the HM substituter
+/// deliberately skips (`SIdx idx -> SIdx idx`) precisely because extents were
+/// out of its scope.
+let rec private shapeRewriteType (subst: Map<string, int64>) (ty: IRType) : IRType =
+    match ty with
+    | IRTArrow (slots, result, identity) ->
+        let slots' =
+            slots |> List.map (function
+                | SIdx ix -> SIdx (shapeRewriteIx subst ix)
+                | SIdxVirt ix -> SIdxVirt (shapeRewriteIx subst ix)
+                | SVal t -> SVal (shapeRewriteType subst t))
+        IRTArrow (slots', shapeRewriteType subst result, identity)
+    | IRTTuple ts -> IRTTuple (ts |> List.map (shapeRewriteType subst))
+    | IRTComputation t -> IRTComputation (shapeRewriteType subst t)
+    | IRTPoly (b, v) -> IRTPoly (shapeRewriteType subst b, v)
+    | IRTUnitAnnotated (t, u) -> IRTUnitAnnotated (shapeRewriteType subst t, u)
+    | IRTIdxTagged (t, tag) ->
+        // IRefAnon's extent is diagnostics-only (never part of tag identity),
+        // but keeping it in step avoids printing `Idx<n>` beside a baked bound.
+        let tag' =
+            match tag with
+            | IRefAnon (nid, ext) -> IRefAnon (nid, shapeRewriteExtent subst ext)
+            | other -> other
+        IRTIdxTagged (shapeRewriteType subst t, tag')
+    | IRTDist (order, elem, axes) ->
+        IRTDist (order, shapeRewriteType subst elem, axes |> List.map (shapeRewriteIx subst))
+    | IRTGroupKeys (outerIdx, sourceIdx, ev) ->
+        IRTGroupKeys (shapeRewriteIx subst outerIdx, shapeRewriteIx subst sourceIdx, ev)
+    | IRTLoop lt ->
+        IRTLoop { lt with
+                    ArrayTypes = lt.ArrayTypes |> List.map (shapeRewriteType subst)
+                    KernelType = lt.KernelType |> Option.map (shapeRewriteType subst) }
+    | _ -> ty
+
+let private shapeRewriteArrayType (subst: Map<string, int64>) (aty: IRArrayType) : IRArrayType =
+    { aty with
+        ElemType = shapeRewriteType subst aty.ElemType
+        IndexTypes = aty.IndexTypes |> List.map (shapeRewriteIx subst) }
+
+/// Rewrite every type-bearing field of every node in an expression tree.
+/// `mapIRExpr` supplies the traversal; this callback enumerates the positions
+/// that actually carry index records. Index types are OPAQUE to ExprShape (by
+/// design — see the ExprShape scope decisions), so the records hung directly
+/// off IRRange/IRVirtualReverse/IRBlocked and off the combinator info records
+/// have to be named here or they are never reached.
+let private shapeRewriteExpr (subst: Map<string, int64>) (expr: IRExpr) : IRExpr =
+    if Map.isEmpty subst then expr else
+    let rt = shapeRewriteType subst
+    let rix = shapeRewriteIx subst
+    let rat = shapeRewriteArrayType subst
+    mapIRExpr (fun e ->
+        match e with
+        | IRVar (id, ty) -> IRVar (id, rt ty)
+        // NOTE: only the node's TYPE. An IRParam in expression position is a
+        // parameter reference; the extent PLACEHOLDER of the same shape only
+        // ever lives inside an index record, which this walk reaches through
+        // the type positions instead.
+        | IRParam (n, i, ty) -> IRParam (n, i, rt ty)
+        | IRApp (f, args, retTy) -> IRApp (f, args, rt retTy)
+        | IRArrayLit (es, aty) -> IRArrayLit (es, rat aty)
+        | IRRange (ixs, off) -> IRRange (ixs |> List.map rix, off)
+        | IRVirtualReverse ix -> IRVirtualReverse (rix ix)
+        | IRBlocked (ix, bs) -> IRBlocked (rix ix, bs)
+        | IRMethodFor info ->
+            IRMethodFor { info with
+                            ArrayTypes = info.ArrayTypes |> List.map rat
+                            SharedIndexTypes = info.SharedIndexTypes |> List.map rix }
+        | IRApplyCombinator info ->
+            IRApplyCombinator { info with
+                                  ArrayTypes = info.ArrayTypes |> List.map rat
+                                  SharedIndexTypes = info.SharedIndexTypes |> List.map rix
+                                  KernelTDims = info.KernelTDims |> List.map rix
+                                  OutputType = rt info.OutputType }
+        | IRComposeApply info -> IRComposeApply { info with OutputType = rt info.OutputType }
+        | _ -> e) expr
+
+/// Every symbolic extent NAME a parameter list mentions, with its occurrence
+/// count. A name bakes only when EVERY one of its occurrences was pinned to
+/// the same literal by the call site — see `shapeSignatureAt`.
+let private shapeSymbolicOccurrences (paramTys: IRType list) : Map<string, int> =
+    let acc = System.Collections.Generic.Dictionary<string, int>()
+    let bump name =
+        acc.[name] <- (match acc.TryGetValue name with | true, v -> v | _ -> 0) + 1
+    let rec goIx (ix: IRIndexType) =
+        match ix.Extent with
+        | ShapeSymbolicExtent name -> bump name
+        | _ -> ()
+    and goTy (ty: IRType) =
+        match ty with
+        | IRTArrow (slots, result, _) ->
+            slots |> List.iter (function
+                | SIdx ix | SIdxVirt ix -> goIx ix
+                | SVal t -> goTy t)
+            goTy result
+        | IRTTuple ts -> ts |> List.iter goTy
+        | IRTComputation t | IRTPoly (t, _) | IRTUnitAnnotated (t, _) | IRTIdxTagged (t, _) -> goTy t
+        | IRTDist (_, elem, axes) -> goTy elem; axes |> List.iter goIx
+        | IRTGroupKeys (a, b, _) -> goIx a; goIx b
+        | IRTLoop lt -> lt.ArrayTypes |> List.iter goTy; lt.KernelType |> Option.iter goTy
+        | _ -> ()
+    paramTys |> List.iter goTy
+    acc |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
+
+/// Walk a (parameter type, argument type) pair in lockstep, recording for each
+/// symbolic parameter extent the literal the argument pins it to. Positions
+/// that fail to line up structurally simply record nothing, which — because a
+/// name bakes only at FULL occurrence coverage — makes them a decline rather
+/// than a guess.
+let private shapeObservations (paramTy: IRType) (argTy: IRType) : (string * int64) list =
+    let acc = System.Collections.Generic.List<string * int64>()
+    let obsIx (p: IRIndexType) (a: IRIndexType) =
+        match p.Extent with
+        | ShapeSymbolicExtent name ->
+            // The two records must describe the same KIND of axis before the
+            // argument's number can be believed as this axis' bound.
+            if p.Rank = a.Rank && p.Symmetry = a.Symmetry && p.IxKind = a.IxKind then
+                match a.Extent with
+                | ShapeLiteralExtent n -> acc.Add((name, n))
+                | _ -> ()
+        | _ -> ()
+    let rec go (p: IRType) (a: IRType) =
+        match p, a with
+        | IRTArrow (ps, pr, _), IRTArrow (as_, ar, _) when ps.Length = as_.Length ->
+            List.iter2 (fun pslot aslot ->
+                match pslot, aslot with
+                | SIdx pi, SIdx ai | SIdxVirt pi, SIdxVirt ai
+                | SIdx pi, SIdxVirt ai | SIdxVirt pi, SIdx ai -> obsIx pi ai
+                | SVal pt, SVal at -> go pt at
+                | _ -> ()) ps as_
+            go pr ar
+        | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length -> List.iter2 go pts ats
+        | IRTComputation pt, IRTComputation at
+        | IRTPoly (pt, _), IRTPoly (at, _)
+        | IRTUnitAnnotated (pt, _), IRTUnitAnnotated (at, _)
+        | IRTIdxTagged (pt, _), IRTIdxTagged (at, _) -> go pt at
+        // A unit/tag wrapper on one side only: unwrap and keep pairing.
+        | IRTUnitAnnotated (pt, _), _ -> go pt a
+        | _, IRTUnitAnnotated (at, _) -> go p at
+        | IRTIdxTagged (pt, _), _ -> go pt a
+        | _, IRTIdxTagged (at, _) -> go p at
+        | _ -> ()
+    go paramTy argTy
+    acc |> List.ofSeq
+
+/// The extent signature a call site pins on a callee: the sorted
+/// (name, literal) list that keys the spec map. A name is admitted only when
+/// the arguments pinned EVERY occurrence of it in the parameter list, and
+/// pinned them all to the SAME literal.
+///
+/// Both halves matter. Full coverage rules out `f(a: Idx<n>, b: Idx<n>)`
+/// called with a literal `a` and a runtime-extent `b`, where baking `n` from
+/// `a` would silently install a wrong bound on `b`'s loop; agreement rules out
+/// the same call with a 3-array and a 5-array, which typechecks today because
+/// unify never compares extents.
+let private shapeSignatureAt (func: IRFuncDef) (args: IRExpr list) : (string * int64) list =
+    if args.Length <> func.Params.Length then [] else
+    let paramTys = func.Params |> List.map (fun p -> p.Type)
+    let occ = shapeSymbolicOccurrences paramTys
+    if Map.isEmpty occ then [] else
+    let obs =
+        List.zip paramTys args
+        |> List.collect (fun (pty, arg) ->
+            match exprTypeIfKnown arg with
+            | Some aty -> shapeObservations pty aty
+            | None -> [])
+    obs
+    |> List.groupBy fst
+    |> List.choose (fun (name, pairs) ->
+        let lits = pairs |> List.map snd
+        match Map.tryFind name occ with
+        | Some k when lits.Length = k && (lits |> List.distinct |> List.length) = 1 ->
+            Some (name, List.head lits)
+        | _ -> None)
+    |> List.sortBy fst
+
+/// Would a specialized copy actually pay? Only if the body iterates: the
+/// baked literal reaches the emitted C++ exclusively through loop bounds and
+/// through Phase 3's compile-time cell count. A function that merely forwards
+/// or reads `extents(A)` gets nothing from a copy, so it does not get one.
+let private shapeSpecWorthwhile (func: IRFuncDef) : bool =
+    let mutable found = false
+    mapIRExpr (fun e ->
+        (match e with
+         | IRApplyCombinator _ | IRComposeApply _ | IRMethodFor _
+         | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRForRange _
+         | IRGram _ | IRMatmul _ | IRArrayProduct _ | IRArrayNegate _ | IRArrayConjugate _
+         | IRReynolds _ | IRDecompact _ | IRTranspose _ -> found <- true
+         | _ -> ())
+        e) func.Body |> ignore
+    found
+
+/// Function ids that can reach themselves through the module's static call
+/// graph (direct self-recursion or a mutual cycle). v1 declines to specialize
+/// these: a spec body's recursive call would name the ORIGINAL id, and
+/// rewriting it to the spec is only sound when the recursive call pins the
+/// same signature — an analysis this pass does not do.
+let private shapeRecursiveIds (funcs: IRFuncDef list) : Set<IRId> =
+    let ids = funcs |> List.map (fun f -> f.Id) |> Set.ofList
+    let direct =
+        funcs
+        |> List.map (fun f -> (f.Id, Set.intersect ids (collectVarRefsIR f.Body)))
+        |> Map.ofList
+    let mutable reach = direct
+    let mutable changed = true
+    let mutable guard = 0
+    while changed && guard < 64 do
+        changed <- false
+        guard <- guard + 1
+        let next =
+            reach |> Map.map (fun _ vs ->
+                vs |> Set.fold (fun acc v ->
+                    match Map.tryFind v reach with
+                    | Some vs2 -> Set.union acc vs2
+                    | None -> acc) vs)
+        if next <> reach then
+            changed <- true
+            reach <- next
+    reach |> Map.toList |> List.choose (fun (k, vs) -> if Set.contains k vs then Some k else None) |> Set.ofList
+
+/// One planned specialization: the callee it copies, the name->literal map the
+/// copy bakes, and the fresh id/name the copy will carry.
+type private ShapeSpec = {
+    Orig: IRFuncDef
+    Subst: Map<string, int64>
+    SpecId: IRId
+    SpecName: string
+}
+
+/// Phase 4: give every symbolic-extent function a literal-extent copy per
+/// distinct call-site shape. Runs after arity and HM monomorphization (both
+/// can create the call sites this reads) and before codegen.
+let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
+    let debug = shapeSpecDebug ()
+    let recursiveIds = shapeRecursiveIds modul.Functions
+    let candidates =
+        modul.Functions
+        |> List.filter (fun f ->
+            not f.IsArityPoly
+            && not (Set.contains f.Id recursiveIds)
+            && not (Map.isEmpty (shapeSymbolicOccurrences (f.Params |> List.map (fun p -> p.Type))))
+            && shapeSpecWorthwhile f)
+    if candidates.IsEmpty then modul else
+    let candMap = candidates |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+
+    // Planned specs, keyed exactly as monomorphizeModule's specMap is:
+    // (callee id, the signature that distinguishes this copy).
+    let mutable specMap : Map<IRId * (string * int64) list, ShapeSpec> = Map.empty
+    // Distinct signatures turned away by the cap (a set, not a tally: the
+    // fixpoint re-visits the same declined site every round).
+    let mutable capDeclines : Set<IRId * (string * int64) list> = Set.empty
+
+    /// Rewrite one call site against the CURRENT spec map. Pure, so the
+    /// scan below can apply it to a throwaway copy of every body and read
+    /// the cascade (an inner call's baked return type is an outer call's
+    /// literal argument extent) without committing to anything.
+    let rewriteCallSites (expr: IRExpr) : IRExpr =
+        mapIRExpr (fun e ->
+            match e with
+            | IRApp (IRVar (fid, fty), args, retTy) when candMap.ContainsKey fid ->
+                let sign = shapeSignatureAt candMap.[fid] args
+                if List.isEmpty sign then e
+                else
+                    match Map.tryFind (fid, sign) specMap with
+                    | Some spec ->
+                        let subst = spec.Subst
+                        IRApp (IRVar (spec.SpecId, shapeRewriteType subst fty),
+                               args,
+                               shapeRewriteType subst retTy)
+                    | None -> e
+            | _ -> e) expr
+
+    let specBody (s: ShapeSpec) : IRExpr = shapeRewriteExpr s.Subst s.Orig.Body
+
+    // Fixpoint: each round rewrites every body (originals, bindings, and the
+    // specs planned so far) with the current map, then harvests the call sites
+    // the rewritten form exposes. A new spec can expose more — its body's own
+    // calls now carry literal argument extents — so the round repeats until it
+    // adds nothing.
+    // (`rounds < 8` is a runaway backstop in the spirit of monomorphizeModule's
+    // MAX_SPECS; real convergence is 2 — one round to find the direct sites,
+    // one to observe that nothing new appeared. A deeper chain of
+    // literal-extent-forwarding callees would use more, and anything past the
+    // backstop simply keeps the generic copy.)
+    let mutable changed = true
+    let mutable rounds = 0
+    while changed && rounds < 8 do
+        changed <- false
+        rounds <- rounds + 1
+        let bodies =
+            (modul.Functions |> List.map (fun f -> f.Body))
+            @ (modul.Bindings |> List.map (fun b -> b.Value))
+            @ (specMap |> Map.toList |> List.map (snd >> specBody))
+        let sites =
+            bodies
+            |> List.collect (fun b ->
+                let mutable found = []
+                mapIRExpr (fun e ->
+                    (match e with
+                     | IRApp (IRVar (fid, _), args, _) when candMap.ContainsKey fid ->
+                         let sign = shapeSignatureAt candMap.[fid] args
+                         if not (List.isEmpty sign) then found <- (fid, sign) :: found
+                     | _ -> ())
+                    e) (rewriteCallSites b) |> ignore
+                found)
+            |> List.distinct
+        for (fid, sign) in sites do
+            if not (Map.containsKey (fid, sign) specMap) then
+                let existing = specMap |> Map.filter (fun (k, _) _ -> k = fid) |> Map.count
+                if existing >= SHAPE_SPEC_CAP then
+                    capDeclines <- Set.add (fid, sign) capDeclines
+                else
+                    let orig = candMap.[fid]
+                    let specId = builder.FreshId()
+                    let suffix = sign |> List.map (fun (n, v) -> sprintf "_%s%d" n v) |> String.concat ""
+                    specMap <- Map.add (fid, sign)
+                                       { Orig = orig
+                                         Subst = Map.ofList sign
+                                         SpecId = specId
+                                         SpecName = sprintf "%s_shape%s" orig.Name suffix }
+                                       specMap
+                    changed <- true
+
+    if Map.isEmpty specMap then
+        (if debug then
+            eprintfn "[shape-spec] %s: %d candidate(s), 0 specialized" modul.Name candidates.Length)
+        modul
+    else
+
+    // Materialize the copies. Param VarIds are deliberately NOT freshened (the
+    // HM specializer does freshen them, and then has to clone every lifted
+    // lambda that captured a param to repair the dangling Captures.Id). Here
+    // the copy is type-identical to the original at every VALUE position —
+    // only Extent fields differ — so sharing the VarIds keeps any lifted lambda
+    // the body references bound to exactly the parameters it always was. The
+    // lambda's own index records keep their symbolic extents; that costs the
+    // optimization inside the lambda and nothing else, because an unbaked
+    // extent still emits the correct runtime read.
+    let materialize (s: ShapeSpec) : IRFuncDef =
+        { s.Orig with
+            Id = s.SpecId
+            Name = s.SpecName
+            Params = s.Orig.Params |> List.map (fun p -> { p with Type = shapeRewriteType s.Subst p.Type })
+            RetType = shapeRewriteType s.Subst s.Orig.RetType
+            Captures = s.Orig.Captures |> List.map (fun c -> { c with Type = shapeRewriteType s.Subst c.Type })
+            Body = rewriteCallSites (specBody s) }
+
+    // PLACEMENT IS PART OF CORRECTNESS, not cosmetics. Codegen interleaves
+    // bindings and functions in IRId order, and every function
+    // `computeMainLocalFuncIds` classifies as main-local is emitted as a
+    // `std::function` LOCAL inside main() with no forward declaration. A copy
+    // carrying a fresh (= largest) id therefore sorts AFTER the very call sites
+    // this pass just rewrote to it — "'<name>' was not declared in this scope".
+    //
+    // So the copy is placed immediately after its origin here, and its
+    // emission-order key is the ORIGIN's id (IRModule.DerivedFuncOrigins,
+    // honoured by genModule/genModuleSplit). The two together put the copy at
+    // exactly its origin's program point, which makes it visible to precisely
+    // the call sites the origin was visible to — the property that has to hold
+    // for a call-site rewrite to be sound, established structurally instead of
+    // re-derived per pass. Every reference the copy's own body makes is
+    // likewise in scope there, because the body's free variables are the
+    // origin's.
+    let specsByOrigin =
+        specMap |> Map.toList |> List.map snd |> List.groupBy (fun s -> s.Orig.Id) |> Map.ofList
+    let newFunctions =
+        modul.Functions
+        |> List.collect (fun f ->
+            let f' = { f with Body = rewriteCallSites f.Body }
+            match Map.tryFind f.Id specsByOrigin with
+            | Some specs -> f' :: (specs |> List.map materialize)
+            | None -> [f'])
+    let newBindings = modul.Bindings |> List.map (fun b -> { b with Value = rewriteCallSites b.Value })
+    let derivedOrigins =
+        specMap
+        |> Map.toList
+        |> List.fold (fun acc (_, s) -> Map.add s.SpecId s.Orig.Id acc) modul.DerivedFuncOrigins
+
+    if debug then
+        let perFunc =
+            specMap |> Map.toList |> List.map (fun ((fid, _), s) -> (fid, s.Orig.Name))
+            |> List.groupBy id |> List.map (fun ((_, n), g) -> sprintf "%s x%d" n g.Length)
+        eprintfn "[shape-spec] %s: %d candidate(s), %d spec(s) [%s], %d cap-decline(s), %d recursive decline(s), %d round(s)"
+                 modul.Name candidates.Length specMap.Count (String.concat "; " perFunc)
+                 (Set.count capDeclines) (Set.count recursiveIds) rounds
+
+    { modul with
+        Functions = newFunctions
+        Bindings = newBindings
+        DerivedFuncOrigins = derivedOrigins }
 
 // ============================================================================
 // Pretty Printing

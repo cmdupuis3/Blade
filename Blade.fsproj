@@ -192,6 +192,12 @@
          from CodeGen so a future IR interpreter can reuse the exact plan. Pure
          int/list logic; no IR/Types dependency, so it can precede CodeGen. -->
     <Compile Include="src/ReynoldsCore.fs" />
+    <!-- Linear-algebra dispatch classification (Phase 5 of
+         docs/plan-cpp-perf-exploitation.md): IR node / loop-nest shape ->
+         typed LinAlgCall descriptor, plus the BLAS-vs-native policy table.
+         Needs IR (it matches IRExpr) and must precede CodeGen, which consults
+         it instead of pattern-matching BLAS shapes itself. -->
+    <Compile Include="src/LinAlgPatterns.fs" />
     <Compile Include="src/CodeGen.fs" />
     <!-- Tree-walking IR interpreter (differential twin of CodeGen; output must
          byte-match compiled binaries). Value = runtime value universe;
@@ -292,6 +298,7 @@
     <Compile Include="tests/Benchmarks.fs" />
     <Compile Include="tests/CudaTests.fs" />
     <Compile Include="tests/OmpTests.fs" />
+    <Compile Include="tests/LinAlgTests.fs" />
     <Compile Include="tests/AllocTests.fs" />
     <Compile Include="tests/NetcdfTests.fs" />
     <Compile Include="tests/ZarrTests.fs" />
@@ -352,6 +359,10 @@
     </None>
     <None Include="src/cpp/blade_runtime.hpp">
       <Link>cpp/blade_runtime.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/blade_linalg.hpp">
+      <Link>cpp/blade_linalg.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

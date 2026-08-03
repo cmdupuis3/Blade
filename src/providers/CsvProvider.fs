@@ -287,6 +287,7 @@ let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRMo
         CompoundInits = Map.empty
         SparseInits = Map.empty
         MutableArrayLets = Set.empty
+        DerivedFuncOrigins = Map.empty
     }
 
 // ============================================================================

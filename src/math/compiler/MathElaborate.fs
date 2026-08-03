@@ -255,9 +255,23 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
         arrayShape ctx scope "matmul" aE |> Result.bind (fun (_, aDims) ->
         arrayShape ctx scope "matmul" bE |> Result.bind (fun (_, bDims) ->
             match aDims, bDims with
-            | [m; k], [k2; n] when k = k2 ->
-                ensure st (fingerprint "matmul" (box (m, k, n))) (fun nm -> Ok (matmulDecl nm m k n))
-                |> Result.map (fun nm -> syn (ExprApp (v nm, [aE; bE])))
+            | [_m; k], [k2; _n] when k = k2 ->
+                // Phase 5 (docs/plan-cpp-perf-exploitation.md): matmul is no
+                // longer SYNTHESIZED as a per-(m,k,n) Blade triple loop. It
+                // rewrites to the `__math_matmul` intrinsic marker, which
+                // TypeCheck.inferMatmul types and codegen emits as one
+                // `blade_linalg::blade_matmul` call — the shim then resolves to
+                // cblas_dgemm or to a native fallback depending on the BUILD.
+                // A blocked/microkernel GEMM is the one shape Blade-native loop
+                // code cannot approach, so it gets a first-class binding rather
+                // than a desugaring. svd/eigh/eig/unfold/mode_product/hosvd stay
+                // synthesized (LAPACK is a separate, later decision).
+                //
+                // The SHAPE VALIDATION above is deliberately unchanged: matmul
+                // still reads the DECLARED shapes and still rejects the same
+                // programs with the same messages, so nothing about the surface
+                // contract moved — only what the accepted call lowers to.
+                Ok (syn (ExprApp (v "__math_matmul", [aE; bE])))
             | [_; k], [k2; _] ->
                 Error (sprintf "matmul: inner extents disagree (A is ..×%d, B is %d×..)" k k2)
             | _ -> Error "matmul: both arguments must be rank-2 (m×k · k×n)"))

@@ -1168,6 +1168,36 @@ let gramArray (left: BladeArray) (right: BladeArray) (outType: IRType) : BladeAr
             out
     | _ -> raise (ArrayOpUnsupported "gram: output type is not an array")
 
+/// matmul(left, right) = left * right:  R[i][j] = Σ_t left[i][t]*right[t][j]
+/// (materializeMatmulForm in CodeGen; the C++ side is one
+/// `blade_linalg::blade_matmul` call). Always DENSE m×n — unlike gram there is
+/// no same-array symmetry to claim, since A·A is not symmetric.
+///
+/// BYTE-IDENTITY: the t-fold accumulates ASCENDING from the element zero,
+/// matching BOTH the shim's native fallback (`acc += A(i,t) * B(t,j)`, one
+/// local accumulator per output cell) and the synthesized Blade triple loop
+/// this route replaced. That agreement is what tests/InterpDiff.fs checks.
+let matmulArray (left: BladeArray) (right: BladeArray) (outType: IRType) : BladeArray =
+    match outType with
+    | ArrayElem outArr ->
+        let outElem = outArr.ElemType
+        let m = if left.Extents.Length >= 1 then left.Extents.[0] else 0L
+        let kk = if left.Extents.Length >= 2 then left.Extents.[1] else 0L
+        let n = if right.Extents.Length >= 2 then right.Extents.[1] else 0L
+        let zero = zeroOfElemTy outElem
+        let extents = [| m; n |]
+        let out = allocDense outElem outArr.IndexTypes extents
+        for i in 0L .. m - 1L do
+            for j in 0L .. n - 1L do
+                let mutable acc = zero
+                for t in 0L .. kk - 1L do
+                    let lv = readCell left [ i; t ]
+                    let rv = readCell right [ t; j ]
+                    acc <- N.evalBinOp IRAdd acc (N.evalBinOp IRMul lv rv)
+                writeCell out [ i; j ] acc
+        out
+    | _ -> raise (ArrayOpUnsupported "matmul: output type is not an array")
+
 // ============================================================================
 // §7 Compound (masked product space, formalism 4.5) — construction + reads
 // ============================================================================

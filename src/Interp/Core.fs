@@ -769,7 +769,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     //      fresh array (forcing deferred inputs first), so route to the Loops
     //      backend, which mirrors CodeGen's materialize{Decompact,Gram,Negate/
     //      Conjugate}Form emitters.
-    | IRDecompact _ | IRGram _ | IRArrayNegate _ | IRArrayConjugate _ ->
+    | IRDecompact _ | IRGram _ | IRMatmul _ | IRArrayNegate _ | IRArrayConjugate _ ->
         evalArrayNode st env expr
 
     | other ->

@@ -93,7 +93,7 @@ let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc:
             let srcAbs = Path.GetFullPath srcPath
             let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
             let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" optFlags exeAbs srcAbs)
+            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
             cpsi.RedirectStandardError <- true
             cpsi.UseShellExecute <- false
             cpsi.WorkingDirectory <- Path.GetDirectoryName(srcAbs)
@@ -180,6 +180,14 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
         { Block = "Differential Timing"; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
     else
         Directory.CreateDirectory(outputDir) |> ignore
+        // The generated .cpp `#include`s the C++ runtime headers with plain
+        // quotes and the g++ invocation below passes no -I, so the headers must
+        // sit next to the source. Deploy them HERE rather than relying on some
+        // other test block having already populated the shared output dir: this
+        // block is excluded from the default `blade test` aggregate, so when it
+        // runs standalone (`blade test timing`) nothing else has deployed them
+        // and every case fails with "nested_array_utilities.hpp: No such file".
+        CodeGen.deployRuntimeHeaders outputDir
         let runs = 5
         let mutable passed = 0
         let mutable warned = 0

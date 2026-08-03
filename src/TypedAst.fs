@@ -291,6 +291,10 @@ and TypedExprKind =
     | TExprTranspose of array: TypedExpr * dim1: int * dim2: int
     | TExprDecompact of array: TypedExpr * dim: int
     | TExprGram of left: TypedExpr * right: TypedExpr * isSameArray: bool
+    /// matmul(A, B): A(m x k) * B(k x n) -> dense m x n. The math package's
+    /// first-class product (Phase 5), routed through blade_linalg rather than
+    /// synthesized as a Blade triple loop.
+    | TExprMatmul of left: TypedExpr * right: TypedExpr
     | TExprArrayNegate of array: TypedExpr
     | TExprArrayConjugate of array: TypedExpr
     | TExprExtents of array: TypedExpr

@@ -180,7 +180,7 @@ let runOrbWreathTests () : Blade.Tests.TestHarness.BlockResult =
         // C++20: the header's level lists are template packs with `if constexpr`
         // sign dispatch (c++17 suffices for neither the pack idioms nor the
         // concepts-adjacent diagnostics the file leans on).
-        let args = sprintf "-std=c++20 %s -o \"%s\" \"%s\"" optFlags exePath testSrc
+        let args = sprintf "-std=c++20 %s -o \"%s\" \"%s\"" (optFlags ()) exePath testSrc
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true

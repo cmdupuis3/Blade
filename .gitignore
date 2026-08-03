@@ -29,6 +29,10 @@ CoqMakefile*
 # creates beside the binary.
 generated_cpp_tests/
 
+# The pinned diff-oracle build (a full copy of bin/Release output; re-pinned
+# per-machine from a fully-gated build — never committed).
+oracle/
+
 # The compiler deploys its C++ runtime headers next to every generated .cpp,
 # and `blade build` with no -o writes them into the current directory -- which
 # is how copies end up beside the corpus sources. src/cpp/ is canonical; these

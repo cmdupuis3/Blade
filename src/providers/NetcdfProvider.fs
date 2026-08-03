@@ -373,6 +373,7 @@ let ncFileToModule
         CompoundInits = Map.empty
         SparseInits = Map.empty
         MutableArrayLets = Set.empty
+        DerivedFuncOrigins = Map.empty
     }
 
 /// Convenience: load a file and produce a module in one step.

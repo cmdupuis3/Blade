@@ -461,7 +461,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                 // doubled path). Absolute paths make the working dir irrelevant.
                 let srcAbs = Path.GetFullPath(srcFile)
                 let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" optFlags exeAbs srcAbs)
+                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
                 cpsi.RedirectStandardError <- true
                 cpsi.UseShellExecute <- false
                 use cproc = Process.Start(cpsi)
@@ -608,7 +608,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
         | Ok srcAbs ->
             let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
             let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" optFlags exeAbs srcAbs)
+            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
             cpsi.RedirectStandardError <- true
             cpsi.UseShellExecute <- false
             use cproc = Process.Start(cpsi)
@@ -730,7 +730,7 @@ let private compileProgram (outputDir: string) (name: string) (src: string) : Re
                 File.WriteAllText(srcAbs, cppCode)
                 let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
                 let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" optFlags exeAbs srcAbs)
+                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
                 cpsi.RedirectStandardError <- true
                 cpsi.UseShellExecute <- false
                 use cproc = Process.Start(cpsi)

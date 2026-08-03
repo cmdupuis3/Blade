@@ -630,6 +630,8 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRDecompact (lowerTypedExpr env array, dim)
     | TExprGram (left, right, isSameArray) ->
         IRGram (lowerTypedExpr env left, lowerTypedExpr env right, isSameArray)
+    | TExprMatmul (left, right) ->
+        IRMatmul (lowerTypedExpr env left, lowerTypedExpr env right)
     | TExprArrayNegate array ->
         IRArrayNegate (lowerTypedExpr env array)
     | TExprArrayConjugate array ->
@@ -2032,6 +2034,9 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
         CompoundInits = currentEnv.CompoundInits
         SparseInits = currentEnv.SparseInits
         MutableArrayLets = Set.ofSeq currentEnv.MutableArrayLets
+        // Nothing is synthesized-from-another at lowering time; the
+        // copy-producing passes (shapeMonomorphizeModule) fill this in.
+        DerivedFuncOrigins = Map.empty
     }
     (irModule, moduleExport)
 
@@ -2060,6 +2065,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // call site. Runs after Poly so per-param/per-arg unification is
         // straightforward — each pack has already been expanded.
         let irModule = IR.monomorphizeHMFunctions irModule env.Builder
+        // SHAPE monomorphization (Phase 4, docs/plan-cpp-perf-exploitation.md):
+        // a function over a symbolic extent (`Idx<n>`) gets a specialized copy
+        // per distinct call-site extent signature, with the cosmetic `IRParam`
+        // extent placeholders rewritten to `IRLit`. Must run AFTER both
+        // monomorphizers — each of them creates call sites this one reads, and
+        // neither can carry extents itself (unify never compares them; HM
+        // substitution passes `SIdx idx` through verbatim) — and before the
+        // combinator-producing rewrites below, so the array types those build
+        // inherit the literals rather than needing a second rewrite.
+        let irModule = IR.shapeMonomorphizeModule irModule env.Builder
         // Rewrite raw array-typed binops into object_for combinators now that
         // pack-element operand types are concrete (post Poly+HM). `A[i] + A[j]`
         // on rank>=1 pack elements couldn't be recognized as an array op at

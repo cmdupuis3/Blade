@@ -1285,6 +1285,7 @@ let zarrStoreToModule
         CompoundInits = Map.empty
         SparseInits = Map.empty
         MutableArrayLets = Set.empty
+        DerivedFuncOrigins = Map.empty
     }
 
 /// Convenience: load a store and produce a module in one step (contract).

@@ -1765,6 +1765,13 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let l = forceInputArray st env lExpr
         let r = forceInputArray st env rExpr
         VArray (A.gramArray l r (typeOf expr))
+    | IRMatmul (lExpr, rExpr) ->
+        // matmul = the dense A·B product (Phase 5). Same FORCE-then-materialize
+        // shape as gram; the naive i/j/t-ascending fold mirrors the shim's
+        // native fallback so the compiled/interpreted differential is exact.
+        let l = forceInputArray st env lExpr
+        let r = forceInputArray st env rExpr
+        VArray (A.matmulArray l r (typeOf expr))
     | IRArrayNegate arrExpr ->
         VArray (A.negateConjugateArray false (forceInputArray st env arrExpr))
     | IRArrayConjugate arrExpr ->
