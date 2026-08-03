@@ -291,6 +291,15 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         else
             printfn "\nOpenMP coverage: not run (opt-in; enable with 'blade test --omp' or run 'blade test omp-coverage')."
             None
+    // Comm-licensed parallel reductions (Phase 2): compiles the omp and serial
+    // spellings of each fold and diffs the VALUES, which no string check can do.
+    // Same opt-in gate as the coverage block — it compiles and runs real
+    // programs — and skips cleanly when g++ is absent.
+    let ompReduce =
+        if opts.IncludeOmp then Some (runOmpReduceTests ())
+        else
+            printfn "OpenMP reductions: not run (opt-in; enable with 'blade test --omp' or run 'blade test omp-reduce')."
+            None
     // Device buffer dimensional-type tests (CUDA streaming foundation). Pure F#.
     let bufType = runBufferTypeTests ()
     // `where cuda` hardware tests (differential vs host-loop oracle). Opt-in;
@@ -357,6 +366,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
+          match ompReduce with Some b -> yield b | None -> ()
           yield bufType
           match cuda with Some b -> yield b | None -> ()
           match mpi with Some b -> yield b | None -> ()

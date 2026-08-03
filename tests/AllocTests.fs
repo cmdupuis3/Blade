@@ -48,7 +48,7 @@ let runAllocLayoutTests () : Blade.Tests.TestHarness.BlockResult =
         let exePath = Path.ChangeExtension(testSrc, exeExt)
         // Compile in cppDir so #include "nested_array_utilities.hpp" resolves to
         // the shipped headers, exactly as g++ resolves them for generated tests.
-        let args = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\"" exePath testSrc
+        let args = sprintf "-std=c++17 %s -o \"%s\" \"%s\"" optFlags exePath testSrc
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true

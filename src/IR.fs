@@ -2792,6 +2792,31 @@ type LoopIndexBinding = {
 }
 
 /// Complete information needed to generate a loop nest
+/// Phase 2 Path B for reduce-over-deferred-computation
+/// (docs/plan-cpp-perf-exploitation.md §2): the OUTERMOST loop level of a fold
+/// nest is split into contiguous per-thread chunks, each thread runs the WHOLE
+/// inner nest serially over its chunk into a private accumulator, and the
+/// partials are combined in thread order through the same fold wrapper.
+///
+/// Why the outermost level and nothing else: a triangular/dependent inner level
+/// is then trivially correct (it runs exactly as it would serially, for each
+/// outer index the thread owns), and the only reordering is between chunks —
+/// which is precisely what the kernel's comm licence covers. Set only when the
+/// outermost binding is rectangular (no bound dependencies, no strict offset),
+/// so the chunk arithmetic is a plain split of [0, extent).
+///
+/// Chunks are seeded from their own first CONTRIBUTED value rather than from the
+/// caller's seed (`HasName` tracks "has one yet"), so no identity element is
+/// required and an outer index whose inner nest is empty contributes nothing.
+/// The caller's seed stays in the outer accumulator and enters the combine
+/// first, which makes the result the serial left fold up to associativity.
+type FoldChunkPlan = {
+    /// C++ type of the accumulator and the per-thread partials array.
+    ElemCpp: string
+    /// Uniquifying suffix for the generated locals (the fold binding's name).
+    Tag: string
+}
+
 type LoopNestCodeGen = {
     /// All loop index bindings, in nesting order (outermost first)
     Bindings: LoopIndexBinding list
@@ -2837,6 +2862,11 @@ type LoopNestCodeGen = {
     /// Kept separately so the emitters can mark a requested-but-serial nest in
     /// the generated C++ instead of silently dropping the request.
     OmpRequested: bool
+    /// Comm-licensed parallel fold over this nest (Phase 2 Path B). Meaningful
+    /// only together with FoldWrapper; None everywhere else, including every
+    /// fold whose kernel did not ask for omp or could not be licensed. See
+    /// FoldChunkPlan for what the shape guarantees.
+    FoldChunk: FoldChunkPlan option
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -4104,6 +4134,7 @@ let buildLoopNestCodeGen
         FoldWrapper = None
         MpiSlab = false
         OmpRequested = kernelRequestedOmp
+        FoldChunk = None
     }
 
 // ============================================================================

@@ -145,6 +145,11 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
             if onWindows then
                 let cppFull = Path.GetFullPath(cppFile)
                 let exeFull = Path.ChangeExtension(cppFull, ".exe")
+                // Stays at -O2, NOT Build.optFlags: this is an nvcc invocation
+                // (cl.exe host), and nvcc's host-flag translation does not take
+                // -march cleanly on Windows. Same rule as Build.fs's CUDA paths.
+                // The Linux branch below goes through compileCpp, so it DOES
+                // pick up the shared -O3 -march flags.
                 let args = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\"" exeFull cppFull
                 runProc "nvcc" args 120000 |> Result.map (fun () -> exeFull)
             else compileCpp cppFile outputDir

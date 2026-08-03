@@ -58,7 +58,7 @@ let private runDiffCase (outputDir: string) (caseName: string) (edgiSrc: string)
                 let srcAbs = Path.GetFullPath srcPath
                 let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
                 let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 -O2 -fopenmp -o \"%s\" \"%s\"" exeAbs srcAbs)
+                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" optFlags exeAbs srcAbs)
                 cpsi.RedirectStandardError <- true
                 cpsi.UseShellExecute <- false
                 cpsi.WorkingDirectory <- Path.GetDirectoryName(srcAbs)

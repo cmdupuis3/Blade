@@ -77,6 +77,7 @@ let printUsage () =
     printfn "  test alloc                        Run C++ allocation-layout tests (contiguity/cardinality)"
     printfn "  test omp-pragma                   Run the OpenMP pragma-emission block standalone"
     printfn "  test omp-coverage                 Run the OpenMP thread-coverage block standalone"
+    printfn "  test omp-reduce                   Run the comm-licensed parallel-reduction block standalone"
     printfn "  test cuda                         Run the CUDA kernel block standalone"
     printfn "  test mpi                          Run the MPI decomposition block standalone"
     printfn "  test netcdf                       Run the NetCDF provider block (needs libnetcdf + sample.nc)"
@@ -1448,6 +1449,13 @@ let private dispatchTest (rest: string list) : int =
         // unannotated one. No toolchain needed, so this also runs in the
         // default suite (unlike omp-coverage below).
         let failed = (Blade.Tests.OmpTests.runOmpPragmaTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "omp-reduce" ] ->
+        // Comm-licensed parallel reductions (Phase 2): compile the omp and
+        // serial spellings of the same fold, run both, and diff the values;
+        // plus the Path-B determinism and collapse(2) compile gates. Needs g++;
+        // skips cleanly without it.
+        let failed = (Blade.Tests.OmpTests.runOmpReduceTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "omp-coverage" ] ->
         // OpenMP thread-coverage: generate representative loop programs with

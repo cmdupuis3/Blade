@@ -179,6 +179,16 @@ module Codes =
             // always, for BL4011's reason — and like BL4011 it grows no
             // `--strict-pins` arm: certificates own no storage decision.
             "BL4014", "galilean certificate suggestion"
+            // BL4015 — the compact-class INHERITANCE gate (AntisymMapNotOdd /
+            // HermitianMapNotReal / WreathTieKernelNotOdd). Registered late:
+            // the code shipped emitting from TypeEnv's mapping without an entry
+            // here, which is the gap this registry exists to close.
+            "BL4015", "compact-class inheritance not certified"
+            // BL4016 — `where ... omp` on a fold kernel with no reorder licence.
+            // Distinct from BL4013 (annotation contradicts body): nothing is
+            // disproved, there is simply no commutativity/associativity claim to
+            // stand on. See docs/plan-cpp-perf-exploitation.md Phase 2.
+            "BL4016", "parallel fold needs a reorder licence"
             // BL5xxx — elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"

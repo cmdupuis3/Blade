@@ -401,6 +401,24 @@ let blasUsedCell () : bool ref =
         fresh
     else v
 
+/// Collector: did THIS program assembly emit code that calls the OpenMP RUNTIME
+/// API (`omp_get_max_threads` / `omp_get_thread_num`), as opposed to only
+/// `#pragma omp` (which needs no header)? Set by the comm-licensed parallel-fold
+/// emission (Phase 2) — the manual chunked path computes its own team size — and
+/// read by the program assemblers, which append `#include <omp.h>` after body
+/// generation. Same collect-then-assemble shape and AsyncLocal isolation as
+/// blasUsedCell above.
+let private ompApiUsedStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let ompApiUsedCell () : bool ref =
+    let v = ompApiUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        ompApiUsedStorage.Value <- fresh
+        fresh
+    else v
+
 /// Optional refinement of split-timing: when set to Some name, the compute
 /// clock starts immediately before the binding with that NAME (everything
 /// before it â€” producers, decompact chains, any setup â€” is attributed to the
@@ -2359,6 +2377,18 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     // guard when the extent is statically proven > 0 (typecheck has
     // already rejected statically-empty inputs); emit the guard for
     // dynamic extents (mask results, group_by groups, etc.).
+    //
+    // Phase 2 (comm-licensed OpenMP folds) deliberately does NOT reach here:
+    // the expression form stays serial even for a licensed `where ... omp`
+    // kernel. An IIFE reduce appears in expression position — inside a KERNEL
+    // BODY (`lambda(g) -> reduce(g, k)`), inside arithmetic, inside another
+    // nest's innermost statement — so its surrounding context is routinely
+    // already inside a parallel region, where opening a nested team is a
+    // pessimisation at best and (for the `omp_get_max_threads()` chunk split)
+    // a wrong team size at worst. The statement forms (genReduceBinding /
+    // genReduceComputeBinding) own a whole binding and know they are at the
+    // top of one, which is what makes the parallel region safe there. Hoist the
+    // fold to its own `let` to get the parallel shape.
     let arrStr = exprToCppCore subst names arrExpr
     let elemType =
         match inferExprType arrExpr with
@@ -3721,7 +3751,20 @@ let exprToCppWithSubst (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExp
 
 /// Generate the element binding expression for a single array at a loop level
 /// Returns (cppCode, newPeeledName) where newPeeledName is used for subsequent levels
-let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (currentName: string) 
+///
+/// `rawRowPeel` (Phase 1 of docs/plan-cpp-perf-exploitation.md): when true, a
+/// peel that leaves exactly ONE dimension is emitted as a raw
+/// `T* __restrict__ row = parent.data[i];` instead of the `Array<T,1>` wrapper.
+/// The caller (`restrictPeelSites`) is what establishes the precondition: the
+/// peeled local must be consumed EXCLUSIVELY by a deeper scalar-leaf peel
+/// (`row[j]`), whose rendered text is byte-identical for a wrapper and a raw
+/// pointer. Never set for a local that escapes as an `Array<T,1>` value (fiber
+/// kernels, `.extents[0]` intrinsic bounds, streamed binds, captures).
+///
+/// Soundness of the qualifier itself: every kernel output is a fresh
+/// `allocate<>`/`allocate_strict<>` pool, so no written pointer ever aliases a
+/// read row; read/read aliasing (`f(A, A)`) is permitted under restrict.
+let genElementBindingPeel (rawRowPeel: bool) (level: LoopIndexBinding) (elem: ElementBinding) (currentName: string)
     : string * string =
     match elem.Virtual with
     | VirtualRange offset when
@@ -3819,6 +3862,10 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
         let peel =
             if resultRank <= 0 then
                 sprintf "%s %s = %s[%s];" elemTypeStr newName currentName coordName
+            elif rawRowPeel then
+                // resultRank = 1 and every consumer is `newName[j]`: drop the
+                // wrapper for a restrict-qualified row pointer (Phase 1).
+                sprintf "%s* __restrict__ %s = %s.data[%s];" elemTypeStr newName currentName coordName
             else
                 sprintf "Array<%s, %d> %s = { %s.data[%s], %s.extents + 1 };"
                     elemTypeStr resultRank newName currentName coordName currentName
@@ -3843,7 +3890,10 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
             if resultRank <= 0 then
                 sprintf "%s %s = %s.data[%s];" elemTypeStr newName currentName r
             else
-                sprintf "%s* %s = %s.data + %s * %s.trailing_stride;" elemTypeStr newName currentName r currentName
+                // Already a raw row pointer; the restrict qualifier is free
+                // here (Phase 1) — a raw `T*` can never have been forwarded as
+                // an `Array<T,1>` value, so no consumer analysis is needed.
+                sprintf "%s* __restrict__ %s = %s.data + %s * %s.trailing_stride;" elemTypeStr newName currentName r currentName
         (code, newName)
     | RealArray ->
         // After indexing once, remaining rank decreases
@@ -3901,15 +3951,87 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
             if resultRank <= 0 then
                 // Scalar leaf: peel returns the element value directly.
                 sprintf "%s %s = %s[%s];" elemTypeStr newName currentName arrayIndex
+            elif rawRowPeel then
+                // Phase 1: resultRank = 1 and the ONLY consumer is the deeper
+                // scalar-leaf peel `newName[__ik]` — which renders identically
+                // against a raw pointer and against the wrapper's operator[].
+                // Dropping the wrapper hands g++ a `__restrict__` row and, with
+                // the output row hoisted the same way, a provable no-alias pair.
+                sprintf "%s* __restrict__ %s = %s.data[%s];" elemTypeStr newName currentName arrayIndex
             else
                 // Sub-array peel: construct a wrapper so the sub still
                 // carries shape information (.extents shifted one level
                 // deeper). The wrapper's data pointer comes from indexing
                 // the parent's data; the extents pointer is parent's
                 // extents+1. Indexing transparency works through operator[].
-                sprintf "Array<%s, %d> %s = { %s.data[%s], %s.extents + 1 };" 
+                sprintf "Array<%s, %d> %s = { %s.data[%s], %s.extents + 1 };"
                     elemTypeStr resultRank newName currentName arrayIndex currentName
         (code, newName)
+
+/// Wrapper-preserving entry point (the pre-Phase-1 behaviour). Kept as the
+/// public name so out-of-module callers (unit tests) are unaffected; the
+/// in-module nest emitters call `genElementBindingPeel` with the analysed flag.
+let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (currentName: string)
+    : string * string =
+    genElementBindingPeel false level elem currentName
+
+/// Phase 1 (docs/plan-cpp-perf-exploitation.md): the set of
+/// `(nest level index, ArrayPosition)` sites whose peel may drop the
+/// `Array<T,1>` wrapper for a raw `T* __restrict__` row pointer.
+///
+/// A site qualifies only when the emission context PROVES the peeled local is
+/// consumed exclusively via `name[subscript]`:
+///
+///   1. the peel leaves exactly one dimension (`resultRank = 1`), and
+///   2. the chain successor — the unique element for the same ArrayPosition
+///      with a higher RankComponent, at this level (fused joint peel) or a
+///      deeper one (ordinary dense peel) — is a RealArray peel that bottoms
+///      out at a SCALAR leaf, i.e. renders `name[__ik]`. Because every level
+///      of one real-array chain shares the SAME `ParamVarId`, the successor's
+///      name overwrites this one in `paramFinalNames`, so the intermediate
+///      never reaches the kernel body at all: no `.extents[0]` intrinsic
+///      bound, no fiber-kernel argument, no capture can see it.
+///   3. no level of the chain up to and including this one is a tabulated
+///      (compound/sparse) axis — that arm's peel emits `parent.data + ...`,
+///      whose parent must stay a wrapper.
+///
+/// Elements at one level that share `(ArrayName, RankComponent)` emit the SAME
+/// C++ declaration name (`f(A, A)` puts two ArrayPositions on one peel, deduped
+/// by the caller's `declaredNames`), so the decision is taken per group and
+/// only granted when every member qualifies — otherwise the two positions would
+/// emit two DIFFERENT declarations of one name (a g++ redeclaration error).
+let restrictPeelSites (bindings: LoopIndexBinding list) : Set<int * int> =
+    let arr = List.toArray bindings
+    let n = arr.Length
+    let isTabulated (b: LoopIndexBinding) =
+        match b.Extent with IRCompoundMask _ | IRSparseKeys _ -> true | _ -> false
+    let isReal (e: ElementBinding) = match e.Virtual with RealArray -> true | _ -> false
+    let chainEligible (li: int) (e: ElementBinding) =
+        if not (isReal e) then false
+        elif e.ArrayRank - (e.RankComponent + 1) <> 1 then false
+        elif [ for lj in 0 .. li do
+                 for e2 in arr.[lj].Elements do
+                   if e2.ArrayPosition = e.ArrayPosition && e2.RankComponent <= e.RankComponent then
+                     yield isTabulated arr.[lj] ] |> List.exists id then false
+        else
+            let successors =
+                [ for lj in li .. n - 1 do
+                    for e2 in arr.[lj].Elements do
+                      if e2.ArrayPosition = e.ArrayPosition && e2.RankComponent > e.RankComponent then
+                        yield (arr.[lj], e2) ]
+            match successors with
+            | [ (b2, e2) ] ->
+                isReal e2
+                && e2.RankComponent = e.RankComponent + 1
+                && e2.ArrayRank - (e2.RankComponent + 1) <= 0
+                && not (isTabulated b2)
+            | _ -> false
+    seq {
+        for li in 0 .. n - 1 do
+            for (_, grp) in arr.[li].Elements |> List.groupBy (fun e -> (e.ArrayName, e.RankComponent)) do
+                if grp |> List.forall (chainEligible li) then
+                    for e in grp do yield (li, e.ArrayPosition)
+    } |> Set.ofSeq
 
 /// Streamed-source element binding: the source is a `alias.stream` provider
 /// read — NO materialized array exists, so instead of peeling, accumulate
@@ -4287,6 +4409,70 @@ let isAssociativeOp (op: IRBinOp) : bool =
     | IRAdd | IRMul | IRAnd | IROr -> true
     | _ -> false
 
+// ---- Parallel-fold reorder licence (docs/plan-cpp-perf-exploitation.md §2) --
+//
+// `reduce(xs, k)` is parallelized only when `k` carries `where ... omp` AND the
+// reorder is licensed. A chunked fold reassociates and reorders, so the licence
+// is exactly "commutative and associative":
+//
+//   * `comm(a, b)` declared on the kernel — the user's word, already
+//     cross-checked against body parity at typecheck (CommContradictsBody);
+//     associativity is the part `omp` itself asserts (the plan's trust model,
+//     the same escape hatch comm's PBottom case uses);
+//   * a recognised BUILTIN body, which carries both outright and needs nothing
+//     declared.
+//
+// TypeCheck refuses `omp` with neither (BL4016), so reaching codegen unlicensed
+// means the front end and this file disagreed; the emitters then fall back to
+// the serial loop with a visible marker rather than parallelizing on a licence
+// nobody granted.
+
+/// The builtin binary op a 2-parameter fold callable's body IS, when the body is
+/// exactly `p0 <op> p1` (either argument order) and `op` is both commutative and
+/// associative. None for anything else — including a body that merely CONTAINS
+/// such an op, which carries no such guarantee.
+///
+/// Paired with TypeCheck.isBuiltinFoldBodySurface / isBuiltinFoldBodyTyped,
+/// which answer the same question at the surface and typed levels for the
+/// BL4016 diagnostic. Deliberately narrow at all three sites so "recognised
+/// builtin" means one thing.
+let foldKernelBuiltinOp (callable: IRCallable) : IRBinOp option =
+    match callable.Params, callable.Body with
+    | [p0; p1], IRBinOp (_, op, l, r) when isCommutativeOp op && isAssociativeOp op ->
+        // A param reference lowers as IRVar over the param's VarId; IRParam
+        // (positional) is accepted too so a callable built by either convention
+        // is recognised.
+        let slotOf (e: IRExpr) =
+            match e with
+            | IRVar (id, _) ->
+                if id = p0.VarId then Some 0 elif id = p1.VarId then Some 1 else None
+            | IRParam (_, idx, _) ->
+                if idx = p0.Index then Some 0 elif idx = p1.Index then Some 1 else None
+            | _ -> None
+        (match slotOf l, slotOf r with
+         | Some a, Some b when a <> b -> Some op
+         | _ -> None)
+    | _ -> None
+
+/// May a fold through `callable` be reordered/reassociated across threads?
+/// Answers only the LICENCE question — whether omp was requested is separate
+/// (callable.IsOmpParallel), so the two can be reported independently.
+let foldReorderLicensed (callable: IRCallable) : bool =
+    callable.IsCommutative
+    || not (List.isEmpty callable.CommGroups)
+    || (foldKernelBuiltinOp callable).IsSome
+
+/// The C++ `reduction(<op>:acc)` operator for a builtin fold body, when OpenMP
+/// knows an identity for it. `+` and `*` only: those are the two whose private
+/// initializer (0 / 1) is unambiguous for every element type Blade folds, and
+/// they are the ones the plan's Path A commits to. Everything else licensed goes
+/// down the manual chunked path (Path B), which needs no identity at all.
+let ompReductionOperator (op: IRBinOp) : string option =
+    match op with
+    | IRAdd -> Some "+"
+    | IRMul -> Some "*"
+    | _ -> None
+
 /// Flatten nested applications of the same commutative+associative op into a list of operands.
 /// E.g. (a * b) * c â†’ [a; b; c]
 let rec flattenAssocOp (mode: IRBinOpMode) (op: IRBinOp) (expr: IRExpr) : IRExpr list =
@@ -4653,7 +4839,31 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // whose parallel region lives further in, and report it as never-threaded.
     let pragmaLevel =
         if codeGen.FoldWrapper.IsSome then None else pragmaLevelOf codeGen.Bindings
-    let outerIsParallel = pragmaLevel.IsSome
+    // "This nest runs inside a parallel team", which gates the thread-coverage
+    // instrumentation. A Path B fold nest qualifies without carrying a `for`
+    // pragma on any level: its team is the explicit region opened below, and the
+    // per-thread markers land in the innermost body exactly as they do for a
+    // `parallel for` nest — which is what lets `blade test omp-coverage` answer
+    // "is the reduce's parallel region genuine" with ground truth instead of
+    // pragma text.
+    let outerIsParallel = pragmaLevel.IsSome || codeGen.FoldChunk.IsSome
+    // Phase 2 Path B: a comm-licensed fold nest. `pragmaLevel` stays None on
+    // purpose — a `parallel for` over the outer level would race on the shared
+    // accumulator, which is exactly why folds were blanket-suppressed. What
+    // replaces it is an explicit team with PRIVATE accumulators and a
+    // fixed-order combine, emitted around the nest below. Names are tagged with
+    // the fold binding so several folds can share one C++ scope.
+    let foldChunk = codeGen.FoldChunk
+    let fcTag = match foldChunk with Some p -> p.Tag | None -> ""
+    let fcRn = sprintf "__rn_%s" fcTag
+    let fcT = sprintf "__rT_%s" fcTag
+    let fcPart = sprintf "__rpart_%s" fcTag
+    let fcHad = sprintf "__rhad_%s" fcTag
+    let fcAcc = sprintf "__racc_%s" fcTag
+    let fcHas = sprintf "__rhas_%s" fcTag
+    // The accumulator the nest body writes: the thread-private one under Path B,
+    // the caller-declared shared scalar otherwise.
+    let foldAccName = if foldChunk.IsSome then fcAcc else codeGen.OutputName
     // Unique region tag derived from the (unique) output name.
     let regionTag = codeGen.OutputName
     if ompInstrument && outerIsParallel then
@@ -4668,11 +4878,130 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     let lastBindingIdx = (List.length codeGen.Bindings) - 1
     let mutable bidx = 0
     let compoundArrays = compoundArrayNamesOf codeGen.Bindings
+    // Phase 2 Path B prologue: hoist the outermost extent, size the team, and
+    // open the explicit parallel region. Three scopes open here (block / non-
+    // empty guard / parallel region) and are closed by the epilogue after the
+    // nest, so `depth` advances by 3 before the first loop header.
+    match foldChunk with
+    | Some plan ->
+        let outerBound = genLoopBoundExpr compoundArrays (List.head codeGen.Bindings)
+        (ompApiUsedCell ()).Value <- true
+        lines <- lines @ [
+            ind depth + "// reduce over computation: comm-licensed parallel fold, outer level chunked"
+            ind depth + "{"
+            ind (depth + 1) + sprintf "const size_t %s = %s;" fcRn outerBound
+            ind (depth + 1) + sprintf "int %s = omp_get_max_threads();" fcT
+            ind (depth + 1) + sprintf "if ((size_t)%s > %s) %s = (int)%s;" fcT fcRn fcT fcRn
+            ind (depth + 1) + sprintf "if (%s < 1) %s = 1;" fcT fcT
+            ind (depth + 1) + sprintf "if (%s > 0) {" fcRn
+            ind (depth + 2) + sprintf "%s* %s = new %s[%s];" plan.ElemCpp fcPart plan.ElemCpp fcT
+            // Zero-initialized: it marks which slots a thread actually wrote, so
+            // the combine is correct for ANY team size the runtime hands back
+            // (num_threads is a request — see the flat path's note) and skips a
+            // chunk whose inner nest contributed nothing.
+            ind (depth + 2) + sprintf "bool* %s = new bool[%s]();" fcHad fcT
+            ind (depth + 2) + sprintf "#pragma omp parallel num_threads(%s)" fcT
+            ind (depth + 2) + "{"
+            ind (depth + 3) + "const int __rnt = omp_get_num_threads();"
+            ind (depth + 3) + "const int __rt = omp_get_thread_num();"
+            ind (depth + 3) + sprintf "const size_t __rlo = (%s * (size_t)__rt) / (size_t)__rnt;" fcRn
+            ind (depth + 3) + sprintf "const size_t __rhi = (%s * ((size_t)__rt + 1)) / (size_t)__rnt;" fcRn
+            // Value-initialized, never READ before __rhas turns true; the
+            // initializer only keeps -Wmaybe-uninitialized quiet.
+            ind (depth + 3) + sprintf "%s %s = %s();" plan.ElemCpp fcAcc plan.ElemCpp
+            ind (depth + 3) + sprintf "bool %s = false;" fcHas
+        ]
+        depth <- depth + 3
+    | None -> ()
     // Dense-halo carousel plan (None when inapplicable): warm-up lines are
     // injected just BEFORE the innermost header, the rotation at the loop
     // tail, and the body renders through the reference-keyed SubstMap.
     let carousel = planHaloCarousel streamed codeGen outerNames
+    // Phase 1: which rank-1 input peels may drop the Array<T,1> wrapper for a
+    // raw `__restrict__` row pointer (see restrictPeelSites for the proof
+    // obligation). Streamed positions are handled by genElementBindingStreamed
+    // and never consult this set — their fiber bind IS an Array<T,1> value.
+    let restrictSites = restrictPeelSites codeGen.Bindings
+    // Phase 1: hoist the innermost OUTPUT row as a raw `__restrict__` pointer
+    // so the write target is provably distinct from every read row. Gated to
+    // the shape the nest builder guarantees to be a scalar cell write:
+    // a plain (non-tabulated) dense/compact array output whose rank is exactly
+    // the nest depth, so `out[__i0]..[__i(n-2)]` is a `T*` row and the
+    // innermost subscript is the only one left. Fold nests (scalar
+    // accumulator), scalar outputs and compound/sparse outputs (flat `.data`
+    // subscript) are excluded; nothing else about the nest changes.
+    let outRowName = sprintf "__orow_%s" (sanitizeCppName codeGen.OutputName)
+    let outRowDecl : string option =
+        match codeGen.OutputType with
+        | ArrayElem at when codeGen.FoldWrapper.IsNone
+                            && not (isCompoundArrayType at)
+                            && not (isSparseArrayType at)
+                            && List.length codeGen.Bindings >= 2
+                            && arrayRank at = List.length codeGen.Bindings ->
+            let prefix =
+                codeGen.Bindings
+                |> List.take (List.length codeGen.Bindings - 1)
+                |> List.map (fun b -> sprintf "[%s]" b.IndexName)
+                |> String.concat ""
+            Some (sprintf "%s* __restrict__ %s = %s%s;"
+                      (elemTypeToCpp at.ElemType) outRowName codeGen.OutputName prefix)
+        | _ -> None
+    // Phase 1 follow-up: `#pragma GCC ivdep` on the innermost header.
+    //
+    // WHY, not just restrict: measured on g++ 15.2, a `__restrict__` qualifier
+    // on a BLOCK-SCOPE LOCAL is dropped entirely — GCC only feeds restrict into
+    // its points-to solver for function PARAMETERS. The row-peel qualifiers
+    // above are therefore documentation (and clang does honour them); `ivdep`
+    // is the assertion GCC acts on, and it removes the runtime alias check plus
+    // the scalar fallback version from the vectorized inner loop.
+    //
+    // `ivdep` claims something STRICTLY STRONGER than no-alias: no loop-carried
+    // dependence of any kind across the innermost iterations. The gate below is
+    // what discharges it, and every clause is load-bearing:
+    //
+    //  1. `outRowDecl.IsSome` — the nest writes exactly one scalar cell per
+    //     iteration through the hoisted row (that predicate already excludes
+    //     fold nests with their shared scalar accumulator, scalar `+=` outputs,
+    //     and compound/sparse flat-buffer writes), and the write index is the
+    //     innermost loop variable, so no two iterations touch one cell.
+    //  2. `carousel.IsNone` — the halo carousel's ring buffer is written at the
+    //     loop tail and read on the NEXT iteration: a real loop-carried
+    //     dependence, and the one construct here that has one.
+    //  3. no omp coverage instrumentation — its `__omp_seen[__tn] = true`
+    //     marker sits in the innermost body and rewrites the SAME slot every
+    //     iteration (a WAW chain). Test-mode only, but the gate is a proof
+    //     obligation, not a heuristic.
+    //
+    // Reads are unconstrained: inputs are distinct pools from the fresh output
+    // (EmitCpp.fs:48-55), so a read at any offset — halo windows, cross-indexed
+    // subscripts, Reynolds permutation sums — cannot depend on this nest's own
+    // writes. Fused nests are deliberately out of scope: every leaf writes its
+    // own row in one body, so clause 1's "exactly one write" fails by
+    // construction and genFusedLoopNestStreamed never emits the pragma.
+    let ivdepEligible =
+        outRowDecl.IsSome
+        && carousel.IsNone
+        && not (ompInstrument && outerIsParallel)
+    // Last nest level that belongs to the OpenMP construct. A `collapse(d)`
+    // prefix FUSES its levels into one iteration space, and g++ then rejects a
+    // pragma on any inner header of that prefix outright:
+    //   error: loop not permitted in intervening code in OpenMP loop body
+    //   error: not enough nested loops
+    // (element peels between the headers are fine — a PRAGMA is not.) The depth
+    // is read back off the pragma the nest will actually emit rather than
+    // re-derived, so this cannot drift from genNestPragma's collapse rule.
+    // Levels strictly below this index are ordinary nested loops and may carry
+    // ivdep; a `schedule(dynamic)` outer with a triangular inner collapses
+    // nothing, so its inner levels stay eligible.
+    let ompLastLevel =
+        match pragmaLevel with
+        | None -> -1
+        | Some pl ->
+            let txt = genNestPragma (List.skip pl codeGen.Bindings) ""
+            let m = System.Text.RegularExpressions.Regex.Match(txt, @"collapse\((\d+)\)")
+            if m.Success then pl + int m.Groups.[1].Value - 1 else pl
     for binding in codeGen.Bindings do
+        let levelIdx = bidx
         // Generate the loop header (pragma only on the outermost loop).
         // Fused-fold nests accumulate into shared scalars â€” not race-safe
         // under a parallel-for â€” so the pragma is suppressed entirely
@@ -4695,8 +5024,11 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                     else "the omp(...) depth licenses no level of this nest"
                 // "Emitted" means the nest gets a pragma SOMEWHERE, not
                 // necessarily at this level — an inner-licensed nest is
-                // parallelized and must not be reported as serial.
-                ompSuppressedMarker codeGen.OmpRequested pragmaLevel.IsSome reason (ind depth)
+                // parallelized and must not be reported as serial. A Path B
+                // fold nest counts as emitted: the parallel region is the
+                // prologue above, not a `for` pragma on any level.
+                ompSuppressedMarker codeGen.OmpRequested
+                                    (pragmaLevel.IsSome || foldChunk.IsSome) reason (ind depth)
             else []
         atOuterLevel <- false
         // MPI slab mode: the outermost level iterates this rank's slab
@@ -4709,6 +5041,13 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                     binding.IndexName codeGen.OutputName
                     binding.IndexName codeGen.OutputName
                     binding.IndexName
+            // Phase 2 Path B: the outermost level iterates this thread's chunk
+            // [__rlo, __rhi) of [0, extent). Same substitution shape as the MPI
+            // slab above; inner levels are untouched, so a triangular inner nest
+            // runs exactly as it would serially for each outer index owned here.
+            elif isOuter && foldChunk.IsSome then
+                sprintf "for (size_t %s = __rlo; %s < __rhi; %s++) {"
+                    binding.IndexName binding.IndexName binding.IndexName
             else genForLoopHeader compoundArrays binding
         // Carousel warm-up: seed the rotating window locals for the first
         // center, in the scope just outside the innermost loop (re-seeded
@@ -4718,7 +5057,18 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             | Some (_, warmupLines, _) ->
                 for w in warmupLines do lines <- lines @ [ind depth + w]
             | None -> ()
-        lines <- lines @ suppressedMarker @ [ind depth + pragmaPrefix + header]
+        // Phase 1 output row hoist: same scope as the carousel warm-up (just
+        // outside the innermost header, re-taken per outer iteration).
+        if bidx = lastBindingIdx then
+            match outRowDecl with
+            | Some d -> lines <- lines @ [ind depth + d]
+            | None -> ()
+        // `#pragma GCC ivdep` must be the LAST thing before the `for`, and only
+        // on a header the OpenMP construct does not own (see ompLastLevel).
+        let ivdepPrefix =
+            if ivdepEligible && bidx = lastBindingIdx && bidx > ompLastLevel
+            then sprintf "#pragma GCC ivdep\n%s" (ind depth) else ""
+        lines <- lines @ suppressedMarker @ [ind depth + pragmaPrefix + ivdepPrefix + header]
         depth <- depth + 1
         // Thread-coverage marker: record this thread as seen and the team size
         // it observes. Each thread writes ONLY its own slot (race-free). Team
@@ -4766,7 +5116,8 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                 let currentName =
                     Map.tryFind elem.ArrayPosition currentNames
                     |> Option.defaultValue elem.ArrayName
-                let (code, newName) = genElementBindingNew binding elem currentName
+                let rawRow = Set.contains (levelIdx, elem.ArrayPosition) restrictSites
+                let (code, newName) = genElementBindingPeel rawRow binding elem currentName
                 if Map.tryFind newName declaredNames <> Some code then
                     lines <- lines @ [ind depth + code]
                 declaredNames <- Map.add newName code declaredNames
@@ -4828,12 +5179,27 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames
     if codeGen.HasReynolds && reynoldsResult.UniqueTerms < reynoldsResult.TotalPerms then
         lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" reynoldsResult.UniqueTerms reynoldsResult.TotalPerms (reynoldsResult.TotalPerms / max 1 reynoldsResult.UniqueTerms)]
+    // Phase 1: when the output row was hoisted, the write goes through the
+    // restrict-qualified row pointer and only the innermost subscript remains.
+    let (writeTarget, writeIdx) =
+        match outRowDecl with
+        | Some _ -> (outRowName, sprintf "[%s]" (List.last codeGen.Bindings).IndexName)
+        | None -> (codeGen.OutputName, outputIdx)
     let assignLine =
-        match codeGen.FoldWrapper with
+        match codeGen.FoldWrapper, foldChunk with
+        // Phase 2 Path B: accumulate into the THREAD-PRIVATE scalar, seeding it
+        // from the chunk's first contributed value. The cell value is bound once
+        // (the kernel expression can be a large Reynolds sum) and the branch is
+        // loop-invariant after the first iteration.
+        | Some wname, Some plan ->
+            sprintf "{ %s __rv = %s; if (%s) %s = %s(%s, __rv); else { %s = __rv; %s = true; } }"
+                plan.ElemCpp reynoldsResult.CppExpr
+                fcHas foldAccName wname foldAccName
+                foldAccName fcHas
         // Fused fold: accumulate the kernel value through the fold-kernel
         // wrapper into the caller-declared scalar accumulator.
-        | Some wname -> sprintf "%s = %s(%s, %s);" codeGen.OutputName wname codeGen.OutputName reynoldsResult.CppExpr
-        | None -> sprintf "%s%s %s %s;" codeGen.OutputName outputIdx assignOp reynoldsResult.CppExpr
+        | Some wname, None -> sprintf "%s = %s(%s, %s);" codeGen.OutputName wname codeGen.OutputName reynoldsResult.CppExpr
+        | None, _ -> sprintf "%s%s %s %s;" writeTarget writeIdx assignOp reynoldsResult.CppExpr
     lines <- lines @ [ind depth + assignLine]
     // Carousel rotation: shift the window by one ordinal and load the single
     // new leading value for the next center.
@@ -4846,6 +5212,27 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     for _ in codeGen.Bindings do
         depth <- depth - 1
         lines <- lines @ [ind depth + "}"]
+
+    // Phase 2 Path B epilogue: publish this thread's partial, close the region,
+    // then combine in THREAD ORDER through the same wrapper — a fixed order, so
+    // a fixed OMP_NUM_THREADS reproduces bit-for-bit. Chunks that contributed
+    // nothing (an outer index whose inner nest is empty) are skipped, and the
+    // caller's seed — already in the shared accumulator — enters the fold first,
+    // which is what makes this the serial left fold up to associativity.
+    match foldChunk, codeGen.FoldWrapper with
+    | Some _, Some wname ->
+        lines <- lines @ [
+            ind depth + sprintf "%s[__rt] = %s;" fcPart fcAcc
+            ind depth + sprintf "%s[__rt] = %s;" fcHad fcHas
+            ind (depth - 1) + "}"
+            ind (depth - 1) + sprintf "for (int __rt = 0; __rt < %s; __rt++) if (%s[__rt]) %s = %s(%s, %s[__rt]);"
+                                  fcT fcHad codeGen.OutputName wname codeGen.OutputName fcPart
+            ind (depth - 1) + sprintf "delete[] %s; delete[] %s;" fcPart fcHad
+            ind (depth - 2) + "}"
+            ind (depth - 3) + "}"
+        ]
+        depth <- depth - 3
+    | _ -> ()
 
     // [omp-coverage] after the nest: count distinct threads that ran the outer
     // region and print a parseable line. The harness reads "distinct=K" and the
@@ -4877,6 +5264,329 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
 /// use genLoopNestStreamed directly.
 let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
     genLoopNestStreamed Map.empty codeGen outerNames indent
+
+
+// ============================================================================
+// Phase 3 — flat-pool elementwise mode
+// (docs/plan-cpp-perf-exploitation.md §"Phase 3")
+// ============================================================================
+//
+// When a materializing nest is INDEX-FREE ELEMENTWISE — every operand is read
+// as a scalar full-depth peel at exactly the loop indices in order, the output
+// is written once per iteration at those same indices, and nothing in the body
+// mentions a loop index — the whole nest collapses to ONE flat loop over the
+// contiguous backing pools:
+//
+//     double* __restrict__ __fp_out = pool_base(out.data);
+//     const double* __restrict__ __fp_A = pool_base(A.data);
+//     #pragma GCC ivdep                    // or: #pragma omp parallel for simd
+//     for (size_t __fk = 0; __fk < N; __fk++)
+//         __fp_out[__fk] = <body with A[coords] -> __fp_A[__fk]>;
+//
+// SOUNDNESS. Three facts compose:
+//
+//  1. POOL CONTIGUITY. allocate<>/allocate_strict<> thread ONE offset through
+//     ONE pool in DFS leaf order for dense, symmetric-compact, antisym-strict
+//     and mixed-strict skeletons (nested_array_utilities.hpp:122-, 347-379);
+//     `pool_base` (hpp:54-87) recovers that base. Ragged and gather-produced
+//     pools are explicitly NOT contiguous and are excluded below (they can
+//     never reach here: a ragged/compound/sparse axis fails the literal-extent
+//     and IxKPlain gates).
+//  2. THE NEST'S VISIT ORDER IS THE POOL ORDER. Under the gate, level k peels
+//     dimension k of every operand at the raw loop variable (the `isSliced`
+//     arm of genElementBindingPeel), and every loop bound is exactly the
+//     allocator's row length at that level (rectangular n; inclusive
+//     triangular n - sum(deps); strict triangular n - sum(deps) - k). So the
+//     nest enumerates each operand's leaves in DFS order, one per iteration,
+//     and the flat index __fk is that leaf's pool offset — for the output and
+//     for every operand alike, because they share one shape signature.
+//  3. PER-CELL FP EVALUATION IS UNCHANGED. The rendered kernel expression is
+//     byte-identical (same nameMap discipline, same genKernelExprWithReynolds
+//     call); only the SPELLING of each leaf read changes, from a per-iteration
+//     `double A__i0__i1 = A__i0[__i1];` local to an inline `__fp_A[__fk]`.
+//     Reads of one cell cannot observe a write, since the output pool is a
+//     fresh allocation distinct from every input (EmitCpp.fs:48-55).
+//
+// The gate is deliberately CONSERVATIVE — the nested fallback is always
+// correct, so every uncertain shape returns None.
+
+/// Binomial C(m, k) in int64, 0 when k < 0 or m < k. Local twin of
+/// genPackedPoolCopy's — same closed form, same overflow envelope (the caller
+/// only ever feeds it literal corpus-scale extents).
+let private flatBinom (m: int64) (k: int) : int64 =
+    if k < 0 || m < int64 k then 0L
+    else
+        let mutable num = 1L
+        let mutable den = 1L
+        for i in 0 .. k - 1 do
+            num <- num * (m - int64 i)
+            den <- den * int64 (i + 1)
+        num / den
+
+/// One storage GROUP of a flat-eligible array: (rank, symmetry class, literal
+/// extent). Two arrays whose group lists are structurally equal have
+/// byte-identical pool layouts, which is exactly the agreement the flat rewrite
+/// needs (spec gate 3 + gate 4 — extents are part of the signature, so
+/// "provably equal extents" is decided here rather than assumed; Blade's unify
+/// does not compare extents).
+type private FlatGroup = { GRank: int; GSym: SymmetryClass; GExtent: int64 }
+
+/// Project an array type into a flat-eligible shape signature, or None.
+///
+/// Refused outright: virtual arrays; any non-plain index KIND (compound,
+/// sparse, ragged, dep, group, irreps, orbit — none of which is a plain
+/// contiguous skeleton the loop bounds describe); reserved `__`-prefixed tags
+/// (halo windows ride one); dependent extents; non-literal extents (v1 emits a
+/// compile-time constant cell count only); Hermitian and wreath classes
+/// (Hermitian shares symmetric STORAGE but its mirror conjugates, and the
+/// wreath pool is the §4 iterated-binomial fold, not this product) — both are
+/// simply future work, not unsoundness.
+let private flatShapeSignature (arr: IRArrayType) : FlatGroup list option =
+    if arr.IsVirtual then None else
+    let groups =
+        arr.IndexTypes
+        |> List.map (fun ix ->
+            let tagOk = match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true
+            if ix.IxKind <> IxKPlain || not tagOk || not ix.Dependencies.IsEmpty then None
+            else
+                match ix.Extent with
+                | IRLit (IRLitInt n) when n > 0L ->
+                    (match ix.Symmetry with
+                     | SymNone when ix.Rank = 1 -> Some { GRank = 1; GSym = SymNone; GExtent = n }
+                     | SymSymmetric | SymAntisymmetric when ix.Rank >= 2 ->
+                         Some { GRank = ix.Rank; GSym = ix.Symmetry; GExtent = n }
+                     | _ -> None)
+                | _ -> None)
+    if groups |> List.forall Option.isSome && not groups.IsEmpty
+    then Some (groups |> List.map Option.get)
+    else None
+
+/// Number of scalars in the pool of an array with this signature = the number
+/// of leaves allocate<> emits = the number of iterations the nest runs.
+///   dense axis (rank 1)      -> n
+///   symmetric group rank r   -> C(n + r - 1, r)   (inclusive simplex)
+///   antisymmetric group r    -> C(n, r)           (STRICT simplex: rows are
+///                                                  SHORTENED, no dead diagonal)
+/// Groups multiply: each is a contiguous block of dims and the skeleton nests
+/// them left to right.
+let private flatCellCount (sg: FlatGroup list) : int64 =
+    sg |> List.fold (fun acc g ->
+        let cells =
+            match g.GSym with
+            | SymNone -> g.GExtent
+            | SymSymmetric -> flatBinom (g.GExtent + int64 g.GRank - 1L) g.GRank
+            | SymAntisymmetric -> flatBinom g.GExtent g.GRank
+            | _ -> 0L
+        acc * cells) 1L
+
+/// Does the built nest iterate EXACTLY the space this signature describes, one
+/// leaf per innermost iteration, in DFS order? Compares every loop level's
+/// extent, bound dependencies and strict offset against what the allocator's
+/// recurrence implies for the group the level belongs to.
+///
+/// Dependency LISTS are compared as SETS: the co-iteration builder emits
+/// `[base .. level-1]` ascending while the outer-product builder emits the
+/// `iminMap` chain descending. Both render as the same bound subtraction (a
+/// sum), so set equality is the right identity here.
+let private flatNestMatchesSignature (sg: FlatGroup list) (bindings: LoopIndexBinding list) : bool =
+    let expected =
+        sg
+        |> List.fold (fun (baseDim, acc) g ->
+            let triangular = (g.GSym = SymSymmetric || g.GSym = SymAntisymmetric)
+            let levels =
+                [ for k in 0 .. g.GRank - 1 ->
+                    let deps = if triangular && k > 0 then Set.ofList [ baseDim .. baseDim + k - 1 ] else Set.empty
+                    let strict = if g.GSym = SymAntisymmetric then k else 0
+                    (g.GExtent, deps, strict) ]
+            (baseDim + g.GRank, acc @ levels)) (0, [])
+        |> snd
+    List.length expected = List.length bindings
+    && List.forall2 (fun (i, n, deps, strict) (b: LoopIndexBinding) ->
+            b.FusedRank.IsNone
+            // Level IS the position: `expected` is indexed by position while
+            // BoundDependencies name LEVELS, so a reordered nest would compare
+            // the two against each other. (Both builders emit them in order;
+            // this pins that rather than assuming it.)
+            && b.Level = i
+            && b.IndexName = sprintf "__i%d" i
+            && (match b.Extent with IRLit (IRLitInt e) -> e = n | _ -> false)
+            && Set.ofList b.BoundDependencies = deps
+            && b.StrictOffset = strict)
+        (expected |> List.mapi (fun i (n, d, s) -> (i, n, d, s))) bindings
+
+/// Phase 3 detection + emission. Returns the flat loop's lines, or None to fall
+/// through to `genLoopNestStreamed` unchanged.
+///
+/// `operandTypes` is `ApplyInfo.ArrayTypes`, positionally parallel to
+/// `codeGen.InputArrayNames` (both are indexed by `ElementBinding.ArrayPosition`).
+let tryGenFlatElementwiseNest
+        (streamed: Map<string, ProviderReadSpec>)
+        (operandTypes: IRArrayType list)
+        (codeGen: LoopNestCodeGen)
+        (outerNames: Map<int, string>)
+        (indent: int) : string list option =
+    let ind n = String.replicate n "    "
+    let bindings = codeGen.Bindings
+    let depth = List.length bindings
+    let nArrays = List.length codeGen.InputArrayNames
+    // ---- Gate 1: the nest is a plain materializing single-leaf map ----------
+    //
+    // FoldWrapper/FoldChunk: a fold writes a scalar accumulator, not one output
+    // cell per iteration. MpiSlab: the outer level iterates a rank slab, not
+    // [0, extent). HasReynolds: the body reads PERMUTED coordinates of its
+    // operands, which is the opposite of index-free. Streamed sources have no
+    // materialized pool at all. Multi-leaf fused trees never reach here
+    // (genFusedLoopNestStreamed is a different emitter).
+    //
+    // ompTestModeEnabled: the omp-coverage instrumentation writes a per-thread
+    // marker INSIDE the innermost body and reports ground truth about the nest
+    // that ran. Rather than grow a second instrumentation site whose numbers
+    // would have to be kept in step, the fast path stands down in test mode —
+    // `blade test omp-coverage` then measures exactly the nest it always has.
+    if codeGen.FoldWrapper.IsSome || codeGen.FoldChunk.IsSome then None
+    elif codeGen.MpiSlab || codeGen.HasReynolds || codeGen.IsAntisymmetric then None
+    elif not (Map.isEmpty streamed) then None
+    elif ompTestModeEnabled () then None
+    elif depth = 0 || nArrays = 0 then None
+    elif List.length operandTypes <> nArrays then None
+    elif (planHaloCarousel streamed codeGen outerNames).IsSome then None
+    else
+    // ---- Gate 2: the output is a plain (non-tabulated) array of nest rank ---
+    match codeGen.OutputType with
+    | ArrayElem outTy when not (isCompoundArrayType outTy)
+                           && not (isSparseArrayType outTy)
+                           && arrayRank outTy = depth ->
+        // ---- Gate 3+4: one shape signature shared by the output and EVERY
+        // operand. Structural equality covers the storage class, the group
+        // decomposition AND the literal extents in one comparison.
+        match flatShapeSignature outTy with
+        | None -> None
+        | Some sg when operandTypes |> List.forall (fun t -> flatShapeSignature t = Some sg) ->
+            // Storage-class restriction (spec gate 3): all-dense-rectangular,
+            // or ONE compact group spanning the whole array. The mixed shape
+            // (a dense axis beside an antisym residual, AllocPerGroupStrict) is
+            // contiguous too, but is left to a later pass — its nest is not
+            // exercised by the corpus and v1 keeps the diff small.
+            let allDense = sg |> List.forall (fun g -> g.GSym = SymNone)
+            let singleCompact =
+                match sg with
+                | [ g ] -> g.GSym = SymSymmetric || g.GSym = SymAntisymmetric
+                | _ -> false
+            if not (allDense || singleCompact) then None
+            elif not (flatNestMatchesSignature sg bindings) then None
+            else
+            // ---- Gate 2 (reads): every operand is a RealArray scalar
+            // full-depth peel at exactly the loop indices in order. Level k
+            // must carry one element per operand position, all at
+            // RankComponent = k over an array of rank = depth. This is what
+            // rules out cross-indexing (A[j][i] reorders RankComponents),
+            // partial peels and fiber arguments (ArrayRank > depth leaves an
+            // Array<T,1> at the last level), index-variable params
+            // (VirtualRange/VirtualReverse bind the loop index INTO the body)
+            // and outer-product nests (a level owned by one array only).
+            let elementsOk =
+                bindings |> List.forall (fun b ->
+                    let els = b.Elements
+                    List.length els = nArrays
+                    && (els |> List.map (fun e -> e.ArrayPosition) |> Set.ofList) = Set.ofList [ 0 .. nArrays - 1 ]
+                    && els |> List.forall (fun e ->
+                            (match e.Virtual with RealArray -> true | _ -> false)
+                            && e.RankComponent = b.Level
+                            && e.ArrayRank = depth
+                            && e.ArrayName = (codeGen.InputArrayNames |> List.item e.ArrayPosition)
+                            // A reserved `__`-prefixed slot tag marks a halo
+                            // window / kind sentinel; flatShapeSignature has
+                            // already refused those on the array types, so this
+                            // is a belt-and-braces read of the SAME tag through
+                            // the element record.
+                            && (match e.SlotTag with Some t -> not (t.StartsWith "__") | None -> true)))
+            let cells = flatCellCount sg
+            // OpenMP licensing. The flat loop FUSES every level, so threading
+            // it threads every dimension — which only the full licence grants.
+            // A PARTIAL licence (`omp(a: 1)` over a rank-2 nest) is honoured by
+            // falling back to the nest, where the pragma lands on exactly the
+            // licensed prefix; over-threading here would silently exceed what
+            // the user granted. Likewise a requested-but-unlicensed nest falls
+            // back so genLoopNestStreamed's `// [omp] requested but emitted
+            // serial` marker still appears.
+            let allParallel = bindings |> List.forall (fun b -> b.IsParallel)
+            if not elementsOk then None
+            elif cells <= 0L then None
+            elif codeGen.OmpRequested && not allParallel then None
+            else
+            let outElem =
+                match codeGen.OutputType with
+                | ArrayElem at -> elemTypeToCpp at.ElemType
+                | t -> irTypeToCpp t
+            // Distinct operand NAMES get one pool pointer each: `f(A, A)` puts
+            // two ArrayPositions on one array, and two declarations of one
+            // pointer name would be a g++ redeclaration error.
+            let poolOf (n: string) = sprintf "__fp_%s" (sanitizeCppName n)
+            let operandDecls =
+                codeGen.InputArrayNames
+                |> List.mapi (fun i n -> (i, n))
+                |> List.distinctBy snd
+                |> List.map (fun (i, n) ->
+                    let elemCpp =
+                        operandTypes |> List.tryItem i
+                        |> Option.map (fun (t: IRArrayType) -> elemTypeToCpp t.ElemType)
+                        |> Option.defaultValue outElem
+                    sprintf "const %s* __restrict__ %s = nested_array_utilities::pool_base(%s.data);"
+                        elemCpp (poolOf n) n)
+            // Kernel-body name map: each operand's leaf param renders as a pool
+            // subscript instead of the per-iteration peel local. Subscript binds
+            // tighter than every operator, so no parenthesization is needed.
+            // Captures fill in only ids the enclosing scope does not know —
+            // the same precedence rule genLoopNestStreamed uses.
+            let paramFinalNames =
+                bindings
+                |> List.collect (fun b -> b.Elements)
+                |> List.fold (fun acc (e: ElementBinding) ->
+                        Map.add e.ParamVarId (sprintf "%s[__fk]" (poolOf e.ArrayName)) acc)
+                   Map.empty
+            let nameMap = paramFinalNames |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
+            let nameMap =
+                codeGen.Captures
+                |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) nameMap
+            let body =
+                genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams
+                                          false false nameMap paramFinalNames
+            // Pragma. Exactly one of the two, never both, and always the LAST
+            // line before the `for` (an OpenMP construct rejects any
+            // intervening code between itself and its loop).
+            //
+            // `__restrict__` on a BLOCK-SCOPE LOCAL is dropped by GCC (it only
+            // feeds restrict into its points-to solver for function
+            // PARAMETERS), so the qualifiers above document intent and the
+            // PRAGMA carries the dependence assertion. Both forms are
+            // discharged by the same fact: exactly one array write per
+            // iteration, through the fresh output pool, at the monotone flat
+            // index — no loop-carried dependence of any kind.
+            let pragma =
+                if allParallel then "#pragma omp parallel for simd"
+                else "#pragma GCC ivdep"
+            let shapeNote =
+                sg
+                |> List.map (fun g ->
+                    match g.GSym with
+                    | SymNone -> sprintf "%d" g.GExtent
+                    | SymSymmetric -> sprintf "sym<%d,%d>" g.GRank g.GExtent
+                    | SymAntisymmetric -> sprintf "antisym<%d,%d>" g.GRank g.GExtent
+                    | s -> sprintf "%A" s)
+                |> String.concat " x "
+            Some (
+                [ ind indent + sprintf "// flat elementwise: %d cells [%s] (pool DFS order == nest order)" cells shapeNote
+                  ind indent + "{" ]
+                @ [ ind (indent + 1) + sprintf "%s* __restrict__ %s = nested_array_utilities::pool_base(%s.data);"
+                                           outElem (poolOf codeGen.OutputName) codeGen.OutputName ]
+                @ (operandDecls |> List.map (fun d -> ind (indent + 1) + d))
+                @ [ ind (indent + 1) + sprintf "const size_t __fp_cells = %dUL;" cells
+                    ind (indent + 1) + pragma
+                    ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++)"
+                    ind (indent + 2) + sprintf "%s[__fk] = %s;" (poolOf codeGen.OutputName) body.CppExpr
+                    ind indent + "}" ])
+        | Some _ -> None
+    | _ -> None
 
 
 // ============================================================================
@@ -4963,8 +5673,11 @@ let genIncludes () : string list =
      "#include <unordered_map>"  // group_keys Case 3 (dynamic ngroups via hash discovery)
      "#include <unordered_set>"  // unique() dedup, contains() hoist (future)
      // OpenMP is ENABLED (Build.compileCppWithExtra always passes -fopenmp);
-     // `#pragma omp` needs no header, so <omp.h> is included only when the
-     // test-mode instrumentation calls the omp_* API.
+     // `#pragma omp` needs no header, so <omp.h> is included only when
+     // something calls the omp_* RUNTIME API: the test-mode instrumentation
+     // (known here) or a comm-licensed parallel fold (only known after body
+     // generation, so the assemblers append it via ompApiUsedCell — the
+     // cblas-include pattern).
      (if ompTestModeEnabled () then "#include <omp.h>  // omp-coverage test-mode instrumentation" else "// #include <omp.h>")
      "#include \"nested_array_utilities.cpp\""
      "#include \"rand_runtime.hpp\""
@@ -8044,8 +8757,19 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
             let mpiDense = (mpiShape = Some MpiDense)
             let codeGen = if mpiDense then { codeGen with MpiSlab = true } else codeGen
 
-            // Generate loop nest
-            let loopCode = genLoopNestStreamed streamedMap codeGen tempCtx.VarNames tempCtx.Indent
+            // Generate loop nest. Phase 3 first: an index-free elementwise nest
+            // over same-shape contiguous pools collapses to ONE flat loop
+            // (docs/plan-cpp-perf-exploitation.md §"Phase 3"). The detector is
+            // conservative and returns None for everything else — the nested
+            // form below is always correct. `info.ArrayTypes` is positionally
+            // parallel to codeGen.InputArrayNames, which is what lets the
+            // detector PROVE per-operand storage-class and extent agreement
+            // rather than assume it (Blade's unify does not compare extents).
+            let loopCode =
+                match tryGenFlatElementwiseNest streamedMap info.ArrayTypes codeGen
+                                                tempCtx.VarNames tempCtx.Indent with
+                | Some flat -> flat
+                | None -> genLoopNestStreamed streamedMap codeGen tempCtx.VarNames tempCtx.Indent
 
             // Per-rank slab bounds. Balanced split: q = n/P with the first
             // n%P ranks taking one extra row; P > n degenerates to empty
@@ -8322,6 +9046,25 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
     let compoundArrays = compoundArrayNamesOf primary.Bindings
     let mutable atOuterLevel = true
 
+    // Phase 1 restrict row peels, per leaf. Extra cross-leaf obligation on top
+    // of restrictPeelSites' own: leaves SHARE `declaredNames`, and a RealArray
+    // peel's emitted name (`A____i0`) is derived from the array + index name
+    // only — not from the leaf — so two leaves peeling the same array at the
+    // same level emit ONE declaration. If one leaf wanted the raw pointer and
+    // the other the wrapper, the codes would differ and both would be emitted
+    // (a g++ redeclaration). So a (level, ArrayName, RankComponent) key is
+    // blocked unless EVERY leaf touching it agrees on the raw peel.
+    let leafRestrictSites = leafCgs |> List.map (fun cg -> restrictPeelSites cg.Bindings) |> List.toArray
+    let blockedRawKeys =
+        seq {
+            for lk in 0 .. leafCgs.Length - 1 do
+                let cgk = leafCgs.[lk]
+                for jj in 0 .. cgk.Bindings.Length - 1 do
+                    for e2 in cgk.Bindings.[jj].Elements do
+                        if not (Set.contains (jj, e2.ArrayPosition) leafRestrictSites.[lk]) then
+                            yield (jj, e2.ArrayName, e2.RankComponent)
+        } |> Set.ofSeq
+
     for j in 0 .. primary.Bindings.Length - 1 do
         let pBinding = primary.Bindings.[j]
         // Nest-level OpenMP pragma at the outermost level only, gated by the
@@ -8410,12 +9153,15 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                         let cur =
                             Map.tryFind (li, elem.ArrayPosition) currentNames
                             |> Option.defaultValue elem.ArrayName
-                        let (code0, name0) = genElementBindingNew binding elem cur
+                        let rawRow =
+                            Set.contains (j, elem.ArrayPosition) leafRestrictSites.[li]
+                            && not (Set.contains (j, elem.ArrayName, elem.RankComponent) blockedRawKeys)
+                        let (code0, name0) = genElementBindingPeel rawRow binding elem cur
                         let (code, newName) =
                             match Map.tryFind name0 declaredNames with
                             | Some prior when prior <> code0 ->
                                 let renamed = { elem with ParamName = sprintf "%s__l%d" elem.ParamName li }
-                                genElementBindingNew binding renamed cur
+                                genElementBindingPeel rawRow binding renamed cur
                             | _ -> (code0, name0)
                         if Map.tryFind newName declaredNames <> Some code then
                             lines <- lines @ [ind depth + code]
@@ -11369,6 +12115,49 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
             sprintf "%sif (%s == 0) { blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", nullptr, 0); }" ind boundExpr
         ]
 
+    // ---- Phase 2: comm-licensed parallel fold ------------------------------
+    // `where ... omp` on the fold kernel is the opt-in; the LICENCE (declared
+    // comm, or a builtin body) is what makes the reorder sound, and typecheck
+    // has already refused the unlicensed combination (BL4016). The two emitted
+    // shapes:
+    //
+    //   Path A — builtin `+`/`*` over a real arithmetic element type: one
+    //     `#pragma omp parallel for simd reduction(<op>:acc)` over the flat
+    //     sweep. The accumulator is seeded exactly as the serial form seeds it
+    //     and the ORIGINAL value participates in the combine (OpenMP updates the
+    //     original list item with the private copies), so this is the serial
+    //     fold up to reassociation — nothing else changes.
+    //
+    //   Path B — any other licensed kernel: manual contiguous chunks with a
+    //     per-thread partial, each chunk seeded from its OWN first element
+    //     (chunk 0 inherits the caller's seed via the fixed-order combine), so
+    //     no identity element is needed and any user kernel works through the
+    //     existing wrapper. Deterministic for a fixed OMP_NUM_THREADS.
+    //
+    // Both paths are flat 1-D sweeps: `reduce` takes rank-1 arrays only, and the
+    // compound/sparse operand walks its contiguous `.data` buffer of present
+    // cells (never the hash table).
+    let parallelFold =
+        match resolveCallable kernelExpr with
+        | Some c when c.Params.Length = 2 && c.IsOmpParallel && foldReorderLicensed c -> Some c
+        | _ -> None
+    // Path A additionally needs an element type OpenMP's built-in reduction
+    // identities are defined for. Complex (and anything non-arithmetic) takes
+    // Path B, which needs no identity.
+    let pathAOp =
+        match parallelFold with
+        | Some c ->
+            (match elemType with
+             | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32) ->
+                foldKernelBuiltinOp c |> Option.bind (fun op ->
+                    ompReductionOperator op |> Option.map (fun r -> (op, r)))
+             | _ -> None)
+        | None -> None
+    // Hoisted sweep bound. OpenMP's canonical loop form wants a loop-invariant
+    // upper bound, and the compound operand's is a two-field product through a
+    // pointer — computed once here for both parallel paths. (The serial path
+    // keeps using `boundExpr` inline, byte-identical to before.)
+    let rnName = sprintf "__rn_%s" name
     let code =
         match resolveCallable kernelExpr with
         | Some callable when callable.Params.Length = 2 ->
@@ -11385,6 +12174,70 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 match initExpr with
                 | Some initE -> (exprToCppCtx ctx initE, "0")
                 | None -> (elemAt "0", "1")
+            match pathAOp, parallelFold with
+            | Some (op, redOp), _ ->
+                // Path A. No wrapper: the reduction clause requires the update
+                // statement to have the `x = x op expr` shape, so the builtin op
+                // is emitted directly (and the wrapper would be dead code).
+                (ompApiUsedCell ()).Value <- true
+                elemErrCode @ guardLines @ [
+                    sprintf "%s// reduce: comm-licensed OpenMP reduction (builtin '%s'), flat sweep" ind (binOpToCpp op)
+                    sprintf "%sconst size_t %s = %s;" ind rnName boundExpr
+                    sprintf "%s%s %s = %s;" ind elemStr name seedStr
+                    sprintf "%s#pragma omp parallel for simd reduction(%s:%s)" ind redOp name
+                    sprintf "%sfor (size_t __ri = %s; __ri < %s; __ri++) {" ind loopStart rnName
+                    sprintf "%s    %s = %s %s %s;" ind name name (binOpToCpp op) (elemAt "__ri")
+                    sprintf "%s}" ind
+                ]
+            | None, Some _ ->
+                // Path B. Chunk bounds and combine order are fixed functions of
+                // omp_get_max_threads(), so a fixed OMP_NUM_THREADS reproduces
+                // bit-for-bit. The `__rcnt > 0` guard is load-bearing: a chunk
+                // seeds from its first element, and with nothing to fold the
+                // result is the seed alone (which is exactly the serial answer
+                // for an empty range, init form included).
+                (ompApiUsedCell ()).Value <- true
+                let partName = sprintf "__rpart_%s" name
+                elemErrCode @ guardLines @ wrapperLines @ [
+                    sprintf "%s// reduce: comm-licensed parallel fold, contiguous chunked partials" ind
+                    sprintf "%sconst size_t %s = %s;" ind rnName boundExpr
+                    sprintf "%s%s %s = %s;" ind elemStr name seedStr
+                    sprintf "%s{" ind
+                    sprintf "%s    const size_t __rlo0 = %s;" ind loopStart
+                    sprintf "%s    const size_t __rcnt = (%s > __rlo0) ? (%s - __rlo0) : (size_t)0;" ind rnName rnName
+                    sprintf "%s    if (__rcnt > 0) {" ind
+                    sprintf "%s        int __rT = omp_get_max_threads();" ind
+                    sprintf "%s        if ((size_t)__rT > __rcnt) __rT = (int)__rcnt;" ind
+                    sprintf "%s        if (__rT < 1) __rT = 1;" ind
+                    // num_threads(n) is a REQUEST, not a guarantee: dynamic
+                    // adjustment, or landing inside an enclosing parallel region
+                    // with nesting off, can hand back a SMALLER team. Splitting
+                    // by the requested count would then leave the tail chunks
+                    // uncomputed and silently drop elements, so the split reads
+                    // the team size the region actually got, and the combine
+                    // reads it back through a slot only thread 0 writes (the
+                    // region's implicit barrier publishes it).
+                    sprintf "%s        int __rTact = __rT;" ind
+                    sprintf "%s        %s* %s = new %s[__rT];" ind elemStr partName elemStr
+                    sprintf "%s        #pragma omp parallel num_threads(__rT)" ind
+                    sprintf "%s        {" ind
+                    sprintf "%s            const int __rnt = omp_get_num_threads();" ind
+                    sprintf "%s            const int __rt = omp_get_thread_num();" ind
+                    sprintf "%s            if (__rt == 0) __rTact = __rnt;" ind
+                    sprintf "%s            const size_t __rlo = __rlo0 + (__rcnt * (size_t)__rt) / (size_t)__rnt;" ind
+                    sprintf "%s            const size_t __rhi = __rlo0 + (__rcnt * ((size_t)__rt + 1)) / (size_t)__rnt;" ind
+                    sprintf "%s            %s __racc = %s;" ind elemStr (elemAt "__rlo")
+                    sprintf "%s            for (size_t __ri = __rlo + 1; __ri < __rhi; __ri++) {" ind
+                    sprintf "%s                __racc = %s(__racc, %s);" ind wname (elemAt "__ri")
+                    sprintf "%s            }" ind
+                    sprintf "%s            %s[__rt] = __racc;" ind partName
+                    sprintf "%s        }" ind
+                    sprintf "%s        for (int __rt = 0; __rt < __rTact; __rt++) %s = %s(%s, %s[__rt]);" ind name wname name partName
+                    sprintf "%s        delete[] %s;" ind partName
+                    sprintf "%s    }" ind
+                    sprintf "%s}" ind
+                ]
+            | None, None ->
             elemErrCode @ guardLines @ wrapperLines @ [
                 sprintf "%s// reduce: accumulator loop, eager" ind
                 sprintf "%s%s %s = %s;" ind elemStr name seedStr
@@ -11460,7 +12313,28 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                     { cg with OutputType = callable.RetType; FoldWrapper = Some wname }
                 match infos with
                 | [single] ->
-                    let cg = foldCg single name
+                    let cg0 = foldCg single name
+                    // Phase 2 Path B (docs/plan-cpp-perf-exploitation.md §2):
+                    // a comm-licensed fold kernel that asked for omp gets the
+                    // outermost level chunked across an explicit team. v1 scope
+                    // is exactly this single-leaf case; the fused tree below
+                    // (one accumulator per leaf) stays serial.
+                    //
+                    // The outermost binding must be RECTANGULAR — no bound
+                    // dependencies, no strict offset — so [0, extent) really is
+                    // the chunked range. Inner levels may be anything, including
+                    // triangular: each thread runs the full inner nest for the
+                    // outer indices it owns, exactly as the serial nest would.
+                    let chunkable =
+                        callable.IsOmpParallel
+                        && foldReorderLicensed callable
+                        && (match cg0.Bindings with
+                            | head :: _ -> head.BoundDependencies.IsEmpty && head.StrictOffset = 0
+                            | [] -> false)
+                    let cg =
+                        if chunkable then
+                            { cg0 with FoldChunk = Some { ElemCpp = elemStr; Tag = sanitizeCppName name } }
+                        else cg0
                     let code =
                         wrapperLines
                         @ [sprintf "%s%s %s = %s;" ind elemStr name seedStr]
@@ -13387,6 +14261,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     (streamBufDeclsCell ()).Value <- Set.empty
     (forcedDeferredIdsCell ()).Value <- Set.empty
     (blasUsedCell ()).Value <- false
+    (ompApiUsedCell ()).Value <- false
     // Deterministic deallocation: clear both cells for this program. genModule
     // reinstalls the facts immediately (it needs the callables table first).
     (freshReturnFactsCell ()).Value <- Map.empty
@@ -13414,6 +14289,13 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     // (collector fills during genModule; Build.fs keys -I/link flags off the
     // include line). Appended post-body like the CUDA prototypes below.
     let includes = if (blasUsedCell ()).Value then includes @ ["#include <cblas.h>"] else includes
+    // <omp.h> only when a comm-licensed parallel fold emitted omp_* runtime
+    // calls this assembly. Same collect-then-append shape as cblas; `#pragma
+    // omp` alone needs no header, so every other program keeps its includes.
+    let includes =
+        if (ompApiUsedCell ()).Value
+           && not (includes |> List.exists (fun (s: string) -> s.StartsWith "#include <omp.h>"))
+        then includes @ ["#include <omp.h>  // comm-licensed parallel fold (omp_get_max_threads)"] else includes
 
     // extern "C" launch-wrapper prototypes for any CUDA kernels emitted during
     // genModule. Bodies live in the .cu (nvcc); the .cpp needs only the proto to
@@ -13519,6 +14401,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // reads it to auto-print deferred bindings that ended up materialized.
     (forcedDeferredIdsCell ()).Value <- Set.empty
     (blasUsedCell ()).Value <- false
+    (ompApiUsedCell ()).Value <- false
     // Deterministic deallocation: see genMainProgram. genModule / genModuleSplit
     // reinstall the facts (both entry points below install).
     (freshReturnFactsCell ()).Value <- Map.empty
@@ -13570,6 +14453,11 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // (collector fills during genModule*; Build.fs keys -I/link flags off the
     // include line). Appended post-body like the CUDA prototypes below.
     let includes = if (blasUsedCell ()).Value then includes @ ["#include <cblas.h>"] else includes
+    // <omp.h>: see genMainProgram — appended only for a comm-licensed fold.
+    let includes =
+        if (ompApiUsedCell ()).Value
+           && not (includes |> List.exists (fun (s: string) -> s.StartsWith "#include <omp.h>"))
+        then includes @ ["#include <omp.h>  // comm-licensed parallel fold (omp_get_max_threads)"] else includes
 
     // extern "C" launch-wrapper prototypes for any CUDA kernels emitted: the
     // .cpp calls them across the linkage boundary (bodies live in the .cu).
@@ -13611,6 +14499,7 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     // genPrintStatements call below (correctly AFTER genModule) reads it.
     (forcedDeferredIdsCell ()).Value <- Set.empty
     (blasUsedCell ()).Value <- false
+    (ompApiUsedCell ()).Value <- false
     // Deterministic deallocation: see genMainProgram.
     (freshReturnFactsCell ()).Value <- Map.empty
     (copyInPlaceMutsCell ()).Value <- Map.empty
@@ -13620,6 +14509,11 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     // (collector fills during genModule; Build.fs keys -I/link flags off the
     // include line).
     let includes = if (blasUsedCell ()).Value then includes @ ["#include <cblas.h>"] else includes
+    // <omp.h>: see genMainProgram — appended only for a comm-licensed fold.
+    let includes =
+        if (ompApiUsedCell ()).Value
+           && not (includes |> List.exists (fun (s: string) -> s.StartsWith "#include <omp.h>"))
+        then includes @ ["#include <omp.h>  // comm-licensed parallel fold (omp_get_max_threads)"] else includes
 
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     let printCode = genPrintStatements modul

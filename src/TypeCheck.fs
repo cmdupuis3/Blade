@@ -1507,6 +1507,58 @@ let checkOmpVarNames (env: TypeEnv) (paramNames: string list)
             | _ -> ())
     | None -> ()
 
+// ---- Parallel-fold reorder licence (docs/plan-cpp-perf-exploitation.md §2) --
+//
+// `where ... omp` on a FOLD kernel asks codegen to split the reduced axis into
+// per-thread chunks and combine the partials. That reassociates AND reorders, so
+// the kernel must be commutative and associative. Two licences are accepted:
+//
+//   1. a declared `comm(a, b)` — the user's word, already cross-checked against
+//      body parity (CommContradictsBody rejects a provably antisymmetric body);
+//   2. a BUILTIN body, which carries both properties outright and needs nothing
+//      declared.
+//
+// The predicates below answer (2) at the surface/typed level. Codegen re-derives
+// the same fact from the LOWERED body (CodeGen.foldKernelBuiltinOp) because that
+// is what picks the emission path; these two must stay in step. They are
+// deliberately narrow — exactly `p <op> q` over the two parameters — so
+// "recognised builtin" means the same thing at both ends, and anything richer
+// takes the `comm` route instead of silently drifting apart.
+
+/// Commutative AND associative surface ops. The pair
+/// `CodeGen.isCommutativeOp && CodeGen.isAssociativeOp` over the IR ops these
+/// lower to (IRAdd/IRMul/IRAnd/IROr) — comparison ops are commutative but not
+/// associative, so they are not here.
+let foldBuiltinCommAssocOp (op: BinOp) : bool =
+    match op with
+    | OpAdd | OpMul | OpAnd | OpOr -> true
+    | _ -> false
+
+/// Surface form: is `body` exactly `p0 <op> p1` (either order) over the
+/// declaration's two parameters, for a comm+assoc builtin op? Used for NAMED
+/// functions, whose bodies are invisible at the reduce seam (see
+/// TypeEnv.FuncFoldBuiltin).
+let isBuiltinFoldBodySurface (paramNames: string list) (body: Expr) : bool =
+    match paramNames, body.Kind with
+    | [p0; p1], ExprKind.ExprBinOp (_, op, l, r) when foldBuiltinCommAssocOp op ->
+        (match l.Kind, r.Kind with
+         | ExprKind.ExprVar a, ExprKind.ExprVar b ->
+            (a = p0 && b = p1) || (a = p1 && b = p0)
+         | _ -> false)
+    | _ -> false
+
+/// Typed form of the same predicate, for lambda kernels (whose TypedLambdaInfo
+/// IS in hand at the reduce seam). Matches on parameter VarIds rather than
+/// names, so shadowing cannot fake a licence.
+let isBuiltinFoldBodyTyped (ps: TypedParam list) (body: TypedExpr) : bool =
+    match ps, body.Kind with
+    | [p0; p1], TExprBinOp (_, op, l, r) when foldBuiltinCommAssocOp op ->
+        (match l.Kind, r.Kind with
+         | TExprVar (_, ia, _), TExprVar (_, ib, _) ->
+            (ia = p0.VarId && ib = p1.VarId) || (ia = p1.VarId && ib = p0.VarId)
+         | _ -> false)
+    | _ -> false
+
 // ============================================================================
 // 7. Array Type Utilities
 // ============================================================================
@@ -3785,11 +3837,37 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
         match inferExpr env array with
         | Error _ -> None
         | Ok tArr0 ->
+            // A DEFERRED rank-k computation whose fold kernel asked for `omp`
+            // is deliberately NOT desugared here. The desugar MATERIALIZES the
+            // computation into a temporary and folds it with a hand-built nest
+            // that carries no clause at all — so a licensed `where comm, omp`
+            // would come out serial with no trace, which is precisely the
+            // silent-drop failure this feature exists to avoid. Declining sends
+            // it to the fused reduction terminal instead (tryInferReduceCompute
+            // below), which needs no intermediate array AND can chunk the outer
+            // level (Phase 2 Path B). Everything else — including every
+            // unannotated rank-k reduce — is untouched.
+            let deferredWithOmpKernel () =
+                match (resolveTypedExpr env tArr0).Kind with
+                | TExprApply _ | TExprFusion _ ->
+                    (match inferExpr env kernel with
+                     | Ok tk ->
+                        (match (resolveTypedExpr env tk).Kind with
+                         | TExprLambda li ->
+                            li.Parallel |> List.exists (function Omp _ -> true | _ -> false)
+                         | TExprVar (fn, _, _) ->
+                            (match env.FuncParallel.TryGetValue fn with
+                             | true, (_, s) -> s |> List.exists (function Omp _ -> true | _ -> false)
+                             | _ -> false)
+                         | _ -> false)
+                     | Error _ -> false)
+                | _ -> false
             match env.Subst.Resolve tArr0.Type with
             | ArrayElem at when at.IndexTypes.Length >= 2
                                 && at.IndexTypes |> List.forall (fun ix ->
                                        ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
-                                && (match env.Subst.Resolve at.ElemType with IRTScalar _ -> true | _ -> false) ->
+                                && (match env.Subst.Resolve at.ElemType with IRTScalar _ -> true | _ -> false)
+                                && not (deferredWithOmpKernel ()) ->
                 let extents =
                     at.IndexTypes |> List.map (fun ix ->
                         match ix.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
@@ -3853,6 +3931,10 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
     (match init with
      | Some e -> inferExpr env e |> Result.map Some
      | None -> Ok None) |> Result.bind (fun tInitOpt ->
+        // ---- Parallel-fold reorder licence --------------------------------
+        // Checked BEFORE the array/deferred split so both fold shapes refuse
+        // an unlicensed `omp` identically (both are parallelized by Phase 2).
+        checkFoldOmpLicense env tKernel |> Result.bind (fun () ->
         // ---- Fused reduction terminal -------------------------------------
         // reduce over a DEFERRED computation (an unforced `L <@> k`, or an
         // <&!> fusion tree of them, possibly behind one let-hop) folds the
@@ -4021,7 +4103,7 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
         | ArrayElem _ ->
             Error (Other "reduce() currently supports only rank-1 arrays (multi-rank reduction over the innermost dimension is deferred)")
         | _ ->
-            Error (Other "reduce() requires an array as first argument"))))
+            Error (Other "reduce() requires an array as first argument")))))
 
 /// Unit soundness of a fold, checked at the rank-1 reduce site.
 ///
@@ -4076,6 +4158,48 @@ and reduceKernelUnitCheck (env: TypeEnv) (tKernel: TypedExpr) (elemTy: IRType) :
                                 "reduce kernel (a fold is typed at its element's unit, so the kernel must preserve that unit — `+` and `-` do; `*` and `/` do not, since folding n of them yields a grade that depends on the extent)",
                                 ppUnitSig eu,
                                 (match ku with Some u -> ppUnitSig u | None -> "dimensionless"))))
+    | _ -> Ok ()
+
+/// Reorder licence for a fold kernel that carries `where ... omp`.
+///
+/// `omp` on the SECOND argument of `reduce` is the opt-in for a parallel fold
+/// (Phase 2 of docs/plan-cpp-perf-exploitation.md): codegen chunks the reduced
+/// axis, folds each chunk serially, and combines the partials in a fixed order.
+/// That is the serial answer only if the kernel is commutative and associative,
+/// so an unlicensed `omp` is REFUSED here rather than silently emitted serial —
+/// the same reasoning as the BL9001 dropped-clause guard: "asked and got serial"
+/// and "never asked" produce byte-identical C++, so the user could not tell.
+///
+/// Ok () for every kernel that did not ask, which is the overwhelming majority
+/// (an operator section cannot carry a where-clause at all).
+and checkFoldOmpLicense (env: TypeEnv) (tKernel: TypedExpr) : TypeResult<unit> =
+    let asksOmp (strategies: ParallelStrategy list) =
+        strategies |> List.exists (function Omp _ -> true | _ -> false)
+    match (resolveTypedExpr env tKernel).Kind with
+    // Inline / let-bound lambda: the clause and the body are both right here.
+    | TExprLambda info when asksOmp info.Parallel ->
+        if info.IsCommutative
+           || not (List.isEmpty info.CommGroups)
+           || isBuiltinFoldBodyTyped info.Params info.Body then Ok ()
+        else Error (FoldOmpNeedsLicense "this fold kernel")
+    // Named function: the clause and the comm groups live in the side channels
+    // checkFunctionDecl fills (a named function's body never reaches here).
+    | TExprVar (fname, _, _) ->
+        let asks =
+            match env.FuncParallel.TryGetValue fname with
+            | true, (_, strategies) -> asksOmp strategies
+            | _ -> false
+        if not asks then Ok ()
+        else
+            let licensed =
+                (match env.FuncCommGroups.TryGetValue fname with
+                 | true, cg -> not (List.isEmpty cg)
+                 | _ -> false)
+                || (match env.FuncFoldBuiltin.TryGetValue fname with
+                    | true, b -> b
+                    | _ -> false)
+            if licensed then Ok ()
+            else Error (FoldOmpNeedsLicense (sprintf "fold kernel '%s'" fname))
     | _ -> Ok ()
 
 and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
@@ -11182,6 +11306,13 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                  env.FuncParallel.[funcDecl.Name] <-
                      (funcDecl.Params |> List.map (fun p -> p.Name), wc.Parallel)
              | _ -> ())
+            // Fold-kernel builtin-body bit, for the parallel-fold reorder
+            // licence (checkFoldOmpLicense). Recorded here for the same reason
+            // as the tables above: a named function's BODY is invisible at the
+            // `reduce(xs, f)` seam, which sees only a `TExprVar`.
+            if isBuiltinFoldBodySurface (funcDecl.Params |> List.map (fun p -> p.Name))
+                                        funcDecl.Body then
+                env.FuncFoldBuiltin.[funcDecl.Name] <- true
             // An `omp(v: n)` naming no parameter is silently dropped downstream.
             checkOmpVarNames env (funcDecl.Params |> List.map (fun p -> p.Name))
                              funcDecl.WhereClause (sprintf "function '%s'" funcDecl.Name)

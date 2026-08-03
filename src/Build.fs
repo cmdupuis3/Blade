@@ -28,6 +28,62 @@ type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 // never a per-test axis.
 // ============================================================================
 
+// ============================================================================
+// Shared host-compiler optimization flags (plan-cpp-perf-exploitation Phase 0)
+//
+// ONE value, consumed by compileCppWithExtra AND by every test block that
+// shells out to g++ on its own (tests/Differential.fs, Benchmarks.fs,
+// OmpTests.fs, AllocTests.fs, OrbWreathTests.fs) — Build.fs compiles before
+// all of them in Blade.fsproj, so those sites reference `Build.optFlags`
+// rather than re-spelling the string. Deliberately does NOT include `-std=`:
+// the std level is a per-site property (orb_wreath_tests.cpp needs c++20).
+//
+// `-march=native` lets GCC use the build machine's full ISA (AVX2/AVX-512,
+// FMA). The BLADE_MARCH env var makes that reproducible across machines:
+//   unset  -> `native` (default)
+//   `off`  -> no -march flag at all (portable binaries / cross-machine repro)
+//   other  -> `-march=<value>` verbatim (e.g. `skylake`, `x86-64-v3`)
+//
+// `-ffp-contract=off` is NOT optional at today's gates, and is the one place
+// this differs from the Phase 0 write-up. GCC defaults to `fast`, so the
+// moment -march exposes FMA the compiler fuses a*b+c into one rounding —
+// which silently breaks tests/InterpDiff.fs, the gate that requires the
+// tree-walking interpreter's stdout to be BYTE-IDENTICAL to the compiled
+// binary's. src/Interp/Numerics.fs is bit-pinned to `g++ -std=c++17 -O2`
+// scalar semantics (its own header says so), so contraction cannot be
+// "re-pinned" the way DiffOracle's binary was; it would mean modelling FMA,
+// per-machine, inside the interpreter. MEASURED on this box (g++ 15.2,
+// ucrt64): `blade test interp math` is 28/42 with contraction on, 42/42 with
+// it off; -O3 alone (BLADE_MARCH=off) is also 42/42, i.e. -march/FMA is the
+// sole cause. Jacobi SVD/eigh/HOSVD amplify a last-ULP delta into printed
+// digits. Turning contraction off keeps everything else -march buys (wider
+// vectors, better scheduling/addressing) and costs only the fused multiply.
+// BLADE_FP_CONTRACT overrides for measurement:
+//   unset  -> `off` (default; keeps the differential gates green)
+//   other  -> `-ffp-contract=<value>` (`fast` restores GCC's default)
+//
+// NOTE (nvcc): the CUDA paths below stay at -O2 on purpose. nvcc translates
+// host flags for its host compiler (cl.exe on Windows) and -march does not
+// pass through cleanly there.
+// ============================================================================
+
+/// The `-march=` fragment (leading space included, or "" when disabled).
+let private marchFlag =
+    match System.Environment.GetEnvironmentVariable("BLADE_MARCH") with
+    | null | "" -> " -march=native"
+    | v when v.Trim().ToLowerInvariant() = "off" -> ""
+    | v -> sprintf " -march=%s" (v.Trim())
+
+/// The `-ffp-contract=` fragment (leading space included).
+let private fpContractFlag =
+    match System.Environment.GetEnvironmentVariable("BLADE_FP_CONTRACT") with
+    | null | "" -> " -ffp-contract=off"
+    | v -> sprintf " -ffp-contract=%s" (v.Trim())
+
+/// Host-compiler optimization flags shared by every g++ invocation.
+/// Currently `-O3 -march=native -ffp-contract=off` (see the two env vars above).
+let optFlags = "-O3" + marchFlag + fpContractFlag
+
 type HostPlatform = PWindows | PLinux | PMacOS
 
 type Capabilities = {
@@ -268,7 +324,7 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
                      incFlag + linkFlag)
 
         let extraFlags = extraLinkInputs |> List.map (fun p -> sprintf " \"%s\"" (Path.GetFullPath p)) |> String.concat ""
-        let args = sprintf "-std=c++17 -O2 %s %s -o \"%s\" \"%s\"%s%s%s%s" ompFlag safetyFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags openblasFlags
+        let args = sprintf "-std=c++17 %s %s %s -o \"%s\" \"%s\"%s%s%s%s" optFlags ompFlag safetyFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags openblasFlags
         
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
@@ -283,7 +339,8 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         
         // 300s: spectra-scale generated programs (rank-2 transforms carry
         // O(cells) initializers and nested-literal outputs, capped at 65536
-        // cells) legitimately push g++ -O2 past the old 60s budget.
+        // cells) legitimately push g++ past the old 60s budget -- and -O3
+        // (Phase 0) is slower still than the -O2 that first blew it.
         if not (proc.WaitForExit(300000)) then
             try proc.Kill() with _ -> ()
             Error "Compilation timed out after 300s"

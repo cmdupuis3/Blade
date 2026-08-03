@@ -1309,6 +1309,12 @@ let parseConjunctArgList (tokens: Token list) : ParseResult<string list> =
 // Where clause parsing (used by both function declarations and lambdas)
 /// Parse the body of omp(...): comma-separated `ident: int` pairs.
 /// e.g. omp(a: 2, b: 1) => [("a",2); ("b",1)]
+/// The parenthesised form is OPTIONAL — bare `omp` yields `Omp { Vars = [] }`,
+/// read downstream as "auto": every consumer already treats an empty depth list
+/// as the historical outermost-level licence (IR.buildLoopNestCodeGen's
+/// `licenseUnresolved` fallback), and the fold-kernel gate (Phase 2 of
+/// docs/plan-cpp-perf-exploitation.md) has no per-argument depth to name at all
+/// — a reduce walks ONE axis, so the only question is may it be reordered.
 let rec private parseOmpArgs (acc: (string * int) list) (tokens: Token list) : ParseResult<(string * int) list> =
     expectIdent tokens >>= fun name afterName ->
     expect TokColon afterName >>= fun _ afterColon ->
@@ -1378,10 +1384,17 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
                 let line, col = currentPos toks
                 rejectPair line col "omp"
             else
-                advance toks |> expect TokLParen >>= fun _ afterLParen ->
-                parseOmpArgs [] afterLParen >>= fun pairs afterArgs ->
-                expect TokRParen afterArgs >>= fun _ remaining ->
-                loop comms antis (par @ [Omp { Vars = pairs }]) custom remaining
+                // `omp(a: n, ...)`  OR  bare `omp` (auto). Same optional-paren
+                // shape the `cuda` arm below already uses.
+                let afterOmp = advance toks
+                match peek afterOmp with
+                | Some TokLParen ->
+                    expect TokLParen afterOmp >>= fun _ afterLParen ->
+                    parseOmpArgs [] afterLParen >>= fun pairs afterArgs ->
+                    expect TokRParen afterArgs >>= fun _ remaining ->
+                    loop comms antis (par @ [Omp { Vars = pairs }]) custom remaining
+                | _ ->
+                    loop comms antis (par @ [Omp { Vars = [] }]) custom afterOmp
         | Some (TokKeyword KwMpi) ->
             // Legal only as the sole (and hence OUTER) strategy.
             if not (List.isEmpty par) then

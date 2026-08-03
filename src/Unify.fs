@@ -145,6 +145,14 @@ type TypeError =
     // deduction says parameter `param` is `proved` instead. `levels` renders
     // the input's class for the message.
     | WreathTieKernelNotOdd of param: string * proved: string * levels: string
+    // `where ... omp` on a FOLD kernel (the second argument of `reduce`) with no
+    // reorder licence. Chunking a fold hands different associations to different
+    // threads, so the kernel must be commutative AND associative; `comm(a, b)`
+    // is the user's declaration of the first (cross-checked against body parity
+    // by CommContradictsBody), and a recognised builtin body (`a + b`, `a * b`,
+    // `a && b`, `a || b`) supplies both outright. Neither present = refuse
+    // rather than silently emit a serial loop. `kernelDesc` names the kernel.
+    | FoldOmpNeedsLicense of kernelDesc: string
     | PlaceholderNeedsAllBound of got: int * total: int
     | GroupKeysRank1
     | CumulantOrderPositive of order: int

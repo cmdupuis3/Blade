@@ -245,7 +245,68 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Loop fusion analysis (fusion depth = common prefix of loop level types incl. parallelism annotations) | Core | v10 §16.2–16.3 |
 | Lazy computation graph; `compute` semantics | Core | v10 §16.1, §16.4 |
 | OpenBLAS lowering for `gram()` (`cblas_dsyrk` same-array / `cblas_dgemm` distinct) | Experimental | Real `Float64` only; opt-in via `BLADE_BLAS=1` (or `OPENBLAS_DIR` set; `BLADE_BLAS=0` forces off). Output layout unchanged (packed symmetric / dense) — BLAS fills a staging buffer, repack lands Blade storage. Emitted `#include <cblas.h>` keys Build.fs's `-I`/link resolution (`OPENBLAS_DIR`, netcdf-style). Measured: gram p=1024×n=16384, 8.6 s loops → 0.55 s 1-thread / 0.15 s 16-thread; values agree to ~1e-14 rel |
+| Comm-licensed parallel reductions: bare `omp` on a fold kernel | Core | See below; `tests/OmpTests.fs` (`blade test omp-reduce`, `omp-pragma`, `omp-coverage`), corpus `loops/110–111`, `diagnostics/049` |
 | Alternative parallel backends (`acc`, ...) | Planned | v10 §6.1 note |
+
+### 16.1 Parallel reductions (`reduce(xs, k)` with `omp` on `k`)
+
+`reduce` is serial by default, like every other loop in Blade. It parallelizes
+when the **fold kernel** carries `omp` in its where-clause:
+
+```blade
+reduce(xs, lambda(a, b) where omp -> a + b)                  // builtin body
+reduce(xs, lambda(a, b) where comm(a, b), omp -> f(a, b))    // declared comm
+function myAdd(a: Float64, b: Float64) where comm(a, b), omp = ...
+reduce(xs, myAdd)                                            // named, same rule
+```
+
+`omp` here is the **bare** form (no parentheses): a fold walks one axis, so
+there is no per-argument depth to name — the only question is whether the axis
+may be reordered. The parenthesised `omp(a: n)` form is unchanged and still
+means "up to n dimensions of argument `a` may carry threads" for map kernels.
+
+**The licence.** Chunking a fold hands different associations and different
+orders to different threads, so the kernel must be commutative *and*
+associative. Two things grant it:
+
+- **`comm(a, b)` declared on the kernel** — the same word `<@>` uses to opt into
+  symmetric storage, and already cross-checked against the body's deduced parity
+  (a provably antisymmetric body is `BL4013`, not a licence).
+- **A recognised builtin body** — exactly `a + b`, `a * b`, `a && b`, `a || b`
+  over the two parameters. These carry both properties outright and need nothing
+  declared.
+
+`omp` on a fold kernel with **neither** is `BL4016`, a hard error, not a silent
+serial fallback: "asked and got serial" and "never asked" emit byte-identical
+C++, so a dropped clause would be invisible.
+
+**Two emission paths.**
+
+| | When | Emitted shape |
+|---|---|---|
+| **A** | builtin `+`/`*` body over a real arithmetic element type, flat 1-D sweep (dense rank-1, or a CompoundIdx/SparseIdx `.data` walk) | one `#pragma omp parallel for simd reduction(<op>:acc)`; the accumulator is seeded exactly as the serial fold seeds it and the original value participates in the combine |
+| **B** | every other licensed kernel, and every reduce over a deferred computation | an explicit team with contiguous per-thread chunks, each seeded from its own first value, combined in thread order through the fold wrapper. Needs no identity element, so any user kernel works |
+
+Path B over a deferred computation chunks the **outermost** loop level only:
+each thread runs the whole inner nest serially over the outer indices it owns,
+so an inner triangular level is correct without any special handling. It also
+materializes no intermediate array.
+
+**Caveat: the reorder is real.** `comm` is checked; **associativity is not** —
+no deduction establishes it, so `omp` on a fold kernel is your explicit reorder
+licence, the same trust model as `comm`'s escape hatch. In floating point,
+addition is not associative, so a parallel fold can differ from the serial one
+in the last ULPs. Path B is deterministic for a fixed `OMP_NUM_THREADS` (chunk
+boundaries and combine order are fixed functions of the team size); Path A hands
+the combine to the OpenMP runtime, whose order the standard leaves unspecified.
+Integer-valued data is exact under every association and reproduces bit-for-bit
+either way.
+
+**Not parallelized (deliberately):** the expression form of `reduce` (an IIFE
+inside a kernel body or arithmetic — it routinely already sits inside a parallel
+region; hoist it to its own `let`), multi-leaf `<&!>` fused fold trees, and
+reduce over compact symmetric/antisymmetric/Hermitian storage (rejected at
+typecheck for all folds — `decompact` first).
 
 ## 17. Equivariance and ML (near-term module)
 

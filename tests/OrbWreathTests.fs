@@ -180,7 +180,7 @@ let runOrbWreathTests () : Blade.Tests.TestHarness.BlockResult =
         // C++20: the header's level lists are template packs with `if constexpr`
         // sign dispatch (c++17 suffices for neither the pack idioms nor the
         // concepts-adjacent diagnostics the file leans on).
-        let args = sprintf "-std=c++20 -O2 -o \"%s\" \"%s\"" exePath testSrc
+        let args = sprintf "-std=c++20 %s -o \"%s\" \"%s\"" optFlags exePath testSrc
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true
@@ -190,10 +190,15 @@ let runOrbWreathTests () : Blade.Tests.TestHarness.BlockResult =
         use cproc = Process.Start(psi)
         let cOut = cproc.StandardOutput.ReadToEndAsync()
         let cErr = cproc.StandardError.ReadToEndAsync()
-        let cExited = cproc.WaitForExit(120000)
+        // 300s (was 120s), matching Build.fs's own budget: this is the
+        // slowest single translation unit in the tree and the Phase 0 flag
+        // bump made it slower still. MEASURED (g++ 15.2, ucrt64, idle):
+        // 36.4s at -O2, 53.0s at -O3 -march=native -ffp-contract=off; on a
+        // BUSY box the same compile took 74.7s, i.e. 62% of the old cap.
+        let cExited = cproc.WaitForExit(300000)
         if not cExited then
             (try cproc.Kill(true) with _ -> ())
-            printfn "C++ compilation TIMED OUT (120s)"
+            printfn "C++ compilation TIMED OUT (300s)"
             { Block = blockName; Passed = 0; Failed = 1; Skipped = 0; FailedNames = ["<compile timeout>"] }
         elif cproc.ExitCode <> 0 then
             printfn "C++ compilation FAILED:"

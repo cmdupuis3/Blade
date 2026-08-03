@@ -288,6 +288,21 @@ type TypeEnv = {
     /// wrapper's params are renamed (`__k<uid>_<i>`); the surfacing site
     /// remaps by position. Shared by reference, like FuncCommGroups.
     FuncParallel: System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>
+    /// Named 2-parameter functions whose BODY is a bare builtin commutative +
+    /// associative binary operation over the two parameters (`a + b`, `a * b`,
+    /// `a && b`, `a || b`, in either argument order): funcName → true.
+    /// Populated by checkFunctionDecl, consulted ONLY by the fold-kernel omp
+    /// licence check (`reduce(xs, f)` where `f` carries `where omp`).
+    ///
+    /// Why a side channel: unlike lambdas, a named function's BODY is nowhere in
+    /// the TypeEnv — `StaticFunctions` holds only `let static` declarations —
+    /// and the reduce seam sees a bare `TExprVar`. This records the one bit that
+    /// seam needs, at the site that already records FuncCommGroups /
+    /// FuncParallel for the same "the surface clause is invisible downstream"
+    /// reason. Codegen re-derives the same predicate from the lowered IRCallable
+    /// body (CodeGen.foldKernelBuiltinOp) and the two must agree; the pairing is
+    /// documented at both ends. Shared by reference, like FuncCommGroups.
+    FuncFoldBuiltin: System.Collections.Generic.Dictionary<string, bool>
 }
 
 let emptyEnv () = {
@@ -322,6 +337,7 @@ let emptyEnv () = {
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
     FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
+    FuncFoldBuiltin = System.Collections.Generic.Dictionary<string, bool>()
 }
 
 /// Structured twin of `TypeEnv.Warnings`: every checker warning as a coded,
@@ -592,6 +608,7 @@ class IS implemented, and the dense result folds like any other array." op level
     | AntisymMapNotOdd (param, proved) -> sprintf "mapping this kernel over an ANTISYMMETRIC (AntisymIdx) array would keep the input's strict-triangular storage, and that is only correct for a SIGN-ODD kernel (f(-x) = -f(x)); the deduction says this one is %s in '%s'. An even or unknown-parity map of an antisymmetric array is SYMMETRIC — it has a diagonal, and the strict iteration the input forces cannot produce one — so the compact result would negate every mirrored read. Map over a dense copy instead (`decompact(A, 0)` materializes the full tensor, and the kernel over THAT is symmetric with the right diagonal), or use a sign-odd kernel." proved param
     | WreathTieKernelNotOdd (param, proved, levels) -> sprintf "the declared clause ties every argument over a compact class with a '-' inner level (%s), and that tie is only sound for a kernel SIGN-ODD in each argument separately (h(-p, q) = -h(p, q)): a '-' level claims that mirroring ONE argument's sub-block negates the value, so an even or unknown-parity kernel would store a class whose mirrored reads and decompaction answer with signs the values do not satisfy. The deduction says this kernel is %s in '%s'. Use a per-argument sign-odd kernel (e.g. p * q; note p + q is NOT odd in each argument), or map over dense copies instead: decompact(_, 0) materializes the full tensor, and the kernel over THAT carries no wreath claim." levels proved param
     | HermitianMapNotReal param -> sprintf "mapping this kernel over a HERMITIAN (HermitianIdx) array would keep the input's Hermitian storage, whose mirrored reads recover H(j,i) as conj(H(i,j)); that is only correct when the kernel commutes with conjugation (f(conj z) = conj(f z)), which is not deducible for '%s'. A kernel built from the parameter, real constants, + - * /, and neg/conj/real qualifies; a complex constant, imag(z), arg(z), `^` and the math intrinsics (exp/log/sqrt/...) do not. Map over a dense copy instead: `decompact(A, 0)` materializes the full conjugate-mirrored matrix, and the kernel over THAT carries no storage claim." param
+    | FoldOmpNeedsLicense kernelDesc -> sprintf "parallel reduction needs comm(...) or a builtin op: %s carries `omp` but nothing licenses the reorder. A parallel fold splits the axis into per-thread chunks and combines the partials, so the kernel must be COMMUTATIVE and ASSOCIATIVE — write `where comm(a, b), omp` to declare it (the same word `<@>` uses for symmetric storage, cross-checked against the body's parity), or use a builtin fold body (a + b, a * b, a && b, a || b), which carries both properties outright. Drop `omp` to keep the serial fold." kernelDesc
     | PlaceholderNeedsAllBound (got, total) -> sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." got total
     | GroupKeysRank1 -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
     | FallbackNeedsArrays (leftDesc, rightDesc) -> sprintf "<|:> (allocated-fallback) reads the LEFT array where its storage holds a cell and the right array elsewhere, so both operands must be arrays; got %s and %s. For value-level choice (first nonzero wins) over scalars or computations, use <|>." leftDesc rightDesc
@@ -741,6 +758,11 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // "cannot certify the kernel commutes with the mirror involution".
             | AntisymMapNotOdd _ | HermitianMapNotReal _
             | WreathTieKernelNotOdd _ -> "BL4015"
+            // Its own code, not BL4013's: nothing is CONTRADICTED here. The
+            // clause `omp` asks for a reorder the checker simply has no licence
+            // for — the fix is to add `comm(...)` (or use a builtin body), not
+            // to remove an annotation the deduction disproved.
+            | FoldOmpNeedsLicense _ -> "BL4016"
             | StructWhereNotBool _ | StructWhereError _ | WherePredicateUnannotated _
             | PplConstraintNeedsImport _
             | UnknownWhereConstraint _ -> "BL4001"
