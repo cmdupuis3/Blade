@@ -1164,6 +1164,19 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             System.Environment.SetEnvironmentVariable("BLADE_FP_REASSOC", (if on then "1" else "0"))
             try f ()
             finally System.Environment.SetEnvironmentVariable("BLADE_FP_REASSOC", prior)
+        // The dot-shaped arms below (`reduce(<unforced zip>, (+))`) are EXACTLY
+        // the shape `LinAlgPatterns.BlasL1` recognises, so in an environment
+        // where BLAS is enabled (OPENBLAS_DIR set, or `blade test linalg`'s
+        // BLADE_BLAS=1) they would emit one `blade_linalg::blade_dot` call and
+        // never reach the fold nest at all -- the lane assertions would pass
+        // vacuously and the value arms would compare two identical BLAS calls.
+        // Pinned OFF for the whole reassoc block (no arm here wants a dispatch)
+        // and restored immediately, same discipline as the knob pin above.
+        let withBlasOff (f: unit -> 'a) : 'a =
+            let prior = System.Environment.GetEnvironmentVariable("BLADE_BLAS")
+            System.Environment.SetEnvironmentVariable("BLADE_BLAS", "0")
+            try f ()
+            finally System.Environment.SetEnvironmentVariable("BLADE_BLAS", prior)
         let emitOnly (nm: string) (src: string) : Result<string, string> =
             try
                 match lower src with
@@ -1181,22 +1194,52 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             sprintf "let A = [%s]\nlet s = reduce(A, lambda(a, b) -> a + b)\n" lit
         let fprSrcProdsum (lit: string) (lit2: string) =
             sprintf "let A = [%s]\nlet B = [%s]\nlet s = prodsum(A, B)\n" lit lit2
+        // THREE operand streams: the comoment3 fiber kernel's shape, and the
+        // one the arity-aware lane count (`laneCountForStreams`) puts at K = 5.
+        let fprSrcProdsum3 (l1: string) (l2: string) (l3: string) =
+            sprintf "let A = [%s]\nlet B = [%s]\nlet C = [%s]\nlet s = prodsum(A, B, C)\n" l1 l2 l3
+        // reduce over an UNFORCED zip -- the dot shape. This lowers through
+        // `genReduceComputeBinding` (reduce over a deferred computation), a
+        // different emitter from the two above: its element is not a subscript
+        // but the nest's whole per-iteration body evaluated at the lane index.
+        let fprSrcDot (lit: string) (lit2: string) =
+            sprintf "let x = [%s]\nlet y = [%s]\n" lit lit2
+              + "let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b\n"
+              + "let s = reduce(P, (+))\n"
         let fprNs = [1; 3; 7; 8; 9; 15; 17]
+        // K = 5 for three streams, so its boundaries are a DIFFERENT set of n:
+        // below the lanes (1, 3), exactly the lanes (5), maximal tail (4, 9),
+        // one past (6), indivisible (11, 17).
+        let fprNs3 = [1; 3; 4; 5; 6; 9; 11; 17]
         let fprCases : (string * string) list =
             [ for n in fprNs do
                 yield (sprintf "reduce_n%d" n, fprSrcReduce (laneLit n awkward))
                 yield (sprintf "prodsum_n%d" n,
                        fprSrcProdsum (laneLit n awkward) (laneLit n (fun i -> awkward (i + 3))))
+                yield (sprintf "dot_n%d" n,
+                       fprSrcDot (laneLit n awkward) (laneLit n (fun i -> awkward (i + 3))))
+              for n in fprNs3 do
+                yield (sprintf "prodsum3_n%d" n,
+                       fprSrcProdsum3 (laneLit n awkward)
+                                      (laneLit n (fun i -> awkward (i + 3)))
+                                      (laneLit n (fun i -> awkward (i + 7))))
               // Integer-valued twins: EXACT equality is demanded of these.
               yield ("reduce_n15_integer_exact", fprSrcReduce (laneLit 15 (fun i -> float (i % 9 + 1))))
               yield ("prodsum_n15_integer_exact",
                      fprSrcProdsum (laneLit 15 (fun i -> float (i % 9 + 1)))
-                                   (laneLit 15 (fun i -> float (i % 5 + 2)))) ]
+                                   (laneLit 15 (fun i -> float (i % 5 + 2))))
+              yield ("prodsum3_n11_integer_exact",
+                     fprSrcProdsum3 (laneLit 11 (fun i -> float (i % 9 + 1)))
+                                    (laneLit 11 (fun i -> float (i % 5 + 2)))
+                                    (laneLit 11 (fun i -> float (i % 3 + 1))))
+              yield ("dot_n15_integer_exact",
+                     fprSrcDot (laneLit 15 (fun i -> float (i % 9 + 1)))
+                               (laneLit 15 (fun i -> float (i % 5 + 2)))) ]
         for (label, src) in fprCases do
             let name = "fp_reassoc_" + label
             let exact = label.EndsWith "integer_exact"
-            match withReassoc true (fun () -> compileProgram outputDir (name + "_on") src),
-                  withReassoc false (fun () -> compileProgram outputDir (name + "_off") src) with
+            match withReassoc true (fun () -> withBlasOff (fun () -> compileProgram outputDir (name + "_on") src)),
+                  withReassoc false (fun () -> withBlasOff (fun () -> compileProgram outputDir (name + "_off") src)) with
             | Error e, _ -> fail name (sprintf "reassoc-on build: %s" e)
             | _, Error e -> fail name (sprintf "reassoc-off build: %s" e)
             | Ok onExe, Ok offExe ->
@@ -1241,11 +1284,17 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
               ("unlicensed_kernel_stays_serial",
                "function myK(a: Float64, b: Float64) = (a + b) * 1.0000001\n"
                  + sprintf "let A = [%s]\n" (laneLit 17 awkward)
-                 + "let s = reduce(A, myK)\n", false) ]
+                 + "let s = reduce(A, myK)\n", false)
+              // reduce-over-deferred-computation (the dot shape). Without this
+              // control the dot value arms above would pass by never firing:
+              // the fold nest and the lane form agree to the last ULP on
+              // 15-element data, so agreement alone proves nothing.
+              ("dot_reduce_over_computation_lanes",
+               fprSrcDot (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), true) ]
         for (label, src, expectLanes) in fprEmitCases do
             let name = "fp_reassoc_emission_" + label
-            match withReassoc true (fun () -> emitOnly name src),
-                  withReassoc false (fun () -> emitOnly name src) with
+            match withReassoc true (fun () -> withBlasOff (fun () -> emitOnly name src)),
+                  withReassoc false (fun () -> withBlasOff (fun () -> emitOnly name src)) with
             | Error e, _ -> fail name (sprintf "emit (knob on): %s" e)
             | _, Error e -> fail name (sprintf "emit (knob off): %s" e)
             | Ok onCpp, Ok offCpp ->
@@ -1259,6 +1308,45 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                 else
                     pass name (if expectLanes then "lanes only with the knob on"
                                else "byte-identical with the knob on (unlicensed, stays serial)")
+
+        // ---- The lane COUNT is a function of the operand-stream count -------
+        // `laneCountForStreams` divides a fixed register/ILP budget among the
+        // concurrent value streams one lane iteration keeps live: K = 8 at one
+        // and two streams (the repo's measured anchor), K = floor(16/s) beyond.
+        // The count is part of the fold's EVALUATION ORDER, so it is pinned
+        // here as emitted text, not left to be inferred from a timing.
+        //
+        // The three-stream arm is the one with a measurement behind it: 8 lanes
+        // on `prodsum(a, b, c)` ran 2.6x SLOWER than 5 lanes in the comoment3
+        // shape (61 vars x 2003 samples, `Array<double,1>` peels through the
+        // named kernel), while 8 lanes on the two-operand form helped. A
+        // regression that silently restores 8 here restores that.
+        let distinctLanes (prefix: string) (s: string) =
+            System.Text.RegularExpressions.Regex.Matches(s, prefix + @"(\d+)")
+            |> Seq.cast<System.Text.RegularExpressions.Match>
+            |> Seq.map (fun m -> int m.Groups.[1].Value)
+            |> Seq.distinct |> Seq.length
+        let fprLaneCountCases : (string * string * string * int) list =
+            // (label, source, lane-local prefix, expected distinct lanes)
+            [ ("reduce_one_stream", fprSrcReduce (laneLit 33 awkward), "__rlane", 8)
+              ("prodsum_two_streams",
+               fprSrcProdsum (laneLit 33 awkward) (laneLit 33 (fun i -> awkward (i + 3))), "__pl", 8)
+              ("prodsum3_three_streams",
+               fprSrcProdsum3 (laneLit 33 awkward)
+                              (laneLit 33 (fun i -> awkward (i + 3)))
+                              (laneLit 33 (fun i -> awkward (i + 7))), "__pl", 5)
+              ("dot_two_streams",
+               fprSrcDot (laneLit 33 awkward) (laneLit 33 (fun i -> awkward (i + 3))), "__rlane", 8) ]
+        for (label, src, prefix, expected) in fprLaneCountCases do
+            let name = "fp_reassoc_lane_count_" + label
+            match withReassoc true (fun () -> withBlasOff (fun () -> emitOnly name src)) with
+            | Error e -> fail name (sprintf "emit (knob on): %s" e)
+            | Ok cpp ->
+                let got = distinctLanes prefix cpp
+                if got <> expected then
+                    fail name (sprintf "expected %d lanes (%s0..%s%d), emitted %d"
+                                   expected prefix prefix (expected - 1) got)
+                else pass name (sprintf "%d lanes" got)
 
         // ---- Phase 1 regression: ivdep must not land inside collapse(2) ----
         // Text-only assertions cannot see this; only g++ can.

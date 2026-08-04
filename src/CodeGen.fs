@@ -373,6 +373,38 @@ let fpReassocEnabled () : bool =
 /// definition is the point: two lane counts would be two evaluation orders.
 let private foldLaneCount = 8
 
+/// The lane count for an accumulation whose every lane iteration keeps `s`
+/// concurrent ARRAY OPERAND STREAMS live (prodsum's argument count; the number
+/// of distinct array leaves a reduce-over-computation body reads; 1 for a plain
+/// `reduce`/sumred sweep).
+///
+/// THE PRINCIPLE, not a tuning table: the lane count divides a FIXED
+/// register/ILP budget among the concurrent value streams a lane iteration
+/// keeps live. One lane of an s-stream body holds s loaded values plus its
+/// accumulator, so K lanes hold roughly K*s live values; past the machine's
+/// architectural register file the lanes spill to the stack and every update
+/// becomes the load-modify-store the lanes existed to remove. The ANCHOR is the
+/// repo's own measurement at one and two streams -- `foldLaneCount` = 8 (Round
+/// C's K sweep over 1e5/1e6/1e7 f64, where 16 already regressed) and the
+/// 2-operand prodsum's +15% at the same K -- and the 1/s scaling simply holds
+/// the product K*s constant at that anchor:
+///
+///     K(1) = K(2) = 8   (the measured optimum; 1 and 2 streams share it)
+///     K(s) = (2 * 8) / s  for s >= 3,  floored at 2 lanes
+///
+/// so K(3) = 5, K(4) = 4, K(8) = 2. Two lanes is the floor because one lane is
+/// not a lane form at all -- it is the serial chain, which the callers' short
+/// fallback already emits.
+///
+/// NOT machine-tuned per s: only the s <= 2 anchor is measured, and the rest is
+/// the budget identity extrapolated from it. That is deliberate -- a per-s
+/// table would be a fit to one microarchitecture, and the lane count is part of
+/// the fold's EVALUATION ORDER, so it must be a stated rule the emitted answer
+/// can be reproduced from, not a number someone searched for.
+let private laneCountForStreams (s: int) : int =
+    if s <= 2 then foldLaneCount
+    else max 2 ((2 * foldLaneCount) / s)
+
 /// Collector: did THIS program assembly emit a `blade_linalg::` dispatch call?
 /// Set by the gram / matmul emitters during genModule; the program assemblers
 /// append the `#include "blade_linalg.hpp"` line after body generation (the
@@ -1624,7 +1656,9 @@ let literalOrRuntimeExtent (ty: IRType) (name: string) (dim: int) : string =
 /// therefore the numeric answer -- cannot drift between them, and so it stays
 /// the same shape Path B's chunked fold already uses (Round C, measured).
 ///
-/// Emits, for `K = foldLaneCount` and the half-open range `[lo, hi)`:
+/// Emits, for the caller's lane count `K` (`foldLaneCount`, or
+/// `laneCountForStreams` where the body reads several operand streams) and the
+/// half-open range `[lo, hi)`:
 ///
 ///   T L0 = elem(lo + 0); ... T L7 = elem(lo + 7);   // seed: no identity needed
 ///   size_t i = lo + 8;
@@ -1649,7 +1683,15 @@ let literalOrRuntimeExtent (ty: IRType) (name: string) (dim: int) : string =
 ///
 /// `combine acc rhs` renders one complete fold statement (semicolon included),
 /// which is what lets `+=` (prodsum) and `acc = W(acc, x)` (reduce) share this.
+///
+/// `k` is passed IN rather than read from `foldLaneCount` here because the
+/// budget rule (`laneCountForStreams`) makes it a function of the body's
+/// operand-stream count; every caller must therefore state the K its emitted
+/// order is a function of. Callers whose body reads one stream pass
+/// `foldLaneCount` and emit exactly what they emitted before the parameter
+/// existed.
 let private fpReassocLaneStmts
+        (k: int)
         (elemStr: string)
         (lanePrefix: string)
         (idxName: string)
@@ -1658,7 +1700,6 @@ let private fpReassocLaneStmts
         (elemAt: string -> string)
         (combine: string -> string -> string)
         : string list * string =
-    let k = foldLaneCount
     let lane (l: int) = sprintf "%s%d" lanePrefix l
     // Lane l's seed index. `lo` is the literal 0 at the intrinsic sites, and
     // `0 + 3` would be noise there; everywhere else it is a hoisted `const`.
@@ -1897,15 +1938,24 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             let prodAt (i: string) =
                 opNames |> List.map (fun a -> sprintf "%s[%s]" a i) |> String.concat " * "
             let boundOn = literalOrRuntimeExtent headTy (List.head opNames) 0
+            // ARITY-AWARE lane count. One lane iteration of an L-operand
+            // prodsum keeps L loaded values plus its accumulator live, so the
+            // register budget the 8 lanes were measured against is spent L
+            // times over: 8 lanes on the THREE-operand form (the comoment3
+            // fiber kernel) measured 2.2-2.7x SLOWER than the serial chain
+            // while the same 8 lanes helped the two-operand form. The budget
+            // rule in `laneCountForStreams` is what reconciles those two
+            // measurements; the operand count IS the stream count here.
+            let kLanes = laneCountForStreams (List.length argStrs)
             let (laneStmts, resultLane) =
-                fpReassocLaneStmts elemStr "__pl" "__pt" "0" "__pn" prodAt
+                fpReassocLaneStmts kLanes elemStr "__pl" "__pt" "0" "__pn" prodAt
                     (fun acc rhs -> sprintf "%s += %s;" acc rhs)
             let shortFallback =
                 // Below K elements there is nothing to interleave, so this is
                 // the serial chain verbatim -- same seed (the additive
                 // identity), same ascending order, hence the same double.
                 sprintf "if (__pn < (size_t)%d) { %s __ps = 0; for (size_t __pt = 0; __pt < __pn; __pt++) { __ps += %s; } return __ps; }"
-                    foldLaneCount elemStr (prodAt "__pt")
+                    kLanes elemStr (prodAt "__pt")
             let body =
                 aliasDecls
                 @ [ sprintf "const size_t __pn = %s;" boundOn; shortFallback ]
@@ -2600,9 +2650,17 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         // need no team, so the answer stays a fixed function of the data and K.
         // Licence is the ordinary one: a recognised builtin body, or declared
         // comm. An unlicensed user kernel stays serial with the knob on.
+        //
+        // ONE operand stream, so the lane count is `foldLaneCount` outright:
+        // `IRReduce` folds a MATERIALIZED rank-1 array, and its lane iteration
+        // keeps exactly one loaded value plus the accumulator live -- the shape
+        // `laneCountForStreams`'s anchor was measured on. A prodsum-like
+        // multi-stream body never reaches here: it lowers either to the
+        // `IRProdSum` IIFE above (which applies the budget rule) or, unforced,
+        // to `IRReduceCompute` (which applies it in genReduceComputeBinding).
         let laneForm (loExpr: string) (seedStr: string) (guard: string) =
             let (laneStmts, resultLane) =
-                fpReassocLaneStmts elemStr "__rlane" "__ri" "__rlo" "__rn" reduceAccAt
+                fpReassocLaneStmts foldLaneCount elemStr "__rlane" "__ri" "__rlo" "__rn" reduceAccAt
                     (fun acc rhs -> sprintf "%s = %s(%s, %s);" acc wname acc rhs)
             let stmts =
                 [ sprintf "const size_t __rn = %s;" reduceBound
@@ -13134,9 +13192,11 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // DETERMINISM: no omp_get_max_threads, no team, no pragma. The
                 // answer is a fixed function of the data and K alone, so
                 // OMP_NUM_THREADS=1 and =N give the same bits.
+                // One operand stream (a materialized rank-1 array), so the
+                // measured anchor applies directly -- see laneCountForStreams.
                 let kLanes = foldLaneCount
                 let (laneStmts, resultLane) =
-                    fpReassocLaneStmts elemStr "__rlane" "__ri" "__rlo" "__rhi" elemAt
+                    fpReassocLaneStmts kLanes elemStr "__rlane" "__ri" "__rlo" "__rhi" elemAt
                         (fun acc rhs -> sprintf "%s = %s(%s, %s);" acc wname acc rhs)
                 elemErrCode @ guardLines @ wrapperLines @ [
                     sprintf "%s// reduce: accumulator loop, eager (%d-lane, BLADE_FP_REASSOC)" ind kLanes
@@ -13279,6 +13339,157 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                                 Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
                                 |> Option.map (fun entry -> (call, entry))
                             | _ -> None
+                    // BLADE_FP_REASSOC for the reduce-over-DEFERRED-COMPUTATION
+                    // nest -- the shape `reduce(<unforced zip>, (+))` (the dot
+                    // benchmark) lowers through, and the last serial arm the knob
+                    // did not reach. Same K-lane shape as every other
+                    // `fpReassocEnabled ()` site (fpReassocLaneStmts owns it), so
+                    // the numeric answer cannot drift between them.
+                    //
+                    // What is different here is the ELEMENT: the flat forms fold
+                    // `A[__ri + l]`, a subscript; this one folds the nest's whole
+                    // per-iteration BODY at `__ri + l`. That is only meaningful
+                    // when the body is a PURE EXPRESSION of the level's index --
+                    // which is exactly what the gate below establishes, and what
+                    // makes K independent evaluations of it legitimate. The body
+                    // is rendered ONCE into a local `[&](size_t __i0) -> T`
+                    // lambda and the lanes call it at their own indices; the K
+                    // copies are the inliner's, not the emitter's. Rendering once
+                    // is not only smaller text: the kernel emitters are not all
+                    // pure (some register collected definitions), so emitting the
+                    // same body twice is a hazard the single render removes.
+                    //
+                    // DECLINED, deliberately, in v1 (each falls through to the
+                    // unchanged serial nest below):
+                    //   * MULTI-LEVEL nests. A lane would have to stride the
+                    //     outermost level while re-running the whole inner nest,
+                    //     which is a different (and much larger) unit of work
+                    //     than a body expression -- and the inner nest may be
+                    //     triangular, so lane l and lane l+1 do not even do equal
+                    //     work. The comm-licensed multi-level case already has
+                    //     its own answer (FoldChunk, Path B).
+                    //   * Non-rectangular / fused / tabulated (compound, sparse)
+                    //     head levels: `__ri + l` is not an element of the
+                    //     iteration space.
+                    //   * Reynolds bodies, MPI slabs, and halo-window slots (the
+                    //     carousel body is stateful across iterations by
+                    //     construction, so it is not a function of the index).
+                    //   * `FoldChunk` (an `omp`-licensed fold): threads and lanes
+                    //     are separate opt-ins and Path B already owns that arm.
+                    //   * The FUSED TREE (several leaves, several accumulators) --
+                    //     handled in the branch below, which stays serial.
+                    //
+                    // Licence is the ordinary one: `foldReorderLicensed callable`.
+                    // On this path `(+)` resolves to a two-parameter callable whose
+                    // body is exactly `p0 + p1`, so `foldKernelBuiltinOp` grants it
+                    // outright (the same fact `dotCall` reads as
+                    // `FoldIsBuiltinAdd`); an unlicensed user fold kernel stays
+                    // serial with the knob on.
+                    // A FUNCTION, not a value: it renders the kernel body, and the
+                    // BLAS-dispatch arm below emits no body at all -- computing it
+                    // eagerly would render (and discard) one there.
+                    let laneLines () : string list option =
+                        let laneable (lvl: LoopIndexBinding) =
+                            lvl.BoundDependencies.IsEmpty && lvl.StrictOffset = 0
+                            && lvl.FusedRank.IsNone
+                            && (match lvl.Extent with
+                                | IRCompoundMask _ | IRSparseKeys _ -> false
+                                | _ -> true)
+                            && not cg.HasReynolds && not cg.MpiSlab
+                            && (lvl.Elements
+                                |> List.forall (fun e ->
+                                    match e.SlotTag with
+                                    | Some t -> not (t.StartsWith "__halowin")
+                                    | None -> true))
+                        match cg.Bindings with
+                        | [lvl] when fpReassocEnabled () && foldReorderLicensed callable
+                                     && cg.FoldChunk.IsNone && laneable lvl ->
+                            // The nest's own element peels and kernel expression,
+                            // built exactly as genLoopNestStreamed builds them for
+                            // one level. `restrictPeelSites` is provably EMPTY for
+                            // a single-level nest (its chain rule needs a deeper
+                            // level to peel into), so `false` here is not a
+                            // simplification -- it is the value that site computes.
+                            let mutable currentNames : Map<int, string> = Map.empty
+                            let mutable paramFinalNames : Map<IRId, string> = Map.empty
+                            let mutable declaredNames : Map<string, string> = Map.empty
+                            let mutable peels : string list = []
+                            for elem in lvl.Elements do
+                                let currentName =
+                                    Map.tryFind elem.ArrayPosition currentNames
+                                    |> Option.defaultValue elem.ArrayName
+                                let (peelCode, newName) = genElementBindingPeel false lvl elem currentName
+                                // Same dedup rule as the nest: zipping an array
+                                // WITH ITSELF puts two slots on one declaration.
+                                if Map.tryFind newName declaredNames <> Some peelCode then
+                                    peels <- peels @ [peelCode]
+                                declaredNames <- Map.add newName peelCode declaredNames
+                                currentNames <- Map.add elem.ArrayPosition newName currentNames
+                                match elem.Virtual with
+                                | VirtualRange _ | VirtualReverse ->
+                                    paramFinalNames <- Map.add elem.ParamVarId elem.ParamName paramFinalNames
+                                | RealArray ->
+                                    paramFinalNames <- Map.add elem.ParamVarId newName paramFinalNames
+                            let nameMap =
+                                paramFinalNames
+                                |> Map.fold (fun acc k v -> Map.add k v acc) ctx.VarNames
+                            let nameMap =
+                                cg.Captures
+                                |> List.fold (fun acc c ->
+                                       if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc)
+                                   nameMap
+                            let bodyExpr =
+                                (genKernelExprWithReynolds cg.KernelExpr cg.KernelParams
+                                     false false nameMap paramFinalNames).CppExpr
+                            // OPERAND STREAMS the body reads: the distinct real
+                            // arrays peeled at this level (a dot reads two; a
+                            // self-dot `zip(x, x)` reads one pointer and counts as
+                            // one). Virtual range/reverse slots are index
+                            // arithmetic, not memory streams, and are not counted.
+                            let streams =
+                                lvl.Elements
+                                |> List.filter (fun e -> match e.Virtual with RealArray -> true | _ -> false)
+                                |> List.map (fun e -> e.ArrayName)
+                                |> List.distinct
+                                |> List.length
+                            let kLanes = laneCountForStreams streams
+                            let bodyAt (i: string) = sprintf "__rbody(%s)" i
+                            let (laneStmts, resultLane) =
+                                fpReassocLaneStmts kLanes elemStr "__rlane" "__ri" "0" "__rhi" bodyAt
+                                    (fun acc rhs -> sprintf "%s = %s(%s, %s);" acc wname acc rhs)
+                            let boundStr = genLoopBoundExpr (compoundArrayNamesOf cg.Bindings) lvl
+                            Some (
+                                [ sprintf "%s// reduce over computation: accumulator loop (%d-lane, BLADE_FP_REASSOC, %d operand stream%s)"
+                                      ind kLanes streams (if streams = 1 then "" else "s")
+                                  sprintf "%s{" ind
+                                  sprintf "%s    const size_t __rhi = %s;" ind boundStr
+                                  sprintf "%s    auto __rbody = [&](size_t %s) -> %s { %s return %s; };"
+                                      ind lvl.IndexName elemStr
+                                      (peels |> String.concat " ") bodyExpr
+                                  sprintf "%s    if (__rhi < (size_t)%d) {" ind kLanes
+                                  // Below K elements there is nothing to
+                                  // interleave: the serial chain verbatim -- the
+                                  // same bodies, folded in the same ascending
+                                  // order into the same seeded accumulator, hence
+                                  // the same double the nest below produces.
+                                  sprintf "%s        for (size_t __ri = 0; __ri < __rhi; __ri++) {" ind
+                                  sprintf "%s            %s = %s(%s, __rbody(__ri));" ind name wname name
+                                  sprintf "%s        }" ind
+                                  sprintf "%s    } else {" ind ]
+                                @ (laneStmts |> List.map (fun s -> ind + "        " + s))
+                                @ [ sprintf "%s        %s = %s(%s, %s);" ind name wname name resultLane
+                                    sprintf "%s    }" ind
+                                    sprintf "%s}" ind ])
+                        | _ -> None
+                    // The fold nest as emitted today, and the lane form when the
+                    // knob and the gate above both admit it. Shared by both
+                    // non-dispatch arms so they cannot drift.
+                    let foldNestLines () =
+                        wrapperLines
+                        @ [sprintf "%s%s %s = %s;" ind elemStr name seedStr]
+                        @ (match laneLines () with
+                           | Some ls -> ls
+                           | None -> genLoopNest cg ctx.VarNames ctx.Indent)
                     let code =
                         match dotCall with
                         | Some (call, entry) ->
@@ -13300,14 +13511,8 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                                 [ sprintf "%s/* linalg dispatch: dot(%s, %s) = reduce(%s * %s, (+)) */ %s %s = %s(%s, %s.data, %s.data, %s);"
                                       ind xName yName xName yName
                                       elemStr name entry nExtent xName yName seedStr ]
-                            | _ ->
-                                wrapperLines
-                                @ [sprintf "%s%s %s = %s;" ind elemStr name seedStr]
-                                @ genLoopNest cg ctx.VarNames ctx.Indent
-                        | None ->
-                            wrapperLines
-                            @ [sprintf "%s%s %s = %s;" ind elemStr name seedStr]
-                            @ genLoopNest cg ctx.VarNames ctx.Indent
+                            | _ -> foldNestLines ()
+                        | None -> foldNestLines ()
                     (code, ctx')
                 | _ :: _ ->
                     // Fused tree: ONE merged nest, one scalar accumulator per
