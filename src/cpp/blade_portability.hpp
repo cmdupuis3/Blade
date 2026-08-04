@@ -83,3 +83,50 @@
     #define BLADE_IVDEP
   #endif
 #endif
+
+// ---------------------------------------------------------------------------
+// BLADE_OMP_PARALLEL_FOR / BLADE_OMP_PARALLEL_FOR_DYNAMIC -- "thread the loop
+// that immediately follows", for the INTRINSIC emitters (gram / matmul).
+//
+// WHY A MACRO AND NOT `#pragma omp parallel for`. The loop-nest emitter can
+// write a real `#pragma` line because its output is always statement text on
+// its own line. The intrinsic materializers cannot: `materializeInlineForm`
+// SPACE-JOINS a form's lines into a single-line IIFE at expression positions
+// (the same hazard that forces `/* */` over `//` in those emitters, see
+// CodeGen.fs materializeGramForm). A `#pragma` line cannot survive that join,
+// and a `#pragma` cannot come out of a macro either -- `_Pragma` is the only
+// spelling that is both an expression-position-safe single token sequence and
+// a pragma. Same argument as BLADE_IVDEP above.
+//
+// GATED ON `_OPENMP`, not on a compiler. Build.compileCppWithExtra always
+// passes `-fopenmp`, and `#pragma omp` needs no header (only the omp_* RUNTIME
+// API does, which is why CodeGen appends `#include <omp.h>` on its own separate
+// gate and why these two macros need no include at all). But a generated `.cpp`
+// compiled BY HAND without `-fopenmp` must still build, and an unrecognized
+// `omp` pragma is a warning (or an error under -Werror) rather than silence --
+// so the guard is the standard `_OPENMP` feature macro the compiler defines
+// exactly when OpenMP is enabled. Off => empty expansion => serial, correct.
+//
+// The DYNAMIC variant is for a loop whose per-iteration work shrinks with the
+// index (gram's same-array triangular arm); the plain variant is for a balanced
+// one. Which is which is decided at the emission site, as with ivdep.
+//
+// SOUNDNESS is discharged at the emission site, never here: threading the outer
+// loop of gram/matmul partitions OUTPUT ROWS, which are disjoint, and leaves
+// every output cell's summation order untouched -- it is not a reassociation,
+// so the interpreter byte-identity differentials are unaffected.
+#ifndef BLADE_OMP_PARALLEL_FOR
+  #if defined(_OPENMP)
+    #define BLADE_OMP_PARALLEL_FOR _Pragma("omp parallel for")
+  #else
+    #define BLADE_OMP_PARALLEL_FOR
+  #endif
+#endif
+
+#ifndef BLADE_OMP_PARALLEL_FOR_DYNAMIC
+  #if defined(_OPENMP)
+    #define BLADE_OMP_PARALLEL_FOR_DYNAMIC _Pragma("omp parallel for schedule(dynamic)")
+  #else
+    #define BLADE_OMP_PARALLEL_FOR_DYNAMIC
+  #endif
+#endif

@@ -220,6 +220,137 @@ let private ompReduceDiagCases : (string * string) list =
        "function halfSum(a: Float64, b: Float64) where omp = (a + b) * 0.5\n" + arr +
        "let s = reduce(A, halfSum)\n") ]
 
+/// Emission SHAPE pins for the three decisions that are invisible in values and
+/// unreachable from the pragma-text cases above: how the native (BLAS-gate-off)
+/// gram/matmul arms are threaded and ordered, whether the loop nest annotates a
+/// header it cannot vectorize, and which DIRECTION a threaded triangular outer
+/// level runs in. All three are pure codegen assertions -- no toolchain, no
+/// threads -- for the same reason the cases above are: the emitted text is the
+/// artifact, and a value test cannot see any of it.
+///
+/// `mustNotContain` carries as much weight as `mustContain` in every case here:
+/// each is an OLD emission whose disappearance is the actual claim (the strided
+/// `B[__mt][__mj]` read, the register accumulator, the per-iteration operand
+/// subscripts, an `ivdep` on a loop containing a loop).
+let private emissionShapeCases : (string * string * string list * string list) list =
+    // (name, source, mustContain, mustNotContain)
+    //
+    // Non-power-of-two extents throughout (3x5, 5x7, 4x5): a bound rendered
+    // from the wrong axis is invisible at square or equal extents.
+    let matmulSrc =
+        "import math as m\n" +
+        "type M35 = Array<Float64 like Idx<3>, Idx<5>>\n" +
+        "type M57 = Array<Float64 like Idx<5>, Idx<7>>\n" +
+        "let A: M35 = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]\n" +
+        "let B: M57 = [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0], [15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0], [22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0], [29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0]]\n" +
+        "let P = m.matmul(A, B)\n"
+    let gramSrc =
+        "type M35 = Array<Float64 like Idx<3>, Idx<5>>\n" +
+        "type M45 = Array<Float64 like Idx<4>, Idx<5>>\n" +
+        "let A: M35 = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]\n" +
+        "let C: M45 = [[2.0, 3.0, 5.0, 7.0, 11.0], [13.0, 17.0, 19.0, 23.0, 29.0], [31.0, 37.0, 41.0, 43.0, 47.0], [53.0, 59.0, 61.0, 67.0, 71.0]]\n" +
+        "let G = gram(A, A)\n" +
+        "let H = gram(A, C)\n"
+    // Rank-2 nest whose kernel body is a `prodsum` over the peeled row fibers.
+    // The nest sees TWO levels; the `__pt` loop lives inside the body's IIFE and
+    // is invisible to it -- which is exactly how `ivdep` came to sit on a header
+    // whose body is a loop.
+    let fiber = "Array<Float64 like Idx<5>>"
+    let rowsDecl = "let R = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]\n"
+    let prodsumSrc =
+        rowsDecl +
+        sprintf "let Cv = method_for(R, R) <@> lambda(a: %s, b: %s) -> prodsum(a, b) |> compute\n" fiber fiber
+    let loopFreeSrc =
+        rowsDecl +
+        sprintf "let D = method_for(R, R) <@> lambda(a: %s, b: %s) -> a(0) * b(0) |> compute\n" fiber fiber
+    // Rank-3 triangular comm nest with an omp licence: the `schedule(dynamic)`
+    // outer level. Extent 13 -- prime, and not 3, so a bound that lost a
+    // dependency subtraction is visible.
+    let triSrc =
+        "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\n" +
+        "let L = method_for(A, A, A)\n" +
+        "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y + z\n" +
+        "let R = L <@> k |> compute\n"
+    [ // ---- matmul: i-t-j, in-place row accumulation, threaded outer ----------
+      ("matmul_native_arm_reordered_i_t_j", matmulSrc,
+       [ // outer level threaded (via the portable macro -- see
+         // cpp/blade_portability.hpp for why this is not a `#pragma` line:
+         // these emitters' output can be space-joined into a one-line IIFE).
+         // Spelled with the header it governs so the _DYNAMIC variant cannot
+         // satisfy it by prefix.
+         "BLADE_OMP_PARALLEL_FOR\nfor (size_t __mi = 0; __mi < 3; __mi++) {"
+         // the accumulator is the output row itself, hoisted and restrict-qualified
+         "double* BLADE_RESTRICT __mcrow = &P[__mi][0];"
+         // ... which therefore has to be zeroed first, at the literal n
+         "for (size_t __mj = 0; __mj < 7; __mj++) { __mcrow[__mj] = double(); }"
+         // t OUTSIDE j: this ordering IS the change. Literal `5` = A's trailing
+         // extent, baked from A's own index record rather than read at runtime.
+         "for (size_t __mt = 0; __mt < 5; __mt++) {"
+         "const double __ma = A[__mi][__mt];"
+         "const double* BLADE_RESTRICT __mbrow = &B[__mt][0];"
+         // unit-stride inner loop, and ivdep is TRUE here (fresh output pool)
+         "BLADE_IVDEP"
+         "__mcrow[__mj] += __ma * __mbrow[__mj];" ],
+       [ // the strided column walk that made the old order slow
+         "B[__mt][__mj]"
+         // the register accumulator the old order needed
+         "__macc"
+         // runtime extent reads for bounds the operand types already pin
+         "__mt < A.extents[1]"
+         "__mj < B.extents[1]" ])
+      // ---- gram: both arms threaded, rows hoisted, order UNCHANGED -----------
+      ("gram_native_arms_threaded_and_hoisted", gramSrc,
+       [ // same-array arm is triangular (inner span `3 - __gi`), so dynamic
+         "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
+         "for (size_t __gjr = 0; __gjr < 3 - __gi; __gjr++) {"
+         // distinct arm is rectangular, so the static schedule
+         "BLADE_OMP_PARALLEL_FOR\nfor (size_t __gi = 0; __gi < 3; __gi++) {"
+         // both operand rows hoisted out of the contraction loop
+         "const double* BLADE_RESTRICT __growi = &A[__gi][0];"
+         "const double* BLADE_RESTRICT __growj = &A[__gj][0];"
+         "const double* BLADE_RESTRICT __growj = &C[__gj][0];"
+         // contraction reads go through the hoists; `k` is still innermost and
+         // still bounded by the LITERAL trailing extent
+         "for (size_t __gk = 0; __gk < 5; __gk++) {"
+         "__gacc += __growi[__gk] * nested_array_utilities::conj_scalar(__growj[__gk]);" ],
+       [ // the per-iteration double subscript the hoists replaced
+         "A[__gi][__gk]"
+         "C[__gj][__gk]"
+         // gram's inner loop is a REDUCTION into `__gacc`: a loop-carried
+         // dependence, so `ivdep` there would be a false claim AND inert.
+         // (matmul's inner loop is not a reduction, which is why it gets one.)
+         "BLADE_IVDEP\nfor (size_t __gk" ])
+      // ---- ivdep is declined, loudly, when the body hides a loop -------------
+      ("ivdep_declined_on_prodsum_body", prodsumSrc,
+       [ "// [ivdep] declined: kernel body contains an inner loop" ],
+       [ "BLADE_IVDEP" ])
+      // Control: identical nest shape, loop-free body. Without this the fix
+      // could degenerate into "never emit ivdep", which is not the claim.
+      ("ivdep_kept_on_loop_free_body", loopFreeSrc,
+       [ "BLADE_IVDEP" ],
+       [ "// [ivdep] declined" ])
+      // ---- the threaded triangular outer level runs ASCENDING ----------------
+      // Pinned as a DECISION, not as an accident of never having considered it.
+      // A performance audit proposed reversing this level to descending, on the
+      // theory that `schedule(dynamic)` hands out chunks in iteration order so
+      // descending would be largest-chunk-first (LPT). It is backwards for this
+      // shape: `genForLoopHeader` SUBTRACTS the outer index from a triangular
+      // level's bound (below: `13 - __i0`, `13 - __i1 - __i0`), so work per
+      // outer iteration DECREASES in `__i0` and ascending order is already
+      // largest-first. Reversing would end the schedule on the ~C(13,2)-cell
+      // row instead of the 1-cell row -- turning the good makespan bound into
+      // the bad one. See the derivation at CodeGen.genNestPragma.
+      ("triangular_outer_level_stays_ascending", triSrc,
+       [ "#pragma omp parallel for schedule(dynamic)"
+         "for (size_t __i0 = 0; __i0 < 13; __i0++) {"
+         // the bounds that make ascending the largest-first order
+         "for (size_t __i1 = 0; __i1 < 13 - __i0; __i1++) {"
+         "for (size_t __i2 = 0; __i2 < 13 - __i1 - __i0; __i2++) {" ],
+       [ // the two descending spellings, neither of which is an OpenMP
+         // canonical loop form anyway
+         "__i0-- > 0"
+         "__i0 = 13;" ]) ]
+
 /// Which loop index the pragma precedes, for the inner-licence case. Presence
 /// alone cannot distinguish "parallelized the licensed inner level" from
 /// "parallelized the unlicensed outer level".
@@ -310,6 +441,29 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
                 resultLine Pass name (sprintf "pragma governs %s" idx)
             | Some idx -> fail name (sprintf "pragma governs %s, expected %s" idx expectedIdx)
             | None -> fail name "no pragma found"
+    // ---- emission SHAPE: native gram/matmul arms, ivdep, loop direction ----
+    // Compared against the source with every line's LEADING INDENT stripped:
+    // these assertions are about which statements are emitted and in what
+    // order, never about how deep the emitter happened to indent them, and a
+    // multi-line pattern would otherwise have to restate the nesting depth of
+    // whatever construct the form was materialized inside.
+    for (name, src, mustContain, mustNotContain) in emissionShapeCases do
+        match cppOf name src with
+        | Error e -> fail name e
+        | Ok cpp ->
+            let flat =
+                cpp.Split('\n') |> Array.map (fun l -> l.TrimStart()) |> String.concat "\n"
+            let missing = mustContain |> List.filter (fun s -> not (flat.Contains s))
+            let present = mustNotContain |> List.filter flat.Contains
+            if not missing.IsEmpty then
+                fail name (sprintf "generated C++ lacks: %s"
+                               (String.concat " | " (missing |> List.map (fun s -> s.Replace("\n", " \\n ")))))
+            elif not present.IsEmpty then
+                fail name (sprintf "generated C++ still contains: %s"
+                               (String.concat " | " (present |> List.map (fun s -> s.Replace("\n", " \\n ")))))
+            else
+                passed <- passed + 1
+                resultLine Pass name "emission shape as expected"
     // ---- comm-licensed parallel REDUCTIONS: which emission path fired ----
     for (name, src, mustContain, mustNotContain) in ompReduceCases do
         match cppOf name src with
