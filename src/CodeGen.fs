@@ -301,6 +301,78 @@ let setSplitTimingMode (on: bool) : unit =
 let splitTimingModeEnabled () : bool =
     (splitTimingModeCell ()).Value
 
+// ---- Floating-point reassociation opt-in (BLADE_FP_REASSOC) -----------------
+
+/// May the emitter reassociate a SERIAL floating-point accumulation chain into
+/// the deterministic K-lane form below?
+///
+///   BLADE_FP_REASSOC=1|on   -> yes
+///   unset / 0 / anything else -> NO (the default)
+///
+/// CONTRACT, stated where the knob lives so it cannot be read without it:
+///
+///  * Reassociation CHANGES BITWISE RESULTS. `(a+b)+c` and `a+(b+c)` are
+///    different doubles. Off is therefore the default, and OFF MEANS NO
+///    REASSOCIATION ANYWHERE: every site guarded by this predicate emits,
+///    character for character, the serial chain it emitted before the knob
+///    existed. (The separate `literalOrRuntimeExtent` rule below changes some
+///    of those chains' loop BOUNDS from a runtime read to the literal the type
+///    already carries. That is a textual change on both settings and a
+///    numerically inert one -- same trip count, same summands, same order.)
+///  * The INTERPRETER DIFFERENTIALS MUST RUN WITH IT OFF. `src/Interp` is a
+///    byte-identity twin of exactly these chains (`ArrayOps.prodSum` walks `t`
+///    ascending through one accumulator, and so does the fold), so
+///    `blade test interp ...` and `diff-oracle` compare two evaluators that
+///    only agree while the emitter is not reassociating. Nothing has to be
+///    done to keep them honest -- they inherit the default -- but a harness
+///    that pins this ON is asserting a false equality.
+///  * DETERMINISM. What the knob buys is instruction-level parallelism, not
+///    threads: the lane form runs `foldLaneCount` independent accumulator
+///    chains and folds them together in a FIXED ASCENDING ORDER, with no
+///    pragma and no team involved. With the knob on the answer is a fixed
+///    function of THE DATA AND K ALONE -- independent of OMP_NUM_THREADS, of
+///    the team a surrounding parallel region actually got, and of run order.
+///    Two runs of one binary, and runs at different thread counts, agree
+///    bit-for-bit.
+///  * The knob licenses reassociation of arithmetic the COMPILER owns (a
+///    recognised builtin fold body) or that the USER has declared reorderable
+///    (`comm`) -- never an arbitrary user kernel. See `foldReorderLicensed`.
+///
+/// A FUNCTION, never a module-level `let`: a module-level binding freezes the
+/// environment read at first touch, which would make a mid-process pin (a
+/// test's scoped ON, a hand-run between two compiles in one process) silently
+/// ineffective. Same reason `LinAlgPatterns.blasAvailable` and `Build.fs`'s
+/// `fpContractFlag` are functions. Every consultation re-reads.
+let fpReassocEnabled () : bool =
+    match System.Environment.GetEnvironmentVariable("BLADE_FP_REASSOC") with
+    | "1" | "on" -> true
+    | _ -> false
+
+/// How many independent LANE accumulators a reassociated accumulation chain
+/// runs. A single accumulator makes the sweep a serial dependence chain through
+/// the fold kernel; K lanes give the C++ compiler K independent chains over the
+/// same contiguous range.
+///
+/// COMPILE-TIME CONSTANT on purpose: the lane count is part of the fold's
+/// evaluation order, so a runtime knob would make the result depend on
+/// something outside the program (OMP_NUM_THREADS); as a constant, the answer
+/// is a fixed function of the data and K.
+///
+/// LICENCE: reordering elements within a chunk is the same reorder the fold's
+/// comm/builtin-body gate already licensed. This constant is read only on
+/// already-licensed arms -- Path B's chunked fold (which needs no knob), and
+/// the `fpReassocEnabled ()` sites, which need one.
+///
+/// Why 8 (measured over 1e5/1e6/1e7 f64 at OMP_NUM_THREADS=1, K in
+/// {1,4,8,16}): 8 is never worse than 4 and is 1.3-1.5x better while the data
+/// is cache-resident; 16 REGRESSES (register pressure spills the lanes back to
+/// the stack). At 1e7 the sweep is memory-bandwidth-bound and 4/8/16 converge.
+///
+/// DEFINED HERE, far above its first fold-path reader, because the `prodsum`
+/// IIFE emitter in `exprToCppCore` needs it too and F# is order-dependent. One
+/// definition is the point: two lane counts would be two evaluation orders.
+let private foldLaneCount = 8
+
 /// Collector: did THIS program assembly emit a `blade_linalg::` dispatch call?
 /// Set by the gram / matmul emitters during genModule; the program assemblers
 /// append the `#include "blade_linalg.hpp"` line after body generation (the
@@ -1399,6 +1471,159 @@ let private dispatchMarkerTag (resolved: (Blade.LinAlgPatterns.LinAlgBackend * s
     | Some (Blade.LinAlgPatterns.CudaBlas, _) -> "cublas"
     | _ -> "linalg"
 
+/// Is this binary operation commutative? (a op b) = (b op a)
+let isCommutativeOp (op: IRBinOp) : bool =
+    match op with
+    | IRAdd | IRMul | IREq | IRNeq | IRAnd | IROr -> true
+    | _ -> false
+
+/// Is this binary operation associative? (a op b) op c = a op (b op c)
+/// Only ops that are BOTH commutative and associative get flattened.
+let isAssociativeOp (op: IRBinOp) : bool =
+    match op with
+    | IRAdd | IRMul | IRAnd | IROr -> true
+    | _ -> false
+
+// ---- Parallel-fold reorder licence (docs/plan-cpp-perf-exploitation.md section 2) --
+//
+// `reduce(xs, k)` is parallelized only when `k` carries `where ... omp` AND the
+// reorder is licensed. A chunked fold reassociates and reorders, so the licence
+// is exactly "commutative and associative":
+//
+//   * `comm(a, b)` declared on the kernel -- the user's word, already
+//     cross-checked against body parity at typecheck (CommContradictsBody);
+//     associativity is the part `omp` itself asserts (the plan's trust model,
+//     the same escape hatch comm's PBottom case uses);
+//   * a recognised BUILTIN body, which carries both outright and needs nothing
+//     declared.
+//
+// TypeCheck refuses `omp` with neither (BL4016), so reaching codegen unlicensed
+// means the front end and this file disagreed; the emitters then fall back to
+// the serial loop with a visible marker rather than parallelizing on a licence
+// nobody granted.
+//
+// The SAME predicate answers "may BLADE_FP_REASSOC turn this serial chain into
+// lanes?" -- the knob supplies the reproducibility opt-in that `omp` supplies
+// on the parallel paths, never the licence itself. An unlicensed user kernel
+// stays serial with the knob on.
+
+/// The builtin binary op a 2-parameter fold callable's body IS, when the body is
+/// exactly `p0 <op> p1` (either argument order) and `op` is both commutative and
+/// associative. None for anything else -- including a body that merely CONTAINS
+/// such an op, which carries no such guarantee.
+///
+/// Paired with TypeCheck.isBuiltinFoldBodySurface / isBuiltinFoldBodyTyped,
+/// which answer the same question at the surface and typed levels for the
+/// BL4016 diagnostic. Deliberately narrow at all three sites so "recognised
+/// builtin" means one thing.
+let foldKernelBuiltinOp (callable: IRCallable) : IRBinOp option =
+    match callable.Params, callable.Body with
+    | [p0; p1], IRBinOp (_, op, l, r) when isCommutativeOp op && isAssociativeOp op ->
+        // A param reference lowers as IRVar over the param's VarId; IRParam
+        // (positional) is accepted too so a callable built by either convention
+        // is recognised.
+        let slotOf (e: IRExpr) =
+            match e with
+            | IRVar (id, _) ->
+                if id = p0.VarId then Some 0 elif id = p1.VarId then Some 1 else None
+            | IRParam (_, idx, _) ->
+                if idx = p0.Index then Some 0 elif idx = p1.Index then Some 1 else None
+            | _ -> None
+        (match slotOf l, slotOf r with
+         | Some a, Some b when a <> b -> Some op
+         | _ -> None)
+    | _ -> None
+
+/// May a fold through `callable` be reordered/reassociated across threads?
+/// Answers only the LICENCE question -- whether omp was requested is separate
+/// (callable.IsOmpParallel), so the two can be reported independently.
+let foldReorderLicensed (callable: IRCallable) : bool =
+    callable.IsCommutative
+    || not (List.isEmpty callable.CommGroups)
+    || (foldKernelBuiltinOp callable).IsSome
+
+/// An operand's extent along `dim`, as a C++ expression: the LITERAL when the
+/// operand's own index record carries one, else the runtime `.extents[dim]`
+/// read that every intrinsic emitter used to hardcode.
+///
+/// This is the rule `tryGenGemvDispatch` already applies to its `n` (see the
+/// note there), lifted so the intrinsic/IIFE emitters can share it instead of
+/// each restating `.extents[0]`. Baking is sound because Phase 4
+/// (`IR.shapeMonomorphizeModule`) writes a literal into `IRIndexTypeG.Extent`
+/// only when EVERY occurrence of the symbolic name was pinned to the SAME
+/// literal, and `shapeRewriteType` confines the rewrite to `Extent` -- it never
+/// touches a body's `extents(A)` read. Deliberately matches `IRLit (IRLitInt
+/// n)` ONLY, not the broader literal-arithmetic evaluation `renderExtentExpr`
+/// does: this is a loop bound in a hot emitter, and the narrow rule is the one
+/// with an existing precedent.
+///
+/// The payoff is not the removed load (any compiler hoists an invariant one)
+/// but the TRIP COUNT: a literal bound lets GCC unroll and vectorize a short
+/// fiber sweep that an opaque `.extents[0]` leaves as a counted loop.
+let literalOrRuntimeExtent (ty: IRType) (name: string) (dim: int) : string =
+    match ty with
+    | ArrayElem at when dim < at.IndexTypes.Length ->
+        (match at.IndexTypes.[dim].Extent with
+         | IRLit (IRLitInt n) -> sprintf "%d" n
+         | _ -> sprintf "%s.extents[%d]" name dim)
+    | _ -> sprintf "%s.extents[%d]" name dim
+
+/// The deterministic K-lane accumulation body, as unindented C++ statements.
+/// SHARED by every `fpReassocEnabled ()` site so the emitted shape -- and
+/// therefore the numeric answer -- cannot drift between them, and so it stays
+/// the same shape Path B's chunked fold already uses (Round C, measured).
+///
+/// Emits, for `K = foldLaneCount` and the half-open range `[lo, hi)`:
+///
+///   T L0 = elem(lo + 0); ... T L7 = elem(lo + 7);   // seed: no identity needed
+///   size_t i = lo + 8;
+///   for (; i + 8 <= hi; i += 8) {                   // 8 INDEPENDENT chains
+///       combine(L0, elem(i + 0)); ... combine(L7, elem(i + 7));
+///   }
+///   if (i < hi) { combine(L0, elem(i)); i++; }      // tail: at most K-1 left,
+///   ... (through L6) ...                            // lane K-1 can never get one
+///   combine(L0, L1); ... combine(L0, L7);           // fixed ASCENDING combine
+///
+/// and returns that list together with the name of the lane holding the result
+/// (`L0`). No pragma of any kind: this is pure instruction-level parallelism,
+/// so it is safe to drop inside an already-parallel loop nest (a `#pragma omp
+/// parallel for` there would nest teams) and the answer does not depend on any
+/// team size. Callers own the `hi - lo < K` short fallback and the disposal of
+/// the result lane.
+///
+/// SEPARATE NAMED LOCALS, not `T lane[K]`: an array kept live by index
+/// arithmetic can defeat scalar replacement, leaving every lane update a
+/// load-modify-store to the stack -- reintroducing exactly the latency the
+/// lanes exist to remove. The fully-unrolled K-1 tail is the price.
+///
+/// `combine acc rhs` renders one complete fold statement (semicolon included),
+/// which is what lets `+=` (prodsum) and `acc = W(acc, x)` (reduce) share this.
+let private fpReassocLaneStmts
+        (elemStr: string)
+        (lanePrefix: string)
+        (idxName: string)
+        (loExpr: string)
+        (hiExpr: string)
+        (elemAt: string -> string)
+        (combine: string -> string -> string)
+        : string list * string =
+    let k = foldLaneCount
+    let lane (l: int) = sprintf "%s%d" lanePrefix l
+    // Lane l's seed index. `lo` is the literal 0 at the intrinsic sites, and
+    // `0 + 3` would be noise there; everywhere else it is a hoisted `const`.
+    let atLo (l: int) = if loExpr = "0" then string l else sprintf "%s + %d" loExpr l
+    let stmts =
+        [ for l in 0 .. k - 1 -> sprintf "%s %s = %s;" elemStr (lane l) (elemAt (atLo l)) ]
+        @ [ sprintf "size_t %s = %s;" idxName (atLo k)
+            sprintf "for (; %s + %d <= %s; %s += %d) {" idxName k hiExpr idxName k ]
+        @ [ for l in 0 .. k - 1 ->
+              "    " + combine (lane l) (elemAt (sprintf "%s + %d" idxName l)) ]
+        @ [ "}" ]
+        @ [ for l in 0 .. k - 2 ->
+              sprintf "if (%s < %s) { %s %s++; }" idxName hiExpr (combine (lane l) (elemAt idxName)) idxName ]
+        @ [ for l in 1 .. k - 1 -> combine (lane 0) (lane l) ]
+    (stmts, lane 0)
+
 /// Convert IRExpr to C++ expression string
 let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
@@ -1575,15 +1800,67 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // rendered as an IIFE so it composes in any expression position --
         // most importantly inside method_for kernels, where the moment
         // formers' fiber kernels land. Bound comes from the first operand
-        // (TypeCheck rejects provably mismatched static extents).
+        // (TypeCheck rejects provably mismatched static extents), through the
+        // shared literal-or-runtime rule so a monomorphized `Idx<n>` fiber
+        // gives GCC its trip count instead of an opaque pointer load.
         let argStrs = args |> List.map (exprToCppCore subst names)
+        let headTy = inferExprType (List.head args)
         let elemStr =
-            match inferExprType (List.head args) with
+            match headTy with
             | ArrayElem at -> elemTypeToCpp at.ElemType
             | t -> elemTypeToCpp t
         let product = argStrs |> List.map (fun a -> sprintf "%s[__pt]" a) |> String.concat " * "
-        sprintf "[&]() { %s __ps = 0; for (size_t __pt = 0; __pt < %s.extents[0]; __pt++) { __ps += %s; } return __ps; }()"
-            elemStr (List.head argStrs) product
+        let serialBound = literalOrRuntimeExtent headTy (List.head argStrs) 0
+        let serialForm =
+            sprintf "[&]() { %s __ps = 0; for (size_t __pt = 0; __pt < %s; __pt++) { __ps += %s; } return __ps; }()"
+                elemStr serialBound product
+        if not (fpReassocEnabled ()) then serialForm
+        else
+            // BLADE_FP_REASSOC: the same summation, run as K independent lane
+            // chains and combined in fixed ascending order. `prodsum`'s
+            // summation IS a builtin `+`, so the licence class is the one
+            // `foldKernelBuiltinOp` grants outright -- what the knob supplies
+            // is the reproducibility opt-in, which an intrinsic has no
+            // where-clause to carry. NO OpenMP: this IIFE routinely sits inside
+            // an already-parallel nest (the comm-triangular covariance loop),
+            // where a `parallel for` would nest teams, and the answer must not
+            // depend on the team it landed in.
+            //
+            // Operands are re-spelled ~3K times by the lane form. A plain
+            // identifier (the peeled row / array name that reaches here in
+            // practice) is repeated verbatim, which keeps any BLADE_RESTRICT
+            // qualification on the pointer it names; anything else is bound
+            // once to an `auto&&` alias so a compound operand expression is
+            // evaluated exactly once, as it is today.
+            let isPlainName (s: string) =
+                s.Length > 0
+                && (System.Char.IsLetter s.[0] || s.[0] = '_')
+                && s |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
+            let needAlias = argStrs |> List.exists (isPlainName >> not)
+            let opNames =
+                if needAlias then argStrs |> List.mapi (fun i _ -> sprintf "__pa%d" i)
+                else argStrs
+            let aliasDecls =
+                if not needAlias then []
+                else List.map2 (fun n s -> sprintf "auto&& %s = %s;" n s) opNames argStrs
+            let prodAt (i: string) =
+                opNames |> List.map (fun a -> sprintf "%s[%s]" a i) |> String.concat " * "
+            let boundOn = literalOrRuntimeExtent headTy (List.head opNames) 0
+            let (laneStmts, resultLane) =
+                fpReassocLaneStmts elemStr "__pl" "__pt" "0" "__pn" prodAt
+                    (fun acc rhs -> sprintf "%s += %s;" acc rhs)
+            let shortFallback =
+                // Below K elements there is nothing to interleave, so this is
+                // the serial chain verbatim -- same seed (the additive
+                // identity), same ascending order, hence the same double.
+                sprintf "if (__pn < (size_t)%d) { %s __ps = 0; for (size_t __pt = 0; __pt < __pn; __pt++) { __ps += %s; } return __ps; }"
+                    foldLaneCount elemStr (prodAt "__pt")
+            let body =
+                aliasDecls
+                @ [ sprintf "const size_t __pn = %s;" boundOn; shortFallback ]
+                @ laneStmts
+                @ [ sprintf "return %s;" resultLane ]
+            sprintf "[&]() { %s }()" (String.concat " " body)
     | IRContains (arrExpr, valueExpr) ->
         // Linear-scan membership test as an IIFE returning bool.
         let arrStr = exprToCppCore subst names arrExpr
@@ -1594,7 +1871,11 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             match inferExprType arrExpr with
             | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
             | _ -> false
-        let bound = if isR1Compound then sprintf "%s.idx->cardinality" arrStr else sprintf "%s.extents[0]" arrStr
+        // Dense scan bound goes through the shared literal-or-runtime rule (a
+        // compound's cardinality is genuinely dynamic and has no literal form).
+        let bound =
+            if isR1Compound then sprintf "%s.idx->cardinality" arrStr
+            else literalOrRuntimeExtent (inferExprType arrExpr) arrStr 0
         let elemAt = if isR1Compound then sprintf "%s.data[__ci]" arrStr else sprintf "%s[__ci]" arrStr
         sprintf "[&]() { for (size_t __ci = 0; __ci < %s; __ci++) { if (%s == %s) return true; } return false; }()"
             bound elemAt valStr
@@ -2244,7 +2525,9 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     let reduceBound =
         if isCompound then sprintf "(%s.idx->cardinality * %s.trailing_stride)" arrStr arrStr
         elif isRagged then sprintf "%s.len" arrStr
-        else sprintf "%s.extents[0]" arrStr
+        // Dense operand: shared literal-or-runtime rule. Compound cardinality
+        // and a RaggedRow's `.len` are genuinely dynamic and stay runtime reads.
+        else literalOrRuntimeExtent (inferExprType arrExpr) arrStr 0
     let reduceNonEmpty = isStaticallyNonEmpty && not isCompound && not isRagged
     // Reduce-kernel resolution via `resolveCallable`. The fold kernel emits as
     // a local wrapper closure inside the IIFE; the fold loop invokes the
@@ -2259,18 +2542,48 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     | Some callable when callable.Params.Length = 2 ->
         let (wrapperCode, wname) = genCallableWrapper names "" callable
         let wrapperStr = wrapperCode |> String.concat " "
+        // BLADE_FP_REASSOC, expression form. Same K-lane shape as the statement
+        // form, minus the thread chunking: ONE chunk, K lanes, no pragma. That
+        // is the right shape here for the reason the note above gives -- an IIFE
+        // reduce is routinely already inside a parallel region -- and the lanes
+        // need no team, so the answer stays a fixed function of the data and K.
+        // Licence is the ordinary one: a recognised builtin body, or declared
+        // comm. An unlicensed user kernel stays serial with the knob on.
+        let laneForm (loExpr: string) (seedStr: string) (guard: string) =
+            let (laneStmts, resultLane) =
+                fpReassocLaneStmts elemStr "__rlane" "__ri" "__rlo" "__rn" reduceAccAt
+                    (fun acc rhs -> sprintf "%s = %s(%s, %s);" acc wname acc rhs)
+            let stmts =
+                [ sprintf "const size_t __rn = %s;" reduceBound
+                  sprintf "%s __r = %s;" elemStr seedStr
+                  sprintf "const size_t __rlo = %s;" loExpr
+                  // `__rn < __rlo` cannot happen once the guard has run, but the
+                  // saturating count costs nothing and keeps the short-branch
+                  // test from wrapping around if it ever could.
+                  sprintf "const size_t __rcnt = (__rn > __rlo) ? (__rn - __rlo) : (size_t)0;"
+                  sprintf "if (__rcnt < (size_t)%d) { for (size_t __ri = __rlo; __ri < __rn; __ri++) { __r = %s(__r, %s); } return __r; }"
+                      foldLaneCount wname (reduceAccAt "__ri") ]
+                @ laneStmts
+                @ [ sprintf "__r = %s(__r, %s);" wname resultLane
+                    "return __r;" ]
+            sprintf "[&]() { %s%s %s }()" guard wrapperStr (String.concat " " stmts)
+        let mayLane = fpReassocEnabled () && foldReorderLicensed callable
         match initExpr with
         | Some initE ->
             // 3-arg form: the accumulator seeds from init and the loop covers
             // ALL elements. The empty fold is defined (it is init), so no
             // emptiness guard is needed for any extent, static or dynamic.
             let initStr = exprToCppCore subst names initE
+            if mayLane then laneForm "0" initStr ""
+            else
             sprintf "[&]() { %s %s __r = %s; for (size_t __ri = 0; __ri < %s; __ri++) { __r = %s(__r, %s); } return __r; }()"
                 wrapperStr elemStr initStr reduceBound wname (reduceAccAt "__ri")
         | None ->
         let guard =
             if reduceNonEmpty then ""
             else sprintf "if (%s == 0) { blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", nullptr, 0); } " reduceBound
+        if mayLane then laneForm "1" (reduceAccAt "0") guard
+        else
         sprintf "[&]() { %s%s %s __r = %s; for (size_t __ri = 1; __ri < %s; __ri++) { __r = %s(__r, %s); } return __r; }()"
             guard wrapperStr elemStr (reduceAccAt "0") reduceBound wname (reduceAccAt "__ri")
     | _ ->
@@ -4344,71 +4657,11 @@ let genForLoopHeader (compoundArrays: Set<string>) (binding: LoopIndexBinding) :
 
 // permutations / permSign moved to ReynoldsCore.fs (shared term-plan core).
 
-/// Is this binary operation commutative? (a op b) = (b op a)
-let isCommutativeOp (op: IRBinOp) : bool =
-    match op with
-    | IRAdd | IRMul | IREq | IRNeq | IRAnd | IROr -> true
-    | _ -> false
-
-/// Is this binary operation associative? (a op b) op c = a op (b op c)
-/// Only ops that are BOTH commutative and associative get flattened.
-let isAssociativeOp (op: IRBinOp) : bool =
-    match op with
-    | IRAdd | IRMul | IRAnd | IROr -> true
-    | _ -> false
-
-// ---- Parallel-fold reorder licence (docs/plan-cpp-perf-exploitation.md section 2) --
-//
-// `reduce(xs, k)` is parallelized only when `k` carries `where ... omp` AND the
-// reorder is licensed. A chunked fold reassociates and reorders, so the licence
-// is exactly "commutative and associative":
-//
-//   * `comm(a, b)` declared on the kernel -- the user's word, already
-//     cross-checked against body parity at typecheck (CommContradictsBody);
-//     associativity is the part `omp` itself asserts (the plan's trust model,
-//     the same escape hatch comm's PBottom case uses);
-//   * a recognised BUILTIN body, which carries both outright and needs nothing
-//     declared.
-//
-// TypeCheck refuses `omp` with neither (BL4016), so reaching codegen unlicensed
-// means the front end and this file disagreed; the emitters then fall back to
-// the serial loop with a visible marker rather than parallelizing on a licence
-// nobody granted.
-
-/// The builtin binary op a 2-parameter fold callable's body IS, when the body is
-/// exactly `p0 <op> p1` (either argument order) and `op` is both commutative and
-/// associative. None for anything else -- including a body that merely CONTAINS
-/// such an op, which carries no such guarantee.
-///
-/// Paired with TypeCheck.isBuiltinFoldBodySurface / isBuiltinFoldBodyTyped,
-/// which answer the same question at the surface and typed levels for the
-/// BL4016 diagnostic. Deliberately narrow at all three sites so "recognised
-/// builtin" means one thing.
-let foldKernelBuiltinOp (callable: IRCallable) : IRBinOp option =
-    match callable.Params, callable.Body with
-    | [p0; p1], IRBinOp (_, op, l, r) when isCommutativeOp op && isAssociativeOp op ->
-        // A param reference lowers as IRVar over the param's VarId; IRParam
-        // (positional) is accepted too so a callable built by either convention
-        // is recognised.
-        let slotOf (e: IRExpr) =
-            match e with
-            | IRVar (id, _) ->
-                if id = p0.VarId then Some 0 elif id = p1.VarId then Some 1 else None
-            | IRParam (_, idx, _) ->
-                if idx = p0.Index then Some 0 elif idx = p1.Index then Some 1 else None
-            | _ -> None
-        (match slotOf l, slotOf r with
-         | Some a, Some b when a <> b -> Some op
-         | _ -> None)
-    | _ -> None
-
-/// May a fold through `callable` be reordered/reassociated across threads?
-/// Answers only the LICENCE question -- whether omp was requested is separate
-/// (callable.IsOmpParallel), so the two can be reported independently.
-let foldReorderLicensed (callable: IRCallable) : bool =
-    callable.IsCommutative
-    || not (List.isEmpty callable.CommGroups)
-    || (foldKernelBuiltinOp callable).IsSome
+// `isCommutativeOp` / `isAssociativeOp` / `foldKernelBuiltinOp` /
+// `foldReorderLicensed` -- the parallel-fold reorder LICENCE -- are defined
+// with the BLADE_FP_REASSOC gate near the top of this file: the expression-form
+// reduce (`renderReduceExpr`) has to consult the same licence before it may
+// reassociate, and F# is order-dependent. One licence predicate, one answer.
 
 /// The C++ `reduction(<op>:acc)` operator for a builtin fold body, when OpenMP
 /// knows an identity for it. `+` and `*` only: those are the two whose private
@@ -4421,25 +4674,10 @@ let ompReductionOperator (op: IRBinOp) : string option =
     | IRMul -> Some "*"
     | _ -> None
 
-/// How many independent LANE accumulators Path B's flat form runs inside one
-/// thread's chunk. A single accumulator makes each chunk a serial dependence
-/// chain through the fold kernel; K lanes give the C++ compiler K independent
-/// chains over the same contiguous range.
-///
-/// COMPILE-TIME CONSTANT on purpose: the lane count is part of the fold's
-/// evaluation order, so a runtime knob would make the result depend on
-/// something outside the program (OMP_NUM_THREADS); as a constant, a fixed
-/// team size still reproduces bit-for-bit.
-///
-/// LICENCE: reordering elements within a chunk is the same reorder the fold's
-/// comm/builtin-body gate already licensed. This constant is only read on the
-/// already-licensed Path B arm; the serial arm and Path A never see it.
-///
-/// Why 8 (measured over 1e5/1e6/1e7 f64 at OMP_NUM_THREADS=1, K in
-/// {1,4,8,16}): 8 is never worse than 4 and is 1.3-1.5x better while the data
-/// is cache-resident; 16 REGRESSES (register pressure spills the lanes back to
-/// the stack). At 1e7 the sweep is memory-bandwidth-bound and 4/8/16 converge.
-let private foldLaneCount = 8
+// `foldLaneCount` -- the lane count Path B's flat form uses below -- is defined
+// with the BLADE_FP_REASSOC gate near the top of this file, because the
+// `prodsum` IIFE emitter in `exprToCppCore` reads it too and F# is
+// order-dependent. One definition, one evaluation order.
 
 /// Flatten nested applications of the same commutative+associative op into a list of operands.
 /// E.g. (a * b) * c -> [a; b; c]
@@ -12294,6 +12532,43 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     sprintf "%s        }" ind
                     sprintf "%s        for (int __rt = 0; __rt < __rTact; __rt++) %s = %s(%s, %s[__rt]);" ind name wname name partName
                     sprintf "%s        delete[] %s;" ind partName
+                    sprintf "%s    }" ind
+                    sprintf "%s}" ind
+                ]
+            | None, None when fpReassocEnabled () && foldReorderLicensed callable ->
+                // BLADE_FP_REASSOC. The user did not write `omp`, so there are
+                // no threads here and none are added: this is Path B's flat
+                // shape with the thread chunking removed -- ONE chunk covering
+                // [loopStart, bound), swept by K lanes and combined in fixed
+                // ascending order. The knob supplies the reproducibility opt-in
+                // that `omp` supplies on the parallel paths; the LICENCE is the
+                // ordinary `foldReorderLicensed` (a recognised builtin body, or
+                // declared comm), so an unlicensed user kernel still falls to
+                // the serial arm below with the knob on.
+                //
+                // DETERMINISM: no omp_get_max_threads, no team, no pragma. The
+                // answer is a fixed function of the data and K alone, so
+                // OMP_NUM_THREADS=1 and =N give the same bits.
+                let kLanes = foldLaneCount
+                let (laneStmts, resultLane) =
+                    fpReassocLaneStmts elemStr "__rlane" "__ri" "__rlo" "__rhi" elemAt
+                        (fun acc rhs -> sprintf "%s = %s(%s, %s);" acc wname acc rhs)
+                elemErrCode @ guardLines @ wrapperLines @ [
+                    sprintf "%s// reduce: accumulator loop, eager (%d-lane, BLADE_FP_REASSOC)" ind kLanes
+                    sprintf "%s%s %s = %s;" ind elemStr name seedStr
+                    sprintf "%s{" ind
+                    sprintf "%s    const size_t __rlo = %s;" ind loopStart
+                    sprintf "%s    const size_t __rhi = %s;" ind boundExpr
+                    sprintf "%s    const size_t __rcnt = (__rhi > __rlo) ? (__rhi - __rlo) : (size_t)0;" ind
+                    sprintf "%s    if (__rcnt < (size_t)%d) {" ind kLanes
+                    // Below K elements there is nothing to interleave, so this
+                    // is the serial chain verbatim -- same order, same bits.
+                    sprintf "%s        for (size_t __ri = __rlo; __ri < __rhi; __ri++) {" ind
+                    sprintf "%s            %s = %s(%s, %s);" ind name wname name (elemAt "__ri")
+                    sprintf "%s        }" ind
+                    sprintf "%s    } else {" ind
+                ] @ (laneStmts |> List.map (fun s -> ind + "        " + s)) @ [
+                    sprintf "%s        %s = %s(%s, %s);" ind name wname name resultLane
                     sprintf "%s    }" ind
                     sprintf "%s}" ind
                 ]

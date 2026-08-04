@@ -969,6 +969,143 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                                                    n (if integerData then "exact" else "vs serial") diff)
                     | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
 
+        // ---- BLADE_FP_REASSOC: the deterministic K-lane opt-in ------------
+        // The knob licenses the emitter to reassociate a SERIAL floating-point
+        // accumulation chain -- `prodsum`'s fiber sweep and an UNQUALIFIED
+        // builtin `reduce` (one the user never marked `omp`) -- into the same
+        // K-lane shape Path B already uses, minus the thread chunking.
+        //
+        // Everything above this point, and every other suite, runs with the
+        // knob at its DEFAULT (off), which is what makes "off means
+        // byte-identical" checkable at all. The pin below is per-COMPILE and
+        // restored immediately, so nothing outside these arms can see it. (Test
+        // blocks run sequentially in one process -- see Cli.fs -- so a
+        // process-global env pin is safe here, the same way InterpDiff pins
+        // BLADE_FP_CONTRACT for its block.)
+        //
+        // Three properties are asserted, and they are not the same property:
+        //
+        //   1. VALUE. Knob-on agrees with knob-off to 1e-9 relative on awkward
+        //      non-representable data, and EXACTLY on integer-valued data (the
+        //      property loops/110-111 and the interpreter differential depend
+        //      on).
+        //   2. DETERMINISM. The lane form has no pragma and no team, so its
+        //      answer is a fixed function of the data and K alone: the SAME
+        //      binary must print the same bytes at OMP_NUM_THREADS=1 and =4,
+        //      and across two runs. (Contrast Path B, whose determinism holds
+        //      only at a FIXED team size.)
+        //   3. LICENCE + LIVENESS, at the emission level. A positive control
+        //      proves the lanes actually appear with the knob on (without it
+        //      the value arms could pass vacuously by never firing), and a
+        //      negative control proves an UNLICENSED user kernel -- no builtin
+        //      body, no `comm` -- is emitted byte-identically with the knob on.
+        //
+        // n walks every boundary of the strided sweep: below the lanes (1, 3),
+        // maximal tail (7), exactly the lanes (8), one past (9), maximal tail
+        // above one full stride (15), indivisible (17). Getting any of them
+        // wrong drops or double-counts elements silently -- the fold still
+        // prints A number.
+        let withReassoc (on: bool) (f: unit -> 'a) : 'a =
+            let prior = System.Environment.GetEnvironmentVariable("BLADE_FP_REASSOC")
+            System.Environment.SetEnvironmentVariable("BLADE_FP_REASSOC", (if on then "1" else "0"))
+            try f ()
+            finally System.Environment.SetEnvironmentVariable("BLADE_FP_REASSOC", prior)
+        let emitOnly (nm: string) (src: string) : Result<string, string> =
+            try
+                match lower src with
+                | Error e -> Error (sprintf "lower failed: %s" e)
+                | Ok ir0 ->
+                    match IR.validateIR ir0 with
+                    | Error errs -> Error (String.concat "; " errs)
+                    | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir nm))
+            with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+        let stripTiming (s: string) =
+            s.Split('\n') |> Array.filter (fun l -> not (l.Contains "completed in")) |> String.concat "\n"
+
+        // (label, n, integerData, sourceOf n)
+        let fprSrcReduce (lit: string) =
+            sprintf "let A = [%s]\nlet s = reduce(A, lambda(a, b) -> a + b)\n" lit
+        let fprSrcProdsum (lit: string) (lit2: string) =
+            sprintf "let A = [%s]\nlet B = [%s]\nlet s = prodsum(A, B)\n" lit lit2
+        let fprNs = [1; 3; 7; 8; 9; 15; 17]
+        let fprCases : (string * string) list =
+            [ for n in fprNs do
+                yield (sprintf "reduce_n%d" n, fprSrcReduce (laneLit n awkward))
+                yield (sprintf "prodsum_n%d" n,
+                       fprSrcProdsum (laneLit n awkward) (laneLit n (fun i -> awkward (i + 3))))
+              // Integer-valued twins: EXACT equality is demanded of these.
+              yield ("reduce_n15_integer_exact", fprSrcReduce (laneLit 15 (fun i -> float (i % 9 + 1))))
+              yield ("prodsum_n15_integer_exact",
+                     fprSrcProdsum (laneLit 15 (fun i -> float (i % 9 + 1)))
+                                   (laneLit 15 (fun i -> float (i % 5 + 2)))) ]
+        for (label, src) in fprCases do
+            let name = "fp_reassoc_" + label
+            let exact = label.EndsWith "integer_exact"
+            match withReassoc true (fun () -> compileProgram outputDir (name + "_on") src),
+                  withReassoc false (fun () -> compileProgram outputDir (name + "_off") src) with
+            | Error e, _ -> fail name (sprintf "reassoc-on build: %s" e)
+            | _, Error e -> fail name (sprintf "reassoc-off build: %s" e)
+            | Ok onExe, Ok offExe ->
+                match runProgram onExe "1", runProgram offExe "1" with
+                | Error e, _ -> fail name (sprintf "reassoc-on run: %s" e)
+                | _, Error e -> fail name (sprintf "reassoc-off run: %s" e)
+                | Ok onOut, Ok offOut ->
+                    match Map.tryFind "s" (scalarBindings onOut), Map.tryFind "s" (scalarBindings offOut) with
+                    | Some ov, Some fv ->
+                        let diff = abs (ov - fv)
+                        let tol = if exact then 0.0 else 1e-9 * max 1.0 (abs fv)
+                        if diff > tol then
+                            fail name (sprintf "reassoc %.17g vs serial %.17g (|diff| = %g, tol = %g)" ov fv diff tol)
+                        else
+                            // Thread-count independence AND run-to-run identity,
+                            // on the SAME binary: the lane form takes neither
+                            // from a team, so both must hold outright.
+                            match runProgram onExe "4", runProgram onExe "1" with
+                            | Error e, _ -> fail name (sprintf "reassoc-on run at 4 threads: %s" e)
+                            | _, Error e -> fail name (sprintf "reassoc-on second run: %s" e)
+                            | Ok at4, Ok again ->
+                                if stripTiming at4 <> stripTiming onOut then
+                                    fail name "output differs between OMP_NUM_THREADS=1 and 4 (lane form is not thread-independent)"
+                                elif stripTiming again <> stripTiming onOut then
+                                    fail name "output differs across two runs at a fixed thread count"
+                                else
+                                    pass name (sprintf "%s: |diff| = %g; identical at 1 vs 4 threads and across 2 runs"
+                                                   (if exact then "exact" else "vs serial") diff)
+                    | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
+
+        // Emission controls. Without these the value arms could all pass by the
+        // knob never firing at all.
+        let fprEmitCases : (string * string * bool) list =
+            // (label, source, lanes expected with the knob ON)
+            [ ("builtin_reduce_lanes",
+               fprSrcReduce (laneLit 17 awkward), true)
+              ("prodsum_lanes",
+               fprSrcProdsum (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), true)
+              // Unlicensed: body is not a bare builtin op and no `comm` is
+              // declared, so the knob grants nothing. `where omp` is absent too,
+              // so this is the serial arm either way.
+              ("unlicensed_kernel_stays_serial",
+               "function myK(a: Float64, b: Float64) = (a + b) * 1.0000001\n"
+                 + sprintf "let A = [%s]\n" (laneLit 17 awkward)
+                 + "let s = reduce(A, myK)\n", false) ]
+        for (label, src, expectLanes) in fprEmitCases do
+            let name = "fp_reassoc_emission_" + label
+            match withReassoc true (fun () -> emitOnly name src),
+                  withReassoc false (fun () -> emitOnly name src) with
+            | Error e, _ -> fail name (sprintf "emit (knob on): %s" e)
+            | _, Error e -> fail name (sprintf "emit (knob off): %s" e)
+            | Ok onCpp, Ok offCpp ->
+                let hasLanes (s: string) = s.Contains "__rlane" || s.Contains "__pl0"
+                if offCpp |> hasLanes then
+                    fail name "knob OFF emitted lane accumulators (the default must never reassociate)"
+                elif expectLanes && not (hasLanes onCpp) then
+                    fail name "knob ON emitted no lane accumulators (the gate never fired; value arms would be vacuous)"
+                elif not expectLanes && onCpp <> offCpp then
+                    fail name "unlicensed kernel: knob ON changed the emission (the knob is not a licence)"
+                else
+                    pass name (if expectLanes then "lanes only with the knob on"
+                               else "byte-identical with the knob on (unlicensed, stays serial)")
+
         // ---- Phase 1 regression: ivdep must not land inside collapse(2) ----
         // Text-only assertions cannot see this; only g++ can.
         let collapseSrc =
