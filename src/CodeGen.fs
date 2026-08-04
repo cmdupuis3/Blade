@@ -1402,6 +1402,42 @@ let private denseCellCountExpr (ty: IRType) (name: string) : string =
 let internal solveSingularMessage =
     "solve(A, b): the matrix is SINGULAR -- LU factorization found an exactly-zero pivot"
 
+/// One dimension's extent as a C++ expression, read off the OPERAND'S OWN index
+/// record: a literal when the record carries one, otherwise the runtime
+/// `<name>.extents[dim]` read that every intrinsic emitter used unconditionally
+/// before this existed.
+///
+/// This is `genLoopBoundExpr`'s first arm (`IRLit (IRLitInt n) -> "%d"`) and
+/// `tryGenGemvDispatch`'s inline copy, factored so the loop NEST and the
+/// INTRINSIC emitters cannot disagree about a bound that is by construction the
+/// same number. The nest has baked literals since Phase 4; the intrinsics did
+/// not, which is the whole of the reported "runtime .extents[] read despite a
+/// literal Idx<n>" symptom at these sites.
+///
+/// SOUNDNESS. `IR.shapeMonomorphizeModule` writes a literal into `Extent` only
+/// when every occurrence of that symbolic name was pinned to the SAME literal,
+/// and `shapeRewriteType` confines the rewrite to the `Extent` field -- it never
+/// touches a body's `extents(A)` read. So a literal in the record is a statement
+/// about the runtime array, not a hope about it, and `<name>.extents[dim]` holds
+/// that same value: the allocation's extents table is filled FROM this record.
+///
+/// TWO DECLINES, both to `.extents[]` (the pre-existing behaviour, never a
+/// guess):
+///   * fewer index records than `dim` -- nothing to read.
+///   * `Rank > 1` -- a packed multi-component record (`SymIdx<2, m>` is ONE
+///     record covering TWO dense axes), so record position `dim` and extents
+///     slot `dim` are not the same axis and baking would silently misalign.
+let private literalOrRuntimeExtent (arr: IRArrayType) (name: string) (dim: int) : string =
+    let runtime = sprintf "%s.extents[%d]" name dim
+    if List.length arr.IndexTypes <= dim then runtime
+    else
+        let ix = List.item dim arr.IndexTypes
+        if ix.Rank <> 1 then runtime
+        else
+            match ix.Extent with
+            | IRLit (IRLitInt n) -> sprintf "%d" n
+            | _ -> runtime
+
 /// The word a dispatch marker comment leads with, for a route resolved by
 /// `LinAlgPatterns.resolveNodeRoute`. Names the BACKEND because that's the only
 /// place the choice is observable (host cblas / device cuBLAS / Blade's own
@@ -3404,15 +3440,46 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             elif isComplexElem ra.ElemType then ra.ElemType
             else la.ElemType
         let outElemStr = irTypeToCpp outElem
-        // The contracted-axis extent comes from A's trailing dim at runtime.
-        let nExtent = sprintf "%s.extents[1]" lName
-        let mExtent = sprintf "%s.extents[0]" lName
-        let pExtent = sprintf "%s.extents[0]" rName
+        // The contracted-axis extent comes from A's trailing dim: a LITERAL when
+        // the operand's own index record carries one (shape monomorphization
+        // pinned it), else the runtime read -- see `literalOrRuntimeExtent`. The
+        // nest emitter has baked literals since Phase 4 and these sites did not,
+        // which is the only reason a program with `Idx<23>` operands emitted
+        // `A.extents[0]` here. Same VALUE either way; a literal is what lets GCC
+        // see the trip count.
+        let nExtent = literalOrRuntimeExtent la lName 1
+        let mExtent = literalOrRuntimeExtent la lName 0
+        let pExtent = literalOrRuntimeExtent ra rName 0
         let extentsName = sprintf "%s_extents" varName
+        // Row-pointer hoists for the contraction loop. `&X[i][0]` (not `X[i]`)
+        // is the one spelling that works for every operand wrapper the arms
+        // below already index with `X[i][__gk]`: `Array<T,2>::operator[]` hands
+        // back a `T*`, a ragged row hands back a row wrapper, and `&row[0]` is a
+        // `T*` in both. `p[__gk]` IS `*(p + __gk)`, so this is CSE, not a new
+        // access pattern.
+        //
+        // BLADE_RESTRICT is the reason to hoist at all: it tells the optimizer
+        // the two contraction operands and the (freshly allocated) output pool
+        // do not overlap. NOTE the measured caveat recorded in
+        // docs/plan-cpp-perf-exploitation.md: g++ feeds restrict into its
+        // points-to solver for function PARAMETERS, and drops it on a
+        // BLOCK-SCOPE LOCAL -- so on g++ the hoist's real payoff is the removed
+        // per-iteration row load, and the qualifier is for the compilers that do
+        // honour it. No BLADE_IVDEP accompanies it here: the `__gk` loop
+        // accumulates into `__gacc`, which IS a loop-carried dependence, so the
+        // assertion would be false (and inert -- vectorizing an FP reduction
+        // needs a reassociation licence this site does not have; see the
+        // byte-identity note below).
+        let lRowDecl name idx =
+            sprintf "const %s* BLADE_RESTRICT %s = &%s[%s][0];" (irTypeToCpp la.ElemType) name lName idx
+        let rRowDecl name idx =
+            sprintf "const %s* BLADE_RESTRICT %s = &%s[%s][0];" (irTypeToCpp ra.ElemType) name rName idx
         // conj wrapper on B's element (std::conj; identity-safe on reals via
         // conj_scalar). Use conj_scalar to keep one spelling for real/complex.
-        let mulTerm i j =
-            sprintf "%s[%s][__gk] * nested_array_utilities::conj_scalar(%s[%s][__gk])" lName i rName j
+        // Reads go through the hoisted rows; the multiplication, its operand
+        // order and its conjugation are untouched.
+        let mulTerm lRow rRow =
+            sprintf "%s[__gk] * nested_array_utilities::conj_scalar(%s[__gk])" lRow rRow
         // The dispatch decision is NOT made here. LinAlgPatterns classifies the
         // node and `shimEntryPoint` applies the BLAS availability gate; a
         // routed call emits ONE `blade_linalg::` call, and NO route emits the
@@ -3478,12 +3545,27 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     [ sprintf "/* %s dispatch: gram(A, A) = A * A^T -> packed upper triangle */ %s(%s, %s, %s.data, %s, %s.data);"
                           dispatchTag entry mExtent nExtent lName lCells varName ]
                 | None ->
-                    [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
+                    // THREADING (see BLADE_OMP_PARALLEL_FOR_DYNAMIC in
+                    // cpp/blade_portability.hpp for the spelling, and the
+                    // matmul emitter below for the full soundness argument):
+                    // `__gi` owns output row `%s[__gi]` exclusively, rows are
+                    // disjoint, and NO summation order changes -- this is not a
+                    // reassociation and needs no licence, exactly the
+                    // `foldKernelBuiltinOp` situation (the arithmetic is fixed
+                    // by the compiler; there is no user body whose commutativity
+                    // is in question). DYNAMIC schedule because this arm is
+                    // TRIANGULAR: row `__gi`'s `__gjr` span is `m - __gi`, so
+                    // per-iteration work shrinks and a static split would leave
+                    // the low-index threads holding most of the triangle.
+                    [ sprintf "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
+                      sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
+                      sprintf "    %s" (lRowDecl "__growi" "__gi")
                       sprintf "    for (size_t __gjr = 0; __gjr < %s - __gi; __gjr++) {" mExtent
                       sprintf "        size_t __gj = __gi + __gjr;"
+                      sprintf "        %s" (rRowDecl "__growj" "__gj")
                       sprintf "        %s __gacc = %s();" outElemStr outElemStr
                       sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
-                      sprintf "            __gacc += %s;" (mulTerm "__gi" "__gj")
+                      sprintf "            __gacc += %s;" (mulTerm "__growi" "__growj")
                       sprintf "        }"
                       sprintf "        %s[__gi][__gjr] = __gacc;" varName
                       sprintf "    }"
@@ -3511,11 +3593,20 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     [ sprintf "/* %s dispatch: gram(A, B) = A * B^T -> dense */ %s(%s, %s, %s, %s.data, %s, %s.data, %s, %s.data, (%s * %s));"
                           dispatchTag entry mExtent nExtent pExtent lName lCells rName rCells varName mExtent pExtent ]
                 | None ->
-                    [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
+                    // Same threading argument as the same-array arm above, with
+                    // the DEFAULT (static) schedule: this arm is rectangular, so
+                    // every `__gi` costs `p * n` and a static split is already
+                    // balanced. Loop ORDER is unchanged -- `A[i][k]` and
+                    // `B[j][k]` are both unit-stride in `k`, so gram has nothing
+                    // to gain from the i-t-j reorder matmul needs.
+                    [ sprintf "BLADE_OMP_PARALLEL_FOR"
+                      sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
+                      sprintf "    %s" (lRowDecl "__growi" "__gi")
                       sprintf "    for (size_t __gj = 0; __gj < %s; __gj++) {" pExtent
+                      sprintf "        %s" (rRowDecl "__growj" "__gj")
                       sprintf "        %s __gacc = %s();" outElemStr outElemStr
                       sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
-                      sprintf "            __gacc += %s;" (mulTerm "__gi" "__gj")
+                      sprintf "            __gacc += %s;" (mulTerm "__growi" "__growj")
                       sprintf "        }"
                       sprintf "        %s[__gi][__gj] = __gacc;" varName
                       sprintf "    }"
@@ -3536,21 +3627,71 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     // (`LinAlgPatterns.shimEntryPoint`). Gate off -- the default -- emits the
     // triple loop below; gate on emits the dispatch call.
     //
-    // BYTE-IDENTITY: the loop's accumulation order (i, j, t all ascending, one
-    // local accumulator per output cell seeded from the element zero) matches
-    // the interpreter's `Interp/ArrayOps.matmulArray` order exactly. This is
-    // the ONLY copy of that arithmetic in the system -- the shim carries no
-    // fallback -- so `interp math` tests the very code an ordinary build runs.
+    // BYTE-IDENTITY: for each output cell (i, j) the summands are added in
+    // ASCENDING t, starting from the element zero. That is the obligation --
+    // `Interp/ArrayOps.matmulArray` does the same, and this is the ONLY copy of
+    // that arithmetic in the system (the shim carries no fallback), so
+    // `interp math` tests the very code an ordinary build runs.
+    //
+    // The loop below is emitted i-t-j, NOT i-j-t, and the obligation SURVIVES
+    // the reorder -- this note is updated, not deleted, because the reorder is
+    // exactly the change it exists to police:
+    //
+    //   * WHAT THE OBLIGATION CONSTRAINS is the per-cell sequence of FP
+    //     additions. In i-j-t that sequence is `acc = 0; acc += a[i][0]*b[0][j];
+    //     acc += a[i][1]*b[1][j]; ...`. In i-t-j it is `C[i][j] = 0;
+    //     C[i][j] += a[i][0]*b[0][j]; C[i][j] += a[i][1]*b[1][j]; ...` -- the
+    //     SAME operations on the SAME values in the SAME order. Only the
+    //     accumulator's STORAGE moved, from a named local to the output cell it
+    //     was going to be stored into anyway.
+    //   * WHAT THE REORDER CHANGES is the INTERLEAVING of independent cells:
+    //     cell (i, j) and cell (i, j') now advance in lockstep instead of one
+    //     finishing before the other starts. Independent cells never interact,
+    //     so no cell's value depends on the interleaving.
+    //   * There is no `-ffast-math` anywhere in `Build.fs`, so GCC may not
+    //     reassociate either form on its own. The zero-init is `T()`, the same
+    //     seed the accumulator had.
+    //
+    // This is a reorder, NOT a reassociation. Anything that DID reassociate
+    // (threading `t`, lane-splitting the contraction) would need a licence and
+    // would break these differentials; nothing here does.
+    //
+    // MEASURED, because the argument above is about ADDITION ORDER and FP
+    // contraction is a separate axis. 23x29 @ 29x31 over deliberately
+    // non-representable data (1/3, 1/7, e, pi, ...), printed at 17 digits,
+    // i-j-t vs i-t-j:
+    //
+    //   -ffp-contract=off   : byte-identical, all 713 cells.  <-- the obligation
+    //   -ffp-contract=fast  : 130 of 713 cells differ, max relative 3.2e-16
+    //                         (1-2 ulp), i.e. purely WHERE GCC placed its FMAs.
+    //
+    // The first line is the one that matters, and it is not a weaker result --
+    // it is the SAME regime the byte-identity gate runs in: `tests/InterpDiff.fs`
+    // and `tests/DiffOracle.fs` PIN `BLADE_FP_CONTRACT=off` for their own runs,
+    // because `src/Interp/Numerics.fs` is bit-pinned to non-FMA scalar semantics
+    // (see the header of `src/Build.fs`: "byte-identity is a property of the
+    // differential gates, not of user builds"). Under that pin the reorder is
+    // exact, which is precisely what proves only the addition ORDER was at stake.
+    //
+    // Under `=fast` no loop form promises a particular contraction, and master's
+    // i-j-t form does not either: the same probe shows master's OWN output
+    // changing under `-fno-tree-vectorize` at `=fast`. Contraction placement is
+    // a build-flag property (`BLADE_FP_CONTRACT`), not an emitter contract.
+    // On the data class the corpus differentials actually use -- integer-valued
+    // f64, where every product and partial sum is exact -- FMA and mul+add
+    // coincide, so all four combinations above agree bit for bit.
     let lName = exprToCppCore subst names lExpr
     let rName = exprToCppCore subst names rExpr
     let lTy = inferExprType lExpr
     let rTy = inferExprType rExpr
     (match lTy, rTy with
-     | ArrayElem la, ArrayElem _ ->
+     | ArrayElem la, ArrayElem ra ->
         let outElemStr = irTypeToCpp la.ElemType
-        let mExtent = sprintf "%s.extents[0]" lName
-        let kExtent = sprintf "%s.extents[1]" lName
-        let nExtent = sprintf "%s.extents[1]" rName
+        // Literal extents when the operands' own index records carry them --
+        // see `literalOrRuntimeExtent`; same value as the runtime read.
+        let mExtent = literalOrRuntimeExtent la lName 0
+        let kExtent = literalOrRuntimeExtent la lName 1
+        let nExtent = literalOrRuntimeExtent ra rName 1
         let extentsName = sprintf "%s_extents" varName
         // Pool capacities for the shim's contiguity probe -- see
         // `denseCellCountExpr` and the note in materializeGramForm.
@@ -3582,13 +3723,40 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                 [ sprintf "/* %s dispatch: matmul(A, B) = A * B -> dense */ %s(%s, %s, %s, %s.data, %s, %s.data, %s, %s.data, (%s * %s));"
                       (dispatchMarkerTag resolved) entry mExtent kExtent nExtent lName lCells rName rCells varName mExtent nExtent ]
             | None ->
-                [ sprintf "for (size_t __mi = 0; __mi < %s; __mi++) {" mExtent
-                  sprintf "    for (size_t __mj = 0; __mj < %s; __mj++) {" nExtent
-                  sprintf "        %s __macc = %s();" outElemStr outElemStr
-                  sprintf "        for (size_t __mt = 0; __mt < %s; __mt++) {" kExtent
-                  sprintf "            __macc += %s[__mi][__mt] * %s[__mt][__mj];" lName rName
+                // i-t-j, accumulating in place. Two independent wins over
+                // i-j-t, both free (see the BYTE-IDENTITY note at the top of
+                // this function for why the reorder costs nothing numerically):
+                //
+                //  1. STRIDE. The old inner loop read `B[__mt][__mj]` with
+                //     `__mt` varying -- a walk DOWN a column, one cache line
+                //     touched per element. Here `__mj` varies innermost over a
+                //     hoisted row `__mbrow`, so both the read and the write are
+                //     unit-stride and the loop is vectorizable at all.
+                //  2. THREADS. `__mi` owns output row `__mcrow` exclusively;
+                //     rows are disjoint and no cell's summation order changes,
+                //     so the outer level is threaded with no licence needed --
+                //     the arithmetic here is the COMPILER'S, not a user kernel's
+                //     (the `foldKernelBuiltinOp` situation). The static schedule
+                //     is right because every `__mi` costs exactly k*n.
+                //     Threading `__mt` instead WOULD reassociate; it is not done.
+                //
+                // BLADE_IVDEP on the `__mj` loop is a TRUE assertion, not the
+                // decorative kind: `__mcrow` points into `%s`, freshly allocated
+                // immediately above and therefore a distinct pool from both
+                // operands, so there is no loop-carried dependence across `__mj`
+                // at all. (The gram arms get no ivdep -- their inner loop is a
+                // reduction. See the note there.)
+                [ sprintf "BLADE_OMP_PARALLEL_FOR"
+                  sprintf "for (size_t __mi = 0; __mi < %s; __mi++) {" mExtent
+                  sprintf "    %s* BLADE_RESTRICT __mcrow = &%s[__mi][0];" outElemStr varName
+                  sprintf "    for (size_t __mj = 0; __mj < %s; __mj++) { __mcrow[__mj] = %s(); }" nExtent outElemStr
+                  sprintf "    for (size_t __mt = 0; __mt < %s; __mt++) {" kExtent
+                  sprintf "        const %s __ma = %s[__mi][__mt];" outElemStr lName
+                  sprintf "        const %s* BLADE_RESTRICT __mbrow = &%s[__mt][0];" (irTypeToCpp ra.ElemType) rName
+                  sprintf "        BLADE_IVDEP"
+                  sprintf "        for (size_t __mj = 0; __mj < %s; __mj++) {" nExtent
+                  sprintf "            __mcrow[__mj] += __ma * __mbrow[__mj];"
                   sprintf "        }"
-                  sprintf "        %s[__mi][__mj] = __macc;" varName
                   sprintf "    }"
                   sprintf "}" ]
         Some (extentDecl @ [allocDecl] @ loop,
@@ -4393,6 +4561,36 @@ let genNestPragma (bindings: LoopIndexBinding list) (pragmaIndent: string) : str
             elif hasTriangularBelow then
                 // Outer loop rectangular (or single), but triangular work below:
                 // parallelize the outer loop with dynamic schedule for balance.
+                //
+                // THE OUTER LOOP STAYS ASCENDING, AND THAT IS THE LOAD-BALANCING
+                // CHOICE, NOT THE ABSENCE OF ONE. A performance audit proposed
+                // emitting this level DESCENDING (`for (i = n; i-- > 0;)`) on the
+                // theory that OpenMP hands out `schedule(dynamic)` chunks in
+                // iteration order, so descending would be largest-chunk-first
+                // (the LPT heuristic). That is backwards for the loop shape this
+                // arm actually governs, and reversing would PESSIMIZE it:
+                //
+                //   * `genForLoopHeader` renders a triangular level as
+                //     `for (__i1 = 0; __i1 < N - __i0; __i1++)` -- the bound
+                //     SUBTRACTS the outer index. Work per outer iteration is
+                //     therefore DECREASING in `__i0` (at rank 3: ~C(N-i, 2)).
+                //     Ascending order already hands out the largest chunk first.
+                //   * The makespan of dynamic list-scheduling is about
+                //     `ideal + (duration of the LAST chunk started)`. Ascending
+                //     ends on the 1-cell row; descending ends on the ~C(N,2)-cell
+                //     row, i.e. it converts the audit's own good bound into the
+                //     bad one it was trying to escape.
+                //
+                // Verified against emitted C++ for a rank-3 `comm(x, y, z)` nest
+                // at N = 13: levels are `__i1 < 13 - __i0` and
+                // `__i2 < 13 - __i1 - __i0`.
+                //
+                // (Independently, `for (i = n; i-- > 0;)` is not an OpenMP
+                // canonical loop form -- the test-expr must be `var op b` and
+                // there must be an incr-expr -- so that spelling could not carry
+                // this pragma at all. Any future descending experiment needs a
+                // signed counter or a reversed-index body, and needs a REASON,
+                // which the analysis above says does not exist for this shape.)
                 sprintf "#pragma omp parallel for schedule(dynamic)\n%s" pragmaIndent
             else
                 // Outer loop parallel, remaining work balanced (rectangular or
@@ -4434,6 +4632,37 @@ let ompSuppressedMarker (requested: bool) (pragmaEmitted: bool) (reason: string)
     if requested && not pragmaEmitted then
         [ markerIndent + sprintf "// [omp] requested but emitted serial: %s" reason ]
     else []
+
+/// Does this kernel body lower to something containing a LOOP of its own?
+///
+/// The nest machinery sees loop LEVELS; a body's own iteration is invisible to
+/// it, because every construct below lowers to an IIFE (or an inline
+/// materialization) that hides a `for` inside an expression position. That gap
+/// is what made `BLADE_IVDEP` land on innermost headers whose bodies contain a
+/// loop -- see `ivdepEligible`. Vectorization is a statement about the loop's
+/// own iterations; a loop whose body is itself a loop cannot be vectorized by
+/// any compiler, so the pragma there is dead text that READS like the
+/// optimization already happened.
+///
+/// Deliberately a whole-subtree walk over `ExprShape`, not a hand-listed set of
+/// positions: a construct that hides a loop is disqualifying wherever it sits
+/// (a `prodsum` under an `if`, inside a `let` value, in a call argument), and
+/// the generic walker cannot silently miss a variant the way a hand-maintained
+/// match arm can.
+///
+/// CONSERVATIVE BY CONSTRUCTION: false negatives cost only a missed
+/// (pre-existing) opportunity, so the list is the constructs that ALWAYS emit a
+/// loop -- the two reduction intrinsics, the membership scan, and a nested
+/// combinator application, which materializes a whole nest.
+let rec kernelBodyContainsInnerLoop (e: IRExpr) : bool =
+    match e with
+    // `[&]() { ... for (__pt) ... }()`  -- CodeGen `IRProdSum` / `reduceBound`.
+    | IRProdSum _ | IRReduce _ | IRReduceCompute _
+    // `[&]() { for (...) if (== x) return true; ... }()` -- `IRContains` scan.
+    | IRContains _
+    // A nested apply/compose materializes an entire loop nest in place.
+    | IRApplyCombinator _ | IRComposeApply _ -> true
+    | ExprShape (children, _) -> children |> List.exists kernelBodyContainsInnerLoop
 
 /// Generate a for-loop header (no pragma; pragmas are nest-level, see
 /// genNestPragma, and are prepended only at the outermost level by the caller).
@@ -5098,14 +5327,28 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     //     loop-carried dependence (written at the tail, read next iteration).
     //  3. no omp coverage instrumentation -- its `__omp_seen` marker rewrites
     //     the same slot every iteration (a WAW chain); test-mode only.
+    //  4. the kernel body contains no loop of its own. This clause is not about
+    //     SOUNDNESS like the three above -- it is about the pragma being
+    //     MEANINGFUL. A `prodsum` / `reduce` / `contains` body, or a nested
+    //     combinator application, lowers to an IIFE with a `for` inside it, and
+    //     the nest machinery cannot see that loop (it counts nest LEVELS). The
+    //     emitted `ivdep` then sat on a loop whose body is a loop, which no
+    //     compiler can vectorize -- inert text that reads, to anyone inspecting
+    //     the emission, as though the vectorization had already happened. That
+    //     misreading is exactly what a performance audit of these emitters
+    //     reported. Declining costs nothing (the loop never vectorized) and the
+    //     marker below says why, in the generated C++, where someone looking at
+    //     this actually looks.
     //
     // Reads are unconstrained (inputs are distinct pools from the fresh
     // output, EmitCpp.fs:48-55). Fused nests are out of scope: every leaf
     // writes its own row, so clause 1 fails by construction there.
+    let bodyHasInnerLoop = kernelBodyContainsInnerLoop codeGen.KernelExpr
     let ivdepEligible =
         outRowDecl.IsSome
         && carousel.IsNone
         && not (ompInstrument && outerIsParallel)
+        && not bodyHasInnerLoop
     // Last nest level that belongs to the OpenMP construct. A `collapse(d)`
     // prefix FUSES its levels into one iteration space, and g++ then rejects a
     // pragma on any inner header of that prefix outright:
@@ -5198,7 +5441,20 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         let ivdepPrefix =
             if ivdepEligible && bidx = lastBindingIdx && bidx > ompLastLevel
             then sprintf "BLADE_IVDEP\n%s" (ind depth) else ""
-        lines <- lines @ suppressedMarker @ [ind depth + pragmaPrefix + ivdepPrefix + header]
+        // Say IN THE GENERATED C++ that the vectorization annotation was
+        // declined and why -- same rationale as `ompSuppressedMarker`, and the
+        // same one-comment-line cost. This case only: the three SOUNDNESS
+        // clauses are self-evident from the emitted code around them (a fold's
+        // `+=`, the carousel's ring buffer, the `__omp_seen` write are all
+        // visible), whereas "the body hides a loop" is precisely the fact the
+        // emission cannot show, which is why the inert pragma read as a real one.
+        let ivdepSuppressedMarker =
+            if bodyHasInnerLoop && outRowDecl.IsSome && carousel.IsNone
+               && not (ompInstrument && outerIsParallel)
+               && bidx = lastBindingIdx && bidx > ompLastLevel
+            then [ ind depth + "// [ivdep] declined: kernel body contains an inner loop (prodsum/reduce/contains/nested apply), so this header cannot vectorize" ]
+            else []
+        lines <- lines @ suppressedMarker @ ivdepSuppressedMarker @ [ind depth + pragmaPrefix + ivdepPrefix + header]
         depth <- depth + 1
         // Thread-coverage marker: record this thread as seen and the team size
         // it observes. Each thread writes ONLY its own slot (race-free). Team
