@@ -1499,7 +1499,7 @@ let internal solveSingularMessage =
 ///   * `Rank > 1` -- a packed multi-component record (`SymIdx<2, m>` is ONE
 ///     record covering TWO dense axes), so record position `dim` and extents
 ///     slot `dim` are not the same axis and baking would silently misalign.
-let private literalOrRuntimeExtent (arr: IRArrayType) (name: string) (dim: int) : string =
+let private literalOrRuntimeExtentOfArray (arr: IRArrayType) (name: string) (dim: int) : string =
     let runtime = sprintf "%s.extents[%d]" name dim
     if List.length arr.IndexTypes <= dim then runtime
     else
@@ -1611,11 +1611,12 @@ let foldReorderLicensed (callable: IRCallable) : bool =
 /// but the TRIP COUNT: a literal bound lets GCC unroll and vectorize a short
 /// fiber sweep that an opaque `.extents[0]` leaves as a counted loop.
 let literalOrRuntimeExtent (ty: IRType) (name: string) (dim: int) : string =
+    // Delegates to the IRArrayType core (defined earlier, next to the gram/
+    // matmul emitters' uses) so the packed-record decline (`Rank <> 1`) is
+    // enforced identically at every site; two parallel implementations of this
+    // rule briefly existed and disagreed on exactly that guard.
     match ty with
-    | ArrayElem at when dim < at.IndexTypes.Length ->
-        (match at.IndexTypes.[dim].Extent with
-         | IRLit (IRLitInt n) -> sprintf "%d" n
-         | _ -> sprintf "%s.extents[%d]" name dim)
+    | ArrayElem at -> literalOrRuntimeExtentOfArray at name dim
     | _ -> sprintf "%s.extents[%d]" name dim
 
 /// The deterministic K-lane accumulation body, as unindented C++ statements.
@@ -3760,9 +3761,9 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // which is the only reason a program with `Idx<23>` operands emitted
         // `A.extents[0]` here. Same VALUE either way; a literal is what lets GCC
         // see the trip count.
-        let nExtent = literalOrRuntimeExtent la lName 1
-        let mExtent = literalOrRuntimeExtent la lName 0
-        let pExtent = literalOrRuntimeExtent ra rName 0
+        let nExtent = literalOrRuntimeExtentOfArray la lName 1
+        let mExtent = literalOrRuntimeExtentOfArray la lName 0
+        let pExtent = literalOrRuntimeExtentOfArray ra rName 0
         let extentsName = sprintf "%s_extents" varName
         // Row-pointer hoists for the contraction loop. `&X[i][0]` (not `X[i]`)
         // is the one spelling that works for every operand wrapper the arms
@@ -4002,9 +4003,9 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         let outElemStr = irTypeToCpp la.ElemType
         // Literal extents when the operands' own index records carry them --
         // see `literalOrRuntimeExtent`; same value as the runtime read.
-        let mExtent = literalOrRuntimeExtent la lName 0
-        let kExtent = literalOrRuntimeExtent la lName 1
-        let nExtent = literalOrRuntimeExtent ra rName 1
+        let mExtent = literalOrRuntimeExtentOfArray la lName 0
+        let kExtent = literalOrRuntimeExtentOfArray la lName 1
+        let nExtent = literalOrRuntimeExtentOfArray ra rName 1
         let extentsName = sprintf "%s_extents" varName
         // Pool capacities for the shim's contiguity probe -- see
         // `denseCellCountExpr` and the note in materializeGramForm.
