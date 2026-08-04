@@ -295,6 +295,13 @@ and TypedExprKind =
     /// first-class product (Phase 5), routed through blade_linalg rather than
     /// synthesized as a Blade triple loop.
     | TExprMatmul of left: TypedExpr * right: TypedExpr
+    /// eigh(S): symmetric / Hermitian eigendecomposition of a rank-2 square
+    /// operand, yielding the TUPLE (Q, LAM) — Q's COLUMNS the eigenvectors,
+    /// LAM descending. The math package's first-class eigensolver (Phase 6 /
+    /// Round B2), routed through blade_lapack instead of being synthesized as
+    /// Blade Jacobi source. Only produced when LAPACK was available at
+    /// elaboration time; otherwise `math.eigh` still expands to that source.
+    | TExprEigh of operand: TypedExpr
     | TExprArrayNegate of array: TypedExpr
     | TExprArrayConjugate of array: TypedExpr
     | TExprExtents of array: TypedExpr

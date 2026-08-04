@@ -599,6 +599,16 @@ class IS implemented, and the dense result folds like any other array." op level
     | ArrayLitLength (got, expected, axisTag) ->
         let axis = match axisTag with Some t -> sprintf " for axis '%s'" t | None -> ""
         sprintf "Array literal%s has %d elements, but the annotation's extent is %d" axis got expected
+    | CompactLitShape (idx, shape, where_, detail) ->
+        sprintf "Array literal over the compact group %s: %s %s. A compact group is ONE axis storing \
+one cell per canonical tuple, laid out as a left-justified simplex, so its literal is written in that \
+same shape — %s. (A flat list or a rectangular nest names cells the storage does not have.)"
+            idx where_ detail shape
+    | HermitianLitDiagComplex where_ ->
+        sprintf "Hermitian literal: %s is a DIAGONAL cell with a non-zero imaginary part. \
+A(i, i) = conj(A(i, i)) forces the diagonal real, and the stored diagonal cell is read unconjugated, \
+so this value is not one the class can hold. Write a real diagonal (the off-diagonal cells carry the \
+complex half)." where_
     | ObjectForKernel got -> sprintf "object_for kernel must be a lambda, reynolds, or zero, but got %A" got
     | ChainOpNeedsMethodFor leftDesc -> sprintf "<@> requires method_for or object_for on the left side, but got %s" leftDesc
     | ChainOpBadKernel rightDesc -> sprintf "<@> kernel must be a lambda, operator section, named function, reynolds(...), or zero, but got %s" rightDesc
@@ -728,7 +738,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
             | ReduceEmptyArray _ | ProdsumExtentMismatch _ | GramNeedsRank2 _
-            | ArrayLitLength _ | ObjectForKernel _ | ChainOpNeedsMethodFor _ | ChainOpBadKernel _
+            | ArrayLitLength _ | CompactLitShape _ | HermitianLitDiagComplex _
+            | ObjectForKernel _ | ChainOpNeedsMethodFor _ | ChainOpBadKernel _
             | ChainOpUndecidable _
             | PlaceholderNeedsAllBound _ | GroupKeysRank1 | CumulantOrderPositive _
             | CumulantOrderExceeds _ | CumulantNeedsDist _ | DistOrderDisagree _

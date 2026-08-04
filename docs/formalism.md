@@ -343,6 +343,44 @@ The index type fixes storage (triangular), iteration (triangular), and access
 symmetry system (§11) *infers* symmetric index types for outputs from kernel
 commutativity and array identity.
 
+A **literal** for such an array is written in the storage's own shape: one
+bracket level per dimension of the group, each row starting where its parent
+left off. A rank-`r` group over extent `n` has an outer level of `n` rows, and
+a row seeded at coordinate `p` holds `n - p` cells (`n - p - 1` for the strict
+antisymmetric group, whose diagonal is not stored).
+
+```blade
+let A: Array<Int64 like SymIdx<2, 3>>    = [[1, 2, 3], [4, 5], [6]]  // 6 cells
+let K: Array<Int64 like AntisymIdx<2, 3>> = [[1, 2], [3], []]        // 3 cells
+```
+
+`A(1, 0)` is `A(0, 1)` is `2`; `K(1, 0)` is `-K(0, 1)`; `K(1, 1)` is `0`. The
+flat pool is deliberately NOT a second spelling — the nesting is what says
+which cell is which — and neither is the rectangular nest, which names cells
+(`(1, 3)` above) the axis does not have. A HermitianIdx literal takes the
+inclusive triangle with a real leading cell per row: the diagonal is read
+unconjugated, so `A(i,i) = conj(A(i,i))` forces it real.
+
+**The triangular shape is symmetric by default.** An unannotated nest whose
+rows are `n, n-1, ..., 1` infers `SymIdx<2, n>` — that profile IS the class's
+storage, so the literal that spells a symmetric matrix out reads back as one
+(`R(1, 0)` folds to `(0, 1)`). The shape is genuinely shared with ragged data,
+and this rule hands it to the compact class, so ragged data of exactly this
+profile takes its annotation: `Array<T like Idx<n>, RaggedIdx<lens>>`. Any
+other row profile — equal lengths, or lengths that don't step down by one to a
+final 1 — is untouched and still infers rectangular or inline-ragged.
+
+The rule is matched at any rank — `[[[1,2,3],[4,5],[6]], [[7,8],[9]], [[10]]]`
+is `SymIdx<3, 3>` — but it is INCLUSIVE only: the strict profile
+(`n-1, ..., 1, 0`) is `AntisymIdx`'s storage, and antisymmetry is a claim about
+SIGNS, which no shape on its own justifies inferring.
+
+Printing agrees with the literal. Every RANK-2 array — compact, ragged or
+dense — prints its rows bracketed, so `A` above echoes as it was written;
+rank 1 is already one level of brackets and ranks ≥ 3 stay flat. The REPL
+additionally shows only the first five entries per level and elides the rest
+as `...`; that cap is the echo's alone, and `blade run` prints every cell.
+
 ### 3.10 Index values and nominal typing
 
 Iteration emits values tagged with their source index type as a **unit**:

@@ -7,7 +7,12 @@
 // RaggedRow (pointer + len) rather than decaying to a bare pointer, so
 // every length-dependent op downstream works -- print, extents, reduce,
 // and element reads.
-let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+// Annotated RAGGED (019's closed form): an unannotated triangular nest now
+// infers SymIdx<2, n> (formalism §3.9), and a compact group has no ROW to
+// take a subview of — the partial subscript this file is about is a ragged
+// feature, so the ragged intent is written down.
+let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
 let row = r(1)
 let n = extents(row)
 let s = reduce(row, (+))

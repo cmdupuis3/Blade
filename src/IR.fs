@@ -127,6 +127,15 @@ type IRExpr =
     | IRDecompact of array: IRExpr * dim: int
     | IRGram of left: IRExpr * right: IRExpr * isSameArray: bool  // A * B^H contraction; symmetric/Hermitian when isSameArray
     | IRMatmul of left: IRExpr * right: IRExpr  // A(m x k) * B(k x n) -> dense m x n; the math package's first-class matmul (Phase 5), emitted through blade_linalg
+    /// eigh(S): symmetric / Hermitian eigendecomposition of a rank-2 square
+    /// operand -> the TUPLE (Q, LAM). Phase 6 / Round B2, emitted through
+    /// `blade_lapack`. Unlike every other linalg node this one is TUPLE-typed
+    /// and produces TWO fresh pools, and for a complex operand the two element
+    /// types DIFFER: Q is complex, LAM is real (a Hermitian matrix's
+    /// eigenvalues are real). It only ever exists when `lapackAvailable ()`
+    /// held at elaboration time — gate off, `math.eigh` still expands to the
+    /// synthesized Jacobi source and this node is never built.
+    | IREigh of operand: IRExpr
     | IRArrayNegate of array: IRExpr     // whole-array elementwise negation (eager); type-preserving
     | IRArrayConjugate of array: IRExpr  // whole-array elementwise conjugation (eager); type-preserving
     | IRReverse of array: IRExpr * dim: int
@@ -4217,6 +4226,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRReynolds (e, anti) -> [e], (function [e'] -> IRReynolds (e', anti) | _ -> badChildren "IRReynolds")
     | IRTranspose (e, d1, d2) -> [e], (function [e'] -> IRTranspose (e', d1, d2) | _ -> badChildren "IRTranspose")
     | IRDecompact (e, d) -> [e], (function [e'] -> IRDecompact (e', d) | _ -> badChildren "IRDecompact")
+    | IREigh e -> [e], (function [e'] -> IREigh e' | _ -> badChildren "IREigh")
     | IRHaloUnhash (w, o) -> [w], (function [w'] -> IRHaloUnhash (w', o) | _ -> badChildren "IRHaloUnhash")
     | IRArrayNegate e -> [e], (function [e'] -> IRArrayNegate e' | _ -> badChildren "IRArrayNegate")
     | IRArrayConjugate e -> [e], (function [e'] -> IRArrayConjugate e' | _ -> badChildren "IRArrayConjugate")
@@ -6276,6 +6286,38 @@ let rec typeOf (expr: IRExpr) : IRType =
             let s1 = { nOuter with Rank = 1; Symmetry = SymNone }
             mkArrayLike { la with IndexTypes = [s0; s1] }
          | t, _ -> t)
+    | IREigh operand ->
+        // eigh(S) -> (Q : n x n dense, LAM : n dense). Phase 6 / Round B2.
+        //
+        // THE MIXED-ELEMENT TUPLE. Q inherits the operand's element type, but
+        // LAM does NOT: the eigenvalues of a symmetric/Hermitian matrix are
+        // REAL, so a Complex128 operand yields `(Array<Complex128,2>,
+        // Array<Float64,1>)` — the first surface value whose tuple elements
+        // have different element types. `blade_lapack`'s signatures say the
+        // same thing (`std::complex<double>** V` beside `double* lam`), and
+        // getting it wrong would be a silent storage-width error at the shim
+        // boundary rather than a type error.
+        //
+        // The operand is rank-2 square in EITHER of the two admissible
+        // spellings (TypeCheck.inferEigh is what establishes that): ONE compact
+        // slot of arity 2, or TWO plain dense axes. Both give n from the first
+        // slot's extent. The derived slots reuse that record — same convention
+        // as the gram/matmul arms above, and the ids are cosmetic here (the
+        // authoritative, fresh-id result type is the one `inferEigh` built and
+        // lowering attached to the binding).
+        (match typeOf operand with
+         | ArrayElem sa when not sa.IndexTypes.IsEmpty ->
+            let ix0 = sa.IndexTypes.Head
+            let axis = { ix0 with Rank = 1; Symmetry = SymNone; IxKind = IxKPlain; Dependencies = [] }
+            let lamElem =
+                match sa.ElemType with
+                | IRTScalar ETComplex128 -> IRTScalar ETFloat64
+                | IRTScalar ETComplex64 -> IRTScalar ETFloat32
+                | t -> t
+            let qTy = mkArrayLike { sa with IndexTypes = [axis; axis] }
+            let lamTy = mkArrayLike { sa with ElemType = lamElem; IndexTypes = [axis] }
+            IRTTuple [qTy; lamTy]
+         | t -> t)
     | IRHaloUnhash _ ->
         // A window neighbor read yields the inner index's coordinate: int64.
         IRTScalar ETInt64
@@ -6368,11 +6410,18 @@ let rec typeOf (expr: IRExpr) : IRType =
 /// because matmul was a synthesized FUNCTION CALL; as an intrinsic node it must
 /// be hoisted to its own let-RHS, which is the only position codegen can
 /// materialize a fresh pool at.
+///
+/// IREigh is included for exactly the same reason, one step further: it arrives
+/// from the same elaborator in the same in-place rewrite, and it materializes
+/// TWO fresh pools plus the tuple that names them. `m.eigh(S)` is almost always
+/// written as a destructuring let-RHS, which is already a blessed position — but
+/// nothing stops `elt(m.eigh(S))`, and an unhoisted occurrence would have no
+/// statement scope to declare the pools in.
 let isInlineForm (e: IRExpr) : bool =
     match e with
     | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
     | IRGroupBy _ | IRGroupKeys _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
-    | IRReduceCompute _ | IRMatmul _ -> true
+    | IRReduceCompute _ | IRMatmul _ | IREigh _ -> true
     | IRCompute (IRApplyCombinator _) -> true
     | _ -> false
 
@@ -6409,6 +6458,12 @@ let private isNestedLoopComputeArg (e: IRExpr) : bool =
     // function call) and was hoisted by the line above; as an intrinsic node it
     // needs its own entry or the nest reads an `arr<i>` it never declared.
     | IRMatmul _ -> true
+    // IREigh is deliberately ABSENT, and its absence is a decision rather than
+    // an omission: an eigh node is TUPLE-typed, and a loop form's `Arrays` slot
+    // holds arrays. There is no surface spelling that puts a tuple where the
+    // nest expects an array — the destructured `Q` / `LAM` are what reach a
+    // loop, and those are ordinary IRVars by then. Adding an arm here would be
+    // a dead branch that reads as if it guarded something.
     | _ -> false
 
 /// An INLINE array literal sitting directly in a loop form's `Arrays` list —
@@ -6670,6 +6725,15 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (bindsL, lFinal) = liftChildEvaluatedOnce builder l'
         let (bindsR, rFinal) = liftChildEvaluatedOnce builder r'
         wrapLets (bindsL @ bindsR) (IRMatmul (lFinal, rFinal))
+    | IREigh operand ->
+        // Same evaluate-once lift, same reason: `materializeEighForm` spells the
+        // operand THREE times (`.extents[0]` for n, and `.data` — twice over,
+        // once bare and once through `pool_base` — depending on the route), so
+        // `eigh(f(A))` would otherwise re-invoke `f` per occurrence, each call
+        // allocating a fresh pool.
+        let operand' = liftExpr builder operand
+        let (binds, opFinal) = liftChildEvaluatedOnce builder operand'
+        wrapLets binds (IREigh opFinal)
     | IRArrayNegate arr ->
         let arr' = liftExpr builder arr
         let (binds, arrFinal) = liftChild builder arr'
@@ -7625,12 +7689,16 @@ let indexNameMap (modul: IRModule) : Map<IRId, string> =
 let rec ppIRTypeIn (names: Map<IRId, string>) = function
     | ArrayElem arr ->
         let indices = arr.IndexTypes |> List.map (ppIndexTypeIn names) |> String.concat ", "
-        sprintf "Array<%s, %s>" (ppIRTypeIn names arr.ElemType) indices
+        // `like`, not a comma: this printer feeds the REPL's type echo and the
+        // IDE tooltips, where the string is read AS SOURCE. `Array<T, I>` is
+        // not the array spelling in any position — it does not parse.
+        sprintf "Array<%s like %s>" (ppIRTypeIn names arr.ElemType) indices
     | other -> ppIRType other
 
 and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
+    let nominal = Map.tryFind idx.Id names
     let extentStr =
-        match Map.tryFind idx.Id names with
+        match nominal with
         | Some name -> name
         // A wreath record's extent is one level down, inside the IROrbitClass
         // marker; `orbitBaseExtent` is the identity on every other record, so
@@ -7641,7 +7709,15 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
     | PgIrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | _ ->
         match idx.Symmetry with
+        // A plain alias keeps the documented `Idx<Lat>` form: that type's one
+        // slot IS the extent, and the alias stands for exactly that extent.
         | SymNone -> sprintf "Idx<%s>" extentStr
+        // An alias of a COMPACT class names the WHOLE class, whose argument
+        // slots are (rank, extent) — slots a name does not fill. Routing it
+        // through the extent slot produced `SymIdx<2, MySym>`, which reads as
+        // "extent = MySym" and does not parse. The bare name IS the surface
+        // spelling of this type (`Array<Int32 like MySym>`), so print that.
+        | _ when nominal.IsSome -> nominal.Value
         | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
         | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
         | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr

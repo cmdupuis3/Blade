@@ -1,0 +1,19 @@
+// TEST: Symmetric Literal As A Function Return
+// A literal is also the statement form of a RETURN (genArrayLiteral is what
+// the function-return path calls), and an Array wrapper keeps a POINTER to its
+// extents table — so the compact branch's table has to be `static constexpr`,
+// not a stack array like the fill_random compact path's (safe only because
+// fill_random is confined to a top-level let). A stack table dangled the
+// moment the frame died and the caller printed hundreds of garbage cells
+// instead of six, which is why this returns the array rather than binding it
+// in place. 158/034 pin the other half: a FLAT body for this return type is a
+// component-rank error.
+function mk() -> Array<Int64 like SymIdx<2, 3>> = {
+    [[1, 2, 3], [4, 5], [6]]
+}
+let M = mk()
+let m21 = M(2, 1)
+let m22 = M(2, 2)
+// EXPECT: M = [[1, 2, 3], [4, 5], [6]]
+// EXPECT: m21 = 5
+// EXPECT: m22 = 6

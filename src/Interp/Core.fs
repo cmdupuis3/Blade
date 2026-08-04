@@ -772,6 +772,14 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRDecompact _ | IRGram _ | IRMatmul _ | IRArrayNegate _ | IRArrayConjugate _ ->
         evalArrayNode st env expr
 
+    // ---- eigh (Phase 6 / Round B2): same materializing family, but its value
+    //      is a TUPLE (Q, LAM) rather than one array, so the Loops backend
+    //      returns a VTuple here. Reachable only when the LAPACK gate was on at
+    //      elaboration; gate off, `math.eigh` is still synthesized Blade source
+    //      and this node never exists.
+    | IREigh _ ->
+        evalArrayNode st env expr
+
     | other ->
         // Anything still uninterpreted (compound / group / provider forms, ...) —
         // later milestones.

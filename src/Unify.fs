@@ -131,6 +131,20 @@ type TypeError =
     | ProdsumExtentMismatch of a: int64 * b: int64
     | GramNeedsRank2 of leftRank: int * rightRank: int
     | ArrayLitLength of got: int * expected: int * axisTag: string option
+    /// An array literal checked against a COMPACT index group (SymIdx /
+    /// AntisymIdx / HermitianIdx, rank >= 2). Such a group is ONE axis whose
+    /// stored cells are a left-justified simplex, not r dense axes, so its
+    /// literal is written in exactly that shape: rows of length n, then
+    /// n - i0 - strict, ... (`canon_left_justify`, the allocator's DFS order).
+    /// `idx` names the group, `shape` is the expected skeleton, `where_` the
+    /// position that disagreed ("the literal" / "row 1" / "row 0, row 2"), and
+    /// `detail` what was found there.
+    | CompactLitShape of idx: string * shape: string * where_: string * detail: string
+    /// A HermitianIdx literal whose DIAGONAL cell carries a non-zero imaginary
+    /// part. A(i,i) = conj(A(i,i)) forces the diagonal real, and the stored
+    /// cell is read unconjugated at (i,i) — so such a literal would name a
+    /// value the class cannot hold. `where_` locates the cell.
+    | HermitianLitDiagComplex of where_: string
     | ObjectForKernel of got: string
     | ChainOpNeedsMethodFor of leftDesc: string
     | ChainOpBadKernel of rightDesc: string

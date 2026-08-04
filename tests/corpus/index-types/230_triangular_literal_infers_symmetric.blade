@@ -1,0 +1,22 @@
+// TEST: Unannotated Triangular Literal Infers Symmetric
+// The triangular shape IS `SymIdx<2, n>`'s storage — rows n, n-1, ..., 1 are
+// exactly the left-justified simplex `canon_left_justify` addresses — so an
+// unannotated nest of that profile infers the compact class rather than a
+// ragged one. The reads are the assertion: R(1, 0) folds to the canonical
+// (0, 1) and answers 2, where the ragged reading of the identical source would
+// have given the short row's own first cell (4).
+//
+// The shape is genuinely shared with ragged data, so ragged data of THIS
+// profile now carries its annotation (`RaggedIdx<lens>`, 019) — index-types
+// 022/023/024/025 and the inference probes are the files that say so. Any
+// other row profile is untouched: 232 pins that.
+let R = [[1, 2, 3], [4, 5], [6]]
+let r10 = R(1, 0)
+let r01 = R(0, 1)
+let r11 = R(1, 1)
+let r22 = R(2, 2)
+// EXPECT: R = [[1, 2, 3], [4, 5], [6]]
+// EXPECT: r10 = 2
+// EXPECT: r01 = 2
+// EXPECT: r11 = 4
+// EXPECT: r22 = 6

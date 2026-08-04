@@ -1772,6 +1772,15 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let l = forceInputArray st env lExpr
         let r = forceInputArray st env rExpr
         VArray (A.matmulArray l r (typeOf expr))
+    | IREigh operandExpr ->
+        // eigh = the one linalg node whose value is a TUPLE, so it cannot go
+        // through `VArray`. Same FORCE-then-materialize shape as gram/matmul
+        // otherwise. See `A.eighArrays` for why this is a deliberate copy of the
+        // BladeMath oracle rather than a call into it, and why it only ever runs
+        // with the LAPACK gate ON.
+        let s = forceInputArray st env operandExpr
+        let (q, lam) = A.eighArrays s (typeOf expr)
+        VTuple [| VArray q; VArray lam |]
     | IRArrayNegate arrExpr ->
         VArray (A.negateConjugateArray false (forceInputArray st env arrExpr))
     | IRArrayConjugate arrExpr ->

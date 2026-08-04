@@ -79,6 +79,7 @@ let printUsage () =
     printfn "  test omp-coverage                 Run the OpenMP thread-coverage block standalone"
     printfn "  test omp-reduce                   Run the comm-licensed parallel-reduction block standalone"
     printfn "  test linalg                       Run the blade_linalg dispatch-emission block standalone"
+    printfn "  test lapack                       Run the blade_lapack eigensolver-dispatch block standalone"
     printfn "  test cuda                         Run the CUDA kernel block standalone"
     printfn "  test mpi                          Run the MPI decomposition block standalone"
     printfn "  test netcdf                       Run the NetCDF provider block (needs libnetcdf + sample.nc)"
@@ -422,6 +423,53 @@ module ReplTypes =
 
     let private eqLineRe = Regex(@"^([A-Za-z_][A-Za-z0-9_]*) = (.*)$", RegexOptions.Compiled)
 
+    /// Split a bracketed body at the commas sitting at nesting depth zero, so a
+    /// row (`[1, 2]`) or a complex cell (`(1, 0)`) stays ONE part. Depth counts
+    /// `[` and `(` alike; commas inside quotes are literal.
+    let private splitTopLevelCommas (inner: string) : string list =
+        let parts = ResizeArray<string>()
+        let cur = System.Text.StringBuilder()
+        let mutable depth = 0
+        let mutable inQuotes = false
+        for c in inner do
+            if c = '"' then
+                inQuotes <- not inQuotes
+                cur.Append(c) |> ignore
+            elif inQuotes then cur.Append(c) |> ignore
+            else
+                match c with
+                | '[' | '(' -> depth <- depth + 1; cur.Append(c) |> ignore
+                | ']' | ')' -> depth <- depth - 1; cur.Append(c) |> ignore
+                | ',' when depth = 0 ->
+                    parts.Add(cur.ToString())
+                    cur.Clear() |> ignore
+                | _ -> cur.Append(c) |> ignore
+        if cur.Length > 0 then parts.Add(cur.ToString())
+        parts |> List.ofSeq
+
+    /// How many entries the REPL shows per bracket level before eliding.
+    let private elideAfter = 5
+
+    /// The REPL's display cap: at EVERY bracket level, show the first
+    /// `elideAfter` entries and stand the rest down to `...`. An echoed line is
+    /// meant to be read at a glance, and a 1000-cell axis is not.
+    ///
+    /// DISPLAY ONLY. The program's own stdout is untouched — `blade run` prints
+    /// every cell, and that is what the corpus pins read — so nothing here can
+    /// weaken a test. Text-level on purpose: it works for any printed shape
+    /// (nested rows, complex pairs, strings) without re-deriving the value.
+    let rec private elideValue (s: string) : string =
+        let t = s.Trim()
+        if not (t.Length >= 2 && t.StartsWith "[" && t.EndsWith "]") then t
+        else
+            let inner = t.Substring(1, t.Length - 2).Trim()
+            if inner = "" then "[]"
+            else
+                let parts = splitTopLevelCommas inner
+                let kept = parts |> List.truncate elideAfter |> List.map elideValue
+                let shown = if parts.Length > elideAfter then kept @ [ "..." ] else kept
+                "[" + String.concat ", " shown + "]"
+
     /// Rewrite one raw output line for display. `transient` is the synthetic
     /// binding a bare REPL expression was wrapped in â€” its name is stripped
     /// so the value echoes alone.
@@ -430,7 +478,7 @@ module ReplTypes =
         if not m.Success then line
         else
             let name = m.Groups.[1].Value
-            let value = m.Groups.[2].Value
+            let value = elideValue m.Groups.[2].Value
             let isTransient = (transient = Some name)
             match Map.tryFind name info with
             | Some (RVal t) ->
@@ -1211,6 +1259,18 @@ let private dispatchTest (rest: string list) : int =
         let emitFailed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
         let probeFailed = (Blade.Tests.LinAlgTests.runLinAlgProbeTests ()).Failed
         if emitFailed + probeFailed = 0 then 0 else 1
+    | [ "lapack" ] ->
+        // Eigensolver dispatch (Phase 6 / Round B2): `math.eigh` routes to
+        // `blade_lapack::blade_eigh_{packed,dense}_{s,d,c,z}` when the LAPACK
+        // gate is on and NO explicit sweeps budget was given, and elaborates to
+        // the synthesized cyclic-Jacobi source otherwise; the mixed-element
+        // tuple a complex operand produces (Q complex, LAM real); the
+        // dependency-surface separation from the BLAS header; and the
+        // `inferEigh` rejections, including the complex-symmetric row LAPACK has
+        // no routine for. Pure codegen string checks — no toolchain, no LAPACK
+        // runtime — so it always runs; also part of the full suite.
+        let failed = (Blade.Tests.LapackTests.runLapackEmissionTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "normalize" ] ->
         // IR-level F# unit tests for the type normalizer. Runs in-process,
         // no Blade source pipeline involved.

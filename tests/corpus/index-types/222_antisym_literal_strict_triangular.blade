@@ -1,0 +1,30 @@
+// TEST: Antisymmetric Literal In Strict Triangular Shape
+// The antisymmetric twin of 221. Its group is STRICT — the diagonal is not
+// stored — so the row seeded at p holds n - p - 1 cells: 2, 1, 0 for
+// AntisymIdx<2,3>. The trailing EMPTY row is written out deliberately: the
+// allocator's skeleton has n rows at the outer level whatever the strictness
+// (build_skeleton's shrink is on the CHILD seed), so the literal that mirrors
+// storage has n of them too, and a literal with the last row dropped is a
+// shape error rather than a silently short pool.
+//
+// The reads pin the two things storage does implicitly: a mirrored tuple comes
+// back NEGATED, and a diagonal tuple — a cell the strict simplex does not
+// have — reads as zero.
+let K: Array<Int64 like AntisymIdx<2, 3>> = [
+    [1, 2],
+    [3],
+    []
+]
+let k01 = K(0, 1)
+let k10 = K(1, 0)
+let k02 = K(0, 2)
+let k12 = K(1, 2)
+let k11 = K(1, 1)
+// Nested pin (see 221): here it also pins the EMPTY trailing row, which is the
+// visible difference between strict and inclusive storage.
+// EXPECT: K = [[1, 2], [3], []]
+// EXPECT: k01 = 1
+// EXPECT: k10 = -1
+// EXPECT: k02 = 2
+// EXPECT: k12 = 3
+// EXPECT: k11 = 0

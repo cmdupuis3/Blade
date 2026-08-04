@@ -10,6 +10,10 @@
 // for the tuple form to contain. extents answers from the argument type
 // where it can, and rejects where the type says the question has no
 // answer. (Per-row lengths: extents on a peeled or indexed row.)
-let r = [[1.0, 2.0], [3.0]]
+// Annotated RAGGED (019's closed form): unannotated, rows 2, 1 are the
+// triangular profile that now infers SymIdx<2, 2> (formalism §3.9), whose
+// extents question is a different one entirely.
+let lens: Array<Int64 like Idx<2>> = [2, 1]
+let r: Array<Float64 like Idx<2>, RaggedIdx<lens>> = [[1.0, 2.0], [3.0]]
 let e = extents(r)
 // EXPECT: typecheck failure — extents on a ragged array is per-row for the ragged dimension.

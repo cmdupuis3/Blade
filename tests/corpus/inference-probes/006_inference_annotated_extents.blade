@@ -1,7 +1,10 @@
 // TEST: Inference: Annotated Extents
 // Probe F: control — annotated extents on a kernel param. Should pass.
 // If it doesn't, extents has more issues than the Gap-1 pattern alone.
-let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+// Source annotated ragged (see 001); the control here is the ANNOTATED kernel
+// param on the next line.
+let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
 let sizes = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> extents(g) |> compute
 // Row lengths of the ragged literal: 3, 2, 1
 // EXPECT: sizes = [3, 2, 1]

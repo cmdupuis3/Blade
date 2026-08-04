@@ -1,0 +1,23 @@
+// TEST: Hermitian Literal In Triangular Shape
+// Hermitian shares the symmetric group's inclusive triangle (buildSymmVec
+// groups it identically); only the READ differs — a mirrored tuple comes back
+// conjugated. So the literal is the 221 shape over Complex128 cells, and the
+// leading cell of each row is the DIAGONAL, which the class forces real
+// (223's twin, 224, is the probe that rejects a complex one).
+// The reads keep their `: Complex128` annotations, which are now redundant
+// (233 pins that a compact read answers at the element type on its own) but
+// harmless — one file that still spells the type out is worth keeping.
+let H: Array<Complex128 like HermitianIdx<3>> = [
+    [complex(1.0, 0.0), complex(2.0, 3.0), complex(0.0, 0.0)],
+    [complex(4.0, 0.0), complex(5.0, 6.0)],
+    [complex(7.0, 0.0)]
+]
+let h01: Complex128 = H(0, 1)
+let h10: Complex128 = H(1, 0)
+let h11: Complex128 = H(1, 1)
+let h22: Complex128 = H(2, 2)
+// EXPECT: H = [(1,0), (2,3), (0,0), (4,0), (5,6), (7,0)]
+// EXPECT: h01 = (2,3)
+// EXPECT: h10 = (2,-3)
+// EXPECT: h11 = (4,0)
+// EXPECT: h22 = (7,0)

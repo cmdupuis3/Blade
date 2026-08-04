@@ -7,7 +7,10 @@
 // If error: unification correctly enforces elem-type compatibility.
 // If silent: confirmed silent miscompile — kernel param's elem type and
 //   source's elem type are decoupled at typecheck/codegen.
-let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+// Source annotated ragged (see 001) so the Float64-vs-Int64 clash below stays
+// the ONLY thing this probe rejects on.
+let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
 let sums = method_for(r) <@> lambda(g: Array<Int64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
 // If error (good): test fails at typecheck with a clear message.
 // If silent (bad): result is whatever the implicit conversion produces.

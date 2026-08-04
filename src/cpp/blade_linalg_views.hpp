@@ -140,11 +140,18 @@ namespace blade_linalg {
     /// skeleton is already row-major contiguous over a pool big enough for the
     /// whole m x ld window; `pool_cells` is the operand's allocated leaf count
     /// (see `row_major_base`), 0 when the caller cannot certify one.
+    ///
+    /// TEMPLATED ON THE ELEMENT TYPE so the same staging logic serves every
+    /// BLAS precision (`float`, `double`, `std::complex<float>`,
+    /// `std::complex<double>`). Nothing here is precision-specific — it is
+    /// pointer arithmetic and element copies — so one template is the honest
+    /// spelling and four copies would be four chances to diverge.
+    template <typename T>
     struct in_view {
-        std::vector<double> buf;
-        const double* p;
-        in_view(double** rows, size_t m, size_t ld, size_t pool_cells) {
-            double* base = row_major_base(rows, m, ld, pool_cells);
+        std::vector<T> buf;
+        const T* p;
+        in_view(T** rows, size_t m, size_t ld, size_t pool_cells) {
+            T* base = row_major_base(rows, m, ld, pool_cells);
             if (base != nullptr) { p = base; return; }
             buf.resize(m * ld);
             if (m != 0 && ld != 0) stage_in(rows, m, ld, buf.data());
@@ -160,14 +167,15 @@ namespace blade_linalg {
     /// staging buffer that `flush()` scatters back. The buffer is NOT
     /// read-initialised from the skeleton — the routines that use it all
     /// overwrite (beta = 0). `pool_cells` as in `row_major_base`.
+    template <typename T>
     struct out_view {
-        std::vector<double> buf;
-        double** rows;
+        std::vector<T> buf;
+        T** rows;
         size_t m, ld;
-        double* p;
-        out_view(double** rows_, size_t m_, size_t ld_, size_t pool_cells)
+        T* p;
+        out_view(T** rows_, size_t m_, size_t ld_, size_t pool_cells)
             : rows(rows_), m(m_), ld(ld_) {
-            double* base = row_major_base(rows_, m_, ld_, pool_cells);
+            T* base = row_major_base(rows_, m_, ld_, pool_cells);
             if (base != nullptr) { p = base; rows = nullptr; return; }
             buf.resize(m_ * ld_);
             p = buf.data();

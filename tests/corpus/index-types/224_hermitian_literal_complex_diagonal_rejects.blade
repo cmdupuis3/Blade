@@ -1,0 +1,12 @@
+// TEST: Hermitian Literal With Complex Diagonal (rejects)
+// ERROR: BL3007
+// ERROR-CONTAINS: DIAGONAL cell with a non-zero imaginary part
+// A(i,i) = conj(A(i,i)) forces the Hermitian diagonal REAL, and the stored
+// diagonal cell is read unconjugated (canon_fold's parity is even there) — so
+// a complex diagonal is not a value the class can hold, and storing it would
+// make the array quietly non-Hermitian rather than fail anywhere later. The
+// leading cell of each row is the diagonal (c1 = 0, so p1 = p0).
+let H: Array<Complex128 like HermitianIdx<2>> = [
+    [complex(1.0, 2.0), complex(0.0, 0.0)],
+    [complex(3.0, 0.0)]
+]

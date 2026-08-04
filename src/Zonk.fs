@@ -201,6 +201,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprDecompact (a, d) -> TExprDecompact (z a, d)
         | TExprGram (l, r, s) -> TExprGram (z l, z r, s)
         | TExprMatmul (l, r) -> TExprMatmul (z l, z r)
+        | TExprEigh a -> TExprEigh (z a)
         | TExprArrayNegate a -> TExprArrayNegate (z a)
         | TExprArrayConjugate a -> TExprArrayConjugate (z a)
         | TExprExtents a -> TExprExtents (z a)

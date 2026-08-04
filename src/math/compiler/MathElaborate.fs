@@ -292,8 +292,40 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
         arrayShape ctx scope "eigh" aE |> Result.bind (fun (_, dims) ->
             match dims with
             | [n; n2] when n = n2 ->
-                ensure st (fingerprint "eigh" (box (n, sweeps))) (fun nm -> Ok (eighDecl nm n sweeps))
-                |> Result.map (fun nm -> syn (ExprApp (v nm, [aE])))
+                // Phase 6 / Round B2 (docs/plan-cpp-perf-exploitation.md): the
+                // ONE conditional elaboration in this file. `eigh` routes to the
+                // `__math_eigh` intrinsic marker — which TypeCheck.inferEigh
+                // types and codegen emits as one `blade_lapack::blade_eigh_*`
+                // call — only when BOTH hold:
+                //
+                //   * LAPACK will be available at BUILD time
+                //     (`LinAlgPatterns.lapackAvailable ()`, the same predicate
+                //     Build.fs uses to decide `-DBLADE_HAS_LAPACK`; two copies
+                //     could disagree, and a disagreement is exactly the
+                //     configuration that emits calls into a header that will not
+                //     compile); and
+                //   * NO explicit SWEEPS argument was given. A stated sweep
+                //     budget is a request for the cyclic-Jacobi ALGORITHM, and
+                //     LAPACK's blocked tridiagonal reduction has no analogue of
+                //     it — routing anyway would silently ignore a parameter the
+                //     user typed. `m.eigh(S, 30)` therefore keeps the
+                //     synthesized path on any machine, which is a readable rule
+                //     rather than a gap.
+                //
+                // GATE OFF (the default) THE SYNTHESIZED PATH IS UNTOUCHED,
+                // byte for byte: same `ensure`/fingerprint key, same
+                // `eighDecl`, same call expression. That is deliberate and
+                // load-bearing — the Jacobi source is the single copy of this
+                // math, the one the interpreter and pinned-oracle differentials
+                // cover, and an eigensolver's output is not unique (eigenvector
+                // signs, degenerate-subspace bases), so it stays the
+                // verification truth. `interp` / `diff-oracle` must never run
+                // with the LAPACK gate set.
+                if List.isEmpty rest && Blade.LinAlgPatterns.lapackAvailable () then
+                    Ok (syn (ExprApp (v "__math_eigh", [aE])))
+                else
+                    ensure st (fingerprint "eigh" (box (n, sweeps))) (fun nm -> Ok (eighDecl nm n sweeps))
+                    |> Result.map (fun nm -> syn (ExprApp (v nm, [aE])))
             | [n; n2] -> Error (sprintf "eigh: the argument must be square (got %d×%d); symmetry is assumed, not checked" n n2)
             | _ -> Error "eigh: the argument must be rank-2 square (Array<Float64 like Idx<n>, Idx<n>>, symmetric)"))
     | "eigh", _ -> Error "eigh: expected eigh(S) or eigh(S, SWEEPS)"

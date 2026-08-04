@@ -723,6 +723,35 @@ let arrayLitFromValues (arrType: IRArrayType) (elems: Value list) : BladeArray =
           IndexTypes = idxTys
           Extents = [| int64 rows.Length; innerExtent |]
           Data = SRagged (rows, lens, offsets) }
+    | (VArray _) :: _ when
+            idxTys |> List.exists (fun ix ->
+                ix.Rank >= 2 &&
+                (match ix.Symmetry with
+                 | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                 | SymNone | SymWreath -> false)) ->
+        // COMPACT literal (TypeCheck.checkCompactArrayLit; CodeGen's compact
+        // branch of genArrayLiteral): the rows ARE the left-justified simplex,
+        // so they shrink, and the FIRST one is not the shape of the axis —
+        // extents come from the index records (the component extents every
+        // compact read folds against). Taking them from the first row, as the
+        // rectangular arm below does, is off by one for a strict (antisym)
+        // group, whose first row is n-1 wide.
+        let rows =
+            elems
+            |> List.map (function
+                | VArray a -> a.Data
+                | v -> raise (ArrayOpUnsupported (sprintf "compact literal: non-array row (%A)" v)))
+            |> Array.ofList
+        let extents =
+            idxTys
+            |> List.collect (fun ix ->
+                let e =
+                    match ix.Extent with
+                    | IRLit (IRLitInt n) -> n
+                    | _ -> raise (ArrayOpUnsupported "compact literal: non-static extent")
+                List.replicate (max 1 ix.Rank) e)
+            |> Array.ofList
+        { ElemType = elemTy; IndexTypes = idxTys; Extents = extents; Data = SNested rows }
     | (VArray first) :: _ ->
         // rank>=2: each element is a row; nest the rows' stores (shared — the
         // rows are freshly-evaluated and owned by this literal).
@@ -1197,6 +1226,122 @@ let matmulArray (left: BladeArray) (right: BladeArray) (outType: IRType) : Blade
                 writeCell out [ i; j ] acc
         out
     | _ -> raise (ArrayOpUnsupported "matmul: output type is not an array")
+
+/// eigh(S) -> (Q, LAM): symmetric eigendecomposition by cyclic two-sided
+/// Jacobi. Q's COLUMNS are the eigenvectors, LAM is descending, and each Q
+/// column is sign-fixed so the first row attaining the maximum |entry| is
+/// positive — the conventions `MathDecls.eighDecl` documents and
+/// `blade_lapack`'s `emit_values_desc` / `emit_vectors_desc` reproduce.
+///
+/// THIS IS A DELIBERATE COPY of `BladeMath.Jacobi.eigh` (src/math/Jacobi.fs),
+/// operation for operation, NOT a call into it. BladeMath is a SEPARATE fsproj
+/// that the compiler never references, and that separation is the whole reason
+/// it can serve as the VALUE ORACLE for the generated Blade code: an oracle
+/// that shares source with the thing it checks proves only that one copy exists.
+/// The duplication is the point; keeping it in step is a review obligation the
+/// oracle differential (`blade test diff-oracle math`) already enforces from the
+/// other side.
+///
+/// REACHABILITY. `IREigh` only exists when LAPACK was available at ELABORATION
+/// time; with the gate off `math.eigh` still expands to synthesized Blade Jacobi
+/// source, which the interpreter walks as ordinary Blade code. So this function
+/// runs only in a gate-ON interpreter run — a configuration the plan says must
+/// never be used for byte-identity (`interp` / `diff-oracle` must run gate-off,
+/// because an eigensolver's output is not unique). It exists so the interpreter
+/// has an answer for every node the compiler can build, not as a differential
+/// twin of the LAPACK route: the two agree on eigenvalues and on the two
+/// normalised freedoms, not bit for bit, and inside a degenerate eigenvalue's
+/// subspace not even on the basis.
+///
+/// The operand is read through `indexArray`, which routes a compact
+/// (symmetric / Hermitian) rank-2 group to the canonical reader and a dense one
+/// to the ordinary peel — so the PACKED and DENSE surface spellings both work
+/// here with one code path, exactly as they do through the shim.
+///
+/// COMPLEX IS DECLINED, by name. A Hermitian Jacobi needs complex rotations and
+/// would be a NEW implementation with no oracle behind it — strictly worse than
+/// refusing, since a plausible-looking wrong answer is the failure mode this
+/// whole layer is built to avoid. The compiled `?heev` / `?hpev` route is the
+/// only implementation of the complex case.
+let eighArrays (operand: BladeArray) (outType: IRType) : BladeArray * BladeArray =
+    let (qTy, lamTy) =
+        match outType with
+        | IRTTuple [ qT; lamT ] ->
+            (match qT, lamT with
+             | ArrayElem qa, ArrayElem la -> (qa, la)
+             | _ -> raise (ArrayOpUnsupported "eigh: result type is not a pair of arrays"))
+        | _ -> raise (ArrayOpUnsupported "eigh: result type is not a 2-tuple")
+    (match elemThrough operand.ElemType with
+     | Some (ETComplex64 | ETComplex128) ->
+         raise (ArrayOpUnsupported "eigh: the interpreter implements the REAL symmetric case only; a Hermitian (complex) eigendecomposition is available from the compiled LAPACK route (?heev / ?hpev) and is deliberately not re-implemented here without an oracle behind it")
+     | _ -> ())
+    let n = if operand.Extents.Length >= 1 then int operand.Extents.[0] else 0
+    // Working copy of the symmetric input + the eigenvector accumulator,
+    // identical to the oracle's `aw` / `q` (and to eighDecl's `aw` / `qm`).
+    let aw = Array2D.init n n (fun i j -> toF64v (indexArray operand [VInt (int64 i); VInt (int64 j)]))
+    let qm = Array2D.init n n (fun i j -> if i = j then 1.0 else 0.0)
+    // `MathDecls.defaultSweeps` (10), duplicated here for the same
+    // oracle-independence reason the algorithm is. The intrinsic only ever
+    // means the DEFAULT schedule: the planned elaborator rule keeps the
+    // synthesized Jacobi path whenever an explicit SWEEPS argument is given,
+    // because a stated sweep budget is a request for that algorithm and LAPACK
+    // has no analogue of it. If that rule ever changes, this constant is the
+    // other half of the change.
+    let sweeps = 10
+    for _sweep in 1 .. sweeps do
+        for p in 0 .. n - 2 do
+            for r in p + 1 .. n - 1 do
+                let apq = aw.[p, r]
+                let app = aw.[p, p]
+                let aqq = aw.[r, r]
+                let conv = abs apq <= 1.0e-15 * sqrt (abs app * abs aqq + 1.0e-300)
+                let theta = (aqq - app) / (if conv then 1.0 else 2.0 * apq)
+                let tt = (if theta >= 0.0 then 1.0 else -1.0) / (abs theta + sqrt (1.0 + theta * theta))
+                let cs = if conv then 1.0 else 1.0 / sqrt (1.0 + tt * tt)
+                let sn = if conv then 0.0 else cs * tt
+                // AW <- AW.R (columns p, r), then AW <- R^T.AW (rows p, r).
+                for i in 0 .. n - 1 do
+                    let tp = aw.[i, p]
+                    let tq = aw.[i, r]
+                    aw.[i, p] <- cs * tp - sn * tq
+                    aw.[i, r] <- sn * tp + cs * tq
+                for i in 0 .. n - 1 do
+                    let tp = aw.[p, i]
+                    let tq = aw.[r, i]
+                    aw.[p, i] <- cs * tp - sn * tq
+                    aw.[r, i] <- sn * tp + cs * tq
+                // Accumulate the column rotation into Q.
+                for i in 0 .. n - 1 do
+                    let tp = qm.[i, p]
+                    let tq = qm.[i, r]
+                    qm.[i, p] <- cs * tp - sn * tq
+                    qm.[i, r] <- sn * tp + cs * tq
+    let lam = Array.init n (fun j -> aw.[j, j])
+    // Selection sort descending (ties keep original order) + Q column swaps.
+    for kk in 0 .. n - 1 do
+        let mutable best = kk
+        for j in kk + 1 .. n - 1 do
+            if lam.[j] > lam.[best] then best <- j
+        let tl = lam.[kk] in lam.[kk] <- lam.[best]; lam.[best] <- tl
+        for i in 0 .. n - 1 do
+            let tq = qm.[i, kk] in qm.[i, kk] <- qm.[i, best]; qm.[i, best] <- tq
+    // Sign fix: first row attaining max |entry| per column made positive.
+    for j in 0 .. n - 1 do
+        let mutable bigv = 0.0
+        let mutable best = 0
+        for i in 0 .. n - 1 do
+            let mag = abs qm.[i, j]
+            if mag > bigv then
+                best <- i
+                bigv <- mag
+        let flip = if qm.[best, j] < 0.0 then -1.0 else 1.0
+        for i in 0 .. n - 1 do qm.[i, j] <- qm.[i, j] * flip
+    let qOut = allocDense qTy.ElemType qTy.IndexTypes [| int64 n; int64 n |]
+    let lamOut = allocDense lamTy.ElemType lamTy.IndexTypes [| int64 n |]
+    for i in 0 .. n - 1 do
+        for j in 0 .. n - 1 do writeCell qOut [ int64 i; int64 j ] (VFloat qm.[i, j])
+    for j in 0 .. n - 1 do writeCell lamOut [ int64 j ] (VFloat lam.[j])
+    (qOut, lamOut)
 
 // ============================================================================
 // §7 Compound (masked product space, formalism 4.5) — construction + reads
@@ -1686,8 +1831,35 @@ let private forEachCoordRowMajor (extents: int64[]) (f: int64 list -> unit) : un
                 i <- i + 1L
     loop 0 []
 
-/// Flat ranks 1-3: `name = [c0, c1, ...]` row-major, ", "-separated, `]`, newline.
+/// Rank 2: `name = [[a, b], [c, d]]` — the twin of CodeGen.genPrintNested2, and
+/// byte-identical to it. `innerBound` takes the outer coordinate because a
+/// compact group's row shrinks with it (`extents[1] - i`, minus one more when
+/// the group is strict); a dense pair ignores its argument.
+let private emitNested2 (sb: StringBuilder) (name: string) (arr: BladeArray) (et: ElemType)
+                        (outerBound: int64) (innerBound: int64 -> int64) : unit =
+    sb.Append(name).Append(" = [") |> ignore
+    let mutable i = 0L
+    while i < outerBound do
+        if i > 0L then sb.Append(", ") |> ignore
+        sb.Append("[") |> ignore
+        let mutable first = true
+        let mutable j = 0L
+        while j < innerBound i do
+            if not first then sb.Append(", ") |> ignore
+            first <- false
+            sb.Append(formatCell et (readCell arr [ i; j ])) |> ignore
+            j <- j + 1L
+        sb.Append("]") |> ignore
+        i <- i + 1L
+    sb.Append("]").Append('\n') |> ignore
+
+/// Ranks 1 and 3: `name = [c0, c1, ...]` row-major, ", "-separated, `]`, newline.
+/// (Rank 2 goes through emitNested2 — see its twin's note on why only that rank
+/// nests.)
 let private emitFlat123 (sb: StringBuilder) (name: string) (arr: BladeArray) (et: ElemType) : unit =
+    if arr.Extents.Length = 2 then
+        emitNested2 sb name arr et arr.Extents.[0] (fun _ -> arr.Extents.[1])
+    else
     sb.Append(name).Append(" = [") |> ignore
     let mutable first = true
     forEachCoordRowMajor arr.Extents (fun coords ->
@@ -1752,8 +1924,16 @@ let private emitSymAware (sb: StringBuilder) (name: string) (arr: BladeArray) (e
             dims.Add(dimIdx, priorDims, strictConst)
             dimIdx <- dimIdx + 1
     let rank = dims.Count
+    // Bound at one dimension: extent minus the prior group coords minus the
+    // strict constant — the twin of genPrintArraySymAware's `boundAt`.
+    let boundAt (d: int) (coords: int64[]) =
+        let (dIdx, priorDims, strictConst) = dims.[d]
+        let sub = (priorDims |> List.sumBy (fun pd -> coords.[pd])) + int64 (List.length priorDims * strictConst)
+        arr.Extents.[dIdx] - sub
     if rank < 1 || rank > 8 then
         sb.Append(name).Append(" = <rank-").Append(string rank).Append(" array>").Append('\n') |> ignore
+    elif rank = 2 then
+        emitNested2 sb name arr et (boundAt 0 [| 0L; 0L |]) (fun i -> boundAt 1 [| i; 0L |])
     else
         sb.Append(name).Append(" = [") |> ignore
         let coords : int64[] = Array.zeroCreate rank
@@ -1802,16 +1982,26 @@ let printArrayBinding (b: IRBinding) (arr: BladeArray) (sb: StringBuilder) : uni
             // flat print over Extents=[ngroups; 0] → the empty `name = []`
             // (genPrintArrayFlat; inner extent 0 emits no cells). Route it to the
             // flat emitter below rather than streaming the backing pool.
-            | SRagged _ when (match b.Value with IRGroupBy _ -> false | _ -> true) ->
-                // A ragged / DepIdx literal prints as its FLAT backing buffer
-                // (CodeGen's ragged auto-print streams the flat pool, row after
-                // row): `name = [v0, v1, ..., v_total]`. Byte-verified vs the
-                // compiled binary (index-types 018/023/077: r = [1, 2, ..., 9]).
+            | SRagged (rows, lens, _) when (match b.Value with IRGroupBy _ -> false | _ -> true) ->
+                // A ragged / DepIdx literal prints its rows NESTED, like every
+                // other rank-2 array (CodeGen's ragged auto-print walks
+                // `lens[i]` and brackets each row): `name = [[..], [..]]`. The
+                // row boundary is the one thing the flat pool cannot show, and
+                // a ragged store keeps each row as its own leaf here.
                 sb.Append(b.Name).Append(" = [") |> ignore
-                raggedFlatValues arr.Data
-                |> List.iteri (fun i v ->
+                rows
+                |> Array.iteri (fun i row ->
                     if i > 0 then sb.Append(", ") |> ignore
-                    sb.Append(formatCell et v) |> ignore)
+                    sb.Append("[") |> ignore
+                    // `lens` is the row bound the compiled printer walks; a row
+                    // store can hold more than its length (a peel or a provider
+                    // read backs rows with a shared buffer).
+                    raggedFlatValues row
+                    |> List.truncate (int lens.[i])
+                    |> List.iteri (fun j v ->
+                        if j > 0 then sb.Append(", ") |> ignore
+                        sb.Append(formatCell et v) |> ignore)
+                    sb.Append("]") |> ignore)
                 sb.Append("]").Append('\n') |> ignore
             | _ ->
                 let rank = arr.Extents.Length

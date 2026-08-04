@@ -95,6 +95,125 @@ let blasAvailable () : bool =
         | null | "" -> false
         | _ -> true
 
+/// THE LAPACK availability gate (Phase 6 / Round B). Rides the SAME
+/// environment resolution as `blasAvailable` — OpenBLAS bundles LAPACKE, so
+/// one install answers both — but it is a SEPARATE FUNCTION with a separate
+/// C++ define (`-DBLADE_HAS_LAPACK`) and its own Build.fs include-sniff arm.
+///
+/// Why separate rather than an alias: the two headers are independently
+/// includable, so a BLAS-only program and a LAPACK-carrying one must stay
+/// distinguishable at the g++ line — otherwise every gram/matmul program would
+/// start advertising a LAPACK dependency it does not have. Keeping the
+/// predicate its own function is also what lets the LAPACK gate be tightened
+/// later (a LAPACKE-less BLAS install, a separate LAPACK_DIR) without touching
+/// the BLAS one.
+///
+/// A FUNCTION, never a module-level `let`, for the same reason as its sibling.
+///
+/// NUMERICS WARNING, recorded here because this is the gate that turns it on:
+/// unlike the BLAS routes — which differ from Blade's loops only in the last
+/// ULP — an eigensolver's OUTPUT IS NOT UNIQUE (eigenvector signs are
+/// arbitrary; within a degenerate eigenvalue's subspace any orthonormal basis
+/// is correct). The shim normalises the two determinate parts (descending
+/// order, sign fix) but cannot normalise the basis choice. So gate-ON results
+/// are correct and NOT bit-reproducible against the native Jacobi path, and
+/// `interp` / `diff-oracle` must never run with this gate set.
+let lapackAvailable () : bool =
+    match System.Environment.GetEnvironmentVariable("BLADE_BLAS") with
+    | "1" | "on" -> true
+    | "0" | "off" -> false
+    | _ ->
+        match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
+        | null | "" -> false
+        | _ -> true
+
+// ============================================================================
+// Backend mode
+// ============================================================================
+
+/// The codegen EMISSION MODE a dispatch decision is being made for.
+///
+/// USER-DIRECTED ARCHITECTURE. The alternative — copying the whole binop /
+/// nest-shape dispatch apparatus once per target — is brittle: the classifiers
+/// would drift apart the first time a pattern is fixed on one side and not the
+/// other, and the shapes they recognise are a property of Blade's IR, not of
+/// any backend. So the CLASSIFIERS ARE MODE-AGNOSTIC (nothing below
+/// `classifyGram` / `(|BlasL1|_|)` / `(|BlasL2|_|)` mentions a backend) and the
+/// mode is threaded into the ONE funnel that turns a classification into a C++
+/// name: `shimEntryPoint`. Adding a target is then a new arm there plus its
+/// entry-point table, never a second copy of the matching logic.
+type LinAlgBackend =
+    /// Host CPU, cblas through `blade_linalg.hpp`. Availability is
+    /// `blasAvailable ()` (BLADE_BLAS / OPENBLAS_DIR).
+    | HostBlas
+    /// Device, cuBLAS. DECLARED, NOT IMPLEMENTED — `shimEntryPoint` returns
+    /// None for every route under this mode, so a caller that asks for it emits
+    /// its ordinary host loops rather than anything wrong.
+    ///
+    /// What the row is holding a place for (see the plan's CUDA notes):
+    ///   * availability will be `cudaEmitModeEnabled () && <cuBLAS resolved>`,
+    ///     the same shape as the host gate but with two conjuncts;
+    ///   * cuBLAS is COLUMN-MAJOR with no row-major mode, so `C = A·B`
+    ///     row-major is emitted as `gemm(B, A)` with the operands SWAPPED and
+    ///     the result read back as its own transpose — a per-route rewrite that
+    ///     belongs in the entry-point table, not in the classifiers;
+    ///   * the LAPACK-level sibling is cuSOLVER, not "cuLAPACK";
+    ///   * a cuBLAS handle is a per-program resource (create once, destroy at
+    ///     exit), so the emission site needs a program-level prologue slot that
+    ///     the host path has no analogue of.
+    | CudaBlas
+
+// ============================================================================
+// Precision
+// ============================================================================
+
+/// The BLAS precision letter an element type dispatches to. This is the second
+/// axis of the (routine × precision × symmetry) matrix: the routine FAMILY is
+/// chosen by symmetry (see `LinAlgRoute`), the letter by this.
+///
+/// Everything not listed — integers, booleans, structs, unit-annotated
+/// scalars — has no BLAS analogue at all and answers None, which is a decline
+/// at every classifier.
+type Precision =
+    /// float32 — `s` routines.
+    | PrecS
+    /// float64 — `d` routines.
+    | PrecD
+    /// complex<float> — `c` routines.
+    | PrecC
+    /// complex<double> — `z` routines.
+    | PrecZ
+
+/// The BLAS precision of an element type, or None when the type has no routine
+/// family. Replaces the old boolean `isRealDouble`: a boolean could only ever
+/// answer "is this the one type we support", which stops being the right
+/// question the moment a second precision is routed.
+let precisionOf (t: IRType) : Precision option =
+    match t with
+    | IRTScalar ETFloat32 -> Some PrecS
+    | IRTScalar ETFloat64 -> Some PrecD
+    | IRTScalar ETComplex64 -> Some PrecC
+    | IRTScalar ETComplex128 -> Some PrecZ
+    | _ -> None
+
+/// The one-letter cblas prefix, used to build entry-point names.
+let precisionLetter (p: Precision) : string =
+    match p with
+    | PrecS -> "s"
+    | PrecD -> "d"
+    | PrecC -> "c"
+    | PrecZ -> "z"
+
+/// Is this precision COMPLEX? The distinction is load-bearing rather than
+/// cosmetic: for a same-array gram it selects `herk` over `syrk` (Blade's
+/// complex gram is HERMITIAN — its scalar loop already conjugates the second
+/// factor), and for an inner product it is the reason the route must be
+/// `dotu` and never `dotc`.
+let isComplexPrecision (p: Precision) : bool =
+    match p with
+    | PrecC | PrecZ -> true
+    | PrecS | PrecD -> false
+
 // ============================================================================
 // Descriptor
 // ============================================================================
@@ -114,7 +233,9 @@ type BlasLevel =
 type LinAlgRoutine =
     /// C = A * B (general matrix product) — `blade_gemm`.
     | Gemm
-    /// C = A * A^T, one triangle (symmetric rank-k update) — `blade_syrk`.
+    /// C = A * A^T (real) or A * A^H (complex), one triangle — `blade_syrk`.
+    /// The complex instance is a HERMITIAN rank-k update (`cherk`/`zherk`), not
+    /// a symmetric one: see `LinAlgRoute.RouteGramSame`.
     | Syrk
     /// y = A * x (matrix-vector).
     | Gemv
@@ -128,6 +249,9 @@ type LinAlgRoutine =
     | Axpy
     /// x = alpha * x.
     | Scal
+    /// Symmetric / Hermitian eigendecomposition — LAPACK, not BLAS.
+    /// `?spev`/`?hpev` for packed operands, `?syev`/`?heev` for dense.
+    | Eigh
 
 /// Where a recognised shape is actually EXECUTED.
 type Routing =
@@ -155,16 +279,53 @@ type OperandRole =
 /// symmetric result is PACKED triangular storage while its general result is a
 /// dense pool — a difference the shim (not codegen) has to absorb.
 type LinAlgRoute =
-    /// `blade_gram_same` — A·Aᵀ into packed upper-triangular symmetric storage.
+    /// `blade_gram_same_<p>` — one triangle into Blade's PACKED upper-triangular
+    /// storage.
+    ///
+    /// REAL:    C = A·Aᵀ, a symmetric rank-k update  (`ssyrk` / `dsyrk`).
+    /// COMPLEX: C = A·A^H, a HERMITIAN rank-k update (`cherk` / `zherk`).
+    ///
+    /// The complex case is not a naming quibble. Blade's own scalar loop for a
+    /// complex gram accumulates `A[i][k] * conj_scalar(A[j][k])` — conjugating
+    /// the SECOND factor — which is exactly A·A^H and exactly what `herk`
+    /// computes. Binding the complex instance to `zsyrk` (the name-symmetric
+    /// choice) would silently compute a different matrix, and would also
+    /// disagree with the Hermitian storage class Blade deduces for the result.
     | RouteGramSame
-    /// `blade_gram_distinct` — A·Bᵀ into a dense pool.
+    /// `blade_gram_distinct_<p>` — into a dense pool.
+    ///
+    /// REAL:    C = A·Bᵀ  (`sgemm`/`dgemm`, transB = Trans).
+    /// COMPLEX: C = A·B^H (`cgemm`/`zgemm`, transB = **ConjTrans**), because
+    /// the scalar loop conjugates B's element exactly as in the same-array case.
     | RouteGramDistinct
-    /// `blade_matmul` — A·B into a dense pool.
+    /// `blade_matmul_<p>` — A·B into a dense pool. f64 only at the SURFACE
+    /// (`TypeCheck.inferMatmul`), so only the `d` instance is reachable today;
+    /// widening the surface is a separate language decision.
     | RouteMatmul
-    /// `blade_dot` — s = seed + x·y over two rank-1 pools.
+    /// `blade_dot_<p>` — s = seed + x·y over two rank-1 pools.
+    ///
+    /// COMPLEX IS `dotu`, NEVER `dotc`. The matched shape is
+    /// `reduce(zip(x, y) under *, (+))`, whose kernel is `a * b` with NO
+    /// conjugation anywhere. `dotc` computes Σ conj(x_i)·y_i and would silently
+    /// return a different number — most visibly for `dot(x, x)`, where `dotc`
+    /// gives the real squared norm and Blade's fold gives the complex Σ x_i².
+    /// A conjugating inner product is a DIFFERENT operation and needs its own
+    /// surface form (a `prodsum` with an explicit `conj`, matched as its own
+    /// pattern); it is deliberately not implemented here.
     | RouteDot
-    /// `blade_gemv` — y = A·x, row skeleton in, rank-1 pool out.
+    /// `blade_gemv_<p>` — y = A·x, row skeleton in, rank-1 pool out. The matched
+    /// body is `prodsum(row, x)`, which conjugates nothing, so every precision
+    /// uses `CblasNoTrans` — including the complex ones.
     | RouteGemv
+    /// `blade_eigh_packed_<p>` — eigendecomposition of a rank-2 COMPACT
+    /// operand, straight off `pool_base`. Real is `?spev`; complex is
+    /// `?hpev` (Hermitian). THE ZERO-CONVERSION ROUTE: Blade's row-major-upper
+    /// packed pool IS col-major-lower packed for a real symmetric matrix
+    /// (measured n = 1..6), so LAPACK reads it as it stands.
+    | RouteEighPacked
+    /// `blade_eigh_dense_<p>` — eigendecomposition of a dense rank-2 operand
+    /// asserted symmetric (real, `?syev`) or Hermitian (complex, `?heev`).
+    | RouteEighDense
 
 /// An operand as classified: the IR expression, its role, and whether the call
 /// consumes it transposed.
@@ -207,7 +368,11 @@ type LinAlgCall = {
     Routine: LinAlgRoutine
     Route: LinAlgRoute
     Level: BlasLevel
-    Routing: Routing
+    // NOTE: there is deliberately NO `Routing` field. Routing is a function of
+    // (routine × BACKEND), and this descriptor is produced by mode-agnostic
+    // classifiers — carrying a mode-dependent answer on a mode-independent
+    // record is exactly the inconsistency the backend DU exists to prevent.
+    // `shimEntryPoint` reads `routingOf backend call.Routine` instead.
     /// NODE-matched routes only (gram/matmul): the operands as IR expressions.
     /// Empty for nest-matched routes, which use `NestOperands` instead.
     Operands: LinAlgOperand list
@@ -223,10 +388,14 @@ type LinAlgCall = {
     N: DimSource option
     /// The contracted extent.
     K: DimSource option
-    /// Element type of the contraction. v1 shim routes require Float64.
+    /// Element type of the contraction, as classified.
     ElemType: IRType
+    /// `ElemType`'s BLAS precision — the second dispatch axis. Filled by every
+    /// classifier and READ by `shimEntryPoint` to pick the routine letter, so a
+    /// call can never reach an entry point of the wrong width.
+    Precision: Precision
     /// True when the result is written into Blade's packed triangular
-    /// (symmetric) storage rather than a dense pool.
+    /// (symmetric or Hermitian) storage rather than a dense pool.
     PackedTriangularResult: bool
 }
 
@@ -243,35 +412,57 @@ type LinAlgCall = {
 /// with L3 >> L2 because blocking and microkernels are simply unreachable from
 /// generated loop code.
 ///
-/// A row exists for every routine this module can NAME, including the ones it
-/// cannot yet MATCH, so "matched but routed native" and "not yet matched" are
+/// A row exists for every (routine × BACKEND) pair this module can NAME,
+/// including the ones it cannot yet MATCH or EMIT, so "matched but routed
+/// native", "not yet matched" and "backend not implemented" are all
 /// distinguishable by reading one table.
-let policy : (LinAlgRoutine * BlasLevel * Routing * string) list =
-    [ Gemm, L3, ViaShim,
-      "the one shape emitted loop code cannot approach; blocking/microkernels pay by orders of magnitude"
-      Syrk, L3, ViaShim,
-      "same as gemm, and it halves the work by computing one triangle — which is also Blade's storage"
-      Gemv, L2, ViaShim,
-      "pays modestly (bandwidth-bound but cache-blocked); MATCHED (Phase 5b) on the per-row prodsum-fiber nest"
-      Dot,  L1, ViaShim,
-      "an L1 REDUCTION, unlike axpy/scal: the serial FP chain is the bottleneck and BLAS breaks it; MATCHED (Phase 5b) on reduce-over-deferred-zip-product. PRECEDENCE: an `omp`-licensed fold kernel WINS — an explicit user reorder licence beats a dispatch heuristic, and under no-BLAS this route's fallback is serial, so firing would silently strip licensed parallelism"
-      Nrm2, L1, ViaShim,
-      "same paying L1-reduction argument as dot, but NOT MATCHED in v1: recognising it means seeing a `sqrt` wrapped around a SELF-dot, and no sqrt-shape case exists in the classifier yet"
-      Axpy, L1, Native,
-      "bandwidth-bound elementwise; the Phase 3 flat loop already vectorises it, so a call boundary is pure loss"
-      Scal, L1, Native,
-      "same as axpy — an elementwise scale is one vectorised pass either way" ]
+let private cudaPending =
+    "CudaBlas is DECLARED, NOT IMPLEMENTED: every route routes Native under this mode, so a caller asking for it emits its ordinary host loops rather than anything wrong. See LinAlgBackend.CudaBlas for what landing it requires (column-major operand swap, cuSOLVER for the LAPACK level, per-program handle lifecycle)"
 
-/// The routing decision for a routine, from the table above.
-let routingOf (r: LinAlgRoutine) : Routing =
+let policy : (LinAlgRoutine * BlasLevel * LinAlgBackend * Routing * string) list =
+    [ Gemm, L3, HostBlas, ViaShim,
+      "the one shape emitted loop code cannot approach; blocking/microkernels pay by orders of magnitude"
+      Syrk, L3, HostBlas, ViaShim,
+      "same as gemm, and it halves the work by computing one triangle — which is also Blade's storage. COMPLEX instances are HERMITIAN (cherk/zherk), matching what Blade's own complex loop already computes"
+      Gemv, L2, HostBlas, ViaShim,
+      "pays modestly (bandwidth-bound but cache-blocked); MATCHED (Phase 5b) on the per-row prodsum-fiber nest"
+      Dot,  L1, HostBlas, ViaShim,
+      "an L1 REDUCTION, unlike axpy/scal: the serial FP chain is the bottleneck and BLAS breaks it; MATCHED (Phase 5b) on reduce-over-deferred-zip-product. COMPLEX instances are dotu, NEVER dotc (Blade's fold does not conjugate). PRECEDENCE: an `omp`-licensed fold kernel WINS — an explicit user reorder licence beats a dispatch heuristic, and under no-BLAS this route's fallback is serial, so firing would silently strip licensed parallelism"
+      Nrm2, L1, HostBlas, ViaShim,
+      "same paying L1-reduction argument as dot, but NOT MATCHED: recognising it means seeing a `sqrt` wrapped around a SELF-dot, and no sqrt-shape case exists in the classifier yet"
+      Axpy, L1, HostBlas, Native,
+      "bandwidth-bound elementwise; the Phase 3 flat loop already vectorises it, so a call boundary is pure loss"
+      Scal, L1, HostBlas, Native,
+      "same as axpy — an elementwise scale is one vectorised pass either way"
+      Eigh, L3, HostBlas, ViaShim,
+      "LAPACK, not BLAS: an eigensolver is unreachable from emitted loop code at any quality, and Blade's synthesized cyclic Jacobi is O(sweeps·n^3) against LAPACK's blocked tridiagonal reduction. Gated separately (lapackAvailable / -DBLADE_HAS_LAPACK) and PERMANENTLY outside byte-identity: eigenvector sign and degenerate-subspace basis are not unique"
+      Gemm, L3, CudaBlas, Native, cudaPending
+      Syrk, L3, CudaBlas, Native, cudaPending
+      Gemv, L2, CudaBlas, Native, cudaPending
+      Dot,  L1, CudaBlas, Native, cudaPending
+      Nrm2, L1, CudaBlas, Native, cudaPending
+      Axpy, L1, CudaBlas, Native, cudaPending
+      Scal, L1, CudaBlas, Native, cudaPending
+      // The device eigensolver sibling is cuSOLVER (`cusolverDnDsyevd` /
+      // `cusolverDnZheevd`), NOT cuBLAS and not "cuLAPACK" — a separate
+      // library, a separate handle, and a workspace-query protocol cuBLAS has
+      // no analogue of. Declared Native for the same reason as the rows above.
+      Eigh, L3, CudaBlas, Native,
+      "cuSOLVER (cusolverDnDsyevd / cusolverDnZheevd), not cuBLAS: separate library, separate handle, explicit workspace query. " + cudaPending ]
+
+/// The routing decision for a routine UNDER A BACKEND, from the table above.
+let routingOf (backend: LinAlgBackend) (r: LinAlgRoutine) : Routing =
     policy
-    |> List.tryPick (fun (rr, _, routing, _) -> if rr = r then Some routing else None)
+    |> List.tryPick (fun (rr, _, bb, routing, _) ->
+        if rr = r && bb = backend then Some routing else None)
     |> Option.defaultValue Native
 
-/// The BLAS level of a routine, from the table above.
+/// The BLAS level of a routine, from the table above. Backend-independent: the
+/// level is a property of the operation's arithmetic intensity, not of where it
+/// runs, so it is read off whichever row names the routine first.
 let levelOf (r: LinAlgRoutine) : BlasLevel =
     policy
-    |> List.tryPick (fun (rr, lvl, _, _) -> if rr = r then Some lvl else None)
+    |> List.tryPick (fun (rr, lvl, _, _, _) -> if rr = r then Some lvl else None)
     |> Option.defaultValue L1
 
 /// The C++ entry point a routed call lands on. Kept here (not in CodeGen) so
@@ -292,32 +483,62 @@ let levelOf (r: LinAlgRoutine) : BlasLevel =
 /// A call that classifies but gets no entry point is a DECLINED DISPATCH, and
 /// all four emission sites already spell that case: gram and matmul fall to
 /// their own scalar loops, dot and gemv fall through to the ordinary loop-nest
-/// emitters. So "gate off" and "shape not recognised" reach the same, already
-/// exercised, code.
-let shimEntryPoint (call: LinAlgCall) : string option =
-    if not (blasAvailable ()) then None else
-    match call.Routing with
+/// emitters. So "gate off", "backend not implemented" and "shape not
+/// recognised" all reach the same, already exercised, code.
+///
+/// THE BACKEND MODE ENTERS HERE AND ONLY HERE. The classifiers above never see
+/// it, which is what keeps one copy of the shape-matching logic across targets.
+///
+/// THE PRECISION LETTER IS APPENDED HERE, so the emitted TEXT names the exact
+/// routine family and width — `blade_gram_same_z` is visibly a `zherk` call and
+/// `blade_gram_same_d` a `dsyrk` one. That is deliberate: it makes the routing
+/// decision assertable from generated source, which is the only place a
+/// mis-dispatch would show (the values agree to a ULP either way).
+let shimEntryPoint (backend: LinAlgBackend) (call: LinAlgCall) : string option =
+    let available =
+        match backend with
+        // The LAPACK routes ride their own gate and their own header, so the
+        // availability question is per-ROUTINE, not per-backend alone. Routing
+        // it here keeps the single-funnel property: still one place, one
+        // conjunct, now reading the right predicate for the routine at hand.
+        | HostBlas when call.Routine = Eigh -> lapackAvailable ()
+        | HostBlas -> blasAvailable ()
+        // Declared, not implemented — see LinAlgBackend.CudaBlas. Returning
+        // None here (rather than omitting the arm) is what makes "asked for a
+        // backend that does not exist yet" a clean fall-through to host loops
+        // instead of a compile error or, worse, a host call in device code.
+        | CudaBlas -> false
+    if not available then None else
+    match routingOf backend call.Routine with
     | Native -> None
     | ViaShim ->
+        let p = precisionLetter call.Precision
         match call.Route with
-        | RouteGramSame -> Some "blade_linalg::blade_gram_same"
-        | RouteGramDistinct -> Some "blade_linalg::blade_gram_distinct"
-        | RouteMatmul -> Some "blade_linalg::blade_matmul"
-        | RouteDot -> Some "blade_linalg::blade_dot"
-        | RouteGemv -> Some "blade_linalg::blade_gemv"
+        | RouteGramSame -> Some (sprintf "blade_linalg::blade_gram_same_%s" p)
+        | RouteGramDistinct -> Some (sprintf "blade_linalg::blade_gram_distinct_%s" p)
+        | RouteMatmul -> Some (sprintf "blade_linalg::blade_matmul_%s" p)
+        | RouteDot -> Some (sprintf "blade_linalg::blade_dot_%s" p)
+        | RouteGemv -> Some (sprintf "blade_linalg::blade_gemv_%s" p)
+        // Different namespace AND different header: `blade_lapack.hpp` carries
+        // its own `#ifndef BLADE_HAS_LAPACK #error`, so a program that names
+        // these advertises a LAPACK dependency distinct from a BLAS one.
+        | RouteEighPacked -> Some (sprintf "blade_lapack::blade_eigh_packed_%s" p)
+        | RouteEighDense -> Some (sprintf "blade_lapack::blade_eigh_dense_%s" p)
 
 // ============================================================================
-// Classification entry points (v1)
+// Classification entry points
 // ============================================================================
 
-/// v1 shim routes are real-Float64 only: `dsyrk`/`dgemm` and their native
-/// fallbacks. Complex (`zherk`/`zgemm`) and float32 (`ssyrk`/`sgemm`) keep the
-/// compiler's scalar loops — the SAME restriction the pre-shim BLAS lowering
-/// carried, so this changes nothing about which programs use which arithmetic.
-let private isRealDouble (t: IRType) =
-    match t with
-    | IRTScalar ETFloat64 -> true
-    | _ -> false
+/// The precision two operands AGREE on, or None. Mixed precisions decline
+/// rather than promote: BLAS has no mixed-width routine, and silently widening
+/// one operand would be a storage change the caller never asked for. (Blade's
+/// own scalar loops promote per the element-type rules, which is exactly what a
+/// declined route falls back to — so declining costs the optimisation and
+/// changes no value.)
+let private agreedPrecision (a: IRType) (b: IRType) : Precision option =
+    match precisionOf a, precisionOf b with
+    | Some pa, Some pb when pa = pb -> Some pa
+    | _ -> None
 
 let private elemOf (e: IRExpr) : IRType option =
     match typeOf e with
@@ -326,21 +547,28 @@ let private elemOf (e: IRExpr) : IRType option =
 
 /// Classify `gram(l, r)`.
 ///
-///   sameArray -> Syrk: square m x m written into PACKED upper-triangular
-///                symmetric storage (Blade's own layout for the result type).
-///   distinct  -> Gemm with B transposed: C(m x p) = A(m x n) * B(p x n)^T,
-///                dense result.
+///   sameArray -> Syrk: square m x m written into Blade's PACKED
+///                upper-triangular storage. REAL is A·Aᵀ (`ssyrk`/`dsyrk`);
+///                COMPLEX is A·A^H, a HERMITIAN rank-k update
+///                (`cherk`/`zherk`) — which is what Blade's own complex scalar
+///                loop already computes, since it conjugates the second factor.
+///   distinct  -> Gemm with B transposed: C(m x p) = A(m x n) · B(p x n)ᵀ for
+///                real, and A · B^H for complex (`ConjTrans`), matching the
+///                same scalar loop. Dense result.
 ///
-/// Returns None (→ caller keeps its scalar loops) when either operand is not a
-/// real-Float64 array.
+/// Returns None (→ caller keeps its scalar loops) when either operand is not an
+/// array, when their element types have no BLAS precision (integers, structs),
+/// or when the two precisions disagree.
 let classifyGram (l: IRExpr) (r: IRExpr) (sameArray: bool) : LinAlgCall option =
     match elemOf l, elemOf r with
-    | Some le, Some re when isRealDouble le && isRealDouble re ->
+    | Some le, Some re ->
+        match agreedPrecision le re with
+        | None -> None
+        | Some prec ->
         if sameArray then
             Some { Routine = Syrk
                    Route = RouteGramSame
                    Level = L3
-                   Routing = routingOf Syrk
                    Operands = [ { Role = RoleA; Expr = l; Transposed = false } ]
                    NestOperands = []
                    // C is m x m from A's leading axis; the contracted extent is
@@ -349,12 +577,15 @@ let classifyGram (l: IRExpr) (r: IRExpr) (sameArray: bool) : LinAlgCall option =
                    N = Some { Operand = RoleA; Axis = 0 }
                    K = Some { Operand = RoleA; Axis = 1 }
                    ElemType = le
+                   Precision = prec
                    PackedTriangularResult = true }
         else
             Some { Routine = Gemm
                    Route = RouteGramDistinct
                    Level = L3
-                   Routing = routingOf Gemm
+                   // `Transposed` on B is the REAL reading; for a complex
+                   // precision the emission site spells it ConjTrans, which is
+                   // the same flag with the conjugation the scalar loop applies.
                    Operands = [ { Role = RoleA; Expr = l; Transposed = false }
                                 { Role = RoleB; Expr = r; Transposed = true } ]
                    NestOperands = []
@@ -362,27 +593,121 @@ let classifyGram (l: IRExpr) (r: IRExpr) (sameArray: bool) : LinAlgCall option =
                    N = Some { Operand = RoleB; Axis = 0 }
                    K = Some { Operand = RoleA; Axis = 1 }
                    ElemType = le
+                   Precision = prec
                    PackedTriangularResult = false }
     | _ -> None
 
 /// Classify `matmul(a, b)`: C(m x n) = A(m x k) * B(k x n), dense result, no
 /// transposes. The first-class intrinsic's only classification.
+///
+/// Only the `d` instance is reachable: `TypeCheck.inferMatmul` requires Float64
+/// elements at the SURFACE (BL3999), so a f32/complex/int call never gets here.
+/// The precision generalisation below is therefore a backstop that keeps this
+/// classifier honest if the surface is ever widened — but widening it is a
+/// LANGUAGE decision (what should `matmul` mean for complex operands: A·B, or
+/// A·B^H?) and is deliberately not taken here.
 let classifyMatmul (a: IRExpr) (b: IRExpr) : LinAlgCall option =
     match elemOf a, elemOf b with
-    | Some ae, Some be when isRealDouble ae && isRealDouble be ->
-        Some { Routine = Gemm
-               Route = RouteMatmul
-               Level = L3
-               Routing = routingOf Gemm
-               Operands = [ { Role = RoleA; Expr = a; Transposed = false }
-                            { Role = RoleB; Expr = b; Transposed = false } ]
-               NestOperands = []
-               M = Some { Operand = RoleA; Axis = 0 }
-               N = Some { Operand = RoleB; Axis = 1 }
-               K = Some { Operand = RoleA; Axis = 1 }
-               ElemType = ae
-               PackedTriangularResult = false }
+    | Some ae, Some be ->
+        match agreedPrecision ae be with
+        | None -> None
+        | Some prec ->
+            Some { Routine = Gemm
+                   Route = RouteMatmul
+                   Level = L3
+                   Operands = [ { Role = RoleA; Expr = a; Transposed = false }
+                                { Role = RoleB; Expr = b; Transposed = false } ]
+                   NestOperands = []
+                   M = Some { Operand = RoleA; Axis = 0 }
+                   N = Some { Operand = RoleB; Axis = 1 }
+                   K = Some { Operand = RoleA; Axis = 1 }
+                   ElemType = ae
+                   Precision = prec
+                   PackedTriangularResult = false }
     | _ -> None
+
+/// Is this index slot an ORDINARY dense axis: one index component, no
+/// symmetry, no reserved kind, no reserved tag, no dependence on an outer
+/// loop index?
+///
+/// Every one of those five refusals is load-bearing for a BLAS route:
+/// symmetry means the pool is a packed triangle rather than a rectangle; a
+/// reserved `IxKind` (compound / sparse / ragged / dep / group / orbit) means
+/// the axis iterates something other than `[0, extent)`; a `__`-prefixed tag
+/// marks a halo window or kind sentinel; and a dependence makes the level
+/// triangular. BLAS knows about none of these.
+let private isPlainDenseAxis (ix: IRIndexType) =
+    ix.Rank = 1
+    && ix.Symmetry = SymNone
+    && ix.IxKind = IxKPlain
+    && ix.Dependencies.IsEmpty
+    && (match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true)
+/// Classify `eigh(S)` — the symmetric/Hermitian eigendecomposition — on the
+/// OPERAND'S TYPE alone. This is the (routine × precision × SYMMETRY) decision
+/// in one place, and symmetry is the axis that picks the routine FAMILY:
+///
+///   | operand                            | s      | d      | c      | z      |
+///   |------------------------------------|--------|--------|--------|--------|
+///   | rank-2 compact SymSymmetric        | sspev  | dspev  | DECLINE| DECLINE|
+///   | rank-2 compact SymHermitian        | sspev  | dspev  | chpev  | zhpev  |
+///   | dense rank-2 (symmetry ASSUMED)    | ssyev  | dsyev  | cheev  | zheev  |
+///   | anything else (antisym, int, …)    | DECLINE                            |
+///
+/// THE COMPLEX-SYMMETRIC TRAP. A complex array carrying `SymSymmetric` is
+/// complex-SYMMETRIC (A = Aᵀ, no conjugation), which is NOT Hermitian and is
+/// not normal in general. LAPACK has no eigensolver for it at all — there is no
+/// `zsyev` and no `zspev`. Its spectrum is COMPLEX and its eigenvectors are not
+/// orthogonal, so the right routine is the general `zgeev`, which returns a
+/// different result TYPE — a different operation, not a precision swap. The
+/// route therefore DECLINES to the native path. This is the row a
+/// precision-only widening would silently get wrong, exactly as
+/// `zsyrk`-for-`zherk` would at the BLAS level.
+///
+/// REAL + `SymHermitian` routes to the REAL packed entry point, and that is a
+/// theorem rather than a convenience: a real Hermitian matrix IS symmetric, and
+/// `?spev` is the routine for it.
+///
+/// DENSE ASSUMES SYMMETRY, inheriting the surface's own domain — `math.eigh`
+/// documents "symmetry is ASSUMED, not checked". A dense COMPLEX operand is
+/// assumed HERMITIAN, which is what the `h` in `eigh` means and the only
+/// reading under which the operation is defined.
+let classifyEigh (operand: IRArrayType) : LinAlgCall option =
+    if operand.IsVirtual then None else
+    match precisionOf operand.ElemType with
+    | None -> None                                   // int, bool, struct: no family
+    | Some prec ->
+        let complexOperand = isComplexPrecision prec
+        match operand.IndexTypes with
+        // ---- rank-2 COMPACT group: the packed route --------------------------
+        | [ ix ] when ix.Rank = 2 && ix.IxKind = IxKPlain && ix.Dependencies.IsEmpty ->
+            let packedOk =
+                match ix.Symmetry with
+                | SymSymmetric -> not complexOperand   // the complex-symmetric trap
+                | SymHermitian -> true                 // real Hermitian == symmetric
+                | _ -> false                           // antisym / wreath: no route
+            if not packedOk then None
+            else
+                Some { Routine = Eigh
+                       Route = RouteEighPacked
+                       Level = L3
+                       Operands = []
+                       NestOperands = []
+                       M = None; N = None; K = None
+                       ElemType = operand.ElemType
+                       Precision = prec
+                       PackedTriangularResult = false }
+        // ---- dense rank-2: symmetry asserted by the caller -------------------
+        | [ i0; i1 ] when isPlainDenseAxis i0 && isPlainDenseAxis i1 ->
+            Some { Routine = Eigh
+                   Route = RouteEighDense
+                   Level = L3
+                   Operands = []
+                   NestOperands = []
+                   M = None; N = None; K = None
+                   ElemType = operand.ElemType
+                   Precision = prec
+                   PackedTriangularResult = false }
+        | _ -> None
 
 /// The single entry point CodeGen calls: classify whatever node it is holding.
 /// Returns None for everything this layer does not (yet) recognise, which is
@@ -407,21 +732,15 @@ let classify (e: IRExpr) : LinAlgCall option =
 /// the axis iterates something other than `[0, extent)`; a `__`-prefixed tag
 /// marks a halo window or kind sentinel; and a dependence makes the level
 /// triangular. BLAS knows about none of these.
-let private isPlainDenseAxis (ix: IRIndexType) =
-    ix.Rank = 1
-    && ix.Symmetry = SymNone
-    && ix.IxKind = IxKPlain
-    && ix.Dependencies.IsEmpty
-    && (match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true)
-
-/// A real (non-virtual) f64 array of exactly `rank` ordinary dense axes.
+/// A non-virtual, BLAS-precision array of exactly `rank` ordinary dense axes;
+/// answers its precision so the caller can require agreement across operands.
 /// Virtual operands are refused because a `range`/`reverse` view has no pool
 /// to point at — it inlines into index arithmetic at every use.
-let private isDenseF64OfRank (rank: int) (t: IRArrayType) =
-    not t.IsVirtual
-    && isRealDouble t.ElemType
-    && List.length t.IndexTypes = rank
-    && t.IndexTypes |> List.forall isPlainDenseAxis
+let private denseBlasArrayOfRank (rank: int) (t: IRArrayType) : Precision option =
+    if t.IsVirtual then None
+    elif List.length t.IndexTypes <> rank then None
+    elif not (t.IndexTypes |> List.forall isPlainDenseAxis) then None
+    else precisionOf t.ElemType
 
 /// A rank-1 f64 operand that is only ever READ elementwise — never iterated as
 /// a loop level and never peeled. `IxKIrreps` is admitted HERE and nowhere
@@ -437,16 +756,14 @@ let private isDenseF64OfRank (rank: int) (t: IRArrayType) =
 /// operands, gemv's matrix, gemv's output): those positions decide loop bounds
 /// and peel structure, where the extra tag is a difference this classifier has
 /// not established is inert.
-let private isReadOnlyF64Vector (t: IRArrayType) =
-    not t.IsVirtual
-    && isRealDouble t.ElemType
-    && (match t.IndexTypes with
-        | [ ix ] ->
-            ix.Rank = 1
-            && ix.Symmetry = SymNone
-            && (ix.IxKind = IxKPlain || ix.IxKind = IxKIrreps)
-            && ix.Dependencies.IsEmpty
-        | _ -> false)
+let private readOnlyBlasVector (t: IRArrayType) : Precision option =
+    if t.IsVirtual then None else
+    match t.IndexTypes with
+    | [ ix ] when ix.Rank = 1
+                  && ix.Symmetry = SymNone
+                  && (ix.IxKind = IxKPlain || ix.IxKind = IxKIrreps)
+                  && ix.Dependencies.IsEmpty -> precisionOf t.ElemType
+    | _ -> None
 
 /// The one loop level of a depth-1 nest, provided it really iterates
 /// `[0, extent)`: rectangular (no bound dependencies, no strict offset) and
@@ -531,37 +848,43 @@ let (|BlasL1|_|) ((streamedCount, facts, operandTypes, cg): int * DotFoldFacts *
         // describe. (`operandTypes` is positionally parallel to
         // `InputArrayNames`; the caller passes them together for that reason.)
         elif List.length operandTypes <> 2 then None
-        elif not (operandTypes |> List.forall (isDenseF64OfRank 1)) then None
         else
-        match level.Elements with
-        | [ e0; e1 ] when e0.ArrayPosition <> e1.ArrayPosition ->
-            let peelOk (e: ElementBinding) =
-                (match e.Virtual with RealArray -> true | _ -> false)
-                && e.RankComponent = level.Level
-                && e.ArrayRank = 1
-                && e.DimIndex = 0
-                && e.ArrayPosition >= 0 && e.ArrayPosition < 2
-                && e.ArrayName = List.item e.ArrayPosition names
-                && (match e.SlotTag with Some t -> not (t.StartsWith "__") | None -> true)
-                && isRealDouble e.ArrayElemType
-            if not (peelOk e0 && peelOk e1) then None else
-            // Body is exactly `<peel> * <peel>` over the two distinct params.
-            match cg.KernelExpr with
-            | IRBinOp (_, IRMul, IRVar (lId, _), IRVar (rId, _)) when lId <> rId ->
-                let byParam id =
-                    [ e0; e1 ] |> List.tryFind (fun e -> e.ParamVarId = id)
-                match byParam lId, byParam rId with
-                | Some le, Some re ->
-                    Some { Routine = Dot
-                           Route = RouteDot
-                           Level = L1
-                           Routing = routingOf Dot
-                           Operands = []
-                           NestOperands = [ RoleA, FromNestArray le.ArrayName
-                                            RoleB, FromNestArray re.ArrayName ]
-                           M = None; N = None; K = None
-                           ElemType = le.ArrayElemType
-                           PackedTriangularResult = false }
+        match operandTypes |> List.map (denseBlasArrayOfRank 1) with
+        | [ Some p0; Some p1 ] when p0 = p1 ->
+            let prec = p0
+            match level.Elements with
+            | [ e0; e1 ] when e0.ArrayPosition <> e1.ArrayPosition ->
+                let peelOk (e: ElementBinding) =
+                    (match e.Virtual with RealArray -> true | _ -> false)
+                    && e.RankComponent = level.Level
+                    && e.ArrayRank = 1
+                    && e.DimIndex = 0
+                    && e.ArrayPosition >= 0 && e.ArrayPosition < 2
+                    && e.ArrayName = List.item e.ArrayPosition names
+                    && (match e.SlotTag with Some t -> not (t.StartsWith "__") | None -> true)
+                    && precisionOf e.ArrayElemType = Some prec
+                if not (peelOk e0 && peelOk e1) then None else
+                // Body is exactly `<peel> * <peel>` over the two distinct params.
+                // NO CONJUGATION appears here, at any precision — which is why a
+                // complex instance of this route must be `dotu` and never
+                // `dotc`. See `RouteDot`.
+                match cg.KernelExpr with
+                | IRBinOp (_, IRMul, IRVar (lId, _), IRVar (rId, _)) when lId <> rId ->
+                    let byParam id =
+                        [ e0; e1 ] |> List.tryFind (fun e -> e.ParamVarId = id)
+                    match byParam lId, byParam rId with
+                    | Some le, Some re ->
+                        Some { Routine = Dot
+                               Route = RouteDot
+                               Level = L1
+                               Operands = []
+                               NestOperands = [ RoleA, FromNestArray le.ArrayName
+                                                RoleB, FromNestArray re.ArrayName ]
+                               M = None; N = None; K = None
+                               ElemType = le.ArrayElemType
+                               Precision = prec
+                               PackedTriangularResult = false }
+                    | _ -> None
                 | _ -> None
             | _ -> None
         | _ -> None
@@ -610,11 +933,12 @@ let (|BlasL2|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
     elif not (nestModeOk streamedCount cg) then None
     else
     match singleRectangularLevel cg, cg.InputArrayNames, operandTypes with
-    | Some level, [ aName ], [ aTy ] when isDenseF64OfRank 2 aTy ->
-        // Output: rank-1 dense real f64.
+    | Some level, [ aName ], [ aTy ] when (denseBlasArrayOfRank 2 aTy).IsSome ->
+        let prec = (denseBlasArrayOfRank 2 aTy).Value
+        // Output: rank-1 dense, SAME precision as the matrix.
         let outOk =
             match cg.OutputType with
-            | ArrayElem outTy -> isDenseF64OfRank 1 outTy
+            | ArrayElem outTy -> denseBlasArrayOfRank 1 outTy = Some prec
             | _ -> false
         if not outOk then None else
         match level.Elements with
@@ -624,7 +948,7 @@ let (|BlasL2|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
                      && e.RankComponent = level.Level
                      && e.ArrayRank = 2
                      && e.DimIndex = 0
-                     && isRealDouble e.ArrayElemType
+                     && precisionOf e.ArrayElemType = Some prec
                      && (match e.SlotTag with Some t -> not (t.StartsWith "__") | None -> true) ->
             (match cg.KernelExpr with
              | IRProdSum [ IRVar (rowId, _); (IRVar (vecId, _) as vecExpr) ] when rowId = e.ParamVarId ->
@@ -640,21 +964,26 @@ let (|BlasL2|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
                 let vecOk =
                     vecId <> rowId
                     && not (isKernelParam vecId)
+                    // Same precision as the matrix and the output: a mixed-width
+                    // gemv has no BLAS routine and declining costs only the
+                    // optimisation.
                     && (match typeOf vecExpr with
-                        | ArrayElem vt -> isReadOnlyF64Vector vt
+                        | ArrayElem vt -> readOnlyBlasVector vt = Some prec
                         | _ -> false)
                 if not vecOk then None
                 else
+                    // `prodsum(row, x)` conjugates nothing, so every precision —
+                    // complex included — emits CblasNoTrans.
                     Some { Routine = Gemv
                            Route = RouteGemv
                            Level = L2
-                           Routing = routingOf Gemv
                            Operands = []
                            NestOperands = [ RoleA, FromNestArray aName
                                             RoleB, FromKernelRef vecExpr
                                             RoleC, FromNestOutput cg.OutputName ]
                            M = None; N = None; K = None
                            ElemType = e.ArrayElemType
+                           Precision = prec
                            PackedTriangularResult = false }
              | _ -> None)
         | _ -> None

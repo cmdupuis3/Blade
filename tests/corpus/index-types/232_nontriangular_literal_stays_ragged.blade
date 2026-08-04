@@ -1,0 +1,14 @@
+// TEST: Non-Triangular Literal Stays Ragged
+// The other side of 230: the symmetric default fires ONLY on the exact
+// simplex profile (rows n, n-1, ..., 1). These rows step 3, 1, 2 — no compact
+// class stores that — so inference is unchanged and the literal is the inline
+// ragged array it always was, rows indexed on their own terms: r(1, 0) is the
+// short row's only cell, with no fold and no mirror.
+let R = [[1, 2, 3], [4], [5, 6]]
+let r10 = R(1, 0)
+let r20 = R(2, 0)
+let r21 = R(2, 1)
+// EXPECT: R = [[1, 2, 3], [4], [5, 6]]
+// EXPECT: r10 = 4
+// EXPECT: r20 = 5
+// EXPECT: r21 = 6

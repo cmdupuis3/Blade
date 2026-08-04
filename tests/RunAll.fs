@@ -298,6 +298,18 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Skipped without it — but needs no BLAS (it includes the BLAS-free
     // blade_linalg_views.hpp). (Also `blade test linalg`.)
     let linalgProbe = Blade.Tests.LinAlgTests.runLinAlgProbeTests ()
+    // Eigensolver dispatch (Phase 6 / Round B2): verifies `math.eigh` reaches
+    // `blade_lapack::blade_eigh_*` gate-on (right precision AND right symmetry
+    // family), that a complex operand's tuple is Q-complex/LAM-REAL, that the
+    // gate-off and explicit-sweeps paths are still the synthesized Jacobi with
+    // no LAPACK dependency named anywhere, and that `inferEigh` rejects the rows
+    // LAPACK has no routine for. The gate-off pin is the load-bearing one: the
+    // corpus, `interp math` and `diff-oracle math` all run that arm, and an
+    // eigensolver's output is not unique, so leaked dispatch would not merely
+    // fail those suites but strip them of meaning. Pure codegen string checks —
+    // no toolchain, no LAPACK — so it runs unconditionally. (Also `blade test
+    // lapack`.)
+    let lapackEmit = Blade.Tests.LapackTests.runLapackEmissionTests ()
     // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
     // regions when cores are available. Opt-in (see FullSuiteOptions).
     let omp =
@@ -378,7 +390,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield lapackEmit
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

@@ -395,6 +395,28 @@ let linalgUsedCell () : bool ref =
         fresh
     else v
 
+/// Collector: did THIS program assembly emit a `blade_lapack::` dispatch call?
+/// Set by the eigh emitter (Phase 6 / Round B2); the program assemblers append
+/// `#include "blade_lapack.hpp"`, and Build.fs sniffs that line to add
+/// `-DBLADE_HAS_LAPACK`.
+///
+/// A SEPARATE CELL FROM `linalgUsedCell`, for the reason `lapackAvailable` is a
+/// separate predicate from `blasAvailable`: the two headers are independently
+/// includable and carry independent defines, so a gram/matmul program must not
+/// start advertising a LAPACK dependency it does not have. Sharing one cell
+/// would make every BLAS program include the eigensolver header, and every
+/// LAPACK program include the BLAS one.
+let private lapackUsedStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let lapackUsedCell () : bool ref =
+    let v = lapackUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        lapackUsedStorage.Value <- fresh
+        fresh
+    else v
+
 /// Collector: did THIS program assembly emit code that calls the OpenMP RUNTIME
 /// API (`omp_get_max_threads` / `omp_get_thread_num`), as opposed to only
 /// `#pragma omp` (which needs no header)? Set by the comm-licensed parallel-fold
@@ -990,6 +1012,14 @@ let inferInlineElemTypeStr (opName: string) (form: IRExpr) : string =
         // rank-changing assembly combinators untyped); their result element
         // type is their operands', which TypeCheck has already unified.
         | IRStack (a :: _) | IRJoin (a :: _, _) -> a
+        // eigh's RESULT is a tuple, which has no single element type — asking
+        // this function for one would collect a spurious "unresolvable element
+        // type" warning and hand back the poison sentinel on a perfectly good
+        // program. Answer the OPERAND's element type instead. The value is
+        // never consumed (materializeEighForm ignores the caller's string and
+        // derives BOTH element types itself, since Q's and LAM's can differ),
+        // so this arm exists purely to keep the diagnostic honest.
+        | IREigh a -> a
         | _ -> form
     match inferExprType arrExpr with
     | ArrayElem a -> elemTypeToCpp a.ElemType
@@ -2771,6 +2801,12 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         materializeGramForm subst names varName elemTypeStr lExpr rExpr sameArray
     | IRMatmul (lExpr, rExpr) ->
         materializeMatmulForm subst names varName elemTypeStr lExpr rExpr
+    // `elemTypeStr` is deliberately NOT forwarded: eigh produces TWO pools whose
+    // element types can differ (complex Q, real LAM), so a single caller-supplied
+    // element string cannot describe the result. The form derives both from the
+    // OPERAND's type, which is the only place the pair is jointly determined.
+    | IREigh operand ->
+        materializeEighForm subst names varName operand
     | _ -> None
 
 
@@ -3673,7 +3709,7 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // the row skeleton, so Blade storage is unchanged either way.
         let linalgCall = Blade.LinAlgPatterns.classify (IRGram (lExpr, rExpr, sameArray))
         let shimEntry =
-            linalgCall |> Option.bind Blade.LinAlgPatterns.shimEntryPoint
+            linalgCall |> Option.bind (Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas)
         let useShim = shimEntry.IsSome
         // Pool capacities for the shim's contiguity probe (Phase 5d). See
         // `denseCellCountExpr`: the probe cannot derive these from the row
@@ -3790,7 +3826,7 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         let lCells = denseCellCountExpr lTy lName
         let rCells = denseCellCountExpr rTy rName
         let linalgCall = Blade.LinAlgPatterns.classify (IRMatmul (lExpr, rExpr))
-        let shimEntry = linalgCall |> Option.bind Blade.LinAlgPatterns.shimEntryPoint
+        let shimEntry = linalgCall |> Option.bind (Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas)
         if shimEntry.IsSome then (linalgUsedCell ()).Value <- true
         let extentDecl =
             [ sprintf "size_t %s[2];" extentsName
@@ -3819,6 +3855,170 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                   sprintf "}" ]
         Some (extentDecl @ [allocDecl] @ loop,
               [MatPool (varName, outElemStr, 2, "nullptr", None)])
+     | _ -> None)
+
+
+and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (operand: IRExpr) : (string list * MaterializedAlloc list) option =
+    // eigh(S) -> (Q, LAM). Phase 6 / Round B2 of
+    // docs/plan-cpp-perf-exploitation.md.
+    //
+    // ============================ THE DESIGN =============================
+    // Every OTHER materialize*Form produces ONE array: it allocates a pool,
+    // fills it, names it `varName`, and hands back one MatPool. This one has to
+    // produce a TUPLE of two arrays with (for a complex operand) DIFFERENT
+    // element types, because that is what the binding downstream consumes:
+    // `let (Q, LAM) = m.eigh(S)` lowers to an anonymous tuple binding plus two
+    // `IRTupleProj`s, and codegen already emits that pair as
+    //
+    //     std::tuple<Array<double, 2>, Array<double, 1>> __tup_58 = <value>;
+    //     Array<double, 2> Q   = std::get<0>(__tup_58);
+    //     Array<double, 1> LAM = std::get<1>(__tup_58);
+    //
+    // — the convention the SYNTHESIZED Jacobi function already returns by value
+    // (`return std::make_tuple(qo, lam);`). So the whole novelty is confined to
+    // producing that one `<value>`, and nothing about the destructuring, the
+    // tuple type rendering, or the projections had to change.
+    //
+    // The shape: declare the two pools under DERIVED names (`<var>__q`,
+    // `<var>__lam`), let the shim write straight into them, then bind `varName`
+    // itself to `std::make_tuple(<var>__q, <var>__lam)`. The tuple holds COPIES
+    // of the two `Array<T,N>` wrappers — a data pointer plus an extents pointer
+    // each — so `std::get<0>(...)` yields a wrapper aliasing the same pool, and
+    // both extents tables are ordinary stack arrays in the same scope, exactly
+    // as gram's and matmul's are. Nothing is heap-owned beyond the two pools,
+    // which are returned as MatPool descriptors so the scope exit frees both.
+    //
+    // Why the shim writes into pre-allocated pools rather than returning them:
+    // `blade_lapack`'s entry points take `lam` and `V` as OUT parameters
+    // (`double* lam, double** V`), which is what lets Blade own the storage
+    // class — LAPACK's own workspace is a `std::vector` inside the adapter and
+    // never escapes. Q is DENSE even when the operand is packed: eigenvectors of
+    // a symmetric matrix carry no symmetry of their own.
+    //
+    // ROUTE SELECTION IS `LinAlgPatterns.classifyEigh`, not a local test. The
+    // packed route hands LAPACK `pool_base(S.data)` with ZERO conversion (the
+    // measured self-duality: Blade's row-major-upper packed pool IS col-major-
+    // lower packed for a symmetric matrix); the dense route hands it the row
+    // SKELETON `S.data` and the adapter copies through `Arows[i][j]`, the same
+    // subscript Blade's own loops use.
+    let srcName = exprToCppCore subst names operand
+    (match inferExprType operand with
+     | ArrayElem sa ->
+        let call = Blade.LinAlgPatterns.classifyEigh sa
+        let shimEntry = call |> Option.bind (Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas)
+        match call, shimEntry with
+        | Some c, Some entry ->
+            (lapackUsedCell ()).Value <- true
+            let qElemStr = irTypeToCpp sa.ElemType
+            // The eigenvalues of a symmetric/Hermitian matrix are REAL, so LAM's
+            // element type is the operand's REAL counterpart — `double` beside a
+            // `std::complex<double>` Q. This mirrors `IR.CarriedType`'s IREigh
+            // arm and `TypeCheck.inferEigh`'s result type; all three must agree,
+            // and the shim's signature (`std::complex<double>** V, double* lam`)
+            // is the fourth statement of the same fact.
+            let lamElemStr =
+                match sa.ElemType with
+                | IRTScalar ETComplex128 -> irTypeToCpp (IRTScalar ETFloat64)
+                | IRTScalar ETComplex64 -> irTypeToCpp (IRTScalar ETFloat32)
+                | t -> irTypeToCpp t
+            let nExtent = sprintf "%s.extents[0]" srcName
+            let qName = sprintf "%s__q" varName
+            let lamName = sprintf "%s__lam" varName
+            let qExtents = sprintf "%s_extents" qName
+            let lamExtents = sprintf "%s_extents" lamName
+            // `n` COMES FROM `.extents[0]`, AND THAT IS RIGHT FOR BOTH ROUTES —
+            // measured, not assumed. A rank-2 compact pool's extents table holds
+            // the LOGICAL extents, not the packed cell count: `gram(A, A)`
+            // emits `G_extents[0] = A.extents[0]; G_extents[1] = A.extents[0];`
+            // for its packed symmetric result. So `S.extents[0]` is `n` whether
+            // S is dense or packed, and the shim derives `n(n+1)/2` itself.
+            //
+            // THE PACKED ROUTE IS NOT REACHABLE FROM `math.eigh` TODAY, and the
+            // block is kept anyway. `MathElaborate.arrayShape` resolves a
+            // declared shape one plain axis at a time, so a `SymIdx<2, n>`
+            // operand is refused with BL5200 ("every axis extent must be
+            // statically known") BEFORE any marker is emitted — identically with
+            // the gate on and off, so this introduces no gate-dependent
+            // asymmetry. That makes packed eigh the same shape `blade_symv`
+            // already has: a verified route (classifier pins + the shim's
+            // invariant checks) waiting on a surface. Teaching `arrayShape`
+            // compact axes is the one change that lands it.
+            //
+            // The operand as the shim wants it: a flat packed pool for the
+            // `?spev`/`?hpev` route, the row skeleton for `?syev`/`?heev`.
+            let (operandArg, routeLabel) =
+                match c.Route with
+                | Blade.LinAlgPatterns.RouteEighPacked ->
+                    (sprintf "nested_array_utilities::pool_base(%s.data)" srcName,
+                     "packed upper-triangular operand, zero conversion")
+                | _ ->
+                    (sprintf "%s.data" srcName, "dense operand, symmetry asserted")
+            let decls =
+                [ sprintf "size_t %s[2];" qExtents
+                  sprintf "%s[0] = %s;" qExtents nExtent
+                  sprintf "%s[1] = %s;" qExtents nExtent
+                  arrayAlloc { Ind = ""; Elem = qElemStr; Rank = 2; Name = qName
+                               Symm = "nullptr"; Strict = None; Extents = qExtents }
+                  sprintf "size_t %s[1];" lamExtents
+                  sprintf "%s[0] = %s;" lamExtents nExtent
+                  arrayAlloc { Ind = ""; Elem = lamElemStr; Rank = 1; Name = lamName
+                               Symm = "nullptr"; Strict = None; Extents = lamExtents } ]
+            // BLOCK comment, not `//`: these lines are SPACE-JOINED into a
+            // single-line IIFE at expression positions, where a line comment
+            // would swallow the rest of the statement (the lesson math/057
+            // taught the gram emitter).
+            let dispatch =
+                sprintf "/* lapack dispatch: eigh(S) -> (Q, LAM), %s */ %s(%s, %s, %s.data, %s.data);"
+                    routeLabel entry nExtent operandArg lamName qName
+            // The binding value the existing destructuring consumes. Spelled
+            // with the EXPLICIT tuple type rather than `auto` so it matches the
+            // `std::tuple<Array<double, 2>, Array<double, 1>>` form a
+            // tuple-returning function's result already binds as — one shape for
+            // both producers.
+            let tupleLine =
+                sprintf "std::tuple<Array<%s, 2>, Array<%s, 1>> %s = std::make_tuple(%s, %s);"
+                    qElemStr lamElemStr varName qName lamName
+            // BOTH POOLS ARE REGISTERED, and it is the OWNER-ID path — not the
+            // return-NAME one — that makes that safe. eigh is the first
+            // materialize form whose pools are not named after the binding
+            // (`<binding>__q` / `<binding>__lam`), so `genFuncBodyScoped`'s
+            // return suppression, a whole-token match of the rendered return
+            // text against `registeredAllocNames ()`, cannot see them: what
+            // escapes a function is the DESTRUCTURED projection (`return Q;`,
+            // where `Array<double,2> Q = std::get<0>(__tup_58);`), and that text
+            // names neither pool.
+            //
+            // The escape ANALYSIS covers it instead, and covers it exactly. The
+            // `None` owner in these descriptors is not the owner that survives:
+            // `registerAlloc` STAMPS every registration with the enclosing
+            // frame's `CurrentOwner` — the id of the source-level `let` being
+            // rendered, set by the per-let folds in `genFuncBodyScoped` and
+            // `genForRangeBinding` (see `setAllocOwner`) — so both pools end up
+            // owned by the `__tup_N` binding itself. `computeScopeEscapes` then
+            // reaches that id whenever a projection escapes: `Q`'s id is seeded
+            // from the return expression, its value `IRTupleProj(__tup, 0)` is a
+            // non-barrier view form, so propagation pulls in `__tup`'s id, and
+            // `popAllocScopeFrees` spares both pools through `ownerEscapes`.
+            // Ownership is all-or-nothing per let, which is exactly the
+            // granularity a tuple of two pools needs — spare one, spare both.
+            //
+            // At module level there is no live frame, so registration no-ops and
+            // the pools live to program exit for auto-print / EXPECT pins — the
+            // same treatment every other module binding gets.
+            Some (decls @ [dispatch; tupleLine],
+                  [ MatPool (qName, qElemStr, 2, "nullptr", None)
+                    MatPool (lamName, lamElemStr, 1, "nullptr", None) ])
+        | _ ->
+            // UNREACHABLE from the surface: `TypeCheck.inferEigh` accepts an
+            // operand only when `classifyEigh` gave it a route, and the node
+            // itself only exists when `lapackAvailable ()` held at elaboration.
+            // Reaching here means the gate flipped BETWEEN elaboration and
+            // emission inside one process (a test's use-guard, say). There is no
+            // native arm to fall back to — the native math is the synthesized
+            // Jacobi source the elaborator did not emit — so refuse loudly at
+            // C++ compile time rather than declaring nothing and leaving the
+            // destructuring to reference an undefined name.
+            Some ([ sprintf "#error \"Blade codegen: eigh reached emission with no LAPACK route (availability gate changed after elaboration?); the synthesized Jacobi path is chosen at elaboration time and cannot be recovered here\"" ], [])
      | _ -> None)
 
 /// Convert IRExpr to C++ using context
@@ -4573,6 +4773,31 @@ let ompReductionOperator (op: IRBinOp) : string option =
     | IRAdd -> Some "+"
     | IRMul -> Some "*"
     | _ -> None
+
+/// Round C: how many independent LANE accumulators Path B's flat form runs
+/// inside one thread's chunk. A single accumulator makes each chunk a serial
+/// dependence chain through the fold kernel — one combine per kernel latency,
+/// with the machine's other pipelines idle. K lanes give the C++ compiler K
+/// independent chains over the same contiguous range.
+///
+/// COMPILE-TIME CONSTANT on purpose. The lane count is part of the fold's
+/// evaluation order, so making it a runtime knob would make the result depend
+/// on something outside (OMP_NUM_THREADS, program text); as a constant, the
+/// determinism story is unchanged — fixed team size still reproduces
+/// bit-for-bit, and every build of the same program agrees.
+///
+/// LICENCE: reordering elements within a chunk is the SAME reorder Phase 2's
+/// gate already licensed (comm, or a builtin body). This constant is only read
+/// on the already-licensed Path B arm; the serial arm and Path A never see it.
+///
+/// Why 8 (measured 2026-08-03, K in {1,4,8,16} over 1e5/1e6/1e7 f64 at
+/// OMP_NUM_THREADS=1; table in docs/plan-cpp-perf-exploitation.md §2
+/// follow-on): 8 is never worse than 4 and is 1.3-1.5x better while the data
+/// is cache-resident; 16 REGRESSES (register pressure spills the lanes back to
+/// the stack, which is the latency the lanes exist to remove). At 1e7 the sweep
+/// is memory-bandwidth-bound and 4/8/16 all converge, so the in-cache regime is
+/// what decides.
+let private foldLaneCount = 8
 
 /// Flatten nested applications of the same commutative+associative op into a list of operands.
 /// E.g. (a * b) * c â†’ [a; b; c]
@@ -5721,7 +5946,7 @@ let tryGenLinAlgNest
     else
     match (Map.count streamed, codeGen.OmpRequested, operandTypes, codeGen) with
     | Blade.LinAlgPatterns.BlasL2 call ->
-        match Blade.LinAlgPatterns.shimEntryPoint call with
+        match Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call with
         | None -> None
         | Some entry ->
             // Name map: enclosing scope first, captures filling only ids it does
@@ -5984,7 +6209,13 @@ let runtimeHeaderNames : string list =
       // and the two staging views. `blade_linalg.hpp` includes it, so it must
       // be deployed beside it — and it is separately includable, which is what
       // lets cpp/linalg_probe_tests.cpp run without BLAS.
-      "blade_linalg_views.hpp" ]
+      "blade_linalg_views.hpp"
+      // Eigensolver dispatch (Phase 6 / Round B): the `?spev`/`?hpev`/`?syev`/
+      // `?heev` adapters. LAPACK-ONLY (its own `#ifndef BLADE_HAS_LAPACK
+      // #error`) and included only by programs that emit a `blade_lapack::`
+      // call, so a BLAS program carries no LAPACK dependency — deployed
+      // unconditionally like every other runtime header.
+      "blade_lapack.hpp" ]
 
 /// Deploy every C++ runtime header next to a generated .cpp so its `#include`s
 /// resolve at g++ time with no -I flag. These are pre-existing static files in
@@ -6250,6 +6481,10 @@ let rec isFreshPoolForm (e: IRExpr) : bool =
     | IRArrayLit _ -> true
     | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
     | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRMatmul _ -> true
+    // eigh: BOTH pools it produces are fresh (`allocate<>` under derived names)
+    // and neither borrows the operand's `.extents` pointer — each gets its own
+    // table. So an escaping (Q, LAM) need not pin S, and propagation stops here.
+    | IREigh _ -> true
     | IRArrayNegate _ | IRArrayConjugate _ -> true
     | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
     | IRApp (f, _, _) -> freshReturnOf f = FreshPool
@@ -6957,6 +7192,73 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             let wrapperDecl = sprintf "%sRagged<%s> %s = { %s__rows, %s_extents, %s_lens, %s_offsets };" 
                                 ind elemType varName varName varName varName varName
             [extentsDecl; lensDecl; offsetsDecl; flatDecl; rowPtrsDecl] @ rowPtrsInit @ [wrapperDecl]
+    elif arrType.IndexTypes |> List.exists (fun ix ->
+             ix.Rank >= 2 &&
+             (match ix.Symmetry with
+              | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+              | SymNone | SymWreath -> false)) then
+        // COMPACT path: a SymIdx / AntisymIdx / HermitianIdx group is ONE axis
+        // over r dimensions whose stored cells are a left-justified simplex.
+        // Two things separate it from the rectangular path below:
+        //
+        //   1. The extents table is the group's COMPONENT extents (n repeated
+        //      r times), not the literal's own row lengths. `computeArrayDims`
+        //      reads the first row, which for a strict (antisym) group is n-1
+        //      wide — an extents table that would make every compact read
+        //      compute the wrong storage bound.
+        //   2. The allocation carries the group's SYMM mask (and DIAGONALS =
+        //      false for antisym), so `allocate<>` builds the shrinking
+        //      skeleton the literal was checked against.
+        //
+        // The ASSIGNMENTS are then the plain nested ones: `checkCompactArrayLit`
+        // accepted the literal only in the storage's own shape, so the literal's
+        // index path IS the storage coordinate — `A[1][0]` is the canonical cell
+        // (1,1) for SymIdx<2,n> (canon_left_justify: p1 = p0 + c1).
+        let ty = mkArrayLike arrType
+        let componentExtents =
+            arrType.IndexTypes |> List.collect (fun ix -> List.replicate (max 1 ix.Rank) ix.Extent)
+        let rank = componentExtents.Length
+        let extentInts =
+            componentExtents |> List.map (fun e ->
+                match e with IRLit (IRLitInt n) -> Some (int n) | _ -> None)
+        let rec walkLeaves (idxPath: int list) (e: IRExpr) : (int list * IRExpr) list =
+            match e with
+            | IRArrayLit (children, _) ->
+                children |> List.mapi (fun i c -> walkLeaves (idxPath @ [i]) c) |> List.concat
+            | leaf -> [(idxPath, leaf)]
+        let leaves = walkLeaves [] (IRArrayLit (elements, arrType))
+        if extentInts |> List.exists Option.isNone then
+            [sprintf "%s#error \"Blade codegen: compact array literal for '%s' needs compile-time extents\"" ind varName]
+        elif leaves |> List.exists (fun (path, _) -> path.Length <> rank) then
+            // Array-VALUED leaves (a computed row) would need a deep copy into a
+            // shrinking row; the checker refuses that shape, so reaching here is
+            // a front-end change, not user input.
+            [sprintf "%s#error \"Blade codegen: compact array literal for '%s' has a leaf at the wrong depth (typechecker bug)\"" ind varName]
+        else
+            let extentsName = sprintf "%s_extents" varName
+            // `static constexpr`, exactly like the rectangular literal path
+            // below and unlike the fill_random compact path (whose stack table
+            // is safe only because fill_random is confined to a top-level let):
+            // the Array wrapper keeps a POINTER to this table, and a literal is
+            // also the statement form of a FUNCTION RETURN — a stack table
+            // would dangle the moment the frame died, handing the caller
+            // garbage extents rather than a compile error.
+            let extentsDecl =
+                sprintf "%sstatic constexpr const size_t %s[%d] = { %s };" ind extentsName rank
+                    (extentInts |> List.map (Option.get >> string) |> String.concat ", ")
+            let symmVec = buildSymmVec ty
+            let symmArg =
+                if hasRealSymmetry symmVec then hoistSymmDecl (sprintf "%s_symm" varName) symmVec
+                else "nullptr"
+            let allocLines =
+                match emitAllocRhs (classifyOutputStorage ty) elemType rank symmArg extentsName with
+                | Ok rhs -> [sprintf "%sArray<%s, %d> %s = %s;" ind elemType rank varName rhs]
+                | Error msg -> [sprintf "%s#error \"compact literal '%s': %s\"" ind varName msg]
+            let initCode =
+                leaves |> List.map (fun (path, leaf) ->
+                    let suffix = path |> List.map (sprintf "[%d]") |> String.concat ""
+                    sprintf "%s%s%s = %s;" ind varName suffix (exprToCpp ctx.VarNames leaf))
+            [extentsDecl] @ allocLines @ initCode
     else
         // Rectangular path: existing behavior.
         let structuralDims = computeArrayDims (IRArrayLit (elements, arrType))
@@ -10349,6 +10651,8 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genGramBinding ctx binding builder
     | IRMatmul (_, _) ->
         genMatmulBinding ctx binding builder
+    | IREigh _ ->
+        genEighBinding ctx binding builder
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         genReduceBinding ctx binding builder arrExpr kernelExpr initExpr
     | IRReduceCompute (compExpr, kernelExpr, seedExpr) ->
@@ -12288,6 +12592,26 @@ and genMatmulBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     (code, ctx')
 
 
+and genEighBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    // eigh(S) -> (Q, LAM). The one linalg binding whose value is a TUPLE, so
+    // unlike gram/matmul there is no single element type to pass down: the
+    // shared helper derives both from the operand (see materializeEighForm's
+    // design note). `binding.Type` here is the `IRTTuple` inferEigh built; the
+    // emitted `std::tuple<...>` spelling is derived from the operand instead, so
+    // the two cannot drift apart through a stale binding type.
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let matStmts =
+        match materializeInlineForm emptySubst ctx.VarNames name "" binding.Value with
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
+        | None -> []
+    let code =
+        [sprintf "%s// eigh: symmetric/Hermitian eigendecomposition -> (Q, LAM)" ind]
+        @ (matStmts |> List.map (fun s -> ind + s))
+    let ctx' = addVarName binding.Id name ctx
+    (code, ctx')
+
+
 
 and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -12438,8 +12762,51 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // for an empty range, init form included).
                 (ompApiUsedCell ()).Value <- true
                 let partName = sprintf "__rpart_%s" name
+                // Round C: K independent LANE accumulators inside each chunk.
+                // Lane l owns __rlo+l, __rlo+l+K, __rlo+l+2K, ... and seeds from
+                // its own first element, so no identity is needed here either.
+                // Lanes fold into lane 0 in fixed ascending order, then the
+                // chunks combine in fixed order exactly as before: the emitted
+                // order is a fixed function of (team size, K) and K is a
+                // compile-time constant, so determinism is unchanged.
+                //
+                // The lanes are SEPARATE NAMED LOCALS, not an array. An array
+                // indexed by the seed/tail loops keeps its address live and can
+                // defeat scalar replacement, leaving every lane update a
+                // load-modify-store to the stack — which reintroduces exactly
+                // the latency the lanes exist to remove. Named locals cannot.
+                //
+                // Below K elements the chunk cannot fill the lanes, so it takes
+                // a plain serial fold — which for len < K is byte-identical to
+                // the lane form anyway (lane l would hold element l alone, and
+                // the ascending lane combine IS the serial left fold).
+                let kLanes = foldLaneCount
+                let laneName (l: int) = sprintf "__rlane%d" l
+                let laneBody =
+                    [ sprintf "%s            if (__rhi - __rlo < (size_t)%d) {" ind kLanes
+                      sprintf "%s                %s __racc = %s;" ind elemStr (elemAt "__rlo")
+                      sprintf "%s                for (size_t __ri = __rlo + 1; __ri < __rhi; __ri++) {" ind
+                      sprintf "%s                    __racc = %s(__racc, %s);" ind wname (elemAt "__ri")
+                      sprintf "%s                }" ind
+                      sprintf "%s                %s[__rt] = __racc;" ind partName
+                      sprintf "%s            } else {" ind ]
+                    @ [ for l in 0 .. kLanes - 1 ->
+                          sprintf "%s                %s %s = %s;" ind elemStr (laneName l) (elemAt (sprintf "__rlo + %d" l)) ]
+                    @ [ sprintf "%s                size_t __ri = __rlo + %d;" ind kLanes
+                        sprintf "%s                for (; __ri + %d <= __rhi; __ri += %d) {" ind kLanes kLanes ]
+                    @ [ for l in 0 .. kLanes - 1 ->
+                          sprintf "%s                    %s = %s(%s, %s);" ind (laneName l) wname (laneName l) (elemAt (sprintf "__ri + %d" l)) ]
+                    @ [ sprintf "%s                }" ind ]
+                    // Tail: at most K-1 elements remain, and they belong to
+                    // lanes 0..K-2 in order (lane K-1 can never receive one).
+                    @ [ for l in 0 .. kLanes - 2 ->
+                          sprintf "%s                if (__ri < __rhi) { %s = %s(%s, %s); __ri++; }" ind (laneName l) wname (laneName l) (elemAt "__ri") ]
+                    @ [ for l in 1 .. kLanes - 1 ->
+                          sprintf "%s                %s = %s(%s, %s);" ind (laneName 0) wname (laneName 0) (laneName l) ]
+                    @ [ sprintf "%s                %s[__rt] = %s;" ind partName (laneName 0)
+                        sprintf "%s            }" ind ]
                 elemErrCode @ guardLines @ wrapperLines @ [
-                    sprintf "%s// reduce: comm-licensed parallel fold, contiguous chunked partials" ind
+                    sprintf "%s// reduce: comm-licensed parallel fold, contiguous chunked partials (%d-lane)" ind kLanes
                     sprintf "%sconst size_t %s = %s;" ind rnName boundExpr
                     sprintf "%s%s %s = %s;" ind elemStr name seedStr
                     sprintf "%s{" ind
@@ -12466,11 +12833,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     sprintf "%s            if (__rt == 0) __rTact = __rnt;" ind
                     sprintf "%s            const size_t __rlo = __rlo0 + (__rcnt * (size_t)__rt) / (size_t)__rnt;" ind
                     sprintf "%s            const size_t __rhi = __rlo0 + (__rcnt * ((size_t)__rt + 1)) / (size_t)__rnt;" ind
-                    sprintf "%s            %s __racc = %s;" ind elemStr (elemAt "__rlo")
-                    sprintf "%s            for (size_t __ri = __rlo + 1; __ri < __rhi; __ri++) {" ind
-                    sprintf "%s                __racc = %s(__racc, %s);" ind wname (elemAt "__ri")
-                    sprintf "%s            }" ind
-                    sprintf "%s            %s[__rt] = __racc;" ind partName
+                ] @ laneBody @ [
                     sprintf "%s        }" ind
                     sprintf "%s        for (int __rt = 0; __rt < __rTact; __rt++) %s = %s(%s, %s[__rt]);" ind name wname name partName
                     sprintf "%s        delete[] %s;" ind partName
@@ -12597,7 +12960,7 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                                   FoldRequestedOmp = callable.IsOmpParallel }
                             match (0, facts, single.ArrayTypes, cg) with
                             | Blade.LinAlgPatterns.BlasL1 call ->
-                                Blade.LinAlgPatterns.shimEntryPoint call
+                                Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
                                 |> Option.map (fun entry -> (call, entry))
                             | _ -> None
                     let code =
@@ -13301,7 +13664,7 @@ let private genFuncBodyScoped
             let (code, _) = genBinding bodyCtx tempBinding builder
             currentNames <- Map.add id varName currentNames
             code
-        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ | IRMatmul _
+        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ | IRMatmul _ | IREigh _
         | IRStack _ | IRJoin _ ->
             // Phase C lift pass can place an inline form as a let value at
             // function-body level. The same materialization helper used by
@@ -13977,11 +14340,40 @@ let genTypeDefs (modul: IRModule) : string list =
 let genPrintScalar (name: string) : string list =
     [sprintf "    cout << \"%s = \" << %s << endl;" name name]
 
-/// Generate code to print an array value (flattened for easy parsing)
+/// Rank-2 print in the NESTED form — `name = [[a, b], [c, d]]` — which is the
+/// shape a rank-2 literal is written in, so the printed line round-trips as
+/// source. `outerBound` / `innerBound` are C++ expressions; the inner one may
+/// reference the outer loop var `i` (a compact group's row shrinks with it),
+/// which is why this takes bound TEXT rather than deriving `extents[d]` itself.
+///
+/// Rank 1 is already one level of brackets and ranks >= 3 stay flat: the pins
+/// that read these lines check VALUES, and a three-deep nest buys a reader
+/// nothing the extents don't already say. The interpreter's twin
+/// (Interp/ArrayOps.emitNested2) must stay byte-identical to this.
+let private genPrintNested2 (name: string) (outerBound: string) (innerBound: string) : string list =
+    let firstVar = sprintf "%s__first" name
+    [ sprintf "    cout << \"%s = [\";" name
+      sprintf "    for (size_t i = 0; i < %s; i++) {" outerBound
+      "        if (i) cout << \", \";"
+      "        cout << \"[\";"
+      sprintf "        bool %s = true;" firstVar
+      sprintf "        for (size_t j = 0; j < %s; j++) {" innerBound
+      sprintf "            if (!%s) cout << \", \";" firstVar
+      sprintf "            %s = false;" firstVar
+      sprintf "            cout << %s[i][j];" name
+      "        }"
+      "        cout << \"]\";"
+      "    }"
+      sprintf "    cout << \"]\" << endl;" ]
+
+/// Generate code to print an array value (rank 2 nested; other ranks flattened
+/// for easy parsing)
 let genPrintArrayFlat (name: string) (rank: int) : string list =
     let firstVar = sprintf "%s__first" name
     if rank < 1 then
         [sprintf "    cout << \"%s = <rank-0>\" << endl;" name]
+    elif rank = 2 then
+        genPrintNested2 name (sprintf "%s.extents[0]" name) (sprintf "%s.extents[1]" name)
     elif rank <= 3 then
         // Ranks 1-3: flat comma-separated output
         let loopVars = [| "i"; "j"; "k" |]
@@ -14072,29 +14464,34 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
             (acc @ groupDims, dimIdx + idxRank)
         ) ([], 0) |> fst
     let rank = dims.Length
+    // The bound at one dimension: extent minus the prior group vars minus the
+    // strict constant (see the fold above). Shared by the nested rank-2 form
+    // and the flat loop nest below so the two cannot drift.
+    let boundAt (loopVar: string, dimIdx: int, offsets: string list, strict: int) =
+        ignore loopVar
+        match offsets @ (if strict > 0 then [string strict] else []) with
+        | [] -> sprintf "%s.extents[%d]" name dimIdx
+        | subParts -> sprintf "%s.extents[%d] - %s" name dimIdx (String.concat " - " subParts)
     if rank < 1 || rank > 8 then
         [sprintf "    cout << \"%s = <rank-%d array>\" << endl;" name rank]
+    elif rank = 2 then
+        // A rank-2 compact group nests exactly as its literal does: the inner
+        // bound carries the row shrink (`extents[1] - i`, or `- i - 1` when the
+        // group is strict), and genPrintNested2's loop vars are the `i`/`j` the
+        // offsets above name.
+        genPrintNested2 name (boundAt (List.item 0 dims)) (boundAt (List.item 1 dims))
     else
         let firstVar = sprintf "%s__first" name
         let opens = [
             sprintf "    cout << \"%s = [\";" name
             sprintf "    bool %s = true;" firstVar ]
         let loops =
-            dims |> List.map (fun (loopVar, dimIdx, offsets, strict) ->
+            dims |> List.map (fun ((loopVar, _, _, _) as dim) ->
                 let indent = "    " + String.replicate (dims |> List.findIndex (fun (v,_,_,_) -> v = loopVar)) "    "
-                // Bound = extents[d] - (prior loop vars) - (strict constant).
-                // For a free dim both are empty/zero -> bare extent. For a
-                // symmetric group level -> extent - priorVars. For an
-                // antisymmetric group level -> extent - priorVars - a (strict).
-                let subParts =
-                    offsets @ (if strict > 0 then [string strict] else [])
-                let bound =
-                    match subParts with
-                    | [] -> sprintf "%s.extents[%d]" name dimIdx
-                    | _ ->
-                        let sub = subParts |> String.concat " - "
-                        sprintf "%s.extents[%d] - %s" name dimIdx sub
-                forLoop indent loopVar bound)
+                // Bound = extents[d] - (prior loop vars) - (strict constant):
+                // a free dim is the bare extent, a symmetric group level is
+                // extent - priorVars, an antisymmetric one also - a (strict).
+                forLoop indent loopVar (boundAt dim))
         let innerIndent = "    " + String.replicate rank "    "
         let idx = dims |> List.map (fun (v,_,_,_) -> sprintf "[%s]" v) |> String.concat ""
         let inner = [
@@ -14394,15 +14791,21 @@ let genPrintStatements (modul: IRModule) : string list =
                     // via .lens; print as the flat value sequence the
                     // validation framework expects.
                     let firstVar = sprintf "%s__first" b.Name
+                    // Nested, like every other rank-2 print (genPrintNested2):
+                    // a ragged array's rows are the one thing its flat pool
+                    // cannot show, and `lens[i]` is exactly the row boundary.
                     [
                         sprintf "    cout << \"%s = [\";" b.Name
-                        sprintf "    bool %s = true;" firstVar
                         sprintf "    for (size_t __ri = 0; __ri < %s.extents[0]; __ri++) {" b.Name
+                        "        if (__ri) cout << \", \";"
+                        "        cout << \"[\";"
+                        sprintf "        bool %s = true;" firstVar
                         sprintf "        for (size_t __rj = 0; __rj < %s.lens[__ri]; __rj++) {" b.Name
                         sprintf "            if (!%s) cout << \", \";" firstVar
                         sprintf "            %s = false;" firstVar
                         sprintf "            cout << %s[__ri][__rj];" b.Name
                         "        }"
+                        "        cout << \"]\";"
                         "    }"
                         "    cout << \"]\" << endl;"
                     ]
@@ -14574,6 +14977,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     (streamBufDeclsCell ()).Value <- Set.empty
     (forcedDeferredIdsCell ()).Value <- Set.empty
     (linalgUsedCell ()).Value <- false
+    (lapackUsedCell ()).Value <- false
     (ompApiUsedCell ()).Value <- false
     // Deterministic deallocation: clear both cells for this program. genModule
     // reinstalls the facts immediately (it needs the callables table first).
@@ -14604,6 +15008,11 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     // line). Appended post-body like the CUDA prototypes below. A program
     // using neither gram nor matmul never names the header at all.
     let includes = if (linalgUsedCell ()).Value then includes @ ["#include \"blade_linalg.hpp\""] else includes
+    // blade_lapack.hpp: the same collect-then-append shape, its OWN cell and
+    // its own define (-DBLADE_HAS_LAPACK). Separate from the line above so a
+    // gram/matmul program never advertises a LAPACK dependency and an eigh
+    // program never advertises a BLAS one.
+    let includes = if (lapackUsedCell ()).Value then includes @ ["#include \"blade_lapack.hpp\""] else includes
     // <omp.h> only when a comm-licensed parallel fold emitted omp_* runtime
     // calls this assembly. Same collect-then-append shape as linalg; `#pragma
     // omp` alone needs no header, so every other program keeps its includes.
@@ -14719,6 +15128,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // reads it to auto-print deferred bindings that ended up materialized.
     (forcedDeferredIdsCell ()).Value <- Set.empty
     (linalgUsedCell ()).Value <- false
+    (lapackUsedCell ()).Value <- false
     (ompApiUsedCell ()).Value <- false
     // Deterministic deallocation: see genMainProgram. genModule / genModuleSplit
     // reinstall the facts (both entry points below install).
@@ -14772,6 +15182,11 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // Build.fs keys -DBLADE_HAS_BLAS + the -I/link flags off this include
     // line). Appended post-body like the CUDA prototypes below.
     let includes = if (linalgUsedCell ()).Value then includes @ ["#include \"blade_linalg.hpp\""] else includes
+    // blade_lapack.hpp: the same collect-then-append shape, its OWN cell and
+    // its own define (-DBLADE_HAS_LAPACK). Separate from the line above so a
+    // gram/matmul program never advertises a LAPACK dependency and an eigh
+    // program never advertises a BLAS one.
+    let includes = if (lapackUsedCell ()).Value then includes @ ["#include \"blade_lapack.hpp\""] else includes
     // <omp.h>: see genMainProgram — appended only for a comm-licensed fold.
     let includes =
         if (ompApiUsedCell ()).Value
@@ -14818,6 +15233,7 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     // genPrintStatements call below (correctly AFTER genModule) reads it.
     (forcedDeferredIdsCell ()).Value <- Set.empty
     (linalgUsedCell ()).Value <- false
+    (lapackUsedCell ()).Value <- false
     (ompApiUsedCell ()).Value <- false
     // Deterministic deallocation: see genMainProgram.
     (freshReturnFactsCell ()).Value <- Map.empty
@@ -14829,6 +15245,11 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     // Build.fs keys -DBLADE_HAS_BLAS + the -I/link flags off this include
     // line).
     let includes = if (linalgUsedCell ()).Value then includes @ ["#include \"blade_linalg.hpp\""] else includes
+    // blade_lapack.hpp: the same collect-then-append shape, its OWN cell and
+    // its own define (-DBLADE_HAS_LAPACK). Separate from the line above so a
+    // gram/matmul program never advertises a LAPACK dependency and an eigh
+    // program never advertises a BLAS one.
+    let includes = if (lapackUsedCell ()).Value then includes @ ["#include \"blade_lapack.hpp\""] else includes
     // <omp.h>: see genMainProgram — appended only for a comm-licensed fold.
     let includes =
         if (ompApiUsedCell ()).Value

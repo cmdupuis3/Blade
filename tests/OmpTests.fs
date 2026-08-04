@@ -884,6 +884,91 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                     | _ ->
                         fail name "no scalar binding 's' in program output (comparison would be vacuous)"
 
+        // ---- Round C: lane-boundary battery -------------------------------
+        // Path B's chunk is now swept by K strided lane accumulators (K fixed
+        // at codegen; CodeGen.foldLaneCount). Every arm of that sweep has an
+        // element-count boundary, and getting any of them wrong silently drops
+        // or double-counts elements — the fold still prints A number, just the
+        // wrong one. So the battery walks n across all of them:
+        //
+        //   n < K            -> the short-chunk arm (no lanes at all)
+        //   n = K            -> lanes seeded, main loop and tail both empty
+        //   n = K + 1        -> one tail element, landing on lane 0
+        //   n = 2K - 1       -> maximal tail (K-1 elements, lanes 0..K-2)
+        //   n not div by K   -> main loop plus a partial tail
+        //   n < thread count -> chunks smaller than K under a 4-thread request
+        //
+        // K is deliberately NOT read from the compiler here: the battery is
+        // written to straddle any K up to 16, so it keeps its meaning if the
+        // constant is retuned. Values are non-integer (reassociation is real)
+        // and the oracle is the same program with `omp` dropped, at 1e-9.
+        //
+        // An INTEGER-data twin runs at n = 2K-1 and demands EXACT equality —
+        // that is the property the corpus files (loops/110, loops/111) and the
+        // interpreter differential rely on, so it is pinned here directly
+        // rather than inferred.
+        let laneKernelOmp = "function laneAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n"
+        let laneKernelSer = "function laneAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n"
+        let laneLit (count: int) (f: int -> float) =
+            // A decimal point is forced: an integer-valued literal printed by
+            // "R" comes out as `1`, which the checker reads as Int64 and then
+            // refuses against the Float64 kernel.
+            [ for i in 1 .. count ->
+                let s = (f i).ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+                if s.Contains "." || s.Contains "E" then s else s + ".0" ]
+            |> String.concat ", "
+        let awkward i = 1.0 / float i + float (i % 5) * 0.7
+        let laneCases : (string * int * bool) list =
+            // (label, n, integerData)
+            [ ("n1_below_lanes",        1,  false)
+              ("n3_below_lanes",        3,  false)
+              ("n4_at_lanes",           4,  false)
+              ("n5_lanes_plus_one",     5,  false)
+              ("n7_maximal_tail",       7,  false)
+              ("n8_two_full_lanes",     8,  false)
+              ("n15_maximal_tail_k8",  15,  false)
+              ("n17_indivisible",      17,  false)
+              ("n3_below_thread_count", 3,  false)
+              ("n33_indivisible",      33,  false)
+              ("n15_integer_exact",    15,  true) ]
+        for (label, n, integerData) in laneCases do
+            let name = "lane_boundary_" + label
+            let lit = laneLit n (fun i -> if integerData then float (i % 9 + 1) else awkward i)
+            let decl = sprintf "let A = [%s]\n" lit
+            let body = "let s = reduce(A, laneAdd)\n"
+            match compileProgram outputDir (name + "_omp") (laneKernelOmp + decl + body),
+                  compileProgram outputDir (name + "_serial") (laneKernelSer + decl + body) with
+            | Error e, _ -> fail name (sprintf "omp build: %s" e)
+            | _, Error e -> fail name (sprintf "serial build: %s" e)
+            | Ok ompExe, Ok serialExe ->
+                match runProgram ompExe forcedThreads, runProgram serialExe "1" with
+                | Error e, _ -> fail name (sprintf "omp run: %s" e)
+                | _, Error e -> fail name (sprintf "serial run: %s" e)
+                | Ok ompOut, Ok serialOut ->
+                    match Map.tryFind "s" (scalarBindings ompOut), Map.tryFind "s" (scalarBindings serialOut) with
+                    | Some pv, Some sv ->
+                        let diff = abs (pv - sv)
+                        let tol = if integerData then 0.0 else 1e-9 * max 1.0 (abs sv)
+                        if diff > tol then
+                            fail name (sprintf "n=%d: parallel %.17g vs serial %.17g (|diff| = %g, tol = %g)" n pv sv diff tol)
+                        else
+                            // Determinism re-check: the lane count is a compile-time
+                            // constant, so a fixed team size must still reproduce the
+                            // run bit for bit.
+                            match runProgram ompExe forcedThreads with
+                            | Error e -> fail name (sprintf "second omp run: %s" e)
+                            | Ok again ->
+                                let strip (s: string) =
+                                    s.Split('\n')
+                                    |> Array.filter (fun l -> not (l.Contains "completed in"))
+                                    |> String.concat "\n"
+                                if strip again <> strip ompOut then
+                                    fail name (sprintf "n=%d: run-to-run output differs at fixed OMP_NUM_THREADS=4" n)
+                                else
+                                    pass name (sprintf "n=%d %s: |diff| = %g; identical across 2 runs"
+                                                   n (if integerData then "exact" else "vs serial") diff)
+                    | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
+
         // ---- Phase 1 regression: ivdep must not land inside collapse(2) ----
         // Text-only assertions cannot see this; only g++ can.
         let collapseSrc =

@@ -632,6 +632,8 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRGram (lowerTypedExpr env left, lowerTypedExpr env right, isSameArray)
     | TExprMatmul (left, right) ->
         IRMatmul (lowerTypedExpr env left, lowerTypedExpr env right)
+    | TExprEigh operand ->
+        IREigh (lowerTypedExpr env operand)
     | TExprArrayNegate array ->
         IRArrayNegate (lowerTypedExpr env array)
     | TExprArrayConjugate array ->

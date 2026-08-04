@@ -8,7 +8,11 @@
 // the standard loop nest knows nothing about per-row lengths. Co-iteration
 // semantics for ragged operands are a rewrite-spec question.
 // REJECT-AT: codegen
-let r = [[1.0, 2.0], [3.0]]
+// Annotated RAGGED (019's closed form): unannotated, rows 2, 1 now infer
+// SymIdx<2, 2> (formalism §3.9), and this file's gate is about a RAGGED
+// operand reaching the multi-array nest.
+let lens: Array<Int64 like Idx<2>> = [2, 1]
+let r: Array<Float64 like Idx<2>, RaggedIdx<lens>> = [[1.0, 2.0], [3.0]]
 let d = [10.0, 20.0]
 let x = method_for(r, d) <@> lambda(g: Array<Float64 like RaggedIdx<_>>, y) -> reduce(g, (+)) + y |> compute
 // This program TYPE-CHECKS and LOWERS: the gate is the codegen `#error` guard

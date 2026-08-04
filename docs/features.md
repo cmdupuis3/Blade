@@ -27,7 +27,7 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | `static function` |  | Core | compile-time evaluable; usable in type positions (`Idx<triangle(n)>`) |
 | `static` parameters | `f(N : static Nat)`  | Planned | usable in return types |
 | Static type functions | `static type Vec<N> = ...` | Planned | type-returning vs value-returning split keeps the type system decidable |
-| Fused assignment | `+=`/`-=`/`*=`/`/=` | Core |  |
+| Fused assignment | `+=`/`-=`/`*=`/`/=` | Core | Mutable variables only |
 
 ## 3. Arrays and array types
 
@@ -42,7 +42,7 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | Computational (lambda) indices | `Dual`, `Symbolic`, thunks | Speculative | v10 §5.5; structural vs computational index separation |
 | Arrays of functions | `models(lat, lon)(params)(t)` | Core | Free mixing of functions and indexing |
 | Extent tuples | `extents(A)` | Core | Static-first evaluation; rejects ragged/grouped dims with guidance |
-| Mutation of array elements | `A(i) = v`, `A(i,j) += v` | Core | Allowed, but unidiomatic |
+| Mutation of array elements | `A(i) = v`, `A(i,j) += v` | Core | Allowed for mutable arrays, but unidiomatic |
 
 ## 4. Array combinators (ArrayExpr layer)
 
@@ -56,8 +56,8 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | Segmentation | `split(A, d, i)` | Speculative | `A, B == split(join(A,B,d), d, i)` |
 | Array fallback | `<\|:>` (nullptr-safe sparse access) | Planned | Partial-depth allocation in C++ codegen for non-final dims |
 | Dimension decoupling | `decompact(A, n: Nat)` | Core | Expand symmetric/antisymmetric compact storage to dense along an axis |
-|  | `diag`, `subset`, `split`, `reverse` (array op), `shift` | Speculative | v10 §3.6–3.7 |
-|  | `align` / `stencil` (sugar) with `StencilSpec`, boundary modes | Speculative | v10 §3.6; kernel receives N separate args (vs zip's one tuple) |
+|  | `diag`, `subset`, `split`, `reverse` (array op), `shift` | Speculative | Superseded by virtual arrays? |
+|  | `align` / `stencil` (sugar) with `StencilSpec`, boundary modes | Speculative | Superseded by virtual arrays? |
 
 
 ## 5. Index types
@@ -70,13 +70,13 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | Symmetric index type | `SymIdx<r:Nat, n:Nat>` | Core | `r` mutually symmetric dimensions of length `n` |
 | Antisymmetric index type | `AntisymIdx<r, n>` | Core | `r` sign-tracked mutually antisymmetric dimensions |
 | Hermitian index type | `HermitianIdx<n>` | Core | 2-D Hermitian index type. `A(i,j) = conj(A(j,i))` |
-| Compound index type | `CompoundIdx<mask: bool^r>` | Core | `r`-dimensional sorted (lex-enumerated) semi-dense index type ideal for relatively dense grids; inherits dimensions from the `mask` array. Flat full-arity indexing like SymIdx (`B(i, j)`); partial/wildcard reads are a `SparseIdx` feature |
+| Compound index type | `CompoundIdx<mask: bool^r>` | Core | `r`-dimensional sorted (lex-enumerated) semi-dense index type ideal for relatively dense grids; inherits dimensions from the `mask` array. |
 | Ragged index type | `RaggedIdx<lengths>` | Core |  |
 | Dependent index type | `DepIdx<I, f: Nat -> Idx<N>>` | Core |  Static function `f` maps each index of `I` to a new `Idx` |
 | Equivariant index type | `EquivIdx<n, G, ρ>` | Planned? | group-representation-annotated indices |
-| Sparse index type | `SparseIdx<keys>` | Core | explicit valid-key enumeration (rank-1 array of Nat tuples; `let static` list or runtime tuple-array) with hash-table lookup. Keys keep their GIVEN order (never sorted — iteration order is key order); rank is implicit from the tuple arity. Tuple indexing with wildcards (all partials gather); built via `range<SparseIdx<keys>>` or `sparse(values, keys)` |
+| Sparse index type | `SparseIdx<keys>` | Core | explicit valid-key enumeration (rank-1 array of Nat tuples; `static` list or runtime tuple-array) with hash-table lookup. Tuple indexing with wildcards for partial gathers. Built with  `sparse(values, keys)` |
 | Orbit (iterated-wreath) index type | `OrbIdx<[(r₁,s₁), ..., (r_d,s_d)], n>` | Partial | flat list of `(rank, ±)` levels, OUTERMOST-LAST, over one extent; group `S_{r₁} ≀ ... ≀ S_{r_d}` on `∏rᵢ` raw axes, character the product of the level signs. **Depth ≤ 1 is fully supported and is not a new type**: `[]` normalizes to `Idx<n>`, `[(r,+)]` to `SymIdx<r,n>`, `[(r,-)]` to `AntisymIdx<r,n>` — the same records, so the same storage, iteration and printing. Rank-1 levels drop at either sign. **Depth ≥ 2 is DEDUCED-ONLY**: a `comm` tie over a repeated compact argument produces the class — gated for soundness when the inner class carries a `-` level, where the tie additionally requires the kernel provably sign-odd in each argument (`h(-p,q) = -h(p,q)`, e.g. `p * q`; refused with BL4015 otherwise, `p + q` included) — and such a value is allocated (closed-form iterated binomial), filled by the segment-peeled `orb_visit` nest, printed, subscripted at any raw tuple `W(i,j,k,l)` (flat coordinates; a mirrored tuple returns the signed cell, a zero-set tuple returns 0), fully decompacted with `decompact(W, 0)`, and round-tripped through a Zarr store (the spec_version 2 `"orbit"` head over the flat canonical pool — [providers/ZarrTriangularSpec.md](../src/providers/ZarrTriangularSpec.md); depth-1 classes keep their `sym`/`antisym` spelling on disk). Still refused with BL4003: WRITING the class down as an annotation (a Zarr store is now a producer, but the annotation also admits classes nothing produces), `reduce`/`prodsum` over the pool (decompact first), partial subscripts, partial (per-level) decompaction, `transpose`, provider I/O outside Zarr. See [plan-orbit-index-types.md](plan-orbit-index-types.md) and [plan-orbidx-decompaction.md](plan-orbidx-decompaction.md) |
-| Nested/mixed symmetry | `NestedSymIdx` (elasticity),<br> `RiemannIdx` (curvature) | Speculative | v10 §4.15.2–4.15.3; cardinality formulas specified. The `RiemannIdx` shape is spellable today as `OrbIdx<[(2,-), (2,+)], n>`, and a DEDUCED one has real storage: 21 cells at n = 4, raw-axis addressing `R(i,j,k,l)` with the inner `-` contributing its sign on a mirrored read and zeroing the `i = j` diagonal — the three things §3 of the plan says the type would have to earn. Writing the annotation down is still refused (no producer) |
+| Nested/mixed symmetry | `NestedSymIdx` (elasticity),<br> `RiemannIdx` (curvature) | Speculative | Cardinality formulas specified. `RiemannIdx` is shorthand for `OrbIdx<[(2,-), (2,+)], n>` |
 
 ### 5a. Index type features
 
@@ -84,8 +84,8 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 |---------|-------|--------|---------------------|
 | Named index types | `type LatIdx = Idx<360>` | Core | Named index types are required for comparison. Unnamed index types are always considered distinct. |
 | Index type tags | `Idx<n: Nat, Tag: String\|Enum>` | Core | String or enum-valued. Tags are for type comparison only. (Maybe redundant?) |
-| Index type composition | `Sym<I,I>`, `Antisym<I,I>` | Planned | v10 §4.16.2 |
-| Index transforms | `flip`, `rename`, `subset`, `align` | Speculative | v10 §4.8; all explicit, no implicit conversions |
+| Index type composition | `Sym<I,I>`, `Antisym<I,I>` | Planned |  |
+| Index transforms | `flip`, `rename`, `subset`, `align` | Speculative | All explicit, no implicit conversions. Superseded by virtual arrays? |
 
 
 ## 6. Virtual Arrays
@@ -100,19 +100,17 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
-| Function declarations with `where` metadata: `comm(...)`, `omp(arg: depth)`, `cuda`, `tdim({extent, symm, name})` | Core | v10 §6.1–6.2; return type after `where` (may depend on constraints); `corpus/functions` |
-| Commutativity groups → commutativity vector | Core | v10 §6.3 |
-| Lambdas (`lambda(a, b) -> ...`), where-clauses on lambdas, array captures under nominal index typing | Core | v10 §6.2.1, §17.4; `corpus/functions` |
-| Sectioned operators `(+)`, `(/) x`; single-wildcard partial application `f(_, y)` | Spec-only | v10 §6.2.2–6.2.3; multiple wildcards rejected by design |
-| Nested `function` declarations (desugar to `let const` lambdas) | Core | v10 §17.3 |
-| Reynolds operators — `reynolds(g)`, `reynolds(g, Antisymmetric)`, partial positions | Core (**clarified, arc 2**) | v10 §6.4; `corpus/reynolds` (23 tests incl. SQL composition, antisym cancellation, joint 2D over the fused path). The surface combinator is the VALUE-LEVEL wrapper (permutes kernel arguments; H = Sₙ by construction) — output symmetry still follows H ∩ Stab, so identity is required (dense output for distinct arrays, pinned by reynolds/013). The proof tower's per-dimension INDEX-LEVEL Reynolds (`reynolds_full_product_symmetry`, lossless canonical access) is a distinct prospective operator, not currently a surface construct |
-| `gram` — Gram-matrix construction (dense / symmetric / Hermitian) | **v7-only** | `corpus/index-types` 066–069; differential oracle in `tests/Oracles.fs` (Gram-Hermitian was an oracle lesson); not in v10 |
-| `hermitian` — adjoint operator | **v7-only** | `corpus/index-types` 070; not in v10 |
-| `zero` kernel and zero-arity base cases (`f(())` = identity element) | Core | v10 §12.9, §10.4.7; `corpus/zero-combinators` (7 tests) |
+| Functions | Core |  |
+| Commutativity groups → commutativity vector | Core |  |
+| Lambdas (`lambda(a, b) -> ...`) | Core | Anonymous functions |
+| Sectioned operators `(+)`, `(/) x`; single-wildcard partial application `f(_, y)` | Speculative | Multiple wildcards rejected by design |
+| Reynolds operators — `reynolds(g)`, `reynolds(g, Antisymmetric)`, partial positions | Core | The surface combinator is the VALUE-LEVEL wrapper (permutes kernel arguments; H = Sₙ by construction) — output symmetry still follows H ∩ Stab, so identity is required (dense output for distinct arrays, pinned by reynolds/013). The proof tower's per-dimension INDEX-LEVEL Reynolds (`reynolds_full_product_symmetry`, lossless canonical access) is a distinct prospective operator, not currently a surface construct |
+| `gram` — Gram-matrix construction (dense / symmetric / Hermitian) | Core | `corpus/index-types` 066–069; differential oracle in `tests/Oracles.fs` (Gram-Hermitian was an oracle lesson); not in v10 |
+| `hermitian` — adjoint operator | Core | `corpus/index-types` 070; not in v10 |
+| `zero` kernel and zero-arity base cases (`f(())` = identity element) | Core | Monadic zero. |
 | Arithmetic symmetry annotations (`(+)` Symmetric, `(-)` Antisymmetric, ...) driving comm inference | Core | v10 §7.1.2 |
-| Elementwise vs outer operator pairs: `+` vs `[+]` (full table incl. comparisons and logical ops) | Core | v10 §7.1.1; `corpus/bracketed` (13 tests); `A [*] A` auto-triangular |
-| Geometric primitives (`norm`, `dot`, `cross`) with equivariance signatures | Spec-only | v10 §7.2; equivariance layer is Near-term |
-| Reductions `sum/mean/min/max` (rank-reducing; min/max invariant-only) | Core (sum via `reduce`) / Spec-only (equivariance rules) | v10 §7.3; v7 exposes `reduce` (see §10 below) |
+| Elementwise vs bracketed operators: `+` vs `[+]` | Core | Elementwise ops (e.g. `+` or `(+)`) provide sugar for `A op B = method_for(zip(A, B)) <@> op`, as opposed to bracketed ops, which use Blade-native outer-product spaces: `A [op] B = method_for(A, B) <@> op`. |
+| Geometric primitives (`norm`, `dot`, `cross`) with equivariance signatures | Speculative |  |
 
 ## 8. Loop objects and iteration
 
@@ -135,17 +133,15 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | Arity polymorphism | `function moment(A: Poly<T^k>)` | Core | Stricter than variadic functions, arity-polymorphism guarantees well-typed functions returning different types depending on arity |
 | Rank | `rank(A: T^r)` | Core | Static function; integer rank of array |
 | Arity | `arity(A: Poly<T^k>)` | Core | Static function; integer arity of poly-pack |
-| Poly-pack destructuring | `let (head, tail) = args` |, `args[k]`, `nth`; nested tuples; identity groups (neighboring identical arrays only) | Core | |
+| Poly-pack destructuring | `let (head, tail) = args` | `args[k]`, `nth`; nested tuples; identity groups (neighboring identical arrays only) | Core | |
 | Arg pack indexing | `args[k]` | Core | The `k`th element of poly-pack `args`. Also valid for general tuple arg packs. |
-|  | `nth()` | Core |  |
-| Type deduction workflow | T-dim match → identity groups → S-dims per group → concatenate | Core |  |
+|  | `nth()` | Core | Vestigial? |
 
 ## 10. Combinator algebra
 
-L aws are stated in the formalism; checked artifacts listed in [proofs.md](proofs.md) (BladeMonad,
-BladeCompute). The MonadPlus laws hold exactly as stated — left zero, both identities,
-LEFT distribution (plus right zero), and **right distribution provably fails** for
-the computation monad (BladeMonad).
+Laws are stated in the formalism. The MonadPlus laws hold exactly as stated — left zero, both identities,
+left distribution (plus right zero), and right distribution provably fails for
+the computation monad.
 
 | Combinator |  | Role |
 |-----------|--|------|
@@ -173,7 +169,7 @@ Some higher-order combinators are particularly useful for applying complex funct
 | Join all | `object_for(<&>)` | Loop-join an array of computations as much as possible |
 | First choice | `object_for(<\|>)` | Select the first `true` computation |
 
-## 11. Relational (SQL-like) operations — **v7-only, formalism gap now filled**
+## 11. Relational (SQL-like) operations
 
 Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 (`corpus/sql-*`, 81 tests across 12 categories).
@@ -209,44 +205,42 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Structs (named fields, no methods); functional update `{ x = 3.0, ..p }` | Core |  |
 | Dependent records (later fields' bounds depend on earlier fields) | Core | CGPath example |
 | Constrained records (`where` clause on struct) | Core | checked at construction |
-| Mutually constrained records (`type P1 = ... and P2 = ... where ...`) | Core | v10 §17.13.3 |
-| Sum types / variants with payloads; `Option`, `Result` | Core | v10 §17.12; `corpus/sum-types` (7 tests) |
-| Pattern matching (`match ... with`, guards, tuple patterns, sum-type payloads); `if/then/else` as sugar | Core | v10 §17.10 |
-| Interfaces + `impl` (signatures only, no inheritance; interface composition) | Core | v10 §17.14; `corpus/interfaces` (4 tests) |
-| Struct FK fields (`ETIndexRef`) | Core | `corpus/sql-foreign-keys` 006; [features/sql.md](features/sql.md) §12 |
-| Type providers: `NetCDFProvider<"file.nc">` — file metadata → index types at compile time | Core | v10 §4.9; v7 `providers/`, `tests/NetcdfTests.fs`, `read` keyword; quasi-static file structure assumption |
+| Mutually constrained records (`type P1 = ... and P2 = ... where ...`) | Core |  |
+| Sum types / variants with payloads; `Option`, `Result` | Core |  |
+| Pattern matching (`match ... with`, guards, tuple patterns, sum-type payloads); `if/then/else` as sugar | Core |  |
+| Interfaces + `impl` (signatures only, no inheritance; interface composition) | Core |  |
+| Struct FK fields | Core | `corpus/sql-foreign-keys` 006; [features/sql.md](features/sql.md) §12 |
+| Type providers | Core | `load` for identifier; lazy `read` with eager `write` for granular streaming I/O |
 
 ## 14. Program structure and syntax
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
-| Newline statement separation, delimiter-aware; optional `;`; inline vs block bodies | Core | v10 §17.0 |
-| Modules (`module` declarations) | **v7-only** | `corpus/modules` (2 tests); not described in v10 |
-| Imports (`import` / `from` / `as` keywords) | Planned | keywords reserved in v7; `corpus/multifile` exists but empty — multifile compilation not landed |
-| Pseudo-native mathematics (rank-0 collapse foundation; `A + B` needs no constructor commitment) | Core | v10 §17.18; foundation proved (rank-0 convergence, BladeCompute 12.2) |
-| Named infix operators `a :name: b` (uniform lowest precedence) | Spec-only | v10 §17.19 |
-| `print` / expression output | Core | v7 codegen; EXPECT-comment test convention |
+| Newline statement separation, delimiter-aware; optional `;`; inline vs block bodies | Core |  |
+| Modules (`module` declarations) | Core |  |
+| Imports (`import` / `from` / `as` keywords) | Planned | multifile compilation not landed |
+| Pseudo-native mathematics (rank-0 collapse foundation; `A + B` needs no constructor commitment) | Core |  |
+| Named infix operators `a :name: b` (uniform lowest precedence) | Planned |  |
+| `print` / expression output | Core | EXPECT-comment test convention |
 
 ## 15. Providers and I/O
 
-| Feature | Status | Notes / sources |
+| Format | Status | Notes / sources |
 |---------|--------|-----------------|
-| NetCDF type provider (`NetCDFProvider<"f.nc">` → index types + typed arrays) | Core | v10 §4.9; v7 `providers/`, `NetcdfTests.fs`, `read` keyword, `sample.nc` |
-| HDF5 / Zarr providers | Planned | provider interface slot (audit §4) |
-| Triangular file format (block-aligned symmetric tensor I/O) | Planned | ext §2.7 |
+| NetCDF | Core |  |
+| Zarr | Core |  |
+| Triangular Zarr file format | Partly Done | Provides Zarr storage spec for natively triangular or wreath-shaped tensors |
 
 ## 16. Backends and performance
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
-| C++ codegen (via g++) | Core | v7 pipeline; EXPECT-based value tests |
-| OpenMP parallelism via `omp(arg: depth)` clause | Core | v10 §6.1, §17.3; `tests/OmpTests.fs`; depth counts S-dim levels per argument, outermost first |
-| CUDA backend via `cuda` clause (incl. simplicial/triangular kernels, split compilation) | Core | v7 `CudaTests.fs`, split-timing machinery; requires x64 Native Tools environment |
-| Loop fusion analysis (fusion depth = common prefix of loop level types incl. parallelism annotations) | Core | v10 §16.2–16.3 |
-| Lazy computation graph; `compute` semantics | Core | v10 §16.1, §16.4 |
+| C++ codegen (via g++) | Core |  |
+| OpenMP parallelism via `omp(arg: depth)` clause | Core | depth counts S-dim levels per argument, outermost first |
+| CUDA backend via `cuda` clause | Core | requires x64 Native Tools environment |
+| Lazy computation | Core | `compute` and `read` |
 | OpenBLAS lowering for `gram()` (`cblas_dsyrk` same-array / `cblas_dgemm` distinct) | Experimental | Real `Float64` only; opt-in via `BLADE_BLAS=1` (or `OPENBLAS_DIR` set; `BLADE_BLAS=0` forces off). Output layout unchanged (packed symmetric / dense) — BLAS fills a staging buffer, repack lands Blade storage. Emitted `#include <cblas.h>` keys Build.fs's `-I`/link resolution (`OPENBLAS_DIR`, netcdf-style). Measured: gram p=1024×n=16384, 8.6 s loops → 0.55 s 1-thread / 0.15 s 16-thread; values agree to ~1e-14 rel |
 | Comm-licensed parallel reductions: bare `omp` on a fold kernel | Core | See below; `tests/OmpTests.fs` (`blade test omp-reduce`, `omp-pragma`, `omp-coverage`), corpus `loops/110–111`, `diagnostics/049` |
-| Alternative parallel backends (`acc`, ...) | Planned | v10 §6.1 note |
 
 ### 16.1 Parallel reductions (`reduce(xs, k)` with `omp` on `k`)
 

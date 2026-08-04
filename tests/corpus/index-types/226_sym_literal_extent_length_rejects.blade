@@ -1,0 +1,10 @@
+// TEST: Symmetric Literal At The Axis Extent (rejects)
+// ERROR: BL3007
+// ERROR-CONTAINS: is not a nested row
+// The regression half of 225: a flat literal whose length equals the group's
+// EXTENT (3) rather than its cardinality (6). This is the shape that used to
+// pass the checker — the array-literal arm read `outerIdx.Extent` as the
+// expected count, which is the right number only for a rank-1 axis — and then
+// died in codegen with a `#error` about the literal's nesting depth. The
+// refusal now happens in the front end, where it can name the shape to write.
+let A: Array<Int64 like SymIdx<2, 3>> = [1, 2, 3]

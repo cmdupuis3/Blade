@@ -155,6 +155,20 @@
          (a SEPARATE fsproj); core touchpoint is the PplElaborate.expand
          pipeline stage in TypeCheck.typeCheck. -->
     <Compile Include="src/ppl/compiler/PplElaborate.fs" />
+    <!-- Linear-algebra dispatch classification (Phase 5 of
+         docs/plan-cpp-perf-exploitation.md): IR node / loop-nest shape ->
+         typed LinAlgCall descriptor, plus the BLAS/LAPACK availability gates
+         and the routing policy table. Depends on IR.fs and Types.fs ONLY (it
+         matches IRExpr and the loop-nest records, all defined there), so it
+         can sit this early — and it must, because THREE stages consult it and
+         two of them precede codegen: MathElaborate reads `lapackAvailable ()`
+         to decide whether `eigh` elaborates to the `__math_eigh` intrinsic or
+         to synthesized Jacobi source (Phase 6 / Round B2); TypeCheck's
+         `inferEigh` reads `classifyEigh` as the intrinsic's admissibility
+         rule; and CodeGen consults the whole module instead of pattern-
+         matching BLAS shapes itself. Moved here from just above CodeGen for
+         exactly that reason — one definition of each gate, not three. -->
+    <Compile Include="src/LinAlgPatterns.fs" />
     <!-- Math compiler layer (Blade.Math.*): tensor decompositions
          (Jacobi SVD/eigh, mode-n unfolding, HOSVD) elaborated to plain
          Blade source. Lives under math/compiler/ beside the BladeMath
@@ -192,12 +206,6 @@
          from CodeGen so a future IR interpreter can reuse the exact plan. Pure
          int/list logic; no IR/Types dependency, so it can precede CodeGen. -->
     <Compile Include="src/ReynoldsCore.fs" />
-    <!-- Linear-algebra dispatch classification (Phase 5 of
-         docs/plan-cpp-perf-exploitation.md): IR node / loop-nest shape ->
-         typed LinAlgCall descriptor, plus the BLAS-vs-native policy table.
-         Needs IR (it matches IRExpr) and must precede CodeGen, which consults
-         it instead of pattern-matching BLAS shapes itself. -->
-    <Compile Include="src/LinAlgPatterns.fs" />
     <Compile Include="src/CodeGen.fs" />
     <!-- Tree-walking IR interpreter (differential twin of CodeGen; output must
          byte-match compiled binaries). Value = runtime value universe;
@@ -299,6 +307,12 @@
     <Compile Include="tests/CudaTests.fs" />
     <Compile Include="tests/OmpTests.fs" />
     <Compile Include="tests/LinAlgTests.fs" />
+    <!-- Eigensolver dispatch emission + the inferEigh rejections (Phase 6 /
+         Round B2). Separate block from LinAlgTests because the two gates,
+         headers and defines are separate by design — and because this one must
+         pin its gate across LOWERING, not just codegen: the eigh decision is
+         made in MathElaborate, which runs inside typecheck. -->
+    <Compile Include="tests/LapackTests.fs" />
     <Compile Include="tests/AllocTests.fs" />
     <Compile Include="tests/NetcdfTests.fs" />
     <Compile Include="tests/ZarrTests.fs" />
@@ -371,6 +385,12 @@
          machines with no BLAS. -->
     <None Include="src/cpp/blade_linalg_views.hpp">
       <Link>cpp/blade_linalg_views.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Eigensolver dispatch (Phase 6 / Round B). LAPACK-only; included only
+         by programs that emit a blade_lapack:: call. -->
+    <None Include="src/cpp/blade_lapack.hpp">
+      <Link>cpp/blade_lapack.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <!-- Runtime tests for the contiguity probe, compiled and run by

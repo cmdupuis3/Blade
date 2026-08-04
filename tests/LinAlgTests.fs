@@ -42,6 +42,8 @@ open System.Diagnostics
 open System.Runtime.InteropServices
 open Blade
 open Blade.Build
+open Blade.Types
+open Blade.IR
 open Blade.Lowering
 open Blade.Tests.TestHarness
 
@@ -103,7 +105,7 @@ let private emissionCases : (string * bool * string * string list * string list)
       // probe then does with it.
       ("gram_same_array_routes_to_syrk_adapter", true,
        realMat + "let G = gram(A, A)\n",
-       [ shimInclude; "blade_linalg::blade_gram_same("; "linalg dispatch: gram(A, A)"
+       [ shimInclude; "blade_linalg::blade_gram_same_d("; "linalg dispatch: gram(A, A)"
          "A.data, (A.extents[0] * A.extents[1])" ],
        [ "cblas_"; "#include <cblas.h>" ])
       // gram(A, B) — distinct operands, dense result: C = A * B^T, a gemm with
@@ -113,11 +115,11 @@ let private emissionCases : (string * bool * string * string list * string list)
       // directly as the extent product.
       ("gram_distinct_routes_to_gemm_adapter", true,
        realMat + realMatB + "let G = gram(A, B)\n",
-       [ shimInclude; "blade_linalg::blade_gram_distinct("; "linalg dispatch: gram(A, B)"
+       [ shimInclude; "blade_linalg::blade_gram_distinct_d("; "linalg dispatch: gram(A, B)"
          "A.data, (A.extents[0] * A.extents[1])"
          "B.data, (B.extents[0] * B.extents[1])"
          "G.data, (A.extents[0] * B.extents[0])" ],
-       [ "cblas_"; "#include <cblas.h>"; "blade_gram_same" ])
+       [ "cblas_"; "#include <cblas.h>"; "blade_gram_same_" ])
       // matmul — the first-class intrinsic. `__math_matmul` must NOT survive
       // into the output (it is a pre-inference marker), and no synthesized
       // `__math_<n>` triple-loop function may be generated for it either.
@@ -126,18 +128,70 @@ let private emissionCases : (string * bool * string * string list * string list)
        "let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
        "let B: Array<Float64 like Idx<3>, Idx<2>> = [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]\n" +
        "let C = m.matmul(A, B)\n",
-       [ shimInclude; "blade_linalg::blade_matmul("; "linalg dispatch: matmul(A, B)"
+       [ shimInclude; "blade_linalg::blade_matmul_d("; "linalg dispatch: matmul(A, B)"
          "A.data, (A.extents[0] * A.extents[1])"
          "B.data, (B.extents[0] * B.extents[1])"
          "C.data, (A.extents[0] * B.extents[1])" ],
        [ "cblas_"; "#include <cblas.h>"; "__math_matmul"; "double __math_1" ])
-      // COMPLEX gram keeps the scalar loops: the shim's v1 domain is real f64
-      // (dsyrk/dgemm), exactly the restriction the pre-shim BLAS lowering had.
-      // A complex program must therefore name neither the header nor a route.
-      ("complex_gram_stays_on_scalar_loops", true,
+      // ================= TYPED DISPATCH (Round A) =================
+      // Every entry point is `blade_<route>_<p>`, p ∈ {s,d,c,z}, and the letter
+      // is appended by `shimEntryPoint` from the classified `Precision`. That
+      // makes the ROUTINE FAMILY AND WIDTH assertable from generated text,
+      // which is the only place a mis-dispatch would ever be visible: BLAS and
+      // Blade's loops agree to a ULP, so no value test can tell them apart.
+      //
+      // Every case runs with the gate ON, so a wrong letter — or a decline —
+      // is provably about the ELEMENT TYPE and not about availability.
+      //
+      // COMPLEX same-array gram is HERMITIAN: `_z` binds `cblas_zherk`, NOT
+      // zsyrk. Blade's own complex scalar loop conjugates the second factor
+      // (`conj_scalar`), i.e. it already computes A·A^H — so herk keeps the
+      // semantics exactly and syrk would silently compute a different matrix.
+      ("complex_gram_same_routes_to_zherk", true,
        "let A: Array<Complex128 like Idx<2>, Idx<2>> = [[complex(1.0, 0.0), complex(2.0, 1.0)], [complex(3.0, 0.0), complex(4.0, -1.0)]]\n" +
        "let G = gram(A, A)\n",
-       [ "conj_scalar" ],
+       [ shimInclude; "blade_linalg::blade_gram_same_z("; "linalg dispatch: gram(A, A)" ],
+       [ "cblas_"; "blade_gram_same_d"; "conj_scalar" ])
+      // COMPLEX distinct gram is A·B^H: `_z` binds `cblas_zgemm` with
+      // **CblasConjTrans** on B, because the scalar loop conjugates B's element
+      // exactly as in the same-array case. A different classifier arm, so
+      // pinned separately.
+      ("complex_gram_distinct_routes_to_zgemm", true,
+       "let A: Array<Complex128 like Idx<2>, Idx<2>> = [[complex(1.0, 0.0), complex(2.0, 1.0)], [complex(3.0, 0.0), complex(4.0, -1.0)]]\n" +
+       "let B: Array<Complex128 like Idx<3>, Idx<2>> = [[complex(1.0, 0.0), complex(0.0, 1.0)], [complex(2.0, 0.0), complex(0.0, 2.0)], [complex(3.0, 0.0), complex(0.0, 3.0)]]\n" +
+       "let G = gram(A, B)\n",
+       [ shimInclude; "blade_linalg::blade_gram_distinct_z("; "linalg dispatch: gram(A, B)" ],
+       [ "cblas_"; "blade_gram_distinct_d"; "blade_gram_same_"; "conj_scalar" ])
+      // FLOAT32 gram, both arms: `ssyrk` / `sgemm`.
+      ("f32_gram_same_routes_to_ssyrk", true,
+       "let A: Array<Float32 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n" +
+       "let G = gram(A, A)\n",
+       [ shimInclude; "blade_linalg::blade_gram_same_s(" ],
+       [ "cblas_"; "blade_gram_same_d"; "__gacc" ])
+      ("f32_gram_distinct_routes_to_sgemm", true,
+       "let A: Array<Float32 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n" +
+       "let B: Array<Float32 like Idx<4>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]\n" +
+       "let G = gram(A, B)\n",
+       [ shimInclude; "blade_linalg::blade_gram_distinct_s(" ],
+       [ "cblas_"; "blade_gram_distinct_d"; "__gacc" ])
+      // INTEGER stays DECLINED everywhere: `precisionOf` answers None for an
+      // int element type, so there is no letter and no routine family. Blade's
+      // own loops are the only correct answer, and this is the shape of every
+      // future non-BLAS element type.
+      ("int_gram_same_stays_on_scalar_loops", true,
+       "let A: Array<Int64 like Idx<3>, Idx<2>> = [[1, 2], [3, 4], [5, 6]]\n" +
+       "let G = gram(A, A)\n",
+       [ "__gacc" ],
+       [ shimInclude; "blade_linalg::"; "cblas_" ])
+      // MIXED precisions decline rather than promote: BLAS has no mixed-width
+      // routine, and silently widening an operand would be a storage change the
+      // caller never asked for. The native loops promote per Blade's own
+      // element rules, which is exactly what a decline falls back to.
+      ("mixed_precision_gram_distinct_declines", true,
+       "let A: Array<Float64 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n" +
+       "let B: Array<Float32 like Idx<4>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]\n" +
+       "let G = gram(A, B)\n",
+       [ "__gacc" ],
        [ shimInclude; "blade_linalg::"; "cblas_" ])
       // NO GRATUITOUS DEPENDENCY SURFACE. A program with no linalg route must
       // not name the header at all — the include is collector-driven, not
@@ -153,7 +207,7 @@ let private emissionCases : (string * bool * string * string list * string list)
       // `for (size_t __i0 ...)`, one call carrying the SEED.
       ("dot_reduce_over_deferred_zip_routes_to_dot", true,
        vecX + vecY + deferredProd + "let s = reduce(P, (+))\n",
-       [ shimInclude; "blade_linalg::blade_dot("; "linalg dispatch: dot(x, y)"
+       [ shimInclude; "blade_linalg::blade_dot_d("; "linalg dispatch: dot(x, y)"
          // seed = (+)'s implicit identity, passed through to the shim so the
          // native fallback starts its accumulator exactly where the loop did.
          "x.data, y.data, 0.0)" ],
@@ -161,7 +215,7 @@ let private emissionCases : (string * bool * string * string list * string list)
       // The 3-arg form: the user's `init` is the seed, and it reaches the shim.
       ("dot_with_explicit_init_carries_the_seed", true,
        vecX + vecY + deferredProd + "let s = reduce(P, (+), 100.0)\n",
-       [ "blade_linalg::blade_dot("; "x.data, y.data, 100.0)" ],
+       [ "blade_linalg::blade_dot_d("; "x.data, y.data, 100.0)" ],
        [ "cblas_"; "for (size_t __i0" ])
       // PRECEDENCE (the load-bearing negative). An `omp`-licensed fold kernel
       // keeps Phase 2's chunked parallel fold. Firing the dot route here would
@@ -190,6 +244,36 @@ let private emissionCases : (string * bool * string * string list * string list)
        vecX + vecY + "let P = x * y\nlet s = reduce(P, (+))\n",
        [ "reduce: accumulator loop" ],
        [ "blade_linalg::"; shimInclude ])
+      // FLOAT32 dot -> `sdot`.
+      ("f32_dot_routes_to_sdot", true,
+       "let x: Array<Float32 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+       + "let y: Array<Float32 like Idx<5>> = [2.0, 3.0, 4.0, 5.0, 6.0]\n"
+       + "let P = method_for(zip(x, y)) <@> lambda(a: Float32, b: Float32) -> a * b\n"
+       + "let s = reduce(P, (+))\n",
+       [ shimInclude; "blade_linalg::blade_dot_s(" ],
+       [ "cblas_"; "blade_dot_d"; "(x____i0 * y____i0)" ])
+      // COMPLEX dot -> `zdotu`, and the `_z` name is the assertion that it is
+      // dotU. Blade's zip product is `a * b` with NO conjugation anywhere, so
+      // `zdotc` (Σ conj(x_i)·y_i) would silently return a different number —
+      // most visibly for dot(x, x), where dotc gives the real squared norm and
+      // Blade's fold gives the complex Σ x_i². A conjugating inner product is a
+      // DIFFERENT operation and needs its own surface form; it is deliberately
+      // not implemented, so nothing here should ever route to a `dotc`.
+      ("complex_dot_routes_to_zdotu", true,
+       "let x: Array<Complex128 like Idx<3>> = [complex(1.0, 1.0), complex(2.0, 0.0), complex(3.0, -1.0)]\n"
+       + "let y: Array<Complex128 like Idx<3>> = [complex(2.0, 0.0), complex(1.0, 1.0), complex(0.0, 1.0)]\n"
+       + "let P = method_for(zip(x, y)) <@> lambda(a: Complex128, b: Complex128) -> a * b\n"
+       + "let s = reduce(P, (+))\n",
+       [ shimInclude; "blade_linalg::blade_dot_z(" ],
+       [ "cblas_"; "blade_dot_d"; "(x____i0 * y____i0)" ])
+      // INTEGER dot stays DECLINED: no BLAS routine family for int elements.
+      ("dot_declines_on_integer_elements_typed", true,
+       "let x: Array<Int64 like Idx<5>> = [1, 2, 3, 4, 5]\n"
+       + "let y: Array<Int64 like Idx<5>> = [2, 3, 4, 5, 6]\n"
+       + "let P = method_for(zip(x, y)) <@> lambda(a: Int64, b: Int64) -> a * b\n"
+       + "let s = reduce(P, (+))\n",
+       [ "(x____i0 * y____i0)" ],
+       [ "blade_linalg::"; shimInclude; "cblas_" ])
 
       // ================= Phase 5b: L2 gemv =================
       // A per-row apply whose kernel is `prodsum(row, x)`: rank-2 operand
@@ -198,14 +282,14 @@ let private emissionCases : (string * bool * string * string list * string list)
       ("gemv_per_row_prodsum_fiber_routes_to_gemv", true,
        matA + vecXv
        + "let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) -> prodsum(row, xv) |> compute\n",
-       [ shimInclude; "blade_linalg::blade_gemv("; "linalg dispatch: gemv y = A * xv"
+       [ shimInclude; "blade_linalg::blade_gemv_d("; "linalg dispatch: gemv y = A * xv"
          // m from the row loop's own bound, n from A's TRAILING extent — both
          // literal after shape monomorphization, exactly as the nest would —
          // and A's pool capacity, because gemv stages A through the same
          // `in_view` the L3 adapters use (Phase 5d). `xv` and `yv` are rank-1
          // pools handed over directly: no skeleton, hence no probe, hence no
          // capacity argument.
-         "blade_linalg::blade_gemv(3, 4, A.data, (A.extents[0] * A.extents[1]), xv.data, yv.data)" ],
+         "blade_linalg::blade_gemv_d(3, 4, A.data, (A.extents[0] * A.extents[1]), xv.data, yv.data)" ],
        // The NEST is gone: no row peel, no per-row output write. (The lifted
        // kernel lambda itself is still emitted as a now-unused function — it
        // always was, since the nest inlined the body rather than calling it —
@@ -236,6 +320,37 @@ let private emissionCases : (string * bool * string * string list * string list)
        + "let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) where omp -> prodsum(row, xv) |> compute\n",
        [ "#pragma omp parallel for" ],
        [ "blade_linalg::"; shimInclude ])
+      // FLOAT32 gemv -> `sgemv`. The `_s` letter is exactly the width a `dgemv`
+      // mis-dispatch would have got wrong.
+      ("f32_gemv_routes_to_sgemv", true,
+       "type M = Idx<3>\ntype N = Idx<4>\n"
+       + "let A: Array<Float32 like M, N> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
+       + "let xv: Array<Float32 like N> = [1.0, 2.0, 3.0, 4.0]\n"
+       + "let yv = method_for(A) <@> lambda(row: Array<Float32 like N>) -> prodsum(row, xv) |> compute\n",
+       [ shimInclude; "blade_linalg::blade_gemv_s(" ],
+       // The NEST is gone. (The lifted kernel lambda is still emitted as an
+       // unused function carrying its own prodsum IIFE — it always was — so
+       // `__ps` is not a usable negative; the row peel and the per-row write
+       // are.)
+       [ "cblas_"; "blade_gemv_d"; "A____i0"; "yv[__i0]" ])
+      // COMPLEX gemv -> `zgemv`, CblasNoTrans. `prodsum(row, x)` conjugates
+      // nothing, so there is nothing for the complex instance to do differently
+      // from the real one beyond its width.
+      ("complex_gemv_routes_to_zgemv", true,
+       "type M = Idx<2>\ntype N = Idx<2>\n"
+       + "let A: Array<Complex128 like M, N> = [[complex(1.0, 0.0), complex(2.0, 0.0)], [complex(3.0, 0.0), complex(4.0, 0.0)]]\n"
+       + "let xv: Array<Complex128 like N> = [complex(1.0, 0.0), complex(1.0, 1.0)]\n"
+       + "let yv = method_for(A) <@> lambda(row: Array<Complex128 like N>) -> prodsum(row, xv) |> compute\n",
+       [ shimInclude; "blade_linalg::blade_gemv_z(" ],
+       [ "cblas_"; "blade_gemv_d"; "A____i0"; "yv[__i0]" ])
+      // INTEGER gemv stays DECLINED.
+      ("int_gemv_stays_on_the_per_row_nest", true,
+       "type M = Idx<2>\ntype N = Idx<2>\n"
+       + "let A: Array<Int64 like M, N> = [[1, 2], [3, 4]]\n"
+       + "let xv: Array<Int64 like N> = [1, 2]\n"
+       + "let yv = method_for(A) <@> lambda(row: Array<Int64 like N>) -> prodsum(row, xv) |> compute\n",
+       [ "__ps = 0" ],
+       [ "blade_linalg::"; shimInclude; "cblas_" ])
 
       // ============ Phase 5c: the GATE-OFF side (the default build) ============
       // With BLAS unavailable, no route is emitted and the native math comes
@@ -304,6 +419,59 @@ let runLinAlgEmissionTests () : BlockResult =
                 resultLine Pass name (if blasOn then "routing as expected (gate on)"
                                       else "native emission as expected (gate off)")
 
+    // ---- matmul: a non-f64 operand is REJECTED, not silently routed ----
+    //
+    // matmul is the one route whose gate sits at TYPECHECK rather than at
+    // classification: `TypeCheck.inferMatmul` (:4581-4583) requires Float64
+    // elements, so a f32/complex/int operand never reaches codegen at all and
+    // `LinAlgPatterns.classifyMatmul`'s own `isRealDouble` conjunct is a
+    // backstop that cannot fire from the surface. Both layers are load-bearing
+    // and neither is tested by the emission cases above, which only ever see
+    // programs that typecheck — hence this block.
+    //
+    // WHY THIS IS THE RIGHT BEHAVIOUR, not a narrowing. The synthesized
+    // `matmulDecl` this intrinsic replaced declared `Array<Float64 …>` params
+    // (git show ffcecbc:src/math/compiler/MathDecls.fs:121), but Blade's
+    // direct-application seam does not unify param types with argument types,
+    // so a non-f64 call TYPECHECKED and then failed in g++ with a C++ template
+    // error. Measured on the still-synthesized siblings that use the identical
+    // machinery: `m.svd` / `m.unfold` with f32, complex128 or int64 operands
+    // all report OK from `blade check` and then die at compile with
+    // "could not convert 'A' from 'Array<long long int,[...]>' to
+    // 'Array<double,[...]>'". So the set of BUILDABLE programs is unchanged;
+    // only the diagnostic moved, from an unintelligible C++ error to a named
+    // rule at the seam that owns it.
+    let matmulHeader =
+        "import math as m\n"
+    let elemGateMsg = "matmul: both arguments must have Float64 elements"
+    let rejectionCases : (string * string * string) list =
+        [ ("matmul_rejects_f32_operands",
+           matmulHeader
+           + "let A: Array<Float32 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+           + "let B: Array<Float32 like Idx<3>, Idx<2>> = [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]\n"
+           + "let C = m.matmul(A, B)\n",
+           elemGateMsg)
+          ("matmul_rejects_complex128_operands",
+           matmulHeader
+           + "let A: Array<Complex128 like Idx<2>, Idx<2>> = [[complex(1.0, 0.0), complex(2.0, 0.0)], [complex(3.0, 0.0), complex(4.0, 0.0)]]\n"
+           + "let C = m.matmul(A, A)\n",
+           elemGateMsg)
+          ("matmul_rejects_int64_operands",
+           matmulHeader
+           + "let A: Array<Int64 like Idx<2>, Idx<2>> = [[1, 2], [3, 4]]\n"
+           + "let C = m.matmul(A, A)\n",
+           elemGateMsg) ]
+    for (name, src, expectedFragment) in rejectionCases do
+        // Gate ON, so a decline can only be about the ELEMENT TYPE.
+        match cppOf true name src with
+        | Ok cpp ->
+            fail name (sprintf "expected rejection %A, but the program compiled (names blade_linalg: %b)"
+                           expectedFragment (cpp.Contains "blade_linalg::"))
+        | Error e when e.Contains expectedFragment ->
+            passed <- passed + 1
+            resultLine Pass name "rejected at typecheck (gate on)"
+        | Error e -> fail name (sprintf "rejected, but not for the pinned reason: %s" e)
+
     // ---- the availability gate itself ----
     // Pinned because it is now shared with Build.fs's flag injection: a change
     // in these semantics silently changes which g++ line a program gets. The
@@ -340,21 +508,132 @@ let runLinAlgEmissionTests () : BlockResult =
     // read the same on a machine with OpenBLAS and one without. Availability
     // enters one level down, in `shimEntryPoint`.
     let policyCases =
-        [ "gemm_via_shim", LinAlgPatterns.Gemm, LinAlgPatterns.ViaShim
-          "syrk_via_shim", LinAlgPatterns.Syrk, LinAlgPatterns.ViaShim
-          "dot_via_shim",  LinAlgPatterns.Dot,  LinAlgPatterns.ViaShim
-          "gemv_via_shim", LinAlgPatterns.Gemv, LinAlgPatterns.ViaShim
-          // Same paying-L1-reduction policy as dot, but NOT MATCHED in v1 (no
+        [ "host_gemm_via_shim", LinAlgPatterns.HostBlas, LinAlgPatterns.Gemm, LinAlgPatterns.ViaShim
+          "host_syrk_via_shim", LinAlgPatterns.HostBlas, LinAlgPatterns.Syrk, LinAlgPatterns.ViaShim
+          "host_dot_via_shim",  LinAlgPatterns.HostBlas, LinAlgPatterns.Dot,  LinAlgPatterns.ViaShim
+          "host_gemv_via_shim", LinAlgPatterns.HostBlas, LinAlgPatterns.Gemv, LinAlgPatterns.ViaShim
+          // Same paying-L1-reduction policy as dot, but NOT MATCHED (no
           // sqrt-shape case exists). The row is here so "routed via the shim
           // but never recognised" stays readable from the table rather than
           // being an undocumented gap.
-          "nrm2_via_shim", LinAlgPatterns.Nrm2, LinAlgPatterns.ViaShim
+          "host_nrm2_via_shim", LinAlgPatterns.HostBlas, LinAlgPatterns.Nrm2, LinAlgPatterns.ViaShim
           // The recorded "matched but routed native" decisions: L1-elementwise
           // is bandwidth-bound and the flat loop already vectorises it.
-          "axpy_native",   LinAlgPatterns.Axpy, LinAlgPatterns.Native
-          "scal_native",   LinAlgPatterns.Scal, LinAlgPatterns.Native ]
-    for (name, routine, expected) in policyCases do
-        let actual = LinAlgPatterns.routingOf routine
+          "host_axpy_native",   LinAlgPatterns.HostBlas, LinAlgPatterns.Axpy, LinAlgPatterns.Native
+          "host_scal_native",   LinAlgPatterns.HostBlas, LinAlgPatterns.Scal, LinAlgPatterns.Native
+          // CudaBlas is DECLARED, NOT IMPLEMENTED: every routine routes Native
+          // under it, so a caller asking for that mode emits ordinary host
+          // loops rather than anything wrong. Pinned so landing the backend is
+          // a deliberate table edit, and so "no cuBLAS yet" is a statement the
+          // suite makes rather than an absence.
+          "cuda_gemm_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Gemm, LinAlgPatterns.Native
+          "cuda_syrk_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Syrk, LinAlgPatterns.Native
+          "cuda_dot_native",    LinAlgPatterns.CudaBlas, LinAlgPatterns.Dot,  LinAlgPatterns.Native
+          "cuda_gemv_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Gemv, LinAlgPatterns.Native ]
+    for (name, backend, routine, expected) in policyCases do
+        let actual = LinAlgPatterns.routingOf backend routine
+        if actual = expected then
+            passed <- passed + 1
+            resultLine Pass name (sprintf "%A" actual)
+        else fail name (sprintf "expected %A, got %A" expected actual)
+
+    // ---- eigh: the (precision × SYMMETRY) route table (Round B) ----
+    //
+    // No surface form reaches these yet — `math.eigh` still elaborates to the
+    // synthesized Jacobi source, and routing it is the next increment — so the
+    // classifier is exercised DIRECTLY on operand types. That is the same
+    // deliberate shape `blade_symv` has: a verified route waiting for a
+    // surface. What it pins is the axis a precision-only widening gets wrong,
+    // namely that SYMMETRY selects the routine family.
+    let mkIx rank sym kind : IRIndexType =
+        { Id = 0; Rank = rank; Extent = IRLit (IRLitInt 4L); Symmetry = sym
+          Tag = None; Kind = SDimension; IxKind = kind; Dependencies = [] }
+    let mkArr (elem: IRType) (ixs: IRIndexType list) : IRArrayType =
+        { ElemType = elem; IndexTypes = ixs; IsVirtual = false; Identity = None }
+    let packed sym elem = mkArr elem [ mkIx 2 sym IxKPlain ]
+    let dense elem = mkArr elem [ mkIx 1 SymNone IxKPlain; mkIx 1 SymNone IxKPlain ]
+    let eighCases =
+        [ // PACKED, real symmetric -> ?spev, the zero-conversion route.
+          "eigh_packed_sym_f64_is_dspev", packed SymSymmetric (IRTScalar ETFloat64),
+            Some "blade_lapack::blade_eigh_packed_d"
+          "eigh_packed_sym_f32_is_sspev", packed SymSymmetric (IRTScalar ETFloat32),
+            Some "blade_lapack::blade_eigh_packed_s"
+          // PACKED, Hermitian complex -> ?hpev.
+          "eigh_packed_herm_c128_is_zhpev", packed SymHermitian (IRTScalar ETComplex128),
+            Some "blade_lapack::blade_eigh_packed_z"
+          "eigh_packed_herm_c64_is_chpev", packed SymHermitian (IRTScalar ETComplex64),
+            Some "blade_lapack::blade_eigh_packed_c"
+          // A REAL Hermitian matrix IS symmetric, so it takes the real packed
+          // entry point. A theorem, not a convenience.
+          "eigh_packed_herm_f64_is_dspev", packed SymHermitian (IRTScalar ETFloat64),
+            Some "blade_lapack::blade_eigh_packed_d"
+          // ***THE COMPLEX-SYMMETRIC TRAP.*** A complex array carrying
+          // SymSymmetric is complex-SYMMETRIC (A = Aᵀ, no conjugation) — not
+          // Hermitian, not normal, and LAPACK has NO eigensolver for it: there
+          // is no zsyev and no zspev. Its spectrum is complex and its
+          // eigenvectors are not orthogonal, so the right routine is the
+          // general zgeev — a different operation with a different result type,
+          // not a precision swap. It MUST decline to the native path.
+          "eigh_complex_symmetric_DECLINES_c128", packed SymSymmetric (IRTScalar ETComplex128), None
+          "eigh_complex_symmetric_DECLINES_c64", packed SymSymmetric (IRTScalar ETComplex64), None
+          // Antisymmetric (skew) has no ?spev either: imaginary spectrum.
+          "eigh_antisymmetric_declines", packed SymAntisymmetric (IRTScalar ETFloat64), None
+          // DENSE (symmetry asserted by the caller, per the eigh surface's own
+          // "symmetry is ASSUMED, not checked"): ?syev real, ?heev complex.
+          "eigh_dense_f64_is_dsyev", dense (IRTScalar ETFloat64),
+            Some "blade_lapack::blade_eigh_dense_d"
+          "eigh_dense_f32_is_ssyev", dense (IRTScalar ETFloat32),
+            Some "blade_lapack::blade_eigh_dense_s"
+          "eigh_dense_c128_is_zheev", dense (IRTScalar ETComplex128),
+            Some "blade_lapack::blade_eigh_dense_z"
+          "eigh_dense_c64_is_cheev", dense (IRTScalar ETComplex64),
+            Some "blade_lapack::blade_eigh_dense_c"
+          // No BLAS/LAPACK routine family for integers, at any shape.
+          "eigh_int_declines_packed", packed SymSymmetric (IRTScalar ETInt64), None
+          "eigh_int_declines_dense", dense (IRTScalar ETInt64), None ]
+    for (name, operand, expected) in eighCases do
+        // Gate ON: a decline must be about the operand TYPE, not availability.
+        use _gate = pinBlas true
+        let actual =
+            LinAlgPatterns.classifyEigh operand
+            |> Option.bind (LinAlgPatterns.shimEntryPoint LinAlgPatterns.HostBlas)
+        if actual = expected then
+            passed <- passed + 1
+            resultLine Pass name (match actual with Some e -> e | None -> "declined -> native")
+        else fail name (sprintf "expected %A, got %A" expected actual)
+
+    // The LAPACK gate is its OWN predicate and its own define, even though it
+    // resolves through the same OpenBLAS install: a BLAS-only program must not
+    // advertise a LAPACK dependency. With the gate off, every eigh route
+    // declines — which is what keeps the synthesized Jacobi path the default
+    // and the verification truth.
+    for (name, operand) in
+        [ "eigh_packed_declines_when_gate_off", packed SymSymmetric (IRTScalar ETFloat64)
+          "eigh_dense_declines_when_gate_off", dense (IRTScalar ETFloat64) ] do
+        use _gate = pinBlas false
+        let actual =
+            LinAlgPatterns.classifyEigh operand
+            |> Option.bind (LinAlgPatterns.shimEntryPoint LinAlgPatterns.HostBlas)
+        if actual = None then
+            passed <- passed + 1
+            resultLine Pass name "declined -> synthesized Jacobi"
+        else fail name (sprintf "expected None, got %A" actual)
+
+    // ---- the precision classifier, and the entry-point NAMES it selects ----
+    // `precisionOf` is the S|D|C|Z generalisation of the old boolean
+    // `isRealDouble`; the letter it yields is appended to every shim entry
+    // point, so a wrong answer here is a mis-dispatch by construction. Integers
+    // (and everything else with no BLAS routine family) must answer None.
+    let precisionCases =
+        [ "prec_f32_is_s",        IRTScalar ETFloat32,    Some LinAlgPatterns.PrecS
+          "prec_f64_is_d",        IRTScalar ETFloat64,    Some LinAlgPatterns.PrecD
+          "prec_complex64_is_c",  IRTScalar ETComplex64,  Some LinAlgPatterns.PrecC
+          "prec_complex128_is_z", IRTScalar ETComplex128, Some LinAlgPatterns.PrecZ
+          "prec_int64_is_none",   IRTScalar ETInt64,      None
+          "prec_int32_is_none",   IRTScalar ETInt32,      None
+          "prec_bool_is_none",    IRTScalar ETBool,       None ]
+    for (name, ty, expected) in precisionCases do
+        let actual = LinAlgPatterns.precisionOf ty
         if actual = expected then
             passed <- passed + 1
             resultLine Pass name (sprintf "%A" actual)

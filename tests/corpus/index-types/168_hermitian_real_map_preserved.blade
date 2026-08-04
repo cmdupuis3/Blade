@@ -6,16 +6,20 @@
 // four field operations commutes with it — and the Hermitian class survives.
 // The mirrored read is the assertion that matters: out(1,0) must come back
 // conjugated, which is only right because the map is conjugation-linear.
-// (The Complex128 annotations are needed on compact reads of a complex array;
-// without them the binding infers `double` and the emitted C++ will not build.)
+// (The reads below are UNANNOTATED. They used to need an explicit
+// `: Complex128`: a full-arity compact read missed every arm of the
+// application dispatch and got a fresh inference variable, which defaulted to
+// Float64 — the emitted C++ then assigned a std::complex to a double and would
+// not build. The dispatch now answers a compact read at the element type; 233
+// is the dedicated probe.)
 let A: Array<Complex128 like Idx<2>, Idx<3>> = [
     [complex(1.0, 1.0), complex(2.0, 0.0), complex(0.0, 1.0)],
     [complex(3.0, -1.0), complex(1.0, 2.0), complex(2.0, 0.0)]
 ]
 let H = gram(A, A)
 let out = method_for(H) <@> lambda(v) -> v * v |> compute
-let upper: Complex128 = out(0, 1)
-let lower: Complex128 = out(1, 0)
+let upper = out(0, 1)
+let lower = out(1, 0)
 // H upper triangle is (0,0)=7, (0,1)=4+2i, (1,1)=19 (see 067), and squaring
 // gives 49, (4+2i)^2 = 12+16i, 361.
 // EXPECT: H = [(7, 0), (4, 2), (19, 0)]

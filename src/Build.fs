@@ -320,17 +320,38 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         //   - OPENBLAS_DIR unset (but BLADE_BLAS forced on): bare -lopenblas
         //     (works when OpenBLAS is on the default include/lib paths, e.g.
         //     an MSYS2 pacman install).
-        let usesLinalgShim =
-            try (File.ReadAllText cppFullPath).Contains "#include \"blade_linalg.hpp\"" with _ -> false
+        let cppTextForSniff = try File.ReadAllText cppFullPath with _ -> ""
+        let usesLinalgShim = cppTextForSniff.Contains "#include \"blade_linalg.hpp\""
         let blasGateOn = Blade.LinAlgPatterns.blasAvailable ()
+        // LAPACK rides the same OpenBLAS install (which bundles LAPACKE) but
+        // gets its OWN sniff arm and its OWN define, so a BLAS-only program and
+        // a LAPACK-carrying one stay distinguishable on the g++ line: a
+        // gram/matmul program must not start advertising a LAPACK dependency it
+        // does not have. Same emit-side pairing guarantee as BLAS — codegen
+        // writes the include only when `lapackAvailable ()` said yes — and the
+        // same loud failure (`blade_lapack.hpp`'s own `#error`) if an emit and
+        // a compile ever disagree.
+        let usesLapackShim = cppTextForSniff.Contains "#include \"blade_lapack.hpp\""
+        let lapackGateOn = Blade.LinAlgPatterns.lapackAvailable ()
         // Split into a COMPILE half (define + -I, which must precede the source
         // so the shim's `#include <cblas.h>` resolves) and a LINK half (the
         // library, which must FOLLOW the source in linker order).
+        //
+        // BOTH shims resolve through the same OpenBLAS install (LAPACKE is
+        // bundled in libopenblas), so the include/link half is shared and the
+        // DEFINES are per-header. `wantsBlas`/`wantsLapack` are each an
+        // (include present AND its own gate) conjunction, so a program gets
+        // exactly the defines its emitted text needs.
+        let wantsBlas = usesLinalgShim && blasGateOn
+        let wantsLapack = usesLapackShim && lapackGateOn
         let (blasCompileFlags, blasLinkFlags) =
-            if not (usesLinalgShim && blasGateOn) then ("", "")
+            if not (wantsBlas || wantsLapack) then ("", "")
             else
+                let defines =
+                    (if wantsBlas then " -DBLADE_HAS_BLAS" else "")
+                    + (if wantsLapack then " -DBLADE_HAS_LAPACK" else "")
                 (match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
-                 | null | "" -> (" -DBLADE_HAS_BLAS", " -lopenblas")
+                 | null | "" -> (defines, " -lopenblas")
                  | dir ->
                      let incFlag = sprintf " -I\"%s\"" (Path.Combine(dir, "include"))
                      let binDir = Path.Combine(dir, "bin")
@@ -346,7 +367,7 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
                              (match glob with
                               | Some p -> sprintf " \"%s\"" p
                               | None -> sprintf " -L\"%s\" -lopenblas" (Path.Combine(dir, "lib")))
-                     (" -DBLADE_HAS_BLAS" + incFlag, linkFlag))
+                     (defines + incFlag, linkFlag))
 
         let extraFlags = extraLinkInputs |> List.map (fun p -> sprintf " \"%s\"" (Path.GetFullPath p)) |> String.concat ""
         let args = sprintf "-std=c++17 %s %s %s%s -o \"%s\" \"%s\"%s%s%s%s" (optFlags ()) ompFlag safetyFlags blasCompileFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags blasLinkFlags

@@ -632,6 +632,7 @@ let private builtinCallOf (te: TypedExpr) : (string * TypedExpr list) option =
     | TExprDecompact (a, _) -> Some ("decompact", [a])
     | TExprGram (l, r, _) -> Some ("gram", [l; r])
     | TExprMatmul (l, r) -> Some ("matmul", [l; r])
+    | TExprEigh a -> Some ("eigh", [a])
     | TExprSequence es -> Some ("sequence", es)
     | TExprReplicate (c, b) -> Some ("replicate", [c; b])
     | TExprComplexLit (re, im) -> Some ("complex", [re; im])

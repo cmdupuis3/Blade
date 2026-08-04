@@ -58,6 +58,7 @@
 #include <cstdio>
 #include <cstddef>
 #include "nested_array_utilities.hpp"
+#include <vector>
 #include "blade_linalg_views.hpp"
 
 using namespace nested_array_utilities;
@@ -216,6 +217,66 @@ int main() {
                          && c[1][0] == 7.0 && c[1][1] == 8.0);
         }
         deallocate<T2, nullptr>(c, ext);
+    }
+
+    // ------------------------------------------------------------------
+    // PACKED SELF-DUALITY (Phase 6 / Round B) — the zero-conversion premise
+    // behind routing `?spev` at LAPACK_COL_MAJOR + uplo 'L' straight off
+    // Blade's pool.
+    //
+    // Blade stores row-major UPPER packed. LAPACK is column-major. Position k
+    // of COL-MAJOR-LOWER packed holds A(j,i) exactly where position k of
+    // ROW-MAJOR-UPPER holds A(i,j) — so for a SYMMETRIC matrix, where
+    // A(j,i) = A(i,j), the two sequences are IDENTICAL and no conversion is
+    // needed at all. This is pure index arithmetic, so it is checked here (no
+    // LAPACK required); that `dspev` then returns the right answer when fed the
+    // pool is a hand check, since it needs the library.
+    //
+    // The complex case is NOT self-dual (the same positions relate by
+    // conj), which is why blade_lapack's Hermitian arms conjugate during their
+    // mandated scratch copy. Pinned negatively below.
+    // ------------------------------------------------------------------
+    {
+        bool allDual = true, complexNotDual = false;
+        for (size_t n = 1; n <= 6; n++) {
+            // logical symmetric A(i,j) = A(j,i), distinct per unordered pair
+            auto logical = [&](size_t i, size_t j) {
+                size_t a = i < j ? i : j, b = i < j ? j : i;
+                return (double)(10 * a + b + 1);
+            };
+            std::vector<double> rowMajorUpper, colMajorLower;
+            for (size_t i = 0; i < n; i++)
+                for (size_t j = i; j < n; j++) rowMajorUpper.push_back(logical(i, j));
+            for (size_t j = 0; j < n; j++)
+                for (size_t i = j; i < n; i++) colMajorLower.push_back(logical(i, j));
+            if (rowMajorUpper != colMajorLower) allDual = false;
+
+            // ...and Blade's actual pool IS the row-major-upper sequence.
+            static constexpr const size_t symm[2] = {1, 1};
+            const size_t ext[2] = {n, n};
+            T2 s = allocate<T2, symm>(ext);
+            for (size_t i = 0; i < n; i++)
+                for (size_t j = i; j < n; j++) s[i][j - i] = logical(i, j);
+            const double* pool = pool_base(s);
+            for (size_t k = 0; k < rowMajorUpper.size(); k++)
+                if (pool[k] != rowMajorUpper[k]) allDual = false;
+            deallocate<T2, symm>(s, ext);
+
+            // The complex counterexample: with a HERMITIAN A the two
+            // conventions differ (they are conjugates), so at least one n must
+            // exhibit a mismatch when the imaginary parts are non-zero.
+            if (n >= 2) {
+                // im(i,j) = +1 for i<j, so A(j,i) = conj(A(i,j)) flips its sign
+                std::vector<double> imUpper, imLower;
+                for (size_t i = 0; i < n; i++)
+                    for (size_t j = i; j < n; j++) imUpper.push_back(i == j ? 0.0 : 1.0);
+                for (size_t j = 0; j < n; j++)
+                    for (size_t i = j; i < n; i++) imLower.push_back(i == j ? 0.0 : -1.0);
+                if (imUpper != imLower) complexNotDual = true;
+            }
+        }
+        check("packed_real_rowmajor_upper_is_colmajor_lower", allDual);
+        check("packed_complex_is_NOT_self_dual_needs_conj", complexNotDual);
     }
 
     printf("LINALG PROBE TESTS: %d/%d passed\n", g_pass, g_total);

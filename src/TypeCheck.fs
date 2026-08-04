@@ -1625,7 +1625,77 @@ let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType
             | _ -> None
         | [] -> None
 
-    if rowTypedElemArr.IsSome then
+    // TRIANGULAR ⇒ SYMMETRIC (the default for an unannotated nest whose rows
+    // are n, n-1, ..., 1). That shape IS the left-justified simplex of
+    // `SymIdx<2, n>` — `canon_left_justify`'s storage, cell for cell — so the
+    // literal that spells a symmetric matrix out reads back as one:
+    //
+    //     let B = [[3, 2, 1], [5, 4], [6]]     // Array<Int64 like SymIdx<2, 3>>
+    //     B(1, 0) == B(0, 1) == 2
+    //
+    // The shape is genuinely shared with ragged data, and this rule hands it to
+    // the compact class, so RAGGED data of exactly this shape now needs its
+    // annotation (`Array<T like Idx<n>, RaggedIdx<lens>>`, corpus
+    // index-types/019). Any other row profile — equal lengths, or lengths that
+    // do not step down by one to a final 1 — is untouched and still infers
+    // rectangular or inline-ragged below.
+    //
+    // The nest is matched at ANY rank r: r levels of brackets, the outer one n
+    // wide, and a level seeded at coordinate p exactly n - p wide, which is the
+    // seed recurrence `canon_left_justify` inverts (p' = p + i). So
+    // `[[[1,2,3],[4,5],[6]], [[7,8],[9]], [[10]]]` is `SymIdx<3, 3>`, whose
+    // C(3+3-1, 3) = 10 cells are the 10 leaves.
+    //
+    // One deliberate narrowing remains: INCLUSIVE only. The strict profile
+    // (n-1, ..., 1, 0) is AntisymIdx's storage, but antisymmetry is a claim
+    // about SIGNS — a mirrored read negates — and no shape on its own
+    // justifies inferring that.
+    let triangularExtent =
+        // The nest's depth, if every leaf sits at the same one and no level is
+        // empty. A ragged/rectangular nest is rejected by the width walk below,
+        // not here; this only establishes the r to walk against.
+        let rec depthOf (e: TypedExpr) =
+            match e.Kind with
+            | TExprArrayLit ([], _) -> None
+            | TExprArrayLit (cs, _) ->
+                let ds = cs |> List.map depthOf
+                match ds with
+                | d :: rest when ds |> List.forall Option.isSome && rest |> List.forall (fun x -> x = d) ->
+                    d |> Option.map (fun k -> k + 1)
+                | _ -> None
+            | _ -> Some 0
+        // Width walk over one level's children: a level seeded at p holds
+        // n - p of them, and child i seeds the next level at p + i. The leaf
+        // level's children are the cells.
+        let rec widthsOk (n: int) (rank: int) (depth: int) (seed: int) (cs: TypedExpr list) =
+            cs.Length = n - seed
+            && (depth = rank - 1
+                || cs
+                   |> List.mapi (fun i c ->
+                       match c.Kind with
+                       | TExprArrayLit (gs, _) -> widthsOk n rank (depth + 1) (seed + i) gs
+                       | _ -> false)
+                   |> List.forall id)
+        let n = List.length exprs
+        if n < 2 then None
+        else
+            // The literal is one level deeper than its rows.
+            let rowDepths = exprs |> List.map depthOf
+            match rowDepths with
+            | d :: rest when rowDepths |> List.forall Option.isSome
+                             && rest |> List.forall (fun x -> x = d) ->
+                let rank = Option.get d + 1
+                if rank >= 2 && widthsOk n rank 0 0 exprs then Some (rank, n) else None
+            | _ -> None
+
+    if triangularExtent.IsSome then
+        let (rank, n) = triangularExtent.Value
+        let symIdx = {
+            Id = builder.FreshId(); Rank = rank; Extent = IRLit (IRLitInt (int64 n))
+            Symmetry = SymSymmetric; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = []
+        }
+        { ElemType = elemType; IndexTypes = [symIdx]; IsVirtual = false; Identity = None }
+    elif rowTypedElemArr.IsSome then
         let elemArr = rowTypedElemArr.Value
         let outerIdx = {
             Id = builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 exprs.Length))
@@ -2273,6 +2343,45 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
              let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
              Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix),
                                              "array subscript of a wreath group combined with other index slots")))
+    // FULL-ARITY READ OF A COMPACT GROUP — the same shape of hole the wreath
+    // arm above exists to close, and it was open for the same reason.
+    //
+    // A rank-k compact slot (SymIdx / AntisymIdx / HermitianIdx) is ONE index
+    // record spanning k dimensions and takes k FLAT subscripts, so `A(i, j)`
+    // presents 2 args against 1 slot: the next arm's `tArgs.Length <=
+    // IndexTypes.Length` guard is FALSE, no other arm matches, and the read
+    // reached the catch-all — which mints a FRESH inference variable and
+    // returns Ok. So the read type-checked at a type nothing downstream ever
+    // constrained, and an unconstrained numeric var defaults to Float64: a read
+    // of an `Array<Int64 like SymIdx<2, 3>>` bound at Float64, and a read of a
+    // complex one needed a hand-written `: Complex128` for the emitted C++ to
+    // build at all (corpus index-types/168 documents that as a requirement).
+    // The VALUE was always right; only the type was invented.
+    //
+    // Answer at the element type, like the wreath arm. Exact arity only: a
+    // SHORT read still routes to the arm below (it consumes whole slots), and
+    // an over-supplied one still falls through.
+    | ArrayElem arrTy when
+        not (List.isEmpty tArgs)
+        && tArgs.Length > arrTy.IndexTypes.Length
+        && tArgs.Length = (arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank))
+        && arrTy.IndexTypes |> List.exists (fun ix ->
+               ix.Rank >= 2 &&
+               (match ix.Symmetry with
+                | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                | SymNone | SymWreath -> false)) ->
+        if tArgs |> List.exists (fun a -> match a.Kind with TExprWildcard -> true | _ -> false) then
+            // A hole frees ONE axis of the group, and a partially-read compact
+            // group has no residual class — the same refusal the wreath arm
+            // gives a partial read, and the reason `decompact` exists.
+            Error (Other "a wildcard `_` frees one axis of a compact (SymIdx / AntisymIdx / HermitianIdx) group, and a partially-read compact group has no residual class. Supply every coordinate of the group, or decompact(A, d) first and read the freed axis there.")
+        else
+            foldEnumIdxLabels env arrTy tArgs
+            |> Result.bind (fun tArgs ->
+            checkArrayIndexTags env arrTy tArgs
+            |> Result.map (fun () ->
+                let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
+                mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType))
     | ArrayElem arrTy when
         // A compound head takes FLAT subscripts (k for the axis + one per
         // trailing dim), so its arg budget exceeds the slot count — and it
@@ -2656,6 +2765,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprDecompact (a, _) -> [a]
         | TExprGram (l, r, _) -> [l; r]
         | TExprMatmul (l, r) -> [l; r]
+        | TExprEigh a -> [a]
         | TExprArrayNegate a -> [a]
         | TExprArrayConjugate a -> [a]
         | TExprContains (a, v) -> [a; v]
@@ -3205,6 +3315,17 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // cannot approach, so it earns a first-class node rather than a desugaring.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__math_matmul" }, [aExpr; bExpr]) when (lookupVar "__math_matmul" env).IsNone ->
         inferMatmul env aExpr bExpr
+
+    // `math.eigh` as a FIRST-CLASS intrinsic (Phase 6 / Round B2). Same
+    // import-gated internal-marker trick as `__math_matmul` above, with one
+    // difference that runs through everything below: the marker is emitted
+    // CONDITIONALLY. `MathElaborate` consults `LinAlgPatterns.lapackAvailable
+    // ()` and only rewrites to this marker when LAPACK will be there; without
+    // it the elaborator still synthesizes the cyclic-Jacobi Blade source, which
+    // stays the default path, the verification truth and the only thing the
+    // interp / diff-oracle differentials ever see.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__math_eigh" }, [aExpr]) when (lookupVar "__math_eigh" env).IsNone ->
+        inferEigh env aExpr
 
     | ExprKind.ExprApp (func, args) ->
         inferExpr env func |> Result.bind (fun tFunc ->
@@ -4601,6 +4722,117 @@ and inferMatmul (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
                         mkArrayArrow [ freshSlot lTy.IndexTypes.[0].Extent
                                        freshSlot rTy.IndexTypes.[1].Extent ] lTy.ElemType None
                     Ok (mkTyped (TExprMatmul (tL, tR)) resultType)))))
+
+
+and inferEigh (env: TypeEnv) (operandE: Expr) : TypeResult<TypedExpr> =
+    // eigh(S) -> (Q, LAM): the symmetric / Hermitian eigendecomposition, as a
+    // first-class intrinsic. Phase 6 / Round B2 of
+    // docs/plan-cpp-perf-exploitation.md.
+    //
+    // THE ADMISSIBILITY RULE IS `LinAlgPatterns.classifyEigh`, NOT A RESTATEMENT
+    // OF IT. inferMatmul restates its (deleted) synthesized signature inline
+    // because matmul's domain is one element type and two plain axes — a rule
+    // small enough that a second copy is honest. eigh's domain is the
+    // (precision x SYMMETRY) matrix, whose whole point is that symmetry selects
+    // the routine FAMILY and that one row of it (complex + SymSymmetric) has no
+    // routine at all. A restatement would be a second place for that matrix to
+    // be wrong. So the checks below establish SHAPE — rank-2, square — and then
+    // the classifier decides the family; a `None` from it is a type error here,
+    // because this node exists only when a route does.
+    //
+    // The classifier is CONSULTED, never used to explain itself: the diagnostic
+    // text is derived from the operand's own record so each decline names its
+    // actual reason (no LAPACK family for the element type / the
+    // complex-symmetric trap / antisymmetric / virtual) instead of one generic
+    // "not supported".
+    //
+    // SURFACE DOMAIN. The synthesized `eighDecl` declared `Array<Float64 like
+    // Idx<n>, Idx<n>>` params, and Blade's direct-application seam does not
+    // unify param types with argument types, so a f32/complex/int operand
+    // TYPECHECKED and then died in g++ (the same measured behaviour the matmul
+    // audit records for `m.svd` / `m.unfold`). This rule therefore does not
+    // narrow anything: it accepts strictly more programs than were BUILDABLE
+    // before, and rejects — with a named reason — exactly the ones that used to
+    // produce a C++ template error.
+    inferExpr env operandE |> Result.bind (fun tA ->
+        requireArrayArgMinRank env tA "eigh" 2 |> Result.bind (fun aTy ->
+            // Rank-2 in either admissible spelling: ONE compact slot of arity 2
+            // (SymIdx / Hermitian storage — the zero-conversion packed route),
+            // or TWO plain dense axes. Anything else is not a matrix.
+            let shapeResult =
+                match aTy.IndexTypes with
+                | [ ix ] when ix.Rank = 2 ->
+                    // A rank-2 compact group is square BY CONSTRUCTION: one
+                    // extent covers both dimensions.
+                    Ok ix.Extent
+                | [ i0; i1 ] when i0.Rank <= 1 && i1.Rank <= 1 ->
+                    let squareMismatch =
+                        match tryEvalIntIR i0.Extent, tryEvalIntIR i1.Extent with
+                        | Some a, Some b -> a <> b
+                        | _ -> false
+                    if squareMismatch then
+                        Error (Other "eigh: the argument must be SQUARE (n x n); symmetry is assumed, not checked.")
+                    else Ok i0.Extent
+                | _ ->
+                    Error (Other "eigh: the argument must be rank-2 square — either two plain axes (Array<Float64 like Idx<n>, Idx<n>>) or one compact arity-2 group (Array<Float64 like SymIdx<2, n>>).")
+            shapeResult |> Result.bind (fun nExtent ->
+                match Blade.LinAlgPatterns.classifyEigh aTy with
+                | None ->
+                    // Explain the specific decline. Order matters: the element
+                    // type is checked first because it is the coarsest gate,
+                    // then the two symmetry rows that have no routine.
+                    let isComplexElem =
+                        match aTy.ElemType with
+                        | IRTScalar (ETComplex64 | ETComplex128) -> true
+                        | _ -> false
+                    if aTy.IsVirtual then
+                        Error (Other "eigh: the argument must be a materialized array — a virtual (range / reverse) view has no pool for the eigensolver to read; bind it with |> compute first.")
+                    elif (Blade.LinAlgPatterns.precisionOf aTy.ElemType).IsNone then
+                        Error (Other "eigh: the element type has no eigensolver — expected Float32, Float64, Complex64 or Complex128.")
+                    else
+                        match aTy.IndexTypes with
+                        | [ ix ] when ix.Rank = 2 && ix.Symmetry = SymSymmetric && isComplexElem ->
+                            // THE COMPLEX-SYMMETRIC TRAP, refused by name. A
+                            // complex array carrying SymSymmetric is
+                            // complex-SYMMETRIC (A = A^T, no conjugation): not
+                            // Hermitian, not normal, complex spectrum,
+                            // non-orthogonal eigenvectors. There is no `zsyev`
+                            // and no `zspev`; the right routine is the general
+                            // `zgeev`, which is a different operation with a
+                            // different result TYPE.
+                            Error (Other "eigh: a COMPLEX SYMMETRIC matrix (A = A^T, without conjugation) is not Hermitian and has no symmetric eigensolver — its spectrum is complex and its eigenvectors are not orthogonal. Use eig for the general decomposition, or declare the operand Hermitian storage.")
+                        | [ ix ] when ix.Rank = 2 && ix.Symmetry = SymAntisymmetric ->
+                            Error (Other "eigh: an ANTISYMMETRIC (skew) operand has a purely imaginary spectrum and no symmetric eigensolver. Use eig on its decompacted form.")
+                        | _ ->
+                            Error (Other "eigh: the argument's index structure has no eigensolver route — expected a plain dense n x n matrix or a rank-2 symmetric/Hermitian compact group.")
+                | Some _ ->
+                    // THE MIXED-ELEMENT RESULT. Q inherits the operand's element
+                    // type; LAM does NOT — a symmetric/Hermitian matrix has REAL
+                    // eigenvalues, so a Complex128 operand yields
+                    // `(Array<Complex128 …>, Array<Float64 …>)`. That is the
+                    // first tuple the surface produces whose elements differ in
+                    // element type, and it is exactly what `blade_lapack`'s
+                    // signatures say (`std::complex<double>** V` beside
+                    // `double* lam`). Typing LAM complex would be a silent
+                    // storage-width error at the shim boundary.
+                    let lamElem =
+                        match aTy.ElemType with
+                        | IRTScalar ETComplex128 -> IRTScalar ETFloat64
+                        | IRTScalar ETComplex64 -> IRTScalar ETFloat32
+                        | t -> t
+                    let freshSlot () =
+                        { Id = env.Builder.FreshId(); Rank = 1; Extent = nExtent
+                          Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                          Kind = SDimension; Dependencies = [] }
+                    // Q is DENSE n x n whatever the operand's storage was: the
+                    // eigenvectors of a symmetric matrix carry no symmetry of
+                    // their own (Q is orthogonal, not symmetric), so claiming a
+                    // compact class for the packed route's output would be
+                    // false. The shim writes through `V[i][k]`, a dense row
+                    // skeleton, which is the same statement one level down.
+                    let qTy = mkArrayArrow [ freshSlot (); freshSlot () ] aTy.ElemType None
+                    let lamTy = mkArrayArrow [ freshSlot () ] lamElem None
+                    Ok (mkTyped (TExprEigh tA) (IRTTuple [qTy; lamTy])))))
 
 
 // ----------------------------------------------------------------------------
@@ -8094,6 +8326,136 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
     env.Subst.PopTypeVarScope(savedScope)
     result
 
+/// An array literal checked against a COMPACT index group — `SymIdx<r, n>`,
+/// `AntisymIdx<r, n>`, `HermitianIdx<n>`, r >= 2. Such a group is ONE index
+/// slot spanning r dimensions, and its STORED cells are the left-justified
+/// simplex the allocator builds (`build_skeleton`, nested_array_utilities.hpp):
+/// the outer level has n rows, a row seeded at p carries n - p cells, and the
+/// seed threads down as p' = p + i + strict (`canon_left_justify`'s inverse;
+/// strict = 1 drops the diagonal, i.e. AntisymIdx). So a literal for a compact
+/// group is written in exactly that shape — `SymIdx<2, 3>` takes
+/// `[[a00, a01, a02], [a11, a12], [a22]]`, `AntisymIdx<2, 3>` takes
+/// `[[a01, a02], [a12], []]` — and this walk checks the nesting against it
+/// level by level, seeding each row from its own coordinate. The leaves land in
+/// the pool in literal order, which IS the allocator's DFS order, so codegen
+/// fills the pool straight through (genArrayLiteral's compact branch).
+///
+/// The FLAT canonical pool is deliberately not a second accepted spelling: the
+/// row nesting is what says which cell is which, and a flat list against a
+/// group whose extent is n (not its cardinality) is exactly the shape that used
+/// to type-check at the wrong length and die in codegen.
+///
+/// Only an ANNOTATION reaches here. An unannotated triangular literal still
+/// infers the ragged type it always did — the same brackets are legal RaggedIdx
+/// data, so the annotation decides the class, never the shape.
+and checkCompactArrayLit (env: TypeEnv) (arrTy: IRArrayType) (elems: Expr list) (litSpan: Span)
+                         : TypeResult<TypedExpr> =
+    let ix = arrTy.IndexTypes.Head
+    let innerIdxs = arrTy.IndexTypes.Tail
+    let idxName = ppIndexType ix
+    let rank = ix.Rank
+    let strict = if ix.Symmetry = SymAntisymmetric then 1 else 0
+    let n = match ix.Extent with IRLit (IRLitInt v) -> int v | _ -> -1
+    let width (seed: int) = max 0 (n - seed)
+    let topName = "the literal"
+    let childName (parent: string) (i: int) =
+        if parent = topName then sprintf "row %d" i else sprintf "%s.%d" parent i
+    // The expected skeleton: the bracket picture when it fits on a line, else
+    // the row-length recurrence it is a picture of.
+    let shapeStr =
+        let rec pic (depth: int) (seed: int) =
+            let w = width seed
+            if depth = rank - 1 then
+                "[" + String.concat ", " (List.replicate w "_") + "]"
+            else
+                "[" + String.concat ", " [ for i in 0 .. w - 1 -> pic (depth + 1) (seed + i + strict) ] + "]"
+        let p = if n >= 0 && n <= 8 then pic 0 0 else ""
+        if p <> "" && p.Length <= 160 then sprintf "write it as %s" p
+        else
+            sprintf "the outer level has %d rows, and a row seeded at coordinate p holds %d - p cells%s"
+                n n (if strict = 1 then " (strict: the diagonal is dropped, so the last row is empty)" else "")
+    let denseAxis (w: int) : IRIndexType =
+        { Id = env.Builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 w))
+          Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
+    // A Hermitian DIAGONAL cell must be real: A(i,i) = conj(A(i,i)), and the
+    // stored diagonal cell is read unconjugated. Only a written-out
+    // `complex(re, im)` with a non-zero literal imaginary part is judged here —
+    // a computed cell carries no static verdict and passes.
+    let rec nonZeroImagLit (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprLit (LitFloat v) -> v <> 0.0
+        | ExprKind.ExprLit (LitInt v) -> v <> 0L
+        | ExprKind.ExprUnaryOp (OpNeg, inner) -> nonZeroImagLit inner
+        | _ -> false
+    let isComplexWithImag (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "complex" }, [_; im]) -> nonZeroImagLit im
+        | _ -> false
+    if not innerIdxs.IsEmpty then
+        // A compact group followed by further axes: the leaves are themselves
+        // arrays, so the literal no longer maps cell-for-cell onto the pool the
+        // compact branch fills. Refuse here rather than accept a shape codegen
+        // would have to bail on.
+        Error (CompactLitShape (idxName, shapeStr, topName,
+                                "is followed by further index axes, and only a literal whose leaves are \
+ELEMENTS of the compact group is representable (build the wider array from a producer instead)"))
+    elif n < 0 then
+        Error (CompactLitShape (idxName, shapeStr, topName,
+                                "needs a compile-time extent: the simplex row lengths, and so the literal's \
+own shape, are not known without one"))
+    else
+    // Every Error below re-stamps the ambient span first: the walk's recursive
+    // checkExpr calls move it to whatever leaf they last visited, so without
+    // this a row-shape complaint would point at the previous row's last cell.
+    let rec checkChildren (depth: int) (seed: int) (where_: string) (selfSpan: Span) (cs: Expr list)
+                          : TypeResult<TypedExpr list> =
+        let w = width seed
+        if cs.Length <> w then
+            setCurrentExprSpan selfSpan
+            Error (CompactLitShape (idxName, shapeStr, where_,
+                                    sprintf "holds %d cell(s), but the simplex row there is %d wide" cs.Length w))
+        else
+            let isLeafLevel = (depth = rank - 1)
+            let checkChild (i: int) (c: Expr) : TypeResult<TypedExpr> =
+                let here = childName where_ i
+                if isLeafLevel then
+                    // i = 0 within a row is the diagonal cell (c_k = 0, so
+                    // p' = p): the only cell a Hermitian class constrains.
+                    if ix.Symmetry = SymHermitian && i = 0 && isComplexWithImag c then
+                        setCurrentExprSpan c.Span
+                        Error (HermitianLitDiagComplex (sprintf "the leading cell of %s" where_))
+                    else checkExpr env arrTy.ElemType c
+                else
+                    match c.Kind with
+                    | ExprKind.ExprArrayLit gs ->
+                        let childSeed = seed + i + strict
+                        checkChildren (depth + 1) childSeed here c.Span gs
+                        |> Result.map (fun tgs ->
+                            let elemT = match tgs with t :: _ -> t.Type | [] -> arrTy.ElemType
+                            let rowTy = { arrTy with ElemType = elemT
+                                                     IndexTypes = [denseAxis (width childSeed)]
+                                                     Identity = None }
+                            mkTyped (TExprArrayLit (tgs, rowTy)) (mkArrayLike rowTy))
+                    | _ ->
+                        setCurrentExprSpan c.Span
+                        Error (CompactLitShape (idxName, shapeStr, here,
+                                                sprintf "is not a nested row: a rank-%d group takes %d levels \
+of brackets, one per dimension of the group" rank rank))
+            // Stop at the first bad cell rather than mapping the whole row and
+            // taking the first Error out of the list: a later SUCCESSFUL child
+            // would re-stamp the ambient span (checkExprInner does that on every
+            // node), and the diagnostic would point one cell past the offender.
+            let rec go (i: int) (acc: TypedExpr list) (rest: Expr list) =
+                match rest with
+                | [] -> Ok (List.rev acc)
+                | c :: tl ->
+                    match checkChild i c with
+                    | Ok t -> go (i + 1) (t :: acc) tl
+                    | Error e -> Error e
+            go 0 [] cs
+    checkChildren 0 0 topName litSpan elems
+    |> Result.map (fun tElems -> mkTyped (TExprArrayLit (tElems, arrTy)) (mkArrayLike arrTy))
+
 // ---- Bidirectional checking ----
 //
 // checkExpr drives an expression to a known target type, pushing the
@@ -8196,6 +8558,27 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
     // Array literal: extract per-rank shape from the annotation and recurse.
     // Outer index supplies the literal's length; inner index types form the
     // element annotation. Elements are checked individually against this.
+    // A COMPACT leading group (SymIdx / AntisymIdx / HermitianIdx, rank >= 2)
+    // is one index slot over r dimensions whose stored cells are a shrinking
+    // simplex, so neither the length check below (which reads the group's
+    // extent n, not its cardinality) nor the one-index-type-per-bracket-level
+    // peel describes it. checkCompactArrayLit owns that shape end to end.
+    | ExprKind.ExprArrayLit elems, ArrayElem arrTy when
+            (not arrTy.IndexTypes.IsEmpty
+             && arrTy.IndexTypes.Head.Rank >= 2
+             && (match arrTy.IndexTypes.Head.Symmetry with
+                 | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                 | SymNone | SymWreath -> false)) ->
+        checkCompactArrayLit env arrTy elems expr.Span
+    // An OrbIdx (iterated-wreath) class: its rows shrink per LEVEL, not per
+    // coordinate, so it is neither the simplex above nor a rectangular nest.
+    // The class has no writable annotation at all (BL4003) — but a literal
+    // checked against one reached here through an inferred type, so refuse at
+    // the same seam every other wreath-storage site does.
+    | ExprKind.ExprArrayLit _, ArrayElem arrTy when
+            (not arrTy.IndexTypes.IsEmpty && arrTy.IndexTypes.Head.Symmetry = SymWreath) ->
+        Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf arrTy.IndexTypes.Head),
+                                        "an array literal"))
     | ExprKind.ExprArrayLit elems, ArrayElem arrTy when not arrTy.IndexTypes.IsEmpty ->
         let outerIdx = arrTy.IndexTypes.Head
         let innerIdxs = arrTy.IndexTypes.Tail
