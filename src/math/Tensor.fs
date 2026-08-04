@@ -1,6 +1,6 @@
-/// Reference tensor ops for the math module: Kolda–Bader mode-n
+/// Reference tensor ops for the math module: Kolda-Bader mode-n
 /// matricization, mode products, and HOSVD over flat row-major storage.
-/// The VALUE ORACLE for the rank-generic generated kernels (phases 3–4).
+/// The VALUE ORACLE for the rank-generic generated kernels (phases 3-4).
 module BladeMath.Tensor
 
 /// A dense tensor: dims (outermost first) + flat row-major data.
@@ -8,13 +8,13 @@ type Tensor = { Dims: int list; Data: float[] }
 
 let private prod xs = List.fold (*) 1 xs
 
-/// Row-major strides: stride_k = Π_{m>k} I_m.
+/// Row-major strides: stride_k = Pi_{m>k} I_m.
 let strides (dims: int list) : int list =
     let n = dims.Length
     [ for k in 0 .. n - 1 -> prod (List.skip (k + 1) dims) ]
 
-/// Kolda–Bader column index weights for mode-n unfolding, 0-based:
-/// J_k = Π_{m<k, m≠mode} I_m  (k ≠ mode).
+/// Kolda-Bader column index weights for mode-n unfolding, 0-based:
+/// J_k = Pi_{m<k, m!=mode} I_m  (k != mode).
 let unfoldWeights (dims: int list) (mode: int) : int list =
     [ for k in 0 .. dims.Length - 1 ->
         if k = mode then 0
@@ -32,7 +32,7 @@ let multiIndices (dims: int list) : int list seq =
         }
     go dims
 
-/// Mode-n unfolding: M(i_mode, j), j = Σ_{k≠mode} i_k · J_k.
+/// Mode-n unfolding: M(i_mode, j), j = Sigma_{k!=mode} i_k * J_k.
 let unfold (t: Tensor) (mode: int) : float[,] =
     let dims = t.Dims
     let str = strides dims
@@ -46,8 +46,8 @@ let unfold (t: Tensor) (mode: int) : float[,] =
         m.[ix.[mode], j] <- t.Data.[flat]
     m
 
-/// Mode-n product Y = X ×_mode U with U: j×I_mode —
-/// Y(..., r, ...) = Σ_i U(r, i) · X(..., i, ...).
+/// Mode-n product Y = X x_mode U with U: jxI_mode --
+/// Y(..., r, ...) = Sigma_i U(r, i) * X(..., i, ...).
 let modeProduct (t: Tensor) (u: float[,]) (mode: int) : Tensor =
     let dims = t.Dims
     let iMode = dims.[mode]
@@ -67,8 +67,8 @@ let modeProduct (t: Tensor) (u: float[,]) (mode: int) : Tensor =
         data.[flatOut] <- acc
     { Dims = outDims; Data = data }
 
-/// Mode-n Gram: G(a,b) = Σ_{other indices} X(..,a,..)·X(..,b,..)
-/// (= X_(n) · X_(n)ᵀ without materializing the unfolding).
+/// Mode-n Gram: G(a,b) = Sigma_{other indices} X(..,a,..)*X(..,b,..)
+/// (= X_(n) * X_(n)^T without materializing the unfolding).
 let modeGram (t: Tensor) (mode: int) : float[,] =
     let m = unfold t mode
     let rows = Array2D.length1 m
@@ -86,7 +86,7 @@ let leadingCols (r: int) (q: float[,]) : float[,] =
     Array2D.init (Array2D.length1 q) r (fun i j -> q.[i, j])
 
 /// (Truncated) HOSVD: per mode, U_n = leading R_n eigenvectors of the
-/// mode-n Gram (descending eigenvalues); core = X ×_1 U1ᵀ ... ×_N UNᵀ.
+/// mode-n Gram (descending eigenvalues); core = X x_1 U1^T ... x_N UN^T.
 /// Returns (core, factors). ranks = dims for the full HOSVD.
 let hosvd (sweeps: int) (t: Tensor) (ranks: int list) : Tensor * float[,] list =
     let factors =
@@ -94,7 +94,7 @@ let hosvd (sweeps: int) (t: Tensor) (ranks: int list) : Tensor * float[,] list =
             let g = modeGram t mode
             let (q, _) = Jacobi.eigh sweeps g
             leadingCols ranks.[mode] q)
-    // core: contract each mode with Uᵀ (i.e. modeProduct with U transposed)
+    // core: contract each mode with U^T (i.e. modeProduct with U transposed)
     let core =
         factors |> List.mapi (fun mode u -> (mode, u))
         |> List.fold (fun acc (mode, u) ->

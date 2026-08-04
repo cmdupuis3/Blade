@@ -4,7 +4,7 @@ namespace BladeSgs
 /// on a periodic grid, box-filtered to a coarse grid, exact 1-D subgrid
 /// stress tau = mean(u^2|tile) - ubar^2, a Smagorinsky-form closure with the
 /// coefficient learned by least squares from the DNS (a priori), and the
-/// a posteriori LES run — with and without the closure — against the
+/// a posteriori LES run -- with and without the closure -- against the
 /// filtered DNS truth.
 ///
 /// Every expression MIRRORS the Blade source term for term (advective form,

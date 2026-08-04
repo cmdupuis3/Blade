@@ -66,7 +66,7 @@ let dumpAll () =
     printfn "// EXPECT: B = %s" (fmtCArr (polyspec [coupled; coupled; coupled]))
     printfn ""
 
-    // corpus spectra/032: dedup smoke at n=4 — fft + power + k=3 polyspec.
+    // corpus spectra/032: dedup smoke at n=4 -- fft + power + k=3 polyspec.
     let x4 = [| 1.0; 2.0; 3.0; 4.0 |]
     let y4 = [| 4.0; 3.0; 2.0; 1.0 |]
     let z4 = [| 1.0; 0.0; 2.0; 0.0 |]
@@ -96,7 +96,7 @@ let dumpAll () =
     printfn "// EXPECT: X = %s" (fmtCArr (fft2 4 4 imp44))
     printfn ""
 
-    // corpus spectra/045: fft2 of a plane wave cos(2pi(2i/8 + j/4)), 8x4 —
+    // corpus spectra/045: fft2 of a plane wave cos(2pi(2i/8 + j/4)), 8x4 --
     // concentrates at bins (2,1) and (6,3) with weight rc/2 = 16.
     let pw84 =
         [| for i in 0 .. 7 do

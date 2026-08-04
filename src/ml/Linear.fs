@@ -2,13 +2,13 @@ namespace BladeML
 
 /// Equivariant linear layer (ml-spec section 7): mixes multiplicities within
 /// each irrep block, shared across m-components. Cross-irrep mixing would
-/// break equivariance and is unrepresentable here by construction — the
+/// break equivariance and is unrepresentable here by construction -- the
 /// weight layout (LinearWeightIdx) only has within-block matrices.
 module Linear =
 
     /// First block of `spec` carrying exactly this irrep, if any.
     /// (Spec quirk, documented in ml/README.md: with duplicate irrep entries
-    /// in spec_in, only the first is ever read — find_block_idx is
+    /// in spec_in, only the first is ever read -- find_block_idx is
     /// first-match by definition.)
     let findBlock (spec: SpecEntry[]) (ir: Irrep) : int option =
         spec |> Array.tryFindIndex (fun e -> e.Ir = ir)
@@ -60,7 +60,7 @@ module Linear =
 
     // ------------------------------------------------------------------
     // Complete Schur basis (derive_linear reference, 2026-07-18): ALL
-    // (l, parity)-matched block pairs — duplicate input irreps become
+    // (l, parity)-matched block pairs -- duplicate input irreps become
     // reachable (F3), unmatched output blocks stay exactly zero (the
     // unique equivariant completion). The compiler's derive_linear bakes
     // EXACTLY this loop order (pairs -> mo -> mi -> c).
@@ -72,7 +72,7 @@ module Linear =
              for bi in 0 .. specIn.Length - 1 do
                if specIn.[bi].Ir = specOut.[bo].Ir then yield (bi, bo) |]
 
-    /// dim Hom_G — pair-summed; equals Irreps.homDim (product of aggregated
+    /// dim Hom_G -- pair-summed; equals Irreps.homDim (product of aggregated
     /// multiplicities per (l, parity)).
     let homWeightDim (specIn: SpecEntry[]) (specOut: SpecEntry[]) : int =
         homPairs specIn specOut

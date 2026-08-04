@@ -335,6 +335,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         else
             printfn "CUDA kernel tests: not run (opt-in; enable with 'blade test --cuda' from the x64 Native Tools prompt)."
             None
+    // Round D's cuBLAS swap-table verification. Same opt-in phase and the same
+    // capability gate as the kernel tests above (nvcc + GPU + cl.exe), because
+    // it needs exactly the same things; separate block so a swap-table failure
+    // is not reported as a `where cuda` codegen failure.
+    let cublasSwap =
+        if opts.IncludeCuda then Some (runCublasSwapTests ())
+        else None
     // `where mpi` decomposition tests (differential vs serial oracle under
     // mpiexec). Opt-in; even when requested they skip cleanly if g++ /
     // -lmsmpi / mpiexec are absent.
@@ -395,6 +402,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType
           match cuda with Some b -> yield b | None -> ()
+          match cublasSwap with Some b -> yield b | None -> ()
           match mpi with Some b -> yield b | None -> ()
           yield diff; yield typeStruct
           match timing with Some b -> yield b | None -> ()

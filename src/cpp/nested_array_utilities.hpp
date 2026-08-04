@@ -9,6 +9,11 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>  // for std::index_sequence_for
+// BLADE_RESTRICT / BLADE_IVDEP. Included from here (rather than left to the
+// generated program's include list) because EVERY generated .cpp reaches this
+// header, through one include list or the other, before any emitted loop nest
+// -- and so do the standalone cpp/*_tests.cpp harnesses.
+#include "blade_portability.hpp"
 
 namespace nested_array_utilities {
 
@@ -39,9 +44,7 @@ namespace nested_array_utilities {
         typedef decltype(promote_impl<TYPE, rank>()) type;
     };
 
-    // strip_ptr<T>: peel all pointer levels to the underlying scalar element
-    // type (T*** -> T). Used by the contiguous allocator to type the single
-    // backing pool.
+    // strip_ptr<T>: peel all pointer levels to the underlying scalar element type (T*** -> T). Used by the contiguous allocator to type the single backing pool.
     template<typename TYPE, bool IsPtr = std::is_pointer<TYPE>::value>
     struct strip_ptr;
     template<typename TYPE>
@@ -51,30 +54,21 @@ namespace nested_array_utilities {
         using type = typename strip_ptr<typename std::remove_pointer<TYPE>::type>::type;
     };
 
-    // pool_base<TYPE>: recover the contiguous backing-pool base pointer from a
-    // promote<T,N>::type skeleton. allocate<> places ALL scalars in one pool in
-    // DFS order; the first leaf row sits at pool + 0, and interior rows are just
-    // pointer arrays into that pool. Descending [0] to the first scalar and
-    // taking its address therefore yields the pool base, from which the whole
-    // array is contiguous (cardinality elements, DFS order). This is the forward-
-    // transform primitive for CUDA streaming: cudaMemcpy(d_buf, pool_base(arr),
-    // cardinality * sizeof(T), H2D) copies the entire pool; the inverse uses it
-    // as the D2H destination. Rank-generic (compile-time recursion on pointer
-    // depth) so generated code calls pool_base(arr.data) regardless of rank.
+    // pool_base<TYPE>: recover the contiguous backing-pool base pointer from a promote<T,N>::type skeleton. allocate<>
+    // places ALL scalars in one pool in DFS order; the first leaf row sits at pool + 0, and interior rows are just
+    // pointer arrays into that pool. Descending [0] to the first scalar and taking its address therefore yields the pool
+    // base, from which the whole array is contiguous (cardinality elements, DFS order). This is the forward-transform
+    // primitive for CUDA streaming: cudaMemcpy(d_buf, pool_base(arr), cardinality * sizeof(T), H2D) copies the entire
+    // pool; the inverse uses it as the D2H destination. Rank-generic (compile-time recursion on pointer depth) so
+    // generated code calls pool_base(arr.data) regardless of rank.
     //
-    // NOTE: relies on allocate<>'s single-contiguous-pool invariant. A skeleton
-    // NOT produced by allocate<> (hypothetical non-contiguous backing) would
-    // break this; all Blade arrays go through allocate<>, so the invariant holds.
+    // Relies on allocate<>'s single-contiguous-pool invariant; all Blade arrays go through allocate<>, so it holds.
     //
-    // FUTURE / RaggedIdx: this is correct ONLY for closed, contiguously-allocated
-    // arrays. A RaggedIdx array is OPEN (per-row materialization via
-    // IRRaggedLookup, GC-tracked) and is NOT guaranteed to be one contiguous pool
-    // in DFS order — so pool_base must NOT be used for ragged backing. Ragged GPU
-    // streaming will need a different forward transform: gather the rows into a
-    // contiguous staging buffer first, and carry the per-row lengths across the
-    // extern "C" boundary as a separate `const size_t*`. Far off (gated behind
-    // symmetric-kernel support and wanting ragged on the GPU at all), but the
-    // assumption is recorded here so no one treats pool_base as universal.
+    // FUTURE / RaggedIdx: correct ONLY for closed, contiguously-allocated arrays. A RaggedIdx array is OPEN (per-row
+    // materialization via IRRaggedLookup, GC-tracked) and is NOT guaranteed to be one contiguous pool in DFS order, so
+    // pool_base must NOT be used for ragged backing. Ragged GPU streaming will need a different forward transform:
+    // gather the rows into a contiguous staging buffer first, and carry the per-row lengths across the extern "C"
+    // boundary as a separate `const size_t*`.
     template<typename PTR>
     typename strip_ptr<PTR>::type* pool_base(PTR skeleton) {
         if constexpr (std::is_pointer<typename std::remove_pointer<PTR>::type>::value) {
@@ -86,23 +80,19 @@ namespace nested_array_utilities {
         }
     }
 
-    // ========================================================================
-    // fallback_copy<>: the <|:> allocated-fallback read (formalism 2.6)
-    // ========================================================================
+    // fallback_copy<>: the <|:> allocated-fallback read (formalism 2.6).
     //
-    // dst[i...] = a[i...] where a's pointer chain to the cell is fully
-    // non-null, else b[i...]. The allocation check runs PER CURRY LEVEL while
-    // descending, so a missing subtree (nullptr at any interior level, or a
-    // null leaf row) falls back to b's whole corresponding subtree.
+    // dst[i...] = a[i...] where a's pointer chain to the cell is fully non-null, else b[i...]. The allocation check runs
+    // PER CURRY LEVEL while descending, so a missing subtree (nullptr at any interior level, or a null leaf row) falls
+    // back to b's whole corresponding subtree.
     //
-    // Compiler-built arrays are fully allocated (allocate<> never leaves a
-    // null row), for which this degenerates to a copy of `a`; partially-
-    // allocated arrays enter from the C++-level partial-depth allocation API
-    // (user-managed sparsity — Blade is not a sparse-tensor system, formalism
-    // §9). dst and b must be fully allocated over the shared extents.
+    // Compiler-built arrays are fully allocated (allocate<> never leaves a null row), for which this degenerates to a
+    // copy of `a`; partially-allocated arrays enter from the C++-level partial-depth allocation API (user-managed
+    // sparsity -- Blade is not a sparse-tensor system, formalism Sec 9). dst and b must be fully allocated over the shared
+    // extents.
     //
-    // T and N are explicit at the call site (promote<> in a parameter
-    // position is non-deducible): fallback_copy<double, 2>(dst, a, b, ext).
+    // T and N are explicit at the call site (promote<> in a parameter position is non-deducible):
+    // fallback_copy<double, 2>(dst, a, b, ext).
     template<typename T, size_t N>
     void fallback_copy(typename promote<T, N>::type dst,
                        typename promote<T, N>::type a,   // may be null at any level
@@ -119,74 +109,49 @@ namespace nested_array_utilities {
         }
     }
 
-    // ========================================================================
-    // allocate<>: contiguous-backing allocation
-    // ========================================================================
+    // allocate<>: contiguous-backing allocation. This is the index metamorphism of formalism Sec 2.7 (double metamorphism
+    // with feedback) with the DATA phases (3-5) elided: we run the INDEX loop purely to discover the array's shape,
+    // allocating one slot per emitted leaf. index-cata structures the remaining space (the per-level bound shrink);
+    // index-ana emits each child slot; the feedback `i + lastIndex` threads the current index to condition the next level.
     //
-    // This is the index metamorphism of formalism §2.7 (double metamorphism
-    // with feedback) with the DATA phases (3-5) elided: we run the INDEX loop
-    // purely to discover the array's shape, allocating one slot per emitted
-    // leaf. index-cata structures the remaining space (the per-level bound
-    // shrink); index-ana emits each child slot; the feedback `i + lastIndex`
-    // threads the current index to condition the next level.
+    // LAYOUT: a single contiguous data pool (alloc #1) holds every scalar element in depth-first iteration order; a
+    // pointer skeleton (alloc #2) is laid over it so the nested `arr[i][j][k]` interface is unchanged. The leaf data
+    // rows point into `pool + offset`; interior rows are small pointer arrays.
     //
-    // LAYOUT: a single contiguous data pool (alloc #1) holds every scalar
-    // element in depth-first iteration order; a pointer skeleton (alloc #2)
-    // is laid over it so the nested `arr[i][j][k]` interface is unchanged.
-    // The leaf data rows point into `pool + offset`; interior rows are small
-    // pointer arrays. This replaces the previous piecewise `new T[]` per leaf,
-    // which produced a non-contiguous layout that could not be sliced into
-    // cudaMemcpy-able spans.
+    // PER-LEVEL SPAN: the child count at each level is computed by FORMULA from the prefix indices -- `extents[DEPTH]`
+    // (free) or `extents[DEPTH]-lastIndex` (in symmetry group). Valid for rectangular, symmetric, and (via the sibling
+    // allocate_antisym) antisymmetric index types. SEAM: tree/graph/compound index types (extensions Sec 2.3-2.4) do NOT
+    // have formula-computable per-level spans -- they supply a precomputed subtree-size / offset table and route
+    // through a separate placement path. The pool-and-skeleton substrate itself is universal; only this span
+    // computation forks.
     //
-    // PER-LEVEL SPAN: the child count at each level is computed by FORMULA from
-    // the prefix indices — `extents[DEPTH]` (free) or `extents[DEPTH]-lastIndex`
-    // (in symmetry group). This formula path is valid for rectangular,
-    // symmetric, and (via the sibling allocate_antisym) antisymmetric index
-    // types. SEAM: tree/graph/compound index types (extensions §2.3-2.4) do NOT
-    // have formula-computable per-level spans — they supply a precomputed
-    // subtree-size / offset table and will route through a separate placement
-    // path. The pool-and-skeleton substrate itself is universal (extensions
-    // §2.3.6); only this span computation forks.
-    //
-    // TEARDOWN CONTRACT (BUILT — see deallocate / deallocate_strict below): the
-    // pool is ONE `delete[]`; the skeleton is the interior pointer rows, freed
-    // bottom-up. This differs from naive recursive per-leaf frees, which are a
-    // HEAP-CORRUPTION bug here: a leaf row is `pool + offset`, a slice of alloc
-    // #1 and not a heap block of its own, so `delete[]`-ing it is an interior
-    // free (and a double free once the pool itself is released). The teardown
-    // must therefore know the same per-level span formula the build used — hence
-    // destroy_skeleton mirrors build_skeleton branch for branch.
-    // What remains is the CALLER side: wiring generated code to call deallocate
-    // at scope exit is the open CodeGen scope-tracker step, so generated
-    // programs still do not free (pre-existing leak, unchanged here).
+    // TEARDOWN CONTRACT (see deallocate / deallocate_strict below): the pool is ONE `delete[]`; the skeleton is the
+    // interior pointer rows, freed bottom-up. This differs from naive recursive per-leaf frees, which are a
+    // HEAP-CORRUPTION bug here: a leaf row is `pool + offset`, a slice of alloc #1 and not a heap block of its own, so
+    // `delete[]`-ing it is an interior free (and a double free once the pool itself is released). The teardown must
+    // therefore know the same per-level span formula the build used -- hence destroy_skeleton mirrors build_skeleton
+    // branch for branch. Wiring generated code to call deallocate at scope exit is the open CodeGen scope-tracker step,
+    // so generated programs still do not free.
 
-    // Phase A — count_leaves: total SCALAR element count under this subtree.
-    // Same recursion shape as the skeleton walk, so the count provably matches
-    // the allocation traversal (no formula-vs-traversal drift).
+    // Phase A -- count_leaves: total SCALAR element count under this subtree. Same recursion shape as the skeleton
+    // walk, so the count provably matches the allocation traversal (no formula-vs-traversal drift).
     //
     // DIAGONALS (default true): whether a symmetric group keeps its diagonal.
     //   true  -> inclusive (i <= j): symmetric / Hermitian storage.
-    //   false -> strict   (i <  j): antisymmetric storage (no diagonal, each
-    //            row one shorter). The single difference from the inclusive
-    //            recurrence is the child SEED within a group: inclusive passes
-    //            `i + lastIndex` (child may equal parent), strict passes
-    //            `i + lastIndex + 1` (child must exceed parent). The shorter
-    //            rows then fall out automatically from the larger incoming
-    //            lastIndex at the next level (bound stays extents-lastIndex).
-    //            Verified byte-identical to the former count_antisym at ranks 2-4.
+    //   false -> strict   (i <  j): antisymmetric storage (no diagonal, each row one shorter). The single difference
+    //            from the inclusive recurrence is the child SEED within a group: inclusive passes `i + lastIndex`
+    //            (child may equal parent), strict passes `i + lastIndex + 1` (child must exceed parent). The shorter
+    //            rows then fall out automatically from the larger incoming lastIndex at the next level (bound stays
+    //            extents-lastIndex).
     template<typename TYPE, const size_t SYMM[] = nullptr, bool DIAGONALS = true, const size_t DEPTH = 0>
     constexpr size_t count_leaves(const size_t extents[], const size_t lastIndex = 0) {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
 
         size_t n;
-        // NOTE (MSVC portability): we must NOT write `(bool)SYMM` directly in an
-        // `if constexpr` when SYMM is the address of a function-local
-        // `static constexpr` array — MSVC refuses to treat that pointer as a
-        // core-constant-expression (error C2131, "unevaluable pointer value"),
-        // even when the value is nullptr. Capturing "is there a symmetry array"
-        // in a local `constexpr bool` first lets MSVC evaluate the branch
-        // condition without demanding the pointer itself be a constant. g++
-        // accepted the direct form too, so this is portable.
+        // MSVC portability: must NOT write `(bool)SYMM` directly in an `if constexpr` when SYMM is the address of a
+        // function-local `static constexpr` array -- MSVC refuses to treat that pointer as a core-constant-expression
+        // (error C2131) even when nullptr. Capturing "is there a symmetry array" in a local `constexpr bool` first lets
+        // MSVC evaluate the branch without demanding the pointer itself be a constant. g++ accepts the direct form too.
         constexpr bool hasSymm = (SYMM != nullptr);
         // Strict offset: 0 for inclusive (diagonal kept), 1 for strict (dropped).
         constexpr size_t strictOff = DIAGONALS ? 0 : 1;
@@ -214,14 +179,12 @@ namespace nested_array_utilities {
         }
     }
 
-    // Phase C — build_skeleton: build pointer rows (alloc #2); leaf data rows
-    // point into `pool`. `offset` is threaded by reference so leaf placement
-    // order equals the DFS traversal order (the canonical storage coordinate
-    // system that linearize/unlinearize will later have to agree with).
+    // Phase C -- build_skeleton: build pointer rows (alloc #2); leaf data rows point into `pool`. `offset` is threaded
+    // by reference so leaf placement order equals the DFS traversal order (the canonical storage coordinate system
+    // that linearize/unlinearize will later have to agree with).
     //
-    // DIAGONALS: see count_leaves. false = strict (antisym, diagonal dropped);
-    // the only change is the child seed (+1 within a group). The leaf-placement
-    // order is byte-identical to the former build_antisym (verified ranks 2-4).
+    // DIAGONALS: see count_leaves. false = strict (antisym, diagonal dropped); the only change is the child seed (+1
+    // within a group).
     template<typename TYPE, const size_t SYMM[] = nullptr, bool DIAGONALS = true, const size_t DEPTH = 0>
     TYPE build_skeleton(const size_t extents[],
                         typename strip_ptr<TYPE>::type* pool,
@@ -230,9 +193,7 @@ namespace nested_array_utilities {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
 
         size_t n;
-        // MSVC portability: see the note in count_leaves — capture symmetry
-        // presence in a constexpr bool rather than `(bool)SYMM` on a possibly
-        // function-local-static pointer.
+        // MSVC portability: see the note in count_leaves.
         constexpr bool hasSymm = (SYMM != nullptr);
         constexpr size_t strictOff = DIAGONALS ? 0 : 1;
         if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
@@ -263,57 +224,44 @@ namespace nested_array_utilities {
         }
     }
 
-    // Top-level entry. Signature compatible with the prior allocate<> (the
-    // optional trailing lastIndex is accepted and ignored at the top level;
-    // internal recursion threads it). Call sites are unchanged.
+    // Top-level entry. Signature compatible with the prior allocate<> (the optional trailing lastIndex is accepted and
+    // ignored at the top level; internal recursion threads it).
     //
-    // DIAGONALS (default true): false selects strict (antisymmetric) storage —
-    // a single all-grouped SYMM mask {1,1,...} plus DIAGONALS=false reproduces
-    // the former allocate_antisym byte-for-byte (count and DFS layout verified
-    // at ranks 2-4). Blade always emits a single symmetry group per storage
-    // block (the multi-group SYMM machinery is vestigial from Blade's POV but
-    // retained for standalone C++ testing).
+    // DIAGONALS (default true): false selects strict (antisymmetric) storage -- a single all-grouped SYMM mask
+    // {1,1,...} plus DIAGONALS=false reproduces the former allocate_antisym byte-for-byte. Blade always emits a single
+    // symmetry group per storage block (the multi-group SYMM machinery is vestigial from Blade's POV but retained for
+    // standalone C++ testing).
     template<typename TYPE, const size_t SYMM[] = nullptr, bool DIAGONALS = true, const size_t DEPTH = 0>
     TYPE allocate(const size_t extents[], const size_t /*lastIndex*/ = 0) {
         using SCALAR = typename strip_ptr<TYPE>::type;
         size_t total = count_leaves<TYPE, SYMM, DIAGONALS, 0>(extents, 0);
-        // Degenerate total==0 (e.g. strict storage with rank > n): allocate a
-        // 1-element pool so a later deref is never on a zero-length buffer.
+        // Degenerate total==0 (e.g. strict storage with rank > n): allocate a 1-element pool so a later deref is never on a zero-length buffer.
         SCALAR* pool = new SCALAR[total > 0 ? total : 1];                 // alloc #1
         size_t offset = 0;
         return build_skeleton<TYPE, SYMM, DIAGONALS, 0>(extents, pool, offset, 0);   // alloc #2
     }
 
-    // =========================================================================
-    // PER-GROUP-STRICT allocation (mixed strictness across groups)
-    // =========================================================================
+    // PER-GROUP-STRICT allocation (mixed strictness across groups).
     //
-    // The global `DIAGONALS` flag above is all-or-nothing: every symmetry group
-    // in the storage is strict, or none is. That cannot express a layout that is
-    // strict in SOME groups and inclusive/dense in others — e.g. the
+    // The global `DIAGONALS` flag above is all-or-nothing: every symmetry group in the storage is strict, or none is.
+    // That cannot express a layout that is strict in SOME groups and inclusive/dense in others -- e.g. the
     // compact-residual decompaction shape
     //     Idx<n> -> AntisymIdx<2,n>      (freed dense axis, strict residual pair)
     //     SYMM = {1,2,2}, per-group strict = {dense, strict}
-    // which arises when an antisymmetric group is fissioned and a residual
-    // antisymmetric sub-group survives.
+    // which arises when an antisymmetric group is fissioned and a residual antisymmetric sub-group survives.
     //
-    // These overloads take a companion STRICT[] array parallel to SYMM[]:
-    // STRICT[d] != 0 means the group at depth d drops its diagonal (i<j); 0
-    // means inclusive (i<=j) or dense. The strict offset is keyed at the CURRENT
-    // depth's group, so each group's strictness is independent. Strictness only
-    // affects the child SEED within a group (the +1 that makes the next
-    // coordinate exceed, not equal, the parent); at a group boundary the seed is
-    // 0 regardless, so a STRICT flag on a non-grouped (dense / freed) axis is a
-    // harmless no-op.
+    // These overloads take a companion STRICT[] array parallel to SYMM[]: STRICT[d] != 0 means the group at depth d
+    // drops its diagonal (i<j); 0 means inclusive (i<=j) or dense. The strict offset is keyed at the CURRENT depth's
+    // group, so each group's strictness is independent. Strictness only affects the child SEED within a group (the +1
+    // that makes the next coordinate exceed, not equal, the parent); at a group boundary the seed is 0 regardless, so a
+    // STRICT flag on a non-grouped (dense / freed) axis is a harmless no-op.
     //
-    // Relationship to the global flag (verified): STRICT all-zero reproduces the
-    // inclusive (symmetric) count; STRICT all-one on a single all-grouped mask
-    // reproduces the global-antisym count. So this is a strict generalization;
-    // the existing single-class call sites are unchanged (they keep using the
-    // DIAGONALS overload above). Only mixed-strictness outputs use these.
+    // Relationship to the global flag (verified): STRICT all-zero reproduces the inclusive (symmetric) count; STRICT
+    // all-one on a single all-grouped mask reproduces the global-antisym count -- a strict generalization; existing
+    // single-class call sites keep using the DIAGONALS overload above.
     //
-    // Sign is NOT handled here — it lives entirely in the read path (canon_*
-    // transform) / the transpose primitive. This allocator is storage-only.
+    // Sign is NOT handled here -- it lives entirely in the read path (canon_* transform) / the transpose primitive.
+    // This allocator is storage-only.
 
     template<typename TYPE, const size_t SYMM[], const size_t STRICT[], const size_t DEPTH = 0>
     constexpr size_t count_leaves_strict(const size_t extents[], const size_t lastIndex = 0) {
@@ -387,31 +335,24 @@ namespace nested_array_utilities {
         return build_skeleton_strict<TYPE, SYMM, STRICT, 0>(extents, pool, offset, 0);
     }
 
-    // =========================================================================
-    // deallocate<> / deallocate_strict<> — the teardown of allocate<>
-    // =========================================================================
+    // deallocate<> / deallocate_strict<> -- the teardown of allocate<>.
     //
-    // The exact inverse of the two allocation families, and ONLY those two: one
-    // `delete[]` for the contiguous scalar pool (alloc #1), plus a bottom-up
-    // `delete[]` of the interior pointer rows (alloc #2). The leaf `T*` rows are
-    // NOT freed — they are `pool + offset` slices, so freeing them would be an
-    // interior free of the pool and then a double free when the pool goes.
+    // The exact inverse of the two allocation families, and ONLY those two: one `delete[]` for the contiguous scalar
+    // pool (alloc #1), plus a bottom-up `delete[]` of the interior pointer rows (alloc #2). The leaf `T*` rows are NOT
+    // freed -- they are `pool + offset` slices, so freeing them would be an interior free of the pool and then a
+    // double free when the pool goes.
     //
-    // Because the surviving row set is defined by the per-level span formula
-    // (each level's `n` depends on the seed threaded down from its parent), the
-    // teardown cannot walk "the whole rectangle" — it must replay the SAME
-    // recurrence the build ran. destroy_skeleton is therefore a branch-for-branch
-    // mirror of build_skeleton (and destroy_skeleton_strict of
-    // build_skeleton_strict); any divergence frees rows that do not exist or
-    // leaks rows that do. Keep them edited in lockstep.
+    // Because the surviving row set is defined by the per-level span formula (each level's `n` depends on the seed
+    // threaded down from its parent), the teardown cannot walk "the whole rectangle" -- it must replay the SAME
+    // recurrence the build ran. destroy_skeleton is therefore a branch-for-branch mirror of build_skeleton (and
+    // destroy_skeleton_strict of build_skeleton_strict); any divergence frees rows that do not exist or leaks rows
+    // that do. Keep them edited in lockstep.
     //
-    // ORDER: children first, then the parent row — the parent still has to be
-    // readable to reach its children. `pool_base` likewise must run BEFORE the
-    // skeleton is destroyed, since it recovers the pool by walking the [0] spine.
+    // ORDER: children first, then the parent row -- the parent still has to be readable to reach its children.
+    // `pool_base` likewise must run BEFORE the skeleton is destroyed, since it recovers the pool by walking the [0] spine.
 
-    // destroy_skeleton: free the interior pointer rows of one subtree, bottom-up.
-    // Leaf level is a deliberate no-op (pool slice). `lastIndex` is the seed
-    // threaded by the caller, exactly as in build_skeleton — it selects this
+    // destroy_skeleton: free the interior pointer rows of one subtree, bottom-up. Leaf level is a deliberate no-op
+    // (pool slice). `lastIndex` is the seed threaded by the caller, exactly as in build_skeleton -- it selects this
     // level's span, hence which children exist.
     template<typename TYPE, const size_t SYMM[] = nullptr, bool DIAGONALS = true, const size_t DEPTH = 0>
     void destroy_skeleton(TYPE skeleton, const size_t extents[], const size_t lastIndex = 0) {
@@ -428,13 +369,11 @@ namespace nested_array_utilities {
         }
 
         if constexpr (!std::is_pointer<DTYPE>::value) {
-            // Leaf data row: a slice of the pool, never a heap block. Nothing to
-            // free here; the pool is released once, by deallocate.
+            // Leaf data row: a slice of the pool, never a heap block. Nothing to free here; the pool is released once, by deallocate.
             (void)n;
             return;
         } else {
-            // Interior pointer row (alloc #2): recurse into the children that the
-            // build created, then free this row.
+            // Interior pointer row (alloc #2): recurse into the children that the build created, then free this row.
             for (size_t i = 0; i < n; i++) {
                 if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
                     if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
@@ -449,42 +388,32 @@ namespace nested_array_utilities {
         }
     }
 
-    // Top-level teardown. Mirror of allocate<>: same TYPE / SYMM / DIAGONALS, and
-    // the same `extents` the allocation was given (the span formula is recomputed
-    // from it, so passing different extents frees the wrong row set).
+    // Top-level teardown. Mirror of allocate<>: same TYPE / SYMM / DIAGONALS, and the same `extents` the allocation was given (passing different extents frees the wrong row set).
     template<typename TYPE, const size_t SYMM[] = nullptr, bool DIAGONALS = true>
     void deallocate(TYPE data, const size_t extents[]) {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
         using SCALAR = typename strip_ptr<TYPE>::type;
 
         if constexpr (!std::is_pointer<DTYPE>::value) {
-            // Rank 1: there is no skeleton — build_skeleton returned `pool + 0`,
-            // so `data` IS the pool base. One delete[] and we are done (this also
-            // covers the degenerate extent-0 case, which still owns the sentinel).
+            // Rank 1: there is no skeleton -- build_skeleton returned `pool + 0`, so `data` IS the pool base. One delete[] and we are done (also covers the degenerate extent-0 case).
             delete[] data;
         } else {
             size_t total = count_leaves<TYPE, SYMM, DIAGONALS, 0>(extents, 0);
-            // Recover the pool BEFORE the skeleton is torn down: pool_base walks
-            // the [0] spine, which requires the rows to still be live. The
-            // leftmost spine carries the smallest seed and therefore the largest
-            // span at every level, so total > 0 guarantees it is walkable and its
-            // leaf sits at pool + 0.
+            // Recover the pool BEFORE the skeleton is torn down: pool_base walks the [0] spine, which requires the rows
+            // to still be live. The leftmost spine carries the smallest seed and therefore the largest span at every
+            // level, so total > 0 guarantees it is walkable and its leaf sits at pool + 0.
             SCALAR* pool = (total > 0) ? pool_base(data) : nullptr;
             destroy_skeleton<TYPE, SYMM, DIAGONALS, 0>(data, extents, 0);
             delete[] pool;   // delete[] nullptr is a no-op
-            // BOUNDED LEAK, total == 0 (e.g. strict storage with rank > extent):
-            // allocate still made a 1-element sentinel pool so a stray deref is
-            // never on a zero-length buffer, but with no leaves there is no [0]
-            // spine to walk (some level has n == 0, so skeleton[0] is out of
-            // bounds) and the sentinel's address is unrecoverable from the
-            // skeleton alone. We free every skeleton row and intentionally leak
-            // that one element rather than read out of bounds to find it. Bound:
-            // one sizeof(SCALAR) block per empty array, once.
+            // BOUNDED LEAK, total == 0 (e.g. strict storage with rank > extent): allocate still made a 1-element
+            // sentinel pool so a stray deref is never on a zero-length buffer, but with no leaves there is no [0]
+            // spine to walk (skeleton[0] would be out of bounds) and the sentinel's address is unrecoverable from the
+            // skeleton alone. We free every skeleton row and intentionally leak that one element rather than read out
+            // of bounds to find it. Bound: one sizeof(SCALAR) block per empty array, once.
         }
     }
 
-    // Per-group-strict teardown: mirror of build_skeleton_strict (strictness read
-    // at the CURRENT depth from STRICT[], so each group is independent).
+    // Per-group-strict teardown: mirror of build_skeleton_strict (strictness read at the CURRENT depth from STRICT[], so each group is independent).
     template<typename TYPE, const size_t SYMM[], const size_t STRICT[], const size_t DEPTH = 0>
     void destroy_skeleton_strict(TYPE skeleton, const size_t extents[], const size_t lastIndex = 0) {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
@@ -497,7 +426,7 @@ namespace nested_array_utilities {
             n = extents[DEPTH];
         }
         if constexpr (!std::is_pointer<DTYPE>::value) {
-            (void)n;   // leaf row is a pool slice — nothing to free
+            (void)n;   // leaf row is a pool slice -- nothing to free
             return;
         } else {
             for (size_t i = 0; i < n; i++) {
@@ -514,8 +443,7 @@ namespace nested_array_utilities {
         }
     }
 
-    // Top-level teardown for allocate_strict. Same total == 0 sentinel-leak
-    // semantics as deallocate (see there).
+    // Top-level teardown for allocate_strict. Same total == 0 sentinel-leak semantics as deallocate (see there).
     template<typename TYPE, const size_t SYMM[], const size_t STRICT[]>
     void deallocate_strict(TYPE data, const size_t extents[]) {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
@@ -531,61 +459,43 @@ namespace nested_array_utilities {
         }
     }
 
-    // =========================================================================
-    // deallocate_ragged* / deallocate_compound* — teardown for the NON-dense
-    // layouts (CSR-ish ragged, masked-product compound)
-    // =========================================================================
+    // deallocate_ragged* / deallocate_compound* -- teardown for the NON-dense layouts (CSR-ish ragged, masked-product
+    // compound). Pointer-level primitives, deliberately NOT one "free this wrapper" entry point: a Ragged<T> or
+    // Compound<T,RANK> VALUE says nothing about which of its members it owns (the identical wrapper shape is produced
+    // by an owning constructor, a shape-preserving map with BORROWED side tables, or a pure view with everything
+    // borrowed). Ownership is knowledge the PRODUCER has and the value does not carry, so the producer names the
+    // routine and each routine frees exactly what its name says -- nothing is inferred at runtime.
     //
-    // Pointer-level primitives, deliberately NOT one "free this wrapper" entry
-    // point. A Ragged<T> or Compound<T,RANK> VALUE says nothing about which of
-    // its members it owns: the identical wrapper shape is produced by an owning
-    // constructor (fresh pool + fresh row table + fresh side tables), by a
-    // shape-preserving map (fresh pool + fresh rows, BORROWED lens / offsets /
-    // extents), and by a pure view (everything borrowed). Ownership is knowledge
-    // the PRODUCER has and the value does not carry — so the producer names the
-    // routine, and each routine frees exactly what its name says. Nothing is
-    // inferred at runtime, and no routine ever guesses about a side table.
+    // Same doctrine as deallocate<> above: unproven stays leaked. A leak is a bug we already have; a double free -- or
+    // a free of storage another wrapper still reads -- is a crash or, worse, silently changed numbers.
     //
-    // Same doctrine as deallocate<> above: unproven stays leaked. A leak is a
-    // bug we already have; a double free — or a free of storage another wrapper
-    // still reads — is a crash or, worse, silently changed numbers.
-    //
-    // The wrapper-shaped convenience layer (deallocate_ragged /
-    // deallocate_compound / the six view-and-gather routines, one per
-    // make_partial_* producer) lives in nested_array_types.hpp, which is where
-    // Ragged / Compound / Array are declared; it delegates to these.
+    // The wrapper-shaped convenience layer (deallocate_ragged / deallocate_compound / the six view-and-gather
+    // routines) lives in nested_array_types.hpp, which is where Ragged / Compound / Array are declared; it delegates
+    // to these.
 
-    // Owning-ragged storage: one contiguous element pool plus its row-pointer
-    // table, and NOTHING else. This is the shape a shape-preserving ragged
-    // producer emits (`<n>__pool = new T[offsets[nrows]]`, `<n>__rows =
-    // new T*[nrows]`), whose Ragged<T> wrapper then BORROWS the input's
-    // extents / lens / offsets — freeing those here would kill the input's
-    // shape metadata while the input is still live.
+    // Owning-ragged storage: one contiguous element pool plus its row-pointer table, and NOTHING else. This is the
+    // shape a shape-preserving ragged producer emits (`<n>__pool = new T[offsets[nrows]]`, `<n>__rows = new
+    // T*[nrows]`), whose Ragged<T> wrapper then BORROWS the input's extents / lens / offsets -- freeing those here
+    // would kill the input's shape metadata while the input is still live.
     //
-    // The rows are pool SLICES (`pool + offsets[g]`), so a per-row `delete[]`
-    // would be an interior free and then a double free once the pool goes —
-    // the same hazard destroy_skeleton avoids for dense leaf rows. For the
-    // opposite layout (each row its own block) use deallocate_ragged_rows_owned.
+    // The rows are pool SLICES (`pool + offsets[g]`), so a per-row `delete[]` would be an interior free and then a
+    // double free once the pool goes -- the same hazard destroy_skeleton avoids for dense leaf rows. For the opposite
+    // layout (each row its own block) use deallocate_ragged_rows_owned.
     //
-    // `pool` is passed EXPLICITLY rather than recovered from `rows[0]`: a
-    // zero-row ragged leaves `rows[0]` uninitialized, and a producer that filled
-    // its rows in some non-DFS order would leave a different slice there. The
-    // emitting site always has the pool's own name, so there is nothing to gain
-    // from guessing.
+    // `pool` is passed EXPLICITLY rather than recovered from `rows[0]`: a zero-row ragged leaves `rows[0]`
+    // uninitialized, and a producer that filled its rows in some non-DFS order would leave a different slice there.
     template<typename T>
     void deallocate_ragged_storage(T** rows, T* pool) {
         delete[] pool;   // delete[] nullptr is a no-op
         delete[] rows;
     }
 
-    // Per-row-owned jagged rows: each row is its OWN `new T[len]` block (the
-    // group_by layout — `out[g] = new T[sz]` under a `new T*[ngroups]` table),
-    // NOT a slice of a shared pool. Exactly the opposite hazard to
+    // Per-row-owned jagged rows: each row is its OWN `new T[len]` block (the group_by layout -- `out[g] = new T[sz]`
+    // under a `new T*[ngroups]` table), NOT a slice of a shared pool. Exactly the opposite hazard to
     // deallocate_ragged_storage: here, freeing only the table leaks every row.
     //
-    // `nrows` must be the count the producer sized the table with — the table
-    // itself carries no length, so a short count leaks the tail and a long one
-    // reads past the end. A null row entry is skipped (`delete[] nullptr`).
+    // `nrows` must be the count the producer sized the table with -- the table itself carries no length, so a short
+    // count leaks the tail and a long one reads past the end. A null row entry is skipped (`delete[] nullptr`).
     template<typename T>
     void deallocate_ragged_rows_owned(T** rows, size_t nrows) {
         if (!rows) return;
@@ -593,13 +503,10 @@ namespace nested_array_utilities {
         delete[] rows;
     }
 
-    // Ragged SIDE TABLES, for the producer that heap-allocates them. Opt-in and
-    // separate on purpose: every ragged producer in Blade today either SHARES
-    // its input's tables or emits them as `static constexpr` / stack arrays, and
-    // handing a borrowed or static table to a `delete[]` is a heap abort, not a
-    // diagnosable error. Any argument may be null (skipped). Deleting through a
-    // pointer-to-const is well-formed; the const is about the reader's view of
-    // the table, not about who owns it.
+    // Ragged SIDE TABLES, for the producer that heap-allocates them. Opt-in and separate on purpose: every ragged
+    // producer in Blade today either SHARES its input's tables or emits them as `static constexpr` / stack arrays, and
+    // handing a borrowed or static table to a `delete[]` is a heap abort, not a diagnosable error. Any argument may be
+    // null (skipped).
     inline void deallocate_ragged_tables(const size_t* lens,
                                          const size_t* offsets,
                                          const size_t* extents) {
@@ -608,39 +515,32 @@ namespace nested_array_utilities {
         delete[] extents;
     }
 
-    // Compound storage: the flat compact buffer plus the index that gives it
-    // meaning. IDXT is a template parameter so this layer needs no knowledge of
-    // compound_index_t — that type lives in index_types.h, which sits ABOVE this
+    // Compound storage: the flat compact buffer plus the index that gives it meaning. IDXT is a template parameter so
+    // this layer needs no knowledge of compound_index_t -- that type lives in index_types.h, which sits ABOVE this
     // header; IDXT is deduced at the call site, where it is complete.
     //
-    // `delete idx` — the SINGLE-object form — is the correct teardown precisely
-    // because abstract_idx_t declares a virtual destructor: the derived
-    // compound_index_t's rank_to_tuple / tuple_to_rank / mask are reclaimed by
-    // the ordinary member-destructor chain even when the static type here is a
-    // base pointer. `delete[] idx` would be undefined behaviour.
+    // `delete idx` -- the SINGLE-object form -- is the correct teardown precisely because abstract_idx_t declares a
+    // virtual destructor: the derived compound_index_t's rank_to_tuple / tuple_to_rank / mask are reclaimed by the
+    // ordinary member-destructor chain even when the static type here is a base pointer. `delete[] idx` would be UB.
     //
-    // ONLY for a compound that owns BOTH. A partial/window view aliases its
-    // parent's data (see deallocate_compound_index_only); a map output shares
-    // its input's index (see deallocate_compound_data_only).
+    // ONLY for a compound that owns BOTH. A partial/window view aliases its parent's data (see
+    // deallocate_compound_index_only); a map output shares its input's index (see deallocate_compound_data_only).
     template<typename T, typename IDXT>
     void deallocate_compound_storage(T* data, IDXT* idx) {
         delete[] data;
         delete idx;
     }
 
-    // Compound data only — the map-output shape: a fresh compact buffer over an
-    // index BORROWED from the input compound (same mask, so the output cannot
-    // own it). Freeing the index here would leave the input holding a dangling
-    // `.idx`.
+    // Compound data only -- the map-output shape: a fresh compact buffer over an index BORROWED from the input
+    // compound (same mask, so the output cannot own it). Freeing the index here would leave the input holding a dangling `.idx`.
     template<typename T>
     void deallocate_compound_data_only(T* data) {
         delete[] data;
     }
 
-    // Compound index only — the view shape: a residual/window whose DATA is a
-    // slice of its parent's buffer (no copy) but whose sub-index was freshly
-    // materialized over the free-axis sub-mask. Freeing the data here would be
-    // an interior free of the parent's buffer.
+    // Compound index only -- the view shape: a residual/window whose DATA is a slice of its parent's buffer (no copy)
+    // but whose sub-index was freshly materialized over the free-axis sub-mask. Freeing the data here would be an
+    // interior free of the parent's buffer.
     template<typename IDXT>
     void deallocate_compound_index_only(IDXT* idx) {
         delete idx;
@@ -720,28 +620,17 @@ namespace nested_array_utilities {
     }
 
 
-    // =========================================================================
-    // Antisymmetric array support — UNIFIED into allocate<TYPE, SYMM, false>
-    // =========================================================================
-    //
-    // Antisymmetric storage is no longer a separate code path. It is the unified
-    // allocate<>/count_leaves/build_skeleton recurrence driven with DIAGONALS =
-    // false (strict simplex: each level's index starts at prev+1, dropping the
-    // diagonal) and a single all-grouped SYMM mask {1,1,...}. This yields the
-    // documented C(n,r) cardinality and the identical DFS leaf-placement order
-    // the former standalone allocate_antisym produced (verified byte-identical at
-    // ranks 2-4 against the prior strict recurrence before removal).
+    // Antisymmetric array support: allocate<TYPE, SYMM, false>. Antisymmetric storage is the same allocate<>/
+    // count_leaves/build_skeleton recurrence driven with DIAGONALS = false (strict simplex: each level's index starts
+    // at prev+1, dropping the diagonal) and a single all-grouped SYMM mask {1,1,...}, yielding the documented C(n,r)
+    // cardinality:
     //
     //   allocate<promote<T,r>::type, MASK_all_ones, false>(extents)
     //
-    // Antisym is thus "a symmetric grouping that happens to be strict" — same
-    // contiguous pool + pointer skeleton, same teardown. The previous
-    // count_antisym/build_antisym/allocate_antisym entry points were retired once
-    // the unification was confirmed in the test suite.
+    // Antisym is thus "a symmetric grouping that happens to be strict" -- same contiguous pool + pointer skeleton,
+    // same teardown.
 
-    // =========================================================================
-    // Index canonicalization wrappers
-    // =========================================================================
+    // Index canonicalization wrappers.
 
     // Symmetric canonicalization: (i,j) -> (min(i,j), max(i,j))
     inline void sym_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
@@ -749,53 +638,38 @@ namespace nested_array_utilities {
         cj = (i <= j) ? j : i;
     }
 
-    // Antisymmetric canonicalization: (i,j) -> (min(i,j), max(i,j)), sign = +1 or -1
-    // Returns -1 if swapped (odd permutation), +1 if not
+    // Antisymmetric canonicalization: (i,j) -> (min(i,j), max(i,j)), sign = +1 or -1. Returns -1 if swapped (odd permutation), +1 if not.
     inline int antisym_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
         if (i < j) { ci = i; cj = j; return 1; }
         else if (i > j) { ci = j; cj = i; return -1; }
         else { ci = i; cj = j; return 0; }  // diagonal: value is zero
     }
 
-    // Hermitian canonicalization: (i,j) -> (min(i,j), max(i,j)), needs_conj flag
-    // For Hermitian: A(i,j) = conj(A(j,i)), so access with j<i needs conjugation
+    // Hermitian canonicalization: (i,j) -> (min(i,j), max(i,j)), needs_conj flag. A(i,j) = conj(A(j,i)), so access with j<i needs conjugation.
     inline bool hermitian_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
         if (i <= j) { ci = i; cj = j; return false; }  // no conjugation needed
         else { ci = j; cj = i; return true; }           // needs conjugation
     }
 
-    // =========================================================================
-    // Whole-array elementwise transforms (negate / conjugate)
-    // =========================================================================
+    // Whole-array elementwise transforms (negate / conjugate). These realize the CHEAP intra-group transposes:
+    // swapping two dimensions inside one symmetry group is, on storage, a uniform per-scalar transform --
+    // antisymmetric -> global negation (any transposition is odd parity), Hermitian -> global conjugation. The
+    // transform is STORAGE-SHAPE-INVARIANT: negating/conjugating the canonical element negates/conjugates each of its
+    // logical images, so the symmetry relation is preserved without touching the skeleton. Because every array
+    // reaching here has compact storage, it is one CONTIGUOUS scalar pool in DFS order, so the transform is a
+    // straight flat loop over the pool -- no skeleton traversal, no per-class branching.
     //
-    // These realize the CHEAP intra-group transposes: swapping two dimensions
-    // inside one symmetry group is, on storage, a uniform per-scalar transform
-    // — antisymmetric -> global negation (any transposition is odd parity),
-    // Hermitian -> global conjugation. The transform is STORAGE-SHAPE-INVARIANT:
-    // negating/conjugating the canonical element negates/conjugates each of its
-    // logical images, so the symmetry relation is preserved without touching the
-    // skeleton. Because every array reaching here has compact (symmetry-like)
-    // storage, it is one CONTIGUOUS scalar pool in DFS order (allocate<>'s
-    // invariant), so the transform is a straight flat loop over the pool — no
-    // skeleton traversal, no per-class branching.
-    //
-    // Type-correctness (which SYMM, the resulting nested view) is handled by the
-    // CALLER: it allocates the destination via the normal allocate path (same
-    // shape/SYMM as the source, so the result's Blade type is identical) and
-    // passes the two pool bases plus the element count. These routines are dumb
-    // T*->T* loops with no storage knowledge.
+    // Type-correctness (which SYMM, the resulting nested view) is handled by the CALLER: it allocates the destination
+    // via the normal allocate path (same shape/SYMM as the source) and passes the two pool bases plus the element
+    // count. These routines are dumb T*->T* loops with no storage knowledge.
 
-    // conj_scalar: std::conj for complex element types; the identity for reals.
-    // (std::conj(double) would return std::complex<double>, breaking assignment
-    // back into a real pool — mirrors the IRConj real-vs-complex handling.)
+    // conj_scalar: std::conj for complex element types; the identity for reals. (std::conj(double) would return std::complex<double>, breaking assignment back into a real pool.)
     template<typename T>
     inline T conj_scalar(const T& x) { return x; }                    // real: identity
     template<typename T>
     inline std::complex<T> conj_scalar(const std::complex<T>& x) { return std::conj(x); }
 
-    // negate_pool: dst[i] = -src[i] over the contiguous pool. dst and src share
-    // shape (same cardinality n); n is supplied by the caller (count_leaves /
-    // count_antisym for the source's storage class).
+    // negate_pool: dst[i] = -src[i] over the contiguous pool. dst and src share shape (same cardinality n); n is supplied by the caller.
     template<typename T>
     void negate_pool(T* dst, const T* src, size_t n) {
         for (size_t i = 0; i < n; i++) dst[i] = -src[i];
@@ -807,41 +681,28 @@ namespace nested_array_utilities {
         for (size_t i = 0; i < n; i++) dst[i] = conj_scalar(src[i]);
     }
 
-    // =========================================================================
-    // canon_access: lazy canonicalize-and-transform read of one compact group
-    // =========================================================================
+    // canon_access: lazy canonicalize-and-transform read of one compact group. The runtime half of the
+    // lazy-sign-on-read access path (formalism 4.16, 14.2-14.3). Reading a compact-group array at an ARBITRARY index
+    // sub-tuple (not necessarily canonical) is three phases, per group:
     //
-    // The runtime half of the lazy-sign-on-read access path (formalism 4.16,
-    // 14.2-14.3). Reading a compact-group array at an ARBITRARY index sub-tuple
-    // (not necessarily canonical) is three phases, per group:
+    //   (1) FOLD       sort the sub-tuple, tracking swap parity. For STRICT (antisymmetric) groups, a repeated index
+    //                  means the value is not stored -> implicit zero.
+    //   (2) LEFT-JUSTIFY  sorted tuple -> storage coords by cumulative subtraction; strict groups subtract an extra
+    //                  +k at position k (each row one shorter).
+    //   (3) TRANSFORM  apply to the fetched canonical value given the parity: symmetric -> identity, antisymmetric ->
+    //                  negate on odd, Hermitian -> conjugate on odd (conj_scalar is identity on reals, so
+    //                  Hermitian-of-real is symmetric automatically).
     //
-    //   (1) FOLD       sort the sub-tuple, tracking swap parity. For STRICT
-    //                  (antisymmetric) groups, a repeated index means the value
-    //                  is not stored -> implicit zero.
-    //   (2) LEFT-JUSTIFY  sorted tuple -> storage coords by cumulative
-    //                  subtraction; strict groups subtract an extra +k at
-    //                  position k (each row one shorter).
-    //   (3) TRANSFORM  apply to the fetched canonical value given the parity:
-    //                  symmetric -> identity, antisymmetric -> negate on odd,
-    //                  Hermitian -> conjugate on odd (conj_scalar is identity on
-    //                  reals, so Hermitian-of-real is symmetric automatically).
+    // The CALLER supplies the per-group strictness (STRICT) and a transform policy. The read path itself never
+    // branches on symmetry class -- it folds, fetches, transforms.
     //
-    // The CALLER supplies the per-group strictness (STRICT) and a transform
-    // policy. The read path itself never branches on symmetry class — it folds,
-    // fetches, transforms. Verified (canon_access_proto) for antisym ranks 2-4
-    // and Hermitian rank 2 (complex + real) against dense references.
-    //
-    // COST: the fold is O(R^2) inversion counting + a sort, paid only on RANDOM
-    // access. Iteration-context reads are canonical by construction and bypass
-    // canon_access entirely (the codegen migration distinguishes the two so the
-    // bulk-compute hot path stays zero-overhead, per the 14.2 cost-model note).
+    // COST: the fold is O(R^2) inversion counting + a sort, paid only on RANDOM access. Iteration-context reads are
+    // canonical by construction and bypass canon_access entirely, keeping the bulk-compute hot path zero-overhead.
 
-    // Transform policies. Selected by the caller from the index type's
-    // ReadTransformBehavior; share one fold/fetch code path.
+    // Transform policies. Selected by the caller from the index type's ReadTransformBehavior; share one fold/fetch path.
     enum class ReadTransform { Identity, NegateOnSwap, ConjugateOnSwap };
 
-    // Fold an R-tuple in place: sort ascending, return swap parity (0 even,
-    // 1 odd). For strict groups, set `zero` if any two entries are equal.
+    // Fold an R-tuple in place: sort ascending, return swap parity (0 even, 1 odd). For strict groups, set `zero` if any two entries are equal.
     template<size_t R>
     inline int canon_fold(std::array<size_t, R>& idx, bool strict, bool& zero) {
         zero = false;
@@ -878,18 +739,11 @@ namespace nested_array_utilities {
         return val;
     }
 
-    // =========================================================================
-    // tuple_hasher: std::hash specialization for std::tuple<...>
-    // =========================================================================
-    //
-    // The standard library does not provide std::hash<std::tuple<...>>.
-    // This hasher uses the canonical boost-style hash-combine recipe:
+    // tuple_hasher: std::hash specialization for std::tuple<...>. The standard library does not provide
+    // std::hash<std::tuple<...>>. This hasher uses the canonical boost-style hash-combine recipe:
     //   seed ^= hash(elem) + 0x9e3779b9 + (seed << 6) + (seed >> 2)
-    // applied across all tuple elements via C++17 fold expression.
-    //
-    // Used by compound group_keys (multi-key SQL-style grouping) where the
-    // bucket dispatch is an unordered_map keyed by a tuple of component
-    // key values. Each component must itself be hashable via std::hash.
+    // applied across all tuple elements via C++17 fold expression. Used by compound group_keys (multi-key SQL-style
+    // grouping) where the bucket dispatch is an unordered_map keyed by a tuple of component key values.
     struct tuple_hasher {
         template <typename... Ts>
         std::size_t operator()(const std::tuple<Ts...>& t) const noexcept {

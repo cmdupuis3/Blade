@@ -1,21 +1,18 @@
-/// Compiler-native Wigner 3j / Clebsch-Gordan machinery — the CG tables the
-/// ML-module elaboration emits as constant arrays in generated C++ ("the
-/// compiler generates CG tables at compile time for all paths actually
-/// used", module doc §7).
+/// Compiler-native Wigner 3j / Clebsch-Gordan machinery -- the CG tables
+/// ML-module elaboration emits as constant arrays in generated C++ (module
+/// doc section 7: CG tables generated at compile time for all paths used).
 ///
-/// PORT of ml/Wigner.fs, which remains the independent oracle: the ml/
-/// project cross-validates these same formulas against independently
-/// computed spherical harmonics (Gaunt identity) and fitted Wigner D
+/// PORT of ml/Wigner.fs, the independent oracle: ml/ cross-validates these
+/// formulas against spherical harmonics (Gaunt identity) and fitted Wigner D
 /// matrices; tests/Test_Wigner.fs pins this port against closed forms, and
-/// the elaborated ops are value-diffed against ml/ outputs.
+/// elaborated ops are value-diffed against ml/ outputs.
 ///
-/// Basis doctrine (ml/README F1, user-resolved 2026-07-12 as TWO types):
-///   - REAL basis: what the spec's own spherical harmonics and e3nn use.
-///     Support is |m3| ∈ {||m1|-|m2||, |m1|+|m2|} with a sign-parity
-///     constraint — NOT m1+m2=m3. `realCGSparse` enumerates it; this is
-///     what `CGIndex` iterates and what tensor_product consumes.
-///   - COMPLEX (Condon-Shortley) basis: selection rule m1+m2=m3
-///     (`clebsch`). Reserved for a future complex-pipeline `CGIndexComplex`.
+/// Two bases (ml/README F1):
+///   - REAL: what the spec's spherical harmonics and e3nn use. Support is
+///     |m3| in {||m1|-|m2||, |m1|+|m2|}, a sign-parity rule, NOT m1+m2=m3.
+///     `realCGSparse` enumerates it; `CGIndex` and tensor_product consume it.
+///   - COMPLEX (Condon-Shortley): selection rule m1+m2=m3 (`clebsch`).
+///     Reserved for a future complex-pipeline `CGIndexComplex`.
 module Blade.ML.WignerTables
 
 open System.Collections.Generic
@@ -26,7 +23,7 @@ open System.Numerics
 type CGEntry = { C1: int; C2: int; C3: int; Coef: float }
 
 /// Factorials as floats, 0..170 (double overflow at 171!). The angular
-/// momenta in scope (l ≤ 10 or so) use only the low entries; the Racah
+/// momenta in scope (l <= 10 or so) use only the low entries; the Racah
 /// formula's worst index is j1+j2+j3+1.
 let private factorial : float[] =
     let f = Array.zeroCreate 171
@@ -76,11 +73,11 @@ let clebsch (j1: int) (m1: int) (j2: int) (m2: int) (j3: int) (m3: int) : float 
 /// columns by complex mu (0-based mu + l). No Condon-Shortley phase on the
 /// real side, matching the spec's explicit Y formulas.
 ///
-/// Public (not private) since stage 2b-i: SymPowerTables.fs reuses this exact
-/// matrix for the realization of the Sym^j(V_l) occurrence tables, and its
-/// phase-rule derivation is anchored to these coded entries (every row is
-/// fixed by the antiunitary J|l,m> = (-1)^m |l,-m> — see the SymPowerTables
-/// module doc). Changing a phase here invalidates that derivation.
+/// Public: SymPowerTables.fs reuses this matrix to realize the Sym^j(V_l)
+/// occurrence tables; its phase-rule derivation is anchored to these coded
+/// entries (every row is fixed by the antiunitary J|l,m> = (-1)^m |l,-m> --
+/// see the SymPowerTables module doc). Changing a phase here invalidates
+/// that derivation.
 let uMatrix (l: int) : Complex[][] =
     let d = 2 * l + 1
     let u = Array.init d (fun _ -> Array.zeroCreate<Complex> d)
@@ -101,8 +98,8 @@ let private sparseCache = Dictionary<int * int * int, CGEntry[]>()
 
 /// Real-basis coupling tensor C: out[c3] += C[c1][c2][c3] * x[c1] * y[c2]
 /// for real-SH component vectors x (degree l1) and y (degree l2). Computed
-/// as U3 · CG · (U1† × U2†); purely real for even l1+l2+l3, purely
-/// imaginary for odd (fixed by a global −i phase, harmless for SO(3));
+/// as U3 * CG * (U1^dag x U2^dag); purely real for even l1+l2+l3, purely
+/// imaginary for odd (fixed by a global -i phase, harmless for SO(3));
 /// realness asserted.
 let realCGDense (l1: int) (l2: int) (l3: int) : float[][][] =
     match denseCache.TryGetValue((l1, l2, l3)) with
@@ -155,7 +152,7 @@ let realCGDense (l1: int) (l2: int) (l3: int) : float[][][] =
         res
 
 /// Sparse nonzero support of the real coupling tensor, in lexicographic
-/// (c1, c2, c3) order — what CGIndex iterates and tensor_product consumes.
+/// (c1, c2, c3) order -- what CGIndex iterates and tensor_product consumes.
 let realCGSparse (l1: int) (l2: int) (l3: int) : CGEntry[] =
     match sparseCache.TryGetValue((l1, l2, l3)) with
     | true, v -> v

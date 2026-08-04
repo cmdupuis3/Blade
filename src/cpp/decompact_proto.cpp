@@ -122,7 +122,7 @@ static double*** make_anti3(size_t n) {
 // the other two axes carry the (now independent) sub-symmetry.
 //
 // Candidate implementation: the output is simply the DENSE rank-3 tensor whose
-// every logical entry is the canonical source value — i.e. decompact of a
+// every logical entry is the canonical source value -- i.e. decompact of a
 // SOLE rank-3 group to a full dense cube, with the understanding that the
 // caller's RESULT TYPE records which axis is free and which two are symmetric.
 //
@@ -132,7 +132,7 @@ static double*** make_anti3(size_t n) {
 // permutation. The `pos` and the sub-symmetry only matter for the result
 // TYPE (storage of the remainder), not for a fully-dense output.
 //
-// But the actual codegen does NOT want a full dense cube — it wants the
+// But the actual codegen does NOT want a full dense cube -- it wants the
 // remainder kept compact (left-rem Sym/Antisym + dense freed axis). So the
 // real target is a MIXED output: dense in the freed axis, triangular in the
 // remaining pair. We validate THAT here.
@@ -290,15 +290,15 @@ static bool test_sym3_peel_mid(size_t n) {
     using T3 = promote<double,3>::type;
     // storage: we keep pair (i,k) compact, j dense. Represent as out[a][x][b]
     // where (a,b) is the compact pair coord and x is the freed middle axis.
-    // count_leaves with {1,2,1}: groups are {pos0,pos2} sym? No — adjacency!
+    // count_leaves with {1,2,1}: groups are {pos0,pos2} sym? No -- adjacency!
     // SYMM groups are by EQUAL ADJACENT numbers. {1,2,1} = three singleton groups
-    // (1),(2),(1) — NOT a pair, because the two 1s are not adjacent. So a compact
+    // (1),(2),(1) -- NOT a pair, because the two 1s are not adjacent. So a compact
     // (i,k) pair with a free middle is NOT expressible as an adjacent-group mask.
     // This is the structural obstruction. Fall back to a DENSE output for the test
     // and just check we can reproduce dense values (the materializer would need
     // dense storage for middle-peel, losing the compaction benefit).
     // DENSE output uses the nullptr mask (true n^3 rectangular). {2,2,2} would
-    // be a SINGLE rank-3 symmetric group (C(n+2,3) storage), not dense — using
+    // be a SINGLE rank-3 symmetric group (C(n+2,3) storage), not dense -- using
     // it and indexing densely overruns. Dense decompact storage is nullptr.
     static const size_t* symmDense = nullptr;
     T3 out = allocate<T3, nullptr>(ext);

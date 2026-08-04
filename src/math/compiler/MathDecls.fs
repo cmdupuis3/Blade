@@ -1,32 +1,23 @@
-/// Math-module decl builders: dense linear-algebra and tensor-decomposition
-/// kernels (matmul, one-sided Jacobi SVD, cyclic Jacobi eigh, mode-n
-/// unfolding, mode products, HOSVD) synthesized as plain Blade source.
+/// Math-module decl builders: dense linear-algebra and tensor-decomposition kernels (one-sided Jacobi SVD, cyclic Jacobi
+/// eigh, mode-n unfolding, mode products, HOSVD) synthesized as plain Blade source.
 ///
-/// Rank polymorphism lives HERE: each builder is ONE order-generic F#
-/// function that emits a fixed-rank Blade FunctionDecl per requested tensor
-/// order (the PplElaborate moment-tower pattern — F# loops over the order,
-/// the generated code is straight per-rank nests).
+/// Rank polymorphism lives HERE: each builder is ONE order-generic F# function that emits a fixed-rank Blade FunctionDecl per
+/// requested tensor order (F# loops over the order, the generated code is straight per-rank nests).
 ///
-/// House style for generated bodies (the LDL lesson from
-/// examples/physics/41: long scalar let-chains inline exponentially in
-/// codegen — never emit them):
+/// House style for generated bodies (long scalar let-chains inline exponentially in codegen -- never emit them):
 ///   - flat rank-1 `mut` work arrays with static-literal strides,
 ///   - for-in loop nests (runtime-expression bounds allowed),
 ///   - if-EXPRESSIONS for guards (no statement-level control flow),
 ///   - rank-2+ inputs copied in via `w(i*n+j) = a(i, j)`,
 ///   - rank-2+ outputs assembled as nested array literals of runtime reads.
 ///
-/// Unfolding convention (documented once, used everywhere): Kolda–Bader
-/// mode-n matricization, 0-based — X(i_0..i_{N-1}) maps to M(i_mode, j)
-/// with j = Σ_{k≠mode} i_k · J_k, J_k = Π_{m<k, m≠mode} I_m.
+/// Unfolding convention (documented once, used everywhere): Kolda-Bader mode-n matricization, 0-based -- X(i_0..i_{N-1}) maps
+/// to M(i_mode, j) with j = Sum_{k<>mode} i_k * J_k, J_k = Prod_{m<k, m<>mode} I_m.
 module Blade.Math.Decls
 
 open Blade.Ast
 
-// ============================================================================
 // AST construction helpers (mirroring MLElaborate's style)
-// ============================================================================
-
 let v (n: string) = syn (ExprVar n)
 let fLit (x: float) = syn (ExprLit (LitFloat x))
 let iLit (n: int) = syn (ExprLit (LitInt (int64 n)))
@@ -40,8 +31,7 @@ let sLetMut n value = StmtLet { Pattern = synPat (PatVar n); Type = None; Value 
 let sAccum lhs e = StmtExpr (syn (ExprAssign (lhs, add lhs e)))
 let sAssign lhs e = StmtExpr (syn (ExprAssign (lhs, e)))
 let sFor var lo hi body = StmtForIn (var, syn (ExprDotDot (iLit lo, iLit hi)), body)
-/// for-in with expression bounds (runtime lower bounds are proven: ml's
-/// tpDecl iterates table-driven ranges).
+/// for-in with expression bounds (runtime lower bounds proven: ml's tpDecl iterates table-driven ranges).
 let sForE var loE hiE body = StmtForIn (var, syn (ExprDotDot (loE, hiE)), body)
 let zerosLit (n: int) = syn (ExprArrayLit (List.replicate n (fLit 0.0)))
 let tyFloat = TyNamed ("Float", [])
@@ -60,13 +50,12 @@ let absE e = syn (ExprApp (v "abs", [e]))
 let sqrtE e = syn (ExprApp (v "sqrt", [e]))
 let negOne = syn (ExprUnaryOp (OpNeg, fLit 1.0))
 let cmp op a b = syn (ExprBinOp (Elementwise, op, a, b))
-/// a(i, j) — multi-subscript read (runtime indices proven, func-arrays/010).
+/// a(i, j) -- multi-subscript read (runtime indices proven, func-arrays/010).
 let idx2 (arr: string) (i: Expr) (j: Expr) = syn (ExprApp (v arr, [i; j]))
 /// Flat row-major cell arr(i*stride + j) of a rank-1 work array.
 let flat (arr: string) (stride: int) (i: Expr) (j: Expr) =
     idx arr (add (mul i (iLit stride)) j)
-/// Rank-2 nested literal of runtime reads over a flat work array
-/// ([[c(0), c(1)], [c(2), c(3)]] — proven by corpus math/005).
+/// Rank-2 nested literal of runtime reads over a flat work array ([[c(0), c(1)], [c(2), c(3)]] -- corpus math/005).
 let nestedFromFlat (arr: string) (rows: int) (cols: int) : Expr =
     syn (ExprArrayLit
         [ for i in 0 .. rows - 1 ->
@@ -74,17 +63,14 @@ let nestedFromFlat (arr: string) (rows: int) (cols: int) : Expr =
 let tyFloatMat (rows: int) (cols: int) =
     TyArray (tyFloat, [ TyIdx (iLit rows); TyIdx (iLit cols) ])
 
-/// Default Jacobi sweep budget: cyclic Jacobi converges quadratically once
-/// sweeps begin; 6–8 reach machine epsilon at n <= ~100, 10 gives margin.
-/// Converged rotations guard to the identity, so surplus sweeps are cheap.
+/// Default Jacobi sweep budget: converges quadratically once sweeps begin; 6-8 reach machine epsilon at n <= ~100, 10 gives margin.
 let defaultSweeps = 10
 
 let prodInts (xs: int list) = List.fold (*) 1 xs
 /// Rank-N dense tensor type: Array<Float like Idx<d0>, Idx<d1>, ...>.
 let tyFloatTensor (dims: int list) =
     TyArray (tyFloat, dims |> List.map (fun d -> TyIdx (iLit d)))
-/// Rank-N nested literal of runtime reads over a flat row-major work array
-/// (the rank-N generalization of nestedFromFlat).
+/// Rank-N nested literal of runtime reads over a flat row-major work array (the rank-N generalization of nestedFromFlat).
 let rec nestedFromFlatN (arr: string) (dims: int list) (offset: int) : Expr =
     match dims with
     | [] -> failwith "nestedFromFlatN: empty dims"
@@ -96,51 +82,28 @@ let rec nestedFromFlatN (arr: string) (dims: int list) (offset: int) : Expr =
 let loopNest (vars: string list) (extents: int list) (body: Stmt list) : Stmt list =
     List.foldBack2 (fun name extent acc -> [ sFor name 0 extent acc ]) vars extents body
 
-// Span-stamping wrappers for the raw combinators used in decl bodies (full-
-// span AST): each attributes to the ambient synthSpan the elaborator stamps.
+// Span-stamping wrappers for the raw combinators used in decl bodies (full-span AST): each attributes to the ambient synthSpan.
 let ifE (c, t, f) = syn (ExprIf (c, t, f))
 let blockE (stmts, fin) = syn (ExprBlock (stmts, fin))
 let tupleE (xs: Expr list) = syn (ExprTuple xs)
 
-// ============================================================================
-// matmul — REMOVED (Phase 5 of docs/plan-cpp-perf-exploitation.md)
-// ============================================================================
-//
-// `matmulDecl` used to synthesize, per distinct (m, k, n), a Blade function
-//     let mut c = zeros(m*n)
-//     for i, for j, for t: c[i*n + j] += a(i,t) * b(t,j)
-//     -> nested literal of reads over c
-// `math.matmul` is now a FIRST-CLASS intrinsic instead: MathElaborate rewrites
-// the call to the `__math_matmul` marker, TypeCheck.inferMatmul types it, and
-// codegen emits one `blade_linalg::blade_matmul` call. The shim's native
-// fallback reproduces exactly the loop above — i, j, t-ascending, one
-// accumulator seeded at +0.0 — so printed values are byte-identical to what
-// this declaration produced; what changes is that a BLAS-linked build gets a
-// blocked/microkernel dgemm instead, which emitted loop code cannot approach.
-//
-// Every OTHER op in this file stays synthesized. LAPACK routing for
-// svd/eigh/eig is a separate, later decision (plan Phase 6).
+// matmul is NOT synthesized here: `math.matmul` is a first-class codegen intrinsic (MathElaborate rewrites the call to the
+// `__math_matmul` marker, TypeCheck.inferMatmul types it, codegen emits one `blade_linalg::blade_matmul` call). The native
+// fallback reproduces the naive i, j, t-ascending triple loop with one accumulator seeded at +0.0, so values match a
+// BLAS-linked build's blocked/microkernel dgemm to print precision. Every OTHER op in this file stays synthesized.
 
-// ============================================================================
 // svd (one-sided / Hestenes cyclic Jacobi)
-// ============================================================================
 
-/// Thin SVD for fixed (m, n, sweeps), m >= n: A ≈ U·diag(S)·Vᵀ with S
-/// descending, U m×n (columns orthonormal; zero σ -> zero column), V n×n
-/// (COLUMNS are the right singular vectors: A(i,j) = Σ_k U(i,k)·S(k)·V(j,k)).
+/// Thin SVD for fixed (m, n, sweeps), m >= n: A ~= U*diag(S)*V^T with S descending, U m x n (columns orthonormal; zero
+/// sigma -> zero column), V n x n (COLUMNS are the right singular vectors: A(i,j) = Sum_k U(i,k)*S(k)*V(j,k)).
 ///
-/// One-sided Jacobi on a working copy W: for each column pair (p, q) the
-/// rotation angle comes from the 2×2 Gram entries a=‖wp‖², b=‖wq‖²,
-/// c=wp·wq via the stable smaller-root formula (t² + 2ζt − 1 = 0,
-/// ζ=(b−a)/2c); a pair with |c| <= 1e-15·√(a·b) guards to the identity
-/// through if-EXPRESSIONS (no statement control flow). V accumulates the
-/// same column rotations from an identity. Post: S = column norms,
-/// selection-sort descending with column swaps, U = normalized columns,
-/// sign fix (first row attaining max |entry| per U column made positive;
-/// U and V columns flip together).
+/// One-sided Jacobi on a working copy W: for each column pair (p, q) the rotation angle comes from the 2x2 Gram entries
+/// a=|wp|^2, b=|wq|^2, c=wp.wq via the stable smaller-root formula (t^2 + 2*zeta*t - 1 = 0, zeta=(b-a)/2c); a pair with
+/// |c| <= 1e-15*sqrt(a*b) guards to the identity through if-EXPRESSIONS. V accumulates the same column rotations from an
+/// identity. Post: S = column norms, selection-sort descending with column swaps, U = normalized columns, sign fix (first
+/// row attaining max |entry| per U column made positive; U and V columns flip together).
 ///
-/// Scratch muts are hoisted to the top and re-zeroed per use (no
-/// `let mut` inside loop bodies).
+/// Scratch muts are hoisted to the top and re-zeroed per use (no `let mut` inside loop bodies).
 let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
     let wAt = flat "w" n
     let vAt = flat "vv" n
@@ -203,8 +166,7 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
                     [ sLet "wj" (wAt (v "i") (v "j"))
                       sAccum (v "aa") (mul (v "wj") (v "wj")) ]
                   sAssign (idx "s" (v "j")) (sqrtE (v "aa")) ]
-              // selection sort descending (ties keep original order); swap
-              // s entries and the matching columns of w and vv
+              // selection sort descending (ties keep original order); swap s entries and matching columns of w and vv
               sFor "kk" 0 n
                 [ sAssign (v "best") (v "kk")
                   sForE "j" (add (v "kk") (iLit 1)) (iLit n)
@@ -220,15 +182,13 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
                     [ sLet "tv" (vAt (v "i") (v "kk"))
                       sAssign (vAt (v "i") (v "kk")) (vAt (v "i") (v "best"))
                       sAssign (vAt (v "i") (v "best")) (v "tv") ] ]
-              // U = normalized columns (zero σ -> zero column, documented)
+              // U = normalized columns (zero sigma -> zero column, documented)
               sLetMut "u" (zerosLit (m * n))
               sFor "j" 0 n
                 [ sLet "inv" (ifE (cmp OpGt (idx "s" (v "j")) (fLit 1.0e-300),
                                       divE (fLit 1.0) (idx "s" (v "j")), fLit 0.0))
                   sFor "i" 0 m [ sAssign (uAt (v "i") (v "j")) (mul (wAt (v "i") (v "j")) (v "inv")) ] ]
-              // sign fix: first row attaining max |entry| per U column made
-              // positive; U and V columns flip together (best reads the OLD
-              // bigv before bigv updates — first-max semantics)
+              // sign fix: first row attaining max |entry| per U column made positive; U and V columns flip together (first-max)
               sFor "j" 0 n
                 [ sAssign (v "bigv") (fLit 0.0)
                   sAssign (v "best") (iLit 0)
@@ -239,33 +199,24 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
                   sLet "flip" (ifE (cmp OpLt (uAt (v "best") (v "j")) (fLit 0.0), negOne, fLit 1.0))
                   sFor "i" 0 m [ sAssign (uAt (v "i") (v "j")) (mul (uAt (v "i") (v "j")) (v "flip")) ]
                   sFor "i" 0 n [ sAssign (vAt (v "i") (v "j")) (mul (vAt (v "i") (v "j")) (v "flip")) ] ]
-              // assemble rank-2 outputs as named lets: array literals are
-              // NOT supported directly inside a tuple construction (codegen
-              // IRArrayLit gap) — tuple-of-variables is the proven boundary
+              // assemble rank-2 outputs as named lets: array literals are NOT supported inside a tuple (codegen IRArrayLit gap)
               sLet "uo" (nestedFromFlat "u" m n)
               sLet "vo" (nestedFromFlat "vv" n n) ],
             Some (tupleE [ v "uo"; v "s"; v "vo" ]))
     mkFunc name [ ("a", tyFloatMat m n) ]
         (TyTuple [ tyFloatMat m n; tyFloatArr n; tyFloatMat n n ]) body
 
-// ============================================================================
 // eigh (cyclic two-sided Jacobi, symmetric input assumed)
-// ============================================================================
 
-/// Symmetric eigendecomposition for fixed (n, sweeps): S ≈ Q·diag(LAM)·Qᵀ
-/// with LAM descending and Q's COLUMNS the eigenvectors. Symmetry of the
-/// input is ASSUMED, not checked (v1).
+/// Symmetric eigendecomposition for fixed (n, sweeps): S ~= Q*diag(LAM)*Q^T with LAM descending and Q's COLUMNS the
+/// eigenvectors. Symmetry of the input is ASSUMED, not checked.
 ///
-/// Cyclic two-sided Jacobi on a working copy AW: for pivot (p, q) the
-/// angle comes from θ = (a_qq − a_pp)/(2·a_pq) via the same stable
-/// smaller-root formula as svd (t² + 2θt − 1 = 0); |a_pq| <=
-/// 1e-15·√(|a_pp·a_qq| + 1e-300) guards to the identity (the tiny absolute
-/// floor keeps the guard alive on indefinite/zero diagonals). Each
-/// rotation updates AW's columns AND rows (AW ← RᵀAWR) and accumulates the
-/// column rotation into QM. Post: eigenvalues = diagonal, selection-sort
-/// descending with QM column swaps, sign fix on QM columns (first row
-/// attaining max |entry| made positive). Mirrors math/Jacobi.fs `eigh`
-/// operation-for-operation, so values agree to the ulp.
+/// Cyclic two-sided Jacobi on a working copy AW: for pivot (p, q) the angle comes from theta = (a_qq - a_pp)/(2*a_pq) via
+/// the same stable smaller-root formula as svd (t^2 + 2*theta*t - 1 = 0); |a_pq| <= 1e-15*sqrt(|a_pp*a_qq| + 1e-300) guards
+/// to the identity (the tiny absolute floor keeps the guard alive on indefinite/zero diagonals). Each rotation updates AW's
+/// columns AND rows (AW <- R^T AW R) and accumulates the column rotation into QM. Post: eigenvalues = diagonal,
+/// selection-sort descending with QM column swaps, sign fix on QM columns (first row attaining max |entry| made positive).
+/// Mirrors math/Jacobi.fs `eigh` operation-for-operation, so values agree to the ulp.
 let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
     let aAt = flat "aw" n
     let qAt = flat "qm" n
@@ -299,13 +250,13 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
                           sLet "cs" (ifE (v "conv", fLit 1.0,
                                              divE (fLit 1.0) (sqrtE (add (fLit 1.0) (mul (v "tt") (v "tt"))))))
                           sLet "sn" (ifE (v "conv", fLit 0.0, mul (v "cs") (v "tt")))
-                          // AW ← AW·R (columns p, qq), scalar-buffered
+                          // AW <- AW*R (columns p, qq), scalar-buffered
                           sFor "i" 0 n
                             [ sLet "tp" (aAt (v "i") (v "p"))
                               sLet "tq" (aAt (v "i") (v "qq"))
                               sAssign (aAt (v "i") (v "p")) (sub (mul (v "cs") (v "tp")) (mul (v "sn") (v "tq")))
                               sAssign (aAt (v "i") (v "qq")) (add (mul (v "sn") (v "tp")) (mul (v "cs") (v "tq"))) ]
-                          // AW ← Rᵀ·AW (rows p, qq)
+                          // AW <- R^T*AW (rows p, qq)
                           sFor "i" 0 n
                             [ sLet "tp" (aAt (v "p") (v "i"))
                               sLet "tq" (aAt (v "qq") (v "i"))
@@ -320,8 +271,7 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
               // eigenvalues = diagonal
               sLetMut "lam" (zerosLit n)
               sFor "j" 0 n [ sAssign (idx "lam" (v "j")) (aAt (v "j") (v "j")) ]
-              // selection sort descending (ties keep original order) + QM
-              // column swaps
+              // selection sort descending (ties keep original order) + QM column swaps
               sFor "kk" 0 n
                 [ sAssign (v "best") (v "kk")
                   sForE "j" (add (v "kk") (iLit 1)) (iLit n)
@@ -349,28 +299,20 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
     mkFunc name [ ("a", tyFloatMat n n) ]
         (TyTuple [ tyFloatMat n n; tyFloatArr n ]) body
 
-// ============================================================================
 // eig (general non-symmetric: Hessenberg + Francis double-shift QR)
-// ============================================================================
 
-/// General real eigenvalues for a fixed (n, maxIter): (LRE, LIM) sorted by
-/// DESCENDING modulus, conjugate pairs adjacent with +im first. Mirrors
-/// math/Eig.fs operation-for-operation (Householder Hessenberg, windowed
-/// Francis double-shift QR with a fixed budget, quasi-triangular
-/// extraction), so values agree with the oracle to the ulp.
+/// General real eigenvalues for a fixed (n, maxIter): (LRE, LIM) sorted by DESCENDING modulus, conjugate pairs adjacent with
+/// +im first. Mirrors math/Eig.fs operation-for-operation (Householder Hessenberg, windowed Francis double-shift QR with a
+/// fixed budget, quasi-triangular extraction), so values agree with the oracle to the ulp.
 ///
-/// Control flow discipline (no statement-level branching in Blade):
-/// conditional work runs as EMPTY loop ranges (runtime bounds), IDENTITY
-/// rotations (cs=1, sn=0), zero Householder betas, and self-assign guards;
-/// composite conditions are Int 0/1 flags composed by multiplication
-/// (OpAnd/OpOr never reach codegen). Indices that would go out of range in
-/// the guarded-off case are CLAMPED to safe in-bounds dummies (lc/ec) whose
-/// writes are identity ops; n <= 2 emits no Hessenberg/QR code at all (the
-/// extraction's exact 1×1/2×2 solve covers it).
+/// Control flow discipline (no statement-level branching in Blade): conditional work runs as EMPTY loop ranges (runtime
+/// bounds), IDENTITY rotations (cs=1, sn=0), zero Householder betas, and self-assign guards; composite conditions are Int
+/// 0/1 flags composed by multiplication (OpAnd/OpOr never reach codegen). Indices that would go out of range in the
+/// guarded-off case are CLAMPED to safe in-bounds dummies (lc/ec) whose writes are identity ops; n <= 2 emits no
+/// Hessenberg/QR code at all (the extraction's exact 1x1/2x2 solve covers it).
 ///
-/// No exceptional shifts (documented): adversarial cyclic-permutation
-/// spectra (exact equal-modulus roots of unity) can stall within the
-/// budget; generic data-derived matrices (Koopman/EDMD) converge normally.
+/// No exceptional shifts (documented): adversarial cyclic-permutation spectra (exact equal-modulus roots of unity) can
+/// stall within the budget; generic data-derived matrices (Koopman/EDMD) converge normally.
 let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
     let hAt = flat "hw" n
     let bint c = ifE (c, iLit 1, iLit 0)
@@ -490,17 +432,15 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
                       sAssign (hAt (v "i") (v "k")) (sub (hAt (v "i") (v "k")) (mul (mul (v "cbeta") (v "sm")) (v "w0")))
                       sAssign (hAt (v "i") kp1) (sub (hAt (v "i") kp1) (mul (mul (v "cbeta") (v "sm")) (v "w1")))
                       sAssign (hAt (v "i") kp2) (sub (hAt (v "i") kp2) (mul (mul (v "cbeta") (v "sm")) (v "w2"))) ]
-                  // restore exact Hessenberg zeros behind the bulge (k > lc;
-                  // the k = 0 flat index (k+1)·n + (k−1) = n−1 is in-bounds,
-                  // and the guard self-assigns there)
+                  // restore exact Hessenberg zeros behind the bulge (k > lc; the k=0 flat index (k+1)*n+(k-1)=n-1 is
+                  // in-bounds, and the guard self-assigns there)
                   sLet "fclean" (mul (v "okc") (bint (cmp OpGt (v "k") (v "lc"))))
                   sAssign (hAt kp1 km1) (ifE (isOne (v "fclean"), fLit 0.0, hAt kp1 km1))
                   sAssign (hAt kp2 km1) (ifE (isOne (v "fclean"), fLit 0.0, hAt kp2 km1))
                   sAssign (v "x") (hAt kp1 (v "k"))
                   sAssign (v "y") (hAt kp2 (v "k"))
                   sAssign (v "z") (ifE (cmp OpLt (v "k") (sub (v "ec") (iLit 2)), hAt kp3 (v "k"), fLit 0.0)) ]
-              // final Givens on (x, y) over rows/cols ec-1, ec (identity
-              // rotation at clamped dummy indices when not chasing)
+              // final Givens on (x, y) over rows/cols ec-1, ec (identity rotation at clamped dummy indices when not chasing)
               sLet "gn" (sqrtE (add (mul (v "x") (v "x")) (mul (v "y") (v "y"))))
               sLet "okg" (mul (v "fchase") (bint (cmp OpGt (v "gn") tinyE)))
               sLet "cs" (ifE (isOne (v "okg"), divE (v "x") (v "gn"), fLit 1.0))
@@ -561,8 +501,7 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
                                ifE (isOne (v "fdpos"), fLit 0.0, syn (ExprUnaryOp (OpNeg, v "rt"))),
                                idx "lim" (v "k2")))
               sAssign (v "skip") (v "fpair") ]
-          // selection sort by modulus^2 descending (pair swap keeps re/im
-          // aligned; ties keep original order — conjugates stay adjacent)
+          // selection sort by modulus^2 descending (pair swap keeps re/im aligned; ties keep original order, conjugates adjacent)
           sFor "kk" 0 n
             [ sAssign (v "best") (v "kk")
               sForE "j" (add (v "kk") one_) (iLit n)
@@ -580,16 +519,11 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
                    Some (tupleE [ v "lre"; v "lim" ]))
     mkFunc name [ ("a", tyFloatMat n n) ] (TyTuple [ tyFloatArr n; tyFloatArr n ]) body
 
-// ============================================================================
-// unfold / mode_product — THE rank-generic generators: one F# definition,
-// instantiated per tensor rank by the elaborator (the PplElaborate
-// moment-tower pattern). All strides/weights are computed here in F# and
-// baked as int literals; the generated code is a straight rank-N nest.
-// ============================================================================
+// unfold / mode_product -- the rank-generic generators: one F# definition, instantiated per tensor rank by the elaborator.
+// All strides/weights are computed here in F# and baked as int literals; the generated code is a straight rank-N nest.
 
-/// Mode-n matricization for a fixed shape (Kolda–Bader, 0-based):
-/// X(i_0..i_{N-1}) -> M(i_mode, j), j = Σ_{k≠mode} i_k·J_k with
-/// J_k = Π_{m<k, m≠mode} I_m. Rows = I_mode, cols = Π_{k≠mode} I_k.
+/// Mode-n matricization for a fixed shape (Kolda-Bader, 0-based): X(i_0..i_{N-1}) -> M(i_mode, j), j = Sum_{k<>mode} i_k*J_k
+/// with J_k = Prod_{m<k, m<>mode} I_m. Rows = I_mode, cols = Prod_{k<>mode} I_k.
 let unfoldDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
     let nRank = dims.Length
     let rows = dims.[mode]
@@ -611,10 +545,8 @@ let unfoldDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
             Some (nestedFromFlat "o" rows cols))
     mkFunc name [ ("x", tyFloatTensor dims) ] (tyFloatMat rows cols) body
 
-/// Mode-n product for a fixed shape: Y = X ×_mode U with U: jOut×I_mode —
-/// Y(..., r, ...) = Σ_t U(r, t)·X(..., t, ...). Output shape = dims with
-/// dims[mode] := jOut. The nest runs over the OUTPUT multi-index with an
-/// inner contraction loop; `acc` is hoisted (no `let mut` in loop bodies).
+/// Mode-n product for a fixed shape: Y = X x_mode U with U: jOut x I_mode -- Y(..., r, ...) = Sum_t U(r,t)*X(..., t, ...).
+/// Output shape = dims with dims[mode] := jOut. The nest runs over the OUTPUT multi-index; `acc` is hoisted.
 let modeProductDecl (name: string) (dims: int list) (mode: int) (jOut: int) : FunctionDecl =
     let nRank = dims.Length
     let iMode = dims.[mode]
@@ -639,14 +571,10 @@ let modeProductDecl (name: string) (dims: int list) (mode: int) (jOut: int) : Fu
     mkFunc name [ ("x", tyFloatTensor dims); ("u", tyFloatMat jOut iMode) ]
         (tyFloatTensor outDims) body
 
-// ============================================================================
-// hosvd — orchestration over generated helpers (never inlined: the body
-// only chains calls, respecting the g++ compile budget)
-// ============================================================================
+// hosvd -- orchestration over generated helpers (never inlined: the body only chains calls, respecting the g++ compile budget)
 
-/// Mode-n Gram for a fixed shape: G(a,b) = Σ_{other indices} X(..a..)·X(..b..)
-/// (= X_(n)·X_(n)ᵀ by the Kolda–Bader identity), formed directly by a loop
-/// nest without materializing the unfolding.
+/// Mode-n Gram for a fixed shape: G(a,b) = Sum_{other indices} X(..a..)*X(..b..) (= X_(n)*X_(n)^T by the Kolda-Bader
+/// identity), formed directly by a loop nest without materializing the unfolding.
 let gramDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
     let nRank = dims.Length
     let g = dims.[mode]
@@ -667,10 +595,9 @@ let gramDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
             Some (nestedFromFlat "gm" g g))
     mkFunc name [ ("x", tyFloatTensor dims) ] (tyFloatMat g g) body
 
-/// Transposed truncated mode product: Y(..., r, ...) = Σ_t Q(t, r)·X(..., t, ...)
-/// with Q the FULL I_mode×I_mode eigenvector matrix and r < rOut — contracts
-/// a mode with U_nᵀ (leading rOut columns of Q) without materializing either
-/// the transpose or the column slice.
+/// Transposed truncated mode product: Y(..., r, ...) = Sum_t Q(t, r)*X(..., t, ...) with Q the FULL I_mode x I_mode
+/// eigenvector matrix and r < rOut -- contracts a mode with U_n^T (leading rOut columns of Q) without materializing
+/// either the transpose or the column slice.
 let modeProdTDecl (name: string) (dims: int list) (mode: int) (rOut: int) : FunctionDecl =
     let nRank = dims.Length
     let iMode = dims.[mode]
@@ -695,16 +622,12 @@ let modeProdTDecl (name: string) (dims: int list) (mode: int) (rOut: int) : Func
     mkFunc name [ ("x", tyFloatTensor dims); ("q", tyFloatMat iMode iMode) ]
         (tyFloatTensor outDims) body
 
-/// (Truncated) HOSVD for a fixed shape: per mode n, U_n = leading R_n
-/// eigenvectors (descending eigenvalues) of the mode-n Gram; core =
-/// X ×₀ U0ᵀ ×₁ U1ᵀ ... — X ≈ core ×₀ U0 ×₁ U1 .... Returns
-/// (core, U0, ..., U{N-1}) — the tuple arity is FIXED per rank at
-/// elaboration time; rank polymorphism lives in this F# generator.
+/// (Truncated) HOSVD for a fixed shape: per mode n, U_n = leading R_n eigenvectors (descending eigenvalues) of the mode-n
+/// Gram; core = X x0 U0^T x1 U1^T ... -- X ~= core x0 U0 x1 U1 .... Returns (core, U0, ..., U{N-1}); the tuple arity is
+/// fixed per rank at elaboration time, rank polymorphism lives in this F# generator.
 ///
-/// The body is pure orchestration: it calls the per-mode generated Gram,
-/// eigh, and transposed-mode-product helpers (whose names the elaborator
-/// passes in; the eigh helpers are ensure-shared with user m.eigh calls
-/// of the same shape) and slices factor columns as nested literals.
+/// The body is pure orchestration: it calls the per-mode generated Gram, eigh, and transposed-mode-product helpers (whose
+/// names the elaborator passes in; the eigh helpers are shared with user m.eigh calls of the same shape).
 let hosvdDecl (name: string) (dims: int list) (ranks: int list)
               (gramNames: string list) (eighNames: string list) (mptNames: string list)
     : FunctionDecl =
@@ -720,8 +643,7 @@ let hosvdDecl (name: string) (dims: int list) (ranks: int list)
               let src = if mode = 0 then "x" else sprintf "c%d" (mode - 1)
               sLet (sprintf "c%d" mode) (syn (ExprApp (v mptNames.[mode], [ v src; v (sprintf "q%d" mode) ]))) ]
         @ [ for mode in 0 .. nRank - 1 ->
-              // U_mode = leading ranks[mode] columns of q_mode (literal-index
-              // reads; bound to a let — tuple-of-variables boundary)
+              // U_mode = leading ranks[mode] columns of q_mode (literal-index reads; bound to a let, tuple-of-variables boundary)
               sLet (sprintf "u%d" mode)
                    (syn (ExprArrayLit
                         [ for i in 0 .. dims.[mode] - 1 ->

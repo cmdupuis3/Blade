@@ -1,7 +1,7 @@
 namespace MomentAlgebra
 
-/// Moment <-> cumulant conversion as Möbius inversion on the set-partition
-/// lattice — the load-bearing algebra of the moment-algebra PPL idea.
+/// Moment <-> cumulant conversion as Mobius inversion on the set-partition
+/// lattice -- the load-bearing algebra of the moment-algebra PPL idea.
 ///
 ///   mu(S)    = sum over partitions pi of the positions of S:
 ///                prod over blocks B in pi of kappa(labels of S at B)

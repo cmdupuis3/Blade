@@ -1,6 +1,6 @@
 // linalg_probe_tests.cpp
 // ============================================================================
-// Standalone runtime tests for `blade_linalg::row_major_base` — the contiguity
+// Standalone runtime tests for `blade_linalg::row_major_base` -- the contiguity
 // probe the dispatch layer uses to decide whether a rank-2 row skeleton can be
 // handed to BLAS as a bare pool base with `ld = trailing extent`, or whether it
 // must be staged through a copy.
@@ -8,7 +8,7 @@
 // WHY THESE EXIST, AND WHY C++. `blade test linalg`'s other block asserts on
 // EMITTED TEXT: that gram/matmul/dot/gemv reach `blade_linalg::` at all. It
 // cannot see what the probe then decides at runtime, and neither can any value
-// test — the probe's two arms (zero-copy and staged) are value-identical by
+// test -- the probe's two arms (zero-copy and staged) are value-identical by
 // construction, so a probe that accepts when it should refuse produces correct
 // output right up until it reads past the end of a pool. The property under
 // test is a C++ runtime invariant about pointer arithmetic, so it is tested in
@@ -24,7 +24,7 @@
 // a machine with no BLAS at all, while leaving that guarantee untouched.
 //
 // THE DEFECT THESE PIN (docs/plan-cpp-perf-exploitation.md, Phase 5d). The
-// original probe tested row-major GEOMETRY only — `rows[i] == base + i*ld` for
+// original probe tested row-major GEOMETRY only -- `rows[i] == base + i*ld` for
 // every row. Row pointers give row STARTS and never row LENGTHS, so a pool
 // SHORTER than the m x ld window can satisfy that test. The n = 2
 // packed-symmetric skeleton is exactly such a pool: left-justified upper
@@ -33,18 +33,18 @@
 // a DENSE 2x2 (4 cells) has. The geometry accepted it; a BLAS call with
 // m = ld = 2 would then read pool[3], one cell past the pool. n >= 3 packed
 // pools fail the geometry unaided (n = 3 puts row 2 at pool+5, not pool+6), so
-// n = 2 was the sole degenerate size — which is what kept it latent.
+// n = 2 was the sole degenerate size -- which is what kept it latent.
 //
 // The fix is the `pool_cells` capacity argument: the emitter supplies each
 // operand's allocated leaf count and the probe refuses when `m*ld` exceeds it.
-// The cases below therefore pin BOTH halves — that the packed n = 2 skeleton is
+// The cases below therefore pin BOTH halves -- that the packed n = 2 skeleton is
 // refused, AND (case `..._geometry_alone_accepts`) that it is the CAPACITY
 // doing the refusing, so this file cannot rot into a vacuous pass if the packed
 // layout ever changes out from under it.
 //
 // NOT TESTED HERE, DELIBERATELY: constructing an `in_view` over the packed n = 2
 // skeleton. The staging fallback reads `rows[i][k]` for k < ld, so it reads
-// pool[3] too — the adapters' rectangular-rows precondition (see the LAYOUT
+// pool[3] too -- the adapters' rectangular-rows precondition (see the LAYOUT
 // CONTRACT in blade_linalg_views.hpp) is upstream of the probe and is enforced
 // by the typechecker, not here. Reading out of bounds to prove we read out of
 // bounds is not a test.
@@ -93,7 +93,7 @@ int main() {
         deallocate<T2, nullptr>(a, ext);
     }
 
-    // The dense 2x2 — same row starts as the packed n = 2 pool below, one more
+    // The dense 2x2 -- same row starts as the packed n = 2 pool below, one more
     // cell. This is the case the fix must NOT break, and the reason a capacity
     // bound (rather than some sharper geometric test) is the only way to tell
     // the two apart.
@@ -120,14 +120,14 @@ int main() {
 
         // The premises of the false accept, pinned so the regression below
         // cannot go vacuous: a 3-cell pool whose row starts are pool+0 and
-        // pool+2 — indistinguishable from the dense 2x2 above.
+        // pool+2 -- indistinguishable from the dense 2x2 above.
         check("packed_n2_cardinality", cells == 3);
         check("packed_n2_rows_at_0_and_2",
               a[0] == pool_base(a) && a[1] == pool_base(a) + 2);
 
         // Pre-fix behaviour, reproduced by handing the probe the capacity a
         // DENSE 2x2 would have had: the geometry alone accepts. Nothing is
-        // dereferenced through the returned pointer — that read is the bug.
+        // dereferenced through the returned pointer -- that read is the bug.
         check("packed_n2_geometry_alone_accepts",
               row_major_base(a, 2, 2, 4) == pool_base(a));
 
@@ -220,13 +220,13 @@ int main() {
     }
 
     // ------------------------------------------------------------------
-    // PACKED SELF-DUALITY (Phase 6 / Round B) — the zero-conversion premise
+    // PACKED SELF-DUALITY (Phase 6 / Round B) -- the zero-conversion premise
     // behind routing `?spev` at LAPACK_COL_MAJOR + uplo 'L' straight off
     // Blade's pool.
     //
     // Blade stores row-major UPPER packed. LAPACK is column-major. Position k
     // of COL-MAJOR-LOWER packed holds A(j,i) exactly where position k of
-    // ROW-MAJOR-UPPER holds A(i,j) — so for a SYMMETRIC matrix, where
+    // ROW-MAJOR-UPPER holds A(i,j) -- so for a SYMMETRIC matrix, where
     // A(j,i) = A(i,j), the two sequences are IDENTICAL and no conversion is
     // needed at all. This is pure index arithmetic, so it is checked here (no
     // LAPACK required); that `dspev` then returns the right answer when fed the

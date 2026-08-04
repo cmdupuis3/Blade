@@ -1,130 +1,87 @@
-/// THE POLYNOMIAL EXTRACTOR AND THE FINITE (WORD-SET) DISCHARGE — the
-/// generator-based certification engine's front half (retired transforms-as-types plan
-/// §3.5's uniform rule, §7 stage 6b). MLEquiv checks that a body COMPOSES
-/// equivariance-preserving operations; this module checks that a body IS an
-/// equivariant map, by normalizing it to an exact polynomial and testing the
-/// equivariance identity coefficientwise. The two are complementary, and the
-/// second runs only where the first has already said no.
+/// THE POLYNOMIAL EXTRACTOR AND FINITE (WORD-SET) DISCHARGE, the
+/// generator-based certification engine's front half. MLEquiv checks that a
+/// body COMPOSES equivariance-preserving operations; this module checks that
+/// it IS an equivariant map, by normalizing it to an exact polynomial and
+/// testing the equivariance identity coefficientwise. Complementary: this
+/// one runs only where MLEquiv has already said no.
 ///
-/// ---------------------------------------------------------------------------
-/// THE DELIBERATE POLARITY DIVERGENCE — READ THIS BEFORE DIFFING THE THREE
-/// WALKERS (the 5c drift-catalog lesson, and §7's explicit instruction)
-/// ---------------------------------------------------------------------------
-/// MLEquiv's aggregate rule REJECTS a representation-typed value packed into a
-/// literal aggregate ("the aggregate does not transform as a rep"), and its
-/// access rule REJECTS a raw index into a non-trivial-label cell ("reads a
-/// basis-dependent number"). THIS FILE ADMITS BOTH, on purpose:
+/// DELIBERATE POLARITY DIVERGENCE (read before diffing the three walkers).
+/// MLEquiv's aggregate rule REJECTS a rep-typed value packed into a literal
+/// aggregate, and its access rule REJECTS a raw index into a non-trivial-label
+/// cell. THIS FILE ADMITS BOTH, on purpose:
 ///
 ///     function rot(x: Array<Float like PgIrrepsIdx<C4, [("E", 1)]>>)
 ///              where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, [("E", 1)]>>
 ///         = [0.0 - x(1), x(0)]
 ///
-/// is exactly the shape composition refuses — raw component reads assembled
-/// into an array literal — and it is exactly the shape this engine exists to
-/// certify (it is J = R₉₀, hand-written). The divergence is INTENTIONAL and is
-/// the engine's whole purpose: the composition rule is a sound-and-cheap
-/// SYNTACTIC sufficient condition, and when it fails the engine asks the
-/// SEMANTIC question directly. A future three-way diff of MLEquiv / MLGalilean
-/// / MLPerm against this file must read the mismatch as design, not drift:
-/// those three are abstract interpretations over a status lattice, this one is
-/// a normalizer over ℚ[rep components][invariant atoms]. Nothing here weakens
-/// any rule there — an admitted shape still has to PASS the discharge below,
-/// which is a stronger obligation than the lattice ever imposed.
+/// is exactly the shape composition refuses (raw component reads assembled
+/// into an array literal) and exactly the shape this engine exists to
+/// certify: composition is a sound-and-cheap SYNTACTIC sufficient condition,
+/// and when it fails this engine asks the SEMANTIC question directly. A
+/// three-way diff of MLEquiv/MLGalilean/MLPerm against this file must read
+/// the mismatch as design, not drift -- those three are abstract
+/// interpretations over a status lattice, this one is a normalizer over
+/// Q[rep components][invariant atoms] -- and an admitted shape still has to
+/// PASS the discharge below, a stronger obligation than the lattice imposed.
 ///
-/// ---------------------------------------------------------------------------
-/// THE NORMAL FORM
-/// ---------------------------------------------------------------------------
-/// A body becomes one `Poly` per OUTPUT COMPONENT (a scalar return is a
-/// one-component vector). A `Poly` is a sparse `Mono -> Rat` map with no zero
-/// coefficients, and a `Mono` is a pair of exponent maps:
+/// THE NORMAL FORM. A body becomes one `Poly` per output component (a scalar
+/// return is a one-component vector). A `Poly` is a sparse `Mono -> Rat` map
+/// with no zero coefficients; a `Mono` is a pair of exponent maps: REP
+/// exponents over (parameter name, component index), the variables the
+/// group acts on, and INV exponents over `InvAtom`s, an invariant parameter
+/// or one static cell of an invariant array. Invariants are held fixed by
+/// the certificate's hypothesis, so they enter as opaque transcendental
+/// atoms and the coefficient ring is Q[atoms] rather than Q -- without that,
+/// `w * cross(u, v)` and every weighted hand-written layer would be out of
+/// scope.
 ///
-///   * REP exponents over (parameter name, component index) — the variables
-///     the group acts on;
-///   * INV exponents over `InvAtom`s — an invariant parameter, or one static
-///     cell of an invariant array. Invariants are HELD FIXED by the
-///     certificate's own hypothesis, so they enter as opaque transcendental
-///     ATOMS and the coefficient ring is ℚ[atoms] rather than ℚ. Without that,
-///     `w · cross(u, v)` and every weighted hand-written layer would be out of
-///     scope; with it, the discharge simply carries the atoms through
-///     untouched (the group acts on rep components, never on an atom).
+/// EXACTNESS, TWO CONVENTIONS. A float literal enters as its exact dyadic
+/// value (the rational the IEEE double actually denotes: `0.5` is 1/2, `0.1`
+/// is 3602879701896397/36028797018963968, not 1/10); a literal division is
+/// evaluated exactly in Q, so `3.0 / 10.0` IS 3/10. The two differ on
+/// purpose: a coefficient meant to be a rational must be WRITTEN as the
+/// division. The near-miss note on a failed discharge (`nearMiss` below)
+/// catches the trap: it fires when the residual's float image is negligible
+/// against the coefficient scale, i.e. the author wrote a truncated decimal
+/// for an exact value. A `let static` binding is folded by the static
+/// evaluator before the judgment seam, in floating point, so it enters here
+/// as the exact dyadic image of that fold; only source-level division inside
+/// the certified body gets the exact-Q treatment.
 ///
-/// Requiring the identity for ALL atom values is STRONGER than requiring it at
-/// the caller's actual weights, which is the correct reading: "held fixed but
-/// arbitrary" is what the conditional theorem promises.
+/// THE V1 CLOSED-WORLD FRAGMENT. Admitted, and nothing else: (1) literals,
+/// dyadic-exact; (2) static indexing into a Rep or Inv parameter; (3) scalar
+/// + - *, and / by a nonzero literal-or-static constant (Q[atoms] has no
+/// inverses, so an atom divisor is out of the ring); (4) whole-array + -
+/// between equal-length vectors, and invariant*array (a scalar factor of
+/// rep-degree 0); (5) `let` (binding expression or block statements);
+/// (6) array literals of scalar polynomials, as the assembled return.
+/// Everything else -- calls, loops, mutation, `if`, `match`, lambdas, field
+/// access, nested aggregates -- is outside the fragment and yields
+/// `OutsideFragment`, on which the engine stays silent and the composition
+/// verdict surfaces untouched. Two conveniences beyond the literal list:
+/// unary `-` (scalar/array subtraction from zero), and indexing into any
+/// vector-valued BINDING rather than a parameter alone.
 ///
-/// ---------------------------------------------------------------------------
-/// EXACTNESS — TWO CONVENTIONS, AND WHY THEY DIFFER (§3.5)
-/// ---------------------------------------------------------------------------
-///   * A FLOAT LITERAL enters as its EXACT DYADIC value — the rational the
-///     IEEE double actually denotes. `0.5` is 1/2; `0.1` is
-///     3602879701896397/36028797018963968, not 1/10.
-///   * A LITERAL DIVISION is evaluated EXACTLY in ℚ: `3.0 / 10.0` IS 3/10.
+/// CAPS: total rep-degree <= 4 and <= 100000 expanded terms, enforced during
+/// extraction and during the discharge's substitution. A breach returns
+/// `CapBreach`, whose note the caller appends to the composition diagnostic.
 ///
-/// The two differ, and that difference is the point: `0.3` and `3.0/10.0` are
-/// different numbers, so a coefficient meant to be a rational must be WRITTEN
-/// as the division. The NEAR-MISS note on a failed discharge (`nearMiss`
-/// below) is what catches the trap — it fires when the residual's float image
-/// is negligible against the coefficient scale, i.e. when the author wrote a
-/// truncated decimal for an exact value.
-///
-/// A `let static` binding is folded by the SHIPPED static evaluator before the
-/// judgment seam, in floating point; its value therefore enters here as the
-/// exact dyadic image of that fold. Only source-level division INSIDE the
-/// certified body gets the exact-ℚ treatment. (Same near-miss net.)
-///
-/// ---------------------------------------------------------------------------
-/// THE v1 CLOSED-WORLD FRAGMENT (§7 stage 6b, implemented exactly)
-/// ---------------------------------------------------------------------------
-/// Admitted, and nothing else:
-///   1. literals (int and float, dyadic-exact);
-///   2. static indexing into a Rep or Inv parameter;
-///   3. scalar `+` `-` `*`, and `/` by a NONZERO literal-or-static constant
-///      (ℚ[atoms] has no inverses, so an atom divisor is out of the ring);
-///   4. whole-array `+` `-` between equal-length vectors, and
-///      invariant · array (a scalar factor of rep-degree 0);
-///   5. `let` (as a binding expression or as block statements);
-///   6. ARRAY LITERALS of scalar polynomials, as the assembled return.
-///
-/// Everything else — calls (including `ml.*` ops and certified callees),
-/// loops, mutation, `if`, `match`, lambdas, field access, nested aggregates —
-/// is OUTSIDE the fragment and yields `OutsideFragment`, on which the ENGINE
-/// STAYS SILENT and the composition verdict surfaces untouched. Two v1
-/// conveniences beyond the literal wording of the list, both trivially
-/// faithful on the normal form and both noted in the stage report: unary `-`
-/// (it is scalar/array subtraction from zero), and indexing into any
-/// vector-valued BINDING rather than a parameter alone (`let` is in the
-/// fragment, and `(let y = x + x in y)(0)` is the same polynomial as
-/// `x(0) + x(0)` — the normal form cannot tell them apart).
-///
-/// CAPS: total rep-degree ≤ 4 and ≤ 100000 expanded terms, enforced during
-/// extraction AND during the discharge's substitution. A breach is NOT
-/// silence: it returns `CapBreach`, whose note the caller appends to the
-/// composition diagnostic, so a body that fell off the engine says so.
-///
-/// ---------------------------------------------------------------------------
-/// GROUP-AGNOSTIC BY CONSTRUCTION
-/// ---------------------------------------------------------------------------
-/// Nothing below knows what a point group, an irrep or a spec is. The
-/// discharge consumes a list of `ElementAction`s — a name, one integer matrix
-/// per rep parameter, one output matrix — so stage 6c's radical-vector Lie
-/// discharger is a SECOND consumer of the same normal form, not a second
-/// extractor. The finite half checks ALL |G| ≤ 8 elements rather than the
-/// generators: it is microseconds either way, it is simpler, and the Coq
-/// lemma (proofs/BladeWordClosure.v) proves the generator checks would have
-/// sufficed — belt and braces pointing in opposite directions.
+/// GROUP-AGNOSTIC BY CONSTRUCTION. Nothing below knows what a point group,
+/// an irrep or a spec is. The discharge consumes a list of `ElementAction`s
+/// (a name, one integer matrix per rep parameter, one output matrix), so
+/// stage 6c's radical-vector Lie discharger is a second consumer of the same
+/// normal form, not a second extractor. The finite half checks ALL |G| <= 8
+/// elements rather than the generators: cheap, simpler, and the Coq lemma
+/// (proofs/BladeWordClosure.v) proves the generator checks would suffice.
 module Blade.ML.PolyExtract
 
 open System.Numerics
 open Blade.Ast
 open Blade.StaticEval
 
-// ---------------------------------------------------------------------------
-// Minimal exact rationals over BigInteger. A LOCAL copy of the SymPowerTables
-// pattern, for the same reason it is local there: nothing else compiler-side
-// needs exact fractions, and this module must not drag the Sym-power tables
-// (or MLSpec) in front of MLEquiv in the build order. Always normalized
-// (Den > 0, gcd = 1), so structural equality is value equality.
-// ---------------------------------------------------------------------------
+// Minimal exact rationals over BigInteger, a local copy of the SymPowerTables
+// pattern (must not drag Sym-power tables or MLSpec in front of MLEquiv in
+// the build order). Always normalized, so structural equality is value equality.
 
 type Rat = { Num: bigint; Den: bigint }
 
@@ -149,9 +106,8 @@ module Rat =
     let neg (a: Rat) = { a with Num = -a.Num }
     let toFloat (a: Rat) = float a.Num / float a.Den
 
-    /// The EXACT dyadic value of an IEEE double — §3.5's "every float literal
-    /// is a dyadic rational", read off the bit pattern rather than through any
-    /// decimal round-trip. `None` at NaN/±∞ (which are not coefficients).
+    /// The exact dyadic value of an IEEE double, read off the bit pattern
+    /// rather than through any decimal round-trip. `None` at NaN/+-inf.
     let tryOfFloatExact (f: float) : Rat option =
         if System.Double.IsNaN f || System.Double.IsInfinity f then None
         elif f = 0.0 then Some zero
@@ -174,14 +130,9 @@ module Rat =
     let render (a: Rat) : string =
         if a.Den.IsOne then string a.Num else sprintf "%O/%O" a.Num a.Den
 
-// ---------------------------------------------------------------------------
-// Monomials and polynomials
-// ---------------------------------------------------------------------------
-
 /// An invariant quantity the group does not move: a whole invariant scalar
 /// parameter (`Index = None`) or one statically-indexed cell of an invariant
-/// array (`Index = Some i`). Opaque — never evaluated, never compared to a
-/// number, only carried.
+/// array. Opaque -- never evaluated or compared, only carried.
 type InvAtom = { Name: string; Index: int option }
 
 /// A monomial: exponents over rep components (parameter name, component
@@ -210,8 +161,7 @@ module Mono =
     let invAtom (a: InvAtom) : Mono = { one with Inv = Map.ofList [ (a, 1) ] }
 
     /// How a monomial reads in a diagnostic: `x(0)^2 * w(3)`, or `1` for the
-    /// constant. Rep factors first, each in declaration-independent key order
-    /// so the rendering is deterministic.
+    /// constant. Rep factors first, in key order, so rendering is deterministic.
     let render (m: Mono) : string =
         let pow (s: string) (e: int) = if e = 1 then s else sprintf "%s^%d" s e
         let reps = [ for KeyValue ((p, i), e) in m.Rep -> pow (sprintf "%s(%d)" p i) e ]
@@ -260,7 +210,7 @@ module Poly =
         out
 
     /// The constant a polynomial is, when it is one (no rep components and no
-    /// invariant atoms) — the only shape admissible as a divisor.
+    /// invariant atoms) -- the only shape admissible as a divisor.
     let asConstant (p: Poly) : Rat option =
         if Map.isEmpty p then Some Rat.zero
         else
@@ -268,10 +218,9 @@ module Poly =
             | [ (m, c) ] when Map.isEmpty m.Rep && Map.isEmpty m.Inv -> Some c
             | _ -> None
 
-    /// Every monomial of two polynomials, in a DETERMINISTIC order: rep degree
-    /// ascending, then rendered form. Diagnostics name "the first offending
-    /// coefficient", so the order has to be a property of the polynomials and
-    /// not of a hash walk.
+    /// Every monomial of two polynomials, in a DETERMINISTIC order (rep degree
+    /// ascending, then rendered form) -- diagnostics name "the first offending
+    /// coefficient", so order must be a property of the polynomials, not a hash walk.
     let unionMonos (a: Poly) (b: Poly) : Mono list =
         Set.union (a |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
                   (b |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
@@ -280,40 +229,27 @@ module Poly =
 
     let coeff (m: Mono) (p: Poly) : Rat = defaultArg (Map.tryFind m p) Rat.zero
 
-// ---------------------------------------------------------------------------
-// Caps and the failure vocabulary
-// ---------------------------------------------------------------------------
-
-/// §7's caps. Degree is TOTAL REP degree (invariant atoms are constants and do
-/// not count — the equivariance identity splits per rep degree, not per atom
-/// degree).
+/// The caps. Degree is TOTAL rep degree -- invariant atoms are constants and
+/// do not count, since the equivariance identity splits per rep degree, not
+/// per atom degree.
 let maxRepDegree = 4
 let maxTerms = 100_000
 
 type ExtractError =
-    /// A construct outside the v1 closed-world fragment, or a shape the normal
-    /// form cannot represent. The engine is SILENT on this: the composition
-    /// diagnostic surfaces untouched.
+    /// A construct outside the v1 closed-world fragment, or a shape the
+    /// normal form cannot represent. The engine is SILENT on this.
     | OutsideFragment of string * Span
     /// A cap breach. The composition diagnostic surfaces WITH this note
-    /// appended — a body that fell off the engine must say so rather than look
-    /// like a body the engine never looked at.
+    /// appended, so a body that fell off the engine says so.
     | CapBreach of string
 
-// ---------------------------------------------------------------------------
-// The signature the extractor is handed
-// ---------------------------------------------------------------------------
-
 /// What a parameter is, as far as the normal form cares. `PRep n` is a
-/// rep-typed array with n REAL components (the group moves them); the `PInv*`
-/// cases are held fixed, and the scalar/array split decides whether the
-/// parameter reads as ONE atom or as a family of statically-indexed atoms.
-///
-/// `PInvOpaque` is the conservative arm: an invariant whose SHAPE the caller's
-/// classifier could not decide. It is bound to a value that refuses every
-/// operation, because modelling an array as a scalar atom would be UNFAITHFUL
-/// — and faithfulness of the normal form is the single thing the soundness of
-/// this whole engine rests on.
+/// rep-typed array with n real components (the group moves them); the
+/// `PInv*` cases are held fixed, split by whether the parameter reads as one
+/// atom or a family of statically-indexed atoms. `PInvOpaque` is the
+/// conservative arm (shape undecidable from the caller's classifier) and
+/// refuses every operation -- modelling an array as a scalar atom would be
+/// unfaithful, and faithfulness is what the engine's soundness rests on.
 type ParamKind =
     | PRep of int
     | PInvScalar
@@ -322,57 +258,46 @@ type ParamKind =
 
 type PolySig = {
     Params: (string * ParamKind) list
-    /// `Some n` — the return is a rep-typed array of n components; `None` — a
-    /// scalar (which the discharge treats as the one-dimensional trivial rep,
-    /// i.e. an invariance claim).
+    /// `Some n` -- a rep-typed array return of n components; `None` -- a
+    /// scalar, which the discharge treats as the trivial rep (invariance).
     ReturnDim: int option
 }
 
-/// Constructors, so a caller never has to qualify a record label across a
-/// module boundary (and so the field names stay this module's business).
+/// A constructor, so a caller never has to qualify a record label across a
+/// module boundary.
 let mkSig (ps: (string * ParamKind) list) (ret: int option) : PolySig =
     { Params = ps; ReturnDim = ret }
 
-// ---------------------------------------------------------------------------
-// The extractor
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// THE VALUE ALGEBRA — public, because there are two front halves
-// ---------------------------------------------------------------------------
-//
-// `Val`, `Budget`, `charge`, `chargeVec` and `binOp` below are the part of the
-// extractor that does NOT walk syntax: given two abstract values and an
-// operator, what polynomial comes out, and does it fit under the caps. Both
-// front halves need exactly this and nothing else of each other —
-// `MLPolyExtractTyped` used to restate `binOp` arm for arm, with a note saying
-// a divergence there would be a SOUNDNESS bug rather than a recall difference
-// (a wrong extraction makes the discharge certify a polynomial that is not the
-// body). It is public here so that there is one copy and the note is moot.
-//
-// The two walkers' *contexts* stay separate and different — this module's
-// carries a `StaticEnv` it needs to fold `let static` reads, the typed one has
-// no statics left to fold by typecheck — so the shared surface is keyed on a
-// bare `Budget` cell, which is the only piece of context the algebra touches.
+// THE VALUE ALGEBRA -- public, because there are two front halves. `Val`,
+// `Budget`, `charge`, `chargeVec` and `binOp` are the part of the extractor
+// that does NOT walk syntax: given two abstract values and an operator, what
+// polynomial comes out and whether it fits under the caps. A divergence
+// between two copies of this would be a SOUNDNESS bug, not a recall
+// difference (a wrong extraction makes the discharge certify a polynomial
+// that is not the body), which is why it is public here rather than
+// restated in `MLPolyExtractTyped`. The two walkers' *contexts* stay
+// separate -- this module's carries a `StaticEnv` to fold `let static`
+// reads, the typed one has none left to fold by typecheck -- so the shared
+// surface is keyed on a bare `Budget` cell, the only context the algebra touches.
 
 /// The extractor's abstract value. Deliberately NOT a status lattice: every
-/// case carries the actual polynomial data, because the whole point is that
-/// the verdict comes from the coefficients and not from a type.
+/// case carries the actual polynomial data, since the verdict comes from the
+/// coefficients and not from a type.
 type Val =
     | VScalar of Poly
     /// An assembled vector of scalar polynomials: a rep parameter, an array
     /// literal, or anything built from those by the array arms.
     | VVec of Poly []
-    /// An invariant ARRAY parameter. It has no polynomial of its own — only
+    /// An invariant ARRAY parameter. It has no polynomial of its own -- only
     /// its statically-indexed cells do, and each of those is an atom.
     | VInvArr of string
     /// An invariant of undecided shape: every use leaves the fragment.
     | VOpaque of string
 
 /// The term budget, shared across a whole extraction so a body cannot dodge
-/// the cap by spreading the blow-up over many components. A mutable CELL and
-/// not a field, so both front halves can hand the same budget to the shared
-/// algebra without agreeing on a context type.
+/// the cap by spreading the blow-up over many components. A mutable cell so
+/// both front halves can hand the same budget to the shared algebra without
+/// agreeing on a context type.
 type Budget = { mutable Remaining: int }
 
 let mkBudget () : Budget = { Remaining = maxTerms }
@@ -381,13 +306,10 @@ let private fuel = 100_000
 
 let private outside (msg: string) (span: Span) = Error (OutsideFragment (msg, span))
 
-/// Charge a freshly built polynomial against the caps. Both caps are checked
-/// here and nowhere else, so every polynomial in the normal form is known to
-/// satisfy them.
-///
-/// The `CapBreach` strings ARE user-visible — `MLEquiv.judgeFunction` appends
-/// them through `EquivMessages.capNote` — so they are pinned by
-/// tests/corpus/diagnostics/024.
+/// Charge a freshly built polynomial against the caps -- checked here and
+/// nowhere else. The `CapBreach` strings ARE user-visible
+/// (`MLEquiv.judgeFunction` appends them via `EquivMessages.capNote`) and
+/// are pinned by tests/corpus/diagnostics/024.
 let charge (bud: Budget) (p: Poly) : Result<Poly, ExtractError> =
     let n = Poly.terms p
     if n > maxTerms then
@@ -406,13 +328,11 @@ let chargeVec (bud: Budget) (ps: Poly []) : Result<Val, ExtractError> =
         (Ok [])
     |> Result.map (List.toArray >> VVec)
 
-/// The binary algebra: THE rules, in one place, for both front halves.
-///
-/// Its refusal strings are `OutsideFragment`, which neither consumer ever
-/// renders (the seam falls back to composition's verdict, the typed side
-/// answers `None`), so they are phrased for whichever walker is reading a
-/// backtrace — "a nonzero constant" covers the surface's literal-or-static
-/// case and the typed side's literal-only one alike.
+/// The binary algebra: the rules, in one place, for both front halves. Its
+/// `OutsideFragment` strings are never rendered by either consumer, so they
+/// are phrased for whichever walker is reading a backtrace -- "a nonzero
+/// constant" covers the surface's literal-or-static case and the typed
+/// side's literal-only one alike.
 let binOp (bud: Budget) (span: Span) (op: BinOp) (vl: Val) (vr: Val)
     : Result<Val, ExtractError> =
     let bad msg = outside msg span
@@ -420,21 +340,20 @@ let binOp (bud: Budget) (span: Span) (op: BinOp) (vl: Val) (vr: Val)
     | VOpaque n, _ | _, VOpaque n ->
         bad (sprintf "the shape of invariant '%s' is not decidable from its declared type" n)
     | VInvArr _, _ | _, VInvArr _ ->
-        bad "an invariant array has no polynomial form — read its cells at static indices"
+        bad "an invariant array has no polynomial form -- read its cells at static indices"
     | VScalar a, VScalar b ->
         match op with
         | OpAdd -> charge bud (Poly.add a b) |> Result.map VScalar
         | OpSub -> charge bud (Poly.sub a b) |> Result.map VScalar
         | OpMul -> charge bud (Poly.mul a b) |> Result.map VScalar
         | OpDiv ->
-            // ℚ[atoms] has no inverses: the divisor must be a nonzero constant
-            // — §7's "/ by nonzero literal/static" — and THIS is where
-            // `3.0 / 10.0` becomes 3/10 exactly.
+            // Q[atoms] has no inverses: the divisor must be a nonzero
+            // constant, and this is where `3.0 / 10.0` becomes 3/10 exactly.
             match Poly.asConstant b with
             | Some c when not (Rat.isZero c) ->
                 charge bud (a |> Map.map (fun _ x -> Rat.div x c)) |> Result.map VScalar
             | Some _ -> bad "division by zero"
-            | None -> bad "division is admitted only by a nonzero constant — an invariant atom has no inverse in the coefficient ring"
+            | None -> bad "division is admitted only by a nonzero constant -- an invariant atom has no inverse in the coefficient ring"
         | _ -> bad "this operator is outside the polynomial fragment"
     | VVec a, VVec b ->
         if a.Length <> b.Length then
@@ -445,17 +364,13 @@ let binOp (bud: Budget) (span: Span) (op: BinOp) (vl: Val) (vr: Val)
             | OpSub -> Array.map2 Poly.sub a b |> chargeVec bud
             | _ -> bad "only + and - are admitted between two arrays"
     | VScalar s, VVec v | VVec v, VScalar s ->
-        // §7's `invariant · array`: the scalar factor must be INVARIANT in the
-        // polynomial sense — rep-degree 0 — which is exactly the composition
-        // rule's `Rep s, Inv, OpMul` arm read over coefficients.
+        // `invariant * array`: the scalar factor must be INVARIANT in the
+        // polynomial sense (rep-degree 0), exactly the composition rule's
+        // `Rep s, Inv, OpMul` arm read over coefficients.
         match op with
         | OpMul when Poly.repDegree s = 0 -> v |> Array.map (Poly.mul s) |> chargeVec bud
         | OpMul -> bad "scaling an array is admitted only by an INVARIANT scalar (rep-degree 0)"
         | _ -> bad "only invariant scaling is admitted between a scalar and an array"
-
-// ---------------------------------------------------------------------------
-// The surface walk
-// ---------------------------------------------------------------------------
 
 type private Ctx = {
     Statics: StaticEnv
@@ -498,7 +413,7 @@ let rec private extractVal (ctx: Ctx) (env: Map<string, Val>) (e: Expr) : Result
             match v with
             | VScalar p -> Ok (VScalar (Poly.neg p))
             | VVec ps -> Ok (VVec (ps |> Array.map Poly.neg))
-            | VInvArr _ -> outside "an invariant array has no polynomial form — read its cells at static indices" e.Span
+            | VInvArr _ -> outside "an invariant array has no polynomial form -- read its cells at static indices" e.Span
             | VOpaque n -> outside (sprintf "the shape of invariant '%s' is not decidable from its declared type" n) e.Span)
     | ExprKind.ExprUnaryOp _ -> outside "this unary operator is outside the polynomial fragment" e.Span
     | ExprKind.ExprBinOp (Elementwise, op, l, r) ->
@@ -507,15 +422,15 @@ let rec private extractVal (ctx: Ctx) (env: Map<string, Val>) (e: Expr) : Result
             binOp ctx.Bud e.Span op vl vr))
     | ExprKind.ExprBinOp _ -> outside "outer-product operators are outside the polynomial fragment" e.Span
     | ExprKind.ExprArrayLit es ->
-        // THE ARM MLEquiv REFUSES (see the header): an array literal of scalar
-        // polynomials is the assembled rep-valued return.
+        // The arm MLEquiv refuses (see the header): an array literal of
+        // scalar polynomials is the assembled rep-valued return.
         es
         |> List.fold (fun acc x ->
             acc |> Result.bind (fun ps ->
                 extractVal ctx env x |> Result.bind (fun v ->
                     match v with
                     | VScalar p -> Ok (ps @ [ p ])
-                    | _ -> outside "an array literal must be built from SCALAR polynomials — nested aggregates are outside the fragment" x.Span)))
+                    | _ -> outside "an array literal must be built from SCALAR polynomials -- nested aggregates are outside the fragment" x.Span)))
             (Ok [])
         |> Result.map (List.toArray >> VVec)
     | ExprKind.ExprLet (binding, body) ->
@@ -539,9 +454,9 @@ let rec private extractVal (ctx: Ctx) (env: Map<string, Val>) (e: Expr) : Result
         |> Result.bind (fun env' -> extractVal ctx env' final)
     | ExprKind.ExprBlock (_, None) -> outside "a polynomial body must end in an expression" e.Span
     | ExprKind.ExprApp (f, args) ->
-        // The ONLY admitted application shape is a static index into a vector
-        // binding or an invariant array. Every genuine CALL — `ml.*` ops,
-        // certified callees, scalar builtins — is a v1 deferral.
+        // The only admitted application shape is a static index into a
+        // vector binding or an invariant array; every genuine call is a v1
+        // deferral.
         match f.Kind, args with
         | ExprKind.ExprVar n, [ idxE ] ->
             match Map.tryFind n env with
@@ -557,9 +472,9 @@ let rec private extractVal (ctx: Ctx) (env: Map<string, Val>) (e: Expr) : Result
             | Some (VScalar _) -> outside (sprintf "'%s' is a scalar, not an array" n) e.Span
             | Some (VOpaque name) ->
                 outside (sprintf "the shape of invariant '%s' is not decidable from its declared type" name) e.Span
-            | None -> outside (sprintf "call to '%s': calls are outside the v1 polynomial fragment" n) e.Span
-        | _ -> outside "calls are outside the v1 polynomial fragment" e.Span
-    | _ -> outside "this expression is outside the v1 polynomial fragment" e.Span
+            | None -> outside (sprintf "call to '%s': calls are outside the polynomial fragment" n) e.Span
+        | _ -> outside "calls are outside the polynomial fragment" e.Span
+    | _ -> outside "this expression is outside the polynomial fragment" e.Span
 
 /// The extracted normal form: one polynomial per output component.
 type PolyForm = { Components: Poly [] }
@@ -588,15 +503,10 @@ let extract (psig: PolySig) (statics: StaticEnv) (fd: FunctionDecl) : Result<Pol
         | VScalar _, Some _ -> outside "the body is a scalar but the declared return is a representation-typed array" fd.Body.Span
         | (VInvArr _ | VOpaque _), _ -> outside "the body is an invariant parameter with no polynomial form" fd.Body.Span)
 
-// ---------------------------------------------------------------------------
-// The finite discharge
-// ---------------------------------------------------------------------------
-
-/// One group element as it acts on THIS function's data: a printable name (the
-/// word), the input matrix for every rep parameter, and the output matrix.
-/// Nothing here names a group — assembling these from a registry is the
-/// caller's job, which is what keeps 6c a second discharger rather than a
-/// second engine.
+/// One group element as it acts on THIS function's data: a printable name
+/// (the word), the input matrix per rep parameter, and the output matrix.
+/// Nothing here names a group -- assembling these from a registry is the
+/// caller's job, which keeps 6c a second discharger rather than a second engine.
 type ElementAction = {
     Name: string
     InMats: Map<string, int [][]>
@@ -615,15 +525,14 @@ type DischargeFailure = {
     Component: int
     /// The offending monomial, rendered.
     Monomial: string
-    /// Its total degree in the rep components — 0 means a CONSTANT term, which
-    /// is the π₀/trivial-label obligation rather than a coefficient slip.
+    /// Its total degree in the rep components -- 0 means a constant term,
+    /// the trivial-label obligation rather than a coefficient slip.
     RepDegree: int
-    /// f(ρ_in(w)·x) coefficient vs (ρ_out(w)·f(x)) coefficient.
+    /// f(rho_in(w).x) coefficient vs (rho_out(w).f(x)) coefficient.
     Lhs: Rat
     Rhs: Rat
-    /// The residual is negligible against the coefficient scale — §3.5's
-    /// mandatory near-miss net (a truncated decimal written for an exact
-    /// rational). Group-agnostic, so 6c inherits it unchanged.
+    /// The residual is negligible against the coefficient scale (a truncated
+    /// decimal for an exact rational). Group-agnostic, so 6c inherits it.
     NearMiss: bool
 }
 
@@ -631,11 +540,9 @@ type DischargeError =
     | GeneratorCheck of DischargeFailure
     | DischargeCap of string
 
-/// The near-miss test, stated once. A residual is a near miss when it is
-/// nonzero but its float image is negligible relative to the scale of the two
-/// coefficients being compared: exactly the signature of `0.3333333` written
-/// where `1.0/3.0` was meant, and never the signature of a genuinely wrong
-/// sign or a factor of two.
+/// A near miss: nonzero but negligible relative to the scale of the two
+/// coefficients compared -- the signature of `0.3333333` written where
+/// `1.0/3.0` was meant, never of a genuinely wrong sign or factor of two.
 let private nearMissThreshold = 1e-6
 
 let private isNearMiss (lhs: Rat) (rhs: Rat) : bool =
@@ -643,9 +550,9 @@ let private isNearMiss (lhs: Rat) (rhs: Rat) : bool =
     let scale = max 1.0 (max (abs (Rat.toFloat lhs)) (abs (Rat.toFloat rhs)))
     residual > 0.0 && residual <= nearMissThreshold * scale
 
-/// Substitute x_(p,i) ↦ Σ_j M_p[i][j] · x_(p,j) into one polynomial. The
-/// matrices are integer ({0, ±1} for every shipped point group), so the whole
-/// substitution stays in ℚ and the invariant atoms ride through untouched.
+/// Substitute x_(p,i) -> sum_j M_p[i][j] * x_(p,j) into one polynomial. The
+/// matrices are integer ({0, +-1} for every shipped point group), so the
+/// substitution stays in Q and the invariant atoms ride through untouched.
 let private substitute (budget: int ref) (images: Map<string * int, Poly>) (p: Poly)
     : Result<Poly, DischargeError> =
     let mutable failed : DischargeError option = None
@@ -657,11 +564,9 @@ let private substitute (budget: int ref) (images: Map<string * int, Poly>) (p: P
             let mutable acc = Map.ofList [ ({ Mono.one with Inv = m.Inv }, c) ]
             for KeyValue (key, e) in m.Rep do
                 if failed.IsNone then
-                    // A rep variable with no image would be treated as FIXED,
-                    // which would verify a different (weaker) identity. It
-                    // cannot arise — the caller builds the images from the same
-                    // Rep parameters the extractor made variables of — so it is
-                    // an internal error rather than a silent widening.
+                    // A rep variable with no image would be treated as FIXED
+                    // (a weaker identity). Cannot arise -- caller builds
+                    // images from the same Rep params the extractor used.
                     match Map.tryFind key images with
                     | None ->
                         failed <- Some (DischargeCap (sprintf "internal: no group action supplied for '%s' component %d" (fst key) (snd key)))
@@ -678,13 +583,11 @@ let private substitute (budget: int ref) (images: Map<string * int, Poly>) (p: P
     | None -> Ok out
 
 /// THE FINITE DISCHARGE. For every enumerated group element w, compare
-/// f(ρ_in(w)·x) with ρ_out(w)·f(x) COEFFICIENTWISE over ℚ[atoms]. `Ok ()` =
-/// the certificate holds; the first failure carries the element, the
-/// component and the offending coefficient.
-///
-/// All |G| elements are checked, not just the generators. Word closure says
-/// the generators would suffice (proofs/BladeWordClosure.v proves it); at
-/// |G| ≤ 8 the extra checks cost nothing and the redundancy is deliberate.
+/// f(rho_in(w).x) with rho_out(w).f(x) coefficientwise over Q[atoms]; `Ok ()`
+/// means the certificate holds, and the first failure names the element,
+/// component and offending coefficient. All |G| elements are checked, not
+/// just the generators -- word closure (proofs/BladeWordClosure.v) proves
+/// the generators would suffice, but at |G| <= 8 the extra checks are free.
 let discharge (form: PolyForm) (elements: ElementAction list) : Result<unit, DischargeError> =
     let budget = ref maxTerms
     let n = form.Components.Length
@@ -692,7 +595,7 @@ let discharge (form: PolyForm) (elements: ElementAction list) : Result<unit, Dis
         match els with
         | [] -> Ok ()
         | el :: rest ->
-            // ρ_in per rep parameter, as the linear image of each variable.
+            // rho_in per rep parameter, as the linear image of each variable.
             let images =
                 el.InMats
                 |> Map.fold (fun acc pname (m: int [][]) ->

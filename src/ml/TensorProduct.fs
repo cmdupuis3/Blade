@@ -3,7 +3,7 @@ namespace BladeML
 /// The equivariant tensor product (ml-spec section 5).
 ///
 /// Paths: all (block1, block2, blockOut) triples satisfying the CG selection
-/// rules — |l1-l2| <= l_out <= l1+l2 and p_out = p1*p2. This is the
+/// rules -- |l1-l2| <= l_out <= l1+l2 and p_out = p1*p2. This is the
 /// TensorPaths<cfg> SparseIdx of the spec, enumerated in lexicographic
 /// (b1, b2, bOut) order.
 ///
@@ -12,7 +12,7 @@ namespace BladeML
 /// flattened path-major, mult_out-major within a path.
 ///
 /// No normalization is applied (the spec does not define one; e3nn applies
-/// path normalization — noted in ml/README.md).
+/// path normalization -- noted in ml/README.md).
 type TPConfig =
     { Spec1: SpecEntry[]
       Spec2: SpecEntry[]
@@ -23,7 +23,7 @@ type TPPath = { B1: int; B2: int; BOut: int }
 module TensorProduct =
 
     /// Single-source CG selection rules: the enumerator lives in
-    /// Blade.ML.Spec.tpPaths (the compiler's static model — the same source
+    /// Blade.ML.Spec.tpPaths (the compiler's static model -- the same source
     /// file is compiled into this project); the reference impl delegates and
     /// maps the triples back to TPPath. Parity maps Even -> 0 / Odd -> 1;
     /// both sides are lexicographic in (B1, B2, BOut).

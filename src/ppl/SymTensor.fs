@@ -58,7 +58,7 @@ module SymTensor =
     let set (t: T) (idx: int[]) (v: float) =
         t.Data.[rankOf (Array.sort idx)] <- v
 
-    /// r! / prod(multiplicity of each distinct label)! — the number of
+    /// r! / prod(multiplicity of each distinct label)! -- the number of
     /// distinct position orderings a canonical entry stands for. This is the
     /// joint-r! weight from Blade's product-symmetry accounting.
     let multiplicity (idx: int[]) : float =

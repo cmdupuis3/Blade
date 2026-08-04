@@ -1,86 +1,74 @@
-// =============================================================================
-//  OrbRank.fs -- the pure-function layer of Phase 2 in
-//  docs/plan-orbidx-bijections.md: OrbIdx canonicalization, the ascending-lex
-//  traversal stream, and the arithmetic rank/unrank pair.
+// OrbRank.fs -- the pure-function layer for OrbIdx canonicalization, the
+// ascending-lex traversal stream, and the arithmetic rank/unrank pair.
 //
-//  A class is a FLAT list of levels, OUTERMOST-LAST
-//  (docs/plan-orbit-index-types.md §2):
+// A class is a FLAT list of levels, OUTERMOST-LAST:
 //
-//      OrbIdx<[(r1,s1), ..., (rd,sd)], n>,   G = S_r1 wr ... wr S_rd
+//     OrbIdx<[(r1,s1), ..., (rd,sd)], n>,   G = S_r1 wr ... wr S_rd
 //
-//  and the empty list is the trivial class Idx<n>. Everything here is a
-//  function of (levels, n) only -- no Blade types, no project dependencies, so
-//  the file can be `#load`ed on its own by an external checker.
+// and the empty list is the trivial class Idx<n>. Everything here is a
+// function of (levels, n) only -- no Blade types, no project dependencies,
+// so the file can be `#load`ed on its own by an external checker.
 //
-//  What is here, and where it comes from:
+// What is here:
+//   cellCountChecked  M0 = n ; M = C(M+r-1,r) at '+' , C(M,r) at '-', with
+//                     exactly-overflow-checked arithmetic (port of
+//                     proofs/OrbitEnum.fsx `foldCellsChecked` / `binomChecked`).
+//   canonOrb          per-level sort fold, innermost first, with the
+//                     character and the zero set (port of OrbitEnum `canon`).
+//   visitStream       the SEGMENT-PEELED traversal, general depth and both
+//                     signs: per level, the successor of a sub-key is
+//                     enumerated by EQUALITY-PREFIX peeling, which at depth 2
+//                     is exactly OrbitEnum `segmentedNestDepth2` (segments E,
+//                     then B, then A, emitted in stream position, so the
+//                     union IS the ascending-lex stream). Nothing here
+//                     enumerates-then-sorts.
+//   orbRank/orbUnrank the random-access pair, computed ARITHMETICALLY: the
+//                     sub-keys rank first (recursively), the level then
+//                     ranks the resulting key sequence with the lex
+//                     combinadic, '+' reduced to strict by
+//                     s_j = k_j + (j-1). The stream is never walked.
+//   orbSuccessor      the structural next-in-stream-order, O(rank).
+//   validateLevels    the ONE structural gate (level ranks >= 1) every entry
+//                     point above shares; visitStreamChecked is the
+//                     Error-typed door to the stream for API consumers.
+//   orbReadPlan       storage read: dense[t] = chi(t) * pool[rank(canon(t))]
+//   orbRead           (0 on the zero set), and its canonical-only inverse.
+//   orbWriteCanonical `orbReadPlan` is the cell-type-agnostic core (gate +
+//                     canon + rank + character, no pool touched) that the
+//                     interpreter's Value-typed reader shares with
+//                     `orbRead`'s int64 reference specialization -- the
+//                     reference semantics the interp/codegen decompaction
+//                     paths must agree with, cell for cell.
 //
-//    cellCountChecked  §4's fold  M0 = n ; M = C(M+r-1,r) at '+' , C(M,r) at '-'
-//                      with exactly-overflow-checked arithmetic. The port of
-//                      proofs/OrbitEnum.fsx `foldCellsChecked` / `binomChecked`.
-//    canonOrb          §5's per-level sort fold, innermost first, with the
-//                      character and the zero set. The port of OrbitEnum `canon`.
-//    visitStream       the bijections plan §2 SEGMENT-PEELED traversal, general
-//                      depth and both signs: per level, the successor of a
-//                      sub-key is enumerated by EQUALITY-PREFIX peeling, which
-//                      at depth 2 is exactly OrbitEnum `segmentedNestDepth2`
-//                      (segments E, then B, then A -- emitted in stream
-//                      position, so the union IS the ascending-lex stream).
-//                      Nothing here enumerates-then-sorts.
-//    orbRank/orbUnrank §3's random-access pair, computed ARITHMETICALLY: the
-//                      sub-keys rank first (recursively), the level then ranks
-//                      the resulting key sequence with the lex combinadic,
-//                      '+' reduced to strict by s_j = k_j + (j-1). The stream
-//                      is never walked.
-//    orbSuccessor      the structural next-in-stream-order, O(rank).
-//    validateLevels    the ONE structural gate (level ranks >= 1) every entry
-//                      point above shares; visitStreamChecked is the
-//                      Error-typed door to the stream for API consumers.
-//    orbReadPlan       docs/plan-orbidx-decompaction.md §2's storage read,
-//    orbRead           dense[t] = chi(t) * pool[rank(canon(t))] (0 on the zero
-//    orbWriteCanonical set), and its canonical-only inverse. `orbReadPlan` is
-//                      the cell-type-agnostic core (gate + canon + rank +
-//                      character, no pool touched) that the interpreter's
-//                      Value-typed reader shares with `orbRead`'s int64
-//                      reference specialization. The reference semantics the
-//                      interp/codegen decompaction paths of that plan's §4
-//                      must agree with, cell for cell.
+// INVARIANT ("the one hard constraint"): rank order = the nest's visit
+// order = ascending lex. tests/Test_OrbRank.fs asserts it directly against
+// a brute-force canonicalization of every raw tuple.
 //
-//  INVARIANT (§3, "the one hard constraint"): rank order = the §2 nest's visit
-//  order = ascending lex. tests/Test_OrbRank.fs asserts it directly against a
-//  brute-force canonicalization of every raw tuple.
+// DEVIATION FROM THE REQUESTED SURFACE, stated once, loudly. `orbRank` and
+// `orbUnrank` were specified without the extent:
 //
-//  ---------------------------------------------------------------------------
-//  DEVIATION FROM THE REQUESTED SURFACE, stated once, loudly.
+//     orbRank   : Level list -> int list -> Result<int64, string>
+//     orbUnrank : Level list -> int64    -> Result<int list, string>
 //
-//  `orbRank` and `orbUnrank` were specified as
+// That cannot be implemented correctly: the position of a tuple in the
+// ascending-lex stream depends on n. For [(2,+)] the tuple (1,1) is stream
+// position 4 at n = 4 and position 5 at n = 5, because the level's
+// combinadic ground set is M_{i-1}, a function of n. (An n-free rank exists
+// only for COLEX order, which is out of scope here.) So both take the
+// extent as their SECOND curried argument, exactly like `visitStream` and
+// `orbSuccessor`:
 //
-//      orbRank   : Level list -> int list -> Result<int64, string>
-//      orbUnrank : Level list -> int64    -> Result<int list, string>
+//     orbRank   : Level list -> int -> int list -> Result<int64, string>
+//     orbUnrank : Level list -> int -> int64    -> Result<int list, string>
 //
-//  i.e. without the extent. That cannot be implemented correctly: the position
-//  of a tuple in the ascending-lex stream depends on n. For [(2,+)] the tuple
-//  (1,1) is stream position 4 at n = 4 and position 5 at n = 5, because the
-//  level's combinadic ground set is M_{i-1}, which is a function of n. (An
-//  n-free rank exists only for COLEX order, which §3 rules out: "rank order =
-//  DFS order ... Order innovations (colex, Gray, blocked) are out of scope".)
-//
-//  So both take the extent as their SECOND curried argument, exactly like
-//  `visitStream` and `orbSuccessor`:
-//
-//      orbRank   : Level list -> int -> int list -> Result<int64, string>
-//      orbUnrank : Level list -> int -> int64    -> Result<int list, string>
-//
-//  A caller wired to the n-free spelling gets a compile error at the call site
-//  (int list vs int), not a silently wrong number.
-// =============================================================================
+// A caller wired to the n-free spelling gets a compile error at the call
+// site (int list vs int), not a silently wrong number.
 
 module Blade.OrbRank
 
 open System
 
-// -----------------------------------------------------------------------------
 // The class
-// -----------------------------------------------------------------------------
 
 /// Per-level character: OPlus = invariant (symmetric), OMinus = sgn (antisymmetric).
 type OrbSign =
@@ -100,7 +88,7 @@ let showLevels (ls: Level list) =
 /// (1 for the empty class, whose tuples are single coordinates).
 let axisRank (levels: Level list) = levels |> List.fold (fun a (r, _) -> a * r) 1
 
-/// §7.2's load-bearing normalization: a level with r = 1 is the trivial group
+/// Load-bearing normalization: a level with r = 1 is the trivial group
 /// and a no-op at EITHER sign, so it is dropped. Without it an AST could append
 /// trivial levels forever.
 let normalizeLevels (levels: Level list) = levels |> List.filter (fun (r, _) -> r <> 1)
@@ -115,9 +103,6 @@ let private peelOuter (levels: Level list) =
 /// `cellCountChecked`, `orbRank`, `orbUnrank` and `visitStreamChecked` all
 /// Error through this, and `orbSuccessor`'s None gate consumes it too, so a
 /// malformed class cannot draw different verdicts from different doors.
-/// (Adversarial-review hardening, 2026-08-01: previously visitStream raised,
-/// the Result trio each carried its own inline check, and orbSuccessor had a
-/// fourth private spelling.)
 let validateLevels (levels: Level list) : Result<unit, string> =
     let rec go i lvls =
         match lvls with
@@ -127,10 +112,8 @@ let validateLevels (levels: Level list) : Result<unit, string> =
             else go (i + 1) rest
     go 1 levels
 
-// -----------------------------------------------------------------------------
-// Checked int64 arithmetic (§7.2: wraparound must diagnose, not corrupt).
+// Checked int64 arithmetic (wraparound must diagnose, not corrupt).
 // All operands are non-negative. Ported from proofs/OrbitEnum.fsx.
-// -----------------------------------------------------------------------------
 
 let addChecked (a: int64) (b: int64) : Result<int64, string> =
     if b > 0L && a > Int64.MaxValue - b then Error(sprintf "int64 overflow: %d + %d" a b) else Ok(a + b)
@@ -172,9 +155,7 @@ let private resultAll (xs: Result<'a, string> list) : Result<'a list, string> =
         | Error e :: _ -> Error e
     go [] xs
 
-// -----------------------------------------------------------------------------
-// §4: cardinality
-// -----------------------------------------------------------------------------
+// Cardinality
 
 /// M0 = n ; Mi = C(M + r - 1, r) if s = '+' , C(M, r) if s = '-'.
 /// Every step is exactly overflow-checked; `cellCountChecked [] n = Ok n`.
@@ -193,9 +174,7 @@ let cellCountChecked (levels: Level list) (n: int64) : Result<int64, string> =
             | Ok m' -> go (i + 1) rest m'
     go 1 levels n
 
-// -----------------------------------------------------------------------------
-// §5: canonicalization
-// -----------------------------------------------------------------------------
+// Canonicalization
 
 let private hasDupKeys (keys: int list list) =
     let s = System.Collections.Generic.HashSet<int list>()
@@ -211,7 +190,7 @@ let sortParity (keys: int list list) =
     if inv % 2 = 0 then 1 else -1
 
 /// Canonical form of one raw tuple plus its character. `None` = the tuple is in
-/// the zero set (§5: an s = '-' level kills tuples with two equal sub-blocks).
+/// the zero set (an s = '-' level kills tuples with two equal sub-blocks).
 /// Levels are outermost-last, so the LAST level is peeled first and the sorts
 /// happen innermost-first. `canonOrb [] [x] = Some([x], 1)`.
 let rec canonOrb (levels: Level list) (tup: int list) : (int list * int) option =
@@ -236,9 +215,7 @@ let rec canonOrb (levels: Level list) (tup: int list) : (int list * int) option 
         | OMinus when hasDupKeys keys -> None
         | OMinus -> Some(sorted (), sgn * sortParity keys)
 
-// -----------------------------------------------------------------------------
-// §2: the segment-peeled traversal stream
-// -----------------------------------------------------------------------------
+// The segment-peeled traversal stream
 //
 // A canonical tuple of class `inner @ [(r,s)]` is the concatenation of r
 // canonical sub-keys of class `inner`, weakly ('+') or strictly ('-')
@@ -315,14 +292,12 @@ let rec keysFrom (levels: Level list) (n: int) (lo: int list option) (strict: bo
 /// the other entry points do.
 let visitStream (levels: Level list) (n: int) : seq<int list> = keysFrom levels n None false
 
-/// The Error-typed door to the traversal: validates the class and the extent
-/// UP FRONT (through the shared `validateLevels`), and only then exposes the
-/// lazy stream -- whose enumeration can then no longer raise, because the
-/// only reachable `failwithf`s in `keysFrom` are the level-rank guard (just
-/// validated) and internal bound-shape invariants that `lo = None` entry
-/// preserves. This is the visitStream failure-mode unification the
-/// 2026-08-01 adversarial review asked for: five entry points, one verdict
-/// for a malformed class.
+/// The Error-typed door to the traversal: validates the class and the
+/// extent UP FRONT (through the shared `validateLevels`), and only then
+/// exposes the lazy stream -- whose enumeration can then no longer raise,
+/// because the only reachable `failwithf`s in `keysFrom` are the
+/// level-rank guard (just validated) and internal bound-shape invariants
+/// that `lo = None` entry preserves.
 let visitStreamChecked (levels: Level list) (n: int) : Result<seq<int list>, string> =
     match validateLevels levels with
     | Error e -> Error e
@@ -330,9 +305,7 @@ let visitStreamChecked (levels: Level list) (n: int) : Result<seq<int list>, str
         if n < 0 then Error(sprintf "negative extent %d" n)
         else Ok(keysFrom levels n None false)
 
-// -----------------------------------------------------------------------------
-// §3: the arithmetic rank/unrank pair
-// -----------------------------------------------------------------------------
+// The arithmetic rank/unrank pair
 
 /// Lex rank of a strictly increasing sequence drawn from [0, ground).
 /// Position j skips every value v with c_{j-1} < v < c_j, each contributing
@@ -369,7 +342,7 @@ let lexRankStrict (ground: int64) (cs: int64 list) : Result<int64, string> =
 /// counts the completions skipped by choosing position j >= v; it is 0 at
 /// v = prev+1 and nondecreasing, so position j is the LARGEST v whose pre(v)
 /// still fits under the remainder. O(r log ground) binomials instead of the
-/// old linear scan's O(ground) -- which mattered the moment the §7.2 wall
+/// old linear scan's O(ground) -- which mattered the moment the overflow wall
 /// became a test: at depth-3 n=360 the outer ground set is ~2.1e9, and a
 /// linear scan cannot cross it. Every binomial here is <= C(ground, r) =
 /// this level's cell count, so the arithmetic overflows only when the class
@@ -545,14 +518,14 @@ let rec private orbSuccessorRec (levels: Level list) (n: int) (t: int list) : in
                 i <- i - 1
             res
 
-/// Validating wrapper. §3 names successor as the resumable/streamed cold-path
+/// Validating wrapper. Successor is the resumable/streamed cold-path
 /// mechanism, and a silent monotonicity break on malformed input is exactly
-/// what a range read cannot detect — so the input must be a genuine canonical
-/// tuple of this class before the structural advance runs: right length,
-/// digits in [0, n), canonical fixed point (which also rejects zero-set
-/// tuples). None still means "last cell" for valid input; malformed input is
-/// also None, deterministically, never a plausible-but-wrong neighbor.
-/// (Adversarial-review finding, 2026-08-01.)
+/// what a range read cannot detect -- so the input must be a genuine
+/// canonical tuple of this class before the structural advance runs: right
+/// length, digits in [0, n), canonical fixed point (which also rejects
+/// zero-set tuples). None still means "last cell" for valid input;
+/// malformed input is also None, deterministically, never a
+/// plausible-but-wrong neighbor.
 let orbSuccessor (levels: Level list) (n: int) (t: int list) : int list option =
     let ranksOk = match validateLevels levels with Ok() -> true | Error _ -> false
     if not ranksOk || n < 0 || List.length t <> axisRank levels then None
@@ -562,22 +535,20 @@ let orbSuccessor (levels: Level list) (n: int) (t: int list) : int list option =
         | Some (c, _) when c = t -> orbSuccessorRec levels n t
         | _ -> None
 
-// -----------------------------------------------------------------------------
-// The storage read/write path (docs/plan-orbidx-decompaction.md §2)
-// -----------------------------------------------------------------------------
+// The storage read/write path
 //
 //     dense[t] = 0                                   if canon(t) is zero-set
 //              = chi(t) * pool[orbRank(canon(t))]    otherwise
 //
-// This is the REFERENCE SEMANTICS: the thing the interp `decompactOrb` and the
-// C++ streaming scatter of that plan's §4 must agree with cell for cell, and
-// the thing a held-out table can pin. So the cells are int64 and the
+// This is the REFERENCE SEMANTICS: the thing the interp `decompactOrb` and
+// the C++ streaming scatter of the decompaction path must agree with cell
+// for cell, and the thing a held-out table can pin. So the cells are int64 and the
 // arithmetic is exact -- no float, no rounding, no "close enough". A generic
 // `orbRead<'T>` over an arbitrary numeric cell type is FUTURE WORK: it needs a
 // negation that is total for the cell type (see the Int64.MinValue case
 // below), which is a per-type decision, not an inlined `~-`. Complex cells
-// additionally need the conjugation character the plan §2 rules out of the
-// +-1 system entirely.
+// additionally need the conjugation character, which the +-1 system rules
+// out entirely.
 //
 // Note what is NOT here: nothing walks `visitStream`. Both entry points go
 // canonOrb -> orbRank, so the read cost is the arithmetic rank's, and a stream
@@ -589,10 +560,10 @@ let orbSuccessor (levels: Level list) (n: int) (t: int list) : int list option =
 let private showTuple (t: int list) =
     "(" + (t |> List.map string |> String.concat ",") + ")"
 
-/// The shared structural gate of the storage path: the class and the extent
-/// (through `cellCountChecked`, hence through `validateLevels` -- still the
-/// ONE structural door, per the 2026-08-01 unification), then the pool size,
-/// the tuple's axis rank, and its digit range. Returns the class's cell count.
+/// The shared structural gate of the storage path: the class and the
+/// extent (through `cellCountChecked`, hence through `validateLevels`,
+/// still the ONE structural door), then the pool size, the tuple's axis
+/// rank, and its digit range. Returns the class's cell count.
 ///
 /// Every one of these is a REFUSAL, never a repair: an out-of-range digit or a
 /// short tuple canonicalizes perfectly happily into some other class's cell,
@@ -620,7 +591,7 @@ let private storageGate (who: string) (levels: Level list) (n: int) (poolLen: in
                 | Some d -> Error(sprintf "%s: coordinate %d outside [0,%d)" who d n)
                 | None -> Ok m
 
-/// Where a §2 read lands, WITHOUT touching a pool: everything about
+/// Where a storage read lands, WITHOUT touching a pool: everything about
 /// `dense[t]` that is a function of `(levels, n, t)` alone.
 ///
 ///   OrbZeroCell        canon(t) is in the zero set. The value is 0 and NO cell
@@ -628,24 +599,23 @@ let private storageGate (who: string) (levels: Level list) (n: int) (poolLen: in
 ///                      CONTRACT insists is a value, not an error.
 ///   OrbPoolCell (i,chi) the value is `chi * pool[i]`, chi in {-1,+1}.
 ///
-/// This is the shared core of every §2 reader, and it exists because the cell
-/// type is not universal: the reference `orbRead` below is int64 (exact, so a
-/// held-out table can pin it), while the interpreter's pool holds `Value` and
-/// the compiled path holds `double`. Negation is the only per-type decision in
-/// the read (see the Int64.MinValue case in `orbRead`), so it -- and ONLY it --
-/// is what the callers specialize. Nothing else about the read is re-derived
-/// anywhere: the gate, the canonicalization, the rank and the zero-set/
-/// out-of-domain split all live here, once.
+/// This is the shared core of every storage reader, and it exists because
+/// the cell type is not universal: the reference `orbRead` below is int64
+/// (exact, so a held-out table can pin it), while the interpreter's pool
+/// holds `Value` and the compiled path holds `double`. Negation is the
+/// only per-type decision in the read, so it -- and ONLY it -- is what the
+/// callers specialize. Nothing else is re-derived anywhere: the gate, the
+/// canonicalization, the rank and the zero-set/out-of-domain split all
+/// live here, once.
 type OrbReadPlan =
     | OrbZeroCell
     | OrbPoolCell of index: int * chi: int
 
-/// The (levels, n, t)-only half of §2's read. `who` prefixes the refusal text,
-/// so each caller's messages name the door the user actually went through;
-/// `poolLen` is the cell count the caller has, checked against the class's fold
-/// exactly as `orbRead`'s own gate does. Only MALFORMED input is refused (bad
-/// class, negative extent, wrong pool size, wrong axis rank, digit outside
-/// [0,n)) -- a MIRRORED tuple is a legal read that returns chi = -1.
+/// The (levels, n, t)-only half of the storage read. `who` prefixes the
+/// refusal text, so each caller's messages name the door the user actually
+/// went through. Only MALFORMED input is refused (bad class, negative
+/// extent, wrong pool size, wrong axis rank, digit outside [0,n)) -- a
+/// MIRRORED tuple is a legal read that returns chi = -1.
 let orbReadPlan (who: string) (levels: Level list) (n: int) (poolLen: int) (t: int list)
                 : Result<OrbReadPlan, string> =
     match storageGate who levels n poolLen t with
@@ -665,7 +635,7 @@ let orbReadPlan (who: string) (levels: Level list) (n: int) (poolLen: int) (t: i
                     Error(sprintf "%s: rank %d outside the pool [0,%d)" who r poolLen)
                 else Ok(OrbPoolCell(int r, chi))
 
-/// §2's read: the value of the dense tensor at ANY raw tuple `t`, served out
+/// The storage read: the value of the dense tensor at ANY raw tuple `t`, served out
 /// of the canonical pool. Zero on the zero set, `chi(t) * pool[rank]`
 /// otherwise -- so a mirrored tuple is a legal read that returns the signed
 /// cell, and only MALFORMED input is refused (bad class, negative extent,
@@ -678,25 +648,25 @@ let orbRead (levels: Level list) (n: int) (pool: int64[]) (t: int list) : Result
         let v = pool.[i]
         if chi >= 0 then Ok v
         elif v = Int64.MinValue then
-            // The one value whose negation leaves int64. §7.2's rule applies to
+            // The one value whose negation leaves int64. The overflow rule applies to
             // the read too: wraparound must diagnose.
             Error(sprintf "int64 overflow: -(%d)" v)
         else Ok(-v)
 
-/// §2's read inverted, and ONLY at a canonical cell: `t` must be a canonOrb
+/// The storage read inverted, and ONLY at a canonical cell: `t` must be a canonOrb
 /// fixed point (which forces character +1, since a fixed point sorts with no
 /// inversions at every level), in range, with a correctly sized pool. A
 /// mirrored, zero-set, out-of-range, wrong-length or wrong-pool argument is
 /// refused with its own message shape, and the pool is left untouched.
 ///
-/// Mirrored write-through (solving `chi * pool[rank] = v` by dividing out the
-/// character) is DELIBERATELY not provided: it would make one pool cell
-/// writable under all |orbit| spellings of its tuple, turning an ordinary
-/// scatter into silent last-writer-wins aliasing that no after-the-fact
-/// well-definedness check can reconstruct -- and on the zero set the equation
-/// has no solution at all for v <> 0, so the "obvious" generalization is
-/// partial as well as unsafe. Callers that mean to fill a pool should
-/// canonicalize first (canonOrb) and write the canonical cell once.
+/// Mirrored write-through (solving `chi * pool[rank] = v` by dividing out
+/// the character) is DELIBERATELY not provided: it would make one pool
+/// cell writable under all |orbit| spellings of its tuple, turning an
+/// ordinary scatter into silent last-writer-wins aliasing -- and on the
+/// zero set the equation has no solution for v <> 0, so the "obvious"
+/// generalization is partial as well as unsafe. Callers that mean to fill
+/// a pool should canonicalize first (canonOrb) and write the canonical
+/// cell once.
 let orbWriteCanonical (levels: Level list) (n: int) (pool: int64[]) (t: int list) (v: int64)
                       : Result<unit, string> =
     match storageGate "orbWriteCanonical" levels n (Array.length pool) t with

@@ -27,13 +27,13 @@ let dumpAll () =
             resid <- resid + d * d
     printfn "  resid = %s" (fmt resid)
 
-    // --- svd known 2x2 [[3,0],[4,5]] (corpus math/013): σ = 3√5, √5 ---
+    // --- svd known 2x2 [[3,0],[4,5]] (corpus math/013): sigma = 3sqrt5, sqrt5 ---
     let a2 = array2D [ [3.0; 0.0]; [4.0; 5.0] ]
     let (_, s2, _) = Jacobi.svd 10 a2
     printfn "svd 2x2 [[3,0],[4,5]]:"
     printfn "  S = %s (analytic: 3*sqrt5 = %s, sqrt5 = %s)" (fmtArr s2) (fmt (3.0 * sqrt 5.0)) (fmt (sqrt 5.0))
 
-    // --- eigh 3x3 tridiagonal (corpus math/021): analytic 2±√2, 2 ---
+    // --- eigh 3x3 tridiagonal (corpus math/021): analytic 2+/-sqrt2, 2 ---
     let s3 = array2D [ [2.0; 1.0; 0.0]; [1.0; 2.0; 1.0]; [0.0; 1.0; 2.0] ]
     let (q3, l3) = Jacobi.eigh 10 s3
     printfn "eigh 3x3 tridiag:"
@@ -50,7 +50,7 @@ let dumpAll () =
     printfn "  LAM = %s" (fmtArr l4)
 
     // --- unfold/mode_product rank-3 worked example (corpus math/03x):
-    // X: 3x4x2, X(i,j,k) = 1 + i + 3*j + 12*k  (Kolda–Bader's example
+    // X: 3x4x2, X(i,j,k) = 1 + i + 3*j + 12*k  (Kolda-Bader's example
     // tensor in 0-based form: mode-0 unfolding columns count 1..24) ---
     let dims3 = [3; 4; 2]
     let x3 =
@@ -66,32 +66,32 @@ let dumpAll () =
     let y = Tensor.modeProduct x3 u23 0
     printfn "mode_product 3x4x2 x U(2x3) mode 0: dims = %A, data = %s" y.Dims (fmtArr y.Data)
 
-    // --- eig: triangular 3x3 (corpus math/050) — eigenvalues = diagonal ---
+    // --- eig: triangular 3x3 (corpus math/050) -- eigenvalues = diagonal ---
     let tr3 = array2D [ [3.0; 1.0; 2.0]; [0.0; 1.0; 5.0]; [0.0; 0.0; 2.0] ]
     let (re1, im1) = Eig.eig 90 tr3
     printfn "eig triangular 3x3: RE = %s IM = %s (expect 3,2,1 / zeros)" (fmtArr re1) (fmtArr im1)
 
-    // --- eig: rotation 2x2 theta=0.3 (corpus math/051) — cos ± i sin ---
+    // --- eig: rotation 2x2 theta=0.3 (corpus math/051) -- cos +/- i sin ---
     let th = 0.3
     let rot = array2D [ [cos th; -(sin th)]; [sin th; cos th] ]
     let (re2, im2) = Eig.eig 60 rot
     printfn "eig rotation 2x2: RE = %s IM = %s" (fmtArr re2) (fmtArr im2)
     printfn "  analytic: cos = %s, sin = %s" (fmt (cos th)) (fmt (sin th))
 
-    // --- eig: companion of (l-1)(l-2)(l-3) (corpus math/052) — real chase ---
+    // --- eig: companion of (l-1)(l-2)(l-3) (corpus math/052) -- real chase ---
     let comp3 = array2D [ [0.0; 1.0; 0.0]; [0.0; 0.0; 1.0]; [6.0; -11.0; 6.0] ]
     let (re3, im3) = Eig.eig 90 comp3
     printfn "eig companion real roots: RE = %s IM = %s (expect 3,2,1)" (fmtArr re3) (fmtArr im3)
 
-    // --- eig: companion of (l-0.5)(l^2-l+0.625) (corpus math/053) — complex chase ---
+    // --- eig: companion of (l-0.5)(l^2-l+0.625) (corpus math/053) -- complex chase ---
     let compC = array2D [ [0.0; 1.0; 0.0]; [0.0; 0.0; 1.0]; [0.3125; -1.125; 1.5] ]
     let (re4, im4) = Eig.eig 90 compC
     printfn "eig companion complex pair: RE = %s IM = %s" (fmtArr re4) (fmtArr im4)
-    printfn "  analytic: 0.5 ± %s i (mod %s), then 0.5" (fmt (sqrt 0.375)) (fmt (sqrt 0.625))
+    printfn "  analytic: 0.5 +/- %s i (mod %s), then 0.5" (fmt (sqrt 0.375)) (fmt (sqrt 0.625))
 
-    // --- eig: coupled damped-rotation ⊕ decay (corpus math/054, Koopman-shaped):
-    // A = S D S^{-1}, D = rot(0.9, 0.7) ⊕ diag(0.7, 0.4), S unit lower
-    // bidiagonal — spectrum 0.9e^{±0.7i}, 0.7, 0.4 with full coupling ---
+    // --- eig: coupled damped-rotation (+) decay (corpus math/054, Koopman-shaped):
+    // A = S D S^{-1}, D = rot(0.9, 0.7) (+) diag(0.7, 0.4), S unit lower
+    // bidiagonal -- spectrum 0.9e^{+/-0.7i}, 0.7, 0.4 with full coupling ---
     let r = 0.9
     let w = 0.7
     let dm = array2D [ [r * cos w; -(r * sin w); 0.0; 0.0]
@@ -109,7 +109,7 @@ let dumpAll () =
     printfn "eig koopman 4x4 fixture A = %s" (fmtArr (flat2 koop))
     let (re5, im5) = Eig.eig 120 koop
     printfn "eig koopman 4x4: RE = %s IM = %s" (fmtArr re5) (fmtArr im5)
-    printfn "  analytic: %s ± %s i (mod 0.9), 0.7, 0.4" (fmt (r * cos w)) (fmt (r * sin w))
+    printfn "  analytic: %s +/- %s i (mod 0.9), 0.7, 0.4" (fmt (r * cos w)) (fmt (r * sin w))
 
     // --- eig vs eigh cross-check on the symmetric 4x4 fixture ---
     let (re6, im6) = Eig.eig 120 s4

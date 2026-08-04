@@ -2,12 +2,12 @@
 ///
 /// MUST match spectra/compiler/SpectraDecls.fs polyspecDecl: same row-major
 /// (k-1)-deep frequency nest, same left-fold product chain, same explicit
-/// conjugate multiply — the arithmetic order is the ulp contract.
+/// conjugate multiply -- the arithmetic order is the ulp contract.
 module BladeSpectra.Polyspec
 
 open BladeSpectra.Fft
 
-/// P(f_0..f_{k-2}) = X_1(f_0) ··· X_{k-1}(f_{k-2}) · conj(X_k((Σf) mod n)),
+/// P(f_0..f_{k-2}) = X_1(f_0) *** X_{k-1}(f_{k-2}) * conj(X_k((Sigmaf) mod n)),
 /// returned FLAT row-major (Blade prints rank-2+ complex arrays flat).
 let polyspec (xs: float[] list) : Cplx[] =
     let k = xs.Length

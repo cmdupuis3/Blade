@@ -6,9 +6,7 @@ module Blade.Lexer
 open System
 open System.Text
 
-// ============================================================================
 // Tokens
-// ============================================================================
 
 type TokenKind =
     // Literals
@@ -148,9 +146,7 @@ type Token = {
     EndCol: int
 }
 
-// ============================================================================
 // Keyword Map
-// ============================================================================
 
 let keywords = 
     [ "let", KwLet
@@ -175,8 +171,8 @@ let keywords =
       "and", KwAnd
       "comm", KwComm
       // `anticomm` is a where-clause conjunct keyword (the anticommutativity
-      // pin, signed sibling of `comm`). Named after the property it pins —
-      // f(b, a) = -f(a, b) — so it cannot collide with the `AntisymIdx` type
+      // pin, signed sibling of `comm`). Named after the property it pins,
+      // f(b, a) = -f(a, b), so it cannot collide with the `AntisymIdx` type
       // keyword or the `Antisymmetric` reynolds variant identifier, both of
       // which speak the index-storage sense of "antisymmetric".
       "anticomm", KwAntisymm
@@ -245,9 +241,7 @@ let keywords =
       "Poly", KwPoly ]
     |> Map.ofList
 
-// ============================================================================
 // Multi-character Operators
-// ============================================================================
 
 let operators = 
     [ "<@>"; ">>="; "<&>"; "<&!>"; "<*>"; "<$>"; "<|>"; "<|:>"
@@ -258,9 +252,7 @@ let operators =
       "+"; "-"; "*"; "/"; "%"; "="; "<"; ">"; "!"; "^" ]
     |> List.sortByDescending String.length  // Match longer operators first
 
-// ============================================================================
 // Lexer State
-// ============================================================================
 
 type LexerState = {
     Source: string
@@ -278,9 +270,7 @@ let createLexer source = {
     Tokens = []
 }
 
-// ============================================================================
 // Character Utilities
-// ============================================================================
 
 let isDigit c = c >= '0' && c <= '9'
 let isAlpha c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
@@ -323,30 +313,25 @@ let advance (state: LexerState) =
 let emit (state: LexerState) startLine startCol kind =
     let len = state.Col - startCol
     // state.Line/state.Col sit immediately after the just-consumed lexeme, so
-    // they are the natural exclusive end — correct even for multi-line lexemes.
+    // they are the natural exclusive end -- correct even for multi-line lexemes.
     // For a zero-width token (EOF), End = Start.
     let tok = { Kind = kind; Line = startLine; Col = startCol; Length = max 1 len
                 EndLine = state.Line; EndCol = state.Col }
     state.Tokens <- state.Tokens @ [tok]
 
-// ============================================================================
 // Token Scanners
-// ============================================================================
 
 let skipWhitespace (state: LexerState) =
     while (match peek state with Some c -> isWhitespace c | None -> false) do
         advance state |> ignore
 
 let skipLineComment (state: LexerState) =
-    // Consume //
     advance state |> ignore
     advance state |> ignore
-    // Consume until newline or EOF
     while (match peek state with Some c -> c <> '\n' | None -> false) do
         advance state |> ignore
 
 let skipBlockComment (state: LexerState) =
-    // Consume /*
     advance state |> ignore
     advance state |> ignore
     let mutable depth = 1
@@ -415,7 +400,6 @@ let scanString (state: LexerState) =
     let startCol = state.Col
     let sb = StringBuilder()
     
-    // Consume opening quote
     advance state |> ignore
     
     let mutable escaped = false
@@ -453,7 +437,6 @@ let scanChar (state: LexerState) =
     let startLine = state.Line
     let startCol = state.Col
     
-    // Consume opening quote
     advance state |> ignore
     
     let c =
@@ -529,9 +512,7 @@ let scanOperator (state: LexerState) =
         let c = advance state |> Option.get
         emit state startLine startCol (TokOp (string c))
 
-// ============================================================================
 // Main Lexer
-// ============================================================================
 
 let scanToken (state: LexerState) =
     skipWhitespace state
@@ -658,12 +639,10 @@ let scanToken (state: LexerState) =
             advance state |> ignore  // consume first ':'
             let nameStart = state.Pos
             let colAfterColon = state.Col  // identifiers contain no newlines, so Line is unchanged
-            // Collect the identifier
             while state.Pos < state.Source.Length &&
                   (let ch = state.Source.[state.Pos] in Char.IsLetterOrDigit(ch) || ch = '_') do
                 advance state |> ignore
             let name = state.Source.Substring(nameStart, state.Pos - nameStart)
-            // Check for closing ':'
             match peek state with
             | Some ':' ->
                 advance state |> ignore  // consume closing ':'
@@ -752,11 +731,10 @@ let tokenize source =
     while scanToken state do ()
     state.Tokens
 
-/// Filter newlines based on delimiter depth
-/// Newlines inside (), [], {} are removed (treated as whitespace)
-/// Newlines at depth 0 are kept (statement terminators)
-/// Consecutive newlines are collapsed to one
-/// Leading/trailing newlines around delimiters are removed
+/// Filter newlines based on delimiter depth: newlines inside (), [], {} are
+/// removed (treated as whitespace); newlines at depth 0 are kept (statement
+/// terminators); consecutive newlines collapse to one; leading/trailing
+/// newlines around delimiters are removed.
 let tokenizeWithNewlines source =
     let tokens = tokenize source
     let mutable depth = 0
@@ -794,7 +772,7 @@ let tokenizeWithNewlines source =
             lastWasOpen <- false
             true)
 
-// Filter out all newlines for simpler parsing (legacy mode)
+// Filter out all newlines for simpler parsing.
 let tokenizeFiltered source =
     tokenize source
     |> List.filter (fun t -> 

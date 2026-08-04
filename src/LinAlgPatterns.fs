@@ -1,91 +1,48 @@
-/// Linear-algebra dispatch classification — Phase 5 of
-/// docs/plan-cpp-perf-exploitation.md.
+/// Linear-algebra dispatch classification.
 ///
-/// PURPOSE. CodeGen must never decide for itself what a loop nest "is" in BLAS
-/// terms. This module owns that judgement: it maps an IR node onto a typed
-/// `LinAlgCall` descriptor naming a routine, the operand roles, the dimensions
-/// and the transpose flags, and it owns the POLICY table that says whether a
-/// recognised shape is actually routed through the `blade_linalg.hpp` shim or
-/// deliberately left to Blade's own loop nest. CodeGen consults; it does not
-/// pattern-match BLAS shapes.
+/// CodeGen must never decide for itself what a loop nest "is" in BLAS terms.
+/// This module maps an IR node onto a typed `LinAlgCall` descriptor naming a
+/// routine, operand roles, dimensions and transpose flags, and owns the
+/// POLICY table saying whether a recognised shape is routed through the
+/// `blade_linalg.hpp` shim or left to Blade's own loop nest. CodeGen consults;
+/// it does not pattern-match BLAS shapes.
 ///
-/// WHY A SEPARATE MODULE. Blade's uniform representation wraps every operation
-/// — even a scalar `T^0 -> T^0 -> T^0` binop like `*` — in at least a trivial
-/// loop nest by codegen time (`lowerArrayBinOpsModule` rewrites raw array
-/// binops into combinator form), so outside the two nodes v1 handles there is
-/// no distinguished "matmul node" to hook. Recognising the rest means matching
-/// LOOP-NEST SHAPES, jointly on (kernel op x fold op x operand ranks x index
-/// ties): the same `*` is Hadamard at equal ranks, `scal` against a scalar,
-/// half of `dot` under a `(+)`-reduce, and `gemm` under a contraction tie. That
-/// enumeration is per-op and per-level and wants its own home, its own tests,
-/// and its own growth path — not another arm inside a 14k-line codegen file.
+/// `IRGram`/`IRMatmul` are first-class IR nodes and classify exactly. Other
+/// shapes are recognised by matching LOOP-NEST SHAPES against
+/// `LoopNestCodeGen` -- the fully-built nest, where "which array feeds which
+/// kernel parameter at which level" is already resolved -- via `(|BlasL1|_|)`
+/// (Dot) and `(|BlasL2|_|)` (Gemv), each one more `try*` in codegen's
+/// shortcircuit chain, falling through on None.
 ///
-/// V1 SCOPE (node matching).
-///   * `IRGram(l, r, sameArray)` -> Syrk (same array) / Gemm (distinct).
-///   * `IRMatmul(a, b)`          -> Gemm.
-/// Both are FIRST-CLASS IR NODES, so their classification is exact rather than
-/// inferred; they need no nest matching and cannot be fooled by a coincidence
-/// of shape.
-///
-/// PHASE 5b SCOPE (nest matching — the growth path, now live).
-///   * `(|BlasL1|_|)` -> Dot:  a `reduce` over an UNFORCED deferred zip whose
-///     kernel is the product of the two co-iterated rank-1 f64 leaves, folded
-///     by the builtin `+`.
-///   * `(|BlasL2|_|)` -> Gemv: a materialising per-row apply over ONE rank-2
-///     f64 operand whose kernel body is `prodsum(<peeled row>, <rank-1 f64
-///     vector>)`, producing a rank-1 f64 output.
-/// Both are matched against `LoopNestCodeGen` — the fully-built nest — rather
-/// than against the surface combinator tree, because that is the structure the
-/// emission site is holding and the only one where "which array feeds which
-/// kernel parameter at which level" is already resolved. The patterns are
-/// consumed by one more `try*` in codegen's shortcircuit chain (precedent:
-/// `tryGenFlatElementwiseNest` at the apply-combinator site), so the seam is
-/// "BLAS match -> flat elementwise -> nested emitter", each arm falling through
-/// on None.
-///
-/// WHAT THIS MODULE STILL DOES NOT DO: invent C++ identifiers. A nest-matched
-/// descriptor names its operands by echoing a name `LoopNestCodeGen` already
-/// holds, or by handing back the IR expression for CodeGen to resolve through
-/// its own name map (`NestOperandSource`).
+/// This module never invents C++ identifiers: a matched descriptor names its
+/// operands by echoing a name `LoopNestCodeGen` already holds, or hands back
+/// the IR expression for CodeGen to resolve through its own name map.
 module Blade.LinAlgPatterns
 
 open Blade.IR
 open Blade.Types
 
-// ============================================================================
 // Availability gate
-// ============================================================================
 
-/// THE BLAS availability gate — the single source of truth, consulted by BOTH
-/// `shimEntryPoint` below (which decides whether a program emits shim calls at
-/// all) and `Build.fs` (which decides whether the g++ line carries
-/// `-DBLADE_HAS_BLAS` plus the include/link flags). Two copies of this
-/// predicate could disagree, and a disagreement is exactly the configuration
-/// where a program emits `blade_linalg::` calls into a header that will not
-/// compile. One definition, referenced twice.
+/// The BLAS availability gate -- the single source of truth, consulted by
+/// both `shimEntryPoint` below and `Build.fs` (which decides whether the g++
+/// line carries `-DBLADE_HAS_BLAS` plus the include/link flags). Two copies of
+/// this predicate could disagree, and a disagreement is exactly the
+/// configuration where a program emits `blade_linalg::` calls into a header
+/// that will not compile.
 ///
 ///   BLADE_BLAS=1|on   -> force on
 ///   BLADE_BLAS=0|off  -> force off
 ///   unset             -> follow OPENBLAS_DIR (set = on)
 ///
-/// Default-off is deliberate and unchanged: BLAS may differ in the last ULP,
-/// and the interpreter/oracle differentials demand byte-identical output, so
-/// Blade's own emitted loops remain the verification truth.
+/// Default-off is deliberate: BLAS may differ in the last ULP, and the
+/// interpreter/oracle differentials demand byte-identical output, so Blade's
+/// own emitted loops remain the verification truth.
 ///
-/// A FUNCTION, never a module-level `let`, for the reason `Build.optFlags`
-/// became one: a module-level binding freezes the environment read at first
-/// touch, which would make a mid-process pin (a test's use-guard, a hand-run)
-/// silently ineffective. Every consultation re-reads.
-///
-/// ARCHITECTURE (Phase 5c, user-directed). Blade knows at ITS compile time
-/// whether BLAS will be available, so the choice belongs here and not in a C++
-/// `#ifdef`. Gate off => no route is emitted => the native math comes from the
-/// PRE-EXISTING emission paths (gram/matmul's own loops, and for dot/gemv the
-/// ordinary loop-nest emitters), which are the paths the interpreter
-/// differential has always covered. That is why `blade_linalg.hpp` no longer
-/// carries hand-written fallbacks: there is nothing for them to be a fallback
-/// FOR, and a second copy of the same arithmetic is a byte-identity obligation
-/// maintained by discipline rather than by construction.
+/// A FUNCTION, never a module-level `let`: a module-level binding freezes the
+/// environment read at first touch, which would make a mid-process pin (a
+/// test's use-guard, a hand-run) silently ineffective. Every consultation
+/// re-reads.
 let blasAvailable () : bool =
     match System.Environment.GetEnvironmentVariable("BLADE_BLAS") with
     | "1" | "on" -> true
@@ -95,29 +52,17 @@ let blasAvailable () : bool =
         | null | "" -> false
         | _ -> true
 
-/// THE LAPACK availability gate (Phase 6 / Round B). Rides the SAME
-/// environment resolution as `blasAvailable` — OpenBLAS bundles LAPACKE, so
-/// one install answers both — but it is a SEPARATE FUNCTION with a separate
-/// C++ define (`-DBLADE_HAS_LAPACK`) and its own Build.fs include-sniff arm.
+/// The LAPACK availability gate. Rides the same environment resolution as
+/// `blasAvailable` (OpenBLAS bundles LAPACKE), but is a SEPARATE FUNCTION with
+/// its own C++ define (`-DBLADE_HAS_LAPACK`) and Build.fs include-sniff arm.
 ///
-/// Why separate rather than an alias: the two headers are independently
-/// includable, so a BLAS-only program and a LAPACK-carrying one must stay
-/// distinguishable at the g++ line — otherwise every gram/matmul program would
-/// start advertising a LAPACK dependency it does not have. Keeping the
-/// predicate its own function is also what lets the LAPACK gate be tightened
-/// later (a LAPACKE-less BLAS install, a separate LAPACK_DIR) without touching
-/// the BLAS one.
-///
-/// A FUNCTION, never a module-level `let`, for the same reason as its sibling.
-///
-/// NUMERICS WARNING, recorded here because this is the gate that turns it on:
-/// unlike the BLAS routes — which differ from Blade's loops only in the last
-/// ULP — an eigensolver's OUTPUT IS NOT UNIQUE (eigenvector signs are
-/// arbitrary; within a degenerate eigenvalue's subspace any orthonormal basis
-/// is correct). The shim normalises the two determinate parts (descending
-/// order, sign fix) but cannot normalise the basis choice. So gate-ON results
-/// are correct and NOT bit-reproducible against the native Jacobi path, and
-/// `interp` / `diff-oracle` must never run with this gate set.
+/// NUMERICS WARNING: unlike BLAS routes, which differ from Blade's loops only
+/// in the last ULP, an eigensolver's output is NOT UNIQUE (eigenvector signs
+/// are arbitrary; a degenerate eigenvalue's subspace has no canonical basis).
+/// The shim normalises the two determinate parts (descending order, sign fix)
+/// but not the basis choice, so gate-ON results are correct but NOT
+/// bit-reproducible against the native Jacobi path -- `interp` /
+/// `diff-oracle` must never run with this gate set.
 let lapackAvailable () : bool =
     match System.Environment.GetEnvironmentVariable("BLADE_BLAS") with
     | "1" | "on" -> true
@@ -127,67 +72,85 @@ let lapackAvailable () : bool =
         | null | "" -> false
         | _ -> true
 
-// ============================================================================
+/// The cuBLAS availability gate -- the device sibling of `blasAvailable`, with
+/// its own environment variable:
+///
+///   BLADE_CUBLAS=1|on   -> force on
+///   BLADE_CUBLAS=0|off  -> force off
+///   unset               -> OFF (does NOT follow GPU presence)
+///
+/// Unset-means-off deliberately breaks the pattern its siblings follow
+/// (falling back to "is OPENBLAS_DIR set"): offloading a contraction changes
+/// the PERFORMANCE MODEL (a device allocation, an H2D copy, a D2H copy and a
+/// free PER CALL), so a machine with a GPU has not thereby asked for its
+/// `gram` to move across PCIe -- opt-in by explicit request only.
+///
+/// The toolchain conjunct (nvcc availability) is enforced at BUILD, not here:
+/// `Build.fs` requires nvcc when it sniffs the `blade_linalg_cuda.hpp`
+/// include.
+///
+/// Not conjoined with `cudaEmitModeEnabled ()`: that gate compiles `where
+/// cuda` KERNELS for the device, this one offloads recognised L3
+/// CONTRACTIONS. A program can want either without the other.
+let cublasAvailable () : bool =
+    match System.Environment.GetEnvironmentVariable("BLADE_CUBLAS") with
+    | "1" | "on" -> true
+    | _ -> false
+
 // Backend mode
-// ============================================================================
 
 /// The codegen EMISSION MODE a dispatch decision is being made for.
 ///
-/// USER-DIRECTED ARCHITECTURE. The alternative — copying the whole binop /
-/// nest-shape dispatch apparatus once per target — is brittle: the classifiers
-/// would drift apart the first time a pattern is fixed on one side and not the
-/// other, and the shapes they recognise are a property of Blade's IR, not of
-/// any backend. So the CLASSIFIERS ARE MODE-AGNOSTIC (nothing below
-/// `classifyGram` / `(|BlasL1|_|)` / `(|BlasL2|_|)` mentions a backend) and the
-/// mode is threaded into the ONE funnel that turns a classification into a C++
-/// name: `shimEntryPoint`. Adding a target is then a new arm there plus its
-/// entry-point table, never a second copy of the matching logic.
+/// The classifiers below (`classifyGram`, `(|BlasL1|_|)`, `(|BlasL2|_|)`) are
+/// MODE-AGNOSTIC -- none mentions a backend -- and the mode is threaded into
+/// the one funnel that turns a classification into a C++ name:
+/// `shimEntryPoint`. Adding a target is a new arm there plus its entry-point
+/// table, never a second copy of the matching logic.
 type LinAlgBackend =
     /// Host CPU, cblas through `blade_linalg.hpp`. Availability is
     /// `blasAvailable ()` (BLADE_BLAS / OPENBLAS_DIR).
     | HostBlas
-    /// Device, cuBLAS. DECLARED, NOT IMPLEMENTED — `shimEntryPoint` returns
-    /// None for every route under this mode, so a caller that asks for it emits
-    /// its ordinary host loops rather than anything wrong.
+    /// Device, cuBLAS through `blade_linalg_cuda.hpp`, for the L3 NODE routes
+    /// only (`gram` both arms, `matmul`). Availability is `cublasAvailable ()`.
+    /// L1/L2 stay native: per-call offload (device alloc + H2D + cuBLAS + D2H
+    /// + free) is PCIe-bound for `dot`/`gemv` (O(n)/O(mn) bytes moved for as
+    /// many flops), while `gemm`/`syrk` move O(mn + nk) bytes for O(mnk)
+    /// flops, so arithmetic intensity grows with the contracted extent and
+    /// the transfer amortises.
     ///
-    /// What the row is holding a place for (see the plan's CUDA notes):
-    ///   * availability will be `cudaEmitModeEnabled () && <cuBLAS resolved>`,
-    ///     the same shape as the host gate but with two conjuncts;
-    ///   * cuBLAS is COLUMN-MAJOR with no row-major mode, so `C = A·B`
-    ///     row-major is emitted as `gemm(B, A)` with the operands SWAPPED and
-    ///     the result read back as its own transpose — a per-route rewrite that
-    ///     belongs in the entry-point table, not in the classifiers;
-    ///   * the LAPACK-level sibling is cuSOLVER, not "cuLAPACK";
-    ///   * a cuBLAS handle is a per-program resource (create once, destroy at
-    ///     exit), so the emission site needs a program-level prologue slot that
-    ///     the host path has no analogue of.
+    /// cuBLAS is column-major with no row-major mode: a row-major m x n pool
+    /// with ld = n is bit-for-bit the column-major n x m matrix A^T, so
+    /// reading Blade's pools as their own transposes and SWAPPING the
+    /// operands computes the right thing with ZERO copies (swap table in
+    /// `src/cpp/blade_linalg_cuda.hpp`). The same-array gram is the one trap:
+    /// under the swap, Hermitian rank-k (`herk`) composes an upper<->lower
+    /// fill-mode flip with the conjugation, verified at runtime against the
+    /// host result. The LAPACK sibling cuSOLVER stays Native (separate
+    /// library, handle, workspace-query protocol); the cuBLAS handle is
+    /// owned by the shim (function-local static, freed at exit).
     | CudaBlas
 
-// ============================================================================
 // Precision
-// ============================================================================
 
-/// The BLAS precision letter an element type dispatches to. This is the second
-/// axis of the (routine × precision × symmetry) matrix: the routine FAMILY is
-/// chosen by symmetry (see `LinAlgRoute`), the letter by this.
+/// The BLAS precision letter an element type dispatches to: the second axis
+/// of the (routine x precision x symmetry) matrix, the routine FAMILY chosen
+/// by symmetry (see `LinAlgRoute`), the letter by this.
 ///
-/// Everything not listed — integers, booleans, structs, unit-annotated
-/// scalars — has no BLAS analogue at all and answers None, which is a decline
-/// at every classifier.
+/// Everything not listed -- integers, booleans, structs, unit-annotated
+/// scalars -- has no BLAS analogue and answers None, a decline at every
+/// classifier.
 type Precision =
-    /// float32 — `s` routines.
+    /// float32 -- `s` routines.
     | PrecS
-    /// float64 — `d` routines.
+    /// float64 -- `d` routines.
     | PrecD
-    /// complex<float> — `c` routines.
+    /// complex<float> -- `c` routines.
     | PrecC
-    /// complex<double> — `z` routines.
+    /// complex<double> -- `z` routines.
     | PrecZ
 
-/// The BLAS precision of an element type, or None when the type has no routine
-/// family. Replaces the old boolean `isRealDouble`: a boolean could only ever
-/// answer "is this the one type we support", which stops being the right
-/// question the moment a second precision is routed.
+/// The BLAS precision of an element type, or None when the type has no
+/// routine family.
 let precisionOf (t: IRType) : Precision option =
     match t with
     | IRTScalar ETFloat32 -> Some PrecS
@@ -204,19 +167,16 @@ let precisionLetter (p: Precision) : string =
     | PrecC -> "c"
     | PrecZ -> "z"
 
-/// Is this precision COMPLEX? The distinction is load-bearing rather than
-/// cosmetic: for a same-array gram it selects `herk` over `syrk` (Blade's
-/// complex gram is HERMITIAN — its scalar loop already conjugates the second
-/// factor), and for an inner product it is the reason the route must be
-/// `dotu` and never `dotc`.
+/// Is this precision COMPLEX? For a same-array gram it selects `herk` over
+/// `syrk` (Blade's complex gram is HERMITIAN -- its scalar loop already
+/// conjugates the second factor), and for an inner product it is the reason
+/// the route must be `dotu` and never `dotc`.
 let isComplexPrecision (p: Precision) : bool =
     match p with
     | PrecC | PrecZ -> true
     | PrecS | PrecD -> false
 
-// ============================================================================
 // Descriptor
-// ============================================================================
 
 /// The BLAS level a routine sits at. Recorded on every policy row because the
 /// routing decision is made per LEVEL, not per routine: L3 pays enormously
@@ -227,44 +187,43 @@ type BlasLevel =
     | L2
     | L3
 
-/// The routines this layer can name. `Dot`/`Gemv`/`Axpy`/`Scal` are declared —
-/// not yet matched — so the policy table below can state their routing decision
-/// explicitly rather than leaving it as an undocumented gap.
+/// The routines this layer can name. `Dot`/`Gemv`/`Axpy`/`Scal` are declared,
+/// not yet matched, so the policy table below can state their routing
+/// decision explicitly rather than leaving it as an undocumented gap.
 type LinAlgRoutine =
-    /// C = A * B (general matrix product) — `blade_gemm`.
+    /// C = A * B (general matrix product) -- `blade_gemm`.
     | Gemm
-    /// C = A * A^T (real) or A * A^H (complex), one triangle — `blade_syrk`.
-    /// The complex instance is a HERMITIAN rank-k update (`cherk`/`zherk`), not
-    /// a symmetric one: see `LinAlgRoute.RouteGramSame`.
+    /// C = A * A^T (real) or A * A^H (complex), one triangle -- `blade_syrk`.
+    /// Complex is a HERMITIAN rank-k update (`cherk`/`zherk`), not symmetric:
+    /// see `LinAlgRoute.RouteGramSame`.
     | Syrk
     /// y = A * x (matrix-vector).
     | Gemv
     /// s = x . y (inner product).
     | Dot
     /// s = ||x||_2. Named so the policy table can state its decision; NOT
-    /// matched in v1 (matching it means recognising a `sqrt` wrapped around a
-    /// self-dot, which is a shape the classifier has no case for yet).
+    /// matched (needs recognising a `sqrt` wrapped around a self-dot).
     | Nrm2
     /// y = alpha * x + y.
     | Axpy
     /// x = alpha * x.
     | Scal
-    /// Symmetric / Hermitian eigendecomposition — LAPACK, not BLAS.
+    /// Symmetric / Hermitian eigendecomposition -- LAPACK, not BLAS.
     /// `?spev`/`?hpev` for packed operands, `?syev`/`?heev` for dense.
     | Eigh
 
 /// Where a recognised shape is actually EXECUTED.
 type Routing =
-    /// Through `blade_linalg.hpp` — which itself resolves to cblas or to the
+    /// Through `blade_linalg.hpp`, which resolves to cblas or to the
     /// contract-preserving native fallback depending on the BUILD.
     | ViaShim
-    /// Deliberately left to Blade's own emitted loop nest. A `Native` row is a
-    /// RECORDED DECISION ("matched but routed native"), not a missing feature.
+    /// Deliberately left to Blade's own emitted loop nest: a RECORDED
+    /// DECISION ("matched but routed native"), not a missing feature.
     | Native
 
-/// The role an operand plays in a call, kept separate from the IR expression so
-/// the emission site can decide how to obtain the pointer (pool base, staged
-/// copy, ...) without re-deriving what the operand IS.
+/// The role an operand plays in a call, kept separate from the IR expression
+/// so the emission site can decide how to obtain the pointer without
+/// re-deriving what the operand IS.
 type OperandRole =
     /// Left/first factor.
     | RoleA
@@ -276,73 +235,60 @@ type OperandRole =
 /// The concrete `blade_linalg.hpp` adapter a routed call lands on. A ROUTE is
 /// narrower than a routine: `gram(A, A)` and `gram(A, B)` are both rank-k
 /// updates in BLAS terms but reach different entry points because Blade's
-/// symmetric result is PACKED triangular storage while its general result is a
-/// dense pool — a difference the shim (not codegen) has to absorb.
+/// symmetric result is PACKED triangular storage while its general result is
+/// a dense pool -- a difference the shim (not codegen) has to absorb.
 type LinAlgRoute =
-    /// `blade_gram_same_<p>` — one triangle into Blade's PACKED upper-triangular
-    /// storage.
-    ///
-    /// REAL:    C = A·Aᵀ, a symmetric rank-k update  (`ssyrk` / `dsyrk`).
-    /// COMPLEX: C = A·A^H, a HERMITIAN rank-k update (`cherk` / `zherk`).
-    ///
-    /// The complex case is not a naming quibble. Blade's own scalar loop for a
-    /// complex gram accumulates `A[i][k] * conj_scalar(A[j][k])` — conjugating
-    /// the SECOND factor — which is exactly A·A^H and exactly what `herk`
-    /// computes. Binding the complex instance to `zsyrk` (the name-symmetric
-    /// choice) would silently compute a different matrix, and would also
-    /// disagree with the Hermitian storage class Blade deduces for the result.
+    /// `blade_gram_same_<p>` -- one triangle into Blade's PACKED
+    /// upper-triangular storage. REAL: C = A.A^T (`ssyrk`/`dsyrk`). COMPLEX:
+    /// C = A.A^H, a HERMITIAN rank-k update (`cherk`/`zherk`) -- not a naming
+    /// quibble: Blade's complex-gram scalar loop accumulates
+    /// `A[i][k] * conj_scalar(A[j][k])`, exactly A.A^H, so binding it to
+    /// `zsyrk` would silently compute a different matrix.
     | RouteGramSame
-    /// `blade_gram_distinct_<p>` — into a dense pool.
-    ///
-    /// REAL:    C = A·Bᵀ  (`sgemm`/`dgemm`, transB = Trans).
-    /// COMPLEX: C = A·B^H (`cgemm`/`zgemm`, transB = **ConjTrans**), because
-    /// the scalar loop conjugates B's element exactly as in the same-array case.
+    /// `blade_gram_distinct_<p>` -- into a dense pool. REAL: C = A.B^T
+    /// (`sgemm`/`dgemm`, transB = Trans). COMPLEX: C = A.B^H (`cgemm`/
+    /// `zgemm`, transB = ConjTrans), matching the same scalar loop.
     | RouteGramDistinct
-    /// `blade_matmul_<p>` — A·B into a dense pool. f64 only at the SURFACE
-    /// (`TypeCheck.inferMatmul`), so only the `d` instance is reachable today;
+    /// `blade_matmul_<p>` -- A.B into a dense pool. f64 only at the SURFACE
+    /// (`TypeCheck.inferMatmul`), so only the `d` instance is reachable;
     /// widening the surface is a separate language decision.
     | RouteMatmul
-    /// `blade_dot_<p>` — s = seed + x·y over two rank-1 pools.
-    ///
-    /// COMPLEX IS `dotu`, NEVER `dotc`. The matched shape is
-    /// `reduce(zip(x, y) under *, (+))`, whose kernel is `a * b` with NO
-    /// conjugation anywhere. `dotc` computes Σ conj(x_i)·y_i and would silently
-    /// return a different number — most visibly for `dot(x, x)`, where `dotc`
-    /// gives the real squared norm and Blade's fold gives the complex Σ x_i².
-    /// A conjugating inner product is a DIFFERENT operation and needs its own
-    /// surface form (a `prodsum` with an explicit `conj`, matched as its own
-    /// pattern); it is deliberately not implemented here.
+    /// `blade_dot_<p>` -- s = seed + x.y over two rank-1 pools. COMPLEX IS
+    /// `dotu`, NEVER `dotc`: the matched shape
+    /// `reduce(zip(x, y) under *, (+))` has kernel `a * b` with NO
+    /// conjugation, while `dotc` computes sum conj(x_i).y_i, a different
+    /// number (most visibly for `dot(x, x)`, real squared norm vs. complex
+    /// sum x_i^2). A conjugating inner product needs its own surface form
+    /// and is not implemented here.
     | RouteDot
-    /// `blade_gemv_<p>` — y = A·x, row skeleton in, rank-1 pool out. The matched
-    /// body is `prodsum(row, x)`, which conjugates nothing, so every precision
-    /// uses `CblasNoTrans` — including the complex ones.
+    /// `blade_gemv_<p>` -- y = A.x, row skeleton in, rank-1 pool out. The
+    /// matched body is `prodsum(row, x)`, which conjugates nothing, so every
+    /// precision uses `CblasNoTrans`, including the complex ones.
     | RouteGemv
-    /// `blade_eigh_packed_<p>` — eigendecomposition of a rank-2 COMPACT
+    /// `blade_eigh_packed_<p>` -- eigendecomposition of a rank-2 COMPACT
     /// operand, straight off `pool_base`. Real is `?spev`; complex is
-    /// `?hpev` (Hermitian). THE ZERO-CONVERSION ROUTE: Blade's row-major-upper
+    /// `?hpev` (Hermitian). ZERO-CONVERSION ROUTE: Blade's row-major-upper
     /// packed pool IS col-major-lower packed for a real symmetric matrix
     /// (measured n = 1..6), so LAPACK reads it as it stands.
     | RouteEighPacked
-    /// `blade_eigh_dense_<p>` — eigendecomposition of a dense rank-2 operand
+    /// `blade_eigh_dense_<p>` -- eigendecomposition of a dense rank-2 operand
     /// asserted symmetric (real, `?syev`) or Hermitian (complex, `?heev`).
     | RouteEighDense
 
-/// An operand as classified: the IR expression, its role, and whether the call
-/// consumes it transposed.
+/// An operand as classified: the IR expression, its role, and whether the
+/// call consumes it transposed.
 type LinAlgOperand = {
     Role: OperandRole
     Expr: IRExpr
     Transposed: bool
 }
 
-/// How the emission site obtains a pointer to a NEST-matched operand.
-///
-/// The distinction matters because a nest's operands reach C++ by three
-/// different routes and this module must not guess which: an input array is
+/// How the emission site obtains a pointer to a NEST-matched operand. A
+/// nest's operands reach C++ by three different routes: an input array is
 /// already named by `LoopNestCodeGen.InputArrayNames`, the output by
 /// `OutputName`, but a value the kernel BODY references (a capture, or an
-/// enclosing let-binding) has no name here at all — only CodeGen's name map
-/// knows it, so the IR expression is handed back untouched.
+/// enclosing let-binding) has no name here -- only CodeGen's name map knows
+/// it, so the IR expression is handed back untouched.
 type NestOperandSource =
     /// A loop-nest input array, under the name the nest already uses.
     | FromNestArray of name: string
@@ -352,10 +298,10 @@ type NestOperandSource =
     /// The nest's freshly-allocated output array.
     | FromNestOutput of name: string
 
-/// How the extents of a call are named. v1 always resolves them at RUNTIME off
-/// the operands' `.extents[]`, exactly as the pre-shim emission did — the
-/// descriptor records WHICH extent of WHICH operand, so the emission site
-/// spells the accessor and this module stays free of C++ text.
+/// How the extents of a call are named: resolved at RUNTIME off the
+/// operands' `.extents[]`. The descriptor records WHICH extent of WHICH
+/// operand, so the emission site spells the accessor and this module stays
+/// free of C++ text.
 type DimSource = {
     /// Index into the call's operand list.
     Operand: OperandRole
@@ -368,21 +314,20 @@ type LinAlgCall = {
     Routine: LinAlgRoutine
     Route: LinAlgRoute
     Level: BlasLevel
-    // NOTE: there is deliberately NO `Routing` field. Routing is a function of
-    // (routine × BACKEND), and this descriptor is produced by mode-agnostic
-    // classifiers — carrying a mode-dependent answer on a mode-independent
-    // record is exactly the inconsistency the backend DU exists to prevent.
-    // `shimEntryPoint` reads `routingOf backend call.Routine` instead.
+    // No `Routing` field: routing is a function of (routine x BACKEND), and
+    // this descriptor is mode-agnostic, so a mode-dependent answer here would
+    // be inconsistent. `shimEntryPoint` reads `routingOf backend
+    // call.Routine` instead.
     /// NODE-matched routes only (gram/matmul): the operands as IR expressions.
     /// Empty for nest-matched routes, which use `NestOperands` instead.
     Operands: LinAlgOperand list
-    /// NEST-matched routes only (dot/gemv): where each operand's pointer comes
-    /// from, in the shim call's own argument order. Empty for node routes.
+    /// NEST-matched routes only (dot/gemv): where each operand's pointer
+    /// comes from, in the shim call's own argument order. Empty for node
+    /// routes.
     NestOperands: (OperandRole * NestOperandSource) list
-    /// Rows of the result. `None` for the nest routes, whose extents come from
-    /// the built loop nest (`genLoopBoundExpr`) rather than from an operand
-    /// axis this module could name — recording a made-up axis would be worse
-    /// than recording nothing.
+    /// Rows of the result. `None` for the nest routes, whose extents come
+    /// from the built loop nest rather than from an operand axis this module
+    /// could name.
     M: DimSource option
     /// Columns of the result (for Syrk this equals M).
     N: DimSource option
@@ -390,65 +335,71 @@ type LinAlgCall = {
     K: DimSource option
     /// Element type of the contraction, as classified.
     ElemType: IRType
-    /// `ElemType`'s BLAS precision — the second dispatch axis. Filled by every
-    /// classifier and READ by `shimEntryPoint` to pick the routine letter, so a
-    /// call can never reach an entry point of the wrong width.
+    /// `ElemType`'s BLAS precision -- the second dispatch axis. Filled by
+    /// every classifier and READ by `shimEntryPoint` to pick the routine
+    /// letter, so a call can never reach an entry point of the wrong width.
     Precision: Precision
     /// True when the result is written into Blade's packed triangular
     /// (symmetric or Hermitian) storage rather than a dense pool.
     PackedTriangularResult: bool
 }
 
-// ============================================================================
 // Policy table
-// ============================================================================
 
 /// The routing policy, stated once and explicitly.
 ///
-/// L1-ELEMENTWISE STAYS NATIVE. `axpy`/`scal` shapes are bandwidth-bound and
-/// the flat elementwise loop (Phase 3) already vectorises them; a BLAS call
-/// boundary buys nothing and costs a function call plus a staging decision.
-/// L1 REDUCTION shapes (`dot`, `nrm2`) and all of L2/L3 are the paying routes,
-/// with L3 >> L2 because blocking and microkernels are simply unreachable from
-/// generated loop code.
+/// L1-ELEMENTWISE STAYS NATIVE: `axpy`/`scal` shapes are bandwidth-bound and
+/// the flat elementwise loop already vectorises them, so a BLAS call boundary
+/// buys nothing. L1 REDUCTION shapes (`dot`, `nrm2`) and all of L2/L3 are the
+/// paying routes, with L3 >> L2 because blocking and microkernels are
+/// unreachable from generated loop code.
 ///
-/// A row exists for every (routine × BACKEND) pair this module can NAME,
-/// including the ones it cannot yet MATCH or EMIT, so "matched but routed
+/// A row exists for every (routine x BACKEND) pair this module can NAME,
+/// including ones it cannot yet MATCH or EMIT, so "matched but routed
 /// native", "not yet matched" and "backend not implemented" are all
 /// distinguishable by reading one table.
-let private cudaPending =
-    "CudaBlas is DECLARED, NOT IMPLEMENTED: every route routes Native under this mode, so a caller asking for it emits its ordinary host loops rather than anything wrong. See LinAlgBackend.CudaBlas for what landing it requires (column-major operand swap, cuSOLVER for the LAPACK level, per-program handle lifecycle)"
+/// The shared rationale for every CudaBlas row that stays Native because it
+/// is TRANSFER-BOUND -- a decision, not a "not implemented" note.
+let private cudaPcieBound =
+    "PCIe-bound under the per-call offload (device alloc + H2D + kernel + D2H + free). The transferred bytes and the flops are the SAME order for an L1/L2 shape, so the copy costs more than the arithmetic it feeds; only L3 amortises, where O(mn + nk) bytes buy O(mnk) flops. Stays on the host, where an OpenBLAS route is available under its own gate"
 
 let policy : (LinAlgRoutine * BlasLevel * LinAlgBackend * Routing * string) list =
     [ Gemm, L3, HostBlas, ViaShim,
       "the one shape emitted loop code cannot approach; blocking/microkernels pay by orders of magnitude"
       Syrk, L3, HostBlas, ViaShim,
-      "same as gemm, and it halves the work by computing one triangle — which is also Blade's storage. COMPLEX instances are HERMITIAN (cherk/zherk), matching what Blade's own complex loop already computes"
+      "same as gemm, and it halves the work by computing one triangle -- which is also Blade's storage. COMPLEX instances are HERMITIAN (cherk/zherk), matching what Blade's own complex loop already computes"
       Gemv, L2, HostBlas, ViaShim,
       "pays modestly (bandwidth-bound but cache-blocked); MATCHED (Phase 5b) on the per-row prodsum-fiber nest"
       Dot,  L1, HostBlas, ViaShim,
-      "an L1 REDUCTION, unlike axpy/scal: the serial FP chain is the bottleneck and BLAS breaks it; MATCHED (Phase 5b) on reduce-over-deferred-zip-product. COMPLEX instances are dotu, NEVER dotc (Blade's fold does not conjugate). PRECEDENCE: an `omp`-licensed fold kernel WINS — an explicit user reorder licence beats a dispatch heuristic, and under no-BLAS this route's fallback is serial, so firing would silently strip licensed parallelism"
+      "an L1 REDUCTION, unlike axpy/scal: the serial FP chain is the bottleneck and BLAS breaks it; MATCHED (Phase 5b) on reduce-over-deferred-zip-product. COMPLEX instances are dotu, NEVER dotc (Blade's fold does not conjugate). PRECEDENCE: an `omp`-licensed fold kernel WINS -- an explicit user reorder licence beats a dispatch heuristic, and under no-BLAS this route's fallback is serial, so firing would silently strip licensed parallelism"
       Nrm2, L1, HostBlas, ViaShim,
       "same paying L1-reduction argument as dot, but NOT MATCHED: recognising it means seeing a `sqrt` wrapped around a SELF-dot, and no sqrt-shape case exists in the classifier yet"
       Axpy, L1, HostBlas, Native,
-      "bandwidth-bound elementwise; the Phase 3 flat loop already vectorises it, so a call boundary is pure loss"
+      "bandwidth-bound elementwise; the flat loop already vectorises it, so a call boundary is pure loss"
       Scal, L1, HostBlas, Native,
-      "same as axpy — an elementwise scale is one vectorised pass either way"
+      "same as axpy -- an elementwise scale is one vectorised pass either way"
       Eigh, L3, HostBlas, ViaShim,
-      "LAPACK, not BLAS: an eigensolver is unreachable from emitted loop code at any quality, and Blade's synthesized cyclic Jacobi is O(sweeps·n^3) against LAPACK's blocked tridiagonal reduction. Gated separately (lapackAvailable / -DBLADE_HAS_LAPACK) and PERMANENTLY outside byte-identity: eigenvector sign and degenerate-subspace basis are not unique"
-      Gemm, L3, CudaBlas, Native, cudaPending
-      Syrk, L3, CudaBlas, Native, cudaPending
-      Gemv, L2, CudaBlas, Native, cudaPending
-      Dot,  L1, CudaBlas, Native, cudaPending
-      Nrm2, L1, CudaBlas, Native, cudaPending
-      Axpy, L1, CudaBlas, Native, cudaPending
-      Scal, L1, CudaBlas, Native, cudaPending
-      // The device eigensolver sibling is cuSOLVER (`cusolverDnDsyevd` /
-      // `cusolverDnZheevd`), NOT cuBLAS and not "cuLAPACK" — a separate
-      // library, a separate handle, and a workspace-query protocol cuBLAS has
-      // no analogue of. Declared Native for the same reason as the rows above.
+      "LAPACK, not BLAS: an eigensolver is unreachable from emitted loop code at any quality, and Blade's synthesized cyclic Jacobi is O(sweeps*n^3) against LAPACK's blocked tridiagonal reduction. Gated separately (lapackAvailable / -DBLADE_HAS_LAPACK) and PERMANENTLY outside byte-identity: eigenvector sign and degenerate-subspace basis are not unique"
+      // CudaBlas: the two L3 rows are the only ones that flip, and the flip
+      // is deliberately a table edit -- `blade test linalg` pins every row,
+      // so landing (or losing) a device route requires changing a test.
+      Gemm, L3, CudaBlas, ViaShim,
+      "the paying offload: O(mnk) flops against O(mn + nk) transferred bytes, so arithmetic intensity grows with the contracted extent and the PCIe round trip amortises. Reaches `gram(A, B)` (A*B^T / A*B^H) and `matmul(A, B)` through cublas?gemm under the column-major operand SWAP -- a reinterpretation of Blade's own pools, not a transpose, so zero staging"
+      Syrk, L3, CudaBlas, ViaShim,
+      "same L3 argument as gemm, and it halves the work by computing one triangle. COMPLEX instances are HERMITIAN (cublasCherk/Zherk), matching what Blade's own complex loop computes. THE TRAP ROW: under the operand swap this composes an upper<->lower FILL-MODE FLIP with the conjugation -- verified at runtime against the host result, not argued"
+      Gemv, L2, CudaBlas, Native, cudaPcieBound
+      Dot,  L1, CudaBlas, Native, cudaPcieBound
+      Nrm2, L1, CudaBlas, Native,
+      "not matched on any backend (no sqrt-shape case exists), and " + cudaPcieBound
+      Axpy, L1, CudaBlas, Native,
+      "Native on EVERY backend for the host reason (bandwidth-bound elementwise, already vectorised by the flat loop) and additionally " + cudaPcieBound
+      Scal, L1, CudaBlas, Native,
+      "same as axpy: Native on every backend, and additionally " + cudaPcieBound
+      // The device eigensolver sibling is cuSOLVER, not cuBLAS: a separate
+      // library, handle and workspace-query protocol. Native because it is
+      // UNIMPLEMENTED, not because it wouldn't pay -- a recorded follow-on.
       Eigh, L3, CudaBlas, Native,
-      "cuSOLVER (cusolverDnDsyevd / cusolverDnZheevd), not cuBLAS: separate library, separate handle, explicit workspace query. " + cudaPending ]
+      "cuSOLVER (cusolverDnDsyevd / cusolverDnZheevd), not cuBLAS: separate library, separate handle, explicit workspace query. NOT IMPLEMENTED -- a recorded follow-on rather than a policy decision, since an O(n^3) eigensolver would amortise its transfer exactly as the L3 rows above do. Gate-off, `math.eigh` keeps the synthesized Jacobi; gate-on with LAPACK it keeps the host route" ]
 
 /// The routing decision for a routine UNDER A BACKEND, from the table above.
 let routingOf (backend: LinAlgBackend) (r: LinAlgRoutine) : Routing =
@@ -457,84 +408,122 @@ let routingOf (backend: LinAlgBackend) (r: LinAlgRoutine) : Routing =
         if rr = r && bb = backend then Some routing else None)
     |> Option.defaultValue Native
 
-/// The BLAS level of a routine, from the table above. Backend-independent: the
-/// level is a property of the operation's arithmetic intensity, not of where it
-/// runs, so it is read off whichever row names the routine first.
+/// The BLAS level of a routine, from the table above. Backend-independent:
+/// level is a property of the operation's arithmetic intensity, not of where
+/// it runs, so it is read off whichever row names the routine first.
 let levelOf (r: LinAlgRoutine) : BlasLevel =
     policy
     |> List.tryPick (fun (rr, lvl, _, _, _) -> if rr = r then Some lvl else None)
     |> Option.defaultValue L1
 
 /// The C++ entry point a routed call lands on. Kept here (not in CodeGen) so
-/// the name of every shim function this compiler can emit is enumerable from
-/// one place — the same reason `runtimeHeaderNames` is a single source of truth.
+/// every shim function name this compiler can emit is enumerable from one
+/// place.
 ///
-/// THE AVAILABILITY GATE IS CONSULTED HERE, AND ONLY HERE (Phase 5c). Every
-/// route — the two node classifications and both nest patterns — funnels
-/// through this function on its way to emitted text, so one conjunct at this
-/// point disables dispatch globally. Deliberately NOT folded into `routingOf`:
-/// that field is POLICY ("is this shape worth a BLAS call at all"), which is a
-/// property of the routine and is pinned by tests that must not depend on
-/// whether OpenBLAS happens to be installed. Availability is a property of the
-/// BUILD. Keeping them separate is what lets the policy table stay a readable,
-/// environment-independent statement while the gate stays a one-line
-/// conjunction.
+/// THE AVAILABILITY GATE, THE BACKEND MODE and THE PRECISION LETTER are all
+/// resolved HERE AND ONLY HERE: every route funnels through this function on
+/// its way to emitted text, so one conjunct disables dispatch globally, and
+/// the classifiers above stay backend- and precision-agnostic. NOT folded
+/// into `routingOf`: that field is POLICY, pinned by tests independent of
+/// whether OpenBLAS is installed, while availability is a property of the
+/// BUILD -- keeping them separate lets the policy table stay a readable,
+/// environment-independent statement.
 ///
-/// A call that classifies but gets no entry point is a DECLINED DISPATCH, and
-/// all four emission sites already spell that case: gram and matmul fall to
-/// their own scalar loops, dot and gemv fall through to the ordinary loop-nest
-/// emitters. So "gate off", "backend not implemented" and "shape not
-/// recognised" all reach the same, already exercised, code.
+/// A call that classifies but gets no entry point is a DECLINED DISPATCH: all
+/// four emission sites already spell that case (gram/matmul fall to their own
+/// scalar loops, dot/gemv fall through to the loop-nest emitters), so "gate
+/// off", "backend not implemented" and "shape not recognised" all reach the
+/// same, already exercised, code.
 ///
-/// THE BACKEND MODE ENTERS HERE AND ONLY HERE. The classifiers above never see
-/// it, which is what keeps one copy of the shape-matching logic across targets.
-///
-/// THE PRECISION LETTER IS APPENDED HERE, so the emitted TEXT names the exact
-/// routine family and width — `blade_gram_same_z` is visibly a `zherk` call and
-/// `blade_gram_same_d` a `dsyrk` one. That is deliberate: it makes the routing
-/// decision assertable from generated source, which is the only place a
-/// mis-dispatch would show (the values agree to a ULP either way).
+/// The precision letter is appended here so the emitted TEXT names the exact
+/// routine family and width (`blade_gram_same_z` is visibly `zherk`), making
+/// the routing decision assertable from generated source.
 let shimEntryPoint (backend: LinAlgBackend) (call: LinAlgCall) : string option =
     let available =
         match backend with
-        // The LAPACK routes ride their own gate and their own header, so the
-        // availability question is per-ROUTINE, not per-backend alone. Routing
-        // it here keeps the single-funnel property: still one place, one
-        // conjunct, now reading the right predicate for the routine at hand.
+        // The LAPACK routes ride their own gate and their own header, so
+        // availability is per-ROUTINE, not per-backend alone.
         | HostBlas when call.Routine = Eigh -> lapackAvailable ()
         | HostBlas -> blasAvailable ()
-        // Declared, not implemented — see LinAlgBackend.CudaBlas. Returning
-        // None here (rather than omitting the arm) is what makes "asked for a
-        // backend that does not exist yet" a clean fall-through to host loops
-        // instead of a compile error or, worse, a host call in device code.
-        | CudaBlas -> false
+        // The device mode has its own gate, environment variable and default
+        // (OFF). See `cublasAvailable`.
+        | CudaBlas -> cublasAvailable ()
     if not available then None else
     match routingOf backend call.Routine with
     | Native -> None
     | ViaShim ->
         let p = precisionLetter call.Precision
-        match call.Route with
-        | RouteGramSame -> Some (sprintf "blade_linalg::blade_gram_same_%s" p)
-        | RouteGramDistinct -> Some (sprintf "blade_linalg::blade_gram_distinct_%s" p)
-        | RouteMatmul -> Some (sprintf "blade_linalg::blade_matmul_%s" p)
-        | RouteDot -> Some (sprintf "blade_linalg::blade_dot_%s" p)
-        | RouteGemv -> Some (sprintf "blade_linalg::blade_gemv_%s" p)
-        // Different namespace AND different header: `blade_lapack.hpp` carries
-        // its own `#ifndef BLADE_HAS_LAPACK #error`, so a program that names
-        // these advertises a LAPACK dependency distinct from a BLAS one.
-        | RouteEighPacked -> Some (sprintf "blade_lapack::blade_eigh_packed_%s" p)
-        | RouteEighDense -> Some (sprintf "blade_lapack::blade_eigh_dense_%s" p)
+        match backend with
+        | HostBlas ->
+            match call.Route with
+            | RouteGramSame -> Some (sprintf "blade_linalg::blade_gram_same_%s" p)
+            | RouteGramDistinct -> Some (sprintf "blade_linalg::blade_gram_distinct_%s" p)
+            | RouteMatmul -> Some (sprintf "blade_linalg::blade_matmul_%s" p)
+            | RouteDot -> Some (sprintf "blade_linalg::blade_dot_%s" p)
+            | RouteGemv -> Some (sprintf "blade_linalg::blade_gemv_%s" p)
+            // Different namespace AND different header: `blade_lapack.hpp`
+            // carries its own `#ifndef BLADE_HAS_LAPACK #error`, so a program
+            // that names these advertises a LAPACK dependency distinct from a
+            // BLAS one.
+            | RouteEighPacked -> Some (sprintf "blade_lapack::blade_eigh_packed_%s" p)
+            | RouteEighDense -> Some (sprintf "blade_lapack::blade_eigh_dense_%s" p)
+        // The device entry-point table is named PER ROUTE, not per cuBLAS
+        // routine, with argument lists identical to the host adapters' (same
+        // order, same skeleton + pool capacity pairs), so a backend cannot
+        // drift into a different calling convention without the emitter
+        // noticing. Which cuBLAS routine each lands on, and the column-major
+        // swap that gets it there, is documented row by row in
+        // `blade_linalg_cuda.hpp`.
+        //
+        // `extern "C"` at global scope, hence NO namespace qualifier: the
+        // definitions are compiled by nvcc into a separate translation unit
+        // and reached across an unmangled linkage boundary, exactly like the
+        // `__launch_*` wrappers the `where cuda` emitters already use. The
+        // `blade_cuda_` prefix is the namespace.
+        | CudaBlas ->
+            match call.Route with
+            | RouteGramSame -> Some (sprintf "blade_cuda_gram_same_%s" p)
+            | RouteGramDistinct -> Some (sprintf "blade_cuda_gram_distinct_%s" p)
+            | RouteMatmul -> Some (sprintf "blade_cuda_matmul_%s" p)
+            // Unreachable: `routingOf CudaBlas` answers Native for Dot / Gemv /
+            // Eigh, so the ViaShim arm above already declined. Spelled out so
+            // that flipping one of those policy rows produces a compile error
+            // here -- a missing entry point rather than a silently wrong one.
+            | RouteDot | RouteGemv | RouteEighPacked | RouteEighDense -> None
 
-// ============================================================================
+/// Resolve a NODE-matched call (`gram`, `matmul`) to the backend it runs on
+/// and the C++ entry point it lands on -- the one place the emission-mode
+/// choice is made.
+///
+/// Device first when its gate is on, host next, native if neither. Asking
+/// `shimEntryPoint CudaBlas` unconditionally would be wrong: for any route
+/// whose CudaBlas policy row is `Native`, a caller that stopped there would
+/// emit Blade's loops even where the HOST route was available -- turning
+/// "BLADE_CUBLAS=1" into a silent regression. Chaining makes the device gate
+/// purely additive.
+///
+/// The backend is RETURNED, not just the name, because the emission site has
+/// to name the matching header (`blade_linalg.hpp` vs
+/// `blade_linalg_cuda.hpp`); deriving it from the entry-point string would be
+/// a second, weaker copy of the same decision.
+///
+/// Only the NODE routes go through here. `dot` / `gemv` / `eigh` ask for
+/// `HostBlas` directly at their own sites: their CudaBlas rows are `Native`
+/// by policy, so the chain would resolve to HostBlas anyway.
+let resolveNodeRoute (call: LinAlgCall) : (LinAlgBackend * string) option =
+    let ask (b: LinAlgBackend) = shimEntryPoint b call |> Option.map (fun e -> (b, e))
+    match (if cublasAvailable () then ask CudaBlas else None) with
+    | Some r -> Some r
+    | None -> ask HostBlas
+
 // Classification entry points
-// ============================================================================
 
 /// The precision two operands AGREE on, or None. Mixed precisions decline
-/// rather than promote: BLAS has no mixed-width routine, and silently widening
-/// one operand would be a storage change the caller never asked for. (Blade's
-/// own scalar loops promote per the element-type rules, which is exactly what a
-/// declined route falls back to — so declining costs the optimisation and
-/// changes no value.)
+/// rather than promote: BLAS has no mixed-width routine, and silently
+/// widening one operand would be a storage change the caller never asked for.
+/// Blade's own scalar loops promote per the element-type rules, which is
+/// exactly what a declined route falls back to, so declining costs the
+/// optimisation and changes no value.
 let private agreedPrecision (a: IRType) (b: IRType) : Precision option =
     match precisionOf a, precisionOf b with
     | Some pa, Some pb when pa = pb -> Some pa
@@ -548,17 +537,17 @@ let private elemOf (e: IRExpr) : IRType option =
 /// Classify `gram(l, r)`.
 ///
 ///   sameArray -> Syrk: square m x m written into Blade's PACKED
-///                upper-triangular storage. REAL is A·Aᵀ (`ssyrk`/`dsyrk`);
-///                COMPLEX is A·A^H, a HERMITIAN rank-k update
-///                (`cherk`/`zherk`) — which is what Blade's own complex scalar
-///                loop already computes, since it conjugates the second factor.
-///   distinct  -> Gemm with B transposed: C(m x p) = A(m x n) · B(p x n)ᵀ for
-///                real, and A · B^H for complex (`ConjTrans`), matching the
+///                upper-triangular storage. REAL is A.A^T (`ssyrk`/`dsyrk`);
+///                COMPLEX is A.A^H, a HERMITIAN rank-k update
+///                (`cherk`/`zherk`) -- what Blade's own complex scalar loop
+///                already computes, since it conjugates the second factor.
+///   distinct  -> Gemm with B transposed: C(m x p) = A(m x n) . B(p x n)^T for
+///                real, and A . B^H for complex (`ConjTrans`), matching the
 ///                same scalar loop. Dense result.
 ///
-/// Returns None (→ caller keeps its scalar loops) when either operand is not an
-/// array, when their element types have no BLAS precision (integers, structs),
-/// or when the two precisions disagree.
+/// Returns None (caller keeps its scalar loops) when either operand is not an
+/// array, when their element types have no BLAS precision (integers,
+/// structs), or when the two precisions disagree.
 let classifyGram (l: IRExpr) (r: IRExpr) (sameArray: bool) : LinAlgCall option =
     match elemOf l, elemOf r with
     | Some le, Some re ->
@@ -600,12 +589,12 @@ let classifyGram (l: IRExpr) (r: IRExpr) (sameArray: bool) : LinAlgCall option =
 /// Classify `matmul(a, b)`: C(m x n) = A(m x k) * B(k x n), dense result, no
 /// transposes. The first-class intrinsic's only classification.
 ///
-/// Only the `d` instance is reachable: `TypeCheck.inferMatmul` requires Float64
-/// elements at the SURFACE (BL3999), so a f32/complex/int call never gets here.
-/// The precision generalisation below is therefore a backstop that keeps this
-/// classifier honest if the surface is ever widened — but widening it is a
-/// LANGUAGE decision (what should `matmul` mean for complex operands: A·B, or
-/// A·B^H?) and is deliberately not taken here.
+/// Only the `d` instance is reachable: `TypeCheck.inferMatmul` requires
+/// Float64 elements at the SURFACE (BL3999), so a f32/complex/int call never
+/// gets here. The precision generalisation below is a backstop that keeps
+/// this classifier honest if the surface is ever widened -- but widening it
+/// is a LANGUAGE decision (what should `matmul` mean for complex operands:
+/// A.B, or A.B^H?) and is deliberately not taken here.
 let classifyMatmul (a: IRExpr) (b: IRExpr) : LinAlgCall option =
     match elemOf a, elemOf b with
     | Some ae, Some be ->
@@ -642,35 +631,32 @@ let private isPlainDenseAxis (ix: IRIndexType) =
     && ix.IxKind = IxKPlain
     && ix.Dependencies.IsEmpty
     && (match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true)
-/// Classify `eigh(S)` — the symmetric/Hermitian eigendecomposition — on the
-/// OPERAND'S TYPE alone. This is the (routine × precision × SYMMETRY) decision
-/// in one place, and symmetry is the axis that picks the routine FAMILY:
+
+/// Classify `eigh(S)` -- the symmetric/Hermitian eigendecomposition -- on the
+/// OPERAND'S TYPE alone. Symmetry is the axis that picks the routine FAMILY:
 ///
-///   | operand                            | s      | d      | c      | z      |
-///   |------------------------------------|--------|--------|--------|--------|
-///   | rank-2 compact SymSymmetric        | sspev  | dspev  | DECLINE| DECLINE|
-///   | rank-2 compact SymHermitian        | sspev  | dspev  | chpev  | zhpev  |
-///   | dense rank-2 (symmetry ASSUMED)    | ssyev  | dsyev  | cheev  | zheev  |
-///   | anything else (antisym, int, …)    | DECLINE                            |
+///   | operand                          | s      | d      | c       | z       |
+///   |-----------------------------------|--------|--------|---------|---------|
+///   | rank-2 compact SymSymmetric      | sspev  | dspev  | DECLINE | DECLINE |
+///   | rank-2 compact SymHermitian      | sspev  | dspev  | chpev   | zhpev   |
+///   | dense rank-2 (symmetry ASSUMED)  | ssyev  | dsyev  | cheev   | zheev   |
+///   | anything else (antisym, int...)  | DECLINE                            |
 ///
-/// THE COMPLEX-SYMMETRIC TRAP. A complex array carrying `SymSymmetric` is
-/// complex-SYMMETRIC (A = Aᵀ, no conjugation), which is NOT Hermitian and is
-/// not normal in general. LAPACK has no eigensolver for it at all — there is no
-/// `zsyev` and no `zspev`. Its spectrum is COMPLEX and its eigenvectors are not
-/// orthogonal, so the right routine is the general `zgeev`, which returns a
-/// different result TYPE — a different operation, not a precision swap. The
-/// route therefore DECLINES to the native path. This is the row a
-/// precision-only widening would silently get wrong, exactly as
-/// `zsyrk`-for-`zherk` would at the BLAS level.
+/// THE COMPLEX-SYMMETRIC TRAP: a complex array carrying `SymSymmetric` is
+/// complex-SYMMETRIC (A = A^T, no conjugation), which is NOT Hermitian and not
+/// normal in general. LAPACK has no eigensolver for it -- no `zsyev`, no
+/// `zspev`. Its spectrum is COMPLEX and its eigenvectors are not orthogonal,
+/// so the right routine is the general `zgeev`, a different result TYPE, not
+/// a precision swap -- exactly the row a precision-only widening would get
+/// wrong, as `zsyrk`-for-`zherk` would. The route DECLINES to the native path.
 ///
-/// REAL + `SymHermitian` routes to the REAL packed entry point, and that is a
-/// theorem rather than a convenience: a real Hermitian matrix IS symmetric, and
-/// `?spev` is the routine for it.
+/// REAL + `SymHermitian` routes to the REAL packed entry point as a theorem,
+/// not a convenience: a real Hermitian matrix IS symmetric, and `?spev` is
+/// the routine for it.
 ///
-/// DENSE ASSUMES SYMMETRY, inheriting the surface's own domain — `math.eigh`
-/// documents "symmetry is ASSUMED, not checked". A dense COMPLEX operand is
-/// assumed HERMITIAN, which is what the `h` in `eigh` means and the only
-/// reading under which the operation is defined.
+/// DENSE ASSUMES SYMMETRY, inheriting the surface's own domain (`math.eigh`
+/// documents "symmetry is ASSUMED, not checked"); a dense COMPLEX operand is
+/// assumed HERMITIAN, the only reading under which the operation is defined.
 let classifyEigh (operand: IRArrayType) : LinAlgCall option =
     if operand.IsVirtual then None else
     match precisionOf operand.ElemType with
@@ -678,7 +664,7 @@ let classifyEigh (operand: IRArrayType) : LinAlgCall option =
     | Some prec ->
         let complexOperand = isComplexPrecision prec
         match operand.IndexTypes with
-        // ---- rank-2 COMPACT group: the packed route --------------------------
+        // rank-2 COMPACT group: the packed route
         | [ ix ] when ix.Rank = 2 && ix.IxKind = IxKPlain && ix.Dependencies.IsEmpty ->
             let packedOk =
                 match ix.Symmetry with
@@ -696,7 +682,7 @@ let classifyEigh (operand: IRArrayType) : LinAlgCall option =
                        ElemType = operand.ElemType
                        Precision = prec
                        PackedTriangularResult = false }
-        // ---- dense rank-2: symmetry asserted by the caller -------------------
+        // dense rank-2: symmetry asserted by the caller
         | [ i0; i1 ] when isPlainDenseAxis i0 && isPlainDenseAxis i1 ->
             Some { Routine = Eigh
                    Route = RouteEighDense
@@ -718,44 +704,28 @@ let classify (e: IRExpr) : LinAlgCall option =
     | IRMatmul (a, b) -> classifyMatmul a b
     | _ -> None
 
-// ============================================================================
-// Nest matching (Phase 5b) — shared shape predicates
-// ============================================================================
+// Nest matching -- shared shape predicates
 
-/// Is this index slot an ORDINARY dense axis: one index component, no
-/// symmetry, no reserved kind, no reserved tag, no dependence on an outer
-/// loop index?
-///
-/// Every one of those five refusals is load-bearing for a BLAS route:
-/// symmetry means the pool is a packed triangle rather than a rectangle; a
-/// reserved `IxKind` (compound / sparse / ragged / dep / group / orbit) means
-/// the axis iterates something other than `[0, extent)`; a `__`-prefixed tag
-/// marks a halo window or kind sentinel; and a dependence makes the level
-/// triangular. BLAS knows about none of these.
-/// A non-virtual, BLAS-precision array of exactly `rank` ordinary dense axes;
-/// answers its precision so the caller can require agreement across operands.
-/// Virtual operands are refused because a `range`/`reverse` view has no pool
-/// to point at — it inlines into index arithmetic at every use.
+/// A non-virtual, BLAS-precision array of exactly `rank` ordinary dense axes
+/// (see `isPlainDenseAxis`); answers its precision so the caller can require
+/// agreement across operands. Virtual operands are refused because a
+/// `range`/`reverse` view has no pool to point at -- it inlines into index
+/// arithmetic at every use.
 let private denseBlasArrayOfRank (rank: int) (t: IRArrayType) : Precision option =
     if t.IsVirtual then None
     elif List.length t.IndexTypes <> rank then None
     elif not (t.IndexTypes |> List.forall isPlainDenseAxis) then None
     else precisionOf t.ElemType
 
-/// A rank-1 f64 operand that is only ever READ elementwise — never iterated as
-/// a loop level and never peeled. `IxKIrreps` is admitted HERE and nowhere
-/// else: an irreps axis is a block-structured but ordinary contiguous dense
-/// axis (the same judgement IR's dense-rank-1-factor rule already makes, where
-/// `IxKPlain` and `IxKIrreps` are the two accepted kinds), so `v.data[t]` is
-/// the identical object `v[t]` denotes. That is the whole of what the shared
-/// vector of a gemv needs, and it is what the real corpus shape uses
-/// (`ml-equiv/018`, `019`: `prodsum(row, fx)` with `fx : Array<Float like
-/// IrrepsIdx<...>>`).
-///
-/// It is deliberately NOT admitted for an array the nest ITERATES (dot's two
-/// operands, gemv's matrix, gemv's output): those positions decide loop bounds
-/// and peel structure, where the extra tag is a difference this classifier has
-/// not established is inert.
+/// A rank-1 f64 operand that is only ever READ elementwise -- never iterated
+/// as a loop level and never peeled. `IxKIrreps` is admitted HERE and nowhere
+/// else: an irreps axis is block-structured but ordinary contiguous dense, so
+/// `v.data[t]` is the identical object `v[t]` denotes (the corpus shape:
+/// `ml-equiv/018`, `019`: `prodsum(row, fx)` with `fx : Array<Float like
+/// IrrepsIdx<...>>`). Deliberately NOT admitted for an array the nest
+/// ITERATES (dot's two operands, gemv's matrix, gemv's output): those
+/// positions decide loop bounds and peel structure, where the extra tag is a
+/// difference this classifier has not established is inert.
 let private readOnlyBlasVector (t: IRArrayType) : Precision option =
     if t.IsVirtual then None else
     match t.IndexTypes with
@@ -776,11 +746,11 @@ let private singleRectangularLevel (cg: LoopNestCodeGen) : LoopIndexBinding opti
     | _ -> None
 
 /// Gates that hold for EVERY nest-matched route: the nest must be an ordinary
-/// serial traversal of a real pool, with none of the modes that change what the
-/// loop body means or where it runs.
+/// serial traversal of a real pool, with none of the modes that change what
+/// the loop body means or where it runs.
 ///
-/// `HasReynolds`/`IsAntisymmetric` — the body reads PERMUTED coordinates.
-/// `MpiSlab` — the outer level iterates a rank slab, not the whole extent.
+/// `HasReynolds`/`IsAntisymmetric` -- the body reads PERMUTED coordinates.
+/// `MpiSlab` -- the outer level iterates a rank slab, not the whole extent.
 /// A streamed source has no materialised pool at all.
 let private nestModeOk (streamedCount: int) (cg: LoopNestCodeGen) =
     streamedCount = 0
@@ -788,17 +758,15 @@ let private nestModeOk (streamedCount: int) (cg: LoopNestCodeGen) =
     && not cg.HasReynolds
     && not cg.IsAntisymmetric
 
-// ============================================================================
-// (|BlasL1|_|) — dot
-// ============================================================================
+// (|BlasL1|_|) -- dot
 
-/// What the caller must tell the L1 pattern about the FOLD, which lives on the
-/// reduce node rather than on the nest.
+/// What the caller must tell the L1 pattern about the FOLD, which lives on
+/// the reduce node rather than on the nest.
 type DotFoldFacts = {
     /// The fold kernel's body is exactly the builtin `+` over its two
-    /// parameters (`CodeGen.foldKernelBuiltinOp` = `Some IRAdd`). Anything else
-    /// — a user lambda, `*`, `max` — is a different accumulation and `blade_dot`
-    /// would compute the wrong thing.
+    /// parameters (`CodeGen.foldKernelBuiltinOp` = `Some IRAdd`). Anything
+    /// else -- a user lambda, `*`, `max` -- is a different accumulation and
+    /// `blade_dot` would compute the wrong thing.
     FoldIsBuiltinAdd: bool
     /// The fold kernel carried `where ... omp`. See the PRECEDENCE note below.
     FoldRequestedOmp: bool
@@ -808,31 +776,28 @@ type DotFoldFacts = {
 ///
 /// SHAPE MATCHED, exactly:
 ///   * depth-1 rectangular nest accumulating through a fold wrapper
-///     (`FoldWrapper.IsSome`), i.e. the reduce-over-deferred-computation path;
-///   * exactly TWO input arrays, both real f64 of ONE ordinary dense axis;
-///   * the single level carries exactly two element bindings, one per operand
-///     position, each a real full-depth scalar peel (`ArrayRank = 1`,
-///     `RankComponent = 0`) at that level;
-///   * the kernel body is exactly `p_a * p_b` over those two peel parameters,
-///     `p_a` and `p_b` distinct — so no capture, no index variable and no
-///     third term can appear in it;
+///     (`FoldWrapper.IsSome`, the reduce-over-deferred-computation path);
+///   * exactly TWO input arrays, both real f64 of ONE ordinary dense axis,
+///     with exactly two element bindings, one per operand, each a real
+///     full-depth scalar peel (`ArrayRank = 1`, `RankComponent = 0`);
+///   * the kernel body is exactly `p_a * p_b` over those two distinct peel
+///     parameters (no capture, index variable or third term);
 ///   * the fold kernel is the builtin `+`.
 ///
-/// PRECEDENCE (fixed by design; see the `Dot` policy row). If the fold kernel
-/// is `omp`-licensed, this pattern DECLINES and Phase 2's chunked parallel fold
-/// keeps the nest. An explicit user reorder licence outranks a dispatch
-/// heuristic, and it has to: in a build without BLAS this route's fallback is a
-/// serial loop, so firing here would silently convert licensed parallelism into
-/// serial code with nothing in the emitted text to show for it.
+/// PRECEDENCE (see the `Dot` policy row): if the fold kernel is
+/// `omp`-licensed, this pattern DECLINES and the chunked parallel fold keeps
+/// the nest -- an explicit user reorder licence outranks a dispatch
+/// heuristic, since firing here in a no-BLAS build would silently convert
+/// licensed parallelism into serial code.
 ///
-/// The SEED is not part of the match. `reduce`'s seed (the implicit `(+)`
+/// The SEED is not part of the match: `reduce`'s seed (the implicit `(+)`
 /// identity, or a user `init`) is passed through to the shim, whose native
-/// fallback starts its accumulator from it — which is what makes the fallback
-/// byte-identical to the loop for ANY seed rather than only for `0.0`.
+/// fallback starts its accumulator from it, making the fallback
+/// byte-identical to the loop for ANY seed, not only `0.0`.
 let (|BlasL1|_|) ((streamedCount, facts, operandTypes, cg): int * DotFoldFacts * IRArrayType list * LoopNestCodeGen)
         : LinAlgCall option =
     if not facts.FoldIsBuiltinAdd then None
-    elif facts.FoldRequestedOmp then None          // precedence: Phase 2 wins
+    elif facts.FoldRequestedOmp then None          // precedence: chunked fold wins
     elif cg.FoldWrapper.IsNone || cg.FoldChunk.IsSome then None
     elif not (nestModeOk streamedCount cg) then None
     else
@@ -841,12 +806,9 @@ let (|BlasL1|_|) ((streamedCount, facts, operandTypes, cg): int * DotFoldFacts *
     | Some level ->
         let names = cg.InputArrayNames
         if List.length names <> 2 then None
-        // Both operands: real f64, ONE ordinary dense axis, non-virtual. This
-        // is what rules out the rank-1 axes that are not `[0, extent)` sweeps
-        // over a plain pool — sparse/compound key spaces, dependent and ragged
-        // axes, orbit classes — none of which `blade_dot`'s pointer pair can
-        // describe. (`operandTypes` is positionally parallel to
-        // `InputArrayNames`; the caller passes them together for that reason.)
+        // Both operands: real f64, ONE ordinary dense axis, non-virtual --
+        // rules out sparse/compound/dependent/ragged/orbit axes, none of
+        // which `blade_dot`'s pointer pair can describe.
         elif List.length operandTypes <> 2 then None
         else
         match operandTypes |> List.map (denseBlasArrayOfRank 1) with
@@ -864,10 +826,10 @@ let (|BlasL1|_|) ((streamedCount, facts, operandTypes, cg): int * DotFoldFacts *
                     && (match e.SlotTag with Some t -> not (t.StartsWith "__") | None -> true)
                     && precisionOf e.ArrayElemType = Some prec
                 if not (peelOk e0 && peelOk e1) then None else
-                // Body is exactly `<peel> * <peel>` over the two distinct params.
-                // NO CONJUGATION appears here, at any precision — which is why a
-                // complex instance of this route must be `dotu` and never
-                // `dotc`. See `RouteDot`.
+                // Body is exactly `<peel> * <peel>` over the two distinct
+                // params. NO CONJUGATION appears here, at any precision --
+                // why a complex instance of this route must be `dotu` and
+                // never `dotc`. See `RouteDot`.
                 match cg.KernelExpr with
                 | IRBinOp (_, IRMul, IRVar (lId, _), IRVar (rId, _)) when lId <> rId ->
                     let byParam id =
@@ -889,43 +851,39 @@ let (|BlasL1|_|) ((streamedCount, facts, operandTypes, cg): int * DotFoldFacts *
             | _ -> None
         | _ -> None
 
-// ============================================================================
-// (|BlasL2|_|) — gemv
-// ============================================================================
+// (|BlasL2|_|) -- gemv
 
 /// `y = method_for(A) <@> lambda(row) -> prodsum(row, x) |> compute`
 ///   ->  `blade_gemv`.
 ///
-/// WHY THIS SHAPE. It is how matrix-vector actually appears in Blade programs:
-/// `prodsum` is a first-class fused product-sum over rank-1 fibers, and the
-/// per-row apply is the only way to reach it with a matrix. The corpus writes
-/// it verbatim (`ml-equiv/018_certificate_derive_linear.blade`,
-/// `ml-equiv/019_certificate_derive_tp.blade`). There is no `matvec` keyword
-/// and no rank-2/rank-1 contraction node to hook instead.
+/// WHY THIS SHAPE: it is how matrix-vector actually appears in Blade
+/// programs -- `prodsum` is a first-class fused product-sum over rank-1
+/// fibers, and the per-row apply is the only way to reach it with a matrix
+/// (corpus: `ml-equiv/018_certificate_derive_linear.blade`,
+/// `019_certificate_derive_tp.blade`). No `matvec` keyword, no rank-2/rank-1
+/// contraction node to hook instead.
 ///
 /// SHAPE MATCHED, exactly:
 ///   * a depth-1 rectangular MATERIALISING nest (no fold wrapper);
-///   * exactly ONE input array, real f64, of TWO ordinary dense axes;
-///   * that level carries exactly ONE element binding: a real peel of dim 0 of
-///     a rank-2 array — `ArrayRank (2) > depth (1)` is precisely what makes it
-///     a FIBER argument rather than a scalar leaf, and it is what separates
-///     this from the Phase 3 flat-elementwise shape;
+///   * exactly ONE input array, real f64, of TWO ordinary dense axes, with
+///     exactly ONE element binding: a real peel of dim 0 of the rank-2 array
+///     (`ArrayRank (2) > depth (1)` makes it a FIBER argument, not a scalar
+///     leaf, separating this from the flat-elementwise shape);
 ///   * the output is a real f64 array of ONE ordinary dense axis;
-///   * the kernel body is exactly `prodsum(<the peeled row>, <v>)` with the
-///     peeled row FIRST and exactly two arguments, `v` an `IRVar` of a real f64
-///     array with one ordinary dense axis.
+///   * the kernel body is exactly `prodsum(<the peeled row>, <v>)`, row
+///     FIRST, `v` an `IRVar` of a real f64 array with one ordinary dense
+///     axis.
 ///
-/// WHY THE ROW MUST COME FIRST. `IRProdSum` takes its loop bound from its FIRST
-/// operand (`CodeGen`'s renderer: `<arg0>.extents[0]`). With the row first that
-/// bound is A's trailing extent, which is the `n` this routine is defined over.
-/// Reversed (`prodsum(x, row)`) the emitted loop would be bounded by the
-/// VECTOR's extent instead — a different iteration count whenever the two
-/// disagree, which Blade's unify does not rule out. Declining is the honest
-/// answer; the reversed form keeps its loop.
+/// WHY THE ROW MUST COME FIRST: `IRProdSum` takes its loop bound from its
+/// FIRST operand (`<arg0>.extents[0]`), which with the row first is A's
+/// trailing extent, the `n` this routine is defined over. Reversed
+/// (`prodsum(x, row)`) the loop would be bounded by the VECTOR's extent
+/// instead -- a different count whenever the two disagree, which Blade's
+/// unify does not rule out -- so declining is the honest answer.
 ///
-/// PRECEDENCE, same rule as dot: an `omp` request on the row kernel declines.
-/// A parallel row map is exactly what `#pragma omp parallel for` over the outer
-/// level already gives, and the no-BLAS fallback here is serial.
+/// PRECEDENCE, same rule as dot: an `omp` request on the row kernel declines,
+/// since a parallel row map is exactly what `#pragma omp parallel for` over
+/// the outer level already gives, and the no-BLAS fallback is serial.
 let (|BlasL2|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * IRArrayType list * LoopNestCodeGen)
         : LinAlgCall option =
     if cg.FoldWrapper.IsSome || cg.FoldChunk.IsSome then None
@@ -952,28 +910,28 @@ let (|BlasL2|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
                      && (match e.SlotTag with Some t -> not (t.StartsWith "__") | None -> true) ->
             (match cg.KernelExpr with
              | IRProdSum [ IRVar (rowId, _); (IRVar (vecId, _) as vecExpr) ] when rowId = e.ParamVarId ->
-                // The second operand must be a value from OUTSIDE the kernel —
-                // a capture or an enclosing binding — never a kernel parameter.
+                // The second operand must be a value from OUTSIDE the kernel:
+                // a capture or an enclosing binding, never a kernel parameter.
                 // `prodsum(er, er)` (the per-row SELF-dot the math corpus uses
                 // for row norms) matches everything above and is emphatically
-                // not a matrix-vector product: routing it would pass the peeled
-                // row as `x` for every row. This is the guard that separates
-                // "one shared vector" from "the row against itself".
+                // not a matrix-vector product: routing it would pass the
+                // peeled row as `x` for every row. This guard separates "one
+                // shared vector" from "the row against itself".
                 let isKernelParam id =
                     cg.KernelParams |> List.exists (fun (p: IRParam) -> p.VarId = id)
                 let vecOk =
                     vecId <> rowId
                     && not (isKernelParam vecId)
-                    // Same precision as the matrix and the output: a mixed-width
-                    // gemv has no BLAS routine and declining costs only the
+                    // Same precision as the matrix and output: a mixed-width
+                    // gemv has no BLAS routine, and declining costs only the
                     // optimisation.
                     && (match typeOf vecExpr with
                         | ArrayElem vt -> readOnlyBlasVector vt = Some prec
                         | _ -> false)
                 if not vecOk then None
                 else
-                    // `prodsum(row, x)` conjugates nothing, so every precision —
-                    // complex included — emits CblasNoTrans.
+                    // `prodsum(row, x)` conjugates nothing, so every
+                    // precision -- complex included -- emits CblasNoTrans.
                     Some { Routine = Gemv
                            Route = RouteGemv
                            Level = L2
@@ -989,26 +947,24 @@ let (|BlasL2|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
         | _ -> None
     | _ -> None
 
-// ============================================================================
-// Still planned — L3 nest matching (skeleton only)
-// ============================================================================
+// Still planned -- L3 nest matching (skeleton only)
 //
 // let (|BlasL3|_|) (...) : LinAlgCall option = ...
 //
-// Left as a comment rather than as a `None`-returning stub on purpose: a stub
+// Left as a comment rather than a `None`-returning stub on purpose: a stub
 // that always declines is indistinguishable at the call site from a pattern
 // that has been implemented and simply did not match, which is exactly the
 // confusion the policy table exists to prevent. L3 nest matching (a genuine
 // three-level contraction written as loops, rather than the `matmul`/`gram`
-// NODES v1 already routes) arrives with its first real case.
+// NODES already routed) arrives with its first real case.
 //
-// PACKED-SYMMETRIC (dspmv) — the shim entry `blade_symv` EXISTS and its layout
-// premise is PROVEN (see `blade_linalg.hpp` and the plan's Phase 5b section:
-// Blade's rank-2 sym-compact DFS pool order is byte-for-byte BLAS row-major
-// UPPER packed order, so the route needs zero staging). There is deliberately
-// no pattern for it, because no Blade surface form can currently produce a
-// sym-compact matvec: peeling a rank-2 compact group into rank-1 fibers is
-// refused at typecheck (BL4004 — "a rank-k compact group is ONE index slot
-// covering k dimensions"), and `reduce`/`prodsum` over compact storage is
-// refused as well. `decompact` first, and the operand is dense — which is the
-// gemv route above. The entry point is the route waiting for a surface.
+// PACKED-SYMMETRIC (dspmv): the shim entry `blade_symv` EXISTS and its layout
+// premise is PROVEN (Blade's rank-2 sym-compact DFS pool order is
+// byte-for-byte BLAS row-major UPPER packed order, so the route needs zero
+// staging; see `blade_linalg.hpp`). There is deliberately no pattern for it,
+// because no Blade surface form can currently produce a sym-compact matvec:
+// peeling a rank-2 compact group into rank-1 fibers is refused at typecheck
+// (BL4004 -- "a rank-k compact group is ONE index slot covering k
+// dimensions"), and `reduce`/`prodsum` over compact storage is refused as
+// well. `decompact` first, and the operand is dense -- the gemv route above.
+// The entry point is the route waiting for a surface.

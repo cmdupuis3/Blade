@@ -1,7 +1,7 @@
 namespace BladeML
 
 /// Reverse-mode building blocks (hand-written adjoints) for the equivariant
-/// ML ops — the executable semantics that the Blade compiler's `grad`
+/// ML ops -- the executable semantics that the Blade compiler's `grad`
 /// transform must reproduce, and the value oracle its generated C++ is
 /// differentially tested against (same doctrine as the forward ops vs the
 /// v7 oracle harness).
@@ -14,7 +14,7 @@ namespace BladeML
 ///     the accumulation-loop structure the compiler transform emits.
 ///   - CG coefficients and spherical-harmonic values of NON-differentiated
 ///     inputs (edge vectors: positions are data, not parameters, in v1) are
-///     constants with zero derivative (module doc §11).
+///     constants with zero derivative (module doc section 11).
 ///
 /// Structural facts the tests pin (and the compiler transform relies on):
 ///   - gather and scatter_add are each other's adjoints;
@@ -40,8 +40,8 @@ module Autodiff =
     // ---- linear ----
 
     /// VJP of Linear.linear: returns (dWeights, dX).
-    /// out[dst+c] += w * x[src+c]  ⇒
-    ///   dW[b, muO, muI] += Σ_c x[src+c] * dOut[dst+c]
+    /// out[dst+c] += w * x[src+c]  =>
+    ///   dW[b, muO, muI] += Sigma_c x[src+c] * dOut[dst+c]
     ///   dX[src+c]      += w * dOut[dst+c]
     /// Duplicate-irrep quirk (F3): multiple OUTPUT blocks may read the same
     /// (first-match) input block; dX accumulates across all of them.
@@ -71,7 +71,7 @@ module Autodiff =
                         dX.[src + c] <- dX.[src + c] + w * dOut.[dst + c]
         dW, dX
 
-    /// VJP of Linear.homLinear (the complete Schur basis — derive_linear's
+    /// VJP of Linear.homLinear (the complete Schur basis -- derive_linear's
     /// reference): the same pair-major traversal, both cotangents.
     let vjpHomLinear (specIn: SpecEntry[]) (specOut: SpecEntry[])
                      (weights: float[]) (x: float[]) (dOut: float[])
@@ -99,8 +99,8 @@ module Autodiff =
             wOff <- wOff + eo.Mult * ei.Mult
         dW, dX
 
-    /// VJP of Activations.norms: out_k = ||x_slot||  ⇒  dX_slot = dOut_k · x_slot / ||x_slot||
-    /// (zero-norm slots get zero cotangent — the subgradient convention).
+    /// VJP of Activations.norms: out_k = ||x_slot||  =>  dX_slot = dOut_k * x_slot / ||x_slot||
+    /// (zero-norm slots get zero cotangent -- the subgradient convention).
     let vjpNorms (spec: SpecEntry[]) (feat: float[]) (dOut: float[]) : float[] =
         let starts = IrrepsIdx.blockStarts spec
         let dX = Array.zeroCreate feat.Length
@@ -123,11 +123,11 @@ module Autodiff =
     // ---- tensor product ----
 
     /// VJP of TensorProduct.tensorProduct: returns (dWeights, dX, dY).
-    /// out[o0+c3] += cg * w * x[x0+c1] * y[y0+c2]  ⇒
+    /// out[o0+c3] += cg * w * x[x0+c1] * y[y0+c2]  =>
     ///   dW  += cg * x * y * dOut     (no w<>0 skip here!)
     ///   dX  += cg * w * y * dOut
     ///   dY  += cg * w * x * dOut
-    /// Same path/mult/sparse-CG iteration as the forward — this is the
+    /// Same path/mult/sparse-CG iteration as the forward -- this is the
     /// "gradients ride the same sparse iteration" claim, executable.
     let vjpTensorProduct (cfg: TPConfig) (weights: float[]) (x: float[]) (y: float[])
                          (dOut: float[])
@@ -208,16 +208,16 @@ module Autodiff =
     // ---- message passing ----
 
     /// VJP of MessagePassing.gather: dFeat = scatter_add(dOut, sources).
-    /// (Adjoint duality: gatherᵀ = scatter_add.)
+    /// (Adjoint duality: gather^T = scatter_add.)
     let vjpGather (dOut: float[]) (featDim: int) (nRows: int) (sources: int[]) : float[] =
         MessagePassing.scatterAdd dOut featDim sources nRows
 
     /// VJP of MessagePassing.scatterAdd: dValues = gather(dOut, targets).
-    /// (Adjoint duality: scatter_addᵀ = gather.)
+    /// (Adjoint duality: scatter_add^T = gather.)
     let vjpScatterAdd (dOut: float[]) (featDim: int) (nTargets: int) (targets: int[]) : float[] =
         MessagePassing.gather dOut featDim nTargets targets
 
-    // ---- equivariant convolution (the §12 composition) ----
+    // ---- equivariant convolution (the section 12 composition) ----
 
     /// VJP of Conv.equivariantConv wrt (weights, nodeFeat); edge vectors are
     /// data (their sh expansion is a constant). Recompute-based, mirroring
@@ -255,7 +255,7 @@ module Autodiff =
 
     // ---- loss ----
 
-    /// Mean squared error over a batch: (1/n) Σ (pred - target)².
+    /// Mean squared error over a batch: (1/n) Sigma (pred - target)^2.
     let mse (pred: float[]) (target: float[]) : float =
         if pred.Length <> target.Length then invalidArg "target" "length mismatch"
         let n = float pred.Length

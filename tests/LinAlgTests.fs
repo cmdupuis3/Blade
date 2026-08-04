@@ -47,28 +47,45 @@ open Blade.IR
 open Blade.Lowering
 open Blade.Tests.TestHarness
 
-/// Pin the BLAS availability gate for the duration of one emit, restoring the
+/// Pin one environment variable for the duration of a scope, restoring the
 /// prior value on exit. Same use-guard idiom as `DiffOracle.pinFpContractOff`,
-/// and it works for the same reason: the gate is read per-call, so a
+/// and it works for the same reason: every gate here is read per-call, so a
 /// mid-process set takes effect immediately.
-let private pinBlas (on: bool) =
-    let prior = System.Environment.GetEnvironmentVariable("BLADE_BLAS")
-    System.Environment.SetEnvironmentVariable("BLADE_BLAS", (if on then "1" else "0"))
+let private pinEnv (name: string) (value: string) =
+    let prior = System.Environment.GetEnvironmentVariable(name)
+    System.Environment.SetEnvironmentVariable(name, value)
     { new System.IDisposable with
-        member _.Dispose() =
-            System.Environment.SetEnvironmentVariable("BLADE_BLAS", prior) }
+        member _.Dispose() = System.Environment.SetEnvironmentVariable(name, prior) }
 
-/// Lower + generate under a pinned gate, returning the C++ source. No compiler
+/// The HOST BLAS availability gate.
+let private pinBlas (on: bool) = pinEnv "BLADE_BLAS" (if on then "1" else "0")
+
+/// The DEVICE cuBLAS availability gate (Round D). A SECOND, INDEPENDENT gate —
+/// which is why every emit below pins BOTH. Leaving this one to the ambient
+/// environment would make the host cases non-deterministic on a machine where
+/// someone had exported `BLADE_CUBLAS`: `resolveNodeRoute` tries the device
+/// first, so a stray export would silently turn every gram/matmul positive into
+/// a device route and fail the suite for a reason that has nothing to do with
+/// the code.
+let private pinCublas (on: bool) = pinEnv "BLADE_CUBLAS" (if on then "1" else "0")
+
+/// Lower + generate under pinned gates, returning the C++ source. No compiler
 /// involved. (Same helper shape as OmpTests.cppOf.)
-let private cppOf (blasOn: bool) (testName: string) (src: string) : Result<string, string> =
-    use _gate = pinBlas blasOn
+let private cppOfGates (blasOn: bool) (cublasOn: bool) (testName: string) (src: string) : Result<string, string> =
+    use _blas = pinBlas blasOn
+    use _cublas = pinCublas cublasOn
     try
         match lower src with
         | Error e -> Error (sprintf "lower: %s" e)
         | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir testName))
     with ex -> Error (sprintf "codegen raised: %s" ex.Message)
 
+/// The host-only emit: BLAS as asked, cuBLAS explicitly OFF.
+let private cppOf (blasOn: bool) (testName: string) (src: string) : Result<string, string> =
+    cppOfGates blasOn false testName src
+
 let private shimInclude = "#include \"blade_linalg.hpp\""
+let private cudaShimInclude = "#include \"blade_linalg_cuda.hpp\""
 
 /// (name, blasGateOn, source, mustContain, mustNotContain).
 ///
@@ -521,15 +538,20 @@ let runLinAlgEmissionTests () : BlockResult =
           // is bandwidth-bound and the flat loop already vectorises it.
           "host_axpy_native",   LinAlgPatterns.HostBlas, LinAlgPatterns.Axpy, LinAlgPatterns.Native
           "host_scal_native",   LinAlgPatterns.HostBlas, LinAlgPatterns.Scal, LinAlgPatterns.Native
-          // CudaBlas is DECLARED, NOT IMPLEMENTED: every routine routes Native
-          // under it, so a caller asking for that mode emits ordinary host
-          // loops rather than anything wrong. Pinned so landing the backend is
-          // a deliberate table edit, and so "no cuBLAS yet" is a statement the
-          // suite makes rather than an absence.
-          "cuda_gemm_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Gemm, LinAlgPatterns.Native
-          "cuda_syrk_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Syrk, LinAlgPatterns.Native
+          // ---- CudaBlas (Round D) ----
+          // The two L3 rows LANDED and are pinned ViaShim; the L1/L2 rows are
+          // pinned Native. Both halves matter: these four pins existed
+          // precisely so that landing (or losing) a device route is a
+          // deliberate table edit rather than a silent flip, and the
+          // Native/ViaShim split IS the policy — L3 amortises a PCIe round trip
+          // (O(mnk) flops against O(mn + nk) bytes), L1/L2 cannot.
+          "cuda_gemm_via_shim", LinAlgPatterns.CudaBlas, LinAlgPatterns.Gemm, LinAlgPatterns.ViaShim
+          "cuda_syrk_via_shim", LinAlgPatterns.CudaBlas, LinAlgPatterns.Syrk, LinAlgPatterns.ViaShim
           "cuda_dot_native",    LinAlgPatterns.CudaBlas, LinAlgPatterns.Dot,  LinAlgPatterns.Native
-          "cuda_gemv_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Gemv, LinAlgPatterns.Native ]
+          "cuda_gemv_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Gemv, LinAlgPatterns.Native
+          "cuda_nrm2_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Nrm2, LinAlgPatterns.Native
+          "cuda_axpy_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Axpy, LinAlgPatterns.Native
+          "cuda_scal_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Scal, LinAlgPatterns.Native ]
     for (name, backend, routine, expected) in policyCases do
         let actual = LinAlgPatterns.routingOf backend routine
         if actual = expected then
@@ -638,6 +660,172 @@ let runLinAlgEmissionTests () : BlockResult =
             passed <- passed + 1
             resultLine Pass name (sprintf "%A" actual)
         else fail name (sprintf "expected %A, got %A" expected actual)
+
+    // ====================================================================
+    // ROUND D — the DEVICE (cuBLAS) backend
+    // ====================================================================
+    //
+    // Emission-only, exactly like everything above: pinning BLADE_CUBLAS=1
+    // makes codegen emit `blade_cuda_*` calls, which needs no CUDA toolkit and
+    // no GPU because nothing here is compiled. What a real device then computes
+    // is `cpp/cublas_swap_tests.cu`'s job (the swap table, verified against a
+    // host reference on real hardware), and the corpus programs' job end to end.
+    //
+    // Emitted TEXT is the only place the backend choice is visible — host
+    // cblas, device cuBLAS and Blade's own loops all agree to within rounding —
+    // which is the same argument the precision letter rests on, one axis over.
+    // So every case pins the ENTRY-POINT NAME, the dispatch MARKER (which names
+    // the backend) and the INCLUDE (which is what Build.fs sniffs to decide
+    // whether to run nvcc at all).
+    let cudaEmissionCases : (string * bool * bool * string * string list * string list) list =
+        let realMat =
+            "let A: Array<Float64 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n"
+        let realMatB =
+            "let B: Array<Float64 like Idx<4>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]\n"
+        let vecX = "let x: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+        let vecY = "let y: Array<Float64 like Idx<5>> = [2.0, 3.0, 4.0, 5.0, 6.0]\n"
+        let deferredProd =
+            "let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b\n"
+        // (name, cublasOn, blasOn, source, mustContain, mustNotContain)
+        [ // ---- the three L3 node routes, device ----
+          // Note what is asserted absent: `blade_linalg.hpp` and
+          // `blade_linalg::`. With the host gate OFF there is no host route to
+          // fall back to, so naming either would mean the device arm had leaked
+          // a dependency it does not have.
+          ("cublas_gram_same_routes_to_device_syrk", true, false,
+           realMat + "let G = gram(A, A)\n",
+           [ cudaShimInclude; "blade_cuda_gram_same_d("; "cublas dispatch: gram(A, A)"
+             "A.data, (A.extents[0] * A.extents[1])" ],
+           [ shimInclude; "blade_linalg::"; "cblas_"; "__gacc" ])
+          ("cublas_gram_distinct_routes_to_device_gemm", true, false,
+           realMat + realMatB + "let G = gram(A, B)\n",
+           [ cudaShimInclude; "blade_cuda_gram_distinct_d("; "cublas dispatch: gram(A, B)"
+             "A.data, (A.extents[0] * A.extents[1])"
+             "B.data, (B.extents[0] * B.extents[1])"
+             "G.data, (A.extents[0] * B.extents[0])" ],
+           [ shimInclude; "blade_linalg::"; "cblas_"; "blade_cuda_gram_same_" ])
+          ("cublas_matmul_routes_to_device_gemm", true, false,
+           "import math as m\n" +
+           "let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
+           "let B: Array<Float64 like Idx<3>, Idx<2>> = [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]\n" +
+           "let C = m.matmul(A, B)\n",
+           [ cudaShimInclude; "blade_cuda_matmul_d("; "cublas dispatch: matmul(A, B)"
+             "C.data, (A.extents[0] * B.extents[1])" ],
+           [ shimInclude; "blade_linalg::"; "cblas_"; "__macc" ])
+          // COMPLEX same-array gram is HERMITIAN on the device too: `_z` binds
+          // cublasZherk, not Zsyrk. The letter is the only place that shows.
+          ("cublas_complex_gram_same_routes_to_device_zherk", true, false,
+           "let A: Array<Complex128 like Idx<2>, Idx<2>> = [[complex(1.0, 0.0), complex(2.0, 1.0)], [complex(3.0, 0.0), complex(4.0, -1.0)]]\n" +
+           "let G = gram(A, A)\n",
+           [ cudaShimInclude; "blade_cuda_gram_same_z(" ],
+           [ "blade_cuda_gram_same_d"; "blade_linalg::"; "conj_scalar" ])
+          // FLOAT32 rides the same table.
+          ("cublas_f32_gram_same_routes_to_device_ssyrk", true, false,
+           "let A: Array<Float32 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n" +
+           "let G = gram(A, A)\n",
+           [ cudaShimInclude; "blade_cuda_gram_same_s(" ],
+           [ "blade_cuda_gram_same_d"; "blade_linalg::"; "__gacc" ])
+          // INTEGER declines on the device exactly as on the host: `precisionOf`
+          // answers None, so there is no letter and no routine family, and the
+          // program carries NO device dependency at all.
+          ("cublas_int_gram_declines_to_native_loops", true, false,
+           "let A: Array<Int64 like Idx<3>, Idx<2>> = [[1, 2], [3, 4], [5, 6]]\n" +
+           "let G = gram(A, A)\n",
+           [ "__gacc" ],
+           [ cudaShimInclude; "blade_cuda_"; shimInclude; "blade_linalg::" ])
+
+          // ---- L1 / L2 DECLINE, which is the policy and not a gap ----
+          // Both are PCIe-bound under per-call offload, so their CudaBlas rows
+          // are Native. With the host gate off there is no other route either,
+          // so what must appear is Blade's OWN emitted arithmetic.
+          ("cublas_dot_declines_to_native_fold", true, false,
+           vecX + vecY + deferredProd + "let s = reduce(P, (+))\n",
+           [ "__wrap" ],
+           [ cudaShimInclude; "blade_cuda_"; shimInclude; "blade_linalg::" ])
+          ("cublas_gemv_declines_to_native_nest", true, false,
+           "type M = Idx<3>\ntype N = Idx<4>\n"
+           + "let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
+           + "let xv: Array<Float64 like N> = [1.0, 2.0, 3.0, 4.0]\n"
+           + "let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) -> prodsum(row, xv) |> compute\n",
+           [ "__ps" ],
+           [ cudaShimInclude; "blade_cuda_"; shimInclude; "blade_linalg::" ])
+
+          // ---- THE FALLBACK CHAIN, which is the reason `resolveNodeRoute`
+          // exists. Device gate ON *and* host gate ON: the L3 node route takes
+          // the device, the L1 route that the device declines still takes the
+          // HOST — it is not stripped. A `shimEntryPoint CudaBlas` asked
+          // unconditionally would have lost that dot route silently, turning
+          // "BLADE_CUBLAS=1" into a regression for every shape the device does
+          // not take. Both headers appear, which is also why the two "used"
+          // collectors cannot be one cell.
+          ("cublas_and_host_gates_compose_per_route", true, true,
+           realMat + vecX + vecY + deferredProd
+           + "let s = reduce(P, (+))\n"
+           + "let G = gram(A, A)\n",
+           [ cudaShimInclude; "blade_cuda_gram_same_d("; "cublas dispatch: gram(A, A)"
+             shimInclude; "blade_linalg::blade_dot_d("; "linalg dispatch: dot(x, y)" ],
+           [ "cblas_" ])
+
+          // ---- GATE OFF: the device backend is INVISIBLE ----
+          // Default-off is the whole point of an opt-in performance-model
+          // change, so the negative is pinned as its own case rather than
+          // inferred from the positives.
+          ("cublas_gate_off_gram_keeps_host_route", false, true,
+           realMat + "let G = gram(A, A)\n",
+           [ shimInclude; "blade_linalg::blade_gram_same_d("; "linalg dispatch: gram(A, A)" ],
+           [ cudaShimInclude; "blade_cuda_" ])
+          ("cublas_gate_off_gram_keeps_native_loops", false, false,
+           realMat + "let G = gram(A, A)\n",
+           [ "__gacc" ],
+           [ cudaShimInclude; "blade_cuda_"; shimInclude; "blade_linalg::" ]) ]
+    for (name, cublasOn, blasOn, src, mustContain, mustNotContain) in cudaEmissionCases do
+        match cppOfGates blasOn cublasOn name src with
+        | Error e -> fail name e
+        | Ok cpp ->
+            let missing = mustContain |> List.filter (fun s -> not (cpp.Contains s))
+            let present = mustNotContain |> List.filter cpp.Contains
+            if not missing.IsEmpty then
+                fail name (sprintf "generated C++ lacks: %s" (String.concat " | " missing))
+            elif not present.IsEmpty then
+                fail name (sprintf "generated C++ unexpectedly contains: %s" (String.concat " | " present))
+            else
+                passed <- passed + 1
+                resultLine Pass name (sprintf "cublas=%b blas=%b" cublasOn blasOn)
+
+    // ---- the cuBLAS availability gate itself ----
+    //
+    // Pinned because its DEFAULT is the deliberate part. Unlike its two
+    // siblings, unset does NOT fall back to a "is the library installed" probe:
+    // offloading changes a program's performance model (v1 pays a device
+    // allocation and two transfers per call), so a machine that merely HAS a GPU
+    // has not asked for it. The two cases that state this are
+    // `cublas_gate_unset_does_not_follow_openblas_dir` — proving it does not
+    // ride the sibling variable — and `cublas_gate_unset_is_off`.
+    let cublasGateCases =
+        [ "cublas_gate_forced_on",      Some "1",   None,                 true
+          "cublas_gate_forced_on_word", Some "on",  None,                 true
+          "cublas_gate_forced_off",     Some "0",   None,                 false
+          "cublas_gate_forced_off_word", Some "off", None,                false
+          "cublas_gate_unset_is_off",   None,       None,                 false
+          "cublas_gate_unset_does_not_follow_openblas_dir", None, Some "C:\\opt\\blas", false
+          // A value that is neither an on- nor an off-word is OFF, not an
+          // error: the gate is a switch, and the safe reading of a typo is "do
+          // not silently move the program to another machine".
+          "cublas_gate_garbage_is_off", Some "yes", None,                 false ]
+    for (name, cublasVar, openblasVar, expected) in cublasGateCases do
+        let priorC = System.Environment.GetEnvironmentVariable("BLADE_CUBLAS")
+        let priorO = System.Environment.GetEnvironmentVariable("OPENBLAS_DIR")
+        try
+            System.Environment.SetEnvironmentVariable("BLADE_CUBLAS", Option.toObj cublasVar)
+            System.Environment.SetEnvironmentVariable("OPENBLAS_DIR", Option.toObj openblasVar)
+            let actual = LinAlgPatterns.cublasAvailable ()
+            if actual = expected then
+                passed <- passed + 1
+                resultLine Pass name (sprintf "%b" actual)
+            else fail name (sprintf "expected %b, got %b" expected actual)
+        finally
+            System.Environment.SetEnvironmentVariable("BLADE_CUBLAS", priorC)
+            System.Environment.SetEnvironmentVariable("OPENBLAS_DIR", priorO)
 
     printFooter "LinAlg Dispatch" [sprintf "%d passed" passed; sprintf "%d failed" failed]
     { Block = "LinAlg Dispatch"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

@@ -1,16 +1,12 @@
 // Unification core: the error types, the mutable substitution, occursIn,
-// unify, and type schemes' free-variable machinery (audit §4:
-// Check/Unify.fs — "already self-contained in the prototype"). Extracted
-// verbatim from TypeCheck.fs (Phase 3).
+// unify, and type schemes' free-variable machinery.
 module Blade.Unify
 
 open Blade.Ast
 open Blade.IR
 open Blade.Types
 
-// ============================================================================
-// Error Types (public — consumed by Lowering.fs and Main.fs)
-// ============================================================================
+// Error Types (public -- consumed by Lowering.fs and Main.fs)
 
 type TypeError =
     | UnboundVariable of string
@@ -24,8 +20,7 @@ type TypeError =
     | InvalidArrayCapture of varName: string
     | InvalidApplication of funcType: IRType
     | PatternTypeMismatch of pattern: string * expected: IRType
-    // ---- Promoted from Other (Stage 5 burn-down). FIELDS = sprintf args;
-    //      formatTypeError (TypeEnv.fs) renders each verbatim. ----
+    // FIELDS = sprintf args; formatTypeError (TypeEnv.fs) renders each verbatim.
     // Index-type violations (BL4003)
     | IndexTagMismatchNamed of expected: string * actual: string
     | IndexTagMismatchAnon of expected: string
@@ -33,16 +28,14 @@ type TypeError =
     | CrossAnonIndexArith of left: int * right: int
     | IndexTypeArithForbidden of name: string
     | IrrepsIdxArgMismatch of pos: int * expected: string * actual: string
-    /// The family-level twin of the above (stage 5b-i): a direct-application
-    /// mismatch where at least one side is the POINT-GROUP block-spec member.
-    /// Covers pg-vs-pg AND the cross-member pair (an irreps space is never a
-    /// pg-irreps space, whatever their extents).
+    /// The family-level twin of the above: a direct-application mismatch
+    /// where at least one side is the POINT-GROUP block-spec member. Covers
+    /// pg-vs-pg and cross-member (irreps is never pg-irreps, any extent).
     | BlockSpecArgMismatch of pos: int * expected: string * actual: string
-    // CompoundIdx flat-subscript application errors. A compound axis consumes
-    // k FLAT positional subscripts like SymIdx (B(i, j, t)) — the historical
-    // tuple form B((i, j)) and all wildcard/partial forms moved to SparseIdx.
-    /// A tuple or wildcard reached a compound axis: the tuple spelling is
-    /// retired and partial/wildcard reads are a SparseIdx feature.
+    // CompoundIdx flat-subscript errors: a compound axis takes k FLAT
+    // positional subscripts like SymIdx (B(i,j,t)), not tuple form
+    // B((i,j)) -- wildcard/partial forms live in SparseIdx.
+    /// Tuple/wildcard form reached a compound axis; not accepted here.
     | CompoundTupleForm of rank: int
     /// Fewer than k subscripts supplied for the rank-k compound axis.
     | CompoundUnderSupplied of rank: int * got: int
@@ -55,27 +48,21 @@ type TypeError =
     | SparseAllFree of rank: int
     | SparseOverSupplied of rank: int * got: int
     | SparseNeedsTuple of rank: int
-    /// v1's HARD REFUSAL at the OrbIdx storage boundary
-    /// (docs/plan-orbit-index-types.md §9): a depth >= 2 iterated-wreath class
-    /// is declarable and type-checks, but no allocator, traversal nest, compact
-    /// read, printer or provider path emits it. `levels` is the rendered level
-    /// list ("[(2,-), (2,+)]") and `where_` names the seam that refused. An
-    /// index-type violation (BL4003): the type is legal, the STORAGE it names
-    /// is not available.
+    /// HARD REFUSAL at the OrbIdx storage boundary (docs/plan-orbit-index-types.md
+    /// sec. 9, BL4003): a depth >= 2 iterated-wreath class type-checks, but no
+    /// allocator/traversal/compact-read/printer/provider path emits it -- legal
+    /// type, unavailable storage. `levels` = rendered level list; `where_` = the seam.
     | OrbitStorageUnsupported of levels: string * where_: string
     /// A wreath subscript at the wrong arity. A depth >= 2 OrbIdx record is ONE
     /// index slot spanning prod(ri) RAW AXES, so `W(i,j,k,l)` presents 4 args
-    /// against 1 slot and `dispatchAppOrIndex`'s arity guard is false for it --
-    /// with no arm matching, the catch-all mints a fresh inference variable and
-    /// returns Ok. This case is what makes the wrong-arity form an ERROR rather
-    /// than a type nothing later contradicts (§9 step 6's "dispatch must not
-    /// rely on a `when` guard failing"). `got < axes` is also the PARTIAL read,
-    /// which v1 refuses outright: a wreath pool's rows shrink per level, so no
-    /// residual class describes a fibre of it.
+    /// against 1 slot; without this case `dispatchAppOrIndex`'s catch-all would
+    /// mint a fresh var and return Ok instead of erroring. `got < axes` is also
+    /// PARTIAL read, refused outright: a wreath pool's rows shrink per level,
+    /// so no residual class describes a fibre of it.
     | OrbitSubscriptArity of levels: string * axes: int * got: int
-    /// `decompact(W, d)` at a `d` other than 0 on a wreath class. v1 implements
-    /// FULL decompaction only; the partial/peel lattice
-    /// (docs/plan-orbidx-decompaction.md §3) is not built.
+    /// `decompact(W, d)` at a `d` other than 0 on a wreath class. Only FULL
+    /// decompaction is implemented; the partial/peel lattice
+    /// (docs/plan-orbidx-decompaction.md sec. 3) is not built.
     | OrbitDecompactPartial of levels: string * dim: int
     /// reduce()/prodsum() over a wreath pool. Separate from the generic storage
     /// refusal because the REMEDY differs: full decompaction now works, so this
@@ -84,23 +71,19 @@ type TypeError =
     | RaggedIdxNeedsPrior of func: string
     | IrrepsIdxSpec of detail: string
     | IrrepsIdxSpecFn of func: string * detail: string
-    /// The pg-irreps twin of the two above (stage 5b-i). Separate cases
-    /// rather than a widened one: the trailing "what a spec looks like"
-    /// sentence differs per block-spec member, and that sentence is the
-    /// actionable half of the diagnostic.
+    /// The pg-irreps twin of the two above: separate cases since the
+    /// trailing "what a spec looks like" sentence differs per block-spec
+    /// member, and is the actionable half of the diagnostic.
     | PgIrrepsIdxSpec of detail: string
     | PgIrrepsIdxSpecFn of func: string * detail: string
     /// `Base<_>` outside parameter position. `where` names the site.
     | TagWildcardNotParam of where_: string
     // Symmetry / compact-group violations (BL4004)
-    /// Two index slots agree positionally but occupy a different number of
-    /// index COMPONENTS: a rank-k compact group (SymIdx<k>/AntisymIdx<k>) is
-    /// one slot but k dimensions of the emitted Array<T, k>. Cell counts can
-    /// coincide, so this is not implied by any extent check.
-    ///
-    /// The two sides are deliberately NOT labelled expected/actual: `unify`
-    /// is symmetric and its callers pass (declared, inferred) in both orders,
-    /// so only `where_` can situate the failure.
+    /// Two index slots agree positionally but span a different index
+    /// COMPONENT count: a rank-k compact group (SymIdx<k>/AntisymIdx<k>) is
+    /// one slot but k dims of Array<T, k>; cell counts can coincide, so no
+    /// extent check implies this. Not labelled expected/actual -- `unify`
+    /// is symmetric, only `where_` situates the failure.
     | IndexRankMismatch of where_: string * left: string * leftRank: int * right: string * rightRank: int
     | DecompactDimRange of dim: int * totalDims: int
     | DecompactPlainAxis of dim: int
@@ -132,18 +115,15 @@ type TypeError =
     | GramNeedsRank2 of leftRank: int * rightRank: int
     | ArrayLitLength of got: int * expected: int * axisTag: string option
     /// An array literal checked against a COMPACT index group (SymIdx /
-    /// AntisymIdx / HermitianIdx, rank >= 2). Such a group is ONE axis whose
-    /// stored cells are a left-justified simplex, not r dense axes, so its
-    /// literal is written in exactly that shape: rows of length n, then
-    /// n - i0 - strict, ... (`canon_left_justify`, the allocator's DFS order).
-    /// `idx` names the group, `shape` is the expected skeleton, `where_` the
-    /// position that disagreed ("the literal" / "row 1" / "row 0, row 2"), and
-    /// `detail` what was found there.
+    /// AntisymIdx / HermitianIdx, rank >= 2): ONE axis whose stored cells
+    /// are a left-justified simplex (rows of length n, then n - i0 -
+    /// strict, ...; `canon_left_justify`, the allocator's DFS order). `idx`
+    /// = group, `shape` = expected skeleton, `where_` = disagreeing
+    /// position, `detail` = what was found.
     | CompactLitShape of idx: string * shape: string * where_: string * detail: string
-    /// A HermitianIdx literal whose DIAGONAL cell carries a non-zero imaginary
-    /// part. A(i,i) = conj(A(i,i)) forces the diagonal real, and the stored
-    /// cell is read unconjugated at (i,i) — so such a literal would name a
-    /// value the class cannot hold. `where_` locates the cell.
+    /// A HermitianIdx literal whose DIAGONAL cell carries a non-zero
+    /// imaginary part: A(i,i) = conj(A(i,i)) forces the diagonal real, and
+    /// the stored cell is read unconjugated at (i,i). `where_` locates the cell.
     | HermitianLitDiagComplex of where_: string
     | ObjectForKernel of got: string
     | ChainOpNeedsMethodFor of leftDesc: string
@@ -153,19 +133,17 @@ type TypeError =
     | AntisymmContradictsBody of param1: string * param2: string
     | AntisymMapNotOdd of param: string * proved: string
     | HermitianMapNotReal of param: string
-    // The wreath-tie analog of AntisymMapNotOdd (IR.deduceWreathTie condition
-    // 6): a declared comm/anticomm tie over an input class with a '-' INNER
-    // level needs the kernel provably sign-odd in every tied argument, and the
-    // deduction says parameter `param` is `proved` instead. `levels` renders
-    // the input's class for the message.
+    // The wreath-tie analog of AntisymMapNotOdd (IR.deduceWreathTie
+    // condition 6): a comm/anticomm tie over an input class with a '-'
+    // INNER level needs the kernel provably sign-odd in every tied argument;
+    // the deduction says `param` is `proved` instead. `levels` renders the class.
     | WreathTieKernelNotOdd of param: string * proved: string * levels: string
-    // `where ... omp` on a FOLD kernel (the second argument of `reduce`) with no
-    // reorder licence. Chunking a fold hands different associations to different
-    // threads, so the kernel must be commutative AND associative; `comm(a, b)`
-    // is the user's declaration of the first (cross-checked against body parity
-    // by CommContradictsBody), and a recognised builtin body (`a + b`, `a * b`,
-    // `a && b`, `a || b`) supplies both outright. Neither present = refuse
-    // rather than silently emit a serial loop. `kernelDesc` names the kernel.
+    // `where ... omp` on a FOLD kernel (reduce's 2nd arg) needs a reorder
+    // licence: chunking hands different associations to different threads,
+    // so the kernel needs commutative AND associative. `comm(a, b)` declares
+    // the first (cross-checked by CommContradictsBody); a recognised builtin
+    // body (`a+b`/`a*b`/`a&&b`/`a||b`) supplies both. Neither present =
+    // refuse rather than silently emit a serial loop. `kernelDesc` names it.
     | FoldOmpNeedsLicense of kernelDesc: string
     | PlaceholderNeedsAllBound of got: int * total: int
     | GroupKeysRank1
@@ -200,24 +178,16 @@ type TypeError =
     /// statically. `where_` locates it ("struct R, field 'm'", "let x", ...).
     | BoundsInverted of where_: string * lo: string * hi: string
     /// A `min=`/`max=` bound applied to an AGGREGATE. `TyBounded` is the
-    /// bounded PRIMITIVE node; the guards `Ast.boundedConjuncts` synthesizes
-    /// are comparisons against the annotated value itself, which an array,
-    /// tuple, struct or arrow has no answer for. `where_` locates it,
-    /// `noun` names what the base resolved to ("an array type", ...), and
-    /// `subject` is the thing being compared ("the annotated value" for an
-    /// annotation, "the field's value" for a struct field, whose bound is
-    /// normalized into FieldDecl.Bound before this check sees it).
+    /// bounded PRIMITIVE node; `boundedConjuncts`'s guards compare against
+    /// the annotated value, which arrays/tuples/structs/arrows have no
+    /// answer for. `where_` locates it, `noun`/`subject` describe what.
     | BoundsOnAggregate of where_: string * noun: string * subject: string
     // Rank deduction violation (BL3009)
-    /// A value flowed into a position demanding rank >= k (a stage-2 rank
-    /// deduction LOWER BOUND, accumulated and max-joined across the body's
-    /// uses) but resolved to something shallower. Dedicated case rather than
-    /// `Other`/BL3999 so a deduction failure is not lost among the generic
-    /// type errors — and so `needed` is machine-readable (its value proves the
-    /// max-join took the maximum, not the last writer). `got` is the rendered
-    /// actual ("a scalar" / "a rank-N array"). Distinct from the compact-group
-    /// `IndexRankMismatch`/BL4004, which is a component-rank-WITHIN-a-slot
-    /// disagreement — do not conflate the two.
+    /// A value flowed into a position demanding rank >= k (stage-2 rank
+    /// deduction LOWER BOUND, max-joined across the body's uses) but
+    /// resolved shallower. Dedicated case (not `Other`/BL3999) so `needed`
+    /// stays machine-readable; `got` is the rendered actual. Distinct from
+    /// `IndexRankMismatch`/BL4004 (component-rank WITHIN a slot).
     | RankBoundViolation of needed: int * got: string
     // Constraint / where-clause violations (BL4001)
     | StructWhereNotBool of structName: string * got: string
@@ -277,9 +247,7 @@ type CompileError = {
 
 type TypeResult<'T> = Result<'T, TypeError>
 
-// ============================================================================
 // 1. Unification Infrastructure
-// ============================================================================
 
 /// Mutable substitution mapping inference variable IDs to resolved types.
 type Subst() =
@@ -287,25 +255,22 @@ type Subst() =
     let mutable nextId = 10000  // High start avoids collision with IRBuilder IDs
     let mutable typeVarScope : Map<string, IRType * int> = Map.empty
     let mutable arityConstraints : Map<int, int> = Map.empty
-    /// Inference vars minted for value-position literals (`1`, `2.0`, `true`).
-    /// The recorded ElemType is the literal's value class = its *default* type
-    /// when the var is never pinned by context (so `let x = 1` stays Int64,
-    /// not the blanket Float64 default), and its *kind* for the no-narrowing
-    /// bind guard in `unify`. Parallels `arityConstraints`.
+    /// Inference vars minted for value-position literals (`1`, `2.0`,
+    /// `true`). ElemType is the literal's *default* type when unpinned (so
+    /// `let x = 1` stays Int64) and its *kind* for the no-narrowing bind
+    /// guard in `unify`. Parallels `arityConstraints`.
     let mutable literalDefaults : Map<int, ElemType> = Map.empty
     let mutable knownTypeVarNames : Set<string> = Set.empty
-    /// IDs of type variables that are HM-polymorphic at a function boundary.
-    /// Such IDs are preserved by zonking (not defaulted to Float64) so the
-    /// IR-phase HM monomorphization pass can substitute them at call sites.
-    /// Populated lazily as LookupOrCreateTypeVar produces fresh IDs for
-    /// names that prescanTypeVarNames previously registered.
+    /// IDs of type variables HM-polymorphic at a function boundary:
+    /// preserved by zonking (not defaulted to Float64) so IR-phase HM
+    /// monomorphization can substitute at call sites. Populated lazily as
+    /// LookupOrCreateTypeVar mints IDs for prescanTypeVarNames names.
     let mutable polymorphicIds : Set<int> = Set.empty
-    /// Minimum-rank lower bounds on inference vars (stage-2 rank deduction):
-    /// the var must eventually resolve to an array of rank >= k. Populated at
-    /// direct-application seams from callee parameter ranks; max-join on
-    /// repeat registration; propagated on var->var binds and validated when
-    /// the var meets a concrete type (see unify). Parallels arityConstraints,
-    /// which is the EXACT-rank pin that `T^k` annotations use.
+    /// Minimum-rank lower bounds on inference vars (stage-2 deduction): the
+    /// var must resolve to rank >= k. Populated at direct-application seams
+    /// from callee parameter ranks (max-joined), propagated on var->var
+    /// binds, validated when the var meets a concrete type (unify).
+    /// Parallels arityConstraints, the EXACT-rank pin `T^k` uses.
     let mutable rankLowerBounds : Map<int, int> = Map.empty
 
     member _.Fresh() =
@@ -330,10 +295,7 @@ type Subst() =
                 | IRTInfer id -> arityConstraints <- Map.add id arity arityConstraints
                 | _ -> ()
             typeVarScope <- Map.add key (tv, arity) typeVarScope
-            // If this name was registered by prescanTypeVarNames, the fresh
-            // ID is a function-boundary HM type variable. Track it so zonk
-            // doesn't default it to Float64 — IR-phase HM monomorphization
-            // will substitute it at call sites.
+            // Track HM-polymorphic names here too (see polymorphicIds doc).
             if Set.contains name knownTypeVarNames then
                 match tv with
                 | IRTInfer id -> polymorphicIds <- Set.add id polymorphicIds
@@ -373,11 +335,10 @@ type Subst() =
         | None -> ()
 
     /// The `rankLowerBounds` twin of CopyArityConstraint, for `instantiate`:
-    /// a generalized (static / let static) value's fresh use-site var must
-    /// inherit the bound its scheme var carried, or the deduction is lost at
-    /// every instantiation. Routed through AddRankLowerBound so the target's
-    /// existing bound (if any) is MAX-JOINED rather than overwritten —
-    /// CopyArityConstraint can overwrite because an arity pin is exact.
+    /// a generalized value's fresh use-site var must inherit its scheme
+    /// var's bound, else the deduction is lost each instantiation. Routed
+    /// through AddRankLowerBound so an existing bound is MAX-JOINED, not
+    /// overwritten (CopyArityConstraint overwrites -- an arity pin is exact).
     member this.CopyRankLowerBound(fromId: int, toId: int) =
         match Map.tryFind fromId rankLowerBounds with
         | Some k -> this.AddRankLowerBound(toId, k)
@@ -482,9 +443,9 @@ let rec findLeafInferScalar (subst: Subst) (ty: IRType) : int option =
     | IRTInfer id ->
         match subst.TryFind id with
         | Some (IRTInfer _ as next) -> findLeafInferScalar subst next
-        | Some (IRTScalar _) -> Some id   // bound to concrete scalar — rebindable
-        | None -> Some id                  // unbound — bindable
-        | _ -> None                        // bound to non-scalar — leave alone
+        | Some (IRTScalar _) -> Some id   // bound to concrete scalar -- rebindable
+        | None -> Some id                  // unbound -- bindable
+        | _ -> None                        // bound to non-scalar -- leave alone
     | _ -> None
 
 /// Strip one layer of tag/unit annotation. Used by the wildcard arm to reach
@@ -495,135 +456,65 @@ let stripTagAnnotation (ty: IRType) : IRType =
     | IRTUnitAnnotated (inner, _) -> inner
     | other -> other
 
-/// Unify two types under the current substitution. Mutates `subst` to
-/// bind inference variables as needed.
-///
-/// Normalization: both sides are passed through `normalize ToNested`
-/// after resolve. This makes the §5.3 mixed-slot identity transparent
-/// to the recursive cases below — they see the canonical (nested)
-/// form regardless of which surface form the caller supplied.
-///
-/// What integrating normalize buys us:
-///   - Concrete equivalent pair (no IRTInfer): structural `=` fires
-///     and we short-circuit.
-///   - Pair containing IRTInfer where one side is flat-mixed-slot and
-///     the other is its split-nested equivalent: the recursive arrow
-///     case (`IRTArrow s1 r1 vs IRTArrow s2 r2`) now sees matching
-///     slot lengths because both sides have been split at kind
-///     boundaries. Inner IRTInfer binds via the structural recursion.
-///   - Genuine mismatches (different slot kinds at a position, different
-///     index identities, different rank): still rejected — normalize
-///     doesn't conflate distinct shapes.
-///
-/// What it does NOT yet bridge: the §5.2 uniform-kind array identity
-/// (flat uniform vs nested uniform). That requires `ToFlat` mode,
-/// which is reserved for the B-flat migration.
+/// Unify two types under the current substitution; mutates `subst` to bind
+/// inference variables. Both sides pass through `normalize ToNested` first
+/// (sec. 5.3 mixed-slot identity): concrete-equal pairs short-circuit via
+/// `=`, flat-mixed-slot types unify against their split-nested equivalent,
+/// genuine mismatches (slot kind, index identity, rank) still reject. NOT
+/// bridged: sec. 5.2 uniform-kind array identity needs a `ToFlat`
+/// normalization mode, not yet built.
 
-/// A BLOCK-SPEC tag, generalized over the two members of the family
-/// (retired transforms-as-types plan §3.6, stage 5b-i): the O(3) irreps tag
-/// `__irreps:<name>:<l,p,m|...>` and the point-group tag
-/// `__pgirreps:<group>:<name>:<LABEL,mult|...>`. Yields
-/// (member-and-spec identity, alias name option) where the identity string
-/// is what makes two tags THE SAME SPACE:
-///
-///   - within a member, it is the serialized spec payload — so different
-///     specs are distinct even at equal total_dim (the whole point);
-///   - ACROSS members it can never collide, because the member's own frozen
-///     prefix is part of it. An `IrrepsIdx<s>` and a `PgIrrepsIdx<G, s'>` of
-///     equal extent are therefore distinct by the same one comparison, with
-///     no cross-member case to write down and no risk of the two families'
-///     payloads accidentally reading alike.
-///
-/// The alias name rides separately because its rule is DIFFERENT from the
-/// identity's: two named aliases of one spec are distinct (nominative), while
-/// anonymous-vs-named is compatible.
-///
-/// The identity is built by RE-SERIALIZING with the alias name erased, i.e.
-/// the member's own canonical tag writer — injective by construction (it is
-/// the format the tag round-trips through) and free of any %A truncation
-/// hazard on long specs.
+/// A BLOCK-SPEC tag, generalized over the family's two members: the O(3)
+/// irreps tag `__irreps:<name>:<l,p,m|...>` and the point-group tag
+/// `__pgirreps:<group>:<name>:<LABEL,mult|...>`. Yields (identity, alias
+/// option); SAME SPACE iff identity matches -- within a member it's the
+/// serialized spec payload (differs even at equal total_dim); across
+/// members it can never collide, since the frozen member prefix is part of
+/// it. Aliases are nominative (two named aliases differ; anon-vs-named is
+/// compatible). Identity is built by re-serializing with the alias erased
+/// via the canonical tag writer -- injective, no %A truncation hazard.
 let (|BlockSpecTag|_|) (tag: string) : (string * string option) option =
     match tag with
     | IrrepsTag (nameOpt, triples) -> Some (mkIrrepsTag None triples, nameOpt)
     | PgIrrepsTag (group, nameOpt, entries) -> Some (mkPgIrrepsTag group None entries, nameOpt)
     | _ -> None
 
-/// Numeric promotion: when two different numeric scalars meet, the
-/// inference variable (if any) is rebound to the promoted type so that
-/// downstream IR and codegen see the correct wider type.
-/// Rank disagreement between two positionally-matched index slots. Rank is
-/// the number of index COMPONENTS the slot occupies (1 for Idx, k for
-/// SymIdx<k>/AntisymIdx<k>), so it is what decides the emitted
-/// `Array<T, N>`'s N -- one slot is NOT one dimension.
-///
-/// indexPairIncompatible checks this ahead of, and independently of, every
-/// tag/symmetry rule it documents, because none of them implies it:
-///   - Symmetry alone doesn't: SymIdx<2, 4> and SymIdx<3, 4> are both
-///     SymSymmetric, and SymNone is a symmetry WILDCARD, so a rank-1 plain
-///     Idx passes the symmetry test against any compact group.
-///   - The irreps arm doesn't: it keys on spec identity only and returns
-///     early, so a rank-k group over an irreps space would match the bare
-///     rank-1 irreps space it was built from.
-///   - The ArrayElem slot-count test doesn't: a rank-k group is ONE entry in
-///     IndexTypes, so `Array<T like SymIdx<2,3>>` and `Array<T like Idx<6>>`
-///     both have length 1.
-///   - Extents can't stand in: they are deliberately never compared, and the
-///     cell counts coincide precisely in the cases that matter (SymIdx<2,3>
-///     stores 6 cells, exactly Idx<6>).
-/// Left unchecked, the mismatch survives to codegen and surfaces as a g++
-/// error (`could not convert Array<double,1> to Array<double,2>`).
-///
-/// Rank 0 is not a value any producer builds; it is normalized to 1 so a
-/// default-constructed record can't read as a distinct rank (same `max 1`
-/// convention CodeGen uses when deciding compact storage).
+/// Rank disagreement between two positionally-matched index slots (index
+/// COMPONENT count: 1 for Idx, k for SymIdx<k>/AntisymIdx<k>), deciding
+/// `Array<T, N>`'s N -- one slot is NOT one dimension. Checked first since
+/// no other rule implies it: Symmetry doesn't (SymIdx<2,4>/SymIdx<3,4>
+/// both SymSymmetric, SymNone a wildcard); irreps doesn't (keys on spec
+/// identity, returns early); ArrayElem slot-count doesn't (rank-k = ONE
+/// entry, same as rank-1); extents can't (coincide where it matters --
+/// SymIdx<2,3> = 6 cells = Idx<6>). Unchecked, reaches codegen as a g++
+/// error (`could not convert Array<double,1> to Array<double,2>`). Rank 0
+/// normalizes to 1, same `max 1` convention CodeGen uses for storage.
 let indexRankDiffers (i1: IRIndexType) (i2: IRIndexType) : bool =
     max 1 i1.Rank <> max 1 i2.Rank
 
 /// Per-index compatibility for POSITIONAL index-list matching (ArrayElem
-/// index types, Dist axes). True = the pair is INCOMPATIBLE. One shared
-/// predicate (previously duplicated inline in the ArrayElem and IRTDist
-/// arms) so the rules cannot drift:
-///   - Component RANK must match (indexRankDiffers, checked first and
-///     unconditionally — the arms below can each mask a rank difference).
-///   - Block-spec tags (both sides — see `BlockSpecTag`): identity is the
-///     MEMBER plus the SPEC, plus the optional nominative alias name.
-///     Different specs are distinct even at equal total_dim; two ALIASES of
-///     the same spec are distinct (nominative); anonymous-vs-named of the
-///     same spec is compatible (mirrors the Some-tag vs None permissiveness
-///     below); and an irreps space is never a pg-irreps space regardless of
-///     extent. This arm must precede the synthetic-tag exemption: block-spec
-///     tags are "__"-prefixed but carry identity, unlike the structural
-///     bookkeeping sentinels.
-///   - A block-spec tag against Tag = None stays COMPATIBLE and falls through
-///     to the permissive arm below: that is plain adoption — an untagged
-///     buffer flowing into a block-structured slot, the same permissiveness
-///     any anonymous index gets.
-///   - User-named tags are nominative: lat != lon even if both Idx<180>.
-///   - Synthetic tags ("__"-prefixed markers like "__raggedidx_inline")
-///     are structural and never gate unification.
-///   - Extents are NOT compared (runtime values, not template parameters).
-///   - Symmetry classes must be compatible (SymNone is a wildcard).
-///   - WREATH LEVEL LISTS are compared, and are the one thing here that is read
-///     OUT of the extent slot — see the dedicated arm below for why that is not
-///     a contradiction of the line above.
+/// index types, Dist axes). True = INCOMPATIBLE. One shared predicate (not
+/// separate copies in ArrayElem/IRTDist) so the rules cannot drift:
+///   - Component RANK must match first, unconditionally (other arms can
+///     each mask a rank difference).
+///   - Block-spec tags (checked before the synthetic-tag exemption):
+///     identity is MEMBER + SPEC + optional alias name -- differs even at
+///     equal total_dim; aliases nominative; anon-vs-named compatible;
+///     irreps never pg-irreps. Tag = None on one side is COMPATIBLE.
+///   - User-named tags are nominative (lat != lon even if both Idx<180>);
+///     synthetic ("__") tags are structural, never gate.
+///   - Extents are NOT compared; Symmetry must be compatible (SymNone
+///     wildcard); WREATH LEVEL LISTS ARE compared (see the arm below).
 let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     let isSyntheticTag (t: string) = t.StartsWith("__")
-    // The wreath arm, ahead of everything but the rank check.
-    //
-    // Rank + Symmetry are NOT sufficient here, and the failure is silent:
-    // OrbIdx<[(2,+),(2,+)], n> and OrbIdx<[(2,-),(2,-)], n> are both Rank 4,
-    // both SymWreath, and both carry the same "__orbidx" synthetic tag (which
-    // the tag arm below exempts by design), so every existing test in this
-    // function says "compatible" -- while the two have DIFFERENT cell counts
-    // (55 vs 15 at n = 4) and different zero sets. The level list is the type.
-    //
-    // It lives in the Extent slot, and this function's contract says extents are
-    // never compared. That contract is about EXTENTS -- runtime values that are
-    // not template parameters. A level list is neither: it is compile-time
-    // syntax, part of the class's identity, and it rides the extent slot only
-    // because IRIndexTypeG has no field for it (the IRSparseKeys precedent).
-    // Comparing it is therefore consistent with the rule, not an exception to
-    // it; the BASE extent inside the marker is still not compared.
+    // The wreath arm, ahead of everything but the rank check. Rank +
+    // Symmetry alone are NOT sufficient: OrbIdx<[(2,+),(2,+)], n> and
+    // OrbIdx<[(2,-),(2,-)], n> are both Rank 4, SymWreath, share the
+    // "__orbidx" tag (exempted below) -- every other test says
+    // "compatible" while cell counts differ (55 vs 15 at n=4). It rides
+    // the Extent slot for lack of a dedicated IRIndexTypeG field
+    // (IRSparseKeys precedent); "extents never compared" means runtime
+    // EXTENTS -- the BASE extent inside the marker is still not compared.
     let wreathLevels (ix: IRIndexType) =
         match ix.Extent with
         | IROrbitClass (levels, _) -> Some levels
@@ -631,11 +522,10 @@ let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     let wreathMismatch =
         match wreathLevels i1, wreathLevels i2 with
         | Some l1, Some l2 -> l1 <> l2
-        // A wreath record against a non-wreath one: the Symmetry test at the
-        // bottom already separates them UNLESS the other side is SymNone (the
-        // wildcard). A plain Idx flowing into a wreath slot is adoption, the
-        // same permissiveness every anonymous index gets, so leave it to that
-        // arm rather than hard-refusing here.
+        // A wreath record against a non-wreath one: the Symmetry test below
+        // already separates them unless the other side is SymNone (the
+        // wildcard) -- a plain Idx flowing into a wreath slot is adoption,
+        // so leave it to that arm rather than hard-refusing here.
         | _ -> false
     indexRankDiffers i1 i2 ||
     wreathMismatch ||
@@ -655,10 +545,9 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     let orig2 = t2
     let t1 = subst.Resolve t1 |> normalize ToNested
     let t2 = subst.Resolve t2 |> normalize ToNested
-    // §5.3 fast path: post-normalization, structural equality holds
-    // iff the two surface forms are equivalent under the mixed-slot
-    // identity. Catches concrete-on-both-sides cases without entering
-    // the recursive cases at all.
+    // sec. 5.3 fast path: post-normalization, structural equality holds
+    // iff the surface forms are equivalent under the mixed-slot identity --
+    // catches concrete-on-both-sides cases without entering recursion.
     if t1 = t2 then Ok ()
     else
     match t1, t2 with
@@ -694,19 +583,17 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                 | ArrayElem arr when arr.IndexTypes.Length = k ->
                     subst.Bind(id, ty); Ok ()
                 | IRTInfer _ ->
-                    // Binding two inference vars — defer invariant check
+                    // Binding two inference vars -- defer invariant check
                     subst.Bind(id, ty); Ok ()
                 | _ ->
                     Error (Other (sprintf "Type variable with arity %d requires a rank-%d array, got %A" k k ty))
             | _ ->
                 match subst.GetLiteralDefault(id) with
                 | Some litE ->
-                    // `id` is a literal var (numeric/bool kind). It may WIDEN to
-                    // a compatible scalar and DEFER to another var, but — like the
-                    // concrete literal it replaces — it does not bind directly to
-                    // an array (that routes through the scalar→array fill coercion
-                    // at `checkExpr`) nor to any non-numeric type, and it never
-                    // narrows (upholds "no silent narrowing", TypeCheck.fs:6016).
+                    // `id` is a literal var (numeric/bool kind): may WIDEN to a
+                    // compatible scalar or DEFER to another var, but never binds
+                    // to an array (routed through checkExpr's fill coercion) or a
+                    // non-numeric type, and never narrows (TypeCheck.fs:6016).
                     match ty with
                     | IRTInfer id2 ->
                         match subst.GetLiteralDefault(id2) with
@@ -723,24 +610,17 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                         | Some p when p = targetE -> subst.Bind(id, ty); Ok ()  // widen-only
                         | _ -> Error (TypeMismatch (t1, t2))                    // narrow / incompatible
                     | _ ->
-                        // arrays (→ fill coercion), tuples, funcs, idx/nat, strings…
+                        // arrays (-> fill coercion), tuples, funcs, idx/nat, strings...
                         Error (TypeMismatch (t1, t2))
                 | None ->
                     subst.Bind(id, ty); Ok ()
     | IRTScalar e1, IRTScalar e2 when e1 = e2 -> Ok ()
-    // Scalar unification.
-    //
-    // Phase 2 (post-Gap-2.5): two concrete-and-different primitives are a
-    // real type error. Pre-fix, we accepted them via `promoteElemType` and
-    // returned Ok, which silently lifted promotion to "type compatibility."
-    // That made Probe E (Int64-annotated kernel param against Float64 source)
-    // type-check — the C++ then truncated values silently.
-    //
-    // The promotion rebind path stays alive when at least one side is an
-    // inference variable: that's the legitimate use (a fresh literal type
-    // gets pinned to the wider type a context requires). When both sides
-    // are concrete, promotion would rewrite types without binding anything,
-    // which is the silent-acceptance failure mode.
+    // Scalar unification: two concrete-and-different primitives are a real
+    // type error, not promotable -- accepting via `promoteElemType` would
+    // let an Int64-annotated param silently unify with Float64, truncating
+    // values in C++. The rebind path stays alive only when at least one
+    // side is an inference variable; with both concrete it would rewrite
+    // types without binding anything -- silent acceptance.
     | IRTScalar e1, IRTScalar e2 ->
         match promoteElemType e1 e2 with
         | Some promoted ->
@@ -748,10 +628,9 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             let leaf2 = findLeafInferScalar subst orig2
             match leaf1, leaf2 with
             | None, None ->
-                // Both concrete, neither is an inference variable being pinned.
-                // The promoteElemType call was just suggesting a "compatible
-                // wider type" — which is a value-promotion fact (used by binop
-                // result-type inference), not a type-equality fact. Refuse.
+                // Both concrete: promoteElemType's "compatible wider type"
+                // is a value-promotion fact (used by binop result-type
+                // inference), not a type-equality fact. Refuse.
                 Error (TypeMismatch (t1, t2))
             | _ ->
                 let promotedTy = IRTScalar promoted
@@ -766,31 +645,27 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
         if a1.IndexTypes.Length <> a2.IndexTypes.Length || a1.IsVirtual <> a2.IsVirtual then
             Error (TypeMismatch (t1, t2))
         else
-            // Per-index compatibility: the shared indexPairIncompatible
-            // predicate (see its doc above unify) — component rank, nominative
-            // user tags, synthetic-tag exemption, irreps spec identity,
-            // compatible symmetry, extents never compared.
+            // Per-index compatibility: shared indexPairIncompatible
+            // predicate (see doc above unify) -- rank, tags, symmetry,
+            // extents never compared.
             let indexMismatch =
                 List.zip a1.IndexTypes a2.IndexTypes
                 |> List.indexed
                 |> List.tryFind (fun (_, (i1, i2)) -> indexPairIncompatible i1 i2)
             match indexMismatch with
-            // A rank disagreement gets its own diagnostic: the bare
-            // "expected X, got Y" reads as a puzzle when the two slots hold
-            // the same number of cells and differ only in how many index
-            // components they span.
+            // A rank disagreement gets its own diagnostic: "expected X, got
+            // Y" reads as a puzzle when the two slots hold the same cell
+            // count and differ only in index-component span.
             | Some (slot, (i1, i2)) when indexRankDiffers i1 i2 ->
                 Error (IndexRankMismatch (sprintf "index slot %d" slot,
                                           ppIndexType i1, max 1 i1.Rank,
                                           ppIndexType i2, max 1 i2.Rank))
             | Some _ -> Error (TypeMismatch (t1, t2))
             | None ->
-                // Phase B5: recursive elem-type unification.
-                // ElemType is IRType post-B2, so this falls through to the
-                // existing unify logic. Inference vars bind; primitives
-                // promote where compatible (IRTScalar e1, IRTScalar e2);
-                // genuine mismatches error out (catching the silent
-                // miscompile that Probe E demonstrated).
+                // ElemType is IRType, so this falls through to unify:
+                // inference vars bind, primitives promote where compatible,
+                // genuine mismatches error (same silent-narrowing hazard
+                // scalar unification guards against).
                 unify subst a1.ElemType a2.ElemType
     | IRTTuple ts1, IRTTuple ts2 when ts1.Length = ts2.Length ->
         List.zip ts1 ts2 |> List.fold (fun acc (a, b) ->
@@ -806,45 +681,30 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     | IRTLoop l1, IRTLoop l2 when l1.Kind = l2.Kind -> Ok ()
     | IRTComputation t1, IRTComputation t2 -> unify subst t1 t2
     // Two parameter packs unify by their base (element) type; the arity
-    // variable NAME is diagnostics-only and doesn't drive specialization
-    // (each Poly occurrence mints a fresh `r%d`). This is what lets a
-    // recursive call on the `tail` sub-pack — `Poly<base, fresh>` — flow into
-    // a parameter declared `Poly<base, r_orig>`.
+    // variable NAME is diagnostics-only (each Poly occurrence mints a
+    // fresh `r%d`) -- lets a recursive call on `tail` (`Poly<base, fresh>`)
+    // flow into a parameter declared `Poly<base, r_orig>`.
     | IRTPoly (b1, _), IRTPoly (b2, _) -> unify subst b1 b2
     | IRTNat _, IRTNat _ -> Ok ()
-    // The tag WILDCARD `Base<_>` (IRefAny). Deliberately ahead of both the
-    // strict IRTIdxTagged arm below and the IRTUnitAnnotated arms further
-    // down — the top-down match order is what makes the wildcard permissive
-    // without loosening anything else. It matches:
-    //   - any other tagged value (Nat<Y>, Nat<X>, an anonymous Idx tag),
-    //   - any unit-annotated value (Float<meters>),
-    //   - a bare untagged scalar (an anonymous `range<Idx<n>>` element).
-    // In every case only the VALUE types have to unify; the tag/unit itself
-    // is exactly what the parameter declined to constrain.
-    //
-    // The wildcard does NOT absorb the concrete tag it met: the parameter's
-    // type stays `Base<_>` and erases to its inner type at codegen (the
-    // eta-expanded kernel params render as `int64_t`, not the index typedef).
-    // So a wildcard-typed value carries no more tag guarantee downstream than
-    // an untagged int, which is why checkArrayIndexTags gives the two the same
-    // warn-and-allow treatment. Propagating the tag instead would need the
-    // parameter to sit behind a rebindable inference variable — that is the
-    // tag-VARIABLE feature, not this one.
+    // The tag WILDCARD `Base<_>` (IRefAny), ahead of the strict
+    // IRTIdxTagged and IRTUnitAnnotated arms so top-down match order makes
+    // it permissive. Matches any tagged value, any unit-annotated value,
+    // or a bare untagged scalar -- only the VALUE types unify; the
+    // tag/unit is what the parameter declined to constrain. It does NOT
+    // absorb the concrete tag it met: erases to its inner type at codegen,
+    // carrying no more tag guarantee than an untagged int
+    // (checkArrayIndexTags treats both the same). Propagating the tag
+    // needs a rebindable inference variable behind the parameter.
     | IRTIdxTagged (wInner, IRefAny), other
     | other, IRTIdxTagged (wInner, IRefAny) ->
         unify subst wInner (stripTagAnnotation other)
-    // IRTIdxTagged unification (parallel to IRTUnitAnnotated below):
-    //   1. Inner types must unify (so an int64 tag won't accidentally
-    //      match a float-tagged value, even if both have the same IdxRef).
-    //   2. IdxRefs must be structurally equal by identity: named-vs-named
-    //      requires name match; anon-vs-anon requires nominalId match
-    //      (extent ignored — diagnostic carrier, not identity).
-    //   Mixed named-vs-anon: never compatible.
-    // The asymmetric arms (tagged-vs-other below) are intentionally
-    // omitted: unlike IRTUnitAnnotated which freely strips units in cross
-    // unification, IRTIdxTagged is strict — a plain int cannot flow to
-    // Nat<I> without explicit casting. This enforces §4.18.3's "untyped
-    // literal" rule at the type level.
+    // IRTIdxTagged unification (parallel to IRTUnitAnnotated below): inner
+    // types must unify (an int64 tag won't match float-tagged, even with
+    // the same IdxRef); IdxRefs must be structurally equal (named needs
+    // name match, anon needs nominalId match, extent ignored; mixed
+    // named/anon never compatible). No asymmetric arms: strict, unlike
+    // IRTUnitAnnotated -- a plain int can't flow to Nat<I> without a cast,
+    // enforcing sec. 4.18.3's "untyped literal" rule.
     | IRTIdxTagged (inner1, r1), IRTIdxTagged (inner2, r2) ->
         let refMatch =
             match r1, r2 with
@@ -853,17 +713,12 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             | _ -> false
         if refMatch then unify subst inner1 inner2
         else Error (TypeMismatch (t1, t2))
-    // IRTDist unification: strict, like IRTIdxTagged — no asymmetric arms,
-    // so a bare tuple of arrays never flows into a Dist (only the dist
-    // construction intrinsic and dist-typed operators produce Dist values).
-    //   1. Carried orders must be EQUAL (the order guard's foundation —
-    //      combining or passing dists of different stochastic order is a
-    //      type error, not a runtime one).
-    //   2. Axes must agree positionally, with the same compatibility rule
-    //      as ArrayElem index types: user-named tags are nominative,
-    //      synthetic (__-prefixed) tags are structural, extents are NOT
-    //      compared (runtime values), symmetry classes must be compatible.
-    //   3. Element types unify recursively.
+    // IRTDist unification: strict, like IRTIdxTagged -- no asymmetric
+    // arms, so a bare tuple of arrays never flows into a Dist (only the
+    // dist intrinsic and dist-typed operators produce Dist values).
+    // Carried orders must be EQUAL (different stochastic order is a type
+    // error, not runtime); axes agree positionally under the same rule as
+    // ArrayElem index types; element types unify recursively.
     | IRTDist (o1, e1, ax1), IRTDist (o2, e2, ax2) ->
         if o1 <> o2 || ax1.Length <> ax2.Length then
             Error (TypeMismatch (t1, t2))
@@ -880,9 +735,8 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             | Some _ -> Error (TypeMismatch (t1, t2))
             | None -> unify subst e1 e2
     // IRTArrow: slot-by-slot unification. Slot kinds (SIdx/SIdxVirt/SVal)
-    // must agree at each position; SIdx/SIdxVirt require matching index
-    // identity (id and tag); SVal recurses through unify. The result
-    // types must also unify. Identity field is ignored — it's metadata.
+    // must agree; SIdx/SIdxVirt need matching index identity (id, tag);
+    // SVal recurses. Result types also unify; Identity field is metadata.
     | IRTArrow (s1, r1, _), IRTArrow (s2, r2, _) when s1.Length = s2.Length ->
         let unifySlot acc (sa, sb) =
             acc |> Result.bind (fun () ->
@@ -894,22 +748,17 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                 | _ -> Error (TypeMismatch (t1, t2)))
         List.zip s1 s2 |> List.fold unifySlot (Ok ())
         |> Result.bind (fun () -> unify subst r1 r2)
-    // Unit-annotated types: when BOTH sides carry a unit signature the
-    // signatures must agree — this is what makes bindings and function
-    // boundaries unit-checked (`let d: Float<meters> = t` with t in
-    // seconds, or passing a seconds value to a meters parameter). The
-    // asymmetric arms stay permissive: bare values flow freely into and
-    // out of annotated positions (that is how units are introduced —
-    // `let d: Float<meters> = 100.0`).
+    // Unit-annotated types: when BOTH sides carry a unit signature they
+    // must agree -- this is what makes bindings and function boundaries
+    // unit-checked. The asymmetric arms stay permissive: bare values flow
+    // freely into/out of annotated positions (how units are introduced).
     | IRTUnitAnnotated (inner1, u1), IRTUnitAnnotated (inner2, u2) ->
         if unitCompatible u1 u2 then unify subst inner1 inner2
         else Error (UnitMismatch ("assignment", ppUnitSig u1, ppUnitSig u2))
     | IRTUnitAnnotated (inner, _), other | other, IRTUnitAnnotated (inner, _) -> unify subst inner other
     | _ -> Error (TypeMismatch (t1, t2))
 
-// ============================================================================
 // 1b. Let-Generalization (Hindley-Milner Polymorphism)
-// ============================================================================
 
 /// A type scheme: a type with universally quantified inference variables.
 /// E.g., `let id = lambda(x: T) -> x` gets scheme `forall {#10001}. #10001 -> #10001`.

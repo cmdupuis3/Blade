@@ -5,23 +5,23 @@ open System
 /// The end-to-end training oracle: a tiny E(3)-equivariant network trained by
 /// full-batch gradient descent on a rotation-invariant regression task. This
 /// module IS the specification of the Blade e2e example (docs
-/// features/equivariant-nn.md §10 composition + AD): the .blade program
+/// features/equivariant-nn.md section 10 composition + AD): the .blade program
 /// replicates this computation with the same data (baked as literals), the
 /// same iteration order, and pins its loss trajectory / gradient snapshots
 /// against these values.
 ///
-/// Task: predict  y = Σ_{i<j} exp(-|r_i - r_j|²)  from a point cloud — a
+/// Task: predict  y = Sigma_{i<j} exp(-|r_i - r_j|^2)  from a point cloud -- a
 /// smooth rotation/translation-invariant function of the geometry.
 ///
 /// Architecture (specs kept minimal but exercising every op):
 ///   specIn  = [(0e,1)]                       node scalar
-///   sh      = Y_to<2>  → [(0e,1),(1o,1),(2e,1)]
-///   conv1   : specIn ⊗ sh → specH = [(0e,2),(1o,2),(2e,1)]   (w1, 5 params)
+///   sh      = Y_to<2>  -> [(0e,1),(1o,1),(2e,1)]
+///   conv1   : specIn (x) sh -> specH = [(0e,2),(1o,2),(2e,1)]   (w1, 5 params)
 ///   gate1   : gated activation on specH
-///   lin     : specH → specH block-diagonal                    (w2, 9 params)
-///   conv2   : specH ⊗ sh → specOut = [(0e,2)]                 (w3, 10 params)
-///   gate2   : gated (all-scalar spec ⇒ silu)
-///   readout : pred = Σ_nodes (wr · node) + br                 (wr, 2 + 1 params)
+///   lin     : specH -> specH block-diagonal                    (w2, 9 params)
+///   conv2   : specH (x) sh -> specOut = [(0e,2)]                 (w3, 10 params)
+///   gate2   : gated (all-scalar spec => silu)
+///   readout : pred = Sigma_nodes (wr * node) + br                 (wr, 2 + 1 params)
 ///   loss    : MSE over graphs
 ///
 /// 27 parameters total. Graphs are complete digraphs on 5 nodes (20 edges),
@@ -51,7 +51,7 @@ module TrainingOracle =
     let nNodes = 5
     let nGraphs = 4
 
-    /// Complete digraph on nNodes (i ≠ j), source-major order.
+    /// Complete digraph on nNodes (i != j), source-major order.
     let edgeSrc, edgeTgt =
         let s = ResizeArray<int>()
         let t = ResizeArray<int>()
@@ -69,7 +69,7 @@ module TrainingOracle =
           NodeFeat: float[]               // nNodes*dIn
           Target: float }
 
-    /// y = Σ_{i<j} exp(-|r_i - r_j|²)
+    /// y = Sigma_{i<j} exp(-|r_i - r_j|^2)
     let invariantTarget (pos: float[]) : float =
         let mutable acc = 0.0
         for i in 0 .. nNodes - 1 do
@@ -82,7 +82,7 @@ module TrainingOracle =
 
     /// Deterministic dataset + init weights (seed 20260711). The Blade
     /// example bakes these exact values as source literals via `dump`.
-    /// Returns (graphs, w1, w2, w3, wr, br) — br is the readout bias,
+    /// Returns (graphs, w1, w2, w3, wr, br) -- br is the readout bias,
     /// initialized to 0.
     let mkDataset () : Graph[] * float[] * float[] * float[] * float[] * float =
         let rng = Random(20260711)
@@ -94,7 +94,7 @@ module TrainingOracle =
         let initW n = Array.init n (fun _ -> rng.NextDouble() - 0.5)
         graphs, initW w1Dim, initW w2Dim, initW w3Dim, initW wrDim, 0.0
 
-    /// Edge vectors for a graph: edge e points src → tgt as pos(src)-pos(tgt).
+    /// Edge vectors for a graph: edge e points src -> tgt as pos(src)-pos(tgt).
     let edgeVecs (pos: float[]) : float[] =
         let ev = Array.zeroCreate (nEdges * 3)
         for e in 0 .. nEdges - 1 do
@@ -158,36 +158,36 @@ module TrainingOracle =
             let g = graphs.[s]
             let t = traces.[s]
             let ev = edgeVecs g.Pos
-            // readoutᵀ: pred = Σ_i wr · G2_i + br
+            // readout^T: pred = Sigma_i wr * G2_i + br
             dBr <- dBr + dPred.[s]
             let cG2 = Array.zeroCreate (nNodes * dOut)
             for i in 0 .. nNodes - 1 do
                 for c in 0 .. dOut - 1 do
                     dWr.[c] <- dWr.[c] + t.G2.[i * dOut + c] * dPred.[s]
                     cG2.[i * dOut + c] <- wr.[c] * dPred.[s]
-            // gate2ᵀ (per node, needs pre-activation F2)
+            // gate2^T (per node, needs pre-activation F2)
             let cF2 = Array.zeroCreate (nNodes * dOut)
             for i in 0 .. nNodes - 1 do
                 let d = Autodiff.vjpGated specOut (Array.sub t.F2 (i * dOut) dOut)
                                                   (Array.sub cG2 (i * dOut) dOut)
                 Array.blit d 0 cF2 (i * dOut) dOut
-            // conv2ᵀ → accumulates dW3, hands back the cotangent of H
+            // conv2^T -> accumulates dW3, hands back the cotangent of H
             let dW3s, cH = Autodiff.vjpEquivariantConv specH specOut lmaxSh t.H nNodes edgeSrc edgeTgt ev w3 cF2
             for i in 0 .. dW3.Length - 1 do dW3.[i] <- dW3.[i] + dW3s.[i]
-            // linᵀ (per node)
+            // lin^T (per node)
             let cG1 = Array.zeroCreate (nNodes * dH)
             for i in 0 .. nNodes - 1 do
                 let dW2s, cRow = Autodiff.vjpLinear specH specH w2 (Array.sub t.G1 (i * dH) dH)
                                                                    (Array.sub cH (i * dH) dH)
                 for k in 0 .. dW2.Length - 1 do dW2.[k] <- dW2.[k] + dW2s.[k]
                 Array.blit cRow 0 cG1 (i * dH) dH
-            // gate1ᵀ (per node, pre-activation F1)
+            // gate1^T (per node, pre-activation F1)
             let cF1 = Array.zeroCreate (nNodes * dH)
             for i in 0 .. nNodes - 1 do
                 let d = Autodiff.vjpGated specH (Array.sub t.F1 (i * dH) dH)
                                                 (Array.sub cG1 (i * dH) dH)
                 Array.blit d 0 cF1 (i * dH) dH
-            // conv1ᵀ → dW1 (node features are data; their cotangent is dropped)
+            // conv1^T -> dW1 (node features are data; their cotangent is dropped)
             let dW1s, _cFeat = Autodiff.vjpEquivariantConv specIn specH lmaxSh g.NodeFeat nNodes edgeSrc edgeTgt ev w1 cF1
             for i in 0 .. dW1.Length - 1 do dW1.[i] <- dW1.[i] + dW1s.[i]
 

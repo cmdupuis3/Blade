@@ -56,7 +56,7 @@ let testMomentCumulant () =
     let back = MomentCumulant.cumulantsFromMoments (MomentCumulant.momentsFromCumulants kappa)
     for k in 1 .. 5 do
         checkArrayClose (sprintf "round trip rank %d" k) 1e-9 kappa.[k - 1].Data back.[k - 1].Data
-    // Isserlis: zero-mean Gaussian pair, rho = 0.5 — only pairings survive
+    // Isserlis: zero-mean Gaussian pair, rho = 0.5 -- only pairings survive
     let g = Dist.create 2 4
     SymTensor.set g.Kappa.[1] [| 0; 0 |] 1.0
     SymTensor.set g.Kappa.[1] [| 0; 1 |] 0.5
@@ -67,7 +67,7 @@ let testMomentCumulant () =
     checkClose "Isserlis E[X^3 Y]"  1e-12 1.5 (SymTensor.get mu.[3] [| 0; 0; 0; 1 |])
     checkClose "Isserlis E[X^2 Y^2]" 1e-12 1.5 (SymTensor.get mu.[3] [| 0; 0; 1; 1 |])
     checkClose "Isserlis E[X^3]"    1e-12 0.0 (SymTensor.get mu.[2] [| 0; 0; 0 |])
-    // Poisson(2) raw moments: Touchard/Stirling — 2, 6, 22, 94
+    // Poisson(2) raw moments: Touchard/Stirling -- 2, 6, 22, 94
     let pois = univariate (Dist.poissonCumulants 2.0 4)
     let pm = Dist.moments pois |> Array.map (fun t -> t.Data.[0])
     checkArrayClose "Poisson(2) raw moments" 1e-9 [| 2.0; 6.0; 22.0; 94.0 |] pm
@@ -110,7 +110,7 @@ let testDistTower () =
     checkClose "Exp*Exp kappa3 = 26"  1e-9 26.0  pc.[2]
     checkClose "Exp*Exp kappa4 = 426" 1e-9 426.0 pc.[3]
     // Exact polynomial pushforward: Y = Z0*Z1 for iid standard normals.
-    // kappa(Y) = [0; 1; 0; 6] — the classic product-normal excess kurtosis.
+    // kappa(Y) = [0; 1; 0; 6] -- the classic product-normal excess kurtosis.
     let zn = Dist.ofIndependent [| Dist.gaussianCumulants 0.0 1.0 8; Dist.gaussianCumulants 0.0 1.0 8 |] 8
     let prodN = Dist.polyMoments zn [ (1.0, [| 1; 1 |]) ] 4
     checkArrayClose "poly Z0*Z1 cumulants" 1e-9 [| 0.0; 1.0; 0.0; 6.0 |] (univCumulants prodN)
@@ -140,7 +140,7 @@ let private computeMoments (data: float[][]) (rmax: int) : SymTensor.T[] =
 let private computeCumulants (data: float[][]) (rmax: int) : SymTensor.T[] =
     computeMoments data rmax |> MomentCumulant.cumulantsFromMoments
 
-/// Univariate jet: vals.[k-1] = g^(k)(μ), packed as dim-1 rank-k tensors.
+/// Univariate jet: vals.[k-1] = g^(k)(mu), packed as dim-1 rank-k tensors.
 let univJet (vals: float[]) : SymTensor.T[] =
     vals |> Array.mapi (fun i v ->
         let t = SymTensor.create 1 (i + 1)
@@ -148,27 +148,27 @@ let univJet (vals: float[]) : SymTensor.T[] =
         t)
 
 let testJetPushforward () =
-    section "jet pushforward (full Faà di Bruno, scalar output)"
-    // 1) Exact jet of g(x,y) = x·y at μ = (0,0) on iid standard normals:
-    //    the product-normal cumulants — agrees with polyMoments exactly.
+    section "jet pushforward (full Faa di Bruno, scalar output)"
+    // 1) Exact jet of g(x,y) = x*y at mu = (0,0) on iid standard normals:
+    //    the product-normal cumulants -- agrees with polyMoments exactly.
     let zn = Dist.ofIndependent [| Dist.gaussianCumulants 0.0 1.0 8; Dist.gaussianCumulants 0.0 1.0 8 |] 8
     let d1 = SymTensor.create 2 1
     let d2 = SymTensor.create 2 2
     SymTensor.set d2 [| 0; 1 |] 1.0
     let viaJet = Dist.jetPushforward zn 0.0 [| d1; d2 |] 4 false
-    checkArrayClose "jet x·y on iid normals = [0,1,0,6]" 1e-9 [| 0.0; 1.0; 0.0; 6.0 |] (univCumulants viaJet)
-    // 2) g(x) = x² on Gamma(3,2): jet (μ², 2μ, 2) vs the exact polynomial pushforward.
+    checkArrayClose "jet x*y on iid normals = [0,1,0,6]" 1e-9 [| 0.0; 1.0; 0.0; 6.0 |] (univCumulants viaJet)
+    // 2) g(x) = x^2 on Gamma(3,2): jet (mu^2, 2mu, 2) vs the exact polynomial pushforward.
     let gam = univariate (Dist.gammaCumulants 3.0 2.0 6)
     let mu = gam.Kappa.[0].Data.[0]
     let viaJet2 = Dist.jetPushforward gam (mu * mu) (univJet [| 2.0 * mu; 2.0 |]) 3 false
     let viaPoly2 = Dist.polyMoments gam [ (1.0, [| 2 |]) ] 3
-    checkArrayClose "jet x² = poly x² (Gamma(3,2))" 1e-9 (univCumulants viaPoly2) (univCumulants viaJet2)
-    // 3) g(x) = x³ + 2x on Exp(1): mixed-degree jet at μ = 1 vs polyMoments.
+    checkArrayClose "jet x^2 = poly x^2 (Gamma(3,2))" 1e-9 (univCumulants viaPoly2) (univCumulants viaJet2)
+    // 3) g(x) = x^3 + 2x on Exp(1): mixed-degree jet at mu = 1 vs polyMoments.
     let ex = univariate (Dist.exponentialCumulants 1.0 6)
     let viaJet3 = Dist.jetPushforward ex 3.0 (univJet [| 5.0; 6.0; 6.0 |]) 2 false
     let viaPoly3 = Dist.polyMoments ex [ (1.0, [| 3 |]); (2.0, [| 1 |]) ] 2
-    checkArrayClose "jet x³+2x = poly (Exp(1))" 1e-9 (univCumulants viaPoly3) (univCumulants viaJet3)
-    // 4) A 1-jet IS the affine map: 2X + 10 on Exp(1) — note g0 = g(μ) = 12,
+    checkArrayClose "jet x^3+2x = poly (Exp(1))" 1e-9 (univCumulants viaPoly3) (univCumulants viaJet3)
+    // 4) A 1-jet IS the affine map: 2X + 10 on Exp(1) -- note g0 = g(mu) = 12,
     //    not the intercept (the jet is anchored at the mean).
     let ex4 = univariate (Dist.exponentialCumulants 1.0 4)
     let viaJet4 = Dist.jetPushforward ex4 12.0 (univJet [| 2.0 |]) 4 false
@@ -181,32 +181,32 @@ let testJetPushforward () =
     let jetSq = univJet [| 2.0; 2.0 |]
     let closed2 = Dist.jetPushforward g2 1.0 jetSq 2 true
     let strict4 = Dist.jetPushforward g4 1.0 jetSq 2 false
-    checkArrayClose "Gaussian closure = strict (x², N(1,2))" 1e-12 (univCumulants strict4) (univCumulants closed2)
-    // 6) The strict order guard: q·s exceeds the carried order.
+    checkArrayClose "Gaussian closure = strict (x^2, N(1,2))" 1e-12 (univCumulants strict4) (univCumulants closed2)
+    // 6) The strict order guard: q*s exceeds the carried order.
     checkThrows "jet order guard" (fun () -> Dist.jetPushforward g2 1.0 jetSq 2 false |> ignore)
     // 7) THE EMPIRICAL-DISTRIBUTION IDENTITY: pushing the empirical dist of
     //    the data through an exact polynomial jet equals the empirical
-    //    cumulants of the transformed data — the property the compiler's
+    //    cumulants of the transformed data -- the property the compiler's
     //    two-route corpus test pins.
     let a1 = [| 1.0; 2.0; 4.0; 6.0; 0.0; 3.0 |]
     let distA1 : Dist.T = { Dim = 1; Order = 6; Kappa = computeCumulants [| a1 |] 6 }
     let m = distA1.Kappa.[0].Data.[0]
     let pushed = Dist.jetPushforward distA1 (m * m) (univJet [| 2.0 * m; 2.0 |]) 3 false
     let direct : Dist.T = { Dim = 1; Order = 3; Kappa = computeCumulants [| a1 |> Array.map (fun x -> x * x) |] 3 }
-    checkArrayClose "empirical push x² = cumulants of squared data" 1e-9 (univCumulants direct) (univCumulants pushed)
+    checkArrayClose "empirical push x^2 = cumulants of squared data" 1e-9 (univCumulants direct) (univCumulants pushed)
 
 let testJetPushforwardVec () =
-    section "vector jet pushforward (mixed-block Faà di Bruno, joint output cumulants)"
-    // The running map: g(x,y) = (x + y, x·y) on the empirical dist of data B.
+    section "vector jet pushforward (mixed-block Faa di Bruno, joint output cumulants)"
+    // The running map: g(x,y) = (x + y, x*y) on the empirical dist of data B.
     let b = [| [| 1.0; 2.0; 4.0 |]; [| 3.0; 5.0; 4.0 |] |]
     let distB6 : Dist.T = { Dim = 2; Order = 6; Kappa = computeCumulants b 6 }
     let mx = SymTensor.get distB6.Kappa.[0] [| 0 |]
     let my = SymTensor.get distB6.Kappa.[0] [| 1 |]
-    // coordinate 0 (x + y): degree-1 jet — deliberately RAGGED (s_0 = 1)
+    // coordinate 0 (x + y): degree-1 jet -- deliberately RAGGED (s_0 = 1)
     let d1sum = SymTensor.create 2 1
     SymTensor.set d1sum [| 0 |] 1.0
     SymTensor.set d1sum [| 1 |] 1.0
-    // coordinate 1 (x·y): D1 = [∂x, ∂y] = [y, x] at the mean; D2 = ∂x∂y = 1
+    // coordinate 1 (x*y): D1 = [dx, dy] = [y, x] at the mean; D2 = dxdy = 1
     let d1prod = SymTensor.create 2 1
     SymTensor.set d1prod [| 0 |] my
     SymTensor.set d1prod [| 1 |] mx
@@ -221,7 +221,7 @@ let testJetPushforwardVec () =
     let m1 = SymTensor.get distA1.Kappa.[0] [| 0 |]
     let scalarJet = Dist.jetPushforward distA1 (m1 * m1) (univJet [| 2.0 * m1; 2.0 |]) 3 false
     let vecOne = Dist.jetPushforwardVec distA1 [| m1 * m1 |] [| univJet [| 2.0 * m1; 2.0 |] |] 3 false
-    checkArrayClose "m=1 vec = scalar jet (x² on A1)" 1e-12 (univCumulants scalarJet) (univCumulants vecOne)
+    checkArrayClose "m=1 vec = scalar jet (x^2 on A1)" 1e-12 (univCumulants scalarJet) (univCumulants vecOne)
     // 2) The linear coordinate's marginal tower = the affine pushforward.
     let viaAffine = Dist.affine [| [| 1.0; 1.0 |] |] [| 0.0 |] distB6
     let sumMarginal = Array.init 3 (fun k -> SymTensor.get vec.Kappa.[k] (Array.create (k + 1) 0))
@@ -229,8 +229,8 @@ let testJetPushforwardVec () =
     // 3) The product coordinate's marginal diagonal = the scalar J2 jet.
     let scalarProd = Dist.jetPushforward distB6 (mx * my) [| d1prod; d2prod |] 3 false
     let prodMarginal = Array.init 3 (fun k -> SymTensor.get vec.Kappa.[k] (Array.create (k + 1) 1))
-    checkArrayClose "vec coord 1 marginal = scalar x·y jet" 1e-9 (univCumulants scalarProd) prodMarginal
-    // 4) THE EMPIRICAL IDENTITY, vectorized — the load-bearing check: joint
+    checkArrayClose "vec coord 1 marginal = scalar x*y jet" 1e-9 (univCumulants scalarProd) prodMarginal
+    // 4) THE EMPIRICAL IDENTITY, vectorized -- the load-bearing check: joint
     //    cumulants of the transformed 2-row data equal the pushed JOINT
     //    tower, cross-cumulants included (nothing univariate pins those).
     let transformed = [| Array.map2 (+) b.[0] b.[1]; Array.map2 (*) b.[0] b.[1] |]
@@ -239,7 +239,7 @@ let testJetPushforwardVec () =
         checkArrayClose (sprintf "vec empirical identity rank %d" k) 1e-9 direct.[k - 1].Data vec.Kappa.[k - 1].Data
     // 5) Guards: the strict order budget, and a mis-shaped derivative slot.
     let distB4 : Dist.T = { Dim = 2; Order = 4; Kappa = computeCumulants b 4 }
-    checkThrows "vec order guard (q·s = 6 > 4 strict)"
+    checkThrows "vec order guard (q*s = 6 > 4 strict)"
         (fun () -> Dist.jetPushforwardVec distB4 g0 jets 3 false |> ignore)
     let badD2 = SymTensor.create 1 2
     checkThrows "vec shape guard (D_2 over wrong dim)"
@@ -443,9 +443,9 @@ let main argv =
         dumpCumulants [| [| 1.0; 2.0 |]; [| 3.0; 4.0 |] |] 4
         printfn "-- data B: [[1,2,4],[3,5,4]] (N=3)"
         dumpCumulants [| [| 1.0; 2.0; 4.0 |]; [| 3.0; 5.0; 4.0 |] |] 4
-        printfn "-- data Z4: [[1,2,4,6],[3,5,4,2]] (N=4) — 2-chunk merge oracle"
+        printfn "-- data Z4: [[1,2,4,6],[3,5,4,2]] (N=4) -- 2-chunk merge oracle"
         dumpCumulants [| [| 1.0; 2.0; 4.0; 6.0 |]; [| 3.0; 5.0; 4.0; 2.0 |] |] 4
-        printfn "-- data Z6: [[1,2,4,6,0,3],[3,5,4,2,1,7]] (N=6) — 3-chunk merge oracle"
+        printfn "-- data Z6: [[1,2,4,6,0,3],[3,5,4,2,1,7]] (N=6) -- 3-chunk merge oracle"
         dumpCumulants [| [| 1.0; 2.0; 4.0; 6.0; 0.0; 3.0 |]; [| 3.0; 5.0; 4.0; 2.0; 1.0; 7.0 |] |] 3
 
         // SECTION 1: joint 5-variable cumulants (mixed-cumulant blocks).
@@ -470,7 +470,7 @@ let main argv =
             printfn "kp%d = [%s]" k cells
 
         // SECTION 4: joint 5-variable cumulants at N=3 (nonzero mixed rank-3
-        // blocks — the N=2 XY5 oracle above has structurally zero rank 3).
+        // blocks -- the N=2 XY5 oracle above has structurally zero rank 3).
         printfn "-- data XY5b: stacked N=3 (mixed-block oracle, nonzero rank 3)"
         let stacked3 =
             [| [| 1.0; 2.0; 4.0 |]; [| 3.0; 5.0; 4.0 |]; [| 2.0; 4.0; 1.0 |]
@@ -509,15 +509,15 @@ let main argv =
         // from cumulant(d, 1).
         let fmt (dist: Dist.T) =
             univCumulants dist |> Array.map (sprintf "%.12g") |> String.concat ", "
-        // J1: univariate g(x) = x² on A1, order-6 dist, q = 3 strict.
+        // J1: univariate g(x) = x^2 on A1, order-6 dist, q = 3 strict.
         let a1 = [| 1.0; 2.0; 4.0; 6.0; 0.0; 3.0 |]
         let distA1 : Dist.T = { Dim = 1; Order = 6; Kappa = computeCumulants [| a1 |] 6 }
         let m1 = SymTensor.get distA1.Kappa.[0] [| 0 |]
-        printfn "-- J1: x² on A1=[1,2,4,6,0,3], dist order 6, q=3 strict"
+        printfn "-- J1: x^2 on A1=[1,2,4,6,0,3], dist order 6, q=3 strict"
         printfn "jet1 = [%s]" (fmt (Dist.jetPushforward distA1 (m1 * m1) (univJet [| 2.0 * m1; 2.0 |]) 3 false))
-        printfn "ref1 = [%s] (cumulants of the squared data — must agree)"
+        printfn "ref1 = [%s] (cumulants of the squared data -- must agree)"
             (fmt { Dim = 1; Order = 3; Kappa = computeCumulants [| a1 |> Array.map (fun x -> x * x) |] 3 })
-        // J2: bivariate g(x,y) = x·y on data B, order-6 dist, q = 3 strict.
+        // J2: bivariate g(x,y) = x*y on data B, order-6 dist, q = 3 strict.
         let b = [| [| 1.0; 2.0; 4.0 |]; [| 3.0; 5.0; 4.0 |] |]
         let distB6 : Dist.T = { Dim = 2; Order = 6; Kappa = computeCumulants b 6 }
         let mx = SymTensor.get distB6.Kappa.[0] [| 0 |]
@@ -527,22 +527,22 @@ let main argv =
         SymTensor.set jd1 [| 1 |] mx
         let jd2 = SymTensor.create 2 2
         SymTensor.set jd2 [| 0; 1 |] 1.0
-        printfn "-- J2: x·y on B=[[1,2,4],[3,5,4]], dist order 6, q=3 strict"
+        printfn "-- J2: x*y on B=[[1,2,4],[3,5,4]], dist order 6, q=3 strict"
         printfn "jet2 = [%s]" (fmt (Dist.jetPushforward distB6 (mx * my) [| jd1; jd2 |] 3 false))
-        printfn "ref2 = [%s] (cumulants of the product data — must agree)"
+        printfn "ref2 = [%s] (cumulants of the product data -- must agree)"
             (fmt { Dim = 1; Order = 3; Kappa = computeCumulants [| Array.map2 (*) b.[0] b.[1] |] 3 })
-        // J3: the same x·y jet but the dist carries only order 4 — CLOSED
-        // mode (q·s = 6 > 4; partition blocks past order 4 are dropped).
+        // J3: the same x*y jet but the dist carries only order 4 -- CLOSED
+        // mode (q*s = 6 > 4; partition blocks past order 4 are dropped).
         let distB4 : Dist.T = { Dim = 2; Order = 4; Kappa = computeCumulants b 4 }
-        printfn "-- J3: x·y on B, dist order 4, q=3 CLOSED"
+        printfn "-- J3: x*y on B, dist order 4, q=3 CLOSED"
         printfn "jet3 = [%s]" (fmt (Dist.jetPushforward distB4 (mx * my) [| jd1; jd2 |] 3 true))
-        // J4: truncated smooth map — exp(x) as its degree-3 jet at the
+        // J4: truncated smooth map -- exp(x) as its degree-3 jet at the
         // mean of A1 (every derivative = exp(m)), q = 2 strict.
         let e = exp m1
         printfn "-- J4: exp(x) (degree-3 jet) on A1, dist order 6, q=2 strict"
         printfn "jet4 = [%s]" (fmt (Dist.jetPushforward distA1 e (univJet [| e; e; e |]) 2 false))
-        // J5/J6: VECTOR map g(x,y) = (x + y, x·y) on data B — the mixed-block
-        // Faà di Bruno oracle. Joint output cumulant tensors printed per
+        // J5/J6: VECTOR map g(x,y) = (x + y, x*y) on data B -- the mixed-block
+        // Faa di Bruno oracle. Joint output cumulant tensors printed per
         // order as flat cells in SymTensor.enumerate (canonical lex) order,
         // which is exactly the corpus flat-ArrayLit cell order.
         let fmtJoint (dist: Dist.T) (k: int) =
@@ -554,13 +554,13 @@ let main argv =
         SymTensor.set jv1sum [| 1 |] 1.0
         let g0v = [| mx + my; mx * my |]
         let jetsV = [| [| jv1sum |]; [| jd1; jd2 |] |]
-        printfn "-- J5: (x+y, x·y) on B, dist order 6, q=3 strict (joint output)"
+        printfn "-- J5: (x+y, x*y) on B, dist order 6, q=3 strict (joint output)"
         let jv5 = Dist.jetPushforwardVec distB6 g0v jetsV 3 false
         for k in 1 .. 3 do printfn "jv5_k%d = [%s]" k (fmtJoint jv5 k)
         let transformed = [| Array.map2 (+) b.[0] b.[1]; Array.map2 (*) b.[0] b.[1] |]
         let rv5 : Dist.T = { Dim = 2; Order = 3; Kappa = computeCumulants transformed 3 }
-        for k in 1 .. 3 do printfn "rv5_k%d = [%s] (cumulants of transformed data — must agree)" k (fmtJoint rv5 k)
-        printfn "-- J6: (x+y, x·y) on B, dist order 4, q=3 CLOSED"
+        for k in 1 .. 3 do printfn "rv5_k%d = [%s] (cumulants of transformed data -- must agree)" k (fmtJoint rv5 k)
+        printfn "-- J6: (x+y, x*y) on B, dist order 4, q=3 CLOSED"
         let jv6 = Dist.jetPushforwardVec distB4 g0v jetsV 3 true
         for k in 1 .. 3 do printfn "jv6_k%d = [%s]" k (fmtJoint jv6 k)
         0

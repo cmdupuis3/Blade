@@ -1,13 +1,13 @@
-// Blade tree-walking interpreter — loop-nest interpreter (Milestone M2).
+// Blade tree-walking interpreter: loop-nest interpreter (Milestone M2).
 //
-// The heart of M2: turns the deferred/force combinator algebra and the
-// dense loop-nest / reduction machinery into runtime Values that BYTE-MATCH
-// the compiled C++ (the differential gate). The central anti-drift invariant
-// is that this module consumes the SAME `LoopNestCodeGen` structure CodeGen
-// renders — built by calling `IR.buildLoopNestCodeGen` DIRECTLY (never
-// re-derived) — so iteration order, bound formulas (Extent − ΣDeps − Strict),
-// per-level element peeling, and reduction seed/order/empty semantics cannot
-// diverge from the compiled binary.
+// The heart of M2: turns the deferred/force combinator algebra and the dense
+// loop-nest / reduction machinery into runtime Values that byte-match the
+// compiled C++ (the differential gate). Anti-drift invariant: this module
+// consumes the same `LoopNestCodeGen` structure CodeGen renders, built by
+// calling `IR.buildLoopNestCodeGen` directly (never re-derived), so
+// iteration order, bound formulas (Extent - SumDeps - Strict), per-level
+// element peeling, and reduction seed/order/empty semantics cannot diverge
+// from the compiled binary.
 //
 // Ground truth (line refs to the scout-time tree): genApplyCombinator
 // (CodeGen.fs:5427), genLoopNestStreamed (3599), genElementBindingNew (2944),
@@ -16,17 +16,17 @@
 // genReduceBinding (8619), genReduceComputeBinding (8714), genParallelTree
 // (6749), buildLoopNestCodeGen (IR.fs:2824).
 //
-// AsyncLocal finding (risk #3, probed): AsyncLocal DOES flow into
-// Runtime.runOnLargeStack's worker thread (ExecutionContext capture on
-// Thread.Start), AND a set performed on the worker is visible within the same
-// worker synchronously. `withCallablesContext` installs the module's callables
-// table via IR.setCallablesContext; Run.fs wraps the whole run in it on the
-// worker thread, so buildLoopNestCodeGen's resolveKernel always resolves.
+// AsyncLocal DOES flow into Runtime.runOnLargeStack's worker thread
+// (ExecutionContext capture on Thread.Start), and a set on the worker is
+// visible within that worker synchronously. `withCallablesContext` installs
+// the module's callables table via IR.setCallablesContext; Run.fs wraps the
+// whole run in it on the worker thread, so buildLoopNestCodeGen's
+// resolveKernel always resolves.
 //
-// Compiled AFTER Interp/Core.fs (references Core.evalExpr, InterpState,
-// InterpHooks) and Interp/ArrayOps.fs (dense storage primitives), BEFORE
-// Interp/Print.fs. Run.fs installs { EvalArrayNode = evalArrayNode;
-// Force = force } into InterpState.Hooks.
+// Compiled after Interp/Core.fs (Core.evalExpr, InterpState, InterpHooks)
+// and Interp/ArrayOps.fs (dense storage primitives), before Interp/Print.fs.
+// Run.fs installs { EvalArrayNode = evalArrayNode; Force = force } into
+// InterpState.Hooks.
 module Blade.Interp.Loops
 
 open System.Collections.Generic
@@ -38,9 +38,7 @@ open Blade.Interp.Core
 module N = Blade.Interp.Numerics
 module A = Blade.Interp.ArrayOps
 
-// ============================================================================
-// AnalysisContext install (buildLoopNestCodeGen's resolveKernel dependency)
-// ============================================================================
+// AnalysisContext install (buildLoopNestCodeGen's resolveKernel dependency).
 
 /// Install the module's callables table into the AsyncLocal AnalysisContext for
 /// the duration of `f`, restoring the prior context afterward. MUST wrap every
@@ -52,9 +50,7 @@ let withCallablesContext (modul: IRModule) (f: unit -> 'a) : 'a =
     try f ()
     finally restoreAnalysisContext prev
 
-// ============================================================================
-// Small value coercions (local mirrors of Core's private ones)
-// ============================================================================
+// Small value coercions (local mirrors of Core's private ones).
 
 let private toI64 (v: Value) : int64 =
     match v with
@@ -75,7 +71,7 @@ let private isNonZero (v: Value) : bool =
     | VComplex (r, i) -> r <> 0.0 || i <> 0.0
     | _ -> false
 
-/// The zero seed of a scalar element type — mirrors `T name = 0;` (the scalar
+/// The zero seed of a scalar element type -- mirrors `T name = 0;` (the scalar
 /// accumulator declaration in genApplyCombinator's IRTScalar branch).
 let private zeroOfElem (et: ElemType) : Value =
     match et with
@@ -95,8 +91,8 @@ let rec private countLeaves (v: Value) : int =
     | VTuple els -> els |> Array.sumBy countLeaves
     | _ -> 1
 
-/// Project element `i` from a (forced) tuple value — structural (get<i>) or flat
-/// (leaf of the fully-flattened tuple). Mirrors Core.projectStruct / projectFlat.
+/// Project element `i` from a (forced) tuple value -- structural (get<i>) or
+/// flat (leaf of the fully-flattened tuple). Mirrors Core.projectStruct / projectFlat.
 let rec private projectValue (v: Value) (i: int) (isFlat: bool) : Value =
     if not isFlat then
         match v with
@@ -121,9 +117,7 @@ let rec private projectValue (v: Value) (i: int) (isFlat: bool) : Value =
             | None -> raise (InterpUnsupported "flat tuple projection index out of range")
         | leaf -> leaf
 
-// ============================================================================
-// Nest input sources + output sinks
-// ============================================================================
+// Nest input sources + output sinks.
 
 /// A resolved input to a nest, keyed by ArrayPosition. Virtual sources carry no
 /// store: their element values are computed from the loop index at peel time.
@@ -137,12 +131,10 @@ type private OutTarget =
     | OutArray of BladeArray
     | OutFold of acc: ValueRef * wrapper: (Value -> Value -> Value)
 
-// ============================================================================
-// applyFunctorWrappers — ported from CodeGen.genComputeBinding (7534).
-// Folds functor-map wrappers into the ApplyInfo kernel body (beta-reduce +
+// applyFunctorWrappers: ported from CodeGen.genComputeBinding (7534). Folds
+// functor-map wrappers into the ApplyInfo kernel body (beta-reduce +
 // synthetic-callable registration in the AnalysisContext, which the
 // interpreter's own resolveKernel then reads). Uses st.Builder for FreshId.
-// ============================================================================
 
 let private applyFunctorWrappers (st: InterpState) (info: ApplyInfo) (wrappers: IRExpr list) : ApplyInfo =
     if List.isEmpty wrappers then info
@@ -189,10 +181,8 @@ let private applyFunctorWrappers (st: InterpState) (info: ApplyInfo) (wrappers: 
             | _ -> newOutputType
         { info with Kernel = wrappedKernel; OutputType = adjustedOutputType }
 
-// ============================================================================
-// Input gating — mirror CodeGen's ragged/grouped/compound/mpi refusals so the
-// differential gate SKIP-UNSUPPORTEDs the exact categories CodeGen also gates.
-// ============================================================================
+// Input gating: mirrors CodeGen's ragged/grouped/compound/mpi refusals so
+// the differential gate SKIP-UNSUPPORTEDs the exact categories CodeGen also gates.
 
 let private raggedFamilyOrCompound (ix: IRIndexType) : bool =
     match ix.IxKind with
@@ -206,9 +196,7 @@ let private gateInputs (info: ApplyInfo) : unit =
     if info.ArrayTypes |> List.exists (fun at -> at.IndexTypes |> List.exists raggedFamilyOrCompound) then
         raise (InterpUnsupported "apply over ragged/grouped/compound input (M2.7)")
 
-// ============================================================================
-// Binary fold resolution (reduce kernels / choice sections lower to callables)
-// ============================================================================
+// Binary fold resolution (reduce kernels / choice sections lower to callables).
 
 let private resolveBinaryFold (st: InterpState) (kernel: IRExpr) : (Value -> Value -> Value) =
     match resolveKernel kernel with
@@ -217,13 +205,11 @@ let private resolveBinaryFold (st: InterpState) (kernel: IRExpr) : (Value -> Val
         (fun a b -> callCallable st callable [a; b])
     | _ -> raise (InterpUnsupported "reduce/fold kernel does not resolve to a binary callable")
 
-// ============================================================================
-// Array literal → dense BladeArray (via ArrayOps.arrayLitFromValues)
-// ============================================================================
-// The top-level element exprs evaluate to Values: scalar leaves for a rank-1
-// literal; VArray rows for a rank>=2 literal (a nested IRArrayLit element goes
-// back through Core.evalExpr → this hook → a VArray). arrayLitFromValues packs
-// them (flat store rank-1 / SNested rows rank>=2). Ragged/DepIdx literals gated.
+// Array literal -> dense BladeArray (via ArrayOps.arrayLitFromValues). The
+// top-level element exprs evaluate to Values: scalar leaves for a rank-1
+// literal; VArray rows for a rank>=2 literal (a nested IRArrayLit element
+// goes back through Core.evalExpr -> this hook -> a VArray), packed flat
+// (rank-1) / SNested (rank>=2). Ragged/DepIdx literals gated.
 
 let private evalArrayLit (st: InterpState) (env: Env) (elems: IRExpr list) (arrType: IRArrayType) : Value =
     if arrType.IndexTypes |> List.exists raggedFamilyOrCompound then
@@ -231,25 +217,22 @@ let private evalArrayLit (st: InterpState) (env: Env) (elems: IRExpr list) (arrT
     let vals = elems |> List.map (Core.evalExpr st env)
     VArray (A.arrayLitFromValues arrType vals)
 
-// ============================================================================
-// Forward declarations resolved via the recursive block below
-// ============================================================================
+// Forward declarations resolved via the recursive block below.
 
 /// Public Force hook: drive a possibly-deferred Value to a concrete one.
 let rec force (st: InterpState) (env: Env) (v: Value) : Value =
     match v with
     | VDeferred (expr, denv) ->
-        // Forced-on-read auto-print parity: a payload that IS a module-level
-        // binding's Value node (reference hit in DeferredBindingIndex) means
-        // this force materializes that binding "under its own name" — the
-        // value-space twin of CodeGen's forceDeferredArrayInput IRVar arm.
-        // Record the id (Print adds it to the render list) and memoize the
-        // result into the ROOT cell so later consumers — and Print — see the
-        // materialized value, exactly as the C++ names the materialized array
-        // once. Sub-expression VDeferreds miss the index and force as before.
-        // NB: resolveComp/forceTreeShaped PEEL through root VDeferreds without
-        // calling force — mirroring resolveComputation's inline resolution,
-        // which does NOT materialize the source binding either.
+        // Forced-on-read auto-print parity: a payload that is a module-level
+        // binding's Value node (hit in DeferredBindingIndex) means this force
+        // materializes that binding "under its own name" -- the value-space
+        // twin of CodeGen's forceDeferredArrayInput IRVar arm. Record the id
+        // (Print adds it to the render list) and memoize into the root cell
+        // so later consumers, and Print, see the materialized value, as the
+        // C++ names the materialized array once. Sub-expression VDeferreds
+        // miss the index and force as before; resolveComp/forceTreeShaped
+        // peel through root VDeferreds without calling force, mirroring
+        // resolveComputation's inline resolution (also non-materializing).
         (match st.DeferredBindingIndex.TryGetValue expr with
          | true, id ->
              let fv = forceExpr st denv expr
@@ -307,12 +290,11 @@ and private extractInlinableKernel (st: InterpState) (env: Env) (e: IRExpr) : IR
         | None -> None
     | _ -> None
 
-/// Apply resolveComp-collected functor / compose wrappers (innermost-first) to a
-/// concrete value — the value-space twin of applyFunctorWrappers for a base that
-/// bottomed out at a CONCRETE array (or scalar), e.g. `f <$> A` where A is a plain
-/// array (not an IRApplyCombinator). Mirrors materializeComposeApply's wrapAll fold
-/// (IRCompose(k,f) = f∘k) and its INPUT-element-type allocation so the result
-/// matches `method_for(A) <@> f |> compute` byte-for-byte.
+/// Apply resolveComp-collected functor / compose wrappers (innermost-first) to
+/// a concrete value -- the value-space twin of applyFunctorWrappers for a base
+/// that bottomed out at a CONCRETE array (or scalar), e.g. `f <$> A` over a
+/// plain array. Mirrors materializeComposeApply's wrapAll fold (IRCompose(k,f)
+/// = f.k) so the result matches `method_for(A) <@> f |> compute` byte-for-byte.
 and private applyWrappersToValue (st: InterpState) (env: Env) (wrappers: IRExpr list) (v: Value) : Value =
     if List.isEmpty wrappers then v else
     let rec wrapperFn (w: IRExpr) : (Value -> Value) =
@@ -350,15 +332,15 @@ and private forceExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRComposeApply cinfo -> materializeComposeApply st renv cinfo wrappers
     | IRComposeObj _ -> raise (InterpUnsupported "IRComposeObj force")
     // A projection of a deferred tuple (`(c1,c2) = <combinator producing a tuple>`,
-    // §4 tuple-of-deferred): force the inner to a VTuple, project element i, then
+    // tuple-of-deferred 4): force the inner to a VTuple, project element i, then
     // force the projected element (itself possibly a deferred computation).
     | IRTupleProj (inner, i, isFlat) ->
         let tv = forceExpr st renv inner
         applyWrappersToValue st renv wrappers (force st renv (projectValue tv i isFlat))
     | IRVar (id, _) ->
         // A base that bottomed out at a CONCRETE array/scalar (resolveComp already
-        // followed any VDeferred alias); apply the trailing functor wrappers here —
-        // `f <$> A` over a plain array A (previously the wrappers were dropped).
+        // followed any VDeferred alias); apply the trailing functor wrappers here:
+        // `f <$> A` over a plain array A.
         match envTryFind renv id with
         | Some cell -> applyWrappersToValue st renv wrappers (force st renv cell.V)
         | None -> raise (InterpUnsupported "force of unbound var")
@@ -377,17 +359,16 @@ and private forceParallelTree (st: InterpState) (env: Env) (expr: IRExpr) (wrapp
         raise (InterpUnsupported "functor-map wrapper over a parallel/fusion tree")
     forceTreeShaped st env expr
 
-/// Force a parallel/fusion tree to a STRUCTURED tuple mirroring the tree shape
-/// — VTuple [| left; right |] per IRParallel/IRFusion node — i.e. the value-
-/// space image of the expression's TYPE: `a <&> b <&> c` is ((α,β),γ). CodeGen
-/// emits a FLAT make_tuple plus a TupleChildren map that genTupleProjBinding
-/// consults (via tupleLeafRanges over the STRUCTURED type) to serve structural
-/// projections; the interpreter's projections are SHAPE-driven
-/// (Core.projectStruct / projectFlat), so the value shape itself must carry the
-/// structure. A flat projection flattens through nested VTuples (countLeaves),
-/// so BOTH destructure styles resolve identically to the compiled binary
-/// (tuple-views structural 3-way pinned this: a flat 3-tuple made structural
-/// proj 0 return leaf a instead of the (a,b) pair — BL8003 downstream).
+/// Force a parallel/fusion tree to a structured tuple mirroring the tree
+/// shape -- VTuple [| left; right |] per IRParallel/IRFusion node: `a <&> b
+/// <&> c` is ((a,b),c). CodeGen emits a flat make_tuple plus a TupleChildren
+/// map genTupleProjBinding consults for structural projections; the
+/// interpreter's projections are shape-driven (Core.projectStruct/
+/// projectFlat), so the value shape itself must carry the structure. A flat
+/// projection flattens through nested VTuples (countLeaves), so both
+/// destructure styles resolve identically to the compiled binary (pinned by
+/// tuple-views structural 3-way: a flat 3-tuple made structural proj 0
+/// returned leaf a instead of (a,b) -- BL8003 downstream).
 and private forceTreeShaped (st: InterpState) (env: Env) (e: IRExpr) : Value =
     match e with
     | IRParallel (l, r, _) | IRFusion (l, r) ->
@@ -434,12 +415,11 @@ and private choiceArray (la: BladeArray) (ra: BladeArray) : BladeArray =
 // ----------------------------------------------------------------------------
 // Fallback `<|:>` (genFallbackBinding always-defers + genFallbackMaterialize
 // 9368). ALLOCATION-keyed, unlike value-keyed `<|>`. Two regimes on the LEFT
-// operand type: dense-left = fallback_copy (A fully allocated ⇒ `A <|:> B ≡ A`,
-// allocated zeros survive); compound-left = SQL sparse overlay, which needs the
-// M2.7 compound-index array representation (gated, like compound-halo / apply-
-// over-compound). The RIGHT operand is unused in the dense-left regime and is
-// NOT forced (arrays are pure; its materialization is output-invisible, and
-// forcing it could spuriously raise for an otherwise-fine program).
+// operand type: dense-left = fallback_copy (A fully allocated, so
+// `A <|:> B = A`); compound-left = SQL sparse overlay (M2.7 compound-index
+// representation, gated like compound-halo / apply-over-compound). RIGHT is
+// unused (and NOT forced) in the dense-left regime -- arrays are pure, so
+// forcing it could spuriously raise for an otherwise-fine program.
 // ----------------------------------------------------------------------------
 and private forceFallback (st: InterpState) (env: Env) (a: IRExpr) (b: IRExpr) (wrappers: IRExpr list) : Value =
     if not (List.isEmpty wrappers) then
@@ -449,7 +429,7 @@ and private forceFallback (st: InterpState) (env: Env) (a: IRExpr) (b: IRExpr) (
         VArray (A.fallbackDense la)
     | VCompound cvS ->
         // Compound-left `S <|:> D`: the SQL sparse overlay. Here the RIGHT
-        // operand IS needed (D fills the absent leading cells), so force it —
+        // operand IS needed (D fills the absent leading cells), so force it --
         // it resolves to a plain dense array (a nested `S2 <|:> D` inner already
         // forced to dense).
         (match forceExpr st env b with
@@ -460,8 +440,8 @@ and private forceFallback (st: InterpState) (env: Env) (a: IRExpr) (b: IRExpr) (
 
 // ----------------------------------------------------------------------------
 // Guard `guard(cond, comp)` (genGuardBinding 8862): fold the predicate into the
-// kernel body (λargs → cond ? body : 0) via a synthetic callable, then
-// materialize — an allocated array filled with zeros where the guard is false.
+// kernel body (lambda args -> cond ? body : 0) via a synthetic callable, then
+// materialize -- an allocated array filled with zeros where the guard is false.
 // ----------------------------------------------------------------------------
 and private forceGuard (st: InterpState) (env: Env) (cond: IRExpr) (body: IRExpr) (wrappers: IRExpr list) : Value =
     let (resolved, innerWrappers, renv) = resolveComp st env body []
@@ -484,8 +464,8 @@ and private forceGuard (st: InterpState) (env: Env) (cond: IRExpr) (body: IRExpr
     | _ ->
         // guard over a CONCRETE array / scalar (or choice/sequence) body: the
         // predicate is a scalar here (it cannot reference per-cell values without a
-        // kernel), so evaluate it once — true ⇒ the (wrapper-applied) materialized
-        // body, false ⇒ a zero array/scalar of the same shape. Mirrors CodeGen's
+        // kernel), so evaluate it once: true -> the (wrapper-applied) materialized
+        // body, false -> a zero array/scalar of the same shape. Mirrors CodeGen's
         // non-apply guard materialization.
         let bodyVal = applyWrappersToValue st renv allWrappers (forceExpr st renv resolved)
         if isNonZero (Core.evalExpr st env cond) then bodyVal
@@ -576,19 +556,19 @@ and private forceComposeMeth (st: InterpState) (env: Env) (left: IRExpr) (right:
 // Compose-object apply `(object_for(k1) >>@ object_for(k2)) <@> A`
 // (IRComposeApply; genComposeApply, CodeGen.fs:6653): the SLOT-INVERTED apply.
 // Two SEPARATE elementwise stages over the (single, rank-1 in corpus) input:
-//   s1[i] = k1(A[i]);   out[i] = k2(s1[i])   ⇒   out[i] = k2(k1(A[i])).
+//   s1[i] = k1(A[i]);   out[i] = k2(s1[i])   so   out[i] = k2(k1(A[i])).
 // CodeGen allocates BOTH s1 and the output with the INPUT array's element type
-// (not the kernels' return types — genComposeApply's `elemType` comes from the
-// input array), so writeCell's coercion reproduces the compiled store exactly.
-// Composition resolves through deferred vars to IRComposeObj; each object's
-// kernel is IRObjectFor.Kernel (or a bare kernel expr). Returns a plain VArray
-// so forceTreeShaped wraps a parallel/fusion leaf correctly (046/047).
+// (not the kernels' return types), so writeCell's coercion reproduces the
+// compiled store exactly. Composition resolves through deferred vars to
+// IRComposeObj; each object's kernel is IRObjectFor.Kernel (or a bare kernel
+// expr). Returns a plain VArray so forceTreeShaped wraps a parallel/fusion
+// leaf correctly (046/047).
 //
 // `wrappers` are trailing functor-map / @>>-extracted kernels resolveComp
 // collected around this node (innermost-first): `p @>> q` reaches here with
-// q's kernel as ONE wrapper (loops/048), so they are applied as a final
-// elementwise stage `out[i] = wrapAll(k2(k1(A[i])))`, folding left-to-right
-// exactly like applyFunctorWrappers.
+// q's kernel as ONE wrapper (loops/048), applied as a final elementwise stage
+// `out[i] = wrapAll(k2(k1(A[i])))`, folding left-to-right like
+// applyFunctorWrappers.
 // ----------------------------------------------------------------------------
 and private materializeComposeApply (st: InterpState) (env: Env) (cinfo: ComposeApplyInfo) (wrappers: IRExpr list) : Value =
     let rec resolveDef (e: IRExpr) (en: Env) : IRExpr * Env =
@@ -614,7 +594,7 @@ and private materializeComposeApply (st: InterpState) (env: Env) (cinfo: Compose
         let call1 = resolveUnaryKernel st (kernelOf o1)
         let call2 = resolveUnaryKernel st (kernelOf o2)
         // A wrapper is a unary transform; an extracted IRCompose(k,f) means
-        // f∘k (applyValue's compose convention). Fold all wrappers innermost-
+        // f.k (applyValue's compose convention). Fold all wrappers innermost-
         // first onto stage 2's result.
         let rec wrapperFn (w: IRExpr) : (Value -> Value) =
             match w with
@@ -644,8 +624,8 @@ and private materializeComposeApply (st: InterpState) (env: Env) (cinfo: Compose
 
 /// Force an eager-op / compose-apply INPUT expr to a concrete BladeArray,
 /// memoizing a deferred IRVar cell (resolveArraySource's double-consumer rule,
-/// §0.3) so a second consumer of the same binding sees the already-materialized
-/// array — the value-space twin of forceDeferredArrayInput. A bare virtual
+/// 0.3) so a second consumer of the same binding sees the already-materialized
+/// array -- the value-space twin of forceDeferredArrayInput. A bare virtual
 /// source fed directly to an eager op is not in the corpus (CodeGen's eager ops
 /// index a materialized `.extents[0]`), so it gates.
 and private forceInputArray (st: InterpState) (env: Env) (arrExpr: IRExpr) : BladeArray =
@@ -656,7 +636,7 @@ and private forceInputArray (st: InterpState) (env: Env) (arrExpr: IRExpr) : Bla
 /// Resolve a sort key / mask predicate / compose-apply stage expr to a unary
 /// Value->Value closure via resolveKernel (peels Reynolds, resolves through the
 /// callables + synthetic table). Invoked with empty captures like
-/// resolveBinaryFold — module-level kernels reach their captures via st.Global.
+/// resolveBinaryFold -- module-level kernels reach their captures via st.Global.
 and private resolveUnaryKernel (st: InterpState) (kernel: IRExpr) : (Value -> Value) =
     match resolveKernel kernel with
     | Some rk when rk.Callable.Params.Length = 1 -> (fun v -> callCallable st rk.Callable [ v ])
@@ -667,13 +647,11 @@ and private resolveUnaryKernel (st: InterpState) (kernel: IRExpr) : (Value -> Va
 /// (CodeGen.fs:6537): force each input array, resolve the (1- or 2-param) kernel
 /// callable, allocate a fresh DENSE output of the carried type, and fill by
 /// invoking the kernel per output cell. `objInfo.InputRanks` selects the shape
-/// ([1;1] = outer m×p, [0;0] = elementwise m, [0] = single-array map). (The
+/// ([1;1] = outer m x p, [0;0] = elementwise m, [0] = single-array map). (The
 /// two-array ELEMENTWISE binop `A + B` is re-synthesized by the checker as
-/// `compute(zip <@> λ)` and never reaches here; only the OUTER form and any
-/// residual single/elementwise object_for applications do.) Note: the kernel's
-/// return type IS the output element type (a comparison `[<]` consumes numbers
-/// and produces bool) — carried by the output array type, so a Bool store is
-/// allocated and writeCell coerces the VBool cell.
+/// `compute(zip <@> lambda)` and never reaches here.) The kernel's return type
+/// IS the output element type (a comparison `[<]` produces bool), carried by
+/// the output array type, so writeCell coerces the VBool cell.
 and private materializeObjectForApp
         (st: InterpState) (env: Env) (outType: IRType) (objInfo: ObjectForInfo) (arrays: IRExpr list) : Value =
     let arrs = arrays |> List.map (forceInputArray st env)
@@ -684,8 +662,8 @@ and private materializeObjectForApp
     // Bind the kernel's declared captures from the SITE env (makeClosure's
     // snapshot, done here because the kernel arrives as a raw callable, not a
     // closure value). evalCall chains frames to the module-global scope only,
-    // so a capture bound in an enclosing FUNCTION frame — e.g. the hoisted
-    // scalar of a broadcast (`a - mymean(a)`) inside a function body — is
+    // so a capture bound in an enclosing FUNCTION frame -- e.g. the hoisted
+    // scalar of a broadcast (`a - mymean(a)`) inside a function body -- is
     // invisible without this; the compiled backend forwards the same capture
     // via captureForwardName.
     let kernelCaptures =
@@ -696,16 +674,14 @@ and private materializeObjectForApp
             | None -> None)
         |> Map.ofList
     let call (vs: Value list) : Value = Core.evalCall st kernel kernelCaptures vs
-    // Output element type + dense index slots. genObjectForApplication derives the
-    // element type from the KERNEL's return type (a comparison `[<]` / logical
-    // `[&&]` consumes numbers but PRODUCES bool) and IGNORES the IRApp's carried
-    // result type — which, for the bool-returning OUTER forms, the checker even
-    // collapses to a bare scalar. (The compiled binary then prints such a binding's
-    // raw Array data POINTER via `cout << arr`, masked by the differential
-    // normalizer to 0xPTR; the interp still materializes the true bool array so a
-    // pointer-aware Print emitter can render the matching token.) Prefer the carried
-    // array type when present (arithmetic — byte-verified); else rebuild dense slots
-    // from the inputs.
+    // Output element type + dense index slots. genObjectForApplication derives
+    // the element type from the KERNEL's return type (a comparison/logical op
+    // produces bool) and IGNORES the IRApp's carried result type, which for
+    // bool-returning OUTER forms the checker collapses to a bare scalar (the
+    // compiled binary then prints such a binding's raw Array data POINTER,
+    // masked to 0xPTR; the interp still materializes the true bool array so a
+    // pointer-aware Print emitter can render the matching token). Prefer the
+    // carried array type when present; else rebuild dense slots from the inputs.
     let outElem, srcIdxTys =
         match outType with
         | ArrayElem outArr -> outArr.ElemType, outArr.IndexTypes
@@ -714,7 +690,7 @@ and private materializeObjectForApp
             kernel.RetType, (arrs |> List.collect firstIdx)
     match objInfo.InputRanks, arrs with
     | [1; 1], [ a; b ] ->
-        // Outer product: out[i][j] = kernel(A[i], B[j]); dense m×p.
+        // Outer product: out[i][j] = kernel(A[i], B[j]); dense m x p.
         let m = a.Extents.[0]
         let p = b.Extents.[0]
         let out = A.allocDense outElem srcIdxTys [| m; p |]
@@ -738,9 +714,7 @@ and private materializeObjectForApp
         VArray out
     | _ -> raise (InterpUnsupported "object_for application: unsupported input-rank configuration")
 
-// ============================================================================
-// materializeApply — the standard dense/co-iteration path (genApplyCombinator).
-// ============================================================================
+// materializeApply: the standard dense/co-iteration path (genApplyCombinator).
 
 and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wrappers: IRExpr list) : Value =
     match tryCompoundHaloMap info0 with
@@ -761,14 +735,13 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     let info = applyFunctorWrappers st info0 wrappers
     let arrayNames = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
     let cg = buildLoopNestCodeGen info arrayNames "out" st.Builder
-    // M3: symmetric/antisymmetric/Hermitian OUTPUT storage (compact) and Reynolds
-    // KERNELS (permutation sum) are now interpreted — see the ArrayElem arm's
-    // compact allocation and interpretNest's Reynolds path. FUSED-JOINT output
-    // levels (Arc-1 fused S-block: a single loop level spanning d plain-dense
-    // source dims of its array — joint symmetry over the compound axis) are
-    // materialized by interpretNest's fused-peel arm (per-dim coordinate decode
-    // from the compound index, mirroring genElementBinding CodeGen.fs:3087).
-    // Resolve input array VALUES by position.
+    // Symmetric/antisymmetric/Hermitian output storage (compact) and Reynolds
+    // kernels (permutation sum) are interpreted -- see the ArrayElem arm's
+    // compact allocation and interpretNest's Reynolds path. Fused-joint output
+    // levels (one loop level spanning d plain-dense source dims -- joint
+    // symmetry over the compound axis) are materialized by interpretNest's
+    // fused-peel arm (per-dim coordinate decode, mirrors CodeGen.fs:3087).
+    // Resolve input array values by position.
     let inputs = Dictionary<int, ArraySource>()
     info.Arrays |> List.iteri (fun i arr -> inputs.[i] <- resolveArraySource st env arr)
     let realAt (pos: int) =
@@ -819,22 +792,18 @@ and private nodeTypeName (ty: IRType) : string =
     let case, _ = Microsoft.FSharp.Reflection.FSharpValue.GetUnionFields(ty, typeof<IRType>)
     case.Name
 
-// ============================================================================
-//  Deduced OrbIdx (iterated-wreath) output — the interpreter's traversal nest
-//  docs/plan-orbit-index-types.md §9 step 4; plan-orbidx-bijections.md §2
-// ============================================================================
+// Deduced OrbIdx (iterated-wreath) output: the interpreter's traversal nest
+// (docs/plan-orbit-index-types.md 9 step 4; plan-orbidx-bijections.md 2).
 //
-//  The interpreter's twin of CodeGen.genWreathApply, and it must produce the
-//  SAME cells in the SAME order — the corpus harness diffs the two. Both are
-//  driven by the verified reference emitter rather than by a hand-rolled peeled
-//  nest: C++ instantiates `orb_visit<Levels...>`, and this walks
-//  `OrbRank.visitStream`, which `blade test orbwreath` diffs cell-for-cell
-//  against that very template on every run. Two independent hand-written nests
-//  is the one thing this feature must not have.
-//
-//  Like the compiled path, it bypasses `buildLoopNestCodeGen` entirely: that
-//  builder refuses a wreath INPUT (the depth >= 3 shape) and has no concept of
-//  segment peeling for the depth-2 one.
+// The interpreter's twin of CodeGen.genWreathApply, and must produce the same
+// cells in the same order -- the corpus harness diffs the two. Both are
+// driven by the verified reference emitter rather than a hand-rolled peeled
+// nest: C++ instantiates `orb_visit<Levels...>`, this walks
+// `OrbRank.visitStream`, and `blade test orbwreath` diffs the two
+// cell-for-cell on every run -- two independent hand-written nests is the
+// one thing this feature must not have. Like the compiled path, it bypasses
+// `buildLoopNestCodeGen` entirely: that builder refuses a wreath input and
+// has no concept of segment peeling for the depth-2 shape.
 
 /// Is this application a deduced wreath tie? Same predicate, same arguments as
 /// `deduceOutputType`'s and codegen's, so all three agree by construction.
@@ -859,12 +828,11 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
     | None -> None
 
 /// Read one tied argument at a CANONICAL sub-key of the traversal stream.
-/// Depth-1 inner classes go through `readCompact` — the interpreter's own
-/// canonical reader, the same one every SymIdx/AntisymIdx read uses, so the
-/// value comes from exactly the cell the compiled `arr[c0][c1-c0]` subscript
-/// names. A wreath inner class (depth >= 3) goes through `orbRank` on the pool.
-/// Neither is the mirrored read: the sub-key is canonical by construction, so
-/// no character is ever applied and nothing folds.
+/// Depth-1 inner classes go through `readCompact` (the same canonical reader
+/// every SymIdx/AntisymIdx read uses, so the value comes from exactly the
+/// cell the compiled `arr[c0][c1-c0]` subscript names); a wreath inner class
+/// (depth >= 3) goes through `orbRank` on the pool. Neither is the mirrored
+/// read: the sub-key is canonical by construction, so nothing folds.
 and private wreathArgValue (arr: BladeArray) (innerLevels: (int * bool) list)
                            (n: int64) (subKey: int list) : Value =
     if List.length innerLevels >= 2 then
@@ -928,12 +896,10 @@ and private materializeWreathApply
                 | _ -> ()
         A.wreathWriteAt out pos (force st kenv (Core.evalExpr st kenv rk.Callable.Body))
         pos <- pos + 1L
-    // The stream length and the §4 fold are INDEPENDENT computations of the same
-    // number (`visitStream`'s enumeration vs `cellCountChecked`'s iterated
-    // binomial). Pin them against each other, as the emitted C++ pins
-    // `orb_cell_count` against the same fold: a short stream would leave the
-    // tail of the pool at its zero-initialized value, which prints as plausible
-    // data, and a long one would already have thrown on the write.
+    // The stream length and the (4) fold are INDEPENDENT computations of the
+    // same number; pin them against each other, as the emitted C++ pins
+    // `orb_cell_count`: a short stream leaves the pool tail zero-initialized
+    // (plausible-looking data), and a long one would already have thrown.
     if pos <> int64 (A.wreathCellCount out) then
         failwithf "OrbIdx%s at extent %d: the traversal visited %d cells but the class's fold says %d"
                   (ppOrbitLevels tie.OutputLevels) n pos (A.wreathCellCount out)
@@ -943,14 +909,14 @@ and private materializeWreathApply
 /// Detect a `method_for(range<CompoundIdx<m>>) <@> kernel` map: the sole input
 /// is a range whose sole index type is a compound mask. Returns (maskExpr,
 /// leadRank). This is the ONE supported compound-range form (a compound slot
-/// cannot mix with other index types — CodeGen.fs:5971).
+/// cannot mix with other index types -- CodeGen.fs:5971).
 and private tryCompoundRangeMap (info: ApplyInfo) : (IRExpr * int) option =
     match info.Arrays with
     | [ IRRange (idxTys, _) ] ->
         (match idxTys with
          // A halo<CompoundIdx<m>, [..]> slot ALSO has IxKCompound + IRCompoundMask
          // but carries a "__halowin|" tag and reads via IRHaloUnhash (window
-         // pointer into the table) — a different peel. Exclude it (it stays a
+         // pointer into the table) -- a different peel. Exclude it (it stays a
          // clean skip rather than being mis-driven as a plain coordinate map).
          | [ ix ] when ix.IxKind = IxKCompound
                        && (match ix.Tag with Some t when t.StartsWith "__halowin|" -> false | _ -> true) ->
@@ -959,11 +925,10 @@ and private tryCompoundRangeMap (info: ApplyInfo) : (IRExpr * int) option =
     | _ -> None
 
 /// Materialize a range<CompoundIdx<m>> map to a Compound VALUE: iterate the
-/// present cells (in lex rank order), binding each kernel param to its tuple
-/// COORDINATE via the index's O(1) unhash, and store the kernel result into the
-/// compact buffer at that rank (genElementBindingNew's compound-range arm +
-/// compoundOutputSubscript, CodeGen.fs:3054-3064 / 3696-3704). The output shares
-/// the range's mask/index (same present tuples), trailing_stride 1.
+/// present cells (lex rank order), binding each kernel param to its tuple
+/// COORDINATE via the index's O(1) unhash, storing the kernel result into the
+/// compact buffer at that rank (CodeGen.fs:3054-3064 / 3696-3704). The output
+/// shares the range's mask/index (same present tuples), trailing_stride 1.
 and private materializeCompoundRangeMap
         (st: InterpState) (env: Env) (info0: ApplyInfo) (wrappers: IRExpr list)
         (maskExpr: IRExpr) (leadRank: int) : Value =
@@ -1020,7 +985,7 @@ and private materializeCompoundRangeMap
 
 /// Detect a `method_for(range<SparseIdx<keys>>) <@> kernel` map: the sole
 /// input is a range whose sole index type is a sparse key set. Returns
-/// (keys source, leadRank) — the sparse twin of tryCompoundRangeMap.
+/// (keys source, leadRank) -- the sparse twin of tryCompoundRangeMap.
 and private trySparseRangeMap (info: ApplyInfo) : (SparseKeysSource * int) option =
     match info.Arrays with
     | [ IRRange (idxTys, _) ] ->
@@ -1052,7 +1017,7 @@ and private resolveSparseKeys (st: InterpState) (env: Env) (src: SparseKeysSourc
 
 /// Materialize a range<SparseIdx<keys>> map to a Sparse VALUE: iterate the
 /// keys IN GIVEN ORDER, binding each kernel param to its tuple COORDINATE, and
-/// store the kernel result into the compact buffer at that rank — the sparse
+/// store the kernel result into the compact buffer at that rank -- the sparse
 /// twin of materializeCompoundRangeMap (same param plan; the only differences
 /// are the key source and the absence of a mask/grid).
 and private materializeSparseRangeMap
@@ -1111,12 +1076,12 @@ and private tryCompoundHaloMap (info: ApplyInfo) : (IRExpr * int * string) optio
          | _ -> None)
     | _ -> None
 
-/// Materialize a compound-halo map: the ordinals walk the PRESENT cells, so the
-/// window `w` at ordinal c exposes `w(o)` = the COORDINATE of the (c+o)-th present
-/// cell (IRHaloUnhash over rank_to_tuple). The loop shrinks by the halo's interior
-/// loss (the runtime-cardinality bound minus the window span, IR.fs:3109-3120);
-/// each `w` is bound to (coordinate column, center ordinal) so IRHaloUnhash reads
-/// col[center+o]. Output is a dense rank-1 array over the shrunk present-cell axis.
+/// Materialize a compound-halo map: the ordinals walk the PRESENT cells, so
+/// the window `w` at ordinal c exposes `w(o)` = the COORDINATE of the (c+o)-th
+/// present cell (IRHaloUnhash over rank_to_tuple). The loop shrinks by the
+/// halo's interior loss (runtime-cardinality bound minus window span,
+/// IR.fs:3109-3120); each `w` binds to (coordinate column, center ordinal) so
+/// IRHaloUnhash reads col[center+o]. Output: dense rank-1 over the shrunk axis.
 and private materializeCompoundHaloMap
         (st: InterpState) (env: Env) (info: ApplyInfo) (wrappers: IRExpr list)
         (maskExpr: IRExpr) (leadRank: int) (tag: string) : Value =
@@ -1209,7 +1174,7 @@ and private materializeGroupedMap (st: InterpState) (env: Env) (info: ApplyInfo)
 
 /// Build a Compound VALUE for a `let B = compound(dense, mask)` binding (recorded
 /// in IRModule.CompoundInits). Run.fs intercepts the binding at its position in
-/// the sequence — like RandomInits — and calls this with the lowered dense/mask
+/// the sequence -- like RandomInits -- and calls this with the lowered dense/mask
 /// exprs; both are forced to concrete arrays here, then bundled via the pure
 /// ArrayOps builder. Mirrors CodeGen.genCompoundInitBinding (CodeGen.fs:8581).
 and materializeCompoundBinding
@@ -1231,7 +1196,7 @@ and materializeCompoundBinding
 /// in IRModule.SparseInits). The keys source rides the binding TYPE's
 /// IRSparseKeys extent; the values' LEADING dim is the key axis and any
 /// remaining dims fold into the trailing stride (buildSparse), copied straight
-/// into the compact buffer in key order — no scatter. A |values| != |keys|
+/// into the compact buffer in key order -- no scatter. A |values| != |keys|
 /// mismatch panics (BL8001), mirroring genSparseInitBinding's runtime guard.
 and materializeSparseBinding
         (st: InterpState) (env: Env) (binding: IRBinding) (valuesExpr: IRExpr) : Value =
@@ -1259,7 +1224,7 @@ and materializeSparseBinding
 /// Resolve one `info.Arrays.[pos]` to an ArraySource. Virtual sources
 /// (range/reverse/blocked) carry no store. A deferred `IRVar` input is forced
 /// AND its cell overwritten with the materialized array (forceDeferredArrayInput's
-/// double-consumer memoization, §0.3).
+/// double-consumer memoization, 0.3).
 and private resolveArraySource (st: InterpState) (env: Env) (arr: IRExpr) : ArraySource =
     match arr with
     | IRRange _ | IRVirtualReverse _ | IRBlocked _ -> SVirtual
@@ -1270,7 +1235,7 @@ and private resolveArraySource (st: InterpState) (env: Env) (arr: IRExpr) : Arra
             | VArray a -> SReal a
             // A compound/sparse operand of an eager op (sort/reduce/set-op)
             // walks its compact present-cell buffer as a plain dense rank-1
-            // array (§4.1 compound-operand path; sparse in key order).
+            // array (4.1 compound-operand path; sparse in key order).
             | VCompound cv -> SReal (A.compoundToDense cv)
             | VSparse sv -> SReal (A.sparseToDense sv)
             | VDeferred _ as d ->
@@ -1300,11 +1265,9 @@ and private resolveArraySource (st: InterpState) (env: Env) (arr: IRExpr) : Arra
         | VSparse sv -> SReal (A.sparseToDense sv)
         | _ -> raise (InterpUnsupported "array input expression is not an array")
 
-// ============================================================================
-// interpretNest — the nest interpreter (analog of genLoopNest). Outermost-first
-// recursion; bound = Extent − ΣBoundDependencies − StrictOffset; per-level
+// interpretNest: the nest interpreter (analog of genLoopNest). Outermost-first
+// recursion; bound = Extent - SumBoundDependencies - StrictOffset; per-level
 // element peeling arm-for-arm; innermost kernel via Core.evalExpr.
-// ============================================================================
 
 and private interpretNest
         (st: InterpState) (env: Env) (cg: LoopNestCodeGen)
@@ -1326,13 +1289,11 @@ and private interpretNest
 
     // Reynolds term plan (precomputed once per nest; iteration-invariant). The
     // kernel is summed over the surviving parameter permutations exactly as
-    // CodeGen.genKernelExprWithReynolds renders it (CodeGen.fs:3531). The buildKey
-    // REUSES CodeGen.canonicalKey with a synthetic per-index name map: the map is
-    // a consistent bijective renaming of CodeGen's peeled C++ names, and
-    // canonicalKey grouping depends only on the key EQUALITY relation, so the
+    // CodeGen.genKernelExprWithReynolds renders it (CodeGen.fs:3531). buildKey
+    // REUSES CodeGen.canonicalKey with a synthetic per-index name map -- a
+    // consistent bijective renaming of CodeGen's peeled C++ names -- so the
     // dedup / coefficient / first-occurrence ordering are IDENTICAL to the
-    // compiled binary by construction (captures fall to canonicalKey's own "v%d"
-    // fallback — fixed across permutations, matching their fixed peeled names).
+    // compiled binary by construction.
     let reynoldsPlan : (ValueRef[] * Blade.ReynoldsCore.ReynoldsTermPlan) option =
         if cg.HasReynolds && cg.KernelParams.Length >= 2 then
             let n = cg.KernelParams.Length
@@ -1349,11 +1310,11 @@ and private interpretNest
         else None
 
     // Evaluate the Reynolds permutation sum for the CURRENT peeled param values,
-    // mirroring genKernelExprWithReynolds's formatTerm/sumExpr value semantics:
-    //   symmetric  : Σ_i (coeff_i==1 ? v_i : coeff_i * v_i)         [coeffs > 0]
-    //   antisym    : first term signed; subsequent negative terms SUBTRACTED
-    //                (acc - |c|*v), positive ADDED (acc + c*v); |c|==1 drops the
-    //                multiply (unary neg for a lone negative). Empty plan -> 0.0.
+    // mirroring genKernelExprWithReynolds's formatTerm/sumExpr semantics:
+    //   symmetric : sum_i (coeff_i==1 ? v_i : coeff_i * v_i)   [coeffs > 0]
+    //   antisym   : first term signed; later negative terms SUBTRACTED
+    //               (acc - |c|*v), positive ADDED (acc + c*v); |c|==1 drops
+    //               the multiply. Empty plan -> 0.0.
     let scaleCoeff (c: int) (v: Value) : Value = N.evalBinOp IRMul (VFloat (float c)) v
     let evalReynolds (pcells: ValueRef[]) (plan: Blade.ReynoldsCore.ReynoldsTermPlan) : Value =
         let origVals = pcells |> Array.map (fun c -> c.V)
@@ -1385,7 +1346,7 @@ and private interpretNest
         result
 
     // Peel one element at `level` given the current per-position peeled arrays
-    // (immutable Map threaded down the recursion — sibling iterations don't see
+    // (immutable Map threaded down the recursion -- sibling iterations don't see
     // each other's peels) and the "sliced?" set (positions peeled at an ancestor
     // level). Returns the updated (curArrays, slicedSet). Mirrors
     // genElementBindingNew arm-for-arm in value space.
@@ -1405,14 +1366,14 @@ and private interpretNest
             (curArrays, sliced)
         | RealArray when b.FusedRank.IsSome ->
             // Arc-1 fused JOINT level (IR.fuseJointSLevels; genElementBinding
-            // CodeGen.fs:3087). This level spans the array's whole d-dim plain-
-            // dense S-block. The loop var is a left-justified compound coordinate;
-            // component 0 shifts it to the ABSOLUTE compound coord p (bound deps +
-            // strict offset), then component rc decodes its per-dim coordinate
+            // CodeGen.fs:3087): spans the array's whole d-dim plain-dense S-block.
+            // The loop var is a left-justified compound coordinate; component 0
+            // shifts it to the ABSOLUTE compound coord p (bound deps + strict
+            // offset), then component rc decodes its per-dim coordinate
             //   coord_rc = (p / prod_{j>rc} n_j) % n_rc
-            // (row-major lex, matching the storage bijection) and peels ONE dim of
-            // the progressively-sliced array. The d components chain through
-            // curArrays[pos]; the final (rc = d-1) peel binds the kernel param.
+            // (row-major lex) and peels ONE dim of the progressively-sliced array.
+            // The d components chain through curArrays[pos]; the final (rc = d-1)
+            // peel binds the kernel param.
             let d = b.FusedRank.Value
             let rc = elem.RankComponent
             let pos = elem.ArrayPosition
@@ -1440,11 +1401,10 @@ and private interpretNest
             let currentArr = Map.tryFind pos curArrays |> Option.defaultValue baseArr
             let isSliced = Set.contains pos sliced
             // Absolute flat coordinate: local loop var + bound-deps + strict if
-            // reading the ORIGINAL array. Once the array has been peeled at an
-            // outer level, the slice IS the storage row: allocCompact already
-            // shortened it and seeded it past the diagonal, so the 0-based loop
-            // var is the slot and BOTH shifts drop (mirrors CodeGen's
-            // genElementBindingNew RealArray arm).
+            // reading the ORIGINAL array. Once peeled at an outer level, the
+            // slice IS the storage row (allocCompact already shortened and
+            // seeded it past the diagonal), so the 0-based loop var is the slot
+            // and BOTH shifts drop (mirrors genElementBindingNew RealArray arm).
             let index =
                 if isSliced then i
                 else (b.BoundDependencies |> List.sumBy (fun d -> idxVals.[d])) + int64 b.StrictOffset + i
@@ -1455,12 +1415,11 @@ and private interpretNest
             | _ -> (curArrays, sliced)
 
     let evalKernelAndStore () =
-        // Force the kernel result: the real Core.fs defers some sub-expression
-        // forms (e.g. a kernel-embedded `<|>` / guard → VDeferred) rather than
-        // routing them to this backend, so a raw Core.evalExpr can hand back a
-        // VDeferred that must be resolved to a scalar before it is stored. A
-        // concrete value passes straight through. A Reynolds kernel instead sums
-        // the kernel over its surviving parameter permutations (plan precomputed).
+        // Force the kernel result: Core.fs defers some sub-expression forms
+        // (e.g. a kernel-embedded `<|>`/guard -> VDeferred) rather than routing
+        // them to this backend, so a raw Core.evalExpr can hand back a
+        // VDeferred that must be resolved before it is stored. A Reynolds
+        // kernel instead sums over its surviving parameter permutations.
         let v =
             match reynoldsPlan with
             | Some (pcells, plan) -> evalReynolds pcells plan
@@ -1498,17 +1457,12 @@ and private interpretNest
         |> Map.ofSeq
     loop 0 baseMap Set.empty
 
-// ============================================================================
-// Reduce over a DEFERRED computation
-// ============================================================================
-
-/// reduce over a DEFERRED computation (genReduceComputeBinding 8714): fold every
-/// cell of each leaf apply into a per-leaf scalar accumulator (all seeded with
-/// `seed`), through the fold kernel wrapper — ONE nest per leaf (value-identical
-/// to CodeGen's staggered merged nest, since leaves don't interact). Single leaf
-/// ⇒ scalar; fusion tree ⇒ a STRUCTURED tuple mirroring the tree shape (same
-/// rationale as forceTreeShaped: shape-driven projections must see the type's
-/// structure; a flat destructure flattens through nesting, so both styles work).
+/// reduce over a deferred computation (genReduceComputeBinding 8714): fold
+/// every cell of each leaf apply into a per-leaf scalar accumulator (all
+/// seeded with `seed`), through the fold kernel wrapper -- one nest per leaf
+/// (value-identical to CodeGen's staggered merged nest, since leaves don't
+/// interact). Single leaf = scalar; fusion tree = a structured tuple
+/// mirroring the tree shape (same rationale as forceTreeShaped).
 let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (kernel: IRExpr) (seed: Value) : Value =
     let rec resolveDeferred e =
         match e with
@@ -1561,9 +1515,7 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
                 | [] -> raise (InterpUnsupported "reduce-compute: accumulator/tree shape mismatch")
         fst (assemble comp accVals)
 
-// ============================================================================
-// Standalone virtual-array materialization (rare: a bare printed range/reverse)
-// ============================================================================
+// Standalone virtual-array materialization (rare: a bare printed range/reverse).
 
 let private materializeVirtual (st: InterpState) (env: Env) (idxTys: IRIndexType list) (kind: VirtualKind) : Value =
     match idxTys with
@@ -1579,9 +1531,7 @@ let private materializeVirtual (st: InterpState) (env: Env) (idxTys: IRIndexType
         VArray (A.mkDenseArray (IRTScalar ETInt64) idxTys [| n |] data)
     | _ -> raise (InterpUnsupported "standalone multi-index virtual array")
 
-// ============================================================================
-// evalArrayNode — Core's array/loop/combinator fallthrough hook
-// ============================================================================
+// evalArrayNode: Core's array/loop/combinator fallthrough hook.
 
 let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     match expr with
@@ -1596,10 +1546,10 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRFallback _ -> VDeferred (expr, env)
 
     // -- Choice `<|>`: DEFER only when an operand is itself a computation
-    //    (mirrors computeDeferredIds' isDeferred — the printability oracle);
+    //    (mirrors computeDeferredIds' isDeferred -- the printability oracle);
     //    otherwise it materializes NOW. A SCALAR choice (both operands scalar,
     //    incl. one embedded in a kernel body, 039) is `(l != 0) ? l : r` with
-    //    `l` evaluated once — the exprToCpp(IRChoice) ternary.
+    //    `l` evaluated once -- the exprToCpp(IRChoice) ternary.
     | IRChoice (left, right) ->
         let isChoiceComp (e: IRExpr) =
             match e with
@@ -1685,7 +1635,7 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         A.polyIndex (force st env (Core.evalExpr st env packExpr)) (toI64 (Core.evalExpr st env idxExpr))
     | IRContains (arrExpr, valExpr) ->
         // A compound operand walks its compact present-cell buffer as a plain
-        // dense array (contains over an empty compound → false, 006).
+        // dense array (contains over an empty compound -> false, 006).
         let arrOpt =
             match force st env (Core.evalExpr st env arrExpr) with
             | VArray a -> Some a
@@ -1717,11 +1667,9 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     //    CodeGen materialize*Form emitters (byte-verified):
     //      mask  = Bool PRESENCE array `m[i]=pred(A[i])`, source index space,
     //              NO compaction (maskPresence, NOT the deprecated maskArray);
-    //      sort  = stable ascending by key (stable_sort on a permutation);
-    //      unique/intersect/union = unordered_set first-occurrence order
-    //              (unique: A; intersect: A-order deduped ∩ B; union: A then
-    //               B-not-in-A);
-    //      transpose = hard swap of two arity-1 axes into a fresh pool.
+    //      sort  = stable ascending by key; unique/intersect/union =
+    //              first-occurrence order; transpose = hard swap of two
+    //              arity-1 axes into a fresh pool.
     | IRMask (arrExpr, predExpr) ->
         let a = forceInputArray st env arrExpr
         VArray (A.maskPresence a (resolveUnaryKernel st predExpr))
@@ -1750,15 +1698,13 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRJoin (arrs, dim) ->
         VArray (A.joinArrays (arrs |> List.map (forceInputArray st env)) dim)
 
-    // -- Symmetry producers (M7-β). Each FORCES its input(s) first (so a deferred
-    //    reynolds/gram source materializes once — 109/110/066), then materializes
-    //    a fresh output. `typeOf expr` carries the fission / gram / preserved
-    //    output type (shape + symmetry), driving storage class and print routing.
-    //      decompact = value-equivalent group fission (read src at each output
-    //                  cell's logical coord via readCompact);
-    //      gram      = A·Bᴴ contraction into Sym/Hermitian-compact (same) or
-    //                  dense (distinct);
-    //      negate/conjugate = shape-preserving contiguous-pool transform.
+    // -- Symmetry producers. Each FORCES its input(s) first (so a deferred
+    //    reynolds/gram source materializes once -- 109/110/066), then materializes
+    //    a fresh output. `typeOf expr` carries the fission/gram/preserved output
+    //    type (shape + symmetry), driving storage class and print routing:
+    //    decompact = value-equivalent group fission (readCompact per output
+    //    cell); gram = A.B^H into Sym/Hermitian-compact (same) or dense
+    //    (distinct); negate/conjugate = shape-preserving pool transform.
     | IRDecompact (arrExpr, _) ->
         VArray (A.decompactArray (forceInputArray st env arrExpr) (typeOf expr))
     | IRGram (lExpr, rExpr, _) ->
@@ -1766,7 +1712,7 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let r = forceInputArray st env rExpr
         VArray (A.gramArray l r (typeOf expr))
     | IRMatmul (lExpr, rExpr) ->
-        // matmul = the dense A·B product (Phase 5). Same FORCE-then-materialize
+        // matmul = the dense A.B product. Same FORCE-then-materialize
         // shape as gram; the naive i/j/t-ascending fold mirrors the shim's
         // native fallback so the compiled/interpreted differential is exact.
         let l = forceInputArray st env lExpr
@@ -1826,10 +1772,10 @@ and private compoundIndexRead (st: InterpState) (env: Env) (cv: CompoundValue) (
             // Unreachable since the flat-subscript conversion: typecheck packs
             // full k-tuples for compound heads and rejects wildcard/partial
             // forms (they moved to SparseIdx). Mirror codegen's backstop.
-            raise (InterpUnsupported "internal: a partial compound index tuple reached the interpreter — partial/wildcard reads on CompoundIdx were removed (use SparseIdx)")
+            raise (InterpUnsupported "internal: a partial compound index tuple reached the interpreter -- partial/wildcard reads on CompoundIdx were removed (use SparseIdx)")
     | _ -> raise (InterpUnsupported "compound index without a tuple head")
 
-/// Sparse index read — the sparse twin of compoundIndexRead, mirroring the
+/// Sparse index read -- the sparse twin of compoundIndexRead, mirroring the
 /// same C++ read emission (full scalar / trailing row / gather partial). The
 /// classification is shared (classifyCompoundIndexTuple is shape-only).
 and private sparseIndexRead (st: InterpState) (env: Env) (sv: SparseValue) (idxExprs: IRExpr list) : Value =

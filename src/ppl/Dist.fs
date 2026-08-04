@@ -1,6 +1,6 @@
 namespace MomentAlgebra
 
-/// Prototype 1: Dist — the cumulant numeric tower. A d-dimensional random
+/// Prototype 1: Dist -- the cumulant numeric tower. A d-dimensional random
 /// value represented by its joint cumulant tensors kappa_1 .. kappa_r
 /// (each rank-k symmetric, packed). The tower's laws, all EXACT:
 ///
@@ -50,7 +50,7 @@ module Dist =
         t
 
     /// Sum of INDEPENDENT variables: cumulants add. This is the whole reason
-    /// cumulants are the right basis — convolution becomes tensor addition.
+    /// cumulants are the right basis -- convolution becomes tensor addition.
     let addIndependent (a: T) (b: T) : T =
         if a.Dim <> b.Dim then failwith "addIndependent: dimension mismatch"
         let r = min a.Order b.Order
@@ -111,26 +111,26 @@ module Dist =
 
     /// Exact polynomial pushforward (the exact fragment of idea 4):
     /// Y = sum_t coeff_t * prod_i X_i^(alpha_t_i), returned as a scalar Dist of
-    /// order q. Needs joint moments of X up to q * max total degree — enforced
+    /// order q. Needs joint moments of X up to q * max total degree -- enforced
     /// here at runtime; in Blade this is the type-level "insufficient
     /// stochastic order" error, caught before any kernel is emitted.
-    /// Full Faà di Bruno pushforward, scalar output: Y = g(X) for a smooth g
-    /// supplied as its degree-s JET AT THE MEAN — g0 = g(μ) and
-    /// derivs.[k-1] = the rank-k symmetric derivative tensor g^(k)(μ).
-    /// Y − g0 is the Taylor polynomial in Z = X − μ, so raw moments of
-    /// Y' = Y − g0 expand over compositions of m into jet degrees,
+    /// Full Faa di Bruno pushforward, scalar output: Y = g(X) for a smooth g
+    /// supplied as its degree-s JET AT THE MEAN -- g0 = g(mu) and
+    /// derivs.[k-1] = the rank-k symmetric derivative tensor g^(k)(mu).
+    /// Y - g0 is the Taylor polynomial in Z = X - mu, so raw moments of
+    /// Y' = Y - g0 expand over compositions of m into jet degrees,
     /// derivative reads contracted with CENTRAL moment tensors of X
-    /// (partition sums over κ with every block of size ≥ 2 — singleton
-    /// blocks vanish because κ_1(Z) = 0); univariate Möbius inversion
-    /// returns cumulants and κ_1 shifts back by g0.
+    /// (partition sums over kappa with every block of size >= 2 -- singleton
+    /// blocks vanish because kappa_1(Z) = 0); univariate Mobius inversion
+    /// returns cumulants and kappa_1 shifts back by g0.
     ///
-    /// Exact when g is a polynomial of degree ≤ s (its jet is finite) and
-    /// q·s ≤ the carried order. `closed = false` demands that budget — the
+    /// Exact when g is a polynomial of degree <= s (its jet is finite) and
+    /// q*s <= the carried order. `closed = false` demands that budget -- the
     /// "insufficient stochastic order" contract; `closed = true` instead
     /// zero-fills cumulants beyond the carried order (the moments(d,k)
     /// closure convention: partition blocks larger than Order are dropped).
     /// Central moment tensors of X, orders 1..tMax (order 1 = zeros):
-    /// partition sums over kappa with every block of size 2..Order —
+    /// partition sums over kappa with every block of size 2..Order --
     /// singletons vanish (kappa_1(Z) = 0), oversized blocks are the
     /// closure drop. Output-agnostic: shared by both jet pushforwards.
     let private centralMoments (dist: T) (tMax: int) : SymTensor.T[] =
@@ -165,7 +165,7 @@ module Dist =
             failwithf "jetPushforward: needs input moments up to order %d but Dist carries order %d (closure required)"
                 tMax dist.Order
         let cm = centralMoments dist tMax
-        // raw moments of Y' = Y − g0: multinomial over jet-degree compositions
+        // raw moments of Y' = Y - g0: multinomial over jet-degree compositions
         let rawY =
             Array.init q (fun mi ->
                 let m = mi + 1
@@ -173,7 +173,7 @@ module Dist =
                 for comp in Combinatorics.compositions m s do
                     // comp.[k-1] factors take jet degree k; total Z-degree t
                     let t = comp |> Array.mapi (fun i c -> (i + 1) * c) |> Array.sum
-                    if t >= 2 then   // t = 1 ⇒ D_1·E[Z] = 0; t = 0 impossible for m ≥ 1
+                    if t >= 2 then   // t = 1 => D_1*E[Z] = 0; t = 0 impossible for m >= 1
                         let mutable w = Combinatorics.factorial m
                         for i in 0 .. s - 1 do
                             w <- w / Combinatorics.factorial comp.[i]
@@ -205,20 +205,20 @@ module Dist =
         SymTensor.set out.Kappa.[0] [| 0 |] (SymTensor.get out.Kappa.[0] [| 0 |] + g0)
         out
 
-    /// Vector-valued Faà di Bruno pushforward: Y = g(X) for g : R^d -> R^m,
-    /// supplied as per-coordinate jets at the mean — g0.[a] = g_a(μ) and
-    /// derivs.[a].[k-1] = the rank-k symmetric tensor g_a^(k)(μ). Jets may
+    /// Vector-valued Faa di Bruno pushforward: Y = g(X) for g : R^d -> R^m,
+    /// supplied as per-coordinate jets at the mean -- g0.[a] = g_a(mu) and
+    /// derivs.[a].[k-1] = the rank-k symmetric tensor g_a^(k)(mu). Jets may
     /// be ragged (a shorter coordinate jet is implicitly zero beyond its
     /// length; an empty jet is a constant coordinate). Joint raw moments of
-    /// Y' = Y − g0, E[∏_j Y'_{a_j}], expand over ORDERED per-factor degree
-    /// assignments (k_1..k_p) ∈ [1..s]^p with weight ∏_j 1/k_j! — the
+    /// Y' = Y - g0, E[prod_j Y'_{a_j}], expand over ORDERED per-factor degree
+    /// assignments (k_1..k_p)  in  [1..s]^p with weight prod_j 1/k_j! -- the
     /// univariate composition-multinomial is exactly this sum with identical
     /// factors collected, so m = 1 reproduces jetPushforward. Factor j reads
     /// D_{k_j} of coordinate a_j, contracted against the CENTRAL moment of
-    /// all t = Σ k_j labels; the multivariate Möbius inversion
+    /// all t = Sigma k_j labels; the multivariate Mobius inversion
     /// (cumulantsFromMoments) returns the JOINT output cumulant tensors and
-    /// κ_1 shifts back by g0. Same strict/closed budget contract as the
-    /// scalar path (tMax = q·s vs the carried order).
+    /// kappa_1 shifts back by g0. Same strict/closed budget contract as the
+    /// scalar path (tMax = q*s vs the carried order).
     let jetPushforwardVec (dist: T) (g0: float[]) (derivs: SymTensor.T[][]) (q: int) (closed: bool) : T =
         let d = dist.Dim
         let m = g0.Length
@@ -245,7 +245,7 @@ module Dist =
                      let rec assign (j: int) =
                          if j = k then
                              let t = Array.sum degs
-                             if t >= 2 then   // t = 1 ⇒ D_1·E[Z] = 0
+                             if t >= 2 then   // t = 1 => D_1*E[Z] = 0
                                  let mutable w = 1.0
                                  for kj in degs do w <- w / Combinatorics.factorial kj
                                  let labels = Array.zeroCreate t

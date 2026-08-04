@@ -1,7 +1,7 @@
-// Toolchain probing and C++/CUDA build orchestration for the Blade compiler.
-// Extracted verbatim from Main.fs (audit §2.3): capability detection,
-// compileCpp/compileCuda/compileCudaSplit, executable running, and the
-// backend-requirement resolution shared by the CLI and the test harness.
+// Toolchain probing and C++/CUDA build orchestration for the Blade compiler:
+// capability detection, compileCpp/compileCuda/compileCudaSplit, executable
+// running, and the backend-requirement resolution shared by the CLI and the
+// test harness.
 module Blade.Build
 
 open System
@@ -12,60 +12,44 @@ open System.Runtime.InteropServices
 type Process = System.Diagnostics.Process
 type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 
-// ============================================================================
-// Backend capability detection + toolchain resolution
+// Backend capability detection + toolchain resolution.
 //
-// CUDA is a backend *mode* from Blade's POV: the choice of whether a test
-// targets the device is determined during codegen. From the harness POV
-// the generated source is already settled by the time we compile, so the
-// backend requirement is *inferred* from the output (presence of device
-// kernels) rather than declared per-test.
-//
-// The harness advertises environment capabilities once at startup; each
-// test's inferred requirement is intersected against them. A test whose
-// requirement the environment can't satisfy is SKIPPED with a reason, not
-// failed. The host-compiler choice is a per-(platform, backend) resolution,
-// never a per-test axis.
-// ============================================================================
+// CUDA is a backend *mode*: which test targets the device is decided during
+// codegen, so by compile time the backend requirement is *inferred* from
+// the generated output (presence of device kernels), not declared per-test.
+// Capabilities are advertised once at startup and intersected against each
+// test's inferred requirement; an unsatisfiable requirement is SKIPPED with
+// a reason, not failed. The host-compiler choice is a per-(platform,
+// backend) resolution, never a per-test axis.
 
-// ============================================================================
-// Shared host-compiler optimization flags (plan-cpp-perf-exploitation Phase 0)
+// Shared host-compiler optimization flags: ONE value, consumed by
+// compileCppWithExtra AND by every test block that shells out to g++ on its
+// own (tests/Differential.fs, Benchmarks.fs, OmpTests.fs, AllocTests.fs,
+// OrbWreathTests.fs) via `Build.optFlags`, since Build.fs compiles first in
+// Blade.fsproj. Excludes `-std=`, a per-site property (orb_wreath_tests.cpp
+// needs c++20).
 //
-// ONE value, consumed by compileCppWithExtra AND by every test block that
-// shells out to g++ on its own (tests/Differential.fs, Benchmarks.fs,
-// OmpTests.fs, AllocTests.fs, OrbWreathTests.fs) — Build.fs compiles before
-// all of them in Blade.fsproj, so those sites reference `Build.optFlags`
-// rather than re-spelling the string. Deliberately does NOT include `-std=`:
-// the std level is a per-site property (orb_wreath_tests.cpp needs c++20).
-//
-// `-march=native` lets GCC use the build machine's full ISA (AVX2/AVX-512,
-// FMA). The BLADE_MARCH env var makes that reproducible across machines:
+// `-march=native` lets GCC use the build machine's full ISA. BLADE_MARCH
+// makes that reproducible:
 //   unset  -> `native` (default)
-//   `off`  -> no -march flag at all (portable binaries / cross-machine repro)
+//   `off`  -> no -march flag (portable / cross-machine repro)
 //   other  -> `-march=<value>` verbatim (e.g. `skylake`, `x86-64-v3`)
 //
-// `-ffp-contract` defaults to `fast` (FMA ON — user decision 2026-08-02,
-// matching GCC's own default once -march exposes FMA). Contraction fuses
-// a*b+c into one rounding, which breaks the BYTE-IDENTITY differential
-// harnesses: src/Interp/Numerics.fs is bit-pinned to non-FMA scalar
-// semantics (MEASURED, g++ 15.2 ucrt64: `blade test interp math` 28/42 with
-// contraction on, 42/42 off; Jacobi SVD/eigh/HOSVD amplify last-ULP deltas
-// into printed digits). Those harnesses therefore PIN `BLADE_FP_CONTRACT=off`
-// for their own runs (tests/InterpDiff.fs, tests/DiffOracle.fs — the oracle
-// subprocess inherits the pin) — byte-identity is a property of the
-// differential gates, not of user builds.
-// BLADE_FP_CONTRACT mirrors g++'s `-ffp-contract=` values exactly:
+// `-ffp-contract` defaults to `fast` (FMA on). Contraction fuses a*b+c into
+// one rounding, which breaks the BYTE-IDENTITY differential harnesses:
+// src/Interp/Numerics.fs is bit-pinned to non-FMA scalar semantics. Those
+// harnesses PIN `BLADE_FP_CONTRACT=off` for their own runs (tests/
+// InterpDiff.fs, tests/DiffOracle.fs), since byte-identity is a property
+// of the differential gates, not of user builds.
 //   unset  -> `fast` (default: FMA on)
 //   other  -> `-ffp-contract=<value>` verbatim (`fast` | `on` | `off`)
 //
-// These are FUNCTIONS, not module-level values, so a harness may set the env
-// var mid-process and have it honored by the next compile (a module-level
-// `let` would freeze the default at first touch).
+// These are FUNCTIONS, not module-level values, so a harness may set the
+// env var mid-process and have it honored by the next compile -- a
+// module-level `let` would freeze the default at first touch.
 //
-// NOTE (nvcc): the CUDA paths below stay at -O2 on purpose. nvcc translates
-// host flags for its host compiler (cl.exe on Windows) and -march does not
-// pass through cleanly there.
-// ============================================================================
+// The CUDA paths below stay at -O2: nvcc translates host flags for its host
+// compiler (cl.exe on Windows) and -march does not pass through cleanly there.
 
 /// The `-march=` fragment (leading space included, or "" when disabled).
 let private marchFlag () =
@@ -97,8 +81,7 @@ type Capabilities = {
 
 /// Backend requirement inferred from generated source. `RequiresCuda` when
 /// codegen emitted at least one device kernel; `RequiresMpi` when the program
-/// includes <mpi.h> (mpiEmitMode codegen — needs -lmsmpi at link and mpiexec
-/// at run); `CpuOnly` otherwise.
+/// includes <mpi.h> (needs -lmsmpi at link and mpiexec at run); `CpuOnly` otherwise.
 type BackendReq = CpuOnly | RequiresCuda | RequiresMpi
 
 /// Resolution of (capabilities, requirement) into a concrete compile action.
@@ -124,9 +107,8 @@ let private probeTool (exe: string) (args: string) : bool =
     with _ -> false
 
 /// Marker-based tool probe: success = the tool launched and its combined
-/// output contains `marker` (case-insensitive). For tools whose exit codes
-/// are not trustworthy as a presence signal — MS-MPI's mpiexec exits nonzero
-/// from a bare help query.
+/// output contains `marker`, for tools whose exit codes are not
+/// trustworthy as a presence signal (MS-MPI's mpiexec exits nonzero from a bare help query).
 let private probeToolLoose (exe: string) (args: string) (marker: string) : bool =
     try
         let psi = ProcessStartInfo(exe, args)
@@ -141,9 +123,9 @@ let private probeToolLoose (exe: string) (args: string) (marker: string) : bool 
         (out + err).IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0
     with _ -> false
 
-/// Probe for a runnable CUDA device. `nvidia-smi -L` lists devices and exits
-/// 0 with a non-empty list when at least one GPU is present. This is a proxy
-/// for a real `cudaGetDeviceCount` probe but avoids compiling one.
+/// Probe for a runnable CUDA device: `nvidia-smi -L` lists devices and exits
+/// 0 with a non-empty list when at least one GPU is present -- a proxy for a
+/// real `cudaGetDeviceCount` probe that avoids compiling one.
 let private probeGpu () : bool =
     try
         let psi = ProcessStartInfo("nvidia-smi", "-L")
@@ -174,23 +156,15 @@ let detectCapabilities () : Capabilities =
 /// Capabilities are environment-global; detect once, lazily.
 let capabilities = lazy (detectCapabilities ())
 
-/// Whether g++ is actually present and runnable on PATH.
-///
-/// This used to be a hardcoded `true` ("actual errors will be caught during
-/// compilation"), which is exactly backwards for the harness: a box without
-/// g++ then reported every compile-and-run test as a genuine FAILURE instead
-/// of a skip, and the "requires g++" skip branches guarding on it were dead
-/// code. Delegates to the same `probeTool "g++" "--version"` capability probe
-/// that resolveCompile/DiffOracle/InterpDiff already consult, so every
-/// consumer agrees on one answer. Defined here (rather than at the top of the
-/// module) because it needs `capabilities`.
+/// Whether g++ is actually present and runnable on PATH. Delegates to the
+/// same `probeTool "g++" "--version"` probe that resolveCompile/DiffOracle/
+/// InterpDiff already consult (a hardcoded `true` would report a box
+/// without g++ as a test FAILURE instead of a skip).
 let checkGppAvailable () = capabilities.Value.HasGpp
 
-/// Infer the backend requirement from generated source. CUDA codegen emits
-/// `__global__`-qualified kernels; CPU codegen never does. This keeps the
-/// codegen signature untouched while the CUDA backend is built out — every
-/// current test infers CpuOnly, and the inference flips automatically once
-/// device kernels appear in the output.
+/// Infer the backend requirement from generated source: CUDA codegen emits
+/// `__global__`-qualified kernels, CPU codegen never does, so the inference
+/// flips automatically once device kernels appear in the output.
 let inferBackendReq (generatedSource: string) : BackendReq =
     if generatedSource.Contains("__global__") then RequiresCuda
     elif generatedSource.Contains("#include <mpi.h>") then RequiresMpi
@@ -199,8 +173,7 @@ let inferBackendReq (generatedSource: string) : BackendReq =
 /// Resolve (capabilities, requirement) into a compile action. A test never
 /// picks a compiler; it produces a BackendReq and this picks the toolchain.
 /// MPI compiles with plain g++ (compileCpp appends -lmsmpi when it sees the
-/// mpi.h include); a missing MS-MPI import lib fails the g++ link loudly,
-/// which is the correct signal under the opt-in mpi emit gate.
+/// mpi.h include); a missing MS-MPI import lib fails the g++ link loudly.
 let resolveCompile (caps: Capabilities) (req: BackendReq) : CompilePlan =
     match req, caps.Platform with
     | CpuOnly, _ when not caps.HasGpp           -> SkipCompile "requires g++, not found"
@@ -217,55 +190,125 @@ let resolveCompile (caps: Capabilities) (req: BackendReq) : CompilePlan =
 let isSkipError (e: string) =
     e = "Skipped" || e.StartsWith("Skipped:")
 
+/// Run a subprocess, capturing combined output. Shared by the split-compile
+/// steps and the device-shim build (`buildCublasDevice`); Ok () on exit 0, else Error with the captured output.
+let runProc (exe: string) (args: string) (timeoutMs: int) : Result<unit, string> =
+    try
+        let psi = ProcessStartInfo(exe, args)
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        use proc = Process.Start(psi)
+        let outT = proc.StandardOutput.ReadToEndAsync()
+        let errT = proc.StandardError.ReadToEndAsync()
+        if not (proc.WaitForExit(timeoutMs)) then
+            (try proc.Kill() with _ -> ())
+            Error (sprintf "%s timed out" exe)
+        else
+            let combined =
+                [ if not (String.IsNullOrWhiteSpace outT.Result) then yield outT.Result
+                  if not (String.IsNullOrWhiteSpace errT.Result) then yield errT.Result ]
+                |> String.concat "\n"
+            if proc.ExitCode = 0 then Ok ()
+            else Error (sprintf "%s failed (exit %d):\n%s\nCommand: %s %s" exe proc.ExitCode combined exe args)
+    with ex -> Error (sprintf "%s exception: %s" exe ex.Message)
+
+/// The include line a cuBLAS-dispatching program carries, analogous to the
+/// `blade_linalg.hpp` / `blade_lapack.hpp` sniffs below: codegen writes it
+/// exactly when `LinAlgPatterns.resolveNodeRoute` picked the device backend.
+let private cublasShimInclude = "#include \"blade_linalg_cuda.hpp\""
+
+/// Builds the DEVICE half of a cuBLAS-dispatching program and returns the
+/// link input the host compile needs. A separate translation unit is
+/// required because g++ (mingw-w64 on Windows) cannot include
+/// `<cuda_runtime.h>` / `<cublas_v2.h>`, so the shim's definitions are
+/// compiled by nvcc and reached across an unmangled `extern "C"` boundary.
+/// On Windows it is a shared library, not an object: nvcc drives cl.exe,
+/// so a device object would carry the MSVC ABI against the host's MinGW
+/// ABI -- linking them directly is the fragility `compileCudaSplit` warns
+/// about. Instead the nvcc half is a self-contained DLL with dllexport'd
+/// `extern "C"` entry points that MinGW links via the export table, so the
+/// ABI boundary is the C-ABI call alone.
+///
+/// The `.cu` is generated here (just an `#include` of the deployed shim
+/// header) since it is build plumbing with no per-program content. A
+/// missing toolchain is a hard error, not a skip: codegen already emitted
+/// `blade_cuda_*` calls under an explicitly-set `BLADE_CUBLAS`, so failing
+/// loudly here mirrors `blade_linalg.hpp`'s `#error` guarantee.
+let buildCublasDevice (cppFullPath: string) : Result<string, string> =
+    let caps = capabilities.Value
+    if not caps.HasNvcc then
+        Error "cuBLAS dispatch was emitted (BLADE_CUBLAS is on) but nvcc was not found on PATH; \
+               the device half of blade_linalg_cuda.hpp cannot be built"
+    elif caps.Platform = PWindows && not caps.HasCl then
+        Error "cuBLAS dispatch was emitted (BLADE_CUBLAS is on) but cl.exe was not found on PATH; \
+               nvcc needs it as its host compiler on Windows (run from a VS x64 Native Tools prompt)"
+    elif caps.Platform = PMacOS then
+        Error "cuBLAS dispatch was emitted (BLADE_CUBLAS is on) but CUDA is unsupported on macOS"
+    else
+        let onWindows = caps.Platform = PWindows
+        let srcDir = Path.GetDirectoryName(cppFullPath)
+        let stem = Path.GetFileNameWithoutExtension(cppFullPath)
+        let cuFile = Path.Combine(srcDir, stem + "_cublas.cu")
+        let libExt = if onWindows then ".dll" else ".so"
+        let libFile = Path.Combine(srcDir, stem + "_cublas" + libExt)
+        let cuText =
+            String.concat "\n"
+                [ "// Generated by Blade.Build.buildCublasDevice -- the DEVICE translation unit"
+                  "// for this program's cuBLAS dispatch. nvcc defines __CUDACC__, so the shim"
+                  "// header below expands to its definitions rather than its host prototypes."
+                  "#include \"blade_linalg_cuda.hpp\""
+                  "" ]
+        // A failed write is reported, not swallowed: nvcc would otherwise
+        // compile whatever stale `.cu` happened to be there.
+        match (try File.WriteAllText(cuFile, cuText); None with ex -> Some ex.Message) with
+        | Some why -> Error (sprintf "could not write the cuBLAS device translation unit %s: %s" cuFile why)
+        | None ->
+        // /Zc:preprocessor: CCCL headers refuse MSVC's traditional
+        // preprocessor (same rule as compileCudaSplit / compileCudaMpiHybrid).
+        let sharedFlags =
+            if onWindows then "-shared -Xcompiler /Zc:preprocessor"
+            else "-shared -Xcompiler -fPIC"
+        let args =
+            sprintf "-std=c++17 -O2 %s -o \"%s\" \"%s\" -lcublas"
+                sharedFlags libFile cuFile
+        match runProc "nvcc" args 300000 with
+        | Error e -> Error e
+        | Ok () -> Ok libFile
+
 /// Compile a C++ file with g++. `extraLinkInputs` are appended after the
-/// source (linker order) — e.g. the hybrid mpi+cuda build passes the
+/// source (linker order) -- e.g. the hybrid mpi+cuda build passes the
 /// nvcc-built device DLL here (MinGW links DLL export tables directly).
 let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
     try
         let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
         let exeFile = Path.ChangeExtension(cppFile, exeExt)
         
-        // Use full paths
         let cppFullPath = Path.GetFullPath(cppFile)
         let exeFullPath = Path.GetFullPath(exeFile)
         
-        // Enable OpenMP for parallel loops
         let ompFlag = "-fopenmp"
 
-        // Backstop the Blade type system: any implicit float→integer narrowing
-        // conversion in generated C++ should be a hard error, not a silent
-        // truncation. Probe E's silent miscompile (Float64 → Int64) is exactly
-        // this pattern.
-        //
-        // -Wnarrowing only catches brace-init narrowing (`int x{1.5};`); we
-        //   need assignment-style coverage too (`int x = 1.5;`).
-        // -Wfloat-conversion catches both, but only for float-vs-integer.
-        // -Wconversion is broader but flags many legitimate cases (size_t loop
-        //   counters compared with int literals, etc.) so we don't enable it.
+        // Backstops the Blade type system: implicit float->integer narrowing
+        // in generated C++ must be a hard error. -Wnarrowing alone only
+        // catches brace-init, not assignment; -Wconversion is broader but
+        // flags legitimate cases (size_t loop counters vs int literals).
         let safetyFlags = "-Werror=float-conversion -Werror=narrowing"
 
-        // Provider programs (load_compound / load) emit `#include <netcdf.h>` and
-        // call nc_*, so they need the netcdf header at compile and the library at
-        // link. These are NOT on g++'s default search path in the common Windows
-        // case: an official MSVC-built netCDF under Program Files, whose DLL is on
-        // PATH (for the F# P/Invoke side) but whose include/lib g++ never sees,
-        // and whose import lib is MSVC-format. Resolution:
-        //   - NETCDF_DIR set: add -I<dir>\include, and link the DLL in <dir>\bin
-        //     DIRECTLY (MinGW g++ links a Windows DLL by reading its export table
-        //     -- robust against an MSVC .lib; the C API is ABI-compatible on x64).
-        //     Fall back to -L<dir>\lib -lnetcdf if no DLL is found there.
-        //   - NETCDF_DIR unset: bare -lnetcdf (works when netcdf is already on the
-        //     default include/lib paths, e.g. an MSYS2 pacman install).
-        // Link inputs go AFTER the source (linker order). Non-provider programs
-        // add nothing.
+        // Provider programs emit `#include <netcdf.h>`, needing the netcdf
+        // header at compile and library at link -- not on g++'s default
+        // search path in the common Windows case (MSVC-built netCDF with
+        // an MSVC-format import lib). Resolution:
+        //   - NETCDF_DIR set: add -I<dir>\include, link the DLL in <dir>\bin
+        //     directly; falls back to -L<dir>\lib -lnetcdf.
+        //   - NETCDF_DIR unset: bare -lnetcdf (default MSYS2 pacman install).
         let needsNetcdf =
             try (File.ReadAllText cppFullPath).Contains "#include <netcdf.h>" with _ -> false
 
-        // MPI programs (mpiEmitMode codegen) include <mpi.h> and call the MPI C
-        // API — link MS-MPI. The MSYS2 mingw-w64 msmpi package puts mpi.h and
-        // libmsmpi.a on g++'s default search paths, so a bare -lmsmpi suffices
-        // (mirrors the bare -lnetcdf convention above). Linker inputs go AFTER
-        // the source.
+        // MPI programs include <mpi.h> and call the MPI C API -- the MSYS2
+        // mingw-w64 msmpi package puts mpi.h/libmsmpi.a on g++'s default
+        // search paths, so a bare -lmsmpi suffices (mirrors -lnetcdf above).
         let needsMpi =
             try (File.ReadAllText cppFullPath).Contains "#include <mpi.h>" with _ -> false
         let mpiFlags = if needsMpi then " -lmsmpi" else ""
@@ -291,57 +334,32 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
                               | None -> sprintf " -L\"%s\" -lnetcdf" (Path.Combine(dir, "lib")))
                      incFlag + linkFlag)
 
-        // Linalg-dispatch programs emit `#include "blade_linalg.hpp"` (Phases
-        // 5 / 5b / 5c of docs/plan-cpp-perf-exploitation.md) and call
-        // blade_linalg::* for gram / matmul / dot / gemv.
-        //
-        // SINCE PHASE 5c THE HEADER IS BLAS-ONLY — it has no native fallbacks
-        // and `#error`s without the define. That is safe because CODEGEN now
-        // consults the SAME gate this line does
-        // (`LinAlgPatterns.blasAvailable`, the one definition) and writes the
-        // include only when the gate is on: within one process, "include
-        // present" and "gate on" cannot disagree, so the define is always
-        // there when the header is. An emit in one process and a compile in
-        // another with a different gate WILL fail — loudly, at the `#error`,
-        // which is the intended behaviour and strictly better than silently
-        // compiling different arithmetic than was emitted for.
+        // Linalg-dispatch programs emit `#include "blade_linalg.hpp"` and
+        // call blade_linalg::* for gram/matmul/dot/gemv. The header is
+        // BLAS-only (`#error`s without the define); codegen consults the
+        // SAME gate this line does (`LinAlgPatterns.blasAvailable`), so
+        // within one process "include present" and "gate on" cannot
+        // disagree -- an emit and a compile with different gates fails
+        // loudly at the `#error` rather than silently miscompiling.
         //
         // Gate semantics (BLADE_BLAS=1|on / 0|off / unset -> follow
-        // OPENBLAS_DIR) live in `blasAvailable`; default-off is deliberate,
-        // because BLAS may differ in the last ULP and the interp/oracle
-        // differentials demand byte-identical output — Blade's own emitted
-        // loops remain the verification truth.
-        //
-        // Resolution scheme, same as NETCDF_DIR above:
-        //   - OPENBLAS_DIR set: add -I<dir>\include, and link the DLL in
-        //     <dir>\bin DIRECTLY (MinGW links a Windows DLL by reading its
-        //     export table — robust against import-lib format drift). Fall
-        //     back to -L<dir>\lib -lopenblas if no DLL is found there.
-        //   - OPENBLAS_DIR unset (but BLADE_BLAS forced on): bare -lopenblas
-        //     (works when OpenBLAS is on the default include/lib paths, e.g.
-        //     an MSYS2 pacman install).
+        // OPENBLAS_DIR) live in `blasAvailable`; default-off since BLAS may
+        // differ in the last ULP and the differentials demand byte-
+        // identical output. Resolution, same as NETCDF_DIR above:
+        //   - OPENBLAS_DIR set: add -I<dir>\include, link the DLL in
+        //     <dir>\bin directly; falls back to -L<dir>\lib -lopenblas.
+        //   - OPENBLAS_DIR unset (BLADE_BLAS forced on): bare -lopenblas.
         let cppTextForSniff = try File.ReadAllText cppFullPath with _ -> ""
         let usesLinalgShim = cppTextForSniff.Contains "#include \"blade_linalg.hpp\""
         let blasGateOn = Blade.LinAlgPatterns.blasAvailable ()
-        // LAPACK rides the same OpenBLAS install (which bundles LAPACKE) but
-        // gets its OWN sniff arm and its OWN define, so a BLAS-only program and
-        // a LAPACK-carrying one stay distinguishable on the g++ line: a
-        // gram/matmul program must not start advertising a LAPACK dependency it
-        // does not have. Same emit-side pairing guarantee as BLAS — codegen
-        // writes the include only when `lapackAvailable ()` said yes — and the
-        // same loud failure (`blade_lapack.hpp`'s own `#error`) if an emit and
-        // a compile ever disagree.
+        // LAPACK rides the same OpenBLAS install (LAPACKE is bundled) but
+        // gets its own sniff arm and define, so a BLAS-only program stays
+        // distinguishable from a LAPACK-carrying one; same #error-on-mismatch guarantee as BLAS.
         let usesLapackShim = cppTextForSniff.Contains "#include \"blade_lapack.hpp\""
         let lapackGateOn = Blade.LinAlgPatterns.lapackAvailable ()
-        // Split into a COMPILE half (define + -I, which must precede the source
-        // so the shim's `#include <cblas.h>` resolves) and a LINK half (the
-        // library, which must FOLLOW the source in linker order).
-        //
-        // BOTH shims resolve through the same OpenBLAS install (LAPACKE is
-        // bundled in libopenblas), so the include/link half is shared and the
-        // DEFINES are per-header. `wantsBlas`/`wantsLapack` are each an
-        // (include present AND its own gate) conjunction, so a program gets
-        // exactly the defines its emitted text needs.
+        // Split into a COMPILE half (define + -I, precedes the source) and
+        // a LINK half (library, follows it); DEFINES stay per-header
+        // (`wantsBlas`/`wantsLapack` each gate on include-present AND its own flag).
         let wantsBlas = usesLinalgShim && blasGateOn
         let wantsLapack = usesLapackShim && lapackGateOn
         let (blasCompileFlags, blasLinkFlags) =
@@ -369,7 +387,20 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
                               | None -> sprintf " -L\"%s\" -lopenblas" (Path.Combine(dir, "lib")))
                      (defines + incFlag, linkFlag))
 
-        let extraFlags = extraLinkInputs |> List.map (fun p -> sprintf " \"%s\"" (Path.GetFullPath p)) |> String.concat ""
+        // The DEVICE half. `blade_linalg_cuda.hpp`'s include line is written
+        // by codegen exactly when a node route resolved to `CudaBlas`; the
+        // resulting shared library joins `extraLinkInputs`, linked after
+        // the source. Handled here rather than at each caller, so every
+        // caller gets it without knowing the backend exists.
+        let deviceBuild =
+            if cppTextForSniff.Contains cublasShimInclude then
+                buildCublasDevice cppFullPath |> Result.map (fun lib -> [lib])
+            else Ok []
+        match deviceBuild with
+        | Error e -> Error (sprintf "cuBLAS device build failed:\n%s" e)
+        | Ok deviceInputs ->
+
+        let extraFlags = (extraLinkInputs @ deviceInputs) |> List.map (fun p -> sprintf " \"%s\"" (Path.GetFullPath p)) |> String.concat ""
         let args = sprintf "-std=c++17 %s %s %s%s -o \"%s\" \"%s\"%s%s%s%s" (optFlags ()) ompFlag safetyFlags blasCompileFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags blasLinkFlags
         
         let psi = ProcessStartInfo("g++", args)
@@ -383,10 +414,8 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         let stdoutTask = proc.StandardOutput.ReadToEndAsync()
         let stderrTask = proc.StandardError.ReadToEndAsync()
         
-        // 300s: spectra-scale generated programs (rank-2 transforms carry
-        // O(cells) initializers and nested-literal outputs, capped at 65536
-        // cells) legitimately push g++ past the old 60s budget -- and -O3
-        // (Phase 0) is slower still than the -O2 that first blew it.
+        // 300s: spectra-scale generated programs (rank-2 transforms, capped
+        // at 65536 cells) can legitimately push g++ this long under -O3.
         if not (proc.WaitForExit(300000)) then
             try proc.Kill() with _ -> ()
             Error "Compilation timed out after 300s"
@@ -395,7 +424,6 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         let stdout = stdoutTask.Result
         let stderr = stderrTask.Result
         
-        // Combine all output
         let allOutput = 
             [if not (String.IsNullOrWhiteSpace stdout) then yield stdout
              if not (String.IsNullOrWhiteSpace stderr) then yield stderr]
@@ -425,20 +453,18 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
         let cuFullPath = Path.GetFullPath(cuFile)
         let exeFullPath = Path.GetFullPath(exeFile)
 
-        // Host-compiler passthrough for the narrowing safety net. nvcc's own
-        // front-end doesn't accept -Werror=float-conversion, so route it to
-        // the host compiler via -Xcompiler. (cl.exe uses different flag
-        // spellings; on Windows we drop the g++-specific ones and rely on
-        // nvcc/cl defaults — refine once a Windows CUDA box is exercised.)
+        // Host-compiler passthrough for the narrowing safety net: nvcc's own
+        // front-end doesn't accept -Werror=float-conversion, so route it via
+        // -Xcompiler (cl.exe uses different flag spellings, so Windows drops
+        // the g++-specific ones and relies on nvcc/cl defaults).
         let hostWarn =
             if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
-                // CCCL (thrust/complex.h, pulled in by complex kernels) refuses
-                // MSVC's traditional preprocessor; the conforming one is safe
-                // for all generated CUDA code, so pass it unconditionally.
+                // CCCL (thrust/complex.h) refuses MSVC's traditional
+                // preprocessor; the conforming one is safe for all generated
+                // CUDA code, so it is passed unconditionally.
                 "-Xcompiler /Zc:preprocessor"
             else "-Xcompiler -Werror=float-conversion,-Werror=narrowing"
 
-        // -std=c++17 matches the CPU path. nvcc accepts it directly.
         let args = sprintf "-std=c++17 -O2 %s -o \"%s\" \"%s\"" hostWarn exeFullPath cuFullPath
 
         let psi = ProcessStartInfo("nvcc", args)
@@ -473,36 +499,11 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
     with ex ->
         Error (sprintf "CUDA compilation exception: %s\n%s" ex.Message ex.StackTrace)
 
-/// Run a subprocess, capturing combined output. Shared by the split-compile
-/// steps. Returns Ok () on exit 0, else Error with the captured output.
-let runProc (exe: string) (args: string) (timeoutMs: int) : Result<unit, string> =
-    try
-        let psi = ProcessStartInfo(exe, args)
-        psi.RedirectStandardOutput <- true
-        psi.RedirectStandardError <- true
-        psi.UseShellExecute <- false
-        psi.CreateNoWindow <- true
-        use proc = Process.Start(psi)
-        let outT = proc.StandardOutput.ReadToEndAsync()
-        let errT = proc.StandardError.ReadToEndAsync()
-        if not (proc.WaitForExit(timeoutMs)) then
-            (try proc.Kill() with _ -> ())
-            Error (sprintf "%s timed out" exe)
-        else
-            let combined =
-                [ if not (String.IsNullOrWhiteSpace outT.Result) then yield outT.Result
-                  if not (String.IsNullOrWhiteSpace errT.Result) then yield errT.Result ]
-                |> String.concat "\n"
-            if proc.ExitCode = 0 then Ok ()
-            else Error (sprintf "%s failed (exit %d):\n%s\nCommand: %s %s" exe proc.ExitCode combined exe args)
-    with ex -> Error (sprintf "%s exception: %s" exe ex.Message)
-
-/// Compile a CUDA program split across two files, per the chosen separation:
-/// nvcc compiles the .cu (device kernels) to an object, g++ compiles the .cpp
-/// (host program — no CUDA syntax, only an extern "C" prototype) to an object,
-/// then the two objects are linked (with nvcc, which resolves the CUDA runtime
-/// automatically). The extern "C" launch wrapper is the unmangled boundary
-/// symbol both compilers agree on. Returns the exe path.
+/// Compiles a CUDA program split across two files: nvcc compiles the .cu
+/// (device kernels) to an object, g++ compiles the .cpp (host program -- no
+/// CUDA syntax, only an extern "C" prototype) to an object, then nvcc links
+/// both (resolving the CUDA runtime automatically). The extern "C" launch
+/// wrapper is the unmangled boundary symbol both compilers agree on.
 let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Result<string, string> =
     let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
     let exeExt = if onWindows then ".exe" else ".out"
@@ -513,18 +514,12 @@ let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Re
     let cppObj = Path.ChangeExtension(cppFull, ".cpp" + objExt)
     let exeFull = Path.GetFullPath(Path.Combine(outputDir, Path.GetFileNameWithoutExtension(cppFile) + exeExt))
     if onWindows then
-        // Windows: pure MSVC toolchain, nvcc-orchestrated. nvcc drives cl.exe as
-        // the host compiler for BOTH the .cu device code and the .cpp host code,
-        // then links. This keeps a SINGLE C++ ABI (MSVC) across both objects —
-        // no MinGW/g++ in the CUDA path, so no cross-ABI link fragility. (The
-        // extern "C" launch wrapper would link across ABIs, but matching the
-        // host toolchain on both halves is the robust native-Windows setup.)
-        // Requires cl.exe on PATH — run from the VS x64 Native Tools prompt.
-        // No OpenMP here: the rank-1 cuda host half has no parallel host loop,
-        // so we avoid the MSVC /openmp vs g++ -fopenmp flag-spelling divergence.
-        // /Zc:preprocessor: CCCL (thrust/complex.h, pulled in by complex
-        // kernels) refuses MSVC's traditional preprocessor. Applied to the .cu
-        // compile only â€” the host .cpp never includes CCCL headers.
+        // Windows: pure MSVC toolchain, nvcc-orchestrated -- nvcc drives
+        // cl.exe as the host compiler for both halves, then links, keeping
+        // a single C++ ABI (no cross-ABI link fragility). Requires cl.exe
+        // on PATH. No OpenMP here: the rank-1 cuda host half has no
+        // parallel loop. /Zc:preprocessor (CCCL refuses MSVC's traditional
+        // preprocessor) applies to the .cu compile only.
         let nvccCu  = sprintf "-std=c++17 -O2 -Xcompiler /Zc:preprocessor -c -o \"%s\" \"%s\"" cuObj cuFull
         let nvccCpp = sprintf "-std=c++17 -O2 -c -o \"%s\" \"%s\"" cppObj cppFull
         let nvccLink = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\" \"%s\"" exeFull cuObj cppObj
@@ -539,8 +534,7 @@ let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Re
                 | Ok () -> Ok exeFull
     else
         // Linux: nvcc compiles the .cu (host code via g++), g++ compiles the
-        // .cpp; both share the g++ ABI, so the split + link is safe. Host
-        // warning passthrough mirrors compileCpp's safety net.
+        // .cpp; both share the g++ ABI, so the split + link is safe.
         let nvccCu = sprintf "-std=c++17 -O2 -c -o \"%s\" \"%s\"" cuObj cuFull
         let gppCpp = sprintf "-std=c++17 -O2 -fopenmp -Werror=float-conversion -Werror=narrowing -c -o \"%s\" \"%s\"" cppObj cppFull
         let nvccLink = sprintf "-std=c++17 -O2 -Xcompiler -fopenmp -o \"%s\" \"%s\" \"%s\"" exeFull cuObj cppObj
@@ -554,14 +548,11 @@ let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Re
                 | Error e -> Error e
                 | Ok () -> Ok exeFull
 
-/// Hybrid mpi+cuda build (MixedParallelismPlan.md phase 3): the .cu becomes
-/// a SELF-CONTAINED MSVC DLL (nvcc -shared drives cl.exe; the hybrid launch
-/// wrappers are dllexport'd extern "C"), and the host .cpp takes the proven
-/// g++ path (-fopenmp, -lmsmpi via the mpi.h scan) linking the DLL directly
-/// — MinGW reads DLL export tables (the same mechanism the netcdf.dll link
-/// uses) — so no MS-MPI SDK import lib and no cross-ABI OBJECT link is
-/// needed; the ABI boundary is the C-ABI wrapper calls. The DLL lands next
-/// to the exe, so it resolves at run time.
+/// Hybrid mpi+cuda build: the .cu becomes a self-contained MSVC DLL (nvcc
+/// -shared drives cl.exe; the launch wrappers are dllexport'd extern "C"),
+/// and the host .cpp takes the g++ path (-fopenmp, -lmsmpi) linking the DLL
+/// directly (MinGW reads DLL export tables, as for netcdf.dll) so no
+/// MS-MPI SDK import lib or cross-ABI object link is needed.
 let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) : Result<string, string> =
     let caps = capabilities.Value
     if not caps.HasNvcc then Error "Skipped: requires CUDA, nvcc not found"
@@ -581,9 +572,8 @@ let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) 
         | Error e -> Error e
         | Ok () -> compileCppWithExtra [dllFull] cppFile outputDir
 
-/// Compile a generated source file according to its backend requirement,
-/// resolved against the environment's capabilities. Returns the existing
-/// `Result<exePath, message>` shape; a skip is reported as
+/// Compiles a generated source file according to its backend requirement,
+/// resolved against the environment's capabilities. A skip is reported as
 /// `Error "Skipped: <reason>"` so downstream skip handling recognizes it.
 let compileForBackend (caps: Capabilities) (req: BackendReq) (srcFile: string) (outputDir: string) : Result<string, string> =
     match resolveCompile caps req with
@@ -608,10 +598,8 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
         let stdoutTask = proc.StandardOutput.ReadToEndAsync()
         let stderrTask = proc.StandardError.ReadToEndAsync()
         
-        // 120s: simulation-scale examples (thousands of spectral steps)
-        // legitimately outlive the old 30s budget; corpus tests still
-        // finish in well under a second, so the longer leash only affects
-        // genuinely long runs.
+        // 120s: simulation-scale examples (thousands of spectral steps) can
+        // legitimately run long; corpus tests still finish well under a second.
         if proc.WaitForExit(120000) then
             let stdout = stdoutTask.Result
             let stderr = stderrTask.Result
@@ -623,16 +611,13 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
     with ex ->
         Error (sprintf "Execution exception: %s" ex.Message)
 
-// ============================================================================
 // MPI launch support (mpiexec resolution + wrapped execution)
-// ============================================================================
 
-/// Locate mpiexec. The MS-MPI installer updates the MACHINE-scope PATH and
-/// MSMPI_BIN, which already-running processes never see — so a bare PATH
-/// lookup is the last resort, not the first. Probe order: process-env
-/// MSMPI_BIN → machine-scope MSMPI_BIN → the well-known install path → bare
-/// "mpiexec" (marker-probed; MS-MPI mpiexec's exit codes are untrustworthy).
-/// Lazy: resolved once, and only when something MPI actually runs.
+/// Locates mpiexec. The MS-MPI installer updates the MACHINE-scope PATH,
+/// which already-running processes never see, so a bare PATH lookup is the
+/// last resort. Probe order: process-env MSMPI_BIN -> machine-scope
+/// MSMPI_BIN -> the well-known install path -> bare "mpiexec" (marker-
+/// probed; MS-MPI's exit codes are untrustworthy). Lazy: resolved once.
 let mpiexecPath : Lazy<string option> =
     lazy (
         let fromEnv (scope: EnvironmentVariableTarget option) =
@@ -655,9 +640,9 @@ let mpiexecPath : Lazy<string option> =
             if Path.IsPathRooted exe then File.Exists exe
             else probeToolLoose exe "-help" "mpi"))
 
-/// Whether g++ can compile+link an MPI program (-lmsmpi resolvable — i.e. the
-/// MSYS2 msmpi package or equivalent is installed). One real link probe in a
-/// temp dir; lazy so ordinary invocations never pay for it.
+/// Whether g++ can compile+link an MPI program (-lmsmpi resolvable, i.e. the
+/// MSYS2 msmpi package or equivalent is installed): one real link probe in a
+/// temp dir, lazy so ordinary invocations never pay for it.
 let hasMpiLink : Lazy<bool> =
     lazy (
         try
@@ -681,8 +666,7 @@ let hasMpiLink : Lazy<bool> =
 
 /// Run a compiled MPI executable under `mpiexec -n <ranks>`. Same
 /// stream/timeout discipline as runExecutable; mpiexec propagates a failing
-/// rank's exit code (verified against MS-MPI), so the exit-code contract is
-/// unchanged. 60s timeout (multi-process startup is slower than a bare exe).
+/// rank's exit code. 60s timeout (multi-process startup is slower than a bare exe).
 let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, string> =
     match mpiexecPath.Value with
     | None -> Error "mpiexec not found (install the MS-MPI runtime)"
@@ -709,10 +693,8 @@ let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, strin
         with ex ->
             Error (sprintf "Execution exception: %s" ex.Message)
 
-/// Sanitize a test name for use as a filename (cross-platform)
+/// Sanitize a test name for use as a filename (cross-platform).
 let sanitizeFileName (name: string) : string =
-    // Replace characters that are invalid in Windows filenames
-    // Use readable names for logical operators
     name
         .Replace("&&", "_and_")
         .Replace("||", "_or_")

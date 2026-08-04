@@ -1,39 +1,32 @@
 /// The `where ml.galilean(u, ...)` discipline: a function carrying the
 /// (normalized) `__ml_galilean` conjunct is PROVED invariant under a
-/// constant Galilean boost of the listed parameters — its body may combine
+/// constant Galilean boost of the listed parameters -- its body may combine
 /// boost-variant values only through boost-cancelling operations. The
-/// judgment is an abstract interpretation over the surface AST, run by
-/// MLElaborate at the same pass-1/pass-2 seam as the equiv judgment (sgs
+/// judgment runs at the same pass-1/pass-2 seam as the equiv judgment (sgs
 /// elaborates AFTER ml, so surface `sgs.*` former calls are still visible
-/// here and carry axiomatic rules).
+/// and carry axiomatic rules).
 ///
 /// The certificate is a conditional theorem: IF the listed parameters are
-/// velocity-typed in the physical sense (every one shifts u -> u + U0 under
-/// the SAME constant boost U0, componentwise for arrays) and all other
-/// parameters are held fixed, THEN the result is unchanged. Scope is
-/// honest: a CONSTANT boost only — rotations are ml.equiv's theorem; no
-/// time-dependent boosts, no coordinate shift x -> x - U0 t.
-///
-/// Units are deliberately NOT the seed: a velocity DIFFERENCE still carries
-/// the velocity unit but is boost-invariant — units track dimension, not
-/// frame behavior. The conjunct names the boost-variant parameters (the
-/// comm/indep precedent).
+/// velocity-typed (each shifts u -> u + U0 under the SAME constant boost U0,
+/// componentwise) and all other parameters are held fixed, THEN the result
+/// is unchanged. Scope is honest: a CONSTANT boost only -- rotations are
+/// ml.equiv's theorem; no time-dependent boosts, no coordinate shift
+/// x -> x - U0 t. Units are deliberately NOT the seed (a velocity DIFFERENCE
+/// still carries the velocity unit but is boost-invariant); the conjunct
+/// names the boost-variant parameters instead.
 ///
 /// Abstract value domain (BVar tracks U0-coefficient EXACTLY 1):
-///   BVar    — value = boosted quantity + boost-independent part;
-///             indexing a BVar array yields BVar elements (boost-variance
-///             is per-component and index-stable — the key structural
-///             difference from the equiv judgment, where raw indexing is
-///             the forbidden read);
-///   BInv    — boost-invariant (differences of BVars, gradients, stresses,
+///   BVar    -- boosted quantity + boost-independent part; indexing a BVar
+///             array yields BVar elements (per-component, index-stable --
+///             unlike the equiv judgment, where raw indexing is forbidden);
+///   BInv    -- boost-invariant (differences of BVars, gradients, stresses,
 ///             constants, everything else);
-///   BOpaque — unclassifiable; rejected where it matters.
+///   BOpaque -- unclassifiable; rejected where it matters.
 ///
 /// v1 rules: BVar - BVar -> BInv (the central rule); BVar +/- BInv -> BVar;
-/// everything that scales or nonlinearizes a BVar is BL4009 (documented v2:
-/// rational U0-coefficient tracking would admit static-weight averages and
-/// BVar-returning steppers). Certified functions must RETURN boost-
-/// invariant values in v1.
+/// everything that scales or nonlinearizes a BVar is BL4009 (v2: rational
+/// U0-coefficient tracking would admit static-weight averages and
+/// BVar-returning steppers). Certified functions must RETURN BInv in v1.
 ///
 /// Axiomatic op rules (surface-visible at this seam):
 ///   sgs.grad(U, DX)      : U any -> BInv   (difference weights sum to 0)
@@ -44,9 +37,8 @@
 module Blade.ML.Galilean
 
 open Blade.Ast
-// The walker shell (stage 5c): freeVars / patternVars / bindPatternVars /
-// judgeEach / conjunctsOf — the syntactic walk shared verbatim with MLEquiv
-// and MLPerm. Every RULE below is this discipline's own.
+// The walker shell (freeVars / patternVars / bindPatternVars / judgeEach /
+// conjunctsOf) is shared verbatim with MLEquiv and MLPerm.
 open Blade.ML.CertShell
 
 type BoostStatus =
@@ -59,9 +51,7 @@ type GalSig = {
     Params: (string * BoostStatus) list
 }
 
-// ============================================================================
 // Helpers
-// ============================================================================
 
 let private bl4009 (span: Span) (msg: string) : Blade.Diagnostics.Diagnostic =
     Blade.Diagnostics.mkError "BL4009" (Blade.Diagnostics.Codes.phaseOfCode "BL4009") span msg
@@ -72,13 +62,10 @@ let private statusStr (st: BoostStatus) : string =
     | BInv -> "boost-invariant"
     | BOpaque -> "unclassifiable"
 
-// ============================================================================
 // Certified-signature table
-// ============================================================================
 
-/// Pre-scan: every DeclFunction carrying a normalized ("__ml_galilean", args)
-/// conjunct. The args NAME the boost-variant parameters; every other
-/// parameter is boost-invariant. Errors are BL4009 at the decl.
+/// Pre-scan: the conjunct's args NAME the boost-variant parameters; every
+/// other parameter is boost-invariant. Errors are BL4009 at the decl.
 let buildCertTable (decls: Located<Decl> list)
     : Result<Map<string, GalSig>, Blade.Diagnostics.Diagnostic> =
     decls
@@ -90,7 +77,7 @@ let buildCertTable (decls: Located<Decl> list)
                 let fail msg = Error (bl4009 d.Span msg)
                 match conjs with
                 | [] -> Ok table
-                | _ :: _ :: _ -> fail (sprintf "function '%s': duplicate galilean constraints — declare one, listing every boost-variant parameter" fd.Name)
+                | _ :: _ :: _ -> fail (sprintf "function '%s': duplicate galilean constraints -- declare one, listing every boost-variant parameter" fd.Name)
                 | [ (_, args) ] ->
                     if args.IsEmpty then
                         fail (sprintf "function '%s': galilean(...) must name at least one boost-variant (velocity) parameter" fd.Name)
@@ -108,12 +95,8 @@ let buildCertTable (decls: Located<Decl> list)
             | _ -> Ok table))
         (Ok Map.empty)
 
-/// The galilean-certificate suggestion side-channel — BL4014's channel,
-/// mirroring `Equiv.CertSuggestions` (BL4011) field for field. Filled by the
-/// galilean inference pass at the MLElaborate seam, reset by
-/// `MLElaborate.expand`, read by `TypeCheck.typeCheck` (string twins),
-/// `Lowering.typeCheckWarningDiagnostics` (rendered warnings) and
-/// `Ide.ideCheck` (structured). AsyncLocal, like the others.
+/// The galilean-certificate suggestion side-channel -- BL4014's channel,
+/// mirroring `Equiv.CertSuggestions` (BL4011). AsyncLocal, like the others.
 module GalCertSuggestions =
     let private slot = new System.Threading.AsyncLocal<(string * Blade.Ast.Span) list>()
     let reset () = slot.Value <- []
@@ -121,8 +104,7 @@ module GalCertSuggestions =
     let get () : (string * Blade.Ast.Span) list =
         match box slot.Value with null -> [] | _ -> List.rev slot.Value
 
-/// Aliases bound to `sgs` (name-only knowledge — no project dependency on
-/// the sgs elaborator; without `import sgs` the axioms are simply absent).
+/// Aliases bound to `sgs`; without `import sgs` the axioms are absent.
 let sgsAliasesOf (decls: Located<Decl> list) : Set<string> =
     decls |> List.fold (fun set d ->
         match d.Value with
@@ -130,9 +112,7 @@ let sgsAliasesOf (decls: Located<Decl> list) : Set<string> =
             Set.add (aliasOpt |> Option.defaultValue "sgs") set
         | _ -> set) Set.empty
 
-// ============================================================================
 // The judgment
-// ============================================================================
 
 type private Ctx = {
     FuncName: string
@@ -150,15 +130,14 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
     match e.Kind with
     | ExprKind.ExprLit _ -> Ok BInv
     | ExprKind.ExprArrayLit es | ExprKind.ExprTuple es ->
-        // a uniformly boost-variant aggregate shifts componentwise and stays
-        // BVar; mixing statuses inside one aggregate loses the coefficient.
+        // mixing statuses inside one aggregate loses the U0-coefficient.
         es
         |> judgeEach j
         |> Result.bind (fun sts ->
             match sts with
             | [] -> Ok BInv
             | s :: rest when rest |> List.forall ((=) s) -> Ok s
-            | _ -> reject "an aggregate mixing boost-variant and boost-invariant elements has no single U0-coefficient — split it")
+            | _ -> reject "an aggregate mixing boost-variant and boost-invariant elements has no single U0-coefficient -- split it")
     | ExprKind.ExprVar n ->
         match Map.tryFind n env with
         | Some st -> Ok st
@@ -169,11 +148,10 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
         j inner |> Result.bind (fun si ->
             match si with
             | BInv -> Ok BInv
-            | BVar -> reject "negating a boost-variant value flips its U0-coefficient to -1 — difference two velocities instead (v2's coefficient tracking will admit this)"
+            | BVar -> reject "negating a boost-variant value flips its U0-coefficient to -1 -- difference two velocities instead"
             | BOpaque -> Ok BOpaque)
-    // Former application must dispatch BEFORE the general binop arithmetic
-    // arm (OpApply is a BinOp constructor): the kernel lambda is judged with
-    // param-bound source statuses, never as an escaping value.
+    // Former application dispatches BEFORE the general binop arm (OpApply is
+    // a BinOp constructor).
     | ExprKind.ExprBinOp (_, OpApply, loop, kern) ->
         judgeFormerApply ctx env e loop kern
     | ExprKind.ExprBinOp (_, op, l, r) ->
@@ -182,15 +160,15 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
             match sl, sr, op with
             | BVar, BVar, OpSub -> Ok BInv // THE rule: the boost cancels
             | BVar, BVar, OpAdd ->
-                reject "adding two boost-variant values doubles the U0-coefficient — subtract them (differences are boost-invariant) or average through sgs.box_filter"
+                reject "adding two boost-variant values doubles the U0-coefficient -- subtract them (differences are boost-invariant) or average through sgs.box_filter"
             | BVar, BVar, _ ->
-                reject "this operator is nonlinear in the frame velocity — take differences first"
+                reject "this operator is nonlinear in the frame velocity -- take differences first"
             | BVar, BInv, (OpAdd | OpSub) -> Ok BVar
             | BInv, BVar, OpAdd -> Ok BVar
             | BInv, BVar, OpSub ->
-                reject "invariant - velocity carries U0-coefficient -1 — write (velocity - invariant) or difference two velocities (v2's coefficient tracking will admit this)"
+                reject "invariant - velocity carries U0-coefficient -1 -- write (velocity - invariant) or difference two velocities"
             | BVar, _, (OpMul | OpDiv) | _, BVar, (OpMul | OpDiv) ->
-                reject "scaling a boost-variant value scales the U0-coefficient — only differences of velocities (and the sgs formers) are boost-invariant"
+                reject "scaling a boost-variant value scales the U0-coefficient -- only differences of velocities (and the sgs formers) are boost-invariant"
             | BVar, _, _ | _, BVar, _ ->
                 reject "this operator does not preserve the U0-coefficient of a boost-variant value"
             | BInv, BInv, _ -> Ok BInv
@@ -203,7 +181,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
                 j f |> Result.bind (fun sf ->
                     if st = sf then Ok st
                     else reject (sprintf "if branches disagree: then-branch is %s, else-branch is %s" (statusStr st) (statusStr sf))))
-            | _ -> reject "an if condition inside a galilean-certified body must be boost-invariant — branching on a frame-dependent value makes the result frame-dependent")
+            | _ -> reject "an if condition inside a galilean-certified body must be boost-invariant -- branching on a frame-dependent value makes the result frame-dependent")
     | ExprKind.ExprMatch (scrut, cases) ->
         j scrut |> Result.bind (fun ss ->
             match ss with
@@ -221,14 +199,14 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
             match binding.Pattern.Kind, sv with
             | PatternKind.PatVar n, _ -> judge ctx (Map.add n sv env) body
             | _, BInv -> judge ctx (bindPatternVars BInv env binding.Pattern) body
-            | _, _ -> reject "cannot destructure a boost-variant value in v1 — bind it whole")
+            | _, _ -> reject "cannot destructure a boost-variant value -- bind it whole")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
         let captured = freeVars (Set.ofList (ps |> List.map (fun p -> p.Name))) lamBody
         let varCapture =
             captured |> Set.toList |> List.tryFind (fun n ->
                 match Map.tryFind n env with Some BVar -> true | _ -> false)
         match varCapture with
-        | Some n -> reject (sprintf "lambda captures boost-variant '%s' — factor velocity work into galilean-certified functions instead" n)
+        | Some n -> reject (sprintf "lambda captures boost-variant '%s' -- factor velocity work into galilean-certified functions instead" n)
         | None -> Ok BInv
     | ExprKind.ExprAssign (l, r) ->
         judgeAssign ctx env e.Span l r |> Result.map (fun () -> BInv)
@@ -240,14 +218,11 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
             | None -> Ok BInv)
     | ExprKind.ExprApp (f, args) -> judgeApp ctx env e f args
     | ExprKind.ExprField (_, _) -> Ok BOpaque
-    // --- functional iteration (the post-imperative surface) ---------------
     // Virtual arrays enumerate indices: frame-independent by nature.
     | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprHalo _ -> Ok BInv
     // compute is a scheduling boundary, not a value transform.
     | ExprKind.ExprCompute x -> judge ctx env x
-    // Additive fold over boost-invariant values is boost-invariant; a fold
-    // over boost-variant values SCALES the frame shift (documented v2) and
-    // is rejected rather than mis-certified.
+    // A fold over boost-variant values SCALES the frame shift, so it rejects.
     | ExprKind.ExprReduce (src, _, init) ->
         judge ctx env src |> Result.bind (fun ss ->
             (match init with
@@ -256,15 +231,13 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
                 match ss, si with
                 | BInv, BInv -> Ok BInv
                 | BVar, _ | _, BVar ->
-                    Error (bl4009 e.Span (sprintf "function '%s': reduce over a boost-variant value scales the frame shift — fold only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName))
+                    Error (bl4009 e.Span (sprintf "function '%s': reduce over a boost-variant value scales the frame shift -- fold only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName))
                 | _ -> Ok BOpaque))
     | _ -> Ok BOpaque
 
-/// `loop <@> kernel` under the galilean judgment: sources from
-/// method_for(...) / `for (A, ...) in virt`, statuses bound to the kernel's
-/// leading params (one per source array; any remaining params are the
-/// co-iteration ordinals, boost-invariant). Non-former applies (compose
-/// chains, object_for) stay opaque in v1.
+/// `loop <@> kernel` under the galilean judgment: source statuses bind to the
+/// kernel's leading params (one per source array; remaining params are the
+/// co-iteration ordinals, boost-invariant). Non-former applies stay opaque.
 and private judgeFormerApply (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (loop: Expr) (kern: Expr)
     : Result<BoostStatus, Blade.Diagnostics.Diagnostic> =
     let srcsOf (l: Expr) =
@@ -297,7 +270,7 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, BoostStatus>) (stmts: Stmt l
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
                     | _, BInv -> Ok (bindPatternVars BInv env binding.Pattern)
                     | _, _ ->
-                        Error (bl4009 binding.Value.Span (sprintf "function '%s': cannot destructure a boost-variant value in v1 — bind it whole" ctx.FuncName)))
+                        Error (bl4009 binding.Value.Span (sprintf "function '%s': cannot destructure a boost-variant value -- bind it whole" ctx.FuncName)))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
             | StmtAssign (l, _, r) -> judgeAssign ctx env l.Span l r |> Result.map (fun () -> env)
             | StmtForIn (v, range, body) ->
@@ -310,9 +283,8 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, BoostStatus>) (stmts: Stmt l
             | _ -> Ok env))
         (Ok env)
 
-/// Assignments: whole-variable writes must preserve boost status; element
-/// writes must match the container's status (a BInv element inside a BVar
-/// array would break its uniform shift, and vice versa).
+/// Whole-variable writes must preserve boost status; element writes must
+/// match the container's (else it breaks the container's uniform shift).
 and private judgeAssign (ctx: Ctx) (env: Map<string, BoostStatus>) (span: Span) (l: Expr) (r: Expr)
     : Result<unit, Blade.Diagnostics.Diagnostic> =
     let fail msg = Error (bl4009 span (sprintf "function '%s': %s" ctx.FuncName msg))
@@ -321,11 +293,10 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, BoostStatus>) (span: Span) 
         | ExprKind.ExprVar n ->
             match Map.tryFind n env with
             | Some st when st = sr -> Ok ()
-            | Some st -> fail (sprintf "assignment changes '%s' from %s to %s — a mut binding must keep one boost status" n (statusStr st) (statusStr sr))
+            | Some st -> fail (sprintf "assignment changes '%s' from %s to %s -- a mut binding must keep one boost status" n (statusStr st) (statusStr sr))
             | None -> Ok ()
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, idxArgs) ->
-            // element write: indices must be boost-invariant, the value must
-            // match the container's status.
+            // indices must be boost-invariant; the value matches the container.
             idxArgs
             |> List.fold (fun acc a ->
                 acc |> Result.bind (fun () ->
@@ -349,7 +320,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
     let reject msg = Error (bl4009 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
     let judgeAll args = judgeEach (judge ctx env) args
     match f.Kind with
-    // --- sgs formers: the axiomatic rules ---------------------------------
+    // sgs formers: the axiomatic rules
     | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) when Set.contains alias ctx.SgsAliases ->
         (match op, args with
          | "grad", [ uE; dxE ] ->
@@ -373,12 +344,12 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
              judgeAll args |> Result.bind (fun sts ->
                  if sts |> List.forall ((=) BInv) then Ok BInv
                  else reject (sprintf "sgs.%s carries no galilean axiom for boost-variant arguments" op)))
-    // --- ml ops: invariants in, invariants out ----------------------------
+    // ml ops: invariants in, invariants out
     | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) when Set.contains alias ctx.MlAliases ->
         judgeAll args |> Result.bind (fun sts ->
             if sts |> List.forall ((=) BInv) then Ok BInv
-            else reject (sprintf "ml.%s does not accept boost-variant arguments — velocities enter models only through boost-invariant combinations (differences, sgs.grad, sgs.stress)" op))
-    // --- named callees ----------------------------------------------------
+            else reject (sprintf "ml.%s does not accept boost-variant arguments -- velocities enter models only through boost-invariant combinations (differences, sgs.grad, sgs.stress)" op))
+    // named callees
     | ExprKind.ExprVar fn ->
         match Map.tryFind fn ctx.Certs with
         | Some cert ->
@@ -399,34 +370,27 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
         | None ->
             match Map.tryFind fn env with
             | Some BVar ->
-                // indexing a boost-variant array: per-component and
-                // index-stable — the elements are themselves boost-variant.
+                // indexing is index-stable: elements are themselves BVar.
                 judgeAll args |> Result.bind (fun sts ->
                     if sts |> List.forall ((=) BInv) then Ok BVar
                     else reject (sprintf "indexing into boost-variant '%s' requires boost-invariant indices" fn))
             | Some BInv | None ->
-                // uncertified callee / builtin / plain-array read: a function
-                // of boost-invariant values is boost-invariant; a BVar
-                // argument escapes the discipline.
+                // a BVar argument escapes the discipline.
                 judgeAll args |> Result.bind (fun sts ->
                     match sts |> List.tryFindIndex (fun s -> s <> BInv) with
                     | None -> Ok BInv
                     | Some i ->
-                        // TWO different failures share this arm, and they are not
-                        // the same news. A BVar argument is a real ESCAPE: the
-                        // judgment knows the value shifts with the frame and the
-                        // callee carries no theorem about it. A BOpaque argument
-                        // is the judgment's OWN blind spot — it classified
-                        // nothing, so calling it "boost-variant" would report a
-                        // fact the walker never established (§E3: an
-                        // unclassifiable value must not be described as variant).
+                        // TWO different failures share this arm: a BVar
+                        // argument is a real ESCAPE (the callee carries no
+                        // theorem about it), while BOpaque is the judgment's
+                        // OWN blind spot -- it must not be reported as variant.
                         match sts.[i] with
                         | BVar ->
                             Error (bl4009 args.[i].Span
-                                       (sprintf "function '%s': a boost-variant value escapes to '%s', which carries no galilean certificate — certify it with `where ml.galilean(...)` or pass only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName fn))
+                                       (sprintf "function '%s': a boost-variant value escapes to '%s', which carries no galilean certificate -- certify it with `where ml.galilean(...)` or pass only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName fn))
                         | _ ->
                             Error (bl4009 args.[i].Span
-                                       (sprintf "function '%s': an argument to '%s' cannot be classified as boost-invariant or boost-variant — a galilean-certified body admits a call only when every argument is provably boost-invariant, so rewrite this argument in terms the judgment reads (parameters, differences, sgs.grad, sgs.stress)" ctx.FuncName fn)))
+                                       (sprintf "function '%s': an argument to '%s' cannot be classified as boost-invariant or boost-variant -- a galilean-certified body admits a call only when every argument is provably boost-invariant, so rewrite this argument in terms the judgment reads (parameters, differences, sgs.grad, sgs.stress)" ctx.FuncName fn)))
             | Some BOpaque -> reject (sprintf "cannot classify the callee '%s'" fn)
     | _ ->
         judgeAll args |> Result.bind (fun sts ->
@@ -434,9 +398,8 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
                 if sf = BInv && sts |> List.forall ((=) BInv) then Ok BInv
                 else reject "cannot classify this call inside a galilean-certified body"))
 
-/// Judge one certified function: seed the env from the conjunct, require
-/// the body boost-invariant (v1 — boost-variant returns are the documented
-/// v2 extension alongside coefficient tracking).
+/// Judge one certified function: seed the env from the conjunct, require the
+/// body boost-invariant (v2: velocity-returning steppers).
 let judgeFunction (certs: Map<string, GalSig>) (mlAliases: Set<string>) (sgsAliases: Set<string>)
                   (fd: FunctionDecl)
     : Blade.Diagnostics.Diagnostic list =
@@ -450,64 +413,37 @@ let judgeFunction (certs: Map<string, GalSig>) (mlAliases: Set<string>) (sgsAlia
         | Ok BInv -> []
         | Ok st ->
             [ bl4009 fd.Body.Span
-                  (sprintf "function '%s': the body is %s — a galilean-certified function must return a boost-invariant value in v1 (velocity-returning steppers are future work)" fd.Name (statusStr st)) ]
+                  (sprintf "function '%s': the body is %s -- a galilean-certified function must return a boost-invariant value" fd.Name (statusStr st)) ]
 
-// ============================================================================
-// The inference channel (stage 6a, galilean twin) — BL4014
-// ============================================================================
+// The inference channel -- BL4014. Transplanted from the equiv channel:
+// hypothesize `where ml.galilean(S)` on an uncertified function, run
+// `judgeFunction` verbatim, and PROPOSE the pin as a warning when it holds.
+// No new rule is introduced, so `Propose subset-of Check-accept` holds BY
+// CONSTRUCTION.
 //
-// The equiv channel's construction, transplanted onto this lattice: hypothesize
-// `where ml.galilean(S)` on a function that does not carry it, run
-// `judgeFunction` verbatim, and PROPOSE the pin as a warning when the
-// certificate holds. Nothing here is a new rule — no arm, no lattice entry, no
-// message below that the checker does not already own — so `Propose ⊆
-// Check-accept` holds BY CONSTRUCTION: checking `ml.galilean(S)` needs only
-// Validate (the named params exist, which a candidate satisfies by
-// construction) plus `judgeFunction`, and `judgeFunction` against exactly this
-// table is what inference ran.
+// A `GalSig` is built from the conjunct and parameter NAMES alone (no
+// annotations needed), but the hypothesis space is the power set of the
+// parameters, not a two-element group list. v1 searches two slices: every
+// SINGLETON {p} that OCCURS free in the body (independent hypotheses, so
+// every passer is proposed), and, if no singleton passed and >= 2 params
+// occur, the FULL occurring set once -- the velocity-DIFFERENCE shape
+// (`u - v`), where every singleton fails but the joint boost cancels.
+// Intermediate subsets are not searched (combinatorial, empirically empty).
 //
-// WHAT MAKES THIS EASIER THAN EQUIV: a `GalSig` is built from the conjunct and
-// the parameter NAMES alone — no type annotations, no static specs, no group
-// roster — so recall is not gated on a fully annotated signature the way the
-// equiv channel is. What makes it HARDER is that the hypothesis space is the
-// power set of the parameters rather than a two-element group list. v1 searches
-// two slices of it:
+// OCCURRENCE IS THE VACUITY GUARD: a parameter the body never names is `BVar`
+// in an environment nothing reads, so `galilean(unused)` would pass
+// vacuously; restricting candidates to free-occurring params removes that.
 //
-//   * every SINGLETON {p} for p that OCCURS free in the body, in param order,
-//     and EVERY passer is proposed. Unlike equiv's strongest-first pick these
-//     are not competing strengths — `galilean(u)` and `galilean(v)` are
-//     independent true claims about independent hypotheses, and suppressing
-//     either would hide a theorem.
-//   * if NO singleton passed and at least two params occur, the FULL occurring
-//     set once. That is the velocity-DIFFERENCE shape (`u - v`), where every
-//     singleton necessarily fails — `BVar - BInv` is `BVar`, so the body
-//     returns boost-variant — and the joint boost cancels. It is the one
-//     non-singleton subset worth the search: intermediate subsets are
-//     combinatorial and, in the bodies this exists for, empirically empty.
-//
-// OCCURRENCE IS THE VACUITY GUARD (equiv's non-vacuity filter, one level
-// down). A parameter the body never names is `BVar` in an environment nothing
-// reads, so the judgment passes for a reason that has nothing to do with the
-// frame: `galilean(unused)` is vacuously true and would be a theorem's face on
-// a tautology. Restricting candidates to free-occurring params removes exactly
-// that class and no other.
-//
-// DEPENDENCY THREADING is equiv's fold with ONE table (this discipline has no
-// groups to key by): declarations fold in DECL ORDER against a speculative
-// table holding every real certificate plus every speculative one already
-// inferred this pass for an EARLIER declaration, no summary proves itself, no
-// fixpoint iteration, and every proposal that RESTS on unwritten pins names its
-// closure. A function with SEVERAL passing candidates is proposed several times
-// but threaded ZERO times: a later caller's closure note can name the callee
-// but not say WHICH of its pins it used, and a note that cannot be acted on is
-// worse than the silence a failed resolution produces.
+// DEPENDENCY THREADING: declarations fold in DECL ORDER against a
+// speculative table of real certs plus earlier-inferred ones; every proposal
+// RESTING on unwritten pins names its closure. A function with SEVERAL
+// passing candidates is proposed several times but threaded ZERO times -- a
+// closure note can name the callee but not which pin it used.
 
 /// One candidate attempt: hypothesize `where ml.galilean(velocities)` on `fd`
-/// (the shape `buildCertTable` produces — the named params `BVar`, every other
-/// `BInv`) and run the CHECKER's own `judgeFunction` against `table` plus that
-/// hypothesis. `Some cert` = the certificate holds. Total by construction — a
-/// speculative run may never turn a compiling program into a crash, so any
-/// exception out of the judgment reads as "no proposal".
+/// and run `judgeFunction` against `table` plus that hypothesis. `Some cert` =
+/// the certificate holds. Total by construction: any exception reads as "no
+/// proposal".
 let private tryGalCandidate (mlAliases: Set<string>) (sgsAliases: Set<string>)
                             (table: Map<string, GalSig>) (fd: FunctionDecl)
                             (velocities: string list)
@@ -523,15 +459,13 @@ let private tryGalCandidate (mlAliases: Set<string>) (sgsAliases: Set<string>)
         | _ :: _ -> None
     with _ -> None
 
-/// Run the shipped galilean judgment speculatively over a module's
-/// declarations and return the BL4014 suggestions, in decl order. Never fails,
-/// never changes a verdict: the caller records these as warnings and compiles
-/// exactly as it would have.
+/// Run the galilean judgment speculatively over a module's declarations and
+/// return the BL4014 suggestions, in decl order. Never fails or changes a
+/// verdict: the caller records these as warnings only.
 let inferGalileanCertificates (mlAliases: Set<string>) (sgsAliases: Set<string>)
                               (gcerts: Map<string, GalSig>) (decls: Located<Decl> list)
     : (string * Blade.Ast.Span) list =
-    // Speculative certificates, their dependency closures, and the DECL ORDER
-    // in which they were inferred.
+    // Speculative certificates, their dependency closures, and decl order.
     let mutable spec : Map<string, GalSig> = Map.empty
     let mutable deps : Map<string, string list> = Map.empty
     let mutable order : string list = []
@@ -543,14 +477,10 @@ let inferGalileanCertificates (mlAliases: Set<string>) (sgsAliases: Set<string>)
             let pNames = fd.Params |> List.map (fun p -> p.Name)
             let bound = Set.ofList pNames
             let free = freeVars bound fd.Body
-            // No summary proves itself: a body that names its own function
-            // would be judged against its own hypothesis, which is exactly the
-            // circularity Deduce.fs's resolver refuses. Skip; silence.
+            // Skip self-recursive bodies -- the circularity Deduce.fs refuses.
             if not (Set.contains fd.Name free) then
                 let table = spec |> Map.fold (fun m k v -> Map.add k v m) gcerts
-                // The candidate params: those the body actually READS. The
-                // walk is run with nothing bound so parameter occurrences are
-                // reported (the self-recursion scan above binds them).
+                // The candidate params: those the body actually READS.
                 let occurring = freeVars Set.empty fd.Body
                 let cands = pNames |> List.filter (fun n -> Set.contains n occurring)
                 let attempt vs = (tryGalCandidate mlAliases sgsAliases table fd vs).IsSome
@@ -560,11 +490,8 @@ let inferGalileanCertificates (mlAliases: Set<string>) (sgsAliases: Set<string>)
                     elif List.length cands >= 2 && attempt cands then [ cands ]
                     else []
                 if not hits.IsEmpty then
-                    // The dependency closure: which speculative pins these
-                    // proposals REST on. Direct deps are the earlier
-                    // speculatively-certified names the body reads; the closure
-                    // adds each of those proposals' own deps (already computed
-                    // — decl order guarantees it), rendered in DECL order.
+                    // Direct deps are earlier speculatively-certified names
+                    // the body reads; the closure adds their own deps too.
                     let direct = order |> List.filter (fun n -> Set.contains n free)
                     let closure =
                         direct
@@ -580,8 +507,8 @@ let inferGalileanCertificates (mlAliases: Set<string>) (sgsAliases: Set<string>)
                             sprintf "function '%s' judges boost-invariant with velocity parameter(s) %s: add 'where ml.galilean(%s)'%s"
                                 fd.Name ps ps closureNote
                         out <- (msg, d.Span) :: out
-                        // The STRUCTURED twin, hosted on MLEquiv's channel so a
-                        // single `deduced[]` array carries both disciplines.
+                        // Structured twin, hosted on MLEquiv's channel so one
+                        // `deduced[]` array carries both disciplines.
                         Blade.ML.Equiv.CertFacts.add
                             { Owner = fd.Name
                               Discipline = "galilean"
@@ -602,16 +529,13 @@ let inferGalileanCertificates (mlAliases: Set<string>) (sgsAliases: Set<string>)
         | _ -> ()
     List.rev out
 
-// ============================================================================
 // Constraint-registry handler
-// ============================================================================
 
 /// `galilean(u, ...)` is a callee-side theorem: Validate re-checks the
-/// conjunct shape (the elaborator has already judged the body by the time
-/// checkFunctionDecl runs), the license scope is unused, and call sites
+/// conjunct shape (the elaborator has already judged the body); call sites
 /// carry no obligation.
 let private galileanHandler : Blade.Constraints.ConstraintHandler = {
-    Describe = "galilean(u, ...) — certifies the function invariant under a constant Galilean boost of the listed velocity parameters; the ML elaborator proves the body combines them only boost-invariantly"
+    Describe = "galilean(u, ...) -- certifies the function invariant under a constant Galilean boost of the listed velocity parameters; the ML elaborator proves the body combines them only boost-invariantly"
     Validate = fun funcName paramNames args ->
         if args.IsEmpty then
             Error (sprintf "function '%s': galilean(...) must name at least one boost-variant (velocity) parameter" funcName)

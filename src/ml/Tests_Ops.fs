@@ -146,7 +146,7 @@ module Tests_Ops =
         let lx = randArray rng (totalDim lSpecIn)
         let lOut = Linear.linear lSpecIn lSpecOut lw lx
 
-        // Equivariance: linear acts on multiplicities, D acts on m — commute.
+        // Equivariance: linear acts on multiplicities, D acts on m -- commute.
         let r = Rotations.randomRotation rng
         checkArrayClose "linear equivariance" 1e-8
             (Rotations.applyRep lSpecOut r lOut)
@@ -178,12 +178,12 @@ module Tests_Ops =
         section "derive_linear reference: complete Schur basis (homLinear)"
 
         // On duplicate-free all-present specs the pair layout coincides with
-        // linear's first-match layout — the two routes must agree exactly.
+        // linear's first-match layout -- the two routes must agree exactly.
         checkArrayClose "homLinear = linear on all-present specs" 1e-14
             (Linear.linear lSpecIn lSpecOut lw lx)
             (Linear.homLinear lSpecIn lSpecOut lw lx)
 
-        // Duplicate input irrep (both copies reachable — the F3 fix) and an
+        // Duplicate input irrep (both copies reachable -- the F3 fix) and an
         // unmatched output block (zero-filled): equivariance still holds.
         let hIn = mkSpec [ (0, Even, 2); (1, Odd, 1); (1, Odd, 2) ]
         let hOut = mkSpec [ (1, Odd, 2); (2, Even, 1); (0, Even, 1) ]
@@ -200,7 +200,7 @@ module Tests_Ops =
         check "homLinear zero-fills the unmatched output block"
             ([ 0 .. 4 ] |> List.forall (fun c -> hOutV.[hStarts.[1] + c] = 0.0))
         // Second input copy of 1o genuinely reaches the output: zero the
-        // first copy's weights, keep the second's — output must be nonzero.
+        // first copy's weights, keep the second's -- output must be nonzero.
         let dupW = Array.copy hw
         for i in 0 .. 1 do dupW.[i] <- 0.0   // pair (bi=1, bo=0) weights (mult 2x1)
         let dupOut = Linear.homLinear hIn hOut dupW hx
@@ -230,7 +230,7 @@ module Tests_Ops =
         section "invariant exits: scalars / norms"
 
         // scalars: shape + values (the l=0 entries verbatim), and rotation
-        // INVARIANCE (not just equivariance) — the certified exit to plain
+        // INVARIANCE (not just equivariance) -- the certified exit to plain
         // number land.
         let sOutInv = Activations.scalars aSpec af
         check "scalars: length = l=0 multiplicity" (sOutInv.Length = 4)
@@ -257,12 +257,12 @@ module Tests_Ops =
         section "O(3): improper-element equivariance (the equiv(O3) claims)"
 
         // The parity content of the equiv(O3) discipline, validated ONCE
-        // here: under inversion∘R each (l, p) block picks up paritySign(p).
+        // here: under inversion.R each (l, p) block picks up paritySign(p).
         let rI = Rotations.randomRotation rng
         let wI = randArray rng (TensorProduct.weightDim eCfg)
         let xI = randArray rng (totalDim eCfg.Spec1)
         let yI = randArray rng (totalDim eCfg.Spec2)
-        // Tensor product: p_out = p1·p2 makes the sign factors multiply
+        // Tensor product: p_out = p1*p2 makes the sign factors multiply
         // consistently through every CG path.
         checkArrayClose "TP improper-equivariance (parity rule)" 1e-7
             (Rotations.applyRepImproper eCfg.SpecOut rI (TensorProduct.tensorProduct eCfg wI xI yI))
@@ -299,7 +299,7 @@ module Tests_Ops =
             (Activations.scalars gSpecOdd gxo |> Array.map (fun t -> -t))
             (Activations.scalars gSpecOdd (Rotations.applyRepImproper gSpecOdd rI gxo))
         // y_to: negated coordinates = improper action at R = identity on the
-        // sh output — sh_spec's parities (-1)^l are exactly right.
+        // sh output -- sh_spec's parities (-1)^l are exactly right.
         let vv = Rotations.randomUnitVector rng
         let idR = [| [| 1.0; 0.0; 0.0 |]; [| 0.0; 1.0; 0.0 |]; [| 0.0; 0.0; 1.0 |] |]
         checkArrayClose "y_to O(3): Y(-v) = improper-rep Y(v)" 1e-10

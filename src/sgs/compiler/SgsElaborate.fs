@@ -1,13 +1,9 @@
-/// sgs-module elaboration: the subgrid-closure field formers as compile-time
-/// source synthesis, mirroring the math elaborator.
+/// sgs-module elaboration: the subgrid-closure field formers as compile-time source synthesis, mirroring the math elaborator.
 ///
-/// Surface (reachable only through `import sgs [as <alias>]`; W is a
-/// `let static` name or literal). The ops read the DECLARED shape — this pass
-/// runs before type inference and the generated former is specialized to the
-/// extents — so the field argument must carry an annotation. It may come from
-/// any of: a variable bound by an annotated `let` (module-level or block-local),
-/// an annotated parameter, a call of a function with an annotated array return
-/// type, or an ascription `(expr : Array<...>)`.
+/// Surface (reachable only through `import sgs [as <alias>]`; W is a `let static` name or literal). The ops read the
+/// DECLARED shape (this pass runs before type inference and the generated former is specialized to the extents), so the
+/// field argument must carry an annotation: a variable bound by an annotated `let` (module-level or block-local), an
+/// annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<...>)`.
 ///
 ///   sgs.grad(U, DX)        -- (3, n, n, n) -> (3, 3, n, n, n): G(c,d,i,j,k)
 ///                             = d_d u_c, 2nd-order central diff, periodic
@@ -16,32 +12,25 @@
 ///                             stress tau_ij = mean(u_i u_j|tile) - mean_i mean_j,
 ///                             packed in CartesianBridge.packPairs order
 ///
-/// For each distinct (op, resolved shape/config) the elaborator synthesizes
-/// ONE Blade function (`__sgs_1`, ...) via Blade.Sgs.Decls; call sites
-/// rewrite to the generated names, deduped by fingerprint.
+/// For each distinct (op, resolved shape/config) the elaborator synthesizes ONE Blade function (`__sgs_1`, ...) via
+/// Blade.Sgs.Decls; call sites rewrite to the generated names, deduped by fingerprint.
 ///
-/// Pipeline position: AFTER ML elaboration (so `where ml.galilean` bodies
-/// can be judged with surface `sgs.*` calls still visible at ML's seam) and
-/// before PPL/Math/Grad — generated bodies remain plain differentiable
-/// Blade source.
+/// Pipeline position: AFTER ML elaboration (so `where ml.galilean` bodies can be judged with surface `sgs.*` calls still
+/// visible at ML's seam) and before PPL/Math/Grad -- generated bodies remain plain differentiable Blade source.
 module Blade.Sgs.Elaborate
 
 open Blade.Ast
 open Blade.StaticEval
 open Blade.Sgs.Decls
 
-// ============================================================================
 // Module-level context (the MathElaborate contract)
-// ============================================================================
 
 /// A name -> declared array shape map (the module-level tables).
 type private Shapes = Map<string, TypeExpr * TypeExpr list>
 
-/// The LEXICAL scope threaded through the walker: parameters and block-local
-/// lets. A binder is recorded even when it is NOT array-annotated (as `None`),
-/// because it still SHADOWS an outer name — without that, an unannotated local
-/// `let f = ...` over a module-level annotated `f` would fall through to the
-/// module-level shape and silently run at the wrong extents.
+/// The LEXICAL scope threaded through the walker: parameters and block-local lets. A binder is recorded even when it is NOT
+/// array-annotated (as `None`), because it still SHADOWS an outer name -- without that, an unannotated local `let f = ...`
+/// over a module-level annotated `f` would fall through to the module-level shape and silently run at the wrong extents.
 type private Scope = Map<string, (TypeExpr * TypeExpr list) option>
 
 type private Ctx = {
@@ -57,13 +46,9 @@ let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> =
         | DeclType (TyDeclAlias (name, _, body)) -> Map.add name body acc
         | _ -> acc) Map.empty
 
-/// Annotations may name a whole-array type alias (`type Field = Array<...>`) —
-/// resolve top-level aliases (cycle-bounded) before matching for TyArray.
-///
-/// TyBounded is TRANSPARENT here, and only for diagnostic ORDER — see the
-/// twin arm in MathElaborate.resolveTop for the reasoning. A bound on an
-/// aggregate is the checker's rejection to make (BL4003); this pass runs
-/// first and must not pre-empt it with "no declared array shape".
+/// Annotations may name a whole-array type alias (`type Field = Array<...>`) -- resolve top-level aliases (cycle-bounded)
+/// before matching for TyArray. TyBounded is TRANSPARENT here, for diagnostic ORDER only (see MathElaborate.resolveTop): a
+/// bound on an aggregate is the checker's rejection to make (BL4003); this pass must not pre-empt it with "no declared shape".
 let rec private resolveTop (aliases: Map<string, TypeExpr>) (fuel: int) (ty: TypeExpr) =
     match ty with
     | TyNamed (n, []) when fuel > 0 ->
@@ -88,8 +73,7 @@ let private collectArrays (aliases: Map<string, TypeExpr>) (decls: Located<Decl>
             | _ -> acc
         | _ -> acc) Map.empty
 
-/// Top-level functions whose annotated RETURN type is an array: a call of one
-/// is as good a shape witness as an annotated let.
+/// Top-level functions whose annotated RETURN type is an array: a call of one is as good a shape witness as an annotated let.
 let private collectFuncs (aliases: Map<string, TypeExpr>) (decls: Located<Decl> list) : Shapes =
     decls |> List.fold (fun acc d ->
         match d.Value with
@@ -99,8 +83,7 @@ let private collectFuncs (aliases: Map<string, TypeExpr>) (decls: Located<Decl> 
             | None -> acc
         | _ -> acc) Map.empty
 
-/// Params of a function / lambda, as a lexical scope seed. Unannotated params
-/// are recorded as shadowing entries (see Scope).
+/// Params of a function / lambda, as a lexical scope seed. Unannotated params are recorded as shadowing entries (see Scope).
 let private paramShapes (aliases: Map<string, TypeExpr>) (ps: (string * TypeExpr option) list) : Scope =
     ps |> List.fold (fun acc (nm, ty) -> Map.add nm (arrayAnnot aliases ty) acc) Map.empty
 
@@ -113,9 +96,8 @@ let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
     | TyNamed (name, []) ->
         match Map.tryFind name ctx.Aliases with
         | Some body -> resolveExtent ctx body
-        // Not a source alias: a provider axis path (`type Y = store.index.y`),
-        // registered by TypeEnv during type CHECKING — after this pass — so the
-        // extent comes from the store's metadata instead.
+        // Not a source alias: a provider axis path, registered by TypeEnv during type checking, so the extent
+        // comes from the store's metadata instead.
         | None -> providerIndexExtent ctx.Statics name
     | _ -> None
 
@@ -123,9 +105,8 @@ let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
 let private shapeSources =
     "sgs ops read the DECLARED shape at compile time (the generated former is specialized to the extents), so the argument must carry an annotation"
 
-/// The declared shape of the field argument, with statically known extents.
-/// `scope` carries the lexical shapes in force here (annotated params and
-/// block-local annotated lets). The returned label is what messages quote.
+/// The declared shape of the field argument, with statically known extents. `scope` carries the lexical shapes in force
+/// here (annotated params and block-local annotated lets). The returned label is what messages quote.
 let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Result<string * int list, string> =
     let finish (label: string) ((_, idxs): TypeExpr * TypeExpr list) =
         let extents = idxs |> List.map (resolveExtent ctx)
@@ -133,10 +114,9 @@ let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Resu
             Ok (label, extents |> List.map Option.get)
         else
             Error (sprintf "%s: every axis extent of %s must be statically known (Idx<n> directly or through aliases)" what label)
-    let noShape name = Error (sprintf "%s: '%s' has no declared array shape — %s" what name shapeSources)
+    let noShape name = Error (sprintf "%s: '%s' has no declared array shape -- %s" what name shapeSources)
     match e.Kind with
-    // A name: the innermost binder wins. A local binder with no array
-    // annotation shadows an outer one rather than falling through to it.
+    // A name: the innermost binder wins; a local binder with no array annotation shadows an outer one.
     | ExprKind.ExprVar name ->
         match Map.tryFind name scope with
         | Some (Some shape) -> finish (sprintf "'%s'" name) shape
@@ -145,23 +125,20 @@ let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Resu
             match Map.tryFind name ctx.Arrays with
             | Some shape -> finish (sprintf "'%s'" name) shape
             | None -> noShape name
-    // An ascription: the universal escape hatch for a shape this pass cannot
-    // otherwise see (it runs before type inference).
+    // An ascription: the universal escape hatch for a shape this pass cannot otherwise see.
     | ExprKind.ExprTyped (_, ty) ->
         match resolveTop ctx.Aliases 8 ty with
         | TyArray (elem, idxs) -> finish "the ascribed expression" (elem, idxs)
         | _ -> Error (sprintf "%s: the ascription must name an array type (Array<Float64 like Idx<...>, ...>)" what)
-    // A call whose function has an annotated array return type. GUARD: in
-    // Blade arrays ARE functions, so `A(i)` and `f(x)` are the same node —
-    // exclude known array names so an index read stays on the error path
-    // instead of being misread as a call and given the array's own shape.
+    // A call whose function has an annotated array return type. GUARD: in Blade arrays ARE functions, so `A(i)` and `f(x)`
+    // are the same node -- exclude known array names so an index read stays on the error path.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _)
             when not (Map.containsKey f scope) && not (Map.containsKey f ctx.Arrays) ->
         match Map.tryFind f ctx.Funcs with
         | Some shape -> finish (sprintf "the result of '%s'" f) shape
-        | None -> Error (sprintf "%s: '%s' has no annotated array return type — %s" what f shapeSources)
+        | None -> Error (sprintf "%s: '%s' has no annotated array return type -- %s" what f shapeSources)
     | _ ->
-        Error (sprintf "%s: the field argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<Float64 like Idx<...>, ...>)` — %s" what shapeSources)
+        Error (sprintf "%s: the field argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<Float64 like Idx<...>, ...>)` -- %s" what shapeSources)
 
 let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int, string> =
     match e.Kind with
@@ -173,10 +150,7 @@ let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int
         | None -> Error (sprintf "%s: '%s' is not a `let static` binding (sgs op configs must be static)" what name)
     | _ -> Error (sprintf "%s: config argument must be a `let static` binding name or literal" what)
 
-// ============================================================================
 // Elaboration state
-// ============================================================================
-
 type private ElabState = {
     mutable Counter: int
     mutable Made: Map<string, string>
@@ -197,43 +171,25 @@ let private ensure (st: ElabState) (key: string) (make: string -> FunctionDecl) 
         st.Decls <- st.Decls @ [ decl ]
         n
 
-// ============================================================================
 // Op elaboration
-// ============================================================================
 
-// ============================================================================
-// Galilean stamping (retired equivariance-in-types plan, stage A1)
-// ============================================================================
+// Galilean stamping: the ML twin of this pass (MLElaborate's `equivStamp`) pins `__ml_equiv` on the kernels it
+// synthesizes; the sgs formers carry the SAME kind of by-construction theorem via MLGalilean's discipline -- a constant
+// boost u -> u + U0 is annihilated by every one of the two bodies stamped below, so the elaborator pins what it knows
+// rather than leaving a loop nest for a later pass to re-derive.
 //
-// The ML twin of this pass (MLElaborate's `equivStamp`) pins `__ml_equiv` on
-// the kernels it synthesizes. The sgs formers carry the SAME kind of
-// by-construction theorem, in MLGalilean's discipline instead: a constant
-// boost u -> u + U0 is annihilated by every one of the two bodies stamped
-// below, so the elaborator pins what it knows rather than leaving a loop nest
-// over baked stencil weights for a later pass to re-derive.
+// The conjunct is the NORMALIZED `__ml_galilean`, whose args NAME the boost-variant parameters (every other parameter is
+// boost-invariant, and the certified result must be boost-invariant -- MLGalilean's rule); it is registered by
+// `Blade.ML.Elaborate.expandStr`, which runs unconditionally first, so the name resolves even in a sgs-only program.
 //
-// The conjunct is the NORMALIZED `__ml_galilean`, whose args NAME the
-// boost-variant parameters (every other parameter is boost-invariant, and the
-// certified result must be boost-invariant — MLGalilean's v1 rule). It is
-// registered by `Blade.ML.Elaborate.expandStr`, which runs unconditionally as
-// the first pipeline stage, so the name resolves even in a program that
-// imports only sgs.
+// ORDERING makes this safe: the galilean judgment runs INSIDE MLElaborate.expandModule over that pass's `decls1`, and sgs
+// elaborates strictly AFTER ML, so the decls stamped here cannot exist when `buildCertTable` / `judgeFunction` /
+// `inferGalileanCertificates` run -- keeping their bodies (flat work arrays, index arithmetic) out of a judgment they were
+// never meant to face.
 //
-// ORDERING, the property that makes this safe: the galilean judgment runs
-// INSIDE MLElaborate.expandModule over that pass's `decls1`, and sgs
-// elaborates strictly AFTER ML (TypeCheck's stage list says so by name). The
-// decls stamped here therefore cannot exist when `buildCertTable` /
-// `judgeFunction` / `inferGalileanCertificates` run, which is what keeps their
-// bodies — flat work arrays and index arithmetic the composition walker would
-// refuse — out of a judgment they were never meant to face.
-//
-// WHY box_filter IS NOT STAMPED. It is the one former whose seam rule is
-// STATUS-PRESERVING rather than invariant-producing: `sgs.box_filter(U, W)`
-// maps a boost-variant field to a boost-variant field (the weights sum to 1,
-// so filter(u + U0) = filter(u) + U0). A `__ml_galilean` certificate asserts a
-// boost-INVARIANT result, so stamping it would be a false axiom, not a weaker
-// one. The v1 claim vocabulary has no spelling for "preserves"; giving it one
-// is a discipline change, not a stamping change.
+// box_filter is NOT stamped: its seam rule is STATUS-PRESERVING rather than invariant-producing (`sgs.box_filter(U, W)`
+// maps a boost-variant field to a boost-variant field, since the weights sum to 1: filter(u + U0) = filter(u) + U0). A
+// `__ml_galilean` certificate asserts a boost-INVARIANT result, so stamping it would be a false axiom, not a weaker one.
 let private galileanStamp (boostParams: string list) (fd: FunctionDecl) : FunctionDecl =
     let conj = ("__ml_galilean", boostParams)
     let wc =
@@ -251,7 +207,7 @@ let private fieldShape (ctx: Ctx) (scope: Scope) (what: string) (uE: Expr) : Res
     arrayShape ctx scope what uE |> Result.bind (fun (_, dims) ->
         match dims with
         | [ 3; a; b; c ] when a = b && b = c -> Ok a
-        | [ 3; _; _; _ ] -> Error (sprintf "%s: the field must be cubic (Idx<3> then three equal spatial extents) in v1" what)
+        | [ 3; _; _; _ ] -> Error (sprintf "%s: the field must be cubic (Idx<3> then three equal spatial extents)" what)
         | _ -> Error (sprintf "%s: the field must be Array<Float64 like Idx<3>, Idx<n>, Idx<n>, Idx<n>> (component-first, space-last)" what))
 
 let private tileArg (ctx: Ctx) (what: string) (n: int) (wE: Expr) : Result<int, string> =
@@ -264,12 +220,9 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
     match op, args with
     | "grad", [ uE; dxE ] ->
         fieldShape ctx scope "grad" uE |> Result.map (fun n ->
-            // A1: boost-variant in `u`. Every emitted cell is
-            // (u(..+1..) - u(..-1..)) / (2 dx) — a difference of two reads of
-            // the SAME field, so the central-difference weights sum to zero
-            // and the constant U0 cancels identically, componentwise and at
-            // every grid point. `dx` is a held-fixed scalar. This is exactly
-            // MLGalilean's axiom `sgs.grad(U, DX) : U any -> BInv`.
+            // Boost-variant in `u`: every emitted cell is (u(..+1..) - u(..-1..)) / (2 dx), a difference of two reads of
+            // the SAME field, so the central-difference weights sum to zero and constant U0 cancels identically at every
+            // grid point (`dx` is held-fixed). Exactly MLGalilean's axiom `sgs.grad(U, DX) : U any -> BInv`.
             let nm = ensure st (fingerprint "grad" (box n)) (fun nm -> galileanStamp [ "u" ] (gradDecl nm n))
             syn (ExprApp (syn (ExprVar nm), [ uE; dxE ])))
     | "grad", _ -> Error "grad: expected grad(U, DX) with DX the grid spacing"
@@ -282,29 +235,22 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
     | "stress", [ uE; wE ] ->
         fieldShape ctx scope "stress" uE |> Result.bind (fun n ->
         tileArg ctx "stress" n wE |> Result.map (fun w ->
-            // A1: boost-variant in `u`. Each packed slot is the SECOND CENTRAL
-            // comoment over the filter cell, prodsum(u_a, u_b)/T - mu_a*mu_b.
-            // Under u -> u + U0 the raw moment picks up
-            // U0_a*mu_b + U0_b*mu_a + U0_a*U0_b and the product of means picks
-            // up precisely the same, so the difference is unchanged: a central
-            // moment of any order >= 2 is boost-invariant. MLGalilean's axiom
-            // `sgs.stress(U, W) : U any -> BInv` states the same thing.
+            // Boost-variant in `u`: each packed slot is the SECOND CENTRAL comoment over the filter cell,
+            // prodsum(u_a, u_b)/T - mu_a*mu_b. Under u -> u + U0 the raw moment picks up
+            // U0_a*mu_b + U0_b*mu_a + U0_a*U0_b and the product of means picks up precisely the same, so the difference is
+            // unchanged: a central moment of any order >= 2 is boost-invariant, matching MLGalilean's axiom.
             let nm = ensure st (fingerprint "stress" (box (n, w))) (fun nm -> galileanStamp [ "u" ] (stressDecl nm n w))
             syn (ExprApp (syn (ExprVar nm), [ uE ]))))
     | "stress", _ -> Error "stress: expected stress(U, W)"
     | _ -> Error (sprintf "sgs: unknown op '%s' (available: %s)" op opList)
 
-// ============================================================================
 // Rewrite walker (same shape as MathElaborate.rewriteExpr)
-// ============================================================================
-
 let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (scope: Scope) (e: Expr)
     : Result<Expr, string> =
     let r = rewriteExpr st ctx aliases scope
     // Same walk under an EXTENDED lexical scope (a binder came into view).
     let rIn (sc: Scope) = rewriteExpr st ctx aliases sc
-    // Every binder is recorded, annotated or not: an unannotated one must
-    // SHADOW an outer array of the same name, not fall through to it.
+    // Every binder is recorded, annotated or not: an unannotated one must SHADOW an outer array of the same name.
     let bind (sc: Scope) (nm: string) (ty: TypeExpr option) =
         Map.add nm (arrayAnnot ctx.Aliases ty) sc
     let bindPat (sc: Scope) (b: Binding) =
@@ -320,9 +266,8 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
         | None -> Ok None
         | Some x -> r x |> Result.map Some
     match e.Kind with
-    // Qualified sgs op: `alias.grad(...)` -> generated specialized function.
-    // Any alias-qualified call is claimed here so an unknown op gets a
-    // steering error instead of an unbound-module type error downstream.
+    // Qualified sgs op: `alias.grad(...)` -> generated specialized function. Any alias-qualified call is claimed here so
+    // an unknown op gets a steering error instead of an unbound-module type error downstream.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) }, args) when Set.contains alias aliases ->
         rList args |> Result.bind (fun args' -> elabOp st ctx scope op args')
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
@@ -348,8 +293,7 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
         rIn (bindPat scope binding) body
         |> Result.map (fun b' -> inheritSpan e (ExprLet ({ binding with Value = v' }, b'))))
     | ExprKind.ExprBlock (stmts, finalE) ->
-        // Statements thread the scope forward: an annotated `let` inside the
-        // block is a shape witness for everything after it.
+        // Statements thread the scope forward: an annotated `let` inside the block is a shape witness for what follows.
         let rec rStmt (sc: Scope) (s: Stmt) : Result<Stmt * Scope, string> =
             match s with
             | StmtSpanned (inner, sp) -> rStmt sc inner |> Result.map (fun (i, sc') -> (StmtSpanned (i, sp), sc'))
@@ -383,20 +327,15 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
                     r c.Body |> Result.map (fun b -> cs @ [{ c with Guard = g'; Body = b }]))))
                 (Ok [])
             |> Result.map (fun cs' -> inheritSpan e (ExprMatch (s', cs'))))
-    // Recursive array (`let rec q: T = match q with ...`): the seed and
-    // inductive slices are ordinary expressions and may contain qualified
-    // ops. Without this arm they fell through untouched, and since this pass
-    // DELETES the import that would bind the alias, the call reached the
-    // checker as an unbound variable.
+    // Recursive array (`let rec q: T = match q with ...`): the seed and inductive slices are ordinary expressions and may
+    // contain qualified ops; without this arm they fell through unrewritten and reached the checker as an unbound variable.
     | ExprKind.ExprRecArray def ->
         rOpt (def.SeedArm |> Option.map snd) |> Result.bind (fun seedE ->
         r def.SliceExpr |> Result.map (fun slice' ->
             let seed' = Option.map2 (fun (sv, _) se -> (sv, se)) def.SeedArm seedE
             inheritSpan e (ExprRecArray { def with SeedArm = seed'; SliceExpr = slice' })))
-    // The rest of the expression algebra. Every constructor holding a
-    // sub-expression is walked, and the catch-all wildcard is deliberately
-    // GONE: an unhandled case is an FS0025 incomplete-match warning at build
-    // time rather than a qualified call silently surviving unrewritten.
+    // The rest of the expression algebra: every constructor holding a sub-expression is walked, and the catch-all wildcard
+    // is deliberately GONE, so an unhandled case is an FS0025 build warning rather than a qualified call surviving unrewritten.
     | ExprKind.ExprCompute inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprCompute i))
     | ExprKind.ExprRead inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprRead i))
     | ExprKind.ExprPure inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprPure i))
@@ -461,17 +400,14 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
          | ForKernel k -> r k |> Result.map ForKernel)
         |> Result.bind (fun src' ->
         rOpt kern |> Result.map (fun kern' -> inheritSpan e (ExprFor (src', cs, kern'))))
-    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>)
-    // carry TypeExprs, not Exprs, and are never rewritten.
+    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>) carry TypeExprs, not Exprs, never rewritten.
     | ExprKind.ExprWildcard | ExprKind.ExprQualified _ | ExprKind.ExprRange _
     | ExprKind.ExprReverse _ | ExprKind.ExprArity _ | ExprKind.ExprNth
     | ExprKind.ExprZero | ExprKind.ExprSection _ -> Ok e
 
-// ============================================================================
 // Gating + program expansion
-// ============================================================================
 
-/// `import sgs [as _]` — the module this layer owns.
+/// `import sgs [as _]` -- the module this layer owns.
 let private isSgsImport (d: Located<Decl>) =
     match d.Value with
     | DeclImport (["sgs"], _) -> true
@@ -510,13 +446,8 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                         let mapped =
                             match d.Value with
                             | DeclFunction fd ->
-                                // Annotated array PARAMETERS are shape
-                                // witnesses inside this body — a galilean-
-                                // certified function applies the formers to
-                                // its own velocity parameter. (This used to be
-                                // an ad-hoc fold into ctx.Arrays; the lexical
-                                // scope now carries it, so block-local
-                                // annotated lets work here too.)
+                                // Annotated array PARAMETERS are shape witnesses inside this body -- a galilean-certified
+                                // function applies the formers to its own velocity parameter.
                                 let pscope = paramShapes tyAliases (fd.Params |> List.map (fun p -> (p.Name, p.Type)))
                                 rewriteExpr st ctx aliases pscope fd.Body
                                 |> Result.map (fun b -> DeclFunction { fd with Body = b })

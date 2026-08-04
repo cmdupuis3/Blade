@@ -47,6 +47,18 @@ oracle/
 /examples/**/*.cpp
 /examples/**/*.exe
 /examples/**/*.out
+# The cuBLAS device half (Round D of docs/plan-cpp-perf-exploitation.md).
+# `Build.buildCublasDevice` writes a two-line `<stem>_cublas.cu` beside the
+# generated .cpp and compiles it into a shared library that the host program
+# links AND LOADS AT RUN TIME -- so unlike the deployed runtime headers these
+# two cannot be cleaned up after the link, and a gate-on `blade run` on a
+# corpus program leaves them in the source tree.
+/tests/corpus/**/*_cublas.cu
+/tests/corpus/**/*_cublas.dll
+/tests/corpus/**/*_cublas.so
+/examples/**/*_cublas.cu
+/examples/**/*_cublas.dll
+/examples/**/*_cublas.so
 *.obj
 *.ilk
 *.pdb

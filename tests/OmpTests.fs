@@ -983,25 +983,38 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             match runProgram exeAbs forcedThreads with
             | Error e -> fail collapseName (sprintf "run: %s" e)
             | Ok out ->
-                // 5x4 outer product through the kernel, printed flat.
-                let expected =
-                    [ for p in [1.5; 2.5; 3.5; 4.5; 5.5] do
-                        for q in [0.25; 0.5; 0.75; 1.25] -> p * q + 1.0 ]
-                let printed =
-                    let m = System.Text.RegularExpressions.Regex.Match(out, @"M = \[([^\]]*)\]")
+                // 5x4 outer product through the kernel. A rank-2 array prints
+                // NESTED — `M = [[a, b, ...], [...], ...]` — so the old flat
+                // `\[([^\]]*)\]` parse stopped at the first inner `]` and read
+                // one row, not the array. Match the whole bracketed value and
+                // then read the ROWS, which is also a STRONGER assertion than a
+                // flatten-and-parse would be: it pins the 5x4 shape, not just
+                // the 20 values in DFS order.
+                let expectedRows =
+                    [ for p in [1.5; 2.5; 3.5; 4.5; 5.5] ->
+                        [ for q in [0.25; 0.5; 0.75; 1.25] -> p * q + 1.0 ] ]
+                let parseNum (s: string) =
+                    match System.Double.TryParse(s.Trim(),
+                                                 System.Globalization.NumberStyles.Float,
+                                                 System.Globalization.CultureInfo.InvariantCulture) with
+                    | true, v -> Some v
+                    | _ -> None
+                let rows =
+                    let m = System.Text.RegularExpressions.Regex.Match(out, @"M = (\[\[.*\]\])")
                     if not m.Success then []
                     else
-                        m.Groups.[1].Value.Split(',')
-                        |> Array.toList
-                        |> List.choose (fun s ->
-                            match System.Double.TryParse(s.Trim(),
-                                                         System.Globalization.NumberStyles.Float,
-                                                         System.Globalization.CultureInfo.InvariantCulture) with
-                            | true, v -> Some v
-                            | _ -> None)
-                if printed.Length <> expected.Length then
-                    fail collapseName (sprintf "expected %d values, parsed %d from output" expected.Length printed.Length)
-                elif List.exists2 (fun (a: float) b -> abs (a - b) > 1e-9) printed expected then
+                        System.Text.RegularExpressions.Regex.Matches(m.Groups.[1].Value, @"\[([^\[\]]*)\]")
+                        |> Seq.cast<System.Text.RegularExpressions.Match>
+                        |> Seq.map (fun r -> r.Groups.[1].Value.Split(',') |> Array.toList |> List.choose parseNum)
+                        |> Seq.toList
+                if List.length rows <> List.length expectedRows
+                   || List.exists2 (fun (a: float list) (b: float list) -> a.Length <> b.Length) rows expectedRows then
+                    fail collapseName
+                        (sprintf "expected a %dx%d nested print, parsed rows of lengths %A"
+                             (List.length expectedRows) 4 (rows |> List.map List.length))
+                elif List.exists2 (fun (ra: float list) rb ->
+                                       List.exists2 (fun (a: float) b -> abs (a - b) > 1e-9) ra rb)
+                                  rows expectedRows then
                     fail collapseName "collapse(2) map produced wrong values under 4 threads"
                 else
                     pass collapseName "compiles under g++ and computes correctly (ivdep/collapse interaction)"

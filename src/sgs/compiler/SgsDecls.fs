@@ -2,7 +2,7 @@
 /// (central-difference gradient, box filter, exact subgrid stress)
 /// synthesized as plain Blade source.
 ///
-/// Field convention (component-first, space-last — the spatial axes are the
+/// Field convention (component-first, space-last -- the spatial axes are the
 /// sample axes of the stress comoment):
 ///   U : Array<Float64 like Idx<3>, Idx<n>, Idx<n>, Idx<n>>   (cubic, periodic)
 ///
@@ -24,7 +24,7 @@ let private idxN (arr: string) (args: Expr list) = syn (ExprApp (v arr, args))
 let private packPairs = Blade.ML.CartesianBridge.packPairs |> List.toArray
 
 /// sgs.grad for a fixed cubic extent n: G(c, d, i, j, k) = d_d u_c at
-/// (i, j, k) — 2nd-order central differences, periodic wrap, spacing dx:
+/// (i, j, k) -- 2nd-order central differences, periodic wrap, spacing dx:
 ///   (u(c, i+1, j, k) - u(c, i-1, j, k)) / (2 dx)   (axis d = 0; etc.)
 /// Mirrors the sgs/ oracle's fdGrad expression exactly.
 let gradDecl (name: string) (n: int) : FunctionDecl =
@@ -98,11 +98,11 @@ let boxFilterDecl (name: string) (n: int) (w: int) : FunctionDecl =
     mkFunc name [ ("u", tyFloatTensor [ 3; n; n; n ]) ] (tyFloatTensor [ 3; m; m; m ]) body
 
 /// sgs.stress for fixed (n, w), m = n/w, T = w^3: the EXACT subgrid stress
-/// per coarse cell — the second central comoment of velocity under the
+/// per coarse cell -- the second central comoment of velocity under the
 /// filter-cell measure, packed in CartesianBridge.packPairs order:
 ///   tau_p(cell) = prodsum(u_a, u_b | tile)/T - (sum(u_a)/T)(sum(u_b)/T)
 /// Mirrors the sgs/ oracle's tau function (ascending-t prodsums and sums,
-/// raw/T - mu_a*mu_b) — and therefore also the userland comm-machinery
+/// raw/T - mu_a*mu_b) -- and therefore also the userland comm-machinery
 /// route of corpus sgs/005, which the identity pin asserts.
 let stressDecl (name: string) (n: int) (w: int) : FunctionDecl =
     let m = n / w

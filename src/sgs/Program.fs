@@ -20,5 +20,5 @@ let main argv =
         Burgers.dump ()
         0
     | _ ->
-        printfn "BladeSgs physics oracle — run with: dump-oracle"
+        printfn "BladeSgs physics oracle -- run with: dump-oracle"
         0

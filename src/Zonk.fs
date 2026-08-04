@@ -1,8 +1,7 @@
-// Zonking — final type resolution (audit §4: Check/Zonk.fs). After type
-// checking, remaining IRTInfer nodes are either solved-but-unresolved or
-// genuinely unconstrained; zonking walks the typed AST, resolves every type
-// through the substitution, and defaults leftovers to Float64. Extracted
-// verbatim from TypeCheck.fs (Phase 3).
+// Zonking: final type resolution. After type checking, remaining IRTInfer
+// nodes are either solved-but-unresolved or genuinely unconstrained; zonking
+// walks the typed AST, resolves every type through the substitution, and
+// defaults leftovers to Float64.
 module Blade.Zonk
 
 open Blade.IR
@@ -10,18 +9,16 @@ open Blade.Types
 open Blade.TypedAst
 open Blade.Unify
 
-// ============================================================================
-// Stage-2 rank deduction: closing a satisfied lower bound
-// ============================================================================
+// Stage-2 rank deduction: closing a satisfied lower bound.
 
 /// The array a satisfied rank lower bound closes to: `k` rank-1 SymNone slots
 /// with `label`-derived symbolic extents over a caller-supplied element type.
 ///
-/// Shared by BOTH close sites — checkFunctionDecl's decl close and zonk's
-/// auto-close below — so the two cannot drift on slot shape. The extent names
-/// are cosmetic (unify never compares extents), but they must be UNIQUE per
-/// close so two independently-closed params never read as the same dimension
-/// in emitted C++; `label` is the uniquifier the caller supplies.
+/// Shared by both close sites (checkFunctionDecl's decl close and zonk's
+/// auto-close below) so the two cannot drift on slot shape. Extent names are
+/// cosmetic (unify never compares extents) but must be unique per close so
+/// two independently-closed params never read as the same dimension in
+/// emitted C++; `label` is the uniquifier the caller supplies.
 let mkDeducedRankArray (freshId: unit -> IRId) (elemTy: IRType) (label: string) (k: int) : IRType =
     let slots =
         List.init k (fun i ->
@@ -36,16 +33,15 @@ let mkDeducedRankArray (freshId: unit -> IRId) (elemTy: IRType) (label: string) 
 
 /// Close the body-only rank deduction (stage 2) over a parameter list: a param
 /// whose type is still an unresolved inference var but carries a rank lower
-/// bound — accumulated from the body's builtin pins and direct-call demands,
-/// max-joined — is pinned to a fresh rank-k array with a free element type.
-/// The minimum rank the body forces IS the cell rank (body-only by
-/// construction: bounds only ever came from this body's own uses). Params with
-/// no bound stay fully generic (scalar-or-array polymorphism, unchanged);
-/// params under a `T^k` annotation are governed by their exact arity
-/// constraint and are skipped.
+/// bound (accumulated from the body's builtin pins and direct-call demands,
+/// max-joined) is pinned to a fresh rank-k array with a free element type.
+/// The minimum rank the body forces is the cell rank, since bounds only ever
+/// came from this body's own uses. Params with no bound stay fully generic
+/// (scalar-or-array polymorphism); params under a `T^k` annotation are
+/// governed by their exact arity constraint and are skipped.
 ///
 /// Lives here rather than in TypeCheck so zonk's auto-close (see `zonkType`)
-/// can share `mkDeducedRankArray` with it — Zonk compiles before TypeCheck,
+/// can share `mkDeducedRankArray` with it -- Zonk compiles before TypeCheck,
 /// which already opens this module.
 let closeDeducedRanks (subst: Subst) (builder: IRBuilder) (label: string) (paramTypes: IRType list) : unit =
     paramTypes |> List.iter (fun pt ->
@@ -67,27 +63,25 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
     let resolved = subst.Resolve ty
     match resolved with
     | IRTInfer n ->
-        // Function-boundary HM type variables survive zonking — IR-phase
-        // monomorphization will substitute them at call sites. Genuinely
-        // unresolved (non-boundary) inference vars still default to Float64
-        // for backwards compatibility with underconstrained local lets —
-        // EXCEPT literal vars, which default to their seeded value class so an
-        // unpinned `let x = 1` stays Int64 rather than becoming Float64.
+        // Function-boundary HM type variables survive zonking -- IR-phase
+        // monomorphization substitutes them at call sites. Other unresolved
+        // inference vars default to Float64, except literal vars, which
+        // default to their seeded value class so an unpinned `let x = 1`
+        // stays Int64 rather than becoming Float64.
         if subst.IsPolymorphicId(n) then resolved
         else
-            // Stage-2 rank AUTO-CLOSE, checked before the scalar defaults
-            // below. checkFunctionDecl closes DECLARED params; a lambda param
-            // (or any other straggler) carrying an unsatisfied rank lower
-            // bound has no such site — inferLambda deliberately does not close
-            // (it cannot know kernel position, and for lambdas that ARE used
-            // as kernels buildApplyInfo's array-side fallback closes them with
-            // strictly more context). Zonk is that leftover case, and reaching
-            // it with a bound in hand IS the deduction succeeding, so it is
-            // infallible: direct construction + Bind, no unify. `T^k` params
-            // are governed by their exact arity pin and are skipped, mirroring
-            // closeDeducedRanks. The element type takes the same default the
-            // scalar arm below would have produced — a rank bound carries no
-            // element information.
+            // Stage-2 rank auto-close, checked before the scalar defaults
+            // below. checkFunctionDecl closes declared params; a lambda param
+            // (or other straggler) carrying an unsatisfied rank lower bound
+            // has no such site -- inferLambda deliberately does not close
+            // (it cannot know kernel position; for lambdas used as kernels,
+            // buildApplyInfo's array-side fallback closes them with strictly
+            // more context). Zonk is that leftover case, and reaching it with
+            // a bound in hand is the deduction succeeding, so this is
+            // infallible: direct construction + Bind, no unify needed. `T^k`
+            // params are skipped, mirroring closeDeducedRanks. The element
+            // type takes the same default the scalar arm below would have
+            // produced -- a rank bound carries no element information.
             let autoCloseRank =
                 if (subst.GetArityConstraint n).IsSome then None
                 else subst.GetRankLowerBound(n)
@@ -100,16 +94,13 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
                     | None -> IRTScalar ETFloat64
                 // The label embeds the var id, so two independently-closed
                 // lambdas can never collide on an extent name. Bind makes the
-                // close idempotent and globally consistent — every later
-                // Resolve of `n` sees this same array — and introduces no new
-                // inference var, so TypeCheck's "no IRTInfer survives zonking"
-                // invariant still holds.
+                // close idempotent and globally consistent (every later
+                // Resolve of `n` sees this same array) and introduces no new
+                // inference var, so "no IRTInfer survives zonking" still holds.
                 let arr = mkDeducedRankArray mkId elem (sprintf "zonk%d" n) k
                 subst.Bind(n, arr)
-                // Integration stitch: zonk-closed ranks join the deduced-facts
-                // channel so `ide check --json`'s deduced[] shows them too
-                // (TypeEnv hosts the channel precisely so this compile-order
-                // direction works).
+                // Zonk-closed ranks also join the deduced-facts channel so
+                // `ide check --json`'s deduced[] shows them too.
                 Blade.TypeEnv.DeducedFacts.recordZonkClosedRank n k
                 arr
             | _ ->
@@ -127,7 +118,7 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
     | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (zonkType subst inner, units)
     | IRTIdxTagged (inner, idxRef) -> IRTIdxTagged (zonkType subst inner, idxRef)
     | IRTDist (order, elem, axes) ->
-        // ERASURE POINT: Dist<r, τ> is a typecheck-time invariant. All
+        // ERASURE POINT: Dist<r, T> is a typecheck-time invariant. All
         // Dist-aware checking (order guard, operator dispatch, signature
         // unification) happens during inference, before zonking; downstream
         // of the checker a Dist value IS the tuple of its packed cumulant
@@ -335,5 +326,3 @@ let zonkDecl (subst: Subst) (decl: TypedDecl) : TypedDecl =
 /// Zonk an entire TypedModule
 let zonkModule (subst: Subst) (modul: TypedModule) : TypedModule =
     { modul with Decls = modul.Decls |> List.map (zonkDecl subst) }
-
-// ============================================================================

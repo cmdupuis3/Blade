@@ -8,9 +8,7 @@ open Blade.Types
 
 open System
 
-// ============================================================================
 // Core Type Definitions
-// ============================================================================
 
 /// Unique identifier for IR values
 /// Index type in IR - represents a single dimension's structure
@@ -55,13 +53,9 @@ type IRExpr =
     | IRCurry of array: IRExpr * index: IRExpr * resultRank: int
     | IRApp of func: IRExpr * args: IRExpr list * retType: IRTypeG<IRExpr>
     | IRTuple of IRExpr list
-    // Complex literal construction: std::complex<double>(re, im) at codegen.
-    // Distinct from IRTuple to preserve scalar nature — Complex is a scalar
-    // throughout the IR; the surface constructor call is consumed
-    // entirely between Parser and TypeCheck. Components are arbitrary
-    // float-typed IRExpr (matching what checkExpr accepts), not just
-    // literal floats; this supports both `complex(1.0, 0.0)` and
-    // `complex(x, y)` for x, y: Float64.
+    // std::complex<double>(re, im) at codegen. Distinct from IRTuple: Complex
+    // is a scalar throughout the IR. Components are arbitrary float-typed
+    // IRExpr, not just literals -- supports `complex(x, y)` for x, y: Float64.
     | IRComplex of re: IRExpr * im: IRExpr
     | IRTupleProj of IRExpr * int * bool  // expr, index, isFlat (true=flat leaf index, false=structural type index)
     | IRTupleCons of head: IRExpr * tail: IRExpr
@@ -75,19 +69,17 @@ type IRExpr =
     | IRObjectFor of ObjectForInfo
     | IRApplyCombinator of ApplyInfo
     /// Slot-inverted apply: `(object_for(f) >>@ object_for(g)) <@> arrays`.
-    /// Distinct from IRApplyCombinator because the kernel slot of a
-    /// canonical apply holds a callable, whereas the compose case threads
-    /// arrays through a composed-object chain. Modeling these as separate
-    /// variants removes the slot overloading that previously forced every
-    /// consumer to inspect Loop's shape to figure out which interpretation
-    /// to apply. See `ComposeApplyInfo` below.
+    /// A canonical apply's kernel slot holds a callable; the compose case
+    /// threads arrays through a composed-object chain instead. Kept as a
+    /// separate variant so no consumer needs to inspect Loop's shape to tell
+    /// the two apart. See `ComposeApplyInfo` below.
     | IRComposeApply of ComposeApplyInfo
     | IRBind of comp: IRExpr * cont: IRExpr
     | IRParallel of IRExpr * IRExpr * fusionDepth: int option
     | IRFusion of IRExpr * IRExpr
     | IRChoice of IRExpr * IRExpr
     // <|:> allocated-fallback: left where storage holds the cell, else right.
-    // Distinct from IRChoice (value-level zero test) — see TExprFallback.
+    // Distinct from IRChoice (value-level zero test) -- see TExprFallback.
     | IRFallback of IRExpr * IRExpr
     | IRArrayProduct of IRExpr * IRExpr
     | IRComposeObj of IRExpr * IRExpr
@@ -106,35 +98,30 @@ type IRExpr =
     | IRUnique of array: IRExpr               // unique(A) - dedup, first-occurrence order
     | IRContains of array: IRExpr * value: IRExpr  // contains(A, x) - membership test, returns bool
     | IRGroupBy of values: IRExpr * grouping: IRExpr  // group_by(vals, gk) - apply grouping
-    | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key ⇒ compound dispatch
+    | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key => compound dispatch
     | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
     | IRReduce of array: IRExpr * kernel: IRExpr * init: IRExpr option  // reduce(arr, op[, init]) - fold innermost dim; init seeds the fold and defines the empty result
-    // reduce(deferred, op[, init]) — the FUSED reduction terminal: fold a
+    // reduce(deferred, op[, init]): the FUSED reduction terminal -- folds a
     // deferred computation (IRApplyCombinator, or an IRFusion tree of them)
     // without materializing the array(s). ONE loop nest; one scalar
-    // accumulator per fusion leaf (result = tuple of scalars for trees).
-    // Semantically the fold is a binary-kernel stage in the loop-object
-    // composition algebra (object_for((+)) is a reduction stage); this node
-    // is the checker-typed forcing of that composition. init is ALWAYS
-    // filled by the checker (identity for (+)/(*) sections, user's init
-    // otherwise — arbitrary kernels REQUIRE an explicit init).
+    // accumulator per fusion leaf (tuple of scalars for trees). init is
+    // ALWAYS filled by the checker (identity for (+)/(*) sections, user's
+    // init otherwise -- arbitrary kernels REQUIRE an explicit init).
     | IRReduceCompute of computation: IRExpr * kernel: IRExpr * init: IRExpr
-    | IRProdSum of args: IRExpr list  // prodsum(x1..xk): fused Σ_t Π_ℓ xℓ(t) over rank-1 arrays of equal extent; empty extent ⇒ 0
+    | IRProdSum of args: IRExpr list  // prodsum(x1..xk): fused sum_t prod_l x_l(t) over rank-1 arrays of equal extent; empty extent => 0
     | IRZip of IRExpr list
     | IRAlign of arrays: IRExpr list * spec: AlignSpec
     | IRStack of IRExpr list
     | IRTranspose of array: IRExpr * dim1: int * dim2: int
     | IRDecompact of array: IRExpr * dim: int
     | IRGram of left: IRExpr * right: IRExpr * isSameArray: bool  // A * B^H contraction; symmetric/Hermitian when isSameArray
-    | IRMatmul of left: IRExpr * right: IRExpr  // A(m x k) * B(k x n) -> dense m x n; the math package's first-class matmul (Phase 5), emitted through blade_linalg
-    /// eigh(S): symmetric / Hermitian eigendecomposition of a rank-2 square
-    /// operand -> the TUPLE (Q, LAM). Phase 6 / Round B2, emitted through
-    /// `blade_lapack`. Unlike every other linalg node this one is TUPLE-typed
-    /// and produces TWO fresh pools, and for a complex operand the two element
-    /// types DIFFER: Q is complex, LAM is real (a Hermitian matrix's
-    /// eigenvalues are real). It only ever exists when `lapackAvailable ()`
-    /// held at elaboration time — gate off, `math.eigh` still expands to the
-    /// synthesized Jacobi source and this node is never built.
+    | IRMatmul of left: IRExpr * right: IRExpr  // A(m x k) * B(k x n) -> dense m x n; the math package's matmul, emitted through blade_linalg
+    /// eigh(S): eigendecomposition of a rank-2 square operand -> the TUPLE
+    /// (Q, LAM), emitted through `blade_lapack`. TUPLE-typed with TWO fresh
+    /// pools; for complex input Q is complex but LAM is real (eigenvalues of
+    /// a Hermitian matrix are real). Exists only when `lapackAvailable ()`
+    /// held at elaboration; gate off, `math.eigh` expands to synthesized
+    /// Jacobi source instead and this node is never built.
     | IREigh of operand: IRExpr
     | IRArrayNegate of array: IRExpr     // whole-array elementwise negation (eager); type-preserving
     | IRArrayConjugate of array: IRExpr  // whole-array elementwise conjugation (eager); type-preserving
@@ -157,154 +144,97 @@ type IRExpr =
     | IRZero
     | IRRank of array: IRExpr
     | IRPolyIndex of pack: IRExpr * index: IRExpr  // Dynamic poly-pack indexing: args[k]
-    // Pack tail from cons-destructuring `let head :: tail = A`. A symbolic
-    // "shifted pack view": `tail` behaves as a Poly pack of arity one less than
-    // `pack`, dropping the first `drop` elements. Only meaningful pre-arity-
-    // monomorphization; specializeFunction rewrites it (and the recursive calls,
-    // element reads, and arity() uses it feeds) into concrete params, so it never
+    // Pack tail from cons-destructuring `let head :: tail = A`: a "shifted
+    // pack view" behaving as a Poly pack of arity one less than `pack`,
+    // dropping the first `drop` elements. Pre-monomorphization only --
+    // specializeFunction rewrites it into concrete params, so it never
     // survives to codegen/interp.
     | IRPolyTail of pack: IRExpr * drop: int
     | IRExtent of array: IRExpr * dim: int
-    // Ragged-extent marker: at the position this appears as an IRIndexTypeG<IRExpr>'s
-    // Extent, the codegen emits a lookup into the lengths array using the
-    // current iteration's flat outer position. The lengths array is shaped
-    // to match the prior index dimensions (e.g., Array<Nat like Idx<M>, Idx<N>>
-    // for `Idx<M>, Idx<N>, RaggedIdx<lengths>`); the codegen handles the
-    // flat-position computation internally so the user doesn't need to expose
-    // the flattening at the type level.
-    //
-    // Distinct from IRExtent (which queries an array's extent metadata):
-    // IRRaggedLookup reads a value from the lengths array at the current
-    // iteration's logical position.
+    // Ragged-extent marker: where this appears as an Extent, codegen emits a
+    // lookup into the lengths array at the current iteration's flat outer
+    // position. The lengths array is shaped to match the prior index
+    // dimensions (e.g. Array<Nat like Idx<M>, Idx<N>> for `Idx<M>, Idx<N>,
+    // RaggedIdx<lengths>`). Distinct from IRExtent (queries an array's
+    // extent metadata): this reads a value from the lengths array itself.
     | IRRaggedLookup of lengths: IRExpr
-    // Compound-index marker (formalism 4.5): where this appears as an
-    // IRIndexTypeG<IRExpr>'s Extent, the index type is a CompoundIdx -- a masked product
-    // space whose valid coordinates are selected by `mask`, a RUNTIME array
-    // value (index types are parameterized by runtime values; a CompoundIdx is
-    // identified by a whole-mask hash, 4.5). Rank (= mask rank) lives on the
-    // IRIndexTypeG<IRExpr> record; per-dimension extents are recovered from the mask's
-    // array type at codegen. Cardinality is NOT closed-form -- the emitted
-    // compound_index_t builds its rank<->tuple table at construction and reports
-    // cardinality at runtime. Distinct from IRRaggedLookup (a nested dependent
-    // extent): a compound mask couples all dimensions at once.
+    // Compound-index marker (formalism 4.5): where this appears as an Extent,
+    // the index type is a CompoundIdx -- a masked product space whose valid
+    // coordinates are selected by `mask`, a RUNTIME array (a CompoundIdx is
+    // identified by a whole-mask hash). Rank = mask rank; per-dim extents
+    // come from the mask's array type at codegen. Cardinality is NOT
+    // closed-form -- compound_index_t builds its rank<->tuple table at
+    // construction and reports cardinality at runtime. Distinct from
+    // IRRaggedLookup: a compound mask couples all dimensions at once.
     | IRCompoundMask of mask: IRExpr
     // Residual-compound marker (formalism 4.5, partial indexing): where this
-    // appears as an IRIndexTypeG<IRExpr>'s Extent, the index type is a CompoundIdx that
-    // arose from PARTIALLY indexing a parent compound -- pinning the first
-    // `prefixLen` (= j) of the parent's k coordinates and leaving k-j free. The
-    // residual is a masked product space over the remaining k-j axes, restricted
-    // to the parent's valid tuples whose leading j coords match the pinned
-    // prefix. Its Rank (= k-j) lives on the IRIndexTypeG<IRExpr> record.
-    //
-    // Representation (design decision, this feature): SHARED DATA, MATERIALIZED
-    // INDEX. The residual's data is a non-copied window into the parent's
-    // contiguous lex-sorted pool (the prefix_range [lo,hi) slice); its index is a
-    // freshly materialized compound_index_t<k-j> built over that window with the
-    // prefix stripped. This reconciles formalism 4.5's internal tension (the
-    // identity language said "view over (parent mask, fixed coords)"; the cost
-    // note said "O(n) scan/materialize") -- the data is a view, the index is
-    // materialized, so the O(window) cost note is the accurate one.
-    //
-    // `parent` is the parent compound array expression; `prefixLen` is j. The
-    // pinned coordinate VALUES are carried by the indexing site (IRIndex), not
-    // here -- this marker only records the residual's shape/identity so that
-    // Extent-consuming passes (PlaceTabulated detection, level counting, varref
-    // collection) treat it uniformly with IRCompoundMask. Codegen for the
-    // residual construction is deferred (phase 2); until then the partial-index
-    // path emits an explicit not-yet-implemented error rather than miscompiling.
+    // appears as an Extent, the index type is a CompoundIdx from PARTIALLY
+    // indexing a parent compound -- pinning the first `prefixLen` (= j) of
+    // the parent's k coordinates, k-j left free. Rank = k-j. Representation:
+    // SHARED DATA, MATERIALIZED INDEX -- data is a non-copied window into the
+    // parent's lex-sorted pool (prefix_range [lo,hi)); the index is a freshly
+    // materialized compound_index_t<k-j> over that window. Cost is O(window),
+    // not O(n). `parent` is the parent compound array; `prefixLen` is j --
+    // pinned coordinate VALUES live at the indexing site (IRIndex), not here.
+    // Codegen for the residual construction is not yet implemented; the
+    // partial-index path emits an explicit error rather than miscompiling.
     | IRCompoundProject of parent: IRExpr * prefixLen: int
-    // Sparse extent marker (formalism 3.5): where this appears as an
-    // IRIndexTypeG<IRExpr>'s Extent, the index type is a SparseIdx -- an
-    // explicit valid-tuple enumeration with hash lookup, keys in GIVEN order
-    // (never sorted). Twin of IRCompoundMask with the mask replaced by the key
-    // source, which comes in two branches:
-    //
-    //   SkStatic entries  -- the key list folded at compile time (a `let
-    //       static` tuple list). Entries are baked; codegen emits the key
-    //       table as literals, and no runtime array is consulted. Desync with
-    //       a mutated source is structurally impossible.
-    //   SkRuntime keys    -- a reference to a runtime rank-1 tuple-element
-    //       array (provider/kernel output); the sparse_index_t is built from
-    //       it at runtime, mirroring the compound mask's deferred build.
-    //
-    // Rank (the key tuple arity) lives on the IRIndexTypeG record. Cardinality
-    // is the key count -- compile-time known for SkStatic, runtime for
-    // SkRuntime. Like IRCompoundMask, this drives PlaceTabulated placement.
+    // Sparse extent marker (formalism 3.5): where this appears as an Extent,
+    // the index type is a SparseIdx -- an explicit valid-tuple enumeration
+    // with hash lookup, keys in GIVEN order (never sorted). Twin of
+    // IRCompoundMask, mask replaced by SkStatic (compile-time-folded key
+    // list, baked as literals) or SkRuntime (runtime rank-1 tuple-element
+    // array; sparse_index_t built from it at runtime). Rank = key tuple
+    // arity; Cardinality = key count. Drives PlaceTabulated, like IRCompoundMask.
     | IRSparseKeys of source: SparseKeysSource
-    // Orbit (iterated-wreath) class marker: where this appears as an
-    // IRIndexTypeG<IRExpr>'s Extent, the index type is an `OrbIdx` of DEPTH >= 2
-    // (docs/plan-orbit-index-types.md §2). Twin of IRSparseKeys in shape and in
-    // motive: the class's defining payload -- the flat level list
-    // [(r1,s1), ..., (rd,sd)], outermost-last, `true` = '+' -- has nowhere else
-    // to live without adding a field to IRIndexTypeG that every other index
-    // kind would carry as None.
-    //
-    // `extent` is the class's BASE extent n (the fold's M0), kept as an ordinary
-    // extent expression so literal folding, varref collection and substitution
-    // reach it exactly as they reach a plain Idx extent.
-    //
-    // Rank (= the PRODUCT of the level ranks = the number of raw axes) lives on
-    // the IRIndexTypeG record, as it does for every other multi-axis class.
-    // Cardinality is closed-form -- §4's iterated binomial, computed by
-    // `Blade.OrbRank.cellCountChecked` -- so this drives PlaceCombinatorial, NOT
-    // PlaceTabulated; see `bufferGroupCardinality`.
-    //
-    // DEPTH <= 1 NEVER PRODUCES THIS. `OrbIdx<[(r,+)],n>` lowers to the exact
-    // SymIdx record and `OrbIdx<[],n>` to the exact Idx record, so this marker
-    // appears only for classes the legacy machinery genuinely cannot express.
+    // Orbit (iterated-wreath) class marker: where this appears as an Extent,
+    // the index type is an `OrbIdx` of DEPTH >= 2 (docs/plan-orbit-index-types.md
+    // section 2). Twin of IRSparseKeys: carries the flat level list
+    // [(r1,s1), ..., (rd,sd)], outermost-last, `true` = '+' -- has nowhere
+    // else to live without a field every other index kind carries as None.
+    // `extent` is the BASE extent n (the fold's M0), an ordinary extent
+    // expression reached like a plain Idx extent by folding/varref/subst.
+    // Rank = PRODUCT of the level ranks. Cardinality is closed-form (section
+    // 4's iterated binomial, `Blade.OrbRank.cellCountChecked`), so this
+    // drives PlaceCombinatorial, NOT PlaceTabulated. DEPTH <= 1 NEVER
+    // PRODUCES THIS: `OrbIdx<[(r,+)],n>` lowers to the exact SymIdx record,
+    // `OrbIdx<[],n>` to the exact Idx record.
     | IROrbitClass of levels: (int * bool) list * extent: IRExpr
-    // Opaque-extent marker: appears as an IRIndexTypeG<IRExpr>'s Extent when the
-    // extent is determined by surrounding context rather than declared up
-    // front. The canonical use is a kernel-parameter type `RaggedIdx<_>`
-    // (or any future "context-supplied extent" variant), where at the peel
-    // point the kernel param is bound to a sub-array whose `_extents[0]`
-    // carries the actual length.
-    //
-    // Distinct from IRRaggedLookup (which carries a specific lengths
-    // expression to read from): IROpaqueExtent carries no data — the
-    // ExtentArrayRef on the loop binding tells codegen where to read the
-    // concrete extent from (typically the sub-array's own _extents).
-    //
-    // Should not normally reach codegen for direct rendering; the loop
-    // builder reads it indirectly via the binding's ExtentArrayRef path.
+    // Opaque-extent marker: an Extent determined by surrounding context
+    // rather than declared up front (e.g. kernel-parameter type
+    // `RaggedIdx<_>`, where the peeled param is bound to a sub-array whose
+    // `_extents[0]` carries the actual length). Unlike IRRaggedLookup it
+    // carries no data -- the loop binding's ExtentArrayRef tells codegen
+    // where to read the concrete extent from. Should not normally reach
+    // codegen directly; the loop builder reads it via ExtentArrayRef.
     | IROpaqueExtent
     | IRAssign of target: IRExpr * value: IRExpr
     | IRForRange of varId: IRId * lo: IRExpr * hi: IRExpr * body: IRExpr
     /// Runtime constraint guard, statement-positioned:
     /// `if (!(cond)) { blade_rt::panic("BL8001", message, file, line); }`.
     /// Synthesized (mutual-group joint checks, struct constraint checks);
-    /// value type is unit. The span carries the source provenance of the
-    /// guarded constraint (Stage 6 runtime traces); noSpan is allowed and the
-    /// panic emission degrades to a nullptr file / 0 line. NOTE: adding this
-    /// span to a single IRExpr case is safe (IRConstraintCheck is a
-    /// statement-positioned node, never compared in the structural `=`
-    /// fast paths that other IRExpr cases flow through).
+    /// value type is unit. The span carries source provenance for runtime
+    /// traces; noSpan degrades the panic to a nullptr file / 0 line. Safe to
+    /// add here: IRConstraintCheck is statement-positioned and never hits
+    /// the structural `=` fast paths other IRExpr cases flow through.
     | IRConstraintCheck of cond: IRExpr * message: string * span: Blade.Ast.Span
 
-/// Abstract callable in IR. The merged form of source-level functions
-/// and lambdas. Lives in the IRExpr mutual-recursion group because
-/// `IRCallable.Body : IRExpr` forms a cycle with IRExpr's variants.
+/// Abstract callable in IR: the merged form of source-level functions and
+/// lambdas. Lives in the IRExpr mutual-recursion group because
+/// `IRCallable.Body : IRExpr` cycles with IRExpr's variants.
 ///
-/// Field roles by source kind:
-///   - Id, Name: always populated. Lambdas get synthesized "__lambda_<id>".
-///   - Params, Body: the callable's interface and computation.
-///   - Captures: free vars from enclosing scope. Empty for source-level
-///     functions; populated for lambdas by lambda-lifting.
-///   - IsCommutative, CommGroups: kernel symmetry annotations.
-///     IsCommutative=false, CommGroups=[] when not annotated.
-///   - Parallelism (+ IsOmpParallel/IsCudaKernel/CudaBlockSize/IsMpiParallel):
-///     populated for both kinds — omp/cuda/mpi clauses on either a function's
-///     where-clause or a lambda's strategy list flow through identically.
-///   - IsStatic, IsArityPoly, ArityParam: function-only metadata;
-///     false/None for lambdas.
-///   - RetType: explicit return type. Functions get it from declaration;
-///     lambdas get it from inference at construction time.
+/// Field roles by source kind: Id/Name always populated (lambdas get
+/// synthesized "__lambda_<id>"); Captures empty for functions, populated for
+/// lambdas by lambda-lifting; IsCommutative/CommGroups default false/[] when
+/// unannotated; Parallelism fields populate identically for both kinds
+/// (omp/cuda/mpi clauses from a where-clause or a strategy list); IsStatic/
+/// IsArityPoly/ArityParam are function-only (false/None for lambdas);
+/// RetType comes from declaration for functions, inference for lambdas.
 ///
-/// Codegen (Stage 5) renders all callables as top-level C++ functions
-/// with signature (originalParams..., captures...). At call sites
-/// referencing a callable with non-empty Captures, a thin C++ lambda
-/// wrapper forwards the captures by reference, preserving the
-/// OCaml-style capture semantics users expect from lambdas.
+/// Codegen renders all callables as top-level C++ functions
+/// (originalParams..., captures...); call sites referencing a callable with
+/// non-empty Captures get a thin C++ lambda wrapper forwarding captures by
+/// reference, preserving OCaml-style capture semantics.
 and IRCallable = {
     Id: IRId
     Name: string
@@ -314,65 +244,52 @@ and IRCallable = {
     IsStatic: bool
     IsCommutative: bool
     CommGroups: int list list
-    // AntisymGroups: the positions a `where anticomm(...)` clause declared
-    // anti-invariant. These positions ALSO appear in CommGroups (the grouping
-    // and iteration license are identical to comm's — one joint simplex over
-    // the group), so every axis-grouping consumer needs no change; this list
-    // is the extra bit that says the simplex is STRICT: no diagonal, sign flip
-    // on a swapped read. Empty for every kernel that did not declare it, so
-    // the reynolds antisymmetrization path (which carries its flag on the
-    // IRReynolds wrapper instead) is untouched.
+    // AntisymGroups: positions a `where anticomm(...)` clause declared
+    // anti-invariant. Also appear in CommGroups (same grouping/iteration
+    // license as comm); this list is the extra bit saying the simplex is
+    // STRICT (no diagonal, sign flip on swap). Empty unless declared, so the
+    // reynolds antisymmetrization path (its own flag on IRReynolds) is
+    // untouched.
     AntisymGroups: int list list
-    // Parallelism: per-(param-index, dim-count) detail from an `omp(...)` clause.
-    // IsOmpParallel is the derived "this callable requested OpenMP" flag — the
-    // opt-in signal that drives loop parallelization (see buildLoopNestCodeGen).
-    // Kept as a bool alongside the detail list, mirroring IsCommutative/CommGroups.
+    // Per-(param-index, dim-count) detail from an `omp(...)` clause.
+    // IsOmpParallel is the derived "requested OpenMP" opt-in flag driving
+    // loop parallelization (buildLoopNestCodeGen).
     Parallelism: (int * int) list
     IsOmpParallel: bool
-    // IsCudaKernel is the analogous opt-in flag for the `cuda` strategy: when
-    // true, codegen emits a flat-launch __global__ kernel + host launch instead
-    // of a host loop nest (see genCudaKernel — added in a following increment).
-    // CudaBlockSize carries the launch block size (default 256). omp, cuda, and
-    // mpi are mutually exclusive today, so at most one of
-    // IsOmpParallel/IsCudaKernel/IsMpiParallel is true; all false = serial host
-    // loop (the default).
+    // Opt-in flag for the `cuda` strategy: true emits a flat-launch
+    // __global__ kernel + host launch instead of a host loop nest
+    // (genCudaKernel). CudaBlockSize is the launch block size (default 256).
+    // omp/cuda/mpi are mutually exclusive; all false means serial host loop.
     IsCudaKernel: bool
     CudaBlockSize: int
-    // IsMpiParallel is the opt-in flag for the `mpi` strategy: the kernel's
-    // iteration domain is decomposed across MPI ranks (SPMD; full output
-    // restored on all ranks by an Allgatherv after the loop). Emission is
-    // gated like cuda — inert unless mpiEmitMode is on (see genApplyCombinator).
+    // Opt-in flag for `mpi`: iteration domain decomposed across MPI ranks
+    // (SPMD; output restored via Allgatherv). Gated like cuda -- inert
+    // unless mpiEmitMode is on (genApplyCombinator).
     IsMpiParallel: bool
     IsArityPoly: bool
     ArityParam: string option
     Captures: CaptureInfo list
-    // Per-parameter SIGN parity of the body (KspOdd / KspEven / KspUnknown, in
-    // declaration order), the summary `deduceWreathTie`'s soundness gate
-    // consumes. Populated by the TypeCheck apply seam for kernel lambdas
-    // (including the eta wrappers over named functions, whose parities resolve
-    // through the callee's FuncSignParities summary) and carried through
-    // Lowering so codegen and the interpreter hand the tie rule the SAME
-    // values typecheck used. Empty ([]) for every non-kernel callable —
-    // consumers treat missing entries as KspUnknown.
+    // Per-parameter SIGN parity of the body (KspOdd/KspEven/KspUnknown, in
+    // declaration order), consumed by `deduceWreathTie`'s soundness gate.
+    // Populated by the TypeCheck apply seam (including eta wrappers, via the
+    // callee's FuncSignParities) and carried through Lowering so codegen and
+    // the interpreter see the same values. Empty for non-kernel callables --
+    // missing entries read as KspUnknown.
     SignParities: KernelSignParity list
 }
 
-/// IRFuncDef is a semantic-marker alias for IRCallable that names
-/// "top-level function in module.Functions" — distinct in intent
-/// from the codegen-internal synthetic callables and from let-bound
-/// aliases. The two type names refer to the same underlying record;
-/// usage sites pick whichever conveys intent.
+/// Semantic-marker alias for IRCallable naming "top-level function in
+/// module.Functions" -- distinct in intent from codegen-internal synthetic
+/// callables and let-bound aliases; same underlying record.
 and IRFuncDef = IRCallable
 
 and CaptureInfo = {
     Id: IRId
     Name: string
-    /// The capture's IR type. Lifted-lambda codegen (Stage 3c) extends
-    /// the C++ function signature with one parameter per capture, typed
-    /// from this field as a reference (`T&`) so mutation propagates and
-    /// the value stays alive via the wrapper's `[&]` capture at the use
-    /// site. Source-level functions have no captures, so this field is
-    /// irrelevant for them.
+    /// Lifted-lambda codegen extends the C++ signature with one parameter
+    /// per capture, typed as a reference (`T&`) so mutation propagates and
+    /// the value stays alive via the wrapper's `[&]` capture. Irrelevant for
+    /// source-level functions (no captures).
     Type: IRTypeG<IRExpr>
     IsMutable: bool
 }
@@ -422,7 +339,7 @@ and ApplyInfo = {
 /// reference; in the compose case the kernel slot of `<@>` instead
 /// holds the input arrays threaded through the composed-object chain.
 /// `Composition` is the chain itself (`IRComposeObj`, or an `IRVar`
-/// let-bound to one — codegen resolves the latter via
+/// let-bound to one -- codegen resolves the latter via
 /// `ctx.DeferredComputations`). `InputArrays` are the arrays the
 /// chain is applied to. Unlike `ApplyInfo`, no symmetry/triangulation
 /// metadata is carried: the composition's leaves carry their own.
@@ -473,7 +390,7 @@ and SparseKeysSource =
     | SkRuntime of keys: IRExpr
 
 
-// Concrete instantiations of the Types.fs generic family at IRExpr —
+// Concrete instantiations of the Types.fs generic family at IRExpr --
 // the prototype's extent representation. Everything downstream uses
 // these names; swapping the extent representation (the rewrite's
 // dedicated Extent DU) is a type-argument change here, nothing more.
@@ -484,12 +401,10 @@ type IdxRef = IdxRefG<IRExpr>
 type IRArrowSlot = IRArrowSlotG<IRExpr>
 type LoopType = LoopTypeG<IRExpr>
 
-// ----------------------------------------------------------------------------
 // OrbIdx (iterated-wreath) accessors. The level list rides the Extent slot as
 // an IROrbitClass marker (see that case), so every consumer reads it through
 // these three functions rather than pattern-matching the extent inline -- one
 // place to change if the carrier ever moves to a record field.
-// ----------------------------------------------------------------------------
 
 /// The (rank, isPlus) level list of a wreath class, OUTERMOST-LAST. `[]` for
 /// every non-wreath record, so `not (List.isEmpty (orbitLevelsOf ix))` is
@@ -499,7 +414,7 @@ let orbitLevelsOf (ix: IRIndexType) : (int * bool) list =
     | IROrbitClass (levels, _) -> levels
     | _ -> []
 
-/// The BASE extent (the §4 fold's M0) of a wreath class; the record's own
+/// The BASE extent (the section 4 fold's M0) of a wreath class; the record's own
 /// Extent for anything else, so extent-reading code that does not care about
 /// the class can go through here uniformly.
 let orbitBaseExtent (ix: IRIndexType) : IRExpr =
@@ -512,14 +427,10 @@ let ppOrbitLevels (levels: (int * bool) list) : string =
     "[" + (levels |> List.map (fun (r, plus) -> sprintf "(%d,%s)" r (if plus then "+" else "-"))
                   |> String.concat ", ") + "]"
 
-/// The ONE text for v1's hard refusal at the storage boundary. Every refusal
-/// site -- the typecheck gates, the allocator, the loop builder, the compact
-/// read/print paths, the providers -- calls this instead of spelling its own
-/// string, so the user sees the same sentence whichever seam their program
-/// reached first, and adding a seam is one call rather than a ninth paraphrase.
-///
-/// `where_` names the seam ("let binding 'R'", "reduce()", ...). It reads as a
-/// prefix, so pass a noun phrase, not a sentence.
+/// The ONE text for the hard refusal at the storage boundary: every refusal
+/// site (typecheck gates, allocator, loop builder, compact read/print,
+/// providers) calls this instead of spelling its own string. `where_` names
+/// the seam ("let binding 'R'", "reduce()", ...) and reads as a prefix.
 let orbitStorageUnsupported (where_: string) (levels: (int * bool) list) : string =
     sprintf "%s: OrbIdx<%s, n> is a declarable index class of depth %d, and a DEDUCED one can now be \
 allocated, written, printed, READ at an arbitrary tuple (the per-level canon fold, the accumulated \
@@ -535,31 +446,25 @@ exactly SymIdx<r, n>, OrbIdx<[(r,-)], n> is exactly AntisymIdx<r, n>, and OrbIdx
 Idx<n>."
             where_ (ppOrbitLevels levels) (List.length levels)
 
-/// Bridge to `Blade.OrbRank`'s own level spelling. The two representations are
-/// deliberately different types: OrbRank is a dependency-free module (it opens
-/// no Blade namespace so proofs/ scripts can `#load` it standalone), so it owns
-/// `OrbSign`, and the IR side keeps a bare bool it can put in a comparable
-/// tuple. This is the ONE conversion point.
+/// Bridge to `Blade.OrbRank`'s own level spelling: OrbRank is a
+/// dependency-free module (no Blade namespace, so proofs/scripts can `#load`
+/// it standalone) and owns `OrbSign`; the IR side keeps a bare bool. The ONE
+/// conversion point.
 let orbRankLevels (levels: (int * bool) list) : Blade.OrbRank.Level list =
     levels |> List.map (fun (r, plus) ->
         (r, (if plus then Blade.OrbRank.OPlus else Blade.OrbRank.OMinus)))
 
-/// §7.2's load-bearing normalization, in the IR's `(rank, isPlus)` spelling: a
-/// level with r = 1 is the trivial group S_1 and a no-op at EITHER sign, so it
-/// is dropped. `OrbRank.normalizeLevels` is the reference; this is the same
-/// filter over the other level representation (the ONE conversion point above
-/// exists precisely so the two spellings do not each grow their own rules).
+/// section 7.2's normalization: a level with r = 1 is the trivial group S_1,
+/// a no-op at EITHER sign, so it's dropped. Mirrors `OrbRank.normalizeLevels`
+/// over the IR's level representation (the ONE conversion point above keeps
+/// the two spellings from growing separate rules).
 let normalizeOrbitLevels (levels: (int * bool) list) : (int * bool) list =
     levels |> List.filter (fun (r, _) -> r <> 1)
 
 /// Which of the three record shapes a normalized level list takes. THE ONE
-/// normalization rule in the compiler: both producers of an OrbIdx class route
-/// through here --
-///   * the SURFACE type (`TypeCheck.orbitIndexRecord`, the `OrbIdx<...>`
-///     annotation), and
-///   * DEDUCTION (`deduceWreathTie`, a comm tie over a repeated compact input).
-/// A second copy of "when does depth collapse" is exactly the drift that would
-/// let an annotation and a deduction disagree about the same class.
+/// normalization rule: both producers of an OrbIdx class -- the SURFACE type
+/// (`TypeCheck.orbitIndexRecord`) and DEDUCTION (`deduceWreathTie`) -- route
+/// through here, so they cannot disagree about the same class.
 type OrbitNormalForm =
     /// `[]` -- the trivial class. The plain `Idx<n>` record.
     | OrbNfTrivial
@@ -574,28 +479,22 @@ let orbitNormalForm (levels: (int * bool) list) : OrbitNormalForm =
     | [ (r, s) ] -> OrbNfDepth1 (r, s)
     | ls -> OrbNfWreath ls
 
-/// Build the depth >= 2 `SymWreath` index record: Rank = the RAW AXIS COUNT
-/// (the product of the level ranks), the level list carried in the Extent slot
-/// as an `IROrbitClass` marker, `IxKOrbit` + the "__orbidx" sentinel Tag (the IR
-/// validator enforces their agreement).
+/// Build the depth >= 2 `SymWreath` index record: Rank = RAW AXIS COUNT
+/// (product of level ranks), level list in the Extent slot as an
+/// `IROrbitClass` marker, `IxKOrbit` + "__orbidx" sentinel Tag (validator
+/// enforces agreement). Shared by surface-type lowering and deduction so the
+/// two cannot build differently-shaped records for the same class; `levels`
+/// must already be normalized (a rank-1 level would miscount the Rank).
 ///
-/// Shared by the surface-type lowering and by deduction so the two cannot build
-/// differently-shaped records for the same class. `levels` must already be
-/// normalized (the caller matched `orbitNormalForm`); passing a rank-1 level
-/// through here would produce a record whose Rank counts an axis the class does
-/// not act on.
-///
-/// The axis fold is bounded before it lands in the record's `int` Rank field:
-/// Rank is a loop count and a subscript arity all over the compiler, and a
-/// wrapped-negative Rank would be a nonsense type rather than an error. The
-/// fold SATURATES at the cap rather than running to completion, so the check
-/// cannot itself overflow.
+/// The axis fold SATURATES at a 65536 cap rather than running to completion
+/// (Rank is a loop count/subscript arity all over the compiler; a
+/// wrapped-negative Rank would be a nonsense type, not an error).
 let mkWreathIndexRecord (id: IRId) (levels: (int * bool) list) (baseExtent: IRExpr) : IRIndexType =
     let axes64 = levels |> List.fold (fun a (r, _) -> if a > 65536L then a else a * int64 r) 1L
     if axes64 > 65536L then
         failwithf "OrbIdx%s: the class acts on more than 65536 raw axes (the product of its level ranks), which is \
 past what this compiler will build an index record for. An iterated-wreath class's cell count leaves int64 well before \
-its rank does (docs/plan-orbit-index-types.md §7.2), so a class this wide is not storable at any extent."
+its rank does (docs/plan-orbit-index-types.md section 7.2), so a class this wide is not storable at any extent."
                   (ppOrbitLevels levels)
     { Id = id; Rank = int axes64; Extent = IROrbitClass (levels, baseExtent)
       Symmetry = SymWreath; Tag = Some "__orbidx"; IxKind = IxKOrbit
@@ -613,20 +512,17 @@ let placementOf (ix: IRIndexType) : PlacementClass =
     match ix.Extent with
     | IRCompoundMask _ -> PlaceTabulated
     | IRSparseKeys _ -> PlaceTabulated
-    // A residual (partially-indexed) compound: the residual RANK decides
-    // placement. Rank 1 means exactly one free coordinate remains at the pinned
-    // prefix -- a single contiguous window [lo,hi) of present cells, iterated as
-    // an ordinary dense 1-D loop (no hash table). Rank >= 2 is still a masked
-    // product space over the remaining axes and needs the tabulated (materialized
-    // child index) path. (Option X: one carrier, placement by residual rank.)
+    // A residual (partially-indexed) compound: Rank 1 means one free
+    // coordinate at the pinned prefix -- a contiguous window [lo,hi),
+    // iterated as an ordinary dense 1-D loop. Rank >= 2 is still a masked
+    // product space needing the tabulated (materialized child index) path.
     | IRCompoundProject _ -> if ix.Rank <= 1 then placementClassOf ix.Symmetry else PlaceTabulated
     | _ -> placementClassOf ix.Symmetry
 
-/// Compute the promoted element type for two numeric types per §3.4.2.
+/// Compute the promoted element type for two numeric types per section 3.4.2.
 /// Returns None if the types are incompatible for promotion. Index nominal
-/// tags are no longer represented at the ElemType level (ETIndexRef was
-/// retired in the Option C migration); their strict unification happens
-/// at the IRType level via IRTIdxTagged in `unify`.
+/// tags are not represented at the ElemType level; their strict unification
+/// happens at the IRType level via IRTIdxTagged in `unify`.
 let promoteElemType (a: ElemType) (b: ElemType) : ElemType option =
     if a = b then Some a
     else
@@ -656,19 +552,14 @@ let (|LVVar|LVIndex|LVField|LVOther|) = function
     | IRFieldAccess (obj, field) -> LVField (obj, field)
     | e                          -> LVOther e
 
-// ============================================================================
-// Element-type active patterns
-// ============================================================================
+// Element-type active patterns.
 //
 // These patterns project an IRType into the role of "array element type."
-// `IRArrayType.ElemType` is `IRType` (post-Phase B2), so consumers can be
-// rewritten to use feature-scoped patterns rather than ad-hoc match arms.
-//
-// Design philosophy: each pattern represents one "concern" (primitives,
-// inference variables, named types, function values, etc.). A site that
-// only handles primitives uses `PrimElem` or `AnyPrimElem`; the pattern
-// fails to match for any other case, so silent fallthroughs are caught
-// at compile time rather than producing wrong-typed values.
+// Each pattern represents one concern (primitives, inference variables,
+// named types, function values); a site that only handles primitives uses
+// `PrimElem` or `AnyPrimElem` and fails to match otherwise, so silent
+// fallthroughs are caught at compile time rather than producing wrong-typed
+// values.
 
 /// Strict primitive element. Doesn't match through unit annotation.
 let (|PrimElem|_|) (ty: IRType) =
@@ -679,7 +570,7 @@ let (|PrimElem|_|) (ty: IRType) =
 /// Primitive element, optionally unit-annotated or index-tagged. Workhorse
 /// for read sites that just want the primitive and don't care whether
 /// wrappers are attached. Matches through both IRTUnitAnnotated (physical
-/// units) and IRTIdxTagged (nominal index tags) — both preserve their
+/// units) and IRTIdxTagged (nominal index tags) -- both preserve their
 /// inner type and erase at codegen.
 let (|AnyPrimElem|_|) (ty: IRType) =
     match ty with
@@ -695,36 +586,28 @@ let (|UnitPrimElem|_|) (ty: IRType) =
     | IRTUnitAnnotated (IRTScalar et, units) -> Some (et, units)
     | _ -> None
 
-/// Inference variable in element position. After Phase B2, this becomes
-/// the natural representation for "kernel param's elem type, deferred
-/// until <@> unifies it with the source array's per-row type."
+/// Inference variable in element position: the natural representation for
+/// "kernel param's elem type, deferred until <@> unifies it with the
+/// source array's per-row type."
 let (|InferElem|_|) (ty: IRType) =
     match ty with
     | IRTInfer id -> Some id
     | _ -> None
 
-/// Named (struct or sum) elem type. Future Phase D enables codegen support
-/// for arrays of user-defined types; this pattern is the dispatch site.
+/// Named (struct or sum) elem type: the dispatch site for eventual codegen
+/// support of arrays of user-defined types.
 let (|NamedElem|_|) (ty: IRType) =
     match ty with
     | IRTNamed name -> Some name
     | _ -> None
 
-/// Function-valued elem type. Reflects the array-function duality: in
-/// Blade, an Array<T like Idx<n>> is conceptually a function `Idx<n> -> T`,
-/// so functions in elem position (arrays of functions) are structurally
-/// Function-shaped type. Matches `IRTArrow` when every slot is `SVal`
-/// (i.e., a pure function with no storage-backed slots), and returns
-/// the canonical `(args, ret)` view that consumers want.
-///
-/// Note: matches the empty-slot case too — `IRTArrow ([], ret, None)`
-/// is a nullary function (produced by `mkFuncArrow []`). This is the
-/// symmetric counterpart to ArrayElem's empty-slot rejection: only
-/// FuncElem accepts the empty-arrow shape.
-///
-/// The `identity` field on IRTArrow is ignored here — functions don't
-/// carry array identity; producers of function arrows always set it
-/// to None.
+/// Function-valued elem type: reflects the array-function duality
+/// (Array<T like Idx<n>> is conceptually `Idx<n> -> T`). Matches `IRTArrow`
+/// when every slot is `SVal` (pure function, no storage-backed slots),
+/// returning the `(args, ret)` view. Matches the empty-slot case too
+/// (`IRTArrow ([], ret, None)`, a nullary function) -- the symmetric
+/// counterpart to ArrayElem's empty-slot rejection. `identity` is ignored:
+/// functions don't carry array identity.
 let (|FuncElem|_|) (ty: IRType) =
     match ty with
     | IRTArrow (slots, ret, _) when slots |> List.forall (function SVal _ -> true | _ -> false) ->
@@ -734,27 +617,22 @@ let (|FuncElem|_|) (ty: IRType) =
 
 /// Smart constructor: build an arrow-shaped type from a parameter type
 /// list and return type. Produces an `IRTArrow` with all-`SVal` slots
-/// and no identity — the unified-IR function form.
+/// and no identity -- the unified-IR function form.
 let mkFuncArrow (args: IRType list) (ret: IRType) : IRType =
     IRTArrow (args |> List.map SVal, ret, None)
 
-/// Validate the shape constraints on an IRTArrow's slot list and result.
-///
-/// Constraints (per the unified-arrow design):
-///   1. If any slot is SIdxVirt, all slots from that point onward must
-///      also be SIdxVirt. Equivalently: no SIdx or SVal may appear
-///      after the first SIdxVirt.
-///   2. If any slot is SIdxVirt, the result type must NOT be IRTArrow —
-///      virtual arrays' elements must be simple values.
-///
-/// Returns the empty list if the arrow is well-formed; otherwise a
-/// list of human-readable error strings.
+/// Validate the shape constraints on an IRTArrow's slot list and result:
+///   1. If any slot is SIdxVirt, all slots from that point on must be too
+///      (no SIdx/SVal after the first SIdxVirt).
+///   2. If any slot is SIdxVirt, the result must NOT be IRTArrow (virtual
+///      arrays' elements must be simple values).
+/// Returns [] if well-formed, else human-readable error strings.
 let rec validateArrowShape (slots: IRArrowSlot list) (result: IRType) : string list =
     let errs = ResizeArray<string>()
     let firstVirt =
         slots |> List.tryFindIndex (function SIdxVirt _ -> true | _ -> false)
     match firstVirt with
-    | None -> ()  // No virtual slots — no constraint
+    | None -> ()  // No virtual slots -- no constraint
     | Some k ->
         // Constraint 1: all slots at or after k must be SIdxVirt
         slots
@@ -773,29 +651,17 @@ let rec validateArrowShape (slots: IRArrowSlot list) (result: IRType) : string l
         | _ -> ()
     errs |> List.ofSeq
 
-/// Array-shaped type. Matches `IRTArrow` when slots are *uniformly* either
-/// all `SIdx` (stored) or all `SIdxVirt` (virtual). Mixed-slot arrows
-/// (some `SIdx` + some `SIdxVirt`, or any `SVal`) do NOT match — they
-/// have no IRArrayType-equivalent encoding.
-///
-/// Returns an `IRArrayType` record as a view of the arrow's array shape;
-/// the record exists primarily as a convenient destructuring target with
-/// `.ElemType`, `.IndexTypes`, `.IsVirtual`, `.Identity` accessors. After
-/// Segment 5, `IRArrayType` is a view-only type (no DU constructor wraps it).
-///
-/// `IsVirtual` is reconstructed from slot kinds:
-///   - all SIdx → IsVirtual = false
-///   - all SIdxVirt → IsVirtual = true
-/// The reconstruction allocates a fresh record on each match; tolerable
-/// for typecheck/codegen frequencies.
-///
-/// Empty-slot arrows do NOT match — they represent nullary functions
-/// (per `mkFuncArrow []`). Rank-0 arrays don't exist as a type form
-/// after Segment 3d: `mkArrayLike` collapses rank-0 IRArrayType inputs
-/// to their element type at the producer side.
+/// Array-shaped type: matches `IRTArrow` when slots are uniformly all
+/// `SIdx` (stored) or all `SIdxVirt` (virtual); mixed slots or any `SVal`
+/// do NOT match. Returns an `IRArrayType` view (`.ElemType`, `.IndexTypes`,
+/// `.IsVirtual`, `.Identity`) reconstructed fresh on each match --
+/// `IRArrayType` is view-only, no DU constructor wraps it. Empty-slot
+/// arrows do NOT match (nullary functions, per `mkFuncArrow []`); rank-0
+/// arrays don't exist as a type form (`mkArrayLike` collapses them to
+/// their element type at the producer side).
 let (|ArrayElem|_|) (ty: IRType) =
     match ty with
-    | IRTArrow ([], _, _) -> None  // nullary function, not an array — see docstring
+    | IRTArrow ([], _, _) -> None  // nullary function, not an array -- see docstring
     | IRTArrow (slots, result, identity) ->
         let allStored = slots |> List.forall (function SIdx _ -> true | _ -> false)
         let allVirtual = slots |> List.forall (function SIdxVirt _ -> true | _ -> false)
@@ -804,7 +670,7 @@ let (|ArrayElem|_|) (ty: IRType) =
                 slots |> List.map (function
                     | SIdx i -> i
                     | SIdxVirt i -> i
-                    | _ -> failwith "unreachable — checked by guards above")
+                    | _ -> failwith "unreachable -- checked by guards above")
             Some {
                 ElemType = result
                 IndexTypes = indexTypes
@@ -820,7 +686,7 @@ let (|ArrayElem|_|) (ty: IRType) =
 /// storage and want to reject virtual sources at the type-match level.
 let (|StoredArrayElem|_|) (ty: IRType) =
     match ty with
-    | IRTArrow ([], _, _) -> None  // nullary function — see ArrayElem
+    | IRTArrow ([], _, _) -> None  // nullary function -- see ArrayElem
     | IRTArrow (slots, result, identity)
         when slots |> List.forall (function SIdx _ -> true | _ -> false) ->
         let indexTypes = slots |> List.map (function SIdx i -> i | _ -> failwith "unreachable")
@@ -837,7 +703,7 @@ let (|StoredArrayElem|_|) (ty: IRType) =
 /// dispatch.
 let (|VirtualArrayElem|_|) (ty: IRType) =
     match ty with
-    | IRTArrow ([], _, _) -> None  // nullary function — see ArrayElem
+    | IRTArrow ([], _, _) -> None  // nullary function -- see ArrayElem
     | IRTArrow (slots, result, _identity)
         when slots |> List.forall (function SIdxVirt _ -> true | _ -> false) ->
         let indexTypes = slots |> List.map (function SIdxVirt i -> i | _ -> failwith "unreachable")
@@ -855,27 +721,18 @@ let (|VirtualArrayElem|_|) (ty: IRType) =
 let mkArrayArrow (indexTypes: IRIndexType list) (elemType: IRType) (identity: ArrayIdentity option) : IRType =
     IRTArrow (indexTypes |> List.map SIdx, elemType, identity)
 
-/// Smart constructor for a virtual array arrow. Identity is forced to
-/// `None` (virtual arrays don't materialize, so there's no handle to
-/// track).
+/// Smart constructor for a virtual array arrow. Identity is forced to `None`
+/// (virtual arrays don't materialize, so there's no handle to track).
 ///
-/// **Gate**: invokes `validateArrowShape` on the constructed slot/result
-/// pair and raises if any violations are reported. The most common
-/// trigger is passing an `IRTArrow` as `elemType` — virtual arrays must
-/// hold simple values, not nested arrays or function closures.
+/// Gate: invokes `validateArrowShape` and raises on any violation -- most
+/// commonly an `IRTArrow` passed as `elemType` (virtual arrays must hold
+/// simple values). This is a compiler-invariant check, not a user-facing
+/// diagnostic; user-facing rejection (e.g. `reverse` of an array-of-arrays)
+/// belongs earlier, in TypeCheck. A raise here means an invalid shape got
+/// through upstream -- treat as a bug report on that path.
 ///
-/// This is a compiler-invariant check, not a user-facing diagnostic.
-/// User-facing rejection of invalid virtual-array shapes (e.g.,
-/// `reverse` of an array-of-arrays) should happen earlier, in
-/// TypeCheck, before reaching this constructor. If this raises, the
-/// upstream type-check or lowering let an invalid shape through and
-/// the error message should be treated as a bug report on that path.
-///
-/// `mkArrayArrow` (all-SIdx) and `mkFuncArrow` (all-SVal) don't gate
-/// because their slot-construction is structurally constraint-safe:
-/// without any `SIdxVirt`, neither constraint can fire. If those
-/// constructors are ever changed to admit mixed slots, the gate should
-/// move here too.
+/// `mkArrayArrow`/`mkFuncArrow` don't gate: without any `SIdxVirt` neither
+/// constraint can fire. If those ever admit mixed slots, move the gate here too.
 let mkVirtualArrayArrow (indexTypes: IRIndexType list) (elemType: IRType) : IRType =
     let slots = indexTypes |> List.map SIdxVirt
     match validateArrowShape slots elemType with
@@ -906,14 +763,13 @@ let mkArrayLike (arr: IRArrayType) : IRType =
     else
         mkArrayArrow arr.IndexTypes arr.ElemType arr.Identity
 
-/// The κ_k component array type of a Dist<order, elem, axes> (typed dist
-/// tower, ppl/NOTES.md). κ_1 is the mean tensor over the variable axes
-/// as-declared; κ_k for k >= 2 is the order-k joint cumulant, symmetric
+/// The kappa_k component array type of a Dist<order, elem, axes> (typed dist
+/// tower, ppl/NOTES.md). kappa_1 is the mean tensor over the variable axes
+/// as-declared; kappa_k for k >= 2 is the order-k joint cumulant, symmetric-
 /// packed over the FUSED variable-axis space: one SymIdx record of Rank k
-/// whose Extent is the product of the axes' extents (the base dimension of
-/// the fused space, matching what the elaborated method_for(A ×k) comm
-/// tower produces). Used by the checker to type cumulant(d, k) projections
-/// and by Zonk to ERASE IRTDist into the component tuple.
+/// whose Extent is the product of the axes' extents. Used by the checker to
+/// type cumulant(d, k) projections and by Zonk to ERASE IRTDist into the
+/// component tuple.
 let distComponentType (k: int) (elem: IRType) (axes: IRIndexType list) : IRType =
     if k = 1 then
         mkArrayArrow axes elem None
@@ -938,33 +794,26 @@ let distComponentType (k: int) (elem: IRType) (axes: IRIndexType list) : IRType 
         }
         mkArrayArrow [symIdx] elem None
 
-/// All component types κ_1 .. κ_order of a Dist — the tuple a Dist value
-/// erases to after type checking.
+/// All component types kappa_1 .. kappa_order of a Dist -- the tuple a Dist
+/// value erases to after type checking.
 let distComponentTypes (order: int) (elem: IRType) (axes: IRIndexType list) : IRType list =
     [ for k in 1 .. order -> distComponentType k elem axes ]
 
-/// The view transform behind `load_compound(var, mask)`: replace a variable's
-/// dimensions with a single CompoundIdx whose presence mask is `maskIR`. This
-/// is a pure type transform -- no data is read; materialization happens later
-/// at `|> read`. The mask is an INPUT (constructed outside Blade, e.g. by
-/// unlinearizing a CompoundIdx and writing NaN-filled gaps), so there is no
-/// is_nan synthesis here and the Blade core stays NaN-less.
+/// The view transform behind `load_compound(var, mask)`: replace a
+/// variable's dimensions with a single CompoundIdx whose presence mask is
+/// `maskIR`. Pure type transform -- no data read; materialization happens
+/// at `|> read`. The mask is an INPUT array, so no is_nan synthesis (Blade
+/// core stays NaN-less).
 ///
-/// The mask covers a LEADING PREFIX of the variable's dimensions, in order,
-/// matched by index-type Id (the provider shares Ids across variables within a
-/// file). The masked prefix collapses into one CompoundIdx (Rank = the mask's
-/// rank); any remaining variable dimensions are kept as regular trailing index
-/// slots -- the formalism's `Array<T like CompoundIdx<mask>, Idx<...>>` shape
-/// (4.5). All-dims coverage is the prefix case with an empty trailing, giving a
-/// scalar `Compound<T, RANK>`. The mask may be ANY integer array: NetCDF has no
-/// boolean type, and a flag/mask variable is stored as NC_BYTE/NC_INT and read
-/// back as Int. No special bool type is required, because the load_compound
-/// call is itself the signal that this variable is a mask -- the int ->
-/// std::vector<bool> conversion (nonzero = present) is triggered by
-/// load_compound at materialization, where compound_index_t needs it; a plain
-/// read of the same variable leaves it as Int. The trailing dims are assumed
-/// regular here; reordered / non-prefix masks, non-integer masks, and a ragged
-/// trailing dim (variable per-cell trailing size) are rejected or deferred.
+/// The mask covers a LEADING PREFIX of the variable's dims, matched by
+/// index-type Id; the masked prefix collapses into one CompoundIdx
+/// (Rank = mask rank), the remainder stays regular trailing slots
+/// (`Array<T like CompoundIdx<mask>, Idx<...>>`, formalism 4.5; all-dims
+/// coverage gives scalar `Compound<T, RANK>`). The mask is ANY integer
+/// array (NetCDF has no bool type; flag vars are NC_BYTE/NC_INT, nonzero =
+/// present) -- `load_compound` is itself the signal that triggers the int ->
+/// std::vector<bool> conversion at materialization. Reordered/non-prefix/
+/// non-integer masks and ragged trailing dims are rejected or deferred.
 let compoundViewType (freshId: IRId) (varArr: IRArrayType) (maskArr: IRArrayType) (maskIR: IRExpr) : Result<IRType, string> =
     let isMaskElem =
         match maskArr.ElemType with
@@ -976,28 +825,16 @@ let compoundViewType (freshId: IRId) (varArr: IRArrayType) (maskArr: IRArrayType
         let varIdxs = varArr.IndexTypes
         let maskIdxs = maskArr.IndexTypes
         let maskRank = List.length maskIdxs
-        // The mask must cover a LEADING prefix of the variable's dimensions, in
-        // order. Remaining dims become regular trailing slots. All-dims coverage
-        // is the maskRank = total case (empty trailing -> scalar Compound).
-        //
-        // Two dimensions "correspond" when they share INDEX-SPACE IDENTITY, not
-        // when they merely have equal extents. This mirrors IR.indexSpacesMatch
-        // (defined later in this file, over IndexSpaceInfo; replicated inline here
-        // because compoundViewType precedes it and needs the IRIndexType-level
-        // check plus the shared-Id fast path). Identity holds when:
-        //   (a) same IRIndexType Id -- the provider shares one index-type
-        //       instance across a file's variables (dimMap), so a mask variable
-        //       and a data variable over the same NetCDF dimension match here; or
-        //   (b) same non-anonymous Tag -- a user-declared NAMED index type
-        //       (`type LatIdx = Idx<n>`) carries Tag = Some "LatIdx", so two
-        //       source arrays annotated over the same named type match by name
-        //       even though each reference gets a fresh Id; or
-        //   (c) both anonymous but sharing a named-reference extent (IRVar id /
-        //       IRParam name) -- same rule as indexSpacesMatch's None/None arm.
-        // Deliberately does NOT match bare literal-extent equality: two anonymous
-        // same-length arrays do not share an index space (formalism 14.6). This is
-        // the user's contract -- they establish shared identity by NAMING the
-        // index types (or via a provider); coincidental shapes are not enough.
+        // The mask must cover a LEADING prefix, in order; remaining dims are
+        // regular trailing slots (maskRank = total -> empty trailing, scalar
+        // Compound). Two dims "correspond" via INDEX-SPACE IDENTITY, not
+        // equal extents (mirrors IR.indexSpacesMatch, replicated inline since
+        // this precedes it): same Id (provider shares one index-type
+        // instance per file), OR same non-anonymous Tag (a NAMED index type
+        // matches across fresh Ids), OR both anonymous sharing a named-
+        // reference extent (IRVar id / IRParam name). Bare literal-extent
+        // equality does NOT match (formalism 14.6) -- shared identity must
+        // be established by NAMING the index types.
         let dimsMatch (d: IRIndexType) (m: IRIndexType) : bool =
             if d.Id = m.Id then true
             else
@@ -1030,30 +867,20 @@ let compoundViewType (freshId: IRId) (varArr: IRArrayType) (maskArr: IRArrayType
             let trailing = varArr.IndexTypes |> List.skip maskRank
             Ok (mkArrayArrow (compoundIdx :: trailing) varArr.ElemType varArr.Identity)
 
-// ============================================================================
-// Type-pattern matching (concrete + abstract) — shared by the type-structure
-// test harness and (eventually) the language server's "type of expression"
-// queries and surface type-ascription checks.
-// ============================================================================
+// Type-pattern matching (concrete + abstract) -- shared by the type-structure
+// test harness and the language server's "type of expression" queries.
 //
-// `matchesTypePattern pattern actual` decides whether `actual` is an INSTANCE
-// of `pattern`. The pattern is the asserted/expected type; it may be CONCRETE
-// (fully specified — then this is strict structural equality on the dimensions
-// that define a type's identity) or ABSTRACT (containing holes that match any
-// concrete filling). This is deliberately NOT `unify`:
-//   - `unify` is symmetric and treats SymNone as compatible with any symmetry
-//     (correct for inference, wrong for an assertion — it would accept a plain
-//     Idx where AntisymIdx<2> is asserted). Here the pattern's symmetry/arity
-//     must match EXACTLY unless that position is a hole.
-//   - raw structural `=` is too strict: it compares extents, inference-var ids,
-//     and synthetic `__` tags, none of which are part of a type's identity.
+// `matchesTypePattern pattern actual` decides whether `actual` is an
+// INSTANCE of `pattern` (CONCRETE = strict structural equality on identity
+// dimensions; ABSTRACT = holes matching any filling). Deliberately NOT
+// `unify` (symmetric, treats SymNone as compatible with any symmetry --
+// wrong for an assertion) and NOT raw `=` (too strict: compares extents/
+// inference ids/synthetic tags, none of which are type identity).
 //
-// Holes in the PATTERN (the abstract positions, each matching anything):
-//   - IRTInfer _            : a whole-type hole (element type, etc.)
-//   - IRTNat None           : an abstract type-level nat (extent placeholder)
-//   - index Extent of (IRTInfer _ / IRLit-less)  : abstract extent — IGNORED
-//     for matching regardless (extents are runtime values, never type identity)
-// Everything else in the pattern is matched concretely against `actual`.
+// Holes in the PATTERN: `IRTInfer _` (whole-type hole), `IRTNat None`
+// (abstract type-level nat), an abstract index Extent (always ignored --
+// extents are runtime values, never type identity). Everything else in the
+// pattern matches concretely.
 let rec matchesTypePattern (pattern: IRType) (actual: IRType) : bool =
     match pattern, actual with
     // Whole-type hole in the pattern matches anything.
@@ -1098,34 +925,22 @@ and matchesIndexPattern (p: IRIndexType) (a: IRIndexType) : bool =
 
 //
 // The IR admits two definitionally-equivalent encodings of the same type
-// (formalism §5.2):
-//
-//   Nested (uniform per arrow):
-//     IRTArrow ([SIdx I; SIdx J],
-//               IRTArrow ([SVal P], R, None),
-//               Some id)
-//
-//   Flat (mixed slots in one arrow):
-//     IRTArrow ([SIdx I; SIdx J; SVal P], R, Some id)
-//
-// Producers currently emit nested forms exclusively, so this normalizer is a
-// no-op on the existing producer output. Its value is:
-//   1. Defining a canonical form so type equivalence is decidable by
-//      structural equality after normalization.
-//   2. Future-proofing for any code path that produces mixed-slot arrows
-//      (e.g., a future B-flat migration where flat IS canonical).
-//   3. Making the formalism's §5.2 identity an algorithm rather than an
-//      external proof obligation.
+// (formalism section 5.2): Nested (IRTArrow ([SIdx I; SIdx J], IRTArrow
+// ([SVal P], R, None), Some id)) vs Flat (IRTArrow ([SIdx I; SIdx J; SVal P],
+// R, Some id)). Producers emit nested forms exclusively, so this normalizer
+// is currently a no-op on producer output; its value is a canonical form for
+// decidable type equivalence, future-proofing for any mixed-slot producer,
+// and making the section 5.2 identity an algorithm rather than an external
+// proof obligation.
 //
 // `NormalizeMode` is a parameter so the canonical direction is a single
-// choice-point rather than scattered convention. `ToFlat` is the eventual
-// B-flat direction; currently stubbed.
+// choice-point. `ToFlat` is the eventual B-flat direction; currently stubbed.
 
 /// Direction of canonical-form normalization.
 ///   - `ToNested`: split mixed-slot arrows at slot-kind boundaries into
 ///     nested uniform-kind arrows. Currently the committed canonical form.
 ///   - `ToFlat`: merge nested uniform-kind arrows into a single mixed-slot
-///     arrow. Not yet implemented — reserved for future B-flat migration.
+///     arrow. Not yet implemented -- reserved for future B-flat migration.
 type NormalizeMode =
     | ToNested
     | ToFlat
@@ -1165,19 +980,17 @@ let private groupConsecutiveByKind (slots: IRArrowSlot list) : IRArrowSlot list 
             | _ -> loop [x] (List.rev current :: acc) xs
     loop [] [] slots
 
-/// Normalize an IRType to the canonical form selected by `mode`. The
-/// transformation walks every IRType subterm; for `IRTArrow` it splits
-/// mixed-slot arrows at slot-kind boundaries (ToNested) into a chain
-/// of nested uniform-kind arrows.
+/// Normalize an IRType to the canonical form selected by `mode`; walks every
+/// IRType subterm, splitting mixed-slot `IRTArrow`s at slot-kind boundaries
+/// (ToNested) into a chain of nested uniform-kind arrows.
 ///
-/// Identity propagation rule (ToNested split): the outermost split
-/// sub-arrow inherits the original identity. All inner sub-arrows get
-/// `None`. Rationale: identity tracks a stored-array handle that exists
-/// at the start of the program; inner sub-arrows in a split chain are
+/// Identity propagation (ToNested split): the outermost split sub-arrow
+/// inherits the original identity, inner sub-arrows get `None` -- identity
+/// tracks a stored-array handle from program start, and inner sub-arrows are
 /// either function residuals (no identity) or function-returned arrays
-/// (fresh identity not known at type level).
+/// (identity unknown at type level).
 ///
-/// `ToFlat` is not yet implemented and raises `notImplemented`.
+/// `ToFlat` is not yet implemented and raises.
 let rec normalize (mode: NormalizeMode) (ty: IRType) : IRType =
     match mode with
     | ToNested -> normalizeToNested ty
@@ -1188,7 +1001,7 @@ and normalizeToNested (ty: IRType) : IRType =
     | IRTArrow (slots, result, idOpt) ->
         // Recurse first: normalize result, and any IRType inside SVal slots.
         // Index types (SIdx, SIdxVirt) carry IRIndexType, which doesn't
-        // contain IRType members — opaque under this walker.
+        // contain IRType members -- opaque under this walker.
         let normResult = normalizeToNested result
         let normSlots =
             slots |> List.map (fun s ->
@@ -1200,7 +1013,7 @@ and normalizeToNested (ty: IRType) : IRType =
             // Already uniform; rebuild with normalized sub-parts.
             IRTArrow (normSlots, normResult, idOpt)
         else
-            // Mixed slots — split at kind boundaries into nested arrows.
+            // Mixed slots -- split at kind boundaries into nested arrows.
             let groups = groupConsecutiveByKind normSlots
             match groups with
             | [] ->
@@ -1233,10 +1046,10 @@ and normalizeToNested (ty: IRType) : IRType =
     | IRTUnitAnnotated (inner, units) ->
         IRTUnitAnnotated (normalizeToNested inner, units)
     | IRTDist (order, elem, axes) ->
-        // Axes are IRIndexTypes (no IRType members) — opaque under this walker.
+        // Axes are IRIndexTypes (no IRType members) -- opaque under this walker.
         IRTDist (order, normalizeToNested elem, axes)
 
-    // Leaf types — no IRType subterms.
+    // Leaf types -- no IRType subterms.
     | IRTScalar _
     | IRTUnit
     | IRTNat _
@@ -1245,24 +1058,19 @@ and normalizeToNested (ty: IRType) : IRType =
     | IRTGroupKeys _ -> ty
 
 /// Structural equivalence on IRTypes, modulo the canonical (B-nested)
-/// normalization. Returns `true` iff `t1` and `t2` normalize to the
-/// same structural form under `normalize ToNested`.
+/// normalization: `true` iff `t1` and `t2` normalize to the same form under
+/// `normalize ToNested`.
 ///
-/// What this currently bridges (§5.3 mixed-slot identity):
-///   - flat mixed-slot arrows and their split nested forms, e.g.
-///     `IRTArrow ([SIdx I, SVal A], R, _)` ≡
-///     `IRTArrow ([SIdx I], IRTArrow ([SVal A], R, _), _)`.
+/// Bridges section 5.3 mixed-slot identity (flat mixed-slot arrows and their
+/// split nested forms, e.g. `IRTArrow ([SIdx I, SVal A], R, _)` ==
+/// `IRTArrow ([SIdx I], IRTArrow ([SVal A], R, _), _)`), but NOT section 5.2
+/// array identity: `Array<T like I, J>` and `Array<Array<T like J> like I>`
+/// are NOT equivalent here (ToNested only splits at slot-kind boundaries;
+/// uniform-kind multi-slot is already canonical). That collapse becomes
+/// available once `ToFlat` is implemented (B-flat migration).
 ///
-/// What this does NOT currently bridge (§5.2 array identity — deferred):
-///   - flat uniform-kind arrays and their nested counterparts, e.g.
-///     `Array<T like I, J>` and `Array<Array<T like J> like I>` are NOT
-///     equivalent here. `ToNested` only splits at slot-kind boundaries;
-///     uniform-kind multi-slot is the canonical form for uniform input.
-///     The §5.2 collapse becomes available when `ToFlat` is implemented
-///     (B-flat migration).
-///
-/// It does NOT perform alpha-renaming on IRTInfer ids — those are
-/// globally unique unification handles, not bound variables.
+/// Does NOT alpha-rename IRTInfer ids -- those are globally unique
+/// unification handles, not bound variables.
 let irTypeEquiv (t1: IRType) (t2: IRType) : bool =
     normalize ToNested t1 = normalize ToNested t2
 
@@ -1273,21 +1081,15 @@ let (|TupleElem|_|) (ty: IRType) =
     | IRTTuple ts -> Some ts
     | _ -> None
 
-/// Pre-specialization parameter-pack type (`Poly<T^r>`). IRTPoly carries
-/// a base type and an arity variable; `specializeFunction` expands it
-/// into `r` individual parameters of the base type at compile time. So
-/// a Poly is semantically a tuple of base types, not a container — it
-/// has no value-level representation outside the function-parameter
-/// position where specialization handles it.
+/// Pre-specialization parameter-pack type (`Poly<T^r>`): a base type + arity
+/// variable that `specializeFunction` expands into `r` individual params at
+/// compile time. Semantically a tuple of base types, not a container -- no
+/// value-level representation outside the function-parameter position.
 ///
-/// Consequently, `Poly` in element position (`Array<Poly<T^k> like ...>`)
-/// has unclear semantics: parameter packs are resolved at specialization
-/// time, but array elements are accessed at runtime. Sites that match
-/// `PolyElem` should emit an explicit "not implemented" error rather
-/// than silently doing the wrong thing.
-///
-/// The future direction (if/when Poly elements get coherent semantics)
-/// is likely to desugar to nested arrays, sharing the codepath with Q3.
+/// `Poly` in element position (`Array<Poly<T^k> like ...>`) has unclear
+/// semantics (packs resolve at specialization time, array elements at
+/// runtime); sites matching `PolyElem` should emit an explicit "not
+/// implemented" error rather than silently doing the wrong thing.
 let (|PolyElem|_|) (ty: IRType) =
     match ty with
     | IRTPoly (inner, var) -> Some (inner, var)
@@ -1319,7 +1121,7 @@ let getUnits (ty: IRType) : UnitSig option =
     | IRTUnitAnnotated (_, units) -> Some units
     | _ -> None
 
-/// Flatten nested tuple types: ((α, β), γ) → (α, β, γ)
+/// Flatten nested tuple types: ((a, b), c) -> (a, b, c)
 /// Makes left-folded tuples syntactically equivalent to flat tuples.
 let rec flattenTupleType (ty: IRType) : IRType =
     match ty with
@@ -1333,25 +1135,15 @@ let rec flattenTupleType (ty: IRType) : IRType =
     | _ -> ty
 
 /// Extract the flat leaf types from a potentially nested tuple.
-/// ((α, β), γ) → [α; β; γ]
+/// ((a, b), c) -> [a; b; c]
 let rec flattenTupleLeaves (ty: IRType) : IRType list =
     match ty with
     | IRTTuple ts -> ts |> List.collect flattenTupleLeaves
     | _ -> [ty]
 
-// ============================================================================
 // Loop Structure (For Code Generation)
-// ============================================================================
 
-// (LoopLevel, LoopNest, and CompNode types removed in Phase B6: dead code
-// from a prior architecture replaced by LoopNestCodeGen / buildLoopNestCodeGen.
-// The `buildLoopNest` function that produced LoopNest was also unused and
-// has been removed. Removing this block also eliminated the S3-tagged
-// ETFloat64 fallbacks in the elem-type derivation it contained.)
-
-// ============================================================================
 // Index Space Matching (for Partial Product Symmetry)
-// ============================================================================
 
 /// Information about an index space (for partial symmetry detection)
 type IndexSpaceInfo = {
@@ -1364,11 +1156,11 @@ type IndexSpaceInfo = {
 
 
 /// Check if two index spaces are "shared" (same logical index space).
-/// DIAGNOSTIC-ONLY since arc 1: nominal index-space identity is NOT a
-/// symmetry license — distinct arrays over the same named index type get NO
-/// triangular grouping (proofs.md shared_units_insufficient refuted the old
-/// §14.6 rule; grouping requires array identity, see rawAxisGroups). Kept for
-/// alignment diagnostics and future nominal-typing checks.
+/// DIAGNOSTIC-ONLY: nominal index-space identity is NOT a symmetry license --
+/// distinct arrays over the same named index type get NO triangular grouping
+/// (proofs.md shared_units_insufficient; grouping requires array identity,
+/// see rawAxisGroups). Kept for alignment diagnostics and future
+/// nominal-typing checks.
 let indexSpacesMatch (a: IndexSpaceInfo) (b: IndexSpaceInfo) : bool =
     if a.Kind <> SDimension || b.Kind <> SDimension then false
     else
@@ -1378,54 +1170,44 @@ let indexSpacesMatch (a: IndexSpaceInfo) (b: IndexSpaceInfo) : bool =
             // Only match on named references (variables or parameters),
             // not on anonymous literal extents. Two arrays that happen to
             // have the same length don't share an index space.
-            // See §14.6: "commutativity is the license, shared index spaces
-            // are the payoff" — shared means same named type, not same extent.
+            // See section 14.6: "commutativity is the license, shared index spaces
+            // are the payoff" -- shared means same named type, not same extent.
             match a.Extent, b.Extent with
             | IRVar (idA, _), IRVar (idB, _) -> idA = idB
             | IRParam (nA, _, _), IRParam (nB, _, _) -> nA = nB
             | _ -> false
         | _ -> false
 
-// ============================================================================
 // Loop Level Structure
-// ============================================================================
 
 /// Represents a single loop level in the nested loop structure
-/// The KIND of an index type -- the classification that iteration/addressing
-/// and other kind-specific logic dispatch on. Derived (not stored) from
-/// Symmetry + Tag, mirroring behaviorOf. The symmetry-like classes are ONE
-/// grouped arm (they share triangular/simplex storage and the fold facet via
-/// behaviorOf); Compound, Dep, and Ragged are siblings with their own
-/// storage/iteration. SymNone is NOT a kind: it is "no class assigned", which
-/// resolves to a plain dense index only when no tag claims it. Ragged variants
-/// (inline/opaque) and Dep sub-records (inner/outer) group here for now; a
-/// nested match splits them where each kind's iteration is built, mirroring how
-/// IxSymmetryLike defers the specific symmetry to ix.Symmetry. New kinds (Enum,
-/// CG, ...) add an arm here.
+/// The KIND of an index type -- the classification iteration/addressing and
+/// other kind-specific logic dispatch on. Derived from Symmetry + Tag
+/// (mirrors behaviorOf). Symmetry-like classes are ONE grouped arm (shared
+/// triangular/simplex storage); Compound, Dep, Ragged are siblings with
+/// their own storage/iteration. SymNone is NOT a kind -- "no class
+/// assigned", resolving to plain dense only when no tag claims it. New
+/// kinds (Enum, CG, ...) add an arm here.
 let (|IxSymmetryLike|IxCompound|IxDep|IxRagged|IxDense|) (ix: IRIndexType) =
     match ix.Symmetry with
-    // A wreath class groups with the symmetry-like family: it IS compact
-    // storage over a permutation group with a +-1 character, so every consumer
-    // that asks "does this slot need canonicalization / compact iteration?"
-    // must answer yes. What it is NOT is a single simplex, so the consumers
-    // reached through this arm each refuse it explicitly (orbitStorageUnsupported)
-    // rather than fall into the depth-1 triangular machinery. Putting it in
-    // IxDense instead would be the silent-miscompile answer: a dense walk over
-    // prod(ri) axes writes n^rank cells into a pool sized for the fold.
+    // A wreath class groups with symmetry-like: compact storage over a
+    // permutation group with a +-1 character needs canonicalization/compact
+    // iteration. It is NOT a single simplex, so consumers reached through
+    // this arm refuse it explicitly (orbitStorageUnsupported) instead of
+    // falling into depth-1 triangular machinery -- IxDense would silently
+    // miscompile (a dense walk over prod(ri) axes into a pool sized for the fold).
     | SymSymmetric | SymAntisymmetric | SymHermitian | SymWreath -> IxSymmetryLike
     | SymNone ->
-        // Kind dispatch reads IxKind, never Tag strings (audit §3.3) — and
-        // is exhaustive, so a new IxKind case must decide its family here.
+        // Kind dispatch reads IxKind, never Tag strings (audit section 3.3) --
+        // exhaustive, so a new IxKind case must decide its family here.
         (match ix.IxKind with
-         // IxKSparse groups with the compound family: same tabulated
-         // storage/iteration shape (materialized index, cardinality-bounded
-         // loop). Sites that care about mask-vs-keys split on ix.IxKind.
+         // IxKSparse groups with compound: same tabulated storage/iteration
+         // shape (materialized index, cardinality-bounded loop).
          | IxKCompound | IxKCompoundDynamic | IxKSparse -> IxCompound
-         // IxKOrbit with Symmetry = SymNone is a MALFORMED record: the two are
-         // stamped together by the one constructor (lowerIndexType's TyOrbIdx
-         // arm) and validateIR checks Tag/IxKind agreement. Grouping it dense
-         // here would give that malformed record a plausible dense reading, so
-         // it joins the symmetry-like family and gets refused there instead.
+         // IxKOrbit with Symmetry = SymNone is a MALFORMED record (the two
+         // are stamped together by the one constructor; validateIR checks
+         // Tag/IxKind agreement). Grouping it dense would give that record a
+         // plausible dense reading, so it's refused via symmetry-like instead.
          | IxKOrbit -> IxSymmetryLike
          | IxKDep | IxKDepInner | IxKDepOuter -> IxDep
          | IxKRagged | IxKRaggedInline | IxKRaggedOpaque -> IxRagged
@@ -1434,7 +1216,7 @@ let (|IxSymmetryLike|IxCompound|IxDep|IxRagged|IxDense|) (ix: IRIndexType) =
          // stored (extent = total_dim(spec), no compression); the block
          // structure is type identity, not a storage/iteration class.
          // IxKPgIrreps (the point-group member) is dense for exactly the same
-         // reason — extent = pg_total_dim(spec), every cell stored.
+         // reason -- extent = pg_total_dim(spec), every cell stored.
          | IxKIrreps | IxKPgIrreps
          | IxKErrorRaggedNoPrior | IxKErrorIrrepsBadSpec
          | IxKErrorPgIrrepsBadSpec -> IxDense)
@@ -1445,17 +1227,15 @@ type LoopLevelInfo = {
     RankIndex: int
     GlobalLevelIndex: int
     IndexSpace: IndexSpaceInfo
-    /// Arc 1 (joint product symmetry): Some factors marks this level as the
-    /// FUSION of its argument's entire plain-dense S-block into one compound
-    /// axis (extent = product of the factors' extents; factors = the original
-    /// S-dim records in order). Iteration decodes per-dim coordinates from the
-    /// compound index (row-major = lex enumeration order). Fusion is what makes
-    /// cross-argument commutative grouping sound for multi-dim identity groups:
-    /// one identity group licenses only the JOINT symmetry over whole argument
-    /// index tuples (docs/formalism.md §12.4, proofs.md diagonal_group_law) —
-    /// never per-dimension partnering (per_dim_swap_not_symmetry), and never
-    /// across distinct arrays via shared index spaces
-    /// (shared_units_insufficient).
+    /// Joint product symmetry: Some factors marks this level as the FUSION of
+    /// its argument's entire plain-dense S-block into one compound axis
+    /// (extent = product of the factors' extents). Iteration decodes per-dim
+    /// coordinates from the compound index (row-major order). Fusion makes
+    /// cross-argument commutative grouping sound: one identity group licenses
+    /// only the JOINT symmetry over whole argument index tuples (docs/
+    /// formalism.md section 12.4, proofs.md diagonal_group_law) -- never
+    /// per-dimension partnering (per_dim_swap_not_symmetry) or across
+    /// distinct arrays via shared index spaces (shared_units_insufficient).
     FusedFactors: IRIndexType list option
 }
 
@@ -1466,11 +1246,10 @@ let computeSDimsPerArray (arrayTypes: IRArrayType list) : int list =
         |> List.filter (fun idx -> idx.Kind = SDimension) 
         |> List.sumBy (fun idx -> idx.Rank))
 
-/// Build the flattened loop level structure
 /// Build the RAW (by-array, unreordered) loop levels: one level per S-dimension
-/// arity component, emitted array-by-array in index-type order. This is the
-/// pre-grouping structure; product-symmetry reordering is applied separately by
-/// buildLoopLevelStructure so that the grouping rule lives in exactly one place
+/// arity component, emitted array-by-array in index-type order. Pre-grouping
+/// structure; product-symmetry reordering is applied separately by
+/// buildLoopLevelStructure so the grouping rule lives in one place
 /// (rawAxisGroups) and the reorder cannot drift from it.
 let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) : LoopLevelInfo list =
     let mutable levels = []
@@ -1479,35 +1258,29 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
     for arrIdx in 0 .. arrayTypes.Length - 1 do
         let arr = arrayTypes.[arrIdx]
         let mutable localDimIdx = 0
-        // Cumulative count of levels emitted for THIS array so far. RankIndex
-        // must be this cumulative depth — NOT the per-record arity position —
-        // because genElementBindingNew uses it as `levelsConsumed = RankIndex +
-        // 1` to decide slice-vs-scalar-leaf (resultRank = ArrayRank -
-        // levelsConsumed). A single multi-arity record (e.g. SymIdx<2>, one
-        // record Rank 2) and a sequence of rank-1 records (e.g. dense Idx,
-        // Idx — two records) BOTH span the same number of levels, so the depth
+        // Cumulative depth of levels emitted for THIS array so far. RankIndex
+        // must be this cumulative depth, not the per-record arity position --
+        // genElementBindingNew uses `levelsConsumed = RankIndex + 1` to decide
+        // slice-vs-scalar-leaf, and a multi-arity record (SymIdx<2>) and a
+        // sequence of rank-1 records span the same number of levels, so depth
         // must increment continuously across records.
         let mutable arrLevel = 0
-        
+
         for idx in arr.IndexTypes do
-            // A wreath slot cannot become loop levels here. The nest it needs is
-            // the SEGMENT-PEELED one (plan-orbidx-bijections §2): multiple
-            // straight-line sub-nests per level body, a structural concept this
-            // builder does not have. Emitting `idx.Rank` ordinary levels would
-            // produce a dense (or, worse, a single-simplex) walk over the raw
-            // axes and fill the wrong number of cells in the wrong order --
-            // exactly the silent failure the order invariant exists to prevent.
+            // A wreath slot needs the SEGMENT-PEELED nest (plan-orbidx-
+            // bijections section 2), not ordinary loop levels: emitting
+            // `idx.Rank` levels here would walk the raw axes densely (or as a
+            // single simplex) and fill the wrong number of cells in the
+            // wrong order.
             if idx.Symmetry = SymWreath then
                 failwith (orbitStorageUnsupported "loop construction (buildRawLoopLevels)"
                                                   (orbitLevelsOf idx))
             if idx.Kind = SDimension then
                 // A CompoundIdx is a SINGLE semantic axis -- it iterates its
-                // present cells (cardinality), not a dense grid over the mask's
-                // leadRank dimensions -- so it contributes exactly ONE loop level
-                // regardless of mask rank. Symmetric/dense slots still expand one
-                // level per arity component. The compacted bound and compact
-                // address for the compound level are emitted by the codegen
-                // consumer; SourceRank carries the mask rank for that consumer.
+                // present cells, not a dense grid over the mask's dimensions --
+                // so it contributes exactly ONE loop level regardless of mask
+                // rank; SourceRank carries the mask rank for the codegen
+                // consumer that emits the compacted bound/address.
                 let levelCount = match idx with | IxCompound -> 1 | _ -> idx.Rank
                 for _compIdx in 0 .. levelCount - 1 do
                     levels <- levels @ [{
@@ -1530,40 +1303,30 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
     
     levels
 
-/// Arc 1 (corrected product symmetry): fuse each eligible argument's plain-
-/// dense multi-level S-block into a SINGLE compound loop level, so that
-/// cross-argument commutative grouping operates on whole argument index tuples
-/// — the JOINT symmetry, which is the only symmetry a single identity group
-/// licenses (docs/formalism.md §12.4; proofs.md diagonal_group_law). The old
-/// per-dimension partnering produced SymIdx per data dimension and an (r!)^d
-/// claim, both refuted (per_dim_swap_not_symmetry, counting_general_C).
+/// Joint product symmetry: fuse each eligible argument's plain-dense multi-
+/// level S-block into a SINGLE compound loop level, so cross-argument
+/// commutative grouping operates on whole argument index tuples -- the JOINT
+/// symmetry, the only symmetry a single identity group licenses (docs/
+/// formalism.md section 12.4; proofs.md diagonal_group_law). Per-dimension
+/// partnering (SymIdx per data dimension, claiming (r!)^d) is unsound
+/// (per_dim_swap_not_symmetry, counting_general_C).
 ///
-/// Eligibility (all required):
-///   - the argument sits in a comm group together with at least one OTHER
-///     position holding the SAME array (identity; shared index spaces license
-///     nothing: shared_units_insufficient),
-///   - it contributes >= 2 S-levels, ALL rank-1 DENSE-STORED records (SymNone,
-///     no dependencies, IxKind ∈ {IxKPlain, IxKIrreps}) — symmetric/ragged/
-///     dep/compound records do not fuse (their joint form needs unrank decode;
-///     such arguments simply do not group across positions), and
-///   - the source is a real array (not a range/reverse virtual).
-/// Identity partners share an array type, so eligibility is uniform across a
-/// group: every member fuses or none does — a fused level therefore always
-/// finds its partners fused.
+/// Eligibility (all required): the argument sits in a comm group with
+/// another SAME-array position (identity; shared index spaces license
+/// nothing: shared_units_insufficient); it contributes >= 2 S-levels, ALL
+/// rank-1 DENSE-STORED records (SymNone, no dependencies, IxKind in
+/// {IxKPlain, IxKIrreps} -- symmetric/ragged/dep/compound records need
+/// unrank decode and don't fuse); the source is a real array. Identity
+/// partners share an array type, so eligibility is uniform across a group.
 ///
-/// IxKIrreps admitted at stage 4 (retired transforms-as-types plan §7 stage 4),
-/// which unlocks `comm` over multi-axis irreps arrays (per-node feature
-/// matrices, batch × IrrepsIdx). Soundness: an irreps axis is DENSE BY DESIGN —
-/// extent = total_dim(spec) = cardinality, every cell stored, no compaction
-/// bijection (see classifyIndexSpace's IxKIrreps arm) — so the fused axis is an
-/// honest row-major product of its factors' extents and §12.4's corrected joint
-/// doctrine applies verbatim; the block structure of an irreps space is TYPE
-/// IDENTITY, not a storage class, and iteration never consults it. What stays
-/// excluded is exactly what was excluded before: a SYMMETRIC (SymIdx-typed)
-/// factor stores only canonical cells, so extent ≠ cardinality and the compound
-/// index is not a dense row-major product — its sound joint form is the wreath
-/// product, not S_r over a flat compound (docs/plan-orbit-index-types.md). Widening the
-/// predicate any further than IxKind is therefore NOT sound.
+/// IxKIrreps unlocks `comm` over multi-axis irreps arrays: an irreps axis is
+/// DENSE BY DESIGN (extent = total_dim(spec) = cardinality, no compaction
+/// bijection), so the fused axis is an honest row-major product and section
+/// 12.4's joint doctrine applies verbatim -- the block structure is TYPE
+/// IDENTITY, not a storage class. Excluded: a SYMMETRIC factor stores only
+/// canonical cells (extent != cardinality), so its sound joint form is the
+/// wreath product, not S_r over a flat compound. Widening past IxKind is
+/// NOT sound.
 let fuseJointSLevels
     (identities: ArrayIdentity list)
     (commGroups: int list list)
@@ -1589,18 +1352,14 @@ let fuseJointSLevels
         |> List.collect (fun (arrIdx, lvls) ->
             let recs = if arrIdx < sRecordsByArray.Length then sRecordsByArray.[arrIdx] else []
             let isVirtual = arrIdx < arrayTypes.Length && arrayTypes.[arrIdx].IsVirtual
-            // Dense rank-1 factors only. IxKPlain and IxKIrreps are the two
-            // kinds whose extent IS their cardinality (stage 4); every other
-            // kind either compacts (Sym/Antisym/compound), varies per row
-            // (ragged/dep), or is a synthetic slot — none of which decode as a
-            // row-major product. Symmetry must be SymNone independently of the
-            // kind: a symmetric record is the wreath-product case, deferred.
-            // IxKPgIrreps (stage 5b-i) satisfies the same "extent IS
-            // cardinality" premise, but is deliberately NOT admitted here yet:
-            // fusion is an OPTIMIZATION, its absence only costs the joint
-            // compound axis, and admitting a second block-spec member to this
-            // path is a separate pin (the stage-4 admission of IxKIrreps came
-            // with its own corpus). Not fusing is the pre-stage-4 behaviour.
+            // Dense rank-1 factors only: IxKPlain/IxKIrreps are the two kinds
+            // whose extent IS their cardinality -- everything else compacts,
+            // varies per row, or is synthetic, none of which decode as a
+            // row-major product. Symmetry must independently be SymNone (a
+            // symmetric record is the deferred wreath-product case).
+            // IxKPgIrreps meets the same premise but is NOT admitted: fusion
+            // is an OPTIMIZATION, so skipping it only costs the joint
+            // compound axis, and not fusing is the safe default.
             let isDenseFusableKind (k: IxKind) =
                 match k with
                 | IxKPlain | IxKIrreps -> true
@@ -1614,10 +1373,9 @@ let fuseJointSLevels
                 let rep = List.head lvls
                 // The fused axis is ANONYMOUS: Tag = None (and, on the output
                 // record deduceOutputType builds from these factors,
-                // IxKind = IxKPlain). A batch × irreps product is NOT an irreps
-                // space — the compound coordinate mixes a representation index
-                // with a non-representation one, so no spec describes it
-                // (retired transforms-as-types plan §6.3(iii), decided at stage 4).
+                // IxKind = IxKPlain). A batch x irreps product is NOT an irreps
+                // space: the compound coordinate mixes a representation index
+                // with a non-representation one, so no spec describes it.
                 [ { rep with
                       LocalDimIndex = 0
                       RankIndex = 0
@@ -1634,20 +1392,17 @@ let fuseJointSLevels
 /// THE single canonical grouping rule, operating on RAW (post-fusion) levels.
 /// Assigns each level an axis-group id (in first-appearance order). Two levels
 /// share a group iff they are product-symmetric partners under either
-/// multiplicity axis of the index-type scheme:
-///   (A) WITHIN one index type: consecutive arity components of a single
-///       symmetric/antisymmetric record (same array, same LocalDimIndex,
-///       consecutive RankIndex).
-///   (B) ACROSS arguments: same comm group AND SAME ARRAY (identity) AND each
-///       side's S-block is a single level (d = 1, or the fused compound level
-///       from fuseJointSLevels). Corrected per docs/formalism.md §11.2/§12.4:
-///       identity is REQUIRED — distinct arrays sharing a named index space
-///       license nothing (proofs.md shared_units_insufficient refuted the old
-///       §14.6 nominal-identity rule) — and per-dimension partnering of a
-///       multi-dim identity group is unsound (per_dim_swap_not_symmetry);
-///       multi-dim groups reach here only through fusion, as whole-tuple axes.
-/// Both the loop reorder/iteration AND the output storage layout derive from
-/// this one function, so they cannot drift apart.
+/// multiplicity axis: (A) WITHIN one index type -- consecutive arity
+/// components of a single symmetric/antisymmetric record (same array, same
+/// LocalDimIndex, consecutive RankIndex); (B) ACROSS arguments -- same comm
+/// group AND SAME ARRAY (identity) AND each side's S-block is a single level
+/// (d = 1, or fused). Identity is REQUIRED (docs/formalism.md section
+/// 11.2/12.4): a shared named index space alone licenses nothing
+/// (shared_units_insufficient), and per-dimension partnering of a multi-dim
+/// identity group is unsound (per_dim_swap_not_symmetry); multi-dim groups
+/// reach here only through fusion, as whole-tuple axes. Both the loop
+/// reorder/iteration AND the output storage layout derive from this one
+/// function, so they cannot drift apart.
 let rawAxisGroups
     (identities: ArrayIdentity list)
     (commGroups: int list list)
@@ -1665,17 +1420,14 @@ let rawAxisGroups
             lv.ArrayIndex = prior.ArrayIndex &&
             lv.LocalDimIndex = prior.LocalDimIndex &&
             lv.RankIndex = prior.RankIndex + 1 &&
-            // SymWreath is DELIBERATELY absent, and BYPASSED rather than
-            // accidentally unmatched. Two independent gates keep it out:
-            // `buildRawLoopLevels` refuses a wreath INPUT outright, and a
-            // wreath-producing application never reaches this function at all
-            // (deduceWreathTie fires first, in deduceOutputType and at the
-            // typecheck analyses, and its iteration is the segment-peeled
-            // `orb_visit` nest). If one ever did arrive, the merge below would
-            // flatten its prod(ri) raw axes into ONE triangular group -- and
-            // since this same function drives the STORAGE layout, the result
-            // would be a single simplex where the class is nested: a wrong pool
-            // with no compiler warning anywhere.
+            // SymWreath is DELIBERATELY absent and BYPASSED, not accidentally
+            // unmatched: `buildRawLoopLevels` refuses a wreath INPUT outright,
+            // and a wreath-producing application never reaches this function
+            // (deduceWreathTie fires first; its iteration is the segment-
+            // peeled `orb_visit` nest). If one ever did arrive, this merge
+            // would flatten its prod(ri) raw axes into ONE triangular group --
+            // and since this function also drives STORAGE layout, that would
+            // silently allocate a single-simplex pool for a nested class.
             (lv.IndexSpace.Symmetry = SymSymmetric ||
              lv.IndexSpace.Symmetry = SymAntisymmetric ||
              lv.IndexSpace.Symmetry = SymHermitian)
@@ -1698,19 +1450,16 @@ let rawAxisGroups
             nextGroup <- nextGroup + 1
     List.ofArray groupOf
 
-/// Build the loop level structure: fuse joint S-blocks (fuseJointSLevels,
-/// arc 1), then REORDER so that levels sharing an axis group (per
-/// rawAxisGroups) are CONTIGUOUS — grouped by axis across the repeated comm
-/// arguments rather than by array. Grouped output storage lays its symmetric
-/// dims out adjacently (e.g. the joint SymIdx<2, Lat*Lon> spans its two fused
-/// levels back-to-back); the loop nest must visit dims in the SAME order for
-/// the write subscript and triangular bounds to line up with storage. Both
-/// this reorder and deduceOutputType derive their ordering from rawAxisGroups,
-/// so iteration and storage cannot disagree. The reorder is a STABLE group-by
-/// (each group's members keep their by-array relative order), which preserves
-/// per-array slice state (currentNames keyed by ArrayPosition) and
-/// RankComponent. For single-axis / single-array cases every level is its own
-/// or one shared group in emission order, so the reorder is an identity.
+/// Build the loop level structure: fuse joint S-blocks (fuseJointSLevels),
+/// then REORDER so levels sharing an axis group (rawAxisGroups) are
+/// CONTIGUOUS, grouped by axis rather than by array. Grouped output storage
+/// lays its symmetric dims out adjacently (e.g. joint SymIdx<2, Lat*Lon>
+/// spans its two fused levels back-to-back); the loop nest must visit dims
+/// in the SAME order for the write subscript and triangular bounds to line
+/// up with storage. Both this reorder and deduceOutputType derive their
+/// ordering from rawAxisGroups, so iteration and storage cannot disagree.
+/// STABLE group-by (each group keeps its by-array relative order), so
+/// single-axis/single-array cases reorder as an identity.
 let buildLoopLevelStructure
     (identities: ArrayIdentity list)
     (commGroups: int list list)
@@ -1728,9 +1477,7 @@ let buildLoopLevelStructure
         |> List.collect (fun g -> keyed |> List.filter (fun (gg, _) -> gg = g) |> List.map snd)
     reordered |> List.mapi (fun i lv -> { lv with GlobalLevelIndex = i })
 
-// ============================================================================
 // Identity Group Detection
-// ============================================================================
 
 type IdentityGroup = {
     StartIndex: int
@@ -1754,15 +1501,7 @@ let partitionIntoIdentityGroups (identities: ArrayIdentity list) : IdentityGroup
         
         groups @ [currentGroup]
 
-// ============================================================================
-// Kernel Rank Analysis (irank and orank)
-// ============================================================================
-
-/// Extract input ranks from a lambda's parameter types
-
-// ============================================================================
 // Consolidated Symmetry Analysis (Section 13.1-13.2, 14.5-14.6)
-// ============================================================================
 
 /// Helper: factorial
 let factorial n = 
@@ -1771,27 +1510,21 @@ let factorial n =
         | n -> f (acc * int64 n) (n - 1)
     f 1L n
 
-// (LoopLevelSymmetry type removed in Phase B6: defined but never referenced.)
-
-/// Compute SymcomState for all loop levels
-/// 
-/// Two sources of triangular iteration:
-/// 1. SYMMETRIC: consecutive arity components of same SymIdx index type
-/// 2. COMMUTATIVE: arrays in same comm group with matching index spaces
-let computeAllSymcomStates 
-    (identities: ArrayIdentity list) 
+/// Compute SymcomState for all loop levels: SYMMETRIC (consecutive arity
+/// components of the same SymIdx) and COMMUTATIVE (arrays in the same comm
+/// group with matching index spaces).
+let computeAllSymcomStates
+    (identities: ArrayIdentity list)
     (arrayTypes: IRArrayType list)
     (commGroups: int list list)
     (sDimsPerArray: int list) : SymcomState list =
-    
-    // A WREATH class never reaches here, by three gates rather than by luck:
-    // `deduceWreathTie` fires first at the typecheck seam (which skips this call
-    // entirely for a tied application), an UNTIED wreath input is refused at the
-    // same seam, and `buildLoopLevelStructure` -> `buildRawLoopLevels` refuses
-    // one outright as a last backstop. The two `Symmetry = SymSymmetric ||
-    // SymAntisymmetric` tests below are the same merge rule as
-    // rawAxisGroups.mergesWith.withinType and would go equally wrong on one:
-    // prod(ri) raw axes read as a single shrinking simplex, with no warning.
+
+    // A WREATH class never reaches here: `deduceWreathTie` fires first at the
+    // typecheck seam, an UNTIED wreath input is refused at the same seam, and
+    // `buildRawLoopLevels` refuses one outright as a backstop. The two
+    // `Symmetry = SymSymmetric || SymAntisymmetric` tests below mirror
+    // rawAxisGroups.mergesWith.withinType and would go equally wrong on a
+    // wreath: prod(ri) raw axes read as a single shrinking simplex, silently.
     let levels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
     if levels.IsEmpty then []
     else
@@ -1803,8 +1536,8 @@ let computeAllSymcomStates
             i < identities.Length && j < identities.Length &&
             sameIdentity identities.[i] identities.[j]
 
-        // Corrected commutative licensing (arc 1): identity required (shared
-        // index spaces license nothing — shared_units_insufficient), and each
+        // Commutative licensing: identity required (shared index spaces
+        // license nothing -- shared_units_insufficient), and each
         // side's S-block must be a single level (d = 1 or fused): mirrors
         // rawAxisGroups.mergesWith.acrossArray exactly.
         let sLevelCount =
@@ -1873,37 +1606,31 @@ let computeAllSymcomStates
                     if factorial symRank >= factorial commRank then SCSymmetric 
                     else SCCommutative)
 
-/// CANONICAL AXIS GROUPING — the single source of dimension grouping that both
-/// the OUTPUT STORAGE layout (deduceOutputType) and the ITERATION layout
-/// (buildLoopLevelStructure reorder / iminMap chaining) are intended to derive
-/// from, so the two cannot drift out of sync (the storage-vs-iteration
-/// divergence behind this session's product-symmetry bugs).
+/// CANONICAL AXIS GROUPING -- the single source of dimension grouping that
+/// both OUTPUT STORAGE (deduceOutputType) and ITERATION (buildLoopLevelStructure
+/// reorder / iminMap chaining) derive from, so the two cannot drift apart.
 ///
-/// Returns one group id per loop level (parallel to `buildLoopLevelStructure`'s
-/// output order). Two levels share a group iff they are joint-symmetric
-/// partners — i.e. iterate/store as one higher-rank symmetric index — under
-/// EITHER of the two multiplicity axes the index-type scheme allows:
-///
+/// Returns one group id per loop level (parallel to buildLoopLevelStructure's
+/// output order). Two levels share a group iff joint-symmetric partners --
+/// iterate/store as one higher-rank symmetric index -- under either axis:
 ///   (A) WITHIN one index type: consecutive arity components of a single
-///       symmetric/antisymmetric record (a SymIdx<r> spans r levels at the same
-///       LocalDimIndex of the same array, consecutive RankIndex).
+///       symmetric/antisymmetric record (a SymIdx<r> spans r levels, same
+///       LocalDimIndex, consecutive RankIndex).
 ///   (B) ACROSS arguments: the SAME ARRAY repeated in a commutative group,
-///       where each occurrence's S-block is one level (d = 1, or the fused
-///       compound level from fuseJointSLevels for d >= 2). Corrected (arc 1):
-///       array identity is REQUIRED — nominal index-type identity across
-///       distinct arrays licenses nothing (shared_units_insufficient) — and a
-///       multi-dim identity group forms ONE joint group over compound tuples,
-///       never one group per data dimension (per_dim_swap_not_symmetry).
+///       each occurrence's S-block one level (d = 1, or fused for d >= 2).
+///       Array identity is REQUIRED -- nominal identity across distinct
+///       arrays licenses nothing (shared_units_insufficient) -- and a
+///       multi-dim identity group forms ONE joint group, never one per data
+///       dimension (per_dim_swap_not_symmetry).
 let computeAxisGroups
     (identities: ArrayIdentity list)
     (arrayTypes: IRArrayType list)
     (commGroups: int list list)
     (sDimsPerArray: int list) : int list =
     // Group ids parallel to buildLoopLevelStructure's REORDERED output order,
-    // using the one shared grouping rule (rawAxisGroups). Applying rawAxisGroups
-    // to the already-reordered levels is well-defined: the reorder is itself a
-    // stable group-by on the same rule, so contiguous same-group runs come out
-    // with contiguous ids — exactly what the iteration consumers index by.
+    // via the one shared grouping rule (rawAxisGroups): the reorder is itself
+    // a stable group-by on the same rule, so contiguous same-group runs come
+    // out with contiguous ids -- what the iteration consumers index by.
     let levels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
     rawAxisGroups identities commGroups levels
 
@@ -1928,11 +1655,11 @@ let computeTriangularLevels
 
 /// Compute the iteration-count speedup from the canonical axis grouping: each
 /// axis group of size g >= 2 is one joint simplex contributing g!; distinct
-/// groups multiply. This is the CORRECTED accounting (arc 1): one identity
-/// group over a d-dimensional array yields a single fused group of size r —
-/// speedup r!, never (r!)^d (per_dim_swap_not_symmetry, counting_general_C);
-/// multiplicative factors come only from DISTINCT groups (separate comm groups
-/// or within-record symmetric blocks). docs/formalism.md §12.4.
+/// groups multiply. One identity group over a d-dimensional array yields a
+/// single fused group of size r -- speedup r!, never (r!)^d
+/// (per_dim_swap_not_symmetry, counting_general_C); multiplicative factors
+/// come only from DISTINCT groups (separate comm groups or within-record
+/// symmetric blocks). docs/formalism.md section 12.4.
 let computePartialProductSpeedup
     (arrayTypes: IRArrayType list)
     (identities: ArrayIdentity list)
@@ -1958,9 +1685,7 @@ let computeTriangularBound
         | [] -> IRLit (IRLitInt 0L)
         | lastIdx :: _ -> IRVar (lastIdx, IRTScalar ETInt64)
 
-// ============================================================================
 // IR Declarations
-// ============================================================================
 
 type IRTypeDef =
     | IRTDAlias of name: string * ty: IRType
@@ -2003,7 +1728,7 @@ type IRBinding = {
 /// (`view |> alias.read`) and consumed at codegen to emit the provider's
 /// reader. Keyed in IRModule.ProviderReads by the receiving binding's IRId. A
 /// plain dense read leaves MaskName/MaskType = None; a load_compound read
-/// carries both. Provider is the registry module name ("netcdf", "zarr") —
+/// carries both. Provider is the registry module name ("netcdf", "zarr") --
 /// codegen dispatches the emitters through it.
 type ProviderReadSpec = {
     Provider: string
@@ -2016,11 +1741,10 @@ type ProviderReadSpec = {
     /// over a packed variable; None for whole-variable reads. When set,
     /// VarType is the WINDOW type (leading packed extent = hi-lo).
     Window: (int64 * int64) option
-    /// `alias.stream(var)`: the variable is NOT materialized at the binding —
-    /// consuming loop nests inline per-fiber reads at the S/T boundary
-    /// (trailing-axis fibers read on demand as the site indices bind).
-    /// Only fiber-kernel method_for consumers are stream-eligible; other
-    /// consumption is a loud codegen error steering to `.read`.
+    /// `alias.stream(var)`: not materialized at the binding -- consuming loop
+    /// nests inline per-fiber reads at the S/T boundary. Only fiber-kernel
+    /// method_for consumers are stream-eligible; other consumption is a
+    /// loud codegen error steering to `.read`.
     Streamed: bool
 }
 
@@ -2055,69 +1779,50 @@ type IRModule = {
     Types: IRTypeDef list
     Functions: IRFuncDef list
     Bindings: IRBinding list
-    /// Diagnostics: static function usage tracking (function name → usage kind)
+    /// Diagnostics: static function usage tracking (function name -> usage kind)
     /// "compile-time" | "runtime" | "both" | "unused"
     StaticFunctionUsage: Map<string, string>
     /// Deferred provider reads, keyed by the receiving binding's IRId.
-    /// Populated during lowering (at `let x = view |> alias.read` over a
-    /// provider variable) and consumed at codegen to emit the provider's
-    /// reader. Empty for modules with no provider reads.
+    /// Populated during lowering, consumed at codegen for the provider reader.
     ProviderReads: Map<IRId, ProviderReadSpec>
     /// Deferred provider writes (`alias.write("path", A)`), keyed by the
-    /// write binding's IRId. Populated during lowering and consumed at
-    /// codegen to emit a flatten prologue + the provider's writer. Empty
-    /// for modules with no provider writes.
+    /// write binding's IRId; consumed at codegen for a flatten prologue + writer.
     ProviderWrites: Map<IRId, ProviderWriteSpec>
-    /// Deferred random-fill array constructors, keyed by the receiving binding's
-    /// IRId. Populated during lowering (at `let A: Array<..> = fill_random(mod)`)
-    /// and consumed at codegen to emit allocate<> + a pool fill. The value is a
-    /// RandomFillSpec (fill_random modulus, or a rand.uniform/normal key). Empty
-    /// for modules with none.
+    /// Deferred random-fill array constructors, keyed by the receiving
+    /// binding's IRId (`fill_random(mod)` or `rand.uniform/normal(key)`);
+    /// consumed at codegen to emit allocate<> + a pool fill.
     RandomInits: Map<IRId, RandomFillSpec>
     /// Deferred compound-construction constructors (compound(dense, mask)),
-    /// keyed by the receiving binding's IRId. Populated during lowering and
-    /// consumed at codegen to emit P0 index materialization + a dense->compact
-    /// scatter. Value is (loweredDense, loweredMask). Empty for modules with none.
+    /// keyed by the receiving binding's IRId; consumed at codegen for P0
+    /// index materialization + a dense->compact scatter. Value is (loweredDense, loweredMask).
     CompoundInits: Map<IRId, IRExpr * IRExpr>
-    /// Deferred sparse-construction constructors (sparse(values, keys)), keyed
-    /// by the receiving binding's IRId. Populated during lowering and consumed
-    /// at codegen to emit the sparse index materialization + a straight pool
-    /// copy (values arrive in key order — no scatter). Value is the lowered
-    /// values expr; the keys source rides the binding TYPE's IRSparseKeys
-    /// extent. Empty for modules with none.
+    /// Deferred sparse-construction constructors (sparse(values, keys)),
+    /// keyed by the receiving binding's IRId; consumed at codegen for index
+    /// materialization + a straight pool copy (key order, no scatter). The
+    /// keys source rides the binding TYPE's IRSparseKeys extent.
     SparseInits: Map<IRId, IRExpr>
     /// Block-level `let mut` bindings of ARRAY type, by binding IRId. IRLet
-    /// erases the surface mutability flag, but codegen needs it: a mut binding
-    /// initialized from an existing array (`let mut a = Z`) must DEEP-COPY the
-    /// storage — binding the Array wrapper by value shares the data pointer,
-    /// so mutations through `a` would silently corrupt `Z`. Populated during
-    /// lowering (lowerTypedBlock TStmtLet); consumed by CodeGen (fresh alloc +
-    /// pool copy) and the interpreter (store deep-copy) at the binding site.
+    /// erases the surface mutability flag, but a mut binding initialized from
+    /// an existing array (`let mut a = Z`) must DEEP-COPY the storage --
+    /// binding by value shares the data pointer, so mutation through `a`
+    /// would silently corrupt `Z`. CodeGen/interpreter deep-copy at the
+    /// binding site when the id is in this set.
     MutableArrayLets: Set<IRId>
     /// EMISSION-ORDER PROXY for functions a compiler pass SYNTHESIZED from an
-    /// existing one: `derived id -> origin id`. The single source of truth for
-    /// "where does this copy belong in the program".
+    /// existing one: `derived id -> origin id`. Codegen emits bindings and
+    /// functions interleaved in IRId order (a lower id means "written earlier
+    /// in the source"), which is load-bearing for every `computeMainLocalFuncIds`
+    /// main-local function: those are `std::function` LOCALS inside `main()`
+    /// with no forward declaration, so a use before definition is a hard C++
+    /// error. A pass minting a copy with `builder.FreshId()` gets the LARGEST
+    /// id and sorts after every call site it just rewrote -- exactly the
+    /// failure mode that broke `ml-equiv`/`sgs`.
     ///
-    /// Why it has to exist. Codegen emits bindings and functions interleaved in
-    /// IRId order (genModule/genModuleSplit's `allItems`), because a lower id
-    /// means "written earlier in the source". That ordering is load-bearing for
-    /// every function `computeMainLocalFuncIds` classifies as main-local: those
-    /// are emitted as `std::function` LOCALS inside `main()`, which get no
-    /// forward declaration, so a use before the definition is a hard C++ error.
-    /// A pass that mints a copy with `builder.FreshId()` gets the LARGEST id in
-    /// the module and therefore sorts after every call site it just rewrote —
-    /// which is exactly how Phase 4's first cut broke `ml-equiv`/`sgs`.
-    ///
-    /// The contract a producer signs by adding an entry: the derived function
-    /// is placed IMMEDIATELY AFTER its origin in `Functions`, and codegen keys
-    /// its order on the ORIGIN's id (the stable sort then keeps origin-then-copy
-    /// adjacency). A copy is thereby emitted at exactly its origin's program
-    /// point, so it is visible to precisely the call sites the origin was
-    /// visible to — no per-pass reasoning about main-locality required.
-    ///
-    /// Empty for modules with no synthesized copies. Populated by
-    /// `shapeMonomorphizeModule`; any future copy-producing pass should use it
-    /// rather than re-deriving the ordering rule.
+    /// Contract: the derived function is placed IMMEDIATELY AFTER its origin
+    /// in `Functions`, and codegen keys order on the ORIGIN's id, so a copy
+    /// is emitted at exactly its origin's program point -- no per-pass
+    /// main-locality reasoning required. Empty for modules with no
+    /// synthesized copies; populated by `shapeMonomorphizeModule`.
     DerivedFuncOrigins: Map<IRId, IRId>
 }
 
@@ -2136,9 +1841,7 @@ let bindingTypeByName (program: IRProgram) (name: string) : IRType option =
         m.Bindings |> List.tryFind (fun b -> b.Name = name) |> Option.map (fun b -> b.Type))
 
 
-// ============================================================================
 // IR Construction Helpers
-// ============================================================================
 
 type IRBuilder() =
     let mutable nextId = 0
@@ -2152,7 +1855,7 @@ type IRBuilder() =
     member _.CurrentId() = nextId
     /// Raise the id floor so ids minted here can never collide with ids
     /// minted by an earlier builder (codegen builds a fresh IRBuilder and
-    /// must not reuse typecheck/lowering-era ids — a synthetic binding
+    /// must not reuse typecheck/lowering-era ids -- a synthetic binding
     /// registered under a reused id hijacks the original variable's
     /// rendered name).
     member _.EnsureAtLeast(n: int) = if nextId < n then nextId <- n
@@ -2197,13 +1900,12 @@ type CallableOptions =
 let defaultLambdaOptions : CallableOptions =
     { NameOverride = None; IdOverride = None; IsStatic = false; IsArityPoly = false; ArityParam = None }
 
-/// The single builder for an IRCallable — the merged construction point for
-/// source-level functions and lambdas. `opts` carries the only fields that
-/// differ between the two (name, id, static, arity-poly); the captures list,
-/// return type, commutativity, and parallelism are caller-supplied because
-/// they depend on the specific callable being built. Parallelism is
-/// populated for both kinds: omp/cuda/mpi clauses on either a function's
-/// where-clause or a lambda's strategy list flow through here identically.
+/// The single builder for an IRCallable -- the merged construction point for
+/// source-level functions and lambdas. `opts` carries the fields that differ
+/// between the two (name, id, static, arity-poly); captures, return type,
+/// commutativity, and parallelism are caller-supplied per callable (omp/
+/// cuda/mpi clauses from either a where-clause or a strategy list flow
+/// through identically for both kinds).
 let mkCallable
     (builder: IRBuilder)
     (opts: CallableOptions)
@@ -2248,10 +1950,8 @@ let mkCallable
     }
 
 /// Build a fresh IRCallable for an anonymous inline lambda: synthesized
-/// "__lambda_<id>" name, fresh id, not static, not arity-polymorphic.
-/// A thin wrapper over `mkCallable` with `defaultLambdaOptions`, kept for
-/// the anonymous construction sites (operator sections, partial
-/// applications, synthesized binop kernels) that never carry a name.
+/// "__lambda_<id>" name, fresh id, not static/arity-polymorphic. Thin
+/// wrapper over `mkCallable` with `defaultLambdaOptions`.
 let mkLambdaCallable
     (builder: IRBuilder)
     (parms: IRParam list)
@@ -2270,23 +1970,19 @@ let mkLambdaCallable
                isCommutative commGroups parallelism isOmpParallel
                isCudaKernel cudaBlockSize isMpiParallel
 
-// ============================================================================
-// The deduced WREATH TIE (docs/plan-orbit-index-types.md §7 / §9 step 4)
-// ============================================================================
+// The deduced WREATH TIE (docs/plan-orbit-index-types.md section 7 / section 9 step 4)
 //
-// §1's motivating gap: `func(A, A)` with `A : SymIdx<2,n>` under `where comm`
-// licenses `S_2 wr S_2` on the output's FOUR raw axes, and before this the type
-// system had no way to say so. It juxtaposed `SymIdx<2,n>` x2 -- sound, but the
-// tie is dropped and the pool is 36 cells where the orbit count is 21. Widening
-// the representative to `SymIdx<4,n>` is the other wrong answer: it claims full
-// S_4 on axes the wreath does not tie.
+// section 1's motivating gap: `func(A, A)` with `A : SymIdx<2,n>` under
+// `where comm` licenses `S_2 wr S_2` on the output's FOUR raw axes, with no
+// prior way to say so. Juxtaposing `SymIdx<2,n>` x2 drops the tie (pool 36
+// cells vs orbit count 21); widening to `SymIdx<4,n>` over-claims full S_4.
 //
-// The rule is APPEND A LEVEL. Input class `L`, `k` repeated occurrences tied by
-// a declared clause -> `L ++ [(k, s)]`, `s = '+'` for comm and `'-'` for
-// anticomm. A depth-1 `SymIdx<r,n>` input contributes `[(r,+)]`,
-// `AntisymIdx<r,n>` contributes `[(r,-)]`, and an already-wreath input
-// contributes its own list -- which is what makes depth 3 (`let P = f(A,A) in
-// g(P,P)`, §7.1) fall out of the same rule rather than needing a second one.
+// The rule is APPEND A LEVEL: input class `L`, `k` repeated occurrences tied
+// by a declared clause -> `L ++ [(k, s)]`, `s = '+'` for comm, `'-'` for
+// anticomm. Depth-1 `SymIdx<r,n>` contributes `[(r,+)]`, `AntisymIdx<r,n>`
+// contributes `[(r,-)]`, an already-wreath input contributes its own list --
+// so depth 3 (`let P = f(A,A) in g(P,P)`, section 7.1) falls out of the same
+// rule.
 
 /// A deduced wreath tie: `Positions` argument slots holding the SAME object,
 /// tied by one declared comm/anticomm clause, over a common inner class.
@@ -2297,7 +1993,7 @@ type WreathTie = {
     InnerLevels: (int * bool) list
     /// The OUTPUT class: `InnerLevels ++ [(k, OuterIsPlus)]`, normalized.
     OutputLevels: (int * bool) list
-    /// §4's fold origin M0 -- the extent every tied argument shares.
+    /// section 4's fold origin M0 -- the extent every tied argument shares.
     BaseExtent: IRExpr
     /// The appended level's character: '+' under comm, '-' under anticomm.
     OuterIsPlus: bool
@@ -2305,22 +2001,18 @@ type WreathTie = {
 
 /// The level list an ARGUMENT contributes to a tie built over it, with its base
 /// extent. `None` for every class that cannot be a wreath sub-block:
-///   * dense (`SymNone`) -- these already tie through `rawAxisGroups`'s
-///     cross-argument rule into a plain `SymIdx<k,n>`, which is the CORRECT
-///     answer (one level, not two); routing them here would double-count.
-///   * Hermitian -- its character is complex conjugation, outside `Hom(G,+-1)`,
-///     so §6's parameterization does not reach it (plan §3's `HermitianIdx`
-///     note) and no sign list describes the result.
-///   * compound / sparse / ragged / dep / irreps and anything multi-record --
-///     not a permutation class over one extent at all.
+///   * dense (`SymNone`) -- already ties via `rawAxisGroups` into a plain
+///     `SymIdx<k,n>` (one level, not two); routing it here would double-count.
+///   * Hermitian -- conjugation is outside `Hom(G,+-1)` (section 6), no sign
+///     list describes it (plan section 3's `HermitianIdx` note).
+///   * compound / sparse / ragged / dep / irreps / multi-record -- not a
+///     permutation class over one extent.
 ///
-/// EXACTLY ONE index record, S-dimensional, is required -- not "exactly one
-/// S-dim record beside whatever else". A wreath pool is a single flat cell
-/// array with nothing to juxtapose a second dimension group against, so an
-/// argument carrying a T-dimension fiber beside its compact block would have
-/// that fiber SILENTLY DROPPED from the deduced output type. Dependencies must
-/// be empty for the same reason: §4's fold starts from one extent, and a
-/// dependent one is not a number the pool can be sized from.
+/// Requires EXACTLY ONE S-dimensional index record: a wreath pool is a flat
+/// cell array with nothing to juxtapose a second dimension against, so a
+/// T-dimension fiber beside the compact block would be SILENTLY DROPPED.
+/// Dependencies must be empty for the same reason -- section 4's fold needs a
+/// plain extent, not a dependent one.
 let private wreathArgContribution (at: IRArrayType) : ((int * bool) list * IRExpr) option =
     match at.IndexTypes with
     | [ ix ] when ix.Kind = SDimension && List.isEmpty ix.Dependencies ->
@@ -2333,94 +2025,56 @@ let private wreathArgContribution (at: IRArrayType) : ((int * bool) list * IRExp
          | _ -> None)
     | _ -> None
 
-/// `deduceWreathTie`'s three-way answer. The tie rule used to be a bare
-/// `WreathTie option`; the soundness gate (condition 6 below) adds an outcome
-/// that is neither "tied" nor "juxtapose as before": the tie WOULD fire, and
-/// firing it would corrupt values, so the application must be REFUSED. `None`
-/// cannot carry that — falling back to the legacy path would silently deduce a
-/// different (also wrong) type instead of erroring.
-///
-/// Only the typecheck seam can surface `WreathKernelNotOdd` to the user
-/// (codegen and the interpreter run downstream of a successful typecheck, so
-/// reaching it there is an internal error and their arms are loud backstops).
+/// `deduceWreathTie`'s three-way answer: `WreathTie option` cannot express a
+/// third outcome where the tie WOULD fire but firing it would corrupt values,
+/// so the application must be REFUSED (condition 6 below) rather than fall
+/// back to a different, also-wrong deduced type. Only the typecheck seam
+/// surfaces `WreathKernelNotOdd` to the user; reaching it in codegen or the
+/// interpreter is an internal error (loud backstop).
 type WreathTieVerdict =
     /// No tie: distinct inputs, a partial tie, a dense input, a mixed clause.
-    /// The application juxtaposes through the axis-group machinery as before.
+    /// Juxtaposes through the axis-group machinery as usual.
     | WreathNoTie
-    /// The tie fires; the output is the wreath class the payload describes.
+    /// The tie fires; output is the wreath class the payload describes.
     | WreathTied of WreathTie
-    /// The tie's conditions all hold, but the kernel's recorded sign parity in
-    /// tied argument `argPos` fails the '-'-inner-level oddness requirement
-    /// (condition 6): `KspEven` — the provable contradiction — or `KspUnknown`
-    /// — unprovable, and there is no declaration to trust (see the gate).
+    /// Conditions hold, but the kernel's recorded sign parity in tied
+    /// argument `argPos` fails the '-'-inner-level oddness requirement
+    /// (condition 6): `KspEven` (provable contradiction) or `KspUnknown`
+    /// (unprovable, no declaration to trust).
     | WreathKernelNotOdd of argPos: int * parity: KernelSignParity * innerLevels: (int * bool) list
 
-/// THE deduction rule, in one place. Fires only for the shape the storage layer
-/// can actually lay out: EVERY argument position in ONE tie.
-///
-/// Conditions, all required:
-///   1. `not isReynolds`. Plan §8.1: under `reynolds` the wrapper owns the
-///      output symmetry and a declared clause degrades to an ITERATION LICENSE
-///      over the signed permutation sum. "A license to iterate is not a claim
-///      about the bare kernel, and building a wreath storage class out of one
-///      reads a permission as a proof." Reynolds behavior is unchanged, byte
-///      for byte, by this whole feature.
-///   2. `k = |arguments| >= 2`, and every position holds the SAME IDENTITY
-///      (`sameIdentity` -- §7.1's caveat: identities are stable only for BARE
-///      VARIABLES, so `let P = f(A,A) in g(P,P)` ties and the inline
-///      `g(f(A,A), f(A,A))` does not; there is no CSE).
-///   3. Every position contributes the SAME inner class over the SAME extent
+/// THE deduction rule, in one place. Fires only when EVERY argument position
+/// is in ONE tie. Conditions, all required:
+///   1. `not isReynolds` (section 8.1) -- under `reynolds` a clause is an
+///      iteration license, not a kernel claim; not sound grounds for a
+///      wreath storage class.
+///   2. `k >= 2` arguments, all the SAME IDENTITY (`sameIdentity`; stable
+///      only for bare variables, so `let P = f(A,A) in g(P,P)` ties but
+///      inline `g(f(A,A), f(A,A))` does not -- no CSE).
+///   3. All positions contribute the SAME inner class over the SAME extent
 ///      (`wreathArgContribution`).
-///   4. A DECLARED clause spans all of them -- one `commGroups` group (which is
-///      comm ∪ anticomm at the call site) containing every position. The
-///      appended sign is '-' iff a single `antisymGroups` group also contains
-///      every position. Both are required: BladeWreath.v's dichotomy is that a
-///      repeated argument alone gets the block-wise product (order `(r!)^k`)
-///      and only commutativity buys the extra factor
-///      (`noncomm_r3_loses_the_swap`).
+///   4. A DECLARED clause spans all positions (`commGroups`, comm union
+///      anticomm); sign is '-' iff `antisymGroups` also spans all. A
+///      repeated argument alone gets only `(r!)^k` (BladeWreath.v);
+///      commutativity buys the extra factor (`noncomm_r3_loses_the_swap`).
+///   5. The kernel contributes no T-dimensions and consumes no inner
+///      dimension (`classifyOutputStorage` refuses that combination anyway).
+///   6. SOUNDNESS GATE (section 8.1's per-level extension): any '-' inner
+///      level requires the kernel provably SIGN-ODD (`KspOdd`) in every tied
+///      argument, h(-p, q) = -h(p, q) -- the wreath analogue of BL4015's
+///      compact-class-inheritance certificate. `KspEven` is the silent-
+///      corruption case (`CommContradictsBody` analog); `KspUnknown` REFUSES
+///      TOO, since no clause declares per-argument oddness (same precedent
+///      as BL4015); all-'+' levels need no certificate. Unobservable while
+///      only canonical cells were reachable -- `decompact` and the mirrored
+///      read turn it into a silent wrong VALUE (corpus 213/214). The gate
+///      reads `argParities` (`IRCallable.SignParities`), so all four call
+///      sites judge from the same values; a missing entry is `KspUnknown`.
 ///
-///   5. The kernel contributes NO T-dimensions and consumes no inner dimension.
-///      A wreath pool is a flat cell array with no second dimension group to
-///      juxtapose, and `classifyOutputStorage` refuses the combination anyway;
-///      excluding those shapes here leaves them exactly as they are today
-///      instead of deducing a type nothing can allocate.
-///
-///   6. SOUNDNESS GATE (docs/plan-orbit-index-types.md §8.1's per-level
-///      extension): when the INNER class carries any '-' level, the kernel
-///      must be recorded provably SIGN-ODD (`KspOdd`) in every tied argument.
-///      A '-' inner level claims that mirroring ONE argument's sub-block
-///      negates the stored value; the tie is sound only when the kernel
-///      commutes with that per-argument negation, h(-p, q) = -h(p, q) — the
-///      wreath analogue of BL4015's compact-class-inheritance certificate
-///      (`compactClassInheritError`'s SymWreath arm applies the identical
-///      per-level rule to elementwise maps). While only canonical cells were
-///      reachable the difference was unobservable; the mirrored read and
-///      `decompact` made it a silent wrong VALUE (corpus 213/214 vs the
-///      refused additive kernel).
-///
-///      The trust model, decided deliberately: `KspEven` is the
-///      `CommContradictsBody` analog one level up (declared comm + provably
-///      even kernel + '-' inner class = the silent-corruption case) and
-///      `KspUnknown` REFUSES TOO — unlike depth-1 `comm`, whose unprovable
-///      declaration is taken on the user's word (§8.1), per-argument oddness
-///      is a claim NO clause declares (`where comm(p, q)` says h(p,q)=h(q,p)
-///      and nothing about h(-p,q)), so there is no user word to trust; the
-///      precedent is BL4015's inheritance gate, which refuses UNKNOWN for the
-///      same reason and steers to decompact-first. All-'+' inner levels need
-///      no certificate (their mirror is the identity), so every previously
-///      sound tie is untouched. The gate reads `argParities` — the summary
-///      the typecheck seam computed and recorded on the kernel's callable
-///      (`IRCallable.SignParities`) — so all four call sites judge from the
-///      same values; a missing entry is `KspUnknown`.
-///
-/// Anything else -- distinct inputs, a partial tie, a dense input, a mixed
-/// clause -- returns WreathNoTie and juxtaposes exactly as before.
-///
-/// EVERY consumer calls THIS (deduction, codegen, the interpreter, and the
-/// typecheck guard that keeps the axis-group analyses off a wreath input), with
-/// the same arguments, so "is this a wreath application" has one answer —
-/// which is why the soundness gate lives INSIDE this function rather than at
-/// the typecheck call site.
+/// Anything else returns WreathNoTie, juxtaposed as usual. EVERY consumer
+/// (deduction, codegen, interpreter, the typecheck guard) calls THIS with
+/// the same arguments, so the soundness gate lives here, not at the
+/// typecheck call site.
 let deduceWreathTie
     (arrayTypes: IRArrayType list)
     (identities: ArrayIdentity list)
@@ -2456,15 +2110,15 @@ let deduceWreathTie
             match orbitNormalForm (levels0 @ [ (k, isPlus) ]) with
             // Only a genuine depth >= 2 class is a tie this layer owns. The
             // other two normal forms are unreachable here (k >= 2 and levels0 is
-            // non-empty with every rank >= 2), but they route to the LEGACY
-            // record rather than to a malformed wreath one -- the normalization
-            // is shared with the surface type precisely so a collapse is handled
-            // once and identically.
+            // non-empty with every rank >= 2), but they route to the plain
+            // SymIdx/AntisymIdx record rather than to a malformed wreath one --
+            // the normalization is shared with the surface type precisely so a
+            // collapse is handled once and identically.
             | OrbNfWreath outLevels ->
                 // Condition 6. The check keys off the INNER levels only: the
                 // appended (outer) level's sign is the declared clause itself
-                // — comm's inclusive simplex or anticomm's pin spelling — and
-                // both inherit depth-1's existing validation (the stage-3
+                // -- comm's inclusive simplex or anticomm's pin spelling -- and
+                // both inherit depth-1's existing validation (the
                 // CommContradictsBody / AntisymmContradictsBody pair checks).
                 // What depth 1 never had is a mirror INSIDE one argument.
                 let innerHasMinus = levels0 |> List.exists (fun (_, plus) -> not plus)
@@ -2487,26 +2141,19 @@ let deduceWreathTie
                                  OuterIsPlus = isPlus }
             | OrbNfTrivial | OrbNfDepth1 _ -> WreathNoTie
 
-/// Deduce output array type from loop application
-/// According to formalism section 10.9:
+/// Deduce output array type from loop application, per formalism section 10.9:
 /// 1. Group arrays by identity (consecutive identical arrays)
-/// 2. For each group: if comm + arity > 1, use SymIdx; else Idx
-///    (AntisymIdx instead of SymIdx when the group is DECLARED antisymmetric
-///     (`where anticomm(a, b)` — antisymGroups, the pin spelling: the kernel is
-///     used AS-IS, storing f(i,j) for i<j only, with reads of (j,i) negated by
-///     the index type's TfNegateOnSwap; no permutation sum) or when
-///     isReynoldsAntisym is set -- Reynolds
-///     antisymmetrization over a commutative same-array group produces a
-///     strictly-triangular antisymmetric output, NOT a symmetric one. The
-///     antisymmetric output stores C(n,r) strict tuples with no diagonal,
-///     versus C(n+r-1,r) for symmetric. This is what makes the
-///     allocate_antisym storage path reachable from the common Reynolds use
-///     case; without it a same-array reynolds(f, Antisymmetric) would deduce
-///     symmetric storage (wrong cardinality, spurious zero diagonal).)
-///    When there is NO Reynolds clause (isReynolds = false), a rank-0
-///    elementwise kernel instead PRESERVES the input group's compact storage
-///    class verbatim (Sym/Antisym/Hermitian), since the kernel does not reshape
-///    symmetry; the Reynolds flags only apply when a Reynolds clause is present.
+/// 2. For each group: if comm + arity > 1, use SymIdx; else Idx.
+///    AntisymIdx instead of SymIdx when DECLARED antisymmetric (`where
+///    anticomm(a, b)`: kernel used AS-IS, storing f(i,j) for i<j only, reads
+///    of (j,i) negated by TfNegateOnSwap; no permutation sum) or when
+///    isReynoldsAntisym: Reynolds antisymmetrization over a commutative
+///    same-array group produces a strictly-triangular output (C(n,r) strict
+///    tuples, no diagonal) NOT a symmetric one (C(n+r-1,r)) -- without this,
+///    a same-array reynolds(f, Antisymmetric) would deduce the wrong
+///    cardinality with a spurious zero diagonal. With NO Reynolds clause, a
+///    rank-0 elementwise kernel instead PRESERVES the input group's compact
+///    storage class verbatim (it doesn't reshape symmetry).
 /// 3. Concatenate S-dims from all groups
 /// 4. Add T-dims from kernel output
 let deduceOutputType
@@ -2525,17 +2172,13 @@ let deduceOutputType
 
     if arrayTypes.IsEmpty then IRTUnit
     else
-    // Step 1a: THE WREATH TIE, ahead of the axis-group machinery and total when
-    // it fires (docs/plan-orbit-index-types.md §9 step 4). Two reasons it cannot
-    // be a post-pass over `sGroups`:
-    //   * the answer is ONE index record where the group walk would emit k, so
-    //     there is no group to rewrite in place; and
-    //   * `buildLoopLevelStructure` below REFUSES a wreath input outright
-    //     (buildRawLoopLevels), which is exactly the depth-3 case `let P =
-    //     f(A,A) in g(P,P)` -- so the tie has to be decided before any loop
-    //     level is built, not after.
-    // Everything about the wreath output's iteration is the segment-peeled
-    // `orb_visit` nest, so nothing downstream of here wants axis groups for it.
+    // Step 1a: THE WREATH TIE, ahead of the axis-group machinery and total
+    // when it fires. Cannot be a post-pass over `sGroups`: the answer is ONE
+    // index record where the group walk would emit k (nothing to rewrite in
+    // place), and `buildLoopLevelStructure` below REFUSES a wreath input
+    // outright -- so the tie must be decided before any loop level is built.
+    // The wreath output's iteration is the segment-peeled `orb_visit` nest,
+    // so nothing downstream wants axis groups for it.
     match deduceWreathTie arrayTypes identities commGroups antisymGroups
                           kernelTDims kernelConsumesInner isReynolds kernelSignParities with
     | WreathTied tie ->
@@ -2545,36 +2188,30 @@ let deduceOutputType
         // Unreachable: the typecheck apply seam runs the SAME call with the
         // SAME arguments first and surfaces this verdict as a user-facing
         // error before any output type is deduced. Loud rather than a silent
-        // fall-through to the legacy record — that record would be a
-        // DIFFERENT wrong type, with no warning anywhere.
+        // fall-through to the plain SymIdx/AntisymIdx record -- that record
+        // would be a DIFFERENT wrong type, with no warning anywhere.
         failwith (sprintf "internal: deduceOutputType reached a wreath tie whose kernel is not \
 provably sign-odd in tied argument %d; the typecheck seam should have refused this application"
                           argPos)
     | WreathNoTie ->
         // Step 1+2: Build output S-dim index types from the SINGLE canonical
-        // axis grouping (rawAxisGroups) — the same source the iteration thread
-        // uses — so output storage and loop iteration cannot disagree. This
-        // replaces the older array-identity grouping, which could not express
+        // axis grouping (rawAxisGroups) -- the same source iteration uses --
+        // so output storage and loop iteration cannot disagree. Supports
         // PARTIAL product symmetry: distinct arrays sharing an index space at
-        // some positions (e.g. comm over A<Lat,Lon>, B<Lat,Depth>) must
-        // symmetrize ONLY the shared axis (Lat), which is an axis-level fact,
-        // not an array-level one (§14.6).
+        // some positions (comm over A<Lat,Lon>, B<Lat,Depth>) symmetrize
+        // ONLY the shared axis, an axis-level fact (section 14.6).
         //
-        // Each axis group becomes ONE output S-dim index:
-        //   - group size > 1  -> a higher-rank SYMMETRIC index (Rank = group
-        //     size), or ANTISYMMETRIC under a Reynolds antisymmetrization. This
-        //     covers both same-array repetition and distinct arrays sharing a
-        //     named index space, plus a within-type symmetric record (whose
-        //     arity components form one group of that arity).
-        //   - group size == 1 -> the source index type copied VERBATIM (Id
-        //     refreshed only), preserving its own Rank/Symmetry and any
-        //     ragged/dep structure. This is load-bearing for a single symmetric
-        //     input (method_for(sym) <@> h carries SymIdx<r,N> through) and for
-        //     elementwise-over-ragged/dep (rank-0 kernel preserves input shape).
+        // Each axis group becomes ONE output S-dim index: group size > 1 ->
+        // a higher-rank SYMMETRIC (or ANTISYMMETRIC under Reynolds) index,
+        // covering both same-array repetition and shared-named-space
+        // arguments, plus a within-type symmetric record's own arity
+        // components. Group size == 1 -> the source index type copied
+        // VERBATIM (Id refreshed), preserving Rank/Symmetry/ragged/dep
+        // structure -- load-bearing for a single symmetric input and for
+        // elementwise-over-ragged/dep.
         //
-        // A level's (ArrayIndex, LocalDimIndex) recovers its source IRIndexType
-        // from that array's S-dim records, so the verbatim copy uses the full
-        // original record (not the projected IndexSpace).
+        // A level's (ArrayIndex, LocalDimIndex) recovers its source
+        // IRIndexType, so the verbatim copy uses the full original record.
         let sLevels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
         let sGroups = rawAxisGroups identities commGroups sLevels
         // Per array: its S-dimension index-type records, in order (LocalDimIndex
@@ -2593,13 +2230,11 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
             let levelArr = List.toArray sLevels
             let groupArr = List.toArray sGroups
             // Is this axis group the one a `where anticomm(...)` clause
-            // declared? The clause names KERNEL PARAMETERS, which are 1:1 with
-            // argument positions, so the test is on the group's member levels'
-            // ArrayIndex values: every one of them must be listed in a single
-            // declared group, and the group must actually span more than one
-            // argument (a within-type symmetric block, whose members all share
-            // one ArrayIndex, is a property of the INPUT type and is never
-            // reclassified by a kernel clause).
+            // declared? The clause names KERNEL PARAMETERS (1:1 with
+            // argument positions): every member's ArrayIndex must be listed
+            // in one declared group, spanning MORE than one argument (a
+            // within-type symmetric block, all one ArrayIndex, is an INPUT
+            // property never reclassified by a kernel clause).
             let groupIsDeclaredAntisym (memberIdxs: int list) : bool =
                 if List.isEmpty antisymGroups then false
                 else
@@ -2619,14 +2254,13 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
                     let repLevel = levelArr.[List.head memberIdxs]
                     match repLevel.FusedFactors with
                     | Some factors when not factors.IsEmpty && groupRank > 1 ->
-                        // Arc 1 JOINT output record: one symmetric index of rank
-                        // groupRank over the COMPOUND extent (product of the fused
-                        // argument's per-dim extents) — SymIdx<r, prod(n_j)>, the
-                        // only sound output for one identity group over a
-                        // multi-dim array (docs/formalism.md §8.4/§12.4). The old
-                        // per-dimension SymIdx-per-dim output is refuted
-                        // (per_dim_swap_not_symmetry) and cannot even hold the
-                        // result (counting_general_C).
+                        // JOINT output record: one symmetric index of rank
+                        // groupRank over the COMPOUND extent -- SymIdx<r,
+                        // prod(n_j)>, the only sound output for one identity
+                        // group over a multi-dim array (docs/formalism.md
+                        // section 8.4/12.4). Per-dimension SymIdx-per-dim is
+                        // unsound (per_dim_swap_not_symmetry) and can't even
+                        // hold the result (counting_general_C).
                         let groupSymmetry =
                             if isReynolds then
                                 (if isReynoldsAntisym then SymAntisymmetric else SymSymmetric)
@@ -2638,17 +2272,14 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
                                         match a, b with
                                         | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
                                         | _ -> IRBinOp (IRElementwise, IRMul, a, b))
-                        // The compound axis is ANONYMOUS and PLAIN. Tag = None
-                        // AND IxKind = IxKPlain must BOTH be stamped, not just
-                        // inherited from the template factor: since stage 4
-                        // admits IxKIrreps factors, a template-inherited
-                        // IxKIrreps beside Tag = None would break the
-                        // Tag↔IxKind agreement the IR validator enforces
-                        // (ixKindOfTag None = IxKPlain), and would falsely
-                        // advertise a spec the compound axis does not have.
-                        // §6.3(iii), decided at stage 4: a batch × irreps (or
-                        // irreps × irreps) product is NOT an irreps space — the
-                        // joint coordinate ranges over tuples, which carry no
+                        // The compound axis is ANONYMOUS and PLAIN: Tag =
+                        // None AND IxKind = IxKPlain must BOTH be stamped,
+                        // not inherited from the template factor -- IxKIrreps
+                        // is an admissible factor kind, so a template-
+                        // inherited IxKIrreps beside Tag = None would break
+                        // the Tag<->IxKind agreement the validator enforces.
+                        // A batch x irreps product is NOT an irreps space:
+                        // the joint coordinate ranges over tuples with no
                         // single-space representation structure. Dependencies
                         // are empty by fusion eligibility.
                         let template = List.head factors
@@ -2669,16 +2300,16 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
                     | None -> ()
                     | Some rep ->
                         if groupRank > 1 then
-                            // A Reynolds clause is a kernel-level unary combinator: when
-                            // present it shapes the output symmetry (sym/antisym per the
-                            // variant), and the input array's native storage class does
-                            // not override it. With NO Reynolds, a rank-0 elementwise
-                            // kernel preserves the input's compact storage class verbatim
-                            // (Sym/Antisym/Hermitian); only a plain (SymNone) multi-level
-                            // group defaults to symmetric — unless the kernel DECLARED
-                            // the group antisymmetric (`where anticomm(a, b)`), which
-                            // pins the strict simplex the same way a comm clause pins
-                            // the inclusive one.
+                            // A Reynolds clause shapes the output symmetry
+                            // (sym/antisym per variant), overriding the
+                            // input's native storage class. With NO
+                            // Reynolds, a rank-0 elementwise kernel preserves
+                            // the input's compact storage class verbatim;
+                            // only a plain (SymNone) multi-level group
+                            // defaults to symmetric, unless the kernel
+                            // DECLARED it antisymmetric (`where anticomm`),
+                            // pinning the strict simplex like comm pins the
+                            // inclusive one.
                             let groupSymmetry =
                                 if isReynolds then
                                     (if isReynoldsAntisym then SymAntisymmetric else SymSymmetric)
@@ -2687,24 +2318,22 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
                                     // A wreath REPRESENTATIVE keeps its own class:
                                     // widening it to a bare SymSymmetric over the
                                     // group rank would claim full S_R on axes the
-                                    // wreath does not tie (§7's whole point), and
-                                    // there is no deduction in v1 that produces one
-                                    // anyway -- storage refuses it upstream.
+                                    // wreath does not tie (section 7's whole point), and
+                                    // no deduction produces one anyway -- storage
+                                    // refuses it upstream.
                                     (match rep.Symmetry with
                                      | SymSymmetric | SymAntisymmetric | SymHermitian | SymWreath -> rep.Symmetry
                                      | SymNone -> SymSymmetric)
                             result <- result @ [{ rep with Rank = groupRank; Symmetry = groupSymmetry; Id = builder.FreshId() }]
                         else
-                            // size-1 group: verbatim copy (preserve Rank, Symmetry,
-                            // ragged/dep structure), refresh Id only. EXCEPT a halo
-                            // slot: the output axis is the plain dense INTERIOR of
-                            // the wrapped index (the window structure is consumed
-                            // by iteration, like the Tag=None raveling rule above).
-                            // A compound-inner halo output in particular must NOT
-                            // stay IxKCompound — its cell count is cardinality
-                            // minus the shrink, not the mask cardinality, so it
-                            // allocates as a dense Array (extent filled from the
-                            // loop binding by CodeGen's extentsFill).
+                            // size-1 group: verbatim copy, refresh Id only.
+                            // EXCEPT a halo slot: the output axis is the
+                            // plain dense INTERIOR of the wrapped index (the
+                            // window structure is consumed by iteration). A
+                            // compound-inner halo output must NOT stay
+                            // IxKCompound -- its cell count is cardinality
+                            // minus the shrink, not the mask cardinality, so
+                            // it allocates as a dense Array.
                             let rep' =
                                 match rep.Tag with
                                 | Some t when t.StartsWith "__halowin|" ->
@@ -2712,24 +2341,16 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
                                 | _ -> rep
                             result <- result @ [{ rep' with Id = builder.FreshId() }]
             result
-            // Drop indices tagged as "consumed by the kernel" — but ONLY when
-            // the kernel actually consumes an inner dimension (it has an
-            // array-typed parameter of rank > 0, e.g. `lambda(g: Array<...>) ->
-            // reduce(g, ...)`). In that case the kernel implicitly receives a
-            // sub-array along the tagged dim and produces a per-outer-iteration
-            // result, so the dim is not part of the output.
-            //
-            // For a rank-0 ELEMENTWISE kernel (all scalar params, e.g.
-            // `lambda(e) -> e * 2`), nothing is consumed: the kernel maps each
-            // scalar and the ragged/dependent inner dim must PROPAGATE to the
-            // output. Dropping it there collapsed a ragged/DepIdx array to a
-            // single Idx record (the elementwise-over-ragged/dep gap).
-            //
-            //   - __group_member        : ragged inner of group_by output
-            //   - __raggedidx          : closed RaggedIdx<lens>
-            //   - __raggedidx_inline   : ragged literal's inferred inner
-            //   - __raggedidx_opaque   : opaque RaggedIdx<_>
-            //   - __depidx_inner       : DepIdx inner (formula-driven extent)
+            // Drop indices tagged "consumed by the kernel" -- ONLY when the
+            // kernel consumes an inner dimension (array-typed param of rank
+            // > 0, e.g. `lambda(g: Array<...>) -> reduce(g, ...)`): the
+            // kernel receives a sub-array along the tagged dim, so the dim
+            // is not part of the output. For a rank-0 ELEMENTWISE kernel
+            // nothing is consumed, so the ragged/dependent inner dim must
+            // PROPAGATE (dropping it collapsed a ragged/DepIdx array to a
+            // plain Idx record -- the elementwise-over-ragged/dep gap):
+            //   __group_member, __raggedidx, __raggedidx_inline,
+            //   __raggedidx_opaque, __depidx_inner.
             |> List.filter (fun idx ->
                 match idx.IxKind with
                 | IxKGroupMember
@@ -2749,19 +2370,16 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
         
         if allDims.IsEmpty then
             // Rank-0 output: just the element type itself.
-            // After Phase B2, elemType is already IRType so no IRTScalar wrap.
+            // elemType is already IRType, so no IRTScalar wrap is needed.
             elemType
         else
             mkArrayArrow allDims elemType None
 
 
-// ============================================================================
 // Code Generation Structures
-// ============================================================================
 // These structures provide explicit bindings between loop indices, arrays,
 // and kernel parameters to facilitate code generation.
 
-/// Binding between a loop index and its corresponding array/parameter
 /// What kind of element access to generate for a loop level
 type VirtualKind =
     | RealArray           // Normal: elem = arr[i]
@@ -2783,7 +2401,7 @@ type ElementBinding = {
     /// For SymIdx: which arity component (0, 1, 2, ...)
     RankComponent: int
     /// Element type of the array (for explicit typing).
-    /// IRType to align with IRArrayType.ElemType (Phase B2).
+    /// IRType to align with IRArrayType.ElemType.
     ArrayElemType: IRType
     /// Total rank of the array being indexed
     ArrayRank: int
@@ -2804,7 +2422,7 @@ type LoopIndexBinding = {
     IndexName: string
     /// Extent as IRExpr (for flexible code gen)
     Extent: IRExpr
-    /// Array name for non-literal extent lookup (e.g. "A" → "A_extents[dim]")
+    /// Array name for non-literal extent lookup (e.g. "A" -> "A_extents[dim]")
     ExtentArrayRef: string
     /// Dimension index for non-literal extent lookup
     ExtentDimRef: int
@@ -2812,7 +2430,7 @@ type LoopIndexBinding = {
     BoundDependencies: int list
     /// Extra offset to subtract from bound (1 for antisymmetric strict i < j)
     StrictOffset: int
-    /// Arc 1: Some d marks a FUSED joint level spanning d plain-dense source
+    /// Some d marks a FUSED joint level spanning d plain-dense source
     /// dims of its array (extent = product of the array's first d extents).
     /// Codegen renders the bound as extents[0]*...*extents[d-1] and each
     /// element binding decodes its per-dim coordinate from the compound index
@@ -2827,24 +2445,22 @@ type LoopIndexBinding = {
 }
 
 /// Complete information needed to generate a loop nest
-/// Phase 2 Path B for reduce-over-deferred-computation
-/// (docs/plan-cpp-perf-exploitation.md §2): the OUTERMOST loop level of a fold
-/// nest is split into contiguous per-thread chunks, each thread runs the WHOLE
-/// inner nest serially over its chunk into a private accumulator, and the
-/// partials are combined in thread order through the same fold wrapper.
+/// Reduce-over-deferred-computation fold-chunking (docs/plan-cpp-perf-
+/// exploitation.md section 2): the OUTERMOST loop level of a fold nest
+/// splits into contiguous per-thread chunks; each thread runs the WHOLE
+/// inner nest serially over its chunk into a private accumulator, and
+/// partials combine in thread order through the fold wrapper. Only the
+/// outermost level chunks: a triangular/dependent inner level then runs
+/// exactly as it would serially, and reordering is only between chunks --
+/// what the kernel's comm licence covers. Set only when the outermost
+/// binding is rectangular (no bound deps, no strict offset), so chunk
+/// arithmetic is a plain split of [0, extent).
 ///
-/// Why the outermost level and nothing else: a triangular/dependent inner level
-/// is then trivially correct (it runs exactly as it would serially, for each
-/// outer index the thread owns), and the only reordering is between chunks —
-/// which is precisely what the kernel's comm licence covers. Set only when the
-/// outermost binding is rectangular (no bound dependencies, no strict offset),
-/// so the chunk arithmetic is a plain split of [0, extent).
-///
-/// Chunks are seeded from their own first CONTRIBUTED value rather than from the
-/// caller's seed (`HasName` tracks "has one yet"), so no identity element is
-/// required and an outer index whose inner nest is empty contributes nothing.
-/// The caller's seed stays in the outer accumulator and enters the combine
-/// first, which makes the result the serial left fold up to associativity.
+/// Chunks seed from their own first CONTRIBUTED value, not the caller's seed
+/// (`HasName` tracks "has one yet"), so no identity element is required and
+/// an empty-inner-nest outer index contributes nothing. The caller's seed
+/// enters the combine first in the outer accumulator, making the result the
+/// serial left fold up to associativity.
 type FoldChunkPlan = {
     /// C++ type of the accumulator and the per-thread partials array.
     ElemCpp: string
@@ -2875,32 +2491,26 @@ type LoopNestCodeGen = {
     HasReynolds: bool
     /// Whether Reynolds is antisymmetric (sign alternates with permutation parity)
     IsAntisymmetric: bool
-    /// Fused-fold mode (reduce over a deferred computation): when Some,
-    /// the nest ACCUMULATES `OutputName = <wrapper>(OutputName, kernel)`
-    /// into a caller-declared scalar instead of assigning output cells —
-    /// "+" / "*" fast-path to `+=` / `*=`. The caller declares and seeds
-    /// the accumulator, forces OutputType scalar, and suppresses the
-    /// nest-level OMP pragma (scalar accumulation is not race-safe).
+    /// Fused-fold mode: when Some, the nest ACCUMULATES
+    /// `OutputName = <wrapper>(OutputName, kernel)` into a caller-declared
+    /// scalar instead of assigning output cells ("+"/"*" fast-path to
+    /// `+=`/`*=`). Caller declares/seeds the accumulator, forces OutputType
+    /// scalar, suppresses the OMP pragma (scalar accumulation isn't race-safe).
     FoldWrapper: string option
     /// MPI slab mode (dense rectilinear decomposition): when true, the
-    /// OUTERMOST loop iterates the per-rank slab [__blade_mpi_lo_<out>,
-    /// __blade_mpi_hi_<out>) instead of [0, extent). The caller
-    /// (genApplyCombinator's MPI-dense path) emits the slab-bound prologue
-    /// before the nest and the Allgatherv after it. Always false outside
-    /// mpiEmitMode.
+    /// OUTERMOST loop iterates the per-rank slab [lo,hi) instead of
+    /// [0, extent); caller emits the slab-bound prologue + Allgatherv.
+    /// Always false outside mpiEmitMode.
     MpiSlab: bool
-    /// Whether the resolved kernel callable ASKED for OpenMP (`where omp(...)`),
-    /// independent of whether the nest actually gets a pragma. `IsParallel` on
-    /// the bindings is the CONJUNCTION of this and "level 0", so once a nest is
-    /// emitted serial the request bit is no longer recoverable from it — and
-    /// "no clause" becomes indistinguishable from "clause honoured nowhere".
-    /// Kept separately so the emitters can mark a requested-but-serial nest in
-    /// the generated C++ instead of silently dropping the request.
+    /// Whether the resolved kernel callable ASKED for OpenMP, independent of
+    /// whether the nest gets a pragma. `IsParallel` on the bindings is the
+    /// CONJUNCTION of this and "level 0", so once serial the request bit
+    /// isn't recoverable from bindings alone -- kept separately so emitters
+    /// can mark a requested-but-serial nest instead of silently dropping it.
     OmpRequested: bool
-    /// Comm-licensed parallel fold over this nest (Phase 2 Path B). Meaningful
-    /// only together with FoldWrapper; None everywhere else, including every
-    /// fold whose kernel did not ask for omp or could not be licensed. See
-    /// FoldChunkPlan for what the shape guarantees.
+    /// Comm-licensed parallel fold over this nest. Meaningful only together
+    /// with FoldWrapper; None everywhere else. See FoldChunkPlan for the
+    /// shape guarantees.
     FoldChunk: FoldChunkPlan option
 }
 
@@ -2917,7 +2527,7 @@ type BufferDimGroup = {
 
 /// The dimensional type of one contiguous device buffer (one array's pool).
 /// The pool holds `cardinality` scalars of `ElemType` in linearize (DFS) order
-/// — identical to allocate<>'s pool order, the invariant making host/device
+/// -- identical to allocate<>'s pool order, the invariant making host/device
 /// access consistent. A skeleton (promote<T,N>::type) is a VIEW of these bytes;
 /// this type is what makes the bytes interpretable and specifies the forward
 /// (native->device) and inverse (device->native) transforms the CUDA shim uses.
@@ -2947,30 +2557,19 @@ let isRectangularConstBuffer (bt: DeviceBufferType) : bool =
         g.Rank = 1 && g.Symmetry = SymNone && List.isEmpty g.Dependencies)
 
 /// True iff the element scalar type crosses an `extern "C"` linkage boundary
-/// cleanly. The CUDA launch wrapper is declared extern "C" so g++ (compiling
-/// the .cpp) and nvcc (compiling the .cu) agree on an unmangled symbol; every
-/// type crossing that boundary must have a stable ABI both compilers share.
-/// Fundamental scalars (int32/int64/float/double/bool) qualify. EXCLUDED:
-///   - ETComplex* (std::complex<...>): a C++ class template; even though
-///     std::complex<double> is often layout-compatible with double[2], that is
-///     NOT guaranteed across extern "C", so we don't rely on it.
-///   - ETString (std::string): a non-POD C++ object — never crosses.
-///   - ETUnit (void): not a data element.
+/// cleanly (the CUDA launch wrapper is extern "C" so g++ and nvcc agree on
+/// an unmangled symbol; every crossing type needs a stable shared ABI).
+/// Fundamental scalars (int32/int64/float/double/bool) qualify. std::complex
+/// also qualifies: the C++ standard guarantees std::complex<T> is layout-
+/// compatible with T[2] and thrust::complex<T> shares that layout, so the
+/// host .cpp keeps std::complex in the extern "C" signatures while the .cu
+/// uses thrust::complex internally (std::complex's operators are host-only
+/// under nvcc), reinterpreting through cudaMemcpy's void*. EXCLUDED:
+/// ETString (non-POD, never crosses) and ETUnit (not a data element).
 ///
-/// std::complex (2026-07-19, complex-over-CUDA arc): boundary-safe. The C++
-/// standard guarantees std::complex<T> is layout-compatible with T[2], and
-/// thrust::complex<T> shares that layout. The extern "C" wrapper SIGNATURES
-/// keep the std::complex spelling (they are text-copied into the host .cpp as
-/// prototypes, so both TUs agree); inside the .cu the device buffers and the
-/// __global__ kernel use thrust::complex (std::complex's operators/functions
-/// are host-only under nvcc), and cudaMemcpy's void* parameters perform the
-/// layout-compatible reinterpret with no casts. Kernel bodies render in the
-/// thrust device dialect (CodeGen's cudaDeviceDialect cell).
-///
-/// A non-boundary-safe element type makes the kernel fall back to the host loop
-/// (gate, don't emit an unlinkable kernel). Uses AnyPrimElem so a unit-annotated
-/// or idx-tagged primitive (e.g. a Float64 carrying a unit) is still recognized
-/// by its underlying scalar.
+/// A non-boundary-safe element type falls back to the host loop rather than
+/// emit an unlinkable kernel. Uses AnyPrimElem so a unit-annotated or
+/// idx-tagged primitive is still recognized by its underlying scalar.
 let isCudaBoundarySafeElem (ty: IRType) : bool =
     match ty with
     | AnyPrimElem ETInt32 | AnyPrimElem ETInt64
@@ -2997,25 +2596,22 @@ let binomI64 (n: int64) (k: int64) : int64 =
 ///   rectangular (Rank=1)      => extent
 ///   symmetric/hermitian (r>=2) => C(n + r - 1, r)   (multiset combinations)
 ///   antisymmetric (r>=2)       => C(n, r)            (strict combinations)
-///   wreath (OrbIdx, depth d)   => §4's ITERATED binomial over the level list
+///   wreath (OrbIdx, depth d)   => section 4's ITERATED binomial over the level list
 /// Symbolic-symmetric counts (binomial of a runtime extent) are deferred; the
 /// first kernel gates on isRectangularConstBuffer so only the literal and the
 /// symbolic-rectangular paths are reachable today.
 let bufferGroupCardinality (g: BufferDimGroup) : IRExpr =
     match g.Extent with
     // ---- Wreath (OrbIdx) groups, FIRST and total ----------------------------
-    // The count is the §4 fold M0 = n; Mi = C(M + r - 1, r) at '+', C(M, r) at
-    // '-' -- NOT one combinadic over g.Rank. Both of the fall-throughs this arm
-    // pre-empts are wrong in a way nothing downstream could notice:
-    //   * the `| other -> other` tail would return the MARKER as the count
-    //     expression (an extent carrier used as a scalar);
-    //   * PlaceCombinatorial _ over R = prod(ri) would compute C(n+R-1, R),
-    //     which for [(2,+),(2,+)] at n = 4 is C(19,4) = 3876 against the true
-    //     55 -- an over-allocation here, an UNDER-count for other level lists,
-    //     and in both directions a number no test on the value side can see.
-    // Overflow and a non-literal extent are ERRORS, never a fallback: §7.2's
-    // failure mode to guard is silent int64 wraparound in offset arithmetic,
-    // and `cellCountChecked` is the exactly-checked fold that detects it.
+    // Count = section 4 fold M0 = n; Mi = C(M+r-1,r) at '+', C(M,r) at '-' --
+    // NOT one combinadic over g.Rank. The obvious fallbacks are wrong in ways
+    // nothing downstream would notice: `| other -> other` would return the
+    // MARKER itself as the count; `PlaceCombinatorial _` over R = prod(ri)
+    // computes C(n+R-1,R), e.g. C(19,4) = 3876 for [(2,+),(2,+)] at n=4
+    // against the true 55. Overflow and a non-literal extent are ERRORS,
+    // never a fallback (section 7.2's failure mode is silent int64
+    // wraparound); `cellCountChecked` is the exactly-checked fold that
+    // detects it.
     | IROrbitClass (levels, baseExtent) ->
         (match baseExtent with
          | IRLit (IRLitInt n) ->
@@ -3024,7 +2620,7 @@ let bufferGroupCardinality (g: BufferDimGroup) : IRExpr =
               | Error detail ->
                   failwithf "OrbIdx<%s, %d>: the class's cell count cannot be computed -- %s. \
 An iterated-wreath class grows one binomial per level, so a deep class over a large extent leaves \
-int64 well before its rank does (docs/plan-orbit-index-types.md §7.2); reduce the extent or the depth."
+int64 well before its rank does (docs/plan-orbit-index-types.md section 7.2); reduce the extent or the depth."
                             (ppOrbitLevels levels) n detail)
          | _ ->
              failwithf "OrbIdx<%s, ?>: a wreath class needs a COMPILE-TIME extent. Its cell count is \
@@ -3063,7 +2659,7 @@ Extent must be the IROrbitClass marker carrying [(r,s), ...]. This record was bu
         IRLit (IRLitInt count)
     | other -> other
 
-/// Total pool cardinality as an IRExpr (product of per-group factors — product
+/// Total pool cardinality as an IRExpr (product of per-group factors -- product
 /// symmetry: independent groups multiply). Folds to a literal when all extents
 /// are literal.
 let deviceBufferCardinality (bt: DeviceBufferType) : IRExpr =
@@ -3077,22 +2673,22 @@ let deviceBufferCardinality (bt: DeviceBufferType) : IRExpr =
             | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
             | _ -> IRBinOp (IRElementwise, IRMul, a, b))
 
-/// Build symmetry vector from output type
-/// Consecutive equal values indicate symmetric dimensions
-/// True iff a symmetry vector encodes ANY actual symmetry — i.e. two adjacent
-/// positions share a group number (a symmetric/antisymmetric block). A purely
-/// rectangular output yields all-distinct consecutive groups (e.g. [1;2;3]),
-/// which is NOT symmetry and must be treated as "no symmetry" (pass nullptr to
-/// allocate). This matters for MSVC: a rectangular rank-2+ output was getting a
-/// non-empty vec like [1;2], which took the named-static-array allocate path and
-/// hit C2131 (address of a function-local static isn't a constant). Routing the
-/// no-real-symmetry case to nullptr fixes that and is semantically identical
-/// (allocate treats null SYMM and all-distinct SYMM the same: full rectangular).
+/// True iff a symmetry vector encodes ANY actual symmetry -- two adjacent
+/// positions share a group number (a symmetric/antisymmetric block). A
+/// purely rectangular output yields all-distinct consecutive groups (e.g.
+/// [1;2;3]), which is NOT symmetry and must pass nullptr to allocate.
+/// Matters for MSVC: a rectangular rank-2+ output with a non-empty vec like
+/// [1;2] took the named-static-array allocate path and hit C2131 (address
+/// of a function-local static isn't a constant); routing no-real-symmetry
+/// to nullptr fixes that (allocate treats null SYMM and all-distinct SYMM
+/// the same: full rectangular).
 let hasRealSymmetry (symmVec: int list) : bool =
     symmVec
     |> List.pairwise
     |> List.exists (fun (a, b) -> a = b)
 
+/// Build symmetry vector from output type: consecutive equal values
+/// indicate symmetric dimensions.
 let buildSymmVec (outputType: IRType) : int list =
     match outputType with
     | ArrayElem arr ->
@@ -3133,7 +2729,7 @@ let buildSymmVec (outputType: IRType) : int list =
 /// Like buildSymmVec, but groups ALL compact classes (symmetric, Hermitian, AND
 /// antisymmetric) into shared storage groups, and returns a parallel per-group
 /// STRICT mask. buildSymmVec deliberately treats antisym as non-symmetric (one
-/// singleton group per dim) because the legacy antisym path used a SEPARATE
+/// singleton group per dim) because plain antisym storage uses a SEPARATE
 /// all-spanning allocate_antisym. For the PER-GROUP-STRICT path we instead want
 /// an antisym group to be one compact SYMM group (so storage shrinks) with its
 /// strictness carried in STRICT. Returns (symmVec, strictVec) of equal length:
@@ -3178,46 +2774,17 @@ let buildSymmVecWithStrict (outputType: IRType) : (int list * int list) =
         (symmVec, strictVec)
     | _ -> ([], [])
 
-/// Storage allocation, derived from an output array's index TYPE (not from the
-/// kernel's Reynolds descriptor). The per-index-class allocator comes from
-/// allocRoutineFor (the placement axis):
-///   - AllocDense / AllocSymmetric -> allocate<T, SYMM>(...)
-///       (SYMM = nullptr for dense, hoisted {1,1,..} vec for symmetric;
-///        Hermitian shares the symmetric path — same upper-triangle storage)
-///   - AllocAntisymmetric -> allocate_antisym<T>(...)  (strict simplex, no mask)
-///
-/// CRITICAL distinction from LoopNestCodeGen.IsAntisymmetric: that flag comes
-/// from the Reynolds descriptor and describes the COMPUTATION (sign alternation
-/// on permutation parity). It is orthogonal to STORAGE: a kernel may
-/// antisymmetrize its arithmetic while writing a rectangular output, or an
-/// antisymmetric-typed output may be filled by a non-Reynolds kernel. Allocation
-/// must key off storage, so it reads the output index type here.
-///
-/// The runtime allocate_antisym applies the strict shrink at EVERY pointer
-/// depth uniformly (no per-group mask), so it is only correct for a SINGLE
-/// antisymmetric index spanning all dimensions. A type annotation always
-/// produces exactly that shape, so a mixed antisym+free output cannot arise from
-/// the front end today. AllocUnsupported is returned defensively if one ever
-/// does, so callers fail loudly (no silent mis-allocation).
-// ============================================================================
 // Index-type behavior interface (the storage-class abstraction).
 //
 // Each index-type CLASS (Rectangular / Symmetric / Antisymmetric / Hermitian,
 // and later Compound / Tree / Graph / CG) populates one stateless behavior
-// object. The behavior is keyed on the index type's SymmetryClass and DERIVED,
-// never stored, so the class and its behavior cannot drift: change the
-// SymmetryClass and the behavior follows automatically (see `behaviorFor`).
+// object, keyed on the index type's SymmetryClass and DERIVED, never stored,
+// so the class and its behavior cannot drift (see `behaviorFor`).
 //
-// The methods return BACKEND-NEUTRAL descriptors (AllocSpec, TransposeBehavior),
-// never C++ strings — the IR stays backend-agnostic (a Python backend would
-// consume the same descriptors). A per-backend emitter (in CodeGen for C++)
-// turns the descriptors into concrete code. This mirrors how allocate/linearize
-// are pre-rolled runtime routines the codegen merely CALLS rather than computes.
-//
-// This is introduced ADDITIVELY here: the existing scattered `match Symmetry`
-// dispatch (emitAllocRhs, transpose typecheck, etc.) is migrated onto this
-// interface in subsequent steps, each verified against the test suite.
-// ============================================================================
+// Methods return BACKEND-NEUTRAL descriptors (AllocSpec, TransposeBehavior),
+// never C++ strings -- the IR stays backend-agnostic. A per-backend emitter
+// (CodeGen for C++) turns descriptors into concrete code, mirroring how
+// allocate/linearize are pre-rolled runtime routines codegen merely CALLS.
 
 /// Names a runtime allocation routine + how its symmetry mask is supplied.
 /// Backend-neutral: the C++ emitter maps AllocDense/AllocSymmetric ->
@@ -3228,66 +2795,52 @@ type AllocSpec =
     | AllocAntisymmetric               // strict simplex: allocate_antisym<T>
     | AllocPerGroupStrict of strict: int list
                                        // mixed strictness across groups: a
-                                       // companion STRICT[] mask parallel to the
-                                       // SYMM-vec (1 = group drops its diagonal /
-                                       // strict, 0 = inclusive or dense). Emits
-                                       // allocate_strict<T, SYMM, STRICT>. Arises
-                                       // from antisym fission leaving a residual
-                                       // antisymmetric sub-group beside a freed
-                                       // dense axis (e.g. Idx -> AntisymIdx<2>).
+                                       // companion STRICT[] mask parallel to
+                                       // SYMM-vec (1 = strict, 0 = inclusive/
+                                       // dense). Emits allocate_strict<T,
+                                       // SYMM, STRICT>. Arises from antisym
+                                       // fission (e.g. Idx -> AntisymIdx<2>).
     /// Iterated-wreath (OrbIdx, depth >= 2) pool: a FLAT array of exactly
-    /// `cells` scalars in `orb_visit` order (== `OrbRank.visitStream` order ==
-    /// ascending-lex canonical), which is the plan's one hard invariant
-    /// (plan-orbidx-bijections §3). NOT a nested skeleton: a wreath's rows
-    /// shrink per LEVEL, so `allocate<>`'s single-simplex recurrence cannot
-    /// describe it. The C++ emitter still SIZES from
-    /// `orb_cell_count<Levels...>(n)` and pins the result against `cells` at
-    /// run time, so the two implementations of §4's fold cannot drift silently.
-    ///
-    /// `cells` is carried rather than recomputed downstream: it comes from
-    /// `OrbRank.cellCountChecked`, the SAME exactly-overflow-checked fold
-    /// `bufferGroupCardinality` uses, so the allocation and the cardinality
-    /// cannot answer differently (§7.2's failure mode is a silent wraparound,
-    /// and a second independent computation is exactly how you get one).
-    /// `levels` is the class as the RECORD holds it — the emitter instantiates
-    /// the nest from this, not from the tie it was deduced through.
+    /// `cells` scalars in `orb_visit` order (the plan's one hard invariant,
+    /// plan-orbidx-bijections section 3). NOT a nested skeleton: a wreath's
+    /// rows shrink per LEVEL, so `allocate<>`'s single-simplex recurrence
+    /// can't describe it. The C++ emitter SIZES from
+    /// `orb_cell_count<Levels...>(n)` and pins it against `cells` at run
+    /// time, so the two fold implementations cannot drift silently.
+    /// `cells` comes from `OrbRank.cellCountChecked`, the SAME fold
+    /// `bufferGroupCardinality` uses, so allocation and cardinality cannot
+    /// answer differently. `levels` is the class as the RECORD holds it.
     | AllocWreath of levels: (int * bool) list * extent: int64 * cells: int64
     | AllocUnsupported of reason: string
 
 /// Placement-axis allocator dispatch: which runtime allocator backs an array
-/// whose storage is governed by a given PlacementClass. This is the Level-1
-/// counterpart to behaviorFor (the symmetry axis) -- the allocator is a property
-/// of PLACEMENT (which tuples are stored and how they rank), not of the value
-/// transform, so it lives here rather than on IIndexTypeBehavior. Behavior is
-/// identical to the per-class AllocRoutine it replaces: dense -> AllocDense;
-/// strict combinadic (antisym) -> AllocAntisymmetric; inclusive combinadic
-/// (symmetric AND Hermitian, which share the upper-triangle layout) ->
-/// AllocSymmetric. A future PlaceTabulated arm adds the tabulated allocator here
-/// (and FS0025 flags this match until it does).
+/// governed by a given PlacementClass. Level-1 counterpart to behaviorFor
+/// (the symmetry axis): the allocator is a property of PLACEMENT, not the
+/// value transform, so it lives here. dense -> AllocDense; strict combinadic
+/// (antisym) -> AllocAntisymmetric; inclusive combinadic (symmetric AND
+/// Hermitian, sharing upper-triangle layout) -> AllocSymmetric. A future
+/// PlaceTabulated arm adds the tabulated allocator here (FS0025 flags this
+/// match until it does).
 let allocRoutineFor (pc: PlacementClass) : AllocSpec =
     match pc with
     | PlaceDense -> AllocDense
     | PlaceCombinatorial SymAntisymmetric -> AllocAntisymmetric
-    // A wreath class DOES have an allocator (AllocWreath: a flat pool of
-    // orb_cell_count cells in orb_visit order), but it cannot be named from the
-    // placement class alone -- the size is the §4 fold over the LEVEL LIST and
-    // the extent, neither of which a bare `PlacementClass` carries.
-    // `classifyOutputStorage` reads them off the record and is the only producer
-    // of AllocWreath. Refusing here (rather than guessing AllocSymmetric, whose
-    // inclusive triangle over prod(ri) axes sizes a pool the fold never agrees
-    // with) keeps this function honest about what it can see.
+    // A wreath class DOES have an allocator (AllocWreath), but it can't be
+    // named from the placement class alone -- the size is the section 4 fold
+    // over the LEVEL LIST and extent, which a bare `PlacementClass` doesn't
+    // carry; `classifyOutputStorage` reads them off the record. Refusing
+    // here (rather than guessing AllocSymmetric, whose triangle sizes a
+    // pool the fold never agrees with) keeps this function honest.
     | PlaceCombinatorial SymWreath ->
         AllocUnsupported "OrbIdx (iterated-wreath) allocation cannot be decided from the placement class \
 alone: the pool size is the iterated-binomial fold over the class's level list and extent \
-(docs/plan-orbit-index-types.md §4), which a bare PlacementClass does not carry. Route through \
+(docs/plan-orbit-index-types.md section 4), which a bare PlacementClass does not carry. Route through \
 classifyOutputStorage, which reads the level list off the index record."
     | PlaceCombinatorial _ -> AllocSymmetric
     | PlaceTabulated ->
-        // Compound storage is runtime-sized from the mask's popcount and is
-        // allocated through the emitted compound_index_t, not a closed-form
-        // allocator. Wired at codegen; unreached here until then (no caller
-        // passes PlaceTabulated yet -- classifyOutputStorage routes compound
-        // separately at codegen time).
+        // Compound storage is runtime-sized from the mask's popcount, via the
+        // emitted compound_index_t, not a closed-form allocator. Unreached
+        // here until codegen wires it (no caller passes PlaceTabulated yet).
         AllocUnsupported "compound (tabulated) allocation is emitted via compound_index_t at codegen"
 
 /// Semantic result of transposing two dimensions that lie WITHIN one index
@@ -3303,24 +2856,24 @@ type TransposeBehavior =
     | TRequiresDecompaction of reason: string  // would break the symmetry relation
 
 /// How a compact group folds an arbitrary index sub-tuple to its canonical
-/// (stored) representative — the FOLD phase of a lazy read (formalism 4.16,
+/// (stored) representative -- the FOLD phase of a lazy read (formalism 4.16,
 /// 14.2). Backend-neutral; the C++ emitter realizes each as inline fold code.
-///   CanonNone    — rectangular / freed axis: indices are already canonical,
+///   CanonNone    -- rectangular / freed axis: indices are already canonical,
 ///                  no reorder, always stored (identity fold).
-///   CanonSort    — symmetric / Hermitian: sort within the group, track swap
+///   CanonSort    -- symmetric / Hermitian: sort within the group, track swap
 ///                  parity, always stored (diagonal kept).
-///   CanonSortStrict — antisymmetric: sort within the group, track parity, AND
+///   CanonSortStrict -- antisymmetric: sort within the group, track parity, AND
 ///                  return "not stored" (implicit zero) on any repeated index
 ///                  (the dropped diagonal / strict-simplex storage).
-///   CanonWreathFold — iterated wreath (OrbIdx, depth >= 2): the §5 fold of
+///   CanonWreathFold -- iterated wreath (OrbIdx, depth >= 2): the section 5 fold of
 ///                  per-LEVEL sorts, innermost first, with the character
 ///                  accumulated multiplicatively and the zero set taken at any
 ///                  '-' level with two equal sub-blocks. Structurally different
 ///                  from CanonSort/CanonSortStrict, which sort ONE flat block
 ///                  once; the reference implementation is OrbRank.canonOrb.
-///                  NOT EMITTED in v1 — every consumer refuses on this arm
-///                  rather than degrade to a flat sort, which would fold
-///                  distinct orbits onto the same cell.
+///                  Not emitted; every consumer refuses on this arm rather
+///                  than degrade to a flat sort, which would fold distinct
+///                  orbits onto the same cell.
 type CanonicalizeBehavior =
     | CanonNone
     | CanonSort
@@ -3328,10 +2881,10 @@ type CanonicalizeBehavior =
     | CanonWreathFold
 
 /// What transform a lazy read applies to the fetched canonical value given the
-/// fold's swap parity — the TRANSFORM phase (formalism 4.16). Backend-neutral.
-///   TfIdentity         — symmetric / rectangular: value unchanged on swap.
-///   TfNegateOnSwap     — antisymmetric: negate when swap parity is odd.
-///   TfConjugateOnSwap  — Hermitian: conjugate when swap parity is odd
+/// fold's swap parity -- the TRANSFORM phase (formalism 4.16). Backend-neutral.
+///   TfIdentity         -- symmetric / rectangular: value unchanged on swap.
+///   TfNegateOnSwap     -- antisymmetric: negate when swap parity is odd.
+///   TfConjugateOnSwap  -- Hermitian: conjugate when swap parity is odd
 ///                        (conj_scalar is identity on real element types, so
 ///                        Hermitian-of-real degenerates to symmetric for free).
 type ReadTransformBehavior =
@@ -3412,8 +2965,8 @@ type private HermitianBehavior() =
 
 /// Iterated wreath (OrbIdx, depth >= 2): compact storage over
 /// S_r1 wr ... wr S_rd with the character the product of the level signs.
-/// Every method here describes the class HONESTLY; what is missing in v1 is the
-/// emission, and the consumers of Canonicalize refuse on CanonWreathFold.
+/// Every method here describes the class HONESTLY; emission is what's
+/// missing, and the consumers of Canonicalize refuse on CanonWreathFold.
 type private WreathBehavior() =
     interface IIndexTypeBehavior with
         member _.ClassName = "Wreath"
@@ -3435,11 +2988,10 @@ AntisymIdx at lowering and must never reach a SymWreath record" (List.length lev
                     Error (sprintf "Wreath index %s acts on %d raw axes but the record's Rank is %d"
                                    (ppOrbitLevels levels) axes ix.Rank)
                 else Ok ()
-        // Swapping two axes of a wreath class is a permutation of the raw axes
-        // that need not lie in the group at all (only within-level and
-        // block-exchange permutations do), so there is no whole-array copy that
-        // realizes it. Decompaction first is the only sound answer -- the same
-        // verdict the rectangular-group-internal swap gets.
+        // Swapping two axes of a wreath class is a permutation of the raw
+        // axes not necessarily in the group (only within-level and block-
+        // exchange permutations are); no whole-array copy realizes it, so
+        // decompaction first is the only sound answer.
         member _.TransposeWithin () =
             TRequiresDecompaction "an OrbIdx (iterated-wreath) group: a raw-axis swap is generally not \
 an element of S_r1 wr ... wr S_rd, so it is not realizable as a whole-array transform on the compact pool"
@@ -3458,7 +3010,7 @@ let private hermitianBehavior = HermitianBehavior() :> IIndexTypeBehavior
 let private wreathBehavior = WreathBehavior() :> IIndexTypeBehavior
 
 /// Total, exhaustive resolver from symmetry class to behavior. Adding a new
-/// SymmetryClass case forces a new arm here (compile error otherwise) — the
+/// SymmetryClass case forces a new arm here (compile error otherwise) -- the
 /// openness guarantee: a new index-type class is "write a behavior + one arm".
 let behaviorFor (sym: SymmetryClass) : IIndexTypeBehavior =
     match sym with
@@ -3481,8 +3033,8 @@ let (|SymmetryLike|_|) (sym: SymmetryClass) : SymmetryClass option =
     match sym with
     // SymWreath belongs here for the same reason it belongs in IxSymmetryLike:
     // it IS a compact symmetry class. Call sites that then assume a single
-    // simplex must check the class, not just membership -- and in v1 they
-    // refuse instead.
+    // simplex must check the class, not just membership -- they refuse
+    // instead.
     | SymSymmetric | SymAntisymmetric | SymHermitian | SymWreath -> Some sym
     | SymNone -> None
 
@@ -3492,33 +3044,36 @@ let (|SymmetryLike|_|) (sym: SymmetryClass) : SymmetryClass option =
 let validateIndexType (ix: IRIndexType) : Result<unit, string> =
     (behaviorOf ix).Validate ix
 
-/// Storage allocation spec for an output array, derived from its index TYPE.
-/// Source of truth for which C++ allocator to emit. The per-index-class
-/// decision comes from allocRoutineFor (the placement axis); the whole-array
-/// COMPOSITION rules (a single antisymmetric index spanning all dims is
-/// allocatable; antisym mixed with other components is not, since
-/// allocate_antisym has no per-group mask) live here, because they are a
-/// property of the array's index-list combination, not of any one class.
+/// Storage allocation spec for an output array, derived from its index TYPE
+/// (not from the kernel's Reynolds descriptor). Source of truth for which
+/// C++ allocator to emit. The per-index-class decision comes from
+/// allocRoutineFor (the placement axis); the whole-array COMPOSITION rules
+/// (a single antisymmetric index spanning all dims is allocatable; antisym
+/// mixed with other components is not, since allocate_antisym has no
+/// per-group mask) live here, because they are a property of the array's
+/// index-list combination, not of any one class.
+///
+/// CRITICAL distinction from LoopNestCodeGen.IsAntisymmetric: that flag comes
+/// from the Reynolds descriptor and describes the COMPUTATION (sign
+/// alternation on permutation parity). It is orthogonal to STORAGE: a kernel
+/// may antisymmetrize its arithmetic while writing a rectangular output, or
+/// an antisymmetric-typed output may be filled by a non-Reynolds kernel.
+/// Allocation must key off storage, so it reads the output index type here.
 let classifyOutputStorage (outputType: IRType) : AllocSpec =
     match outputType with
-    // A wreath component short-circuits the whole composition question, and now
-    // it can ANSWER it: a SOLE OrbIdx group of depth >= 2 over a compile-time
-    // extent allocates a flat pool of exactly `cellCountChecked levels n` cells
-    // (docs/plan-orbit-index-types.md §4), in orb_visit order. Answering here
-    // (rather than letting buildSymmVec's failwith fire) keeps both the spec and
-    // the refusal on the channel callers already handle.
+    // A wreath component short-circuits the whole composition question: a
+    // SOLE OrbIdx group of depth >= 2 over a compile-time extent allocates a
+    // flat pool of exactly `cellCountChecked levels n` cells (docs/plan-
+    // orbit-index-types.md section 4), in orb_visit order. Size comes from
+    // `OrbRank.cellCountChecked`, the SAME fold `bufferGroupCardinality`
+    // uses, so allocator and cardinality cannot disagree (overflow is a
+    // diagnostic, not section 7.2's silent wraparound).
     //
-    // The size comes from `OrbRank.cellCountChecked` -- the SAME fold
-    // `bufferGroupCardinality` uses for this record, so the allocator and the
-    // cardinality cannot disagree, and an overflow is a diagnostic rather than
-    // §7.2's silent wraparound.
-    //
-    // COMBINATIONS ARE REFUSED, deliberately. A wreath pool has no nested
-    // skeleton to hang a second dimension group off, and there is no product
-    // layout in the runtime that mixes one with a dense or triangular block.
-    // Deduction never produces the combination (deduceWreathTie requires the tie
-    // to cover every argument and forbids kernel T-dims), so this arm is a
-    // backstop for a future producer, not a reachable user program.
+    // COMBINATIONS ARE REFUSED, deliberately: a wreath pool has no nested
+    // skeleton to hang a second dimension group off, and no runtime layout
+    // mixes one with a dense or triangular block. Deduction never produces
+    // the combination, so this is a backstop for a future producer, not a
+    // reachable user program.
     | ArrayElem arr when arr.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
         let ix = arr.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
         let levels = orbitLevelsOf ix
@@ -3531,7 +3086,7 @@ let classifyOutputStorage (outputType: IRType) : AllocSpec =
                    | Error detail ->
                        AllocUnsupported (sprintf "OrbIdx<%s, %d>: the class's cell count cannot be \
 computed -- %s. An iterated-wreath class grows one binomial per level, so a deep class over a large \
-extent leaves int64 well before its rank does (docs/plan-orbit-index-types.md §7.2)."
+extent leaves int64 well before its rank does (docs/plan-orbit-index-types.md section 7.2)."
                                                  (ppOrbitLevels levels) n detail))
               | _ ->
                   AllocUnsupported (sprintf "OrbIdx<%s, ?>: a wreath class needs a COMPILE-TIME extent \
@@ -3563,7 +3118,7 @@ mixes one with a dense or triangular block."
             allocRoutineFor (PlaceCombinatorial SymAntisymmetric)
         | _ ->
             // Antisymmetric group(s) combined with other components in one
-            // storage block — the mixed-strictness layout the global DIAGONALS
+            // storage block -- the mixed-strictness layout the global DIAGONALS
             // flag cannot express, but the per-group STRICT mask can. This is
             // the compact-residual fission shape (e.g. Idx -> AntisymIdx<2>:
             // a freed dense axis beside a strict residual pair). Each group is
@@ -3574,30 +3129,24 @@ mixes one with a dense or triangular block."
             AllocPerGroupStrict strictVec
     | _ -> AllocDense
 
-// ============================================================================
 // Cross-procedural analysis context. All callable references in IR are
 // IRVar(callable.Id, funcType); resolveCallable threads them back to
 // the underlying IRCallable via the CallablesTable installed in the
 // AsyncLocal context. Consumers (buildLoopNestCodeGen, validator's
 // ApplyInfo check, mask-rewrite, exprAttrs IRApp arm) all share this
 // resolution path.
-// ============================================================================
 
 type CallablesTable = Map<IRId, IRCallable>
 
 type AnalysisContext = {
     Callables: CallablesTable
     Visited:   Set<IRId>
-    /// Per-codegen-pass registry of transient synthetic callables.
-    /// These are created during codegen by transformations that need
-    /// to express "callable with modified body" — e.g.
-    /// applyFunctorWrappers' inline-wrap or the IRIf guard wrap —
-    /// without storing them in module.Functions (they're consumed
-    /// immediately by buildLoopNestCodeGen for inline emission and
-    /// don't need C++ function emission). `resolveCallable` queries
-    /// this registry alongside the module's CallablesTable. The
-    /// registry is mutable (Dictionary, not Map) for cheap in-place
-    /// accumulation; it's a per-flow AsyncLocal field, so concurrent
+    /// Per-codegen-pass registry of transient synthetic callables, for
+    /// transformations that need "callable with modified body" (e.g.
+    /// applyFunctorWrappers' inline-wrap, IRIf guard wrap) without storing
+    /// them in module.Functions. `resolveCallable` queries this registry
+    /// alongside the module's CallablesTable. Mutable Dictionary for cheap
+    /// in-place accumulation; a per-flow AsyncLocal field, so concurrent
     /// module compilations don't interfere.
     SyntheticCallables: System.Collections.Generic.Dictionary<IRId, IRCallable>
 }
@@ -3616,7 +3165,7 @@ let private currentAnalysisCtx () : AnalysisContext =
 
 /// Install the callables table. Returns the previous context for
 /// stack-style save/restore by the caller. The synthetic registry
-/// is reset to a fresh empty Dictionary — each module compilation
+/// is reset to a fresh empty Dictionary -- each module compilation
 /// starts with no synthetic callables. Synthetic callables produced
 /// during one module's codegen don't leak into another's.
 let setCallablesContext (callables: CallablesTable) : AnalysisContext =
@@ -3645,7 +3194,7 @@ let private withVisited (fId: IRId) (action: unit -> 'T) : 'T =
 /// supply a fresh IRId for the callable (typically via
 /// IRBuilder.FreshId()) so it doesn't collide with module.Functions
 /// ids or other synthetic ids. The returned IRVar can be consumed
-/// like any other callable reference — resolveCallable will find
+/// like any other callable reference -- resolveCallable will find
 /// the registered version via the SyntheticCallables registry.
 let registerSyntheticCallable (callable: IRCallable) : IRExpr =
     let ctx = currentAnalysisCtx ()
@@ -3655,13 +3204,10 @@ let registerSyntheticCallable (callable: IRCallable) : IRExpr =
     IRVar (callable.Id, funcType)
 
 /// Resolve an expression at a "callable position" to the underlying
-/// IRCallable. Handles:
-///   - `IRVar(id, _)` where id resolves in the CallablesTable
-///     (module.Functions + let-binding aliases): returns Some c.
-///   - `IRVar(id, _)` where id resolves in the SyntheticCallables
-///     registry (codegen-internal synthetic callables): returns
-///     Some c.
-///   - Anything else (or unresolvable IRVar): returns None.
+/// IRCallable: `IRVar(id, _)` resolving in the CallablesTable (module.
+/// Functions + let-binding aliases) or the SyntheticCallables registry
+/// (codegen-internal synthetics); anything else (or an unresolvable IRVar)
+/// returns None.
 let resolveCallable (expr: IRExpr) : IRCallable option =
     match expr with
     | IRVar (id, _) ->
@@ -3677,21 +3223,19 @@ let resolveCallable (expr: IRExpr) : IRCallable option =
             | false, _ -> None
     | _ -> None
 
-// ============================================================================
 // Reynolds peel/resolve helpers
 //
 // The kernel slot of an ApplyInfo (and of functor-wrapper composition
 // sites) may be either a bare callable reference (`IRVar(id, _)`) or
 // that same reference wrapped in `IRReynolds(_, isAntisymmetric)`.
 // Several passes need to look through the optional Reynolds wrapper to
-// reach the underlying callable. Before consolidation each site
-// open-coded the peel + resolveCallable dance, with subtly different
-// tuple shapes. These three helpers express the common patterns.
-// ============================================================================
+// reach the underlying callable; these three helpers express the common
+// pattern in one place rather than each site open-coding its own peel +
+// resolveCallable dance.
 
 /// Captures the flags carried by an `IRReynolds` wrapper. For
 /// non-Reynolds kernels both flags are `false`. The invariant
-/// `not HasReynolds ⇒ not IsAntisymmetric` is preserved by construction
+/// `not HasReynolds => not IsAntisymmetric` is preserved by construction
 /// in `peelReynolds` (the only constructor in normal use).
 type ReynoldsDescriptor = {
     HasReynolds: bool
@@ -3751,11 +3295,10 @@ let buildLoopNestCodeGen
     let arrayTypes = info.ArrayTypes
     let sDimsPerArray = info.SDimsPerArray
     
-    // Extract kernel info through `resolveKernel`, which peels any
-    // `IRReynolds` wrapper and resolves the inner callable via both
-    // module.Functions references and let-binding aliases in the
-    // CallablesTable + synthetic registry. The Reynolds wrapper's
-    // `isAntisymmetric` flag is captured in the descriptor.
+    // `resolveKernel` peels any `IRReynolds` wrapper and resolves the inner
+    // callable via module.Functions or let-binding aliases in the
+    // CallablesTable + synthetic registry; captures the wrapper's
+    // `isAntisymmetric` flag in the descriptor.
     let (kernelParams, kernelBody, commGroups, captures, isAntisymmetric) =
         match resolveKernel info.Kernel with
         | Some rk ->
@@ -3764,30 +3307,29 @@ let buildLoopNestCodeGen
         | None -> ([], IRLit IRLitUnit, [], [], false)
 
     // Positions the kernel declared antisymmetric (`where anticomm(a, b)`).
-    // These are already inside CommGroups (same grouping + iteration license),
-    // so only the STRICTNESS of the simplex reads this list: an argument
-    // position in a declared antisym group iterates i < j, never i <= j,
-    // because the strict-simplex storage the output type deduced has no
+    // Already inside CommGroups (same grouping/iteration license); this list
+    // is only the STRICTNESS of the simplex -- a declared-antisym position
+    // iterates i < j, never i <= j, since strict-simplex storage has no
     // diagonal cell to write. Empty for every kernel without the clause.
     let declaredAntisymGroups =
         match resolveKernel info.Kernel with
         | Some rk -> rk.Callable.AntisymGroups
         | None -> []
-    // Under a Reynolds wrapper the VARIANT owns the output symmetry (and hence
-    // the strictness) — a declared clause on the wrapped kernel is an
-    // iteration license only, never a storage claim — so the declared list is
-    // consulted only outside reynolds. Keeps `reynolds(k, Symmetric)` with a
-    // stray anticomm clause from iterating off its own storage.
+    // Under a Reynolds wrapper the VARIANT owns the output symmetry: a
+    // declared clause on the wrapped kernel is an iteration license only,
+    // never a storage claim, so the declared list is consulted only outside
+    // reynolds (keeps `reynolds(k, Symmetric)` with a stray anticomm clause
+    // from iterating off its own storage).
     let inDeclaredAntisym (arrayIdx: int) =
         not info.HasReynolds
         && declaredAntisymGroups |> List.exists (List.contains arrayIdx)
 
     // Opt-in parallelism: the loop nest is parallelized ONLY if the resolved
     // kernel callable requested OpenMP via an `omp(...)` clause. No clause =>
-    // serial (the language default, like C/Rust). This replaces the earlier
-    // structural rule (isParallel = level=0 unconditionally), which parallelized
-    // everything. The genNestPragma strategy logic (collapse vs. dynamic) is
-    // preserved as the IMPLEMENTATION of "how to parallelize once omp is asked".
+    // serial (the language default, like C/Rust) -- never a structural default
+    // of parallelizing level 0 unconditionally. The genNestPragma strategy
+    // logic (collapse vs. dynamic) is the IMPLEMENTATION of "how to
+    // parallelize once omp is asked".
     let kernelRequestedOmp =
         match resolveKernel info.Kernel with
         | Some rk -> rk.Callable.IsOmpParallel
@@ -3795,7 +3337,7 @@ let buildLoopNestCodeGen
     // The `omp(a: n)` DEPTHS, as (paramIndex, n). Until now this list was built
     // by extractParallelism and then never read: `omp` was effectively a boolean
     // and the collapse depth came purely from bound structure, so `omp(a: 1)` on
-    // a 2-level nest still emitted `collapse(2)` — threading a dimension of an
+    // a 2-level nest still emitted `collapse(2)` -- threading a dimension of an
     // argument that was never licensed.
     let ompDepths =
         match resolveKernel info.Kernel with
@@ -3807,7 +3349,7 @@ let buildLoopNestCodeGen
     // buildApplyInfo's expandedRows so param indices line up. The flat param index
     // for (arrayPos, slot) is (sum of spans of earlier sources) + the slot. For
     // single-slot sources every span is 1, so paramStart pos == pos and the
-    // mapping is identical to the old one-param-per-position scheme.
+    // mapping degenerates to one-param-per-position.
     let isVirtualSrc pos =
         pos < arrays.Length &&
         (match arrays.[pos] with IRRange _ | IRVirtualReverse _ -> true | _ -> false)
@@ -3817,28 +3359,23 @@ let buildLoopNestCodeGen
         else 1
     let paramStart pos = List.init (max 0 pos) paramSpan |> List.sum
 
-    // ---- `omp(a: n)` as a LICENSE ------------------------------------------
+    // `omp(a: n)` is a LICENSE, not a demand: "up to n dimensions of this
+    // argument may carry OpenMP threads". It CAPS the structural strategy
+    // rather than replacing it -- `omp(a: 2)` on a nest that can only
+    // collapse one level still collapses one; `omp(a: 1)` on a collapsible
+    // 2-level nest stops at one instead of silently taking both.
     //
-    // `n` is a permission, not a demand: "up to n dimensions of this argument
-    // may carry OpenMP threads". It CAPS the structural strategy rather than
-    // replacing it — a level is parallelized only where the license and the
-    // bound structure agree, so `omp(a: 2)` on a nest that can only collapse
-    // one level still collapses one, and `omp(a: 1)` on a collapsible 2-level
-    // nest now stops at one instead of silently taking both.
-    //
-    // Depth counts the levels OF THAT ARGUMENT, outermost first (formalism.md
-    // §17.3). A real array owns all its rank components through ONE param, so
-    // the license covers its first n components. A virtual source (range<...>)
-    // spends one param PER slot, so each such param owns exactly one level and
-    // any n >= 1 covers it. Expressed uniformly as "ordinal of this level among
-    // the levels sharing its param".
+    // Depth counts levels OF THAT ARGUMENT, outermost first (formalism.md
+    // section 17.3). A real array owns all its rank components through ONE
+    // param, so the license covers its first n components. A virtual source
+    // spends one param PER slot, so any n >= 1 covers that param's one level.
     let ompDepthOfParam (pIdx: int) : int option =
         ompDepths |> List.tryPick (fun (i, n) -> if i = pIdx then Some n else None)
     // A clause whose variable names no parameter leaves ompDepths EMPTY while
     // IsOmpParallel stays true (extractParallelism drops unmatched names). That
-    // is a source mistake — TypeCheck warns about it — but it must not silently
-    // turn a requested nest serial, so fall back to the historical "outermost
-    // level only" licence rather than to nothing.
+    // is a source mistake -- TypeCheck warns about it -- but it must not silently
+    // turn a requested nest serial, so fall back to an "outermost level only"
+    // licence rather than to nothing.
     let licenseUnresolved = kernelRequestedOmp && List.isEmpty ompDepths
     let isLevelLicensed (arrayPos: int) (rankIdx: int) (level: int) : bool =
         if not kernelRequestedOmp then false
@@ -3882,7 +3419,7 @@ let buildLoopNestCodeGen
                 match arrays.[arrayPos] with
                 | IRRange (_, offset) ->
                     // Halo slot: the center's start offset rides the slot's
-                    // "__halowin|" TAG (per-slot — IRRange's single offset is
+                    // "__halowin|" TAG (per-slot -- IRRange's single offset is
                     // shared by all slots, which multi-slot ranges like
                     // range<halo<Lat,..>, halo<Lon,..>> cannot use).
                     match slotTag |> Option.bind haloStartOffsetOfTag with
@@ -3892,19 +3429,14 @@ let buildLoopNestCodeGen
                 | IRVirtualReverse _ -> VirtualReverse
                 | _ -> RealArray
             else RealArray
-        // Per-slot param for a virtual source (range<...>): the flat param index
-        // is (sum of earlier sources' param spans, via paramStart) + this level's
-        // position WITHIN its source. That within-source position is the rank
-        // component (levelInfo.RankIndex): it advances once per loop level and
-        // resets per source (buildRawLoopLevels' arrLevel), so a rank-1 slot and
-        // each arity component of a multi-rank slot both map to consecutive
-        // params -- range<SymIdx<2,N>> yields two params (i, j) at RankIndex 0, 1.
-        // (Previously this used dimIndex = LocalDimIndex, which is shared across
-        // the rank components of a single multi-rank index type; that collapsed
-        // all of them onto the first param and left the rest undeclared -- the
-        // range<SymIdx<2,N>> "__v3 not declared" bug. LocalDimIndex == RankIndex
-        // for every rank-1 slot, so this only changes the multi-rank case.)
-        // Real / non-virtual sources resolve to paramStart pos (else branch).
+        // Per-slot param for a virtual source (range<...>): flat param index
+        // = (sum of earlier sources' spans, via paramStart) + this level's
+        // position WITHIN its source (levelInfo.RankIndex, which resets per
+        // source) -- range<SymIdx<2,N>> yields two params (i, j) at
+        // RankIndex 0, 1. (dimIndex = LocalDimIndex would be WRONG: it's
+        // shared across a multi-rank type's components, collapsing them onto
+        // the first param -- the range<SymIdx<2,N>> "__v3 not declared" bug.)
+        // Real/non-virtual sources resolve to paramStart pos.
         let flatParamIdx =
             if isVirtualSrc arrayPos then paramStart arrayPos + rankComponent
             else paramStart arrayPos
@@ -3930,12 +3462,12 @@ let buildLoopNestCodeGen
             // rank-1 record contributes ONE level at its own extent; a packed
             // symmetric/antisymmetric record contributes Rank triangular levels
             // over its flat canonical cells (bounds depend on the record's own
-            // earlier levels, strict offset for antisym) — byte-identical to
-            // the historical single-record behavior when the list is [packed].
+            // earlier levels, strict offset for antisym) -- byte-identical to
+            // plain single-record behavior when the list is [packed].
             // All operands peel at EVERY level. Each level's extent/dim-ref
             // comes from its record and the record's cumulative base dim, so
-            // non-square products (range<Lat, Lon> with Lat ≠ Lon) bound
-            // correctly — the old single-record branch hardcoded dim 0.
+            // non-square products (range<Lat, Lon> with Lat != Lon) bound
+            // correctly -- a single-record shortcut hardcoding dim 0 would not.
             let sharedRecords = info.SharedIndexTypes
             // Reference first real array for extent lookups
             let refArrayName = if arrayNames.Length > 0 then arrayNames.[0] else "arr0"
@@ -3967,7 +3499,7 @@ let buildLoopNestCodeGen
                     // CO-ITERATION: every argument is peeled at EVERY level, so
                     // each licensed argument's depth licenses that many levels
                     // from the outside in; the most permissive one wins. (There
-                    // is no per-argument level ownership to distinguish here —
+                    // is no per-argument level ownership to distinguish here --
                     // that only exists on the outer-product path below.)
                     let coIterLicense =
                         if not kernelRequestedOmp then 0
@@ -4002,20 +3534,16 @@ let buildLoopNestCodeGen
             let symcomStates = info.SymcomStates
             
             // Compute the iminMap from the single canonical axis grouping
-            // (computeAxisGroups), so chaining stays in lock-step with the
+            // (computeAxisGroups), so chaining stays in lock-step with
             // triangular-level detection, the loop reorder, and the output
-            // storage layout. Each level either:
-            //   - is the FIRST member of its axis group -> root (maps to itself,
-            //     iterated fully), or
-            //   - chains to the NEAREST EARLIER level sharing its axis group ->
-            //     descends triangularly relative to it.
-            // The grouping encodes the CORRECTED symmetry rule (arc 1): a
-            // repeated array under comm forms ONE rank-r simplex over its
-            // (possibly fused compound) S-axis — the joint symmetry, r! once —
-            // and distinct groups (separate comm groups, within-type symmetric
-            // records) stay independent and multiply. Never per-dimension for
-            // one group, never across distinct arrays via shared index types
-            // (docs/formalism.md §12.4).
+            // storage layout. A level is either the FIRST member of its axis
+            // group (root, maps to itself) or chains to the NEAREST EARLIER
+            // level sharing its group (descends triangularly). The grouping
+            // encodes the symmetry rule: a repeated array under comm forms
+            // ONE rank-r simplex over its S-axis (joint symmetry, r! once);
+            // distinct groups multiply independently -- never per-dimension
+            // for one group, never across arrays via shared index types
+            // (docs/formalism.md section 12.4).
             let axisGroupIds = computeAxisGroups identities arrayTypes commGroups sDimsPerArray
             let groupAt i = if i < axisGroupIds.Length then axisGroupIds.[i] else -1
             let iminMap = 
@@ -4053,41 +3581,33 @@ let buildLoopNestCodeGen
                 // dynamic over the licensed prefix.
                 let isParallel = isLevelLicensed arrayPos levelInfo.RankIndex level
                 // Strict (j > i > ...) bounds are required whenever the OUTPUT
-                // storage is antisymmetric — strict-triangular storage has no
-                // diagonal, so the iteration must not visit it. Two ways the
-                // output is antisymmetric:
-                //   (1) the input index type is itself SymAntisymmetric (an
-                //       explicit AntisymIdx array), reflected in IndexSpace, or
-                //   (2) this application is a Reynolds antisymmetrization over a
-                //       commutative group (isAntisymmetric, from the Reynolds
-                //       descriptor). Here the INPUT arrays are plain (SymNone) —
-                //       the triangular iteration comes from the commutative path
-                //       — so IndexSpace.Symmetry alone would miss it.
-                //   (3) the kernel DECLARED this argument position antisymmetric
-                //       (`where anticomm(a, b)`, the pin spelling). Same shape as
-                //       (2) — plain inputs, triangularity from the group — but the
-                //       kernel is used AS-IS with no permutation sum, so the flag
-                //       rides the callable rather than a Reynolds wrapper. Checked
-                //       per LEVEL (by its owning argument position) so a declared
-                //       pair cannot make an unrelated symmetric group strict.
-                // The strict offset is CUMULATIVE across the group: level a (the
-                // a-th index within the strict group, 0-based) must start a slots
-                // past the group base, because each prior index already consumed
-                // one diagonal slot. That cumulative depth equals the number of
-                // bound-dependency levels this level carries (List.length deps):
-                // level 1 -> 1, level 2 -> 2, etc. (A flat offset of 1 is correct
-                // only at rank 2, where level 1 is the sole strict level; at rank
-                // >= 3 a flat 1 under-shifts, making the loop visit non-canonical
-                // tuples with repeated indices that alias storage cells — the
-                // antisym rank-3 storage-collision bug.)
+                // storage is antisymmetric -- strict-triangular storage has no
+                // diagonal to visit. Three ways the output is antisymmetric:
+                // (1) the input index type is itself SymAntisymmetric; (2) a
+                // Reynolds antisymmetrization over a commutative group (inputs
+                // are plain SymNone, so IndexSpace.Symmetry alone would miss
+                // it); (3) the kernel DECLARED this position antisymmetric
+                // (`where anticomm(a, b)`) -- same shape as (2) but the flag
+                // rides the callable, not a Reynolds wrapper, and is checked
+                // per LEVEL so a declared pair can't make an unrelated group
+                // strict.
                 //
-                // SCOPE: this offset belongs to the loop BOUND and to the
-                // ABSOLUTE coordinate of a flat (dense, not-yet-peeled) read.
-                // It is NOT a storage subscript. A peeled row of a strict-packed
-                // array is already diagonal-free and already shortened by the
-                // allocator, so the 0-based loop var IS the slot; re-adding this
-                // offset there walks one cell past the row (CodeGen's
-                // genElementBindingNew isSliced arm, Interp's peelElement).
+                // The strict offset is CUMULATIVE across the group: level a
+                // (0-based within the strict group) must start a slots past
+                // the group base, since each prior index already consumed
+                // one diagonal slot -- equal to List.length deps (level 1 ->
+                // 1, level 2 -> 2, ...). A flat offset of 1 is correct only
+                // at rank 2; at rank >= 3 it under-shifts, visiting
+                // non-canonical tuples that alias storage cells (the antisym
+                // rank-3 storage-collision bug).
+                //
+                // SCOPE: this offset belongs to the loop BOUND / the ABSOLUTE
+                // coordinate of a flat (not-yet-peeled) read, NOT a storage
+                // subscript. A peeled row of a strict-packed array is already
+                // diagonal-free and shortened by the allocator, so the
+                // 0-based loop var IS the slot; re-adding this offset there
+                // walks one cell past the row (CodeGen's genElementBindingNew
+                // isSliced arm, Interp's peelElement).
                 let strictOffset =
                     if isTriangular &&
                        (levelInfo.IndexSpace.Symmetry = SymAntisymmetric
@@ -4109,14 +3629,12 @@ let buildLoopNestCodeGen
                         | _ -> 0
                 
                 // A compound VIRTUAL source (range<CompoundIdx<m>>) is ONE loop
-                // level (present-cell axis) but spans SourceRank kernel params
-                // (one per mask dimension, per the rank rule / expandedRows).
-                // Emit one element PER rank component at this single level so
-                // every coordinate param gets bound -- each element extracts
-                // component rc of the cell tuple (genElementBindingNew's
-                // compound VirtualRange arm: unhash(r)[rc]). A real compound
-                // ARRAY keeps the single peel element (it reads .data[r], not
-                // per-axis coordinates).
+                // level but spans SourceRank kernel params (one per mask
+                // dimension). Emit one element PER rank component so every
+                // coordinate param gets bound (each extracts component rc of
+                // the cell tuple: genElementBindingNew's unhash(r)[rc] arm).
+                // A real compound ARRAY keeps the single peel element (it
+                // reads .data[r], not per-axis coordinates).
                 let elements =
                     let isCompoundLevel =
                         match levelInfo.IndexSpace.Extent with IRCompoundMask _ | IRSparseKeys _ -> true | _ -> false
@@ -4125,7 +3643,7 @@ let buildLoopNestCodeGen
                         (match arrays.[arrayPos] with IRRange _ -> true | _ -> false)
                     match levelInfo.FusedFactors with
                     | Some factors ->
-                        // Fused JOINT level (arc 1): one element per source dim;
+                        // Fused JOINT level: one element per source dim;
                         // each decodes its coordinate from the compound loop
                         // index and peels one dimension (genElementBindingNew's
                         // fused arm). RankComponent doubles as the dim position.
@@ -4172,32 +3690,26 @@ let buildLoopNestCodeGen
         FoldChunk = None
     }
 
-// ============================================================================
-// Canonical expression traversal — ExprShape (audit §3.2)
-// ============================================================================
+// Canonical expression traversal -- ExprShape (audit section 3.2)
 //
 // THE one place that knows every IRExpr variant's immediate expression
 // children. Every generic walker (mapIRExpr, collectVarRefsIR,
-// collectTypesInExpr, exprAttrs) is a fold over this shape, so a new IRExpr
-// variant is added in exactly one enumeration — this one. The match is
-// deliberately wildcard-free: a new variant fails to compile until its shape
-// is declared here, which is the exhaustiveness guarantee the old per-walker
-// `| _ ->` fallbacks silently destroyed.
+// collectTypesInExpr, exprAttrs) folds over this shape, so a new variant is
+// added in exactly one place. Wildcard-free: a new variant fails to compile
+// until declared here, an exhaustiveness guarantee a per-walker `| _ ->`
+// fallback would silently destroy.
 //
-// Scope decisions (uniform across all walkers by construction):
-//   - IRIndexType is OPAQUE to expression traversal. Extent-marker
-//     expressions living inside an IRIndexType are reached by the dedicated
-//     extent paths, never by generic traversal — matching the long-standing
-//     behavior of mapIRExpr.
-//   - Boundary pads and range offsets ARE children: the BndPad expression in
-//     IRShift/IRAlign and IRRange's offset are real sub-expressions. (The old
-//     hand-maintained walkers disagreed about these — mapIRExpr skipped them,
-//     exprAttrs walked the pads — the canonical shape includes them.)
+// Scope decisions (uniform across all walkers by construction): IRIndexType
+// is OPAQUE to traversal (extent-marker expressions inside it are reached by
+// dedicated extent paths, never generic traversal); boundary pads and range
+// offsets ARE children (the BndPad expression in IRShift/IRAlign and
+// IRRange's offset are real sub-expressions -- hand-maintained per-walker
+// versions can disagree about this without the canonical shape).
 //
 // `rebuild` requires exactly the children it handed out (same count, same
 // order); anything else is a hard failure, never a silent drop.
 
-/// Child-list mismatch in a rebuild — always a walker bug, never recoverable.
+/// Child-list mismatch in a rebuild -- always a walker bug, never recoverable.
 let private badChildren (ctor: string) : 'a =
     failwithf "ExprShape.rebuild: child list does not match %s's shape" ctor
 
@@ -4399,7 +3911,7 @@ let rec patternBoundIds (pat: IRPattern) : Set<IRId> =
 /// analysis). Returns the children NOT under a binder, plus one
 /// (boundIds, scopedChildren) group per scope. Non-binding variants return
 /// None and fall through to the generic ExprShape arm of whichever
-/// dispatcher is asking — so a new binding variant needs exactly one case
+/// dispatcher is asking -- so a new binding variant needs exactly one case
 /// here to get correct scoping everywhere.
 let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) list) option =
     match expr with
@@ -4417,13 +3929,11 @@ let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) 
                   (patternBoundIds c.Pattern, Option.toList c.Guard @ [c.Body])))
     | _ -> None
 
-// ============================================================================
 // Expression Mapping (bottom-up rewriter)
-// ============================================================================
 
 /// Apply f to every sub-expression bottom-up, then to the root.
 /// f should return the expression unchanged for cases it doesn't handle.
-/// Generic recursion is a fold over ExprShape — variant-specific structure
+/// Generic recursion is a fold over ExprShape -- variant-specific structure
 /// lives entirely in the shape enumeration above.
 let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
     let mapped =
@@ -4433,13 +3943,12 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
     f mapped
 
 /// Collect every variable id referenced (IRVar) anywhere in an expression.
-/// The one var-ref collector (audit §3.2 [now]: CodeGen's hand-maintained
-/// duplicate `collectVarRefs` is gone; capture computation and match-case
-/// usage checks in CodeGen call this). Recursion is the ExprShape fold, so
-/// no variant's subtree can be silently skipped the way the old
-/// `| _ -> Set.empty` catchalls did.
+/// The one var-ref collector (audit section 3.2): capture computation and
+/// match-case usage checks in CodeGen call this rather than keeping their
+/// own duplicate. Recursion is the ExprShape fold, so no variant's subtree
+/// can be silently skipped by a stray `| _ -> Set.empty` catchall.
 ///
-/// Scoping contract: only IRForRange subtracts its binder — its loop var is
+/// Scoping contract: only IRForRange subtracts its binder -- its loop var is
 /// synthesized and callers never mean it. IRLet ids and match-pattern ids
 /// stay IN the result because the call sites subtract or query specific ids
 /// themselves. For real free/bound analysis use exprAttrs, which scopes all
@@ -4452,12 +3961,10 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     | ExprShape (children, _) ->
         children |> List.map collectVarRefsIR |> Set.unionMany
 
-// ============================================================================
 // HM Type Substitution
-// ============================================================================
 //
 // Substitutes IRTInfer occurrences with concrete types throughout types and
-// expressions. Pure structural substitution — no rewrites, no expansion.
+// expressions. Pure structural substitution -- no rewrites, no expansion.
 // This is the substrate shared between HM monomorphization and (eventually,
 // in the unified architecture) Poly's type-substitution step.
 
@@ -4481,16 +3988,12 @@ let rec substTypeInIRType (bindings: Map<int, IRType>) (ty: IRType) : IRType =
         IRTArrow (slots |> List.map substSlot, substTypeInIRType bindings result, identity)
     | _ -> ty
 
-/// Substitute IRVar references throughout an expression tree. For each
-/// IRVar(id, _) where `mapping` has an entry, replace the node with the
-/// mapped expression. Used when importing a called function's probes
-/// into a caller's analysis: the probe's BuildOn references the
-/// function's formal parameters, and at the call site we want those
-/// references resolved to the actual argument expressions.
-///
-/// Walks bottom-up via mapIRExpr; only IRVar nodes are affected, and
-/// only those whose id appears in `mapping`. Other variant types (IRApp,
-/// IRBinOp, etc.) carry their own substituted children automatically.
+/// Substitute IRVar references throughout an expression tree: each
+/// IRVar(id, _) with an entry in `mapping` is replaced by the mapped
+/// expression. Used when importing a called function's probes into a
+/// caller's analysis, resolving the probe's formal-parameter references to
+/// the actual argument expressions at the call site. Walks bottom-up via
+/// mapIRExpr; only IRVar nodes in `mapping` are affected.
 let substituteIRVars (mapping: Map<IRId, IRExpr>) (expr: IRExpr) : IRExpr =
     mapIRExpr (fun e ->
         match e with
@@ -4514,15 +4017,11 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
                             ArrayTypes = info.ArrayTypes
                                          |> List.map (fun aty -> { aty with ElemType = st aty.ElemType }) }
         | IRApplyCombinator info ->
-            // ApplyInfo carries three type-bearing pieces that must be
-            // substituted in lockstep with the rest of the expression
-            // tree: ArrayTypes (each has an ElemType that may be a type
-            // variable referencing the surrounding function's T) and
-            // OutputType (the deduced result-array type, often a fresh
-            // IRTArray whose ElemType is the same T). Skipping these
-            // leaves stale IRTInfer in spec function bodies, which the
-            // IR validator flags as "unresolved type variable in body"
-            // for the HM specialization.
+            // ArrayTypes (ElemType may be a type variable referencing the
+            // surrounding function's T) and OutputType (the deduced
+            // result-array type, often sharing that T) must be substituted
+            // in lockstep with the rest of the tree; skipping them leaves
+            // stale IRTInfer in spec bodies, which the IR validator flags.
             IRApplyCombinator { info with
                                   ArrayTypes = info.ArrayTypes
                                                |> List.map (fun aty ->
@@ -4538,8 +4037,8 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
         | _ -> e
     mapIRExpr substInNode expr
 
-/// Types carried directly on a node — no reconstruction, no environment.
-/// The shared first tier of the canonical typing (audit §2.2): the whole of
+/// Types carried directly on a node -- no reconstruction, no environment.
+/// The shared first tier of the canonical typing (audit section 2.2): the whole of
 /// exprTypeIfKnown below, and the first arm of typeOf.
 let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     match expr with
@@ -4557,14 +4056,13 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     | IRLit IRLitUnit -> Some IRTUnit
     | _ -> None
 
-/// Get the type of an IRExpr where determinable from the node directly —
+/// Get the type of an IRExpr where determinable from the node directly --
 /// deliberately the CarriedType tier only, NOT the full typeOf
 /// reconstruction. Used at HM call sites to extract arg types for
 /// unification against param types: a reconstructed type could carry
-/// pre-substitution type variables, so only node-carried types are safe to
-/// unify with. For anything else this returns None, and the call site falls
-/// back to the function's declared type-var positions; they'll be
-/// substituted with whatever else unification provides.
+/// pre-substitution type variables, so only node-carried types are safe.
+/// Anything else returns None; the call site falls back to the function's
+/// declared type-var positions.
 let exprTypeIfKnown (expr: IRExpr) : IRType option =
     match expr with
     | CarriedType ty -> Some ty
@@ -4579,8 +4077,8 @@ let exprTypeIfKnown (expr: IRExpr) : IRType option =
 let rec unifyParamWithArg (paramTy: IRType) (argTy: IRType) (acc: Map<int, IRType>) : Map<int, IRType> =
     match paramTy, argTy with
     | IRTInfer n, t when not (acc.ContainsKey n) -> Map.add n t acc
-    | IRTInfer n, t when acc.[n] = t -> acc  // Consistent reuse — fine
-    | IRTInfer _, _ -> acc  // Inconsistent — leave as-is; the IR validator will catch it
+    | IRTInfer n, t when acc.[n] = t -> acc  // Consistent reuse -- fine
+    | IRTInfer _, _ -> acc  // Inconsistent -- leave as-is; the IR validator will catch it
     | ArrayElem pa, ArrayElem aa ->
         unifyParamWithArg pa.ElemType aa.ElemType acc
     | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length ->
@@ -4597,7 +4095,7 @@ let rec unifyParamWithArg (paramTy: IRType) (argTy: IRType) (acc: Map<int, IRTyp
     | IRTArrow (pSlots, pRet, _), IRTArrow (aSlots, aRet, _) when pSlots.Length = aSlots.Length ->
         // Generic IRTArrow-vs-IRTArrow: handles arrows with SIdx and/or
         // SIdxVirt slots (FuncElem above only matched all-SVal arrows).
-        // Identity is ignored for unification — it's metadata, not type.
+        // Identity is ignored for unification -- it's metadata, not type.
         let unifySlot acc' (p, a) =
             match p, a with
             | SVal pt, SVal at -> unifyParamWithArg pt at acc'
@@ -4606,7 +4104,7 @@ let rec unifyParamWithArg (paramTy: IRType) (argTy: IRType) (acc: Map<int, IRTyp
             | _ -> acc'
         let acc' = List.zip pSlots aSlots |> List.fold unifySlot acc
         unifyParamWithArg pRet aRet acc'
-    | _ -> acc  // Concrete types or unhandled compound — no bindings learned
+    | _ -> acc  // Concrete types or unhandled compound -- no bindings learned
 
 /// Walk a type collecting all IRTInfer IDs found inside (recursively).
 let rec collectInferIds (ty: IRType) : Set<int> =
@@ -4629,7 +4127,7 @@ let rec collectInferIds (ty: IRType) : Set<int> =
 
 /// Does this function carry any unresolved type variables in its declared
 /// signature (params or return type)? Boundary criterion for HM
-/// monomorphization — only such functions need specialization.
+/// monomorphization -- only such functions need specialization.
 let hasTypeVarsInSignature (func: IRFuncDef) : bool =
     let paramIds =
         func.Params |> List.fold (fun s p -> Set.union s (collectInferIds p.Type)) Set.empty
@@ -4638,31 +4136,25 @@ let hasTypeVarsInSignature (func: IRFuncDef) : bool =
 
 /// Does this function have type vars in its PARAMETERS specifically? Only such
 /// functions need per-call-site specialization. A function whose type vars sit
-/// ONLY in the return type (its params fully concrete) has a return type that is
-/// determined by its body — a former kernel `lambda(x) -> rowsum(x)` whose x was
-/// pinned to a concrete fiber but whose return echoes the HM helper's still-
-/// abstract return is the canonical case. Such a function must be KEPT (its body
-/// call-site-rewritten, its return type substituted from the global bindings),
-/// not dropped-and-specialized like a parametric HM function; dropping it while
-/// it is referenced as a first-class kernel value leaves a dangling VarId.
+/// ONLY in the return type (params fully concrete, e.g. `lambda(x) ->
+/// rowsum(x)` echoing an HM helper's abstract return) must be KEPT -- body
+/// call-site-rewritten, return type substituted from global bindings -- not
+/// dropped-and-specialized; dropping it while referenced as a first-class
+/// kernel value leaves a dangling VarId.
 let hasTypeVarsInParams (func: IRFuncDef) : bool =
     func.Params
     |> List.exists (fun p -> not (Set.isEmpty (collectInferIds p.Type)))
 
-// ============================================================================
 // HM Monomorphization
-// ============================================================================
 //
 // Generates specialized copies of functions with free type variables in
-// their signatures, one per unique call-site type pattern. Sibling pass
-// to the existing Arity (Poly) monomorphization. Runs before Poly so that
-// type-substitution happens at the abstract signature level, then Poly
-// expands param packs against concrete element types.
-//
-// Architecture mirrors monomorphizeModule's 5-phase shape: identify,
-// collect call sites with bindings, specialize, build rewrite map,
-// rewrite all expressions. The key difference vs Poly: SpecRequest carries
-// (typeVarId → concreteType) bindings rather than a single arity int.
+// their signatures, one per unique call-site type pattern. Sibling pass to
+// Arity (Poly) monomorphization; runs before Poly so type-substitution
+// happens at the abstract signature level before Poly expands param packs.
+// Architecture mirrors monomorphizeModule's 5-phase shape (identify, collect
+// call sites with bindings, specialize, build rewrite map, rewrite all
+// expressions); the key difference is SpecRequest carrying (typeVarId ->
+// concreteType) bindings rather than a single arity int.
 
 /// Collect call sites of HM-polymorphic functions.
 /// Returns list of (funcId, sortedBindings) pairs. Bindings are sorted
@@ -4692,13 +4184,13 @@ let collectHMCallSites (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId 
     results |> Seq.toList
 
 /// Occurrence-id-INDEPENDENT structural key for a type: same element, rank,
-/// extent, and symmetry ⇒ same key, regardless of the per-occurrence index-type
+/// extent, and symmetry => same key, regardless of the per-occurrence index-type
 /// `Id`s. Used BOTH to dedup HM specializations and to NAME them, so the two
 /// stay consistent. Without this, one recursive poly kernel (`comoment_prod`)
 /// specialized at the same arity from two call chains carried two different
-/// index ids for the same `Array<double, Idx<3>>` — distinct dedup keys but an
-/// identical mangled name (the old `mangleType` collapsed every array to "T"),
-/// which g++ rejected as a redefinition. Output is C++-identifier-safe.
+/// index ids for the same `Array<double, Idx<3>>` -- distinct dedup keys but an
+/// identical mangled name (a naive `mangleType` collapses every array to "T"),
+/// which g++ rejects as a redefinition. Output is C++-identifier-safe.
 let rec canonTypeKey (ty: IRType) : string =
     match ty with
     | IRTScalar ETFloat64 -> "double"
@@ -4756,33 +4248,22 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
         |> Map.ofList
     let bodyWithTypes = substTypeInIRExpr bindings func.Body
 
-    // Stage 3c.3 follow-on: lifted lambdas that capture HM-polymorphic
-    // params need to be cloned-and-specialized alongside their
-    // enclosing function. Pre-3c.3 the lambda was inline in the
-    // enclosing function's body so the existing `mapIRExpr` walk over
-    // `bodyWithTypes` covered everything in one pass: the lambda's
-    // body, captures, and the VarId remap all got reached. Post-3c.3
-    // the lambda lives in `module.Functions` and the body only carries
-    // an `IRVar(lambdaId, _)` reference; the lambda's body and its
-    // Captures.Type fields still hold the unsubstituted T type, and
-    // its Captures.Id still points at the pre-spec function's param
-    // VarIds. Both checks fail validation: dangling VarId (the spec
-    // function's params have new ids) AND unresolved IRTInfer (T
-    // never got substituted in the lambda).
-    //
-    // Fix: for each lifted callable the body references whose
-    // captures intersect this function's params, clone it. The clone
-    // gets fresh ids for its own params, has captures' Ids and types
-    // remapped via `varIdRemap` and `bindings`, body's IRVar refs
-    // remapped via the combined map. The original lambda stays in
-    // module.Functions unchanged — other specializations or the
-    // unspecialized form (which doesn't survive monomorphization
-    // anyway) would build their own clones.
+    // Lifted lambdas capturing HM-polymorphic params must be cloned-and-
+    // specialized alongside their enclosing function: the lambda lives in
+    // `module.Functions`, so the `mapIRExpr` walk over `bodyWithTypes` only
+    // reaches an `IRVar(lambdaId, _)` reference -- its own body and
+    // Captures.Type still hold the unsubstituted T, and Captures.Id still
+    // points at the pre-spec function's param VarIds, failing validation
+    // (dangling VarId, unresolved IRTInfer). Fix: for each lifted callable
+    // the body references whose captures intersect this function's params,
+    // clone it -- fresh ids for its own params, captures' Ids/types remapped
+    // via `varIdRemap`/`bindings`, body's IRVar refs via the combined map.
+    // The original lambda stays in module.Functions unchanged.
     let origParamIds = func.Params |> List.map (fun p -> p.VarId) |> Set.ofList
     let lambdaClones = System.Collections.Generic.Dictionary<IRId, IRCallable>()
     // Ids applied directly in the body (heads of IRApp). These go through the
     // module-level call-site rewrite + memoized spec path, so we must NOT
-    // clone them into this parent — doing so would bypass spec dedup and
+    // clone them into this parent -- doing so would bypass spec dedup and
     // leave any inner HM calls in the clone unrewritten.
     let appliedIds =
         let acc = System.Collections.Generic.HashSet<IRId>()
@@ -4793,14 +4274,12 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
             e) bodyWithTypes |> ignore
         acc
     let needsClone (c: IRCallable) : bool =
-        // (a) closures capturing one of this function's params, or
-        // (b) HM-polymorphic callables referenced as *first-class values*
-        //     (e.g. an operator-section lambda passed as a `reduce` kernel).
-        //     Such a lambda's signature carries the same type var this spec
-        //     is resolving; the module-level pass drops every un-applied HM
-        //     function, so without a specialized clone the spec body would
-        //     reference a now-deleted id (dangling VarId). Applied HM callees
-        //     are excluded — they specialize via the normal spec path.
+        // (a) closures capturing one of this function's params, or (b)
+        // HM-polymorphic callables referenced as first-class values (e.g. an
+        // operator-section lambda passed as a `reduce` kernel): the
+        // module-level pass drops every un-applied HM function, so without a
+        // clone the spec body would reference a deleted id. Applied HM
+        // callees are excluded -- they specialize via the normal spec path.
         (c.Captures |> List.exists (fun cap -> Set.contains cap.Id origParamIds))
         || (hasTypeVarsInSignature c && not (appliedIds.Contains c.Id))
     // Walk bodyWithTypes to identify referenced lambdas needing clones.
@@ -4863,7 +4342,7 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
             | _ -> e) bodyWithTypes
     // Name-mangle by binding signature, using the occurrence-id-independent
     // canonTypeKey so the emitted name matches the HM dedup key exactly (arrays
-    // no longer collapse to a colliding "T"; see canonTypeKey).
+    // don't collapse to a colliding "T"; see canonTypeKey).
     let suffix =
         bindings
         |> Map.toList
@@ -4882,20 +4361,17 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
 
 /// Driver: monomorphize all HM-polymorphic functions in a module.
 ///
-/// This is an *iterative* fixpoint algorithm, not single-pass. The reason
-/// is that specialization can expose new concrete types: when we specialize
-/// `twiceId(x: T) -> T = id(id(x))` with `T → Int64`, the substitution
-/// makes the inner `id(x)` call's arg type concrete (Int64), which then
-/// licenses specializing `id` itself with `T → Int64`. A single pass would
-/// see `id(x)`'s arg as `IRTInfer 10001` (still abstract before substitution)
-/// and either skip the binding or produce a useless self-binding spec.
-/// The loop runs until no new (funcId, bindings) keys appear.
+/// An *iterative* fixpoint, not single-pass: specialization can expose new
+/// concrete types (specializing `twiceId(x: T) -> T = id(id(x))` with
+/// `T -> Int64` makes the inner `id(x)` call's arg concrete, licensing
+/// `id`'s own specialization). A single pass would see `id(x)`'s arg as
+/// still-abstract `IRTInfer 10001`. The loop runs until no new
+/// (funcId, bindings) keys appear.
 ///
-/// The algorithm also (a) substitutes call-site-learned type bindings into
-/// the binding's *declared type* (`IRBinding.Type`), since TypeCheck leaves
-/// it as `IRTInfer N` when the call site's return type was polymorphic;
-/// and (b) substitutes types throughout each spec function's body so that
-/// post-specialization their bodies are free of `IRTInfer`.
+/// Also (a) substitutes call-site-learned bindings into a binding's
+/// *declared type* (TypeCheck leaves it `IRTInfer N` when the call site's
+/// return was polymorphic), and (b) substitutes types throughout each spec
+/// body so it's free of `IRTInfer`.
 let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     // 1. Identify functions with type vars in signature
     // Only functions with type vars in their PARAMETERS get dropped-and-
@@ -4909,16 +4385,14 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     let hmFuncMap = hmFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let hmFuncIdSet = hmFuncs |> List.map (fun f -> f.Id) |> Set.ofList
 
-    // 2. Iterate to fixpoint: each round may discover new specializations
-    //    by inspecting both the original module's expressions AND the bodies
-    //    of specs generated in earlier rounds (those bodies may contain HM
-    //    calls whose arg types only became concrete after substitution).
-    // Keyed by (funcId, canonical (varId, type-key) list). The type-key is
-    // occurrence-id-independent (canonTypeKey), so the same specialization
-    // requested from two call chains with differently-numbered index types
-    // dedups to one spec instead of two identically-named C++ definitions.
+    // 2. Iterate to fixpoint: each round inspects the original module's
+    //    expressions AND earlier-round spec bodies (an HM call's arg types
+    //    may only become concrete after substitution). Keyed by (funcId,
+    //    canonical (varId, type-key) list) -- occurrence-id-independent
+    //    (canonTypeKey), so the same specialization from two differently-
+    //    numbered call chains dedups to one spec.
     let mutable specMap : Map<IRId * (int * string) list, IRFuncDef> = Map.empty
-    // Stage 3c.3: cloned lambdas accumulated across spec generation.
+    // Cloned lambdas accumulated across spec generation.
     // See specializeHMFunction's clone logic.
     let lambdaClones = System.Collections.Generic.List<IRCallable>()
     let mutable changed = true
@@ -4943,26 +4417,19 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
 
         for (funcId, sortedBindings) in uniqueSites do
             let key = (funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
-            // Only generate specs whose bindings are entirely concrete.
-            // A self-binding like (10001, IRTInfer 10002) means the call
-            // site was inside a still-abstract context (e.g. the original
-            // body of `twiceId` before its own specialization). Such a
-            // spec would carry unresolved IRTInfer through to the
-            // validator. The fixpoint will revisit this call site after
-            // the surrounding spec is generated and its body's types
-            // become concrete; at that point the bindings are fully
-            // concrete and we generate the real spec.
+            // Only generate specs whose bindings are entirely concrete. A
+            // self-binding like (10001, IRTInfer 10002) means the call site
+            // was inside a still-abstract context; the fixpoint revisits it
+            // after the surrounding spec is generated and its types become
+            // concrete.
             let allConcrete =
                 sortedBindings |> List.forall (fun (_, v) ->
                     match v with IRTInfer _ -> false | _ -> true)
-            // Also require the call site to have resolved every type var in the
-            // callee's *parameters*. An empty/partial binding means the call
-            // sits inside a still-abstract enclosing function (e.g. `mean(A_0)`
-            // where `A_0` is a pack element whose element type is not yet
-            // concrete); specializing here would emit a dead spec carrying
-            // unresolved type vars (and any first-class HM kernels it
-            // references). The fixpoint revisits the site once the enclosing
-            // function is specialized and the arg types become concrete.
+            // Also require the call site to have resolved every type var in
+            // the callee's PARAMETERS -- an empty/partial binding means the
+            // call sits inside a still-abstract enclosing function (e.g. a
+            // pack element's not-yet-concrete type); the fixpoint revisits
+            // once the enclosing function is specialized.
             let origFunc = hmFuncMap.[funcId]
             let paramVarIds =
                 origFunc.Params
@@ -5004,21 +4471,15 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             | None -> e
         | _ -> e
 
-    // 4. Build a *global*, conflict-free type-var binding map for the
-    //    whole module. The motivation: a downstream binding like
-    //    `let r = result(0)` references the same IRTInfer N as the
-    //    upstream `let result = arr_id(xs)` (because TypeCheck propagates
-    //    the function's polymorphic return type through to dependents
-    //    without generalizing top-level functions). Per-binding-local
-    //    substitution wouldn't fix r.Type because r.Value contains no
-    //    HM call directly. A global union does, with the caveat that we
-    //    must detect conflicts: if the same ID is bound to different
-    //    concrete types at different call sites (which can happen when
-    //    a polymorphic function is used with multiple types in one
-    //    program), we drop that ID from the global map and let the
-    //    per-call-site rewrite still produce the right specs — the
-    //    binding type for any individual `let r = f(...)` will still
-    //    get its concrete substitution via the per-binding fallback.
+    // 4. Build a *global*, conflict-free type-var binding map for the whole
+    //    module: a downstream binding like `let r = result(0)` references
+    //    the same IRTInfer N as the upstream `let result = arr_id(xs)`
+    //    (TypeCheck propagates a polymorphic return through dependents
+    //    without generalizing top-level functions), so per-binding-local
+    //    substitution alone wouldn't fix r.Type. If the same ID binds to
+    //    different concrete types at different call sites, drop it from the
+    //    global map -- the per-call-site rewrite still produces the right
+    //    specs, and the per-binding fallback covers r.Type.
     let collectAllBindingsFromExpr (expr: IRExpr) : (int * IRType) list =
         collectHMCallSites hmFuncMap expr
         |> List.collect (fun (_, sortedBindings) ->
@@ -5043,14 +4504,12 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             let distinctTypes = pairs |> List.map snd |> List.distinct
             match distinctTypes with
             | [singleTy] -> Some (id, singleTy)
-            | _ -> None)  // conflict — leave alone, per-call-site rewrite handles each
+            | _ -> None)  // conflict -- leave alone, per-call-site rewrite handles each
         |> Map.ofList
 
-    // Per-binding-local fallback: useful when a call sits *directly* in
-    // a binding's value (the existing simple case) and there's no
-    // conflict from elsewhere. Same construction as before, but only
-    // applied when global bindings don't already cover the IDs in
-    // the binding's declared type.
+    // Per-binding-local fallback: for a call sitting directly in a binding's
+    // value, when global bindings don't already cover the IDs in its
+    // declared type.
     let unionBindingsFromExpr (expr: IRExpr) : Map<int, IRType> =
         collectAllBindingsFromExpr expr
         |> List.fold (fun acc (k, v) ->
@@ -5058,12 +4517,10 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             | Some _ -> acc
             | None -> Map.add k v acc) Map.empty
 
-    // 5. Rewrite all expressions; substitute binding declared types
-    //    using the union of (global, per-binding-local) bindings;
-    //    also substitute types and rewrite call sites inside spec bodies.
-    //    Local bindings layer on top of global — local wins for IDs in
-    //    conflict at the global level (each call site is locally
-    //    consistent even when globally inconsistent).
+    // 5. Rewrite all expressions; substitute binding declared types using
+    //    the union of (global, per-binding-local) bindings, and rewrite call
+    //    sites inside spec bodies. Local bindings win over global on
+    //    conflict (each call site is locally consistent).
     let mergeBindings (local: Map<int, IRType>) : Map<int, IRType> =
         local |> Map.fold (fun acc k v -> Map.add k v acc) globalBindings
     let newFunctions =
@@ -5112,26 +4569,21 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         Functions = newFunctions @ specFuncs @ (lambdaClones |> List.ofSeq)
         Bindings = newBindings }
 
-/// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose operands
-/// are BOTH arrays becomes the `method_for(zip ..) <@> kernel |> compute`
-/// co-iteration combinator — byte-for-byte the shape TypeCheck.inferBinOp
-/// synthesizes for a top-level `x + y`, and the one codegen + interpreter both
-/// materialize correctly (dense, packed and multi-rank).
+/// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose
+/// operands are BOTH arrays becomes the `method_for(zip ..) <@> kernel |>
+/// compute` co-iteration combinator -- the same shape TypeCheck.inferBinOp
+/// synthesizes for a top-level `x + y`.
 ///
-/// Pack-element operands can't be recognized at lowering/type-check time: in
-/// `firstsum(A: Poly<Float64^1>) = A[0] + A[1]` the element type is an
-/// unresolved arity-polymorphic var until Poly + HM specialization substitutes
-/// the concrete `Array<..>` in. Running here — after BOTH monomorphizers — the
-/// operand types are concrete, so the same co-iteration form applies. Without
-/// it the binop stays a raw `Array op Array` that only C++'s (absent) array
-/// operator overload could consume, and the tree-walking interpreter would
-/// reject the array operands (BL8010).
+/// Pack-element operands can't be recognized at lowering/type-check time:
+/// in `firstsum(A: Poly<Float64^1>) = A[0] + A[1]` the element type is
+/// unresolved until Poly + HM specialization substitutes the concrete
+/// `Array<..>` in. Running here (after BOTH monomorphizers) the operand
+/// types are concrete. Without this the binop stays a raw `Array op Array`
+/// with no C++ operator overload, and the interpreter rejects it (BL8010).
 ///
-/// The synthesized `lambda(a, b) -> a op b` kernel closes over nothing (both
-/// operands are its own params). Only Elementwise mode is rewritten (the
-/// gap: pack-element `A[i] + A[j]`); outer products and scalar/broadcast binops
-/// are left untouched (the former is a distinct former, the latter is either a
-/// native scalar op or synthesized at lowering time from a known array operand).
+/// The synthesized `lambda(a, b) -> a op b` kernel closes over nothing.
+/// Only Elementwise mode is rewritten (pack-element `A[i] + A[j]`); outer
+/// products and scalar/broadcast binops are left untouched.
 let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     let newLambdas = System.Collections.Generic.List<IRCallable>()
     let isCmpOrLogical op =
@@ -5140,14 +4592,14 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         | _ -> false
     // Distinct identity per distinct operand var so codegen's symmetry
     // deduction treats `A_0 + A_1` as two different arrays (and `A_0 + A_0` as
-    // the same array — correct commutative collapse).
+    // the same array -- correct commutative collapse).
     let identityOf e =
         match e with
         | IRVar (id, _) -> AIDVariable (sprintf "__coi%d" id)
         | _ -> AIDVariable "__coi"
     // Operand type, seeing through a `|> compute` wrapper so a *nested* array
-    // binop — whose inner rewrite already produced `IRCompute(IRApplyCombinator)`
-    // (an array-typed, but not CarriedType-tagged, node) — is still recognized
+    // binop -- whose inner rewrite already produced `IRCompute(IRApplyCombinator)`
+    // (an array-typed, but not CarriedType-tagged, node) -- is still recognized
     // as an array operand by the enclosing binop (`A[0] + A[1] + A[2]`).
     let rec operandType e =
         match e with
@@ -5157,13 +4609,11 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         | IRLet (_, _, body) -> operandType body
         | CarriedType ty -> Some ty
         | _ -> None
-    // Broadcast a scalar against an array (`arr op scalar` / `scalar op arr`):
-    // the value-space twin of TypeCheck.inferBinOp's array-scalar path, built
-    // post-monomorphization for pack elements whose array type only resolves
-    // then (e.g. centering `head - mean(head)` in a Poly<T^1> kernel). The
-    // scalar is materialized into a local let and CAPTURED by a single-parameter
-    // map kernel; a single-array method_for maps it. `arrTy` is the operand's raw
-    // array arrow, used to swap in the result element type.
+    // Broadcast a scalar against an array (`arr op scalar` / `scalar op
+    // arr`): value-space twin of TypeCheck.inferBinOp's array-scalar path,
+    // for pack elements whose array type only resolves post-monomorphization
+    // (e.g. `head - mean(head)` in a Poly<T^1> kernel). The scalar is
+    // materialized into a captured local; a single-array method_for maps it.
     let broadcastScalar op (arr: IRExpr) (arrTy: IRType) (la: IRArrayType)
                         (scalarE: IRExpr) (sElem: ElemType) (scalarOnLeft: bool) : IRExpr =
         let arrElem = match la.ElemType with PrimElem et -> et | _ -> ETFloat64
@@ -5228,7 +4678,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                     IRTArrow ([SVal (IRTScalar elemTypeL); SVal (IRTScalar elemTypeR)], kernelRet, None)
                 // Materialize non-variable operands into let-bindings so the loop
                 // reads NAMED arrays. A function-call operand (`head + packsum1(tail)`
-                // in a recursive pack kernel) must be evaluated once and bound —
+                // in a recursive pack kernel) must be evaluated once and bound --
                 // codegen's loop reads `arr[i]` by the operand's name, and an
                 // unnamed call expression there is an undeclared identifier.
                 let mutable prelude : (IRId * IRExpr) list = []
@@ -5244,7 +4694,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                 let identities = [identityOf lArr; identityOf rArr]
                 let arrayTypes = [la; ra]
                 // Shared co-iteration record: the left array's index axes (both
-                // operands share the same iteration space — the elementwise
+                // operands share the same iteration space -- the elementwise
                 // conformance the type-checker guaranteed).
                 let sharedIdx = la.IndexTypes
                 let sdimsPerArray = [la.IndexTypes.Length; ra.IndexTypes.Length]
@@ -5298,12 +4748,10 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         Functions = newFunctions @ (newLambdas |> List.ofSeq)
         Bindings = newBindings }
 
-// ============================================================================
 // Arity Monomorphization
-// ============================================================================
 
 /// Locate every Poly param's index in a function, in declaration order.
-/// Each Poly pack is independent — different slots may have different
+/// Each Poly pack is independent -- different slots may have different
 /// concrete arities at any given call site. Returns [] for non-Poly
 /// functions.
 let findPolyParamIndices (func: IRFuncDef) : int list =
@@ -5316,40 +4764,32 @@ let findPolyParamIndices (func: IRFuncDef) : int list =
 
 /// Compute the concrete pack arity for a call to an arity-polymorphic
 /// function, returning one arity per Poly slot (in declaration order). Each
-/// pack stands independently — `pairSum((1.0, 2.0), (3.0, 4.0, 5.0))` is a
+/// pack stands independently -- `pairSum((1.0, 2.0), (3.0, 4.0, 5.0))` is a
 /// valid call with arities [2; 3]. Three call shapes are recognized:
-///
-/// (a) Variadic — only when the function has a single Poly param and no
-///     free params. Every positional arg is a pack element. Returns
-///     [args.Length].
-///
-/// (b) Single-Poly tuple-as-pack — single Poly param accompanied by free
-///     params. The pack is a tuple at the Poly slot; free args follow in
-///     their normal positions. Returns [tuple.Length].
-///
-/// (c) Multi-Poly tuple-as-pack — every Poly slot receives a tuple, each
-///     with its own (potentially different) arity. Free args occupy non-
-///     Poly positions. Returns [size_slot_0; size_slot_1; ...].
-///
+/// (a) Variadic -- single Poly param, no free params: every positional arg
+///     is a pack element, returns [args.Length].
+/// (b) Single-Poly tuple-as-pack -- single Poly param plus free params: the
+///     pack is a tuple at the Poly slot, returns [tuple.Length].
+/// (c) Multi-Poly tuple-as-pack -- every Poly slot gets its own tuple,
+///     returns [size_slot_0; size_slot_1; ...].
 /// Returns None for unsupported shapes (mismatched arg count, non-tuple at
 /// a required Poly slot).
 let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
     let polyIndices = findPolyParamIndices func
     // A call passing a symbolic pack tail (`f(tail)` inside an un-specialized
-    // recursive body, where `tail = IRPolyTail(A, k)`) is NOT a concrete call
-    // site: its true arity is only known once the ENCLOSING function is
+    // recursive body, `tail = IRPolyTail(A, k)`) is NOT a concrete call site:
+    // its true arity is only known once the ENCLOSING function is
     // specialized, at which point specializeFunction spreads the tail into
-    // `f(A_k, .., A_{n-1})` — that spread form is the real call site the worklist
-    // then picks up. Treating the symbolic call as a concrete one (arity =
-    // arg-count = 1) mints a bogus specialization: harmless only when it happens
-    // to hit the base arm, but for e.g. a `| 2` base it cascades into an invalid
+    // `f(A_k, .., A_{n-1})`, the real call site the worklist then picks up.
+    // Treating the symbolic call as concrete (arity = arg-count = 1) mints a
+    // bogus specialization -- for a `| 2` base it cascades into an invalid
     // arity-0 spec. Reject it here.
     if args |> List.exists (function IRPolyTail _ -> true | _ -> false) then None
     else
     match polyIndices with
     | [] -> None
     | [pidx] when func.Params.Length = 1 ->
-        // Variadic — args are the pack elements directly
+        // Variadic -- args are the pack elements directly
         Some [args.Length]
     | _ ->
         // Tuple-as-pack at every Poly slot. args.Length must equal the
@@ -5369,12 +4809,12 @@ let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
 /// Rewrite a call's arg list to match the specialized function's expanded
 /// param list. Variadic single-Poly leaves args flat; tuple-as-pack (single
 /// or multi) expands each tuple at its Poly slot. Each pack expands
-/// independently — different slots can yield different numbers of elements.
+/// independently -- different slots can yield different numbers of elements.
 let flattenAtPolyPosition (func: IRFuncDef) (args: IRExpr list) : IRExpr list =
     let polyIndices = findPolyParamIndices func
     match polyIndices with
     | [] -> args
-    | [_] when func.Params.Length = 1 -> args  // variadic — already flat
+    | [_] when func.Params.Length = 1 -> args  // variadic -- already flat
     | _ ->
         if args.Length <> func.Params.Length then args
         else
@@ -5390,7 +4830,7 @@ let flattenAtPolyPosition (func: IRFuncDef) (args: IRExpr list) : IRExpr list =
 
 /// Collect all call sites to arity-polymorphic functions.
 /// Returns list of (funcId, arities) pairs where arities is the per-slot
-/// arity list. Unsupported call shapes are silently skipped — they surface
+/// arity list. Unsupported call shapes are silently skipped -- they surface
 /// as type errors downstream rather than producing wrong-arity specs.
 let collectPolyCallSites (polyFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId * int list) list =
     let results = System.Collections.Generic.List<_>()
@@ -5407,11 +4847,11 @@ let collectPolyCallSites (polyFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (I
     results |> Seq.toList
 
 /// Create a monomorphized copy of a poly function for a list of slot arities.
-/// `arities` carries one arity per Poly slot, in declaration order — packs
+/// `arities` carries one arity per Poly slot, in declaration order -- packs
 /// are independent, so different slots may have different sizes.
 let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId, IRFuncDef>) (builder: IRBuilder) : IRFuncDef =
     let polyIndices = findPolyParamIndices func
-    if List.isEmpty polyIndices then func  // Not actually poly — shouldn't happen
+    if List.isEmpty polyIndices then func  // Not actually poly -- shouldn't happen
     elif List.length arities <> List.length polyIndices then func  // arity-count mismatch
     else
         // Per-slot info: original param, base type, the N_slot new params
@@ -5451,13 +4891,13 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             slotInfo |> List.map (fun (_, _, bt, _) -> bt) |> List.toArray
         let aritiesArr = arities |> List.toArray
 
-        // Alias map: VarId -> (slotIdx, offset). Each pack-slot param, plus every
-        // let-alias of it, and every cons-destructuring tail view built from it.
-        // The offset is how many leading elements the view drops: 0 for the pack
-        // itself and its plain aliases; `off + drop` for `let t = tail-of(view)`
-        // (from `let head :: tail = view`). A read `view[k]` resolves to expanded
-        // param `off + k`; a call passing `view` spreads params `off ..`. Built by
-        // a top-down walk so a later alias sees an earlier one (lets are ordered).
+        // Alias map: VarId -> (slotIdx, offset), for each pack-slot param plus
+        // every let-alias and cons-destructuring tail view built from it. The
+        // offset is leading elements dropped: 0 for the pack itself; `off +
+        // drop` for `let t = tail-of(view)` (from `let head :: tail = view`).
+        // A read `view[k]` resolves to expanded param `off + k`; a call
+        // passing `view` spreads params `off ..`. Top-down walk so a later
+        // alias sees an earlier one (lets are ordered).
         let aliasInfo : Map<IRId, int * int> =
             let mutable info =
                 slotInfo
@@ -5480,7 +4920,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
         // Slot-only view, for the pack-former unroller's membership test.
         let aliasToSlot = aliasInfo |> Map.map (fun _ (slot, _) -> slot)
 
-        // Map param name → slot index, for the IRArity intrinsic. `arity(xs)`
+        // Map param name -> slot index, for the IRArity intrinsic. `arity(xs)`
         // resolves to slot 0's arity; `arity(ys)` to slot 1's, etc.
         let paramNameToSlot =
             slotInfo
@@ -5492,11 +4932,11 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
         let slotParamVar slot idx =
             IRVar (newParamsBySlot.[slot].[idx].VarId, baseTypeBySlot.[slot])
 
-        // Rewrite body: resolve IRPolyIndex reads to the expanded param, IRArity
-        // to a literal, and spread any pack-view argument at a call site into its
-        // trailing params (so `f(tail)` becomes `f(A_off, .., A_{n-1})` — a normal
-        // arity-(n-off) call the driver re-collects, which is how recursion over a
-        // shrinking pack terminates at the base case).
+        // Rewrite body: resolve IRPolyIndex reads to the expanded param,
+        // IRArity to a literal, and spread any pack-view argument at a call
+        // site into its trailing params (`f(tail)` becomes
+        // `f(A_off, .., A_{n-1})`, a normal call the driver re-collects --
+        // how recursion over a shrinking pack terminates at the base case).
         let rewrite e =
             match e with
             | IRPolyIndex (IRVar (id, _), IRLit (IRLitInt k)) when Map.containsKey id aliasInfo ->
@@ -5506,7 +4946,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                 if idx >= 0 && idx < slotArity then slotParamVar slotIdx idx
                 else e
             | IRPolyIndex (IRVar (id, _), _) when Map.containsKey id aliasInfo ->
-                e  // Dynamic index — can't monomorphize, leave as-is
+                e  // Dynamic index -- can't monomorphize, leave as-is
             | IRArity (_, name) when Map.containsKey name paramNameToSlot ->
                 let slotIdx = paramNameToSlot.[name]
                 IRLit (IRLitInt (int64 aritiesArr.[slotIdx]))
@@ -5524,14 +4964,13 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             | _ -> e
         let newBody = mapIRExpr rewrite func.Body
 
-        // Static match reduction: after `rewrite` turned `arity(A)` into a literal,
-        // `match arity(A) with | k -> .. | _ -> ..` picks its one live arm at
-        // compile time and discards the rest. Essential for recursion termination:
-        // the base arm (`| 0 -> zero`) must be selected — and the recursive arm
-        // (which destructures the pack and calls f(tail)) discarded — at the base
-        // arity, or specialization would keep shrinking past 0 and destructure an
-        // empty pack. Only guard-free arms are reduced; anything else is left for
-        // ordinary runtime dispatch.
+        // Static match reduction: after `rewrite` turns `arity(A)` into a
+        // literal, `match arity(A) with | k -> .. | _ -> ..` picks its one
+        // live arm at compile time. Essential for recursion termination: the
+        // base arm must be selected (and the recursive arm, which
+        // destructures the pack and calls f(tail), discarded) at the base
+        // arity, or specialization would shrink past 0 and destructure an
+        // empty pack. Only guard-free arms are reduced.
         let rec reduceArityMatch expr =
             match expr with
             | IRMatch (IRLit (IRLitInt n), cases) ->
@@ -5582,29 +5021,24 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             | _ -> expr
         let newBody = unrollForRanges newBody
 
-        // ----------------------------------------------------------------
         // Pack-former unrolling pass (poly-specialization only).
         //
         // Recognizes a let-bound former whose iteration source is a single
-        // virtual range and whose kernel — a lifted lambda — reads THIS
-        // function's pack via a dynamic `IRPolyIndex` (`args[k]`). Two things
-        // block ordinary codegen for such a former after arity is known:
-        //   (1) the kernel keeps the dynamic subscript `args[k]`, invalid once
-        //       the pack has been split into scalar params; and
-        //   (2) the range extent lowered to an opaque `IRParam` placeholder
-        //       (not an `IRArity`), so `rewrite` never resolves it and codegen
-        //       emits an undeclared `__range0.extents[0]`.
-        // The pack size is exactly the slot arity, so we sidestep the extent
-        // entirely and unroll the former into an n-element ARRAY LITERAL:
+        // virtual range and whose kernel (a lifted lambda) reads THIS
+        // function's pack via a dynamic `IRPolyIndex` (`args[k]`). Two
+        // things block ordinary codegen once arity is known: (1) the kernel
+        // keeps the dynamic subscript `args[k]`, invalid once the pack is
+        // split into scalar params; (2) the range extent is an opaque
+        // `IRParam` placeholder (not `IRArity`), so codegen emits an
+        // undeclared `__range0.extents[0]`. Since the pack size is exactly
+        // the slot arity, unroll the former into an n-element ARRAY LITERAL:
         // element k = the kernel body with its ordinal param substituted to
-        // `Lit k`, then re-run through `rewrite` so `IRPolyIndex(pack, Lit k)`
-        // becomes the k-th monomorphized param. Downstream (array-literal
-        // codegen, the `reduce` over the binding) then works unchanged.
+        // `Lit k`, re-run through `rewrite` so `IRPolyIndex(pack, Lit k)`
+        // becomes the k-th monomorphized param.
         //
         // Tightly scoped: fires ONLY when the kernel lambda body references a
-        // pack slot of this function (the `aliasToSlot` membership test).
-        // Every other former is left byte-for-byte untouched, so the pass has
-        // zero blast radius outside poly specialization.
+        // pack slot of this function (`aliasToSlot` membership test); every
+        // other former is left byte-for-byte untouched.
         let unrollPackFormers expr =
             let tryUnroll (info: ApplyInfo) : IRExpr option =
                 // The virtual source must be a single range with no real data
@@ -5678,13 +5112,10 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             | IRTPoly (bt, _) -> bt
             | other -> other
         // Arity-dependent return rank: when arity reduction collapses this
-        // specialization's body to a SCALAR — an empty-pack base arm returning a
-        // scalar identity, e.g. `| 0 -> 1` / `| 0 -> zero` in an arity-poly
-        // product — the specialization genuinely returns T^0, not the declared
-        // array shape. The enclosing op (the recursion's `*`/`+`) broadcasts that
-        // scalar. Deriving the return from the body here is what lets `| 0 -> 1`
-        // actually run; we only ever narrow a declared array to the body's scalar
-        // (never widen), so array-returning base arms are untouched.
+        // specialization's body to a SCALAR (an empty-pack base arm, e.g.
+        // `| 0 -> zero`), the specialization genuinely returns T^0, not the
+        // declared array shape, and the enclosing op broadcasts it. We only
+        // ever narrow a declared array to the body's scalar, never widen.
         let rec finalScalarType e =
             match e with
             | IRLet (_, _, body) -> finalScalarType body
@@ -5724,12 +5155,11 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                         if span = 1 then [start]
                         else List.init span (fun i -> start + i)
                     | None -> [idx]))
-        // Expand whatever groups the source carried. Historically this was
-        // gated on IsCommutative, which was equivalent (the flag and a
-        // non-empty group list were set together); the declared-anticomm
-        // spelling breaks that coupling — an antisym kernel has groups but is
-        // NOT commutative — so the expansion keys off the lists themselves and
-        // the flag is carried through untouched.
+        // Expand whatever groups the source carried, independent of
+        // IsCommutative: the declared-anticomm spelling means the flag and a
+        // non-empty group list are not always set together -- an antisym
+        // kernel has groups but is NOT commutative -- so the expansion keys
+        // off the lists themselves and the flag is carried through untouched.
         let newIsComm = func.IsCommutative
         let newCommGroups = expandGroups func.CommGroups
         let newAntisymGroups = expandGroups func.AntisymGroups
@@ -5757,12 +5187,10 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
           // Specialized clones inherit the original's captures verbatim;
           // arity specialization doesn't introduce new free vars.
           Captures = func.Captures
-          // Sign parities are per-PARAMETER, so a pack slot expanding to k
-          // positions replicates its origin's parity across them (each
-          // expanded position receives one component of the pack, and the
-          // body treats every component by the same law the summary proved).
-          // Vacuous today — only apply-seam kernel lambdas carry a summary
-          // and those are fixed-arity — but kept honest for a future producer.
+          // Sign parities are per-PARAMETER: a pack slot expanding to k
+          // positions replicates its origin's parity across them. Vacuous
+          // today (only apply-seam kernel lambdas carry a summary, and
+          // those are fixed-arity) but kept honest for a future producer.
           SignParities =
             (if List.isEmpty func.SignParities then []
              else
@@ -5773,46 +5201,33 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                     | None -> [p])
                 |> List.concat) }
 
-// ============================================================================
 // Inline-Form Lifting Pass
-// ============================================================================
 //
 // Some IR forms (IRMask, IRSort, IRIntersect, IRUnion, IRGroupBy, IRGroupKeys)
-// represent operations whose codegen requires a *named binding*: the loop body
-// references the result by name (e.g., `m_extents[0]`, `m[i]`), and the
-// codegen for the form itself emits multi-statement setup (size computation,
-// allocation, fill loop). When these forms appear inline as a sub-expression
-// — say `reduce(mask(g, pred), op)` — the IIFE wrapping `reduce` would need
-// to inline-emit the entire mask setup as statements before reducing, and
-// every other site that consumes an array (IRExtent, IRIndex, IRApp, ...)
-// would need parallel handling.
+// require a *named binding*: codegen for the form emits multi-statement
+// setup (size computation, allocation, fill loop), so inline use as a
+// sub-expression (`reduce(mask(g, pred), op)`) would need every consumer
+// (IRExtent, IRIndex, IRApp, ...) to inline-emit that setup itself.
 //
-// Rather than adding bespoke inline-materialization to each consumer, this
-// pass normalizes the IR: any inline-form occurrence in a non-let-RHS position
-// is rewritten to a fresh `IRLet(tmp, form, parent(IRVar(tmp, ty)))`. Codegen
-// then sees only the canonical pattern `let tmp = mask(...)` and emits its
-// existing genBinding path.
+// Rather than bespoke inline-materialization per consumer, this pass
+// normalizes the IR: any inline-form occurrence in a non-let-RHS position
+// is rewritten to a fresh `IRLet(tmp, form, parent(IRVar(tmp, ty)))`, so
+// codegen only ever sees the canonical `let tmp = mask(...)` pattern.
 //
-// The blessed positions (no rewrite) are:
-//   - The value side of an IRLet (already named)
-//   - The Arrays list of IRMethodFor / IRApplyCombinator (handled by their
-//     own auto-materialize at codegen)
-//
-// Everywhere else (IRReduce.array, IRExtent.array, IRIndex.array, IRApp args,
-// etc.), the rewrite fires.
+// Blessed positions (no rewrite): the value side of an IRLet, and the
+// Arrays list of IRMethodFor/IRApplyCombinator (auto-materialized at
+// codegen). Everywhere else the rewrite fires.
 
 /// Map from struct name to its fields, used by typeOf for IRFieldAccess
-/// resolution. Built at the entry to liftInlineFormsModule and used throughout
-/// the same lift-pass invocation.
+/// resolution. Built at liftInlineFormsModule entry, used throughout the
+/// same lift-pass invocation.
 ///
-/// Thread-safety: the test runner uses `Array.Parallel.mapi` to compile
-/// tests in parallel. With a plain module-level mutable Dictionary, one
-/// test's `setStructFieldsCache` would wipe another concurrent test's
-/// cache state — causing intermittent `IRTUnit` results from
-/// `tryLookupFieldType` and downstream codegen errors (see the
-/// `Struct Array With Array Field` regression). Wrapping the cache in
-/// `AsyncLocal<T>` and assigning a fresh Dictionary per set call gives
-/// each task its own instance.
+/// Thread-safety: the test runner compiles tests in parallel
+/// (`Array.Parallel.mapi`); a plain module-level mutable Dictionary would
+/// let one test's `setStructFieldsCache` wipe another's cache state,
+/// causing intermittent `IRTUnit` results (see the `Struct Array With
+/// Array Field` regression). `AsyncLocal<T>` with a fresh Dictionary per
+/// set call gives each task its own instance.
 let private structFieldsCacheStorage =
     System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<string, (string * IRType) list>>()
 
@@ -5825,7 +5240,7 @@ let private getStructFieldsCache () : System.Collections.Generic.Dictionary<stri
     else v
 
 let setStructFieldsCache (types: IRTypeDef list) =
-    // Create a fresh Dictionary for this async context — do not reuse and
+    // Create a fresh Dictionary for this async context -- do not reuse and
     // .Clear() a shared instance, since other tasks may hold the same
     // reference from earlier in the parallel test run.
     let cache = System.Collections.Generic.Dictionary<string, (string * IRType) list>()
@@ -5845,36 +5260,31 @@ let tryLookupFieldType (objType: IRType) (fieldName: string) : IRType option =
         | false, _ -> None
     | _ -> None
 
-// ============================================================================
-// Canonical expression typing — typeOf (audit §2.2)
-// ============================================================================
+// Canonical expression typing -- typeOf (audit section 2.2)
 //
 // THE one type-reconstruction over IR expressions. Until every IR node
 // carries its type (the rewrite's design), passes that need a type must
-// re-derive it. Previously three hand-maintained derivations existed —
-// CodeGen.inferExprType (full, with its own compound/group_by/gram rules),
-// IR.typeOf (a partial second copy for the lift pass), and
-// IR.exprTypeIfKnown (deliberately local) — and any divergence between them
-// was a silent wrong-codegen bug. Now:
-//   - typeOf                — the full reconstruction (this section)
-//   - exprTypeIfKnown       — the CarriedType subset only (HM call sites
+// re-derive it -- multiple hand-maintained derivations invite silent
+// divergence between them (a wrong-codegen bug class). The three roles:
+//   - typeOf                -- the full reconstruction (this section)
+//   - exprTypeIfKnown       -- the CarriedType subset only (HM call sites
 //                             must not unify against reconstructed types;
 //                             see its doc comment)
-//   - CodeGen.inferExprType — thin alias of typeOf
+//   - CodeGen.inferExprType -- thin alias of typeOf
 //
 // Dispatch is organized as active-pattern families feeding a top-level
 // match, not one flat 74-arm wall:
-//   CarriedType — types carried directly on the node (defined earlier,
+//   CarriedType -- types carried directly on the node (defined earlier,
 //                 shared with exprTypeIfKnown)
-//   TypeVia     — variants whose type IS one distinguished child's type
-//   IntValued   — index-arithmetic markers, always Int64
+//   TypeVia     -- variants whose type IS one distinguished child's type
+//   IntValued   -- index-arithmetic markers, always Int64
 // Structural rules (indexing, group_by, gram, ...) follow, and the
 // deliberately-untyped variants (loop objects, emission-internal markers)
 // are enumerated WITHOUT a wildcard, so a new IRExpr variant demands an
 // explicit typing decision here instead of silently becoming IRTUnit.
 
 /// Variants whose type equals one distinguished child's type. The returned
-/// expression is the child whose type to take — not necessarily the first
+/// expression is the child whose type to take -- not necessarily the first
 /// child (e.g. `IRComposeMeth (_, right)` types as `right`).
 let (|TypeVia|_|) (expr: IRExpr) : IRExpr option =
     match expr with
@@ -5905,42 +5315,30 @@ let (|IntValued|_|) (expr: IRExpr) : unit option =
         Some ()
     | _ -> None
 
-// ----------------------------------------------------------------------------
 // Synthetic sentinel index IDs
 //
-// Some typeOf branches need to construct an IRIndexType in flight — e.g., to
-// recover the rank-2 shape of an IRGroupBy result that was not already
-// let-bound (and therefore has no typecheck-derived IRBinding.Type to
-// consult). Those branches don't have access to an IRBuilder and can't
-// allocate fresh IDs via FreshId().
-//
-// Convention: synthetic sentinel IDs are NEGATIVE. IRBuilder.FreshId starts
-// at 0 and counts up, so the negative range is reserved and never collides
-// with builder-assigned IDs. Each call site that synthesizes indices picks a
-// distinct negative ID below.
-//
-// IDs are not load-bearing for codegen decisions — consumers of inferred
-// types pattern-match on structure (ArrayElem, IRTScalar) and on `Tag`, not
-// on `Id`. The IDs serve only to satisfy IRIndexType's record shape.
-// ----------------------------------------------------------------------------
+// Some typeOf branches construct an IRIndexType in flight (e.g. recovering
+// the rank-2 shape of a not-yet-let-bound IRGroupBy result) without access
+// to an IRBuilder to allocate fresh IDs. Convention: synthetic sentinel IDs
+// are NEGATIVE (IRBuilder.FreshId counts up from 0, so the negative range
+// never collides); each synthesizing call site picks a distinct one below.
+// IDs are not load-bearing for codegen -- consumers pattern-match on
+// structure (ArrayElem, IRTScalar) and `Tag`, not `Id`.
 let synthSlotIdOuter : IRId = -1
 let synthSlotIdMember : IRId = -2
 let synthSlotIdCompoundResidual : IRId = -3
 
-// ----------------------------------------------------------------------------
 // Compound partial-index classification (formalism 4.5)
 //
 // Shared by typeOf's IRIndex arm, CodeGen's genScalarBinding wrapper
 // decision, and exprToCppCore's compoundRead emission, so the three never
 // disagree about WHICH indexing form a compound read is.
 //
-// A wildcard coordinate arrives as an `IRLit IRLitUnit` sentinel inside the
-// index tuple: TypeCheck's dispatchAppOrIndex rewrites each consumed
-// TExprWildcard hole to a unit literal, and unit is never a valid coordinate
-// value, so the encoding is unambiguous. A short tuple (arity j < k, no
+// A wildcard coordinate arrives as an `IRLit IRLitUnit` sentinel: TypeCheck's
+// dispatchAppOrIndex rewrites each TExprWildcard hole to a unit literal
+// (never a valid coordinate, so unambiguous). A short tuple (arity j < k, no
 // sentinels) pins the LEADING j coordinates -- B((a,b)) and B((a,b,_)) on a
 // rank-3 compound are the same read.
-// ----------------------------------------------------------------------------
 
 /// Classification of the FIRST index against a rank-k compound head slot.
 type CompoundIndexForm =
@@ -5966,10 +5364,10 @@ let classifyCompoundIndexTuple (k: int) (coords: IRExpr list) : CompoundIndexFor
 
 /// Coverage-arm backstop: a family active pattern above no longer covers a
 /// constructor its coverage arm claims. Impossible unless a family pattern
-/// was edited out of sync with typeOf's coverage tail — fail loudly rather
+/// was edited out of sync with typeOf's coverage tail -- fail loudly rather
 /// than mistype silently.
 let private unreachableTyping (family: string) (expr: IRExpr) : 'a =
-    failwithf "typeOf: family pattern %s no longer covers %s — coverage arm and family out of sync"
+    failwithf "typeOf: family pattern %s no longer covers %s -- coverage arm and family out of sync"
         family (expr.GetType().Name)
 
 /// The canonical expression type reconstruction. See the section comment
@@ -6017,8 +5415,8 @@ let rec typeOf (expr: IRExpr) : IRType =
               | _ -> IRTScalar ETFloat64))
     | IRTuple exprs -> IRTTuple (exprs |> List.map typeOf)
     | IRComplex (re, _) ->
-        // Complex type derived from component width: Float32 → Complex64,
-        // Float64 → Complex128. Reports as a scalar (NOT a tuple) — that's
+        // Complex type derived from component width: Float32 -> Complex64,
+        // Float64 -> Complex128. Reports as a scalar (NOT a tuple) -- that's
         // the whole point of having a separate IRComplex node.
         (match typeOf re with
          | IRTScalar ETFloat32 -> IRTScalar ETComplex64
@@ -6040,11 +5438,9 @@ let rec typeOf (expr: IRExpr) : IRType =
         // peeling: a rank-k compound is ONE slot filled by ONE tuple, and a
         // PARTIAL tuple (short prefix, or full-arity with wildcard sentinels)
         // REPLACES that slot with a residual fragment rather than consuming
-        // it -- mirroring TypeCheck's compoundResidualType (dense Idx for one
-        // free axis, residual CompoundIdx for >= 2). Without this branch a
-        // partial read reports the element type (1 index >= 1 slot), which
-        // breaks chained/inline consumers (reduce over a residual, chained
-        // partials) at codegen.
+        // it (mirroring TypeCheck's compoundResidualType). Without this
+        // branch a partial read reports the element type, breaking chained/
+        // inline consumers at codegen.
         (match typeOf arr with
          | ArrayElem arrTy ->
              let headTabulated =
@@ -6111,8 +5507,8 @@ let rec typeOf (expr: IRExpr) : IRType =
     | IRFieldAccess (obj, field) ->
         // Resolved via the ONE struct-fields cache (structFieldsCacheStorage
         // above), populated both at liftInlineFormsModule entry and at
-        // codegen module entry from the same module's Types — collapsing the
-        // duplicate codegen-side cache that audit §2.4 flagged as a
+        // codegen module entry from the same module's Types -- collapsing the
+        // duplicate codegen-side cache that audit section 2.4 flagged as a
         // valid-but-wrong-lookup hazard.
         (match tryLookupFieldType (typeOf obj) field with
          | Some ty -> ty
@@ -6137,20 +5533,15 @@ let rec typeOf (expr: IRExpr) : IRType =
          | t -> t)
     | IRContains _ -> IRTScalar ETBool  // Membership returns bool
     | IRGroupBy (v, gk) ->
-        // The TypeCheck-side `ExprGroupBy` rule constructs a rank-2 array
-        // type with `__group_outer` + `__group_member` tagged index slots
-        // (see TypeCheck.fs:ExprGroupBy). For let-bound group_by results
-        // — which is the only currently-allowed usage; inline group_by
-        // in method_for() is rejected at codegen entry — the binding's
-        // Type field carries this rank-2 form, and `IRVar` lookups
-        // return it correctly.
-        //
-        // This branch fires when an IRGroupBy node is consulted
-        // directly (e.g., lifted bindings, future inline support).
-        // Reconstruct the same rank-2 form here so consumers that
-        // pattern-match on shape (ArrayElem, rank checks) see the
-        // correct structure. See `synthSlotId*` above for the
-        // sentinel-ID convention used here.
+        // TypeCheck's `ExprGroupBy` rule constructs a rank-2 array type with
+        // `__group_outer` + `__group_member` tagged index slots. For
+        // let-bound group_by results (the only currently-allowed usage;
+        // inline group_by in method_for() is rejected at codegen entry) the
+        // binding's Type field carries this form, and `IRVar` lookups return
+        // it correctly. This branch fires when an IRGroupBy node is
+        // consulted directly (lifted bindings, future inline support):
+        // reconstruct the same rank-2 form so shape-matching consumers see
+        // the correct structure (see `synthSlotId*` above).
         let valsTy = typeOf v
         let gkTy = typeOf gk
         (match gkTy, valsTy with
@@ -6169,7 +5560,7 @@ let rec typeOf (expr: IRExpr) : IRType =
          | _ ->
              // Fallback: gk isn't IRTGroupKeys-typed yet or v isn't an
              // array. Returning vals's type preserves the prior placeholder
-             // behavior — same shape, same element type — so any caller
+             // behavior -- same shape, same element type -- so any caller
              // that was previously satisfied stays satisfied.
              valsTy)
     | IRGroupKeys _ -> IRTUnit  // GroupKeys is an opaque structure, not a runtime value with a simple type
@@ -6189,21 +5580,17 @@ let rec typeOf (expr: IRExpr) : IRType =
     | IRDecompact (arr, d) ->
         // Split the compact slot containing dim d: left-remainder / extracted
         // Idx / right-remainder. Shape only (codegen reads arity/symmetry off
-        // this); Ids reused — authoritative nominal type is set by TypeCheck.
+        // this); Ids reused -- authoritative nominal type is set by TypeCheck.
         (match typeOf arr with
          // FULL decompaction of a wreath class, ahead of the dimension walk:
-         // `d` is the number of LEVELS TO KEEP here, not a dimension to free
-         // (docs/plan-orbidx-decompaction.md §4.3), and TypeCheck's
-         // inferDecompact has already refused every d except 0. The shape is
-         // the dense rank-prod(ri) tensor: one plain Idx<n> axis per raw axis,
-         // extent the class's BASE extent (the §4 fold's M0), which lives one
-         // level down inside the IROrbitClass marker -- reading `ix.Extent`
-         // directly here would put the marker itself on a dense axis.
-         //
-         // Built from scratch rather than `{ ix with ... }` for the same reason
-         // inferDecompact builds it that way: IxKOrbit, the "__orbidx" sentinel
-         // Tag and the IROrbitClass extent are all wreath-specific, and the IR
-         // validator enforces their agreement.
+         // `d` is the number of LEVELS TO KEEP (docs/plan-orbidx-decompaction.md
+         // section 4.3), and TypeCheck's inferDecompact has already refused
+         // every d except 0. The shape is the dense rank-prod(ri) tensor: one
+         // plain Idx<n> axis per raw axis, extent the class's BASE extent
+         // (reading `ix.Extent` directly would put the IROrbitClass marker
+         // itself on a dense axis). Built from scratch, not `{ ix with ... }`:
+         // IxKOrbit, the "__orbidx" Tag, and the IROrbitClass extent are all
+         // wreath-specific and validator-enforced together.
          | ArrayElem a when (match a.IndexTypes with
                              | [ ix ] -> ix.Symmetry = SymWreath
                              | _ -> false) ->
@@ -6225,13 +5612,12 @@ let rec typeOf (expr: IRExpr) : IRType =
                     else walk (slotIdx + 1) (acc + ar) rest
             (match walk 0 0 a.IndexTypes with
              // A wreath COMBINED with other slots is excluded rather than
-             // refused: this is `typeOf`, a pure shape reconstruction with no
-             // error channel, and TypeCheck's inferDecompact already refuses
-             // that arrangement with the real diagnostic — so no IRDecompact
-             // over one can exist. Excluding it means that if one somehow did,
-             // this returns the array's shape UNCHANGED instead of a
-             // `{ ix with Rank = ar }` whose Rank no longer matches its level
-             // list (an internally inconsistent type that would then flow on
+             // refused: `typeOf` is a pure shape reconstruction with no error
+             // channel, and TypeCheck's inferDecompact already refuses that
+             // arrangement with the real diagnostic. Excluding it means that
+             // if one somehow arrived here, this returns the array's shape
+             // UNCHANGED instead of a `{ ix with Rank = ar }` whose Rank no
+             // longer matches its level list (internally inconsistent but
              // looking well formed).
              | Some (slot, r, posInSlot, ix) when r >= 2 && ix.Symmetry <> SymNone
                                                   && ix.Symmetry <> SymWreath ->
@@ -6277,7 +5663,7 @@ let rec typeOf (expr: IRExpr) : IRType =
         // SymNone). No conjugation and no symmetry claim: unlike gram, matmul
         // over the same array is not symmetric, so there is no same-array mode.
         // Element type is the left operand's (the checker requires both real
-        // Float64 — the shim's v1 domain).
+        // Float64 -- the shim's current domain).
         (match typeOf l, typeOf r with
          | ArrayElem la, ArrayElem ra when la.IndexTypes.Length >= 1 && ra.IndexTypes.Length >= 1 ->
             let mOuter = la.IndexTypes.[0]
@@ -6287,24 +5673,19 @@ let rec typeOf (expr: IRExpr) : IRType =
             mkArrayLike { la with IndexTypes = [s0; s1] }
          | t, _ -> t)
     | IREigh operand ->
-        // eigh(S) -> (Q : n x n dense, LAM : n dense). Phase 6 / Round B2.
+        // eigh(S) -> (Q : n x n dense, LAM : n dense).
         //
-        // THE MIXED-ELEMENT TUPLE. Q inherits the operand's element type, but
-        // LAM does NOT: the eigenvalues of a symmetric/Hermitian matrix are
-        // REAL, so a Complex128 operand yields `(Array<Complex128,2>,
-        // Array<Float64,1>)` — the first surface value whose tuple elements
-        // have different element types. `blade_lapack`'s signatures say the
-        // same thing (`std::complex<double>** V` beside `double* lam`), and
-        // getting it wrong would be a silent storage-width error at the shim
-        // boundary rather than a type error.
+        // THE MIXED-ELEMENT TUPLE: Q inherits the operand's element type, but
+        // LAM does NOT (eigenvalues of a symmetric/Hermitian matrix are REAL,
+        // so Complex128 yields `(Array<Complex128,2>, Array<Float64,1>)`) --
+        // matching `blade_lapack`'s signatures (`std::complex<double>** V`
+        // beside `double* lam`); getting it wrong would be a silent
+        // storage-width error rather than a type error.
         //
-        // The operand is rank-2 square in EITHER of the two admissible
-        // spellings (TypeCheck.inferEigh is what establishes that): ONE compact
-        // slot of arity 2, or TWO plain dense axes. Both give n from the first
-        // slot's extent. The derived slots reuse that record — same convention
-        // as the gram/matmul arms above, and the ids are cosmetic here (the
-        // authoritative, fresh-id result type is the one `inferEigh` built and
-        // lowering attached to the binding).
+        // The operand is rank-2 square in EITHER admissible spelling (ONE
+        // compact slot of arity 2, or TWO plain dense axes); both give n from
+        // the first slot's extent. Ids here are cosmetic -- the authoritative
+        // result type is the one `inferEigh` built and lowering attached.
         (match typeOf operand with
          | ArrayElem sa when not sa.IndexTypes.IsEmpty ->
             let ix0 = sa.IndexTypes.Head
@@ -6349,7 +5730,7 @@ let rec typeOf (expr: IRExpr) : IRType =
          | [] -> IRTScalar ETFloat64)
 
     // -- Deliberately untyped (loop objects, combinator/emission-internal
-    //    markers — not runtime values with a simple type). Enumerated with
+    //    markers -- not runtime values with a simple type). Enumerated with
     //    no wildcard so a NEW variant demands a typing decision here.
     | IRMethodFor _ | IRObjectFor _ | IRReynolds _ | IRArrayProduct _
     | IRComposeObj _ | IRCompose _
@@ -6362,9 +5743,9 @@ let rec typeOf (expr: IRExpr) : IRType =
     // -- Coverage tail ---------------------------------------------------
     // Every constructor below is already handled by a family pattern above
     // (partial active patterns are invisible to the exhaustiveness checker).
-    // Listing them keeps this match provably exhaustive WITHOUT a wildcard —
+    // Listing them keeps this match provably exhaustive WITHOUT a wildcard --
     // a brand-new IRExpr variant still fails to compile until it gets a
-    // typing rule — and if one of these arms ever fires, a family pattern
+    // typing rule -- and if one of these arms ever fires, a family pattern
     // was edited out of sync: fail loudly, never mistype.
     | IRVar _ | IRParam _ | IRApp _ | IRArrayLit _ | IRStructLit _
     | IRApplyCombinator _ | IRComposeApply _ | IRLit _ ->
@@ -6379,44 +5760,17 @@ let rec typeOf (expr: IRExpr) : IRType =
         unreachableTyping "IntValued" expr
 
 /// Predicate: is this an inline form that needs lifting when in a non-blessed
-/// position? Note: we deliberately exclude IRReduce — reduce's codegen
-/// handles inline forms via IIFE (when the array is named) and the array
-/// argument to reduce IS what we lift, not reduce itself.
-///
-/// IRReduceCompute (the FUSED reduction terminal) IS included: unlike IRReduce
-/// it is statement-shaped — it declares scalar accumulator(s) plus a loop nest
-/// and has no expression/IIFE rendering — so codegen can only emit it at a
-/// let-binding position. Lifting it here means `reduce(deferred, …) / 125.0`
-/// normalizes to `let __t = reduce(deferred, …) in __t / 125.0` before codegen,
-/// exactly as writing that intermediate `let` by hand would (embedded reduces
-/// are always single-leaf scalars; a fused tree only ever appears as a directly
-/// destructured binding RHS, which is a blessed position and is not lifted).
-/// IRCompute (IRApplyCombinator …) — a FORCED combinator apply, as produced by
-/// desugaring array-vs-array binops (`A * B` → compute(method_for(zip(A,B)) <@>
-/// lambda)) — is included: its only correct rendering is the statement-form loop
-/// nest at a let-RHS. In an expression slot it falls to a legacy 2-array IIFE
-/// that hardcodes one loop per operand (a Cartesian sum, not co-iteration) and
-/// yields a scalar the array-typed parent then re-indexes. Lifting normalizes
-/// `reduce(A * B, (+))` to `let __t = A * B in reduce(__t, (+))`, exactly as
-/// writing that intermediate `let` by hand would. Note the bare (unwrapped)
-/// IRApplyCombinator is deliberately NOT lifted — that one is genuinely deferred
-/// and has no materialized value.
-/// IRMatmul is included (IRGram deliberately is NOT — it entered the language
-/// through the `gram` KEYWORD, whose only surface position is a let-RHS, so it
-/// has never needed lifting). `matmul` arrives from the math package's
-/// elaborator, which rewrites `m.matmul(A, B)` in place — so it appears in
-/// ordinary EXPRESSION positions: a function argument (`elt00(m.matmul(A,B))`),
-/// an index head, an operand of a binop. Before Phase 5 those all worked
-/// because matmul was a synthesized FUNCTION CALL; as an intrinsic node it must
-/// be hoisted to its own let-RHS, which is the only position codegen can
-/// materialize a fresh pool at.
-///
-/// IREigh is included for exactly the same reason, one step further: it arrives
-/// from the same elaborator in the same in-place rewrite, and it materializes
-/// TWO fresh pools plus the tuple that names them. `m.eigh(S)` is almost always
-/// written as a destructuring let-RHS, which is already a blessed position — but
-/// nothing stops `elt(m.eigh(S))`, and an unhoisted occurrence would have no
-/// statement scope to declare the pools in.
+/// position? Excludes IRReduce (its own codegen handles inline forms via
+/// IIFE; the array argument is what gets lifted, not reduce itself).
+/// Includes IRReduceCompute (statement-shaped, no expression/IIFE rendering,
+/// only emittable at a let-binding); IRCompute(IRApplyCombinator ...) (only
+/// correct as a statement-form loop nest at a let-RHS -- the bare unwrapped
+/// IRApplyCombinator is NOT lifted, being genuinely deferred with no
+/// materialized value); IRMatmul (an intrinsic node from the math package's
+/// in-place elaborator, so it reaches ordinary expression positions and must
+/// be hoisted to materialize its pool -- IRGram is NOT included, entering
+/// only via the `gram` keyword's let-RHS); and IREigh (same elaborator, two
+/// pools plus the naming tuple).
 let isInlineForm (e: IRExpr) : bool =
     match e with
     | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
@@ -6426,19 +5780,19 @@ let isInlineForm (e: IRExpr) : bool =
     | _ -> false
 
 /// A loop-form array operand (in a method_for / apply-combinator / compose-apply
-/// `Arrays` list) that is itself a forced or inline elementwise computation —
+/// `Arrays` list) that is itself a forced or inline elementwise computation --
 /// e.g. the left input `A * B` of a chained positional op `A * B * C`, which
-/// lowers to `IRCompute(IRApplyCombinator …)`. Unlike the blessed inline forms
+/// lowers to `IRCompute(IRApplyCombinator ...)`. Unlike the blessed inline forms
 /// (mask/intersect/union/unique), these have NO codegen-side auto-materialize
 /// path, so the loop-nest builder names them `arr0` and reads an array it never
 /// declared (`error: 'arr0' was not declared in this scope`). They must be
 /// hoisted to their own let-RHS so codegen materializes each into a real temp
-/// before the outer loop consumes it — exactly as writing the intermediate
+/// before the outer loop consumes it -- exactly as writing the intermediate
 /// `let` by hand would. Deliberately narrow: it does NOT list the blessed inline
 /// forms, so their existing auto-materialize path stays untouched.
 ///
 /// Array-typed APPLICATION and partial-INDEX operands are included for the same
-/// reason — `f(x) + g(x)` (both operands calls) and `m(0) + m(1)` (both operands
+/// reason -- `f(x) + g(x)` (both operands calls) and `m(0) + m(1)` (both operands
 /// row views) equally leave the nest with no named array to read. A call operand
 /// must also be evaluated exactly once rather than re-invoked per element. This
 /// mirrors the `materialize` helper in `lowerArrayBinOpsModule`, which covers the
@@ -6453,20 +5807,20 @@ let private isNestedLoopComputeArg (e: IRExpr) : bool =
     | IRCompute _ -> true
     | IRApp (IRObjectFor _, _, _) -> true
     | IRApp _ | IRIndex _ -> isArrayTyped ()
-    // Phase 5: `m.matmul(A, B) * 2.0` puts a matmul directly in a loop form's
-    // Arrays list. It used to arrive as an array-typed IRApp (the synthesized
-    // function call) and was hoisted by the line above; as an intrinsic node it
-    // needs its own entry or the nest reads an `arr<i>` it never declared.
+    // `m.matmul(A, B) * 2.0` puts a matmul directly in a loop form's Arrays
+    // list. As an intrinsic node -- not a synthesized function-call IRApp,
+    // which the line above already hoists -- it needs its own entry or the
+    // nest reads an `arr<i>` it never declared.
     | IRMatmul _ -> true
     // IREigh is deliberately ABSENT, and its absence is a decision rather than
     // an omission: an eigh node is TUPLE-typed, and a loop form's `Arrays` slot
     // holds arrays. There is no surface spelling that puts a tuple where the
-    // nest expects an array — the destructured `Q` / `LAM` are what reach a
+    // nest expects an array -- the destructured `Q` / `LAM` are what reach a
     // loop, and those are ordinary IRVars by then. Adding an arm here would be
     // a dead branch that reads as if it guarded something.
     | _ -> false
 
-/// An INLINE array literal sitting directly in a loop form's `Arrays` list —
+/// An INLINE array literal sitting directly in a loop form's `Arrays` list --
 /// e.g. the right operand of `yr - [2.0, -14.0]`. Same gap as
 /// `isNestedLoopComputeArg`: the blessed-position exemption assumes codegen's
 /// auto-materialize covers the slot, but that arm only knows the inline
@@ -6479,7 +5833,7 @@ let private isInlineArrayLitArg (e: IRExpr) : bool =
     | IRArrayLit _ -> true
     | _ -> false
 
-/// Path B / Phase D: peel any IRLet chain that descendant lifts produced.
+/// Peel any IRLet chain that descendant lifts produced.
 /// When a sub-expression's lift wraps it in `IRLet(id, v, IRLet(...,inner))`,
 /// the chain shouldn't be visible to the parent context (e.g., an outer
 /// IRArrayLit's element list, or a struct field value). Peeling pulls the
@@ -6499,7 +5853,7 @@ let peelLetChain (e: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
 
 /// Predicate: is this an IRFieldAccess whose result type is an array? Such
 /// accesses need to be hoisted to a let-RHS so codegen can synthesize the
-/// companion `_extents` (and `_lens` for ragged) array — without a let-RHS
+/// companion `_extents` (and `_lens` for ragged) array -- without a let-RHS
 /// drain point, the field access expression `t.samples` produces a pointer
 /// but no shape information, breaking any consumer that expects an extents
 /// sibling (kernel args, reduce, method_for, etc.).
@@ -6515,9 +5869,9 @@ let private isArrayFieldAccess (e: IRExpr) : bool =
 /// for the no-rewrite case, or ([(id, ty, child)], IRVar(id, ty)) for the
 /// lifted case.
 ///
-/// Path B / Phase D: also peels any IRLet chain the descendant produced,
-/// so the chain bindings hoist alongside any new lift binding to the
-/// caller's wrap point.
+/// Also peels any IRLet chain the descendant produced, so the chain
+/// bindings hoist alongside any new lift binding to the caller's wrap
+/// point.
 let liftChild (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
     let (peeled, inner) = peelLetChain child
     if isInlineForm inner then
@@ -6525,7 +5879,7 @@ let liftChild (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) li
         let ty = typeOf inner
         (peeled @ [(id, ty, inner)], IRVar (id, ty))
     elif isArrayFieldAccess inner then
-        // Phase D: hoist `t.samples` (when samples is array-typed) into a
+        // Hoist `t.samples` (when samples is array-typed) into a
         // let-RHS so codegen can synthesize `<bound_name>_extents`.
         let id = builder.FreshId()
         let ty = typeOf inner
@@ -6535,7 +5889,7 @@ let liftChild (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) li
 
 /// Like `liftChild`, but additionally lifts IRArrayLit. Used at sites
 /// where an inline IRArrayLit can't render (struct field values, function
-/// args). NOT used at IRArrayLit element positions — there, the inner
+/// args). NOT used at IRArrayLit element positions -- there, the inner
 /// IRArrayLit must remain so the genArrayLiteral walker sees full nesting
 /// depth (otherwise dims and per-leaf indexing break).
 let liftChildIncludingArrayLit (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
@@ -6550,7 +5904,7 @@ let liftChildIncludingArrayLit (builder: IRBuilder) (child: IRExpr) : (IRId * IR
         let ty = typeOf e
         (peeled @ [(id, ty, e)], IRVar (id, ty))
     | e when isArrayFieldAccess e ->
-        // Phase D: same hoisting as liftChild, so struct field values and
+        // Same hoisting as liftChild, so struct field values and
         // function args carrying `t.samples` get the same treatment.
         let id = builder.FreshId()
         let ty = typeOf e
@@ -6558,17 +5912,12 @@ let liftChildIncludingArrayLit (builder: IRBuilder) (child: IRExpr) : (IRId * IR
     | e -> (peeled, e)
 
 /// Like `liftChild`, but ALSO hoists array-typed applications, partial index
-/// reads and forced computations — i.e. everything `isNestedLoopComputeArg`
-/// covers.
-///
-/// Used for the operands of the LINALG intrinsics (`gram`, `matmul`). Their
-/// emission spells each operand's C++ text more than once — `X.extents[0]`,
-/// `X.extents[1]`, `X.data` — so an unhoisted call operand is re-invoked once
-/// per occurrence, allocating a fresh array each time and handing the
-/// contraction two different (if equal-valued) pools. `matmul` made this live:
-/// as a synthesized FUNCTION CALL its operands were ordinary call arguments,
-/// evaluated exactly once; as an intrinsic node they reach an emitter that
-/// re-spells them.
+/// reads and forced computations -- i.e. everything `isNestedLoopComputeArg`
+/// covers. Used for the LINALG intrinsic operands (`gram`, `matmul`): their
+/// emission spells each operand's C++ text more than once (`X.extents[0]`,
+/// `X.extents[1]`, `X.data`), so an unhoisted call operand would be
+/// re-invoked per occurrence, allocating a fresh array each time and handing
+/// the contraction two different (if equal-valued) pools.
 let liftChildEvaluatedOnce (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
     let (peeled, inner) = peelLetChain child
     if isInlineForm inner || isNestedLoopComputeArg inner || isArrayFieldAccess inner then
@@ -6593,7 +5942,7 @@ let wrapLets (bindings: (IRId * IRType * IRExpr) list) (body: IRExpr) : IRExpr =
 ///
 /// Note: when an inline form is itself the IRLet-RHS, we leave it alone
 /// (that's the canonical position). When it's nested inside IRMethodFor's
-/// or IRApplyCombinator's Arrays list, we also leave it — codegen's
+/// or IRApplyCombinator's Arrays list, we also leave it -- codegen's
 /// auto-materialize handles those positions.
 let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     match expr with
@@ -6609,13 +5958,13 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
 
     // The inline forms themselves: descend into their sub-expressions
     // (which may contain further nested inline forms), but DO NOT lift
-    // them at this point — the parent's child slot will lift them if
+    // them at this point -- the parent's child slot will lift them if
     // needed.
     | IRMask (a, p) ->
         // Lift inline-form array arg so codegen sees a let-bound name in
         // the array slot (rather than another inline form it can't render
-        // inside its own template). The predicate is a lambda — not an
-        // inline form — so it just recurses normally.
+        // inside its own template). The predicate is a lambda -- not an
+        // inline form -- so it just recurses normally.
         let a' = liftExpr builder a
         let p' = liftExpr builder p
         let (binds, aFinal) = liftChildIncludingArrayLit builder a'
@@ -6644,7 +5993,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRGroupBy (v, k) -> IRGroupBy (liftExpr builder v, liftExpr builder k)
     | IRGroupKeys ks -> IRGroupKeys (List.map (liftExpr builder) ks)
 
-    // Contains returns a scalar Bool — its array argument may be an inline
+    // Contains returns a scalar Bool -- its array argument may be an inline
     // form that needs lifting (so codegen can read .extents off a named binding).
     | IRContains (arr, v) ->
         let arr' = liftExpr builder arr
@@ -6661,7 +6010,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         wrapLets binds (IRReduce (arrFinal, kernel', init'))
     | IRReduceCompute (comp, kernel, seed) ->
         // The computation child is a deferred combinator (apply/fusion
-        // tree) — never lift it into a binding (it has no materialized
+        // tree) -- never lift it into a binding (it has no materialized
         // value); recurse for nested inline forms in kernel arrays/seed.
         IRReduceCompute (liftExpr builder comp, liftExpr builder kernel, liftExpr builder seed)
     | IRProdSum args ->
@@ -6708,7 +6057,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arrFinal) = liftChild builder arr'
         wrapLets binds (IRDecompact (arrFinal, d))
     | IRHaloUnhash (w, o) ->
-        // Scalar coordinate read; the window is a param var — nothing to lift.
+        // Scalar coordinate read; the window is a param var -- nothing to lift.
         IRHaloUnhash (liftExpr builder w, o)
     // Both linalg intrinsics use the evaluate-once lift: their emitters spell
     // each operand several times (extents + data), so a call/index operand has
@@ -6726,11 +6075,10 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (bindsR, rFinal) = liftChildEvaluatedOnce builder r'
         wrapLets (bindsL @ bindsR) (IRMatmul (lFinal, rFinal))
     | IREigh operand ->
-        // Same evaluate-once lift, same reason: `materializeEighForm` spells the
-        // operand THREE times (`.extents[0]` for n, and `.data` — twice over,
-        // once bare and once through `pool_base` — depending on the route), so
-        // `eigh(f(A))` would otherwise re-invoke `f` per occurrence, each call
-        // allocating a fresh pool.
+        // Same evaluate-once lift, same reason: `materializeEighForm` spells
+        // the operand THREE times (`.extents[0]`, and `.data` twice, bare and
+        // via `pool_base`), so `eigh(f(A))` would otherwise re-invoke `f`
+        // per occurrence, each call allocating a fresh pool.
         let operand' = liftExpr builder operand
         let (binds, opFinal) = liftChildEvaluatedOnce builder operand'
         wrapLets binds (IREigh opFinal)
@@ -6762,7 +6110,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
 
     // Multi-child consumers (any arg can be an inline form)
     | IRApp (fn, args, retTy) ->
-        // Phase D: function args may contain inline IRArrayLit (e.g.,
+        // Function args may contain inline IRArrayLit (e.g.,
         // `f([1.0, 2.0, 3.0])`) which can't render inline. Use the
         // extended helper that lifts both inline forms and IRArrayLit.
         let fn' = liftExpr builder fn
@@ -6800,9 +6148,9 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         | [reF; imF] -> wrapLets binds (IRComplex (reF, imF))
         | _ -> wrapLets binds (IRComplex (re', im'))  // unreachable; defensive
     | IRArrayLit (es, ty) ->
-        // Path B / Phase D: peel any IRLet chains from element results
+        // Peel any IRLet chains from element results
         // (descendant lifts) and re-wrap them at THIS level. Don't lift the
-        // peeled inner expressions further — IRArrayLit elements must
+        // peeled inner expressions further -- IRArrayLit elements must
         // remain as the genArrayLiteral walker expects (nested IRArrayLit
         // for multi-dim, scalar leaves at the bottom). Replacing an inner
         // IRArrayLit with an IRVar would shorten computeArrayDims to just
@@ -6831,7 +6179,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRTupleDecons e -> IRTupleDecons (liftExpr builder e)
     | IRFieldAccess (e, f) -> IRFieldAccess (liftExpr builder e, f)
     | IRStructLit (n, flds) ->
-        // Phase D / nested element types: descend into each field expression,
+        // Nested element types: descend into each field expression,
         // then lift IRArrayLit and inline-form values into auto-let bindings.
         // Array literals are statement-level constructs (allocation; rendered
         // by genArrayLiteral, not exprToCpp), so they cannot appear inline as
@@ -6856,14 +6204,12 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRReplicate (c, b) -> IRReplicate (liftExpr builder c, liftExpr builder b)
     | IRPure e -> IRPure (liftExpr builder e)
     | IRCompute e ->
-        // Drain any let-chain that lifting the inner expression produced OUT
-        // of the IRCompute wrapper. A hoisted array operand (e.g. the inner
-        // `A * B` of `A * B * C`, lifted from the wrapped combinator's Arrays)
-        // must land at an enclosing statement position: genComputeBinding has
-        // no IRLet arm, so a let left inside IRCompute falls to the scalar
-        // exprToCpp path and emits BLADE_CODEGEN_ERROR_UNEVALUATED_COMPUTATION.
-        // Peeling it out yields `let __t = A * B in (… |> compute)`, which
-        // genLetChainBinding materializes as ordered statement bindings.
+        // Drain any let-chain that lifting the inner expression produced out
+        // of the IRCompute wrapper: genComputeBinding has no IRLet arm, so a
+        // let left inside IRCompute falls to the scalar exprToCpp path and
+        // errors (BLADE_CODEGEN_ERROR_UNEVALUATED_COMPUTATION). Peeling it out
+        // yields `let __t = A * B in (... |> compute)`, materialized by
+        // genLetChainBinding as ordered statement bindings.
         let e' = liftExpr builder e
         let (peeled, inner) = peelLetChain e'
         wrapLets peeled (IRCompute inner)
@@ -6945,10 +6291,9 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
 
 /// Lift inline forms across an entire IR module's bindings and functions.
 let liftInlineFormsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
-    // Phase D / companion-array gap: populate the struct fields cache so
-    // typeOf can resolve IRFieldAccess result types. Required for
-    // hoisting array-typed field accesses to let-RHS so codegen can
-    // synthesize their _extents companions.
+    // Populate the struct fields cache so typeOf can resolve IRFieldAccess
+    // result types. Required for hoisting array-typed field accesses to
+    // let-RHS so codegen can synthesize their _extents companions.
     setStructFieldsCache modul.Types
     let liftedBindings =
         modul.Bindings |> List.map (fun b -> { b with Value = liftExpr builder b.Value })
@@ -6968,15 +6313,15 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     let polyFuncMap = polyFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
 
     // 2. Collect call sites from the original module. Seed ONLY from concrete
-    //    entry points — NON-poly functions and top-level bindings. A poly
+    //    entry points -- NON-poly functions and top-level bindings. A poly
     //    function's own body reaches other poly functions (and itself) with the
     //    still-symbolic pack/tail as the argument (`f(rest)`, `comoment_prod(a)`),
     //    which computePolyArity would mis-read as an arity-1 call and mint a
-    //    bogus spec. Those calls become CONCRETE — the tail/pack spread into
-    //    real per-element args — only once the enclosing function is specialized,
+    //    bogus spec. Those calls become CONCRETE -- the tail/pack spread into
+    //    real per-element args -- only once the enclosing function is specialized,
     //    at which point the spec-body scan below (step 3) picks up the real
-    //    arity. (This is why a `| 2`-base recursion previously cascaded into an
-    //    invalid arity-0 spec.)
+    //    arity. (A `| 2`-base recursion seeded from a poly call site would
+    //    otherwise cascade into an invalid arity-0 spec.)
     let callSitesFromFuncs =
         modul.Functions
         |> List.filter (fun f -> not f.IsArityPoly)
@@ -6984,15 +6329,12 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     let callSitesFromBindings =
         modul.Bindings |> List.collect (fun b -> collectPolyCallSites polyFuncMap b.Value)
 
-    // 3. Generate specialized functions to a fixpoint. Specializing a function
-    //    can introduce NEW call sites: a recursion over a shrinking pack
-    //    (`f(tail)`) is rewritten by specializeFunction into an arity-(n-1) call,
-    //    so specializing f_arity_n demands f_arity_(n-1), down to the base arm
-    //    that `match arity` statically selects. A single pass (the pre-recursion
-    //    behavior) would miss every level below the first. The worklist scans
-    //    each fresh spec's body and enqueues what it finds until nothing new
-    //    appears. The pack-former unroller inside specializeFunction inlines
-    //    lifted kernel lambdas by id, so it needs the whole-module function map.
+    // 3. Generate specialized functions to a fixpoint. Specializing a
+    //    function can introduce NEW call sites: a recursion over a shrinking
+    //    pack (`f(tail)`) is rewritten into an arity-(n-1) call, so
+    //    specializing f_arity_n demands f_arity_(n-1), down to the base arm
+    //    `match arity` statically selects. The worklist scans each fresh
+    //    spec's body and enqueues what it finds until nothing new appears.
     let funcMap = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let mutable specMap : Map<IRId * int list, IRFuncDef> = Map.empty
     let queue = System.Collections.Generic.Queue<IRId * int list>()
@@ -7045,12 +6387,12 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
             { spec with Body = mapIRExpr rewriteCallSite spec.Body })
 
     // Prune lifted kernel lambdas that captured a poly PACK and are now dead.
-    // The pack-former unroller inlines such a lambda's body into the specialized
-    // caller, leaving the original lambda unreferenced — and un-codegen-able,
-    // since its body still subscripts the Poly-typed pack (`args[k]`) that no
-    // longer exists as a scalar. Drop it once nothing references it. The gate is
-    // deliberately narrow (name is a synthesized "__lambda_", has a Poly-typed
-    // capture, AND is unreferenced), so no live function is ever removed.
+    // The pack-former unroller inlines such a lambda's body into the
+    // specialized caller, leaving the original lambda unreferenced and
+    // un-codegen-able (its body still subscripts a Poly-typed pack that no
+    // longer exists as a scalar). Drop it once unreferenced. The gate is
+    // narrow (synthesized "__lambda_" name, Poly-typed capture, unreferenced)
+    // so no live function is ever removed.
     let allFuncs = newFunctions @ specFuncs
     let referencedIds =
         (allFuncs |> List.map (fun f -> f.Body))
@@ -7070,41 +6412,34 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         Functions = prunedFuncs
         Bindings = newBindings }
 
-// ============================================================================
-// Shape monomorphization (Phase 4, docs/plan-cpp-perf-exploitation.md)
-// ============================================================================
+// Shape monomorphization (docs/plan-cpp-perf-exploitation.md)
 //
 // A function declared over a SYMBOLIC extent (`f(A: Array<Float64 like Idx<n>>)`)
-// carries `IRParam ("n", 0, IRTNat None)` as its index records' `Extent` — the
-// cosmetic placeholder `TypeCheck.lowerExtentExpr` mints. Nothing downstream
-// ever turns that into a number: unify deliberately never compares extents
-// (Unify.fs:590,606-612) and HM substitution structurally cannot carry them
-// (`SIdx idx -> SIdx idx`, substTypeInIRType). So `genLoopBoundExpr` falls to
-// its `<arr>.extents[d]` arm inside every such function, and Phase 3's flat
-// elementwise mode — which requires literal extents to compute a compile-time
-// cell count — can never fire there.
+// carries `IRParam ("n", 0, IRTNat None)` as its index records' `Extent` -- a
+// cosmetic placeholder that nothing downstream turns into a number (unify
+// never compares extents; HM substitution can't carry them). So
+// `genLoopBoundExpr` falls to `<arr>.extents[d]` in every such function, and
+// the flat elementwise mode (which needs a literal extent for its compile-
+// time cell count) can never fire there.
 //
-// This pass closes that gap the same way `monomorphizeModule` closes the arity
+// This pass closes that gap the way `monomorphizeModule` closes the arity
 // gap: collect call sites, key a spec map by (funcId, extent signature), and
 // emit one specialized copy per unique signature with the placeholders
-// rewritten to `IRLit`. The generic copy stays for every call site that does
-// not pin a literal.
+// rewritten to `IRLit`. The generic copy stays for calls that don't pin a
+// literal.
 //
-// What it does NOT change: the runtime ABI. `Array<T,R>` still carries
-// `const size_t* extents`, `extents(A)` in the body still reads it, and every
-// `.extents[d]` expression the pass leaves alone still yields the right
-// number — the literal and the runtime read agree by construction, because the
-// literal came from the ARGUMENT's own type. That is why the rewrite is
-// confined to `IRIndexTypeG.Extent` fields and never touches body expressions.
+// It does NOT change the runtime ABI: `Array<T,R>` still carries
+// `const size_t* extents`, and every `.extents[d]` expression left alone
+// still yields the right number (the literal came from the ARGUMENT's own
+// type), so the rewrite is confined to `IRIndexTypeG.Extent` fields and
+// never touches body expressions.
 //
-// Explosion control (the reason extents were deferred to runtime arguments in
-// the first place — see the plan doc): dedupe by signature, cap at
-// SHAPE_SPEC_CAP copies per function, and decline recursive / mutually
-// recursive functions outright in v1. Unlike C++ template instantiation this
-// is bounded by real call-site diversity and is capped in the compiler.
+// Explosion control: dedupe by signature, cap at SHAPE_SPEC_CAP copies per
+// function, and decline recursive/mutually recursive functions outright --
+// bounded by real call-site diversity and capped in the compiler.
 
 /// Most specialized copies any one function may earn. Past this, further call
-/// sites keep the generic copy — declines are counted and surfaced under
+/// sites keep the generic copy -- declines are counted and surfaced under
 /// BLADE_DEBUG_SHAPE_SPEC, never as a user diagnostic (a missed optimization
 /// is not a program defect).
 let private SHAPE_SPEC_CAP = 4
@@ -7131,11 +6466,10 @@ let private (|ShapeLiteralExtent|_|) (e: IRExpr) =
 
 /// Rewrite an EXTENT expression under a name->literal substitution.
 /// Deliberately narrow: the placeholder itself, arithmetic built over it
-/// (dependent extents like `n - i` stay correct and get one operand folded),
-/// and an orbit class's base extent (which the ExprShape enumeration already
-/// treats as an ordinary extent). Everything else — compound masks, sparse key
-/// sources, ragged lookups, `extents(A)` reads, opaque extents — is a RUNTIME
-/// value that happens to sit in an Extent slot and must be left alone.
+/// (dependent extents like `n - i` stay correct), and an orbit class's base
+/// extent. Everything else -- compound masks, sparse key sources, ragged
+/// lookups, `extents(A)` reads, opaque extents -- is a RUNTIME value that
+/// happens to sit in an Extent slot and must be left alone.
 let rec private shapeRewriteExtent (subst: Map<string, int64>) (e: IRExpr) : IRExpr =
     match e with
     | IRParam (name, _, _) when subst.ContainsKey name -> IRLit (IRLitInt subst.[name])
@@ -7150,7 +6484,7 @@ let private shapeRewriteIx (subst: Map<string, int64>) (ix: IRIndexType) : IRInd
 
 /// Rewrite every index record reachable from a type. Structural mirror of
 /// `substTypeInIRType`, but over the Extent axis instead of the IRTInfer axis
-/// — and it must descend into the arrow SLOTS, which the HM substituter
+/// -- and it must descend into the arrow SLOTS, which the HM substituter
 /// deliberately skips (`SIdx idx -> SIdx idx`) precisely because extents were
 /// out of its scope.
 let rec private shapeRewriteType (subst: Map<string, int64>) (ty: IRType) : IRType =
@@ -7191,10 +6525,9 @@ let private shapeRewriteArrayType (subst: Map<string, int64>) (aty: IRArrayType)
 
 /// Rewrite every type-bearing field of every node in an expression tree.
 /// `mapIRExpr` supplies the traversal; this callback enumerates the positions
-/// that actually carry index records. Index types are OPAQUE to ExprShape (by
-/// design — see the ExprShape scope decisions), so the records hung directly
-/// off IRRange/IRVirtualReverse/IRBlocked and off the combinator info records
-/// have to be named here or they are never reached.
+/// that actually carry index records -- IRIndexType is OPAQUE to ExprShape,
+/// so the records on IRRange/IRVirtualReverse/IRBlocked and the combinator
+/// info records must be named here or they are never reached.
 let private shapeRewriteExpr (subst: Map<string, int64>) (expr: IRExpr) : IRExpr =
     if Map.isEmpty subst then expr else
     let rt = shapeRewriteType subst
@@ -7228,7 +6561,7 @@ let private shapeRewriteExpr (subst: Map<string, int64>) (expr: IRExpr) : IRExpr
 
 /// Every symbolic extent NAME a parameter list mentions, with its occurrence
 /// count. A name bakes only when EVERY one of its occurrences was pinned to
-/// the same literal by the call site — see `shapeSignatureAt`.
+/// the same literal by the call site -- see `shapeSignatureAt`.
 let private shapeSymbolicOccurrences (paramTys: IRType list) : Map<string, int> =
     let acc = System.Collections.Generic.Dictionary<string, int>()
     let bump name =
@@ -7255,8 +6588,8 @@ let private shapeSymbolicOccurrences (paramTys: IRType list) : Map<string, int> 
 
 /// Walk a (parameter type, argument type) pair in lockstep, recording for each
 /// symbolic parameter extent the literal the argument pins it to. Positions
-/// that fail to line up structurally simply record nothing, which — because a
-/// name bakes only at FULL occurrence coverage — makes them a decline rather
+/// that fail to line up structurally simply record nothing, which -- because a
+/// name bakes only at FULL occurrence coverage -- makes them a decline rather
 /// than a guess.
 let private shapeObservations (paramTy: IRType) (argTy: IRType) : (string * int64) list =
     let acc = System.Collections.Generic.List<string * int64>()
@@ -7296,14 +6629,12 @@ let private shapeObservations (paramTy: IRType) (argTy: IRType) : (string * int6
 
 /// The extent signature a call site pins on a callee: the sorted
 /// (name, literal) list that keys the spec map. A name is admitted only when
-/// the arguments pinned EVERY occurrence of it in the parameter list, and
-/// pinned them all to the SAME literal.
-///
-/// Both halves matter. Full coverage rules out `f(a: Idx<n>, b: Idx<n>)`
-/// called with a literal `a` and a runtime-extent `b`, where baking `n` from
-/// `a` would silently install a wrong bound on `b`'s loop; agreement rules out
-/// the same call with a 3-array and a 5-array, which typechecks today because
-/// unify never compares extents.
+/// the arguments pinned EVERY occurrence of it in the parameter list, all to
+/// the SAME literal. Both halves matter: full coverage rules out
+/// `f(a: Idx<n>, b: Idx<n>)` called with a literal `a` and runtime `b` (baking
+/// `n` from `a` would install a wrong bound on `b`'s loop); agreement rules
+/// out the same call with a 3-array and a 5-array (unify never compares
+/// extents, so this typechecks today).
 let private shapeSignatureAt (func: IRFuncDef) (args: IRExpr list) : (string * int64) list =
     if args.Length <> func.Params.Length then [] else
     let paramTys = func.Params |> List.map (fun p -> p.Type)
@@ -7327,8 +6658,9 @@ let private shapeSignatureAt (func: IRFuncDef) (args: IRExpr list) : (string * i
 
 /// Would a specialized copy actually pay? Only if the body iterates: the
 /// baked literal reaches the emitted C++ exclusively through loop bounds and
-/// through Phase 3's compile-time cell count. A function that merely forwards
-/// or reads `extents(A)` gets nothing from a copy, so it does not get one.
+/// through the flat mode's compile-time cell count. A function that merely
+/// forwards or reads `extents(A)` gets nothing from a copy, so it does not
+/// get one.
 let private shapeSpecWorthwhile (func: IRFuncDef) : bool =
     let mutable found = false
     mapIRExpr (fun e ->
@@ -7342,10 +6674,10 @@ let private shapeSpecWorthwhile (func: IRFuncDef) : bool =
     found
 
 /// Function ids that can reach themselves through the module's static call
-/// graph (direct self-recursion or a mutual cycle). v1 declines to specialize
-/// these: a spec body's recursive call would name the ORIGINAL id, and
+/// graph (direct self-recursion or a mutual cycle). This pass declines to
+/// specialize these: a spec body's recursive call would name the ORIGINAL id, and
 /// rewriting it to the spec is only sound when the recursive call pins the
-/// same signature — an analysis this pass does not do.
+/// same signature -- an analysis this pass does not do.
 let private shapeRecursiveIds (funcs: IRFuncDef list) : Set<IRId> =
     let ids = funcs |> List.map (fun f -> f.Id) |> Set.ofList
     let direct =
@@ -7378,9 +6710,9 @@ type private ShapeSpec = {
     SpecName: string
 }
 
-/// Phase 4: give every symbolic-extent function a literal-extent copy per
-/// distinct call-site shape. Runs after arity and HM monomorphization (both
-/// can create the call sites this reads) and before codegen.
+/// Give every symbolic-extent function a literal-extent copy per distinct
+/// call-site shape. Runs after arity and HM monomorphization (both can
+/// create the call sites this reads) and before codegen.
 let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     let debug = shapeSpecDebug ()
     let recursiveIds = shapeRecursiveIds modul.Functions
@@ -7425,14 +6757,10 @@ let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
 
     // Fixpoint: each round rewrites every body (originals, bindings, and the
     // specs planned so far) with the current map, then harvests the call sites
-    // the rewritten form exposes. A new spec can expose more — its body's own
-    // calls now carry literal argument extents — so the round repeats until it
-    // adds nothing.
-    // (`rounds < 8` is a runaway backstop in the spirit of monomorphizeModule's
-    // MAX_SPECS; real convergence is 2 — one round to find the direct sites,
-    // one to observe that nothing new appeared. A deeper chain of
-    // literal-extent-forwarding callees would use more, and anything past the
-    // backstop simply keeps the generic copy.)
+    // exposed. A new spec can expose more (its body's own calls now carry
+    // literal argument extents), so the round repeats until nothing changes.
+    // `rounds < 8` is a runaway backstop; real convergence is 2. Anything past
+    // the backstop simply keeps the generic copy.
     let mutable changed = true
     let mutable rounds = 0
     while changed && rounds < 8 do
@@ -7478,15 +6806,15 @@ let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         modul
     else
 
-    // Materialize the copies. Param VarIds are deliberately NOT freshened (the
-    // HM specializer does freshen them, and then has to clone every lifted
-    // lambda that captured a param to repair the dangling Captures.Id). Here
-    // the copy is type-identical to the original at every VALUE position —
-    // only Extent fields differ — so sharing the VarIds keeps any lifted lambda
-    // the body references bound to exactly the parameters it always was. The
-    // lambda's own index records keep their symbolic extents; that costs the
-    // optimization inside the lambda and nothing else, because an unbaked
-    // extent still emits the correct runtime read.
+    // Materialize the copies. Param VarIds are deliberately NOT freshened
+    // (unlike the HM specializer, which freshens and then must clone every
+    // lifted lambda that captured a param to repair Captures.Id): the copy is
+    // type-identical to the original at every VALUE position -- only Extent
+    // fields differ -- so sharing VarIds keeps any lifted lambda the body
+    // references bound to its original parameters. The lambda's own index
+    // records keep their symbolic extents, costing the optimization inside
+    // the lambda and nothing else (an unbaked extent still emits the correct
+    // runtime read).
     let materialize (s: ShapeSpec) : IRFuncDef =
         { s.Orig with
             Id = s.SpecId
@@ -7497,21 +6825,14 @@ let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
             Body = rewriteCallSites (specBody s) }
 
     // PLACEMENT IS PART OF CORRECTNESS, not cosmetics. Codegen interleaves
-    // bindings and functions in IRId order, and every function
-    // `computeMainLocalFuncIds` classifies as main-local is emitted as a
-    // `std::function` LOCAL inside main() with no forward declaration. A copy
-    // carrying a fresh (= largest) id therefore sorts AFTER the very call sites
-    // this pass just rewrote to it — "'<name>' was not declared in this scope".
-    //
-    // So the copy is placed immediately after its origin here, and its
-    // emission-order key is the ORIGIN's id (IRModule.DerivedFuncOrigins,
-    // honoured by genModule/genModuleSplit). The two together put the copy at
-    // exactly its origin's program point, which makes it visible to precisely
-    // the call sites the origin was visible to — the property that has to hold
-    // for a call-site rewrite to be sound, established structurally instead of
-    // re-derived per pass. Every reference the copy's own body makes is
-    // likewise in scope there, because the body's free variables are the
-    // origin's.
+    // bindings and functions in IRId order; every function
+    // `computeMainLocalFuncIds` classifies as main-local is a `std::function`
+    // LOCAL inside main() with no forward declaration, so a copy carrying a
+    // fresh (largest) id sorts AFTER the call sites this pass just rewrote to
+    // it -- a scope error. The copy is placed immediately after its origin
+    // here, keyed by the ORIGIN's id (IRModule.DerivedFuncOrigins), so it
+    // lands at exactly its origin's program point and is visible to precisely
+    // the call sites the origin was.
     let specsByOrigin =
         specMap |> Map.toList |> List.map snd |> List.groupBy (fun s -> s.Orig.Id) |> Map.ofList
     let newFunctions =
@@ -7540,9 +6861,7 @@ let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         Bindings = newBindings
         DerivedFuncOrigins = derivedOrigins }
 
-// ============================================================================
 // Pretty Printing
-// ============================================================================
 
 let rec ppIRType = function
     | IRTScalar ETInt32 -> "Int32"
@@ -7595,9 +6914,9 @@ let rec ppIRType = function
     | IRTArrow (slots, result, identity) ->
         // Renders the unified arrow form. For array-shaped arrows (all-SIdx
         // or all-SIdxVirt with non-empty slots), use the user-friendly
-        // "Array<elem like indices>" rendering — same form as the legacy
-        // IRTArray printer, which keeps error messages recognizable. Other
-        // shapes (functions, mixed slots) get the canonical "Arrow<...>" form.
+        // "Array<elem like indices>" rendering, which keeps error messages
+        // recognizable. Other shapes (functions, mixed slots) get the
+        // canonical "Arrow<...>" form.
         let isAllStored = not slots.IsEmpty && slots |> List.forall (function SIdx _ -> true | _ -> false)
         let isAllVirtual = not slots.IsEmpty && slots |> List.forall (function SIdxVirt _ -> true | _ -> false)
         if isAllStored || isAllVirtual then
@@ -7653,13 +6972,12 @@ and ppExtentOf (e: IRExpr) =
     | _ -> "?"
 
 /// Render an irreps-identity record whose Symmetry/Rank make it a symmetric
-/// POWER of that irreps space (`SymIdx<k, IrrepsIdx<s>>` — writable since
-/// stage 3 of the retired transforms-as-types plan, and what deduceOutputType infers for
-/// a comm group over irreps-typed inputs). A plain rank-1 irreps index prints
-/// as its own base form. Shared by both index printers so a diagnostic never
-/// shows the base while hiding the power — and by both BLOCK-SPEC members
-/// (IrrepsIdxLike and PgIrrepsIdxLike), since the power wrapper is about
-/// Symmetry/Rank and says nothing about which member the base belongs to.
+/// POWER of that irreps space (`SymIdx<k, IrrepsIdx<s>>` -- what
+/// deduceOutputType infers for a comm group over irreps-typed inputs). A
+/// plain rank-1 irreps index prints as its own base form. Shared by both
+/// index printers, and by both BLOCK-SPEC members (IrrepsIdxLike and
+/// PgIrrepsIdxLike), since the power wrapper says nothing about which
+/// member the base belongs to.
 and ppIrrepsPower (idx: IRIndexType) (renderedBase: string) =
     match idx.Symmetry with
     | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank renderedBase
@@ -7671,10 +6989,6 @@ and ppIrrepsPower (idx: IRIndexType) (renderedBase: string) =
     // SymWreath record today). Render both halves rather than drop one.
     | SymWreath -> sprintf "OrbIdx<%s, %s>" (ppOrbitLevels (orbitLevelsOf idx)) renderedBase
     | SymNone -> renderedBase
-
-// (ppElemType removed in Phase B6: unused after ppIRType was made recursive
-// over IRType in Phase B2. The primitive-only printer is no longer needed
-// since elem types are now full IRTypes printed by ppIRType.)
 
 /// Build a map from IRIndexType.Id -> type name from a module's IRTDIndexType defs
 let indexNameMap (modul: IRModule) : Map<IRId, string> =
@@ -7691,7 +7005,7 @@ let rec ppIRTypeIn (names: Map<IRId, string>) = function
         let indices = arr.IndexTypes |> List.map (ppIndexTypeIn names) |> String.concat ", "
         // `like`, not a comma: this printer feeds the REPL's type echo and the
         // IDE tooltips, where the string is read AS SOURCE. `Array<T, I>` is
-        // not the array spelling in any position — it does not parse.
+        // not the array spelling in any position -- it does not parse.
         sprintf "Array<%s like %s>" (ppIRTypeIn names arr.ElemType) indices
     | other -> ppIRType other
 
@@ -7713,7 +7027,7 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
         // slot IS the extent, and the alias stands for exactly that extent.
         | SymNone -> sprintf "Idx<%s>" extentStr
         // An alias of a COMPACT class names the WHOLE class, whose argument
-        // slots are (rank, extent) — slots a name does not fill. Routing it
+        // slots are (rank, extent) -- slots a name does not fill. Routing it
         // through the extent slot produced `SymIdx<2, MySym>`, which reads as
         // "extent = MySym" and does not parse. The bare name IS the surface
         // spelling of this type (`Array<Int32 like MySym>`), so print that.
@@ -7883,22 +7197,14 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
 let ppIRExpr indent expr = ppIRExprWithNames Map.empty indent expr
 
 
-// ============================================================================
-// IR Validator — catches malformed IR between lowering and codegen
-// ============================================================================
+// IR Validator -- catches malformed IR between lowering and codegen
 
-/// Collect all variable IDs referenced in an expression (for scope validation)
-/// Attempt to statically evaluate an IRExpr to an int64. Used for resolving
-/// extent expressions to compile-time literals when possible. Handles literal
-/// integer arithmetic (the common case for derived index extents like
-/// `Idx<n+1>`); anything more general (variable references, function calls,
-/// runtime-dependent expressions) returns None.
-///
-/// This is intentionally narrow — a full static evaluator over IR would be a
-/// much larger undertaking (and StaticEval.fs already provides one over the
-/// surface AST). The use cases right now are extent inspection in extents()
-/// and reduce()'s non-emptiness check, both of which only need arithmetic
-/// over int literals.
+/// Attempt to statically evaluate an IRExpr to an int64, for resolving
+/// extent expressions to compile-time literals (e.g. derived extents like
+/// `Idx<n+1>`); anything more general returns None. Intentionally narrow --
+/// StaticEval.fs already provides a full evaluator over the surface AST; the
+/// use cases here (extents() inspection, reduce()'s non-emptiness check)
+/// only need arithmetic over int literals.
 let rec tryEvalIntIR (expr: IRExpr) : int64 option =
     match expr with
     | IRLit (IRLitInt n) -> Some n
@@ -7917,41 +7223,27 @@ let rec tryEvalIntIR (expr: IRExpr) : int64 option =
         tryEvalIntIR e |> Option.map (fun n -> -n)
     | _ -> None
 
-// (collectVarRefsIR now lives beside the canonical ExprShape traversal,
-// before mapIRExpr. The hand-maintained copy that lived here had a
-// `| _ -> Set.empty` catchall that silently skipped ~15 variants; the
-// shape-based fold cannot skip anything.)
-
-// ============================================================================
-// AnalysisContext — unified callable-walking for cross-procedural analysis
-// ============================================================================
+// AnalysisContext -- unified callable-walking for cross-procedural analysis
 //
 // `exprAttrs` walks an expression tree to compute attributes (FreeVars,
-// BoundVars, IsPure). The IRApp arm follows IRVar(fId) references via
-// the CallablesTable, substitutes the callee's params with the call's
-// args, and walks the body, so free variables originating inside a
-// callee's body are surfaced to the caller's analysis.
+// BoundVars, IsPure); its IRApp arm follows IRVar(fId) through the
+// CallablesTable, substitutes the callee's params with the call's args, and
+// walks the body, so free variables from inside a callee surface to the
+// caller's analysis. `Visited` short-circuits recursion (mutual and direct
+// self-recursion stop on re-entry). CallablesTable is set once per module at
+// codegen entry; Visited is augmented/restored at each IRApp boundary by
+// `withVisited`; both live in one AsyncLocal record.
 //
-// `Visited` short-circuits recursion. When walking f's body, we add f
-// to Visited; if g calls f (mutual recursion), the IRApp arm sees f in
-// Visited and stops. Direct self-recursion stops on the first walk.
-//
-// The CallablesTable is set once per module at codegen entry. Visited
-// is augmented (and restored) at each IRApp boundary by `withVisited`.
-// Both live in a single AsyncLocal record so we have one piece of
-// per-flow state rather than two.
-//
-// What this gives the optimization: a mask predicate's exprAttrs walk
-// sees every reachable contains — direct, through inline lambdas, and
-// through function calls (up to recursion). Whether codegen can
-// actually substitute set.count for any given probe is a separate
-// question answered by reachability check on the rendered tree.
+// This gives a mask predicate's exprAttrs walk visibility into every
+// reachable contains (direct, through inline lambdas, through function
+// calls up to recursion); whether codegen can substitute set.count for a
+// given probe is a separate reachability check on the rendered tree.
 //
 // (CallablesTable, AnalysisContext, analysisCtxStorage, currentAnalysisCtx,
 // setCallablesContext, restoreAnalysisContext, withVisited, and
-// resolveCallable were moved earlier in the file — to before
-// buildLoopNestCodeGen — because Stage 3c.3 needs that builder to
-// resolve IRVar-typed kernels through the CallablesTable.)
+// resolveCallable were moved earlier in the file, to before
+// buildLoopNestCodeGen, because that builder needs to resolve IRVar-typed
+// kernels through the CallablesTable.)
 
 /// Build a CallablesTable from a module's function list. Codegen calls
 /// this at module entry and installs the result via setCallablesContext.
@@ -7961,11 +7253,11 @@ let buildCallablesTable (funcs: IRCallable list) : CallablesTable =
 /// Build a CallablesTable from a full module, including alias entries
 /// for let-bindings that reference lifted callables.
 ///
-/// Stage 3c.3 motivation: when `let f = lambda(...)` lowers, the lambda
+/// Motivation: when `let f = lambda(...)` lowers, the lambda
 /// gets lifted to module.Functions with callableId, and the binding's
 /// value is `IRVar(callableId, funcType)`. The binding itself has a
 /// FRESH `bindingId` distinct from `callableId`. Subsequent references
-/// to `f` lower as `IRVar(bindingId, _)`, NOT `IRVar(callableId, _)` —
+/// to `f` lower as `IRVar(bindingId, _)`, NOT `IRVar(callableId, _)` --
 /// they go through the binding's identity, not the callable's.
 ///
 /// Without alias entries, `resolveCallable(IRVar(bindingId, _))` returns
@@ -7978,14 +7270,14 @@ let buildCallablesTable (funcs: IRCallable list) : CallablesTable =
 /// expressions (a `let f = lambda(...) in body` inside a block becomes
 /// `IRLet(f.Id, ..., body)` inside the enclosing binding's value).
 /// Every alias of the form `bindingId = IRVar(callableId, _)` where
-/// callableId resolves in the base table adds `bindingId → callable`
+/// callableId resolves in the base table adds `bindingId -> callable`
 /// to the alias map. Multiple hops are followed transitively
 /// (`let g = f` where `f` itself aliases a callable resolves `g` to the
 /// same callable). The result is the base table with all aliases merged.
 let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
     let baseTable = buildCallablesTable modul.Functions
     let aliases = System.Collections.Generic.Dictionary<IRId, IRId>()
-    // Side-effecting visitor: at every IRLet, record bindingId → targetId
+    // Side-effecting visitor: at every IRLet, record bindingId -> targetId
     // if the value is a direct IRVar reference. Returns the expression
     // unchanged so `mapIRExpr` walks the whole tree.
     let visitor (e: IRExpr) : IRExpr =
@@ -8005,7 +7297,7 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
         walk b.Value)
     // Walk function bodies (nested IRLets there too).
     modul.Functions |> List.iter (fun f -> walk f.Body)
-    // Resolve transitive aliases (bindingId → targetId → ...) with a
+    // Resolve transitive aliases (bindingId -> targetId -> ...) with a
     // fixed step bound. Well-formed IR has fresh ids per binding so
     // cycles are structurally impossible; the bound is defensive.
     let resolveTransitive (startId: IRId) : IRId =
@@ -8016,7 +7308,7 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
             steps <- steps + 1
         curr
     // For each alias, follow transitively; if the final target is a
-    // real callable, add the binding id → callable entry.
+    // real callable, add the binding id -> callable entry.
     let mutable result = baseTable
     for kvp in aliases do
         let finalId = resolveTransitive kvp.Key
@@ -8025,38 +7317,32 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
         | None -> ()
     result
 
-// (resolveCallable was moved earlier in the file — see the analysisCtx
-// block before buildLoopNestCodeGen — so that the loop-nest builder
-// can call it for IRVar-typed kernels after Stage 3c.3.)
+// (resolveCallable was moved earlier in the file -- see the analysisCtx
+// block before buildLoopNestCodeGen -- so that the loop-nest builder
+// can call it for IRVar-typed kernels.)
 
-// ============================================================================
-// ExprAttrs — bottom-up attribute computation for IR expressions
-// ============================================================================
+// ExprAttrs -- bottom-up attribute computation for IR expressions
 //
-// Phase B of the LICM roadmap: a single bottom-up pass that computes
-//   FreeVars  — IRIds referenced from outside this expression's binders
-//   BoundVars — IRIds introduced inside (by IRLet, lambda params, etc.)
-//   IsPure    — no observable side effects
+// A single bottom-up pass that computes
+//   FreeVars  -- IRIds referenced from outside this expression's binders
+//   BoundVars -- IRIds introduced inside (by IRLet, lambda params, etc.)
+//   IsPure    -- no observable side effects
 // for any IRExpr.
 //
-// Phase B does NOT drive any rewrite. The function exists so that future
-// passes (Phase C: general hoist; Phase D: LICM/CSE) can consume a
-// uniform, audited source of "what does this expression depend on?".
+// This does NOT drive any rewrite. It exists so that future passes (a
+// general hoist, then LICM/CSE) can consume a uniform, audited source of
+// "what does this expression depend on?".
 //
 // Design notes:
-//   - No memoization. Phase B is a correctness foundation, not a hot
-//     path. If profiling later shows attribute computation dominating,
-//     add a reference-keyed cache then.
+//   - No memoization: a correctness foundation, not a hot path. Add a
+//     reference-keyed cache if profiling later shows this dominating.
 //   - IsPure is currently true for all native Blade IR (no I/O, no
-//     in-language mutation that affects observable behavior beyond what
-//     codegen wraps in deterministic allocations). The field exists for
-//     forward compatibility — when an impure construct lands, its arm
-//     declares IsPure = false and the field starts mattering.
-//   - Exhaustive by construction: only the semantically special variants
-//     have explicit arms (IRVar contributes a free var; IRApp follows
-//     resolvable callees; the BinderShape variants scope their bound ids).
-//     Everything else — including any future variant — merges its
-//     children's attrs via the canonical ExprShape fold.
+//     in-language mutation beyond codegen's deterministic allocations);
+//     exists for forward compatibility with a future impure construct.
+//   - Exhaustive by construction: only semantically special variants have
+//     explicit arms (IRVar contributes a free var; IRApp follows resolvable
+//     callees; BinderShape variants scope their bound ids). Everything else
+//     merges its children's attrs via the canonical ExprShape fold.
 
 type ExprAttrs = {
     FreeVars:  Set<IRId>
@@ -8087,18 +7373,18 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
         // direct IRVar reference and resolvable in the current
         // CallablesTable, walk its body with parameter substitution.
         // This treats named functions the same way the IR tree walker
-        // already treats inline lambdas — both are "callables whose
+        // already treats inline lambdas -- both are "callables whose
         // body we walk." Recursion is bounded by the visited set in
         // AnalysisContext, which is augmented at every function-body
         // walk and restored afterwards.
         //
         // The walked body's probes will have Node references pointing
         // at IRContains nodes inside the function body, not in the
-        // caller's tree. The mask renderer's reachability check
-        // (Phase C codegen) filters those out before adding to its
-        // substitution map, so unreachable probes don't generate
-        // unused preamble. They remain visible in the analysis for
-        // diagnostic or future-use purposes.
+        // caller's tree. The mask renderer's reachability check in
+        // codegen filters those out before adding to its substitution
+        // map, so unreachable probes don't generate unused preamble.
+        // They remain visible in the analysis for diagnostic or
+        // future-use purposes.
         match f with
         | IRVar (fId, _) ->
             let ctx = currentAnalysisCtx ()
@@ -8121,7 +7407,7 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
 
     // -- Binders: scoped children lose their bound ids, which surface in
     //    BoundVars instead. One arm covers IRLet, IRForRange, and IRMatch
-    //    via BinderShape — a new binding variant needs exactly one
+    //    via BinderShape -- a new binding variant needs exactly one
     //    BinderShape case to get correct scoping here. (IRLet's value
     //    arrives in the free part: a reference to the let-id inside its
     //    own value is ill-formed IR, and NOT subtracting it there keeps
@@ -8150,9 +7436,9 @@ type IRValidationError = {
 /// Recursively collect all types from an IRExpr tree. The per-variant TYPE
 /// contributions are enumerated in `own` (a contribution override with a
 /// default, not a traversal); recursion into children is the canonical
-/// ExprShape fold, so no variant's subtree can be silently skipped. (The
-/// previous version's `| _ -> []` catchall stopped RECURSION at ~15
-/// variants — IRSlice, IRShift, IRMask, IRZip, ... — hiding any unresolved
+/// ExprShape fold, so no variant's subtree can be silently skipped. (A bare
+/// `| _ -> []` catchall would stop RECURSION at whichever variants it didn't
+/// enumerate -- IRSlice, IRShift, IRMask, IRZip, ... -- hiding any unresolved
 /// types below them from the validator.)
 let collectTypesInExpr (expr: IRExpr) : IRType list =
     let rec go (e: IRExpr) : IRType list =
@@ -8214,34 +7500,28 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     let errors = ResizeArray<IRValidationError>()
     let addError ctx msg = errors.Add({ Message = msg; Context = ctx })
 
-    // checkApplyInfo (below) resolves kernel slots through
-    // `resolveCallable` to inspect param count and comm groups,
-    // which requires the CallablesTable to be installed in the
-    // AsyncLocal analysis context. We install it here using
-    // buildCallablesTableForModule (so let-bound kernel references
-    // resolve through their binding-id → callable alias) and
-    // restore the prior context on exit, so the validator doesn't
-    // leak state to subsequent passes.
+    // checkApplyInfo (below) resolves kernel slots through `resolveCallable`,
+    // which needs the CallablesTable installed in the AsyncLocal analysis
+    // context; install it via buildCallablesTableForModule (so let-bound
+    // kernel references resolve through their alias) and restore the prior
+    // context on exit so the validator doesn't leak state.
     let savedCtx = setCallablesContext (buildCallablesTableForModule modul)
-    
-    // Track all defined IDs (bindings + functions define names in scope).
-    // External Ids come from other modules visible via imports; the IR-level
-    // validator can't cheaply distinguish "imported and used" from "unrelated
-    // module's Id that happens to match" without import metadata in IRModule,
-    // so we accept all program Ids as in-scope. False negatives (an
-    // accidental cross-module reference) would require a TypeCheck/Lowering
-    // bug to manifest, which would likely surface elsewhere.
+
+    // Track all defined IDs (bindings + functions). External Ids come from
+    // other modules visible via imports; without import metadata in
+    // IRModule the validator can't cheaply distinguish "imported and used"
+    // from "unrelated module's Id that happens to match", so it accepts all
+    // program Ids as in-scope.
     let moduleIds =
         let bindIds = modul.Bindings |> List.map (fun b -> b.Id) |> Set.ofList
         let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
         Set.unionMany [bindIds; funcIds; externalIds]
-    
-    // Tag/IxKind agreement (audit §3.3 migration): while both encodings
-    // exist, they must never diverge — a construction or with-update that
-    // stamps a sentinel Tag without the matching IxKind (or vice versa)
-    // is exactly the valid-but-wrong hazard the field was added to kill.
-    // ixKindOfTag maps sentinels to kinds and everything else to IxKPlain,
-    // so equality enforces both directions.
+
+    // Tag/IxKind agreement: the two encodings must never diverge -- a
+    // construction that stamps a sentinel Tag without the matching IxKind
+    // (or vice versa) is exactly the valid-but-wrong hazard this field
+    // exists to kill. ixKindOfTag maps sentinels to kinds and everything
+    // else to IxKPlain, so equality enforces both directions.
     let rec indexTypesOfType (ty: IRType) : IRIndexType list =
         match ty with
         | IRTArrow (slots, ret, _) ->
@@ -8356,7 +7636,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | IRPure e -> checkScope scope ctx e
         | IRAssign (t, v) -> checkScope scope ctx t; checkScope scope ctx v
         | IRConstraintCheck (c, _, _) -> checkScope scope ctx c
-        | _ -> ()  // Literals, params, etc. — no var refs
+        | _ -> ()  // Literals, params, etc. -- no var refs
     
     let mutable cumulativeScope = moduleIds
     for b in modul.Bindings do
@@ -8367,18 +7647,14 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     for f in modul.Functions do
         let ctx = sprintf "in function '%s'" f.Name
         let paramIds = f.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-        // Stage 3c.3: lifted lambdas live in module.Functions with their
-        // captures in `f.Captures` (separate from `f.Params`). The
-        // captures' Ids reference the enclosing source-level var; the
-        // lambda's body references those Ids directly. Before 3c.3, the
-        // lambda lived inline inside its enclosing function's body, so
-        // the body's IRVar references to captures resolved against the
-        // enclosing function's params — and the validator's scope
-        // walk picked them up that way. After 3c.3, the lambda is its
-        // own top-level function and the enclosing function's params
-        // aren't in scope at the validator's `for f in modul.Functions`
-        // loop; we have to add the function's own Captures' Ids to
-        // the visible scope so the body's references resolve.
+        // Lifted lambdas live in module.Functions with their captures in
+        // `f.Captures` (separate from `f.Params`). The captures' Ids
+        // reference the enclosing source-level var; the lambda's body
+        // references those Ids directly. Because the lambda is its own
+        // top-level function, the enclosing function's params aren't in
+        // scope at the validator's `for f in modul.Functions` loop; we
+        // have to add the function's own Captures' Ids to the visible
+        // scope so the body's references resolve.
         let captureIds = f.Captures |> List.map (fun c -> c.Id) |> Set.ofList
         let funcScope = Set.unionMany [moduleIds; paramIds; captureIds]
         checkScope funcScope ctx f.Body
@@ -8393,23 +7669,15 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                 addError ctx (sprintf "ApplyInfo: Arrays.Length=%d != Identities.Length=%d" info.Arrays.Length info.Identities.Length)
             if info.SDimsPerArray.Length <> info.Arrays.Length && info.SDimsPerArray.Length <> 0 then
                 addError ctx (sprintf "ApplyInfo: SDimsPerArray.Length=%d != Arrays.Length=%d" info.SDimsPerArray.Length info.Arrays.Length)
-            // Canonical apply: Kernel slot is a callable reference,
-            // either IRVar(id, _) or IRReynolds(IRVar(id, _), _).
-            // `resolveKernel` peels any Reynolds wrapper and resolves
-            // the inner via CallablesTable + synthetic registry.
-            //
-            // After the IRComposeApply split, `info.Loop = IRObjectFor _`
-            // can only arise from canonical `object_for(g) <@> A` going
-            // through `buildApplyInfo` — the slot-inverted compose case
-            // routes through IRComposeApply, and the meta-application
-            // patterns (object_for(<@>) <@> tuples) don't produce
-            // TExprApply at all. So IRObjectFor in the Loop slot also
-            // unambiguously implies a callable kernel.
-            //
-            // We still skip the check when Loop is IRVar (let-bound;
-            // could resolve to either canonical or compose-apply
-            // shape, and we don't have the binding env here) — the
-            // codegen path retains its own resolution for that case.
+            // Canonical apply: Kernel slot is a callable reference, either
+            // IRVar(id, _) or IRReynolds(IRVar(id, _), _); `resolveKernel`
+            // peels any Reynolds wrapper. `info.Loop = IRObjectFor _` can
+            // only arise from canonical `object_for(g) <@> A` (the
+            // slot-inverted compose case routes through IRComposeApply), so
+            // it also unambiguously implies a callable kernel. Skip the
+            // check when Loop is IRVar (let-bound; could resolve to either
+            // shape, and the binding env isn't available here) -- codegen
+            // retains its own resolution for that case.
             let kernelSlotIsCallable =
                 match info.Loop with
                 | IRMethodFor _ | IRObjectFor _ -> true

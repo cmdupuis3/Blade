@@ -1,45 +1,39 @@
-// Blade tree-walking interpreter — value domain (Milestone 1 foundation).
+// Blade tree-walking interpreter: value domain (Milestone 1 foundation).
 //
 // The interpreter walks the typed IR (Blade.IR) and produces printed output
-// that must BYTE-MATCH the compiled C++ binaries (the differential gate). This
+// that must byte-match the compiled C++ binaries (the differential gate). This
 // file owns the runtime value universe the walker manipulates; Numerics.fs owns
-// the bit-exact scalar arithmetic over it. Nothing here evaluates — these are
+// the bit-exact scalar arithmetic over it. Nothing here evaluates -- these are
 // data definitions plus the environment/limit/panic scaffolding the evaluator
-// (a later milestone) plugs into.
+// plugs into.
 //
-// This file is compiled INSIDE Blade.fsproj AFTER IR.fs and CodeGen.fs, so it
-// freely references the project's concrete IR types:
-//   - IRType        = IRTypeG<IRExpr>     (IR.fs:385)   — carried by arrays/closures
-//   - IRIndexType   = IRIndexTypeG<IRExpr>(IR.fs:386)   — array dimension structure
-//   - IRExpr        (IR.fs:46)            — suspended-computation payload
-//   - IRCallable    (IR.fs:239)           — closure provenance (Params/Body/Captures)
-//   - IRId = int    (Types.fs:10)         — binding identity, the env key
-//   - ElemType      (Types.fs:285)        — scalar element discriminator
+// Compiled inside Blade.fsproj after IR.fs and CodeGen.fs, so it freely
+// references the project's concrete IR types:
+//   - IRType        = IRTypeG<IRExpr>     (IR.fs:385)   -- carried by arrays/closures
+//   - IRIndexType   = IRIndexTypeG<IRExpr>(IR.fs:386)   -- array dimension structure
+//   - IRExpr        (IR.fs:46)            -- suspended-computation payload
+//   - IRCallable    (IR.fs:239)           -- closure provenance (Params/Body/Captures)
+//   - IRId = int    (Types.fs:10)         -- binding identity, the env key
+//   - ElemType      (Types.fs:285)        -- scalar element discriminator
 module Blade.Interp.Value
 
 open System.Collections.Generic
 open Blade.Types
 open Blade.IR
 
-// ============================================================================
-// The value universe
-// ============================================================================
-//
-// Scalar spelling mirrors ElemType 1:1 so a Value round-trips its declared type
-// without a side table:
+// The value universe. Scalar spelling mirrors ElemType 1:1 so a Value
+// round-trips its declared type without a side table:
 //   VInt      <-> ETInt64        VInt32    <-> ETInt32
 //   VFloat    <-> ETFloat64      VFloat32  <-> ETFloat32
 //   VComplex  <-> ETComplex128   VBool     <-> ETBool
 //   VString   <-> ETString       VUnit     <-> ETUnit
-//   VChar                        — char LITERALS lower to ETInt32 in this
-//                                  compiler (TypeCheck.fs:1095), so VChar is
-//                                  retained for surface fidelity/printing but is
-//                                  not produced by numeric lowering.
+//   VChar                        -- char literals lower to ETInt32
+//                                  (TypeCheck.fs:1095); VChar is kept for
+//                                  surface fidelity/printing only.
 //
-// KNOWN GAP (documented): ETComplex64 (std::complex<float>) has no distinct
-// value case — VComplex carries double components only. Complex64 is a rare
-// element type (Complex128 is the first-class one); a width-tagged complex or a
-// VComplex32 case is deferred to the milestone that needs bit-exact Complex64.
+// Known gap: ETComplex64 (std::complex<float>) has no distinct value case --
+// VComplex carries double components only (Complex128 is the first-class
+// type); a width-tagged complex is deferred to the milestone that needs it.
 [<CustomEquality; NoComparison>]
 type Value =
     | VInt of int64
@@ -56,10 +50,10 @@ type Value =
     | VVariant of typeName: string * tag: int * payload: Value option
     | VArray of BladeArray
     // A callable value: the reusable IRCallable plus the captured free-variable
-    // cells (by binding id — IRCallable.Captures carries the CaptureInfo.Id
-    // keys). Captured by ValueRef so mutation through the closure is visible to
-    // the defining scope, matching the `T&`-by-reference capture semantics
-    // CodeGen emits for lifted lambdas (IR.fs:280 CaptureInfo).
+    // cells (by binding id -- IRCallable.Captures carries the CaptureInfo.Id
+    // keys), captured by ValueRef so mutation through the closure is visible
+    // to the defining scope, matching CodeGen's `T&`-by-reference capture
+    // semantics for lifted lambdas (IR.fs:280 CaptureInfo).
     | VClosure of callable: IRCallable * captures: Map<IRId, ValueRef>
     | VLoopObj of LoopObjValue
     // A suspended computation (Blade's deferred-array / IRCompute discipline):
@@ -69,11 +63,10 @@ type Value =
     | VCompound of CompoundValue
     | VSparse of SparseValue
 
-    // Value embeds IRExpr / IRCallable / Env (a Dictionary) — deep structural
+    // Value embeds IRExpr / IRCallable / Env (a Dictionary) -- deep structural
     // equality would be surprising and costly, and comparison is undefined for
-    // the env. Physical equality is the right identity for a runtime value here;
-    // the evaluator compares scalars by destructuring through Numerics, never by
-    // `=` on Value. Hence CustomEquality (reference) + NoComparison.
+    // the env. Physical equality is the right identity here; the evaluator
+    // compares scalars by destructuring through Numerics, never `=` on Value.
     override this.Equals(o: obj) = System.Object.ReferenceEquals(this, o)
     override this.GetHashCode() = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this)
 
@@ -82,9 +75,7 @@ type Value =
 /// contents) is its equality, so aliasing is observable.
 and [<ReferenceEquality>] ValueRef = { mutable V: Value }
 
-// ============================================================================
-// Arrays and their backing stores
-// ============================================================================
+// Arrays and their backing stores.
 //
 // A BladeArray is the runtime image of a Blade Array<Elem like I, J, ...>. It
 // keeps the full IR element type and index types so the evaluator can reproduce
@@ -104,12 +95,9 @@ and BladeArray = {
 // models regular multi-level nesting (array-of-arrays with uniform sub-shape);
 // SRagged is the CSR-style per-row layout shared by RaggedIdx / DepIdx / group
 // members (CodeGen's Ragged<T>: flat backing + per-row lens + prefix offsets,
-// CodeGen.fs ~4237).
-//
-// KNOWN GAP (documented): no SFloat32 / SInt32 / SComplex64 stores — arrays of
-// the narrow element types widen into SFloat / SInt / SComplex or fall to SObj.
-// Bit-exact narrow-element arrays are deferred (scalar Float32/Int32 ARE exact
-// in Numerics; this is only about their packed array form).
+// CodeGen.fs ~4237). Known gap: no SFloat32 / SInt32 / SComplex64 stores --
+// narrow element types widen into SFloat / SInt / SComplex or fall to SObj
+// (scalar Float32/Int32 ARE exact in Numerics; this is only their array form).
 and Store =
     | SFloat of float[]
     | SInt of int64[]
@@ -119,15 +107,12 @@ and Store =
     | SNested of Store[]
     | SRagged of rows: Store[] * lens: int64[] * offsets: int64[]
 
-// ============================================================================
-// Placeholder value shapes (fleshed out in later milestones)
-// ============================================================================
+// Placeholder value shapes (fleshed out in later milestones).
 
 /// A reified loop object: `method_for(...)` / `object_for(f)` and their
 /// compositions, awaiting the complementary operand before `<@>` forces a nest.
-/// TODO(milestone: loops): carry the resolved ApplyInfo/loop plan rather than
-/// the raw provenance node. For now it records the provenance IRExpr and the
-/// environment captured at reification, which is enough to force it later.
+/// Records the provenance IRExpr and the environment captured at
+/// reification, which is enough to force it later.
 and LoopObjValue = {
     /// Provenance: IRMethodFor / IRObjectFor / IRComposeObj / IRComposeMeth.
     Provenance: IRExpr
@@ -135,44 +120,43 @@ and LoopObjValue = {
     Captured: Env
 }
 
-/// group_keys result: the CSR grouping structure (IRTGroupKeys, Types.fs:420 —
+/// group_keys result: the CSR grouping structure (IRTGroupKeys, Types.fs:420,
 /// maps a sourceIdx into groups indexed by an outerIdx). `Offsets` is the CSR
 /// row-pointer (length nGroups+1, exclusive prefix-sum of the per-group counts);
-/// `Members` are the source positions in group-contiguous order (the CSR "perm"
-/// — genGroupKeysBinding's `<name>__perm`, CodeGen.fs:7603-7606). A group g's
+/// `Members` are the source positions in group-contiguous order (the CSR "perm",
+/// genGroupKeysBinding's `<name>__perm`, CodeGen.fs:7603-7606). A group g's
 /// members are `Members.[Offsets.[g] .. Offsets.[g+1]-1]`, each an index into the
 /// original value array; its key can be recovered as `keys.[Members.[Offsets.[g]]]`
-/// (the compiler stores NO keys array — §4.2). ReferenceEquality: a runtime
-/// value, never compared structurally (Value's own equality is reference-based).
+/// (the compiler stores no keys array, 4.2). ReferenceEquality: never compared
+/// structurally.
 and [<ReferenceEquality>] GroupKeysValue = {
     Offsets: int64[]
     Members: int64[]
 }
 
-/// A compound (masked product-space) index VALUE — formalism 4.5 CompoundIdx
+/// A compound (masked product-space) index value: formalism 4.5 CompoundIdx
 /// (IRCompoundMask, IR.fs:164) / runtime `Compound<T,RANK>` + `compound_index_t`
-/// (cpp/nested_array_types.hpp:133, index_types.h:235). The value bundles the
-/// full rank<->tuple bijection with a compact backing buffer of the present
-/// cells, so full/partial/trailing reads and reduce reproduce the C++ helpers
-/// byte-for-byte.
+/// (cpp/nested_array_types.hpp:133, index_types.h:235). Bundles the full
+/// rank<->tuple bijection with a compact backing buffer of the present cells,
+/// so full/partial/trailing reads and reduce reproduce the C++ helpers byte-for-byte.
 ///
-///   ElemType       — the stored element type (drives read coercion / print).
-///   IndexTypes     — the full index-type list (compound head slot + any
+///   ElemType       - the stored element type (drives read coercion / print).
+///   IndexTypes     - the full index-type list (compound head slot + any
 ///                    trailing regular dims); carried for downstream typing.
-///   LeadRank       — k, the number of masked (compound) leading dims (= mask
+///   LeadRank       - k, the number of masked (compound) leading dims (= mask
 ///                    rank). A rank-1 compound is the filtered-set case.
-///   LeadExtents    — extents of the k masked dims (row-major); mask_offset base.
-///   Mask           — flat mask bits over the masked grid (length = product
+///   LeadExtents    - extents of the k masked dims (row-major); mask_offset base.
+///   Mask           - flat mask bits over the masked grid (length = product
 ///                    LeadExtents, row-major); the allocation record + submask
 ///                    source for partial (residual) reads.
-///   Table          — rank_to_tuple: present coordinate tuples in row-major lex
+///   Table          - rank_to_tuple: present coordinate tuples in row-major lex
 ///                    order, one per valid cell (each length LeadRank).
-///   RankOf         — linearize: mask_offset(tuple) -> compact rank (O(1) reverse
+///   RankOf         - linearize: mask_offset(tuple) -> compact rank (O(1) reverse
 ///                    of Table; mask_offset is a unique per-grid-cell key).
-///   Cardinality    — popcount(Mask) = |Table| (runtime, not closed form).
-///   TrailingStride — product of the trailing regular extents; 1 when the mask
-///                    covers ALL dims (the all-dims compound).
-///   Data           — compact backing buffer, length Cardinality*TrailingStride,
+///   Cardinality    - popcount(Mask) = |Table| (runtime, not closed form).
+///   TrailingStride - product of the trailing regular extents; 1 when the mask
+///                    covers all dims (the all-dims compound).
+///   Data           - compact backing buffer, length Cardinality*TrailingStride,
 ///                    present cells in Table order, each followed by its trailing
 ///                    block (data[r*trailing_stride + t]).
 /// ReferenceEquality: runtime value, never structurally compared (and the
@@ -190,17 +174,17 @@ and [<ReferenceEquality>] CompoundValue = {
     Data: Store
 }
 
-/// A sparse (explicit key enumeration) index VALUE — formalism 3.5 SparseIdx
+/// A sparse (explicit key enumeration) index value: formalism 3.5 SparseIdx
 /// (IRSparseKeys) / runtime `Sparse<T,RANK>` + `sparse_index_t`. The compound
-/// twin MINUS the grid: there are no per-axis extents and no mask, so the
-/// reverse map keys STRUCTURALLY on the tuple itself (a grid offset does not
+/// twin minus the grid: there are no per-axis extents and no mask, so the
+/// reverse map keys structurally on the tuple itself (a grid offset does not
 /// exist), and partial reads scan `Keys` in key order rather than a mask.
 ///
-///   Keys           — rank_to_tuple in GIVEN order (never sorted); iteration
+///   Keys           - rank_to_tuple in given order (never sorted); iteration
 ///                    order is this order.
-///   RankOf         — linearize: tuple -> rank, via TupleKeyComparer (int64[]
+///   RankOf         - linearize: tuple -> rank, via TupleKeyComparer (int64[]
 ///                    has no structural hashing in .NET).
-///   Other fields   — as CompoundValue (compact Data in key order, each cell
+///   Other fields   - as CompoundValue (compact Data in key order, each cell
 ///                    followed by its trailing block).
 and [<ReferenceEquality>] SparseValue = {
     ElemType: IRType
@@ -213,22 +197,20 @@ and [<ReferenceEquality>] SparseValue = {
     Data: Store
 }
 
-// ============================================================================
-// Environment
-// ============================================================================
+// Environment.
 //
-// SCOPING MODEL. Lowered Blade IR is SSA-ish: every let / parameter / loop
+// Scoping model: lowered Blade IR is SSA-ish -- every let / parameter / loop
 // variable gets a globally-unique IRId (IRLet's id, IRParam.VarId, IRForRange's
 // varId, IRVar's id). So the primary binding structure is a flat mutable
-// Dictionary<IRId, ValueRef> — direct-address, O(1), and a loop variable is a
+// Dictionary<IRId, ValueRef>, direct-address, O(1), and a loop variable is a
 // single reused cell mutated per iteration (matching the C++ loop counter).
 //
 // A `Parent` link is retained for the two places uniqueness is not enough:
-//   1. Function application binds this call's parameters in a FRESH child scope
-//      so recursion doesn't clobber the caller's frame.
-//   2. Lexical shadowing across independently-lowered fragments.
-// Lookup walks Vars, then Parent. Closures capture their free cells explicitly
-// (VClosure.captures), so they don't rely on the parent chain surviving.
+// (1) function application binds this call's parameters in a FRESH child
+// scope so recursion doesn't clobber the caller's frame; (2) lexical
+// shadowing across independently-lowered fragments. Lookup walks Vars, then
+// Parent. Closures capture their free cells explicitly (VClosure.captures),
+// so they don't rely on the parent chain surviving.
 and [<ReferenceEquality>] Env = {
     Vars: Dictionary<IRId, ValueRef>
     Parent: Env option
@@ -248,9 +230,7 @@ type TupleKeyComparer() =
                 h <- h * 31 + int (v ^^^ (v >>> 32))
             h
 
-// ============================================================================
-// Environment helpers
-// ============================================================================
+// Environment helpers.
 
 /// A fresh empty root environment.
 let envNew () : Env = { Vars = Dictionary<IRId, ValueRef>(); Parent = None }
@@ -277,12 +257,10 @@ let envBind (env: Env) (id: IRId) (v: Value) : ValueRef =
 let envBindRef (env: Env) (id: IRId) (cell: ValueRef) : unit =
     env.Vars.[id] <- cell
 
-// ============================================================================
-// Store / array deep copy
-// ============================================================================
+// Store / array deep copy.
 
 /// Deep-copy a backing store. Element Values themselves are copied by
-/// reference (SObj) — they are treated immutably by the evaluator (mutation
+/// reference (SObj) -- they are treated immutably by the evaluator (mutation
 /// goes through cells, never in-place on a Value), exactly as the C++ pool
 /// copy copies struct elements by value.
 let rec copyStore (s: Store) : Store =
@@ -298,14 +276,12 @@ let rec copyStore (s: Store) : Store =
 
 /// Deep-copy a BladeArray (fresh extents + fresh backing pool). The
 /// differential twin of CodeGen's materializeArrayCopyForm (fresh allocate<>
-/// + std::copy_n over the contiguous pool), which backs the copy semantics
-/// of assignable array bindings (`let mut a = Z`; IRModule.MutableArrayLets).
+/// + std::copy_n), backing the copy semantics of assignable array bindings
+/// (`let mut a = Z`; IRModule.MutableArrayLets).
 let copyBladeArray (ba: BladeArray) : BladeArray =
     { ba with Extents = Array.copy ba.Extents; Data = copyStore ba.Data }
 
-// ============================================================================
-// Interpreter faults and resource limits
-// ============================================================================
+// Interpreter faults and resource limits.
 
 /// A runtime fault raised by the interpreter, carrying the same shape as the
 /// C++ runtime's blade_rt::panic (error code + message + source provenance).
@@ -316,17 +292,17 @@ exception InterpPanic of code: string * msg: string * file: string option * line
 
 /// Resource ceilings that bound a single interpreter run so a divergent or
 /// pathological program fails loudly instead of hanging the differential gate.
-/// Generous by default — real corpus programs are far under these.
-///   MaxSteps — evaluator step budget (one per reduction).
-///   MaxDepth — recursion / call-stack depth.
-///   MaxCells — total array cells allocated across the run.
+/// Generous by default -- real corpus programs are far under these.
+///   MaxSteps - evaluator step budget (one per reduction).
+///   MaxDepth - recursion / call-stack depth.
+///   MaxCells - total array cells allocated across the run.
 type InterpLimits = {
     MaxSteps: int64
     MaxDepth: int
     MaxCells: int64
 }
 
-/// Default ceilings (billion steps / cells, 100k deep) — high enough that no
+/// Default ceilings (billion steps / cells, 100k deep) -- high enough that no
 /// legitimate corpus program trips them, low enough to catch runaways.
 let defaultLimits : InterpLimits =
     { MaxSteps = 1_000_000_000L

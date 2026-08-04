@@ -1,27 +1,22 @@
-/// Math-module elaboration: dense linear algebra and tensor decompositions
-/// as compile-time source synthesis, mirroring the ml/ppl elaborators.
+/// Math-module elaboration: dense linear algebra and tensor decompositions as compile-time source synthesis, mirroring the
+/// ml/ppl elaborators.
 ///
-/// Surface (reachable only through `import math [as <alias>]`; config ints are
-/// `let static` names or literals). The ops read the DECLARED shape — this pass
-/// runs before type inference and the generated routine is specialized to the
-/// extents — so an array argument must carry an annotation. It may come from
-/// any of: a variable bound by an annotated `let` (module-level or block-local),
-/// an annotated parameter, a call of a function with an annotated array return
-/// type, or an ascription `(expr : Array<...>)`.
+/// Surface (reachable only through `import math [as <alias>]`; config ints are `let static` names or literals). The ops
+/// read the DECLARED shape (this pass runs before type inference and the generated routine is specialized to the extents),
+/// so an array argument must carry an annotation: a variable bound by an annotated `let` (module-level or block-local), an
+/// annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<...>)`.
 ///
-///   m.matmul(A, B)                 -- m×k · k×n -> m×n
+///   m.matmul(A, B)                 -- m x k . k x n -> m x n
 ///   m.svd(A) | m.svd(A, SWEEPS)    -- thin SVD, m >= n -> (U, S, V), S descending
 ///   m.eigh(S) | m.eigh(S, SWEEPS)  -- symmetric -> (Q, LAM), LAM descending
-///   m.unfold(X, MODE)              -- Kolda–Bader mode-n matricization
-///   m.mode_product(X, U, MODE)     -- tensor × matrix along MODE
+///   m.unfold(X, MODE)              -- Kolda-Bader mode-n matricization
+///   m.mode_product(X, U, MODE)     -- tensor x matrix along MODE
 ///   m.hosvd(X) | m.hosvd(X, R1..RN)-- Tucker/HOSVD -> (G, U1, ..., UN)
 ///
-/// For each distinct (op, resolved shape/config) the elaborator synthesizes
-/// ONE Blade function (`__math_1`, ...) via Blade.Math.Decls; call sites
-/// rewrite to the generated names, deduped by fingerprint.
+/// For each distinct (op, resolved shape/config) the elaborator synthesizes ONE Blade function (`__math_1`, ...) via
+/// Blade.Math.Decls; call sites rewrite to the generated names, deduped by fingerprint.
 ///
-/// Pipeline position: after ML/PPL elaboration, BEFORE Grad expansion
-/// (TypeCheck.typeCheck), so generated bodies remain plain differentiable
+/// Pipeline position: after ML/PPL elaboration, before Grad expansion, so generated bodies remain plain differentiable
 /// Blade source.
 module Blade.Math.Elaborate
 
@@ -29,24 +24,18 @@ open Blade.Ast
 open Blade.StaticEval
 open Blade.Math.Decls
 
-// ============================================================================
 // Module-level context: annotated array shapes, aliases, statics
-// ============================================================================
 
 /// A name -> declared array shape map (the module-level tables).
 type private Shapes = Map<string, TypeExpr * TypeExpr list>
 
-/// The LEXICAL scope threaded through the walker: parameters and block-local
-/// lets. A binder is recorded even when it is NOT array-annotated (as `None`),
-/// because it still SHADOWS an outer name — without that, an unannotated local
-/// `let f = ...` over a module-level annotated `f` would fall through to the
-/// module-level shape and silently run at the wrong extents.
+/// The LEXICAL scope threaded through the walker: parameters and block-local lets. A binder is recorded even when it is NOT
+/// array-annotated (as `None`), because it still SHADOWS an outer name -- without that, an unannotated local `let f = ...`
+/// over a module-level annotated `f` would fall through to the module-level shape and silently run at the wrong extents.
 type private Scope = Map<string, (TypeExpr * TypeExpr list) option>
 
-/// Shape/static context the op elaborations read. The ops read a DECLARED
-/// shape, never an inferred one (this pass runs before type inference) — but
-/// the declaration may live on a let, a parameter, a function return type or
-/// an ascription (SpectraElaborate's contract).
+/// Shape/static context the op elaborations read. The ops read a DECLARED shape, never an inferred one (this pass runs
+/// before type inference), but the declaration may live on a let, a parameter, a function return type, or an ascription.
 type private Ctx = {
     Arrays: Shapes                              // module-level annotated lets
     Funcs: Shapes                               // top-level fns with an annotated array return type
@@ -60,27 +49,21 @@ let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> =
         | DeclType (TyDeclAlias (name, _, body)) -> Map.add name body acc
         | _ -> acc) Map.empty
 
-/// Annotations may name a whole-array type alias (`type Field = Array<...>`) —
-/// resolve top-level aliases (cycle-bounded) before matching for TyArray.
+/// Annotations may name a whole-array type alias (`type Field = Array<...>`) -- resolve top-level aliases (cycle-bounded)
+/// before matching for TyArray.
 ///
-/// TyBounded is TRANSPARENT here, and only for diagnostic ORDER. A bound on an
-/// aggregate is rejected by the checker (BL4003, TypeCheck.boundedAggregateError),
-/// but this pass runs BEFORE the checker: without this arm `A: MA<min=0.0,
-/// max=99.0>` fails to match TyArray and the user is told "'A' has no declared
-/// array shape" about an annotation that plainly declares one. Seeing through
-/// the bound lets the elaborator do its job and lets the checker deliver the
-/// diagnostic that actually explains the mistake. Nothing legitimate changes:
-/// a bound on a SCALAR still resolves to a non-array and is still not a shape.
+/// TyBounded is TRANSPARENT here, for diagnostic ORDER only. A bound on an aggregate is rejected by the checker (BL4003,
+/// TypeCheck.boundedAggregateError), but this pass runs BEFORE the checker: without this arm `A: MA<min=0.0, max=99.0>`
+/// fails to match TyArray and the user is told "'A' has no declared array shape" about an annotation that plainly declares
+/// one. Seeing through the bound lets the elaborator do its job and the checker deliver the diagnostic that actually
+/// explains the mistake. A bound on a SCALAR still resolves to a non-array and is still not a shape.
 let rec private resolveTop (aliases: Map<string, TypeExpr>) (fuel: int) (ty: TypeExpr) =
     match ty with
     | TyNamed (n, []) when fuel > 0 ->
         match Map.tryFind n aliases with
         | Some body -> resolveTop aliases (fuel - 1) body
         | None -> ty
-    // TyBounded resolves through to its base: bounds on AGGREGATE types are now
-    // rejected upstream (boundedAggregateError, the element-bound round), so the
-    // pass-through no longer reaches the old bounded-array codegen bug — the
-    // earlier deliberate omission here is superseded by that guard.
+    // TyBounded resolves through to its base: bounds on AGGREGATE types are rejected upstream (boundedAggregateError).
     | TyBounded (baseTy, _, _) when fuel > 0 -> resolveTop aliases (fuel - 1) baseTy
     | _ -> ty
 
@@ -110,8 +93,7 @@ let private collectFuncs (aliases: Map<string, TypeExpr>) (decls: Located<Decl> 
             | None -> acc
         | _ -> acc) Map.empty
 
-/// Params of a function / lambda, as a lexical scope seed. Unannotated params
-/// are recorded as shadowing entries (see Scope).
+/// Params of a function / lambda, as a lexical scope seed. Unannotated params are recorded as shadowing entries (see Scope).
 let private paramShapes (aliases: Map<string, TypeExpr>) (ps: (string * TypeExpr option) list) : Scope =
     ps |> List.fold (fun acc (nm, ty) -> Map.add nm (arrayAnnot aliases ty) acc) Map.empty
 
@@ -125,12 +107,10 @@ let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
     | TyNamed (name, []) ->
         match Map.tryFind name ctx.Aliases with
         | Some body -> resolveExtent ctx body
-        // Not a source alias: a provider axis path (`type Y = store.index.y`),
-        // registered by TypeEnv during type CHECKING — after this pass — so the
-        // extent comes from the store's metadata instead.
+        // Not a source alias: a provider axis path, registered by TypeEnv during type checking, so the extent comes
+        // from the store's metadata instead.
         | None -> providerIndexExtent ctx.Statics name
-    // A bound in an alias body (`type B = A<min=.., max=..>`) does not change
-    // the extent — see the twin arm in SpectraElaborate.resolveExtent.
+    // A bound in an alias body does not change the extent (twin arm in SpectraElaborate.resolveExtent).
     | TyBounded (inner, _, _) -> resolveExtent ctx inner
     | _ -> None
 
@@ -138,10 +118,8 @@ let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
 let private shapeSources =
     "math ops read the DECLARED shape at compile time (the generated routine is specialized to the extents), so the argument must carry an annotation"
 
-/// The declared shape of an op's array argument: every axis extent must be
-/// statically known. `scope` carries the lexical shapes in force here
-/// (annotated params and block-local annotated lets). The returned label is
-/// what the op-level messages quote.
+/// The declared shape of an op's array argument: every axis extent must be statically known. `scope` carries the lexical
+/// shapes in force here (annotated params and block-local annotated lets). The returned label is what op-level messages quote.
 let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Result<string * int list, string> =
     let finish (label: string) ((_, idxs): TypeExpr * TypeExpr list) =
         let extents = idxs |> List.map (resolveExtent ctx)
@@ -149,10 +127,9 @@ let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Resu
             Ok (label, extents |> List.map Option.get)
         else
             Error (sprintf "%s: every axis extent of %s must be statically known (Idx<n> directly or through aliases)" what label)
-    let noShape name = Error (sprintf "%s: '%s' has no declared array shape — %s" what name shapeSources)
+    let noShape name = Error (sprintf "%s: '%s' has no declared array shape -- %s" what name shapeSources)
     match e.Kind with
-    // A name: the innermost binder wins. A local binder with no array
-    // annotation shadows an outer one rather than falling through to it.
+    // A name: the innermost binder wins; a local binder with no array annotation shadows an outer one.
     | ExprKind.ExprVar name ->
         match Map.tryFind name scope with
         | Some (Some shape) -> finish (sprintf "'%s'" name) shape
@@ -161,26 +138,22 @@ let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Resu
             match Map.tryFind name ctx.Arrays with
             | Some shape -> finish (sprintf "'%s'" name) shape
             | None -> noShape name
-    // An ascription: the universal escape hatch for a shape this pass cannot
-    // otherwise see (it runs before type inference).
+    // An ascription: the universal escape hatch for a shape this pass cannot otherwise see.
     | ExprKind.ExprTyped (_, ty) ->
         match resolveTop ctx.Aliases 8 ty with
         | TyArray (elem, idxs) -> finish "the ascribed expression" (elem, idxs)
         | _ -> Error (sprintf "%s: the ascription must name an array type (Array<Float64 like Idx<...>, ...>)" what)
-    // A call whose function has an annotated array return type. GUARD: in
-    // Blade arrays ARE functions, so `A(i)` and `f(x)` are the same node —
-    // exclude known array names so an index read stays on the error path
-    // instead of being misread as a call and given the array's own shape.
+    // A call whose function has an annotated array return type. GUARD: in Blade arrays ARE functions, so `A(i)` and `f(x)`
+    // are the same node -- exclude known array names so an index read stays on the error path.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _)
             when not (Map.containsKey f scope) && not (Map.containsKey f ctx.Arrays) ->
         match Map.tryFind f ctx.Funcs with
         | Some shape -> finish (sprintf "the result of '%s'" f) shape
-        | None -> Error (sprintf "%s: '%s' has no annotated array return type — %s" what f shapeSources)
+        | None -> Error (sprintf "%s: '%s' has no annotated array return type -- %s" what f shapeSources)
     | _ ->
-        Error (sprintf "%s: the array argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<Float64 like Idx<...>, ...>)` — %s" what shapeSources)
+        Error (sprintf "%s: the array argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<Float64 like Idx<...>, ...>)` -- %s" what shapeSources)
 
-/// Resolve a static-argument expression: a plain variable naming a
-/// `let static` binding, or an inline int literal (ml's staticArg contract).
+/// Resolve a static-argument expression: a plain variable naming a `let static` binding, or an inline int literal.
 let private staticArg (statics: StaticEnv) (what: string) (e: Expr) : Result<StaticValue, string> =
     match e.Kind with
     | ExprKind.ExprLit (LitInt n) -> Ok (SVInt n)
@@ -196,10 +169,7 @@ let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int
         | SVInt n -> Ok (int n)
         | _ -> Error (sprintf "%s: expected a static int" what))
 
-// ============================================================================
 // Elaboration state (fingerprint-deduped generated decls)
-// ============================================================================
-
 type private ElabState = {
     mutable Counter: int
     /// (op, config fingerprint) -> generated function name
@@ -223,16 +193,13 @@ let private ensure (st: ElabState) (key: string) (make: string -> Result<Functio
             st.Decls <- st.Decls @ [ decl ]
             n)
 
-/// ensure for a TOTAL decl builder (no failure path) — used by the hosvd
-/// orchestration, which ensures a batch of helpers per mode.
+/// ensure for a TOTAL decl builder (no failure path) -- used by the hosvd orchestration, which ensures a batch per mode.
 let private ensureT (st: ElabState) (key: string) (make: string -> FunctionDecl) : string =
     match ensure st key (fun n -> Ok (make n)) with
     | Ok n -> n
     | Error e -> failwith e // unreachable: make is total
 
-// ============================================================================
 // Op elaboration
-// ============================================================================
 
 let private opNames =
     Set.ofList [ "matmul"; "svd"; "eigh"; "eig"; "unfold"; "mode_product"; "hosvd" ]
@@ -256,25 +223,15 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
         arrayShape ctx scope "matmul" bE |> Result.bind (fun (_, bDims) ->
             match aDims, bDims with
             | [_m; k], [k2; _n] when k = k2 ->
-                // Phase 5 (docs/plan-cpp-perf-exploitation.md): matmul is no
-                // longer SYNTHESIZED as a per-(m,k,n) Blade triple loop. It
-                // rewrites to the `__math_matmul` intrinsic marker, which
-                // TypeCheck.inferMatmul types and codegen emits as one
-                // `blade_linalg::blade_matmul` call — the shim then resolves to
-                // cblas_dgemm or to a native fallback depending on the BUILD.
-                // A blocked/microkernel GEMM is the one shape Blade-native loop
-                // code cannot approach, so it gets a first-class binding rather
-                // than a desugaring. svd/eigh/eig/unfold/mode_product/hosvd stay
-                // synthesized (LAPACK is a separate, later decision).
-                //
-                // The SHAPE VALIDATION above is deliberately unchanged: matmul
-                // still reads the DECLARED shapes and still rejects the same
-                // programs with the same messages, so nothing about the surface
-                // contract moved — only what the accepted call lowers to.
+                // matmul is not synthesized as a per-(m,k,n) Blade triple loop: it rewrites to the `__math_matmul` intrinsic
+                // marker, which TypeCheck.inferMatmul types and codegen emits as one `blade_linalg::blade_matmul` call (the
+                // shim resolves to cblas_dgemm or a native fallback depending on the build). svd/eigh/eig/unfold/
+                // mode_product/hosvd stay synthesized. Shape validation above is unchanged: matmul still reads the
+                // DECLARED shapes and rejects the same programs with the same messages -- only what it lowers to changed.
                 Ok (syn (ExprApp (v "__math_matmul", [aE; bE])))
             | [_; k], [k2; _] ->
-                Error (sprintf "matmul: inner extents disagree (A is ..×%d, B is %d×..)" k k2)
-            | _ -> Error "matmul: both arguments must be rank-2 (m×k · k×n)"))
+                Error (sprintf "matmul: inner extents disagree (A is ..x%d, B is %dx..)" k k2)
+            | _ -> Error "matmul: both arguments must be rank-2 (mxk * kxn)"))
     | "matmul", _ -> Error "matmul: expected matmul(A, B)"
     | "svd", (aE :: rest) ->
         sweepsArg ctx.Statics "svd" rest |> Result.bind (fun sweeps ->
@@ -284,7 +241,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                 ensure st (fingerprint "svd" (box (m, n, sweeps))) (fun nm -> Ok (svdDecl nm m n sweeps))
                 |> Result.map (fun nm -> syn (ExprApp (v nm, [aE])))
             | [m; n] ->
-                Error (sprintf "svd: m < n unsupported in v1 (%d×%d); svd the transpose (transpose(A, [0, 1])) and swap U/V" m n)
+                Error (sprintf "svd: m < n unsupported (%dx%d); svd the transpose (transpose(A, [0, 1])) and swap U/V" m n)
             | _ -> Error "svd: the argument must be rank-2 (Array<Float64 like Idx<m>, Idx<n>>)"))
     | "svd", _ -> Error "svd: expected svd(A) or svd(A, SWEEPS)"
     | "eigh", (aE :: rest) ->
@@ -292,41 +249,24 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
         arrayShape ctx scope "eigh" aE |> Result.bind (fun (_, dims) ->
             match dims with
             | [n; n2] when n = n2 ->
-                // Phase 6 / Round B2 (docs/plan-cpp-perf-exploitation.md): the
-                // ONE conditional elaboration in this file. `eigh` routes to the
-                // `__math_eigh` intrinsic marker — which TypeCheck.inferEigh
-                // types and codegen emits as one `blade_lapack::blade_eigh_*`
-                // call — only when BOTH hold:
+                // `eigh` routes to the `__math_eigh` intrinsic marker (TypeCheck.inferEigh types it, codegen emits one
+                // `blade_lapack::blade_eigh_*` call) only when BOTH hold: LAPACK is available at build time
+                // (`LinAlgPatterns.lapackAvailable ()`, the same predicate Build.fs uses for `-DBLADE_HAS_LAPACK` -- two
+                // copies disagreeing would emit calls into a header that won't compile); and NO explicit SWEEPS argument
+                // was given (a stated sweep budget requests the cyclic-Jacobi ALGORITHM, which LAPACK's blocked tridiagonal
+                // reduction has no analogue of, so `m.eigh(S, 30)` keeps the synthesized path on any machine).
                 //
-                //   * LAPACK will be available at BUILD time
-                //     (`LinAlgPatterns.lapackAvailable ()`, the same predicate
-                //     Build.fs uses to decide `-DBLADE_HAS_LAPACK`; two copies
-                //     could disagree, and a disagreement is exactly the
-                //     configuration that emits calls into a header that will not
-                //     compile); and
-                //   * NO explicit SWEEPS argument was given. A stated sweep
-                //     budget is a request for the cyclic-Jacobi ALGORITHM, and
-                //     LAPACK's blocked tridiagonal reduction has no analogue of
-                //     it — routing anyway would silently ignore a parameter the
-                //     user typed. `m.eigh(S, 30)` therefore keeps the
-                //     synthesized path on any machine, which is a readable rule
-                //     rather than a gap.
-                //
-                // GATE OFF (the default) THE SYNTHESIZED PATH IS UNTOUCHED,
-                // byte for byte: same `ensure`/fingerprint key, same
-                // `eighDecl`, same call expression. That is deliberate and
-                // load-bearing — the Jacobi source is the single copy of this
-                // math, the one the interpreter and pinned-oracle differentials
-                // cover, and an eigensolver's output is not unique (eigenvector
-                // signs, degenerate-subspace bases), so it stays the
-                // verification truth. `interp` / `diff-oracle` must never run
-                // with the LAPACK gate set.
+                // With the gate off (the default) the synthesized path is untouched, byte for byte: same
+                // `ensure`/fingerprint key, same `eighDecl`, same call expression. That is load-bearing -- the Jacobi
+                // source is the single copy of this math, the one the interpreter and pinned-oracle differentials cover,
+                // and an eigensolver's output is not unique (eigenvector signs, degenerate-subspace bases), so it stays
+                // the verification truth. `interp` / `diff-oracle` must never run with the LAPACK gate set.
                 if List.isEmpty rest && Blade.LinAlgPatterns.lapackAvailable () then
                     Ok (syn (ExprApp (v "__math_eigh", [aE])))
                 else
                     ensure st (fingerprint "eigh" (box (n, sweeps))) (fun nm -> Ok (eighDecl nm n sweeps))
                     |> Result.map (fun nm -> syn (ExprApp (v nm, [aE])))
-            | [n; n2] -> Error (sprintf "eigh: the argument must be square (got %d×%d); symmetry is assumed, not checked" n n2)
+            | [n; n2] -> Error (sprintf "eigh: the argument must be square (got %dx%d); symmetry is assumed, not checked" n n2)
             | _ -> Error "eigh: the argument must be rank-2 square (Array<Float64 like Idx<n>, Idx<n>>, symmetric)"))
     | "eigh", _ -> Error "eigh: expected eigh(S) or eigh(S, SWEEPS)"
     | "eig", (aE :: rest) ->
@@ -343,15 +283,15 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                 maxIterRes |> Result.bind (fun maxIter ->
                     ensure st (fingerprint "eig" (box (n, maxIter))) (fun nm -> Ok (eigDecl nm n maxIter))
                     |> Result.map (fun nm -> syn (ExprApp (v nm, [aE]))))
-            | [n; n2] -> Error (sprintf "eig: the argument must be square (got %d×%d)" n n2)
+            | [n; n2] -> Error (sprintf "eig: the argument must be square (got %dx%d)" n n2)
             | _ -> Error "eig: the argument must be rank-2 square (Array<Float64 like Idx<n>, Idx<n>>)")
-    | "eig", _ -> Error "eig: expected eig(A) or eig(A, MAXITER) — returns (LRE, LIM) by descending modulus"
+    | "eig", _ -> Error "eig: expected eig(A) or eig(A, MAXITER) -- returns (LRE, LIM) by descending modulus"
     | "unfold", [xE; modeE] ->
         staticInt ctx.Statics "unfold MODE" modeE |> Result.bind (fun mode ->
         arrayShape ctx scope "unfold" xE |> Result.bind (fun (_, dims) ->
             let r = dims.Length
             if r < 2 || r > 4 then
-                Error (sprintf "unfold: tensor rank must be 2..4 in v1 (got rank %d); the generator is rank-generic — raise the cap when needed" r)
+                Error (sprintf "unfold: tensor rank must be 2..4 (got rank %d); the generator is rank-generic -- raise the cap when needed" r)
             elif mode < 0 || mode >= r then
                 Error (sprintf "unfold: MODE must be in 0..%d for a rank-%d tensor (got %d)" (r - 1) r mode)
             else
@@ -364,7 +304,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
         arrayShape ctx scope "mode_product" uE |> Result.bind (fun (_, uDims) ->
             let r = dims.Length
             if r < 2 || r > 4 then
-                Error (sprintf "mode_product: tensor rank must be 2..4 in v1 (got rank %d)" r)
+                Error (sprintf "mode_product: tensor rank must be 2..4 (got rank %d)" r)
             elif mode < 0 || mode >= r then
                 Error (sprintf "mode_product: MODE must be in 0..%d for a rank-%d tensor (got %d)" (r - 1) r mode)
             else
@@ -374,14 +314,14 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                         (fun nm -> Ok (modeProductDecl nm dims mode jOut))
                     |> Result.map (fun nm -> syn (ExprApp (v nm, [xE; uE])))
                 | [_; im] ->
-                    Error (sprintf "mode_product: U's second extent must match the mode-%d extent (U is ..×%d, mode extent is %d)" mode im dims.[mode])
+                    Error (sprintf "mode_product: U's second extent must match the mode-%d extent (U is ..x%d, mode extent is %d)" mode im dims.[mode])
                 | _ -> Error "mode_product: U must be rank-2 (Array<Float64 like Idx<j>, Idx<i_mode>>)")))
     | "mode_product", _ -> Error "mode_product: expected mode_product(X, U, MODE) with a static MODE"
     | "hosvd", (xE :: rankArgs) ->
         arrayShape ctx scope "hosvd" xE |> Result.bind (fun (_, dims) ->
             let r = dims.Length
             if r < 2 || r > 4 then
-                Error (sprintf "hosvd: tensor rank must be 2..4 in v1 (got rank %d)" r)
+                Error (sprintf "hosvd: tensor rank must be 2..4 (got rank %d)" r)
             else
                 let ranksRes =
                     if List.isEmpty rankArgs then Ok dims
@@ -396,17 +336,15 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                     if List.exists2 (fun rk ik -> rk < 1 || rk > ik) ranks dims then
                         Error (sprintf "hosvd: each truncation rank must be in 1..I_k (dims %A, ranks %A)" dims ranks)
                     else
-                        // Per-mode helpers. The eigh fingerprint matches the
-                        // m.eigh arm exactly, so hosvd and user eigh calls of
-                        // the same shape share one generated function.
+                        // Per-mode helpers. The eigh fingerprint matches the m.eigh arm exactly, so hosvd and user eigh
+                        // calls of the same shape share one generated function.
                         let gramNames =
                             [ for mode in 0 .. r - 1 ->
                                 ensureT st (fingerprint "gram" (box (dims, mode))) (fun nm -> gramDecl nm dims mode) ]
                         let eighNames =
                             [ for mode in 0 .. r - 1 ->
                                 ensureT st (fingerprint "eigh" (box (dims.[mode], defaultSweeps))) (fun nm -> eighDecl nm dims.[mode] defaultSweeps) ]
-                        // Successive core shapes: mode n contracts against
-                        // dims-with-earlier-modes-already-truncated.
+                        // Successive core shapes: mode n contracts against dims-with-earlier-modes-already-truncated.
                         let mutable curDims = dims
                         let mptNames =
                             [ for mode in 0 .. r - 1 ->
@@ -421,17 +359,13 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
     | "hosvd", _ -> Error "hosvd: expected hosvd(X) or hosvd(X, R1, ..., RN) with static ranks"
     | _ -> Error (sprintf "math: unknown op '%s' (available: %s)" op opList)
 
-// ============================================================================
 // Rewrite walker (same shape as MLElaborate.rewriteExpr)
-// ============================================================================
-
 let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (scope: Scope) (e: Expr)
     : Result<Expr, string> =
     let r = rewriteExpr st ctx aliases scope
     // Same walk under an EXTENDED lexical scope (a binder came into view).
     let rIn (sc: Scope) = rewriteExpr st ctx aliases sc
-    // Every binder is recorded, annotated or not: an unannotated one must
-    // SHADOW an outer array of the same name, not fall through to it.
+    // Every binder is recorded, annotated or not: an unannotated one must SHADOW an outer array of the same name.
     let bind (sc: Scope) (nm: string) (ty: TypeExpr option) =
         Map.add nm (arrayAnnot ctx.Aliases ty) sc
     let bindPat (sc: Scope) (b: Binding) =
@@ -447,9 +381,8 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
         | None -> Ok None
         | Some x -> r x |> Result.map Some
     match e.Kind with
-    // Qualified math op: `alias.svd(...)` -> generated specialized function.
-    // Any alias-qualified call is claimed here so an unknown op gets a
-    // steering error instead of an unbound-module type error downstream.
+    // Qualified math op: `alias.svd(...)` -> generated specialized function. Any alias-qualified call is claimed here so
+    // an unknown op gets a steering error instead of an unbound-module type error downstream.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) }, args) when Set.contains alias aliases ->
         rList args |> Result.bind (fun args' -> elabOp st ctx scope op args')
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
@@ -475,8 +408,7 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
         rIn (bindPat scope binding) body
         |> Result.map (fun b' -> inheritSpan e (ExprLet ({ binding with Value = v' }, b'))))
     | ExprKind.ExprBlock (stmts, finalE) ->
-        // Statements thread the scope forward: an annotated `let` inside the
-        // block is a shape witness for everything after it.
+        // Statements thread the scope forward: an annotated `let` inside the block is a shape witness for what follows.
         let rec rStmt (sc: Scope) (s: Stmt) : Result<Stmt * Scope, string> =
             match s with
             | StmtSpanned (inner, sp) -> rStmt sc inner |> Result.map (fun (i, sc') -> (StmtSpanned (i, sp), sc'))
@@ -510,20 +442,15 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
                     r c.Body |> Result.map (fun b -> cs @ [{ c with Guard = g'; Body = b }]))))
                 (Ok [])
             |> Result.map (fun cs' -> inheritSpan e (ExprMatch (s', cs'))))
-    // Recursive array (`let rec q: T = match q with ...`): the seed and
-    // inductive slices are ordinary expressions and may contain qualified
-    // ops. Without this arm they fell through untouched, and since this pass
-    // DELETES the import that would bind the alias, the call reached the
-    // checker as an unbound variable.
+    // Recursive array (`let rec q: T = match q with ...`): the seed and inductive slices are ordinary expressions and may
+    // contain qualified ops; without this arm they fell through unrewritten and reached the checker as an unbound variable.
     | ExprKind.ExprRecArray def ->
         rOpt (def.SeedArm |> Option.map snd) |> Result.bind (fun seedE ->
         r def.SliceExpr |> Result.map (fun slice' ->
             let seed' = Option.map2 (fun (sv, _) se -> (sv, se)) def.SeedArm seedE
             inheritSpan e (ExprRecArray { def with SeedArm = seed'; SliceExpr = slice' })))
-    // The rest of the expression algebra. Every constructor holding a
-    // sub-expression is walked, and the catch-all wildcard is deliberately
-    // GONE: an unhandled case is an FS0025 incomplete-match warning at build
-    // time rather than a qualified call silently surviving unrewritten.
+    // The rest of the expression algebra: every constructor holding a sub-expression is walked, and the catch-all wildcard
+    // is deliberately GONE, so an unhandled case is an FS0025 build warning rather than a qualified call surviving unrewritten.
     | ExprKind.ExprCompute inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprCompute i))
     | ExprKind.ExprRead inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprRead i))
     | ExprKind.ExprPure inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprPure i))
@@ -588,17 +515,14 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
          | ForKernel k -> r k |> Result.map ForKernel)
         |> Result.bind (fun src' ->
         rOpt kern |> Result.map (fun kern' -> inheritSpan e (ExprFor (src', cs, kern'))))
-    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>)
-    // carry TypeExprs, not Exprs, and are never rewritten.
+    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>) carry TypeExprs, not Exprs, never rewritten.
     | ExprKind.ExprWildcard | ExprKind.ExprQualified _ | ExprKind.ExprRange _
     | ExprKind.ExprReverse _ | ExprKind.ExprArity _ | ExprKind.ExprNth
     | ExprKind.ExprZero | ExprKind.ExprSection _ -> Ok e
 
-// ============================================================================
 // Gating + program expansion
-// ============================================================================
 
-/// `import math [as _]` — the module this layer owns.
+/// `import math [as _]` -- the module this layer owns.
 let private isMathImport (d: Located<Decl>) =
     match d.Value with
     | DeclImport (["math"], _) -> true
@@ -620,8 +544,7 @@ let private mathAliasesOf (decls: Located<Decl> list) : Result<Set<string>, stri
 
 let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
     mathAliasesOf decls |> Result.bind (fun aliases ->
-    // Import-gated: with no `import math`, this pass is a strict no-op — a
-    // user's own `svd`/`matmul` functions are never touched.
+    // Import-gated: with no `import math`, this pass is a strict no-op -- a user's own `svd`/`matmul` functions are never touched.
     if Set.isEmpty aliases then Ok decls
     else
         let declsNoImport = decls |> List.filter (not << isMathImport)

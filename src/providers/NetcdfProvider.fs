@@ -1,8 +1,4 @@
-// Blade-DSL NetCDF Type Provider
-// Compile-time metadata extraction from NetCDF files.
-// Reads dimensions, variable names, types, and shapes so the compiler
-// can construct IR array types.  Actual data I/O is deferred to
-// generated C++ code that calls the NetCDF C API directly.
+// Blade-DSL NetCDF Type Provider: compile-time metadata extraction (dims, var names, types, shapes) for IR array types; data I/O is generated C++ calling the NetCDF C API.
 
 module Blade.NetcdfProvider
 
@@ -10,9 +6,7 @@ open System.Runtime.InteropServices
 open Blade.IR
 open Blade.Types
 
-// ============================================================================
 // NetCDF Metadata Types
-// ============================================================================
 
 type NcDim = {
     Name: string
@@ -31,9 +25,7 @@ type NcFile = {
     Vars: NcVar list
 }
 
-// ============================================================================
 // P/Invoke Bindings to libnetcdf
-// ============================================================================
 
 module private NcFFI =
 
@@ -70,11 +62,10 @@ module private NcFFI =
     [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
     extern int nc_inq_vardimid(int fileId, int varid, int[] dimids)
 
-    // Data reads for the compile-time fold (provider-backed statics).
-    // libnetcdf converts any numeric variable type to the requested C type,
-    // so double + longlong cover the whole ncTypeToElemType surface. These
-    // are the same C functions CppNetcdf.genReadVar emits as source text
-    // for the runtime schedule — the two schedules read through one API.
+    // Data reads for the compile-time fold (provider-backed statics): libnetcdf
+    // converts any numeric type to the requested C type (double + longlong
+    // cover the whole ncTypeToElemType surface) -- the same functions
+    // CppNetcdf.genReadVar emits as source text.
     [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
     extern int nc_get_var_double(int fileId, int varid, double[] data)
 
@@ -84,9 +75,7 @@ module private NcFFI =
     let check (status: int) (msg: string) =
         if status <> 0 then failwithf "NetCDF error (%d): %s" status msg
 
-// ============================================================================
 // Safe Wrappers
-// ============================================================================
 
 module private NcQuery =
 
@@ -153,12 +142,9 @@ module private NcQuery =
 
         { Name = name; Dims = dims; TypeCode = xtype }
 
-// ============================================================================
 // File Loading (compile-time metadata extraction)
-// ============================================================================
 
-/// Load all metadata from a NetCDF file.
-/// Opens the file read-only, extracts dimensions and variable info, closes.
+/// Loads all metadata from a NetCDF file (opens read-only, extracts dims/vars, closes).
 let load (path: string) : NcFile =
     if not (System.IO.File.Exists path) then
         failwithf "NetCDF file not found: '%s' (resolved against cwd '%s')"
@@ -174,16 +160,10 @@ let load (path: string) : NcFile =
     finally
         NcQuery.closeFile fileId
 
-// ============================================================================
-// Compile-time DATA read (provider-backed statics, staging contract
-// clause 1: reading at compile time and at runtime produce the same
-// value, so a closed input's payload may fold)
-// ============================================================================
+// Compile-time DATA read (provider-backed statics)
 
 /// A variable's payload read at compile time: dimension extents plus the
-/// row-major flat buffer. libnetcdf handles the container format (classic
-/// or NetCDF-4/HDF5), chunking, compression, and endianness internally —
-/// the buffer arrives host-ordered.
+/// row-major flat buffer (host-ordered; libnetcdf handles format/chunking/endianness).
 type NcVarData = {
     DimLengths: int list
     Payload: NcPayload
@@ -192,9 +172,8 @@ and NcPayload =
     | NcFloats of float[]
     | NcInts of int64[]
 
-/// Read a variable's full payload at compile time. Float-coded variables
-/// (NC_FLOAT/NC_DOUBLE) arrive as doubles; every integer coding arrives
-/// as int64 — mirroring ncTypeToElemType's collapse.
+/// Reads a variable's full payload at compile time. Float-coded variables
+/// arrive as doubles; every integer coding arrives as int64 (mirrors ncTypeToElemType's collapse).
 let readVarData (path: string) (varName: string) : Result<NcVarData, string> =
     try
         let fileId = NcQuery.openFile path 0  // NC_NOWRITE
@@ -226,15 +205,9 @@ let readVarData (path: string) (varName: string) : Result<NcVarData, string> =
     with ex ->
         Error ex.Message
 
-// ============================================================================
 // Mapping to Blade IR Types
-// ============================================================================
 
-/// Map NetCDF type codes to the nearest Blade ElemType.
-///   Integer types (byte, short, int, int64, unsigned) -> ETInt64
-///   Float  -> ETFloat32
-///   Double -> ETFloat64
-///   Char   -> ETInt32 (treated as integer)
+/// Maps a NetCDF type code to the nearest Blade ElemType (per-code mapping below).
 let ncTypeToElemType (tc: int) : ElemType =
     match tc with
     | 1  -> ETInt64     // NC_BYTE     (signed 8-bit  -> Int)
@@ -250,8 +223,7 @@ let ncTypeToElemType (tc: int) : ElemType =
     | 11 -> ETInt64     // NC_UINT64   (unsigned 64   -> Int)
     | _  -> failwithf "Unsupported NetCDF type code: %d" tc
 
-/// Build a named IRIndexType from an NcDim.
-/// The name becomes the nominal identity of this index space.
+/// Builds a named IRIndexType from an NcDim; the name is this index space's nominal identity.
 let ncDimToNamedIndexType (builder: IRBuilder) (dim: NcDim) : string * IRIndexType =
     let idx = {
         Id = builder.FreshId()
@@ -264,9 +236,8 @@ let ncDimToNamedIndexType (builder: IRBuilder) (dim: NcDim) : string * IRIndexTy
     }
     (dim.Name, idx)
 
-/// Build an IRArrayType for a variable, reusing the module's named index types.
-/// dimMap provides the mapping from dimension name -> IRIndexType so that
-/// variables sharing the same dimension get the same IRIndexType reference.
+/// Builds an IRArrayType for a variable, reusing the module's named index
+/// types (dimMap: dim name -> IRIndexType) so variables sharing a dimension get the same reference.
 let ncVarToArrayType (dimMap: Map<string, IRIndexType>) (var: NcVar) : IRArrayType =
     let indexTypes =
         var.Dims
@@ -281,7 +252,10 @@ let ncVarToArrayType (dimMap: Map<string, IRIndexType>) (var: NcVar) : IRArrayTy
         Identity = Some (AIDVariable var.Name)
     }
 
-/// Convert an NcFile into an IRModule using structs for dims/vars.
+/// Converts an NcFile into an IRModule using structs for dims/vars.
+/// Coordinate variables (1D arrays named after their dimension) go in
+/// `dims`; all other data variables go in `vars`. Named index types live
+/// at module scope. Access: sample.dims.xdim, sample.vars.A.
 ///
 /// Produces IR equivalent to:
 ///
@@ -300,23 +274,12 @@ let ncVarToArrayType (dimMap: Map<string, IRIndexType>) (var: NcVar) : IRArrayTy
 ///           A: Array<Float32, Idx<zdim>, Idx<ydim>, Idx<xdim>>
 ///       }
 ///
-/// Coordinate variables (1D arrays named after their dimension) go in dims.
-/// All other data variables go in vars.
-/// Named index types live at module scope.
+/// The structs are namespaced by `moduleName` rather than the bare
+/// "dims"/"vars": one flat TypeDefs map means literal names would let a
+/// second load silently overwrite the first; `fieldFor` resolves the
+/// suffix, so `.dims`/`.vars` stay unchanged.
 ///
-/// Access: sample.dims.xdim (coordinate array), sample.vars.A (data array).
-///
-/// The structs are namespaced by `moduleName` (the receiving binding) rather
-/// than named the bare "dims"/"vars", because registerProviderModule adds them
-/// to a single flat TypeDefs map: with literal names a second load in the same
-/// program silently overwrote the first, and since field access re-resolves the
-/// struct name at every use site, `a.vars.X` after `let b = NetCDF.load(..)`
-/// then type-checked against b's fields with no diagnostic. CsvProvider
-/// established the convention; registerProviderModule's `fieldFor` resolves
-/// the suffix, so the `.dims` / `.vars` surface syntax is unchanged.
-///
-/// The dimMap parameter allows a schema to supply shared index types
-/// so that multiple files get type-compatible dimensions.
+/// externalDimMap lets a schema supply shared index types across files.
 let ncFileToModule
     (builder: IRBuilder)
     (moduleName: string)
@@ -324,7 +287,7 @@ let ncFileToModule
     (externalDimMap: Map<string, IRIndexType> option)
     : IRModule =
 
-    // Step 1: Build named index types
+    // Build named index types
     let (indexTypeDefs, dimMap) =
         match externalDimMap with
         | Some dm ->
@@ -336,7 +299,7 @@ let ncFileToModule
             let dm = pairs |> Map.ofList
             (typeDefs, dm)
 
-    // Step 2: dims struct — coordinate arrays (one per dimension)
+    // dims struct: coordinate arrays (one per dimension)
     let dimsFields =
         file.Dims |> List.map (fun dim ->
             let idx = dimMap.[dim.Name]
@@ -345,7 +308,7 @@ let ncFileToModule
 
     let dimsStruct = IRTDStruct(sprintf "%s__dims" moduleName, dimsFields)
 
-    // Step 3: vars struct — data variables only (exclude coordinate variables)
+    // vars struct: data variables only (exclude coordinate variables)
     let dimNames = file.Dims |> List.map (fun d -> d.Name) |> Set.ofList
     let isCoordinateVar (v: NcVar) =
         dimNames.Contains v.Name
@@ -381,10 +344,8 @@ let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRMo
     let file = load path
     ncFileToModule builder moduleName file None
 
-// ============================================================================
-// NetCDF C++ Code Generation Helpers
-// ============================================================================
-// These produce the C++ fragments that do the actual data I/O at runtime.
+// NetCDF C++ Code Generation Helpers: produce the C++ fragments that do
+// the actual data I/O at runtime.
 
 module CppNetcdf =
 
@@ -396,14 +357,10 @@ module CppNetcdf =
         | ETInt64   -> "NC_INT64"
         | _         -> "NC_DOUBLE"  // fallback
 
-    /// Wrap a fallible nc_* call: capture its status into <cppVarName>_ncstat
-    /// (declared once per fragment) and exit loudly on failure. Every nc_*
-    /// status used to be ignored, so a runtime failure -- e.g. the .nc file
-    /// missing from the executable's working directory -- left the data buffer
-    /// uninitialized: the program printed denormal heap garbage and still
-    /// exited 0. `callExpr` is the call without its trailing semicolon;
-    /// `context` describes the operation for the stderr message (it is spliced
-    /// into a C++ string literal, so it must not contain double quotes).
+    /// Wraps a fallible nc_* call: captures its status into <cppVarName>_ncstat
+    /// and exits loudly on failure (an ignored status silently leaves the data
+    /// buffer uninitialized). `callExpr` omits its trailing semicolon; `context`
+    /// is spliced into a C++ string literal, so it must avoid double quotes.
     let private ncChecked (cppVarName: string) (context: string) (callExpr: string) : string list =
         [
             sprintf "%s_ncstat = %s;" cppVarName callExpr
@@ -414,14 +371,12 @@ module CppNetcdf =
     /// Generate C++ code to open a NetCDF file and read a variable
     let genReadVar (filePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
         let rank = arrType.IndexTypes.Length
-        // Phase B2: arrType.ElemType is IRType. NetCDF only supports
-        // primitive numeric types, so extract the primitive ElemType
-        // for the dispatch. Non-primitive elements are unsupported in
-        // this provider — they'd require new NetCDF type machinery.
+        // NetCDF only supports primitive numeric types; non-primitive
+        // elements are unsupported here (would need new NetCDF machinery).
         let primElem =
             match arrType.ElemType with
             | IRTScalar et -> et
-            | _ -> ETFloat64  // S3 tag: relic. NetCDF doesn't support compound elem types yet.
+            | _ -> ETFloat64  // NetCDF doesn't support compound elem types yet.
         let elemCpp =
             match primElem with
             | ETFloat32 -> "float"
@@ -446,10 +401,9 @@ module CppNetcdf =
             | ETInt32 -> "int"
             | ETInt64 -> "longlong"
             | _ -> "double"
-        // Flat read: a NetCDF variable is stored contiguous (row-major), so read
-        // it into a flat buffer first. Each nc_* call is status-checked: a
-        // silent open/read failure would otherwise hand the copy loop an
-        // uninitialized buffer (denormal garbage) with exit code 0.
+        // Flat read: NetCDF variables are stored contiguous (row-major), so
+        // read into a flat buffer first; each nc_* call is status-checked so a
+        // silent failure can't hand the copy loop an uninitialized buffer.
         let flatRead =
             [
                 sprintf "// Read %s from %s" varName filePath
@@ -469,12 +423,10 @@ module CppNetcdf =
             @ [
                 sprintf "nc_close(%s_ncid);" cppVarName
             ]
-        // Materialize the nested-pointer Array a downstream method_for indexes as
-        // <v>[i][j]... . allocate<> builds the nested structure; the flat buffer is
-        // copied in (runtime-bounded loops, so this compiles fast, unlike a baked
-        // literal) and released. This is what makes a plain `sample.vars.A |> read`
-        // consumable by a compute -- the codegen ProviderReads intercept routes a
-        // maskless spec here, vs genReadCompoundVar for a masked one.
+        // Materialize the nested-pointer Array indexed as <v>[i][j]...: allocate<>
+        // builds the nested structure, the flat buffer is copied in (runtime-
+        // bounded loops compile fast, unlike a baked literal) and released.
+        // ProviderReads routes a maskless spec here, vs genReadCompoundVar.
         let idxVars = [ for i in 0 .. rank - 1 -> sprintf "%s_i%d" cppVarName i ]
         let openLoops =
             idxVars |> List.mapi (fun d iv ->
@@ -501,25 +453,22 @@ module CppNetcdf =
             @ [ sprintf "delete[] %s_flat;" cppVarName ]
         flatRead @ materialize
 
-    /// Generate C++ to read a variable as a COMPOUND (masked) array. The mask
-    /// variable `maskName` is any integer array (nonzero = present); the dense
-    /// var is scattered into a compact buffer of cardinality == popcount(mask).
-    /// This is load_compound's materialization: the int -> std::vector<bool>
-    /// conversion lives HERE, triggered only by load_compound (never a plain
-    /// read). All RANK dims are compound (first increment), so the result is a
-    /// scalar nested_array_utilities::Compound<T, RANK>. Both `data` and `idx`
-    /// are heap-allocated (Compound is non-owning, per the allocate<> convention).
+    /// Reads a variable as a COMPOUND (masked) array, triggered only by
+    /// load_compound: `maskName` is any integer array (nonzero = present);
+    /// the dense var is scattered into a compact buffer of cardinality ==
+    /// popcount(mask). All RANK dims are compound, so the result is a scalar
+    /// nested_array_utilities::Compound<T, RANK> (heap-allocated, non-owning
+    /// per the allocate<> convention).
     ///
-    /// Scatter ordering: compound_index_t::enumerate walks tuples row-major and
-    /// assigns rank = running set-bit count, i.e. rank == row-major prefix
-    /// popcount. nc_get_var reads row-major too, so one sequential pass copying
-    /// set cells reproduces the compact layout exactly -- no linearize() per cell.
+    /// Scatter ordering: compound_index_t::enumerate walks tuples row-major,
+    /// assigning rank = row-major prefix popcount, matching nc_get_var's own
+    /// row-major reads -- so one sequential copy over set cells reproduces
+    /// the compact layout exactly, no per-cell linearize() needed.
     let genReadCompoundVar
             (filePath: string) (varName: string) (maskName: string)
             (cppVarName: string) (varArrType: IRArrayType) (maskArrType: IRArrayType) : string list =
-        // The mask covers the leading dims; its rank is the compound (leading)
-        // rank. Remaining variable dims are regular trailing dims folded into a
-        // runtime trailing_stride at allocation (here, at read).
+        // The mask covers the leading (compound) dims; remaining variable dims
+        // are regular trailing dims folded into a runtime trailing_stride.
         let leadRank = maskArrType.IndexTypes.Length
         let primElem =
             match varArrType.ElemType with
@@ -606,23 +555,22 @@ module CppNetcdf =
             sprintf "compound_index_t<%d>* %s_idx = new compound_index_t<%d>(\"%s\", %s_extents, %s_maskvec);" leadRank v leadRank varName v v
             // compact backing: present leading cells x trailing block
             sprintf "%s* %s_compact = new %s[%s_idx->cardinality * %s_trail];" elemCpp v elemCpp v v
-            // scatter: for each present leading cell (row-major prefix-popcount),
-            // copy its whole contiguous trailing block. String-concatenated (not
-            // sprintf) so the index-variable count can't drift from the format.
+            // scatter: copy each present cell's trailing block (row-major
+            // prefix-popcount order); string-concatenated so the count can't drift.
             ("{ size_t " + v + "_r = 0; for (size_t " + v + "_c = 0; " + v + "_c < " + v + "_grid; " + v + "_c++) if (" + v + "_maskvec[" + v + "_c]) { for (size_t " + v + "_t = 0; " + v + "_t < " + v + "_trail; " + v + "_t++) " + v + "_compact[" + v + "_r * " + v + "_trail + " + v + "_t] = " + v + "_dense[" + v + "_c * " + v + "_trail + " + v + "_t]; " + v + "_r++; } }")
             sprintf "delete[] %s_dense;" v
             // bundle into the non-owning Compound wrapper (trailing_stride = _trail; 1 when all dims are masked)
             sprintf "nested_array_utilities::Compound<%s, %d> %s { %s_compact, %s_idx, %s_trail };" elemCpp leadRank v v v v
         ]
 
-    /// Generate C++ code to write a variable to a NetCDF file.
-    /// dimNames provides the dimension names from the module's IRTDIndexType defs.
+    /// Generates C++ to write a variable to a NetCDF file. dimNames provides
+    /// the dimension names from the module's IRTDIndexType defs.
     let genWriteVar (filePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) (dimNames: string list) : string list =
-        // Phase B2: same extraction as genReadVar.
+        // Same primitive-elem extraction as genReadVar.
         let primElem =
             match arrType.ElemType with
             | IRTScalar et -> et
-            | _ -> ETFloat64  // S3 tag: relic. NetCDF compound types unsupported.
+            | _ -> ETFloat64  // NetCDF compound types unsupported.
         let elemCpp =
             match primElem with
             | ETFloat32 -> "float"
@@ -671,15 +619,12 @@ module CppNetcdf =
                  | ETInt64 -> "longlong"
                  | _ -> "double")
                 cppVarName cppVarName cppVarName)
-        // nc_close flushes buffered writes, so its status matters here (unlike
-        // the read paths, where a close failure cannot corrupt already-read data).
+        // nc_close flushes buffered writes, so its status matters here (unlike the read paths).
         @ ncChecked cppVarName (sprintf "closing '%s' after writing %s" filePath varName)
             (sprintf "nc_close(%s_ncid)" cppVarName)
 
-    /// STREAMED fiber reads: hoisted prologue — open the file once, declare
-    /// the fiber buffer (trailing-axis length) and the start/count vectors
-    /// for nc_get_vara (count = {1,..,1,T}). The handle stays open for the
-    /// program's lifetime (read-only; process exit closes it).
+    /// STREAMED fiber reads: hoisted prologue -- opens the file once and
+    /// declares the start/count vectors for nc_get_vara; the handle stays open for the program's lifetime.
     let genStreamOpen (filePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
         let v = cppVarName
         let primElem =
@@ -717,8 +662,7 @@ module CppNetcdf =
         @ [ sprintf "%s_count[%d] = %d;" v (rank - 1) fiberLen
             sprintf "%s_start[%d] = 0;" v (rank - 1) ]
 
-    /// STREAMED fiber reads: the in-nest read — set the site coordinates
-    /// and pull one trailing-axis fiber into the destination buffer.
+    /// STREAMED fiber reads: the in-nest read -- sets the site coordinates and pulls one trailing-axis fiber into the destination buffer.
     let genStreamFiber (filePath: string) (varName: string) (cppVarName: string) (destBuf: string) (siteExprs: string list) (arrType: IRArrayType) : string list =
         let v = cppVarName
         let suffix =

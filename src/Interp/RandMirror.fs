@@ -2,25 +2,22 @@
 /// Blade tree-walking interpreter. Every draw here must byte-match what the
 /// generated C++ binary produces so interpreter output == compiled output.
 ///
-/// SOURCE OF TRUTH: cpp/rand_runtime.hpp. If that file changes, this mirror
-/// MUST be updated in lockstep (and revalidated with the probe in
-/// scratchpad, see the arc report). The `mix64`/`Mt19937_64`/`bitsToUnit`
-/// core is a faithful copy of spectra/Rand.fs (module BladeSpectra.Rand),
-/// which is the pre-existing, oracle-validated uniform mirror; it is copied
-/// here rather than shared to avoid a cross-project (.fsproj) file-include
-/// coupling and to keep this module self-contained under Blade.Interp.
+/// Source of truth: cpp/rand_runtime.hpp -- if that file changes, this mirror
+/// must be updated in lockstep. The `mix64`/`Mt19937_64`/`bitsToUnit` core is
+/// a faithful copy of spectra/Rand.fs (module BladeSpectra.Rand), the
+/// pre-existing, oracle-validated uniform mirror; it is copied here rather
+/// than shared to avoid a cross-project (.fsproj) file-include coupling and
+/// to keep this module self-contained under Blade.Interp.
 ///
 /// Codegen contract mirrored (CodeGen.fs genRandGenBinding, ~L8187-8213):
 ///   blade_rand::<kind>(pool_base(A.data), card, key)
 /// where `card` = product of ALL extents (dense SymNone, row-major flat pool),
 /// `key` is the int64 stream key, one draw per pool slot, filled in flat order.
 /// `normal` consumes TWO uniform draws per element (Box-Muller, cos branch
-/// only; the sin partner is NOT cached — see `next_normal` below).
+/// only; the sin partner is NOT cached, see `next_normal` below).
 module Blade.Interp.RandMirror
 
-// ---------------------------------------------------------------------------
-// Core stream (copy of spectra/Rand.fs BladeSpectra.Rand)
-// ---------------------------------------------------------------------------
+// Core stream (copy of spectra/Rand.fs BladeSpectra.Rand).
 
 /// SplitMix64 finalizer (rand_runtime.hpp `mix64`): decorrelates nearby keys
 /// before seeding the engine.
@@ -81,16 +78,14 @@ let private nextNormal (g: Mt19937_64) : float =
     if u1 < twoPow53Inv then u1 <- twoPow53Inv
     sqrt (-2.0 * log u1) * cos (twoPi * u2)
 
-// ---------------------------------------------------------------------------
-// Public draw APIs (match blade_rand::uniform / blade_rand::normal)
-// ---------------------------------------------------------------------------
+// Public draw APIs (match blade_rand::uniform / blade_rand::normal).
 
-/// blade_rand::uniform(out, n, key) — `n` draws ~ U[0,1) for stream `key`.
+/// blade_rand::uniform(out, n, key): `n` draws ~ U[0,1) for stream `key`.
 let uniform (key: int64) (n: int) : float[] =
     let g = Mt19937_64(mix64 (uint64 key))
     Array.init n (fun _ -> nextUniform g)
 
-/// blade_rand::normal(out, n, key) — `n` draws ~ N(0,1) via Box-Muller for
+/// blade_rand::normal(out, n, key): `n` draws ~ N(0,1) via Box-Muller for
 /// stream `key`. Each element consumes two uniform draws (no caching).
 let normal (key: int64) (n: int) : float[] =
     let g = Mt19937_64(mix64 (uint64 key))
@@ -98,16 +93,14 @@ let normal (key: int64) (n: int) : float[] =
 
 /// Dispatch on the runtime `kind` string ("uniform" | "normal") that codegen
 /// records in RandGen (CodeGen.fs). Matches the internal builtin call surface
-/// (__rand_uniform / __rand_normal) — a single int64 key, `n` flat draws.
+/// (__rand_uniform / __rand_normal): a single int64 key, `n` flat draws.
 let draws (kind: string) (key: int64) (n: int) : float[] =
     match kind with
     | "uniform" -> uniform key n
     | "normal"  -> normal key n
     | other -> failwithf "RandMirror.draws: unknown rand kind '%s' (expected 'uniform' | 'normal')" other
 
-// ---------------------------------------------------------------------------
-// RandomFillSpec executor
-// ---------------------------------------------------------------------------
+// RandomFillSpec executor.
 
 /// A filled random array: the flat, row-major pool plus its extents. Mirrors
 /// the dense-SymNone pool codegen emits (genRandGenBinding): a single flat

@@ -3,8 +3,14 @@
 // banded, unique). The corpus-driven diagnostics block (pinning codes/spans
 // against real .blade sources) lives with the runner; this file covers the
 // Diagnostics.fs machinery itself.
+//
+// Plus one RUNTIME-diagnostic tripwire at the end: the source-tree invariant
+// that keeps the Blade call stack in a runtime panic complete. See the section
+// comment there — it guards a codegen optimization, not the renderer.
 module Blade.Tests.DiagnosticsCore
 
+open System
+open System.IO
 open Blade.Ast
 open Blade.Diagnostics
 open Blade.Tests.TestHarness
@@ -196,6 +202,77 @@ let runDiagnosticsCoreTests () : BlockResult =
     check "render: plain mode emits no ANSI escapes"
         (not ((Render.render false (Some sm) d4).Contains "["))
         ""
+
+    // -- panic containment (shadow-frame elision tripwire) ------------------
+    // `blade_rt::panic` is the ONLY reader of the BLADE_FRAME shadow stack, and
+    // `blade_rt::Scope` its only writer, so codegen is free to omit the frame
+    // from an emitted body it can prove never panics (CodeGen's
+    // resolveShadowFrames). That proof is TEXTUAL: it inspects the calls the
+    // emitted body makes, and is blind to the inline and template runtime code
+    // a call-free body still executes anyway — Array::operator[] in
+    // nested_array_types.hpp, the nested-array and orbit/wreath utilities, the
+    // linalg/lapack shims, rand_runtime.hpp. If any of those ever gained a
+    // panic, kernels compiled without a frame would panic FRAMELESS: every
+    // BL-panic trace through such a kernel silently loses a link in its call
+    // chain, and no value test can see it (the values are unchanged; only the
+    // stack print degrades). So the invariant is: panic is defined in
+    // blade_runtime.hpp and called only from generated code.
+    //
+    // The check is the grep the invariant is written as — no src/cpp file but
+    // blade_runtime.hpp contains `blade_rt::panic`. It is stated at both ends
+    // already (the header comment above the panic definition, and the doc
+    // comment on codegen's frame-elision helper); this is what enforces it.
+    let cppRoots =
+        [ Path.Combine(".", "src", "cpp")               // source tree, from the repo root
+          Path.Combine(AppContext.BaseDirectory, "cpp") ]  // copy deployed next to the binary
+    match cppRoots |> List.tryFind Directory.Exists with
+    | None ->
+        check "runtime C++ sources located for the panic-containment scan" false
+            (sprintf "no cpp directory found; looked in %s"
+                (cppRoots |> List.map Path.GetFullPath |> String.concat " ; "))
+    | Some root ->
+        let sources =
+            Directory.GetFiles root
+            |> Array.filter (fun p ->
+                match (Path.GetExtension p).ToLowerInvariant() with
+                | ".hpp" | ".h" | ".cpp" | ".cu" | ".cuh" -> true
+                | _ -> false)
+            |> Array.sort
+            |> Array.toList
+        // Anti-vacuity: a scan that found nothing — wrong root, renamed or
+        // un-deployed headers — would "pass" by looking at zero files. Pin the
+        // headers whose inline code a frameless kernel body actually runs, so
+        // the grep below has to have covered them.
+        let mustScan =
+            [ "blade_runtime.hpp"; "nested_array_types.hpp"; "nested_array_utilities.hpp"
+              "orbit_wreath_utilities.hpp"; "blade_linalg.hpp"; "blade_linalg_views.hpp"
+              "blade_lapack.hpp"; "linearized_storage.hpp"; "rand_runtime.hpp"
+              "index_types.h" ]
+        let scanned = sources |> List.map Path.GetFileName |> Set.ofList
+        let unscanned = mustScan |> List.filter (fun f -> not (scanned.Contains f))
+        check "panic-containment scan covers every runtime header an emitted body can reach"
+            (List.isEmpty unscanned)
+            (if List.isEmpty unscanned then sprintf "%d files under %s" sources.Length root
+             else sprintf "not found under %s: %s (the scan below would pass vacuously)"
+                    root (String.concat ", " unscanned))
+        let offenders =
+            sources
+            |> List.filter (fun p -> Path.GetFileName p <> "blade_runtime.hpp")
+            |> List.choose (fun p ->
+                let hits =
+                    File.ReadAllLines p
+                    |> Array.indexed
+                    |> Array.filter (fun (_, line) -> line.Contains "blade_rt::panic")
+                    |> Array.map (fun (i, _) -> string (i + 1))
+                if hits.Length = 0 then None
+                else Some (sprintf "%s:%s" (Path.GetFileName p) (String.concat "," hits)))
+        check "blade_rt::panic is reached only from generated code (no runtime header but blade_runtime.hpp)"
+            (List.isEmpty offenders)
+            (if List.isEmpty offenders then
+                sprintf "%d file(s) scanned under %s" sources.Length root
+             else
+                sprintf "panic now reachable from %s. This BREAKS SHADOW-FRAME ELISION: codegen omits BLADE_FRAME from emitted bodies it proves cannot reach a panic, and that proof only looks at the calls the body makes — inline/template runtime code is invisible to it. Those kernels would now panic with no frame pushed, so every BL-panic trace through one drops a link in its Blade call stack (values unchanged, diagnostics silently degraded). Fix: keep the panic in blade_runtime.hpp behind a call the generated body makes textually, or teach codegen to stop eliding the frame."
+                    (String.concat "; " offenders))
 
     printFooter "Diagnostics Core" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
     { Block = "Diagnostics Core"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

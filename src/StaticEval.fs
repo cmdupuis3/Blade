@@ -2,9 +2,7 @@ module Blade.StaticEval
 
 open Blade.Ast
 
-// ============================================================================
 // Static Value Types
-// ============================================================================
 
 /// Compile-time evaluated values
 type StaticValue =
@@ -15,13 +13,13 @@ type StaticValue =
     | SVUnit
     | SVTuple of StaticValue list
     /// A folded struct literal: the type name plus (field, value) pairs in
-    /// DECLARATION order (when the struct registry is in scope — always the
-    /// case for module-level folds). Keeping the name and field names lets
-    /// splice-back emit a designated struct literal instead of a tuple, so
-    /// runtime field access on a `let static` struct stays well-typed.
+    /// DECLARATION order (when the struct registry is in scope). Keeping
+    /// the name and field names lets splice-back emit a designated struct
+    /// literal instead of a tuple, so runtime field access on a
+    /// `let static` struct stays well-typed.
     | SVStruct of name: string * fields: (string * StaticValue) list
 
-/// A static function definition (unevaluated — applied during evaluation)
+/// A static function definition (unevaluated -- applied during evaluation)
 type StaticFuncDef = {
     Name: string
     Params: string list
@@ -30,7 +28,7 @@ type StaticFuncDef = {
 
 /// Struct constraint info for fold-time checks: field names in declaration
 /// order plus the FULL conjunct list (declared where-conjuncts + desugared
-/// field bounds, built with Ast.structConjuncts — the same helper the type
+/// field bounds, built with Ast.structConjuncts, the same helper the type
 /// checker uses, so the two worlds cannot drift).
 type StructStaticInfo = {
     Fields: string list
@@ -43,14 +41,12 @@ type StructStaticInfo = {
     /// enumeration reading runs over a box that already enforces the
     /// bounds, so folding them again at every cell is pure cost; keeping
     /// the two halves separate lets the fence hand out the residual list
-    /// without re-deriving it (structConjuncts is `declared @ bounds`, so
-    /// `Conjuncts = structConjuncts FieldDecls Declared` is an invariant,
-    /// not a coincidence — Test_StructIdxFence pins it).
+    /// without re-deriving it (`Conjuncts = structConjuncts FieldDecls
+    /// Declared` is an invariant, pinned by Test_StructIdxFence).
     Declared: Expr list
-    /// `static struct Name { ... }` — the declared static-eligibility fence.
-    /// Irrelevant to folding (a plain constrained struct still folds and still
-    /// asserts); read by the index-type fence, for which it is the FIRST
-    /// eligibility question.
+    /// `static struct Name { ... }` -- the declared static-eligibility
+    /// fence, irrelevant to folding; read by the index-type fence, for
+    /// which it is the FIRST eligibility question.
     IsStatic: bool
 }
 
@@ -61,19 +57,17 @@ type StaticEnv = {
     /// Accumulates names of functions called during evaluation
     CalledFunctions: ref<Set<string>>
     /// Provider-backed roots in scope: binding name (`sample` from
-    /// `let sample = nc.load("f.nc")`) → (provider module name, store
-    /// path). Consulted by the provider-read fold — staging contract
-    /// clause 1: a closed input is an argument the program was applied
-    /// to, so a `let static` read may fold its payload at compile time.
+    /// `let sample = nc.load("f.nc")`) -> (provider module name, store
+    /// path). Consulted by the provider-read fold: a closed input is an
+    /// argument the program was applied to, so a `let static` read may
+    /// fold its payload at compile time.
     ProviderRoots: Map<string, string * string>
     /// Constrained-struct registry for fold-time conjunct checks. Empty in
     /// contexts that never fold user struct literals (angle-bracket args).
     Structs: Map<string, StructStaticInfo>
 }
 
-// ============================================================================
 // Dependency Analysis
-// ============================================================================
 
 /// Collect all free variable names referenced in an expression.
 /// Does NOT descend into type annotations (those are handled in Phase 4).
@@ -135,18 +129,18 @@ and collectStmtNames (stmt: Stmt) : Set<string> =
 /// Struct TYPE names occurring as LITERALS (`R { ... }`) anywhere in an
 /// expression.
 ///
-/// `collectFreeNames` deliberately does not report these, and must not start:
-/// a struct name is not a variable reference, and surfacing it there would
-/// make the checker's field-bound scope check (TypeCheck's StructBoundScope)
-/// reject a bound that merely mentions a struct. But the static dependency
-/// graph genuinely needs them — CONSTRUCTING `R { ... }` runs R's conjuncts,
-/// and those may name statics that the literal itself never mentions. This is
-/// the construction-reading twin of the mention edge in Phase 2 below: that
-/// one keys off `ExprVar` (`idx_card(R)`), and an `ExprStruct` node's name is
-/// not an `ExprVar`, so neither covers the other.
+/// `collectFreeNames` deliberately does not report these, and must not
+/// start: a struct name is not a variable reference, and surfacing it there
+/// would make the checker's field-bound scope check reject a bound that
+/// merely mentions a struct. But the static dependency graph genuinely
+/// needs them -- CONSTRUCTING `R { ... }` runs R's conjuncts, which may
+/// name statics the literal itself never mentions. This is the
+/// construction-reading twin of the mention edge in Phase 2 below (that one
+/// keys off `ExprVar`; an `ExprStruct` node's name is not one, so neither
+/// covers the other).
 ///
 /// Conservative by construction: a form this walker misses simply yields no
-/// edge, which is exactly the pre-existing behavior, never a worse one.
+/// edge, the pre-existing behavior, never a worse one.
 let rec collectStructLitNames (expr: Expr) : Set<string> =
     let u (xs: Set<string> list) = xs |> List.fold Set.union Set.empty
     let opt f o = o |> Option.map f |> Option.defaultValue Set.empty
@@ -182,8 +176,8 @@ and collectStructLitNamesStmt (stmt: Stmt) : Set<string> =
         (collectStructLitNames range :: (body |> List.map collectStructLitNamesStmt))
         |> List.fold Set.union Set.empty
 
-/// Topological sort: given a map of name → dependencies, return an evaluation order.
-/// Returns Error with cycle members if a cycle exists.
+/// Topological sort: given a map of name -> dependencies, return an
+/// evaluation order. Returns Error with cycle members if a cycle exists.
 let topoSort (deps: Map<string, Set<string>>) : Result<string list, string list> =
     let mutable result = []
     let mutable remaining = deps
@@ -204,49 +198,43 @@ let topoSort (deps: Map<string, Set<string>>) : Result<string list, string list>
     if remaining.IsEmpty then Ok result
     else Error (remaining |> Map.toList |> List.map fst)
 
-// ============================================================================
 // External builtin registry
-// ============================================================================
 
 /// Extension point: domain layers register additional static builtins here
 /// (name -> evaluated args -> result). The evaluator consults the registry
 /// only after its own builtin table misses, so core names cannot be
-/// overridden. Current registrant: the ML module's sizing builtins
-/// (ml/compiler/MLStatics.fs, installed by MLElaborate.expand).
+/// overridden. Current registrant: the ML module's sizing builtins.
 let private externalBuiltins =
     System.Collections.Concurrent.ConcurrentDictionary<string, StaticValue list -> Result<StaticValue, string>>()
 
-/// Register (idempotently — last write wins) an external static builtin.
+/// Register (idempotently -- last write wins) an external static builtin.
 let registerStaticBuiltin (name: string) (f: StaticValue list -> Result<StaticValue, string>) =
     externalBuiltins.[name] <- f
 
-/// Extension point: static builtins whose arguments must NOT be evaluated —
-/// the argument NAMES A DECLARATION rather than denoting a value. `idx_card(R)`
-/// is the first: R is a struct type name, so the evaluate-args-first path
-/// above would fold it to "undefined variable" before the builtin ever ran.
-/// The handler receives the environment, the REMAINING STEP COUNT of the fold
-/// that reached it, and the raw argument expressions, and may call `evalExpr`
-/// on whichever of them it actually wants evaluated.
+/// Extension point: static builtins whose arguments must NOT be evaluated --
+/// the argument NAMES A DECLARATION rather than denoting a value.
+/// `idx_card(R)` is the first: R is a struct type name, so the
+/// evaluate-args-first path above would fold it to "undefined variable"
+/// before the builtin ever ran. The handler receives the environment, the
+/// REMAINING STEP COUNT of the fold that reached it, and the raw argument
+/// expressions, and may call `evalExpr` on whichever it wants evaluated.
 ///
-/// A handler that re-enters `evalExpr` starts a FRESH budget: the step count
-/// is passed by value, so nothing the handler does draws down the caller's
-/// pool and nothing it does inherits the caller's depth. That is a deliberate
-/// seam — a syntactic builtin is a compiler subroutine with its own cost model
-/// (`idx_card` folds one conjunct per box cell, which has no sensible
-/// expression in the caller's remaining steps) — and it is also a LOADED GUN:
-/// a builtin reachable from the declaration it is reading can recur forever
-/// with the depth counter reset at every hop, and neither guard below will see
-/// it. Such a builtin owns its own cycle detection (StructIdxSpec's
-/// enumeration-in-progress set is the worked example).
+/// A handler that re-enters `evalExpr` starts a FRESH budget, passed by
+/// value, so it inherits neither the caller's pool nor its depth -- a
+/// syntactic builtin is a compiler subroutine with its own cost model, and
+/// also a LOADED GUN: one reachable from the declaration it is reading can
+/// recur forever with the depth counter reset at every hop, unseen by
+/// either guard below. Such a builtin owns its own cycle detection
+/// (StructIdxSpec's enumeration-in-progress set is the worked example).
 ///
-/// Consulted BEFORE the user's static functions and before the evaluated-args
+/// Consulted BEFORE the user's static functions and the evaluated-args
 /// path, so a registered syntactic name is reserved; registrants are core
-/// layers (StructIdxSpec), not user code.
+/// layers, not user code.
 let private syntacticBuiltins =
     System.Collections.Concurrent.ConcurrentDictionary<string, StaticEnv -> int -> Expr list -> Result<StaticValue, string>>()
 
-/// Register (idempotently — last write wins) a static builtin that takes its
-/// arguments UNEVALUATED.
+/// Register (idempotently -- last write wins) a static builtin that takes
+/// its arguments UNEVALUATED.
 let registerSyntacticStaticBuiltin (name: string) (f: StaticEnv -> int -> Expr list -> Result<StaticValue, string>) =
     syntacticBuiltins.[name] <- f
 
@@ -269,11 +257,11 @@ let knownBuiltinNames () : Set<string> =
                     syntacticBuiltins.Keys |> Set.ofSeq ]
 
 /// Extension point: the provider layer registers its compile-time DATA
-/// reader here ((providerName, storePath, varName) → folded value) — see
-/// ProviderStatics.install. Kept behind a hook so this module stays free
-/// of provider/IR dependencies (same layering rule as the builtin
-/// registry above). When absent or failing, a `let static ... |> alias.read`
-/// fails the fold assertion with the reader's message.
+/// reader here ((providerName, storePath, varName) -> folded value); see
+/// ProviderStatics.install. Kept behind a hook so this module stays free of
+/// provider/IR dependencies. When absent or failing, a
+/// `let static ... |> alias.read` fails the fold assertion with the
+/// reader's message.
 let mutable private providerReader : (string -> string -> string -> Result<StaticValue, string>) option = None
 
 let registerProviderReader (f: string -> string -> string -> Result<StaticValue, string>) =
@@ -281,8 +269,7 @@ let registerProviderReader (f: string -> string -> string -> Result<StaticValue,
 
 /// Extension point: the set of registered provider MODULE names ("netcdf",
 /// "zarr", ...), used by resolveStatics to recognize provider imports
-/// (`import netcdf as nc`) without referencing the provider registry from
-/// here (same layering rule as the reader hook above).
+/// (`import netcdf as nc`) without referencing the provider registry here.
 let mutable private providerModuleNames : Set<string> = Set.empty
 
 let registerProviderNames (names: Set<string>) =
@@ -291,24 +278,25 @@ let registerProviderNames (names: Set<string>) =
 let isProviderModuleName (name: string) : bool =
     Set.contains name providerModuleNames
 
-/// Extension point: the provider layer registers its compile-time AXIS reader
-/// here ((providerName, storePath, rootBinding, dimName) → static extent) —
-/// see ProviderStatics.install. Same layering rule as the data reader above.
+/// Extension point: the provider layer registers its compile-time AXIS
+/// reader here ((providerName, storePath, rootBinding, dimName) -> static
+/// extent); see ProviderStatics.install.
 let mutable private providerIndexReader : (string -> string -> string -> string -> int option) option = None
 
 let registerProviderIndexReader (f: string -> string -> string -> string -> int option) =
     providerIndexReader <- Some f
 
-/// Resolve a provider axis type (`store.index.y`, which the parser hands over
-/// as ONE name carrying the dotted path) to its extent.
+/// Resolve a provider axis type (`store.index.y`, which the parser hands
+/// over as ONE name carrying the dotted path) to its extent.
 ///
 /// The module elaborations (spectra/math/sgs/ppl) need these extents to
-/// specialize their generated code, and they run BEFORE type checking — which
-/// is where TypeEnv registers the provider's axis types. So they resolve the
-/// path here instead, through the same (root → provider, store) map the
-/// payload fold uses. None when the name is not such a path, its root is not
-/// a provider binding, no reader is installed, or the store has no such dim —
-/// callers then report their ordinary "extent not statically known" steer.
+/// specialize their generated code, and they run BEFORE type checking
+/// (where TypeEnv registers the provider's axis types), so they resolve
+/// the path here instead, through the same (root -> provider, store) map
+/// the payload fold uses. None when the name is not such a path, its root
+/// is not a provider binding, no reader is installed, or the store has no
+/// such dim -- callers then report their ordinary "extent not statically
+/// known" steer.
 let providerIndexExtent (env: StaticEnv) (name: string) : int option =
     match providerIndexReader with
     | None -> None
@@ -325,29 +313,26 @@ let providerIndexExtent (env: StaticEnv) (name: string) : int option =
                 | Some (provider, path) -> reader provider path root dim
                 | None -> None
 
-// ============================================================================
 // Expression Evaluator
-// ============================================================================
 
 /// A fold budget: TWO numbers, because a fold has two ways to run away and
 /// neither bound implies the other.
-///
-///   Steps — total node visits in one top-level fold, SHARED by sibling
-///           subexpressions. This is the WORK bound. A depth bound alone does
-///           not give you one: `f(n) = g(n-1) + g(n-1)` does 2^depth work
-///           inside any depth limit you care to name.
-///   Depth — maximum nesting of the evaluator's own recursion. This is the
-///           SURVIVAL bound. A step bound alone does not give you one either:
-///           the counter cannot fire before the .NET stack does unless
-///           something separately bounds nesting.
+///   Steps -- total node visits in one top-level fold, SHARED by sibling
+///            subexpressions: the WORK bound. A depth bound alone does not
+///            give you one -- `f(n) = g(n-1) + g(n-1)` does 2^depth work
+///            inside any depth limit.
+///   Depth -- maximum nesting of the evaluator's own recursion: the
+///            SURVIVAL bound. A step bound alone does not give you one
+///            either, since the counter cannot fire before the .NET stack
+///            does unless something separately bounds nesting.
 type Budget = {
     Steps: int
     Depth: int
 }
 
 /// Live state of ONE top-level fold. `Left` is mutable so that sibling
-/// subexpressions draw from a single pool rather than each inheriting a copy
-/// of the parent's remainder — which is the whole difference between a step
+/// subexpressions draw from a single pool rather than each inheriting a
+/// copy of the parent's remainder -- the whole difference between a step
 /// budget and a depth budget wearing its name.
 type private Fuel = {
     mutable Left: int
@@ -356,34 +341,30 @@ type private Fuel = {
 
 /// Total node visits one ordinary `let static` fold may take.
 ///
-/// THE NAME USED TO LIE, and the history is worth keeping because the failure
-/// it produced was not a wrong answer. This number was threaded as `fuel - 1`
-/// into every CHILD of a node, so both operands of a `+` received the same
-/// `fuel - 1` from their parent: it bounded evaluation DEPTH while being named,
-/// documented and reported as a step count. 100,000 nested `evalExpr` frames
-/// exhaust even the 64 MB stack every compiler entry point runs on
-/// (`Runtime.largeStackBytes`, installed at Main.fs's `runOnLargeStack`), so
-/// the "step limit exceeded" error below was unreachable for exactly the input
-/// it was written for: `static function bomb(n: Int) -> Int = bomb(n + 1)` did
-/// not burn 100,000 steps and then diagnose, it killed the compiler process
-/// with an uncatchable StackOverflowException. It is now a genuine step count,
-/// charged once per node visit, and `maxDepth` is what keeps the process alive
-/// long enough for it to matter.
+/// THE NAME USED TO LIE: this number used to be threaded as `fuel - 1` into
+/// every CHILD of a node, so both operands of a `+` received the same
+/// `fuel - 1` from their parent -- it bounded evaluation DEPTH while being
+/// documented as a step count. 100,000 nested `evalExpr` frames exhaust even
+/// the 64 MB stack every compiler entry point runs on
+/// (`Runtime.largeStackBytes`), so the "step limit exceeded" error was
+/// unreachable for exactly the input it was written for: `static function
+/// bomb(n: Int) -> Int = bomb(n + 1)` killed the compiler process with an
+/// uncatchable StackOverflowException instead of diagnosing. It is now a
+/// genuine step count, charged once per node visit, and `maxDepth` is what
+/// keeps the process alive long enough for it to matter.
 let maxSteps = 100_000
 
 /// Maximum nesting of the evaluator's recursion.
 ///
-/// SIZED AGAINST THE STACK, not against any language rule: one evaluation
-/// level costs well under 2 KB across its `Result.bind` closures, so 4,096
-/// levels is a few MB against `Runtime.largeStackBytes`' 64 MB — two orders of
-/// magnitude of headroom. Lowering that thread's stack size without lowering
-/// this re-arms the crash described above, which is why the coupling is named
-/// here rather than left to be rediscovered.
+/// SIZED AGAINST THE STACK: one evaluation level costs well under 2 KB
+/// across its `Result.bind` closures, so 4,096 levels is a few MB against
+/// the 64 MB stack, two orders of magnitude of headroom. Lowering that
+/// thread's stack size without lowering this re-arms the crash described
+/// above.
 ///
-/// This is a ceiling on NESTING, not on how many times a static function may
-/// recurse in total: a static call costs one level, so it admits ~4,000 nested
-/// static calls — far past anything a compile-time constant needs, and far
-/// short of what the stack can take.
+/// A ceiling on NESTING, not on how many times a static function may
+/// recurse in total: a static call costs one level, so it admits ~4,000
+/// nested static calls -- far past anything a compile-time constant needs.
 let maxDepth = 4_096
 
 /// Ordinary `let static` folding: the whole budget, for one declaration.
@@ -392,21 +373,22 @@ let defaultBudget = { Steps = maxSteps; Depth = maxDepth }
 /// The constrained-index counting layer's PER-CELL budget, spent afresh on
 /// every conjunct at every box cell (StructIdxFence.evalConjunctsAtCell).
 ///
-/// Much smaller than the default ON PURPOSE, and the reason is the cost model,
-/// not caution. A cell predicate is a boolean over a handful of already-bound
-/// integer fields — a few dozen nodes at the outside — so 10,000 steps is
-/// already three orders of magnitude of slack, while the default budget would
-/// let one pathological conjunct do 100,000 steps' work at each of up to
-/// `StructIdxSpec.maxBoxCells` cells. Depth 512 is likewise far past any real
-/// conjunct and well under the stack.
+/// Much smaller than the default ON PURPOSE, by cost model, not caution: a
+/// cell predicate is a boolean over a handful of already-bound integer
+/// fields, a few dozen nodes at the outside, so 10,000 steps is already
+/// three orders of magnitude of slack, while the default budget would let
+/// one pathological conjunct do 100,000 steps' work at each of up to
+/// `StructIdxSpec.maxBoxCells` cells. Depth 512 is likewise far past any
+/// real conjunct and well under the stack.
 let cellBudget = { Steps = 10_000; Depth = 512 }
 
-/// PPL license conjuncts (`__ppl_indep(...)`) are static LICENSES, not value
-/// predicates — they are present only at the pre-elaborator Unfold call site
-/// and never denote a truth about field values. Both readings of a struct's
-/// conjunct list skip them: the CONSTRUCTION reading below, and the
-/// ENUMERATION reading in StructIdxFence. One definition, so a licensed
-/// struct cannot be constructible in one world and empty in the other.
+/// PPL license conjuncts (`__ppl_indep(...)`) are static LICENSES, not
+/// value predicates -- present only at the pre-elaborator Unfold call site
+/// and never denoting a truth about field values. Both readings of a
+/// struct's conjunct list skip them (the CONSTRUCTION reading below, and
+/// the ENUMERATION reading in StructIdxFence), one definition, so a
+/// licensed struct cannot be constructible in one world and empty in the
+/// other.
 let isPplLicenseConjunct (c: Expr) : bool =
     match c.Kind with
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) -> f.StartsWith "__ppl_"
@@ -431,12 +413,12 @@ let private foldProviderRead (env: StaticEnv) (inner: Expr) : Result<StaticValue
         Error "Static evaluation: `alias.read(...)` folds only over a provider-backed variable (root.vars.<name> where root = alias.load(\"store\"))"
 
 /// The evaluator proper. `depth` is the nesting level of THIS node; every
-/// child is visited at `depth + 1`, and every visit costs one step out of the
-/// shared pool. Both guards are checked before the node is looked at, so a
-/// runaway is refused rather than half-evaluated.
+/// child is visited at `depth + 1`, and every visit costs one step out of
+/// the shared pool. Both guards are checked before the node is looked at,
+/// so a runaway is refused rather than half-evaluated.
 let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr) : Result<StaticValue, string> =
     if depth > fuel.MaxDepth then
-        Error (sprintf "Static evaluation: nesting depth limit exceeded (%d levels — possible infinite recursion)" fuel.MaxDepth)
+        Error (sprintf "Static evaluation: nesting depth limit exceeded (%d levels -- possible infinite recursion)" fuel.MaxDepth)
     elif fuel.Left <= 0 then
         Error "Static evaluation: step limit exceeded (possible infinite recursion)"
     else
@@ -474,7 +456,7 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
 
     // Syntactic builtins (`idx_card(R)`): the argument names a DECLARATION,
     // so it is handed over unevaluated. Checked before the static-function
-    // and evaluated-args paths — see registerSyntacticStaticBuiltin.
+    // and evaluated-args paths -- see registerSyntacticStaticBuiltin.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fname }, args) when (trySyntacticBuiltin fname).IsSome ->
         (trySyntacticBuiltin fname).Value env fuel.Left args
 
@@ -501,19 +483,18 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
             // Try as a built-in static function
             evalBuiltin env fuel depth fname args
 
-    // Provider payload fold: `alias.read(root.vars.A)` (equivalently
-    // `root.vars.A |> alias.read`) where root is a provider-backed binding
-    // (env.ProviderRoots). The registered reader (ProviderStatics) pulls
-    // the data through the provider at compile time — the same value the
-    // runtime read would produce, so folding is unobservable except in
-    // cost (clause 1). Matched by the "read" field name; the operand's
-    // root decides the provider, so a non-provider `alias.read(...)`
-    // falls out with foldProviderRead's steering error.
+    // Provider payload fold: `alias.read(root.vars.A)` where root is a
+    // provider-backed binding (env.ProviderRoots). The registered reader
+    // pulls the data through the provider at compile time -- the same
+    // value the runtime read would produce, so folding is unobservable
+    // except in cost. Matched by the "read" field name; the operand's root
+    // decides the provider, so a non-provider `alias.read(...)` falls out
+    // with foldProviderRead's steering error.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar _alias }, "read") }, [inner]) ->
         foldProviderRead env inner
 
     | ExprKind.ExprApp (func, args) ->
-        // Non-variable function position — try evaluating
+        // Non-variable function position -- try evaluating
         Error (sprintf "Static evaluation: unsupported function form in call")
 
     | ExprKind.ExprIf (cond, thenBr, elseBr) ->
@@ -542,9 +523,8 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
         evalBlock env fuel depth stmts finalExpr
 
     // Module-qualified static access (`M.k`): imported statics are seeded
-    // into Values under their qualified name by checkModule's pre-pass
-    // (TypeModuleExport.StaticValues) — consult that before treating the
-    // field access as a structural read.
+    // into Values under their qualified name by checkModule's pre-pass --
+    // consult that before treating the field access as a structural read.
     | ExprKind.ExprField ({ Kind = ExprKind.ExprVar objName }, field) when Map.containsKey (sprintf "%s.%s" objName field) env.Values ->
         Ok env.Values.[sprintf "%s.%s" objName field]
 
@@ -558,14 +538,13 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
             | _ -> Error (sprintf "Static evaluation: field access '%s' not supported on static values" field))
 
     | ExprKind.ExprStruct (name, fields, spread) ->
-        // Evaluate all field values — stored as an SVStruct (name + named
+        // Evaluate all field values, stored as an SVStruct (name + named
         // fields) so the folded value keeps nominal identity and splices
         // back as a designated struct literal. A `..base` spread folds the
-        // base and inherits its missing fields by name. A CONSTRAINED struct
-        // folding here is in the
-        // compile-time world: run its conjuncts with the field values bound
-        // by name, and fail the fold on violation (let-static assertion
-        // semantics) instead of waiting for a runtime guard.
+        // base and inherits its missing fields by name. A CONSTRAINED
+        // struct folding here runs its conjuncts with the field values
+        // bound by name, failing the fold on violation (let-static
+        // assertion semantics) instead of waiting for a runtime guard.
         let providedR =
             fields |> List.map (fun (fn, e) -> evalCore env fuel (depth + 1) e |> Result.map (fun v -> (fn, v)))
             |> List.fold (fun acc r ->
@@ -596,8 +575,8 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
         |> Result.bind (fun fieldVals ->
             // Field order follows DECLARATION order when known (the spread
             // path requires it, and splice-back emits C++ designated
-            // initializers which demand it); plain literals with an unknown
-            // layout keep written order, matching the pre-spread behavior.
+            // initializers which demand it); plain literals with an
+            // unknown layout keep written order.
             let orderedFields =
                 match Map.tryFind name env.Structs with
                 | Some info when info.Fields.Length = fieldVals.Length
@@ -653,7 +632,7 @@ and bindPattern (env: StaticEnv) (pat: Pattern) (value: StaticValue) : StaticEnv
         match value with
         | SVTuple vs when vs.Length = pats.Length ->
             (pats, vs) ||> List.zip |> List.fold (fun e (p, v) -> bindPattern e p v) env
-        // Positional destructure of a folded struct — the pre-SVStruct
+        // Positional destructure of a folded struct -- the pre-SVStruct
         // behavior (structs folded as bare tuples), kept for compatibility.
         | SVStruct (_, fs) when fs.Length = pats.Length ->
             (pats, fs |> List.map snd) ||> List.zip |> List.fold (fun e (p, v) -> bindPattern e p v) env
@@ -729,15 +708,14 @@ and tryMatchPattern (value: StaticValue) (pat: Pattern) : (string * StaticValue)
             else None
         | _ -> None
     | PatternKind.PatVariant (tag, payloadPat) ->
-        // For static evaluation of sum types — match on tag name
-        // This is a simplified approach; full variant matching would need
-        // the static value to carry a tag
+        // Simplified: full variant matching would need the static value
+        // to carry a tag.
         None
     | _ -> None
 
 and private evalBlock env fuel depth (stmts: Stmt list) (finalExpr: Expr option) : Result<StaticValue, string> =
-    // Statements are SIBLINGS, so the depth passed on is the block's own — a
-    // long block is wide, not deep, and only the step pool should feel it.
+    // Statements are SIBLINGS, so the depth passed on is the block's own --
+    // a long block is wide, not deep, and only the step pool should feel it.
     match stmts with
     | [] ->
         match finalExpr with
@@ -783,8 +761,8 @@ and private evalBuiltin env fuel depth (name: string) (args: Expr list) : Result
         | "max", [SVFloat a; SVFloat b] -> Ok (SVFloat (max a b))
         | "length", [SVTuple xs] -> Ok (SVInt (int64 xs.Length))
         | "prodsum", (SVTuple _ :: _) when argVals |> List.forall (function SVTuple _ -> true | _ -> false) ->
-            // Static mirror of the runtime prodsum intrinsic: Σ_t Π_ℓ xℓ(t)
-            // over equal-length static arrays (arrays fold as SVTuple).
+            // Static mirror of the runtime prodsum intrinsic: sum_t prod_l
+            // x_l(t), over equal-length static arrays (fold as SVTuple).
             let tuples = argVals |> List.map (function SVTuple xs -> xs | _ -> [])
             let n = tuples.Head.Length
             if tuples |> List.exists (fun t -> t.Length <> n) then
@@ -799,8 +777,8 @@ and private evalBuiltin env fuel depth (name: string) (args: Expr list) : Result
                 folded |> Result.map SVFloat
         | _ ->
             // External registry (domain layers, e.g. the ML module's sizing
-            // builtins — see registerStaticBuiltin). Consulted after the
-            // core table misses so core names cannot be overridden.
+            // builtins). Consulted after the core table misses so core
+            // names cannot be overridden.
             match externalBuiltins.TryGetValue name with
             | true, f -> f argVals
             | _ -> Error (sprintf "Static evaluation: unknown function '%s' or wrong arguments" name))
@@ -849,26 +827,23 @@ and evalBinOp (op: BinOp) (lv: StaticValue) (rv: StaticValue) : Result<StaticVal
     | OpNeq, SVString a, SVString b -> Ok (SVBool (a <> b))
     | _ -> Error (sprintf "Static evaluation: cannot apply %A to %A and %A" op lv rv)
 
-/// Fold an expression under an explicit budget. Each call starts a FRESH pool
-/// at depth zero — the budget bounds one top-level fold, not the compiler.
+/// Fold an expression under an explicit budget. Each call starts a FRESH
+/// pool at depth zero -- the budget bounds one top-level fold, not the compiler.
 let evalExprWith (env: StaticEnv) (budget: Budget) (expr: Expr) : Result<StaticValue, string> =
     evalCore env { Left = budget.Steps; MaxDepth = budget.Depth } 0 expr
 
 /// Fold an expression under a STEP budget of `fuel`, at the default depth
-/// ceiling. This is the historical signature and every existing call site
-/// passes `maxSteps` — which is what they all meant by it, so none of them
-/// changed when the threading was fixed. Reach for `evalExprWith` when the
-/// caller's cost model differs from `let static` folding's (the counting
-/// layer's per-cell budget is the one such caller today).
+/// ceiling. The historical signature; every existing call site passes
+/// `maxSteps`. Reach for `evalExprWith` when the caller's cost model
+/// differs from `let static` folding's (the counting layer's per-cell
+/// budget is the one such caller today).
 let evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue, string> =
     evalExprWith env { defaultBudget with Steps = fuel } expr
 
-// ============================================================================
-// Static Resolution — Main Entry Point
-// ============================================================================
+// Static Resolution -- Main Entry Point
 
 /// A `let static` declaration whose right-hand side did not evaluate at
-/// compile time. `let static` is an assertion — fold or fail loudly — so
+/// compile time. `let static` is an assertion -- fold or fail loudly -- so
 /// the type-checker turns these into compile errors. A bare `let` remains
 /// free to stage its work at runtime; only the annotated form demands
 /// folding.
@@ -893,7 +868,7 @@ type private PendingStatic = {
 }
 
 /// A lambda-valued `let static` declares a function (the marker means
-/// immutability there), not a foldable value — the fold assertion skips it.
+/// immutability there), not a foldable value -- the fold assertion skips it.
 let rec private isLambdaExpr (expr: Expr) : bool =
     match expr.Kind with
     | ExprKind.ExprLambda _ -> true
@@ -947,10 +922,9 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
     let staticNames = pending |> List.collect (fun pd -> pd.Names) |> Set.ofList
 
     // Provider-backed roots: `import netcdf as nc` provider-module aliases
-    // (recognized against the registered provider-name set) plus the
-    // bindings that load through them (`let sample = nc.load("file")`),
-    // giving the provider-read fold its name → (provider, path) map. Both
-    // plain and static load bindings are recognized.
+    // plus the bindings that load through them (`let sample =
+    // nc.load("file")`), giving the provider-read fold its name -> (provider,
+    // path) map. Both plain and static load bindings are recognized.
     let providerAliases =
         decls |> List.fold (fun acc d ->
             match d.Value with
@@ -967,31 +941,28 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
                 Map.add root (providerAliases.[alias], path) acc
             | _ -> acc) Map.empty
 
-    // Phase 2: Dependency graph over bound names — a destructured decl's
-    // names share the decl's dependencies — and topological sort.
+    // Phase 2: Dependency graph over bound names -- a destructured decl's
+    // names share the decl's dependencies -- and topological sort.
     let deps =
         pending
         |> List.collect (fun pd ->
             let direct = collectFreeNames pd.Expr
-            // NAMING A STRUCT PULLS IN THE STRUCT'S OWN STATICS. A static
+            // NAMING A STRUCT PULLS IN THE STRUCT'S OWN STATICS: a static
             // expression that mentions a struct TYPE by name (`idx_card(R)`)
-            // is going to fold that struct's field bounds and conjuncts, and
-            // those may name statics that the mentioning expression never
-            // does — `static struct R { m: Int<min=-L, max=L> }` with
+            // is going to fold that struct's field bounds and conjuncts,
+            // which may name statics the mentioning expression never does
+            // (`static struct R { m: Int<min=-L, max=L> }` with
             // `let static L = 1` gives `idx_card(R)` a real dependency on L
-            // that no walk of the CALL can see. Without this edge the
-            // topological sort is free to fold the call first, and the bound
-            // fails with "undefined variable 'L'" against a perfectly good
-            // program. The field names themselves are excluded: they are
-            // bound per cell, not statics.
-            // Struct names reach this fold two ways, and neither covers the
-            // other: MENTIONED as a value (`idx_card(R)` — an ExprVar, so it
-            // is already in `direct`), or CONSTRUCTED as a literal
-            // (`R { ... }` — an ExprStruct, whose name is not an ExprVar).
-            // The literal case is the CONSTRUCTION reading and needs the same
-            // edge: folding it runs R's conjuncts. Seeded into the lookup
-            // only, never into `refs`, so a static that happens to share a
-            // struct's name cannot gain a spurious self-edge.
+            // no walk of the CALL can see). Without this edge the
+            // topological sort could fold the call first and fail with
+            // "undefined variable 'L'" against a perfectly good program.
+            // Field names themselves are excluded: bound per cell, not
+            // statics. Struct names reach this fold two ways, neither
+            // covering the other: MENTIONED as a value (an ExprVar, already
+            // in `direct`), or CONSTRUCTED as a literal (an ExprStruct,
+            // whose name is not an ExprVar) -- seeded into the lookup only,
+            // never into `refs`, so a static sharing a struct's name cannot
+            // gain a spurious self-edge.
             let mentioned = Set.union direct (collectStructLitNames pd.Expr)
             let structRefs =
                 mentioned |> Set.fold (fun acc n ->

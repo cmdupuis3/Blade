@@ -1,4 +1,4 @@
-// Blade `rand` module runtime — deterministic, cross-compiler-stable RNG.
+// Blade `rand` module runtime -- deterministic, cross-compiler-stable RNG.
 //
 // The `rand` module cannot be expressed in Blade source (the language has no
 // unsigned integers and no bitwise operators), so the compiler emits calls into
@@ -9,12 +9,12 @@
 // corpus EXPECT pinned once stays valid on any toolchain.
 //
 // API surface (called from generated main()):
-//   blade_rand::uniform(double* out, size_t n, int64_t key) — n draws ~ U[0,1)
-//   blade_rand::normal (double* out, size_t n, int64_t key) — n draws ~ N(0,1)
+//   blade_rand::uniform(double* out, size_t n, int64_t key) -- n draws ~ U[0,1)
+//   blade_rand::normal (double* out, size_t n, int64_t key) -- n draws ~ N(0,1)
 //
 // `key` is the stream key: same key => same sequence; nearby keys decorrelate
 // (SplitMix64 finalizer). The key-first signature is the seam for a future
-// counter-based (Philox-style) backend — only these function bodies change.
+// counter-based (Philox-style) backend -- only these function bodies change.
 #pragma once
 #include <cstdint>
 #include <cstddef>

@@ -1,6 +1,5 @@
-﻿// Command-line interface: argument parsing and command dispatch, plus the
-// user-facing compile/run/check/emit commands. Extracted from Main.fs
-// (audit Â§2.3) â€” Main.fs is now the entry point only.
+// Command-line interface: argument parsing and command dispatch, plus the
+// user-facing compile/run/check/emit commands. Main.fs is the entry point only.
 module Blade.Cli
 
 open System
@@ -106,20 +105,16 @@ let printUsage () =
     printfn "  blade test"
     printfn "  blade test --omp --cuda --timing"
 
-/// Â§6.1(b) strict mode. The stage-3/4 confirm-and-pin SUGGESTIONS (BL4010) are
-/// warnings by default: the deduction proposes, storage stays DENSE, and
-/// nothing changes until the user pins the annotation in source.
-/// `--strict-pins` promotes every outstanding suggestion to a build ERROR, so
-/// a CI build fails on an unpinned deduction that would change storage and the
-/// pin decision has to be committed in source (the annotation is the durable
-/// artifact â€” plan Â§6.1 option (b)).
+/// Strict-pins mode. Confirm-and-pin SUGGESTIONS (BL4010) are warnings by
+/// default: the deduction proposes, storage stays DENSE, nothing changes
+/// until the user pins the annotation in source. `--strict-pins` promotes
+/// every outstanding suggestion to a build ERROR, so a CI build fails on an
+/// unpinned deduction that would change storage.
 ///
-/// Reads the `PinSuggestions` side-channel `typeCheck` fills â€” the structured
-/// (message, kernel span) twin of the plain-string warnings â€” and renders each
-/// through the ordinary diagnostic renderer, so a strict failure looks exactly
-/// like any other `error[BL4010]:` with its source snippet. Returns None when
-/// strict mode is off or nothing is outstanding. Deduplicated and in
-/// deduction order (Â§6.6 determinism).
+/// Reads the `PinSuggestions` side-channel `typeCheck` fills (structured
+/// (message, kernel span) twin of the plain-string warnings) and renders each
+/// through the ordinary diagnostic renderer, so a strict failure looks like
+/// any other `error[BL4010]:`. None when strict mode is off or nothing outstanding.
 let private strictPinFailure (strictPins: bool) (useColor: bool)
                              (sm: Blade.Diagnostics.SourceMap option) : string option =
     if not strictPins then None
@@ -141,14 +136,11 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
     else
         let source = File.ReadAllText(filePath)
         let testName = Path.GetFileNameWithoutExtension(filePath)
-        // Errors come back as coded, spanned Diagnostics and are rendered
-        // here (rustc-style, with source snippets) into the string channel.
+        // Errors come back as coded, spanned Diagnostics, rendered rustc-style with source snippets.
         let useColor = not Console.IsErrorRedirected
         match lowerDiag (Some filePath) source with
         | Error ds, sm ->
-            // S1: a file that also has a hard error has still EARNED every
-            // warning the checker produced before it failed. They rode
-            // typeCheck's Ok-only payload before and were dropped here.
+            // A file with a hard error has still EARNED every warning the checker produced before it failed.
             printTypeCheckWarnings useColor (Some sm) false
             Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
         | Ok (ir, _), sm ->
@@ -179,16 +171,13 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         let baseName = Path.GetFileNameWithoutExtension(filePath)
         let dir = Path.GetDirectoryName(Path.GetFullPath(filePath))
         let dir = if String.IsNullOrEmpty dir then "." else dir
-        // Infer backend from generated source: device kernels â†’ .cu + nvcc.
+        // Infer backend from generated source: device kernels -> .cu + nvcc.
         let backendReq = inferBackendReq cppCode
         let ext = match backendReq with RequiresCuda -> ".cu" | RequiresMpi | CpuOnly -> ".cpp"
         let cppFile = Path.Combine(dir, baseName + ext)
         File.WriteAllText(cppFile, cppCode)
-        // The generated source `#include`s the C++ runtime headers with plain
-        // quotes and compileForBackend passes no -I, so the headers must sit
-        // next to the .cpp (the test runners deploy them into their output
-        // dirs for the same reason). Record which ones we newly created so
-        // cleanup removes only our copies, never a pre-existing file.
+        // Runtime headers are #include'd with plain quotes and no -I, so they
+        // must sit next to the .cpp; record which ones we create so cleanup removes only our copies.
         let deployedHeaders =
             CodeGen.runtimeHeaderNames
             |> List.map (fun name -> Path.Combine(dir, name))
@@ -200,7 +189,6 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         | Error e ->
             Error (sprintf "Compilation failed:\n%s" e)
         | Ok exePath ->
-            // If user specified output path, move the exe there
             let finalPath =
                 match outputPath with
                 | Some out ->
@@ -209,8 +197,7 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
                         try File.Copy(exePath, outFull, true) with _ -> ()
                     outFull
                 | None -> exePath
-            // Clean up intermediates (.cpp + the headers we deployed); verbose
-            // keeps both so the generated source can be inspected/recompiled.
+            // verbose keeps the intermediates so the source can be inspected/recompiled.
             if not verbose then
                 try File.Delete(cppFile) with _ -> ()
                 for h in deployedHeaders do
@@ -220,10 +207,8 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
             Ok finalPath
 
 /// Run a .edgi file: compile and execute. `mpiRanks = Some n` switches on the
-/// MPI emit gate for codegen (decomposed kernels + Init/Finalize + rank-0
-/// printing), links -lmsmpi (via the mpi.h detection in compileCpp), and
-/// launches under `mpiexec -n n`. None = the historical serial path (any
-/// `where mpi` clause stays inert).
+/// MPI emit gate (decomposed kernels + Init/Finalize + rank-0 printing),
+/// links -lmsmpi, launches under `mpiexec -n n`. None = serial path.
 let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPins: bool) : int =
     match mpiRanks with
     | None ->
@@ -257,36 +242,24 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
         finally
             CodeGen.setMpiEmitMode false
 
-// ----------------------------------------------------------------------------
-// Interactive REPL (`blade repl`)
-// ----------------------------------------------------------------------------
+// Interactive REPL (`blade repl`): `blade run` semantics give REPL behavior
+// for free, since every top-level binding prints its value. The REPL
+// accumulates a session program in a temp file; each submitted snippet
+// re-compiles and re-runs the WHOLE session, but echoes ONLY the value of the
+// snippet's LAST top-level binding. Earlier bindings, and the synthetic
+// `__`-internal bindings a `ppl.dist`/module call expands into, stay hidden.
+// Rebinding a top-level name replaces the earlier definition in place
+// (duplicate lets are a C++ redeclaration error) so downstream snippets still see it.
 //
-// Blade has no interpreter, but `blade run` semantics give REPL behavior for
-// free: every top-level binding prints its value. The REPL accumulates a
-// session program in a temp file; each submitted snippet re-compiles and
-// re-runs the WHOLE session, but echoes ONLY the value of the snippet's LAST
-// top-level binding â€” its "return value", as in a function body. Earlier
-// bindings, and the many synthetic `__`-internal bindings that a single
-// `ppl.dist`/module call expands into, stay hidden. Rebinding a top-level name
-// replaces the earlier definition (duplicate lets are a C++ redeclaration
-// error) so downstream snippets still see it; the echo then shows that
-// snippet's own last value, recomputed.
-//
-// A snippet that is not a declaration is a bare EXPRESSION (`a`, `a + 1`) â€”
-// the file-level "return a value by naming it" idiom. Top-level source only
-// admits declarations, so the REPL wraps the expression in a transient
-// binding (`let it = <expr>`), runs, echoes the value, and discards it: the
-// session and the diff baseline stay untouched, so repeating the expression
-// echoes again instead of diffing to silence. A bare identifier naming a
-// session FUNCTION echoes its signature from the typechecker alone (functions
-// aren't let-bindable just to print them).
+// A bare EXPRESSION snippet (`a`, `a + 1`) gets wrapped in a transient
+// binding (`let it = <expr>`), run, echoed, and discarded, so the session
+// stays untouched and repeating it echoes again. A bare identifier naming a
+// session FUNCTION echoes its signature from the typechecker alone.
 //
 // Output lines are type-annotated by an in-process parse+typecheck(+lower,
-// for HM-monomorphized value types) of the same source â€” see ReplTypes.
-//
-// The compiled session runs with the REPL process's own working directory,
-// so relative data paths (NetCDF.load("sample.nc")) resolve where the user
-// launched the REPL â€” not in the session temp dir.
+// for HM-monomorphized value types) of the same source -- see ReplTypes. The
+// compiled session runs with the REPL process's own cwd, so relative data
+// paths resolve where the user launched the REPL, not in the session temp dir.
 
 /// Run a compiled session exe with an explicit working directory, capturing
 /// stdout/stderr separately (runExecutable pins cwd to the exe's dir, which
@@ -310,22 +283,16 @@ let private runExeIn (cwd: string) (exeFile: string) : Result<int * string * str
     with ex ->
         Error (sprintf "Execution exception: %s" ex.Message)
 
-// ----------------------------------------------------------------------------
-// REPL display: type-annotated echoes
-// ----------------------------------------------------------------------------
-//
-// The compiled session prints raw `name = value` lines. The REPL joins those
-// with an in-process parse+typecheck of the SAME source (the front half of
-// `lower`; cheap next to the g++ invocation that just ran) to display types:
-//
+// REPL display: type-annotated echoes. The compiled session prints raw `name
+// = value` lines; the REPL joins those with an in-process parse+typecheck of
+// the SAME source to display types:
 //   - primitives inline:                  a = Int64: 5
-//   - all other types (arrays, tuples, functions) on the next line, tabbed:
+//   - other types (arrays, tuples, functions) on the next line, tabbed:
 //         v = [1, 2, 3]
 //             Array<Int64, Idx<3>>
-//   - function definitions echo their signature. Abstract (type-variable)
-//     positions render with their source names (`T`, `T^2`); positions
-//     inference bound to a concrete type render that concrete type
-//     substituted into the same syntax.
+//   - functions echo their signature; abstract (type-variable) positions
+//     render with source names (`T`, `T^2`), inference-bound positions render
+//     the concrete type substituted in.
 module ReplTypes =
     open System.Collections.Generic
     open System.Text.RegularExpressions
@@ -341,9 +308,8 @@ module ReplTypes =
 
     /// Render a function signature: `(Int64, T) -> T`. Concrete positions
     /// print concretely; abstract positions print their source type-variable
-    /// names (fresh letters for inference-invented ones). The abstract-var
-    /// recovery and naming live in Blade.Ide (shared with `ide check`'s
-    /// hover types); this wraps them in the REPL's single-line format.
+    /// names (fresh letters for inference-invented ones); recovery/naming
+    /// live in Blade.Ide, shared with `ide check`'s hover types.
     let funcSig (src: FunctionDecl option) (tf: TypedFunctionDecl) : string =
         let seed =
             match src with
@@ -361,12 +327,10 @@ module ReplTypes =
         sprintf "(%s) -> %s" (String.concat ", " ps) (pp tf.ReturnType)
 
     /// Build the top-level name -> display info map from an ALREADY-lowered
-    /// session (Blade.Interp.Repl.LoweredSession) â€” the SAME front-end pass the
-    /// interpreter runs on in compileRunEcho, so the candidate path never lowers
-    /// twice. Value bindings prefer the LOWERED types: calls to HM-polymorphic
-    /// functions monomorphize during lowering, so the typed AST can still carry
-    /// T?n inference vars where the IR is concrete (`let r = id(3.5)` is Float64
-    /// only in IR). Pure map assembly â€” no parse/typecheck/lower here.
+    /// session (the same front-end pass compileRunEcho's interpreter runs, so
+    /// it never lowers twice). Value bindings prefer the LOWERED types: HM
+    /// calls monomorphize during lowering, so the typed AST can still carry
+    /// T?n inference vars where the IR is concrete.
     let sessionInfoOf (lowered: Blade.Interp.Repl.LoweredSession) : Map<string, Info> =
         let prog = lowered.Prog
         let tp = lowered.Typed
@@ -400,12 +364,11 @@ module ReplTypes =
                 | _ -> ()
         acc
 
-    /// Parse + typecheck + lower session source (one pass) and return top-level
-    /// name -> display info. Failures yield an empty map â€” values still print,
-    /// just unannotated (shouldn't happen for source that just compiled
-    /// successfully). Used for the bare-identifier "is this a session function?"
-    /// probe on the CURRENT session; the candidate path reuses the interpreter's
-    /// own LoweredSession via sessionInfoOf, so it never lowers twice.
+    /// Parse + typecheck + lower session source (one pass) and return
+    /// top-level name -> display info. Failures yield an empty map (values
+    /// still print, just unannotated). Used for the bare-identifier "is this
+    /// a session function?" probe; the candidate path reuses the
+    /// interpreter's own LoweredSession via sessionInfoOf instead, so it never lowers twice.
     let sessionInfo (source: string) : Map<string, Info> =
         try
             match Blade.Interp.Repl.lowerSession None false source with
@@ -451,13 +414,10 @@ module ReplTypes =
     let private elideAfter = 5
 
     /// The REPL's display cap: at EVERY bracket level, show the first
-    /// `elideAfter` entries and stand the rest down to `...`. An echoed line is
-    /// meant to be read at a glance, and a 1000-cell axis is not.
-    ///
-    /// DISPLAY ONLY. The program's own stdout is untouched — `blade run` prints
-    /// every cell, and that is what the corpus pins read — so nothing here can
-    /// weaken a test. Text-level on purpose: it works for any printed shape
-    /// (nested rows, complex pairs, strings) without re-deriving the value.
+    /// `elideAfter` entries and truncate the rest to `...`. DISPLAY ONLY --
+    /// the program's own stdout is untouched (`blade run` prints every cell,
+    /// which is what the corpus pins read). Text-level on purpose: works for
+    /// any printed shape without re-deriving the value.
     let rec private elideValue (s: string) : string =
         let t = s.Trim()
         if not (t.Length >= 2 && t.StartsWith "[" && t.EndsWith "]") then t
@@ -471,8 +431,7 @@ module ReplTypes =
                 "[" + String.concat ", " shown + "]"
 
     /// Rewrite one raw output line for display. `transient` is the synthetic
-    /// binding a bare REPL expression was wrapped in â€” its name is stripped
-    /// so the value echoes alone.
+    /// binding a bare REPL expression was wrapped in; its name is stripped so the value echoes alone.
     let annotate (info: Map<string, Info>) (transient: string option) (line: string) : string =
         let m = eqLineRe.Match line
         if not m.Success then line
@@ -493,7 +452,7 @@ module ReplTypes =
             | None -> if isTransient then value else line
 
 let replLoop () : int =
-    printfn "Blade REPL (v%s) â€” each submission echoes its last binding's (typed) value." compilerVersion
+    printfn "Blade REPL (v%s) -- each submission echoes its last binding's (typed) value." compilerVersion
     printfn "A bare expression (e.g. `a`, `a + 1`) evaluates and echoes without joining the session."
     printfn "Commands: :reset (clear session)  :show (print session)  :quit"
     printfn "Multi-line: unbalanced brackets continue on the next line, or use :paste ... :end"
@@ -513,7 +472,7 @@ let replLoop () : int =
         if m.Success then Some m.Groups.[1].Value else None
 
     // The generated main prints a "<name> completed in Xs" timing line whose
-    // value changes every run â€” exclude it from the output diff.
+    // value changes every run -- exclude it from the output diff.
     let isTimingLine (l: string) =
         System.Text.RegularExpressions.Regex.IsMatch(l, @"completed in [0-9.eE+~-]+m?s\s*$")
 
@@ -525,12 +484,10 @@ let replLoop () : int =
     let identRe =
         System.Text.RegularExpressions.Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
 
-    // A reassignment `x = e` (or `x[i] = e`, `x.f = e`, `x += e`, â€¦): an lvalue
-    // followed by an assignment operator. `=(?!=)` matches a single `=` but not
-    // `==`; `<=`/`>=`/`!=` never match here because their `<`/`>`/`!` is not part
-    // of the lvalue â€” so `b == 1`, `b <= 1`, `b != 1` stay bare expressions. The
-    // leading identifier (group 1) is the ROOT variable to echo. Checked AFTER
-    // declRe so `let â€¦` stays a declaration.
+    // A reassignment `x = e` (or `x[i] = e`, `x.f = e`, `x += e`, etc.): an
+    // lvalue followed by an assignment operator. `=(?!=)` matches `=` but not
+    // `==`, so `b == 1` stays a bare expression. Group 1 (leading identifier)
+    // is the ROOT variable to echo. Checked after declRe so `let ...` stays a declaration.
     let assignRe =
         System.Text.RegularExpressions.Regex(
             @"^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]*\])*\s*(?:\+=|-=|\*=|/=|=(?!=))")
@@ -542,26 +499,20 @@ let replLoop () : int =
             @"^([A-Za-z_][A-Za-z0-9_]*) = ",
             System.Text.RegularExpressions.RegexOptions.Compiled)
 
-    /// Evaluate `candidate` and echo ONLY `targetName`'s value line â€” the
-    /// submission's "return value" â€” type-annotated. Every earlier user binding,
-    /// and every synthetic `__`-internal binding (a single `ppl.dist` expands
-    /// into dozens), stays hidden.
+    /// Evaluate `candidate` and echo ONLY `targetName`'s value line, type-
+    /// annotated. Every earlier user binding, and every synthetic
+    /// `__`-internal binding, stays hidden.
     ///
-    /// INTERP-FIRST (the payoff of the interpreter arc): the candidate lowers
-    /// ONCE (Repl.lowerSession â€” shared with the type-annotation map below), then
-    /// runs under the tree-walking interpreter. On a supported exit (0, or a
-    /// Blade guard panic 1) its output is authoritative and NO g++ is invoked â€”
-    /// a typical turn drops from ~1-5 s to <100 ms. If the interpreter cannot yet
-    /// evaluate some node (125) or hits its own bug (70) it FALLS BACK to the
-    /// historical g++ compile+run for this one input (a single notice on stderr),
-    /// with identical filtering/annotation. A front-end/validate rejection is
-    /// surfaced exactly as the old compileToExe Error arm did.
+    /// INTERP-FIRST: the candidate lowers ONCE (Repl.lowerSession, shared
+    /// with the type-annotation map below), then runs under the tree-walking
+    /// interpreter. On a supported exit its output is authoritative and no
+    /// g++ is invoked -- a typical turn drops from ~1-5s to <100ms. If the
+    /// interpreter can't yet evaluate some node (125) or hits its own bug
+    /// (70) it falls back to a g++ compile+run for this one input.
     ///
-    /// `transient` is the synthetic name a bare expression was wrapped in (its
-    /// prefix is stripped in display), else None. Returns Some (lines,
-    /// printedCount, info) on a clean exit â€” info is the SAME LoweredSession's
-    /// annotation map, so the caller reuses it without lowering again â€” or None
-    /// (snippet must not be kept).
+    /// `transient` is the synthetic name a bare expression was wrapped in
+    /// (stripped in display), else None. Returns Some (lines, printedCount,
+    /// info) on a clean exit, or None if the snippet must not be kept.
     let compileRunEcho (candidate: ResizeArray<string>) (targetName: string option) (transient: string option)
         : (string[] * int * Map<string, ReplTypes.Info>) option =
         let src = String.concat "\n\n" candidate + "\n"
@@ -569,17 +520,14 @@ let replLoop () : int =
         let useColor = not Console.IsErrorRedirected
         match Blade.Interp.Repl.lowerSession (Some srcPath) useColor src with
         | Error rendered ->
-            // Front-end / validate rejection â€” identical to the old
-            // compileToExe Error arm (both render the same diagnostics).
+            // Front-end / validate rejection: same diagnostics as compileToExe's Error arm.
             eprintfn "%s" rendered
             eprintfn "[snippet not kept]"
             None
         | Ok lowered ->
             let info = ReplTypes.sessionInfoOf lowered
             let display l = ReplTypes.annotate info transient l
-            // Given a process-like (code, stdout, stderr) triple from EITHER the
-            // interpreter or the compiled fallback, filter to targetName and
-            // echo â€” this is the historical tail of compileRunEcho, unchanged.
+            // Given a (code, stdout, stderr) triple from either the interpreter or the compiled fallback, filter to targetName and echo.
             let emit (code: int) (stdout: string) (stderr: string) =
                 let lines =
                     stdout.Replace("\r\n", "\n").Split('\n')
@@ -596,9 +544,9 @@ let replLoop () : int =
                 if stderr.Trim() <> "" then eprintfn "%s" (stderr.Trim())
                 if code = 0 then Some (lines, printed, info)
                 else
-                    eprintfn "[exit %d â€” snippet not kept]" code
+                    eprintfn "[exit %d -- snippet not kept]" code
                     None
-            // Historical g++ compile+run for this ONE input (the fallback lane).
+            // g++ compile+run for this ONE input (the fallback lane).
             let viaCompiled () =
                 match compileToExe srcPath None false false with
                 | Error e ->
@@ -614,15 +562,11 @@ let replLoop () : int =
                     | Ok (code, stdout, stderr) -> emit code stdout stderr
             match Blade.Interp.Repl.evalSession lowered "session" with
             | Blade.Interp.Repl.InterpDone r ->
-                // Interpreter is authoritative (exit 0 or guard panic 1). Surface
-                // the same TypeCheck warnings compileFile prints on the g++ path.
+                // Interpreter is authoritative (exit 0 or guard panic 1); surface the same TypeCheck warnings the g++ path prints.
                 printTypeCheckWarnings (not Console.IsErrorRedirected) None false
                 emit r.ExitCode r.Stdout r.Stderr
             | Blade.Interp.Repl.InterpFellShort _ ->
-                // The interpreter can't evaluate this input yet â€” one-time notice
-                // so the user understands the latency spike, then the g++ path
-                // (whose stdout the SAME targetName filter isolates â€” no
-                // suppression regression). Warnings print via compileFile there.
+                // Interpreter can't evaluate this input yet: one-time notice, then the g++ path.
                 eprintfn "-- falling back to compiled evaluation for this input --"
                 viaCompiled ()
 
@@ -640,9 +584,7 @@ let replLoop () : int =
         if trimmed = "" then () else
         if declRe.IsMatch (classifyTarget trimmed) then
             // Declaration: rebinding replaces the earlier definition IN PLACE
-            // so snippets that referenced the name (defined later in the
-            // session) still see it; the output diff then shows their
-            // recomputed values.
+            // so later snippets referencing the name see the update.
             let candidate = ResizeArray(session)
             match bindingName trimmed with
             | Some name ->
@@ -659,7 +601,7 @@ let replLoop () : int =
             | None -> ()
             | Some (lines, printed, info) ->
                 let mutable printed = printed
-                // A final function/type binding produces no run output â€” echo
+                // A final function/type binding produces no run output -- echo
                 // its signature (abstract unless inference bound it concrete).
                 match lastTarget with
                 | Some name when printed = 0 ->
@@ -674,16 +616,13 @@ let replLoop () : int =
                 session.AddRange candidate
                 lastLines <- lines
         elif assignRe.IsMatch (classifyTarget trimmed) then
-            // Reassignment (`b = b + 1`, `b += 1`, â€¦): a bare assignment does not
-            // parse at top level, but wrapping it in a hidden binding does â€” the
-            // wrapper's value IS the ExprAssign, which mutates the target's
-            // existing cell. Unlike the bare-expression path we KEEP the wrapper,
-            // so the mutation persists into the re-run session. Successive
-            // assignments append (never rebind-replace) under fresh __assignN
-            // names, so `b = b + 1` twice accumulates 1->2->3. The echo targets
-            // the ROOT variable, whose end-of-program auto-print already reflects
-            // the final value (both backends print bindings after the whole body
-            // runs), so no re-read is needed.
+            // Reassignment (`b = b + 1`, `b += 1`, etc.): a bare assignment
+            // does not parse at top level, but wrapping it in a hidden
+            // binding does -- the wrapper's value IS the ExprAssign, which
+            // mutates the target's existing cell. Unlike bare expressions we
+            // KEEP the wrapper so the mutation persists; successive
+            // assignments append under fresh __assignN names, so `b = b + 1`
+            // twice accumulates 1->2->3.
             let candidate = ResizeArray(session)
             let hidden =
                 let inUse = candidate |> Seq.choose bindingName |> Set.ofSeq
@@ -692,7 +631,7 @@ let replLoop () : int =
             candidate.Add (sprintf "let %s = %s" hidden trimmed)
             let root = (assignRe.Match trimmed).Groups.[1].Value
             match compileRunEcho candidate (Some root) None with
-            | None -> ()                                    // static/unknown/etc â†’ not kept
+            | None -> ()                                    // static/unknown/etc -> not kept
             | Some (lines, printed, _) ->
                 if printed = 0 then printfn "(ok)"          // e.g. array reassign isn't auto-printed
                 session.Clear()
@@ -701,9 +640,8 @@ let replLoop () : int =
         else
             // Bare expression: `blade run` semantics only print top-level
             // BINDINGS, so wrap the expression in a transient one, run, and
-            // echo its value â€” WITHOUT keeping it. The session (and diff
-            // baseline) stay untouched, so re-entering the same expression
-            // echoes again rather than diffing to silence.
+            // echo its value WITHOUT keeping it, so re-entering the same
+            // expression echoes again rather than diffing to silence.
             let curInfo = lazy (ReplTypes.sessionInfo (String.concat "\n\n" session + "\n"))
             let asFuncName =
                 if identRe.IsMatch trimmed then
@@ -769,8 +707,7 @@ let replLoop () : int =
             lastLines <- [||]
             printfn "(session cleared)"
         | line when buffer.Count = 0 && line.Trim() = ":show" ->
-            // Hide the synthetic `let __assignâ€¦ = <reassignment>` wrappers the
-            // assignment path appends â€” the user sees only what they typed.
+            // Hide the synthetic `let __assign... = <reassignment>` wrappers the assignment path appends.
             let visible =
                 session
                 |> Seq.filter (fun s -> bindingName s |> Option.forall (fun n -> not (n.StartsWith "__assign")))
@@ -786,12 +723,8 @@ let replLoop () : int =
     0
 
 /// End-to-end CLI smoke test: compile and run a one-line .edgi from a FRESH
-/// temp directory containing nothing but the source file. The test runners
-/// deploy the C++ runtime headers into their own output dirs before compiling,
-/// so they cannot catch a compileToExe that forgets to â€” historically
-/// `blade run` failed with "nested_array_utilities.hpp: No such file or
-/// directory" unless the source happened to sit next to the headers. This is
-/// the only block that exercises the user-facing path from a bare directory.
+/// temp directory -- the only block exercising the user-facing path from a
+/// bare directory (other runners pre-deploy runtime headers, masking a compileToExe that forgets to).
 let runCliSmokeTests () : TH.BlockResult =
     let blockName = "CLI Smoke"
     TH.printHeader "CLI Smoke Test (blade run from a fresh directory)"
@@ -818,9 +751,7 @@ let runCliSmokeTests () : TH.BlockResult =
                      record runTest TH.Pass ""
                  | Ok (code, output) ->
                      record runTest TH.Fail (sprintf "exit %d, output: %s" code (output.Trim())))
-                // Non-verbose compiles must clean up after themselves: the
-                // intermediate .cpp and the deployed runtime headers go away,
-                // leaving the directory with only source + executable.
+                // Non-verbose compiles must clean up: only source + executable remain.
                 let leftovers =
                     Directory.GetFiles(tmpDir)
                     |> Array.map Path.GetFileName
@@ -870,14 +801,10 @@ let checkFile (filePath: string) (strictPins: bool) : int =
             | Ok _ ->
                 match strictPinFailure strictPins useColor (Some sm) with
                 | Some rendered ->
-                    // Strict mode (Â§6.1(b)): the pin suggestions ARE the
-                    // failure. Their warning twins are dropped (same dedup rule
-                    // as `blade ide check`), so each suggestion is reported
-                    // exactly once, as an error. The old hand-rolled
-                    // message-text Set is gone: the twins are BL4010 BY
-                    // CONSTRUCTION — same code, same span, same text — so
-                    // filtering on the code is the exact same filter, minus the
-                    // string comparison.
+                    // Strict mode: the pin suggestions ARE the failure. Their
+                    // warning twins are dropped (same dedup rule as `blade ide
+                    // check`) so each is reported exactly once, as an error;
+                    // the twins are BL4010 by construction so filtering on the code is exact.
                     printTypeCheckWarnings useColor (Some sm) true
                     eprintfn "%s" rendered
                     1
@@ -896,9 +823,7 @@ let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (str
         match outputPath with
         | Some outPath ->
             File.WriteAllText(outPath, cppCode)
-            // Ship the runtime headers next to the emitted .cpp so it compiles
-            // as-is (`g++ file.cpp`, no -I flag) â€” its `#include`s use plain
-            // quotes and resolve relative to the source.
+            // Ship the runtime headers next to the emitted .cpp so `g++ file.cpp` compiles as-is (no -I flag needed).
             let outDir = Path.GetDirectoryName(Path.GetFullPath(outPath))
             CodeGen.deployRuntimeHeaders (if String.IsNullOrEmpty outDir then "." else outDir)
             if verbose then
@@ -908,18 +833,10 @@ let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (str
             printf "%s" cppCode
             0
 
-/// `--strict-pins` (Â§6.1(b)) regression block. The corpus harness runs .blade
-/// files with fixed compiler options, so a FLAG's behavior cannot be expressed
-/// as a corpus entry; this block drives the two CLI surfaces that own the gate
-/// (checkFile, and compileFile â€” the lane compile/emit/run all funnel through)
-/// against a temp file, in-process. No C++ toolchain involved: the gate fires
-/// at typecheck, before codegen.
-///
-/// The two programs are the corpus twins functions/026 (unpinned â†’ suggestion)
-/// and functions/029 (the suggested pin applied); kept inline so the flag test
-/// stays readable and independent of corpus renumbering. Console output is
-/// captured so a passing run stays quiet â€” and so the rendered text can be
-/// asserted on (substring "BL4010", which survives ANSI coloring).
+/// `--strict-pins` regression block. A corpus entry can't express a FLAG's
+/// behavior, so this drives checkFile and compileFile (which compile/emit/run
+/// funnel through) against a temp file in-process. Uses corpus twins
+/// functions/026 (unpinned -> suggestion) / functions/029 (pin applied), inline so the test survives corpus renumbering.
 let private runStrictPinTests () : TH.BlockResult =
     let blockName = "Strict Pins"
     TH.printHeader "Strict Pin Mode (--strict-pins: unpinned deduction = build failure)"
@@ -1012,16 +929,10 @@ let private runStrictPinTests () : TH.BlockResult =
       FailedNames = failedNames }
 
 /// Warning/suggestion SURFACING, end to end. Not expressible in the corpus:
-/// the load-bearing assertions drive `ide check --json` and the two console
-/// streams, neither of which any corpus harness touches (the diagnostics corpus
-/// calls `lowerDiag` directly and never renders; the value corpus compares
-/// program OUTPUT, and a warning changes no value).
-///
-/// The regression this locks: warnings and pin suggestions used to ride
-/// `typeCheck`'s Ok-only `string list`, so a file with ANY hard error silently
-/// lost every nudge the checker had already earned — on the CLI (S1) and in the
-/// editor JSON (S2). That is precisely the file an editor is looking at while
-/// you type.
+/// drives `ide check --json` and the two console streams, which no corpus
+/// harness touches (the diagnostics corpus never renders; the value corpus
+/// compares OUTPUT, and a warning changes no value). Locks warnings/pin
+/// suggestions surviving a file with a hard error, on both the CLI (S1) and editor JSON (S2).
 let private runSurfacingTests () : TH.BlockResult =
     let blockName = "Surfacing"
     TH.printHeader "Warning Surfacing (codes, streams, and survival of the error path)"
@@ -1029,22 +940,19 @@ let private runSurfacingTests () : TH.BlockResult =
     let record name outcome detail =
         TH.resultLine outcome name detail
         results.Add((name, outcome))
-    // The strict-pins `unpinned` twin (earns a BL4010 storage suggestion)...
+    // The strict-pins `unpinned` twin (earns a BL4010 storage suggestion).
     let unpinned =
         "function mymean(row) = reduce(row, (+)) / extents(row)\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
          let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
-    // ...plus an unrelated hard type error in a LATER declaration, so the
-    // checker records the suggestion and THEN fails. Order matters: the
-    // suggestion must already be on the channel when the error aborts.
+    // Plus an unrelated hard type error in a LATER declaration: the checker
+    // must record the suggestion before it fails on the later error.
     let errPlusWarn = unpinned + "let boom = nosuchthing + 1.0\n"
     let tmpDir = Path.Combine(Path.GetTempPath(), "blade_surfacing_" + Guid.NewGuid().ToString("N"))
     Directory.CreateDirectory(tmpDir) |> ignore
-    /// Run `f` with stdout and stderr captured SEPARATELY — strict-pins' own
-    /// `quietly` merges them into one writer, which cannot see which stream a
-    /// line went to, and "warnings go to stderr so stdout stays pipeable" is
-    /// exactly a claim about the split.
+    /// Run `f` with stdout and stderr captured SEPARATELY, so "warnings go to
+    /// stderr, stdout stays pipeable" can actually be asserted.
     let quietly2 (f: unit -> 'a) : 'a * string * string =
         let (swOut, swErr) = (new StringWriter(), new StringWriter())
         let (oldOut, oldErr) = (Console.Out, Console.Error)
@@ -1066,7 +974,7 @@ let private runSurfacingTests () : TH.BlockResult =
                           unpinned.Replace("function covariance(a, b) =",
                                            "function covariance(a, b) where comm(a, b) ="))
 
-        // --- 1. ide check --json, ERROR path: the suggestion survives (S2).
+        // 1. ide check --json, ERROR path: the suggestion survives (S2).
         let (code, out, _) = quietly2 (fun () -> Blade.Ide.ideCheck errPath)
         let name = "ide check --json: BL4010 survives a file with a hard error"
         if code = 1 && out.Contains "\"severity\":\"error\"" && out.Contains "\"code\":\"BL4010\"" then
@@ -1075,14 +983,14 @@ let private runSurfacingTests () : TH.BlockResult =
             record name TH.Fail
                    (sprintf "exit %d, json: %s" code (out.Trim()))
 
-        // --- 2. ...and so do the deduced facts (channel (f)) on that arm.
+        // 2. ...and so do the deduced facts (channel (f)) on that arm.
         let name = "ide check --json: deduced[] is populated on the error arm"
         if out.Contains "\"deduced\":[" && out.Contains "\"kind\":\"comm\"" then
             record name TH.Pass ""
         else
             record name TH.Fail (sprintf "json: %s" (out.Trim()))
 
-        // --- 3. Control: the pinned twin is clean and claims nothing.
+        // 3. Control: the pinned twin is clean and claims nothing.
         let (code, out, _) = quietly2 (fun () -> Blade.Ide.ideCheck pinnedPath)
         let name = "ide check --json: the pinned twin yields no BL4010 (exit 0)"
         if code = 0 && not (out.Contains "BL4010") then
@@ -1090,9 +998,8 @@ let private runSurfacingTests () : TH.BlockResult =
         else
             record name TH.Fail (sprintf "exit %d, json: %s" code (out.Trim()))
 
-        // --- 4. `check`: warnings are rendered diagnostics, and they are on
-        // STDERR. Both halves matter — the code proves the render, the empty
-        // stdout proves `blade check` stays pipeable.
+        // 4. `check`: warnings render as diagnostics on STDERR, keeping
+        // stdout ("OK") pipeable.
         let (code, out, err) = quietly2 (fun () -> checkFile unpinnedPath false)
         let name = "check: the warning renders as warning[BL4010] on stderr, not stdout"
         if code = 0 && err.Contains "warning[BL4010]" && not (out.Contains "BL4010")
@@ -1102,7 +1009,7 @@ let private runSurfacingTests () : TH.BlockResult =
             record name TH.Fail
                    (sprintf "exit %d, stdout: %s, stderr: %s" code (out.Trim()) (err.Trim()))
 
-        // --- 5. `check` on the erroring file still prints the warning (S1).
+        // 5. `check` on the erroring file still prints the warning (S1).
         let (code, _, err) = quietly2 (fun () -> checkFile errPath false)
         let name = "check: warnings print alongside the error instead of vanishing"
         if code = 1 && err.Contains "warning[BL4010]" && err.Contains "error[BL2001]" then
@@ -1110,7 +1017,7 @@ let private runSurfacingTests () : TH.BlockResult =
         else
             record name TH.Fail (sprintf "exit %d, stderr: %s" code (err.Trim()))
 
-        // --- 6. The compile lane agrees (compile/emit/run all funnel here).
+        // 6. The compile lane agrees (compile/emit/run all funnel here).
         let ((result: Result<string * string list, string>), _, err) =
             quietly2 (fun () -> compileFile errPath false false)
         let name = "compile lane: warnings print on the error arm too"
@@ -1119,22 +1026,14 @@ let private runSurfacingTests () : TH.BlockResult =
         | Error _ -> record name TH.Fail (sprintf "no warning on stderr: %s" (err.Trim()))
         | Ok _ -> record name TH.Fail "compiled instead of failing"
 
-        // --- 7-9. The stage-6a CERTIFICATE channels (BL4011's galilean twin
-        // BL4014, and the structured CertFacts feed behind `deduced[]`).
-        //
-        // These three drive the DRAIN, not the producer: each stages a channel
-        // entry by hand and asserts the surfacing code carries it to the right
-        // place, then resets. The inference passes that fill these channels for
-        // real live in the ML elaborator, which resets them on entry — so an
-        // end-to-end "write a boost-invariant function, check it" assertion
-        // cannot be written here; that direction is covered by the ml-equiv
-        // corpus SUGGEST pins. What is genuinely at risk in THIS file is a
-        // channel that gets filled and then read by nobody, and that is exactly
-        // what these catch.
+        // 7-9. The CERTIFICATE channels (BL4011's galilean twin BL4014, and
+        // the CertFacts feed behind `deduced[]`). Test the DRAIN, not the
+        // producer: stage a channel entry by hand, assert it surfaces, reset
+        // -- catches a channel filled and then read by nobody.
         let testSpan : Blade.Ast.Span =
             { StartLine = 2; StartCol = 1; EndLine = 2; EndCol = 9; File = None }
 
-        // --- 7. The code renders. Channel-independent: the diagnostic is built
+        // 7. The code renders. Channel-independent: the diagnostic is built
         // directly, so this holds even with both inference passes absent.
         let galMsg =
             "function 'drift' judges boost-invariant with velocity parameter(s) u: \
@@ -1149,10 +1048,9 @@ let private runSurfacingTests () : TH.BlockResult =
         else
             record name TH.Fail (sprintf "rendered: %s" (rendered.Trim()))
 
-        // --- 8. GalCertSuggestions reaches the shared warning-diagnostic
-        // assembly (the one every CLI lane prints through), and does so under
-        // `skipPins` too: a certificate owns no storage decision, so
-        // --strict-pins must not swallow it the way it swallows BL4010.
+        // 8. GalCertSuggestions reaches the shared warning-diagnostic assembly
+        // and survives `skipPins`: a certificate owns no storage decision, so
+        // --strict-pins must not swallow it like it swallows BL4010.
         Blade.ML.Galilean.GalCertSuggestions.reset ()
         Blade.ML.Galilean.GalCertSuggestions.add galMsg testSpan
         let drained = Blade.Lowering.typeCheckWarningDiagnostics false
@@ -1173,10 +1071,9 @@ let private runSurfacingTests () : TH.BlockResult =
                    (sprintf "codes drained: %s"
                             (drainedStrict |> List.map (fun d -> d.Code) |> String.concat ","))
 
-        // --- 9. CertFacts reaches `deduced[]` as STRUCTURED data, through the
-        // real mapping and the real renderer. Both disciplines, because they
-        // take the same renderer arm and a typo in either kind string would
-        // silently drop `name` (the group) into the pair-fields branch.
+        // 9. CertFacts reaches `deduced[]` as STRUCTURED data through the real
+        // mapping and renderer. Both disciplines share a renderer arm, so a
+        // typo in either kind string would silently drop `name` (the group).
         Blade.ML.Equiv.CertFacts.reset ()
         Blade.ML.Equiv.CertFacts.add
             { Owner = "rotate"; Discipline = "equiv"; Group = "O3"; Deps = ["helper"; "inner"] }
@@ -1209,17 +1106,15 @@ let private runSurfacingTests () : TH.BlockResult =
       FailedNames = failedNames }
 
 /// Run the full suite, appending the CLI smoke block and the strict-pin block
-/// (which live in this file â€” see runAllTestsFullWith's doc comment for why
-/// they're passed in).
+/// (which live in this file -- see runAllTestsFullWith's doc comment for why they're passed in).
 let private runFullSuite opts =
     runAllTestsFullWith [runCliSmokeTests; runStrictPinTests; runSurfacingTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 let private dispatchTest (rest: string list) : int =
     // `--omp` / `--cuda` / `--timing` / `--mpi` / `--interp` / `--diff-oracle`
-    // opt the corresponding blocks into the full suite; they may appear in any
-    // order and combine. Each has a standalone arm below too; the flag form
-    // exists so an opt-in block still lands in the grand total.
+    // opt the corresponding blocks into the full suite, in any combination;
+    // each also has a standalone arm below.
     let isSuiteFlag f =
         f = "--omp" || f = "--cuda" || f = "--timing" || f = "--mpi"
         || f = "--interp" || f = "--diff-oracle"
@@ -1235,88 +1130,66 @@ let private dispatchTest (rest: string list) : int =
     | [ "--ir-only" ] -> runAllTests ()
     | [ "--gen" ] -> runAllTestsGenOnly ()
     | [ "strict-pins" ] | [ "strictpins" ] ->
-        // The --strict-pins CLI gate (Â§6.1(b)) standalone. In-process, no
-        // toolchain; also part of the full suite.
+        // The --strict-pins CLI gate standalone. In-process, no toolchain; also part of the full suite.
         let failed = (runStrictPinTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "surfacing" ] ->
-        // Warning/suggestion surfacing: codes, streams, and survival of the
-        // checker's error path. In-process, no toolchain; also in the full suite.
+        // Warning/suggestion surfacing: codes, streams, and survival of the checker's error path.
         let failed = (runSurfacingTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "linalg" ] ->
-        // LinAlg dispatch emission (Phases 5 / 5b / 5c): gram/matmul/dot/gemv
-        // route to `blade_linalg::` when the BLAS gate is on and to Blade's own
-        // loops when it is off, the shim header is included exactly when a route
-        // fires, and the routing policy table matches what it documents. Pure
-        // codegen string checks; also part of the full suite.
-        //
-        // Plus (Phase 5d) the shim's runtime contiguity probe, which emitted
-        // text cannot reach: cpp/linalg_probe_tests.cpp pins that the n = 2
-        // packed-symmetric skeleton is REFUSED rather than handed to BLAS one
-        // cell past its pool. That arm needs g++ and skips without it, so the
-        // emission arm above stays the toolchain-free part of the verb.
+        // gram/matmul/dot/gemv route to blade_linalg:: when the BLAS gate is
+        // on, else Blade's own loops; shim inclusion, routing policy table.
+        // Plus the runtime contiguity probe (needs g++): n=2 packed-symmetric
+        // must be REFUSED, not handed to BLAS past its pool.
         let emitFailed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
         let probeFailed = (Blade.Tests.LinAlgTests.runLinAlgProbeTests ()).Failed
         if emitFailed + probeFailed = 0 then 0 else 1
     | [ "lapack" ] ->
-        // Eigensolver dispatch (Phase 6 / Round B2): `math.eigh` routes to
-        // `blade_lapack::blade_eigh_{packed,dense}_{s,d,c,z}` when the LAPACK
-        // gate is on and NO explicit sweeps budget was given, and elaborates to
-        // the synthesized cyclic-Jacobi source otherwise; the mixed-element
-        // tuple a complex operand produces (Q complex, LAM real); the
-        // dependency-surface separation from the BLAS header; and the
-        // `inferEigh` rejections, including the complex-symmetric row LAPACK has
-        // no routine for. Pure codegen string checks — no toolchain, no LAPACK
-        // runtime — so it always runs; also part of the full suite.
+        // math.eigh routes to blade_lapack::blade_eigh_{packed,dense}_{s,d,c,z}
+        // when the LAPACK gate is on with no explicit sweeps budget, else the
+        // cyclic-Jacobi source; complex tuple typing; BLAS/LAPACK dependency
+        // separation; inferEigh rejections (e.g. complex-symmetric).
         let failed = (Blade.Tests.LapackTests.runLapackEmissionTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "normalize" ] ->
-        // IR-level F# unit tests for the type normalizer. Runs in-process,
-        // no Blade source pipeline involved.
+        // IR-level F# unit tests for the type normalizer. No Blade source pipeline.
         let failed = (runNormalizeTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "unify" ] ->
-        // TypeCheck-level F# unit tests for the unify Â§5.3 fast path.
-        // Constructs IRType values directly and calls unify; no Blade
-        // source pipeline.
+        // TypeCheck-level F# unit tests for the unify fast path: constructs
+        // IRType values directly and calls unify. No Blade source pipeline.
         let failed = (runUnifyTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "validate-arrow" ] ->
         // IR-level F# unit tests for the validateArrowShape gate at
-        // mkVirtualArrayArrow entry. Constructs IRType values directly;
-        // no Blade source pipeline.
+        // mkVirtualArrayArrow entry. No Blade source pipeline.
         let failed = (runValidateArrowTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "type-structure" ] ->
-        // Type-level structural assertions on lowered Blade source: asserts the
-        // deduced IR type (rank, per-group arity+symmetry, element type) of named
-        // bindings via Blade's own matchesTypePattern relation. No codegen/run.
+        // Type-level structural assertions on lowered Blade source: deduced IR
+        // type (rank, per-group arity+symmetry, elem type) via matchesTypePattern. No codegen/run.
         let failed = (Blade.Tests.TypeStructure.runTypeStructureTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "attrs" ] ->
-        // Phase B: IR-level F# unit tests for the exprAttrs bottom-up
-        // attribute computation. Constructs IR fragments directly and
-        // compares actual vs. expected attribute sets. No Blade source
-        // pipeline.
+        // IR-level F# unit tests for the exprAttrs bottom-up attribute
+        // computation. No Blade source pipeline.
         let failed = (runAttrsTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "subst" ] ->
-        // Phase C Step 2: F# unit tests for the contains-substitution
-        // mechanism in exprToCpp. Constructs IR fragments, renders with
-        // populated and empty SubstMaps, asserts on the resulting C++
-        // string. No Blade source pipeline.
+        // F# unit tests for the contains-substitution mechanism in exprToCpp:
+        // renders IR fragments with populated and empty SubstMaps. No Blade source pipeline.
         let failed = (runCodeGenSubstTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "shape" ] ->
-        // F# unit tests for the canonical ExprShape traversal (Â§3.2):
+        // F# unit tests for the canonical ExprShape traversal:
         // childrenOf/rebuildWith round-trips, mapIRExpr identity, and
         // collectVarRefsIR completeness. No Blade source pipeline.
         let failed = (Blade.Tests.Shape.runShapeTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "diff-oracle" ] ->
-        // Phase 4 differential gate: this binary vs the pinned ./oracle build
-        // over the dense corpus slice â€” identical printed VALUES required.
+        // Differential gate: this binary vs the pinned ./oracle build over
+        // the dense corpus slice -- identical printed VALUES required.
         let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" Blade.Tests.DiffOracle.denseSlice).Failed
         if failed = 0 then 0 else 1
     | [ "diff-oracle"; cat ] ->
@@ -1324,9 +1197,8 @@ let private dispatchTest (rest: string list) : int =
         let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" [cat]).Failed
         if failed = 0 then 0 else 1
     | [ "interp" ] ->
-        // Interpreter differential gate: the tree-walking IR interpreter vs the
-        // compiled binary over the supported corpus slice â€” byte-identical
-        // normalized stdout required. Slice grows per interpreter milestone.
+        // Interpreter differential gate: tree-walking IR interpreter vs the
+        // compiled binary over the supported corpus slice -- byte-identical normalized stdout required.
         let failed = (Blade.Tests.InterpDiff.runInterpDiffTests Blade.Tests.InterpDiff.currentSlice).Failed
         if failed = 0 then 0 else 1
     | [ "interp"; cat ] ->
@@ -1334,8 +1206,7 @@ let private dispatchTest (rest: string list) : int =
         let failed = (Blade.Tests.InterpDiff.runInterpDiffTests [cat]).Failed
         if failed = 0 then 0 else 1
     | [ "spans" ] ->
-        // Error-location tests (Â§3.4 / Phase 2 gate): deliberately broken
-        // sources, asserting the reported line. No C++ pipeline.
+        // Error-location tests: deliberately broken sources, asserting the reported line. No C++ pipeline.
         let failed = (Blade.Tests.Spans.runSpanTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "diagnostics" ] ->
@@ -1343,258 +1214,170 @@ let private dispatchTest (rest: string list) : int =
         // (broken sources with pinned codes/spans). No C++ pipeline.
         let core = (Blade.Tests.DiagnosticsCore.runDiagnosticsCoreTests ()).Failed
         let corpus = (Blade.Tests.DiagCorpus.runDiagCorpusTests ()).Failed
-        // Stage-6a BL4011 suggestions: pinned (and pinned-ABSENT) over the
-        // ml-equiv corpus. A warning channel, so it has no home in the value
-        // corpus; it rides here with the other coded-diagnostic assertions.
+        // BL4011 suggestions: pinned (and pinned-ABSENT) over the ml-equiv corpus.
         let certSuggest = (Blade.Tests.DiagCorpus.runCertSuggestTests ()).Failed
         if core + corpus + certSuggest = 0 then 0 else 1
     | [ "rep-differential" ] | [ "repdifferential" ] ->
-        // Phase-B3 deduction parity gate (retired equivariance-in-types plan): the
-        // typed rep-status deduction vs the stage-6a seam inference, proposal
-        // by proposal over the ml-equiv corpus. In-process, no C++ pipeline;
-        // also part of the full suite, where a red differential blocks the run.
+        // Deduction parity gate: the typed rep-status deduction vs the seam
+        // inference, proposal by proposal over the ml-equiv corpus. In-process, no C++ pipeline; also part of the full suite.
         let failed = (Blade.Tests.RepDifferential.runRepDifferentialTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "rep-check" ] | [ "repcheck" ] ->
-        // Phase-C1 declared-certificate agreement gate: the typed walker's
-        // SECOND OPINION on every certificate the elaboration seam already
-        // checked. Asserts zero disagreements over the ml-equiv corpus (a
-        // disagreement is a compiler bug, not a user error), prints the
-        // confirm/abstain split, and self-tests the disagree path and the C2
-        // engine-hook slot. In-process, no C++ pipeline.
+        // Declared-certificate agreement gate: the typed walker's SECOND
+        // OPINION on every certificate the elaboration seam already checked.
+        // Zero disagreements over the ml-equiv corpus (else a compiler bug).
         let failed = (Blade.Tests.RepCheckAgreement.runRepCheckAgreementTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "rep-reject" ] | [ "repreject" ] ->
-        // Phase-C3 REJECTION-PARITY census: the third gate, and the only one
-        // that looks at programs the compiler REFUSES. Measures, for every
-        // ml-equiv reject-probe, what the typed walker would say if it were
-        // the checking authority — by shadowing the `ml.equiv` pin so the
-        // elaboration seam falls silent and the program reaches typecheck.
-        // Changes no checking behaviour; the assertions are the harness's own
-        // health plus the two directions that would be alarming.
+        // Rejection-parity census: the only gate that looks at REFUSED
+        // programs. For every ml-equiv reject-probe, measures what the typed
+        // walker would say by shadowing the `ml.equiv` pin so it reaches typecheck.
         let failed = (Blade.Tests.RepRejectCensus.runRepRejectCensusTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "gal-layer" ] | [ "gallayer" ] ->
-        // MEASUREMENT ONLY (retired galilean-layer census): the GALILEAN
-        // discipline's layer question — what would a typecheck-resident walker
-        // conclude about every galilean certificate in the corpus, on the
-        // programs the seam accepts AND on the programs it refuses. Builds an
-        // experimental typed judgment inside the test assembly; changes no
-        // checking behaviour and is deliberately NOT part of the full suite.
+        // MEASUREMENT ONLY: what a typecheck-resident walker would conclude
+        // about every galilean certificate in the corpus, accepted and
+        // refused alike. Changes no checking behaviour; not in the full suite.
         let failed = (Blade.Tests.GalLayerCensus.runGalLayerCensusTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "perm-layer" ] | [ "permlayer" ] ->
-        // MEASUREMENT ONLY (retired perm-layer census): the PERM discipline's
-        // layer question, plus the first-ever perm INFERENCE experiment. Perm
-        // has no incumbent inference, so the differential degenerates to its
-        // false-positive half: every proposal is gated by writing the pin back
-        // into the source and running the SHIPPED SEAM CHECKER on it. Builds an
-        // experimental typed judgment inside the test assembly; changes no
-        // checking behaviour and is deliberately NOT part of the full suite.
+        // MEASUREMENT ONLY: the PERM discipline's layer question, plus the
+        // first perm INFERENCE experiment (writes the pin back into the
+        // source, runs the shipped seam checker). Not in the full suite.
         let failed = (Blade.Tests.PermLayerCensus.runPermLayerCensusTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "oracles" ] ->
-        // Phase 0.2 review block: the differential-harness oracles checked
-        // against hand-computed / analytic values. No Blade source pipeline.
+        // Differential-harness oracles checked against hand-computed / analytic values.
         let failed = (Blade.Tests.OracleReview.runOracleTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "orbrank" ] | [ "orb-rank" ] ->
-        // Phase 2 (pure-function layer) of docs/plan-orbidx-bijections.md: the
         // OrbIdx cardinality fold, canonicalizer, segment-peeled traversal
-        // stream and arithmetic rank/unrank pair (src/OrbRank.fs), pinned
-        // against a brute-force canonicalization of every raw tuple as a SET
-        // and as an ORDER — §3's hard constraint is that rank order = the §2
-        // nest's visit order, and a read->write roundtrip cannot catch an order
-        // mismatch. Plus the hand-unrolled depth-2 E/B/A nest, the depth-1
-        // triangular-offset anchors, and the int64 wall. Pure integer,
-        // in-process, no Blade source pipeline.
+        // stream, and rank/unrank pair (src/OrbRank.fs), pinned against
+        // brute-force canonicalization as SET and ORDER (a read->write roundtrip can't catch an order mismatch).
         let failed = (Blade.Tests.OrbRankReview.runOrbRankTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "sympower" ] | [ "sympower-tables" ] ->
-        // Stage 2b-i review block: the T_{j,l} Sym-power occurrence tables
-        // (SymPowerTables.fs) — exact rational kernel/Gram pins, the derived
-        // realization phase rule, bit-pins, and the extended realCG
-        // completeness pins. In-process, no Blade source pipeline.
+        // T_{j,l} Sym-power occurrence tables (SymPowerTables.fs): exact
+        // rational kernel/Gram pins, the realization phase rule, realCG completeness.
         let failed = (Blade.Tests.SymPowerTablesReview.runSymPowerTablesTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "polyoracle" ] | [ "poly-oracle" ] ->
-        // Stage 2b-iii oracle block: the Sym^k label basis checked against
-        // isotypic projectors built by an independent Casimir-Lagrange route
-        // (exact integer/rational, no SymPowerTables exact layer), plus the
-        // k = 2 value-level M-pin vs stage 1. In-process, no C++ pipeline.
+        // Sym^k label basis checked against isotypic projectors from an
+        // independent Casimir-Lagrange route (exact integer/rational).
         let failed = (Blade.Tests.PolyOracleReview.runPolyOracleTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "lietables" ] | [ "lie-tables" ] ->
-        // Stage 6c oracle block: the exact so(3) generator tables and the
-        // radical-vector Lie discharger (MLLieDischarge.fs). THE EXP-PIN is
-        // the keystone — float-assemble each table, exponentiate, and compare
-        // against the real Wigner action fit from an INDEPENDENT
-        // transcription of the solid harmonics, which is the only thing that
-        // rules out convention drift between the symbolic tables and the
-        // numeric action the shipped certificates are about. Then the exact
-        // algebra (skew-symmetry per radical component, brackets, Casimir,
-        // l <= 4), the known-answer verdicts (the triple-product triple, the
-        // |x|^2·x thesis pin), three negative controls, and the
-        // composition-vs-engine differential. In-process, no C++ pipeline.
+        // Exact so(3) generator tables and the radical-vector Lie discharger
+        // (MLLieDischarge.fs): assemble/exponentiate each table, compare
+        // against the real Wigner action fit from solid harmonics, plus exact
+        // algebra (skew-symmetry, brackets, Casimir) and negative controls.
         let failed = (Blade.Tests.LieTablesReview.runLieTablesTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "permspec" ] | [ "perm-spec" ] ->
-        // Stage 5a-i review block: the Sn permutation-module counting layer
-        // (MLPermSpec.fs) — RGS partition enumeration against the Stirling
-        // recurrence and against an independently coded block-insertion
-        // enumerator, the witness-unitriangularity certificate (strict half
-        // tested explicitly: it is the numerical shadow of the Coq order
-        // keystone), and the perm_weight_dim / perm_bias_dim sizing rules.
-        // Pure integer, in-process, no Blade source pipeline.
+        // Sn permutation-module counting layer (MLPermSpec.fs): RGS partition
+        // enumeration vs the Stirling recurrence and an independent
+        // enumerator, witness-unitriangularity, perm_weight/bias_dim sizing.
         let failed = (Blade.Tests.PermSpecReview.runPermSpecTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "permoracle" ] | [ "perm-oracle" ] ->
-        // Stage 5a-ii oracle block: the coarsening-indicator basis checked for
-        // COMPLETENESS against the exact rational Reynolds projector
-        // (1/N!)Sum_sigma M(sigma)^{tensor m} - B(B^T B)^-1 B^T = P_ref
-        // ENTRYWISE over Q, with the Gram closed form N^b(join) predicted by an
-        // independent union-find join. BigInteger fractions throughout: no
-        // float, no tolerance, no rank decision. This is the half
-        // BladePartition.v cites rather than proves. In-process, no C++
-        // pipeline.
+        // Coarsening-indicator basis checked for COMPLETENESS against the
+        // exact rational Reynolds projector over Q; Gram closed form from an
+        // independent union-find join. BigInteger fractions, no float/tolerance.
         let failed = (Blade.Tests.PermOracleReview.runPermOracleTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "structidx" ] | [ "struct-idx" ] ->
-        // Stage C1 review block: the constrained-record COUNTING layer
-        // (StructIdxSpec.fs) - box enumeration over the per-field INCLUSIVE
-        // bounds with the two-route certificate (flat filter vs arrow-style
-        // heads filter, compared as set AND as order, since order agreement is
-        // what catches an offset bug), the CGm112 anchor and its 3/7/9
-        // lo-sweep against an independent triple-loop dense count, the fence
-        // and idx_card(R) end to end through resolveStatics, and the negative
-        // controls: box cap, non-Int field, unbounded field, non-static
-        // struct, and the fuel bomb with its witness cell. Also pins the
-        // shared StaticEval fold budget (depth vs steps, the wide shallow
-        // fold, the idx_card re-entrancy cycle). Pure integer, in-process,
-        // no Blade source pipeline.
+        // Constrained-record COUNTING layer (StructIdxSpec.fs): box
+        // enumeration over per-field INCLUSIVE bounds with a two-route
+        // certificate (flat filter vs arrow-style heads filter, set AND
+        // order), the CGm112 anchor sweep, idx_card(R) via resolveStatics.
         let failed = (Blade.Tests.StructIdxSpecReview.runStructIdxSpecTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "structidxoracle" ] | [ "struct-idx-oracle" ] ->
-        // Stage C1 oracle block: an INDEPENDENTLY CODED recursive per-field
-        // enumerator over the same solution sets, compared against
-        // StructIdxSpec.enumerateBox as SET and as ORDER (the two failure
-        // modes reported separately), with hand-written lex tables so two
-        // agreeing programs can still be caught being wrong together.
+        // Independently coded recursive per-field enumerator over the same
+        // solution sets, compared against StructIdxSpec.enumerateBox as SET and ORDER.
         let failed = (Blade.Tests.StructIdxOracle.runStructIdxOracleTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "pgspec" ] | [ "pg-spec" ] ->
-        // Stage 5b-0 review block: the point-group counting layer
-        // (MLPointSpec.fs) - the frozen {C4, D4} tables and their integrity
-        // certificate (closure vs declared order, orthogonality, the FS
-        // indicators nu = 2 - e, J^2 = -Id and J-generator commutation, the
-        // R-Burnside trap sum d^2/e = |G|), the 9-vs-5 FS contrast that is
-        // stage 5b's thesis, and the TWIN PIN of the generic e-weighted core
-        // against MLSpec.homDim / homBlocks on a 15-spec sweep. Pure integer,
-        // in-process, no Blade source pipeline.
+        // Point-group counting layer (MLPointSpec.fs): frozen {C4, D4} tables
+        // and their integrity certificate (closure vs declared order,
+        // orthogonality, FS indicators, R-Burnside trap sum), 9-vs-5 FS
+        // contrast, generic e-weighted core vs MLSpec.homDim/homBlocks (15-spec sweep).
         let failed = (Blade.Tests.PointSpecReview.runPointSpecTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "pgoracle" ] | [ "pg-oracle" ] ->
-        // Stage 5b-0 oracle block: the emitted point-group Hom basis ([Id] at
-        // FS-real cells, [Id, J] at FS-complex ones) checked for COMPLETENESS
-        // against the exact rational Reynolds projector
-        // (1/|G|)Sum_g rho_W(g) M rho_V(g)^T - B(B^T B)^-1 B^T = P_ref
-        // ENTRYWISE over Q, with the Gram closed form d*I_e per cell. Three
-        // negative controls run live: a dropped J column (trace deficit one per
-        // affected cell), the naive e = 1 sizing formula, and a spurious
-        // diag(1,-1) End column that dies at R90. BigInteger fractions
-        // throughout: no float, no tolerance. In-process, no C++ pipeline.
+        // Emitted point-group Hom basis checked for COMPLETENESS against the
+        // exact rational Reynolds projector over Q, Gram closed form d*I_e
+        // per cell, three negative controls. BigInteger fractions throughout.
         let failed = (Blade.Tests.PgOracleReview.runPgOracleTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "alloc" ] ->
         // Standalone C++ runtime-layout tests for the contiguous-backing
-        // allocate<>. Compiles + runs cpp/alloc_layout_tests.cpp against the
-        // shipped headers. Verifies contiguity/cardinality invariants the
-        // value-checking Blade tests cannot catch. No Blade source pipeline.
+        // allocate<>: contiguity/cardinality invariants value-checking Blade tests cannot catch.
         let failed = (Blade.Tests.AllocTests.runAllocLayoutTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "orbwreath" ] | [ "orb-wreath" ] ->
         // Standalone C++ wreath-class storage tests: segment-peeled traversal
-        // order, cardinality fold, rank/unrank bijection, canon signs,
-        // overflow walls. Compiles + runs cpp/orb_wreath_tests.cpp against the
-        // shipped orbit_wreath_utilities.hpp. No Blade source pipeline.
+        // order, cardinality fold, rank/unrank bijection, canon signs, overflow walls.
         let failed = (Blade.Tests.OrbWreathTests.runOrbWreathTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "omp-pragma" ] ->
-        // Pure codegen-string checks: a `where omp(...)` clause must reach the
-        // generated C++ as a pragma for every kernel spelling, and for no
-        // unannotated one. No toolchain needed, so this also runs in the
-        // default suite (unlike omp-coverage below).
+        // Codegen-string checks: `where omp(...)` reaches C++ as a pragma for
+        // every kernel spelling, none for unannotated ones. No toolchain needed.
         let failed = (Blade.Tests.OmpTests.runOmpPragmaTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "omp-reduce" ] ->
-        // Comm-licensed parallel reductions (Phase 2): compile the omp and
-        // serial spellings of the same fold, run both, and diff the values;
-        // plus the Path-B determinism and collapse(2) compile gates. Needs g++;
-        // skips cleanly without it.
+        // Comm-licensed parallel reductions: compile omp and serial spellings
+        // of the same fold, diff values; Path-B determinism, collapse(2) gates. Needs g++.
         let failed = (Blade.Tests.OmpTests.runOmpReduceTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "omp-coverage" ] ->
-        // OpenMP thread-coverage: generate representative loop programs with
-        // codegen test-mode instrumentation, compile -fopenmp, run with forced
+        // OpenMP thread-coverage: generate loop programs with codegen
+        // test-mode instrumentation, compile -fopenmp, run with forced
         // threads, verify emitted pragmas form genuine parallel regions.
         let failed = (Blade.Tests.OmpTests.runOmpCoverageTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "cli" ] ->
-        // CLI smoke: compile+run a one-line .edgi from a fresh temp directory
-        // via the user-facing compileToExe path (runtime-header deployment).
+        // CLI smoke: compile+run a one-line .edgi via the user-facing compileToExe path.
         let failed = (runCliSmokeTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "cuda" ] ->
-        // CUDA kernel block standalone (differential vs host-loop oracle).
-        // Skips cleanly when nvcc/GPU absent; on Windows run from the
-        // x64 Native Tools prompt so nvcc finds cl.exe.
-        let failed = (Blade.Tests.CudaTests.runCudaTests ()).Failed
+        // CUDA kernel block (differential vs host-loop oracle) plus cuBLAS
+        // swap-table verification. Skips without nvcc/GPU; on Windows run from x64 Native Tools prompt.
+        let failed =
+            (Blade.Tests.CudaTests.runCudaTests ()).Failed
+            + (Blade.Tests.CudaTests.runCublasSwapTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "mpi" ] ->
-        // MPI decomposition block standalone (differential vs serial oracle
-        // under mpiexec -n 1/2/4). Skips cleanly when g++ / -lmsmpi /
-        // mpiexec are absent.
+        // MPI decomposition block (differential vs serial oracle under
+        // mpiexec -n 1/2/4). Skips without g++ / -lmsmpi / mpiexec.
         let failed = (Blade.Tests.MpiTests.runMpiTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "timing" ] ->
-        // Differential timing: measure the (r!)^d speedup of comm-annotation
-        // and symmetric-type forms vs their dense equivalents. Reports ratios;
-        // warns (never fails) on a slow ratio. Requires g++.
+        // Differential timing: (r!)^d speedup of comm-annotation and
+        // symmetric-type forms vs dense. Warns (never fails) on a slow ratio.
         let failed = (Blade.Tests.Benchmarks.runDifferentialTimingTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "netcdf" ] ->
-        // NetCDF provider tests. Tests 1-6 run against a mock NcFile (pure,
-        // always run). Tests 7-8 ("Live Load", "Blade Program Import") need
-        // sample.nc in the working dir + libnetcdf, else they SKIP. Returns an
-        // exit code directly (not a BlockResult like the other blocks).
+        // NetCDF provider tests 1-6 run against a mock NcFile. Tests 7-8 need
+        // sample.nc + libnetcdf, else SKIP.
         Blade.Tests.NetcdfTests.runNetcdfTests ()
     | [ "zarr" ] ->
-        // Zarr provider tests. Hermetic: fixtures are generated on the fly
-        // (pure .NET file writes), so only the e2e compile+run blocks need
-        // g++ (and skip without it). Kept out of the default aggregate like
-        // netcdf; returns an exit code directly.
+        // Zarr provider tests. Hermetic (fixtures generated on the fly); only
+        // the e2e compile+run blocks need g++ and skip without it.
         Blade.Tests.ZarrTests.runZarrTests ()
     | [ "csv" ] ->
-        // CSV provider tests. Fully hermetic: fixtures are plain-text files
-        // written on the fly, so only the e2e compile+run blocks need g++
-        // (and skip without it). Kept out of the default aggregate like
-        // netcdf/zarr; returns an exit code directly.
+        // CSV provider tests. Fully hermetic; only the e2e compile+run blocks
+        // need g++ and skip without it.
         Blade.Tests.CsvTests.runCsvTests ()
     | [ "hybrid" ] ->
-        // Mixed-parallelism tests (MixedParallelismPlan.md): order-table
-        // parse checks + gate-off degradation run always; the mpi+omp
-        // differentials need mpiexec and skip without it. Opt-in like
-        // netcdf/zarr; returns an exit code directly.
+        // Mixed-parallelism tests: order-table parse + gate-off degradation
+        // run always; mpi+omp differentials need mpiexec and skip without it.
         Blade.Tests.HybridTests.runHybridTests ()
     | [ cat ] ->
         // Test a specific category: blade test basic, blade test loops, etc.
-        //
-        // The two "-errors" corpora are ENTIRELY negative — every source is
-        // meant to be refused by the front end — yet their `// TEST:` names
-        // carry no "(rejects)" marker for the runner to classify on, so run
-        // as-is each member would be reported as a failure. Mark them here.
-        // (InterpDiff.rejectOnlyCategories makes the same observation and
-        // hard-codes the same reading for the interpreter gate.)
+        // The two "-errors" corpora are ENTIRELY negative (every source is
+        // meant to be refused) but their `// TEST:` names carry no "(rejects)"
+        // marker for the runner to classify on -- mark them here.
         let asRejectProbes (tests: (string * string) list) =
             tests
             |> List.map (fun (name, source) ->
@@ -1645,17 +1428,15 @@ let private dispatchTest (rest: string list) : int =
         | None -> eprintfn "Unknown test category: %s" cat; 1
     | _ -> printUsage (); 1
 
-/// Top-level command dispatch (the body of the old Main.fs entry point).
+/// Top-level command dispatch.
 let private dispatchInner (args: string[]) : int =
     // Share the compiler version with the test-harness output helpers so every
     // block header reads "(vX.Y.Z)" consistently, including standalone runs.
     Blade.Tests.TestHarness.version <- compilerVersion
-    // `--strict-pins` (Â§6.1(b)) is a build MODE, not a positional argument, and
-    // it only means anything for the four verbs that own a typecheck. Strip it
-    // out of the argv the verb patterns match on so every existing arm shape
-    // (`compile f -o out`, `emit f -o out --verbose`, `run f --mpi 4`) accepts
-    // it in any position without a combinatorial explosion of match patterns.
-    // Left in place for every other verb, where it stays an unknown argument.
+    // `--strict-pins` is a build MODE, not a positional argument, and only
+    // means anything for the four verbs that own a typecheck. Strip it from
+    // the argv the verb patterns match on so every arm shape accepts it in
+    // any position; left in place for every other verb (unknown argument there).
     let strictPinVerb =
         args.Length >= 1 &&
         (match args.[0] with
@@ -1664,8 +1445,8 @@ let private dispatchInner (args: string[]) : int =
     let strictPins = strictPinVerb && Array.contains "--strict-pins" args
     let args = if strictPins then args |> Array.filter (fun a -> a <> "--strict-pins") else args
     match args with
-    // ---- User-facing commands ----
-    // `run <file> [--verbose] [--mpi N]` â€” flags in any order after the file.
+    // User-facing commands.
+    // `run <file> [--verbose] [--mpi N]` -- flags in any order after the file.
     | _ when args.Length >= 2 && args.[0] = "run" ->
         let rest = args.[1..] |> Array.toList
         let mutable verbose = false
@@ -1707,27 +1488,25 @@ let private dispatchInner (args: string[]) : int =
 
     | [| "repl" |] -> replLoop ()
 
-    // ---- Editor tooling (JSON on stdout; see Ide.fs) ----
+    // Editor tooling (JSON on stdout; see Ide.fs).
     | [| "ide"; "check"; "--json"; file |]
     | [| "ide"; "check"; file; "--json" |]
     | [| "ide"; "check"; file |] -> Blade.Ide.ideCheck file
 
-    // ---- Test commands ----
     | _ when args.Length >= 1 && args.[0] = "test" ->
         dispatchTest (args.[1..] |> Array.toList)
 
-    // ---- Legacy flags (backward compat) ----
+    // Backward-compat flags.
     | [||] -> runFullSuite defaultFullSuiteOptions
     | [| "--full" |] -> runFullSuite defaultFullSuiteOptions
     | [| "--help" |] -> printUsage (); 0
     | _ -> printUsage (); 1
 
-/// Top-level error boundary. Runs the real dispatch and turns any escaping
-/// exception into a rendered diagnostic on stderr (exit 1) instead of a raw
-/// .NET stack trace: a typed BladeDiagnosticException renders as itself, any
-/// other exception becomes a BL9001 internal compiler error (the .NET stack is
-/// shown only under --verbose). Successful and existing eprintfn error paths
-/// inside dispatchInner are untouched â€” this only catches what used to crash.
+/// Top-level error boundary: turns any escaping exception into a rendered
+/// diagnostic on stderr (exit 1) instead of a raw .NET stack trace. A typed
+/// BladeDiagnosticException renders as itself; any other exception becomes a
+/// BL9001 internal compiler error (.NET stack shown only under --verbose).
+/// Existing eprintfn error paths inside dispatchInner are untouched.
 let dispatch (args: string[]) : int =
     let verbose = args |> Array.contains "--verbose"
     try

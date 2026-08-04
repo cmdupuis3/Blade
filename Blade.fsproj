@@ -339,6 +339,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- BLADE_RESTRICT / BLADE_IVDEP: the portable spellings codegen emits.
+         Included by nested_array_utilities.hpp and blade_linalg_views.hpp, so
+         it must ship wherever they do. -->
+    <None Include="src/cpp/blade_portability.hpp">
+      <Link>cpp/blade_portability.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="src/cpp/nested_array_utilities.hpp">
       <Link>cpp/nested_array_utilities.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -387,10 +394,25 @@
       <Link>cpp/blade_linalg_views.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- DEVICE (cuBLAS) dispatch, Round D. Two halves selected by __CUDACC__:
+         extern "C" prototypes for the host .cpp (g++ cannot include the CUDA
+         headers) and definitions for the companion .cu that Build.fs writes
+         and nvcc compiles. -->
+    <None Include="src/cpp/blade_linalg_cuda.hpp">
+      <Link>cpp/blade_linalg_cuda.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <!-- Eigensolver dispatch (Phase 6 / Round B). LAPACK-only; included only
          by programs that emit a blade_lapack:: call. -->
     <None Include="src/cpp/blade_lapack.hpp">
       <Link>cpp/blade_lapack.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Round D's cuBLAS swap-table verification, compiled with nvcc and run
+         by Blade.Tests.CudaTests.runCublasSwapTests (`blade test cuda`).
+         Needs a real GPU, so it rides the opt-in CUDA phase. -->
+    <None Include="src/cpp/cublas_swap_tests.cu">
+      <Link>cpp/cublas_swap_tests.cu</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <!-- Runtime tests for the contiguity probe, compiled and run by

@@ -1,47 +1,36 @@
-/// Spectra-module elaboration: FFT and arity-polymorphic polyspectra as
-/// compile-time source synthesis (the MathElaborate mold).
+/// Spectra-module elaboration: FFT and arity-polymorphic polyspectra as compile-time source synthesis (the MathElaborate mold).
 ///
-/// Surface (reachable only through `import spectra [as <alias>]`). The ops
-/// read the DECLARED shape — this pass runs before type inference, and the
-/// generated transform bakes in the per-axis radix choice plus the twiddle
-/// and bit-reversal tables — so an array argument must carry an annotation.
-/// It may come from any of: a variable bound by an annotated `let` (module-
-/// level or block-local), an annotated parameter, a call of a function with
-/// an annotated array return type, or an ascription `(expr : Array<...>)`.
+/// Surface (reachable only through `import spectra [as <alias>]`). The ops read the DECLARED shape (this pass runs before
+/// type inference, and the generated transform bakes in the per-axis radix choice plus the twiddle and bit-reversal
+/// tables), so an array argument must carry an annotation: a variable bound by an annotated `let` (module-level or
+/// block-local), an annotated parameter, a call of a function with an annotated array return type, or an ascription.
 ///
 ///   sp.fft(x)             -- real x -> Array<Complex128 like Idx<n>> (unnormalized)
 ///   sp.ifft(X)            -- complex spectrum -> real signal (carries the 1/n)
-///   sp.power(x)           -- |FFT(x)|² per bin (real)
+///   sp.power(x)           -- |FFT(x)|^2 per bin (real)
 ///   sp.polyspec(x1,..,xk) -- order-k cross-polyspectrum, k = the CALL-SITE
 ///                            ARITY (2 cross-power, 3 bispectrum, 4 trispectrum):
-///                            P(f_0..f_{k-2}) = X1(f_0)···X_{k-1}(f_{k-2})
-///                                              · conj(Xk((Σf) mod n))
+///                            P(f_0..f_{k-2}) = X1(f_0)***X_{k-1}(f_{k-2}) * conj(Xk((Sum f) mod n))
 ///
-/// For each distinct (op, resolved shape/order) the elaborator synthesizes
-/// ONE Blade function (`__spectra_1`, ...) via Blade.Spectra.Decls; call
-/// sites rewrite to the generated names, deduped by fingerprint — every op
-/// at one n shares a single generated FFT.
+/// For each distinct (op, resolved shape/order) the elaborator synthesizes ONE Blade function (`__spectra_1`, ...) via
+/// Blade.Spectra.Decls; call sites rewrite to the generated names, deduped by fingerprint -- every op at one n shares a
+/// single generated FFT.
 ///
-/// Pipeline position: after ML/PPL/Math/Rand elaboration, BEFORE Grad
-/// expansion (TypeCheck.typeCheck).
+/// Pipeline position: after ML/PPL/Math/Rand elaboration, BEFORE Grad expansion.
 module Blade.Spectra.Elaborate
 
 open Blade.Ast
 open Blade.StaticEval
 open Blade.Spectra.Decls
 
-// ============================================================================
 // Module-level context (MathElaborate's contract)
-// ============================================================================
 
 /// A name -> declared array shape map (the module-level tables).
 type private Shapes = Map<string, TypeExpr * TypeExpr list>
 
-/// The LEXICAL scope threaded through the walker: parameters and block-local
-/// lets. A binder is recorded even when it is NOT array-annotated (as `None`),
-/// because it still SHADOWS an outer name — without that, an unannotated local
-/// `let f = ...` over a module-level annotated `f` would fall through to the
-/// module-level shape and silently transform at the wrong extents.
+/// The LEXICAL scope threaded through the walker: parameters and block-local lets. A binder is recorded even when it is NOT
+/// array-annotated (as `None`), because it still SHADOWS an outer name -- without that, an unannotated local `let f = ...`
+/// over a module-level annotated `f` would fall through to the module-level shape and silently transform at wrong extents.
 type private Scope = Map<string, (TypeExpr * TypeExpr list) option>
 
 type private Ctx = {
@@ -58,13 +47,9 @@ let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> =
         | _ -> acc) Map.empty
 
 /// Annotations may name a whole-array type alias (`type Field = Array<...>`;
-/// `let mut q: Field = ...`) — resolve top-level aliases (cycle-bounded)
-/// before matching for TyArray, so aliased transform arguments are found.
-///
-/// TyBounded is TRANSPARENT here, and only for diagnostic ORDER — see the
-/// twin arm in MathElaborate.resolveTop for the reasoning. A bound on an
-/// aggregate is the checker's rejection to make (BL4003); this pass runs
-/// first and must not pre-empt it with "no declared array shape".
+/// `let mut q: Field = ...`) -- resolve top-level aliases (cycle-bounded) before matching for TyArray. TyBounded is
+/// TRANSPARENT here, for diagnostic ORDER only (see MathElaborate.resolveTop): a bound on an aggregate is the checker's
+/// rejection to make (BL4003); this pass must not pre-empt it with "no declared array shape".
 let rec private resolveTop (aliases: Map<string, TypeExpr>) (fuel: int) (ty: TypeExpr) =
     match ty with
     | TyNamed (n, []) when fuel > 0 ->
@@ -89,9 +74,8 @@ let private collectArrays (aliases: Map<string, TypeExpr>) (decls: Located<Decl>
             | _ -> acc
         | _ -> acc) Map.empty
 
-/// Top-level functions whose annotated RETURN type is an array of static
-/// extents: `flux(...) -> RF` is as good a shape witness as an annotated let,
-/// so `sp.fft2(flux(u, 0.0, qr))` needs no staging binding.
+/// Top-level functions whose annotated RETURN type is an array of static extents: `flux(...) -> RF` is as good a shape
+/// witness as an annotated let, so `sp.fft2(flux(u, 0.0, qr))` needs no staging binding.
 let private collectFuncs (aliases: Map<string, TypeExpr>) (decls: Located<Decl> list) : Shapes =
     decls |> List.fold (fun acc d ->
         match d.Value with
@@ -101,8 +85,7 @@ let private collectFuncs (aliases: Map<string, TypeExpr>) (decls: Located<Decl> 
             | None -> acc
         | _ -> acc) Map.empty
 
-/// Params of a function / lambda, as a lexical scope seed. Unannotated params
-/// are recorded as shadowing entries (see Scope).
+/// Params of a function / lambda, as a lexical scope seed. Unannotated params are recorded as shadowing entries (see Scope).
 let private paramShapes (aliases: Map<string, TypeExpr>) (ps: (string * TypeExpr option) list) : Scope =
     ps |> List.fold (fun acc (nm, ty) -> Map.add nm (arrayAnnot aliases ty) acc) Map.empty
 
@@ -115,10 +98,8 @@ let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
     | TyNamed (name, []) ->
         match Map.tryFind name ctx.Aliases with
         | Some body -> resolveExtent ctx body
-        // Not a source alias: a provider axis path (`type Y = store.index.y`
-        // resolves its body to one of these). TypeEnv registers those types
-        // during type CHECKING, which is after this pass — so the extent comes
-        // from the store's metadata instead. Same answer, one stage earlier.
+        // Not a source alias: a provider axis path, registered by TypeEnv during type checking, so the extent comes
+        // from the store's metadata instead.
         | None -> providerIndexExtent ctx.Statics name
     | _ -> None
 
@@ -131,19 +112,13 @@ let private classifyElem (ty: TypeExpr) : ElemClass =
     | TyComplex128 | TyNamed ("Complex128", []) -> ElemComplex
     | _ -> ElemOther
 
-/// The steer appended to every "no declared shape here" rejection: the ops
-/// need (elem, extents) at compile time, and these are the four places a
-/// static annotation can come from.
+/// The steer appended to every "no declared shape here" rejection: the ops need (elem, extents) at compile time.
 let private shapeSources =
     "spectra ops read the DECLARED shape at compile time (the generated transform bakes in the per-axis radix choice and the twiddle tables), so the argument must carry an annotation"
 
-/// The declared shape AND element class of an op's array argument.
-///
-/// The shape must be statically known — the generated transform picks radix-2
-/// vs table DFT per axis and bakes twiddle/bit-reversal tables into the source
-/// — but it need not come from a module-level let. `scope` carries the lexical
-/// shapes in force here (annotated params and block-local annotated lets).
-/// The returned label is what the op-level messages quote.
+/// The declared shape AND element class of an op's array argument. The shape must be statically known (the generated
+/// transform picks radix-2 vs table DFT per axis and bakes twiddle/bit-reversal tables into the source), but it need not
+/// come from a module-level let. `scope` carries the lexical shapes in force here. The returned label is what messages quote.
 let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Result<string * ElemClass * int list, string> =
     let finish (label: string) ((elem, idxs): TypeExpr * TypeExpr list) =
         let extents = idxs |> List.map (resolveExtent ctx)
@@ -151,10 +126,9 @@ let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Resu
             Ok (label, classifyElem elem, extents |> List.map Option.get)
         else
             Error (sprintf "%s: every axis extent of %s must be statically known (Idx<n> directly or through aliases)" what label)
-    let noShape name = Error (sprintf "%s: '%s' has no declared array shape — %s" what name shapeSources)
+    let noShape name = Error (sprintf "%s: '%s' has no declared array shape -- %s" what name shapeSources)
     match e.Kind with
-    // A name: the innermost binder wins. A local binder with no array
-    // annotation shadows an outer one rather than falling through to it.
+    // A name: the innermost binder wins; a local binder with no array annotation shadows an outer one.
     | ExprKind.ExprVar name ->
         match Map.tryFind name scope with
         | Some (Some shape) -> finish (sprintf "'%s'" name) shape
@@ -163,23 +137,20 @@ let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Resu
             match Map.tryFind name ctx.Arrays with
             | Some shape -> finish (sprintf "'%s'" name) shape
             | None -> noShape name
-    // An ascription: the universal escape hatch for a shape the elaborator
-    // cannot otherwise see (it runs before type inference).
+    // An ascription: the universal escape hatch for a shape the elaborator cannot otherwise see.
     | ExprKind.ExprTyped (_, ty) ->
         match resolveTop ctx.Aliases 8 ty with
         | TyArray (elem, idxs) -> finish "the ascribed expression" (elem, idxs)
         | _ -> Error (sprintf "%s: the ascription must name an array type (Array<... like Idx<...>, ...>)" what)
-    // A call whose function has an annotated array return type. GUARD: in
-    // Blade arrays ARE functions, so `A(i)` and `f(x)` are the same node —
-    // exclude known array names so an index read stays on the error path
-    // instead of being misread as a call and given the array's own shape.
+    // A call whose function has an annotated array return type. GUARD: in Blade arrays ARE functions, so `A(i)` and `f(x)`
+    // are the same node -- exclude known array names so an index read stays on the error path.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _)
             when not (Map.containsKey f scope) && not (Map.containsKey f ctx.Arrays) ->
         match Map.tryFind f ctx.Funcs with
         | Some shape -> finish (sprintf "the result of '%s'" f) shape
-        | None -> Error (sprintf "%s: '%s' has no annotated array return type — %s" what f shapeSources)
+        | None -> Error (sprintf "%s: '%s' has no annotated array return type -- %s" what f shapeSources)
     | _ ->
-        Error (sprintf "%s: the array argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<... like Idx<...>, ...>)` — %s" what shapeSources)
+        Error (sprintf "%s: the array argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<... like Idx<...>, ...>)` -- %s" what shapeSources)
 
 /// A real rank-1 signal of static length.
 let private realSignal (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Result<int, string> =
@@ -189,10 +160,7 @@ let private realSignal (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Resu
         | ElemFloat, _ -> Error (sprintf "%s: %s must be rank-1 (Array<Float64 like Idx<n>>)" what label)
         | _, _ -> Error (sprintf "%s: %s must have Float64 elements (a real signal)" what label))
 
-// ============================================================================
 // Elaboration state (fingerprint-deduped generated decls)
-// ============================================================================
-
 type private ElabState = {
     mutable Counter: int
     mutable Made: Map<string, string>
@@ -214,8 +182,7 @@ let private ensure (st: ElabState) (key: string) (make: string -> Result<Functio
             st.Decls <- st.Decls @ [ decl ]
             n)
 
-/// ensure for a TOTAL decl builder — used to mint the shared per-n FFT
-/// before the ops that orchestrate it.
+/// ensure for a TOTAL decl builder -- used to mint the shared per-n FFT before the ops that orchestrate it.
 let private ensureT (st: ElabState) (key: string) (make: string -> FunctionDecl) : string =
     match ensure st key (fun n -> Ok (make n)) with
     | Ok n -> n
@@ -224,15 +191,12 @@ let private ensureT (st: ElabState) (key: string) (make: string -> FunctionDecl)
 let private ensureFft (st: ElabState) (n: int) : string =
     ensureT st (fingerprint "fft" (box n)) (fun nm -> fftDecl nm n)
 
-// ============================================================================
 // Op elaboration
-// ============================================================================
 
 let private opList = "fft, ifft, fft2, ifft2, power, polyspec"
 
-/// v1 cap on the polyspectrum output (the zeros literal and the C++
-/// initializer both scale with n^(k-1); steer before g++ meets a
-/// million-element initializer).
+/// Cap on the polyspectrum output (the zeros literal and the C++ initializer both scale with n^(k-1); steer before g++
+/// meets a million-element initializer).
 let private maxOutCells = 65536
 
 let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args: Expr list) : Result<Expr, string> =
@@ -240,7 +204,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
     | "fft", [xE] ->
         realSignal ctx scope "fft" xE |> Result.bind (fun n ->
             Ok (ensureFft st n) |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE]))))
-    | "fft", _ -> Error "fft: expected fft(X) — the unnormalized forward DFT of a real signal"
+    | "fft", _ -> Error "fft: expected fft(X) -- the unnormalized forward DFT of a real signal"
     | "ifft", [xE] ->
         arrayShape ctx scope "ifft" xE |> Result.bind (fun (label, elem, dims) ->
             match elem, dims with
@@ -249,37 +213,37 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                 |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE])))
             | ElemComplex, _ -> Error (sprintf "ifft: %s must be rank-1 (Array<Complex128 like Idx<n>>)" label)
             | _, _ -> Error (sprintf "ifft: %s must have Complex128 elements (ifft takes the complex spectrum; rebind the fft result with a full Array<Complex128 like Idx<n>> annotation first)" label))
-    | "ifft", _ -> Error "ifft: expected ifft(X) — real inverse synthesis of a complex spectrum (carries the 1/n)"
+    | "ifft", _ -> Error "ifft: expected ifft(X) -- real inverse synthesis of a complex spectrum (carries the 1/n)"
     | "fft2", [xE] ->
         arrayShape ctx scope "fft2" xE |> Result.bind (fun (label, elem, dims) ->
             match elem, dims with
             | ElemFloat, [r; c] ->
                 if r * c > maxOutCells then
-                    Error (sprintf "fft2: the %dx%d field has %d cells; v1 caps spectra outputs at %d (the generated initializers scale with it) — reduce the grid" r c (r * c) maxOutCells)
+                    Error (sprintf "fft2: the %dx%d field has %d cells; spectra outputs are capped at %d (the generated initializers scale with it) -- reduce the grid" r c (r * c) maxOutCells)
                 else
                     ensure st (fingerprint "fft2" (box (r, c))) (fun nm -> Ok (fft2Decl nm r c))
                     |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE])))
             | ElemFloat, _ -> Error (sprintf "fft2: %s must be rank-2 (Array<Float64 like Idx<r>, Idx<c>>)" label)
             | _, _ -> Error (sprintf "fft2: %s must have Float64 elements (a real 2-D field)" label))
-    | "fft2", _ -> Error "fft2: expected fft2(X) — the unnormalized forward 2-D DFT of a real rank-2 field"
+    | "fft2", _ -> Error "fft2: expected fft2(X) -- the unnormalized forward 2-D DFT of a real rank-2 field"
     | "ifft2", [xE] ->
         arrayShape ctx scope "ifft2" xE |> Result.bind (fun (label, elem, dims) ->
             match elem, dims with
             | ElemComplex, [r; c] ->
                 if r * c > maxOutCells then
-                    Error (sprintf "ifft2: the %dx%d spectrum has %d cells; v1 caps spectra outputs at %d (the generated initializers scale with it) — reduce the grid" r c (r * c) maxOutCells)
+                    Error (sprintf "ifft2: the %dx%d spectrum has %d cells; spectra outputs are capped at %d (the generated initializers scale with it) -- reduce the grid" r c (r * c) maxOutCells)
                 else
                     ensure st (fingerprint "ifft2" (box (r, c))) (fun nm -> Ok (ifft2Decl nm r c))
                     |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE])))
             | ElemComplex, _ -> Error (sprintf "ifft2: %s must be rank-2 (Array<Complex128 like Idx<r>, Idx<c>>)" label)
             | _, _ -> Error (sprintf "ifft2: %s must have Complex128 elements (ifft2 takes the complex spectrum; rebind the fft2 result with a full Array<Complex128 like Idx<r>, Idx<c>> annotation first)" label))
-    | "ifft2", _ -> Error "ifft2: expected ifft2(X) — real inverse synthesis of a rank-2 complex spectrum (carries the 1/(r*c))"
+    | "ifft2", _ -> Error "ifft2: expected ifft2(X) -- real inverse synthesis of a rank-2 complex spectrum (carries the 1/(r*c))"
     | "power", [xE] ->
         realSignal ctx scope "power" xE |> Result.bind (fun n ->
             let fftName = ensureFft st n
             ensure st (fingerprint "power" (box n)) (fun nm -> Ok (powerDecl nm n fftName))
             |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE]))))
-    | "power", _ -> Error "power: expected power(X) — |FFT(X)|² per bin"
+    | "power", _ -> Error "power: expected power(X) -- |FFT(X)|^2 per bin"
     | "polyspec", args when args.Length >= 2 && args.Length <= 4 ->
         let k = args.Length
         args
@@ -291,7 +255,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
             | [n] ->
                 let cells = pown n (k - 1)
                 if cells > maxOutCells then
-                    Error (sprintf "polyspec: the order-%d output at n=%d has %d cells; v1 caps the output at %d (the generated initializers scale with it) — reduce n or the order" k n cells maxOutCells)
+                    Error (sprintf "polyspec: the order-%d output at n=%d has %d cells; the output is capped at %d (the generated initializers scale with it) -- reduce n or the order" k n cells maxOutCells)
                 else
                     let fftName = ensureFft st n
                     ensure st (fingerprint "polyspec" (box (n, k))) (fun nm -> Ok (polyspecDecl nm n k fftName))
@@ -300,20 +264,16 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                 Error (sprintf "polyspec: all signals must share one static length (got %s)"
                                (ns |> List.map string |> String.concat ", ")))
     | "polyspec", args ->
-        Error (sprintf "polyspec: the argument count IS the polyspectrum order and must be 2..4 in v1 (got %d) — k=2 cross-power, k=3 bispectrum, k=4 trispectrum; the generator is order-generic, raise the cap when needed" args.Length)
+        Error (sprintf "polyspec: the argument count IS the polyspectrum order and must be 2..4 (got %d) -- k=2 cross-power, k=3 bispectrum, k=4 trispectrum; the generator is order-generic, raise the cap when needed" args.Length)
     | _ -> Error (sprintf "spectra: unknown op '%s' (available: %s)" op opList)
 
-// ============================================================================
 // Rewrite walker (MathElaborate's shape)
-// ============================================================================
-
 let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (scope: Scope) (e: Expr)
     : Result<Expr, string> =
     let r = rewriteExpr st ctx aliases scope
     // Same walk under an EXTENDED lexical scope (a binder came into view).
     let rIn (sc: Scope) = rewriteExpr st ctx aliases sc
-    // Every binder is recorded, annotated or not: an unannotated one must
-    // SHADOW an outer array of the same name, not fall through to it.
+    // Every binder is recorded, annotated or not: an unannotated one must SHADOW an outer array of the same name.
     let bind (sc: Scope) (nm: string) (ty: TypeExpr option) =
         Map.add nm (arrayAnnot ctx.Aliases ty) sc
     let bindPat (sc: Scope) (b: Binding) =
@@ -329,9 +289,8 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
         | None -> Ok None
         | Some x -> r x |> Result.map Some
     match e.Kind with
-    // Qualified spectra op: `alias.fft(...)` -> generated specialized
-    // function. Any alias-qualified call is claimed here so an unknown op
-    // gets a steering error instead of an unbound-module type error.
+    // Qualified spectra op: `alias.fft(...)` -> generated specialized function. Any alias-qualified call is claimed here
+    // so an unknown op gets a steering error instead of an unbound-module type error.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) }, args) when Set.contains alias aliases ->
         rList args |> Result.bind (fun args' -> elabOp st ctx scope op args')
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
@@ -357,8 +316,7 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
         rIn (bindPat scope binding) body
         |> Result.map (fun b' -> inheritSpan e (ExprLet ({ binding with Value = v' }, b'))))
     | ExprKind.ExprBlock (stmts, finalE) ->
-        // Statements thread the scope forward: an annotated `let` inside the
-        // block is a shape witness for everything after it.
+        // Statements thread the scope forward: an annotated `let` inside the block is a shape witness for what follows.
         let rec rStmt (sc: Scope) (s: Stmt) : Result<Stmt * Scope, string> =
             match s with
             | StmtSpanned (inner, sp) -> rStmt sc inner |> Result.map (fun (i, sc') -> (StmtSpanned (i, sp), sc'))
@@ -392,20 +350,15 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
                     r c.Body |> Result.map (fun b -> cs @ [{ c with Guard = g'; Body = b }]))))
                 (Ok [])
             |> Result.map (fun cs' -> inheritSpan e (ExprMatch (s', cs'))))
-    // Recursive array (`let rec q: T = match q with ...`): the seed and
-    // inductive slices are ordinary expressions and may contain qualified
-    // ops. Without this arm they fell through untouched, and since this pass
-    // DELETES the import that would bind the alias, the call reached the
-    // checker as an unbound variable.
+    // Recursive array (`let rec q: T = match q with ...`): the seed and inductive slices are ordinary expressions and may
+    // contain qualified ops; without this arm they fell through unrewritten and reached the checker as an unbound variable.
     | ExprKind.ExprRecArray def ->
         rOpt (def.SeedArm |> Option.map snd) |> Result.bind (fun seedE ->
         r def.SliceExpr |> Result.map (fun slice' ->
             let seed' = Option.map2 (fun (sv, _) se -> (sv, se)) def.SeedArm seedE
             inheritSpan e (ExprRecArray { def with SeedArm = seed'; SliceExpr = slice' })))
-    // The rest of the expression algebra. Every constructor holding a
-    // sub-expression is walked, and the catch-all wildcard is deliberately
-    // GONE: an unhandled case is an FS0025 incomplete-match warning at build
-    // time rather than a qualified call silently surviving unrewritten.
+    // The rest of the expression algebra: every constructor holding a sub-expression is walked, and the catch-all wildcard
+    // is deliberately GONE, so an unhandled case is an FS0025 build warning rather than a qualified call surviving unrewritten.
     | ExprKind.ExprCompute inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprCompute i))
     | ExprKind.ExprRead inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprRead i))
     | ExprKind.ExprPure inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprPure i))
@@ -470,15 +423,12 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
          | ForKernel k -> r k |> Result.map ForKernel)
         |> Result.bind (fun src' ->
         rOpt kern |> Result.map (fun kern' -> inheritSpan e (ExprFor (src', cs, kern'))))
-    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>)
-    // carry TypeExprs, not Exprs, and are never rewritten.
+    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>) carry TypeExprs, not Exprs, never rewritten.
     | ExprKind.ExprWildcard | ExprKind.ExprQualified _ | ExprKind.ExprRange _
     | ExprKind.ExprReverse _ | ExprKind.ExprArity _ | ExprKind.ExprNth
     | ExprKind.ExprZero | ExprKind.ExprSection _ -> Ok e
 
-// ============================================================================
 // Gating + program expansion
-// ============================================================================
 
 let private isSpectraImport (d: Located<Decl>) =
     match d.Value with
@@ -498,8 +448,7 @@ let private spectraAliasesOf (decls: Located<Decl> list) : Result<Set<string>, s
 
 let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
     spectraAliasesOf decls |> Result.bind (fun aliases ->
-    // Import-gated: with no `import spectra`, this pass is a strict no-op —
-    // a user's own `fft`/`power` functions are never touched.
+    // Import-gated: with no `import spectra`, this pass is a strict no-op -- a user's own `fft`/`power` functions untouched.
     if Set.isEmpty aliases then Ok decls
     else
         let declsNoImport = decls |> List.filter (not << isSpectraImport)
@@ -515,14 +464,12 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             let mapped =
                 declsNoImport |> List.fold (fun acc d ->
                     acc |> Result.bind (fun out ->
-                        // Stamp the user decl's span so every syn-built node
-                        // attributes to this declaration's source line.
+                        // Stamp the user decl's span so every syn-built node attributes to this declaration's source line.
                         Blade.Ast.synthSpan <- d.Span
                         let mapped =
                             match d.Value with
                             | DeclFunction fd ->
-                                // Annotated array PARAMS are shape witnesses
-                                // inside the body — `sp.ifft2(qs)` on a
+                                // Annotated array PARAMS are shape witnesses inside the body -- `sp.ifft2(qs)` on a
                                 // `qs: CF` param needs no staging binding.
                                 let pscope = paramShapes tyAliases (fd.Params |> List.map (fun p -> (p.Name, p.Type)))
                                 rewriteExpr st ctx aliases pscope fd.Body

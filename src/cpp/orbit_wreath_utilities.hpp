@@ -4,79 +4,48 @@
 //  Blade DSL Runtime Support Library -- OrbIdx wreath-class storage machinery
 // =============================================================================
 //
-//  PROOF ARTIFACT.  This header is the C++ half of Phase 1 of
-//  docs/plan-orbidx-bijections.md (`§4 Implementation sketch, phased`).  It is
-//  not yet wired into codegen: nothing in src/ includes it.  Its job is to make
-//  the four `OrbIdx` bijections *exist and be checkable* --
-//  src/cpp/orb_wreath_tests.cpp is the checker (run via `blade test
-//  orbwreath`), and it validates every function here against brute-force
-//  ground truth built in the same translation unit.
-//
-//  THE CLASS (docs/plan-orbit-index-types.md §2).  An OrbIdx class is a flat
-//  list of levels over one extent `n`:
-//
+//  Not yet wired into codegen: nothing in src/ includes it. Its job is to make the four `OrbIdx` bijections exist and be
+//  checkable -- src/cpp/orb_wreath_tests.cpp (run via `blade test orbwreath`) validates every function here against a
+//  brute-force ground truth built in the same translation unit.
+//  THE CLASS (docs/plan-orbit-index-types.md Sec 2). An OrbIdx class is a flat list of levels over one extent `n`:
 //      OrbIdx<[(r1,s1), (r2,s2), ..., (rd,sd)], n>
-//
-//  The list is OUTERMOST-LAST: level 1 is the innermost tie, level d the
-//  outermost.  Level i groups `ri` sub-blocks of the level below and orders
-//  them by their canonical keys in lexicographic order -- nondecreasing when
-//  si = '+', strictly increasing when si = '-'.  The class's group is the
-//  iterated wreath product  S_r1 wr S_r2 wr ... wr S_rd  acting on
-//  `prod_i ri` raw axes; the sign list picks one of the 2^d characters that
-//  group admits (§6 of the same doc).
-//
-//  In this header a level is a TYPE, `orb_level<R, Pos>`, and a class is a
-//  parameter pack of them in the doc's order (outermost last):
-//
+//  The list is OUTERMOST-LAST: level 1 is the innermost tie, level d the outermost. Level i groups `ri` sub-blocks of
+//  the level below and orders them by their canonical keys in lexicographic order -- nondecreasing when si = '+',
+//  strictly increasing when si = '-'. The class's group is the iterated wreath product S_r1 wr S_r2 wr ... wr S_rd
+//  acting on `prod_i ri` raw axes; the sign list picks one of the 2^d characters that group admits.
+//  In this header a level is a TYPE, `orb_level<R, Pos>`, and a class is a parameter pack of them in the doc's order
+//  (outermost last):
 //      OrbIdx<[(2,-),(2,+)],n>   (the Riemann shape)
 //          ==  orb_level<2,false>, orb_level<2,true>
-//
-//  Everything that consults a sign or a level's structure does so through
-//  `if constexpr` on a template parameter.  There is NO runtime branch on a
-//  sign anywhere below, and in particular the equality ("diagonal") segment of
-//  the traversal nest is `if constexpr (GE)` where GE is the enclosing level's
-//  sign -- so a '-' level's instantiation contains no trace of it, not even a
-//  skipped test (docs/plan-orbidx-bijections.md §2, "Codegen shape").
-//
+//  Everything that consults a sign or a level's structure does so through `if constexpr` on a template parameter: there
+//  is NO runtime branch on a sign anywhere below (the equality/"diagonal" segment of the traversal nest is
+//  `if constexpr (GE)`, so a '-' level's instantiation contains no trace of it, not even a skipped test).
 //  WHAT IS HERE
-//    orb_cell_count<Levels...>(n)          §4 of plan-orbit-index-types.md
-//    orb_visit<Levels...>(n, visitor)      §2 of plan-orbidx-bijections.md
-//    orb_canon<Levels...>(tuple, out)      §5 of plan-orbit-index-types.md
-//    orb_rank<Levels...>(canonical, n)     §3 of plan-orbidx-bijections.md
-//    orb_unrank<Levels...>(r, n, out)      §3, the greedy inverse
-//
-//  ... and the STORAGE LAYER built on top of those five (§1 of
-//  plan-orbidx-bijections.md, "two access paths, dual views"):
-//    orb_read_checked<T,Levels...>         §2 of plan-orbidx-decompaction.md
+//    orb_cell_count<Levels...>(n)          Sec 4 of plan-orbit-index-types.md
+//    orb_visit<Levels...>(n, visitor)      Sec 2 of plan-orbidx-bijections.md
+//    orb_canon<Levels...>(tuple, out)      Sec 5 of plan-orbit-index-types.md
+//    orb_rank<Levels...>(canonical, n)     Sec 3 of plan-orbidx-bijections.md
+//    orb_unrank<Levels...>(r, n, out)      Sec 3, the greedy inverse
+//  ... and the STORAGE LAYER built on top of those five (Sec 1: "two access paths, dual views"):
+//    orb_read_checked<T,Levels...>         Sec 2 of plan-orbidx-decompaction.md
 //    orb_read<T,Levels...>                 the same, with a precondition
 //    orb_write_canonical<T,Levels...>      canonical-cell store
 //    orb_skeleton<T,Levels...>             the nested-pointer dual view
-//
 //  HOUSE CONVENTIONS FOLLOWED
-//    * Storage order is ascending-lex DFS, exactly as `build_skeleton`
-//      (nested_array_utilities.hpp:217-264) lays out the pool: the traversal
-//      order IS the allocation order.  "rank agrees with the §2 nest's visit
-//      order" is a stated invariant with its own test, not an implementation
-//      detail (plan-orbidx-bijections.md §3) -- a read->write roundtrip cannot
-//      catch an order mismatch, so the test compares against an independent
-//      brute-force oracle instead.
-//    * Canonicalization mirrors `canon_fold` (nested_array_utilities.hpp:846):
-//      count inversions with an O(R^2) double loop, then sort; a repeated key
-//      at a strict level means the value is not stored -> implicit zero.
-//    * The '+' -> strict reduction `s_j = k_j + (j-1)` in orb_rank realizes
-//      the same strict<->weak correspondence `canon_left_justify` uses
-//      (nested_array_utilities.hpp:861-868), in a DIFFERENT encoding: that
-//      helper stores successive differences, this one applies a fixed
-//      per-position shift.  Same bijection, not the same map.
-//    * All cell/offset arithmetic is CHECKED.  §7.2 of
-//      plan-orbit-index-types.md names silent int64 wraparound -- not stack
-//      exhaustion -- as the failure mode to guard, because each level's output
-//      is the next level's extent.  `binom_checked` below is a transcription of
-//      `binomChecked` in proofs/OrbitEnum.fsx: the gcd reduction makes every
-//      intermediate equal to C(m-r+i, i) <= C(m,r), so the multiply-then-divide
-//      loop cannot wrap even TRANSIENTLY.  An overflow report here means the
-//      true value exceeds int64, never that an intermediate did.
-//
+//    * Storage order is ascending-lex DFS, exactly as `build_skeleton` (nested_array_utilities.hpp:217-264) lays out
+//      the pool: traversal order IS allocation order. "Rank agrees with the Sec 2 nest's visit order" is a stated
+//      invariant with its own test -- a read->write roundtrip cannot catch an order mismatch, so the test compares
+//      against an independent brute-force oracle instead.
+//    * Canonicalization mirrors `canon_fold` (nested_array_utilities.hpp:846): count inversions with an O(R^2) double
+//      loop, then sort; a repeated key at a strict level means the value is not stored -> implicit zero.
+//    * The '+' -> strict reduction `s_j = k_j + (j-1)` in orb_rank realizes the same strict<->weak correspondence
+//      `canon_left_justify` uses (nested_array_utilities.hpp:861-868), in a DIFFERENT encoding (that helper stores
+//      successive differences, this one a fixed per-position shift): same bijection, not the same map.
+//    * All cell/offset arithmetic is CHECKED. Sec 7.2 of plan-orbit-index-types.md names silent int64 wraparound -- not
+//      stack exhaustion -- as the failure mode to guard, because each level's output is the next level's extent.
+//      `binom_checked` is a transcription of `binomChecked` in proofs/OrbitEnum.fsx: the gcd reduction makes every
+//      intermediate equal to C(m-r+i, i) <= C(m,r), so the multiply-then-divide loop cannot wrap even TRANSIENTLY. An
+//      overflow report here means the true value exceeds int64, never that an intermediate did.
 //  C++20, header-only, no dependency beyond <cstdint>/<cstddef>/<cassert>.
 // =============================================================================
 
@@ -84,28 +53,22 @@
 #include <cstddef>
 #include <cstdint>
 
-/// Diagnostic hook for the ONE precondition this header states (orb_read's
-/// in-domain tuple; see "THE DOMAIN CONTRACT" below).  Defined only if the
-/// translation unit has not already supplied one, so a harness that must
-/// EXERCISE the violation path -- or an embedded build with no <cassert> --
-/// can substitute its own without patching the header.  The default is a plain
-/// assert: diagnostic in a checked build, gone under NDEBUG.  Whichever it is,
-/// the violating call still returns T(0) without ever indexing the pool.
+/// Diagnostic hook for the ONE precondition this header states (orb_read's in-domain tuple; see "THE DOMAIN CONTRACT"
+/// below). Defined only if the translation unit has not already supplied one, so a harness that must EXERCISE the
+/// violation path -- or an embedded build with no <cassert> -- can substitute its own without patching the header. The
+/// default is a plain assert: diagnostic in a checked build, gone under NDEBUG. Either way, the violating call still
+/// returns T(0) without ever indexing the pool.
 #ifndef ORB_ASSERT
 #  define ORB_ASSERT(cond, msg) assert((cond) && (msg))
 #endif
 
 namespace orbit_wreath_utilities {
 
-    // =========================================================================
     // Level and class description (compile time)
-    // =========================================================================
 
-    /// One wreath level: `R` sub-blocks tied with character `Pos`
-    /// (true = '+', invariant/nondecreasing; false = '-', sgn/strictly
-    /// increasing).  A level with R == 1 is the trivial group and a no-op at
-    /// either sign; plan-orbit-index-types.md §7.2 normalizes those away before
-    /// they reach here, but they are harmless if they do.
+    /// One wreath level: `R` sub-blocks tied with character `Pos` (true = '+', invariant/nondecreasing; false = '-',
+    /// sgn/strictly increasing). A level with R == 1 is the trivial group and a no-op at either sign;
+    /// plan-orbit-index-types.md Sec 7.2 normalizes those away before they reach here, but they are harmless if they do.
     template<int R, bool Pos>
     struct orb_level {
         static_assert(R >= 1, "orb_level: rank must be >= 1");
@@ -113,22 +76,18 @@ namespace orbit_wreath_utilities {
         static constexpr bool pos  = Pos;
     };
 
-    /// Internal class representation: a list of levels, OUTERMOST-FIRST.
-    /// (The public API takes them outermost-last, per the doc's spelling; the
-    /// two orders are bridged by `detail::make_list`.)  `orb_list<>` is the
-    /// scalar class `OrbIdx<[],n>` == `Idx<n>`: one axis, no tie.
+    /// Internal class representation: a list of levels, OUTERMOST-FIRST. (The public API takes them outermost-last, per
+    /// the doc's spelling; the two orders are bridged by `detail::make_list`.) `orb_list<>` is the scalar class
+    /// `OrbIdx<[],n>` == `Idx<n>`: one axis, no tie.
     template<class... Ls>
     struct orb_list {};
 
-    /// Sentinel returned by the checked-arithmetic paths.  Every quantity they
-    /// compute is non-negative, so -1 is unambiguous.
+    /// Sentinel returned by the checked-arithmetic paths. Every quantity they compute is non-negative, so -1 is unambiguous.
     inline constexpr int64_t ORB_OVERFLOW = -1;
 
     namespace detail {
 
-        // ---------------------------------------------------------------
         // Pack reversal: doc order (outermost LAST) -> internal (FIRST)
-        // ---------------------------------------------------------------
         template<class Acc, class... Ls> struct rev;
         template<class... A>
         struct rev<orb_list<A...>> { using type = orb_list<A...>; };
@@ -140,9 +99,7 @@ namespace orbit_wreath_utilities {
         template<class... Ls>
         using make_list = typename rev<orb_list<>, Ls...>::type;
 
-        // ---------------------------------------------------------------
         // Raw axis count: prod_i r_i (rank of the tensor the class describes)
-        // ---------------------------------------------------------------
         template<class C> struct axes;
         template<> struct axes<orb_list<>> { static constexpr int value = 1; };
         template<class L, class... Rest>
@@ -150,19 +107,14 @@ namespace orbit_wreath_utilities {
             static constexpr int value = L::rank * axes<orb_list<Rest...>>::value;
         };
 
-        // ---------------------------------------------------------------
-        // Checked non-negative int64 arithmetic
-        // (proofs/OrbitEnum.fsx: addChecked / mulChecked / binomChecked)
-        // ---------------------------------------------------------------
+        // Checked non-negative int64 arithmetic (proofs/OrbitEnum.fsx: addChecked / mulChecked / binomChecked)
 
         inline int64_t gcd64(int64_t a, int64_t b) {
             while (b != 0) { int64_t t = a % b; a = b; b = t; }
             return a;
         }
 
-        /// a + b, or ORB_OVERFLOW.  Both operands are expected non-negative;
-        /// a negative result is reported as overflow so that a corrupted input
-        /// cannot silently produce a plausible offset.
+        /// a + b, or ORB_OVERFLOW. Both operands are expected non-negative; a negative result is reported as overflow so that a corrupted input cannot silently produce a plausible offset.
         inline int64_t add_checked(int64_t a, int64_t b) {
             if (a < 0 || b < 0) return ORB_OVERFLOW;
             if (a > INT64_MAX - b) return ORB_OVERFLOW;
@@ -177,14 +129,9 @@ namespace orbit_wreath_utilities {
             return a * b;
         }
 
-        /// Exact C(m, r) in int64, or ORB_OVERFLOW.
-        ///
-        /// The gcd reduction is the load-bearing part: at step i the
-        /// accumulator equals C(m-r+i, i) <= C(m,r), so no intermediate ever
-        /// exceeds the answer.  A report here therefore means the BINOMIAL
-        /// overflows int64, not that the algorithm did.  (`binomI64`,
-        /// IR.fs:2438-2447, is the unchecked version this replaces; its
-        /// mid-loop division is exact but nothing checks the multiply.)
+        /// Exact C(m, r) in int64, or ORB_OVERFLOW. The gcd reduction is load-bearing: at step i the accumulator equals
+        /// C(m-r+i, i) <= C(m,r), so no intermediate ever exceeds the answer -- a report here means the BINOMIAL overflows
+        /// int64, not that the algorithm did.
         inline int64_t binom_checked(int64_t m, int r) {
             if (r < 0)  return ORB_OVERFLOW;   // negative rank
             if (m < 0)  return ORB_OVERFLOW;   // negative extent
@@ -193,21 +140,18 @@ namespace orbit_wreath_utilities {
             for (int i = 1; i <= r; ++i) {
                 const int64_t f = m - static_cast<int64_t>(r) + static_cast<int64_t>(i);
                 const int64_t g = gcd64(f, static_cast<int64_t>(i));
-                // (i/g) divides acc because gcd(i/g, f/g) = 1 and acc*f/i is
-                // an integer -- so this division is exact, never a truncation.
+                // (i/g) divides acc because gcd(i/g, f/g) = 1 and acc*f/i is an integer -- so this division is exact, never a truncation.
                 acc = mul_checked(acc / (static_cast<int64_t>(i) / g), f / g);
                 if (acc < 0) return ORB_OVERFLOW;
             }
             return acc;
         }
 
-        // ---------------------------------------------------------------
-        // §4 cardinality fold
+        // Sec 4 cardinality fold
         //     M0 = n ;  Mi = C(M_{i-1} + ri - 1, ri)  if si = '+'
         //                    C(M_{i-1},          ri)  if si = '-'
-        // Levels are folded INNERMOST-FIRST, so the recursion runs down the
-        // internal (outermost-first) list to its tail and folds back out.
-        // ---------------------------------------------------------------
+        // Levels are folded INNERMOST-FIRST, so the recursion runs down the internal (outermost-first) list to its tail
+        // and folds back out.
         template<class C> struct cells;
         template<> struct cells<orb_list<>> {
             static int64_t f(int64_t n) { return n < 0 ? ORB_OVERFLOW : n; }
@@ -227,57 +171,39 @@ namespace orbit_wreath_utilities {
             }
         };
 
-        // ---------------------------------------------------------------
-        // §2 traversal nest -- segment-peeled, branch-free, in stream order
-        // ---------------------------------------------------------------
+        // Sec 2 traversal nest -- segment-peeled, branch-free, in stream order
         //
-        // A canonical tuple of a class with outermost level (R,s) over inner
-        // class D is a sequence of R D-canonical keys
+        // A canonical tuple of a class with outermost level (R,s) over inner class D is a sequence of R D-canonical keys
         //     K_0 <= K_1 <= ... <= K_{R-1}      (s = '+')
         //     K_0 <  K_1 <  ... <  K_{R-1}      (s = '-')
-        // ordered by D-lex.  Because all keys have the same length, lex on the
-        // flat tuple IS lex on the key sequence, so the whole traversal reduces
-        // to two mutually recursive primitives:
+        // ordered by D-lex. Because all keys have the same length, lex on the flat tuple IS lex on the key sequence, so
+        // the whole traversal reduces to two mutually recursive primitives:
         //
         //   all<C>      : every C-canonical tuple, ascending lex.
-        //   above<C,GE> : every C-canonical tuple  > prev  (GE=false)
-        //                 or >= prev (GE=true), ascending lex.
+        //   above<C,GE> : every C-canonical tuple  > prev  (GE=false) or >= prev (GE=true), ascending lex.
         //
-        // `all` is a chain: K_0 from all<D>, then K_t from above<D, s> of
-        // K_{t-1}.  `above` is where the peeling lives.  Split the target set
-        // by the index t of the FIRST key that differs from `prev`:
+        // `all` is a chain: K_0 from all<D>, then K_t from above<D, s> of K_{t-1}. `above` is where the peeling lives.
+        // Split the target set by the index t of the FIRST key that differs from `prev`:
         //
-        //   * no differing key: K == prev.  This is the equality segment --
-        //     the "diagonal" -- and it exists only when GE, i.e. only under a
-        //     '+' level.  `if constexpr (GE)` erases it otherwise.
-        //   * first difference at t: keys 0..t-1 are PINNED to prev (not loops
-        //     at all, just a copy of the outer values), K_t ranges over
-        //     above<D,false> of prev_t, and keys t+1..R-1 continue the chain
-        //     with above<D, s>.
+        //   * no differing key: K == prev. This is the equality segment -- the "diagonal" -- and it exists only when GE,
+        //     i.e. only under a '+' level. `if constexpr (GE)` erases it otherwise.
+        //   * first difference at t: keys 0..t-1 are PINNED to prev (not loops, just a copy of the outer values), K_t
+        //     ranges over above<D,false> of prev_t, and keys t+1..R-1 continue the chain with above<D, s>.
         //
-        // ORDER.  If K first differs at t and K' first differs at t' > t, then
-        // K'_t == prev_t < K_t, so K' < K: a LATER first difference is a
-        // SMALLER tuple.  Ascending order is therefore
-        //     equality, then t = R-1, R-2, ..., 0
-        // which is exactly the E / B / A segment order of the reference
-        // emitter `segmentedNestDepth2` in proofs/OrbitEnum.fsx:314-334, and
-        // the depth-2 instantiation below reproduces it line for line.
+        // ORDER. If K first differs at t and K' first differs at t' > t, then K'_t == prev_t < K_t, so K' < K: a LATER
+        // first difference is a SMALLER tuple. Ascending order is therefore "equality, then t = R-1, R-2, ..., 0", which
+        // is exactly the E / B / A segment order of the reference emitter `segmentedNestDepth2` in
+        // proofs/OrbitEnum.fsx:314-334, and the depth-2 instantiation below reproduces it line for line.
         //
-        // The recursion bottoms out at orb_list<> (one axis), where the two
-        // primitives are a bare `for` with bounds `0`, `prev[0]`, `prev[0]+1`,
-        // and `n`.  Every bound in the whole nest is a var, a var+1, or a
-        // constant -- the vocabulary BoundDependencies/StrictOffset already
-        // has.  No ternary, no data-dependent bound, no runtime test on a sign.
+        // The recursion bottoms out at orb_list<> (one axis), where the two primitives are a bare `for` with bounds `0`,
+        // `prev[0]`, `prev[0]+1`, and `n`. Every bound in the whole nest is a var, a var+1, or a constant -- the
+        // vocabulary BoundDependencies/StrictOffset already has. No ternary, no data-dependent bound, no runtime sign test.
         //
-        // The SEGMENT STRUCTURE (how many straight-line nests, and which
-        // coordinates each pins) is entirely compile-time: it is the shape of
-        // the `seg<T>` / `chain<T>` template recursion over the level list.
-        // Only the bound VALUES are runtime.  Instantiated nest count is the
-        // product over levels of the per-level segment count, and it grows
-        // multiplicatively: measured visitor call sites (one class per TU,
-        // -O2) are 3 for `2+,2+`, 18 for `2+,2+,2+`, 16 for `3+,3+`, 263 for
-        // `3+,3+,3+`.  Fine at the §7.2 realistic ceiling (depth <= 3, r
-        // mostly 2), but not "tens" in general -- deep all-3 classes get big.
+        // The SEGMENT STRUCTURE (how many straight-line nests, and which coordinates each pins) is entirely compile-time:
+        // the shape of the `seg<T>` / `chain<T>` template recursion over the level list; only bound VALUES are runtime.
+        // Instantiated nest count is the product over levels of the per-level segment count, and grows multiplicatively:
+        // measured visitor call sites (one class per TU, -O2) are 3 for `2+,2+`, 18 for `2+,2+,2+`, 16 for `3+,3+`, 263
+        // for `3+,3+,3+`. Fine at the Sec 7.2 realistic ceiling (depth <= 3, r mostly 2), but deep all-3 classes get big.
 
         template<class C> struct nest;
 
@@ -290,9 +216,7 @@ namespace orbit_wreath_utilities {
                 for (int x = 0; x < n; ++x) { out[0] = x; sink(); }
             }
 
-            /// Two straight-line loops selected at compile time, so the emitted
-            /// bound is literally `prev[0]` or `prev[0] + 1` -- no ternary
-            /// survives to runtime, and neither does the unselected loop.
+            /// Two straight-line loops selected at compile time, so the emitted bound is literally `prev[0]` or `prev[0] + 1` -- no ternary survives to runtime, and neither does the unselected loop.
             template<bool GE, class F>
             static void above(int n, const int* prev, int* out, F&& sink) {
                 if constexpr (GE) {
@@ -311,8 +235,7 @@ namespace orbit_wreath_utilities {
             static constexpr int  LD   = inner::AXES;  // axes per sub-block
             static constexpr int  AXES = R * LD;
 
-            /// Continue the chain at key index T, given key T-1 already in
-            /// `out`.  T == R terminates the nest and emits.
+            /// Continue the chain at key index T, given key T-1 already in `out`. T == R terminates the nest and emits.
             template<int T, class F>
             static void chain(int n, int* out, F&& sink) {
                 if constexpr (T >= R) {
@@ -329,9 +252,7 @@ namespace orbit_wreath_utilities {
                 inner::all(n, out, [&]() { chain<1>(n, out, sink); });
             }
 
-            /// Peeled segment T: keys 0..T-1 pinned (already copied by
-            /// `above`), key T strictly above prev's, keys T+1.. free chain.
-            /// Emitted in DESCENDING T so the union is ascending-lex.
+            /// Peeled segment T: keys 0..T-1 pinned (already copied by `above`), key T strictly above prev's, keys T+1.. free chain. Emitted in DESCENDING T so the union is ascending-lex.
             template<int T, class F>
             static void seg(int n, const int* prev, int* out, F&& sink) {
                 inner::template above<false>(n, prev + T * LD, out + T * LD,
@@ -341,14 +262,10 @@ namespace orbit_wreath_utilities {
 
             template<bool GE, class F>
             static void above(int n, const int* prev, int* out, F&& sink) {
-                // Pin keys 0..R-2 once.  Segments run T = R-1 down to 0 and
-                // segment T only ever writes keys >= T, so the copy made here
-                // stays valid for every segment that follows.
+                // Pin keys 0..R-2 once. Segments run T = R-1 down to 0 and segment T only ever writes keys >= T, so the copy made here stays valid for every segment that follows.
                 for (int i = 0; i < (R - 1) * LD; ++i) out[i] = prev[i];
 
-                // The equality ("diagonal") segment.  Present only under a '+'
-                // level; `if constexpr` means a '-' level's instantiation
-                // contains no trace of it.
+                // The equality ("diagonal") segment. Present only under a '+' level; `if constexpr` means a '-' level's instantiation contains no trace of it.
                 if constexpr (GE) {
                     for (int i = (R - 1) * LD; i < R * LD; ++i) out[i] = prev[i];
                     sink();
@@ -358,9 +275,7 @@ namespace orbit_wreath_utilities {
             }
         };
 
-        // ---------------------------------------------------------------
-        // §5 canonicalization -- one sort per level, innermost first
-        // ---------------------------------------------------------------
+        // Sec 5 canonicalization -- one sort per level, innermost first
 
         /// Lexicographic comparison of two equal-length coordinate blocks.
         inline int lexcmp(const int* a, const int* b, int len) {
@@ -384,33 +299,27 @@ namespace orbit_wreath_utilities {
             static constexpr int  LD   = inner::AXES;
             static constexpr int  AXES = R * LD;
 
-            /// Canonicalize `in` (AXES raw coordinates) into `out`, returning
-            /// the accumulated character: +1, -1, or 0 for a zero-set tuple.
-            /// `in` and `out` MAY alias: sub-blocks are canonicalized into a
-            /// local buffer and `out` is written only at the end.
+            /// Canonicalize `in` (AXES raw coordinates) into `out`, returning the accumulated character: +1, -1, or 0 for
+            /// a zero-set tuple. `in` and `out` MAY alias: sub-blocks are canonicalized into a local buffer and `out` is
+            /// written only at the end.
             static int f(const int* in, int* out) {
                 int buf[AXES];
                 int sign = 1;
 
-                // Innermost first: canonicalize each sub-block, multiply the
-                // characters, and short-circuit the zero set.
+                // Innermost first: canonicalize each sub-block, multiply the characters, and short-circuit the zero set.
                 for (int b = 0; b < R; ++b) {
                     const int s = inner::f(in + b * LD, buf + b * LD);
                     if (s == 0) return 0;
                     sign *= s;
                 }
 
-                // Inversion count over the ORIGINAL block order -- the parity
-                // of the permutation that sorts them (canon_fold's recipe,
-                // nested_array_utilities.hpp:846-859, lifted from scalars to
-                // composite keys).
+                // Inversion count over the ORIGINAL block order -- the parity of the permutation that sorts them (canon_fold's recipe, nested_array_utilities.hpp:846-859, lifted from scalars to composite keys).
                 int inv = 0;
                 for (int a = 0; a < R; ++a) {
                     for (int b = a + 1; b < R; ++b) {
                         const int c = lexcmp(buf + a * LD, buf + b * LD, LD);
                         if constexpr (!POS) {
-                            // §5 zero set: a '-' level kills tuples with two
-                            // equal sub-blocks at that level.
+                            // Sec 5 zero set: a '-' level kills tuples with two equal sub-blocks at that level.
                             if (c == 0) return 0;
                         }
                         if (c > 0) ++inv;
@@ -420,8 +329,7 @@ namespace orbit_wreath_utilities {
                     if (inv & 1) sign = -sign;
                 }
 
-                // Sort the R blocks by lex key (insertion sort; R is small and
-                // compile-time known).
+                // Sort the R blocks by lex key (insertion sort; R is small and compile-time known).
                 int idx[R];
                 for (int i = 0; i < R; ++i) idx[i] = i;
                 for (int i = 1; i < R; ++i) {
@@ -441,48 +349,34 @@ namespace orbit_wreath_utilities {
             }
         };
 
-        // ---------------------------------------------------------------
-        // §3 random-access pair -- rank / unrank, strictify-then-combinadic
-        // ---------------------------------------------------------------
+        // Sec 3 random-access pair -- rank / unrank, strictify-then-combinadic
         //
-        // A canonical tuple at a level is a sequence of R sub-keys, each a
-        // level-below rank in [0, M).  The '+' case reduces to strict via
-        //     s_j = k_j + j            (0-based per-position shift; the same
-        //                               strict<->weak correspondence that
-        //                               canon_left_justify encodes as gaps)
-        // over the widened alphabet N = M + R - 1; the '-' case is already
-        // strict over N = M.  A strictly increasing R-sequence over [0,N) is
-        // then ranked by the standard LEX combinadic.  Counting the sequences
-        // that share the first j coordinates and are smaller at position j and
-        // collapsing the inner sum by hockey stick gives, with s_{-1} = -1,
+        // A canonical tuple at a level is a sequence of R sub-keys, each a level-below rank in [0, M). The '+' case
+        // reduces to strict via s_j = k_j + j (0-based per-position shift; the same strict<->weak correspondence that
+        // canon_left_justify encodes as gaps) over the widened alphabet N = M + R - 1; the '-' case is already strict
+        // over N = M. A strictly increasing R-sequence over [0,N) is then ranked by the standard LEX combinadic: counting
+        // the sequences that share the first j coordinates and are smaller at position j and collapsing the inner sum by
+        // hockey stick gives, with s_{-1} = -1,
         //
         //     rank = sum_{j=0}^{R-1}  C(N - s_{j-1} - 1, R-j) - C(N - s_j, R-j)
         //
-        // -- 2R binomials, no O(N) loop.  Every term is <= C(N,R) = M_level, so
-        // if the cell count fits in int64 the rank arithmetic cannot overflow;
-        // it is still computed with the checked binomial, and a wrap-or-invalid
-        // input reports ORB_OVERFLOW rather than returning a plausible offset.
+        // -- 2R binomials, no O(N) loop. Every term is <= C(N,R) = M_level, so if the cell count fits in int64 the rank
+        // arithmetic cannot overflow; it is still computed with the checked binomial, and a wrap-or-invalid input reports
+        // ORB_OVERFLOW rather than returning a plausible offset.
         //
-        // LEX, not colex.  The colex rank sum C(s_j, j) is extent-independent
-        // and tempting, but it is the WRONG ORDER: pool_base linear copies,
-        // genMpiNestSimplicial and the Zarr flat-range spec all assume
-        // ascending-lex DFS, and §3 makes "rank order == the §2 nest's visit
-        // order" an invariant with its own test.  Lex ranking depends on the
-        // alphabet size, which is why `orb_rank` needs `n` (see the note on the
-        // public signature below).
+        // LEX, not colex. The colex rank sum C(s_j, j) is extent-independent and tempting, but it is the WRONG ORDER:
+        // pool_base linear copies, genMpiNestSimplicial and the Zarr flat-range spec all assume ascending-lex DFS, and Sec 3
+        // makes "rank order == the Sec 2 nest's visit order" an invariant with its own test. Lex ranking depends on the
+        // alphabet size, which is why `orb_rank` needs `n`.
 
         template<class C> struct rnk;
 
         template<> struct rnk<orb_list<>> {
             static constexpr int AXES = 1;
             static int64_t rank(const int* t, int64_t n) {
-                // Bounds check at the ONE place a raw coordinate enters rank
-                // arithmetic. Without it, coordinate == n (the classic
-                // off-by-one) strictifies onto the alphabet-size symbol and
-                // ranks to a VALID NEIGHBORING cell -- a silent wrong offset,
-                // not an error; every composite level above only normalizes
-                // negatives. (Adversarial-review finding, 2026-08-01; the F#
-                // sibling validates here too.)
+                // Bounds check at the ONE place a raw coordinate enters rank arithmetic. Without it, coordinate == n (the
+                // classic off-by-one) strictifies onto the alphabet-size symbol and ranks to a VALID NEIGHBORING cell --
+                // a silent wrong offset, not an error; every composite level above only normalizes negatives.
                 const int64_t v = static_cast<int64_t>(t[0]);
                 if (v < 0 || v >= n) return ORB_OVERFLOW;
                 return v;
@@ -513,8 +407,7 @@ namespace orbit_wreath_utilities {
                 }
             }
 
-            /// Position of a CANONICAL tuple in the orb_visit stream, or
-            /// ORB_OVERFLOW on overflow or a non-canonical input.
+            /// Position of a CANONICAL tuple in the orb_visit stream, or ORB_OVERFLOW on overflow or a non-canonical input.
             static int64_t rank(const int* t, int64_t n) {
                 const int64_t N = alphabet(n);
                 if (N < 0) return ORB_OVERFLOW;
@@ -543,12 +436,9 @@ namespace orbit_wreath_utilities {
                 return acc;
             }
 
-            /// Greedy inverse of `rank`.  Returns false if `r` is out of range
-            /// or the arithmetic overflows.  The per-position search is a
-            /// binary search on the (monotone) partial-sum closed form rather
-            /// than a linear scan, so cost is O(axes * log M) binomials -- this
-            /// is the cold path (§1: decompaction, provider block maps, partial
-            /// reads), but there is no reason for it to be O(M).
+            /// Greedy inverse of `rank`. Returns false if `r` is out of range or the arithmetic overflows. The
+            /// per-position search is a binary search on the (monotone) partial-sum closed form rather than a linear
+            /// scan, so cost is O(axes * log M) binomials -- this is the cold path, but no reason for it to be O(M).
             static bool unrank(int64_t r, int64_t n, int* out) {
                 const int64_t N = alphabet(n);
                 if (N < 0 || r < 0) return false;
@@ -557,10 +447,7 @@ namespace orbit_wreath_utilities {
                 int64_t rem  = r;
                 int64_t prev = -1;
                 for (int j = 0; j < R; ++j) {
-                    // pre(v) = C(N-prev-1, R-j) - C(N-v, R-j) is the number of
-                    // completions skipped by choosing s_j >= v; it is 0 at
-                    // v = prev+1 and nondecreasing.  Take the largest v whose
-                    // pre(v) still fits under `rem`.
+                    // pre(v) = C(N-prev-1, R-j) - C(N-v, R-j) is the number of completions skipped by choosing s_j >= v; it is 0 at v = prev+1 and nondecreasing. Take the largest v whose pre(v) still fits under `rem`.
                     const int64_t base = binom_checked(N - prev - 1, R - j);
                     if (base < 0) return false;
                     int64_t lo = prev + 1;
@@ -579,8 +466,7 @@ namespace orbit_wreath_utilities {
                     s[j] = lo;
                     prev = lo;
                 }
-                // Fixing all R positions determines the tuple, so a leftover
-                // remainder means `r` was past the end of this level's pool.
+                // Fixing all R positions determines the tuple, so a leftover remainder means `r` was past the end of this level's pool.
                 if (rem != 0) return false;
 
                 for (int b = 0; b < R; ++b) {
@@ -598,45 +484,33 @@ namespace orbit_wreath_utilities {
 
     } // namespace detail
 
-    // =========================================================================
-    // Public API.  `Levels...` is the doc's list, OUTERMOST-LAST:
+    // Public API. `Levels...` is the doc's list, OUTERMOST-LAST:
     //     OrbIdx<[(2,-),(2,+)],n>  ->  orb_level<2,false>, orb_level<2,true>
-    // =========================================================================
 
-    /// Raw axis count of the class: prod_i r_i.  `orb_axes<>` is 1.
+    /// Raw axis count of the class: prod_i r_i. `orb_axes<>` is 1.
     template<class... Levels>
     inline constexpr int orb_axes = detail::axes<detail::make_list<Levels...>>::value;
 
-    /// §4 cardinality fold, with exact overflow detection.
-    /// Returns the number of stored cells, or ORB_OVERFLOW (-1) if the fold
-    /// leaves int64 at any level, or if `n` is negative.  No intermediate ever
-    /// wraps, even transiently (see `binom_checked`).
-    ///
-    /// EXTENT TYPE.  All four public entry points take the extent as `int`,
-    /// because coordinates are `int` throughout (an extent past INT_MAX is
-    /// unreachable by every other function here).  Internally the fold runs in
-    /// int64 regardless: each level's OUTPUT is the next level's ground-set
-    /// size, and those blow past int32 immediately.
+    /// Sec 4 cardinality fold, with exact overflow detection. Returns the number of stored cells, or ORB_OVERFLOW (-1) if
+    /// the fold leaves int64 at any level, or if `n` is negative. No intermediate ever wraps, even transiently.
+    /// EXTENT TYPE: all four public entry points take the extent as `int` (coordinates are `int` throughout; an extent
+    /// past INT_MAX is unreachable elsewhere). Internally the fold runs in int64 regardless, since each level's OUTPUT
+    /// is the next level's ground-set size and those blow past int32 immediately.
     template<class... Levels>
     inline int64_t orb_cell_count(int n) {
         return detail::cells<detail::make_list<Levels...>>::f(static_cast<int64_t>(n));
     }
 
-    /// §2 traversal: call `visitor(const int* coords, int64_t linear_index)`
-    /// once per canonical tuple, in ascending-lex order, with `linear_index`
-    /// counting 0, 1, 2, ...  `coords` points at a buffer of `orb_axes` ints
-    /// owned by this call and reused between visits -- copy it if you keep it.
+    /// Sec 2 traversal: call `visitor(const int* coords, int64_t linear_index)` once per canonical tuple, in ascending-lex
+    /// order, with `linear_index` counting 0, 1, 2, ... `coords` points at a buffer of `orb_axes` ints owned by this
+    /// call and reused between visits -- copy it if you keep it.
     ///
-    /// Returns false -- visiting NOTHING -- iff `n` is negative, the same
-    /// input `orb_cell_count` reports as ORB_OVERFLOW; the two entry points
-    /// give one verdict on malformed extents rather than one diagnosing and
-    /// the other silently emitting an empty stream (adversarial-review
-    /// finding, 2026-08-01).  n == 0 is a well-formed empty class: true, no
-    /// visits.
+    /// Returns false -- visiting NOTHING -- iff `n` is negative, the same input `orb_cell_count` reports as
+    /// ORB_OVERFLOW; the two entry points give one verdict on malformed extents. n == 0 is a well-formed empty class:
+    /// true, no visits.
     ///
-    /// This is the hot path: the emitted nest carries no strides, computes no
-    /// offsets and tests nothing at runtime.  `linear_index` is a convenience
-    /// for oracles and cold consumers; a pool walk should bump a pointer.
+    /// This is the hot path: the emitted nest carries no strides, computes no offsets and tests nothing at runtime.
+    /// `linear_index` is a convenience for oracles and cold consumers; a pool walk should bump a pointer.
     template<class... Levels, class V>
     inline bool orb_visit(int n, V&& visitor) {
         if (n < 0) return false;
@@ -650,130 +524,87 @@ namespace orbit_wreath_utilities {
         return true;
     }
 
-    /// §5 canonicalization.  Writes the canonical representative of `tuple`
-    /// (orb_axes raw coordinates) to `out` and returns the accumulated
-    /// character: +1, -1, or 0 when the tuple is in the zero set (two equal
-    /// sub-blocks at a '-' level).  On a 0 return `out` is unspecified.
-    /// `tuple` and `out` may alias.
+    /// Sec 5 canonicalization. Writes the canonical representative of `tuple` (orb_axes raw coordinates) to `out` and
+    /// returns the accumulated character: +1, -1, or 0 when the tuple is in the zero set (two equal sub-blocks at a '-'
+    /// level). On a 0 return `out` is unspecified. `tuple` and `out` may alias.
     template<class... Levels>
     inline int orb_canon(const int* tuple, int* out) {
         return detail::canon<detail::make_list<Levels...>>::f(tuple, out);
     }
 
-    /// §3 rank: position of a CANONICAL tuple in the `orb_visit` stream.
-    /// Returns ORB_OVERFLOW (-1) on overflow or a non-canonical input.
+    /// Sec 3 rank: position of a CANONICAL tuple in the `orb_visit` stream. Returns ORB_OVERFLOW (-1) on overflow or a
+    /// non-canonical input.
     ///
-    /// SIGNATURE NOTE.  The plan writes this as `orb_rank(canonical)`, but a
-    /// LEX rank is not extent-free: (1,2) is rank 3 among the strict pairs over
-    /// [0,4) and rank 4 over [0,5).  Only a colex rank would be extent-free,
-    /// and §3 fixes the order as ascending-lex, so `n` is required.  It is
-    /// passed rather than baked into the type because extents are runtime in
-    /// Blade's C++ runtime everywhere else (see `extents[]` in
-    /// nested_array_utilities.hpp).
+    /// SIGNATURE NOTE. A LEX rank is not extent-free: (1,2) is rank 3 among the strict pairs over [0,4) and rank 4 over
+    /// [0,5). Only a colex rank would be extent-free, and Sec 3 fixes the order as ascending-lex, so `n` is required. It is
+    /// passed rather than baked into the type because extents are runtime in Blade's C++ runtime everywhere else.
     template<class... Levels>
     inline int64_t orb_rank(const int* canonical, int n) {
         return detail::rnk<detail::make_list<Levels...>>::rank(canonical, static_cast<int64_t>(n));
     }
 
-    /// §3 unrank: inverse of `orb_rank`.  Writes the canonical tuple with
-    /// position `r` into `out` (orb_axes ints) and returns true; returns false
-    /// if `r` is out of range or the arithmetic overflows.
+    /// Sec 3 unrank: inverse of `orb_rank`. Writes the canonical tuple with position `r` into `out` (orb_axes ints) and returns true; returns false if `r` is out of range or the arithmetic overflows.
     template<class... Levels>
     inline bool orb_unrank(int64_t r, int n, int* out) {
         return detail::rnk<detail::make_list<Levels...>>::unrank(r, static_cast<int64_t>(n), out);
     }
 
-    // =========================================================================
-    //  STORAGE LAYER -- the read/write path and the nested-pointer dual view
-    //  docs/plan-orbidx-bijections.md §1 ("two access paths, dual views")
-    //  docs/plan-orbidx-decompaction.md §2 (the read semantics)
-    // =========================================================================
+    // STORAGE LAYER -- the read/write path and the nested-pointer dual view.
+    // docs/plan-orbidx-bijections.md Sec 1 ("two access paths, dual views"); docs/plan-orbidx-decompaction.md Sec 2 (read semantics)
     //
-    //  §1 of the bijections plan names TWO access paths over ONE pool, and both
-    //  are built here on the five functions above -- nothing below re-derives an
-    //  offset formula:
+    // Sec 1 names TWO access paths over ONE pool, both built here on the five functions above -- nothing below re-derives an
+    // offset formula:
     //
-    //    RANDOM ACCESS (the cold path: decompaction, provider block maps,
-    //      partial reads).  orb_read / orb_read_checked / orb_write_canonical
-    //      realize decompaction §2 literally,
+    //   RANDOM ACCESS (cold path: decompaction, provider block maps, partial reads). orb_read / orb_read_checked /
+    //     orb_write_canonical realize decompaction Sec 2 literally,
+    //         dense[t] = 0                                    if canon(t) = 0
+    //                  = chi(t) * pool[orb_rank(canon(t), n)]  otherwise
+    //     i.e. canonicalize, rank, apply the character. The composition IS the definition.
     //
-    //          dense[t] = 0                                    if canon(t) = 0
-    //                   = chi(t) * pool[orb_rank(canon(t), n)]  otherwise
+    //   TRAVERSAL (hot path). orb_skeleton is the nested-pointer half of the dual view: the same pool served through
+    //     pointer rows so a consumer walks it by pointer-chasing with no stride arithmetic, exactly as build_skeleton
+    //     (nested_array_utilities.hpp:217-264) does for the rectangular / simplex index types. The contiguous half of the
+    //     dual view is the pool itself -- `base()` is the pool_base analog (:54-87), and walking it linearly IS the
+    //     orb_visit stream, because rank order == visit order (Sec 3's invariant).
     //
-    //      i.e. canonicalize, rank, apply the character.  The composition IS
-    //      the definition.
+    // THE DOMAIN CONTRACT. A raw tuple can fail in two completely different ways, and conflating them is the bug this
+    // section avoids:
+    //   * ZERO SET -- orb_canon returns character 0 (two equal sub-blocks at a '-' level). This is a VALUE, not an
+    //     error: the dense tensor genuinely holds 0 there, no cell is stored, every consumer wants T(0). IN the domain.
+    //   * OUT OF DOMAIN -- a digit outside [0,n), a negative extent, or an arithmetic overflow. A CONTRACT VIOLATION.
+    //     Answering it with T(0) would alias it onto the zero set and make an off-by-one indistinguishable from a
+    //     structural zero -- exactly the failure `rnk<orb_list<>>::rank`'s bounds check exists to stop (coordinate == n
+    //     used to strictify onto the alphabet-size symbol and rank to a VALID NEIGHBOURING cell: a silent wrong offset).
     //
-    //    TRAVERSAL (the hot path).  orb_skeleton is the nested-pointer half of
-    //      the dual view: the same pool served through pointer rows so a
-    //      consumer walks it by pointer-chasing with no stride arithmetic
-    //      anywhere, exactly as build_skeleton (nested_array_utilities.hpp:
-    //      217-264) does for the rectangular / simplex index types.  The
-    //      contiguous half of the dual view is the pool itself -- `base()` is
-    //      the pool_base analog (:54-87), and walking it linearly IS the
-    //      orb_visit stream, because rank order == visit order (§3's invariant).
+    // So the domain check is not folded into the value. `orb_read_checked` is the total function -- bool success plus an
+    // out parameter, `out` left untouched on failure -- for any tuple whose provenance is not already trusted.
+    // `orb_read` is the convenience wrapper whose PRECONDITION is an in-domain tuple; violating it trips ORB_ASSERT and
+    // returns T(0) WITHOUT EVER INDEXING THE POOL. The value is unspecified; the memory access is not. A read that
+    // silently reports "structural zero" for a corrupt index is the same class of bug as the rank off-by-one -- it
+    // survives every roundtrip test, because a roundtrip writes and reads through the same wrong door. The two-function
+    // split makes the caller say which one it wants, and the assert makes the wrong one loud where loudness is affordable.
     //
-    //  THE DOMAIN CONTRACT (design point; adversarial-review lineage).  A raw
-    //  tuple can fail in two completely different ways and conflating them is
-    //  the bug this section is shaped to avoid:
+    // The explicit digit check in orb_read_checked/orb_write_canonical is DELIBERATELY REDUNDANT with orb_rank's bounds
+    // check: the rank check is the backstop that keeps the memory-safety claim true even if this one is ever weakened;
+    // this one makes the zero-set/out-of-domain distinction exact (a tuple like (5,5) at n=3 under a '-' level
+    // canonicalizes to the zero set BEFORE any rank arithmetic could object, so without a digit check it would be
+    // reported as an in-domain zero).
     //
-    //    * ZERO SET -- orb_canon returns character 0 (two equal sub-blocks at a
-    //      '-' level).  This is a VALUE, not an error.  The dense tensor
-    //      genuinely holds 0 there, no cell is stored, and every consumer wants
-    //      T(0).  It is IN the domain.
-    //    * OUT OF DOMAIN -- a digit outside [0,n), a negative extent, or an
-    //      arithmetic overflow.  This is a CONTRACT VIOLATION.  Answering it
-    //      with T(0) would alias it onto the zero set and make an off-by-one
-    //      indistinguishable from a structural zero -- and an off-by-one here is
-    //      exactly the failure `rnk<orb_list<>>::rank`'s bounds check exists to
-    //      stop (coordinate == n used to strictify onto the alphabet-size symbol
-    //      and rank to a VALID NEIGHBOURING cell: a silent wrong offset).
-    //
-    //  So the domain check is not folded into the value.  `orb_read_checked` is
-    //  the total function -- bool success plus an out parameter, `out` left
-    //  untouched on failure -- and is the entry point for any tuple whose
-    //  provenance is not already trusted.  `orb_read` is the convenience wrapper
-    //  whose PRECONDITION is an in-domain tuple; violating it trips ORB_ASSERT
-    //  and then returns T(0) WITHOUT EVER INDEXING THE POOL.  The value is
-    //  unspecified; the memory access is not.  Out-of-range can never read a
-    //  valid cell, in any build, with any ORB_ASSERT.
-    //
-    //  Why an assert rather than a total orb_read: a read that silently reports
-    //  "structural zero" for a corrupt index is the same class of bug as the
-    //  rank off-by-one -- it survives every roundtrip test, because a roundtrip
-    //  writes and reads through the same wrong door.  The two-function split
-    //  makes the caller say which one it wants, and the assert makes the wrong
-    //  one loud in the build where loudness is affordable.
-    //
-    //  The explicit digit check below is DELIBERATELY REDUNDANT with orb_rank's
-    //  bounds check.  The rank check is the backstop that keeps the
-    //  memory-safety claim true even if this one is ever weakened; this one is
-    //  what makes the zero-set/out-of-domain distinction exact (a tuple like
-    //  (5,5) at n=3 under a '-' level canonicalizes to the zero set BEFORE any
-    //  rank arithmetic could object, so without a digit check it would be
-    //  reported as an in-domain zero).
-    //
-    //  SIGN APPLICATION AND T.  chi is in {-1, 0, +1}.  T must be constructible
-    //  from 0 (the zero set) and -- only when the class has at least one '-'
-    //  level -- must support unary minus.  `orb_has_minus_level` makes that an
-    //  `if constexpr`, so a '+'-only class (SymIdx-like: every character is +1)
-    //  instantiates cleanly over a T that has no negation at all.  Conjugation
-    //  is NOT handled: Hermitian stays depth-1-only, outside the +-1 character
-    //  system (decompaction §2 / plan-orbit-index-types.md §3).
-    // =========================================================================
+    // SIGN APPLICATION AND T. chi is in {-1, 0, +1}. T must be constructible from 0 (the zero set) and -- only when the
+    // class has at least one '-' level -- must support unary minus. `orb_has_minus_level` makes that an `if constexpr`,
+    // so a '+'-only class (SymIdx-like) instantiates cleanly over a T with no negation at all. Conjugation is NOT
+    // handled: Hermitian stays depth-1-only, outside this +-1 character system.
 
-    /// True iff the class admits a -1 character, i.e. has at least one '-'
-    /// level.  Empty pack folds to false -- OrbIdx<[],n> == Idx<n> is '+'-only.
+    /// True iff the class admits a -1 character, i.e. has at least one '-' level. Empty pack folds to false -- OrbIdx<[],n> == Idx<n> is '+'-only.
     template<class... Levels>
     inline constexpr bool orb_has_minus_level = (... || (!Levels::pos));
 
-    /// decompaction §2 read, total.  Writes chi(t) * pool[rank(canon(t))] --
-    /// or T(0) on the zero set, with no pool access -- into `out` and returns
-    /// true.  Returns false, leaving `out` UNTOUCHED, iff the tuple is out of
-    /// domain: `n` negative, some digit outside [0,n), or rank overflow.
+    /// decompaction Sec 2 read, total. Writes chi(t) * pool[rank(canon(t))] -- or T(0) on the zero set, with no pool access
+    /// -- into `out` and returns true. Returns false, leaving `out` UNTOUCHED, iff the tuple is out of domain: `n`
+    /// negative, some digit outside [0,n), or rank overflow.
     ///
-    /// `tuple` is ANY raw tuple: digits need not be canonical or even ordered.
-    /// `pool` may be null when the caller only wants the domain verdict; it is
-    /// dereferenced only on the true-and-nonzero path.
+    /// `tuple` is ANY raw tuple: digits need not be canonical or even ordered. `pool` may be null when the caller only
+    /// wants the domain verdict; it is dereferenced only on the true-and-nonzero path.
     template<class T, class... Levels>
     inline bool orb_read_checked(const T* pool, const int* tuple, int n, T& out) {
         constexpr int A = orb_axes<Levels...>;
@@ -788,29 +619,24 @@ namespace orbit_wreath_utilities {
             return true;
         }
         const int64_t r = orb_rank<Levels...>(can, n);
-        // Reached only when the rank arithmetic leaves int64 (§7.2's wall, an
-        // extent far past anything allocatable); the off-by-one case the rank
-        // bounds check also guards is already refused by the digit check above.
+        // Reached only when the rank arithmetic leaves int64 (an extent far past anything allocatable); the off-by-one case the rank bounds check also guards is already refused by the digit check above.
         if (r == ORB_OVERFLOW) return false;
 
         if constexpr (orb_has_minus_level<Levels...>) {
             out = (chi < 0) ? static_cast<T>(-pool[r]) : pool[r];
         } else {
-            // chi is +1 for every canonical tuple of a '+'-only class, so T is
-            // never required to have unary minus here.
+            // chi is +1 for every canonical tuple of a '+'-only class, so T is never required to have unary minus here.
             out = pool[r];
         }
         return true;
     }
 
-    /// decompaction §2 read, with a PRECONDITION: every digit of `tuple` is in
-    /// [0,n) and `n` >= 0.  The zero set is in the domain and yields T(0).
+    /// decompaction Sec 2 read, with a PRECONDITION: every digit of `tuple` is in [0,n) and `n` >= 0. The zero set is in
+    /// the domain and yields T(0).
     ///
-    /// Violating the precondition trips ORB_ASSERT and returns T(0) without
-    /// indexing `pool`.  That T(0) is UNSPECIFIED, not a promise: it aliases
-    /// the zero set on purpose-free grounds (there is no other total answer),
-    /// which is exactly why a caller that cannot vouch for its tuple must use
-    /// orb_read_checked instead of comparing against 0.
+    /// Violating the precondition trips ORB_ASSERT and returns T(0) without indexing `pool`. That T(0) is UNSPECIFIED,
+    /// not a promise: it aliases the zero set on purpose-free grounds (there is no other total answer), which is why a
+    /// caller that cannot vouch for its tuple must use orb_read_checked instead of comparing against 0.
     template<class T, class... Levels>
     inline T orb_read(const T* pool, const int* tuple, int n) {
         T v = T(0);
@@ -819,29 +645,21 @@ namespace orbit_wreath_utilities {
         return ok ? v : T(0);
     }
 
-    /// Store `v` at `tuple`, which must be EXACTLY the canonical representative
-    /// of its orbit: an orb_canon fixed point with character +1, digits in
-    /// [0,n).  Returns false -- writing nothing -- otherwise, i.e. for an
-    /// out-of-domain tuple, a zero-set tuple (chi == 0), a mirrored tuple
-    /// (chi == -1), a non-canonical tuple that happens to sit at an EVEN
-    /// permutation (chi == +1 but not a fixed point: e.g. the 3-cycle
-    /// (1,2,0) under a single (3,-) level), or a rank overflow.
+    /// Store `v` at `tuple`, which must be EXACTLY the canonical representative of its orbit: an orb_canon fixed point
+    /// with character +1, digits in [0,n). Returns false -- writing nothing -- otherwise, i.e. for an out-of-domain
+    /// tuple, a zero-set tuple (chi == 0), a mirrored tuple (chi == -1), a non-canonical tuple that happens to sit at an
+    /// EVEN permutation (chi == +1 but not a fixed point: e.g. the 3-cycle (1,2,0) under a single (3,-) level), or a
+    /// rank overflow.
     ///
-    /// The fixed-point test is therefore load-bearing and separate from the
-    /// character test -- chi == +1 does NOT imply canonical.  The converse
-    /// direction is redundant on purpose: chi == -1 needs an odd sort
-    /// permutation, so a mirrored tuple is never a fixed point either and the
-    /// two tests overlap there.  The character test's UNIQUE job is the zero
-    /// set, which IS a fixed point (canon leaves `out` unspecified at chi == 0,
-    /// so the tests are ordered character-first for that reason too).
+    /// The fixed-point test is therefore load-bearing and separate from the character test -- chi == +1 does NOT imply
+    /// canonical. The converse direction is redundant on purpose: chi == -1 needs an odd sort permutation, so a mirrored
+    /// tuple is never a fixed point either and the two tests overlap there. The character test's UNIQUE job is the zero
+    /// set, which IS a fixed point (canon leaves `out` unspecified at chi == 0, hence the character-first test order).
     ///
-    /// NO MIRRORED WRITES IN v1.  Storing through a non-canonical tuple would
-    /// mean solving chi * pool[r] = v for pool[r], i.e. DIVIDING by the
-    /// character.  That is well defined for signed arithmetic types and not for
-    /// the general T this layer is otherwise agnostic about (unsigned, modular,
-    /// saturating, monoid accumulators), and it silently loses the "the caller
-    /// knew which cell it was touching" property that makes a compaction
-    /// well-definedness check possible (decompaction §5).  Deferred, on purpose.
+    /// NO MIRRORED WRITES IN v1. Storing through a non-canonical tuple would mean solving chi * pool[r] = v for pool[r],
+    /// i.e. DIVIDING by the character -- well defined for signed arithmetic types but not for the general T this layer
+    /// is otherwise agnostic about (unsigned, modular, saturating, monoid accumulators), and it silently loses the "the
+    /// caller knew which cell it was touching" property a compaction well-definedness check needs. Deferred, on purpose.
     template<class T, class... Levels>
     inline bool orb_write_canonical(T* pool, const int* tuple, int n, T v) {
         constexpr int A = orb_axes<Levels...>;
@@ -860,65 +678,43 @@ namespace orbit_wreath_utilities {
         return true;
     }
 
-    // -------------------------------------------------------------------------
-    //  orb_skeleton<T, Levels...> -- the NESTED-POINTER dual view
+    // orb_skeleton<T, Levels...> -- the NESTED-POINTER dual view.
     //
-    //  The wreath generalization of build_skeleton (nested_array_utilities.hpp:
-    //  217-264), which lays a pointer skeleton over ONE contiguous pool so that
-    //  `arr[i][j][k]` costs no offset arithmetic and the DFS traversal order IS
-    //  the allocation order.  Same substrate, same promise: the caller owns the
-    //  pool (already laid out in orb_visit order), this adds ONE arena
-    //  allocation of node records, and navigation walks the canonical
-    //  coordinate space axis by axis by chasing pointers.
+    // The wreath generalization of build_skeleton (nested_array_utilities.hpp:217-264), which lays a pointer skeleton
+    // over ONE contiguous pool so that `arr[i][j][k]` costs no offset arithmetic and the DFS traversal order IS the
+    // allocation order. Same substrate, same promise: the caller owns the pool (already laid out in orb_visit order),
+    // this adds ONE arena allocation of node records, and navigation walks the canonical coordinate space axis by axis
+    // by chasing pointers.
     //
-    //  WHERE THE CHILD COUNTS COME FROM.  Not from a second bound formula --
-    //  from the §2 nest itself.  `build` RUNS orb_visit and records, at each
-    //  node, the span of coordinate values the nest establishes there.  That is
-    //  the §2 peeling bound as realized: every base-case loop in the nest is
-    //  `for (x = lo; x < n; ++x)`, and a peeled segment's pinned coordinate
-    //  contributes the single value that the neighbouring free segment's lower
-    //  bound sits one above -- so the values a node serves are one contiguous
-    //  ascending run, and a node is (first value, length, where the children
-    //  start).  There is no bound logic in this class that could drift from the
-    //  traversal, because there is no bound logic in this class at all.
+    // WHERE THE CHILD COUNTS COME FROM: not a second bound formula, but the Sec 2 nest itself. `build` RUNS orb_visit and
+    // records, at each node, the span of coordinate values the nest establishes there -- the Sec 2 peeling bound as
+    // realized: every base-case loop is `for (x = lo; x < n; ++x)`, and a peeled segment's pinned coordinate contributes
+    // the single value the neighbouring free segment's lower bound sits one above, so the values a node serves are one
+    // contiguous ascending run: a node is (first value, length, where the children start). There is no bound logic in
+    // this class that could drift from the traversal, because there is no bound logic in this class at all. The
+    // contiguous-run property is CHECKED, not assumed: a gap, a descent, or a non-contiguous leaf row fails the build.
     //
-    //  The contiguous-run property is CHECKED, not assumed: a gap, a descent,
-    //  or a leaf row that is not contiguous in the pool fails the build.
+    // DIVERGENCE FROM build_skeleton: it allocates the FORMULA trip count `extents[d] - lastIndex` and so keeps trailing
+    // zero-length rows; this skeleton materializes only what the nest visits, so an empty subtree is not built and
+    // `navigate` answers nullptr there, same as a zero-length row would. The two agree -- count == n - lo -- at EVERY
+    // leaf row of EVERY class and at every node of a '+'-only class (every value extends). They differ only where a
+    // deeper level's emptiness truncates the tail: `2-` at n = 4 serves i in [0,3) at the root, not [0,4), because i = 3
+    // has no partner.
     //
-    //  DIVERGENCE FROM build_skeleton, stated rather than hidden.
-    //  build_skeleton allocates the FORMULA trip count `extents[d] - lastIndex`
-    //  and so keeps trailing zero-length rows (strict rank-2 storage keeps row
-    //  n-1, which holds nothing).  This skeleton materializes only what the
-    //  nest visits, so a child whose entire subtree is empty is not built;
-    //  `navigate` answers nullptr for that coordinate, which is what a
-    //  zero-length row answers too.  The two agree -- count == n - lo -- at
-    //  EVERY leaf row of EVERY class (the last axis is never a pinned
-    //  coordinate, its loop runs to n, and every iteration emits a cell) and at
-    //  every node of a '+'-only class (every value extends: the all-equal
-    //  completion is always canonical).  They differ only where a deeper
-    //  level's emptiness truncates the tail: `2-` at n = 4 serves i in [0,3) at
-    //  the root, not [0,4), because i = 3 has no partner.
+    // ARENA LAYOUT. ONE `new node[N]`, carved into AXES regions by depth: region k holds every depth-k node in
+    // ascending-lex order of its prefix. Children of a depth-k node are therefore a CONTIGUOUS run inside region k+1
+    // (consecutive prefixes have consecutive children), which is why a node stores one child pointer instead of a
+    // pointer array, and why the whole skeleton is one allocation and one delete[]. Depth-(AXES-1) nodes are the leaf
+    // rows: `row` points into the CALLER's pool at the rank of their first cell, and their `count` cells are contiguous
+    // from there -- the same "leaf rows are slices of the pool, not heap blocks of their own" invariant build_skeleton's
+    // teardown contract rests on.
     //
-    //  ARENA LAYOUT.  ONE `new node[N]`, carved into AXES regions by depth:
-    //  region k holds every depth-k node in ascending-lex order of its prefix.
-    //  Children of a depth-k node are therefore a CONTIGUOUS run inside region
-    //  k+1 (consecutive prefixes have consecutive children), which is why a
-    //  node stores one child pointer instead of a pointer array, and why the
-    //  whole skeleton is one allocation and one delete[].  Depth-(AXES-1) nodes
-    //  are the leaf rows: `row` points into the CALLER's pool at the rank of
-    //  their first cell, and their `count` cells are contiguous from there --
-    //  the same "leaf rows are slices of the pool, not heap blocks of their own"
-    //  invariant build_skeleton's teardown contract rests on.
+    // N = sum over k of (number of distinct canonical prefixes of length k), reported as node_count(); arena_bytes() is
+    // N * sizeof(node).
     //
-    //  N = sum over k of (number of distinct canonical prefixes of length k),
-    //  reported as node_count(); arena_bytes() is N * sizeof(node).
-    //
-    //  LIFETIME.  Copy is deleted (a copy would double-free the arena); the
-    //  destructor frees, and `free()` is public for explicit release.  The pool
-    //  is NOT owned: freeing the skeleton leaves it untouched, and destroying
-    //  the pool first dangles every leaf row -- the caller sequences the two,
-    //  exactly as with allocate<>/deallocate.
-    // -------------------------------------------------------------------------
+    // LIFETIME. Copy is deleted (a copy would double-free the arena); the destructor frees, and `free()` is public for
+    // explicit release. The pool is NOT owned: freeing the skeleton leaves it untouched, and destroying the pool first
+    // dangles every leaf row -- the caller sequences the two, exactly as with allocate<>/deallocate.
 
     template<class T, class... Levels>
     class orb_skeleton {
@@ -926,14 +722,10 @@ namespace orbit_wreath_utilities {
         /// Raw axes of the class == depth of the node tree.
         static constexpr int AXES = orb_axes<Levels...>;
 
-        /// One skeleton node.  Depth < AXES-1: `kids` is a run of `count`
-        /// child nodes, `row` is null.  Depth == AXES-1 (a leaf row): `row`
-        /// points into the pool at this row's first cell, `kids` is null.
-        /// `lo` is the first coordinate value this node serves, so child index
-        /// == coordinate - lo.  (build_skeleton stores no lo/count because its
-        /// consumers recompute the bound by formula at every use site; this one
-        /// caches the nest's own bounds so that `navigate` needs no bound logic
-        /// whatsoever.  Two ints per node buys a pointer-chase-only accessor.)
+        /// One skeleton node. Depth < AXES-1: `kids` is a run of `count` child nodes, `row` is null. Depth == AXES-1 (a
+        /// leaf row): `row` points into the pool at this row's first cell, `kids` is null. `lo` is the first coordinate
+        /// value this node serves, so child index == coordinate - lo (build_skeleton recomputes bounds by formula at
+        /// every use site; this caches the nest's own bounds so `navigate` needs no bound logic whatsoever).
         struct node {
             int   lo;
             int   count;
@@ -943,8 +735,7 @@ namespace orbit_wreath_utilities {
 
         orb_skeleton() = default;
         ~orb_skeleton() { free(); }
-        /// Copy is deleted -- two owners would double-free the arena.  Move
-        /// transfers it, so a skeleton can be returned or stored by value.
+        /// Copy is deleted -- two owners would double-free the arena. Move transfers it, so a skeleton can be returned or stored by value.
         orb_skeleton(const orb_skeleton&)            = delete;
         orb_skeleton& operator=(const orb_skeleton&) = delete;
         orb_skeleton(orb_skeleton&& o) noexcept
@@ -964,16 +755,12 @@ namespace orbit_wreath_utilities {
             return *this;
         }
 
-        /// Build over an EXISTING pool of orb_cell_count<Levels...>(n) cells,
-        /// already in (or about to be filled in) orb_visit order.  Releases any
-        /// previous build first, so rebuilding is safe.
+        /// Build over an EXISTING pool of orb_cell_count<Levels...>(n) cells, already in (or about to be filled in)
+        /// orb_visit order. Releases any previous build first, so rebuilding is safe.
         ///
-        /// Returns false -- owning nothing -- iff `n` is negative (the same
-        /// verdict orb_visit and orb_cell_count give) or the contiguity
-        /// invariants above are violated.  A class with zero cells (n == 0, or
-        /// a strict level wider than the extent) builds successfully into an
-        /// EMPTY skeleton: no arena, null root, navigate always null.
-        /// Throws whatever `new` throws; nothing is leaked if it does.
+        /// Returns false -- owning nothing -- iff `n` is negative or the contiguity invariants above are violated. A
+        /// class with zero cells (n == 0, or a strict level wider than the extent) builds successfully into an EMPTY
+        /// skeleton: no arena, null root, navigate always null. Throws whatever `new` throws; nothing is leaked if it does.
         bool build(int n, T* pool) {
             free();
             if (n < 0) return false;
@@ -985,10 +772,9 @@ namespace orbit_wreath_utilities {
             bool    dup       = false;
             int64_t cells     = 0;
 
-            // Pass 1 -- how many nodes per depth.  A depth-k node IS a distinct
-            // canonical prefix of length k; the stream is ascending lex, so
-            // prefixes change exactly at the first differing axis and every
-            // depth strictly below it starts a new node.
+            // Pass 1 -- how many nodes per depth. A depth-k node IS a distinct canonical prefix of length k; the stream
+            // is ascending lex, so prefixes change exactly at the first differing axis and every depth strictly below
+            // it starts a new node.
             const bool okv = orb_visit<Levels...>(n, [&](const int* t, int64_t) {
                 int d = -1;
                 if (!firstCell) {
@@ -1011,9 +797,7 @@ namespace orbit_wreath_utilities {
 
             int64_t total = 0;
             for (int k = 0; k < AXES; ++k) total += per[k];
-            // The ONE allocation.  Nothing is committed to `this` until it
-            // succeeds, so a throwing `new` leaves the skeleton empty rather
-            // than half-built.
+            // The ONE allocation. Nothing is committed to `this` until it succeeds, so a throwing `new` leaves the skeleton empty rather than half-built.
             node* const fresh = new node[static_cast<size_t>(total)];
             arena_ = fresh;
             nodes_ = total;
@@ -1037,8 +821,7 @@ namespace orbit_wreath_utilities {
             firstCell = true;
             bool ok   = true;
 
-            // Pass 2 -- place the nodes.  Same walk, so placement order is the
-            // stream order by construction.
+            // Pass 2 -- place the nodes. Same walk, so placement order is the stream order by construction.
             const bool okv2 = orb_visit<Levels...>(n, [&](const int* t, int64_t r) {
                 if (!ok) return;
                 int d = -1;
@@ -1083,8 +866,7 @@ namespace orbit_wreath_utilities {
             return true;
         }
 
-        /// Release the arena.  The pool is not touched (not owned).  Safe on an
-        /// unbuilt or already-freed skeleton, and safe to call before rebuild.
+        /// Release the arena. The pool is not touched (not owned). Safe on an unbuilt or already-freed skeleton, and safe to call before rebuild.
         void free() {
             delete[] arena_;
             arena_ = nullptr;
@@ -1095,19 +877,14 @@ namespace orbit_wreath_utilities {
             n_     = 0;
         }
 
-        /// Pointer to the cell of a CANONICAL tuple -- pure pointer-chasing, one
-        /// subtract and one bounds test per axis, no stride and no rank
-        /// arithmetic.  Equals base() + orb_rank<Levels...>(tuple, n) whenever
-        /// the tuple has a stored cell.
+        /// Pointer to the cell of a CANONICAL tuple -- pure pointer-chasing, one subtract and one bounds test per axis,
+        /// no stride and no rank arithmetic. Equals base() + orb_rank<Levels...>(tuple, n) whenever the tuple has a
+        /// stored cell.
         ///
-        /// Returns nullptr for any tuple with NO stored cell under this
-        /// skeleton: out of range at some axis, in the zero set, or off the
-        /// canonical set entirely (a non-canonical tuple leaves the visited span
-        /// at the first axis where it stops being canonical, so it cannot land
-        /// on some other orbit's cell).  It does NOT canonicalize -- a mirrored
-        /// tuple is not silently redirected to its representative; that is
-        /// orb_read's job, and keeping the two separate is what makes this the
-        /// zero-arithmetic path.
+        /// Returns nullptr for any tuple with NO stored cell under this skeleton: out of range at some axis, in the
+        /// zero set, or off the canonical set entirely (a non-canonical tuple leaves the visited span at the first axis
+        /// where it stops being canonical, so it cannot land on some other orbit's cell). It does NOT canonicalize -- a
+        /// mirrored tuple is not redirected to its representative; that is orb_read's job, keeping this zero-arithmetic.
         T* navigate(const int* canonicalTuple) const {
             const node* nd = root_;
             if (!nd) return nullptr;
@@ -1121,11 +898,9 @@ namespace orbit_wreath_utilities {
             return nd->row + c;
         }
 
-        /// The contiguous half of the dual view: the pool base, exactly what
-        /// pool_base (nested_array_utilities.hpp:54-87) recovers from a
-        /// build_skeleton skeleton.  Here it needs no recovery -- the caller
-        /// supplied it -- and `base()[0 .. cells())` is the orb_visit stream in
-        /// order, ready for a linear walk or one cudaMemcpy.
+        /// The contiguous half of the dual view: the pool base, exactly what pool_base (nested_array_utilities.hpp:54-87)
+        /// recovers from a build_skeleton skeleton. Here it needs no recovery -- the caller supplied it -- and
+        /// `base()[0 .. cells())` is the orb_visit stream in order, ready for a linear walk or one cudaMemcpy.
         T* base() const { return pool_; }
 
         /// Root node (depth 0), or null for an empty / unbuilt skeleton.

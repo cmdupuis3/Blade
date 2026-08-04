@@ -1,38 +1,13 @@
-/// Stage-3 symmetry deduction (the deduction triad, docs/plan-implicit-
-/// formers-and-deduction.md §3.2) — EARLY TIER: adjacent-pair swap parity of
-/// fixed-arity typed kernel bodies, deduced bottom-up from the per-primitive
-/// tables. Pure analysis over TypedAst: no unification, no side effects; the
-/// consumers (TypeCheck's buildApplyInfo hook and checkFunctionDecl summary)
-/// decide what a parity MEANS (validation of a declared `where comm`,
-/// pin suggestions). Placed before TypeCheck in the build so typeCheck can
-/// invoke it internally (the Zonk pattern).
+/// Symmetry deduction (the deduction triad), EARLY TIER: adjacent-pair swap
+/// parity of fixed-arity typed kernel bodies, deduced bottom-up from
+/// per-primitive tables (opSwapClass, combineBinOp) plus interprocedural
+/// SIGN-PARITY call summaries (deduceSignParities). Pure analysis over
+/// TypedAst; TypeCheck's buildApplyInfo hook and checkFunctionDecl summary
+/// decide what a parity MEANS (placed before TypeCheck so it can invoke this internally).
 ///
-/// The judgment, per the plan (and the adversarial review that shaped it):
-/// for the transposition σ of one ADJACENT parameter pair (pi, pj), every
-/// subtree gets a Parity — PInv (e[σ] ≡ e), PNeg (e[σ] ≡ −e), or PBottom
-/// (unknown). Two per-primitive tables drive it:
-///   1. the 3-way SWAP CLASS (comm / antisym / neither), consulted when a
-///      binary node's two children are structural MIRRORS of each other
-///      under σ (Mirror is a sibling-scoped fact resolved locally at the
-///      node — it is not itself a propagating lattice value);
-///   2. per-operand SIGN behavior, which propagates a child's PNeg upward:
-///      * and / are sign-multiplicative in each operand (PNeg·PNeg = PInv —
-///      the (a−b)*(a−b) case); + and − require both children to transform
-///      the same way; comparisons and logicals absorb sign; %, ^ and every
-///      unlisted node are PBottom (the closed-world default that keeps the
-///      analysis sound as node kinds are added). Table 2 also has an
-///      INTERPROCEDURAL half: per-function SIGN-PARITY summaries
-///      (`deduceSignParities`, {SOdd, SEven, SUnknown} per parameter) let a
-///      CALL propagate PNeg — `mymean(x − y)` is antisymmetric because
-///      `mymean` is odd in its parameter — where the call rule alone could
-///      only ever certify invariance.
-///
-/// Soundness bias: PInv/PNeg are only ever produced by the finite rules
-/// below; anything unrecognized — exotic node kinds, reduce over non-(+)
-/// kernels, lambdas with fresh binders inside mirror candidates — collapses
-/// to PBottom, which downstream means "no claim": dense storage, no
-/// suggestion, no validation verdict. Wrong-guess state is dense, never
-/// compact-and-corrupt.
+/// Transposing one ADJACENT parameter pair (pi, pj) gives each subtree a
+/// Parity: PInv (e[swap]=e), PNeg (e[swap]=-e), or PBottom -- the
+/// closed-world default: "no claim," dense storage, never compact-and-corrupt.
 module Blade.Deduce
 
 open Blade.Ast
@@ -40,49 +15,40 @@ open Blade.Types
 open Blade.IR
 open Blade.TypedAst
 
-/// Swap-parity of a kernel body under transposition of one adjacent
-/// parameter pair.
+/// Swap-parity of a kernel body under transposition of one adjacent parameter pair.
 type Parity =
     | PInv
     | PNeg
     | PBottom
 
-/// SIGN-parity of a function body with respect to NEGATING one parameter —
-/// the interprocedural half of table 2 (plan §3.2.1's "sign parity per
-/// operand", lifted from primitives to whole callees).
+/// SIGN-parity of a function body under NEGATING one parameter --
+/// interprocedural half of table 2, lifted from primitives to callees.
 ///
-///   SOdd     f(.., −x, ..) ≡ −f(..)   (odd/sign-linear in that parameter)
-///   SEven    f(.., −x, ..) ≡  f(..)   (that parameter's SIGN is irrelevant;
-///                                      NOT "the parameter is irrelevant" —
+///   SOdd     f(.., -x, ..) = -f(..)   (odd/sign-linear in that parameter)
+///   SEven    f(.., -x, ..) =  f(..)   (that parameter's SIGN is irrelevant;
+///                                      NOT "the parameter is irrelevant" --
 ///                                      `extents(row)` is even in `row`)
 ///   SUnknown no claim.
 ///
-/// Both SOdd and SEven can hold for a body that is identically zero; every
-/// rule below only ever returns a claim it can prove, so reporting either is
-/// sound. Deduced bottom-up exactly like the pair parities, and recorded per
-/// fixed-arity function in decl order — that is what lets `mymean(x − y)`
-/// (mymean linear) come out PNeg instead of PBottom under the pair swap.
+/// Deduced bottom-up like the pair parities, per function in decl order --
+/// what lets `mymean(x - y)` come out PNeg, not PBottom, under swap.
 type SignParity =
     | SOdd
     | SEven
     | SUnknown
 
-/// Table 1: swap class of a primitive binary op under operand exchange.
-/// Mirrors the boolean comm tables (TypeCheck.inferApply's section arm /
-/// Lowering.lowerTypedSection) and extends `-` to antisymmetric — the 3-way
-/// classification the plan's §2.3 calls for. `/`, `%`, `^`, comparisons:
-/// neither.
+/// Table 1: swap class of a primitive op under operand exchange. Mirrors
+/// the boolean comm tables (TypeCheck.inferApply's section arm /
+/// Lowering.lowerTypedSection), extended with `-` as antisymmetric (`/`, `%`, `^`, comparisons: neither).
 let private opSwapClass (op: BinOp) : Parity =
     match op with
     | OpAdd | OpMul | OpEq | OpNeq | OpAnd | OpOr -> PInv
     | OpSub -> PNeg
     | _ -> PBottom
 
-/// Structural equality of `l` and `r` MODULO the pair swap: does applying
-/// σ = (pi pj) to l yield r, node for node? Vars compare by VarId (binder
-/// identity, never surface name — match-arm rebinding makes names unsafe);
-/// the swapped pair cross-matches; every other var must be the SAME id.
-/// Unknown node kinds never mirror (conservative).
+/// Structural equality of `l` and `r` MODULO the pair swap (pi pj): does
+/// transposing l yield r, node for node? Vars compare by VarId, not surface
+/// name; the swapped pair cross-matches, others must match id (unknown kinds never mirror).
 let rec private mirrorEq (pi: IRId) (pj: IRId) (l: TypedExpr) (r: TypedExpr) : bool =
     match l.Kind, r.Kind with
     | TExprVar (_, idL, _), TExprVar (_, idR, _) ->
@@ -116,17 +82,13 @@ let rec private mirrorEq (pi: IRId) (pj: IRId) (l: TypedExpr) (r: TypedExpr) : b
         mirrorEq pi pj cA cB && mirrorEq pi pj tA tB && mirrorEq pi pj eA eB
     | TExprField (oA, fA, _), TExprField (oB, fB, _) ->
         fA = fB && mirrorEq pi pj oA oB
-    // Deliberately NO TExprMatch arm, even though parityOf/signParityOf both
-    // grew one: two matches can only mirror if their PATTERN BINDERS
-    // correspond, and this function has no binder-correspondence parameter to
-    // decide that with (deducePackFold supplies one by hand for its two arms).
-    // The `false` below is already the sound answer, so an arm would only ever
-    // restate it.
+    // Deliberately NO TExprMatch arm: matches only mirror if PATTERN BINDERS
+    // correspond, and this function has no binder-correspondence parameter
+    // for that (deducePackFold supplies one by hand) -- `false` is already sound.
     | _ -> false
 
 /// Reduce kernels inside mirror candidates: only a literal operator section
-/// or the SAME named reference compares equal (a lambda's fresh binder ids
-/// defeat structural comparison — conservative false).
+/// or the SAME named reference compares equal (lambda binder ids defeat structural comparison -- conservative false).
 and private kernelEq (a: TypedExpr) (b: TypedExpr) : bool =
     match a.Kind, b.Kind with
     | TExprSection x, TExprSection y -> x = y
@@ -134,12 +96,12 @@ and private kernelEq (a: TypedExpr) (b: TypedExpr) : bool =
     | _ -> false
 
 /// Table 2: combine child parities through a binary op (the non-mirror
-/// case) — the sign chain rule.
+/// case) -- the sign chain rule.
 let private combineBinOp (op: BinOp) (a: Parity) (b: Parity) : Parity =
     match op with
     | OpMul | OpDiv ->
-        // Sign-multiplicative in each operand: (−x)·y = −(x·y),
-        // x/(−y) = −(x/y); PNeg·PNeg = PInv — (a−b)*(a−b) is even.
+        // Sign-multiplicative in each operand: (-x)*y = -(x*y), x/(-y) =
+        // -(x/y); PNeg*PNeg = PInv -- (a-b)*(a-b) is even.
         (match a, b with
          | PInv, PInv -> PInv
          | PInv, PNeg | PNeg, PInv -> PNeg
@@ -147,7 +109,7 @@ let private combineBinOp (op: BinOp) (a: Parity) (b: Parity) : Parity =
          | _ -> PBottom)
     | OpAdd | OpSub ->
         // Jointly sign-linear: both operands must transform the same way
-        // ((−x)+(−y) = −(x+y); mixed parities certify nothing).
+        // ((-x)+(-y) = -(x+y); mixed parities certify nothing).
         (match a, b with
          | PInv, PInv -> PInv
          | PNeg, PNeg -> PNeg
@@ -156,16 +118,12 @@ let private combineBinOp (op: BinOp) (a: Parity) (b: Parity) : Parity =
         // Boolean results absorb sign: only joint invariance survives.
         (match a, b with PInv, PInv -> PInv | _ -> PBottom)
     | _ ->
-        // %, ^, and anything else: invariance only (no literal-exponent
-        // cleverness in v1 — ^ lowers to generic pow()).
+        // %, ^, and anything else: invariance only (^ lowers to pow()).
         (match a, b with PInv, PInv -> PInv | _ -> PBottom)
 
-/// Every EXPRESSION carried inside a pattern. `TPatGuarded` is the only
-/// pattern kind that holds one, but it can sit at any depth of a composite
-/// pattern, so the whole shape is walked. A match rule that judged only
-/// `TypedMatchCase.Guard` would miss these and could report a parity for a
-/// pattern that secretly tests one of the swapped parameters; the walkers
-/// below therefore fold them in alongside the case guard.
+/// Every EXPRESSION carried inside a pattern. Only `TPatGuarded` holds one,
+/// but it can sit at any depth of a composite pattern -- walking the whole
+/// shape catches what `TypedMatchCase.Guard` alone would miss.
 let rec private patGuardExprs (p: TypedPattern) : TypedExpr list =
     match p.Kind with
     | TPatGuarded (inner, g) -> g :: patGuardExprs inner
@@ -175,9 +133,8 @@ let rec private patGuardExprs (p: TypedPattern) : TypedExpr list =
     | TPatStruct (_, flds) -> flds |> List.collect (snd >> patGuardExprs)
     | TPatWild | TPatVar _ | TPatLit _ | TPatVariant (_, None, _) -> []
 
-/// Conservative "does this subtree reference VarId v" — unknown node kinds
-/// answer TRUE (assume it does), which makes every consumer of this helper
-/// fail toward PBottom / SUnknown.
+/// Conservative "does this subtree reference VarId v": unknown node kinds
+/// answer TRUE, so every consumer of this helper fails toward PBottom / SUnknown.
 let rec private usesVar (v: IRId) (e: TypedExpr) : bool =
     match e.Kind with
     | TExprLit _ | TExprSection _ | TExprArity _ -> false
@@ -193,11 +150,9 @@ let rec private usesVar (v: IRId) (e: TypedExpr) : bool =
     | TExprIf (c, t, f) -> usesVar v c || usesVar v t || usesVar v f
     | TExprField (o, _, _) -> usesVar v o
     | TExprMatch (scrut, cases) ->
-        // Pattern BINDERS are fresh ids, so they can never be `v`; only the
-        // scrutinee, the case guards, the in-pattern guards and the arm
-        // bodies can mention it. Answering precisely here (rather than the
-        // blanket TRUE below) is what lets a match that never touches a
-        // parameter be judged even/invariant instead of unknown.
+        // Pattern BINDERS are fresh ids, never `v`; only the scrutinee,
+        // guards, and arm bodies can mention it -- precise here (not the
+        // blanket TRUE below) so an untouched match reads even/invariant.
         usesVar v scrut
         || cases |> List.exists (fun c ->
                usesVar v c.Body
@@ -206,34 +161,17 @@ let rec private usesVar (v: IRId) (e: TypedExpr) : bool =
     | TExprLet (_, _, value, body) -> usesVar v value || usesVar v body
     | _ -> true   // unknown: assume it uses v
 
-// ============================================================================
-// Binding-form normalization (ONE descent, shared by every walker below)
-// ============================================================================
+// Binding-form normalization (ONE descent, shared by every walker below).
 //
-// Blade has no `let x = v in body` expression: the bind-then-use kernel is the
-// brace block `{ let d = x - y ⏎ d * d }`, i.e. TExprBlock([TStmtLet b], Some
-// final). TExprLet is real too — `wrapMutualReturnBody` wraps every declared-
-// return mutual-group body in a TExprLet chain. Neither is understood by any
-// rule below, so both collapse to PBottom / SUnknown at the walkers' closed-
-// world catch-alls, and the analysis is blind to the single most idiomatic way
-// to write a kernel.
+// Blade's bind-then-use idiom is the brace block `{ let d = x - y; d * d }`
+// (TExprBlock([TStmtLet b], Some final)) or TExprLet (`wrapMutualReturnBody`'s
+// declared-return chains); neither is understood below, so bindings are
+// eliminated ONCE via substitution rather than taught to every walker
+// (`mirrorEq` lacks a binder-correspondence param): `{ let d = x - y; d * d }`
+// becomes (x-y)*(x-y), certified by `combineBinOp OpMul PNeg PNeg = PInv`.
 //
-// Rather than teach four walkers about binding forms (four places to drift —
-// and `mirrorEq` would additionally need a binder-CORRESPONDENCE parameter it
-// does not have), the bindings are eliminated once, up front, by substitution.
-// This is sound because the walkers judge STRUCTURE, never evaluation count,
-// and the flattened tree is a throwaway consumed only by this module — the
-// real body handed to Lowering is untouched. Duplication is in fact exactly
-// what `mirrorEq` needs: `{ let d = x - y ⏎ d * d }` becomes (x−y)*(x−y),
-// whose two children are NOT each other's σ-image, so the mirror rule stands
-// down and `combineBinOp OpMul PNeg PNeg = PInv` does the work.
-//
-// THE NO-REGRESSION INVARIANT every guard below leans on: a binding that is
-// not eliminated leaves its TExprBlock / TExprLet node standing, the walker
-// bottoms out exactly as it does today, and the binder is never exposed as a
-// bare TExprVar (which parityOf would wrongly read as PInv, since it is
-// neither pi nor pj). Every bail-out is therefore a loss of PRECISION, never
-// of soundness.
+// NO-REGRESSION INVARIANT: an un-eliminated binding leaves its node
+// standing, so a bail-out is a loss of PRECISION only, never soundness.
 
 /// Node count over the kinds the walkers understand. Anything else counts as
 /// "large" so it can never pass the duplication cap.
@@ -256,12 +194,9 @@ let rec private exprSize (e: TypedExpr) : int =
         1 + exprSize a + exprSize k + (match i with Some x -> exprSize x | None -> 0)
     | _ -> 1000   // unmodelled: "large"
 
-/// Occurrence count of `v`, conservative UPWARD: node kinds this walker does
-/// not model count as 2 ("many"), so an unknown context can never let a
-/// multi-use binding masquerade as single-use. The unknown tail delegates to
-/// `usesVar`, which is conservative-TRUE, so the count is never an
-/// UNDER-estimate — which is what the `= 0` (drop the binding) and `= 1`
-/// (inline without duplicating) decisions below rely on.
+/// Occurrence count of `v`, conservative UPWARD: unmodeled kinds count as 2
+/// ("many"); the `usesVar` fallback (conservative-TRUE) keeps it never an
+/// UNDER-estimate, which the `= 0` / `= 1` decisions below rely on.
 let rec private countVar (v: IRId) (e: TypedExpr) : int =
     let c = countVar v
     let sum = List.sumBy c
@@ -293,15 +228,11 @@ let rec private countVar (v: IRId) (e: TypedExpr) : int =
 
 /// Capture-free substitution of `repl` for every TExprVar bearing VarId `v`.
 ///
-/// Returns None when the tree contains a node kind this pass cannot rewrite —
-/// the caller then LEAVES THE BINDING IN PLACE (a precision loss, never an
-/// unsoundness). That single `| _ ->` line is what makes TExprLambda's
-/// `Captures`, TypedApplyInfo's ten expression-bearing fields, TExprAssign and
-/// every other mutation site safe BY CONSTRUCTION: if the binder appears
-/// anywhere inside a record this pass does not fully model, substitution is
-/// refused rather than performed half-way. No alpha-renaming is needed —
-/// binder IRIds are globally unique, so nothing `repl` mentions can be
-/// captured by a binder it lands under.
+/// Returns None on an unrewritable node kind, LEAVING THE BINDING IN PLACE
+/// (precision loss, not unsoundness) -- the single `| _ ->` arm is what
+/// makes TExprLambda's `Captures`, TypedApplyInfo's ten expression fields,
+/// TExprAssign, and other mutation sites safe BY CONSTRUCTION. Binder IRIds
+/// are globally unique, so no alpha-renaming is needed: `repl` can't be captured.
 let rec private substVar (v: IRId) (repl: TypedExpr) (e: TypedExpr) : TypedExpr option =
     let sub = substVar v repl
     let subs (es: TypedExpr list) =
@@ -377,13 +308,9 @@ let rec private substVar (v: IRId) (repl: TypedExpr) (e: TypedExpr) : TypedExpr 
          | true, Some f -> ok (TExprBlock (ss |> List.map Option.get, f))
          | _ -> None)
     | TExprMatch (scrut, cases) ->
-        // Patterns are left alone — their BINDERS are fresh ids and can never
-        // be `v` — except that a `TPatGuarded` carries a real expression. If
-        // one of those mentions `v` the substitution is refused outright:
-        // rewriting the body while leaving a live reference to a binding the
-        // caller is about to delete would leave a FREE variable behind, and
-        // parityOf reads a free var that is neither pi nor pj as PInv — an
-        // outright false claim rather than a lost one.
+        // Patterns are left alone (BINDERS are fresh, never `v`) except a
+        // `TPatGuarded` expression; if one mentions `v`, substitution is
+        // refused -- a stranded FREE var would make parityOf misread it as PInv, a false claim not a lost one.
         let subCase (c: TypedMatchCase) =
             if patGuardExprs c.Pattern |> List.exists (usesVar v) then None
             else
@@ -397,36 +324,26 @@ let rec private substVar (v: IRId) (repl: TypedExpr) (e: TypedExpr) : TypedExpr 
          | _ -> None)
     | _ -> if usesVar v e then None else Some e
 
-/// Is this whole tree inside the world `substVar` can rewrite? Asked with an
-/// IRId no binder can hold, so the only thing the walk can discover is an
-/// unmodelled node kind (the unknown arm's `usesVar` is unconditionally true
-/// there). One case list, not two.
+/// Is this whole tree inside the world `substVar` can rewrite? Queried with
+/// an IRId no binder can hold, so it can only discover an unmodelled node kind.
 let private isRewritable (e: TypedExpr) : bool =
     (substVar System.Int32.MinValue e e).IsSome
 
-/// Duplication cap: a leaf, or one operator over leaves (`x - y` is 3 nodes).
-/// SINGLE-use bindings inline unconditionally — no duplication happens at all
-/// — so this governs only the duplicating case.
+/// Duplication cap: a leaf, or one operator over leaves (`x - y` = 3 nodes).
+/// SINGLE-use bindings inline unconditionally, so this governs only the duplicating case.
 let private smallValueSize = 3
 
 /// Per-binding DUPLICATION budget, in nodes added.
 ///
-/// `smallValueSize` alone does NOT bound growth, which is the trap here. In a
-/// chain like
-///     let a = x - y      let b = a * a      let c = b * b      …
-/// every VALUE is three nodes — the cap is measured BEFORE the enclosing
-/// bindings are substituted into it, so `a * a` never looks big — yet each
-/// link doubles the tree, and N links would expand to 2^N nodes. The quantity
-/// that actually blows up is the occurrence count `n`, counted in the
-/// already-expanded body, so that is what this bounds. Capping the nodes any
-/// ONE binding may add keeps total growth linear in the number of bindings,
-/// and a binding that would exceed it is simply kept (⇒ the enclosing fold
-/// yields a TExprLet at its root ⇒ the walkers bottom out, as they do today).
+/// `smallValueSize` alone does NOT bound growth: a chain
+///     let a = x - y   let b = a * a   let c = b * b   ...
+/// has each VALUE at 3 nodes pre-substitution, yet each link doubles the
+/// tree (N links -> 2^N nodes). What blows up is occurrence count `n` in
+/// the EXPANDED body, so THAT's capped per binding (over-budget bindings kept as-is).
 let private duplicationBudget = 256
 
-/// Reduce one `let name = value; body`, returning the binding-free body when
-/// that is safe and the rebuilt binding otherwise (see the no-regression
-/// invariant above: a rebuilt binding is exactly today's behavior).
+/// Reduce one `let name = value; body`: the binding-free body when safe,
+/// else the rebuilt binding (see the no-regression invariant above).
 let private reduceLet (name: string) (vid: IRId) (value: TypedExpr) (body: TypedExpr) : TypedExpr =
     // A let's type is its body's type, so the body node carries the right
     // Type/Span for the rebuilt node.
@@ -447,24 +364,14 @@ let private reduceLet (name: string) (vid: IRId) (value: TypedExpr) (body: Typed
             | None -> keep ()
         else keep ()
 
-/// Reduce a brace block. The statement guard is stated POSITIVELY — every
-/// statement must be a plain, non-destructuring `let` — which is strictly
-/// stronger than bailing on a list of known-bad forms: TStmtAssign, TStmtForIn
-/// and TStmtExpr simply are not TStmtLet, so they can never appear in a block
-/// this rewrites, and the pack-fold template's `head :: tail` (DSConsRest,
-/// non-empty SubBindings) and a mutual-group binding's PostChecks are excluded
-/// by the same clause.
+/// Reduce a brace block. Statement guard is POSITIVE -- every statement
+/// must be a plain, non-destructuring `let`, excluding TStmtAssign/
+/// TStmtForIn/TStmtExpr, DSConsRest (pack-fold), and mutual-group PostChecks.
 ///
-/// NOT guarded on `IsMutable`: that flag is `assign <> ReadOnly`, and
-/// `assignOfBindingMut` maps ORDINARY `let` to `Assignable` (only `static` /
-/// `let const` is ReadOnly), so `IsMutable` is true for every idiomatic block
-/// binding and gating on it would make this whole pass a no-op. The mutation
-/// hazard it was meant to cover is carried instead by the two structural
-/// guards that actually see mutations: no assignment or loop can be a
-/// statement of a block reduced here, and any assignment buried inside a
-/// binding's VALUE makes that value unrewritable, which keeps the binding —
-/// and one kept binding leaves a TExprLet at the root of the fold, so the
-/// walkers bottom out on the whole block exactly as they do today.
+/// NOT guarded on `IsMutable`: `assignOfBindingMut` maps ordinary `let` to
+/// `Assignable` (only `static`/`let const` is ReadOnly), so gating on it
+/// would no-op this pass. The real guard is structural: no assignment/loop
+/// or VALUE-embedded assignment can pass (kept as unrewritable).
 let private reduceBlock (orig: TypedExpr) (stmts: TypedStmt list) (final: TypedExpr option) : TypedExpr =
     match stmts, final with
     | [], Some inner -> inner
@@ -485,12 +392,9 @@ let private reduceBlock (orig: TypedExpr) (stmts: TypedStmt list) (final: TypedE
         else orig
 
 /// Normalize binding forms so every walker below sees a binding-free tree
-/// wherever that is possible at all. Post-order: children first (so a let
-/// VALUE that is itself a block is already flat by the time it is inlined),
-/// then the node. Node kinds outside the rewritable world are returned
-/// UNCHANGED and UNRECURSED — flattening inside a lambda body or an apply-info
-/// record buys nothing (those nodes are ⊥ to every walker) and would force
-/// this pass to understand `Captures` / `ArrayTypes`.
+/// wherever possible (post-order: children first, then the node). Node
+/// kinds outside the rewritable world are UNCHANGED/UNRECURSED -- flattening
+/// inside a lambda body or apply-info record buys nothing and would need `Captures`/`ArrayTypes` support.
 let rec private flattenBindings (e: TypedExpr) : TypedExpr =
     let f = flattenBindings
     let fs = List.map f
@@ -533,58 +437,46 @@ let rec private flattenBindings (e: TypedExpr) : TypedExpr =
     | TExprLet (n, vid, value, body) -> reduceLet n vid value body
     | _ -> rebuilt
 
-// ============================================================================
 // Sign-linearity summaries (the interprocedural half of table 2)
-// ============================================================================
 
 /// Table 2', the SIGN chain rule through a binary op: how `l op r` behaves
 /// when the tracked parameter is negated, given how each operand behaves.
 let private combineSign (op: BinOp) (a: SignParity) (b: SignParity) : SignParity =
     match op with
     | OpMul | OpDiv ->
-        // Multiplicative in EACH operand, hence multiplicative in the pair:
-        // (−l)·r = −(l·r), l/(−r) = −(l/r), and (−l)/(−r) = l/r — two flips
-        // cancel, exactly as PNeg·PNeg = PInv does on the swap side.
+        // Multiplicative in EACH operand: (-l)*r=-(l*r), l/(-r)=-(l/r), and
+        // (-l)/(-r)=l/r (two flips cancel, as PNeg*PNeg=PInv does for swap).
         (match a, b with
          | SEven, SEven -> SEven
          | SOdd, SEven | SEven, SOdd -> SOdd
          | SOdd, SOdd -> SEven
          | _ -> SUnknown)
     | OpAdd | OpSub ->
-        // Jointly linear: (−l) ± (−r) = −(l ± r), l ± r unchanged when both
-        // operands are unchanged. A MIXED pair (`−l + r`) is neither, so ⊥.
+        // Jointly linear: (-l) +/- (-r) = -(l +/- r), unchanged when both are;
+        // a MIXED pair (`-l + r`) is neither, so unknown.
         (match a, b with
          | SEven, SEven -> SEven
          | SOdd, SOdd -> SOdd
          | _ -> SUnknown)
     | _ ->
         // Comparisons, logicals, `%`, `^`: a flipped operand changes the
-        // node's VALUE (`x > 0` vs `−x > 0`; `(−x)^2 = x^2` only for literal
-        // even exponents, which v1 does not read) and no sign law survives —
-        // a boolean cannot be "the negation of" another boolean. Only joint
-        // evenness composes: unchanged inputs give an unchanged result.
+        // node's VALUE (`x > 0` vs `-x > 0`) -- a boolean isn't "the negation
+        // of" another boolean, so only joint evenness composes.
         (match a, b with
          | SEven, SEven -> SEven
          | _ -> SUnknown)
 
-/// Sign-parity of one subtree with respect to negating parameter `p`.
-/// `resolver` supplies an already-summarized callee's per-parameter sign
-/// parities, in the callee's declaration order (None = not summarized). It is
-/// keyed by the callee's BINDER ID, not its surface name — a parameter or
-/// local that shadows a top-level function's name would otherwise borrow that
-/// function's sign law, and a wrong SOdd/SEven is a wrong parity, which is a
-/// wrong pin suggestion.
+/// Sign-parity of one subtree under negating parameter `p`. `resolver`
+/// supplies a summarized callee's sign parities in decl order (None = not
+/// summarized), keyed by BINDER ID, not surface name (shadowing-safe).
 let rec private signParityOf (resolver: IRId -> SignParity list option)
                              (p: IRId) (e: TypedExpr) : SignParity =
     let sp = signParityOf resolver p
     match e.Kind with
-    // Base case, and the one that subsumes literals, sections, the OTHER
-    // parameters and every capture: a subtree that never mentions p evaluates
-    // to the same value, so it is even. `usesVar` is conservative (unknown
-    // node kinds answer TRUE), and NO rule below descends into a binding form
-    // (block / let / match / lambda), so a variable reached here can only be
-    // p, another parameter, or an outer capture — never a local whose value
-    // silently depends on p.
+    // Base case (literals, sections, other parameters, captures): a subtree
+    // never mentioning p evaluates unchanged (even). `usesVar` is
+    // conservative-TRUE and nothing here descends into a binding form, so a
+    // var reached is p, a parameter, or a capture -- never a local.
     | _ when not (usesVar p e) -> SEven
     | TExprVar (_, id, _) ->
         // The guard above already claimed every var that is not p.
@@ -592,35 +484,29 @@ let rec private signParityOf (resolver: IRId -> SignParity list option)
     | TExprBinOp (_, op, l, r) -> combineSign op (sp l) (sp r)
     | TExprUnaryOp (op, inner) ->
         (match op, sp inner with
-         | _, SEven -> SEven          // unchanged input ⇒ unchanged result, any op
+         | _, SEven -> SEven          // unchanged input, unchanged result, any op
          | (OpNeg | OpReal | OpImag | OpConj), SOdd -> SOdd
-         // R-linear ops commute with the sign: −(−x), Re(−z) = −Re(z),
-         // conj(−z) = −conj(z). `!` yields a bool, `arg(−z) = arg(z) ± π`,
-         // and the OpMath intrinsics (exp/log/sqrt/…) are not sign-linear.
+         // R-linear ops commute with sign: -(-x), Re(-z)=-Re(z), conj(-z)=
+         // -conj(z) (`!` yields bool; `arg`/OpMath intrinsics aren't sign-linear).
          | _ -> SUnknown)
     | TExprArrayNegate a ->
         // Whole-array negation is the array-level OpNeg: sign passes through.
         (match sp a with SOdd -> SOdd | SEven -> SEven | SUnknown -> SUnknown)
     | TExprArrayConjugate a ->
-        // Conjugation is R-linear elementwise: conj(−A) = −conj(A).
+        // Conjugation is R-linear elementwise: conj(-A) = -conj(A).
         (match sp a with SOdd -> SOdd | SEven -> SEven | SUnknown -> SUnknown)
     | TExprApp (f, args) ->
-        // THE chain rule. Negating p flips argument i exactly when that
-        // argument is SOdd in p; such a flip reaches the RESULT exactly when
-        // the callee is SOdd in position i (an SEven position absorbs it).
-        // The result therefore flips by (−1)^k, k = the number of flipping
-        // arguments in SOdd callee positions. Composition across positions is
-        // legitimate because each summary is universally quantified over the
-        // other arguments: f(−x₁, −x₂) = s₁·f(x₁, −x₂) = s₁·s₂·f(x₁, x₂).
-        // An SUnknown anywhere that matters, an unsummarized callee, or an
-        // arity mismatch (partial application) certifies nothing.
+        // THE chain rule: negating p flips argument i iff it's SOdd in p
+        // AND the callee is SOdd in position i (SEven absorbs it); result
+        // flips by (-1)^k, k = count of such flips (legitimate since each
+        // summary is universally quantified: f(-x1,-x2)=s1*f(x1,-x2)=
+        // s1*s2*f(x1,x2)). SUnknown, an unsummarized callee, or a partial application: no claim.
         if sp f <> SEven then SUnknown   // p itself in callee position
         else
             let argPs = args |> List.map sp
             if argPs |> List.forall ((=) SEven) then SEven
-            // Every argument value is unchanged, so the call is unchanged —
-            // no summary needed (the same determinism assumption parityOf's
-            // all-invariant App rule already makes).
+            // Every argument unchanged, so the call is unchanged -- no
+            // summary needed (parityOf's all-invariant App rule agrees).
             else
                 match f.Kind with
                 | TExprVar (_, fid, _) ->
@@ -643,30 +529,23 @@ let rec private signParityOf (resolver: IRId -> SignParity list option)
          | SEven when kernelEven && initEven -> SEven
          | SOdd when init.IsNone
                      && (match kernel.Kind with TExprSection OpAdd -> true | _ -> false) ->
-             SOdd   // Σ(−x) = −Σx
-         // Negative rules, explicit rather than by analogy: reduce(_, (*))
-         // scales by (−1)^extent — unknowable without a static extent — and a
-         // SEEDED fold folds an UNnegated accumulator in, so neither carries
-         // the sign. min/max and user combinators: no law at all.
+             SOdd   // Sum(-x) = -Sum(x)
+         // reduce(_, (*)) scales by (-1)^extent (unknowable); a SEEDED
+         // fold's UNnegated accumulator, and min/max/user combinators, get no law.
          | _ -> SUnknown)
     | TExprExtents a ->
-        // extents(−x) = extents(x). Negation is a value operation and the
-        // negated value has exactly the shape of the original, so an ODD
-        // child yields an EVEN extents — this entry is what makes
+        // extents(-x) = extents(x): negation doesn't change shape, so an ODD
+        // child yields EVEN extents -- what makes
         // `mymean(row) = reduce(row, (+)) / extents(row)` odd overall
-        // (odd / even = odd). An SUnknown child may have a value-DEPENDENT
-        // shape (mask/filter), so it stays unknown.
+        // (odd/even = odd). A value-DEPENDENT shape (mask/filter) stays unknown.
         (match sp a with SOdd | SEven -> SEven | SUnknown -> SUnknown)
     | TExprIndex (arr, idxs, _) ->
-        // Indexing is linear in the array — (−A)(i) = −(A(i)) — but only at
-        // the SAME cell: an odd index would select a different element, so
-        // every index must be even before the array's parity passes through.
+        // Indexing is linear in the array -- (-A)(i)=-(A(i)) -- but only at
+        // the SAME cell, so every index must be even before parity passes through.
         if idxs |> List.forall (fun i -> sp i = SEven) then sp arr else SUnknown
     | TExprIf (c, t, f) ->
-        // The condition must be unchanged (an odd condition can flip which
-        // branch is taken, and `−(if c then t else e)` is then meaningless);
-        // with the branch fixed, the chosen value carries its own parity, so
-        // matching branches propagate — including SOdd/SOdd.
+        // The condition must be unchanged (else it could select a
+        // different branch); with it fixed, matching branches propagate, including SOdd/SOdd.
         if sp c <> SEven then SUnknown
         else
             (match sp t, sp f with
@@ -675,9 +554,7 @@ let rec private signParityOf (resolver: IRId -> SignParity list option)
              | _ -> SUnknown)
     | TExprMatch (scrut, cases) when not (List.isEmpty cases) ->
         // The sign twin of parityOf's match rule: an EVEN scrutinee selects
-        // the same arm and decomposes identically when p is negated, so every
-        // pattern binder is even (their fresh ids land on the usesVar guard
-        // above), and the arms then compose exactly like `if` branches.
+        // the same arm when p is negated, so binders are even and arms compose like `if` branches.
         let guards =
             cases |> List.collect (fun c ->
                 (match c.Guard with Some g -> [g] | None -> [])
@@ -690,40 +567,28 @@ let rec private signParityOf (resolver: IRId -> SignParity list option)
             elif bodies |> List.forall ((=) SOdd) then SOdd
             else SUnknown
     | TExprTuple es ->
-        // Aggregates have no negation as a value operation, so an odd
-        // component certifies nothing about the tuple; only invariance
-        // composes.
+        // Aggregates have no negation as a value operation, so only
+        // invariance composes.
         if es |> List.forall (fun x -> sp x = SEven) then SEven else SUnknown
     | TExprField (o, _, _) ->
-        // Same reasoning as tuples: "the field of a negated struct" is not a
-        // defined value operation.
-        (match sp o with SEven -> SEven | _ -> SUnknown)
+        (match sp o with SEven -> SEven | _ -> SUnknown)   // same reasoning as tuples
     | _ -> SUnknown   // closed world: unlisted node kinds certify nothing
 
-/// Per-parameter sign-linearity summary of a fixed-arity function body: one
-/// entry per parameter, in declaration order (so a caller can index it by
-/// argument position). Consumed by `parityOf`'s call rule and by nested
-/// calls' own summaries, resolved in declaration order — a self- or
-/// forward-call simply resolves to None and lands on SUnknown, so no fixpoint
-/// is needed and no summary is ever assumed to prove itself.
+/// Per-parameter sign-linearity summary, one entry per parameter in decl
+/// order. Consumed by `parityOf`'s call rule and nested calls' own
+/// summaries -- a self- or forward-call resolves to None (SUnknown), so no fixpoint is needed.
 let deduceSignParities (resolver: IRId -> SignParity list option)
                        (parms: TypedParam list) (body: TypedExpr) : SignParity list =
-    // Binding forms are eliminated ONCE here, not per parameter, and not at
-    // the two producer call sites in TypeCheck.
+    // Binding forms are eliminated ONCE here, not per parameter or at the two producer call sites in TypeCheck.
     let body = flattenBindings body
     parms |> List.map (fun p -> signParityOf resolver p.VarId body)
 
-// ============================================================================
 // Conjugation-linearity (the Hermitian twin of the sign summaries)
-// ============================================================================
 
-/// Is this p-free subtree a REAL constant of the map — one conjugation fixes?
-/// The element TYPE decides it, with one exception: the kernel-body complex
-/// re-stamp in buildApplyInfo upgrades real literals to the body's complex
-/// element type, so reading the stamp back would reject `H <@> (v * 2.0)`.
-/// Literals (and the field expressions over them) are therefore judged
-/// syntactically; everything else falls back to its stamp, which answers
-/// "not real" for an unresolved type — the conservative direction.
+/// Is this p-free subtree a REAL constant (one conjugation fixes)? Element
+/// TYPE decides it, except buildApplyInfo's complex re-stamp upgrades real
+/// literals to the body's complex type (so reading the stamp back would
+/// reject `H <@> (v * 2.0)`); literals/field-exprs are judged syntactically, else fall back to the stamp.
 let rec private isRealConstant (e: TypedExpr) : bool =
     match e.Kind with
     | TExprLit (LitInt _ | LitFloat _) -> true
@@ -737,53 +602,40 @@ let rec private isRealConstant (e: TypedExpr) : bool =
         | IRTScalar _ -> true
         | _ -> false
 
-/// Does a body COMMUTE WITH COMPLEX CONJUGATION in `p` — f(conj z) ≡ conj(f z)
-/// for every z? This is the Hermitian twin of the sign law above. Each compact
-/// storage class stores one triangle and recovers the other through a mirror
-/// involution on the VALUE — negation for AntisymIdx, conjugation for
-/// HermitianIdx, the identity for SymIdx — so a kernel mapped elementwise over
-/// a compact array may keep that class exactly when it commutes with the
-/// class's involution. Antisymmetric asks `signParityOf … = SOdd`; symmetric
-/// asks nothing (its mirror is the identity, which every map commutes with);
-/// Hermitian asks this.
+/// Does a body COMMUTE WITH COMPLEX CONJUGATION in `p` -- f(conj z) =
+/// conj(f z)? Hermitian twin of the sign law: each compact class recovers
+/// its missing triangle via a mirror involution on the VALUE (negation for
+/// AntisymIdx, conjugation for HermitianIdx, identity for SymIdx). A kernel
+/// keeps its class iff it commutes with that involution: antisymmetric asks
+/// `signParityOf ... = SOdd`, symmetric asks nothing, Hermitian asks this.
 ///
-/// Conjugation is a FIELD AUTOMORPHISM fixing the reals, so the certificate is
-/// syntactic and needs no lattice: a body built from p, real constants, the
-/// four field operations, and the conjugation-commuting unary ops is a "real"
-/// map. Deliberately NOT on the list: a complex constant (`z + i` is not
-/// Hermitian-preserving), `imag` and `arg` (which NEGATE under conjugation),
-/// and `^` / the OpMath intrinsics — `conj(z^w)` and `conj(exp z)` do agree
-/// off the branch cut, but not ON it, and a rule that holds almost everywhere
-/// is not a rule. Unlisted nodes answer FALSE, the same closed-world default
-/// the parity walkers take toward PBottom / SUnknown.
+/// Conjugation is a FIELD AUTOMORPHISM fixing the reals, so the certificate
+/// is syntactic (p, real constants, field ops, conjugation-commuting unary
+/// ops = "real"; excluded: complex constants, `imag`/`arg`, `^`/OpMath). Unlisted: FALSE.
 let rec private conjCommutesIn (p: IRId) (e: TypedExpr) : bool =
     let cc = conjCommutesIn p
     match e.Kind with
-    // Base case: a subtree that never mentions p is a constant of the map, and
-    // conj(c) = c holds iff c is real.
+    // Base case: a p-free subtree is a constant of the map; conj(c)=c iff c is real.
     | _ when not (usesVar p e) -> isRealConstant e
     | TExprVar (_, id, _) -> id = p   // the identity map trivially commutes
     | TExprBinOp (_, (OpAdd | OpSub | OpMul | OpDiv), l, r) -> cc l && cc r
-    // conj(−z) = −conj z; conj(conj z) = z = conj(conj z); Re(conj z) = Re z,
-    // which is real, so conj fixes it. (`!` yields a bool; the rest are on the
-    // reject list above.)
+    // conj(-z)=-conj z; conj(conj z)=z; Re(conj z)=Re z is real, so conj
+    // fixes it (`!` yields bool; rest are on the reject list above).
     | TExprUnaryOp ((OpNeg | OpConj | OpReal), inner) -> cc inner
-    // An arm chosen independently of p is the same arm for z and conj z, so
-    // the chosen branch carries its own law.
+    // An arm chosen independently of p is the same for z and conj z, so it carries its own law.
     | TExprIf (c, t, f) -> not (usesVar p c) && cc t && cc f
     | _ -> false
 
-/// Per-parameter conjugation-linearity summary, in declaration order — the
-/// `deduceSignParities` shape, for the Hermitian half of the same question.
-/// Intraprocedural: a call certifies nothing (there is no summary side-channel
-/// for this law), which lands on the conservative FALSE.
+/// Per-parameter conjugation-linearity summary, in declaration order -- the
+/// `deduceSignParities` shape for the Hermitian half. Intraprocedural: a
+/// call certifies nothing (no summary side-channel), landing on FALSE.
 let deduceConjCommutes (parms: TypedParam list) (body: TypedExpr) : bool list =
     let body = flattenBindings body
     parms |> List.map (fun p -> conjCommutesIn p.VarId body)
 
-/// Parity of one subtree under σ = (pi pj). A bare occurrence of either
-/// swapped param that no enclosing mirror node accounts for is PBottom.
-/// `resolver` is the sign-summary lookup used by the call rule below.
+/// Parity of one subtree under the swap (pi pj): a bare occurrence of
+/// either swapped param with no enclosing mirror is PBottom. `resolver` is
+/// the sign-summary lookup used by the call rule below.
 let rec private parityOf (resolver: IRId -> SignParity list option)
                          (pi: IRId) (pj: IRId) (e: TypedExpr) : Parity =
     let allInv ps = if ps |> List.forall ((=) PInv) then PInv else PBottom
@@ -800,19 +652,12 @@ let rec private parityOf (resolver: IRId -> SignParity list option)
          | (OpNeg | OpReal | OpImag), PNeg -> PNeg   // R-linear: sign passes
          | _ -> PBottom)
     | TExprApp (f, args) ->
-        // Invariant when callee and every argument are invariant. Otherwise
-        // INTERPROCEDURAL SIGN-LINEARITY: the swap flips argument i's sign
-        // exactly where its own pair-parity is PNeg, and such a flip reaches
-        // the result exactly where the callee's summary is SOdd in position i
-        // (SEven positions absorb it) — so the call is (−1)^k times itself,
-        // k = the number of PNeg arguments in SOdd positions. Same chain rule
-        // as signParityOf's App arm, with the pair swap supplying the flips;
-        // this is what makes `mymean(x − y)` PNeg (mymean is odd in its one
-        // parameter) and `mymean(x − y) * mymean(x − y)` PInv through
-        // combineBinOp's PNeg·PNeg — the second shape is invisible to the
-        // mirror rule, whose two children must be each other's σ-image.
-        // A PBottom argument, an unsummarized callee, an SUnknown position or
-        // an arity mismatch (partial application): no claim.
+        // Invariant when callee and every argument are invariant; else the
+        // same chain rule as signParityOf's App arm: call = (-1)^k times
+        // itself, k = count of PNeg args in SOdd callee positions. Makes
+        // `mymean(x - y)` PNeg and `mymean(x-y) * mymean(x-y)` PInv via
+        // combineBinOp's PNeg*PNeg (invisible to the mirror rule). PBottom
+        // arg, unsummarized callee, SUnknown position, or arity mismatch: no claim.
         let fp = par f
         let argPs = args |> List.map par
         if fp = PInv && argPs |> List.forall ((=) PInv) then PInv
@@ -837,7 +682,7 @@ let rec private parityOf (resolver: IRId -> SignParity list option)
          | PInv, None -> PInv
          | PInv, Some i -> (match par i with PInv -> PInv | _ -> PBottom)
          | PNeg, None when (match kernel.Kind with TExprSection OpAdd -> true | _ -> false) ->
-             PNeg   // Σ(−x) = −Σx; reduce(*) and seeded folds certify nothing
+             PNeg   // Sum(-x) = -Sum(x); reduce(*) and seeded folds certify nothing
          | _ -> PBottom)
     | TExprExtents arr ->
         (match par arr with PInv -> PInv | _ -> PBottom)
@@ -845,12 +690,9 @@ let rec private parityOf (resolver: IRId -> SignParity list option)
         allInv (par arr :: (idxs |> List.map par))
     | TExprTuple es -> allInv (es |> List.map par)
     | TExprIf (c, t, f) ->
-        // The condition must be INVARIANT — an unknown or sign-flipped
-        // condition can select a different branch under the swap, and there is
-        // no law relating two different branches' values. With the branch
-        // pinned, the chosen value carries its own parity, so branches that
-        // AGREE propagate — including PNeg/PNeg, which the previous
-        // all-invariant rule threw away. Same shape as signParityOf's TExprIf.
+        // The condition must be INVARIANT (else it could select a
+        // different branch, and no law relates two different branches).
+        // With it pinned, matching branches propagate, including PNeg/PNeg.
         if par c <> PInv then PBottom
         else
             (match par t, par f with
@@ -858,14 +700,10 @@ let rec private parityOf (resolver: IRId -> SignParity list option)
              | PNeg, PNeg -> PNeg
              | _ -> PBottom)
     | TExprMatch (scrut, cases) when not (List.isEmpty cases) ->
-        // The multi-way TExprIf, and the load-bearing reason no substitution
-        // is needed for PATTERN-BOUND variables: an INVARIANT scrutinee
-        // selects the same arm and decomposes to the same sub-values under
-        // σ, so every binder the pattern introduces really is invariant —
-        // which is exactly what the TExprVar arm above already answers for
-        // their fresh ids (≠ pi, ≠ pj ⇒ PInv). Guards are conditions, so like
-        // the `if` condition they must be invariant rather than merely
-        // agreeing; in-pattern guards (TPatGuarded) count as guards too.
+        // The multi-way TExprIf. Also why PATTERN-BOUND vars need no
+        // substitution: an INVARIANT scrutinee decomposes to the same
+        // sub-values under the swap, so binders are invariant too (matches
+        // the TExprVar arm). Guards, including in-pattern ones, must be invariant, not merely agreeing.
         let guards =
             cases |> List.collect (fun c ->
                 (match c.Guard with Some g -> [g] | None -> [])
@@ -882,11 +720,9 @@ let rec private parityOf (resolver: IRId -> SignParity list option)
     | _ -> PBottom   // closed world: unlisted node kinds certify nothing
 
 /// Deduce the swap parity of each ADJACENT parameter pair of a fixed-arity
-/// typed kernel: n params yield n−1 entries (empty for arity < 2). Adjacent
-/// pairs match both the Sₙ generator structure and the call site's
-/// consecutive-identity grouping (H ∩ Stab), so nothing is lost between
-/// kernel parity and storage licensing. `resolver` supplies callee
-/// sign-linearity summaries (see deduceSignParities) to the call rule.
+/// kernel: n params yield n-1 entries (empty for arity < 2), matching the
+/// Sn generator structure and the call site's consecutive-identity grouping
+/// (H cap Stab). `resolver` supplies callee summaries (deduceSignParities).
 let deduceAdjacentPairs (resolver: IRId -> SignParity list option)
                         (parms: TypedParam list) (body: TypedExpr) : Parity list =
     match parms with
@@ -897,21 +733,16 @@ let deduceAdjacentPairs (resolver: IRId -> SignParity list option)
         |> List.pairwise
         |> List.map (fun (a, b) -> parityOf resolver a.VarId b.VarId body)
 
-// ============================================================================
-// Late tier: arity-polymorphic (Poly-pack) kernels — the ∀-arity exchange law
-// ============================================================================
+// Late tier: arity-polymorphic (Poly-pack) kernels -- the all-arity
+// exchange law.
 //
-// A pack kernel's adjacent pairs only exist per materialized arity, but the
-// canonical head::tail recursion makes a single decl-level check sufficient
-// for EVERY arity: g(x1) ⊛ g(x2) ⊛ … ⊛ g(xn) is fully symmetric whenever ⊛
-// is associative AND commutative and the base case is the same g as the step
-// (the AC-fold induction; the adversarial review verified both directions,
-// including that an antisymmetric ⊛ cannot satisfy the SIGNED exchange law —
-// so packs only ever claim PInv or PBottom, never PNeg, and pack validation
-// can produce no false errors). Wrapper kernels (comoment = mean(prod(a)))
-// inherit the property compositionally: an expression is invariant under
-// pack permutation when every pack-touching part is a whole-pack call to an
-// already-summarized-invariant function.
+// A pack's adjacent pairs exist only per materialized arity, but the
+// canonical head::tail recursion makes one decl-level check suffice for
+// EVERY arity: g(x1) op...op g(xn) is fully symmetric when `op` is AC with
+// the same g at base/step (AC-fold induction; antisymmetric `op` can't
+// satisfy the SIGNED exchange law, so packs claim only PInv/PBottom, never
+// PNeg). Wrapper kernels (comoment = mean(prod(a))) inherit this
+// compositionally: invariant iff every pack-touching part whole-pack-calls an invariant function.
 
 /// Unwrap a trivial block (`{ e }` with no statements) around an expression.
 let rec private unwrapBlock (e: TypedExpr) : TypedExpr =
@@ -930,19 +761,15 @@ let private consArm (packId: IRId) (armBody: TypedExpr) : (IRId * IRId * TypedEx
          | _ -> None)
     | _ -> None
 
-/// The ∀-arity pack-fold template check for a Poly-pack function `fname`
-/// with pack parameter `packId`:
+/// The all-arity pack-fold template check for Poly-pack function `fname` with pack parameter `packId`:
 ///
 ///     match arity(pack) with
 ///     | 1 -> { let head :: tail = pack; g(head) }
-///     | _ -> { let head :: tail = pack; g(head) ⊛ fname(tail) }
+///     | _ -> { let head :: tail = pack; g(head) op fname(tail) }
 ///
-/// (self-call on either side of ⊛). Returns PInv when ⊛ is associative AND
-/// commutative (+ * && ||), the two g's are structurally identical (modulo
-/// the two arms' distinct head binders — checked with mirrorEq over that
-/// pair), and no g touches a tail or the pack itself. Anything else is
-/// PBottom. PNeg is deliberately impossible for packs (no signed exchange
-/// law exists — reviewer-verified).
+/// PInv when `op` is associative AND commutative (+ * && ||), the two g's
+/// are structurally identical (mirrorEq over the head binders), and neither
+/// touches a tail or the pack. Else PBottom; PNeg is impossible (no signed exchange law).
 let deducePackFold (fname: string) (packName: string) (packId: IRId) (body: TypedExpr) : Parity =
     let isAcOp op = match op with OpAdd | OpMul | OpAnd | OpOr -> true | _ -> false
     match (unwrapBlock body).Kind with
@@ -984,14 +811,11 @@ let deducePackFold (fname: string) (packName: string) (packId: IRId) (body: Type
             | _ -> PBottom
     | _ -> PBottom
 
-/// Compositional pack parity for WRAPPER functions over a Poly pack: is the
-/// body invariant under any permutation of the pack's elements? Invariance
-/// composes through EVERY operator (no comm/sign table needed — permuting
-/// inputs of invariant subvalues changes nothing), so the only base cases
-/// are: expressions that never touch the pack (invariant), `arity(pack)`
-/// (permutation-invariant by definition), a whole-pack call to a function
-/// the `resolver` already summarizes as invariant, and the bare pack itself
-/// (unknown). Unknown node kinds that touch the pack are unknown.
+/// Compositional pack parity for WRAPPER functions: is the body invariant
+/// under any permutation of the pack's elements? Invariance composes
+/// through EVERY operator (permuting invariant subvalues changes nothing).
+/// Base cases: expressions untouching the pack, `arity(pack)`, a whole-pack
+/// call to an already-invariant function, and the bare pack itself (unknown).
 let packParityOf (resolver: string -> Parity option) (packId: IRId) (body: TypedExpr) : Parity =
     let rec go (e: TypedExpr) : Parity =
         let allInv es = if es |> List.forall (fun x -> go x = PInv) then PInv else PBottom
@@ -1015,19 +839,16 @@ let packParityOf (resolver: string -> Parity option) (packId: IRId) (body: Typed
         | TExprIf (c, t, f) -> allInv [c; t; f]
         | TExprField (o, _, _) -> go o
         | TExprMatch (scrut, cases) ->
-            // Invariance composes through every construct, so the only thing
-            // to check is that each part is invariant. Requiring the
-            // SCRUTINEE to be invariant is also what keeps pattern binders
-            // safe: a binder decomposed from a permutation-invariant value is
-            // itself permutation-invariant, whereas `match pack with h :: t`
-            // has a bare-pack scrutinee, which `go` answers PBottom.
+            // Invariance composes through every construct, so each part need
+            // only be invariant. Requiring the SCRUTINEE invariant keeps
+            // pattern binders safe too: `match pack with h :: t` has a
+            // bare-pack scrutinee (PBottom), so a decomposed binder is safe.
             allInv (scrut :: (cases |> List.collect (fun c ->
                 c.Body :: (match c.Guard with Some g -> [g] | None -> [])
                         @ patGuardExprs c.Pattern)))
         | TExprBlock ([], Some inner) -> go inner
         | _ -> PBottom
-    // Same normalization the fixed-arity entry points get: `{ let s = prod(a)
-    // ⏎ mean(s) }` flattens to `mean(prod(a))`, which the wrapper walk can
-    // certify. (deducePackFold keeps the RAW body — TypeCheck runs it first,
-    // and its head::tail template is DSConsRest, which flattening skips.)
+    // Same normalization the fixed-arity entry points get: `{ let s =
+    // prod(a); mean(s) }` flattens to `mean(prod(a))` for the wrapper walk
+    // (deducePackFold keeps the RAW body; DSConsRest is skipped by flattening).
     go (flattenBindings body)

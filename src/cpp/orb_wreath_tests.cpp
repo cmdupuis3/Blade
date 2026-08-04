@@ -8,16 +8,16 @@
 //
 //    (a) orb_visit emits exactly the brute-force canonical set -- same content,
 //        same ascending-lex order, same length -- where the brute force walks
-//        all n^rank raw tuples, canonicalizes each, and dedups.  §3 of the plan
+//        all n^rank raw tuples, canonicalizes each, and dedups.  section 3 of the plan
 //        says outright that a read->write roundtrip cannot catch an order
 //        mismatch (both sides shift together -- the antisym storage
 //        post-mortem), so the oracle is independent by construction.
-//    (b) orb_cell_count (the §4 closed-form fold) equals that stream's length.
-//    (c) orb_rank(stream[i]) == i and orb_unrank(i) == stream[i]: the §3
-//        bijection agrees with the §2 nest's visit order, the plan's one hard
+//    (b) orb_cell_count (the section 4 closed-form fold) equals that stream's length.
+//    (c) orb_rank(stream[i]) == i and orb_unrank(i) == stream[i]: the section 3
+//        bijection agrees with the section 2 nest's visit order, the plan's one hard
 //        constraint.
 //    (d) sign spot checks on mixed-character classes.
-//    (e) the §7.2 overflow wall diagnoses instead of wrapping.
+//    (e) the section 7.2 overflow wall diagnoses instead of wrapping.
 //    (f) extent harmonization: a negative extent gets ONE verdict from every
 //        entry point (count ORB_OVERFLOW, visit false, rank ORB_OVERFLOW,
 //        unrank false), never a silent empty stream from one of them.
@@ -28,7 +28,7 @@
 //        that pins the canonicalizer's CHARACTER (not just its key) without
 //        a second canonicalizer: a sign convention drift cannot survive it,
 //        where the (d) spot checks only sample ~5 points.
-//    (h) the STORAGE READ/WRITE path (plan-orbidx-decompaction.md §2): over a
+//    (h) the STORAGE READ/WRITE path (plan-orbidx-decompaction.md section 2): over a
 //        pool filled through orb_visit with pool[i] = i+1, EVERY raw tuple of
 //        the class is read and compared against chi * (rank+1) computed from
 //        an in-file reference that shares no code with the header --
@@ -40,7 +40,7 @@
 //        memory.  Plus the domain contract: an out-of-range digit trips the
 //        diagnostic hook and reads T(0) from a NULL pool -- if it touched
 //        storage at all the harness would crash instead of reporting.
-//    (i) the NESTED-POINTER dual view (plan-orbidx-bijections.md §1/§2):
+//    (i) the NESTED-POINTER dual view (plan-orbidx-bijections.md section 1/section 2):
 //        orb_skeleton's leaves enumerate in exactly orb_visit order, navigate
 //        lands on pool + rank for every canonical tuple and on nullptr for
 //        every other raw tuple, the arena size is what build reports against
@@ -238,7 +238,7 @@ using L3m = orb_level<3, false>;
 //   exact<D>     every sign pattern at exactly depth D over rank-2 levels
 //                (full-alphabet depth 3 would multiply nest instantiations
 //                and brute-force cost past the point of usefulness; rank 2 is
-//                where §7.2 says real depth-3 classes live).
+//                where section 7.2 says real depth-3 classes live).
 //
 // menu() = closure<2> + exact<3> = 1 + 6 + 36 + 8 = 51 classes.  A class
 // family not swept is now a statement about the BOUND (r <= 3 at d <= 2;
@@ -316,7 +316,7 @@ static std::string show(const std::vector<int>& t) {
 // -----------------------------------------------------------------------------
 // Ground truth: every raw tuple, canonicalized, deduped, ascending lex.
 // std::vector<int>'s operator< is lexicographical, and all tuples here have the
-// same length, so std::set gives exactly the order §2 claims for the nest.
+// same length, so std::set gives exactly the order section 2 claims for the nest.
 // -----------------------------------------------------------------------------
 
 static std::vector<std::vector<int>> brute(const Cfg& c, int n) {
@@ -377,7 +377,7 @@ static void check_config(const Cfg& c, int n) {
         report("visit==brute  " + tag, ok, detail);
     }
 
-    // (b) the §4 closed form counts what the nest emits.
+    // (b) the section 4 closed form counts what the nest emits.
     {
         const int64_t m = c.count(n);
         const bool ok = (m == static_cast<int64_t>(want.size()));
@@ -727,7 +727,7 @@ static int ref_canon(const std::vector<std::pair<int, bool>>& lv,
             };
             std::sort(ord, ord + r, less);
             if (!pos) {
-                // §5 zero set: two equal blocks under a '-' level.
+                // section 5 zero set: two equal blocks under a '-' level.
                 for (int i = 0; i + 1 < r; ++i)
                     if (!less(ord[i], ord[i + 1])) return 0;
                 // sgn = (-1)^(r - cycles) -- the cycle-count route to the same
@@ -767,7 +767,7 @@ static void check_read_write(const Cfg& c, int n,
     const size_t M = want.size();
 
     // The pool is filled through orb_visit -- the traversal path -- and read
-    // back through the random-access path, so the two §1 access paths are
+    // back through the random-access path, so the two section 1 access paths are
     // pinned against each other and not just each against itself.
     std::vector<double> pool(M ? M : 1, 0.0);
     bool ok = c.visit(n, [&](const int*, int64_t i) {
@@ -1011,7 +1011,7 @@ static bool skel_check(int n, const std::vector<std::vector<int>>& want,
     }
 
     // Leaves in DFS order must BE the orb_visit stream, cell for cell and
-    // pointer for pointer -- the §1 claim that the traversal order is the
+    // pointer for pointer -- the section 1 claim that the traversal order is the
     // allocation order, checked rather than assumed.
     std::vector<std::vector<int>> leafT;
     std::vector<const double*>    leafP;
@@ -1023,7 +1023,7 @@ static bool skel_check(int n, const std::vector<std::vector<int>>& want,
     // of N records, i.e. that there is exactly one arena -- established from the
     // pointers themselves, with no allocator instrumentation involved.
     std::vector<char> slot(static_cast<size_t>(sk.node_count()), 0);
-    // The §2 peeling bound, swept rather than hand-picked.  The header claims
+    // The section 2 peeling bound, swept rather than hand-picked.  The header claims
     // the node span equals the nest's loop trip count n - lo at EVERY leaf row
     // of EVERY class (the last axis is never a pinned coordinate, its loop runs
     // to n, and every iteration emits a cell), and at EVERY node of a '+'-only
@@ -1154,7 +1154,7 @@ static bool skel_check(int n, const std::vector<std::vector<int>>& want,
     return true;
 }
 
-/// Hand-pinned node: walk `prefix` from the root and assert the §2 peeling
+/// Hand-pinned node: walk `prefix` from the root and assert the section 2 peeling
 /// span it serves.  `note` records WHY the number is what it is -- in
 /// particular whether it is the full trip count n - lo or a tail truncated by a
 /// deeper level's emptiness (see the header's "DIVERGENCE FROM build_skeleton").
@@ -1207,7 +1207,7 @@ static int dump(const char* spec, int n) {
 /// pool[i] = i + 1 in orb_visit order.  Cells are int64, so `v` is exact:
 /// "0" is the zero set, a negative value is a mirrored read, and a positive
 /// value is 1 + the rank of the tuple's canonical representative.  This is
-/// plan-orbidx-decompaction.md §2 printed out, and it is what an external
+/// plan-orbidx-decompaction.md section 2 printed out, and it is what an external
 /// consumer diffs against its own decompaction.
 static int read_dump(const char* spec, int n) {
     const Cfg* c = find_cfg(spec);
@@ -1283,7 +1283,7 @@ int main(int argc, char** argv) {
         { "2-",       4,    6 },   // AntisymIdx<2,4>
         { "3+",       3,   10 },
         { "3-",       4,    4 },
-        { "2-,2+",    4,   21 },   // RiemannIdx<4> = 21 (formalism §3.4)
+        { "2-,2+",    4,   21 },   // RiemannIdx<4> = 21 (formalism section 3.4)
         { "2+,2+",    3,   21 },   // deduced func(A,A) class
         { "2+,2+",    4,   55 },
         { "2+,2-",    4,   45 },
@@ -1316,7 +1316,7 @@ int main(int argc, char** argv) {
     // "2+,2-": sym within each pair, antisym between them.
     check_canon<L2p, L2m>("2+,2-", { 0, 1, 1, 0 },  0, {});
     check_canon<L2p, L2m>("2+,2-", { 1, 2, 0, 1 }, -1, { 0, 1, 1, 2 });
-    // canon is idempotent with character +1 on its own output (OrbitEnum §5).
+    // canon is idempotent with character +1 on its own output (OrbitEnum section 5).
     {
         bool ok = true;
         std::vector<int> out;
@@ -1331,7 +1331,7 @@ int main(int argc, char** argv) {
         report("canon idempotent, character +1", ok, "over every menu class at n=4");
     }
 
-    std::printf("\n--- (e) §7.2 overflow wall: diagnose, never wrap ---\n");
+    std::printf("\n--- (e) section 7.2 overflow wall: diagnose, never wrap ---\n");
     {
         const int64_t m = orb_cell_count<L2p, L2p, L2p>(1000);
         report("2+,2+,2+ n=1000 overflows", m == ORB_OVERFLOW,

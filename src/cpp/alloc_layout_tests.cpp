@@ -4,13 +4,13 @@
 //
 // WHY THESE EXIST: the Blade test harness checks computed VALUES (read back
 // through arr[i][j][k]). Those pass identically whether the backing store is
-// one contiguous pool or many piecewise allocations — so they cannot detect a
+// one contiguous pool or many piecewise allocations -- so they cannot detect a
 // layout regression. These tests check the layout invariants directly:
 //
-//   (1) CARDINALITY   — count_leaves matches the closed form per index type
-//   (2) CONTIGUITY     — every leaf element lives in ONE pool, addresses
+//   (1) CARDINALITY   -- count_leaves matches the closed form per index type
+//   (2) CONTIGUITY     -- every leaf element lives in ONE pool, addresses
 //                        strictly increasing in DFS order with no gaps/overlaps
-//   (3) ROUND-TRIP     — values written in iteration order read back correctly
+//   (3) ROUND-TRIP     -- values written in iteration order read back correctly
 //
 // These are the properties the CUDA streaming design depends on (a leaf span
 // must be a contiguous, cudaMemcpy-able slice). Run via `blade test alloc`,
@@ -38,8 +38,8 @@ using namespace nested_array_utilities;
 //
 // Replacing the global array operators is legal here because this is a
 // standalone binary. It gives the one property the teardown tests need and that
-// values cannot show: that every heap block allocate<> made — the pool AND each
-// interior pointer row, whose count depends on the per-level span formula — is
+// values cannot show: that every heap block allocate<> made -- the pool AND each
+// interior pointer row, whose count depends on the per-level span formula -- is
 // handed back exactly once.
 //
 // Counting is TU-WIDE: any new[]/delete[] anywhere in the program moves these,
@@ -50,20 +50,20 @@ using namespace nested_array_utilities;
 // vacuously true).
 //
 // Tests read both counters through live_arrays() / total_arrays() below, NEVER
-// through these variables directly — see the note there.
+// through these variables directly -- see the note there.
 //
 // We delegate to the SINGLE-object operators (which we do not replace) rather
 // than to malloc/free: that is precisely what the default operator new[] does,
 // so the blocks stay in the heap the default would have used and no cross-
 // library new[]/delete[] pairing can be mismatched. BOTH the sized and unsized
-// operator delete[] must be replaced — for trivially-destructible element types
+// operator delete[] must be replaced -- for trivially-destructible element types
 // g++ emits the C++14 SIZED form, so replacing only the unsized one would drop
 // decrements and every balance test would report a phantom leak.
 //
 // That deliberate array-to-object delegation is also why building this file
 // with -Wall raises -Wmismatched-new-delete ("operator delete called on pointer
 // returned from operator new[]") wherever the optimizer can inline a whole
-// new[]/delete[] pair into one place — currently the ragged teardowns, whose
+// new[]/delete[] pair into one place -- currently the ragged teardowns, whose
 // call graph is a straight line. It is a false positive about the scaffolding,
 // not about the runtime under test. The harness compiles with plain
 // `-std=c++17 -O2` (tests/AllocTests.fs), so the gate never sees it.
@@ -90,7 +90,7 @@ void operator delete[](void* p, std::size_t) noexcept {
 // touches, and therefore cannot move allocation traffic across it.
 //
 // That matters because GCC treats `operator new[]` / `operator delete[]` as
-// malloc-like — free to sink, hoist, coalesce, or omit the call entirely
+// malloc-like -- free to sink, hoist, coalesce, or omit the call entirely
 // (C++14 grants the omission explicitly, as a carve-out from the as-if rule).
 // Sound for the DEFAULT operators; not for these replaced ones, whose counter
 // updates are the whole point. Reading `g_live_arrays` directly, the increments
@@ -98,8 +98,8 @@ void operator delete[](void* p, std::size_t) noexcept {
 // that should have followed them: at -O2 the block-boundary balance still came
 // out right (which is why the dense tests above never needed this) but every
 // "+N still live" assertion read short. The ragged/compound tests below must
-// assert exactly that — "the teardown freed the owned blocks and left the
-// borrowed ones alive" is not expressible as a net balance — so they pin the
+// assert exactly that -- "the teardown freed the owned blocks and left the
+// borrowed ones alive" is not expressible as a net balance -- so they pin the
 // allocation traffic with these instead. Verified 56/56 at -O0/-O1/-O2/-O3;
 // without them, -O1 and -O2 fail.
 static size_t live_arrays_impl()  { return g_live_arrays; }
@@ -130,7 +130,7 @@ static void check(const char* name, bool ok) {
 //
 // This subclass is that witness, and it is also the exact scenario the runtime
 // relies on: the Compound wrapper holds a `compound_index_t<RANK>*`, teardown
-// deletes through THAT static type, and the derived destructor must still run —
+// deletes through THAT static type, and the derived destructor must still run --
 // which it does only because abstract_idx_t declares its destructor virtual. If
 // that `virtual` were ever dropped, g_live_cidx would not return to its
 // snapshot here (and the real index's tables would leak silently). Reclamation
@@ -148,7 +148,7 @@ struct counted_cidx : compound_index_t<R> {
 
 // Same witness for sparse_index_t: the Sparse wrapper deletes through a
 // `sparse_index_t<RANK>*`, and the derived destructor must run for the same
-// virtual-destructor reason documented on counted_cidx. Shares g_live_cidx —
+// virtual-destructor reason documented on counted_cidx. Shares g_live_cidx --
 // the tests only ever snapshot/compare, never read an absolute, and one
 // counter keeps the balance checks uniform across both index families.
 template<size_t R>
@@ -456,14 +456,14 @@ int main() {
     // Teardown: deallocate<> / deallocate_strict<> balance
     // =======================================================================
     //
-    // (4) BALANCE — every block allocate<> made is freed exactly once.
+    // (4) BALANCE -- every block allocate<> made is freed exactly once.
     //
     // This is the property the layout invariants make non-obvious. The interior
     // pointer rows that exist are decided by the per-level span formula (each
     // level's bound depends on the seed threaded from its parent), so a teardown
     // that does not replay the SAME recurrence either misses rows (leak: counter
     // ends high) or invents them (heap abort). And the leaf T* rows are pool
-    // slices, not blocks — the classic error is to free them, so the round-trips
+    // slices, not blocks -- the classic error is to free them, so the round-trips
     // below also write and read back the elements, then reallocate, which is
     // where an interior/double free shows up.
     //
@@ -571,7 +571,7 @@ int main() {
     }
 
     // ----- Antisymmetric rank 3 n=5: C(5,3)=10, and the interior level ends in
-    // a ZERO-LENGTH row (i=4) — `new DTYPE[0]` is a real block, so the teardown
+    // a ZERO-LENGTH row (i=4) -- `new DTYPE[0]` is a real block, so the teardown
     // has to visit it too.
     {
         static const size_t ext[3] = {5, 5, 5};
@@ -589,7 +589,7 @@ int main() {
     }
 
     // ----- Per-group strict: SYMM={1,2,2} STRICT={0,1,1} (the compact-residual
-    // shape — dense freed axis, strict residual pair). total = 2*(3+2+1+0) = 12.
+    // shape -- dense freed axis, strict residual pair). total = 2*(3+2+1+0) = 12.
     {
         static const size_t ext[3] = {2, 4, 4};
         static constexpr const size_t symm[3]   = {1, 2, 2};
@@ -652,7 +652,7 @@ int main() {
     // Teardown: ragged / compound (the NON-dense layouts)
     // =======================================================================
     //
-    // (5) OWNERSHIP — each routine frees exactly the blocks its documented
+    // (5) OWNERSHIP -- each routine frees exactly the blocks its documented
     // producer allocated, and NOTHING it borrowed.
     //
     // The dense tests above could assert "the counter returns to its snapshot"
@@ -662,7 +662,7 @@ int main() {
     // index, and every prefix view borrows the parent's data buffer. So each
     // block below allocates the borrowed part DELIBERATELY on the heap, frees
     // only the owned part, and asserts the counter lands on
-    // `snapshot + <borrowed blocks>` — a plain return-to-snapshot would mean
+    // `snapshot + <borrowed blocks>` -- a plain return-to-snapshot would mean
     // the teardown over-freed. The borrowed part is then released explicitly to
     // bring the counter home, which also proves it was still a live block.
 
@@ -706,7 +706,7 @@ int main() {
     // ----- Ragged aliasing guard: free, then rebuild the SAME shape and sweep
     // it. If the teardown had freed the ROWS individually (they are pool
     // slices, not blocks) the heap would be corrupt and the second pool would
-    // alias live storage — the write/read sweep is what surfaces it.
+    // alias live storage -- the write/read sweep is what surfaces it.
     {
         static const size_t lens2[3]  = {2, 3, 1};
         static const size_t offs2[4]  = {0, 2, 5, 6};
@@ -813,7 +813,7 @@ int main() {
         for (size_t r = 0; r < keys.size(); r++)
             if (idx->unhash(r) != keys[r] || idx->linearize(keys[r]) != r) orderOk = false;
         bool presentOk = idx->present({2,2}) && !idx->present({1,1});
-        // Missing key: unordered_map::at throws — the runtime contract for a
+        // Missing key: unordered_map::at throws -- the runtime contract for a
         // full-tuple read of an absent key.
         bool throws = false;
         try { (void)idx->linearize({9,9}); } catch (const std::out_of_range&) { throws = true; }
@@ -839,7 +839,7 @@ int main() {
     }
 
     // ----- Sparse map output: owns its buffer, SHARES the input's index
-    // (identical key set by construction) — mirror of the compound case.
+    // (identical key set by construction) -- mirror of the compound case.
     {
         size_t snap = live_arrays();
         size_t csnap = g_live_cidx;
@@ -943,7 +943,7 @@ int main() {
     }
 
     // ----- Empty gather (no key matches the pin): sentinel-buffer behavior
-    // must match the compound gathers — extent 0, no crash, balanced teardown
+    // must match the compound gathers -- extent 0, no crash, balanced teardown
     // for the RR>=2 case (its 1-slot sentinel buffer IS handed to
     // deallocate_sparse, unlike the trail case's unrecoverable pool).
     {

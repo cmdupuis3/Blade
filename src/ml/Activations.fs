@@ -18,7 +18,7 @@ module Activations =
 
     /// Gated activation (ml-spec section 8.1). Block 0 must be scalars; its
     /// features double as the gates for higher-L blocks (gate for
-    /// multiplicity mu is sigmoid(features(0, mu % num_gates, 0)) — the
+    /// multiplicity mu is sigmoid(features(0, mu % num_gates, 0)) -- the
     /// spec's exact rule, including the scalar double-duty).
     let gated (spec: SpecEntry[]) (feat: float[]) : float[] =
         if feat.Length <> Irreps.totalDim spec then
@@ -54,7 +54,7 @@ module Activations =
 
     /// scalars(spec, x): copies the l=0 blocks' entries (all parities) into
     /// a plain array, block order then multiplicity order. Under equiv(O3)
-    /// the judgment only admits calls on specs with no (l=0, odd) blocks —
+    /// the judgment only admits calls on specs with no (l=0, odd) blocks --
     /// pseudoscalars are SO(3)- but not O(3)-invariant.
     let scalars (spec: SpecEntry[]) (feat: float[]) : float[] =
         if feat.Length <> Irreps.totalDim spec then
@@ -65,7 +65,7 @@ module Activations =
                  for mu in 0 .. spec.[b].Mult - 1 do
                      yield feat.[starts.[b] + mu] |]
 
-    /// norms(spec, x): per-(block, multiplicity) 2-norms — sqrt of the sum
+    /// norms(spec, x): per-(block, multiplicity) 2-norms -- sqrt of the sum
     /// of squares over the 2l+1 components, ascending component order, in
     /// (block, mu) order. O(3)-invariant for every parity (squares kill the
     /// parity sign).

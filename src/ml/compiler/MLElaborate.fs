@@ -1,9 +1,6 @@
-/// ML-module elaboration: the equivariant ops as compile-time source
-/// synthesis (user decision, IrrepsIdx/CGPath arc: "elaborate to Blade
-/// source" over opaque builtins).
-///
-/// Surface (call-shaped, recognized when the name is not user-bound;
-/// configs are `let static` bindings — ordinary required-static arguments):
+/// ML-module elaboration: equivariant ops synthesized as compile-time Blade
+/// source rather than opaque builtins. Surface (call-shaped, recognized only
+/// when the name is not user-bound; configs are `let static` bindings):
 ///
 ///   y_to(LMAX, x, y, z)                 -> Array<Float like Idx<(LMAX+1)^2>>
 ///   tensor_product(CFG, x, y, w)        -> Array<Float like Idx<total_dim(specOut)>>
@@ -12,47 +9,41 @@
 ///   scalars(SPEC, x)                    -> Array<Float like Idx<#l=0 entries>>
 ///   norms(SPEC, x)                      -> Array<Float like Idx<#(block, mu) slots>>
 ///
-/// Functions carrying `where <alias>.equiv(O3|SO3)` are additionally JUDGED
-/// (Blade.ML.Equiv) at the pass-1/pass-2 seam: the body must compose only
-/// equivariance-preserving operations, else BL4008. Two SIBLING judgments run
-/// at the same seam over their own status sets and never interact:
-/// `where <alias>.galilean(u, ...)` (Blade.ML.Galilean, BL4009) and
-/// `where <alias>.perm_equiv(N)` (Blade.ML.Perm, BL4012 — the S_n node-axis
-/// lattice, whose polarity is the OPPOSITE of equiv's at the pointwise arms).
+/// Functions carrying `where <alias>.equiv(O3|SO3)` are JUDGED (Blade.ML.Equiv)
+/// at the pass-1/pass-2 seam: the body must compose only equivariance-preserving
+/// operations, else BL4008. Two SIBLING judgments run at the same seam over
+/// their own status sets and never interact: `where <alias>.galilean(u, ...)`
+/// (Blade.ML.Galilean, BL4009) and `where <alias>.perm_equiv(N)` (Blade.ML.Perm,
+/// BL4012 -- the S_n node-axis lattice, whose polarity is the OPPOSITE of
+/// equiv's at the pointwise arms).
 ///
-/// where a SPEC is a static array of (l, parity, mult) int triples
-/// (parity: 0 = even, 1 = odd), and a CFG is a static triple
-/// (spec1, spec2, specOut). `sh_spec(lmax)` builds the Y-expansion spec
-/// statically, and `total_dim` / `tp_weight_dim` / `linear_weight_dim`
-/// are static sizing functions for weight buffers — all registered by
-/// ml/compiler/MLStatics.fs through StaticEval's builtin registry.
+/// A SPEC is a static array of (l, parity, mult) int triples (0/1 = even/odd
+/// parity); a CFG is a static (spec1, spec2, specOut) triple. `sh_spec(lmax)`
+/// builds the Y-expansion spec statically; `total_dim`/`tp_weight_dim`/
+/// `linear_weight_dim` size weight buffers, all registered by MLStatics.fs
+/// through StaticEval's builtin registry.
 ///
 /// For each distinct (op, resolved config) the elaborator synthesizes ONE
-/// Blade function (`__ml_tp_1`, ...) whose body is exactly the loop
-/// structure of the ml/ reference implementation (same iteration order —
-/// value agreement to the ulp), with path metadata and real-basis CG
-/// coefficients (WignerTables, F1: the real support, not m1+m2=m3) baked
-/// as literal tables. Call sites rewrite to the generated names.
+/// Blade function (`__ml_tp_1`, ...) whose body is exactly the ml/ reference
+/// implementation's loop structure (same iteration order, ulp agreement),
+/// with path metadata and real-basis CG coefficients (WignerTables) baked as
+/// literal tables. Call sites rewrite to the generated names.
 ///
-/// Pipeline position: BEFORE Grad expansion (TypeCheck.typeCheck), so
-/// grad() differentiates elaborated ops through its normal inliner — no
-/// VJP registry, no new IR nodes, and the generated functions type-check
-/// like user code.
+/// Runs BEFORE Grad expansion (TypeCheck.typeCheck), so grad() differentiates
+/// elaborated ops through its normal inliner -- no VJP registry, no new IR
+/// nodes, and the generated functions type-check like user code.
 module Blade.ML.Elaborate
 
 open Blade.Ast
 open Blade.StaticEval
 open Blade.ML.Spec
 
-// ============================================================================
 // Elaboration errors
-// ============================================================================
 
 /// Elaboration failure: a message plus the BLxxxx code it surfaces under.
 /// BL5000 = generic ML-elaboration failure; BL4007 = "no equivariant map
 /// exists" (Schur selection-rule violations: unreachable tensor_product
-/// output blocks, linear over specs sharing no (l, parity)). Both codes
-/// live in Diagnostics.Codes; expand's boundary renders Code faithfully.
+/// output blocks, linear over specs sharing no (l, parity)).
 type private ElabError = { Code: string; Msg: string }
 let private err5000 (msg: string) : ElabError = { Code = "BL5000"; Msg = msg }
 let private err4007 (msg: string) : ElabError = { Code = "BL4007"; Msg = msg }
@@ -63,9 +54,7 @@ let private err4007 (msg: string) : ElabError = { Code = "BL4007"; Msg = msg }
 let private specOfStatic what v = Blade.ML.Statics.specOfStatic what v |> Result.mapError err5000
 let private cfgOfStatic what v = Blade.ML.Statics.cfgOfStatic what v |> Result.mapError err5000
 
-// ============================================================================
 // AST construction helpers (mirroring Grad.fs's style)
-// ============================================================================
 
 let private v (n: string) = syn (ExprVar n)
 let private fLit (x: float) = syn (ExprLit (LitFloat x))
@@ -85,26 +74,24 @@ let private intArrLit (xs: int list) = syn (ExprArrayLit (xs |> List.map iLit))
 let private floatArrLit (xs: float list) = syn (ExprArrayLit (xs |> List.map fLit))
 let private tyFloatArr (n: int) = TyArray (TyNamed ("Float", []), [ TyIdx (iLit n) ])
 
-/// Array<Float like IrrepsIdx<[(l, p, m), ...]>> — irreps-typed signature
-/// slot, the inline spec literal rebuilt from the RESOLVED Spec. Used for
-/// the ops' feature params and results that genuinely ARE the irreps space
-/// (single-vector forms); row-stacked `_rows` buffers (extent nRows *
-/// total_dim) and path-major weight buffers are NOT irreps spaces and stay
-/// plain Idx. Anonymous (no alias name), so a user's alias of the same
-/// spec unifies by the name-permissive rule while a WRONG-spec annotation
-/// or argument is a type error.
+/// Array<Float like IrrepsIdx<[(l, p, m), ...]>> -- irreps-typed signature
+/// slot, the inline spec literal rebuilt from the RESOLVED Spec. Used for the
+/// ops' feature params/results that genuinely ARE the irreps space
+/// (single-vector forms); row-stacked `_rows` buffers and path-major weight
+/// buffers are NOT irreps spaces and stay plain Idx. Anonymous, so a user's
+/// alias of the same spec unifies by the name-permissive rule while a
+/// wrong-spec annotation or argument is a type error.
 let private tyIrrepsArr (s: Spec) : TypeExpr =
     let specLit =
         syn (ExprArrayLit (s |> List.map (fun e ->
             syn (ExprTuple [ iLit e.L; iLit e.Parity; iLit e.Mult ]))))
     TyArray (TyNamed ("Float", []), [ TyIrrepsIdx specLit ])
 
-/// Array<Float like PgIrrepsIdx<GROUP, [(LABEL, mult), ...]>> — the pg twin of
-/// `tyIrrepsArr` (stage 5b-i), the inline spec literal rebuilt from the
-/// RESOLVED PgSpec. Anonymous (no alias name), so a user's alias of the same
-/// (group, spec) unifies by the name-permissive rule while a wrong-spec
-/// annotation, a wrong-GROUP annotation, or an O(3) irreps argument of the
-/// same extent is a type error.
+/// Array<Float like PgIrrepsIdx<GROUP, [(LABEL, mult), ...]>> -- the pg twin
+/// of `tyIrrepsArr`, the inline spec literal rebuilt from the RESOLVED
+/// PgSpec. Anonymous, so a user's alias of the same (group, spec) unifies by
+/// the name-permissive rule while a wrong-spec annotation, a wrong-GROUP
+/// annotation, or an O(3) irreps argument of the same extent is a type error.
 let private tyPgIrrepsArr (group: string) (s: Blade.ML.PointSpec.PgSpec) : TypeExpr =
     let specLit =
         syn (ExprArrayLit (s |> List.map (fun (label, m) ->
@@ -120,65 +107,52 @@ let private mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl
       Body = body
       IsStatic = false }
 
-// ============================================================================
-// Equivariance stamping (retired equivariance-in-types plan, stage A1)
-// ============================================================================
+// Equivariance stamping
 //
 // The functions this elaborator SYNTHESIZES are equivariant BY CONSTRUCTION:
 // each is a Schur/CG basis expansion whose admissible-map count IS the
-// theorem. `homBlocks` and `linearBlocks` connect only (l, parity)-matched
+// theorem. `homBlocks`/`linearBlocks` connect only (l, parity)-matched
 // blocks; `tpPaths` guards `eo.Parity = parityMul e1.Parity e2.Parity`;
-// `polyLabels` carries the degree-K monomial parity (-1)^(sum j*p) and
+// `polyLabels` carries the degree-K monomial parity (-1)^(sum j*p), and
 // `derivePolyDecl.matched` mixes a label only into output blocks of its own
-// (L, parity); the point-group member is the same construction over a frozen
-// character table with the Frobenius-Schur correction. Nothing downstream can
-// re-derive any of that: after pass 2 the `ml.*` vocabulary is gone and the
-// body is a loop nest over baked tables, which is exactly why the seam
-// judgment refuses composition on these bodies. So the elaborator PINS what
-// it knows at the moment it knows it, and later consumers read the pin as an
-// axiom (plan §1 and §3's A1).
+// (L, parity); the point-group member is the same construction over a
+// frozen character table with the Frobenius-Schur correction. After pass 2
+// the `ml.*` vocabulary is gone and the body is a loop nest over baked
+// tables, so nothing downstream can re-derive any of this -- which is why
+// the seam judgment refuses composition on these bodies, and why the
+// elaborator PINS what it knows (in the normalized spelling `__ml_equiv`,
+// after the `<alias>.equiv -> __ml_equiv` rewrite, which only touches
+// SOURCE decls) and later consumers read the pin as an axiom.
 //
-// The conjunct is written in its NORMALIZED spelling `__ml_equiv`. Generated
-// decls are built during PASS 2, long after the `<alias>.equiv -> __ml_equiv`
-// rewrite in expandModule, which only ever touches SOURCE decls.
+// The stamp is inert in every pass but three: TypeCheck dispatches it
+// through the Blade.Constraints registry to MLEquiv's handler (an
+// unparseable group name is a check error, not a silent pin), `ide check
+// --json` renders it in bindings[].where, and the typecheck-resident
+// certified-callee walker consumes it. It never reaches the seam's own
+// `buildCertTable` / `judgeFunction` / `inferCertificates`, which all run
+// over `decls1` BEFORE pass 2 exists -- so a stamped body never has to
+// survive a composition judgment it would refuse.
 //
-// The stamp is inert in every pass but three: TypeCheck dispatches it through
-// the Blade.Constraints registry to MLEquiv's handler (whose Validate
-// re-parses the group name, so an unparseable name is a check error rather
-// than a silent pin), `ide check --json` renders it in bindings[].where, and
-// the typecheck-resident walker of plan stage B consumes it as a certified
-// callee. It never reaches the seam's own `buildCertTable` / `judgeFunction`
-// / `inferCertificates`, all three of which run over `decls1` BEFORE pass 2
-// exists (expandModule's splice is `gen @ decls2` at the very end), and the
-// module fold in `expandStr` keeps that ordering per module — so a stamped
-// body is never asked to survive a composition judgment it would refuse.
-//
-// SOUNDNESS DISCIPLINE. The stamp is a claim about the SIGNATURE the emitter
-// declares, read the way MLEquiv.statusOfType reads it: an
-// `Array<Float like IrrepsIdx<S>>` (resp. `PgIrrepsIdx<G, S>`) slot is a Rep,
-// everything else is an invariant. Stamping is legitimate only when
-//
-//     for all arguments meeting their declared status,
-//     the result meets its own
-//
-// is a theorem OF THE EMITTED BODY. Three families this elaborator also
-// synthesizes fail that test and are deliberately left UNSTAMPED rather than
-// stamped weakly:
-//
-//   * rep-INTRODUCTION forms (y_to, tensor_to_irreps, sym_to_irreps):
-//     invariant scalars in, Rep out. The seam admits them under a documented
-//     conditional premise — "the coordinates really are the components of the
-//     standard vector" — that no signature carries. An axiom of that shape
-//     would let any three invariants manufacture a representation.
-//   * rep-ESCAPE forms (irreps_to_sym, sym_lift): Rep in, invariant out,
-//     which is false for basis-dependent Cartesian components and not even
-//     nameable for monomial coordinates. MLEquiv rejects both by name.
-//   * forms over buffers that are not representation spaces at all: the
-//     row-stacked `linear_rows` / `gated_rows` kernels (which the seam
-//     refuses by name for exactly this reason) and the S_n index-action
+// SOUNDNESS: the stamp claims, of the declared SIGNATURE (read as
+// MLEquiv.statusOfType reads it -- an `Array<Float like IrrepsIdx<S>>` /
+// `PgIrrepsIdx<G, S>` slot is a Rep, everything else an invariant), that
+// for all arguments meeting their declared status, the result meets its
+// own -- a theorem OF THE EMITTED BODY. Three families this elaborator
+// also synthesizes fail that test and are deliberately left UNSTAMPED
+// rather than stamped weakly:
+//   * rep-INTRODUCTION (y_to, tensor_to_irreps, sym_to_irreps): invariant
+//     scalars in, Rep out, sound only under an unstatable premise ("the
+//     coordinates really are the components of the standard vector") --
+//     an axiom of that shape would let any three invariants manufacture a
+//     representation.
+//   * rep-ESCAPE (irreps_to_sym, sym_lift): Rep in, invariant out, false
+//     for basis-dependent Cartesian components and unnameable for monomial
+//     coordinates. MLEquiv rejects both by name.
+//   * non-representation buffers: the row-stacked `linear_rows` /
+//     `gated_rows` kernels (seam refuses by name) and the S_n index-action
 //     layers, whose discipline is `__ml_perm_equiv`, not this one.
 //
-// Under-stamping costs the stage-B walker recall. A wrong stamp would be a
+// Under-stamping costs the stage-B walker recall; a wrong stamp would be a
 // false axiom, so the balance is struck on that side every time.
 
 /// Attach the normalized `__ml_equiv(<group>)` conjunct to a synthesized
@@ -194,48 +168,44 @@ let private equivStamp (group: string) (fd: FunctionDecl) : FunctionDecl =
     { fd with WhereClause = Some wc }
 
 /// The strongest group admitted by a spec's l = 0 content, for the two
-/// emitters whose bodies treat l = 0 entries as ordinary numbers: `gated`
-/// applies a nonlinear scalar map (silu) to every one of them, and `scalars`
-/// hands them out as declared invariants.
+/// emitters that treat l = 0 entries as ordinary numbers: `gated` applies a
+/// nonlinear scalar map (silu) to every one, and `scalars` hands them out as
+/// declared invariants.
 ///
 /// O(3)'s improper elements act on an l = 0 block as (-1)^parity, so a
-/// parity-ODD l = 0 entry is a PSEUDOSCALAR: it is not an invariant (so
-/// `scalars` may not export it as one), and silu does not commute with the
-/// sign flip either (silu(-s) = -s + s*sigmoid(s), while equivariance would
-/// demand -silu(s) = -s*sigmoid(s); they agree only at s = 0). SO(3) has no
-/// improper elements, every l = 0 entry is a genuine invariant under it, and
-/// the emitted arithmetic is unchanged — so the claim WEAKENS to SO3 rather
-/// than disappearing.
+/// parity-ODD entry is a PSEUDOSCALAR: not an invariant (`scalars` may not
+/// export it as one), and silu does not commute with the sign flip either
+/// (silu(-s) = -s + s*sigmoid(s), while equivariance needs
+/// -silu(s) = -s*sigmoid(s); equal only at s = 0). SO(3) has no improper
+/// elements, so every l = 0 entry is a genuine invariant and the claim
+/// WEAKENS to SO3 rather than disappearing.
 ///
-/// NOTE (reported upstream, not patchable from this file): MLEquiv's `gated`
-/// arm tests only `spec.Head.Parity`, so a spec with an even gate block and a
-/// parity-odd l = 0 block ELSEWHERE is accepted under equiv(O3) at the seam
-/// even though the silu applied to that block breaks the O(3) claim. The
-/// predicate here is over the WHOLE spec, which is the sound reading and
+/// DRIFT (reported upstream, not patchable here): MLEquiv's `gated` arm
+/// tests only `spec.Head.Parity`, so a spec with an even gate block and a
+/// parity-odd l = 0 block ELSEWHERE is wrongly accepted under equiv(O3) at
+/// the seam. The predicate here is over the WHOLE spec -- sound, and
 /// strictly more conservative than the seam.
 let private o3UnlessPseudoscalar (s: Spec) : string =
     if s |> List.exists (fun e -> e.L = 0 && e.Parity <> 0) then "SO3" else "O3"
 
-// ============================================================================
 // Op synthesis
-// ============================================================================
 
 /// __ml_sigmoid: shared scalar helper for gated activations.
 let private sigmoidDecl (name: string) : FunctionDecl =
     mkFunc name [ ("z", TyNamed ("Float", [])) ] (TyNamed ("Float", []))
         (divE (fLit 1.0) (add (fLit 1.0) (syn (ExprApp (v "exp", [ syn (ExprUnaryOp (OpNeg, v "z")) ])))))
 
-/// NOT equiv-stamped (A1): a rep-INTRODUCTION form. Three invariant scalars
-/// in, a Rep out — sound only under the premise that (x, y, z) really are the
+/// NOT equiv-stamped: a rep-INTRODUCTION form. Three invariant scalars in, a
+/// Rep out -- sound only under the premise that (x, y, z) really are the
 /// components of the standard vector, which the signature cannot state. See
 /// the stamping header above.
 ///
-/// y_to (closed forms, lmax <= 2 in v1): mirrors ml/SphericalHarmonics
-/// component order (m ascending per l) and the orthonormalized real solid
-/// harmonics constants pinned by ml/Tests_SphericalHarmonics.
+/// y_to (closed forms, lmax <= 2): mirrors ml/SphericalHarmonics component
+/// order (m ascending per l) and the orthonormalized real solid harmonics
+/// constants pinned by ml/Tests_SphericalHarmonics.
 let private yToDecl (name: string) (lmax: int) : Result<FunctionDecl, ElabError> =
     if lmax < 0 || lmax > 2 then
-        Error (err5000 "y_to: lmax must be 0..2 in v1 (closed forms; the recurrence-generated form is future work)")
+        Error (err5000 "y_to: lmax must be 0..2 (closed forms only)")
     else
     let dimTot = (lmax + 1) * (lmax + 1)
     let f = TyNamed ("Float", [])
@@ -260,9 +230,9 @@ let private yToDecl (name: string) (lmax: int) : Result<FunctionDecl, ElabError>
 /// the DENSE weight buffer it reads: returns (statements, result expression).
 /// The loop order and the left-associated product `(((coef*w)*x)*y)` mirror
 /// the ml/TensorProduct reference exactly, which is what makes
-/// tensor_product / derive_tp agree with it to the ulp. The S₂-compacted
-/// kernels do NOT go through here — they emit only the kept paths, with the
-/// dropped contributions fused in (deriveS2TpDecl, plan §7 stage 1b).
+/// tensor_product / derive_tp agree with it to the ulp. The S2-compacted
+/// kernels do NOT go through here -- they emit only the kept paths, with the
+/// dropped contributions fused in (deriveS2TpDecl).
 let private tpBodyStmts (cfg: TPConfig) (wName: string) : Stmt list * Expr =
     let dO = totalDim cfg.SpecOut
     let paths = tpPaths cfg
@@ -341,47 +311,46 @@ let private tpBodyStmts (cfg: TPConfig) (wName: string) : Stmt list * Expr =
 /// skip is omitted (adding exact zeros in the same order is the identity).
 let private tpDecl (name: string) (cfg: TPConfig) : FunctionDecl =
     let stmts, ret = tpBodyStmts cfg "w"
-    // A1: O3. Every emitted term is a real-basis Clebsch-Gordan contraction
-    // over a path `tpPaths` admitted, and that filter carries the FULL O(3)
-    // selection rule — triangle inequality on l AND
-    // `eo.Parity = parityMul e1.Parity e2.Parity`. An output block reachable
-    // by no path is never written, and exact zero transforms as anything, so
-    // an explicit `tensor_product` SpecOut wider than the decomposition is
-    // still covered.
+    // O3: every term is a real-basis Clebsch-Gordan contraction over a path
+    // `tpPaths` admitted, and that filter carries the full O(3) selection
+    // rule (triangle inequality on l AND
+    // `eo.Parity = parityMul e1.Parity e2.Parity`). An unreachable output
+    // block is never written, and exact zero transforms as anything, so a
+    // SpecOut wider than the decomposition is still covered.
     mkFunc name
         [ ("x", tyIrrepsArr cfg.Spec1); ("y", tyIrrepsArr cfg.Spec2); ("w", tyFloatArr (tpWeightDim cfg)) ]
         (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some ret)))
     |> equivStamp "O3"
 
-/// derive_sym_tp / derive_alt_tp for a fixed spec: the S₂-compacted
+/// derive_sym_tp / derive_alt_tp for a fixed spec: the S2-compacted
 /// self-tensor-product derive_tp(S, S, x, y, w), compacted in ARITHMETIC as
-/// well as in parameters (plan §7 stage 1b). Only the KEPT paths (b1 ≤ b2,
-/// minus the τ = −1 multiplicity-1 diagonals) are emitted at all; each kept
-/// path's dropped counterpart — the b1 > b2 mirror path, or the (u2, u1) half
-/// of a diagonal path's τ-symmetric weight block — folds into the kept term
-/// as a SECOND product against the same baked CG entry, per MLSpec.S2TpCell:
+/// well as in parameters. Only the KEPT paths (b1 <= b2, minus the tau = -1
+/// multiplicity-1 diagonals) are emitted; each kept path's dropped
+/// counterpart (the b1 > b2 mirror path, or the (u2, u1) half of a diagonal
+/// path's tau-symmetric weight block) folds into the kept term as a SECOND
+/// product against the same baked CG entry, per MLSpec.S2TpCell:
 ///
 ///   out[oo + mo*do + c3] += (coef * w[wb + mo*ws])
 ///                         * ( x[oA + c1]*y[oB + c2]
 ///                           + pairSign * (y[oA + e2]*x[oB + e1]) )
 ///
-/// so the dense path table, the dense weight buffer, and stage 1a's expansion
-/// loop all disappear. The license for collapsing the mirror path
-/// onto the kept path's CG table is the cross-block exchange identity
-/// realCG(l2,l1,l3)[m2,m1,m3] = σ·realCG(l1,l2,l3)[m1,m2,m3], pinned
+/// so the dense path table, the dense weight buffer and the expansion loop
+/// all disappear. Collapsing the mirror path onto the kept path's CG table
+/// is licensed by the cross-block exchange identity
+/// realCG(l2,l1,l3)[m2,m1,m3] = sigma*realCG(l1,l2,l3)[m1,m2,m3], pinned
 /// bit-exact in ml/Tests_Wigner.
 ///
-/// Association: `(coef*w) * (x*y)` per term rather than tpDecl's
-/// left-associated `((coef*w)*x)*y`, so that in the F(x, x) case the two
-/// products of a mirror cell are bit-identical and Λ²'s `F(x, x) = 0` stays
-/// EXACT (the diagonal cells cancel across the CG entry pairs instead). Values
-/// therefore differ from stage 1a in the last ulps — §6.7's tolerance pin,
-/// relative 1e-13 against derive_tp on the embedded dense weights.
+/// Association is `(coef*w) * (x*y)` per term rather than tpDecl's
+/// left-associated `((coef*w)*x)*y`, so in the F(x, x) case the two products
+/// of a mirror cell are bit-identical and Lambda^2's `F(x, x) = 0` stays
+/// EXACT (diagonal cells cancel across the CG entry pairs). Values differ in
+/// the last ulps from the unfused kernel -- tolerance pin: relative 1e-13
+/// against derive_tp on the embedded dense weights.
 let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result<FunctionDecl, ElabError> =
     let cfg = selfTpConfig s
     let packedDim = match comp with S2Sym -> symTpWeightDim s | S2Alt -> altTpWeightDim s
     let cells = s2TpCells comp s
-    // The S₂ split is a partition of the dense parameter space — cheap to
+    // The S2 split is a partition of the dense parameter space -- cheap to
     // check here, and a violation would mis-size a user's weight buffer.
     if not (s2TpSplitIsPartition s) then
         Error (err5000 (sprintf "internal: the S2 split of the self-TP weight space is not a partition (sym %d + alt %d <> dense %d)"
@@ -446,53 +415,44 @@ let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result
                                        (mul (kIdx "__k_ps")
                                             (mul (idx "y" (add (kIdx "__k_oa") (tIdx "__cg_e2")))
                                                  (idx "x" (add (kIdx "__k_ob") (tIdx "__cg_e1"))))))) ]) ]) ] ]
-    // A1: O3, for tpDecl's reason exactly. The S2 compaction is a
-    // reparameterization of a SUBSPACE of the same hom-space — it drops
-    // weights, never relaxes a selection rule — and the exchange symmetry is
-    // a property of the weights, not of the equivariance claim.
+    // O3, for tpDecl's reason exactly. The S2 compaction is a
+    // reparameterization of a SUBSPACE of the same hom-space -- it drops
+    // weights, never relaxes a selection rule -- and the exchange symmetry
+    // is a property of the weights, not of the equivariance claim.
     Ok (mkFunc name
             [ ("x", tyIrrepsArr s); ("y", tyIrrepsArr s); ("w", tyFloatArr packedDim) ]
             (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some (v "out"))))
         |> equivStamp "O3")
 
-/// NOT equiv-stamped (A1): a rep EXIT the lattice cannot name. The monomial
-/// coordinates co-rotate POLYNOMIALLY (as Sym^K(V)), so the declared plain-Idx
-/// result is neither a Rep of any spec nor an invariant. See the stamping
-/// header above.
+/// NOT equiv-stamped: a rep the lattice cannot name. The monomial
+/// coordinates co-rotate POLYNOMIALLY (as Sym^K(V)), so the declared
+/// plain-Idx result is neither a Rep of any spec nor an invariant.
 ///
-/// The monomial lift x |-> its symmetric K-th power (plan §3.1's storage
-/// identification, §6.6's convention fork): a flat Idx<C(n+K-1, K)> vector of
-/// the UNWEIGHTED monomials ∏_j x(i_j) over the canonical multisets
-/// i1 <= ... <= iK of 0..n-1, n = total_dim(SPEC), in LEX order (nondecreasing
-/// tuples, ascending lexicographic — the SymIdx<K, ·> cell order, §6.8).
+/// The monomial lift x |-> its symmetric K-th power: a flat Idx<C(n+K-1, K)>
+/// vector of the UNWEIGHTED monomials prod_j x(i_j) over the canonical
+/// multisets i1 <= ... <= iK of 0..n-1 (n = total_dim(SPEC)), in LEX order
+/// (the SymIdx<K, .> cell order). NO multiplicity weights: the cell IS the
+/// coefficient of the monomial e_{i1}...e_{iK}, not the symmetrized-tensor
+/// component (which differs by multiplicity(idx) per cell).
 ///
-/// NO multiplicity weights: the cell IS the coefficient of the monomial
-/// e_{i1}···e_{iK}, not the symmetrized-tensor component (which differs by
-/// exactly multiplicity(idx) per cell). Stated once in the plan, implemented
-/// once here.
-///
-/// The K tuple-position tables are baked flat, one per position, so the loop
-/// is a single pass over cells with a left-associated K-fold product. The
-/// input is the irreps space; the OUTPUT is a plain Idx<cells> — the monomial
-/// space is not an irreps space (its O(3) action is Sym^K(V) =
+/// The K tuple-position tables are baked flat, one per position, so the
+/// loop is a single pass over cells with a left-associated K-fold product.
+/// The input is the irreps space; the OUTPUT is a plain Idx<cells> -- the
+/// monomial space is not an irreps space (its O(3) action is Sym^K(V) =
 /// ml.sym_spec(SPEC, K)).
 ///
-/// Stage 3 made `SymIdx<K, IrrepsIdx<SPEC>>` writable, so the result COULD now
-/// be declared as that type — the storage agrees exactly (§6.6 monomial
-/// coordinates in §6.8 lex order = the SymIdx cell order, C(n+K-1, K) cells).
-/// It is deliberately NOT: the declared type would be rank-K, and the emitted
-/// body here is a rank-1 flat pass (`out(c)` over 0..cells). Those are
-/// different C++ shapes — `Array<double, 1>` vs the rank-K compact
-/// `Array<double, K>` with a symmetric allocator — so the retype compiles in
-/// Blade (Unify's SymNone-is-a-wildcard permissiveness accepts one slot
-/// against one slot) but produces C++ that does not build. Retyping the result
-/// therefore requires REWRITING the body to K-ary canonical accesses; tracked
-/// as a follow-up, not a type annotation change.
+/// `SymIdx<K, IrrepsIdx<SPEC>>` is writable and its storage agrees exactly
+/// with this result, but the result is deliberately NOT declared as that
+/// type: it would be rank-K vs the emitted rank-1 flat pass, different C++
+/// shapes (`Array<double, 1>` vs the rank-K compact `Array<double, K>`).
+/// The retype compiles in Blade (Unify's SymNone wildcard accepts one slot
+/// against one slot) but produces C++ that does not build; fixing it means
+/// REWRITING the body to K-ary canonical accesses, tracked as a follow-up.
 let private symLiftDecl (name: string) (s: Spec) (k: int) : Result<FunctionDecl, ElabError> =
     let n = totalDim s
     let cells = binomial (n + k - 1) k
     if cells > 100000L then
-        Error (err5000 (sprintf "sym_lift: the degree-%d monomial space of a dim-%d input has C(%d, %d) = %d cells, over the 100000-cell limit — lift a smaller spec (ml.scalars/ml.linear first) or lower K"
+        Error (err5000 (sprintf "sym_lift: the degree-%d monomial space of a dim-%d input has C(%d, %d) = %d cells, over the 100000-cell limit -- lift a smaller spec (ml.scalars/ml.linear first) or lower K"
                             k n (n + k - 1) k cells))
     else
     let tuples = symMultisets n k
@@ -511,65 +471,42 @@ let private symLiftDecl (name: string) (s: Spec) (k: int) : Result<FunctionDecl,
 
 /// derive_poly(SPEC, K, SOUT, x, w) for a fixed (spec, K, specOut): the
 /// COMPLETE basis of the degree-K homogeneous equivariant maps V -> W, one
-/// weight per basis map, `polyWeightDim SPEC K SOUT` of them
-/// (retired transforms-as-types plan §3.3b construction, §7 stage 2b-iii emission).
-/// K = 1 is derive_linear; K = 2 is derive_sym_tp's hom-space seen through the
-/// UNIFORM label convention rather than through the kept-path layout.
+/// weight per basis map, `polyWeightDim SPEC K SOUT` of them. K = 1 is
+/// derive_linear; K = 2 is derive_sym_tp's hom-space in the UNIFORM label
+/// convention rather than the kept-path layout.
 ///
-/// THE EMITTED KERNEL, in the order the statements come out (everything is
-/// ordinary Blade — lets, loops, baked tables, accumulate-only, so grad()
-/// differentiates it through its normal inliner):
+/// THE EMITTED KERNEL (ordinary Blade -- lets, loops, baked tables,
+/// accumulate-only, so grad() differentiates it through its normal
+/// inliner), in emission order:
 ///
-///  1. MONOMIALS. Per (copy, degree) actually used by some label — a copy is
-///     one multiplicity slot of the spec (MLSpec.polyCopies, §3.3b move 1) —
-///     the degree-j monomials of that copy's OWN 2l+1 components over the
-///     canonical multisets (lex `symMultisets`, the symLiftDecl convention:
-///     bare products, NO multiplicity weights, §6.6). Baked as j position
-///     tables of ABSOLUTE x indices, one accumulate loop per (copy, degree).
+///  1. MONOMIALS. Per (copy, degree) used by some label, the degree-j
+///     monomials of that copy's own 2l+1 components over the canonical
+///     multisets (lex `symMultisets`, no multiplicity weights), baked as j
+///     position tables of absolute x indices.
 ///  2. OCCURRENCE FEATURES. The T_{j,l} matvec (SymPowerTables.symPowerTable,
-///     rows baked as float literals in sparse (row, cell, coef) form):
-///     f[row] = Σ_I T[occ][row, I]·mono_I — §3.3b identity (2), evaluation
-///     carries NO /N_I factor (that lives in the Gram identity (3)). A label's
-///     flat occurrence index indexes the table's `Occurrences` list directly;
-///     the two orders are re-checked here against the label's own (L, copy).
-///     At j = 1 there is no table: Sym¹(V_l) = V_l and the feature IS the
-///     copy's slice of x, read in place — which is what makes K = 1 reduce to
-///     derive_linear's arithmetic bit for bit.
-///  3. CHAINS, SHARED BY PREFIX. The used copies' features are coupled
-///     left-comb in copy order through baked `realCGSparse` tables at unit
-///     weight. Labels within a sector form a TREE over (occurrence choices,
-///     intermediate L's) and the enumeration is prefix-ordered, so emitting
-///     each distinct prefix node once — on first appearance, which is
-///     automatically a topological order — gives code size ~ O(#labels)
-///     rather than O(#labels · K). Each node is its own `let mut` buffer:
-///     one write, later reads, never a read-then-rewrite of one buffer
-///     (Grad.checkWriteAfterRead would refuse that).
-///  4. SECTOR CONSTANT. √(k!/∏_c j_c!) — §3.3b identity (1)'s cross-copy
-///     multinomial, the ONLY place it appears — baked as an EXPLICIT scalar
-///     multiplication in the weight product (§6.9(ii), resolved here in favour
-///     of auditability: the constant is a literal in the emitted table, not
-///     absorbed into a T row or a CG coefficient). It is 1.0 for every
-///     single-copy sector, hence exactly 1.0 at K = 1.
-///  5. WEIGHT MIXING. The per-label final features land in one flat `__lf`
-///     buffer, label-major, and the accumulation into the SOUT layout is a
-///     single table-driven loop.
+///     sparse (row, cell, coef)): f[row] = sum_I T[occ][row, I]*mono_I, no
+///     /N_I factor (lives in the Gram identity). At j = 1 there is no
+///     table: Sym^1(V_l) = V_l and the feature IS the copy's slice of x --
+///     what makes K = 1 reduce to derive_linear's arithmetic bit for bit.
+///  3. CHAINS, SHARED BY PREFIX. Copies' features couple left-comb through
+///     baked `realCGSparse` tables at unit weight; each distinct prefix
+///     node (occurrence choices, intermediate L's) is emitted once, on
+///     first appearance, giving code size ~ O(#labels) rather than
+///     O(#labels*K). Each node is a `let mut` buffer written once, read
+///     later (Grad.checkWriteAfterRead forbids read-then-rewrite).
+///  4. SECTOR CONSTANT. sqrt(k!/prod_c j_c!), the cross-copy multinomial,
+///     baked as an explicit scalar in the weight product (1.0 for every
+///     single-copy sector, hence exactly 1.0 at K = 1).
+///  5. WEIGHT MIXING. Per-label features land in one flat `__lf` buffer,
+///     label-major; accumulation into SOUT is one table-driven loop.
 ///
-/// WEIGHT LAYOUT (the documented surface contract). LABEL-MAJOR: labels in
-/// `MLSpec.polyLabels` order (slowest), then the matching W copies — SOUT
-/// blocks of the label's (L, parity) in block order, multiplicity index
-/// inner. That is `polyWeightDimViaLabels`'s summation order; it agrees with
-/// `polyWeightDim` = `homDim(sym_spec(SPEC,K), SOUT)` on the COUNT (asserted
-/// here on every synthesis) but not on the ORDER — homBlocks, which
-/// derive_linear follows, is OUTPUT-block-major with the input multiplicity
-/// innermost. The two coincide exactly when no (l, parity) has both input
-/// multiplicity > 1 and output multiplicity > 1 and the matched blocks are in
-/// the same relative order, which covers the K = 1 corpus pin; in general
-/// derive_poly follows the label-major order, because that is the order the
-/// label basis itself is defined in.
-///
-/// §6.9(iv), restated where a reader of the emitted code can see it: the
-/// copy-split label basis is NOT GL(m)-channel-covariant. Label indices name
-/// multiplicity SLOTS, never channel structure.
+/// WEIGHT LAYOUT (surface contract): LABEL-MAJOR -- `MLSpec.polyLabels`
+/// order, then matching W copies (SOUT blocks of the label's (L, parity),
+/// multiplicity inner). Agrees with `polyWeightDim` on COUNT but not
+/// necessarily ORDER: homBlocks (derive_linear's) is OUTPUT-block-major
+/// with input multiplicity innermost, coinciding only when no (l, parity)
+/// has both mults > 1 (the K = 1 corpus pin). Label indices name
+/// multiplicity SLOTS -- the basis is NOT GL(m)-channel-covariant.
 let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Result<FunctionDecl, ElabError> =
     let labels = polyLabels s k |> List.toArray
     let copies = polyCopies s |> List.toArray
@@ -598,7 +535,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
         [ for lb in used do
             for oo in matched lb -> (lfOff.[lb.Index], oo, 2 * lb.L + 1, sqrt (float lb.Multinomial)) ]
     let wDim = slots.Length
-    // The §3.3b convention pin the two files cannot check against each other
+    // The convention pin the two files cannot check against each other
     // (MLSpec stays dependency-free): a label's flat occurrence index must be
     // a direct index into symPowerTable's `Occurrences`.
     let occProblem =
@@ -615,7 +552,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
                                   u.Degree u.CopyL u.Occ occs.[u.Occ].L occs.[u.Occ].Copy u.OccL u.OccCopy)
                     else None))
     if occProblem.IsSome then
-        Error (err5000 (sprintf "internal: derive_poly occurrence order drift — %s" occProblem.Value))
+        Error (err5000 (sprintf "internal: derive_poly occurrence order drift -- %s" occProblem.Value))
     elif wDim <> polyWeightDim s k sOut then
         Error (err5000 (sprintf "internal: derive_poly enumerated %d weight slots label by label but poly_weight_dim says %d (spec %A, K %d, out %A)"
                             wDim (polyWeightDim s k sOut) s k sOut))
@@ -625,7 +562,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
     let fresh (p: string) = ctr <- ctr + 1; sprintf "__%s%d" p ctr
     stmts.Add (sLetMut "out" (zerosLit (totalDim sOut)))
     stmts.Add (sLetMut "__lf" (zerosLit (max lfDim 1)))
-    // --- 1. monomial buffers, one per used (copy, degree), degree >= 2 -------
+    // 1. monomial buffers, one per used (copy, degree), degree >= 2
     let monKeys =
         used
         |> Array.collect (fun lb -> lb.Uses |> List.filter (fun u -> u.Degree >= 2) |> List.map (fun u -> (u.Copy, u.Degree)) |> List.toArray)
@@ -646,7 +583,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
                               ([ 0 .. j - 1 ]
                                |> List.map (fun a -> idx "x" (idx (sprintf "%s_i%d" nm a) (v "c")))
                                |> List.reduce mul) ]))
-    // --- 2. the T_{j,l} matvec, sparse (row, cell, coef) --------------------
+    // 2. the T_{j,l} matvec, sparse (row, cell, coef)
     let emitMatvec (dstName: string) (dstBase: int) (u: PolyCopyUse) =
         let tbl = Blade.ML.SymPowerTables.symPowerTable u.Degree u.CopyL
         let occ = tbl.Occurrences |> List.item u.Occ
@@ -669,7 +606,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
         stmts.Add (StmtForIn ("c", syn (ExprDotDot (iLit 0, iLit d)),
                      [ sAccum (idx "__lf" (add (iLit dstBase) (v "c")))
                               (idx "x" (add (iLit srcOff) (v "c"))) ]))
-    // --- 3. one pairwise CG contraction, unit weight ------------------------
+    // 3. one pairwise CG contraction, unit weight
     let emitCouple (dstName: string) (dstBase: int)
                    (aName: string, aBase: int, la: int) (bName: string, bBase: int, lb: int) (lMid: int) =
         let cg = Blade.ML.WignerTables.realCGSparse la lb lMid |> Array.toList
@@ -684,7 +621,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
                                    (idx bName (idx (nm + "_2") (v "t")))) ]))
     // Shared nodes: occurrence features keyed by (copy, degree, occ), chain
     // prefixes keyed by the whole (uses, chain) prefix. First appearance IS a
-    // topological order — a child key extends its parent's.
+    // topological order -- a child key extends its parent's.
     let mutable nodes : Map<string, string> = Map.empty
     let useKey (u: PolyCopyUse) = sprintf "%d.%d.%d" u.Copy u.Degree u.Occ
     let prefixKey (lb: PolyLabel) (m: int) =
@@ -741,7 +678,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
                         accName <- nm
                         accBase <- 0
                 accL <- lMid
-    // --- 5. weight mixing, one table-driven loop ----------------------------
+    // 5. weight mixing, one table-driven loop
     stmts.Add (sLet "__w_fo" (intArrLit (slots |> List.map (fun (a, _, _, _) -> a))))
     stmts.Add (sLet "__w_oo" (intArrLit (slots |> List.map (fun (_, b, _, _) -> b))))
     stmts.Add (sLet "__w_d" (intArrLit (slots |> List.map (fun (_, _, c, _) -> c))))
@@ -751,24 +688,21 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
                    StmtForIn ("c", syn (ExprDotDot (iLit 0, idx "__w_d" (v "kk"))),
                      [ sAccum (idx "out" (add (idx "__w_oo" (v "kk")) (v "c")))
                               (mul (v "wv") (idx "__lf" (add (idx "__w_fo" (v "kk")) (v "c")))) ]) ])
-    // A1: O3. The label basis is built by CG coupling chains off the input's
-    // copies, so each label transforms as its own (L, parity) — computed as
-    // (-1)^(sum_c j_c * p_c), the honest O(3) parity of a degree-K monomial —
+    // O3: the label basis is built by CG coupling chains off the input's
+    // copies, so each label transforms as its own (L, parity) -- computed as
+    // (-1)^(sum_c j_c * p_c), the honest O(3) parity of a degree-K monomial --
     // and `matched` above mixes a label ONLY into output blocks carrying that
-    // same (L, parity). Labels with no match carry no weight and are not
-    // emitted, so no unmatched parity can leak into the result.
+    // same (L, parity). Unmatched labels carry no weight and are not emitted.
     Ok (mkFunc name [ ("x", tyIrrepsArr s); ("w", tyFloatArr wDim) ]
             (tyIrrepsArr sOut) (syn (ExprBlock (List.ofSeq stmts, Some (v "out"))))
         |> equivStamp "O3")
 
-/// linear for fixed (specIn, specOut): block-diagonal multiplicity mixing,
-/// first-match input block, ml/Linear loop order (blocks -> muO -> muI -> c).
-/// `rows` is MLSpec.linearBlocks output: one (inputBlockIdx, eo, ei) per
-/// OUTPUT block, in output-block order (list position = output index).
-/// linear over nRows row vectors stored flat (row-major): the per-block
-/// multiplicity mixing (first-match input block, ml/Linear loop order:
-/// blocks -> muO -> muI -> c) inside an outer row loop, all x/out indices
-/// offset by the row base. nRows = 1 is the single-vector `linear`; the
+/// linear for fixed (specIn, specOut), nRows row vectors stored flat
+/// (row-major; nRows = 1 is the single-vector `linear`): block-diagonal
+/// multiplicity mixing, first-match input block, ml/Linear loop order
+/// (blocks -> muO -> muI -> c), inside an outer row loop with x/out indices
+/// offset by the row base. `rows` is MLSpec.linearBlocks output: one
+/// (inputBlockIdx, eo, ei) per OUTPUT block, in output-block order. The
 /// batched `linear_rows` form exists so callers do not hand-write
 /// row-extract/write-back copy loops around the single-vector op.
 let private linearDecl (name: string) (specIn: Spec) (specOut: Spec)
@@ -798,31 +732,28 @@ let private linearDecl (name: string) (specIn: Spec) (specOut: Spec)
             [ sLetMut "out" (zerosLit (nRows * dOut))
               sFor "rr" 0 nRows blockStmts ],
             Some (v "out")))
-    // nRows = 1: x/out ARE the irreps spaces — stamp them. nRows > 1: the
+    // nRows = 1: x/out ARE the irreps spaces -- stamp them. nRows > 1: the
     // row-stacked buffers (extent nRows * total_dim) are not irreps spaces.
     let tyIn = if nRows = 1 then tyIrrepsArr specIn else tyFloatArr (nRows * dIn)
     let tyOut = if nRows = 1 then tyIrrepsArr specOut else tyFloatArr (nRows * dOut)
     let fd = mkFunc name [ ("w", tyFloatArr wDim); ("x", tyIn) ] tyOut body
-    // A1: O3 at nRows = 1 — `linearBlocks` selects the input block by
-    // (l, parity) equality, so this is a SUB-basis of derive_linear's complete
-    // Schur basis (one input block per output block instead of all matches),
-    // and a subspace of the equivariant hom-space is equivariant.
+    // O3 at nRows = 1: `linearBlocks` selects the input block by (l, parity)
+    // equality, a SUB-basis of derive_linear's complete Schur basis (one
+    // input block per output block instead of all matches), and a subspace
+    // of the equivariant hom-space is equivariant.
     //
     // nRows > 1 is left UNSTAMPED: the row-stacked buffers are declared plain
-    // `Idx<nRows * total_dim>`, so the signature carries no representation for
-    // a claim to be about (the seam refuses `linear_rows` by name for the same
-    // reason). A stamp there would read "invariants in, invariants out" —
-    // vacuously true, and misleading to any consumer treating stamps as
-    // evidence of an equivariant layer.
+    // `Idx<nRows * total_dim>`, so the signature carries no representation to
+    // claim anything about (the seam refuses `linear_rows` by name for the
+    // same reason) -- a stamp there would read "invariants in, invariants
+    // out", vacuously true and misleading.
     if nRows = 1 then equivStamp "O3" fd else fd
 
-/// gated for a fixed spec: block-0 scalars silu'd AND reused as gates for
-/// higher-L blocks (gate for multiplicity mu is sigmoid(x[mu % numGates])),
-/// mirroring ml/Activations.gated including the scalar double-duty (F2).
-/// gated over nRows row vectors stored flat: block-0 scalars silu'd AND
-/// reused as gates for higher-L blocks (gate for multiplicity mu is
-/// sigmoid(x[row_base + mu % numGates]) — the F2 double-duty rule, per
-/// row), inside an outer row loop. nRows = 1 is the single-vector `gated`.
+/// gated for a fixed spec (nRows row vectors stored flat; nRows = 1 is the
+/// single-vector `gated`): block-0 scalars silu'd AND reused as gates for
+/// higher-L blocks (gate for multiplicity mu is
+/// sigmoid(x[row_base + mu % numGates]) -- the F2 double-duty rule, per row,
+/// mirroring ml/Activations.gated), inside an outer row loop.
 let private gatedDecl (name: string) (sigmoidName: string) (spec: Spec) (nRows: int) : Result<FunctionDecl, ElabError> =
     if spec.IsEmpty then Error (err5000 "gated: empty spec")
     elif spec.Head.L <> 0 then Error (err5000 "gated: the first block must be scalars (L=0)")
@@ -848,7 +779,7 @@ let private gatedDecl (name: string) (sigmoidName: string) (spec: Spec) (nRows: 
                         [ sAssign (idx "out" (add baseE (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c")))))
                                   (mul (v "g")
                                        (idx "x" (add baseE (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c")))))) ] ] ]
-    // nRows = 1: x/out ARE the irreps space (same spec in and out) — stamp.
+    // nRows = 1: x/out ARE the irreps space (same spec in and out) -- stamp.
     let tyVec = if nRows = 1 then tyIrrepsArr spec else tyFloatArr (nRows * dTot)
     let fd =
         mkFunc name [ ("x", tyVec) ] tyVec
@@ -856,27 +787,26 @@ let private gatedDecl (name: string) (sigmoidName: string) (spec: Spec) (nRows: 
                 [ sLetMut "out" (zerosLit (nRows * dTot))
                   sFor "rr" 0 nRows rowStmts ],
                 Some (v "out"))))
-    // A1, GROUP-CONDITIONAL at nRows = 1. Two things happen to l = 0 entries
-    // here and both are parity-sensitive: the gate factor is
-    // sigmoid(x[head + mu mod numGates]) — an invariant scalar only if the
-    // head block is parity-even — and EVERY l = 0 block (not just the head) is
-    // silu'd in place, which is not sign-equivariant. `o3UnlessPseudoscalar`
-    // therefore weakens the whole spec to SO3 when any l = 0 block is odd.
-    // Blocks with l > 0 are only scaled by that one factor, which commutes
-    // with D^l, so the output spec is the input spec.
+    // GROUP-CONDITIONAL at nRows = 1. Two things happen to l = 0 entries here
+    // and both are parity-sensitive: the gate factor is
+    // sigmoid(x[head + mu mod numGates]) -- an invariant scalar only if the
+    // head block is parity-even -- and EVERY l = 0 block (not just the head)
+    // is silu'd in place, which is not sign-equivariant. So
+    // `o3UnlessPseudoscalar` weakens the whole spec to SO3 when any l = 0
+    // block is odd. Blocks with l > 0 are only scaled by that one factor,
+    // which commutes with D^l, so the output spec is the input spec.
     //
-    // nRows > 1 is left UNSTAMPED for linearDecl's reason: row-stacked buffers
-    // are not representation spaces.
+    // nRows > 1 is left UNSTAMPED for linearDecl's reason: row-stacked
+    // buffers are not representation spaces.
     Ok (if nRows = 1 then equivStamp (o3UnlessPseudoscalar spec) fd else fd)
 
 /// derive_linear for fixed (specIn, specOut): the COMPLETE Schur basis of
-/// Hom_G(V_in, V_out) — every (l, parity)-matched (input, output) block
+/// Hom_G(V_in, V_out) -- every (l, parity)-matched (input, output) block
 /// pair mixes multiplicities, weight layout pair-major (MLSpec.homBlocks
 /// order) mult_out x mult_in per pair, ACCUMULATING (+=) so duplicate
-/// matches add; output blocks with no matching input stay exactly zero,
-/// the unique equivariant completion. "You declare what the layer must
-/// respect; the compiler writes the layer." Mirrors ml/Linear.homLinear
-/// loop order (pairs -> mo -> mi -> c) for ulp agreement.
+/// matches add; output blocks with no matching input stay exactly zero, the
+/// unique equivariant completion. Mirrors ml/Linear.homLinear loop order
+/// (pairs -> mo -> mi -> c) for ulp agreement.
 let private deriveLinearDecl (name: string) (specIn: Spec) (specOut: Spec) : FunctionDecl =
     let dOut = totalDim specOut
     let sIn = blockStarts specIn
@@ -901,50 +831,45 @@ let private deriveLinearDecl (name: string) (specIn: Spec) (specOut: Spec) : Fun
             [ yield sLetMut "out" (zerosLit dOut)
               yield! pairStmts ],
             Some (v "out")))
-    // A1: O3. `homBlocks` admits a (input, output) block pair only when BOTH
-    // l and parity agree, so the emitted basis is exactly Hom_{O(3)} — the
-    // complete one, which is why zero-filled output blocks (no matching input)
+    // O3: `homBlocks` admits an (input, output) block pair only when BOTH l
+    // and parity agree, so the emitted basis is exactly the complete
+    // Hom_{O(3)}, which is why zero-filled output blocks (no matching input)
     // are the unique equivariant completion rather than a gap in the claim.
     mkFunc name [ ("w", tyFloatArr wDim); ("x", tyIrrepsArr specIn) ] (tyIrrepsArr specOut) body
     |> equivStamp "O3"
 
-// ============================================================================
-// The POINT-GROUP block-spec surface (retired transforms-as-types plan §3.6, §7 stage
-// 5b-i) — `derive_linear`'s SECOND member, and the first place the
-// Frobenius-Schur correction is visible in emitted code.
-// ============================================================================
+// The POINT-GROUP block-spec surface -- `derive_linear`'s SECOND member, and
+// the first place the Frobenius-Schur correction is visible in emitted code.
 //
-// Over ℝ, Schur's lemma does NOT give one free scalar per (input copy, output
-// copy) pair: it gives one free element of the division algebra
-// End_G(U) ∈ {ℝ, ℂ, ℍ}, so a cell carries e = dim_ℝ End_G(U) scalars and
+// Over R, Schur's lemma does NOT give one free scalar per (input copy,
+// output copy) pair: it gives one free element of the division algebra
+// End_G(U) in {R, C, H}, so a cell carries e = dim_R End_G(U) scalars:
 //
-//     dim_ℝ Hom_G(⊕ mᵢUᵢ, ⊕ nᵢUᵢ) = Σᵢ mᵢ·nᵢ·eᵢ         (the FS formula)
+//     dim_R Hom_G(+i mi*Ui, +i ni*Ui) = sum_i mi*ni*ei     (the FS formula)
 //
-// Every O(3) irrep is of real type, which is exactly why `deriveLinearDecl`
-// above can be `Σ mᵢ·nᵢ` and still be right. Point groups break that: C4's E
-// is of COMPLEX type (e = 2) while D4's E — same dimension, same R₉₀ generator
-// — is of REAL type (e = 1). All of the difference is in this file's `basis`.
+// Every O(3) irrep is of real type, which is why `deriveLinearDecl` above
+// can be `sum mi*ni` and still be right. Point groups break that: C4's E is
+// of COMPLEX type (e = 2) while D4's E -- same dimension, same R90
+// generator -- is of REAL type (e = 1); the difference lives in this file's
+// `basis`.
 //
-// THE EMITTED BASIS OF A CELL is `PointSpec.endBasis`: [Id] at e = 1 and
-// [Id, J] at e = 2, with J the BAKED complex structure from the frozen table
-// (there is no call site at which J could be "derived" — it depends on the
-// chosen real form). So the emitted map of one cell is
+// THE EMITTED BASIS OF A CELL is `PointSpec.endBasis`: [Id] at e = 1, [Id,
+// J] at e = 2 (J the BAKED complex structure from the frozen table -- no
+// call site "derives" it; it depends on the chosen real form):
 //
-//     e = 1:  out_block += w · x_block                (Id only)
-//     e = 2:  out_block += w_Id · x_block + w_J · (J · x_block)
+//     e = 1:  out_block += w * x_block                (Id only)
+//     e = 2:  out_block += w_Id * x_block + w_J * (J * x_block)
 //
-// WEIGHT LAYOUT: homBlocks order (pair-major, output-major within), mult_out ×
-// mult_in cells per pair, and the e scalars of a cell CONSECUTIVE — [Id, J]
-// adjacent, so a cell is a contiguous e-slice and the e = 1 layout degenerates
-// to `deriveLinearDecl`'s exactly.
-//
-// THE e = 1 PATH IS `deriveLinearDecl`'s LOOP NEST VERBATIM — same statement
-// order, same index association, same `wv` binding — because an all-real-type
-// point group must agree with a hand-written O(3)-shaped layer to the ULP, and
-// that pin is only meaningful if the arithmetic is literally the same shape.
+// WEIGHT LAYOUT: homBlocks order (pair-major, output-major within), mult_out
+// x mult_in cells per pair, e scalars of a cell CONSECUTIVE ([Id, J]
+// adjacent), so the e = 1 layout degenerates to `deriveLinearDecl`'s
+// exactly. THE e = 1 PATH IS ITS LOOP NEST VERBATIM (same statement order,
+// index association, `wv` binding), because an all-real-type point group
+// must agree with a hand-written O(3)-shaped layer to the ULP, and that pin
+// is only meaningful if the arithmetic is literally the same shape.
 
 /// derive_pg_linear for a fixed (group, specIn, specOut): the COMPLETE
-/// ℝ-Schur basis of Hom_G(V_in, V_out) for a point group. See the block
+/// R-Schur basis of Hom_G(V_in, V_out) for a point group. See the block
 /// comment above for the FS formula, the emitted cell basis and the layout.
 let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGroup)
                                (specIn: Blade.ML.PointSpec.PgSpec)
@@ -960,14 +885,14 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
             let ir = Blade.ML.PointSpec.pgIrrep grp label
             let d = ir.DimR
             // THE FsQuat GUARD: `endBasis` is the emission-adjacent path
-            // MLPointSpec reserves the quaternionic value against — counting
+            // MLPointSpec reserves the quaternionic value against -- counting
             // reads endDim FsQuat = 4 happily, this raises a loud internal
             // error. Calling it on EVERY pair (not just the e = 2 ones) is
             // what makes the guard reachable rather than decorative.
             let basis = Blade.ML.PointSpec.endBasis ir
             let e = List.length basis
             if not (Blade.ML.PointSpec.matEq (List.head basis) (Blade.ML.PointSpec.matId d)) then
-                failwithf "internal: the End-basis of %s::%s does not lead with the identity — the e = 1 emission path assumes it"
+                failwithf "internal: the End-basis of %s::%s does not lead with the identity -- the e = 1 emission path assumes it"
                     grp.Name label
             let thisOff = wOff
             wOff <- wOff + mOut * mIn * e
@@ -979,7 +904,7 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
                 idx "w" (add (iLit thisOff) (if k = 0 then flat else add flat (iLit k)))
             if e = 1 then
                 // VERBATIM `deriveLinearDecl`'s nest (mo -> mi -> c, one `wv`
-                // let, one accumulate) — the ulp pin depends on this shape.
+                // let, one accumulate) -- the ulp pin depends on this shape.
                 [ sFor "mo" 0 mOut
                     [ sFor "mi" 0 mIn
                         [ sLet "wv" (wAt 0)
@@ -988,21 +913,20 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
                                      (mul (v "wv")
                                           (idx "x" (add (iLit sIn.[bi]) (add (mul (v "mi") (iLit d)) (v "c"))))) ] ] ] ]
             else
-                // e = 2: the two-term form, with J's entries BAKED SPARSE.
-                // J is ±1-sparse over the shipped roster (matrix rationality
-                // is what put C4/D4 there), so each output component gets the
-                // Id term plus exactly the nonzero J terms written out — no
-                // inner contraction loop, no zero multiplies. `c` is unrolled
-                // because J's support varies per row; d ≤ 2 here.
+                // e = 2: the two-term form, with J's entries BAKED SPARSE. J
+                // is +/-1-sparse over the shipped roster (matrix rationality
+                // is what put C4/D4 there), so each output component gets
+                // the Id term plus exactly the nonzero J terms written out --
+                // no inner contraction loop, no zero multiplies. `c` is
+                // unrolled because J's support varies per row; d <= 2 here.
                 let j = List.item 1 basis
                 let anyNeg = j |> Array.exists (Array.exists (fun v -> v < 0))
                 [ sFor "mo" 0 mOut
                     [ sFor "mi" 0 mIn
                         ([ yield sLet "wid" (wAt 0)
                            yield sLet "wj" (wAt 1)
-                           // -w bound once per cell rather than folded into
-                           // each term: `0.0 - w` is exact, and reusing one
-                           // binding keeps every negative J entry identical.
+                           // -w bound once per cell (exact), so every
+                           // negative J entry reuses one binding.
                            if anyNeg then yield sLet "wjn" (sub (fLit 0.0) (v "wj"))
                            for c in 0 .. d - 1 do
                              let outAt = idx "out" (add (iLit sOut.[bo]) (add (mul (v "mo") (iLit d)) (iLit c)))
@@ -1014,13 +938,12 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
                                if jv = 1 then yield sAccum outAt (mul (v "wj") (xAt k))
                                elif jv = -1 then yield sAccum outAt (mul (v "wjn") (xAt k))
                                elif jv <> 0 then
-                                   failwithf "internal: the baked J of %s::%s has entry %d at (%d, %d) — the emitted two-term form bakes J SPARSE and handles only {0, +-1} (the shipped roster's matrix-rationality boundary)"
+                                   failwithf "internal: the baked J of %s::%s has entry %d at (%d, %d) -- the emitted two-term form bakes J SPARSE and handles only {0, +-1} (the shipped roster's matrix-rationality boundary)"
                                        grp.Name label jv c k ]) ] ])
     let wDim = wOff
-    // The count is the theorem BECAUSE the basis is emitted: the number of
+    // The count is the theorem because the basis is emitted: the number of
     // weight slots the kernel actually reads, checked against the number the
-    // user sized their buffer by (`ml.pg_hom_dim`). The derive_perm_linear
-    // precedent, one member over.
+    // user sized their buffer by (`ml.pg_hom_dim`).
     let declared = Blade.ML.PointSpec.pgHomDim grp specIn specOut
     if wDim <> declared then
         Error (err5000 (sprintf "internal: derive_pg_linear emitted %d weight slots but pg_hom_dim(%s, ...) says %d"
@@ -1031,11 +954,11 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
                 [ yield sLetMut "out" (zerosLit dOut)
                   yield! pairStmts ],
                 Some (v "out")))
-        // A1: the POINT GROUP NAMED IN THE CALL, and nothing weaker or
-        // stronger. This is derive_linear's construction over a finite group's
-        // frozen character table — cells connect equal LABELS only, with the
+        // The POINT GROUP NAMED IN THE CALL, and nothing weaker or stronger.
+        // This is derive_linear's construction over a finite group's frozen
+        // character table -- cells connect equal LABELS only, with the
         // Frobenius-Schur correction supplying e = dim_R End_G(U) scalars per
-        // cell — so the emitted basis is exactly Hom_{grp}. It says nothing
+        // cell -- so the emitted basis is exactly Hom_{grp}. It says nothing
         // about any other group: `grp.Name` is a registered point-group name
         // (MLPointSpec.pointGroupNames), which is what MLEquiv's parseGroup
         // accepts, and certificates do not transfer between groups.
@@ -1043,54 +966,45 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
                 (tyPgIrrepsArr grp.Name specOut) body
             |> equivStamp grp.Name)
 
-// ============================================================================
-// NOT equiv-stamped (A1): a DIFFERENT DISCIPLINE, not a weaker claim. These
-// kernels are equivariant for the node-relabelling action of Sₙ over flat
-// N^K buffers, whose claim vocabulary is `__ml_perm_equiv` and whose lattice
-// is MLPerm's; `__ml_equiv` names O(3)/SO(3)/point-group representation
-// spaces, and no `IrrepsIdx` slot appears in any signature below. Stamping
-// them here would be a category error, not conservatism. A `__ml_perm_equiv`
-// twin of this stamping pass is a follow-up, not part of A1.
+// NOT equiv-stamped: a DIFFERENT DISCIPLINE, not a weaker claim. These
+// kernels are equivariant for the node-relabelling action of Sn over flat
+// N^K buffers (claim vocabulary `__ml_perm_equiv`, lattice MLPerm's);
+// `__ml_equiv` names O(3)/SO(3)/point-group representation spaces, and no
+// `IrrepsIdx` slot appears in any signature below, so stamping them here
+// would be a category error, not conservatism.
 //
-// The Sₙ INDEX-ACTION surface (retired transforms-as-types plan §3.6, §7 stage 5a-ii)
-// ============================================================================
+// The Sn INDEX-ACTION surface
 //
 // `ml.derive_perm_linear(K, L, N, x, w)` is deriveLinearDecl's sibling for a
 // FINITE group acting on INDICES rather than on irrep blocks: the complete
-// basis of Hom_{Sₙ}(ℝ^{N^K}, ℝ^{N^L}), one weight per basis map. There is no
-// spec, no character table and no Clebsch–Gordan anything, because for
+// basis of Hom_{Sn}(R^{N^K}, R^{N^L}), one weight per basis map. There is
+// no spec, no character table and no Clebsch-Gordan anything, because for
 // PERMUTATION modules the layer algebra is orbit combinatorics:
 //
-//     dim Hom_{Sₙ}(ℝ^{N^K}, ℝ^{N^L}) = #orbits of Sₙ on [N]^{K+L}
-//                                    = #partitions of [K+L] into ≤ N blocks
+//     dim Hom_{Sn}(R^{N^K}, R^{N^L}) = #orbits of Sn on [N]^{K+L}
+//                                    = #partitions of [K+L] into <= N blocks
 //
-// and the basis is the set of ORBIT (= coarsening) INDICATORS B_γ, one per
-// partition γ of the m = K + L axis positions — inputs 0..K−1, outputs
-// K..K+L−1, the position convention fixed by MLPermSpec's header and baked
-// into the loop nests below. The count is the theorem BECAUSE the basis is
-// emitted (§3.6's house rule); MLPermSpec.permPartitions supplies the
-// partitions in the canonical weight order and certifies, on every call, that
-// the emitted order is a linear extension of refinement.
+// and the basis is the set of ORBIT (coarsening) INDICATORS B_gamma, one
+// per partition gamma of the m = K + L axis positions (inputs 0..K-1,
+// outputs K..K+L-1, per MLPermSpec's header). The count is the theorem
+// because the basis is emitted; MLPermSpec.permPartitions supplies the
+// partitions in canonical weight order and certifies the emitted order is
+// a linear extension of refinement.
 //
-// BUFFERS ARE FLAT ROW-MAJOR — `x` is one `Idx<N^K>` axis, the result one
-// `Idx<N^L>` axis, exactly the `_rows` house precedent (linearDecl). No rank-K
-// parameters, so nothing here needs new index machinery. L = 0 is the
-// INVARIANT READOUT and returns `Array<Float like Idx<1>>`, a ONE-CELL
-// buffer read as `y(0)` — N^0 = 1 keeps the emission uniform, and it is the
-// shape every other ml op already gives a scalar result (derive_poly into a
-// single-(l=0) SOUT, ml.scalars of a one-scalar spec: a 1-cell array, never a
-// bare `Float`).
+// BUFFERS ARE FLAT ROW-MAJOR: `x` is one `Idx<N^K>` axis, the result one
+// `Idx<N^L>` axis, the `_rows` house precedent (linearDecl). L = 0 is the
+// INVARIANT READOUT, `Array<Float like Idx<1>>` (N^0 = 1), matching the
+// shape every other ml op gives a scalar result.
 
-/// The flat-buffer cell cap of the Sₙ ops. ORTHOGONAL to
-/// `PermSpec.checkPermSizing`: that gate decides which BASIS the surface admits
-/// (§3.6's no-silent-fork rule, shared verbatim with the sizing builtins), this
-/// one is about emitted code size — `out` is materialized as a literal array of
-/// N^L zeros, so the extent appears verbatim in the generated source. Same
-/// number and same reason as symLiftDecl's monomial cap.
+/// The flat-buffer cell cap of the Sn ops. ORTHOGONAL to
+/// `PermSpec.checkPermSizing`, which decides which BASIS the surface admits;
+/// this one is about emitted code size -- `out` is materialized as a literal
+/// array of N^L zeros, so the extent appears verbatim in the generated
+/// source. Same number and reason as symLiftDecl's monomial cap.
 let private permCellCap = 100000
 
 /// N^e, saturating just past `permCellCap`. N is bounded only by the caller's
-/// sanity range, so the honest product can overflow int64 — and the only
+/// sanity range, so the honest product can overflow int64 -- the only
 /// question this answers is "is the buffer over the cap?".
 let private permPow (n: int) (e: int) : int64 =
     let mutable acc = 1L
@@ -1100,46 +1014,39 @@ let private permPow (n: int) (e: int) : int64 =
         i <- i + 1
     acc
 
-/// THE EMITTED KERNEL, shared by derive_perm_linear and derive_perm_bias: ONE
-/// LOOP NEST PER PARTITION, in `permPartitions` order (= the canonical weight
-/// order, so weight slot g is partition g).
+/// THE EMITTED KERNEL, shared by derive_perm_linear and derive_perm_bias:
+/// ONE LOOP NEST PER PARTITION, in `permPartitions` order (so weight slot g
+/// is partition g). For partition gamma, one `let`-free block variable per
+/// gamma-BLOCK, each ranging over 0..N-1 (b(gamma) loops deep), with the two
+/// flat indices read off the position convention directly:
 ///
-/// For partition γ, one `let`-free block variable per γ-BLOCK, each ranging
-/// over 0..N−1 — b(γ) loops deep — and the two flat indices are read off the
-/// position convention directly:
-///
-///     inIdx  = Σ_{i=0..K−1}    v_{γ(i)} · N^{K−1−i}         (input positions)
-///     outIdx = Σ_{i=K..K+L−1}  v_{γ(i)} · N^{K+L−1−i}       (output positions)
+///     inIdx  = sum_{i=0..K-1}   v_{gamma(i)} * N^{K-1-i}    (input positions)
+///     outIdx = sum_{i=K..K+L-1} v_{gamma(i)} * N^{K+L-1-i}  (output positions)
 ///     out(outIdx) += w(g) * x(inIdx)         [bias: += b(g), no x factor]
 ///
-/// That IS the orbit indicator B_γ contracted with x: the nest visits exactly
-/// the tuples of [N]^m that are constant on every block of γ, which is the
-/// support of B_γ, and adds each one's x-cell into its out-cell.
+/// That IS the orbit indicator B_gamma contracted with x: the nest visits
+/// exactly the tuples of [N]^m constant on every block of gamma, adding
+/// each one's x-cell into its out-cell.
 ///
-/// THE SUM / GATHER / BROADCAST CLASSIFICATION NEEDS NO CODE — it falls out of
-/// which of the two indices a block variable appears in:
-///   * a block of INPUT-only positions is a variable that occurs in inIdx but
-///     not in outIdx, so its loop accumulates many x-cells into one out-cell:
-///     a SUMMATION (K=L=1's `sum(x)`, K=2/L=0's trace and total sum);
-///   * a MIXED block occurs in both, so it selects the same coordinate on each
-///     side: a GATHER (the identity map, the transpose, the diagonal read);
-///   * an OUTPUT-only block occurs only in outIdx, so the same accumulated
-///     value is written across its whole range: a BROADCAST.
-/// Nothing below branches on this. It is one uniform nest and the semantics
-/// are whatever the index expressions say.
+/// THE SUM / GATHER / BROADCAST CLASSIFICATION NEEDS NO CODE -- it falls
+/// out of which index a block variable appears in: INPUT-only (in inIdx,
+/// not outIdx) is a SUMMATION (K=L=1's `sum(x)`, K=2/L=0's trace); MIXED
+/// (both) is a GATHER (identity, transpose, diagonal read); OUTPUT-only is
+/// a BROADCAST. Nothing below branches on this: one uniform nest, whatever
+/// semantics the index expressions give it.
 ///
-/// Accumulate-only (`+=` into a zero-initialized `out`, never a read-then-
-/// rewrite), so grad() differentiates it through its normal inliner.
-/// Code size is Σ_γ b(γ) loops — 37 at the Maron point (K=L=2), and the cap
-/// K+L ≤ 6 bounds it by Σ_γ b(γ) over Bell(6) = 203 partitions.
+/// Accumulate-only (`+=` into a zero-initialized `out`, never a
+/// read-then-rewrite), so grad() differentiates it through its normal
+/// inliner. Code size is sum_gamma b(gamma) loops -- 37 at the Maron point
+/// (K=L=2), bounded by the K+L <= 6 cap at Bell(6) = 203 partitions.
 let private permNestStmts (k: int) (l: int) (n: int) (coefName: string) (readsX: bool)
                           (parts: int[] list) : Stmt list =
     parts |> List.mapi (fun g rgs ->
         let nBlocks = Blade.ML.PermSpec.blockCount rgs
         let bv (j: int) = sprintf "__pv%d_%d" g j
-        // Σ_{i=lo..hi−1} v_{γ(i)} · N^{hi−1−i}: the flat row-major index of one
-        // axis run. The EMPTY run (K = 0 bias inputs, or L = 0 outputs) is the
-        // single cell 0 — N^0 = 1.
+        // sum_{i=lo..hi-1} v_{gamma(i)} * N^{hi-1-i}: the flat row-major index
+        // of one axis run. The EMPTY run (K = 0 bias inputs, or L = 0
+        // outputs) is the single cell 0 -- N^0 = 1.
         let flat (lo: int) (hi: int) =
             if lo >= hi then iLit 0
             else
@@ -1151,21 +1058,21 @@ let private permNestStmts (k: int) (l: int) (n: int) (coefName: string) (readsX:
             if readsX then mul (idx coefName (iLit g)) (idx "x" (flat 0 k))
             else idx coefName (iLit g)
         let body = [ sAccum (idx "out" (flat k (k + l))) term ]
-        // b(γ) block loops, block 0 outermost. b(γ) = 0 only at m = 0, where
-        // the "nest" is the bare body: out(0) += b(0), the constant map.
+        // b(gamma) block loops, block 0 outermost. b(gamma) = 0 only at
+        // m = 0, where the "nest" is the bare body: out(0) += b(0).
         List.foldBack (fun j inner -> [ sFor (bv j) 0 n inner ]) [ 0 .. nBlocks - 1 ] body
         |> List.exactlyOne)
 
-/// derive_perm_linear for a fixed (K, L, N): the complete Sₙ-equivariant linear
-/// layer ℝ^{N^K} -> ℝ^{N^L}, `ml.perm_weight_dim(K, L, N)` weights, weight slot
-/// g = the g-th partition in `permPartitions (K+L) N` order. See the block
-/// comment above for the kernel and the position convention.
+/// derive_perm_linear for a fixed (K, L, N): the complete Sn-equivariant
+/// linear layer R^{N^K} -> R^{N^L}, `ml.perm_weight_dim(K, L, N)` weights,
+/// weight slot g = the g-th partition in `permPartitions (K+L) N` order. See
+/// the block comment above for the kernel and the position convention.
 let private derivePermLinearDecl (name: string) (k: int) (l: int) (n: int)
     : Result<FunctionDecl, ElabError> =
     let inCells = permPow n k
     let outCells = permPow n l
     if inCells > int64 permCellCap || outCells > int64 permCellCap then
-        Error (err5000 (sprintf "derive_perm_linear: the flat node-power buffers of K = %d, L = %d, N = %d are N^K and N^L cells, and at least one is over the %d-cell limit — the emitted kernel materializes the output as a literal zero array of that extent. Lower N (the node-axis extent), or lower K / L"
+        Error (err5000 (sprintf "derive_perm_linear: the flat node-power buffers of K = %d, L = %d, N = %d are N^K and N^L cells, and at least one is over the %d-cell limit -- the emitted kernel materializes the output as a literal zero array of that extent. Lower N (the node-axis extent), or lower K / L"
                             k l n permCellCap))
     else
     let parts = Blade.ML.PermSpec.permPartitions (k + l) n
@@ -1180,17 +1087,18 @@ let private derivePermLinearDecl (name: string) (k: int) (l: int) (n: int)
         Ok (mkFunc name [ ("x", tyFloatArr (int inCells)); ("w", tyFloatArr wDim) ]
                 (tyFloatArr (int outCells)) (syn (ExprBlock (stmts, Some (v "out")))))
 
-/// derive_perm_bias for a fixed (L, N): the REP-INTRODUCTION form — the
-/// complete space of Sₙ-invariant constants in ℝ^{N^L}, `ml.perm_bias_dim(L, N)`
-/// of them. It is derive_perm_linear at K = 0 (partitions of the L output
-/// positions alone, every block output-only, hence every nest a pure
-/// broadcast), which is exactly why K = 0 is REFUSED by the linear op with a
-/// pointer here rather than silently accepted.
+/// derive_perm_bias for a fixed (L, N): the REP-INTRODUCTION form -- the
+/// complete space of Sn-invariant constants in R^{N^L},
+/// `ml.perm_bias_dim(L, N)` of them. It is derive_perm_linear at K = 0
+/// (partitions of the L output positions alone, every block output-only,
+/// hence every nest a pure broadcast), which is exactly why K = 0 is
+/// REFUSED by the linear op with a pointer here rather than silently
+/// accepted.
 let private derivePermBiasDecl (name: string) (l: int) (n: int)
     : Result<FunctionDecl, ElabError> =
     let outCells = permPow n l
     if outCells > int64 permCellCap then
-        Error (err5000 (sprintf "derive_perm_bias: the flat node-power buffer of L = %d, N = %d is N^L cells, over the %d-cell limit — the emitted kernel materializes it as a literal zero array of that extent. Lower N (the node-axis extent), or lower L"
+        Error (err5000 (sprintf "derive_perm_bias: the flat node-power buffer of L = %d, N = %d is N^L cells, over the %d-cell limit -- the emitted kernel materializes it as a literal zero array of that extent. Lower N (the node-axis extent), or lower L"
                             l n permCellCap))
     else
     let parts = Blade.ML.PermSpec.permPartitions l n
@@ -1203,27 +1111,27 @@ let private derivePermBiasDecl (name: string) (l: int) (n: int)
         Ok (mkFunc name [ ("b", tyFloatArr bDim) ] (tyFloatArr (int outCells))
                 (syn (ExprBlock (stmts, Some (v "out")))))
 
-/// perm_matmul for a fixed N: the flat N²-buffer matrix product
+/// perm_matmul for a fixed N: the flat N^2-buffer matrix product
 ///
 ///     out(i*N + j) += a(i*N + t) * b(t*N + j)
 ///
-/// — PPGN's engine (Maron et al.'s provably powerful graph network), and the
-/// ONE BILINEAR SHIPPED EARLY, BY NAME, not by synthesis (§3.6). Naming it is
-/// the point: the S_n-equivariant bilinear maps R^{N^2} x R^{N^2} -> R^{N^2}
-/// are a large space with no analogue of the orbit-indicator basis at this
-/// arity, so 5a ships the one map the literature actually uses and defers the
-/// synthesis (`derive_perm_tp`, the Burnside/orbit-quotient construction) as a
-/// named item rather than pretending to a complete basis.
+/// -- PPGN's engine (Maron et al.'s provably powerful graph network), and the
+/// ONE BILINEAR SHIPPED BY NAME rather than by synthesis. Naming it is the
+/// point: the S_n-equivariant bilinear maps R^{N^2} x R^{N^2} -> R^{N^2} are
+/// a large space with no analogue of the orbit-indicator basis at this
+/// arity, so this ships the one map the literature actually uses and defers
+/// the synthesis (`derive_perm_tp`, the Burnside/orbit-quotient
+/// construction) as a named item rather than pretending to a complete basis.
 ///
 /// The equivariance is one line: conjugating both factors by a permutation
-/// matrix P conjugates the product, (P A Pᵀ)(P B Pᵀ) = P (A B) Pᵀ, which is
-/// exactly "both arguments are Pow 2 and so is the result" in the MLPerm
+/// matrix P conjugates the product, (P A P^T)(P B P^T) = P (A B) P^T, which
+/// is exactly "both arguments are Pow 2 and so is the result" in the MLPerm
 /// lattice.
 ///
-/// Buffers are the same FLAT ROW-MAJOR N² convention as derive_perm_linear at
-/// K = L = 2, so a matmul composes with the derived layers with no reshape.
-/// Accumulate-only into a zero-initialized `out`, so grad() differentiates it
-/// through its normal inliner.
+/// Buffers are the same FLAT ROW-MAJOR N^2 convention as derive_perm_linear
+/// at K = L = 2, so a matmul composes with the derived layers with no
+/// reshape. Accumulate-only into a zero-initialized `out`, so grad()
+/// differentiates it through its normal inliner.
 let private permMatmulDecl (name: string) (n: int) : FunctionDecl =
     let cells = n * n
     let flat (r: string) (c: string) = add (mul (iLit n) (v r)) (v c)
@@ -1239,7 +1147,7 @@ let private permMatmulDecl (name: string) (n: int) : FunctionDecl =
     mkFunc name [ ("a", tyFloatArr cells); ("b", tyFloatArr cells) ] (tyFloatArr cells) body
 
 /// scalars for a fixed spec: the l=0 blocks' entries copied into a plain
-/// Idx array (block order, multiplicity order) — an invariant-exit op, the
+/// Idx array (block order, multiplicity order) -- an invariant-exit op, the
 /// compile-time twin of ml/Activations.scalars (pure copies, ulp-trivial).
 /// Emits ALL l=0 entries regardless of parity; the equiv judgment governs
 /// which callers may treat them as invariants (O3 rejects (0, odd) specs).
@@ -1255,17 +1163,17 @@ let private scalarsDecl (name: string) (spec: Spec) : Result<FunctionDecl, ElabE
             [ yield sLetMut "out" (zerosLit offs.Length)
               for k in 0 .. offs.Length - 1 do
                 yield sAssign (idx "out" (iLit k)) (idx "x" (iLit offs.[k])) ]
-        // A1, GROUP-CONDITIONAL. The declared return type is a plain Idx
-        // array, i.e. the claim is "these entries are INVARIANTS". True of
-        // every l = 0 entry under SO(3); true under O(3) only when no l = 0
-        // block is parity-odd, since a pseudoscalar flips under improper
+        // GROUP-CONDITIONAL. The declared return type is a plain Idx array,
+        // i.e. the claim is "these entries are INVARIANTS". True of every
+        // l = 0 entry under SO(3); true under O(3) only when no l = 0 block
+        // is parity-odd, since a pseudoscalar flips under improper
         // rotations. Same predicate the seam's `scalars` arm applies.
         Ok (mkFunc name [ ("x", tyIrrepsArr spec) ] (tyFloatArr offs.Length)
                 (syn (ExprBlock (stmts, Some (v "out"))))
             |> equivStamp (o3UnlessPseudoscalar spec))
 
 /// norms for a fixed spec: per-(block, multiplicity) 2-norms in (block, mu)
-/// order — mirrors ml/Activations.norms exactly (sum of squares in
+/// order -- mirrors ml/Activations.norms exactly (sum of squares in
 /// ascending component order, then sqrt). O(3)-invariant for every parity.
 /// Squares accumulate into a scratch buffer and `out` is written ONCE per
 /// slot: grad() differentiates `x = x + e` accumulation but rejects the
@@ -1290,7 +1198,7 @@ let private normsDecl (name: string) (spec: Spec) : FunctionDecl =
                                        (idx "x" (add (iLit off) (v "c")))) ])
           for k in 0 .. slots.Length - 1 do
             yield sAssign (idx "out" (iLit k)) (syn (ExprApp (v "sqrt", [ idx "sq" (iLit k) ]))) ]
-    // A1: O3, unconditionally — the one l = 0 exporter that needs no parity
+    // O3, unconditionally: the one l = 0 exporter that needs no parity
     // side-condition. Each slot is the Euclidean norm of one (block,
     // multiplicity) component vector, and every O(3) irrep in the real basis
     // acts by an ORTHOGONAL matrix (parity contributes only an overall sign,
@@ -1300,14 +1208,14 @@ let private normsDecl (name: string) (spec: Spec) : FunctionDecl =
         (syn (ExprBlock (stmts, Some (v "out"))))
     |> equivStamp "O3"
 
-/// NOT equiv-stamped (A1), in either direction. `tensor_to_irreps` /
+/// NOT equiv-stamped, in either direction. `tensor_to_irreps` /
 /// `sym_to_irreps` are rep-INTRODUCTION forms carrying y_to's unstatable
-/// premise; `irreps_to_sym` is a rep ESCAPE whose declared invariant result is
-/// a vector of basis-dependent Cartesian components, and MLEquiv rejects it by
-/// name inside a certified body. See the stamping header above.
+/// premise; `irreps_to_sym` is a rep ESCAPE whose declared invariant result
+/// is a vector of basis-dependent Cartesian components, and MLEquiv rejects
+/// it by name inside a certified body. See the stamping header above.
 ///
-/// Cartesian<->irreps bridge ops (rank-2, 3-D, v1): a dense matvec over the
-/// baked orthonormal closed-form table (Blade.ML.CartesianBridge — the
+/// Cartesian<->irreps bridge ops (rank-2, 3-D): a dense matvec over the
+/// baked orthonormal closed-form table (Blade.ML.CartesianBridge -- the
 /// single source of truth, fit-certified against SphericalHarmonics by the
 /// ml/ `dump-cartesian` oracle). Loop order mirrors the oracle's matvec
 /// (i ascending, j ascending) for ulp agreement with the sgs corpus pins.
@@ -1325,9 +1233,7 @@ let private bridgeDecl (name: string) (table: float list) (n: int)
             Some (v "out")))
     mkFunc name [ (pName, tyIn) ] tyOut body
 
-// ============================================================================
 // Call-site recognition + program expansion
-// ============================================================================
 
 let private opNames =
     Set.ofList [ "y_to"; "tensor_product"; "linear"; "gated"; "linear_rows"; "gated_rows"
@@ -1350,9 +1256,9 @@ let private sizingNames =
                  "perm_weight_dim"; "perm_bias_dim"
                  "irreps_len"; "irreps_l"; "irreps_parity"; "irreps_mult"
                  "irreps_dim"; "irreps_offset"
-                 // The point-group sizing surface (stage 5b-i). All ints
-                 // except `pg_restrict`, the restriction table of stage A3
-                 // (retired equivariance-in-types plan), which returns a pg SPEC.
+                 // The point-group sizing surface. All ints except
+                 // `pg_restrict`, the restriction table, which returns a pg
+                 // SPEC.
                  "pg_total_dim"; "pg_hom_dim"; "pg_irreps_len"
                  "pg_irreps_dim"; "pg_irreps_mult"; "pg_irreps_fs"
                  "pg_irreps_offset"; "pg_restrict" ]
@@ -1380,21 +1286,17 @@ let private staticArg (statics: StaticEnv) (what: string) (e: Expr) : Result<Sta
         | None -> Error (err5000 (sprintf "%s: '%s' is not a `let static` binding (ML op configs must be static)" what name))
     | _ -> Error (err5000 (sprintf "%s: config argument must be a `let static` binding name or literal" what))
 
-/// Resolve the GROUP argument of a point-group op (stage 5b-i). Two accepted
-/// spellings, tried in that order:
-///
-///   1. a `let static` binding holding a STRING — the ordinary static-argument
-///      contract every other op config obeys (and the spelling the pg SIZING
-///      builtins require, since those go through StaticEval, which evaluates
-///      their arguments as expressions);
-///   2. a BARE IDENTIFIER naming a registered group — `ml.derive_pg_linear(C4,
-///      ...)`, which is exactly how the group reads in `PgIrrepsIdx<C4, SPEC>`
-///      and in the mathematics. Legal here and nowhere else because this pass
-///      REWRITES the call before the checker sees it: the group argument is
-///      consumed at elaboration and never reaches name resolution.
-///
-/// Statics win, so an explicit `let static G = "D4"` is never shadowed by the
-/// registry. A string literal also works, via arm 1's fall-through.
+/// Resolve the GROUP argument of a point-group op. Two accepted spellings,
+/// tried in order: (1) a `let static` binding holding a STRING -- the
+/// ordinary static-argument contract every other op config obeys, and the
+/// spelling the pg SIZING builtins require, since those go through
+/// StaticEval; (2) a BARE IDENTIFIER naming a registered group --
+/// `ml.derive_pg_linear(C4, ...)`, exactly how the group reads in
+/// `PgIrrepsIdx<C4, SPEC>` and in the mathematics. Legal here and nowhere
+/// else because this pass REWRITES the call before the checker sees it: the
+/// group argument is consumed at elaboration and never reaches name
+/// resolution. Statics win, so an explicit `let static G = "D4"` is never
+/// shadowed by the registry; a string literal also works, via arm 1.
 let private pgGroupArg (statics: StaticEnv) (what: string) (e: Expr)
     : Result<Blade.ML.PointSpec.PointGroup, ElabError> =
     let byName (n: string) =
@@ -1405,7 +1307,7 @@ let private pgGroupArg (statics: StaticEnv) (what: string) (e: Expr)
         match Map.tryFind name statics.Values with
         | Some (SVString s) -> byName s
         | Some _ ->
-            Error (err5000 (sprintf "%s: '%s' is a `let static` binding but not a STRING — GROUP names a registered point group, e.g. \"C4\"" what name))
+            Error (err5000 (sprintf "%s: '%s' is a `let static` binding but not a STRING -- GROUP names a registered point group, e.g. \"C4\"" what name))
         | None -> byName name
     | _ ->
         Error (err5000 (sprintf "%s: GROUP must be a point-group name (a bare C4 / D4, a string literal, or a `let static` string binding)" what))
@@ -1435,8 +1337,8 @@ let private ensure (st: ElabState) (key: string) (make: string -> Result<Functio
 /// single-vector form; the fingerprint includes nRows so each batch size
 /// gets its own generated function).
 /// `site` is the surface call expression: the generated application inherits
-/// its span (as y_to/tensor_product/scalars already do) so diagnostics — and
-/// editor tooling reading back the checked call — land on what the user wrote
+/// its span (as y_to/tensor_product/scalars already do) so diagnostics and
+/// editor tooling reading back the checked call land on what the user wrote
 /// rather than on the ambient per-declaration synthetic span.
 let private elabLinear (st: ElabState) (statics: StaticEnv) (what: string) (site: Expr)
                        (sInE: Expr) (sOutE: Expr) (nRows: int) (wE: Expr) (xE: Expr)
@@ -1452,9 +1354,9 @@ let private elabLinear (st: ElabState) (statics: StaticEnv) (what: string) (site
         // whole hom-space is zero; a partial miss keeps the classic
         // all_irreps_present framing from linearBlocks.
         if homDim si so = 0 then
-            Error (err4007 (sprintf "%s: no equivariant linear map exists from the input spec to the output spec — by Schur's lemma an equivariant linear map can only connect irreps of identical (l, parity), and these specs share none: every admissible map is zero" what))
+            Error (err4007 (sprintf "%s: no equivariant linear map exists from the input spec to the output spec -- by Schur's lemma an equivariant linear map can only connect irreps of identical (l, parity), and these specs share none: every admissible map is zero" what))
         else
-            Error (err4007 (detail + " — the only equivariant map into that block is zero (Schur's lemma); ml.derive_linear gives the zero-completed complete basis")))
+            Error (err4007 (detail + " -- the only equivariant map into that block is zero (Schur's lemma); ml.derive_linear gives the zero-completed complete basis")))
     |> Result.bind (fun rows ->
         ensure st (fingerprint "linear" (box (si, so, nRows))) (fun n -> Ok (linearDecl n si so rows nRows))
         |> Result.map (fun n -> inheritSpan site (ExprApp (v n, [ wE; xE ]))))))))
@@ -1479,7 +1381,7 @@ let private elabDeriveLinear (st: ElabState) (statics: StaticEnv) (sInE: Expr) (
     specOfStatic "derive_linear specIn" svi |> Result.bind (fun si ->
     specOfStatic "derive_linear specOut" svo |> Result.bind (fun so ->
         if homDim si so = 0 then
-            Error (err4007 "derive_linear: no equivariant linear map exists from the input spec to the output spec — by Schur's lemma an equivariant linear map can only connect irreps of identical (l, parity), and these specs share none: every admissible map is zero")
+            Error (err4007 "derive_linear: no equivariant linear map exists from the input spec to the output spec -- by Schur's lemma an equivariant linear map can only connect irreps of identical (l, parity), and these specs share none: every admissible map is zero")
         else
             ensure st (fingerprint "derive_linear" (box (si, so))) (fun n -> Ok (deriveLinearDecl n si so))))))
 
@@ -1496,13 +1398,12 @@ let private elabDeriveTp (st: ElabState) (statics: StaticEnv) (s1E: Expr) (s2E: 
         let cfg = { Spec1 = s1; Spec2 = s2; SpecOut = tpSpec s1 s2 }
         ensure st (fingerprint "tp" (box cfg)) (fun n -> Ok (tpDecl n cfg))))))
 
-/// Shared elaboration for derive_sym_tp / derive_alt_tp: the S₂-compacted
-/// self-TP, one spec argument (both inputs and the derived output follow from
-/// it). BL4007 when the requested component is EMPTY — then every map of that
-/// exchange symmetry is zero and there is nothing to parameterize, the exact
-/// analogue of derive_linear's Schur-zero refusal. Fingerprints are distinct
-/// from "tp" (different weight arity), so the dense and compacted kernels for
-/// the same spec coexist.
+/// Shared elaboration for derive_sym_tp / derive_alt_tp: the S2-compacted
+/// self-TP, one spec argument (both inputs and the derived output follow
+/// from it). BL4007 when the requested component is EMPTY -- then every map
+/// of that exchange symmetry is zero, the exact analogue of derive_linear's
+/// Schur-zero refusal. Fingerprints are distinct from "tp" (different weight
+/// arity), so the dense and compacted kernels for the same spec coexist.
 let private elabDeriveS2Tp (st: ElabState) (statics: StaticEnv) (comp: S2Component) (site: Expr)
                            (specE: Expr) (xE: Expr) (yE: Expr) (wE: Expr)
     : Result<Expr, ElabError> =
@@ -1514,7 +1415,7 @@ let private elabDeriveS2Tp (st: ElabState) (statics: StaticEnv) (comp: S2Compone
     specOfStatic (what + " spec") sv |> Result.bind (fun s ->
         let packedDim = match comp with S2Sym -> symTpWeightDim s | S2Alt -> altTpWeightDim s
         if packedDim = 0 then
-            Error (err4007 (sprintf "%s: no nonzero exchange-%s equivariant bilinear map exists on this spec — every map in the %s component is zero for this spec, so the whole hom-space sits in the %s component (use ml.derive_%s_tp, or ml.derive_tp for the uncompacted parameterization)"
+            Error (err4007 (sprintf "%s: no nonzero exchange-%s equivariant bilinear map exists on this spec -- every map in the %s component is zero for this spec, so the whole hom-space sits in the %s component (use ml.derive_%s_tp, or ml.derive_tp for the uncompacted parameterization)"
                                 what thisName thisName otherName
                                 (match comp with S2Sym -> "alt" | S2Alt -> "sym")))
         else
@@ -1522,10 +1423,10 @@ let private elabDeriveS2Tp (st: ElabState) (statics: StaticEnv) (comp: S2Compone
             |> Result.map (fun n -> inheritSpan site (ExprApp (v n, [ xE; yE; wE ])))))
 
 /// Shared elaboration for derive_poly: resolve (SPEC, K, SOUT), gate K to
-/// 1..4 and the label count to the 100000-cell cap (symLiftDecl's precedent —
-/// the label basis is indexed by the same Sym^K cells), refuse the Schur-zero
-/// case with BL4007 in derive_linear's framing, then synthesize the
-/// complete degree-K basis.
+/// 1..4 and the label count to the 100000-cell cap (symLiftDecl's precedent
+/// -- the label basis is indexed by the same Sym^K cells), refuse the
+/// Schur-zero case with BL4007 in derive_linear's framing, then synthesize
+/// the complete degree-K basis.
 let private elabDerivePoly (st: ElabState) (statics: StaticEnv) (site: Expr)
                            (specE: Expr) (kE: Expr) (sOutE: Expr) (xE: Expr) (wE: Expr)
     : Result<Expr, ElabError> =
@@ -1540,30 +1441,29 @@ let private elabDerivePoly (st: ElabState) (statics: StaticEnv) (site: Expr)
             let n = totalDim s
             let cells = binomial (n + k - 1) k
             if cells > 100000L then
-                Error (err5000 (sprintf "derive_poly: the degree-%d symmetric power of a dim-%d input has C(%d, %d) = %d cells, over the 100000-cell limit — the label basis is one vector per cell, so the emitted kernel would be unusable; lower K, or reduce the input spec first (ml.scalars / ml.linear). The channel-shared degree-K op that amortizes one basis over many multiplicity slots is future work"
+                Error (err5000 (sprintf "derive_poly: the degree-%d symmetric power of a dim-%d input has C(%d, %d) = %d cells, over the 100000-cell limit -- the label basis is one vector per cell, so the emitted kernel would be unusable; lower K, or reduce the input spec first (ml.scalars / ml.linear). The channel-shared degree-K op that amortizes one basis over many multiplicity slots is future work"
                                     k n (n + k - 1) k cells))
             elif polyWeightDim s k sOut = 0 then
-                Error (err4007 (sprintf "derive_poly: no equivariant degree-%d polynomial map exists from the input spec to the output spec — by Schur's lemma a degree-%d homogeneous equivariant map is a linear map out of Sym^%d of the input (ml.sym_spec(SPEC, %d)), which can only connect irreps of identical (l, parity), and those specs share none: every admissible map is zero"
+                Error (err4007 (sprintf "derive_poly: no equivariant degree-%d polynomial map exists from the input spec to the output spec -- by Schur's lemma a degree-%d homogeneous equivariant map is a linear map out of Sym^%d of the input (ml.sym_spec(SPEC, %d)), which can only connect irreps of identical (l, parity), and those specs share none: every admissible map is zero"
                                     k k k k))
             else
                 ensure st (fingerprint "derive_poly" (box (s, k, sOut))) (fun n2 -> derivePolyDecl n2 s k sOut)
                 |> Result.map (fun n2 -> inheritSpan site (ExprApp (v n2, [ xE; wE ])))
         | SVInt kk ->
-            Error (err5000 (sprintf "derive_poly: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan §6.5)" kk))
+            Error (err5000 (sprintf "derive_poly: K must be a static int in 1..4 (got %d) -- the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan section 6.5)" kk))
         | _ -> Error (err5000 "derive_poly: K must be a static int"))))))
 
-/// Shared elaboration for derive_pg_linear (stage 5b-i): resolve the group,
-/// decode the two label-named specs against ITS table, refuse the Schur-zero
-/// case, then synthesize (or reuse) the complete ℝ-Schur basis.
+/// Shared elaboration for derive_pg_linear: resolve the group, decode the
+/// two label-named specs against ITS table, refuse the Schur-zero case, then
+/// synthesize (or reuse) the complete R-Schur basis.
 ///
-/// The zero case is BL4007 in derive_linear's framing — the same code, the
+/// The zero case is BL4007 in derive_linear's framing -- the same code, the
 /// same theorem, one block-spec member over. Its finite-group reading is
 /// sharper: `pg_hom_dim = 0` says the two specs share no LABEL, and by Schur
-/// over ℝ every equivariant map between modules with no common irreducible
-/// constituent is zero. (Registry note: BL4007 "no equivariant map exists" is
-/// a TITLE, and this is another instance of exactly that title — reusing it is
-/// the opposite of the BL4011 double-booking, which was two different meanings
-/// under one code.)
+/// over R every equivariant map between modules with no common irreducible
+/// constituent is zero. BL4007 "no equivariant map exists" is a TITLE, and
+/// this is another instance of exactly that title -- unlike the BL4011
+/// double-booking, which was two different meanings under one code.
 let private elabDerivePgLinear (st: ElabState) (statics: StaticEnv) (site: Expr)
                                (groupE: Expr) (sInE: Expr) (sOutE: Expr) (xE: Expr) (wE: Expr)
     : Result<Expr, ElabError> =
@@ -1575,25 +1475,25 @@ let private elabDerivePgLinear (st: ElabState) (statics: StaticEnv) (site: Expr)
     (Blade.ML.Statics.pgSpecOfStatic "derive_pg_linear SOUT" grp svo |> Result.mapError err5000)
     |> Result.bind (fun so ->
         if Blade.ML.PointSpec.pgHomDim grp si so = 0 then
-            Error (err4007 (sprintf "derive_pg_linear: no %s-equivariant linear map exists from the input spec to the output spec — by Schur's lemma over R an equivariant linear map can only connect irreducible blocks carrying the SAME label, and these specs share none: every admissible map is zero"
+            Error (err4007 (sprintf "derive_pg_linear: no %s-equivariant linear map exists from the input spec to the output spec -- by Schur's lemma over R an equivariant linear map can only connect irreducible blocks carrying the SAME label, and these specs share none: every admissible map is zero"
                                 grp.Name))
         else
             ensure st (fingerprint "pg_linear" (box (grp.Name, si, so)))
                 (fun n -> derivePgLinearDecl n grp si so)
             |> Result.map (fun n -> inheritSpan site (ExprApp (v n, [ xE; wE ]))))))))
 
-/// The sanity range of the Sₙ ops' static arguments, mirroring the sizing
-/// builtins' guard (MLStatics) so a wild literal is a clean message rather than
-/// an int overflow inside `permPartitions`. The REAL gates — the K+L cap and
-/// N >= K+L — are `PermSpec.checkPermSizing`'s, shared verbatim with
-/// `perm_weight_dim` / `perm_bias_dim` per §3.6's no-silent-fork rule.
+/// The sanity range of the Sn ops' static arguments, mirroring the sizing
+/// builtins' guard (MLStatics) so a wild literal is a clean message rather
+/// than an int overflow inside `permPartitions`. The REAL gates -- the K+L
+/// cap and N >= K+L -- are `PermSpec.checkPermSizing`'s, shared verbatim
+/// with `perm_weight_dim` / `perm_bias_dim`.
 let private permRangeOk (k: int64) (l: int64) (n: int64) = k <= 64L && l <= 64L && n <= 1000000L
 
 /// Shared elaboration for derive_perm_linear: three static ints, then the
-/// shared precondition, then the complete Sₙ layer. K = 0 is refused BY NAME
+/// shared precondition, then the complete Sn layer. K = 0 is refused BY NAME
 /// (it is derive_perm_bias, whose weight buffer is sized by a different
-/// builtin), and that check runs BEFORE the sizing gate so the diagnostic names
-/// the op the user wants rather than an N that is beside the point.
+/// builtin), and that check runs BEFORE the sizing gate so the diagnostic
+/// names the op the user wants rather than an N that is beside the point.
 let private elabDerivePermLinear (st: ElabState) (statics: StaticEnv) (site: Expr)
                                  (kE: Expr) (lE: Expr) (nE: Expr) (xE: Expr) (wE: Expr)
     : Result<Expr, ElabError> =
@@ -1603,9 +1503,9 @@ let private elabDerivePermLinear (st: ElabState) (statics: StaticEnv) (site: Exp
         match kv, lv, nv with
         | SVInt kk, SVInt ll, SVInt nn ->
             if kk < 1L then
-                Error (err5000 (sprintf "derive_perm_linear: K must be a static int >= 1 (got %d) — K = 0 has no input axes, so the map is a CONSTANT and its complete basis is the rep-introduction form ml.derive_perm_bias(L, N, b), whose buffer is sized by ml.perm_bias_dim(L, N) rather than ml.perm_weight_dim(0, L, N)" kk))
+                Error (err5000 (sprintf "derive_perm_linear: K must be a static int >= 1 (got %d) -- K = 0 has no input axes, so the map is a CONSTANT and its complete basis is the rep-introduction form ml.derive_perm_bias(L, N, b), whose buffer is sized by ml.perm_bias_dim(L, N) rather than ml.perm_weight_dim(0, L, N)" kk))
             elif ll < 0L then
-                Error (err5000 (sprintf "derive_perm_linear: L must be a static int >= 0 (got %d) — L = 0 is the invariant readout, a one-cell Idx<1> result" ll))
+                Error (err5000 (sprintf "derive_perm_linear: L must be a static int >= 0 (got %d) -- L = 0 is the invariant readout, a one-cell Idx<1> result" ll))
             elif not (permRangeOk kk ll nn) then
                 Error (err5000 (sprintf "derive_perm_linear: K, L and N are static ints out of any sane range (got %d, %d, %d)" kk ll nn))
             else
@@ -1618,8 +1518,8 @@ let private elabDerivePermLinear (st: ElabState) (statics: StaticEnv) (site: Exp
                     |> Result.map (fun nm -> inheritSpan site (ExprApp (v nm, [ xE; wE ]))))
         | _ -> Error (err5000 "derive_perm_linear: K, L and N must be static ints"))))
 
-/// Shared elaboration for derive_perm_bias — derive_perm_linear at K = 0, and
-/// the same shared precondition with `L` spelling m.
+/// Shared elaboration for derive_perm_bias -- derive_perm_linear at K = 0,
+/// and the same shared precondition with `L` spelling m.
 let private elabDerivePermBias (st: ElabState) (statics: StaticEnv) (site: Expr)
                                (lE: Expr) (nE: Expr) (bE: Expr)
     : Result<Expr, ElabError> =
@@ -1641,11 +1541,11 @@ let private elabDerivePermBias (st: ElabState) (statics: StaticEnv) (site: Expr)
                     |> Result.map (fun nm -> inheritSpan site (ExprApp (v nm, [ bE ]))))
         | _ -> Error (err5000 "derive_perm_bias: L and N must be static ints")))
 
-/// Shared elaboration for perm_matmul. Its gate is its OWN — a matrix product
-/// has no K + L basis behind it, so `checkPermSizing`'s N >= K + L rule does
-/// not apply and would be a false constraint (perm_matmul at N = 2 is a
-/// perfectly good 2x2 product). What it does share is the flat-buffer cell cap:
-/// `out` is materialized as a literal N² zero array.
+/// Shared elaboration for perm_matmul. Its gate is its OWN -- a matrix
+/// product has no K + L basis behind it, so `checkPermSizing`'s N >= K + L
+/// rule does not apply (perm_matmul at N = 2 is a perfectly good 2x2
+/// product). What it does share is the flat-buffer cell cap: `out` is
+/// materialized as a literal N^2 zero array.
 let private elabPermMatmul (st: ElabState) (statics: StaticEnv) (site: Expr)
                            (nE: Expr) (aE: Expr) (bE: Expr)
     : Result<Expr, ElabError> =
@@ -1653,13 +1553,13 @@ let private elabPermMatmul (st: ElabState) (statics: StaticEnv) (site: Expr)
         match nv with
         | SVInt nn ->
             if nn < 1L then
-                Error (err5000 (sprintf "perm_matmul: N must be a static int >= 1 (got %d) — it is the node-axis extent, and the buffers are the flat row-major N^2 matrices" nn))
+                Error (err5000 (sprintf "perm_matmul: N must be a static int >= 1 (got %d) -- it is the node-axis extent, and the buffers are the flat row-major N^2 matrices" nn))
             elif not (permRangeOk 0L 0L nn) then
                 Error (err5000 (sprintf "perm_matmul: N is a static int out of any sane range (got %d)" nn))
             else
                 let n = int nn
                 if permPow n 2 > int64 permCellCap then
-                    Error (err5000 (sprintf "perm_matmul: the flat node-power buffers of N = %d are N^2 = %d cells, over the %d-cell limit — the emitted kernel materializes the result as a literal zero array of that extent. Lower N (the node-axis extent)"
+                    Error (err5000 (sprintf "perm_matmul: the flat node-power buffers of N = %d are N^2 = %d cells, over the %d-cell limit -- the emitted kernel materializes the result as a literal zero array of that extent. Lower N (the node-axis extent)"
                                         n (n * n) permCellCap))
                 else
                     ensure st (fingerprint "perm_matmul" (box n)) (fun nm -> Ok (permMatmulDecl nm n))
@@ -1683,8 +1583,8 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
     match e.Kind with
     // Qualified ML sizing builtin: `alias.total_dim(...)` -> the mangled
     // internal registry name so the static evaluator folds it (and a bare
-    // `total_dim(...)` no longer resolves anywhere). Normalized in every pass
-    // — sizing must resolve before op configs fold.
+    // `total_dim(...)` no longer resolves anywhere). Normalized in every
+    // pass -- sizing must resolve before op configs fold.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, name) }, args)
         when Set.contains alias aliases && Set.contains name sizingNames ->
         rList args |> Result.map (fun args' -> inheritSpan e (ExprApp (v (Blade.ML.Statics.statName name), args')))
@@ -1718,7 +1618,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                                 sprintf "(l=%d, %s)" entry.L (if entry.Parity = 0 then "even" else "odd"))
                             |> String.concat ", "
                         let plural = missing.Length > 1
-                        Error (err4007 (sprintf "tensor_product: output irrep%s %s %s unreachable from the inputs — no Clebsch-Gordan path satisfies the triangle inequality |l1-l2| <= l <= l1+l2 with parity p1*p2, so by Schur's lemma the only equivariant map into %s is zero"
+                        Error (err4007 (sprintf "tensor_product: output irrep%s %s %s unreachable from the inputs -- no Clebsch-Gordan path satisfies the triangle inequality |l1-l2| <= l <= l1+l2 with parity p1*p2, so by Schur's lemma the only equivariant map into %s is zero"
                                             (if plural then "s" else "") names
                                             (if plural then "are" else "is")
                                             (if plural then "those blocks" else "that block")))
@@ -1762,7 +1662,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                 elabDeriveLinear st statics sInE sOutE
                 |> Result.map (fun n -> inheritSpan e (ExprApp (v n, [ wE; xE ])))
             | "derive_linear", [ sInE; sOutE ] ->
-                // Binding form: the derived layer as a function VALUE —
+                // Binding form: the derived layer as a function VALUE --
                 // `let layer = ml.derive_linear(SIN, SOUT)` then
                 // `layer(w, x)` through the normal FuncElem path (wrong-spec
                 // calls hit the IrrepsIdx strictness seam, BL4003).
@@ -1776,8 +1676,8 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                 elabDeriveTp st statics s1E s2E
                 |> Result.map (fun n -> inheritSpan e (ExprVar n))
             | "derive_tp", _ -> Error (err5000 "derive_tp: expected derive_tp(SPEC1, SPEC2[, x, y, w])")
-            // S₂-compacted self-TP: same arithmetic as derive_tp(SPEC, SPEC,
-            // x, y, ·) with a smaller weight buffer (sym/alt_tp_weight_dim).
+            // S2-compacted self-TP: same arithmetic as derive_tp(SPEC, SPEC,
+            // x, y, .) with a smaller weight buffer (sym/alt_tp_weight_dim).
             | "derive_sym_tp", [ specE; xE; yE; wE ] ->
                 elabDeriveS2Tp st statics S2Sym e specE xE yE wE
             | "derive_sym_tp", _ -> Error (err5000 "derive_sym_tp: expected derive_sym_tp(SPEC, x, y, w) with w of extent ml.sym_tp_weight_dim(SPEC)")
@@ -1785,22 +1685,22 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                 elabDeriveS2Tp st statics S2Alt e specE xE yE wE
             | "derive_alt_tp", _ -> Error (err5000 "derive_alt_tp: expected derive_alt_tp(SPEC, x, y, w) with w of extent ml.alt_tp_weight_dim(SPEC)")
             // The degree-K equivariant polynomial layer: the uniform Sym^K
-            // label basis (plan §3.3b), one weight per basis map. K = 1 is
-            // derive_linear; K = 2 is derive_sym_tp's hom-space in the uniform
-            // convention rather than in the kept-path one.
+            // label basis, one weight per basis map. K = 1 is derive_linear;
+            // K = 2 is derive_sym_tp's hom-space in the uniform convention
+            // rather than in the kept-path one.
             | "derive_poly", [ specE; kE; sOutE; xE; wE ] ->
                 elabDerivePoly st statics e specE kE sOutE xE wE
             | "derive_poly", _ -> Error (err5000 "derive_poly: expected derive_poly(SPEC, K, SOUT, x, w) with x of type Array<Float like IrrepsIdx<SPEC>> and w of extent ml.poly_weight_dim(SPEC, K, SOUT)")
-            // The Sₙ index-action layer: the complete Hom_{Sₙ}(ℝ^{N^K}, ℝ^{N^L})
+            // The Sn index-action layer: the complete Hom_{Sn}(R^{N^K}, R^{N^L})
             // basis over FLAT ROW-MAJOR node-power buffers, one loop nest per
-            // partition of the K+L axis positions (plan §3.6, stage 5a-ii).
+            // partition of the K+L axis positions.
             | "derive_perm_linear", [ kE; lE; nE; xE; wE ] ->
                 elabDerivePermLinear st statics e kE lE nE xE wE
             | "derive_perm_linear", _ -> Error (err5000 "derive_perm_linear: expected derive_perm_linear(K, L, N, x, w) with K, L, N static ints, x of extent N^K (flat row-major over the K node axes) and w of extent ml.perm_weight_dim(K, L, N); the result has extent N^L (Idx<1> at L = 0, the invariant readout)")
             | "derive_perm_bias", [ lE; nE; bE ] ->
                 elabDerivePermBias st statics e lE nE bE
             | "derive_perm_bias", _ -> Error (err5000 "derive_perm_bias: expected derive_perm_bias(L, N, b) with L, N static ints and b of extent ml.perm_bias_dim(L, N); the result has extent N^L")
-            // The one bilinear shipped BY NAME (§3.6): PPGN's flat N^2 matrix
+            // The one bilinear shipped BY NAME: PPGN's flat N^2 matrix
             // product, S_n-equivariant because conjugation distributes over it.
             | "perm_matmul", [ nE; aE; bE ] ->
                 elabPermMatmul st statics e nE aE bE
@@ -1808,14 +1708,14 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
             // The point-group layer: the complete R-Schur basis of
             // Hom_G(V_in, V_out) over a FINITE group's labelled blocks, with
             // the Frobenius-Schur correction (e scalars per cell, [Id, J] at
-            // complex type) that the O(3) member never needed (§3.6, 5b-i).
+            // complex type) that the O(3) member never needed.
             | "derive_pg_linear", [ gE; sInE; sOutE; xE; wE ] ->
                 elabDerivePgLinear st statics e gE sInE sOutE xE wE
             | "derive_pg_linear", _ -> Error (err5000 "derive_pg_linear: expected derive_pg_linear(GROUP, SIN, SOUT, x, w) with GROUP a registered point group (C4, D4), SIN/SOUT static arrays of (LABEL_NAME, mult) tuples, x of type Array<Float like PgIrrepsIdx<GROUP, SIN>> and w of extent ml.pg_hom_dim(GROUP, SIN, SOUT)")
             // The monomial lift: the value-side half of the symmetric-power
             // bridge. Its type-side twin is ml.sym_spec(SPEC, K), and
             // ml.derive_linear(ml.sym_spec(SPEC, K), SPEC_OUT) composed with
-            // it is degree-K equivariant synthesis (plan §3.1).
+            // it is degree-K equivariant synthesis.
             | "sym_lift", [ specE; kE; xE ] ->
                 staticArg statics "sym_lift spec" specE |> Result.bind (fun sv ->
                 specOfStatic "sym_lift spec" sv |> Result.bind (fun s ->
@@ -1825,7 +1725,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                         ensure st (fingerprint "sym_lift" (box (s, int k))) (fun n -> symLiftDecl n s (int k))
                         |> Result.map (fun n -> inheritSpan e (ExprApp (v n, [ xE ])))
                     | SVInt k ->
-                        Error (err5000 (sprintf "sym_lift: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan §6.5)" k))
+                        Error (err5000 (sprintf "sym_lift: K must be a static int in 1..4 (got %d) -- the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan section 6.5)" k))
                     | _ -> Error (err5000 "sym_lift: K must be a static int"))))
             | "sym_lift", _ -> Error (err5000 "sym_lift: expected sym_lift(SPEC, K, x) with x of type Array<Float like IrrepsIdx<SPEC>>; the result is a plain Idx<C(total_dim(SPEC)+K-1, K)> monomial vector")
             | "tensor_to_irreps", [ gE ] ->
@@ -1981,7 +1881,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
     | ExprKind.ExprReverse _ | ExprKind.ExprArity _ | ExprKind.ExprNth
     | ExprKind.ExprZero | ExprKind.ExprSection _ -> Ok e
 
-/// `import ml [as _]` — the module this layer owns.
+/// `import ml [as _]` -- the module this layer owns.
 let private isMlImport (d: Located<Decl>) =
     match d.Value with
     | DeclImport (["ml"], _) -> true
@@ -2008,14 +1908,14 @@ type private ExpandFailure = Choice<ElabError, Blade.Diagnostics.Diagnostic list
 
 let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list, ExpandFailure> =
     (mlAliasesOf decls |> Result.mapError Choice1Of2) |> Result.bind (fun aliases ->
-    // Import-gated: with no `import ml`, this pass is a no-op — bare op names
-    // are left unbound (a normal type error) and never rewritten.
+    // Import-gated: with no `import ml`, this pass is a no-op -- bare op
+    // names are left unbound (a normal type error) and never rewritten.
     if Set.isEmpty aliases then Ok decls
     else
         let declsNoImport = decls |> List.filter (not << isMlImport)
-        // Normalize `<alias>.equiv` where-conjuncts to the registered
-        // internal name (mold: PplElaborate.stripConjunctName), so the
-        // judgment and the checker's registry dispatch see one spelling.
+        // Normalize `<alias>.equiv` where-conjuncts to their registered
+        // internal name, so the judgment and the checker's registry dispatch
+        // see one spelling.
         let normalizeConjunct (cname: string) =
             match cname.Split('.') with
             | [| a; "equiv" |] when Set.contains a aliases -> "__ml_equiv"
@@ -2067,7 +1967,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         match Blade.StaticEval.resolveStatics decls1 with
         | Error e -> Error (Choice1Of2 (err5000 (sprintf "ML elaboration: static resolution failed: %s" e)))
         | Ok (statics, _) ->
-            // The equiv judgment runs HERE — the seam between passes: `ml.*`
+            // The equiv judgment runs HERE, at the pass-1/pass-2 seam: `ml.*`
             // op calls are still surface-visible, and specs resolve through
             // the identical static machinery pass 2 uses, so judgment and
             // synthesis cannot disagree about a spec.
@@ -2090,15 +1990,13 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                                 | _ -> [])
                     if not diags.IsEmpty then Error diags
                     else
-                        // Stage 6a — the CERTIFICATE-INFERENCE channel, run at
-                        // the same seam and off the same tables. It only ever
-                        // ADDS warnings (BL4011): the certified functions have
+                        // The CERTIFICATE-INFERENCE channel, run at the same
+                        // seam and off the same tables. It only ever ADDS
+                        // warnings (BL4011): the certified functions have
                         // just been checked and none of them reached here, so
                         // an uncertified neighbour that happens to judge
-                        // equivariant costs nothing but a suggestion. Runs even
-                        // when `certs` is empty — a file whose every function is
-                        // uncertified is precisely the file this channel exists
-                        // for.
+                        // equivariant costs nothing but a suggestion -- which
+                        // is why it runs even when `certs` is empty.
                         for (msg, span) in Blade.ML.Equiv.inferCertificates statics aliases certs decls1 do
                             Blade.ML.Equiv.CertSuggestions.add msg span
                         Ok ()
@@ -2106,17 +2004,17 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             | Error ds -> Error (Choice2Of2 ds)
             | Ok () ->
             // The galilean judgment runs at the SAME seam (surface `sgs.*`
-            // former calls are still visible — sgs elaborates after ml).
-            // It is independent of the equiv judgment: a function may carry
-            // both conjuncts, each judged in its own domain.
+            // calls are still visible -- sgs elaborates after ml). It is
+            // independent of the equiv judgment: a function may carry both
+            // conjuncts, each judged in its own domain.
             let judgedGal =
                 match Blade.ML.Galilean.buildCertTable decls1 with
                 | Error d -> Error [ d ]
                 | Ok gcerts ->
                     // `sgsAliases` is computed OUTSIDE the empty-table
-                    // short-circuit: the inference channel below needs the sgs
-                    // axioms precisely on the files where no function carries a
-                    // conjunct yet, which is exactly the empty-table case.
+                    // short-circuit: the inference channel below needs the
+                    // sgs axioms precisely on files where no function yet
+                    // carries a conjunct -- exactly the empty-table case.
                     let sgsAliases = Blade.ML.Galilean.sgsAliasesOf decls1
                     let diags =
                         if Map.isEmpty gcerts then []
@@ -2129,18 +2027,12 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                                 | _ -> [])
                     if not diags.IsEmpty then Error diags
                     else
-                        // Stage 6a's GALILEAN twin — the certificate-inference
-                        // channel, run at the same seam and off the same table.
-                        // It only ever ADDS warnings (BL4014): the certified
-                        // functions have just been checked and none of them
-                        // reached here, so an uncertified neighbour that happens
-                        // to judge boost-invariant costs nothing but a
-                        // suggestion. Runs even when `gcerts` is empty — a file
-                        // whose every function is uncertified is precisely the
-                        // file this channel exists for. A file whose DECLARED
-                        // certificate fails never gets here, and that gate is
-                        // deliberate: a module the checker is already rejecting
-                        // gets one story, not two.
+                        // The GALILEAN twin of the certificate-inference
+                        // channel above, adding BL4014 warnings only, for the
+                        // same reason (including running when `gcerts` is
+                        // empty). A file whose DECLARED certificate fails
+                        // never gets here -- deliberate: a module the checker
+                        // is already rejecting gets one story, not two.
                         for (msg, span) in
                             Blade.ML.Galilean.inferGalileanCertificates aliases sgsAliases gcerts decls1 do
                             Blade.ML.Galilean.GalCertSuggestions.add msg span
@@ -2148,14 +2040,12 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             match judgedGal with
             | Error ds -> Error (Choice2Of2 ds)
             | Ok () ->
-            // The S_n index-action judgment: the THIRD member, run at the same
-            // seam and for the same reason (surface `ml.*` op calls still
-            // visible, extents resolving through the identical static
-            // machinery). The three lattices do NOT interact: a function may
-            // carry perm_equiv + galilean, or perm_equiv + equiv, and each
-            // conjunct is judged in its own domain over its own status set —
-            // node relabelling, frame velocity and the Wigner action are
-            // orthogonal hypotheses about the same arguments.
+            // The S_n index-action judgment: the THIRD member, at the same
+            // seam and for the same reason. The three lattices do NOT
+            // interact: a function may carry perm_equiv + galilean, or
+            // perm_equiv + equiv, each judged in its own domain over its own
+            // status set -- node relabelling, frame velocity and the Wigner
+            // action are orthogonal hypotheses about the same arguments.
             let judgedPerm =
                 match Blade.ML.Perm.buildCertTable statics decls1 with
                 | Error d -> Error [ d ]
@@ -2184,16 +2074,15 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                     gen @ decls2)))
 
 /// Entry point: elaborate ML ops across a program (before Grad expansion).
-/// Also installs the ML sizing builtins into the static evaluator —
-/// expand runs unconditionally as the first pipeline stage, so this makes
-/// sh_spec / total_dim / tp_weight_dim / linear_weight_dim visible to
-/// every resolveStatics pass (the elaborator's own, checkModule's, and
-/// Lowering's Phase 0) without the core evaluator knowing about ML.
+/// Also installs the ML sizing builtins into the static evaluator -- expand
+/// runs unconditionally as the first pipeline stage, so this makes sh_spec /
+/// total_dim / tp_weight_dim / linear_weight_dim visible to every
+/// resolveStatics pass (the elaborator's own, checkModule's, and Lowering's
+/// Phase 0) without the core evaluator knowing about ML.
 let private expandStr (program: Program) : Result<Program, ExpandFailure> =
     Blade.ML.Statics.install ()
-    // Stage 6a's suggestion side-channel accumulates across the program's
-    // modules, so it is cleared once here — the elaborator is its only
-    // producer (the TypeCheck.PinSuggestions.reset precedent, one phase over).
+    // The suggestion side-channel accumulates across the program's modules,
+    // so it is cleared once here -- the elaborator is its only producer.
     // The structured twin and the galilean channel follow the same lifecycle.
     Blade.ML.Equiv.CertSuggestions.reset ()
     Blade.ML.Equiv.CertFacts.reset ()
