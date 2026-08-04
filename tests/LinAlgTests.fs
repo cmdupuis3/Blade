@@ -109,6 +109,17 @@ let private emissionCases : (string * bool * string * string list * string list)
         "type M = Idx<3>\ntype N = Idx<4>\n"
         + "let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
     let vecXv = "let xv: Array<Float64 like N> = [1.0, 2.0, 3.0, 4.0]\n"
+    // ---- L3 syrk fixtures: the packed-covariance nest ----
+    // 3 rows x 4 samples, so `m` (3) and `n` (4) are distinct in the emitted
+    // call and a transposed argument order could not pass unnoticed.
+    let covMat =
+        "type T = Idx<4>\n"
+        + "let CA: Array<Float64 like Idx<3>, T> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
+    /// The pair kernel, parameterised by its where-clause and its body, so the
+    /// plain / scaled / omp cases differ ONLY in the part under test.
+    let covKernel (whereClause: string) (body: string) =
+        "lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) where "
+        + whereClause + " -> " + body + " |> compute\n"
     [ // gram(A, A) — the symmetric rank-k update. Blade's result is PACKED
       // upper-triangular storage, which is why the route is its own adapter
       // rather than a bare `blade_syrk` call.
@@ -369,6 +380,113 @@ let private emissionCases : (string * bool * string * string list * string list)
        [ "__ps = 0" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
 
+      // ================= L3 syrk: the packed-covariance nest =================
+      // `method_for(A, A) <@> lambda(ri, rj) where comm(ri, rj) -> prodsum(ri, rj)`
+      // is a covariance / Gram matrix: a two-level nest, level 0 rectangular
+      // and level 1 the INCLUSIVE triangle the `comm` licence created, two
+      // peels of dim 0 of ONE array, output a rank-2 SymSymmetric packed pool.
+      // That is `C = A·Aᵀ`, upper triangle, packed — i.e. `?syrk` — and the
+      // whole nest (row peels, triangular bound, prodsum IIFE) becomes one call.
+      //
+      // The pool capacity rides along for A exactly as it does for gram/gemv
+      // (the shim stages A through the same `in_view`); C carries NONE, because
+      // `blade_gram_same_*` writes `Crows[i][jr]` with `jr < m - i`, which is
+      // Blade's packed row footprint cell for cell — no view, no probe.
+      ("syrk_comm_prodsum_nest_routes_to_syrk", true,
+       covMat
+       + "let m2 = method_for(CA, CA) <@> " + covKernel "comm(x, y)" "prodsum(x, y)",
+       [ shimInclude; "blade_linalg::blade_gram_same_d("
+         "linalg dispatch: syrk C = A * A^T (packed upper, from comm nest)"
+         "blade_linalg::blade_gram_same_d(3, 4, CA.data, (CA.extents[0] * CA.extents[1]), m2.data);" ],
+       // The NEST is gone: no row peel, no triangular inner bound, no scale
+       // pass. (The lifted kernel lambda survives as a now-unused function
+       // carrying its own prodsum IIFE — it always did — so `__ps` is not a
+       // usable negative here; the peel and the inner bound are.)
+       [ "cblas_"; "CA____i0"; "__i1 < 3 - __i0"; "__sy_i" ])
+      // THE `/N` FORM, which is what a real centred covariance carries
+      // (corpus: `sgs/005_filter_stress_comoment`, `ppl/065_staged_moment_tower`).
+      // The kernel's scalar is applied AFTER the call over the same `[i][jr]`
+      // footprint the shim just wrote — deliberately NOT folded into syrk's
+      // `alpha`, since `alpha = 1/N` rounds a reciprocal and then multiplies
+      // whereas the nest this replaces divides the finished sum.
+      ("syrk_scaled_nest_applies_the_kernel_scalar_after_the_call", true,
+       covMat
+       + "let c2 = method_for(CA, CA) <@> " + covKernel "comm(x, y)" "prodsum(x, y) / 4.0",
+       [ "blade_linalg::blade_gram_same_d(3, 4, CA.data, (CA.extents[0] * CA.extents[1]), c2.data);"
+         "for (size_t __sy_i = 0; __sy_i < 3; __sy_i++) for (size_t __sy_j = 0; __sy_j < 3 - __sy_i; __sy_j++) c2[__sy_i][__sy_j] /= (4.0);" ],
+       [ "cblas_"; "CA____i0"; "__i1 < 3 - __i0" ])
+      // ***PRECEDENCE, AND IT IS THE OPPOSITE OF L1/L2's.*** An `omp` request
+      // on the kernel does NOT decline this route. Copying L2's hardcoded
+      // `ompRequested -> None` would have made the pattern fire on nothing:
+      // the covariance kernels it exists for are precisely the ones written
+      // with `omp`. The answer now comes from `LinAlgPatterns.ompPolicy`, whose
+      // L3 row is `BlasWins` — OpenBLAS's `?syrk` is itself multithreaded AND
+      // register-blocked AND packed, so honouring the pragma instead of the
+      // route would cost the user the parallelism they asked for.
+      ("syrk_still_routes_when_the_comm_kernel_requests_omp", true,
+       covMat
+       + "let o2 = method_for(CA, CA) <@> " + covKernel "comm(x, y), omp" "prodsum(x, y)",
+       [ shimInclude; "blade_linalg::blade_gram_same_d("
+         "linalg dispatch: syrk C = A * A^T (packed upper, from comm nest)" ],
+       [ "cblas_"; "#pragma omp parallel for"; "CA____i0" ])
+      // DISTINCT ARRAYS are `gram(A, B)` — a DENSE result, a different route
+      // and a different adapter. Without `comm` the nest is also rectangular,
+      // not triangular, so nothing about syrk's half-work applies.
+      ("syrk_declines_on_two_distinct_arrays", true,
+       covMat
+       + "let CB: Array<Float64 like Idx<2>, T> = [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 1.0, 0.0]]\n"
+       + "let d1 = method_for(CA, CB) <@> lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) -> prodsum(x, y) |> compute\n",
+       [ "__ps = 0"; "CB____i1" ],
+       [ "blade_linalg::"; shimInclude; "cblas_" ])
+      // SAME ARRAY BUT NO `comm`: a full rectangular sweep into a DENSE
+      // rank-2 output. syrk computes a triangle into packed storage, so the
+      // output storage class alone rules this out.
+      ("syrk_declines_without_the_comm_licence", true,
+       covMat
+       + "let d2 = method_for(CA, CA) <@> lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) -> prodsum(x, y) |> compute\n",
+       [ "__ps = 0"; "for (size_t __i1 = 0; __i1 < 3;" ],
+       [ "blade_linalg::"; shimInclude; "cblas_" ])
+      // INTEGER elements: `precisionOf` answers None, so there is no routine
+      // family and no letter — the same decline every other route makes.
+      ("syrk_declines_on_integer_elements", true,
+       "type T = Idx<4>\n"
+       + "let CI: Array<Int64 like Idx<3>, T> = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]\n"
+       + "let d3 = method_for(CI, CI) <@> lambda(x: Array<Int64 like T>, y: Array<Int64 like T>) where comm(x, y) -> prodsum(x, y) |> compute\n",
+       [ "__ps = 0" ],
+       [ "blade_linalg::"; shimInclude; "cblas_" ])
+      // ***COMPLEX DECLINES, and not for want of an entry point.***
+      // `blade_gram_same_z` exists and binds `zherk` — A·A^H, conjugating the
+      // second factor — because that is what Blade's complex GRAM NODE loop
+      // computes. The matched kernel body here is `prodsum(ri, rj)`, which
+      // conjugates NOTHING, so this nest is A·Aᵀ; routing it to the Hermitian
+      // adapter would silently return a different matrix. A conjugating
+      // surface form would be a different match, not a precision widening.
+      ("syrk_declines_on_complex_elements", true,
+       "let CZ: Array<Complex128 like Idx<2>, Idx<2>> = [[complex(1.0, 0.0), complex(2.0, 1.0)], [complex(3.0, 0.0), complex(4.0, -1.0)]]\n"
+       + "let d4 = method_for(CZ, CZ) <@> lambda(x: Array<Complex128 like Idx<2>>, y: Array<Complex128 like Idx<2>>) where comm(x, y) -> prodsum(x, y) |> compute\n",
+       [ "__ps = 0" ],
+       [ "blade_linalg::blade_gram_same_"; shimInclude; "cblas_" ])
+      // FLOAT32 declines in THIS increment, and the negative is pinned so the
+      // narrowing is a decision on the record rather than an oversight.
+      // `blade_gram_same_s` exists, is layout-identical and is already reached
+      // by the gram NODE route (`f32_gram_same_routes_to_ssyrk` above), so
+      // widening is one conjunct in `(|BlasL3|_|)` plus the positive twin of
+      // this case — deliberately left until it is exercised.
+      ("syrk_declines_on_float32_in_this_increment", true,
+       "type T = Idx<4>\n"
+       + "let CF: Array<Float32 like Idx<3>, T> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
+       + "let d6 = method_for(CF, CF) <@> lambda(x: Array<Float32 like T>, y: Array<Float32 like T>) where comm(x, y) -> prodsum(x, y) |> compute\n",
+       [ "__ps = 0" ],
+       [ "blade_linalg::blade_gram_same_"; shimInclude ])
+      // REYNOLDS reads PERMUTED coordinates, so the cell value is a SUM over
+      // the orbit and not the contraction at all (`2 * prodsum` here). The
+      // shared `nestModeOk` gate refuses it for every nest route.
+      ("syrk_declines_under_a_reynolds_wrapper", true,
+       covMat
+       + "let d5 = method_for(CA, CA) <@> reynolds(lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) where comm(x, y) -> prodsum(x, y)) |> compute\n",
+       [ "Reynolds:"; "__ps = 0" ],
+       [ "blade_linalg::"; shimInclude; "cblas_" ])
+
       // ============ Phase 5c: the GATE-OFF side (the default build) ============
       // With BLAS unavailable, no route is emitted and the native math comes
       // from Blade's OWN pre-existing emission paths. These four cases are the
@@ -410,6 +528,25 @@ let private emissionCases : (string * bool * string * string list * string list)
        matA + vecXv
        + "let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) -> prodsum(row, xv) |> compute\n",
        [ "A____i0"; "yv[__i0]"; "__ps = 0" ],
+       [ shimInclude; "blade_linalg::" ])
+      // syrk: the comm-licensed triangular nest, row peels and prodsum IIFE
+      // and all — the emission an ordinary (BLAS-free) build gets, which is
+      // also the one `interp math` proves byte-identical to the interpreter.
+      // The scale stays where the kernel put it: INSIDE the cell expression,
+      // not in a second pass.
+      ("gate_off_syrk_emits_the_triangular_comm_nest", false,
+       covMat
+       + "let c2 = method_for(CA, CA) <@> " + covKernel "comm(x, y)" "prodsum(x, y) / 4.0",
+       [ "CA____i0"; "for (size_t __i1 = 0; __i1 < 3 - __i0"; "__ps = 0"; "/ 4.0)" ],
+       [ shimInclude; "blade_linalg::"; "__sy_i" ])
+      // ...and with the gate off the `omp` request keeps its pragma, because
+      // there is no route to hand the parallelism to. The gate is the ONLY
+      // difference between this and `syrk_still_routes_when_the_comm_kernel_
+      // requests_omp` above, which is what makes the pair isolate it.
+      ("gate_off_syrk_omp_nest_keeps_its_pragma", false,
+       covMat
+       + "let o2 = method_for(CA, CA) <@> " + covKernel "comm(x, y), omp" "prodsum(x, y)",
+       [ "#pragma omp parallel for schedule(dynamic)"; "CA____i0" ],
        [ shimInclude; "blade_linalg::" ]) ]
 
 let runLinAlgEmissionTests () : BlockResult =
@@ -558,6 +695,32 @@ let runLinAlgEmissionTests () : BlockResult =
             passed <- passed + 1
             resultLine Pass name (sprintf "%A" actual)
         else fail name (sprintf "expected %A, got %A" expected actual)
+
+    // ---- the OMP-vs-BLAS precedence table, pinned per LEVEL ----
+    //
+    // This used to be a hardcoded `ompRequested -> None` inside each matcher,
+    // which read as a universal rule; it is not one. L1/L2 decline (the user's
+    // explicit reorder licence outranks a dispatch heuristic, and the no-BLAS
+    // fallback for dot/gemv is serial), L3 does NOT (OpenBLAS's `?syrk` is
+    // itself multithreaded, register-blocked and packed, so the route honours
+    // the licence better than the pragma does — and declining would have made
+    // the L3 nest pattern fire on nothing, since covariance kernels carry
+    // `omp`).
+    //
+    // Pinned for the same reason `routingOf` is: these are DECISIONS. Flipping
+    // one silently changes which programs dispatch, with nothing in the values
+    // to show for it.
+    let precedenceCases =
+        [ "omp_precedence_L1_omp_wins",  LinAlgPatterns.L1, LinAlgPatterns.OmpWins
+          "omp_precedence_L2_omp_wins",  LinAlgPatterns.L2, LinAlgPatterns.OmpWins
+          "omp_precedence_L3_blas_wins", LinAlgPatterns.L3, LinAlgPatterns.BlasWins ]
+    for (name, lvl, expected) in precedenceCases do
+        let actual = LinAlgPatterns.ompPrecedenceOf lvl
+        let declines = LinAlgPatterns.ompRequestDeclines lvl
+        if actual = expected && declines = (expected = LinAlgPatterns.OmpWins) then
+            passed <- passed + 1
+            resultLine Pass name (sprintf "%A (declines dispatch: %b)" actual declines)
+        else fail name (sprintf "expected %A, got %A (declines %b)" expected actual declines)
 
     // ---- eigh: the (precision × SYMMETRY) route table (Round B) ----
     //

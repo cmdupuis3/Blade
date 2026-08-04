@@ -5699,28 +5699,19 @@ let tryGenFlatElementwiseNest
 
 /// L2 dispatch at the apply-combinator site. On a `LinAlgPatterns.(|BlasL2|_|)`
 /// match AND the BLAS gate on (`shimEntryPoint`), emits ONE `blade_linalg::`
-/// call in place of the whole per-row nest; otherwise falls through to the
-/// flat elementwise path (`tryGenFlatElementwiseNest`) then
-/// `genLoopNestStreamed`, unchanged -- the ordinary emitted nest the
-/// interpreter differential already covers.
+/// call in place of the whole per-row nest; a decline returns None and the
+/// chain in `tryGenLinAlgNest` carries on.
 ///
 /// CodeGen decides NOTHING about the shape: the pattern owns which nests are
 /// gemv, this only turns the descriptor into text (resolving the vector
 /// operand's name through the kernel body's map, computing extents the same
 /// way the nest's own bounds are computed).
-///
-/// Stands down in test mode for the same reason the flat path does: omp-
-/// coverage instrumentation needs an innermost body to mark, which a
-/// dispatched call has none of.
-let tryGenLinAlgNest
+let private tryGenGemvDispatch
         (streamed: Map<string, ProviderReadSpec>)
         (operandTypes: IRArrayType list)
         (codeGen: LoopNestCodeGen)
         (outerNames: Map<int, string>)
         (indent: int) : string list option =
-    if ompTestModeEnabled () then None
-    elif (planHaloCarousel streamed codeGen outerNames).IsSome then None
-    else
     match (Map.count streamed, codeGen.OmpRequested, operandTypes, codeGen) with
     | Blade.LinAlgPatterns.BlasL2 call ->
         match Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call with
@@ -5784,6 +5775,144 @@ let tryGenLinAlgNest
                              aName xName entry mExtent nExtent aName aCells xName yName ]
             | _ -> None
     | _ -> None
+
+
+/// L3 dispatch at the apply-combinator site: the comm-licensed
+/// packed-covariance nest becomes ONE `blade_gram_same_*` (`?syrk`) call.
+///
+/// The twin of `tryGenGemvDispatch` one level up, and it turns the SAME
+/// descriptor kind into text -- `LinAlgPatterns.(|BlasL3|_|)` owns which nests
+/// are syrk, this owns nothing but the spelling.
+///
+/// C NEEDS NO STAGING AND NO CAPACITY ARGUMENT. `blade_gram_same_*` writes
+/// `Crows[i][jr]` with `jr < m - i`, which is Blade's packed upper-triangular
+/// row footprint exactly, so the freshly-allocated output pool is handed over
+/// as it stands (`blade_linalg.hpp` records the layout proof). Only A, which
+/// the shim stages through an `in_view`, carries the pool capacity the
+/// contiguity probe cannot derive from a row skeleton.
+///
+/// THE KERNEL'S SCALAR (`prodsum(x, y) / N`) is applied AFTER the call, over
+/// the same `[i][jr]` footprint the shim just wrote -- not folded into syrk's
+/// `alpha`. `alpha = 1/N` would round a reciprocal and then multiply; the nest
+/// this replaces divides the finished sum, and dividing the finished triangle
+/// reproduces that operation for operation.
+let private tryGenSyrkDispatch
+        (streamed: Map<string, ProviderReadSpec>)
+        (operandTypes: IRArrayType list)
+        (codeGen: LoopNestCodeGen)
+        (outerNames: Map<int, string>)
+        (indent: int) : string list option =
+    match (Map.count streamed, codeGen.OmpRequested, operandTypes, codeGen) with
+    | Blade.LinAlgPatterns.BlasL3 call ->
+        match Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call with
+        | None -> None
+        | Some entry ->
+            let aName =
+                call.NestOperands
+                |> List.tryPick (fun (r, src) ->
+                    match r, src with
+                    | Blade.LinAlgPatterns.RoleA, Blade.LinAlgPatterns.FromNestArray n -> Some n
+                    | _ -> None)
+            let cName =
+                call.NestOperands
+                |> List.tryPick (fun (r, src) ->
+                    match r, src with
+                    | Blade.LinAlgPatterns.RoleC, Blade.LinAlgPatterns.FromNestOutput n -> Some n
+                    | _ -> None)
+            match aName, cName with
+            | Some aName, Some cName ->
+                // m = the outer level's own bound (literal after shape
+                // monomorphization, else the runtime extent read) -- byte-for-
+                // byte what the nest would have emitted. The inner level is the
+                // triangle over the SAME m, which the pattern proved.
+                let mExtent =
+                    genLoopBoundExpr (compoundArrayNamesOf codeGen.Bindings)
+                                     (List.head codeGen.Bindings)
+                // n = A's TRAILING extent -- the contracted axis. Same rule as
+                // gemv: rendered from the operand TYPE when literal.
+                let nExtent =
+                    match operandTypes with
+                    | aTy :: _ ->
+                        (match (List.item 1 aTy.IndexTypes).Extent with
+                         | IRLit (IRLitInt n) -> sprintf "%d" n
+                         | _ -> sprintf "%s.extents[1]" aName)
+                    | _ -> sprintf "%s.extents[1]" aName
+                let aCells =
+                    match operandTypes with
+                    | aTy :: _ -> denseCellCountOfArray aTy aName
+                    | _ -> "0"
+                // The scale, re-derived from the kernel body through the
+                // pattern module's OWN peel so the two cannot disagree about
+                // what a scaled contraction is.
+                let nameMap =
+                    codeGen.Captures
+                    |> List.fold (fun acc (c: CaptureInfo) ->
+                            if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc)
+                       outerNames
+                let renderScalar (e: IRExpr) : string option =
+                    match e with
+                    | IRVar (id, _) when not (Map.containsKey id nameMap) -> None
+                    | _ ->
+                        let r = genKernelExprWithReynolds e codeGen.KernelParams
+                                                          false false nameMap Map.empty
+                        Some r.CppExpr
+                // Three answers, hence the nested option: `None` = DECLINE the
+                // whole dispatch (a scale this site cannot spell), `Some None`
+                // = no scale to apply, `Some (Some line)` = the scaling pass.
+                let scaleLine : string option option =
+                    match codeGen.KernelExpr with
+                    | Blade.LinAlgPatterns.ProdSumScaled (_, None) -> Some None
+                    | Blade.LinAlgPatterns.ProdSumScaled (_, Some sc) ->
+                        let (opStr, sExpr) =
+                            match sc with
+                            | Blade.LinAlgPatterns.ScaleDiv d -> ("/=", d)
+                            | Blade.LinAlgPatterns.ScaleMul s -> ("*=", s)
+                        match renderScalar sExpr with
+                        | None -> None                       // unresolvable -> decline
+                        | Some sTxt ->
+                            Some (Some (String.replicate indent "    "
+                                        + sprintf "/* ... then the kernel's own scalar, over the same packed triangle */ for (size_t __sy_i = 0; __sy_i < %s; __sy_i++) for (size_t __sy_j = 0; __sy_j < %s - __sy_i; __sy_j++) %s[__sy_i][__sy_j] %s (%s);"
+                                              mExtent mExtent cName opStr sTxt))
+                    | _ -> None
+                match scaleLine with
+                | None -> None
+                | Some tail ->
+                    (linalgUsedCell ()).Value <- true
+                    // BLOCK comment, not `//`: an inline-form materialization
+                    // space-joins its lines into a single-line IIFE, where a
+                    // line comment would swallow the rest of the statement.
+                    Some ([ String.replicate indent "    "
+                            + sprintf "/* linalg dispatch: syrk C = A * A^T (packed upper, from comm nest) */ %s(%s, %s, %s.data, %s, %s.data);"
+                                  entry mExtent nExtent aName aCells cName ]
+                          @ Option.toList tail)
+            | _ -> None
+    | _ -> None
+
+
+/// The linear-algebra dispatch chain at the apply-combinator site: each
+/// recognised NEST shape in turn, falling through to the flat elementwise path
+/// (`tryGenFlatElementwiseNest`) and then `genLoopNestStreamed`, unchanged --
+/// the ordinary emitted nest the interpreter differential already covers.
+///
+/// Order is not load-bearing: the shapes are disjoint by depth (gemv is a
+/// depth-1 nest over a rank-2 operand, syrk a depth-2 triangular nest over
+/// two slots naming one array), so at most one can match.
+///
+/// Stands down in test mode for the same reason the flat path does: omp-
+/// coverage instrumentation needs an innermost body to mark, which a
+/// dispatched call has none of.
+let tryGenLinAlgNest
+        (streamed: Map<string, ProviderReadSpec>)
+        (operandTypes: IRArrayType list)
+        (codeGen: LoopNestCodeGen)
+        (outerNames: Map<int, string>)
+        (indent: int) : string list option =
+    if ompTestModeEnabled () then None
+    elif (planHaloCarousel streamed codeGen outerNames).IsSome then None
+    else
+    match tryGenGemvDispatch streamed operandTypes codeGen outerNames indent with
+    | Some lines -> Some lines
+    | None -> tryGenSyrkDispatch streamed operandTypes codeGen outerNames indent
 
 
 // Symmetry Vector Generation
