@@ -1727,6 +1727,15 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let s = forceInputArray st env operandExpr
         let (q, lam) = A.eighArrays s (typeOf expr)
         VTuple [| VArray q; VArray lam |]
+    | IRSolve (mExpr, rExpr) ->
+        // solve = the dense LU linear solve. Same FORCE-then-materialize shape
+        // as gram/matmul, and like matmul (and unlike eigh) it is the twin of
+        // code an ORDINARY build runs -- `A.solveArray` mirrors
+        // `materializeSolveForm`'s emitted loop nest operation for operation,
+        // so the compiled/interpreted differential is exact.
+        let m = forceInputArray st env mExpr
+        let r = forceInputArray st env rExpr
+        VArray (A.solveArray m r (typeOf expr))
     | IRArrayNegate arrExpr ->
         VArray (A.negateConjugateArray false (forceInputArray st env arrExpr))
     | IRArrayConjugate arrExpr ->

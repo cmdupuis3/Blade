@@ -1,0 +1,12 @@
+// TEST: Math solve: non-square A rejects (rejects)
+// ERROR: BL5200
+// ERROR-CONTAINS: solve: A must be square
+// LU is defined for square systems only. Caught by `MathElaborate` from the
+// DECLARED shapes, before any marker is emitted, so the refusal is identical
+// with the LAPACK gate on and off -- the same discipline the eigh/svd shape
+// rejections follow. `TypeCheck.inferSolve` carries the same rule as a
+// backstop for a hand-written `__math_solve`; this pin is on the surface one.
+import math as m
+let A: Array<Float64 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+let b: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let x = m.solve(A, b)

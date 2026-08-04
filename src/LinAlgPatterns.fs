@@ -211,6 +211,11 @@ type LinAlgRoutine =
     /// Symmetric / Hermitian eigendecomposition -- LAPACK, not BLAS.
     /// `?spev`/`?hpev` for packed operands, `?syev`/`?heev` for dense.
     | Eigh
+    /// General dense linear solve A.x = b by partial-pivoted LU -- LAPACK
+    /// `?gesv`. No symmetry axis (unlike Eigh): one routine covers every
+    /// square operand, so the classifier's only decisions are shape and
+    /// precision.
+    | Solve
 
 /// Where a recognised shape is actually EXECUTED.
 type Routing =
@@ -274,6 +279,19 @@ type LinAlgRoute =
     /// `blade_eigh_dense_<p>` -- eigendecomposition of a dense rank-2 operand
     /// asserted symmetric (real, `?syev`) or Hermitian (complex, `?heev`).
     | RouteEighDense
+    /// `blade_solve_<p>` -- A.x = b through `?gesv`, dense square A and a
+    /// single right-hand side. There is no packed sibling and no same-array
+    /// mode: `?spsv` wants a packed SYMMETRIC operand, which the surface
+    /// cannot spell today (`MathElaborate.arrayShape` resolves plain axes
+    /// only), and A's symmetry is not part of what this route asserts.
+    ///
+    /// UNLIKE the eigh routes, this one has a NATIVE TWIN: declining it emits
+    /// Blade's own LU loop nest, which is the byte-identity truth the
+    /// interpreter differential covers. So a `None` here costs the
+    /// optimisation and nothing else -- the same relationship `RouteMatmul`
+    /// has to its triple loop, and the opposite of `RouteEighDense`, whose
+    /// absence means the operation is not emitted at all.
+    | RouteSolve
 
 /// An operand as classified: the IR expression, its role, and whether the
 /// call consumes it transposed.
@@ -380,6 +398,8 @@ let policy : (LinAlgRoutine * BlasLevel * LinAlgBackend * Routing * string) list
       "same as axpy -- an elementwise scale is one vectorised pass either way"
       Eigh, L3, HostBlas, ViaShim,
       "LAPACK, not BLAS: an eigensolver is unreachable from emitted loop code at any quality, and Blade's synthesized cyclic Jacobi is O(sweeps*n^3) against LAPACK's blocked tridiagonal reduction. Gated separately (lapackAvailable / -DBLADE_HAS_LAPACK) and PERMANENTLY outside byte-identity: eigenvector sign and degenerate-subspace basis are not unique"
+      Solve, L3, HostBlas, ViaShim,
+      "LAPACK ?gesv, and the same O(n^3)-against-a-scalar-loop argument as gemm: Blade's emitted LU is an unblocked right-looking factorization, LAPACK's is blocked over ?trsm/?gemm panels. UNLIKE eigh, this row has a native twin -- gate off, Blade emits its own partial-pivoted LU, byte-pinned against Interp/ArrayOps.solveArray -- so the gate chooses an implementation rather than deciding whether the operation exists. The two arms agree to ~1e-14, not bit for bit (different pivot-application and update order), so byte-identity harnesses run gate-OFF like every other route"
       // CudaBlas: the two L3 rows are the only ones that flip, and the flip
       // is deliberately a table edit -- `blade test linalg` pins every row,
       // so landing (or losing) a device route requires changing a test.
@@ -399,7 +419,9 @@ let policy : (LinAlgRoutine * BlasLevel * LinAlgBackend * Routing * string) list
       // library, handle and workspace-query protocol. Native because it is
       // UNIMPLEMENTED, not because it wouldn't pay -- a recorded follow-on.
       Eigh, L3, CudaBlas, Native,
-      "cuSOLVER (cusolverDnDsyevd / cusolverDnZheevd), not cuBLAS: separate library, separate handle, explicit workspace query. NOT IMPLEMENTED -- a recorded follow-on rather than a policy decision, since an O(n^3) eigensolver would amortise its transfer exactly as the L3 rows above do. Gate-off, `math.eigh` keeps the synthesized Jacobi; gate-on with LAPACK it keeps the host route" ]
+      "cuSOLVER (cusolverDnDsyevd / cusolverDnZheevd), not cuBLAS: separate library, separate handle, explicit workspace query. NOT IMPLEMENTED -- a recorded follow-on rather than a policy decision, since an O(n^3) eigensolver would amortise its transfer exactly as the L3 rows above do. Gate-off, `math.eigh` keeps the synthesized Jacobi; gate-on with LAPACK it keeps the host route"
+      Solve, L3, CudaBlas, Native,
+      "cuSOLVER (cusolverDnDgetrf + cusolverDnDgetrs), not cuBLAS -- the same separate-library reason as the Eigh row, and NOT IMPLEMENTED for the same reason. Gate-off it is Blade's own emitted LU; gate-on with LAPACK it keeps the host ?gesv route" ]
 
 /// The routing decision for a routine UNDER A BACKEND, from the table above.
 let routingOf (backend: LinAlgBackend) (r: LinAlgRoutine) : Routing =
@@ -443,7 +465,7 @@ let shimEntryPoint (backend: LinAlgBackend) (call: LinAlgCall) : string option =
         match backend with
         // The LAPACK routes ride their own gate and their own header, so
         // availability is per-ROUTINE, not per-backend alone.
-        | HostBlas when call.Routine = Eigh -> lapackAvailable ()
+        | HostBlas when call.Routine = Eigh || call.Routine = Solve -> lapackAvailable ()
         | HostBlas -> blasAvailable ()
         // The device mode has its own gate, environment variable and default
         // (OFF). See `cublasAvailable`.
@@ -467,6 +489,7 @@ let shimEntryPoint (backend: LinAlgBackend) (call: LinAlgCall) : string option =
             // BLAS one.
             | RouteEighPacked -> Some (sprintf "blade_lapack::blade_eigh_packed_%s" p)
             | RouteEighDense -> Some (sprintf "blade_lapack::blade_eigh_dense_%s" p)
+            | RouteSolve -> Some (sprintf "blade_lapack::blade_solve_%s" p)
         // The device entry-point table is named PER ROUTE, not per cuBLAS
         // routine, with argument lists identical to the host adapters' (same
         // order, same skeleton + pool capacity pairs), so a backend cannot
@@ -489,7 +512,7 @@ let shimEntryPoint (backend: LinAlgBackend) (call: LinAlgCall) : string option =
             // Eigh, so the ViaShim arm above already declined. Spelled out so
             // that flipping one of those policy rows produces a compile error
             // here -- a missing entry point rather than a silently wrong one.
-            | RouteDot | RouteGemv | RouteEighPacked | RouteEighDense -> None
+            | RouteDot | RouteGemv | RouteEighPacked | RouteEighDense | RouteSolve -> None
 
 /// Resolve a NODE-matched call (`gram`, `matmul`) to the backend it runs on
 /// and the C++ entry point it lands on -- the one place the emission-mode
@@ -695,6 +718,51 @@ let classifyEigh (operand: IRArrayType) : LinAlgCall option =
                    PackedTriangularResult = false }
         | _ -> None
 
+/// Classify `solve(A, b)` -- A.x = b by LU -- on the two operands' types.
+///
+/// There is no symmetry matrix here, and that absence is the whole difference
+/// from `classifyEigh`. `?gesv` factorizes ANY square matrix, so symmetry
+/// selects nothing: a symmetric operand is simply a matrix whose LU happens to
+/// be cheap to have computed differently. What the classifier does require is
+/// that both operands be ORDINARY DENSE pools of the agreed precision --
+///
+///   * A: two plain dense axes (`isPlainDenseAxis`). A rank-2 COMPACT group is
+///     declined rather than routed to `?spsv`: that routine wants a packed
+///     symmetric operand AND writes a packed factor, while Blade's surface
+///     cannot spell a compact `solve` argument at all today
+///     (`MathElaborate.arrayShape` resolves plain axes one at a time). Adding
+///     the route before the surface exists would be an unreachable branch.
+///   * b: one plain dense axis. `readOnlyBlasVector`'s `IxKIrreps` latitude is
+///     deliberately NOT taken -- b is COPIED INTO and returned as x's initial
+///     contents, an in-place role, not the read-only one that admission was
+///     measured for.
+///
+/// Deliberately does NOT check that the extents agree: `TypeCheck.inferSolve`
+/// owns that, and restating it here would be a second place for it to be wrong.
+let classifySolve (a: IRArrayType) (b: IRArrayType) : LinAlgCall option =
+    if a.IsVirtual || b.IsVirtual then None else
+    match a.IndexTypes, b.IndexTypes with
+    | [ a0; a1 ], [ b0 ] when isPlainDenseAxis a0 && isPlainDenseAxis a1 && isPlainDenseAxis b0 ->
+        match agreedPrecision a.ElemType b.ElemType with
+        | None -> None
+        | Some prec ->
+            Some { Routine = Solve
+                   Route = RouteSolve
+                   Level = L3
+                   Operands = []
+                   NestOperands = []
+                   // A is n x n and b is n: one extent describes the whole
+                   // call, recorded as M (rows of the system). N is the
+                   // right-hand-side count, which this surface pins at 1, so
+                   // there is no operand axis to name it with.
+                   M = Some { Operand = RoleA; Axis = 0 }
+                   N = None
+                   K = None
+                   ElemType = a.ElemType
+                   Precision = prec
+                   PackedTriangularResult = false }
+    | _ -> None
+
 /// The single entry point CodeGen calls: classify whatever node it is holding.
 /// Returns None for everything this layer does not (yet) recognise, which is
 /// the caller's signal to emit its ordinary loop nest.
@@ -702,6 +770,10 @@ let classify (e: IRExpr) : LinAlgCall option =
     match e with
     | IRGram (l, r, sameArray) -> classifyGram l r sameArray
     | IRMatmul (a, b) -> classifyMatmul a b
+    | IRSolve (a, b) ->
+        (match typeOf a, typeOf b with
+         | ArrayElem aa, ArrayElem bb -> classifySolve aa bb
+         | _ -> None)
     | _ -> None
 
 // Nest matching -- shared shape predicates

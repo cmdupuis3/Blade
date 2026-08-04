@@ -1,0 +1,50 @@
+// TEST: Math solve: diagonally dominant 5x5
+// n = 5 deliberately -- a non-power-of-two extent, so nothing here can be right
+// by accident of a stride or a tail-handling special case.
+//
+// A is STRICTLY COLUMN-DIAGONALLY DOMINANT (|a_kk| exceeds the sum of the other
+// magnitudes in its column: 12 > 5.5, 15 > 7, 18 > 6.5, 11 > 7, 14 > 5.25), and
+// that is the complement to math/070 rather than a repetition of it: for such a
+// matrix partial pivoting provably NEVER swaps, so this case exercises the
+// straight-line elimination and back-substitution path with the row-exchange
+// code dormant, where 070 forces two swaps. Between them both branches of
+// `if (__sp != __sk)` are covered.
+//
+// Every entry is a dyadic rational, so the source literals are exact and the
+// only rounding in the program is the arithmetic under test.
+//
+// b = A * [1, 2, 3, 4, 5], computed by hand:
+//   row0:  12 +  2 -  6 +  2 +  5    = 15
+//   row1:  -1 + 30 +  9 -  8 + 1.25  = 31.25
+//   row2:   2 -  6 + 54 +  6 -  5    = 51
+//   row3: 0.5 +  4 -  3 + 44 + 15    = 60.5
+//   row4:  -2 +  2 + 1.5 - 12 + 70   = 59.5
+//
+// so x is [1, 2, 3, 4, 5] mathematically. It is NOT recovered exactly -- the
+// multipliers here are not dyadic -- which is exactly why the pin is written as
+// the integers and left to EXPECT's 1e-9 combined tolerance rather than as
+// whatever seventeen digits this build happened to produce. A pin of the latter
+// kind would be a record of the implementation, not a test of it.
+//
+// The interpreter and the compiled binary must still agree DIGIT FOR DIGIT (a
+// stronger statement than this pin makes); `blade test interp math` is what
+// asserts that.
+import math as m
+type M5 = Array<Float64 like Idx<5>, Idx<5>>
+type V5 = Array<Float64 like Idx<5>>
+let A: M5 = [[12.0, 1.0, -2.0, 0.5, 1.0],
+             [-1.0, 15.0, 3.0, -2.0, 0.25],
+             [2.0, -3.0, 18.0, 1.5, -1.0],
+             [0.5, 2.0, -1.0, 11.0, 3.0],
+             [-2.0, 1.0, 0.5, -3.0, 14.0]]
+let b: V5 = [15.0, 31.25, 51.0, 60.5, 59.5]
+let x = m.solve(A, b)
+// The residual A*x - b, as an independent check that does not reuse the
+// factorization: each component is a sum of five products against the SAME A
+// the solve read, so a solve that silently factorized a different matrix (a
+// missing evaluate-once lift, say) would show up here and not in `x`.
+let r0 = 12.0 * x(0) + 1.0 * x(1) - 2.0 * x(2) + 0.5 * x(3) + 1.0 * x(4) - 15.0
+let r4 = -2.0 * x(0) + 1.0 * x(1) + 0.5 * x(2) - 3.0 * x(3) + 14.0 * x(4) - 59.5
+// EXPECT: x = [1, 2, 3, 4, 5]
+// EXPECT: r0 = 0
+// EXPECT: r4 = 0

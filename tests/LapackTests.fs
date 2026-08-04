@@ -100,6 +100,30 @@ let private symF32 =
     "import math as m\n"
     + "let S: Array<Float32 like Idx<3>, Idx<3>> = [[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 4.0]]\n"
 
+/// A 3x3 system for the `solve` route. n = 3, not a power of two, and A is
+/// square-but-not-symmetric on purpose: `?gesv` has no symmetry axis, so an
+/// operand that happened to be symmetric would leave "did symmetry accidentally
+/// matter" untested.
+let private sysF64 =
+    "import math as m\n"
+    + "let A: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 1.0, 1.0], [2.0, 4.0, 1.0], [1.0, 0.0, 2.0]]\n"
+    + "let bv: Array<Float64 like Idx<3>> = [6.0, 13.0, 7.0]\n"
+
+/// The pivot-scan line the NATIVE LU arm emits and nothing else does. Pinned by
+/// name in both directions below, because "did we dispatch" is otherwise
+/// invisible for solve in a way it is not for eigh: BOTH arms of solve produce a
+/// correct x to ~1e-14, so no value comparison distinguishes them and the
+/// emitted text is again the only witness.
+let private nativeLuMarker = "size_t __sp = __sk;"
+
+/// THE PIVOT TIE-BREAK, pinned as text. Strict `>` means the FIRST row
+/// attaining the maximum magnitude wins; `>=` would take the last. Both
+/// factorize correctly and the two differ only in WHICH matrix they factorize,
+/// so the difference shows up as a last-digit disagreement between the
+/// interpreter and the compiled binary and nowhere else. That makes this
+/// one character exactly the kind of thing a text pin is for.
+let private nativePivotTieBreak = "if (__sm > __sbig) { __sbig = __sm; __sp = __si; }"
+
 /// A genuinely Hermitian 3x3 (A = A^H): real diagonal, conjugate off-diagonal.
 let private hermC128 =
     "import math as m\n"
@@ -168,6 +192,52 @@ let private emissionCases : (string * bool * string * string list * string list)
          "blade_lapack::blade_eigh_packed_d(A.extents[0], nested_array_utilities::pool_base(A.data),"
          "std::tuple<Array<double, 2>, Array<double, 1>>" ],
        [ "LAPACKE_"; "blade_eigh_dense_" ])
+
+      // ================= SOLVE: THE TWO-REAL-ARMS ROUTE =================
+      // Gate ON, `m.solve(A, b)` becomes one `?gesv` call. What this pins
+      // beyond the entry point: `n` comes off the operand's extents table, A
+      // goes in as its ROW SKELETON and b as its flat pool (the shim owns the
+      // column-major bridge), and the BL8007 panic is emitted AT THE CALL SITE
+      // from `info` rather than inside the header -- which is how the singular
+      // message stays one string shared with the native arm.
+      ("solve_f64_routes_to_dgesv", true,
+       sysF64 + "let x = m.solve(A, bv)\n",
+       [ lapackInclude; "blade_lapack::blade_solve_d("
+         "lapack dispatch: solve(A, b) -> x, dense square operand, single right-hand side"
+         "blade_lapack::blade_solve_d(x__n, A.data, bv.data, x.data);"
+         "blade_rt::panic(\"BL8007\"" ],
+       // The marker is pre-inference and must not survive; the NATIVE LU must
+       // be gone entirely (this is the half that would silently pass if the
+       // gate were consulted at the wrong level and both arms were emitted);
+       // and a LAPACK program must not drag in the BLAS header.
+       [ "LAPACKE_"; "__math_solve"; nativeLuMarker; "std::fabs("; "blade_linalg.hpp" ])
+      // ***THE ARM EIGH DOES NOT HAVE.*** Gate OFF, solve still compiles and
+      // still solves -- as Blade's own partial-pivoted LU, named here line by
+      // line. For eigh the gate-off arm is synthesized SOURCE and the
+      // corresponding assertion is "a `__math_1` function exists"; here there is
+      // no function, the loops are emitted inline at the binding, and that
+      // difference is the whole design. This arm is also the byte-identity
+      // truth `blade test interp math` runs, so a regression that started
+      // dispatching by default would invalidate that gate rather than fail it.
+      ("solve_gate_off_is_native_lu", false,
+       sysF64 + "let x = m.solve(A, bv)\n",
+       [ nativeLuMarker; nativePivotTieBreak
+         // The singular guard is in BOTH arms and must be, so it is asserted in
+         // both cases rather than treated as a dispatch marker.
+         "blade_rt::panic(\"BL8007\""
+         // The working copy: A is never factorized in place, which is what
+         // makes two solves over one A give the same answer twice.
+         "std::vector<double> x__lu(x__n * x__n);" ],
+       [ lapackInclude; "blade_lapack::"; "__math_solve"; "LAPACKE_" ])
+      // A solve program with the gate on names the LAPACK header and NOT the
+      // BLAS one -- the converse of `blas_program_carries_no_lapack_dependency`
+      // below, asserted for the second LAPACK routine because `lapackUsedCell`
+      // is set from a new emission site and a collector wired to the wrong cell
+      // would make every solve program advertise a BLAS dependency.
+      ("solve_program_carries_no_blas_dependency", true,
+       sysF64 + "let x = m.solve(A, bv)\n",
+       [ lapackInclude ],
+       [ "#include \"blade_linalg.hpp\""; "blade_linalg::" ])
 
       // ================= GATE ON, BUT DECLINED =================
       // An explicit SWEEPS budget keeps the synthesized Jacobi EVEN WITH THE
@@ -270,7 +340,50 @@ let private rejectionCases : (string * string * string) list =
       ("eigh_rejects_non_square",
        "let A: Array<Float64 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n"
        + "let (Q, LAM) = __math_eigh(A)\n",
-       "must be SQUARE") ]
+       "must be SQUARE")
+
+      // ---- the rules `TypeCheck.inferSolve` owns ----
+      //
+      // Spelled through the `__math_solve` marker for the same reason the eigh
+      // rows are: `m.solve`'s sugar rejects these earlier, from the DECLARED
+      // shapes, with BL5200 (corpus math/072, /073 pin that surface). These
+      // rows reach the checker's own copy of the rule -- the one a hand-written
+      // marker, or a future widening of `arrayShape`, would meet.
+      //
+      // Unlike eigh's rejections, none of these is about symmetry: `?gesv`
+      // factorizes any square matrix, so what is left to refuse is exactly
+      // shape and element type, and each is named separately.
+      ("solve_rejects_non_float64_elements",
+       "let A: Array<Complex128 like Idx<2>, Idx<2>> = [[complex(1.0, 0.0), complex(0.0, 0.0)], [complex(0.0, 0.0), complex(1.0, 0.0)]]\n"
+       + "let bv: Array<Complex128 like Idx<2>> = [complex(1.0, 0.0), complex(2.0, 0.0)]\n"
+       + "let x = __math_solve(A, bv)\n",
+       "Float64 elements")
+      // A rank-2 COMPACT operand: one index slot of arity 2, not two plain
+      // axes. Declined rather than densified, because LU overwrites its copy
+      // with a factor that is NOT symmetric -- a packed pool is the wrong shape
+      // to hold it, and quietly staging a dense copy would be a storage-class
+      // change behind the user's back. `decompact` first.
+      ("solve_rejects_compact_matrix",
+       "let A: Array<Float64 like SymIdx<2, 3>> = fill_random(6)\n"
+       + "let bv: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
+       + "let x = __math_solve(A, bv)\n",
+       "rank-2 dense SQUARE matrix")
+      // A rank-2 right-hand side. THE MATRIX-RHS CASE, refused by name rather
+      // than by falling through a generic shape message: `?gesv` already takes
+      // `nrhs`, so this is a recorded not-yet rather than an impossibility, and
+      // the refusal is where it will be lifted from.
+      ("solve_rejects_matrix_rhs",
+       "let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 0.0], [0.0, 1.0]]\n"
+       + "let B: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]\n"
+       + "let x = __math_solve(A, B)\n",
+       "b must be a rank-1 dense vector")
+      // Square A, wrong-length b. The checker's own copy of the agreement rule
+      // (corpus math/073 pins the elaborator's).
+      ("solve_rejects_extent_disagreement",
+       "let A: Array<Float64 like Idx<3>, Idx<3>> = [[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]\n"
+       + "let bv: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]\n"
+       + "let x = __math_solve(A, bv)\n",
+       "b's extent must match A's dimension") ]
 
 let runLapackEmissionTests () : BlockResult =
     printHeader "LAPACK Eigensolver Dispatch"
@@ -377,7 +490,13 @@ let runLapackEmissionTests () : BlockResult =
     // cuSOLVER is a deliberate table edit rather than a silent flip.
     let policyCases =
         [ "host_eigh_via_shim", LinAlgPatterns.HostBlas, LinAlgPatterns.Eigh, LinAlgPatterns.ViaShim
-          "cuda_eigh_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Eigh, LinAlgPatterns.Native ]
+          "cuda_eigh_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Eigh, LinAlgPatterns.Native
+          // Solve's rows read the same as Eigh's, and mean something weaker:
+          // `Native` here is a real fallback (Blade's own emitted LU), not the
+          // absence of the operation. Pinned so landing cuSOLVER's
+          // getrf/getrs pair is a deliberate table edit.
+          "host_solve_via_shim", LinAlgPatterns.HostBlas, LinAlgPatterns.Solve, LinAlgPatterns.ViaShim
+          "cuda_solve_native",   LinAlgPatterns.CudaBlas, LinAlgPatterns.Solve, LinAlgPatterns.Native ]
     for (name, backend, routine, expected) in policyCases do
         let actual = LinAlgPatterns.routingOf backend routine
         if actual = expected then

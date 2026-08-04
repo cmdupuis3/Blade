@@ -1,7 +1,7 @@
 #pragma once
 // blade_lapack.hpp
-// Blade DSL Runtime Support Library -- dense/packed eigensolver dispatch layer. Same architecture as
-// `blade_linalg.hpp`, one level up.
+// Blade DSL Runtime Support Library -- LAPACK dispatch layer: the dense/packed eigensolvers and the general
+// linear solve. Same architecture as `blade_linalg.hpp`, one level up.
 //
 // THIS HEADER IS LAPACK-ONLY. IT HAS NO NATIVE FALLBACKS. It compiles ONLY under `-DBLADE_HAS_LAPACK`; the guard
 // below makes that a hard error rather than a silent divergence: the Blade compiler knows at ITS compile time
@@ -9,6 +9,12 @@
 // the math package's SYNTHESIZED Jacobi source runs instead. That synthesized source is the single copy of the
 // native math and the one the interpreter and pinned-oracle differentials cover, so a hand-written fallback here
 // would be a second copy whose agreement is maintained by discipline rather than by construction.
+//
+// `blade_solve_d` IS THE EXCEPTION TO THE PARAGRAPH ABOVE, and is documented as such at its own definition: its
+// native counterpart is a loop nest CODEGEN EMITS, not source the elaborator declines to synthesize, so declining
+// that route is the ordinary default rather than an impossibility. Everything about the `#error` guard still
+// applies -- a call reaching a build without `-DBLADE_HAS_LAPACK` is still a compiler bug -- only the reason the
+// fallback cannot live here changes: for solve it simply lives somewhere better.
 //
 // NUMERICS -- LAPACK ROUTES ARE PERMANENTLY OUTSIDE BYTE-IDENTITY. Unlike the BLAS routes, which differ from Blade's
 // loops only in the last ULP, an eigensolver's OUTPUT IS NOT UNIQUE: eigenvector signs are arbitrary, and within a
@@ -213,7 +219,77 @@ namespace blade_lapack {
         return (int)info;
     }
 
+    // solve -- A.x = b through ?gesv (partial-pivoted LU, one right-hand side).
+    //
+    // THE ONE ENTRY POINT HERE THAT HAS A NATIVE TWIN, and the difference is
+    // worth stating because everything above this line does not. The eigh arms
+    // exist because the compiler declines to synthesize its Jacobi source when
+    // LAPACK is present -- there is no other implementation, which is why the
+    // `#error` at the top of this file is a hard failure. `solve` is the
+    // opposite: `CodeGen.materializeSolveForm` emits a complete partial-pivoted
+    // LU loop nest whenever this route is not taken, and that loop nest is the
+    // DEFAULT (the gate is off unless asked for) and the byte-identity truth
+    // the interpreter differential covers. So this function is a faster
+    // replacement for working code, not the only copy of it.
+    //
+    // CONSEQUENCE FOR NUMERICS: the two arms agree to about 1e-14, not to the
+    // ULP. Both are partial-pivoted LU and both break ties by strict `>` (the
+    // native arm by construction, LAPACK through `idamax`), so they factorize
+    // the SAME matrix with the SAME pivot sequence -- but ?gesv is blocked over
+    // ?trsm/?gemm panels and accumulates its updates in a different order. That
+    // is the ordinary BLAS-route situation, not eigh's non-uniqueness, and it
+    // is why byte-identity harnesses run gate-off here exactly as they do for
+    // gemm.
+    //
+    // LAYOUT: ?gesv DESTROYS its `a`, so a scratch copy is mandatory whatever
+    // the layout -- and since it is mandatory, transposing INTO it is free.
+    // `a[j * n + i] = Arows[i][j]` makes the scratch column-major, so
+    // LAPACK_COL_MAJOR reads the intended matrix with no LAPACKE temporary.
+    // (The self-duality trick the eigh arms use does not apply: it relies on
+    // the operand being symmetric, and a general LU operand is not.)
+    //
+    // `b` is READ ONLY; the solution is written into `x`, which ?gesv then
+    // overwrites in place with the answer. A right-hand side is layout-agnostic
+    // at nrhs = 1, so no bridging is needed for it.
+    //
+    // Returns LAPACK's `info` (0 = success, i > 0 = U(i,i) is exactly zero, so
+    // the matrix is singular; i < 0 = bad argument). THE CALLER DECIDES what a
+    // non-zero means -- codegen emits the BL8007 panic, so the singular message
+    // is spelled once (`CodeGen.solveSingularMessage`) and shared with the
+    // native arm rather than duplicated in a header that includes no runtime.
+
+    inline int blade_solve_d(size_t n, double** Arows, const double* b, double* x) {
+        std::vector<double> a(n * n);
+        for (size_t i = 0; i < n; i++)
+            for (size_t j = 0; j < n; j++) a[j * n + i] = Arows[i][j];   // row-major in -> col-major scratch
+        for (size_t i = 0; i < n; i++) x[i] = b[i];
+        std::vector<lapack_int> ipiv(n ? n : 1);
+        lapack_int info = LAPACKE_dgesv(LAPACK_COL_MAJOR, (lapack_int)n, 1,
+                                        a.data(), (lapack_int)n, ipiv.data(),
+                                        x, (lapack_int)n);
+        return (int)info;
+    }
+
     // NOT PROVIDED, and why.
+    //
+    // OTHER PRECISIONS OF `solve` (`sgesv` / `cgesv` / `zgesv`). They exist and
+    // would drop straight in, but `TypeCheck.inferSolve` pins the surface at
+    // real Float64 -- and widening it means the NATIVE arm must widen too, in
+    // both the emitted C++ and the interpreter twin, since those two are held
+    // to byte-identity. That makes it a language decision with a differential
+    // cost, not a precision swap, so it is not taken here silently.
+    //
+    // MULTIPLE RIGHT-HAND SIDES (a rank-2 `b`). `?gesv` already takes `nrhs`,
+    // so this layer would change by one argument. What stops it is one level
+    // up: the surface returns ONE array whose rank is fixed by
+    // `IR.CarriedType`'s IRSolve arm, and a matrix-RHS `solve` returns a rank-2
+    // x -- a rank that depends on an argument's rank, which is a different
+    // typing rule rather than a wider domain. Recorded as the natural next
+    // step, with `nrhs = 1` hard-coded above marking exactly where it lands.
+    //
+    // PACKED / SYMMETRIC `solve` (`?spsv` / `?posv`). No surface can express a
+    // compact operand argument today (`MathElaborate.arrayShape` resolves plain
+    // axes one at a time), the same wall the packed eigh route sits behind.
     //
     // COMPLEX-SYMMETRIC (A = A^T without conjugation). There is NO LAPACK eigensolver for it -- `zsyev` does not
     // exist, and the packed sibling `zspev` does not either. Such a matrix is not normal in general, so its

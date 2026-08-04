@@ -1388,6 +1388,20 @@ let private denseCellCountExpr (ty: IRType) (name: string) : string =
     | ArrayElem arr -> denseCellCountOfArray arr name
     | _ -> "0"
 
+/// The singular-matrix panic message, spelled ONCE. Four readers have to agree
+/// on it byte for byte: `materializeSolveForm`'s native guard, the same form's
+/// LAPACK `info` check, the interpreter's `Interp/ArrayOps.solveArray`, and any
+/// corpus `// ABORT:` pin. Two of those four live in other files, so this
+/// binding is the anchor a reviewer greps for, not a saving of characters.
+///
+/// Kept free of the operand's name and of the failing column index on purpose:
+/// the LAPACK arm learns the column from `info` and the native arm from `k`,
+/// but a message that differed between the arms would make the corpus pin
+/// gate-dependent -- and a gate-dependent abort pin is a test that passes for
+/// the wrong reason on exactly one machine.
+let internal solveSingularMessage =
+    "solve(A, b): the matrix is SINGULAR -- LU factorization found an exactly-zero pivot"
+
 /// The word a dispatch marker comment leads with, for a route resolved by
 /// `LinAlgPatterns.resolveNodeRoute`. Names the BACKEND because that's the only
 /// place the choice is observable (host cblas / device cuBLAS / Blade's own
@@ -2527,6 +2541,8 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     // OPERAND's type, which is the only place the pair is jointly determined.
     | IREigh operand ->
         materializeEighForm subst names varName operand
+    | IRSolve (mExpr, rExpr) ->
+        materializeSolveForm subst names varName elemTypeStr mExpr rExpr
     | _ -> None
 
 
@@ -3713,6 +3729,159 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             // C++ compile time rather than declaring nothing and leaving the
             // destructuring to reference an undefined name.
             Some ([ sprintf "#error \"Blade codegen: eigh reached emission with no LAPACK route (availability gate changed after elaboration?); the synthesized Jacobi path is chosen at elaboration time and cannot be recovered here\"" ], [])
+     | _ -> None)
+
+
+and materializeSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (mExpr: IRExpr) (rExpr: IRExpr) : (string list * MaterializedAlloc list) option =
+    // solve(A, b) -> x with A.x = b, by partial-pivoted LU. A : n x n dense,
+    // b : n dense, x : a fresh dense rank-1 pool of n cells.
+    //
+    // TWO ARMS, AND BOTH ARE REAL -- the structural difference from
+    // `materializeEighForm`, where the un-dispatched case is a `#error` because
+    // the native math lives in source the elaborator declined to synthesize.
+    // Here the native math is emitted RIGHT HERE, so `shimEntry = None` is the
+    // ordinary path (and the default one, the gate being off by default).
+    //
+    // BYTE-IDENTITY, and what it is a claim about. The native arm below is the
+    // operation-for-operation twin of `Interp/ArrayOps.solveArray`: same
+    // row-major working copy, same pivot rule, same swap, same in-elimination
+    // update of the right-hand side, same descending back-substitution, and
+    // every arithmetic step written as an explicit `a - b * c` rather than a
+    // compound assignment, so no step can be reassociated by rewriting. Those
+    // two are what `blade test interp math` byte-compares. THE LAPACK ARM IS
+    // NOT PART OF THAT CLAIM: `?gesv` is blocked and applies its pivots in a
+    // different order, so it agrees to ~1e-14 and not to the ULP -- the same
+    // standing policy every BLAS route has, and the reason the differential
+    // harnesses run gate-off.
+    //
+    // THE PIVOT RULE, pinned in words because it is the one place two correct
+    // implementations can silently disagree: scan column k from row k
+    // downward, keep the FIRST row attaining the maximum |value| -- a STRICT
+    // `>` comparison, so a later equal magnitude never displaces an earlier
+    // one. LAPACK's `idamax` uses the same strict-greater tie-break, which is
+    // why the two arms agree on WHICH matrix they factorize even though they
+    // do not agree bitwise on the result.
+    //
+    // SINGULARITY is an EXACT `== 0.0` test on the chosen pivot, never an
+    // epsilon. An epsilon would be a second tunable that the interpreter and
+    // the C++ arm would have to keep numerically identical across a
+    // difference-of-two-roundings, which is exactly the class of disagreement
+    // this design removes. Exact zero is decidable identically everywhere, and
+    // a nearly-singular matrix is the user's numerical problem, not a
+    // compile-time one.
+    let aName = exprToCppCore subst names mExpr
+    let bName = exprToCppCore subst names rExpr
+    let aTy = inferExprType mExpr
+    let bTy = inferExprType rExpr
+    (match aTy, bTy with
+     | ArrayElem aa, ArrayElem ba ->
+        let outElemStr = irTypeToCpp aa.ElemType
+        let nExtent = sprintf "%s.extents[0]" aName
+        let extentsName = sprintf "%s_extents" varName
+        // Derived names, the `materializeEighForm` convention: everything this
+        // form introduces at statement level is prefixed by the binding, so two
+        // solves in one scope cannot collide. The loop-body temporaries below
+        // need no prefix -- each is scoped to its own `for` body.
+        let nName = sprintf "%s__n" varName
+        let luName = sprintf "%s__lu" varName
+        let infoName = sprintf "%s__info" varName
+        let call = Blade.LinAlgPatterns.classifySolve aa ba
+        // HostBlas asked DIRECTLY, not through `resolveNodeRoute`: the CudaBlas
+        // policy row for Solve is `Native` (cuSOLVER is a separate library), so
+        // the chain would resolve to HostBlas anyway -- the same shortcut
+        // `materializeEighForm` takes, and for the same recorded reason.
+        let shimEntry = call |> Option.bind (Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas)
+        match shimEntry with
+        | Some _ -> (lapackUsedCell ()).Value <- true
+        | None -> ()
+        let extentDecl =
+            [ sprintf "size_t %s[1];" extentsName
+              sprintf "%s[0] = %s;" extentsName nExtent ]
+        let allocDecl =
+            sprintf "Array<%s, 1> %s = { allocate<typename promote<%s, 1>::type, nullptr>(%s), %s };"
+                outElemStr varName outElemStr extentsName extentsName
+        // BLOCK comments only, never `//`: these lines are SPACE-JOINED into a
+        // single-line IIFE at expression positions, where a line comment would
+        // swallow the rest of the statement (the lesson math/057 taught the
+        // gram emitter).
+        let panicLine (ind: string) =
+            sprintf "%sblade_rt::panic(\"BL8007\", \"%s\", nullptr, 0);" ind solveSingularMessage
+        let luCell (i: string) (j: string) = sprintf "%s[%s * %s + %s]" luName i nName j
+        let body =
+            match shimEntry with
+            | Some entry ->
+                // A is handed over as its ROW SKELETON and b as its flat pool,
+                // exactly the subscripts Blade's own loops use, so a staged or
+                // sliced operand contributes the identical values. The shim
+                // owns the column-major bridge and the destroy-on-exit copies;
+                // `info` comes back for THIS site to judge, keeping the panic
+                // message in one place shared with the native arm rather than
+                // duplicating it inside a header that has no runtime include.
+                [ sprintf "const size_t %s = %s;" nName nExtent
+                  sprintf "/* lapack dispatch: solve(A, b) -> x, dense square operand, single right-hand side */ int %s = %s(%s, %s.data, %s.data, %s.data);"
+                      infoName entry nName aName bName varName
+                  sprintf "if (%s != 0) { %s }" infoName (panicLine "") ]
+            | None ->
+                [ sprintf "const size_t %s = %s;" nName nExtent
+                  // The working copy. LU overwrites it, so A itself is never
+                  // touched -- `solve(A, b)` twice over the same A is the same
+                  // answer twice, which a factor-in-place would quietly break.
+                  sprintf "std::vector<%s> %s(%s * %s);" outElemStr luName nName nName
+                  sprintf "for (size_t __si = 0; __si < %s; __si++) {" nName
+                  sprintf "    for (size_t __sj = 0; __sj < %s; __sj++) { %s = %s[__si][__sj]; }" nName (luCell "__si" "__sj") aName
+                  // x starts life as b and is transformed in place: the forward
+                  // substitution is FUSED INTO the elimination (each multiplier
+                  // is applied to the right-hand side the moment it is formed),
+                  // so there is no separate L-solve pass and no permutation
+                  // vector to replay. `solveArray` does exactly this.
+                  sprintf "    %s[__si] = %s[__si];" varName bName
+                  sprintf "}"
+                  sprintf "for (size_t __sk = 0; __sk < %s; __sk++) {" nName
+                  sprintf "    size_t __sp = __sk;"
+                  sprintf "    %s __sbig = std::fabs(%s);" outElemStr (luCell "__sk" "__sk")
+                  sprintf "    for (size_t __si = __sk + 1; __si < %s; __si++) {" nName
+                  sprintf "        %s __sm = std::fabs(%s);" outElemStr (luCell "__si" "__sk")
+                  // STRICT `>`: first maximal magnitude wins. See the pivot-rule
+                  // note above -- this single character is the tie-break.
+                  sprintf "        if (__sm > __sbig) { __sbig = __sm; __sp = __si; }"
+                  sprintf "    }"
+                  sprintf "    if (%s == %s(0)) { %s }" (luCell "__sp" "__sk") outElemStr (panicLine "")
+                  sprintf "    if (__sp != __sk) {"
+                  sprintf "        for (size_t __sj = 0; __sj < %s; __sj++) {" nName
+                  sprintf "            %s __st = %s;" outElemStr (luCell "__sk" "__sj")
+                  sprintf "            %s = %s;" (luCell "__sk" "__sj") (luCell "__sp" "__sj")
+                  sprintf "            %s = __st;" (luCell "__sp" "__sj")
+                  sprintf "        }"
+                  sprintf "        %s __sxt = %s[__sk]; %s[__sk] = %s[__sp]; %s[__sp] = __sxt;" outElemStr varName varName varName varName
+                  sprintf "    }"
+                  sprintf "    for (size_t __si = __sk + 1; __si < %s; __si++) {" nName
+                  sprintf "        %s __sf = %s / %s;" outElemStr (luCell "__si" "__sk") (luCell "__sk" "__sk")
+                  sprintf "        %s = __sf;" (luCell "__si" "__sk")
+                  sprintf "        for (size_t __sj = __sk + 1; __sj < %s; __sj++) {" nName
+                  // Written `a = a - f * b`, never `a -= f * b`: identical in
+                  // C++, but the explicit form is the one the interpreter twin
+                  // reads as a single subtract-of-a-product, so the two texts
+                  // can be diffed against each other by eye.
+                  sprintf "            %s = %s - __sf * %s;" (luCell "__si" "__sj") (luCell "__si" "__sj") (luCell "__sk" "__sj")
+                  sprintf "        }"
+                  sprintf "        %s[__si] = %s[__si] - __sf * %s[__sk];" varName varName varName
+                  sprintf "    }"
+                  sprintf "}"
+                  // Back substitution, k descending. Counted DOWN through an
+                  // unsigned `__skk` from n to 1 rather than `for (size_t k = n
+                  // - 1; k >= 0; k--)`, which never terminates on an unsigned
+                  // index -- and would read as correct.
+                  sprintf "for (size_t __skk = %s; __skk > 0; __skk--) {" nName
+                  sprintf "    size_t __sk = __skk - 1;"
+                  sprintf "    %s __ss = %s[__sk];" outElemStr varName
+                  sprintf "    for (size_t __sj = __sk + 1; __sj < %s; __sj++) { __ss = __ss - %s * %s[__sj]; }" nName (luCell "__sk" "__sj") varName
+                  sprintf "    %s[__sk] = __ss / %s;" varName (luCell "__sk" "__sk")
+                  sprintf "}" ]
+        // Everything the form introduces beyond `varName` itself is wrapped in
+        // one block so a second solve in the same scope re-declares nothing.
+        // `varName` and its extents table stay OUTSIDE it -- they are the value.
+        Some (extentDecl @ [allocDecl; "{"] @ body @ ["}"],
+              [MatPool (varName, outElemStr, 1, "nullptr", None)])
      | _ -> None)
 
 /// Convert IRExpr to C++ using context
@@ -5690,6 +5859,7 @@ let genIncludes () : string list =
      "#include <chrono>"
      "#include <algorithm>"  // std::stable_sort (used by sort())
      "#include <numeric>"    // std::iota (used by sort())
+     "#include <vector>"     // solve()'s LU working copy (materializeSolveForm)
      "#include <unordered_map>"  // group_keys Case 3 (dynamic ngroups via hash discovery)
      "#include <unordered_set>"  // unique() dedup, contains() hoist (future)
      // OpenMP is ENABLED (Build.compileCppWithExtra always passes -fopenmp);
@@ -5854,6 +6024,7 @@ let genIncludesExternal () : string list =
      "#include <chrono>"
      "#include <algorithm>"  // std::stable_sort (used by sort())
      "#include <numeric>"    // std::iota (used by sort())
+     "#include <vector>"     // solve()'s LU working copy (materializeSolveForm)
      "#include <unordered_map>"  // group_keys Case 3 (dynamic ngroups via hash discovery)
      "#include <unordered_set>"  // unique() dedup, contains() hoist (future)
      "#include <omp.h>"
@@ -6084,6 +6255,10 @@ let rec isFreshPoolForm (e: IRExpr) : bool =
     // and neither borrows the operand's `.extents` pointer -- each gets its own
     // table. So an escaping (Q, LAM) need not pin S, and propagation stops here.
     | IREigh _ -> true
+    // solve: x is a fresh `allocate<>` pool with its own extents table -- it
+    // borrows nothing from A or b (b's values are COPIED in, not aliased), so
+    // an escaping x need pin neither operand and propagation stops here.
+    | IRSolve _ -> true
     | IRArrayNegate _ | IRArrayConjugate _ -> true
     | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
     | IRApp (f, _, _) -> freshReturnOf f = FreshPool
@@ -6139,7 +6314,7 @@ let private isMaterializedFreshArray (v: IRExpr) : bool =
     | IRCompute inner -> isFreshPoolForm inner
     | IRArrayLit _ -> true
     | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _
-    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRMatmul _
+    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRMatmul _ | IRSolve _
     | IRArrayNegate _ | IRArrayConjugate _ -> true
     | _ -> false
 
@@ -10167,6 +10342,8 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genMatmulBinding ctx binding builder
     | IREigh _ ->
         genEighBinding ctx binding builder
+    | IRSolve (_, _) ->
+        genSolveBinding ctx binding builder
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         genReduceBinding ctx binding builder arrExpr kernelExpr initExpr
     | IRReduceCompute (compExpr, kernelExpr, seedExpr) ->
@@ -12085,6 +12262,28 @@ and genEighBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     (code, ctx')
 
 
+and genSolveBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    // solve(A, b) -> x. Same shape as genMatmulBinding: one array result, one
+    // element type, and the shared materialize helper emits the statement form
+    // (allocation plus either the LU loop nest or one `blade_lapack::blade_solve`
+    // dispatch call, per the availability gate).
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let elemStr =
+        match binding.Type with
+        | ArrayElem at -> irTypeToCpp at.ElemType
+        | _ -> "double"
+    let matStmts =
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
+        | None -> []
+    let code =
+        [sprintf "%s// solve: A.x = b by partial-pivoted LU -> x" ind]
+        @ (matStmts |> List.map (fun s -> ind + s))
+    let ctx' = addVarName binding.Id name ctx
+    (code, ctx')
+
+
 
 and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -13112,7 +13311,7 @@ let private genFuncBodyScoped
             let (code, _) = genBinding bodyCtx tempBinding builder
             currentNames <- Map.add id varName currentNames
             code
-        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ | IRMatmul _ | IREigh _
+        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ | IRMatmul _ | IREigh _ | IRSolve _
         | IRStack _ | IRJoin _ ->
             // The lift pass can place an inline form as a let value at
             // function-body level. The same materialization helper used by

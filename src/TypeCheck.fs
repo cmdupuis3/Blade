@@ -2498,6 +2498,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprGram (l, r, _) -> [l; r]
         | TExprMatmul (l, r) -> [l; r]
         | TExprEigh a -> [a]
+        | TExprSolve (a, b) -> [a; b]
         | TExprArrayNegate a -> [a]
         | TExprArrayConjugate a -> [a]
         | TExprContains (a, v) -> [a; v]
@@ -3048,6 +3049,18 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // thing the interp / diff-oracle differentials ever see.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__math_eigh" }, [aExpr]) when (lookupVar "__math_eigh" env).IsNone ->
         inferEigh env aExpr
+
+    // `math.solve` as a FIRST-CLASS intrinsic. Import-gated internal marker
+    // like `__math_matmul`, and emitted UNCONDITIONALLY like it too (NOT like
+    // `__math_eigh`): the native arm is the emitted LU loop nest, so the node
+    // is the only spelling of this operation and the LAPACK gate only decides
+    // whether those loops are replaced by one `dgesv` call. That is the
+    // difference eigh cannot have -- an eigensolver's output is not unique, so
+    // its two arms could not be one verification truth, while an LU solve's is
+    // (up to the last ULP) and its native arm is byte-pinned against the
+    // interpreter.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__math_solve" }, [aExpr; bExpr]) when (lookupVar "__math_solve" env).IsNone ->
+        inferSolve env aExpr bExpr
 
     | ExprKind.ExprApp (func, args) ->
         inferExpr env func |> Result.bind (fun tFunc ->
@@ -4416,6 +4429,83 @@ and inferEigh (env: TypeEnv) (operandE: Expr) : TypeResult<TypedExpr> =
                     let qTy = mkArrayArrow [ freshSlot (); freshSlot () ] aTy.ElemType None
                     let lamTy = mkArrayArrow [ freshSlot () ] lamElem None
                     Ok (mkTyped (TExprEigh tA) (IRTTuple [qTy; lamTy])))))
+
+
+and inferSolve (env: TypeEnv) (matrixE: Expr) (rhsE: Expr) : TypeResult<TypedExpr> =
+    // solve(A, b) -> x with A.x = b: the general dense linear solve by
+    // partial-pivoted LU. A is rank-2 square n x n, b is rank-1 of extent n,
+    // and x comes back rank-1 of extent n.
+    //
+    // The domain is deliberately NARROWER than eigh's, and the narrowness is
+    // the point: eigh's admissibility is a (precision x SYMMETRY) matrix
+    // because symmetry picks the routine FAMILY, so it delegates to
+    // `classifyEigh`. LU has no symmetry axis -- `dgesv` is the routine for
+    // ANY square matrix -- so the only questions are shape and element type,
+    // and both are settled here. `LinAlgPatterns.classifySolve` still answers
+    // the ROUTE (and thus the precision letter), but it cannot decline an
+    // operand this function accepted.
+    //
+    // Float64 ONLY, matching `inferMatmul`'s surface rule rather than eigh's
+    // four precisions. Widening is a real option (dgesv has s/c/z siblings)
+    // but it is a LANGUAGE decision about what the emitted native arm must
+    // then also cover byte-identically, so it is not taken silently here.
+    //
+    // As with matmul, the math elaborator already rejected a shape mismatch
+    // with its own message before inference runs; these are the backstop for a
+    // marker that reaches the checker some other way (and the only check a
+    // hand-written `__math_solve` ever meets).
+    inferExpr env matrixE |> Result.bind (fun tA ->
+    inferExpr env rhsE |> Result.bind (fun tB ->
+        requireArrayArgMinRank env tA "solve" 2 |> Result.bind (fun aTy ->
+        requireArrayArgMinRank env tB "solve" 1 |> Result.bind (fun bTy ->
+            // A: two PLAIN axes. A rank-2 compact (symmetric / antisymmetric)
+            // group is refused rather than densified: LU overwrites its copy
+            // with a factor that is NOT symmetric, so the packed pool would be
+            // the wrong shape to read and the right answer would need a dense
+            // staging copy this node does not make. `decompact` first.
+            let plainRank2 (a: IRArrayType) =
+                a.IndexTypes.Length = 2 && a.IndexTypes |> List.forall (fun ix -> ix.Rank <= 1)
+            let plainRank1 (a: IRArrayType) =
+                a.IndexTypes.Length = 1 && a.IndexTypes.Head.Rank <= 1
+            if not (plainRank2 aTy) then
+                Error (Other "solve: A must be a rank-2 dense SQUARE matrix (two plain index axes, Array<Float64 like Idx<n>, Idx<n>>).")
+            elif not (plainRank1 bTy) then
+                Error (Other "solve: b must be a rank-1 dense vector (Array<Float64 like Idx<n>>).")
+            elif aTy.IsVirtual || bTy.IsVirtual then
+                Error (Other "solve: both arguments must be materialized arrays -- a virtual (range / reverse) view has no pool for the factorization to read; bind it with |> compute first.")
+            else
+            let isFloat64 (t: IRType) = match t with IRTScalar ETFloat64 -> true | _ -> false
+            if not (isFloat64 aTy.ElemType) || not (isFloat64 bTy.ElemType) then
+                Error (Other "solve: both arguments must have Float64 elements (Array<Float64 like Idx<n>, Idx<n>> and Array<Float64 like Idx<n>>).")
+            else
+                // EXTENT AGREEMENT, checked only where BOTH sides are statically
+                // known -- the same discipline `inferMatmul`'s contracted-extent
+                // check uses, and for the same reason: unify never compares
+                // extents, so a static disagreement is the only kind this seam
+                // can see. A dynamic mismatch is not silently wrong either; the
+                // emitted loops and the shim both take n from A's extents table
+                // and read b at those indices.
+                let n0 = aTy.IndexTypes.[0].Extent
+                let n1 = aTy.IndexTypes.[1].Extent
+                let bn = bTy.IndexTypes.Head.Extent
+                let disagree (l: IRExpr) (r: IRExpr) =
+                    match tryEvalIntIR l, tryEvalIntIR r with
+                    | Some a, Some b -> a <> b
+                    | _ -> false
+                if disagree n0 n1 then
+                    Error (Other "solve: A must be SQUARE (n x n); its two extents disagree.")
+                elif disagree n0 bn then
+                    Error (Other "solve(A, b): b's extent must match A's dimension (A is n x n, b must be length n).")
+                else
+                    // x is a fresh DENSE rank-1 pool of A's leading extent --
+                    // taken from A, not from b, because A's is the extent the
+                    // factorization iterates and the shim's `n`.
+                    let freshSlot (ext: IRExpr) =
+                        { Id = env.Builder.FreshId(); Rank = 1; Extent = ext
+                          Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                          Kind = SDimension; Dependencies = [] }
+                    let resultType = mkArrayArrow [ freshSlot n0 ] aTy.ElemType None
+                    Ok (mkTyped (TExprSolve (tA, tB)) resultType)))))
 
 
 // stack / join -- the two rank-changing assembly combinators (formalism 2.6)

@@ -1124,6 +1124,87 @@ let matmulArray (left: BladeArray) (right: BladeArray) (outType: IRType) : Blade
         out
     | _ -> raise (ArrayOpUnsupported "matmul: output type is not an array")
 
+/// solve(A, b) -> x with A.x = b: the general dense linear solve by
+/// partial-pivoted LU (`materializeSolveForm`; the C++ side is the same loop
+/// nest, or one `blade_lapack::blade_solve` call under the LAPACK gate).
+///
+/// THE OPERATION-FOR-OPERATION TWIN of the emitted native arm, and unlike
+/// `eighArrays` this one IS a byte-identity claim: `blade test interp math`
+/// compares this function's printed output against the compiled program's,
+/// digit for digit. The two texts are written to be diffable by eye --
+///
+///   * one row-major working copy `lu` of A, so A itself is never factorized
+///     in place and `solve(A, b)` twice over one A answers twice the same;
+///   * x starts as a copy of b, and the forward substitution is FUSED INTO the
+///     elimination (each multiplier is applied to the right-hand side the
+///     moment it is formed), so no permutation vector is replayed later;
+///   * every update spelled `a - f * b`, never a compound assignment, so the
+///     two implementations' arithmetic reads as the same sequence of
+///     roundings. .NET never fuses a multiply-add on its own, and the C++ side
+///     is compiled with `-ffp-contract=off` by the differential harnesses, so
+///     the two agree exactly rather than nearly.
+///
+/// THE PIVOT RULE: scan column k downward from row k and keep the FIRST row
+/// attaining the maximum |value| -- a STRICT `>`, so a later equal magnitude
+/// never displaces an earlier one. That single character is the whole tie-break
+/// and it matches both the emitted C++ and LAPACK's own `idamax`.
+///
+/// SINGULARITY is an EXACT `= 0.0` test on the chosen pivot, never an epsilon:
+/// an epsilon would be a tunable this function and the C++ arm would have to
+/// agree on across a difference of two roundings, which is precisely the class
+/// of disagreement the design removes. The panic is BL8007 with
+/// `CodeGen.solveSingularMessage`, spelled here as a literal because the
+/// compiler's CodeGen module is not referenced from the interpreter -- the two
+/// copies are kept in step by the corpus abort pin that reads both.
+let solveArray (matrix: BladeArray) (rhs: BladeArray) (outType: IRType) : BladeArray =
+    match outType with
+    | ArrayElem outArr ->
+        let n = if matrix.Extents.Length >= 1 then int matrix.Extents.[0] else 0
+        // Working copy + right-hand side, in the compiled arm's own order: the
+        // whole row of `lu`, then that row's `x` cell.
+        let lu = Array.zeroCreate<float> (n * n)
+        let x = Array.zeroCreate<float> n
+        for i in 0 .. n - 1 do
+            for j in 0 .. n - 1 do
+                lu.[i * n + j] <- toF64v (indexArray matrix [VInt (int64 i); VInt (int64 j)])
+            x.[i] <- toF64v (indexArray rhs [VInt (int64 i)])
+        for k in 0 .. n - 1 do
+            // Partial pivot: first maximal |value|, strict >.
+            let mutable p = k
+            let mutable big = abs lu.[k * n + k]
+            for i in k + 1 .. n - 1 do
+                let m = abs lu.[i * n + k]
+                if m > big then
+                    big <- m
+                    p <- i
+            if lu.[p * n + k] = 0.0 then
+                raise (InterpPanic ("BL8007",
+                                    "solve(A, b): the matrix is SINGULAR -- LU factorization found an exactly-zero pivot",
+                                    None, 0))
+            if p <> k then
+                for j in 0 .. n - 1 do
+                    let t = lu.[k * n + j]
+                    lu.[k * n + j] <- lu.[p * n + j]
+                    lu.[p * n + j] <- t
+                let xt = x.[k] in x.[k] <- x.[p]; x.[p] <- xt
+            for i in k + 1 .. n - 1 do
+                let f = lu.[i * n + k] / lu.[k * n + k]
+                lu.[i * n + k] <- f
+                for j in k + 1 .. n - 1 do
+                    lu.[i * n + j] <- lu.[i * n + j] - f * lu.[k * n + j]
+                x.[i] <- x.[i] - f * x.[k]
+        // Back substitution, k descending.
+        for kk in n .. -1 .. 1 do
+            let k = kk - 1
+            let mutable s = x.[k]
+            for j in k + 1 .. n - 1 do
+                s <- s - lu.[k * n + j] * x.[j]
+            x.[k] <- s / lu.[k * n + k]
+        let out = allocDense outArr.ElemType outArr.IndexTypes [| int64 n |]
+        for i in 0 .. n - 1 do writeCell out [ int64 i ] (VFloat x.[i])
+        out
+    | _ -> raise (ArrayOpUnsupported "solve: output type is not an array")
+
 /// eigh(S) -> (Q, LAM): symmetric eigendecomposition by cyclic two-sided
 /// Jacobi. Q's columns are the eigenvectors, LAM is descending, each Q column
 /// sign-fixed so the first row attaining the maximum |entry| is positive --

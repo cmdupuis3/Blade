@@ -196,6 +196,10 @@ module Codes =
             "BL8004", "MPI runtime error"
             "BL8005", "unhandled runtime exception"
             "BL8006", "index out of bounds"
+            // solve(A, b) hit an exactly-zero pivot. Raised identically by the
+            // emitted LU loop nest, by the LAPACK ?gesv arm's non-zero `info`,
+            // and by the interpreter's twin -- see CodeGen.solveSingularMessage.
+            "BL8007", "singular matrix"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"

@@ -7,6 +7,7 @@
 /// annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<...>)`.
 ///
 ///   m.matmul(A, B)                 -- m x k . k x n -> m x n
+///   m.solve(A, b)                  -- A.x = b by partial-pivoted LU, A n x n, b n -> x n
 ///   m.svd(A) | m.svd(A, SWEEPS)    -- thin SVD, m >= n -> (U, S, V), S descending
 ///   m.eigh(S) | m.eigh(S, SWEEPS)  -- symmetric -> (Q, LAM), LAM descending
 ///   m.unfold(X, MODE)              -- Kolda-Bader mode-n matricization
@@ -202,9 +203,9 @@ let private ensureT (st: ElabState) (key: string) (make: string -> FunctionDecl)
 // Op elaboration
 
 let private opNames =
-    Set.ofList [ "matmul"; "svd"; "eigh"; "eig"; "unfold"; "mode_product"; "hosvd" ]
+    Set.ofList [ "matmul"; "solve"; "svd"; "eigh"; "eig"; "unfold"; "mode_product"; "hosvd" ]
 
-let private opList = "matmul, svd, eigh, eig, unfold, mode_product, hosvd"
+let private opList = "matmul, solve, svd, eigh, eig, unfold, mode_product, hosvd"
 
 /// Optional trailing SWEEPS argument shared by svd/eigh.
 let private sweepsArg (statics: StaticEnv) (what: string) (rest: Expr list) : Result<int, string> =
@@ -233,6 +234,27 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                 Error (sprintf "matmul: inner extents disagree (A is ..x%d, B is %dx..)" k k2)
             | _ -> Error "matmul: both arguments must be rank-2 (mxk * kxn)"))
     | "matmul", _ -> Error "matmul: expected matmul(A, B)"
+    | "solve", [aE; bE] ->
+        arrayShape ctx scope "solve" aE |> Result.bind (fun (_, aDims) ->
+        arrayShape ctx scope "solve" bE |> Result.bind (fun (_, bDims) ->
+            match aDims, bDims with
+            | [n; n2], [m] when n = n2 && m = n ->
+                // Like matmul and UNLIKE svd/eigh/eig, solve is not synthesized as a per-n Blade routine: it rewrites to
+                // the `__math_solve` intrinsic marker, which TypeCheck.inferSolve types and codegen emits as either its own
+                // LU loop nest or one `blade_lapack::blade_solve` call. NOTE THE ABSENCE OF A GATE CHECK HERE, which is the
+                // one place this arm differs from eigh's: eigh's marker exists only when `lapackAvailable ()` held, because
+                // its non-dispatched arm is synthesized SOURCE that must be generated instead. Solve's non-dispatched arm
+                // is emitted by codegen from the same node, so the node is unconditional and the gate is consulted one
+                // level down, at emission. That keeps the surface's meaning independent of the build.
+                Ok (syn (ExprApp (v "__math_solve", [aE; bE])))
+            | [n; n2], _ when n <> n2 ->
+                Error (sprintf "solve: A must be square (got %dx%d)" n n2)
+            | [n; _], [m] ->
+                Error (sprintf "solve: b's extent must match A's dimension (A is %dx%d, b is length %d)" n n m)
+            | [_; _], _ ->
+                Error "solve: b must be rank-1 (Array<Float64 like Idx<n>>)"
+            | _ -> Error "solve: A must be rank-2 square (Array<Float64 like Idx<n>, Idx<n>>)"))
+    | "solve", _ -> Error "solve: expected solve(A, b) -- A an n x n matrix, b a length-n vector, returning x with A.x = b"
     | "svd", (aE :: rest) ->
         sweepsArg ctx.Statics "svd" rest |> Result.bind (fun sweeps ->
         arrayShape ctx scope "svd" aE |> Result.bind (fun (_, dims) ->

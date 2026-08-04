@@ -123,6 +123,11 @@ type IRExpr =
     /// held at elaboration; gate off, `math.eigh` expands to synthesized
     /// Jacobi source instead and this node is never built.
     | IREigh of operand: IRExpr
+    /// solve(A, b): A.x = b by partial-pivoted LU -> a fresh dense rank-1 x.
+    /// UNCONDITIONAL, unlike IREigh: the native arm is the emitted LU loop
+    /// nest (byte-pinned against `Interp/ArrayOps.solveArray`), and the LAPACK
+    /// `dgesv` route only replaces those loops when the gate is on.
+    | IRSolve of matrix: IRExpr * rhs: IRExpr
     | IRArrayNegate of array: IRExpr     // whole-array elementwise negation (eager); type-preserving
     | IRArrayConjugate of array: IRExpr  // whole-array elementwise conjugation (eager); type-preserving
     | IRReverse of array: IRExpr * dim: int
@@ -3739,6 +3744,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRTranspose (e, d1, d2) -> [e], (function [e'] -> IRTranspose (e', d1, d2) | _ -> badChildren "IRTranspose")
     | IRDecompact (e, d) -> [e], (function [e'] -> IRDecompact (e', d) | _ -> badChildren "IRDecompact")
     | IREigh e -> [e], (function [e'] -> IREigh e' | _ -> badChildren "IREigh")
+    | IRSolve (a, b) -> [a; b], (function [a'; b'] -> IRSolve (a', b') | _ -> badChildren "IRSolve")
     | IRHaloUnhash (w, o) -> [w], (function [w'] -> IRHaloUnhash (w', o) | _ -> badChildren "IRHaloUnhash")
     | IRArrayNegate e -> [e], (function [e'] -> IRArrayNegate e' | _ -> badChildren "IRArrayNegate")
     | IRArrayConjugate e -> [e], (function [e'] -> IRArrayConjugate e' | _ -> badChildren "IRArrayConjugate")
@@ -5699,6 +5705,18 @@ let rec typeOf (expr: IRExpr) : IRType =
             let lamTy = mkArrayLike { sa with ElemType = lamElem; IndexTypes = [axis] }
             IRTTuple [qTy; lamTy]
          | t -> t)
+    | IRSolve (matrix, _) ->
+        // solve(A, b) -> x : DENSE rank-1 of A's leading extent, element type
+        // A's. Taken from A rather than from b so the carried type names the
+        // same `n` the emitted loops and the shim both iterate; `inferSolve`
+        // has already required the two to agree wherever that is statically
+        // decidable. The id is cosmetic -- the authoritative result type is the
+        // one `inferSolve` built and lowering attached.
+        (match typeOf matrix with
+         | ArrayElem aa when not aa.IndexTypes.IsEmpty ->
+            let axis = { aa.IndexTypes.Head with Rank = 1; Symmetry = SymNone; IxKind = IxKPlain; Dependencies = [] }
+            mkArrayLike { aa with IndexTypes = [axis] }
+         | t -> t)
     | IRHaloUnhash _ ->
         // A window neighbor read yields the inner index's coordinate: int64.
         IRTScalar ETInt64
@@ -5769,13 +5787,14 @@ let rec typeOf (expr: IRExpr) : IRType =
 /// materialized value); IRMatmul (an intrinsic node from the math package's
 /// in-place elaborator, so it reaches ordinary expression positions and must
 /// be hoisted to materialize its pool -- IRGram is NOT included, entering
-/// only via the `gram` keyword's let-RHS); and IREigh (same elaborator, two
-/// pools plus the naming tuple).
+/// only via the `gram` keyword's let-RHS); IREigh (same elaborator, two
+/// pools plus the naming tuple); and IRSolve (same elaborator, one fresh
+/// rank-1 pool plus its LU scratch).
 let isInlineForm (e: IRExpr) : bool =
     match e with
     | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
     | IRGroupBy _ | IRGroupKeys _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
-    | IRReduceCompute _ | IRMatmul _ | IREigh _ -> true
+    | IRReduceCompute _ | IRMatmul _ | IREigh _ | IRSolve _ -> true
     | IRCompute (IRApplyCombinator _) -> true
     | _ -> false
 
@@ -5812,6 +5831,9 @@ let private isNestedLoopComputeArg (e: IRExpr) : bool =
     // which the line above already hoists -- it needs its own entry or the
     // nest reads an `arr<i>` it never declared.
     | IRMatmul _ -> true
+    // `m.solve(A, b) * 2.0` is the same shape as the matmul line above, and
+    // ARRAY-typed (unlike eigh), so it genuinely can occupy an `Arrays` slot.
+    | IRSolve _ -> true
     // IREigh is deliberately ABSENT, and its absence is a decision rather than
     // an omission: an eigh node is TUPLE-typed, and a loop form's `Arrays` slot
     // holds arrays. There is no surface spelling that puts a tuple where the
@@ -6082,6 +6104,18 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let operand' = liftExpr builder operand
         let (binds, opFinal) = liftChildEvaluatedOnce builder operand'
         wrapLets binds (IREigh opFinal)
+    | IRSolve (a, b) ->
+        // Same evaluate-once lift as matmul/eigh, and needed harder here:
+        // `materializeSolveForm` spells A FIVE times (`.extents[0]` twice plus
+        // `.data` in the copy-in loop and in either dispatch arm), so
+        // `solve(f(A), b)` would otherwise re-invoke `f` per occurrence, each
+        // call allocating a fresh pool -- and, worse, factorize a different
+        // matrix than the one whose extent bounded the loops.
+        let a' = liftExpr builder a
+        let b' = liftExpr builder b
+        let (bindsA, aFinal) = liftChildEvaluatedOnce builder a'
+        let (bindsB, bFinal) = liftChildEvaluatedOnce builder b'
+        wrapLets (bindsA @ bindsB) (IRSolve (aFinal, bFinal))
     | IRArrayNegate arr ->
         let arr' = liftExpr builder arr
         let (binds, arrFinal) = liftChild builder arr'
@@ -6667,7 +6701,7 @@ let private shapeSpecWorthwhile (func: IRFuncDef) : bool =
         (match e with
          | IRApplyCombinator _ | IRComposeApply _ | IRMethodFor _
          | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRForRange _
-         | IRGram _ | IRMatmul _ | IRArrayProduct _ | IRArrayNegate _ | IRArrayConjugate _
+         | IRGram _ | IRMatmul _ | IRSolve _ | IRArrayProduct _ | IRArrayNegate _ | IRArrayConjugate _
          | IRReynolds _ | IRDecompact _ | IRTranspose _ -> found <- true
          | _ -> ())
         e) func.Body |> ignore

@@ -1,0 +1,50 @@
+// TEST: Math solve: exact 3x3 with two row swaps
+// `m.solve(A, b)` is a first-class intrinsic (like m.matmul, unlike m.svd):
+// codegen emits either its own partial-pivoted LU loop nest or, under the
+// LAPACK gate, one `blade_lapack::blade_solve_d` (?gesv) call. The loop nest is
+// the default and is the operation-for-operation twin of the interpreter's
+// `Interp/ArrayOps.solveArray`, which is what `blade test interp math` compares
+// digit for digit.
+//
+// A IS CHOSEN SO THE WHOLE FACTORIZATION IS EXACT IN BINARY, which is what
+// makes an equality pin honest here rather than a tolerance in disguise:
+//
+//   A = [[1,1,1],[2,4,1],[1,0,2]],  b = [6,13,7]
+//
+//   column 0 holds 1, 2, 1 -> the pivot is row 1, SWAP #1. The two multipliers
+//   are 1/2 = 0.5, exact. After elimination column 1 holds -1 and -2, so the
+//   pivot is the LAST row -> SWAP #2, and its multiplier is -1/-2 = 0.5, again
+//   exact. Every subsequent value is a dyadic rational (-0.25, -0.75, 1.5), so
+//   nothing rounds anywhere and x comes back as the integers it should be.
+//
+// Two swaps is the point: a matrix that needed no pivoting would exercise none
+// of the row-exchange code, and a permutation bug would print the right answer.
+// The right-hand side is permuted ALONGSIDE the matrix (the forward
+// substitution is fused into the elimination), so a swap applied to one and
+// not the other is visible immediately.
+//
+//   A * [1, 2, 3] = [1+2+3, 2+8+3, 1+0+6] = [6, 13, 7] = b.
+//
+// The three positions below are the three an intrinsic node has to be taught,
+// mirroring math/058's coverage for matmul:
+//   x  - the canonical let-RHS (the only position codegen materializes at)
+//   xs - directly inside an elementwise binop, i.e. a loop form's Arrays slot
+//   e  - as a function ARGUMENT, i.e. a lifted non-blessed child position
+import math as m
+type M3 = Array<Float64 like Idx<3>, Idx<3>>
+type V3 = Array<Float64 like Idx<3>>
+let A: M3 = [[1.0, 1.0, 1.0], [2.0, 4.0, 1.0], [1.0, 0.0, 2.0]]
+let b: V3 = [6.0, 13.0, 7.0]
+function total3(v: V3) -> Float64 = v(0) + v(1) + v(2)
+let x = m.solve(A, b)
+let xs = m.solve(A, b) * 2.0
+let e = total3(m.solve(A, b))
+// A is READ ONLY: the factorization runs on a working copy, so a second solve
+// over the same A against a different right-hand side must still be right.
+// A * [0, 1, -1] = [0, 3, -2].
+let b2: V3 = [0.0, 3.0, -2.0]
+let x2 = m.solve(A, b2)
+// EXPECT: x = [1, 2, 3]
+// EXPECT: xs = [2, 4, 6]
+// EXPECT: e = 6
+// EXPECT: x2 = [0, 1, -1]

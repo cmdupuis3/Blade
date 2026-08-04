@@ -242,6 +242,14 @@ and TypedExprKind =
     /// descending. Routed through blade_lapack when available at elaboration
     /// time; otherwise `math.eigh` expands to Blade Jacobi source instead.
     | TExprEigh of operand: TypedExpr
+    /// solve(A, b): the general dense linear solve A.x = b by partial-pivoted
+    /// LU, A rank-2 square and b rank-1 of the matching extent, yielding x.
+    /// ALWAYS a first-class node (unlike eigh): the native arm is emitted LU
+    /// loops whose operation order the interpreter's `A.solveArray` mirrors, so
+    /// the byte-identity differential covers the code an ordinary build runs.
+    /// The LAPACK `dgesv` route is an availability-gated replacement for those
+    /// loops, not a precondition for the node existing.
+    | TExprSolve of matrix: TypedExpr * rhs: TypedExpr
     | TExprArrayNegate of array: TypedExpr
     | TExprArrayConjugate of array: TypedExpr
     | TExprExtents of array: TypedExpr

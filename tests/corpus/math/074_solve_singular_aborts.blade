@@ -1,0 +1,27 @@
+// TEST: Math solve: singular matrix aborts (aborts)
+// ABORT: error[BL8007]
+// ABORT: the matrix is SINGULAR
+// Row 1 is exactly twice row 0, so A has rank 2 and no LU factorization with a
+// nonzero diagonal exists. The detection is an EXACT `== 0.0` test on the
+// chosen pivot, never an epsilon -- an epsilon would be a tunable that the
+// emitted C++ and the interpreter would have to agree on across a difference of
+// two roundings, which is the one class of disagreement this design removes.
+//
+// THE ZERO IS REACHED EXACTLY, by construction, and that is what makes this
+// probe deterministic rather than lucky:
+//
+//   column 0 holds 1, 2, 1 -> pivot row 1, multipliers 1/2 = 0.5 (exact). Row 0
+//   becomes [0.5, 2 - 0.5*4, 3 - 0.5*6] = [0.5, 0, 0] with both zeros exact,
+//   because 0.5*4 and 0.5*6 are exact. Column 1 then holds 0 and -1, so the
+//   pivot moves to the last row and the remaining multiplier is 0, leaving the
+//   final diagonal entry exactly 0. The guard fires at k = 2.
+//
+// Pinned as TWO independent substrings: the code (so a future renumbering of
+// the BL8xxx runtime family is caught) and the message (so a guard that fired
+// for some OTHER reason cannot satisfy it). Both are what
+// `CodeGen.solveSingularMessage` and `Interp/ArrayOps.solveArray` emit, which
+// is how this one file pins the compiled arm and the interpreted arm at once.
+import math as m
+let A: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 1.0, 1.0]]
+let b: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let x = m.solve(A, b)
