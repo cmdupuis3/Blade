@@ -146,7 +146,10 @@ let private emissionCases : (string * bool * string * string list * string list)
        [ shimInclude; "blade_linalg::blade_gram_distinct_d("; "linalg dispatch: gram(A, B)"
          "A.data, (A.extents[0] * A.extents[1])"
          "B.data, (B.extents[0] * B.extents[1])"
-         "G.data, (A.extents[0] * B.extents[0])" ],
+         // Output capacity is BAKED from the fixture's literal Idx<3>/Idx<4>
+         // extents (literalOrRuntimeExtentOfArray); operand cell counts keep
+         // the runtime spelling (denseCellCountExpr, deliberately untouched).
+         "G.data, (3 * 4)" ],
        [ "cblas_"; "#include <cblas.h>"; "blade_gram_same_" ])
       // matmul — the first-class intrinsic. `__math_matmul` must NOT survive
       // into the output (it is a pre-inference marker), and no synthesized
@@ -159,7 +162,8 @@ let private emissionCases : (string * bool * string * string list * string list)
        [ shimInclude; "blade_linalg::blade_matmul_d("; "linalg dispatch: matmul(A, B)"
          "A.data, (A.extents[0] * A.extents[1])"
          "B.data, (B.extents[0] * B.extents[1])"
-         "C.data, (A.extents[0] * B.extents[1])" ],
+         // Baked output capacity: literal Idx<2> x Idx<2> from the fixture.
+         "C.data, (2 * 2)" ],
        [ "cblas_"; "#include <cblas.h>"; "__math_matmul"; "double __math_1" ])
       // ================= TYPED DISPATCH (Round A) =================
       // Every entry point is `blade_<route>_<p>`, p ∈ {s,d,c,z}, and the letter
@@ -500,23 +504,27 @@ let private emissionCases : (string * bool * string * string list * string list)
       // accumulator per canonical cell.
       ("gate_off_gram_same_emits_packed_triangular_loops", false,
        realMat + "let G = gram(A, A)\n",
-       [ "for (size_t __gi"; "__gjr < A.extents[0] - __gi"; "G[__gi][__gjr] = __gacc;" ],
+       // The triangular bound is baked from the fixture's literal Idx<3>.
+       [ "for (size_t __gi"; "__gjr < 3 - __gi"; "G[__gi][__gjr] = __gacc;" ],
        [ shimInclude; "blade_linalg::"; "cblas_" ])
       // gram(A, B): the dense scatter over all (i, j).
       ("gate_off_gram_distinct_emits_dense_loops", false,
        realMat + realMatB + "let G = gram(A, B)\n",
        [ "for (size_t __gi"; "for (size_t __gj"; "G[__gi][__gj] = __gacc;" ],
        [ shimInclude; "blade_linalg::"; "cblas_" ])
-      // matmul: the triple loop, i/j/t ascending — the SAME order
-      // Interp/ArrayOps.matmulArray uses, which is what makes `interp math`
-      // a byte-identity test of the code an ordinary build actually runs.
+      // matmul: the reordered i-t-j triple loop (unit-stride B, row-accumulator
+      // in C). Per OUTPUT CELL the summands are still added in ascending t —
+      // the same per-cell order Interp/ArrayOps.matmulArray uses, which is what
+      // keeps `interp math` a byte-identity test of the code an ordinary build
+      // actually runs (verified byte-identical under -ffp-contract=off).
       ("gate_off_matmul_emits_native_triple_loop", false,
        "import math as m\n" +
        "let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
        "let B: Array<Float64 like Idx<3>, Idx<2>> = [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]\n" +
        "let C = m.matmul(A, B)\n",
        [ "for (size_t __mi"; "for (size_t __mj"; "for (size_t __mt"
-         "__macc += A[__mi][__mt] * B[__mt][__mj];" ],
+         "const double __ma = A[__mi][__mt];"
+         "__mcrow[__mj] += __ma * __mbrow[__mj];" ],
        [ shimInclude; "blade_linalg::"; "cblas_"; "__math_matmul" ])
       // dot: the fused fold nest, unchanged from before any dispatch existed.
       ("gate_off_dot_emits_the_fold_nest", false,
@@ -865,7 +873,8 @@ let runLinAlgEmissionTests () : BlockResult =
            [ cudaShimInclude; "blade_cuda_gram_distinct_d("; "cublas dispatch: gram(A, B)"
              "A.data, (A.extents[0] * A.extents[1])"
              "B.data, (B.extents[0] * B.extents[1])"
-             "G.data, (A.extents[0] * B.extents[0])" ],
+             // Baked output capacity, same rule as the host adapter pin above.
+             "G.data, (3 * 4)" ],
            [ shimInclude; "blade_linalg::"; "cblas_"; "blade_cuda_gram_same_" ])
           ("cublas_matmul_routes_to_device_gemm", true, false,
            "import math as m\n" +
@@ -873,7 +882,7 @@ let runLinAlgEmissionTests () : BlockResult =
            "let B: Array<Float64 like Idx<3>, Idx<2>> = [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]\n" +
            "let C = m.matmul(A, B)\n",
            [ cudaShimInclude; "blade_cuda_matmul_d("; "cublas dispatch: matmul(A, B)"
-             "C.data, (A.extents[0] * B.extents[1])" ],
+             "C.data, (2 * 2)" ],
            [ shimInclude; "blade_linalg::"; "cblas_"; "__macc" ])
           // COMPLEX same-array gram is HERMITIAN on the device too: `_z` binds
           // cublasZherk, not Zsyrk. The letter is the only place that shows.

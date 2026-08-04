@@ -268,9 +268,14 @@ let runPermSpecTests () : BlockResult =
     let rejN = checkPermSizing "perm_weight_dim" "K + L" 4 3
     check "N < K + L is REFUSED (v1 full-basis rule), not silently truncated"
           (isErr rejN) ""
-    check "the N < K + L diagnostic names the truncated-basis DEFERRAL and both counts"
+    // The message was reworded in the c85e48c comment cleanup: the retired-plan
+    // "§3.6 named deferral" phrasing became "unsupported rather than silently
+    // substituted". The load-bearing content is unchanged: the TRUNCATED-BASIS
+    // variant is named, and both counts (full 15 vs truncated 14) appear.
+    check "the N < K + L diagnostic names the TRUNCATED-BASIS variant and both counts"
           (let m = msgOf rejN
-           m.Contains "deferral" && m.Contains "15" && m.Contains "14" && m.Contains "§3.6")
+           m.Contains "TRUNCATED-BASIS" && m.Contains "15" && m.Contains "14"
+           && m.Contains "unsupported")
           (msgOf rejN)
     check "N = K + L exactly is accepted; N >= 1 is required"
           (checkPermSizing "perm_weight_dim" "K + L" 4 4 = Ok ()
