@@ -416,6 +416,51 @@ let levelOf (r: LinAlgRoutine) : BlasLevel =
     |> List.tryPick (fun (rr, lvl, _, _, _) -> if rr = r then Some lvl else None)
     |> Option.defaultValue L1
 
+// Omp-vs-BLAS precedence policy
+
+/// Which side wins when a nest that MATCHES a route also carries an explicit
+/// `omp` licence on its kernel.
+type OmpPrecedence =
+    /// THE USER'S PRAGMA WINS. An `omp` request on the matched kernel declines
+    /// the dispatch outright; the nest keeps its `#pragma omp` (or its chunked
+    /// parallel fold) exactly as written.
+    | OmpWins
+    /// THE BLAS ROUTE WINS. The dispatch fires even though the kernel asked
+    /// for `omp` -- the licence is honoured by the ROUTINE's own threading
+    /// rather than by a pragma on a nest that no longer exists.
+    | BlasWins
+
+/// The precedence policy, stated once and per LEVEL -- because the answer is
+/// OPPOSITE at L1/L2 and at L3, and the argument for each only reads as an
+/// argument when the two sit side by side.
+///
+/// THIS TABLE EXISTS BECAUSE THE RULE USED TO BE A HARDCODED MATCHER GUARD.
+/// `(|BlasL1|_|)` and `(|BlasL2|_|)` each carried their own
+/// `ompRequested -> None`, which read as a UNIVERSAL rule; copying it into the
+/// L3 nest matcher would have made that pattern fire on nothing, since a real
+/// covariance/gram kernel carries `omp`. Stating precedence per level makes
+/// "omp wins" and "BLAS wins" both auditable in one place, and makes flipping
+/// one a test edit rather than a silent change of behaviour.
+let ompPolicy : (BlasLevel * OmpPrecedence * string) list =
+    [ L1, OmpWins,
+      "an explicit user reorder licence outranks a dispatch heuristic. `blade_dot`'s no-BLAS fallback is a SERIAL accumulator, so firing here would silently convert declared parallelism into serial code in every build without OpenBLAS -- a performance regression with nothing in the emitted text to show for it"
+      L2, OmpWins,
+      "a parallel row map is exactly what `#pragma omp parallel for` over the outer level already gives, so the dispatch adds cache blocking and takes away the user's pragma. Same no-BLAS-fallback-is-serial argument as dot"
+      L3, BlasWins,
+      "INVERTED, and deliberately: a threaded scalar triangle is NOT 'what the routine already gives'. OpenBLAS's `?syrk` is itself multithreaded AND register-blocked AND packed, typically an order of magnitude past a `schedule(dynamic)` scalar nest, so honouring the pragma instead of the route would cost the user the very parallelism they asked for. The licence is discharged by the routine, not dropped" ]
+
+/// The precedence for a level, from the table above. Defaults to `OmpWins`:
+/// an unstated level keeps the user's pragma, which is the conservative half.
+let ompPrecedenceOf (lvl: BlasLevel) : OmpPrecedence =
+    ompPolicy
+    |> List.tryPick (fun (ll, p, _) -> if ll = lvl then Some p else None)
+    |> Option.defaultValue OmpWins
+
+/// Does an `omp` request on the matched kernel DECLINE this level's dispatch?
+/// The one predicate every nest matcher consults, so no matcher states the
+/// rule for itself.
+let ompRequestDeclines (lvl: BlasLevel) : bool = ompPrecedenceOf lvl = OmpWins
+
 /// The C++ entry point a routed call lands on. Kept here (not in CodeGen) so
 /// every shim function name this compiler can emit is enumerable from one
 /// place.
@@ -784,11 +829,11 @@ type DotFoldFacts = {
 ///     parameters (no capture, index variable or third term);
 ///   * the fold kernel is the builtin `+`.
 ///
-/// PRECEDENCE (see the `Dot` policy row): if the fold kernel is
-/// `omp`-licensed, this pattern DECLINES and the chunked parallel fold keeps
-/// the nest -- an explicit user reorder licence outranks a dispatch
-/// heuristic, since firing here in a no-BLAS build would silently convert
-/// licensed parallelism into serial code.
+/// PRECEDENCE is READ OFF `ompPolicy`, never decided here: L1 is `OmpWins`,
+/// so an `omp`-licensed fold kernel DECLINES this pattern and the chunked
+/// parallel fold keeps the nest -- an explicit user reorder licence outranks
+/// a dispatch heuristic, since firing here in a no-BLAS build would silently
+/// convert licensed parallelism into serial code.
 ///
 /// The SEED is not part of the match: `reduce`'s seed (the implicit `(+)`
 /// identity, or a user `init`) is passed through to the shim, whose native
@@ -797,7 +842,9 @@ type DotFoldFacts = {
 let (|BlasL1|_|) ((streamedCount, facts, operandTypes, cg): int * DotFoldFacts * IRArrayType list * LoopNestCodeGen)
         : LinAlgCall option =
     if not facts.FoldIsBuiltinAdd then None
-    elif facts.FoldRequestedOmp then None          // precedence: chunked fold wins
+    // Precedence from the POLICY TABLE (`ompPolicy`), not from a rule stated
+    // here: L1 is `OmpWins`, so the chunked parallel fold keeps the nest.
+    elif facts.FoldRequestedOmp && ompRequestDeclines L1 then None
     elif cg.FoldWrapper.IsNone || cg.FoldChunk.IsSome then None
     elif not (nestModeOk streamedCount cg) then None
     else
@@ -881,13 +928,17 @@ let (|BlasL1|_|) ((streamedCount, facts, operandTypes, cg): int * DotFoldFacts *
 /// instead -- a different count whenever the two disagree, which Blade's
 /// unify does not rule out -- so declining is the honest answer.
 ///
-/// PRECEDENCE, same rule as dot: an `omp` request on the row kernel declines,
-/// since a parallel row map is exactly what `#pragma omp parallel for` over
-/// the outer level already gives, and the no-BLAS fallback is serial.
+/// PRECEDENCE is READ OFF `ompPolicy`, same answer as dot: L2 is `OmpWins`,
+/// so an `omp` request on the row kernel declines, since a parallel row map is
+/// exactly what `#pragma omp parallel for` over the outer level already gives,
+/// and the no-BLAS fallback is serial. (L3 answers the opposite -- see
+/// `(|BlasL3|_|)`.)
 let (|BlasL2|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * IRArrayType list * LoopNestCodeGen)
         : LinAlgCall option =
     if cg.FoldWrapper.IsSome || cg.FoldChunk.IsSome then None
-    elif ompRequested then None                    // precedence: keep the pragma
+    // Precedence from the POLICY TABLE (`ompPolicy`), not from a rule stated
+    // here: L2 is `OmpWins`, so the nest keeps the pragma the user asked for.
+    elif ompRequested && ompRequestDeclines L2 then None
     elif not (nestModeOk streamedCount cg) then None
     else
     match singleRectangularLevel cg, cg.InputArrayNames, operandTypes with
@@ -947,16 +998,199 @@ let (|BlasL2|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
         | _ -> None
     | _ -> None
 
-// Still planned -- L3 nest matching (skeleton only)
+// (|BlasL3|_|) -- syrk, from a comm-licensed packed-covariance nest
+
+/// A trailing scalar the kernel applies to the contraction -- the `/ N` a
+/// centred covariance carries. Kept as the IR EXPRESSION (this module never
+/// invents C++ text); CodeGen resolves it through its own name map, exactly
+/// as it does a `FromKernelRef` operand.
+type NestScale =
+    /// `<contraction> / d`
+    | ScaleDiv of IRExpr
+    /// `<contraction> * s`, either operand order
+    | ScaleMul of IRExpr
+
+/// `prodsum(a, b)`, bare or wrapped in EXACTLY ONE scalar `/` or `*`.
+///
+/// THE ONE DEFINITION OF THE PEEL, exported so that the matcher (which uses it
+/// as a shape gate) and the emission site (which needs the scale expression to
+/// render) cannot drift into disagreeing about what a scaled contraction is.
+///
+/// The scale is admitted as a LITERAL or a plain `IRVar` only. Anything richer
+/// is declined rather than rendered: a general expression could read a kernel
+/// parameter, and a per-CELL factor is not a scale at all.
+let (|ProdSumScaled|_|) (e: IRExpr) : (IRExpr list * NestScale option) option =
+    let scalarOk (s: IRExpr) =
+        (match s with
+         | IRLit (IRLitFloat _) | IRLit (IRLitInt _) | IRVar _ -> true
+         | _ -> false)
+        && (match typeOf s with
+            | IRTScalar ETFloat64 | IRTScalar ETFloat32 -> true
+            | _ -> false)
+    match e with
+    | IRProdSum args -> Some (args, None)
+    | IRBinOp (_, IRDiv, IRProdSum args, d) when scalarOk d -> Some (args, Some (ScaleDiv d))
+    | IRBinOp (_, IRMul, IRProdSum args, s) when scalarOk s -> Some (args, Some (ScaleMul s))
+    | IRBinOp (_, IRMul, s, IRProdSum args) when scalarOk s -> Some (args, Some (ScaleMul s))
+    | _ -> None
+
+/// `C = method_for(A, A) <@> lambda(ri, rj) where comm(ri, rj) -> prodsum(ri, rj)`
+///   ->  `blade_gram_same` (`?syrk`).
+///
+/// WHY THIS SHAPE: it is how a packed covariance / Gram matrix actually
+/// appears in Blade programs (corpus: `sgs/005_filter_stress_comoment`,
+/// `symmetry/017_fiber_kernel_reduce_block`, `ppl/065_staged_moment_tower`).
+/// `comm(ri, rj)` is what made the nest TRIANGULAR, and `?syrk` computes
+/// exactly that triangle -- so this is not a rewrite the licence has to
+/// justify, it is the licence's own iteration space computed by a better
+/// routine.
+///
+/// SHAPE MATCHED, exactly:
+///   * a TWO-level MATERIALISING nest (no fold wrapper, no fold chunk);
+///   * level 0 RECTANGULAR, level 1 TRIANGULAR over the SAME extent of the
+///     SAME axis (`BoundDependencies = [0]`, `StrictOffset = 0` -- the
+///     INCLUSIVE triangle syrk writes, never the strict one an antisymmetric
+///     nest iterates), neither level fused;
+///   * exactly TWO input array slots naming the SAME array, real f64, of TWO
+///     ordinary dense axes;
+///   * one element binding per level, each a real peel of dim 0 of that array
+///     (`ArrayRank (2) > depth (1)` at its level makes it a FIBER, not a
+///     scalar leaf);
+///   * the output is a real f64 array of ONE rank-2 `SymSymmetric` group --
+///     Blade's PACKED upper triangle, which is byte-for-byte the layout
+///     `blade_gram_same_*` already writes (proven in `blade_linalg.hpp`, so
+///     the route needs zero staging on C);
+///   * the kernel body is exactly `prodsum(<level 0's peel>, <level 1's
+///     peel>)`, optionally divided or multiplied by ONE scalar.
+///
+/// THE SCALE. `prodsum(x, y) / N` is the real covariance shape, and it is
+/// admitted: the descriptor carries the scalar and the emission site applies
+/// it to the packed triangle AFTER the call. Deliberately NOT folded into
+/// syrk's `alpha`: `alpha = 1/N` would round the reciprocal first and then
+/// multiply, whereas the nest this replaces divides the finished sum, so
+/// post-scaling reproduces the emitted arithmetic one operation for one
+/// operation instead of merely agreeing to a ULP.
+///
+/// PRECEDENCE is READ OFF `ompPolicy`, and L3's answer is the OPPOSITE of
+/// L1/L2's: `BlasWins`, so a kernel carrying `omp` still routes. Copying L2's
+/// hardcoded decline would have made this pattern fire on nothing, since the
+/// covariance kernels it exists for are precisely the ones written with `omp`.
+///
+/// COMPLEX DECLINES, and not for want of an entry point. The complex instance
+/// of this route is a HERMITIAN rank-k update (`?herk`, conjugating the second
+/// factor) -- which is right for the gram NODE, whose scalar loop conjugates.
+/// The matched kernel body here is `prodsum(ri, rj)`, which conjugates
+/// NOTHING, so this nest is A.A^T and `herk` would silently return a different
+/// matrix. A conjugating surface form would be a DIFFERENT match, not a
+/// precision widening.
+///
+/// F64 ONLY, deliberately, in this increment. `blade_gram_same_s` exists and
+/// is layout-identical, and the NODE route already reaches it -- so widening
+/// is the single conjunct below plus its emission test, and is left as that
+/// rather than landed unexercised. Every other precision declines to the
+/// existing nest, which costs the optimisation and changes no value.
+let (|BlasL3|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * IRArrayType list * LoopNestCodeGen)
+        : LinAlgCall option =
+    if cg.FoldWrapper.IsSome || cg.FoldChunk.IsSome then None
+    // Precedence from the POLICY TABLE: L3 is `BlasWins`, so this is a no-op
+    // today. Spelled anyway, so that flipping the table row flips the matcher
+    // and no level silently ignores the policy it is supposed to obey.
+    elif ompRequested && ompRequestDeclines L3 then None
+    elif not (nestModeOk streamedCount cg) then None
+    else
+    match cg.Bindings, cg.InputArrayNames, operandTypes with
+    | [ l0; l1 ], [ aName; bName ], [ aTy; bTy ]
+        when aName = bName
+             && l0.BoundDependencies.IsEmpty && l0.StrictOffset = 0 && l0.FusedRank.IsNone
+             && l1.BoundDependencies = [ 0 ] && l1.StrictOffset = 0 && l1.FusedRank.IsNone
+             // Both levels iterate the SAME axis of the SAME array: `m` is one
+             // number, which is what makes the result square.
+             && l0.ExtentArrayRef = l1.ExtentArrayRef
+             && l0.ExtentDimRef = l1.ExtentDimRef
+             && l0.Extent = l1.Extent ->
+        match denseBlasArrayOfRank 2 aTy, denseBlasArrayOfRank 2 bTy with
+        // `PrecD` and nothing else (see the two notes above): complex is a
+        // DIFFERENT operation here, and f32 is an unexercised widening.
+        // Relaxing to `not (isComplexPrecision pa)` is what admits `ssyrk`.
+        | Some pa, Some pb when pa = pb && pa = PrecD ->
+            let prec = pa
+            // Output: ONE rank-2 SymSymmetric group -- Blade's packed upper
+            // triangle -- of the SAME precision. A dense rank-2 output, an
+            // antisymmetric group, or a compound/orbit axis all decline: the
+            // shim writes `Crows[i][jr]` with `jr < m - i` and nothing else
+            // has that footprint.
+            let outOk =
+                match cg.OutputType with
+                | ArrayElem outTy ->
+                    not outTy.IsVirtual
+                    && precisionOf outTy.ElemType = Some prec
+                    && (match outTy.IndexTypes with
+                        | [ ix ] ->
+                            ix.Rank = 2
+                            && ix.Symmetry = SymSymmetric
+                            && ix.IxKind = IxKPlain
+                            && ix.Dependencies.IsEmpty
+                            // C is m x m over the SAME m the levels iterate.
+                            // Deduction gives this today; checking it makes
+                            // "square" a fact rather than an assumption, and a
+                            // spurious decline costs only the optimisation.
+                            && ix.Extent = l0.Extent
+                            && (match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true)
+                        | _ -> false)
+                | _ -> false
+            if not outOk then None else
+            // NOTE on `RankComponent`: it is NOT checked against the level.
+            // For an outer-product nest over two SLOTS of the same array both
+            // peels carry component 0 (the component index is per-ARRAY, and
+            // each slot is peeled once) -- which array a level peels is
+            // `ArrayPosition`, and that is what separates the two here.
+            let peelOk (pos: int) (e: ElementBinding) =
+                (match e.Virtual with RealArray -> true | _ -> false)
+                && e.ArrayPosition = pos
+                && e.ArrayName = aName
+                && e.ArrayRank = 2
+                && e.DimIndex = 0
+                && precisionOf e.ArrayElemType = Some prec
+                && (match e.SlotTag with Some t -> not (t.StartsWith "__") | None -> true)
+            match l0.Elements, l1.Elements with
+            | [ e0 ], [ e1 ] when peelOk 0 e0 && peelOk 1 e1 && e0.ParamVarId <> e1.ParamVarId ->
+                (match cg.KernelExpr with
+                 | ProdSumScaled ([ IRVar (iId, _); IRVar (jId, _) ], scale)
+                        when iId = e0.ParamVarId && jId = e1.ParamVarId ->
+                    // A scale that reads a KERNEL PARAMETER is not a scale:
+                    // it would vary per cell. (No scalar f64 parameter exists
+                    // on this kernel today -- both params are fibers -- so
+                    // this is a guard against a future widening, not a case
+                    // reachable now.)
+                    let isKernelParam id =
+                        cg.KernelParams |> List.exists (fun (p: IRParam) -> p.VarId = id)
+                    let scaleOk =
+                        match scale with
+                        | Some (ScaleDiv (IRVar (id, _))) | Some (ScaleMul (IRVar (id, _))) ->
+                            not (isKernelParam id)
+                        | _ -> true
+                    if not scaleOk then None
+                    else
+                        Some { Routine = Syrk
+                               Route = RouteGramSame
+                               Level = L3
+                               Operands = []
+                               NestOperands = [ RoleA, FromNestArray aName
+                                                RoleC, FromNestOutput cg.OutputName ]
+                               M = None; N = None; K = None
+                               ElemType = e0.ArrayElemType
+                               Precision = prec
+                               PackedTriangularResult = true }
+                 | _ -> None)
+            | _ -> None
+        | _ -> None
+    | _ -> None
+
+// Still planned -- L3 nest matching, the OTHER shapes
 //
-// let (|BlasL3|_|) (...) : LinAlgCall option = ...
-//
-// Left as a comment rather than a `None`-returning stub on purpose: a stub
-// that always declines is indistinguishable at the call site from a pattern
-// that has been implemented and simply did not match, which is exactly the
-// confusion the policy table exists to prevent. L3 nest matching (a genuine
-// three-level contraction written as loops, rather than the `matmul`/`gram`
-// NODES already routed) arrives with its first real case.
+// A genuine three-level dense contraction written as loops (rather than the
+// `matmul` / `gram` NODES already routed) has no pattern here yet. It arrives
+// with its first real case, on the model of `(|BlasL3|_|)` above.
 //
 // PACKED-SYMMETRIC (dspmv): the shim entry `blade_symv` EXISTS and its layout
 // premise is PROVEN (Blade's rank-2 sym-compact DFS pool order is
