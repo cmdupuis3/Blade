@@ -1,0 +1,21 @@
+// TEST: Cross-module kernel-lambda co-specialization
+// MODULE: Fibers
+// `rowdot` maps a kernel LAMBDA over the rows of a 2D array, closing over a
+// weight vector. The lambda is lifted to its own IRFunction here, so a shape
+// specialization of `rowdot` reaches it only through the kernel slot of the
+// combinator record -- a reference, not a definition. Co-specialization makes
+// the copy bake the fiber extent `n` into the kernel's own loop as well as the
+// row extent `p` into the enclosing nest.
+//
+// This file pins the VALUES: the specialized nest and the generic one must
+// compute the same numbers, whichever the call site got. `blade test shapespec`
+// pins the decision (which bound is a literal), which values cannot see.
+module Fibers
+
+function rowdot(A: Array<Float64 like Idx<p>, Idx<n>>, w: Array<Float64 like Idx<n>>) -> Array<Float64 like Idx<p>> =
+    method_for(A) <@> lambda(row: Array<Float64 like Idx<n>>) -> prodsum(row, w) |> compute
+
+// A second entry point over the SAME kernel shape but a different fiber
+// length, so the two specializations (and their two kernel clones) coexist.
+function rowdot2(B: Array<Float64 like Idx<q>, Idx<m>>, u: Array<Float64 like Idx<m>>) -> Array<Float64 like Idx<q>> =
+    method_for(B) <@> lambda(fiber: Array<Float64 like Idx<m>>) -> prodsum(fiber, u) |> compute

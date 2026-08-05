@@ -62,6 +62,22 @@ let private sumFn (name: string) =
 let private vec5 = "let w5: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
 let private vec3 = "let w3: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
 
+/// The fiberdot shape: a row-mapped kernel LAMBDA closing over a weight
+/// vector. `p` is the outer (row) extent, `n` the inner (fiber) extent, and
+/// the kernel's own loop runs over `n`. Before co-specialization that was the
+/// one bound in the whole specialized nest still read from `.extents[]`: the
+/// lambda is a separate `IRFuncDef`, reached from the spec's body only as a
+/// value in the combinator's kernel slot, so the spec's type rewrite stopped
+/// at the reference.
+let private rowdotFn =
+    "function rowdot(A: Array<Float64 like Idx<p>, Idx<n>>, w: Array<Float64 like Idx<n>>)"
+    + " -> Array<Float64 like Idx<p>> =\n"
+    + "    method_for(A) <@> lambda(row: Array<Float64 like Idx<n>>) -> prodsum(row, w) |> compute\n"
+
+let private mat43 =
+    "let M: Array<Float64 like Idx<4>, Idx<3>> ="
+    + " [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [1.0, 1.0, 1.0]]\n"
+
 /// (name, sources, mustContain, mustNotContain). A single-element source list
 /// goes through the single-module pipeline; two or more exercise
 /// `lowerMultiSource` and the module merge.
@@ -158,6 +174,135 @@ let private runEmissionCase
             false
 
 // ---------------------------------------------------------------------------
+// Kernel-lambda co-specialization
+//
+// The block above asks whether a COPY was made. This one asks whether the copy
+// is baked all the way DOWN, which needs a scoped assertion: "the spec's kernel
+// loop reads a literal" is a claim about one function's body, and a whole-file
+// `Contains` cannot make it -- the generic copy three lines above says the
+// opposite and would satisfy either polarity of the same needle.
+// ---------------------------------------------------------------------------
+
+/// The text of one emitted C++ function DEFINITION, brace-matched from its
+/// signature. The forward declaration carrying the same signature is skipped:
+/// the definition is the occurrence whose line ends in `{`.
+let private bodyOf (cpp: string) (signature: string) : string option =
+    let rec findDef (from: int) =
+        if from >= cpp.Length then -1 else
+        let i = cpp.IndexOf(signature, from)
+        if i < 0 then -1
+        else
+            let eol = match cpp.IndexOf('\n', i) with | -1 -> cpp.Length | k -> k
+            if cpp.Substring(i, eol - i).TrimEnd().EndsWith "{" then i else findDef (i + 1)
+    let start = findDef 0
+    if start < 0 then None else
+    let mutable depth = 0
+    let mutable j = cpp.IndexOf('{', start)
+    let mutable fin = -1
+    if j < 0 then None else
+    while fin < 0 && j < cpp.Length do
+        (if cpp.[j] = '{' then depth <- depth + 1
+         elif cpp.[j] = '}' then
+             depth <- depth - 1
+             if depth = 0 then fin <- j)
+        j <- j + 1
+    if fin < 0 then None else Some (cpp.Substring(start, fin - start + 1))
+
+/// (name, sources, [(function signature, mustContain, mustNotContain)]).
+/// Every assertion is scoped to one emitted function.
+let private scopedCases
+        : (string * (string * string) list
+                  * (string * string list * string list) list) list =
+    [ // The single-module fiberdot. Both bounds are literals inside the spec:
+      // `4` from the spec's own parameter record, `3` from the CO-SPECIALIZED
+      // kernel's. `.extents[` must not appear at all -- the peel writes
+      // `A.extents + 1`, which is a pointer bump, not a bound read.
+      ("lifted_kernel_lambda_bakes_the_inner_bound",
+       [ ("Main", rowdotFn
+                  + "let W: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
+                  + mat43 + "let r = rowdot(M, W)\n") ],
+       [ ("Array<double, 1> rowdot_shape_n3_p4(", [ "__i0 < 4"; "__pt < 3" ], [ ".extents[" ])
+         // The generic copy is untouched: it still serves any call site that
+         // pins nothing, and every one of its bounds is a runtime read.
+         ("Array<double, 1> rowdot(", [ "A.extents[0]"; "A____i0.extents[0]" ], [])
+         // …as does the generic kernel. The clone is PRIVATE to the spec.
+         ("double __lambda_", [ "row.extents[0]" ], []) ])
+
+      // The same shape across a module boundary: the kernel lambda lives in
+      // the defining module (it was lifted out of a body there), the literal
+      // comes from an importer, and the clone is placed beside its origin.
+      ("cross_module_lifted_kernel_lambda_bakes_the_inner_bound",
+       [ ("Fibers", "module Fibers\n" + rowdotFn)
+         ("Main", "module Main\nimport Fibers\n"
+                  + "let W: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
+                  + mat43 + "let r = Fibers.rowdot(M, W)\n") ],
+       [ ("Array<double, 1> rowdot_shape_n3_p4(", [ "__i0 < 4"; "__pt < 3" ], [ ".extents[" ])
+         ("Array<double, 1> rowdot(", [ "A____i0.extents[0]" ], []) ])
+
+      // PROVENANCE NEGATIVE. A source-level function used as a kernel declares
+      // its OWN `Idx<n>` -- identically spelled, unrelated axis -- so its names
+      // are not the caller's to bake, and baking them is the very
+      // out-of-bounds class ff3ad88's gate exists to refuse. The enclosing
+      // function still specializes; the kernel keeps its runtime bound.
+      ("named_function_kernel_is_not_co_specialized",
+       [ ("Main",
+          "function krn(row: Array<Float64 like Idx<n>>) -> Float64 = reduce(row, (+))\n"
+          + "function rowsum(A: Array<Float64 like Idx<p>, Idx<n>>) -> Array<Float64 like Idx<p>> =\n"
+          + "    method_for(A) <@> krn |> compute\n"
+          + mat43 + "let r = rowsum(M)\n") ],
+       [ ("Array<double, 1> rowsum_shape_n3_p4(", [ "__i0 < 4"; "krn(A____i0)" ], [])
+         ("double krn(", [ "row.extents[0]" ], []) ]) ]
+
+/// Whole-file negatives, where the claim IS about the whole file.
+let private absenceCases : (string * (string * string) list * string list) list =
+    [ // NEGATIVE CONTROL. Every call site is symbolic (the forwarding wrapper
+      // pins nothing), so no function specializes and therefore no kernel is
+      // cloned -- co-specialization is strictly downstream of a spec.
+      ("symbolic_call_site_clones_no_kernel",
+       [ ("Main",
+          rowdotFn
+          + "function driver(B: Array<Float64 like Idx<q>, Idx<r>>, v: Array<Float64 like Idx<r>>)"
+          + " -> Array<Float64 like Idx<q>> = rowdot(B, v)\n"
+          + "let W: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
+          + mat43 + "let r = driver(M, W)\n") ],
+       [ "_shape" ])
+      // A named kernel earns no clone under any name.
+      ("named_function_kernel_earns_no_copy",
+       [ ("Main",
+          "function krn(row: Array<Float64 like Idx<n>>) -> Float64 = reduce(row, (+))\n"
+          + "function rowsum(A: Array<Float64 like Idx<p>, Idx<n>>) -> Array<Float64 like Idx<p>> =\n"
+          + "    method_for(A) <@> krn |> compute\n"
+          + mat43 + "let r = rowsum(M)\n") ],
+       [ "krn_shape" ]) ]
+
+let private runScopedCase
+        ((name, sources, checks)
+            : string * (string * string) list * (string * string list * string list) list) =
+    match (if List.length sources = 1 then cppOfSource name (snd sources.[0]) else cppOfModules name sources) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let problems =
+            checks |> List.collect (fun (signature, mustContain, mustNotContain) ->
+                match bodyOf cpp signature with
+                | None -> [ sprintf "no definition of `%s`" signature ]
+                | Some body ->
+                    (mustContain |> List.filter (body.Contains >> not)
+                                 |> List.map (sprintf "`%s` missing %s" signature))
+                    @ (mustNotContain |> List.filter body.Contains
+                                      |> List.map (sprintf "`%s` unexpectedly holds %s" signature)))
+        if problems.IsEmpty then resultLine Pass name ""; true
+        else resultLine Fail name (String.concat "; " problems); false
+
+let private runAbsenceCase
+        ((name, sources, forbidden) : string * (string * string) list * string list) =
+    match (if List.length sources = 1 then cppOfSource name (snd sources.[0]) else cppOfModules name sources) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        match forbidden |> List.filter cpp.Contains with
+        | [] -> resultLine Pass name ""; true
+        | present -> resultLine Fail name (sprintf "unexpected: %s" (String.concat " | " present)); false
+
+// ---------------------------------------------------------------------------
 // Cap plumbing
 // ---------------------------------------------------------------------------
 
@@ -189,12 +334,50 @@ let private runCapCase (name: string) (envValue: string option) (expected: int) 
             resultLine Fail name (sprintf "expected %d spec(s), got %d" expected got)
             false
 
+/// The same five shapes, but against a function whose body applies a lifted
+/// kernel. Kernel clones ride the same cap: they are minted per (lambda,
+/// signature), so a bound on the signatures is a bound on the copies, and the
+/// cap stays the standing termination backstop for both worklists at once.
+let private lambdaCapProbeSource =
+    rowdotFn
+    + ([1 .. 5]
+       |> List.map (fun k ->
+            let elems = [1 .. k] |> List.map (fun i -> sprintf "%d.0" i) |> String.concat ", "
+            sprintf "let w%d: Array<Float64 like Idx<%d>> = [%s]\n" k k elems
+            + sprintf "let m%d: Array<Float64 like Idx<2>, Idx<%d>> = [[%s], [%s]]\n" k k elems elems
+            + sprintf "let r%d = rowdot(m%d, w%d)\n" k k k)
+       |> String.concat "")
+
+/// How many co-specialized KERNEL definitions the emitted program holds. The
+/// clone's name embeds its origin's synthesized id, which is not stable across
+/// unrelated edits, so this counts definition lines by shape instead.
+let private lambdaCloneCountOf (cpp: string) =
+    cpp.Split('\n')
+    |> Array.filter (fun l ->
+        let l = l.Trim()
+        l.StartsWith "double __lambda_" && l.Contains "_shape_" && l.EndsWith "{")
+    |> Array.length
+
+let private runLambdaCapCase (name: string) (envValue: string option) (expected: int) =
+    use _cap = pinEnv "BLADE_SHAPE_SPEC_CAP" envValue
+    match cppOfSource name lambdaCapProbeSource with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let got = lambdaCloneCountOf cpp
+        if got = expected then
+            resultLine Pass name (sprintf "%d kernel clone(s)" got)
+            true
+        else
+            resultLine Fail name (sprintf "expected %d kernel clone(s), got %d" expected got)
+            false
+
 let runShapeSpecTests () =
     printHeader "Blade-DSL: Shape Specialization Tests"
     // The cap is ambient state for every case here, so neutralize any inherited
     // export before the emission block runs against the default.
     use _neutral = pinEnv "BLADE_SHAPE_SPEC_CAP" None
     let emission = emissionCases |> List.map runEmissionCase
+    let scoped = (scopedCases |> List.map runScopedCase) @ (absenceCases |> List.map runAbsenceCase)
     let caps =
         [ // unset -> the measured-safe default of 4
           runCapCase "cap_default_is_four" None 4
@@ -205,8 +388,11 @@ let runShapeSpecTests () =
           // "0" is NOT unlimited -- it clamps to 64, which for 5 sites is 5
           runCapCase "cap_zero_clamps_rather_than_unlimited" (Some "0") 5
           // garbage falls back to the default rather than to no cap at all
-          runCapCase "cap_unparseable_falls_back_to_default" (Some "banana") 4 ]
-    let results = emission @ caps
+          runCapCase "cap_unparseable_falls_back_to_default" (Some "banana") 4
+          // kernel clones honour the same cap, one per surviving signature
+          runLambdaCapCase "cap_bounds_kernel_clones_too" (Some "2") 2
+          runLambdaCapCase "cap_default_bounds_kernel_clones" None 4 ]
+    let results = emission @ scoped @ caps
     let passed = results |> List.filter id |> List.length
     let failed = results.Length - passed
     printFooter "Shape Specialization" [sprintf "%d passed" passed; sprintf "%d failed" failed]

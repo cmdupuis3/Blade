@@ -6887,6 +6887,25 @@ type private ShapeSpec = {
     SpecName: string
 }
 
+/// One planned CO-specialization: a lifted kernel lambda copied alongside the
+/// spec whose body applies it, baking that spec's own substitution.
+///
+/// A spec's body reaches its kernels as VALUES -- `ApplyInfo.Kernel` /
+/// `IRObjectFor.Kernel` hold a bare `IRVar (lambdaId, funcTy)`, and codegen
+/// resolves and inlines the callable behind it. `shapeRewriteExpr` therefore
+/// rewrites the reference's type and stops: the lambda's own parameter,
+/// capture and body index records live in a separate `IRFuncDef` in
+/// `module.Functions` and keep their symbolic extents, so the inlined kernel's
+/// loop bound stays `<row>.extents[0]` inside a spec whose every other bound
+/// is a literal. Cloning the lambda per (lambda, signature) and pointing only
+/// the spec's own reference at the clone closes that.
+type private ShapeLambdaClone = {
+    LOrig: IRCallable
+    LSubst: Map<string, int64>
+    LCloneId: IRId
+    LCloneName: string
+}
+
 /// Give every symbolic-extent function a literal-extent copy per distinct
 /// call-site shape. Runs after arity and HM monomorphization (both can
 /// create the call sites this reads) and before codegen.
@@ -6974,6 +6993,108 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
     if candidates.IsEmpty then modules else
     let candMap = candidates |> List.map (fun f -> (f.Id, f)) |> Map.ofList
 
+    // CO-SPECIALIZING THE LIFTED KERNEL LAMBDAS
+    //
+    // A spec bakes literals into its own types, but the kernels its body
+    // applies are separate `IRFuncDef`s in `module.Functions`, reached as bare
+    // `IRVar (lambdaId, funcTy)` values in a combinator record's Kernel slot.
+    // The reference's TYPE is rewritten; the definition behind it is not, so
+    // the inlined kernel keeps a `.extents[d]` bound inside a spec whose
+    // surrounding nest is fully baked. Cloning the lambda per (lambda,
+    // signature) and repointing only the spec's own reference closes it.
+    //
+    // The linkage question is the whole difficulty. Nothing in the IR records
+    // "this lambda was lifted out of that function" -- lowering appends every
+    // lifted callable to a flat `module.Functions` -- so it is established from
+    // the reference structure plus the one thing the name does tell us, and it
+    // is exactly what makes inheriting the parent's PROVENANCE (ff3ad88's gate)
+    // sound. See `liftedKernelIds` and `lambdaOwnsNames` below.
+    let allFuncIds = allFuncs |> List.map (fun f -> f.Id) |> Set.ofList
+    /// Callable ids appearing as the HEAD of an application anywhere in the
+    /// program. An applied callee is specialized through the per-signature spec
+    /// path above -- its own call sites pin its own names, which is both more
+    /// precise and already deduped -- so co-specialization deliberately covers
+    /// only callables reached as VALUES. Excluding them program-wide is also
+    /// what lets the reference rewrite be a plain bottom-up id swap: no `IRVar`
+    /// it can reach is ever an application head.
+    let programAppliedIds =
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        let scan (b: IRExpr) =
+            mapIRExpr (fun e ->
+                (match e with
+                 | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
+                 | _ -> ())
+                e) b |> ignore
+        allFuncs |> List.iter (fun f -> scan f.Body)
+        modules |> List.iter (fun m -> m.Bindings |> List.iter (fun b -> scan b.Value))
+        Set.ofSeq acc
+    /// How many DEFINITIONS (function bodies, module-level binding values)
+    /// mention each callable id at all -- one count per definition, however
+    /// many times that definition names it.
+    let refCensus =
+        let fromDef (b: IRExpr) = Set.intersect allFuncIds (collectVarRefsIR b) |> Set.toList
+        ((allFuncs |> List.collect (fun f -> fromDef f.Body))
+         @ (modules |> List.collect (fun m -> m.Bindings |> List.collect (fun b -> fromDef b.Value))))
+        |> List.countBy id |> Map.ofList
+    /// The callables a spec may co-specialize AT ALL, before any per-signature
+    /// question is asked. Every clause is load-bearing for provenance:
+    ///
+    /// - **synthesized `__lambda_N` name**: this is the linkage. Lowering mints
+    ///   such a callable at the point the source lambda expression occurs, so
+    ///   its index records were written INSIDE some function's lexical scope
+    ///   and an `Idx<n>` in them denotes that function's `n`. A source-level
+    ///   function used as a kernel (`method_for(A) <@> krn`) has a real name and
+    ///   declares its OWN `n` -- identically spelled, unrelated axis -- and
+    ///   baking a caller's literal into it is precisely the out-of-bounds bug
+    ///   ff3ad88's gate exists to refuse. (The same prefix test already marks
+    ///   synthesized lambdas for `liftInlineFormsModule`'s dead-copy pruning.)
+    /// - **referenced by exactly ONE definition**: that definition is then the
+    ///   only lexical site the lambda can have come from, which is what turns
+    ///   "written inside SOME function's scope" into "written inside THIS
+    ///   spec's origin's scope". It also rules out a kernel shared by two
+    ///   parents, whose names could not be attributed to either, and (because a
+    ///   self-reference counts as a second definition) any recursive lambda --
+    ///   the conservative answer the recursion rule already gives.
+    /// - **never applied**: see `programAppliedIds`.
+    /// - **benefit gate**: same rule as a function spec. A copy pays only
+    ///   through loop bounds, so a forwarding lambda (an eta wrapper around a
+    ///   named kernel, say) gets none.
+    let liftedKernelIds =
+        allFuncs
+        |> List.filter (fun f ->
+            f.Name.StartsWith "__lambda_"
+            && not f.IsArityPoly
+            && not (Set.contains f.Id programAppliedIds)
+            && (match Map.tryFind f.Id refCensus with Some 1 -> true | _ -> false)
+            && shapeSpecWorthwhile f)
+        |> List.map (fun f -> f.Id)
+        |> Set.ofList
+    /// The per-signature half of the provenance question, and the inherited
+    /// form of `shapeSpecNamesAreOwn`.
+    ///
+    /// `liftedKernelIds` establishes that the lambda's own parameter records
+    /// were written in the parent's scope. Two further doors can still carry a
+    /// FOREIGN name of the same spelling into the copy, and both are shut here:
+    ///
+    /// - a CAPTURE, whose type comes from whatever the enclosing scope bound.
+    ///   Admitted only when the captured id is one of the owning chain's own
+    ///   parameters (`ownedIds`) or its type names nothing being baked. This is
+    ///   what refuses the eta wrapper a named kernel produces: it captures the
+    ///   named function itself, and that arrow type carries the CALLEE's `n`.
+    ///   A capture of an intermediate local declines rather than being chased,
+    ///   which costs an optimization and never correctness.
+    /// - the lambda's BODY, through exactly the two doors `shapeSpecNamesAreOwn`
+    ///   already enumerates (a call's result type, a module-level binding
+    ///   reference). The parent passed that gate over ITS body; the lambda's
+    ///   body is not part of it, so it is gated in its own right.
+    let lambdaOwnsNames (ownedIds: Set<IRId>) (subst: Map<string, int64>) (lam: IRCallable) : bool =
+        let dom = subst |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+        (lam.Captures
+         |> List.forall (fun c ->
+                Set.isEmpty (Set.intersect dom (shapeSymbolicNames c.Type))
+                || Set.contains c.Id ownedIds))
+        && shapeSpecNamesAreOwn funcById bindingIds subst lam.Body
+
     // Planned specs, keyed exactly as monomorphizeModule's specMap is:
     // (callee id, the signature that distinguishes this copy).
     let mutable specMap : Map<IRId * (string * int64) list, ShapeSpec> = Map.empty
@@ -6982,6 +7103,10 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
     let mutable capDeclines : Set<IRId * (string * int64) list> = Set.empty
     // Distinct signatures turned away by the name-provenance gate.
     let mutable nameDeclines : Set<IRId * (string * int64) list> = Set.empty
+    // Planned lambda co-specializations, keyed the same way: (lifted lambda id,
+    // the signature of the spec that asked for it). A reference type, not a
+    // `let mutable`, because the recursive planner below closes over it.
+    let lamMap = System.Collections.Generic.Dictionary<IRId * (string * int64) list, ShapeLambdaClone>()
 
     /// Rewrite one call site against the CURRENT spec map. Pure, so the
     /// scan below can apply it to a throwaway copy of every body and read
@@ -7005,6 +7130,80 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
 
     let specBody (s: ShapeSpec) : IRExpr = shapeRewriteExpr s.Subst s.Orig.Body
 
+    /// Point a body's kernel-slot references at the co-specialized copies
+    /// planned for ITS OWN signature. Only bodies belonging to that signature
+    /// (the spec's, and its clones') are ever rewritten -- the originals keep
+    /// referencing the original lambdas, which is what makes a clone private to
+    /// the one copy that wanted it.
+    ///
+    /// A bottom-up id swap is safe precisely because `liftedKernelIds` excludes
+    /// every id that is ever an application head: no `IRVar` this can reach is
+    /// the callee position of a call.
+    let rewriteLambdaRefs (sign: (string * int64) list) (expr: IRExpr) : IRExpr =
+        if lamMap.Count = 0 then expr else
+        mapIRExpr (fun e ->
+            match e with
+            | IRVar (id, ty) when Set.contains id liftedKernelIds ->
+                match lamMap.TryGetValue ((id, sign)) with
+                | true, c -> IRVar (c.LCloneId, ty)
+                | _ -> e
+            | _ -> e) expr
+
+    /// The clone's own body: the same rewrite the parent spec's body gets.
+    /// VarIds are deliberately NOT freshened, for exactly the reason the spec
+    /// itself does not freshen them (see `materialize`): the copy is
+    /// type-identical to the original at every VALUE position, so sharing ids
+    /// keeps `Captures.Id` pointing at the parameters of the spec that will
+    /// hold it -- which are the ORIGINAL function's parameter ids, unchanged.
+    let lamBody (c: ShapeLambdaClone) : IRExpr = shapeRewriteExpr c.LSubst c.LOrig.Body
+
+    /// Plan the lambda clones one body needs, transitively: a kernel may itself
+    /// apply a further lifted kernel, and that one inherits the same signature
+    /// and the same owned-id chain (extended by this lambda's own parameters,
+    /// which the nested lambda captures).
+    ///
+    /// Termination: the recursion follows `liftedKernelIds`, whose members are
+    /// referenced by exactly one definition each, so the reference graph over
+    /// them is a forest -- no cycle to chase -- and `cap` bounds the breadth per
+    /// origin regardless.
+    let rec planLambdas (ownedIds: Set<IRId>) (subst: Map<string, int64>)
+                        (sign: (string * int64) list) (body: IRExpr) : unit =
+        for lid in Set.intersect liftedKernelIds (collectVarRefsIR body) do
+            if not (lamMap.ContainsKey ((lid, sign))) then
+                match Map.tryFind lid funcById with
+                | None -> ()
+                | Some lam ->
+                    if lambdaOwnsNames ownedIds subst lam then
+                        let newParams =
+                            lam.Params |> List.map (fun p -> { p with Type = shapeRewriteType subst p.Type })
+                        let newRet = shapeRewriteType subst lam.RetType
+                        let newCaps =
+                            lam.Captures |> List.map (fun c -> { c with Type = shapeRewriteType subst c.Type })
+                        let newBody = shapeRewriteExpr subst lam.Body
+                        // Vacuity: this signature names nothing the lambda
+                        // mentions, so the copy would be the original.
+                        let vacuous =
+                            newParams = lam.Params && newRet = lam.RetType
+                            && newCaps = lam.Captures && newBody = lam.Body
+                        // Same cap as a function spec, counted per ORIGIN
+                        // lambda: the standing termination backstop applies
+                        // here too, and a lambda cannot outgrow the specs that
+                        // ask for it by more than the nesting depth.
+                        let existing =
+                            lamMap.Keys |> Seq.filter (fun (k, _) -> k = lid) |> Seq.length
+                        if not vacuous && existing < cap then
+                            lamMap.[(lid, sign)] <-
+                                { LOrig = lam
+                                  LSubst = subst
+                                  LCloneId = builder.FreshId()
+                                  LCloneName =
+                                    sprintf "%s_shape%s" lam.Name
+                                            (sign |> List.map (fun (n, v) -> sprintf "_%s%d" n v)
+                                                  |> String.concat "") }
+                            planLambdas
+                                (Set.union ownedIds (lam.Params |> List.map (fun p -> p.VarId) |> Set.ofList))
+                                subst sign newBody
+
     // Fixpoint: each round rewrites every body (originals, bindings, and the
     // specs planned so far) with the current map, then harvests the call sites
     // exposed. A new spec can expose more (its body's own calls now carry
@@ -7020,6 +7219,10 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
             (allFuncs |> List.map (fun f -> f.Body))
             @ (modules |> List.collect (fun m -> m.Bindings |> List.map (fun b -> b.Value)))
             @ (specMap |> Map.toList |> List.map (snd >> specBody))
+            // A clone's body is a call-site source in its own right: its calls
+            // now carry literal argument extents, which can specialize a
+            // function nothing else pinned.
+            @ (lamMap.Values |> Seq.map lamBody |> List.ofSeq)
         let sites =
             bodies
             |> List.collect (fun b ->
@@ -7057,6 +7260,17 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
                                          SpecName = sprintf "%s_shape%s" orig.Name suffix }
                                        specMap
                     changed <- true
+        // Co-specialize the kernels every planned spec applies. Done inside the
+        // fixpoint rather than after it so a clone's own calls join the next
+        // round's harvest, and so a clone minted by a spec planned this round
+        // is seen before the loop settles.
+        let lamBefore = lamMap.Count
+        specMap
+        |> Map.toList
+        |> List.iter (fun ((_, sign), s) ->
+            planLambdas (s.Orig.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
+                        s.Subst sign (specBody s))
+        if lamMap.Count > lamBefore then changed <- true
 
     // Census, per DEFINING module: candidates counted where they are defined,
     // specs where they are placed, declines charged to the module owning the
@@ -7082,8 +7296,13 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
                         let perFunc =
                             mySpecs |> List.map (fun ((fid, _), s) -> (fid, s.Orig.Name))
                             |> List.groupBy id |> List.map (fun ((_, n), g) -> sprintf "%s x%d" n g.Length)
-                        eprintfn "[shape-spec] %s: %d candidate(s), %d spec(s) [%s], %d cap-decline(s), %d name-decline(s), %d recursive decline(s), %d round(s)"
-                                 m.Name cands.Length mySpecs.Length (String.concat "; " perFunc)
+                        // Lambda clones are charged to the module owning the
+                        // LAMBDA, which is where they are placed -- the same
+                        // rule the spec counts follow.
+                        let myLams =
+                            lamMap.Keys |> Seq.filter (fun (lid, _) -> inThis lid) |> Seq.length
+                        eprintfn "[shape-spec] %s: %d candidate(s), %d spec(s) [%s], %d lambda-clone(s), %d cap-decline(s), %d name-decline(s), %d recursive decline(s), %d round(s)"
+                                 m.Name cands.Length mySpecs.Length (String.concat "; " perFunc) myLams
                                  (countDecl capDeclines) (countDecl nameDeclines)
                                  (recursiveDeclines |> Set.filter inThis |> Set.count) rounds)
 
@@ -7096,11 +7315,10 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
     // (unlike the HM specializer, which freshens and then must clone every
     // lifted lambda that captured a param to repair Captures.Id): the copy is
     // type-identical to the original at every VALUE position -- only Extent
-    // fields differ -- so sharing VarIds keeps any lifted lambda the body
-    // references bound to its original parameters. The lambda's own index
-    // records keep their symbolic extents, costing the optimization inside
-    // the lambda and nothing else (an unbaked extent still emits the correct
-    // runtime read).
+    // fields differ -- so sharing VarIds keeps every lifted lambda the body
+    // references, ORIGINAL or CO-SPECIALIZED, bound to exactly the parameters
+    // it always was. That is what lets a clone carry its origin's
+    // `Captures.Id` list over untouched.
     let materialize (s: ShapeSpec) : IRFuncDef =
         { s.Orig with
             Id = s.SpecId
@@ -7108,7 +7326,19 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
             Params = s.Orig.Params |> List.map (fun p -> { p with Type = shapeRewriteType s.Subst p.Type })
             RetType = shapeRewriteType s.Subst s.Orig.RetType
             Captures = s.Orig.Captures |> List.map (fun c -> { c with Type = shapeRewriteType s.Subst c.Type })
-            Body = rewriteCallSites (specBody s) }
+            Body = rewriteLambdaRefs (Map.toList s.Subst) (rewriteCallSites (specBody s)) }
+
+    /// A co-specialized kernel. Same shape as `materialize`, and same VarId
+    /// rule for the same reason; the reference rewrite is keyed on the SAME
+    /// signature, so a nested kernel resolves to the clone made for this copy.
+    let materializeLambda (c: ShapeLambdaClone) : IRCallable =
+        { c.LOrig with
+            Id = c.LCloneId
+            Name = c.LCloneName
+            Params = c.LOrig.Params |> List.map (fun p -> { p with Type = shapeRewriteType c.LSubst p.Type })
+            RetType = shapeRewriteType c.LSubst c.LOrig.RetType
+            Captures = c.LOrig.Captures |> List.map (fun cp -> { cp with Type = shapeRewriteType c.LSubst cp.Type })
+            Body = rewriteLambdaRefs (Map.toList c.LSubst) (rewriteCallSites (lamBody c)) }
 
     // PLACEMENT IS PART OF CORRECTNESS, not cosmetics. Codegen interleaves
     // bindings and functions in IRId order; every function
@@ -7123,24 +7353,42 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
     // the rule survive going cross-module: the merged emission stream keys a
     // derived id on its origin's, so B's copy sits at B's program point even
     // though A's call site is what asked for it.
+    // A lambda clone obeys the identical rule against ITS origin, the lambda --
+    // and that is enough for the spec that references it, without a second
+    // argument. The spec is emitted at its own origin `f`'s program point; `f`
+    // already referenced the lambda, so wherever `f` is in scope the lambda is
+    // too, and the clone sits immediately after the lambda.
     let specsByOrigin =
         specMap |> Map.toList |> List.map snd |> List.groupBy (fun s -> s.Orig.Id) |> Map.ofList
+    let lamsByOrigin =
+        lamMap.Values |> List.ofSeq |> List.groupBy (fun c -> c.LOrig.Id) |> Map.ofList
     let rewritten =
         modules |> List.map (fun modul ->
             let newFunctions =
                 modul.Functions
                 |> List.collect (fun f ->
                     let f' = { f with Body = rewriteCallSites f.Body }
-                    match Map.tryFind f.Id specsByOrigin with
-                    | Some specs -> f' :: (specs |> List.map materialize)
-                    | None -> [f'])
+                    let specCopies =
+                        match Map.tryFind f.Id specsByOrigin with
+                        | Some specs -> specs |> List.map materialize
+                        | None -> []
+                    let lamCopies =
+                        match Map.tryFind f.Id lamsByOrigin with
+                        | Some clones -> clones |> List.map materializeLambda
+                        | None -> []
+                    f' :: (specCopies @ lamCopies))
             let newBindings = modul.Bindings |> List.map (fun b -> { b with Value = rewriteCallSites b.Value })
             let derivedOrigins =
-                specMap
-                |> Map.toList
-                |> List.fold (fun acc (_, s) ->
-                    if newFunctions |> List.exists (fun f -> f.Id = s.SpecId)
-                    then Map.add s.SpecId s.Orig.Id acc else acc) modul.DerivedFuncOrigins
+                let withSpecs =
+                    specMap
+                    |> Map.toList
+                    |> List.fold (fun acc (_, s) ->
+                        if newFunctions |> List.exists (fun f -> f.Id = s.SpecId)
+                        then Map.add s.SpecId s.Orig.Id acc else acc) modul.DerivedFuncOrigins
+                lamMap.Values
+                |> Seq.fold (fun acc c ->
+                    if newFunctions |> List.exists (fun f -> f.Id = c.LCloneId)
+                    then Map.add c.LCloneId c.LOrig.Id acc else acc) withSpecs
             { modul with
                 Functions = newFunctions
                 Bindings = newBindings
