@@ -310,6 +310,14 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // no toolchain, no LAPACK — so it runs unconditionally. (Also `blade test
     // lapack`.)
     let lapackEmit = Blade.Tests.LapackTests.runLapackEmissionTests ()
+    // Shape-monomorphization REACH (Phase 4, second increment): which call
+    // sites earn a specialized copy — cross-module, self-recursive — and which
+    // must still decline (extent-changing recursion, a foreign extent NAME).
+    // The decision is invisible in the values, and it fails silently in both
+    // directions: a lost spec is only a lost 1.77x, a wrongly-taken one is an
+    // out-of-bounds loop bound. Pure codegen string checks, no toolchain.
+    // (Also `blade test shapespec`.)
+    let shapeSpec = Blade.Tests.ShapeSpecTests.runShapeSpecTests ()
     // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
     // regions when cores are available. Opt-in (see FullSuiteOptions).
     let omp =
@@ -397,7 +405,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield lapackEmit
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield lapackEmit; yield shapeSpec
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

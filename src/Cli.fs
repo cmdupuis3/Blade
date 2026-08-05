@@ -79,6 +79,8 @@ let printUsage () =
     printfn "  test omp-reduce                   Run the comm-licensed parallel-reduction block standalone"
     printfn "  test linalg                       Run the blade_linalg dispatch-emission block standalone"
     printfn "  test lapack                       Run the blade_lapack eigensolver-dispatch block standalone"
+    printfn "  test multifile                    Run the cross-module (multi-file) corpus standalone"
+    printfn "  test shapespec                    Run the shape-specialization reach block standalone"
     printfn "  test cuda                         Run the CUDA kernel block standalone"
     printfn "  test mpi                          Run the MPI decomposition block standalone"
     printfn "  test netcdf                       Run the NetCDF provider block (needs libnetcdf + sample.nc)"
@@ -1145,6 +1147,18 @@ let private dispatchTest (rest: string list) : int =
         let emitFailed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
         let probeFailed = (Blade.Tests.LinAlgTests.runLinAlgProbeTests ()).Failed
         if emitFailed + probeFailed = 0 then 0 else 1
+    | [ "multifile" ] ->
+        // The cross-module corpus (tests/corpus/multifile), standalone. Also
+        // part of the full suite; broken out because it is the only slice that
+        // exercises `lowerMultiSource` and therefore the only one that can see
+        // a cross-module shape specialization.
+        let failed = (runMultiFileTestsFull "Multi-File Modules" multiFileTests "./generated_cpp_tests").Failed
+        if failed = 0 then 0 else 1
+    | [ "shapespec" ] | [ "shape-spec" ] ->
+        // Which call sites earn a shape-specialized copy and which decline.
+        // Pure lowering + codegen, no toolchain.
+        let failed = (Blade.Tests.ShapeSpecTests.runShapeSpecTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "lapack" ] ->
         // math.eigh routes to blade_lapack::blade_eigh_{packed,dense}_{s,d,c,z}
         // when the LAPACK gate is on with no explicit sweeps budget, else the
