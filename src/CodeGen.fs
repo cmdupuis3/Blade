@@ -7568,6 +7568,50 @@ let popAllocScope () : AllocScope option =
     | top :: rest -> cell.Value <- rest; Some top
     | [] -> None
 
+/// THE shared companion-extents rule. Every emitter that materializes an
+/// `Array<T,R>` needs a table for its shape; this decides which of the two
+/// forms that table takes, and reports back whether the caller now OWNS it.
+///
+/// Default (any entry is a runtime read): a HEAP table. `Array<T,R>` stores
+/// only a POINTER to its extents, so a stack `size_t[R]` would make the
+/// wrapper non-returnable -- the pool outlives the frame but the extents
+/// pointer dangles, and a caller reading `c.extents[d]` gets garbage. Heap
+/// extents make the wrapper self-describing across a call boundary, at the
+/// cost of a `delete[]` the scope has to remember (`Some name`).
+///
+/// WHEN EVERY ENTRY IS LITERAL none of that management is needed: a
+/// `static constexpr const size_t[R]` table has STATIC storage duration, which
+/// satisfies the same constraint strictly more safely -- it outlives every
+/// wrapper naming it and every copy of that wrapper unconditionally, there is
+/// nothing to free, and nothing to get wrong if a frame is torn down early.
+/// It is the form the rectangular array-literal path already hands back across
+/// a function return, chosen there for exactly this reason. `allocate<>` and
+/// `deallocate<>` both take `const size_t extents[]` and `Array<T,R>::extents`
+/// is a `const size_t*`, so the array-to-pointer decay leaves the stored
+/// pointer identical in type and in every read (`NAME[d]` indexes an array the
+/// same way it indexed a pointer). Being constexpr, the static also costs no
+/// `__cxa_guard` even when the declaration sits inside a loop body.
+/// `None` is returned as the owned name, which is what suppresses the free.
+///
+/// A MIXED table keeps the heap: a constexpr initializer cannot name a runtime
+/// `.extents[]` read, and half-baking it would need two tables. RANK 0 keeps
+/// the heap too -- `new size_t[0]` is legal where `const size_t t[0]` is not.
+///
+/// `dims` pairs each entry's RENDERED value with whether it is a literal. That
+/// pairing is the caller's job precisely because the answer is structural: it
+/// must fall out of the same match that chose the text (an `IRLit` arm vs an
+/// `.extents[]` arm), never out of re-inspecting the rendered string.
+let emitExtentsTable (ind: string) (extentsName: string) (rank: int)
+                     (dims: (string * bool) list) : string list * string option =
+    if rank > 0 && dims |> List.forall snd then
+        ([ sprintf "%sstatic constexpr const size_t %s[%d] = { %s };"
+               ind extentsName rank (dims |> List.map fst |> String.concat ", ") ],
+         None)
+    else
+        ((sprintf "%ssize_t* %s = new size_t[%d];" ind extentsName rank)
+         :: (dims |> List.mapi (fun d (e, _) -> sprintf "%s%s[%d] = %s;" ind extentsName d e)),
+         Some extentsName)
+
 /// The free-side mirror of emitAllocRhs (217-247), case for case, reusing
 /// hoistSymmDecl with the identical `%s_anti` / `%s_strict` names keyed off
 /// extentsName (the hoist collector is idempotent per distinct decl, so
@@ -8596,24 +8640,29 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
     let extentsName = sprintf "%s_extents" name
     let ones = List.replicate r 1
     let symmArg = hoistSymmDecl (sprintf "%s_symm" name) ones
-    let extentDecls =
-        [ sprintf "    size_t* %s = new size_t[%d];" extentsName r ]
-        @ [ for d in 0 .. r - 1 -> sprintf "    %s[%d] = %dUL;" extentsName d n ]
+    // The group extent came from an `IRLit (IRLitInt n)` gate above (a
+    // non-literal extent is out of simplicial scope entirely), so every entry
+    // of this table is a literal and it takes the static form unconditionally.
+    // These are host `.cpp` lines -- the device text goes to cudaKernelDefsCell
+    // -- so a function-local static is in scope-kind terms an ordinary one.
+    let (extentDecls, ownedExtents) =
+        emitExtentsTable "    " extentsName r [ for _ in 1 .. r -> (sprintf "%dUL" n, true) ]
     let strictArgOpt =
         if strict then Some (hoistSymmDecl (sprintf "%s_strict" name) ones) else None
     let allocLine =
         arrayAlloc { Ind = "    "; Elem = elemCpp; Rank = r; Name = name
                      Symm = symmArg; Strict = strictArgOpt; Extents = extentsName }
-    // dealloc(D): the HOST packed output + its heap extents. The device buffers
-    // (cudaMalloc/cudaFree) are untouched -- they are already paired inside the
-    // .cu wrapper. Deferred to the two Some-returning arms below so a `None`
-    // (no MPI datatype) registers nothing, and skipped entirely under
-    // `softSplit`, whose caller (tryGenCudaSoftJoin) abandons every piece when
-    // ANY leaf turns out ineligible -- registering there would emit frees for
-    // C++ names that never got declared.
+    // dealloc(D): the HOST packed output (its extents table is static, so
+    // `ownedExtents` is None and no `delete[]` is registered for it). The
+    // device buffers (cudaMalloc/cudaFree) are untouched -- they are already
+    // paired inside the .cu wrapper. Deferred to the two Some-returning arms
+    // below so a `None` (no MPI datatype) registers nothing, and skipped
+    // entirely under `softSplit`, whose caller (tryGenCudaSoftJoin) abandons
+    // every piece when ANY leaf turns out ineligible -- registering there would
+    // emit frees for C++ names that never got declared.
     let registerHostOutput () =
         if not softSplit then
-            registerArrayAlloc name elemCpp r symmArg strictArgOpt (Some extentsName)
+            registerArrayAlloc name elemCpp r symmArg strictArgOpt ownedExtents
     if mpiRange then
         // Rank-scoped launch: balanced flat cell-range split (the same
         // q/rem the MPI host path uses), per-rank device launch over
@@ -8768,9 +8817,11 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
         let extentsName = sprintf "%s_extents" name
         let ones = List.replicate r 1
         let symmArg = hoistSymmDecl (sprintf "%s_symm" name) ones
-        let extentDecls =
-            [ sprintf "    size_t* %s = new size_t[%d];" extentsName r ]
-            @ [ for d in 0 .. r - 1 -> sprintf "    %s[%d] = %dUL;" extentsName d n ]
+        // Same literal-only story as the CUDA simplicial peel: this arm is
+        // reached only through the `IRLit (IRLitInt n)` match on the group
+        // extent, so the table is all-literal and takes the static form.
+        let (extentDecls, ownedExtents) =
+            emitExtentsTable "    " extentsName r [ for _ in 1 .. r -> (sprintf "%dUL" n, true) ]
         let strictArgOpt =
             if strict then Some (hoistSymmDecl (sprintf "%s_strict" name) ones) else None
         let allocLine =
@@ -8810,11 +8861,12 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
               sprintf "        MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, __blade_mpi_out_%s, __blade_mpi_counts, __blade_mpi_displs, %s, MPI_COMM_WORLD);" name mpiDtype
               "        delete[] __blade_mpi_counts; delete[] __blade_mpi_displs;"
               "    }" ]
-        // dealloc(D): the MPI simplicial HOST packed output + its heap extents.
-        // Every rank keeps the full pool after the Allgatherv, so this is an
-        // ordinary scope-owned array; the counts/displs tables above already
-        // delete themselves and are left alone.
-        registerArrayAlloc name elemCpp r symmArg strictArgOpt (Some extentsName)
+        // dealloc(D): the MPI simplicial HOST packed output (extents static,
+        // so nothing extra to free). Every rank keeps the full pool after the
+        // Allgatherv, so this is an ordinary scope-owned array; the
+        // counts/displs tables above already delete themselves and are left
+        // alone.
+        registerArrayAlloc name elemCpp r symmArg strictArgOpt ownedExtents
         Some (extentDecls @ [allocLine] @ split @ loop @ gather)
     | _ -> None
 
@@ -8964,17 +9016,23 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
     let extentsName = sprintf "%s_extents" name
     // First-kernel scope is rectangular (no symmetry), so pass `nullptr` directly
     // as the symm template arg -- not via a function-local static (MSVC C2131).
+    // Extent entries: rectOk already forced every binding to IRLit, so the
+    // non-literal arms below are structurally unreachable -- kept so the dims
+    // pairing stays derived from the SAME match that renders each value, and
+    // the table degrades to the heap form (not garbage) if the gate ever widens.
+    let extentDims =
+        bindings |> List.map (fun b ->
+            match b.Extent with
+            | IRLit (IRLitInt n) -> (sprintf "%dUL" n, true)
+            | _ ->
+                match b.FusedRank with
+                | Some d ->
+                    let prod = [0 .. d - 1] |> List.map (sprintf "%s.extents[%d]" b.ExtentArrayRef) |> String.concat " * "
+                    (prod, false)
+                | None -> (sprintf "%s.extents[%d]" b.ExtentArrayRef b.ExtentDimRef, false))
+    let (extentDecls, ownedExtents) = emitExtentsTable "    " extentsName outputRank extentDims
     let inlineLines =
-        [ sprintf "    size_t* %s = new size_t[%d];" extentsName outputRank ]
-        @ (bindings |> List.mapi (fun i b ->
-              match b.Extent with
-              | IRLit (IRLitInt n) -> sprintf "    %s[%d] = %dUL;" extentsName i n
-              | _ ->
-                  match b.FusedRank with
-                  | Some d ->
-                      let prod = [0 .. d - 1] |> List.map (sprintf "%s.extents[%d]" b.ExtentArrayRef) |> String.concat " * "
-                      sprintf "    %s[%d] = %s;" extentsName i prod
-                  | None -> sprintf "    %s[%d] = %s.extents[%d];" extentsName i b.ExtentArrayRef b.ExtentDimRef))
+        extentDecls
         @ [ sprintf "    Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s), %s };"
                 elemCpp outputRank name elemCpp outputRank extentsName extentsName
             sprintf "    %s(%s, pool_base(%s.data));"
@@ -8985,11 +9043,12 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                 // inputs are wrappers here, never bare pointers.
                 (codeGen.InputArrayNames |> List.map (fun n -> sprintf "pool_base(%s.data)" n) |> String.concat ", ")
                 name ]
-    // dealloc(D): the rectangular HOST output + its heap extents (dense, so the
-    // SYMM argument is the `nullptr` literal emitted just above). Skipped under
+    // dealloc(D): the rectangular HOST output (dense, so the SYMM argument is
+    // the `nullptr` literal emitted just above; extents are static here, so
+    // ownedExtents is None and nothing extra is freed). Skipped under
     // `softSplit` for the same abandon-the-pieces reason as the simplicial peel.
     if not softSplit then
-        registerArrayAlloc name elemCpp outputRank "nullptr" None (Some extentsName)
+        registerArrayAlloc name elemCpp outputRank "nullptr" None ownedExtents
     if softSplit then
         // Soft-join caller sequences the begin/end calls itself; return the
         // host output allocation only (everything but the final call line).
@@ -9129,16 +9188,27 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
     let cell = cudaKernelDefsCell ()
     cell.Value <- cell.Value @ (kernelDef @ [""] @ wrapper @ [""])
     // Inline: allocate each output Array on the host, then a single launch.
+    // Per-leaf extents: the co-fusion gate (rectOk over every leaf) forces
+    // every binding extent to IRLit, so each table is all-literal and static;
+    // the non-literal arm is kept structural (same match renders the value)
+    // so a widened gate degrades to the heap form. leafExtentsOwned is
+    // positionally parallel to leafNames for the registrations below.
+    let leafExtentsOwned =
+        leafCgs |> List.mapi (fun k cg ->
+            let extentsName = sprintf "%s_extents" leafNames.[k]
+            let dims =
+                cg.Bindings |> List.map (fun b ->
+                    match b.Extent with
+                    | IRLit (IRLitInt n) -> (sprintf "%dUL" n, true)
+                    | _ -> (sprintf "%s.extents[%d]" b.ExtentArrayRef b.ExtentDimRef, false))
+            emitExtentsTable "    " extentsName nDims dims)
     let inlineLines =
         (leafCgs |> List.mapi (fun k cg ->
             let lname = leafNames.[k]
             let et = (outElemOpt cg).Value |> elemTypeToCpp
             let extentsName = sprintf "%s_extents" lname
-            [ sprintf "    size_t* %s = new size_t[%d];" extentsName nDims ]
-            @ (cg.Bindings |> List.mapi (fun i b ->
-                  match b.Extent with
-                  | IRLit (IRLitInt n) -> sprintf "    %s[%d] = %dUL;" extentsName i n
-                  | _ -> sprintf "    %s[%d] = %s.extents[%d];" extentsName i b.ExtentArrayRef b.ExtentDimRef))
+            let (extentDecls, _) = leafExtentsOwned.[k]
+            extentDecls
             @ [ sprintf "    Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s), %s };"
                     et nDims lname et nDims extentsName extentsName ]) |> List.concat)
         @ [ sprintf "    %s(%s, %s);"
@@ -9152,7 +9222,7 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
     for k in 0 .. leafCgs.Length - 1 do
         let et = (outElemOpt leafCgs.[k]).Value |> elemTypeToCpp
         registerArrayAlloc leafNames.[k] et nDims "nullptr" None
-            (Some (sprintf "%s_extents" leafNames.[k]))
+            (snd leafExtentsOwned.[k])
     Some inlineLines
 
 /// Classification of a loop nest for MPI decomposition (`where mpi`).
@@ -9879,16 +9949,18 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
             // symmetric -> hoisted to namespace scope (see hoistSymmDecl). Either
             // way nothing symm-related is declared inside main().
 
-            // Generate extent computation
+            // Generate extent computation. Each entry pairs its rendered value
+            // with a structural is-literal bit from the SAME match: only the
+            // IRLit arm is compile-time; a compound cardinality read and the
+            // fused/`.extents[]` reads are runtime. All-literal tables take the
+            // static constexpr form (emitExtentsTable), which also returns
+            // None as the owned name so no delete[] is registered below.
             let extentsName = sprintf "%s_extents" name
-            let extentsDecl = sprintf "%ssize_t* %s = new size_t[%d];" ind extentsName outputRank
-
-            // Fill extents from loop level info
-            let extentsFill =
-                codeGen.Bindings |> List.mapi (fun i b ->
+            let extentDims =
+                codeGen.Bindings |> List.map (fun b ->
                     match b.Extent with
                     | IRLit (IRLitInt n) ->
-                        sprintf "%s%s[%d] = %s;" ind extentsName i (sprintf "%d" n)
+                        (sprintf "%d" n, true)
                     | IRCompoundMask _ ->
                         // Compound-inner halo level (the only compound level
                         // that reaches the DENSE output path -- plain compound
@@ -9896,21 +9968,22 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                         // cells = cardinality minus the interior shrink, which
                         // rides the binding's StrictOffset (see IR loop build).
                         let sub = if b.StrictOffset > 0 then sprintf " - %d" b.StrictOffset else ""
-                        sprintf "%s%s[%d] = %s_cidx->cardinality%s;" ind extentsName i b.ExtentArrayRef sub
+                        (sprintf "%s_cidx->cardinality%s" b.ExtentArrayRef sub, false)
                     | _ ->
                         // Fused joint level (arc 1): output extent = product of
                         // the source array's fused dims.
                         match b.FusedRank with
                         | Some d ->
                             let prod = [0 .. d - 1] |> List.map (sprintf "%s.extents[%d]" b.ExtentArrayRef) |> String.concat " * "
-                            sprintf "%s%s[%d] = %s;" ind extentsName i prod
+                            (prod, false)
                         | None ->
-                            sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName i b.ExtentArrayRef b.ExtentDimRef)
+                            (sprintf "%s.extents[%d]" b.ExtentArrayRef b.ExtentDimRef, false))
+            let (extentDecls, ownedExtents) = emitExtentsTable ind extentsName outputRank extentDims
 
-            // Generate allocation as Array<T,N> wrapper. extentsName here is
-            // a runtime-allocated `size_t*` (not a static constexpr); the
-            // wrapper just stores a pointer to it, so the same brace-init
-            // pattern works.
+            // Generate allocation as Array<T,N> wrapper. extentsName is either
+            // a runtime-allocated `size_t*` or (all-literal) a static constexpr
+            // table; the wrapper just stores a pointer either way (array-to-
+            // pointer decay), so the same brace-init pattern works.
             let allocRhs =
                 match emitAllocRhs (classifyOutputStorage codeGen.OutputType)
                           outputElemType outputRank symmArg extentsName with
@@ -10069,8 +10142,9 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 // is the only registered site that can emit a non-`nullptr` SYMM
                 // free, so its template arguments must mirror allocRhs above
                 // exactly -- hence the same (spec, elem, rank, symmArg, extents)
-                // tuple rather than a re-derivation. `extentsName` is heap
-                // (`new size_t[R]`), so the frame owns it too. CUDA never reaches
+                // tuple rather than a re-derivation. `ownedExtents` is Some only
+                // when the table above is heap (`new size_t[R]`) -- an
+                // all-literal static table owns nothing. CUDA never reaches
                 // here (cudaInline returned above).
                 //
                 // dealloc(D): the MPI dense-slab arm is no longer excluded. The
@@ -10082,9 +10156,9 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 match codeGen.OutputType with
                 | ArrayElem at when isFreeableDenseArrayType at ->
                     registerPoolAlloc (classifyOutputStorage codeGen.OutputType)
-                        outputElemType outputRank symmArg extentsName name (Some extentsName)
+                        outputElemType outputRank symmArg extentsName name ownedExtents
                 | _ -> ()
-                preCode @ streamPrologue @ [""; extentsDecl] @ extentsFill @ [""; allocDecl; ""]
+                preCode @ streamPrologue @ [""] @ extentDecls @ [""; allocDecl; ""]
                 @ mpiSlabPrologue @ loopCode @ mpiGather
 
 /// Execution backend a fusion leaf requests. Backends are whole-leaf: `omp`
@@ -10424,46 +10498,17 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
                 |> Option.defaultValue (match callable.Params with p :: _ -> irTypeToCpp p.Type | [] -> "void")
         // Indent wrapper-emission lines to match surrounding scope.
         let wrapperLines = wrapperCode |> List.map (fun s -> ind + s)
-        // Return-extent ABI: the materialized array's shape table is HEAP
-        // allocated (`size_t*`), not a stack `size_t[R]`. `Array<T,R>` stores
-        // only a POINTER to its extents, so a stack table makes the wrapper
-        // non-returnable -- the data buffer (allocate<>, `new`) outlives the
-        // frame but the extents pointer dangles, and a caller reading
-        // `c.extents[d]` gets garbage. Heap extents make the wrapper
-        // self-describing across the call boundary, which is exactly the
-        // convention genApplyCombinator already uses for its outputs
-        // (`size_t* R_extents = new size_t[ORANK]`). Reads are unchanged:
-        // `NAME_extents[d]` indexes a pointer the same way it indexed an
-        // array, so every existing companion-extents consumer is unaffected.
-        // Lifetime is scope-bound: under a live alloc frame (function body or
-        // for-range body) each arm below registers BOTH the pool and this heap
-        // extents table, so the pair is released together at scope exit. At
-        // main's top level there is no frame and both keep program lifetime.
-        //
-        // WHEN EVERY EXTENT IS LITERAL none of that management is needed: a
-        // `static constexpr const size_t[R]` table has STATIC storage duration,
-        // which satisfies the constraint above strictly more safely than the
-        // heap does -- it outlives every wrapper naming it and every copy of
-        // that wrapper unconditionally, there is nothing to free, and nothing
-        // to get wrong if a frame is torn down early. It is the same table form
-        // the rectangular array-literal path already hands back across a
-        // function return (`static constexpr`, chosen there for exactly this
-        // reason), and `allocate<>` takes `const size_t extents[]`, so the
-        // pointer the wrapper stores is unchanged in type and in reads.
-        // A MIXED table keeps the heap: a constexpr initializer cannot name a
-        // runtime `.extents[]` read, and half-baking would need two tables.
-        //
-        // Returns the declaration lines and the name to register as OWNED --
-        // `None` for the static table, which is what suppresses the free.
+        // Return-extent ABI: this wrapper crosses a call boundary, so its
+        // extents table must outlive the frame -- the shared heap-vs-static
+        // rule (emitExtentsTable) exists for exactly this constraint; see its
+        // doc for the full rationale. Lifetime of the heap form is
+        // scope-bound: under a live alloc frame (function body or for-range
+        // body) each arm below registers BOTH the pool and the heap extents
+        // table, so the pair is released together at scope exit. At main's
+        // top level there is no frame and both keep program lifetime. The
+        // static form owns nothing on either path.
         let retExtents (rank: int) (dims: (string * bool) list) : string list * string option =
-            if dims |> List.forall snd then
-                ([ sprintf "%sstatic constexpr const size_t %s_extents[%d] = { %s };"
-                       ind name rank (dims |> List.map fst |> String.concat ", ") ],
-                 None)
-            else
-                ((sprintf "%ssize_t* %s_extents = new size_t[%d];" ind name rank)
-                 :: (dims |> List.mapi (fun d (e, _) -> sprintf "%s%s_extents[%d] = %s;" ind name d e)),
-                 Some (name + "_extents"))
+            emitExtentsTable ind (sprintf "%s_extents" name) rank dims
         // One derivation of each operand extent, feeding BOTH the copy-loop
         // bound and the return-extents table -- the loop and the shape it
         // describes cannot disagree because they are the same expression.
@@ -10763,17 +10808,21 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
             let outputRank = match cg.OutputType with ArrayElem arr -> arrayRank arr | _ -> 0
             let outputElemType = match cg.OutputType with ArrayElem arr -> elemTypeToCpp arr.ElemType | IRTScalar et -> primTypeToCpp et | t -> irTypeToCpp t
             let extentsName = sprintf "%s_extents" lname
-            let extentsDecl = sprintf "%ssize_t* %s = new size_t[%d];" ind extentsName outputRank
-            let extentsFill =
-                cg.Bindings |> List.mapi (fun j b ->
+            // Same structural literal pairing as the single-kernel dense arm:
+            // only the IRLit arm is compile-time; an all-literal table takes
+            // the static constexpr form and owns nothing (emitExtentsTable
+            // returns None), so the leafReg below registers no delete[].
+            let extentDims =
+                cg.Bindings |> List.map (fun b ->
                     match b.Extent with
-                    | IRLit (IRLitInt n) -> sprintf "%s%s[%d] = %d;" ind extentsName j n
+                    | IRLit (IRLitInt n) -> (sprintf "%d" n, true)
                     | _ ->
                         match b.FusedRank with
                         | Some d ->
                             let prod = [0 .. d - 1] |> List.map (sprintf "%s.extents[%d]" b.ExtentArrayRef) |> String.concat " * "
-                            sprintf "%s%s[%d] = %s;" ind extentsName j prod
-                        | None -> sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName j b.ExtentArrayRef b.ExtentDimRef)
+                            (prod, false)
+                        | None -> (sprintf "%s.extents[%d]" b.ExtentArrayRef b.ExtentDimRef, false))
+            let (extentDecls, ownedExtents) = emitExtentsTable ind extentsName outputRank extentDims
             let allocRhs =
                 match emitAllocRhs (classifyOutputStorage cg.OutputType)
                           outputElemType outputRank symmArg extentsName with
@@ -10785,9 +10834,9 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
              | ArrayElem at when isFreeableDenseArrayType at ->
                  leafRegs.Add(fun () ->
                      registerPoolAlloc (classifyOutputStorage cg.OutputType)
-                         outputElemType outputRank symmArg extentsName lname (Some extentsName))
+                         outputElemType outputRank symmArg extentsName lname ownedExtents)
              | _ -> ())
-            [extentsDecl] @ extentsFill @ [allocDecl]) |> List.concat
+            extentDecls @ [allocDecl]) |> List.concat
         let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (leafNames |> String.concat ", ")
         let childrenMap = Map.ofList [name, leafNames]
         let wrap body =
