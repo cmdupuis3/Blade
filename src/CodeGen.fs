@@ -13410,6 +13410,39 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                             // a single-level nest (its chain rule needs a deeper
                             // level to peel into), so `false` here is not a
                             // simplification -- it is the value that site computes.
+                            // RESTRICT SOURCE ALIASES. The peel below would read
+                            // each rank-1 operand as `<name>[i]` through the
+                            // Array struct; behind that subscript GCC will not
+                            // SLP-pack the K independent lane chains at all.
+                            // Reading through a raw restrict pointer to the pool
+                            // base lets SLP fire -- but note the measured
+                            // residual (dot shape, 1e7, 1 thread): GCC marshals
+                            // the named scalar lanes into vectors through a
+                            // vunpck/vpermpd permute storm that spends the gain,
+                            // landing at parity with the serial chain rather
+                            // than the ~1.6x clean packed FMA would give. The
+                            // aliases are kept because they are sound, cost
+                            // nothing, and make the win available to any
+                            // compiler (or future GCC) whose SLP handles the
+                            // idiom cleanly. Licence is Phase 1's:
+                            // these operands are READ-ONLY here (the fold writes
+                            // only its scalar accumulator), and read-only
+                            // sharing -- including `zip(x, x)` binding one array
+                            // to two slots -- is permitted under C's restrict
+                            // semantics; only written-through pointers must be
+                            // exclusive.
+                            let mutable srcAliases : Map<string, string> = Map.empty
+                            let mutable aliasDecls : string list = []
+                            for elem in lvl.Elements do
+                                match elem.Virtual with
+                                | RealArray when elem.ArrayRank = 1
+                                                 && not (Map.containsKey elem.ArrayName srcAliases) ->
+                                    let alias = sprintf "__rsrc%d" (Map.count srcAliases)
+                                    srcAliases <- Map.add elem.ArrayName alias srcAliases
+                                    aliasDecls <- aliasDecls
+                                        @ [ sprintf "const %s* BLADE_RESTRICT %s = %s.data;"
+                                                (irTypeToCpp elem.ArrayElemType) alias elem.ArrayName ]
+                                | _ -> ()
                             let mutable currentNames : Map<int, string> = Map.empty
                             let mutable paramFinalNames : Map<IRId, string> = Map.empty
                             let mutable declaredNames : Map<string, string> = Map.empty
@@ -13417,7 +13450,9 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                             for elem in lvl.Elements do
                                 let currentName =
                                     Map.tryFind elem.ArrayPosition currentNames
-                                    |> Option.defaultValue elem.ArrayName
+                                    |> Option.defaultValue
+                                           (Map.tryFind elem.ArrayName srcAliases
+                                            |> Option.defaultValue elem.ArrayName)
                                 let (peelCode, newName) = genElementBindingPeel false lvl elem currentName
                                 // Same dedup rule as the nest: zipping an array
                                 // WITH ITSELF puts two slots on one declaration.
@@ -13462,20 +13497,21 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                                 [ sprintf "%s// reduce over computation: accumulator loop (%d-lane, BLADE_FP_REASSOC, %d operand stream%s)"
                                       ind kLanes streams (if streams = 1 then "" else "s")
                                   sprintf "%s{" ind
-                                  sprintf "%s    const size_t __rhi = %s;" ind boundStr
-                                  sprintf "%s    auto __rbody = [&](size_t %s) -> %s { %s return %s; };"
-                                      ind lvl.IndexName elemStr
-                                      (peels |> String.concat " ") bodyExpr
-                                  sprintf "%s    if (__rhi < (size_t)%d) {" ind kLanes
-                                  // Below K elements there is nothing to
-                                  // interleave: the serial chain verbatim -- the
-                                  // same bodies, folded in the same ascending
-                                  // order into the same seeded accumulator, hence
-                                  // the same double the nest below produces.
-                                  sprintf "%s        for (size_t __ri = 0; __ri < __rhi; __ri++) {" ind
-                                  sprintf "%s            %s = %s(%s, __rbody(__ri));" ind name wname name
-                                  sprintf "%s        }" ind
-                                  sprintf "%s    } else {" ind ]
+                                  sprintf "%s    const size_t __rhi = %s;" ind boundStr ]
+                                @ (aliasDecls |> List.map (fun s -> ind + "    " + s))
+                                @ [ sprintf "%s    auto __rbody = [&](size_t %s) -> %s { %s return %s; };"
+                                        ind lvl.IndexName elemStr
+                                        (peels |> String.concat " ") bodyExpr
+                                    sprintf "%s    if (__rhi < (size_t)%d) {" ind kLanes
+                                    // Below K elements there is nothing to
+                                    // interleave: the serial chain verbatim -- the
+                                    // same bodies, folded in the same ascending
+                                    // order into the same seeded accumulator, hence
+                                    // the same double the nest below produces.
+                                    sprintf "%s        for (size_t __ri = 0; __ri < __rhi; __ri++) {" ind
+                                    sprintf "%s            %s = %s(%s, __rbody(__ri));" ind name wname name
+                                    sprintf "%s        }" ind
+                                    sprintf "%s    } else {" ind ]
                                 @ (laneStmts |> List.map (fun s -> ind + "        " + s))
                                 @ [ sprintf "%s        %s = %s(%s, %s);" ind name wname name resultLane
                                     sprintf "%s    }" ind
