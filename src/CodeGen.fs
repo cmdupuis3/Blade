@@ -303,8 +303,7 @@ let splitTimingModeEnabled () : bool =
 
 // ---- Floating-point reassociation opt-in (BLADE_FP_REASSOC) -----------------
 
-/// May the emitter reassociate a SERIAL floating-point accumulation chain into
-/// the deterministic K-lane form below?
+/// May the emitter reassociate a SERIAL floating-point accumulation chain?
 ///
 ///   BLADE_FP_REASSOC=1|on   -> yes
 ///   unset / 0 / anything else -> NO (the default)
@@ -326,17 +325,49 @@ let splitTimingModeEnabled () : bool =
 ///    only agree while the emitter is not reassociating. Nothing has to be
 ///    done to keep them honest -- they inherit the default -- but a harness
 ///    that pins this ON is asserting a false equality.
-///  * DETERMINISM. What the knob buys is instruction-level parallelism, not
-///    threads: the lane form runs `foldLaneCount` independent accumulator
-///    chains and folds them together in a FIXED ASCENDING ORDER, with no
-///    pragma and no team involved. With the knob on the answer is a fixed
-///    function of THE DATA AND K ALONE -- independent of OMP_NUM_THREADS, of
-///    the team a surrounding parallel region actually got, and of run order.
-///    Two runs of one binary, and runs at different thread counts, agree
-///    bit-for-bit.
+///  * DETERMINISM, and this is the part that CHANGED. What the knob buys is
+///    instruction-level and SIMD parallelism, never threads -- no site guarded
+///    by this predicate creates a team, so a surrounding parallel region and
+///    OMP_NUM_THREADS remain irrelevant to the answer. What a knob-on result is
+///    therefore guaranteed to be:
+///
+///        deterministic for a FIXED BINARY -- identical bytes across runs, and
+///        across OMP_NUM_THREADS values
+///
+///    and what it is NOT guaranteed to be:
+///
+///        reproducible ACROSS compilers, compiler versions, or optimization
+///        flags -- the same Blade program built twice differently may print
+///        different low bits
+///
+///    on the sites that emit `omp simd reduction` (`fpReassocSimdStmts`), whose
+///    summation order is the vectorizer's: its vector width, its unroll factor,
+///    its choice to vectorize at all. That weakening is DELIBERATE, licensed by
+///    the project policy that optimized (-O3) Release builds are not expected
+///    to be bit-reproducible across builds, and it is what bought the measured
+///    wins recorded at those sites (1.64x on the dot nest and 2.60x on the gemv
+///    fiber, both of which the lane form left at PARITY with the serial chain;
+///    3.36x on the 3-stream moment former against the lanes' 1.80x).
+///
+///    Which sites those are is a per-site MEASUREMENT, not a blanket switch,
+///    and the split is real:
+///
+///        simd   IRProdSum's fiber IIFE; the reduce-over-computation nest
+///        lanes  reduce over a MATERIALIZED array (both its statement and its
+///               expression form) -- where the lanes measured 1.12x-1.90x
+///               FASTER than simd, so nothing was traded away
+///        lanes  any `comm`-declared kernel, at every site: its combine is a
+///               call, which no reduction clause can name
+///
+///    So the older, stronger property -- a fixed function of the data and K
+///    alone, reproducible across any toolchain -- is not gone; it still holds
+///    wherever `fpReassocLaneStmts` is what got emitted. Off is, as always,
+///    stronger than either: byte-identical to the serial chain everywhere.
 ///  * The knob licenses reassociation of arithmetic the COMPILER owns (a
 ///    recognised builtin fold body) or that the USER has declared reorderable
 ///    (`comm`) -- never an arbitrary user kernel. See `foldReorderLicensed`.
+///    Which FORM that licence is spent in is a second, narrower question, and
+///    `fpReassocSimdOp` answers it.
 ///
 /// A FUNCTION, never a module-level `let`: a module-level binding freezes the
 /// environment read at first touch, which would make a mid-process pin (a
@@ -1716,6 +1747,125 @@ let private fpReassocLaneStmts
         @ [ for l in 1 .. k - 1 -> combine (lane 0) (lane l) ]
     (stmts, lane 0)
 
+/// The C++ `reduction(<op>:acc)` operator for a builtin fold body, when OpenMP
+/// knows an identity for it. `+` and `*` only: those are the two whose private
+/// initializer (0 / 1) is unambiguous for every element type Blade folds, and
+/// they are the ones the plan's Path A commits to. `&&`/`||` are licensed by
+/// `isCommutativeOp`/`isAssociativeOp` and ARE valid OpenMP reduction
+/// identifiers, but no Blade fold reaches these sites with a `bool` element
+/// type today, so they are left out rather than shipped unmeasured; everything
+/// else licensed goes down the manual chunked path (Path B) or the K-lane form,
+/// neither of which needs an identity at all.
+///
+/// DEFINED HERE, far above Path A's chunked-fold reader, because the
+/// BLADE_FP_REASSOC simd form needs it from `simdReducibleElem`'s neighbourhood
+/// onwards -- `fpReassocSimdOp` sits with the rest of the knob's machinery, and
+/// F# is order-dependent. Same reason `foldLaneCount` and the licence
+/// predicates live up here.
+let ompReductionOperator (op: IRBinOp) : string option =
+    match op with
+    | IRAdd -> Some "+"
+    | IRMul -> Some "*"
+    | _ -> None
+
+/// Is `elemStr` a C++ type OpenMP's builtin `+`/`*` reduction identifiers are
+/// defined for, and that a SIMD lane can hold?
+///
+/// The list is closed on purpose. `reduction(+:x)` on a class type is not a
+/// portable construct (whether the builtin identifiers apply to a type with an
+/// `operator+` is compiler-dependent, and `declare reduction` would be the
+/// portable spelling), and `std::complex<double>` and `std::string` both reach
+/// `elemTypeToCpp`. A fold over either keeps the K-lane form, which needs no
+/// identity and no vector lane -- it is plain instruction-level parallelism
+/// over whatever `combine` the caller passes.
+let private simdReducibleElem (elemStr: string) : bool =
+    match elemStr with
+    | "double" | "float" | "int32_t" | "int64_t" -> true
+    | _ -> false
+
+/// The `omp simd reduction` accumulation body, as unindented C++ statements:
+/// the SECOND emission form BLADE_FP_REASSOC can spend its licence on, and a
+/// sibling of `fpReassocLaneStmts` rather than a replacement for it.
+///
+/// Emits, for the half-open range `[lo, hi)` and an accumulator the caller has
+/// already DECLARED AND SEEDED:
+///
+///   BLADE_OMP_SIMD_REDUCTION(+:acc)
+///   for (size_t i = lo; i < hi; i++) {
+///       acc = acc + elem(i);
+///   }
+///
+/// WHY THIS CAN BEAT THE LANES. Both forms buy the same thing -- independent
+/// partial sums that break the serial dependence chain through the fold -- but
+/// they ask for it at different levels. The lane form asks for it in SCALARS and
+/// relies on the C++ compiler's SLP pass to pack K named locals into vectors;
+/// where that pass packs them through a shuffle network the packing costs as
+/// much as the chain it removed (measured: the dot shape, where 8 named lanes
+/// land at parity with the serial chain through a vunpck/vpermpd permute
+/// storm). The simd form asks for it in VECTORS directly: the vectorizer owns
+/// the accumulator, so the partials are born in lanes and never marshalled.
+///
+/// WHAT IT COSTS. The lane count -- and therefore the summation order -- stops
+/// being a property of the emitted text and becomes a property of the compiler
+/// and its flags (vector width, unroll factor, whether it vectorized at all).
+/// That is a trade the knob is allowed to make and the lane form was not: see
+/// the contract note at `fpReassocEnabled`, which the policy change to
+/// "optimized Release builds are non-repro" is what licenses.
+///
+/// NO SHORT FALLBACK, no seed lanes, no tail peel, no fixed combine order: the
+/// loop IS the serial loop, and every reassociation is the pragma's. That is
+/// why this emitter is four lines and its sibling is twenty -- and why a `hi -
+/// lo` below the vector width is not a special case here (the vectorizer emits
+/// its own scalar remainder).
+///
+/// `accName` must name a plain local: OpenMP reduction list items may not be
+/// struct members or dereferences. Every caller passes either its own IIFE
+/// accumulator or `bindingCppName`, both of which are locals.
+///
+/// `prelude` is emitted at the top of the loop body, before the accumulate.
+/// Empty for the `prodsum` IIFE, whose element is just a subscript product; the
+/// reduce-over-computation site puts the level's ELEMENT PEELS there, so that
+/// its body expression is written straight into the vectorized loop rather than
+/// behind a lambda the vectorizer would have to see through. (The lane form has
+/// to use a lambda -- it evaluates the body at K different indices and would
+/// otherwise re-render it K times -- which is exactly the asymmetry that makes
+/// one shared `elemAt` insufficient here.)
+let private fpReassocSimdStmts
+        (opStr: string)
+        (accName: string)
+        (idxName: string)
+        (loExpr: string)
+        (hiExpr: string)
+        (prelude: string list)
+        (elemAt: string -> string)
+        : string list =
+    [ sprintf "BLADE_OMP_SIMD_REDUCTION(%s:%s)" opStr accName
+      sprintf "for (size_t %s = %s; %s < %s; %s++) {" idxName loExpr idxName hiExpr idxName ]
+    @ (prelude |> List.map (fun s -> "    " + s))
+    @ [ sprintf "    %s = %s %s %s;" accName accName opStr (elemAt idxName)
+        "}" ]
+
+/// The reduction operator the simd form would use for a fold through
+/// `callable` over `elemStr` elements -- `None` when the simd form is not
+/// available and the caller must keep the K-lane form.
+///
+/// TWO conditions, and they are different in kind. The ELEMENT TYPE condition
+/// is portability (see `simdReducibleElem`). The OP condition is that OpenMP's
+/// reduction clause names an OPERATOR, not a function: a `comm`-declared user
+/// kernel is licensed to be reassociated but its combine is a call
+/// `w(acc, x)`, which is not a reduction-statement form -- there is no identity
+/// to seed private copies with and no operator to name in the clause. Such a
+/// fold keeps the lane form, which needs neither. So the split is:
+///
+///   builtin `+`/`*` body  -> simd form (this returns Some)
+///   comm-declared kernel  -> K-lane form (this returns None)
+///
+/// and `foldReorderLicensed` -- unchanged -- still gates whether either is
+/// reached at all.
+let private fpReassocSimdOp (callable: IRCallable) (elemStr: string) : string option =
+    if not (simdReducibleElem elemStr) then None
+    else foldKernelBuiltinOp callable |> Option.bind ompReductionOperator
+
 /// Convert IRExpr to C++ expression string
 let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
@@ -1908,15 +2058,15 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 elemStr serialBound product
         if not (fpReassocEnabled ()) then serialForm
         else
-            // BLADE_FP_REASSOC: the same summation, run as K independent lane
-            // chains and combined in fixed ascending order. `prodsum`'s
+            // BLADE_FP_REASSOC: the same summation, reassociated. `prodsum`'s
             // summation IS a builtin `+`, so the licence class is the one
             // `foldKernelBuiltinOp` grants outright -- what the knob supplies
-            // is the reproducibility opt-in, which an intrinsic has no
-            // where-clause to carry. NO OpenMP: this IIFE routinely sits inside
+            // is the opt-in, which an intrinsic has no where-clause to carry.
+            //
+            // NO WORKSHARING OpenMP either way: this IIFE routinely sits inside
             // an already-parallel nest (the comm-triangular covariance loop),
-            // where a `parallel for` would nest teams, and the answer must not
-            // depend on the team it landed in.
+            // where a `parallel for` would nest teams. `omp simd` is a SIMD
+            // construct, creates no team, and is legal exactly there.
             //
             // Operands are re-spelled ~3K times by the lane form. A plain
             // identifier (the peeled row / array name that reaches here in
@@ -1938,6 +2088,45 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             let prodAt (i: string) =
                 opNames |> List.map (fun a -> sprintf "%s[%s]" a i) |> String.concat " * "
             let boundOn = literalOrRuntimeExtent headTy (List.head opNames) 0
+            // WHICH FORM. `omp simd reduction(+:__ps)` where the element type
+            // admits it (`simdReducibleElem`), the K-lane chains otherwise.
+            //
+            // MEASURED over every shape that reaches this site (ST,
+            // OMP_NUM_THREADS=1, medians over 3 processes x 5 reps, round-robin;
+            // `bench\blade` and `bench\sym` full config, this machine):
+            //
+            //   gemv row fiber, 3001 x 2999, 2 streams
+            //       serial 7.16 ms   8 lanes 7.44 ms (0.96x)   simd 2.76 ms (2.60x)
+            //   comoment2, 201 x 10007, 2 streams
+            //       serial  163 ms   8 lanes 43.6 ms (3.74x)   simd 53.2 ms (3.07x)
+            //   comoment3, 61 x 2003, 3 streams
+            //       serial 59.3 ms   5 lanes 32.9 ms (1.80x)   simd 17.6 ms (3.36x)
+            //
+            // simd is the site's form because it wins the site, not because it
+            // wins everywhere: comoment2 genuinely prefers the lanes by 1.22x,
+            // and that is given up on purpose. What buys it back is that the
+            // lanes are worth NOTHING at the gemv fiber (0.96x -- the SLP
+            // permute storm documented in `genReduceComputeBinding`) and only
+            // half as much at three streams, so across the site simd is 2.99x
+            // geometric mean against the lanes' 1.86x, and it never regresses.
+            //
+            // NOTE the two 2-stream shapes DISAGREE (gemv wants simd, comoment2
+            // wants lanes), which is what rules out splitting this site by
+            // operand count: the stream count does not predict the winner, so a
+            // per-arity rule here would be a fit to two points, not a principle.
+            // `laneCountForStreams` still governs the fallback arm below (and
+            // Path B's chunked fold), which is why the arity-aware count
+            // survives the change.
+            if simdReducibleElem elemStr then
+                let simdStmts = fpReassocSimdStmts "+" "__ps" "__pt" "0" "__pn" [] prodAt
+                let body =
+                    aliasDecls
+                    @ [ sprintf "const size_t __pn = %s;" boundOn
+                        sprintf "%s __ps = 0;" elemStr ]
+                    @ simdStmts
+                    @ [ "return __ps;" ]
+                sprintf "[&]() { %s }()" (String.concat " " body)
+            else
             // ARITY-AWARE lane count. One lane iteration of an L-operand
             // prodsum keeps L loaded values plus its accumulator live, so the
             // register budget the 8 lanes were measured against is spent L
@@ -2650,6 +2839,14 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         // need no team, so the answer stays a fixed function of the data and K.
         // Licence is the ordinary one: a recognised builtin body, or declared
         // comm. An unlicensed user kernel stays serial with the knob on.
+        //
+        // LANES AND NOT `omp simd reduction`, DELIBERATELY: this is the
+        // EXPRESSION TWIN of `genReduceBinding`'s unlicensed-serial arm -- the
+        // same fold over the same materialized rank-1 array, differing only in
+        // where the result lands -- so the two must not be measured separately
+        // or chosen separately. that arm's measurement (sumred, both
+        // memory-hierarchy regimes; see the note there) says lanes, by 1.12x
+        // bandwidth-bound and 1.90x cache-resident. This site inherits it.
         //
         // ONE operand stream, so the lane count is `foldLaneCount` outright:
         // `IRReduce` folds a MATERIALIZED rank-1 array, and its lane iteration
@@ -5120,16 +5317,12 @@ let genForLoopHeader (compoundArrays: Set<string>) (binding: LoopIndexBinding) :
 // reduce (`renderReduceExpr`) has to consult the same licence before it may
 // reassociate, and F# is order-dependent. One licence predicate, one answer.
 
-/// The C++ `reduction(<op>:acc)` operator for a builtin fold body, when OpenMP
-/// knows an identity for it. `+` and `*` only: those are the two whose private
-/// initializer (0 / 1) is unambiguous for every element type Blade folds, and
-/// they are the ones the plan's Path A commits to. Everything else licensed goes
-/// down the manual chunked path (Path B), which needs no identity at all.
-let ompReductionOperator (op: IRBinOp) : string option =
-    match op with
-    | IRAdd -> Some "+"
-    | IRMul -> Some "*"
-    | _ -> None
+// `ompReductionOperator` -- the `reduction(<op>:acc)` operator for a builtin
+// fold body -- is defined with the BLADE_FP_REASSOC gate near the top of this
+// file too, because the knob's `omp simd reduction` form reads it through
+// `fpReassocSimdOp`, which lives with the rest of that machinery, and F# is
+// order-dependent. Path A below and the knob name the SAME operator table on
+// purpose: one table, one answer, whichever construct spends it.
 
 // `foldLaneCount` -- the lane count Path B's flat form uses below -- is defined
 // with the BLADE_FP_REASSOC gate near the top of this file, because the
@@ -13189,9 +13382,35 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // declared comm), so an unlicensed user kernel still falls to
                 // the serial arm below with the knob on.
                 //
-                // DETERMINISM: no omp_get_max_threads, no team, no pragma. The
-                // answer is a fixed function of the data and K alone, so
-                // OMP_NUM_THREADS=1 and =N give the same bits.
+                // LANES, NOT `omp simd reduction`, AND THAT IS A MEASUREMENT.
+                // The simd form (`fpReassocSimdStmts`) is available here -- the
+                // licence class that reaches this arm is usually a builtin `+`
+                // -- and it is what sites `IRProdSum` and `genReduceComputeBinding`
+                // now emit. It LOSES here, at both ends of the memory hierarchy
+                // (sumred = `reduce(x, (+))`, f64, OMP_NUM_THREADS=1, medians
+                // over 3 processes x 5 reps, `bench\blade`):
+                //
+                //     n = 10000019 (bandwidth-bound)  serial 8.02 ms
+                //                                     8 lanes 2.78 ms  (2.88x)
+                //                                     simd    3.10 ms  (2.59x)
+                //     n = 300007 (cache-resident)     serial  223 us
+                //                                     8 lanes 29.9 us  (7.45x)
+                //                                     simd    56.7 us  (3.93x)
+                //
+                // and the cache-resident gap -- 1.9x, entirely outside the
+                // spread -- is the one that says why. A ONE-STREAM add chain is
+                // register-cheap, so all 8 named lanes stay in registers and GCC
+                // additionally packs and unrolls them (the emitted lane form
+                // itself vectorizes: 2 `vaddpd` per iteration, 8 doubles). The
+                // simd form hands the compiler ONE 4-wide accumulator and it
+                // stops there, so it runs 4 chains where the lanes run 8+.
+                // Where the simd form wins is the shapes with more per-element
+                // work, where the lanes spill instead (see the two sites above).
+                //
+                // DETERMINISM, on this arm, is therefore still the STRONG
+                // property the knob originally promised: no omp_get_max_threads,
+                // no team, no pragma at all, so the answer is a fixed function
+                // of the data and K alone and reproduces across toolchains.
                 // One operand stream (a materialized rank-1 array), so the
                 // measured anchor applies directly -- see laneCountForStreams.
                 let kLanes = foldLaneCount
@@ -13412,25 +13631,31 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                             // simplification -- it is the value that site computes.
                             // RESTRICT SOURCE ALIASES. The peel below would read
                             // each rank-1 operand as `<name>[i]` through the
-                            // Array struct; behind that subscript GCC will not
-                            // SLP-pack the K independent lane chains at all.
-                            // Reading through a raw restrict pointer to the pool
-                            // base lets SLP fire -- but note the measured
-                            // residual (dot shape, 1e7, 1 thread): GCC marshals
-                            // the named scalar lanes into vectors through a
-                            // vunpck/vpermpd permute storm that spends the gain,
-                            // landing at parity with the serial chain rather
-                            // than the ~1.6x clean packed FMA would give. The
-                            // aliases are kept because they are sound, cost
-                            // nothing, and make the win available to any
-                            // compiler (or future GCC) whose SLP handles the
-                            // idiom cleanly. Licence is Phase 1's:
-                            // these operands are READ-ONLY here (the fold writes
-                            // only its scalar accumulator), and read-only
-                            // sharing -- including `zip(x, x)` binding one array
-                            // to two slots -- is permitted under C's restrict
+                            // Array struct, and behind that subscript the
+                            // vectorizer cannot prove the sweep is
+                            // dependence-free (the pool pointers could alias the
+                            // accumulator's storage as far as it knows). Reading
+                            // through raw restrict pointers to the pool bases is
+                            // what lets it fire. Licence is Phase 1's: these
+                            // operands are READ-ONLY here (the fold writes only
+                            // its scalar accumulator), and read-only sharing --
+                            // including `zip(x, x)` binding one array to two
+                            // slots -- is permitted under C's restrict
                             // semantics; only written-through pointers must be
                             // exclusive.
+                            //
+                            // HISTORY, because it is the measurement that chose
+                            // the form below. These aliases were added for the
+                            // K-LANE form, whose independent partials live in
+                            // named scalars and need GCC's SLP pass to pack them
+                            // into vectors. With the aliases SLP did fire -- and
+                            // spent the entire gain marshalling the named lanes
+                            // through a vunpck/vpermpd permute storm, landing at
+                            // PARITY with the serial chain (dot shape, n = 1e7,
+                            // 1 thread: 8.63 ms serial vs 8.66 ms in 8 lanes).
+                            // The simd form asks for the partials in vector
+                            // registers directly, so nothing is ever marshalled;
+                            // the same aliases then buy the whole win.
                             let mutable srcAliases : Map<string, string> = Map.empty
                             let mutable aliasDecls : string list = []
                             for elem in lvl.Elements do
@@ -13487,12 +13712,70 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                                 |> List.map (fun e -> e.ArrayName)
                                 |> List.distinct
                                 |> List.length
+                            let boundStr = genLoopBoundExpr (compoundArrayNamesOf cg.Bindings) lvl
+                            match fpReassocSimdOp callable elemStr with
+                            | Some opStr ->
+                                // SIMD FORM, and the site the two forms differ
+                                // most sharply at. The peels go INSIDE the
+                                // vectorized loop (the `prelude`), so the body
+                                // expression is written straight into it -- no
+                                // `__rbody` lambda, because there is only ONE
+                                // index to evaluate it at and nothing to
+                                // re-render.
+                                //
+                                // MEASURED (dot shape, `reduce(<unforced zip>,
+                                // (+))`, f64, OMP_NUM_THREADS=1, medians over 3
+                                // processes x 5 reps, `bench\blade`):
+                                //
+                                //   n = 10000019 (bandwidth-bound)
+                                //       serial 8.82 ms  8 lanes 9.32 ms (0.95x)
+                                //                       simd    5.38 ms (1.64x)
+                                //   n = 300007 (cache-resident)
+                                //       serial  224 us  8 lanes  229 us (0.97x)
+                                //                       simd    58.6 us (3.81x)
+                                //
+                                // The lanes are worth NOTHING at this shape in
+                                // either regime -- they are the permute storm
+                                // described above -- and 5.4 ms is what a
+                                // hand-written packed-FMA dot reaches on this
+                                // machine. The whole gain was sitting behind the
+                                // marshalling.
+                                //
+                                // NO short fallback and no `streams` count: the
+                                // vectorizer emits its own scalar remainder, and
+                                // the register-budget rule the lane count exists
+                                // to apply (`laneCountForStreams`) is about
+                                // NAMED scalar accumulators -- it has nothing to
+                                // say about vector-register partials, whose
+                                // width the compiler picks.
+                                Some (
+                                    [ sprintf "%s// reduce over computation: accumulator loop (omp simd reduction, BLADE_FP_REASSOC, %d operand stream%s)"
+                                          ind streams (if streams = 1 then "" else "s")
+                                      sprintf "%s{" ind
+                                      sprintf "%s    const size_t __rhi = %s;" ind boundStr ]
+                                    @ (aliasDecls |> List.map (fun s -> ind + "    " + s))
+                                    @ (fpReassocSimdStmts opStr name lvl.IndexName "0" "__rhi"
+                                           peels (fun _ -> bodyExpr)
+                                       |> List.map (fun s -> ind + "    " + s))
+                                    @ [ sprintf "%s}" ind ])
+                            | None ->
+                            // K-LANE FORM: the fallback for a licence the simd
+                            // arm cannot spell (a `comm`-declared kernel, whose
+                            // combine is a call, or a non-scalar element type).
+                            // Here the body IS evaluated at K different indices,
+                            // so it is rendered ONCE into a local
+                            // `[&](size_t) -> T` lambda and the lanes call it at
+                            // their own indices; the K copies are the inliner's,
+                            // not the emitter's. Rendering once is not only
+                            // smaller text: the kernel emitters are not all pure
+                            // (some register collected definitions), so emitting
+                            // the same body twice is a hazard the single render
+                            // removes.
                             let kLanes = laneCountForStreams streams
                             let bodyAt (i: string) = sprintf "__rbody(%s)" i
                             let (laneStmts, resultLane) =
                                 fpReassocLaneStmts kLanes elemStr "__rlane" "__ri" "0" "__rhi" bodyAt
                                     (fun acc rhs -> sprintf "%s = %s(%s, %s);" acc wname acc rhs)
-                            let boundStr = genLoopBoundExpr (compoundArrayNamesOf cg.Bindings) lvl
                             Some (
                                 [ sprintf "%s// reduce over computation: accumulator loop (%d-lane, BLADE_FP_REASSOC, %d operand stream%s)"
                                       ind kLanes streams (if streams = 1 then "" else "s")

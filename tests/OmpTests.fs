@@ -1123,11 +1123,27 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                                                    n (if integerData then "exact" else "vs serial") diff)
                     | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
 
-        // ---- BLADE_FP_REASSOC: the deterministic K-lane opt-in ------------
+        // ---- BLADE_FP_REASSOC: the reassociation opt-in -------------------
         // The knob licenses the emitter to reassociate a SERIAL floating-point
-        // accumulation chain -- `prodsum`'s fiber sweep and an UNQUALIFIED
-        // builtin `reduce` (one the user never marked `omp`) -- into the same
-        // K-lane shape Path B already uses, minus the thread chunking.
+        // accumulation chain -- `prodsum`'s fiber sweep, a reduce over a
+        // deferred computation, and an UNQUALIFIED builtin `reduce` (one the
+        // user never marked `omp`).
+        //
+        // TWO EMITTED FORMS, chosen per site by measurement (CodeGen.fs
+        // `fpReassocSimdStmts` / `fpReassocLaneStmts`, each of which carries the
+        // numbers that chose it):
+        //
+        //   omp simd   `#pragma omp simd reduction(<op>:acc)` over the plain
+        //              serial loop. Emitted by the `prodsum` IIFE and by the
+        //              reduce-over-computation nest. Needs a builtin `+`/`*`
+        //              body (a reduction clause names an OPERATOR) and a scalar
+        //              element type.
+        //   K lanes    K independent named accumulators combined in fixed
+        //              ascending order, no pragma at all. Emitted by `reduce`
+        //              over a MATERIALIZED array (both its statement and its
+        //              expression form), and everywhere the simd form is not
+        //              available -- above all for a `comm`-declared kernel,
+        //              whose combine is a CALL.
         //
         // Everything above this point, and every other suite, runs with the
         // knob at its DEFAULT (off), which is what makes "off means
@@ -1140,25 +1156,37 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // Three properties are asserted, and they are not the same property:
         //
         //   1. VALUE. Knob-on agrees with knob-off to 1e-9 relative on awkward
-        //      non-representable data, and EXACTLY on integer-valued data (the
-        //      property loops/110-111 and the interpreter differential depend
-        //      on).
-        //   2. DETERMINISM. The lane form has no pragma and no team, so its
-        //      answer is a fixed function of the data and K alone: the SAME
-        //      binary must print the same bytes at OMP_NUM_THREADS=1 and =4,
-        //      and across two runs. (Contrast Path B, whose determinism holds
-        //      only at a FIXED team size.)
-        //   3. LICENCE + LIVENESS, at the emission level. A positive control
-        //      proves the lanes actually appear with the knob on (without it
-        //      the value arms could pass vacuously by never firing), and a
-        //      negative control proves an UNLICENSED user kernel -- no builtin
-        //      body, no `comm` -- is emitted byte-identically with the knob on.
+        //      non-representable data, and EXACTLY on integer-valued data.
+        //      Integer exactness holds under ANY summation order -- including
+        //      the vectorizer's, which is why it survives the simd form
+        //      unchanged -- and it is the property loops/110-111 and the
+        //      interpreter differential depend on.
+        //   2. DETERMINISM, in the form the contract at `fpReassocEnabled` now
+        //      states it: for a FIXED BINARY the answer is identical across two
+        //      runs and across OMP_NUM_THREADS values. NEITHER form creates a
+        //      team (`omp simd` is a SIMD construct, and the lane form has no
+        //      pragma at all), so thread count cannot enter the answer. What is
+        //      deliberately NOT asserted any more is reproducibility across
+        //      compilers or flags: under the simd form the summation order is
+        //      the vectorizer's, and the project policy is that optimized
+        //      Release builds are not bit-reproducible across builds. (The lane
+        //      arms do still have the stronger property -- a fixed function of
+        //      the data and K -- but it is not separately pinned here, because
+        //      one binary cannot observe it.)
+        //   3. LICENCE + LIVENESS, at the emission level. Positive controls
+        //      prove each site emits the FORM it is supposed to (without them
+        //      the value arms could pass vacuously by never firing, and a site
+        //      could silently swap forms), and a negative control proves an
+        //      UNLICENSED user kernel -- no builtin body, no `comm` -- is
+        //      emitted byte-identically with the knob on.
         //
         // n walks every boundary of the strided sweep: below the lanes (1, 3),
         // maximal tail (7), exactly the lanes (8), one past (9), maximal tail
         // above one full stride (15), indivisible (17). Getting any of them
         // wrong drops or double-counts elements silently -- the fold still
-        // prints A number.
+        // prints A number. The boundaries still matter under the simd form: the
+        // vectorizer's own scalar remainder is exercised by exactly the same
+        // awkward trip counts.
         let withReassoc (on: bool) (f: unit -> 'a) : 'a =
             let prior = System.Environment.GetEnvironmentVariable("BLADE_FP_REASSOC")
             System.Environment.SetEnvironmentVariable("BLADE_FP_REASSOC", (if on then "1" else "0"))
@@ -1206,6 +1234,27 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             sprintf "let x = [%s]\nlet y = [%s]\n" lit lit2
               + "let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b\n"
               + "let s = reduce(P, (+))\n"
+        // A `comm`-DECLARED kernel whose body is NOT a bare builtin op. This is
+        // the licence class the simd form cannot spell -- no operator to name in
+        // a reduction clause -- so it is what still gets the K-lane form, at
+        // every site. `+ 0.0` is what keeps `foldKernelBuiltinOp` from
+        // recognising the body while leaving the arithmetic (and hence the
+        // expected value) identical to a plain sum.
+        let fprCommKernel =
+            "function myK(a: Float64, b: Float64) where comm(a, b) = a + b + 0.0\n"
+        let fprSrcCommReduce (lit: string) =
+            fprCommKernel + sprintf "let A = [%s]\nlet s = reduce(A, myK)\n" lit
+        // comm kernel over a deferred computation: the reduce-over-computation
+        // site's lane fallback. The 3-arg form is required there (a fused fold
+        // cannot seed from its first element).
+        let fprSrcCommDot (lit: string) (lit2: string) =
+            fprCommKernel + sprintf "let x = [%s]\nlet y = [%s]\n" lit lit2
+              + "let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b\n"
+              + "let s = reduce(P, myK, 0.0)\n"
+        let fprSrcCommDot3 (l1: string) (l2: string) (l3: string) =
+            fprCommKernel + sprintf "let x = [%s]\nlet y = [%s]\nlet z = [%s]\n" l1 l2 l3
+              + "let P = method_for(zip(x, y, z)) <@> lambda(a: Float64, b: Float64, c: Float64) -> a * b * c\n"
+              + "let s = reduce(P, myK, 0.0)\n"
         let fprNs = [1; 3; 7; 8; 9; 15; 17]
         // K = 5 for three streams, so its boundaries are a DIFFERENT set of n:
         // below the lanes (1, 3), exactly the lanes (5), maximal tail (4, 9),
@@ -1234,7 +1283,20 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                                     (laneLit 11 (fun i -> float (i % 3 + 1))))
               yield ("dot_n15_integer_exact",
                      fprSrcDot (laneLit 15 (fun i -> float (i % 9 + 1)))
-                               (laneLit 15 (fun i -> float (i % 5 + 2)))) ]
+                               (laneLit 15 (fun i -> float (i % 5 + 2))))
+              // The K-LANE form's own value arms. The four cases above all
+              // reach a site that now emits `omp simd`, so without these the
+              // lane emitter -- still live for every `comm`-declared kernel --
+              // would have no value coverage at all here.
+              for n in fprNs do
+                yield (sprintf "comm_reduce_n%d" n, fprSrcCommReduce (laneLit n awkward))
+                yield (sprintf "comm_dot_n%d" n,
+                       fprSrcCommDot (laneLit n awkward) (laneLit n (fun i -> awkward (i + 3))))
+              yield ("comm_reduce_n15_integer_exact",
+                     fprSrcCommReduce (laneLit 15 (fun i -> float (i % 9 + 1))))
+              yield ("comm_dot_n15_integer_exact",
+                     fprSrcCommDot (laneLit 15 (fun i -> float (i % 9 + 1)))
+                                   (laneLit 15 (fun i -> float (i % 5 + 2)))) ]
         for (label, src) in fprCases do
             let name = "fp_reassoc_" + label
             let exact = label.EndsWith "integer_exact"
@@ -1255,43 +1317,68 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                             fail name (sprintf "reassoc %.17g vs serial %.17g (|diff| = %g, tol = %g)" ov fv diff tol)
                         else
                             // Thread-count independence AND run-to-run identity,
-                            // on the SAME binary: the lane form takes neither
-                            // from a team, so both must hold outright.
+                            // on the SAME BINARY -- the whole of what the knob
+                            // now promises. Neither form takes anything from a
+                            // team (`omp simd` is a SIMD construct and creates
+                            // none; the lane form has no pragma at all), so both
+                            // must hold outright. Note what is NOT compared: two
+                            // DIFFERENTLY BUILT binaries, which the contract at
+                            // `fpReassocEnabled` no longer claims agree.
                             match runProgram onExe "4", runProgram onExe "1" with
                             | Error e, _ -> fail name (sprintf "reassoc-on run at 4 threads: %s" e)
                             | _, Error e -> fail name (sprintf "reassoc-on second run: %s" e)
                             | Ok at4, Ok again ->
                                 if stripTiming at4 <> stripTiming onOut then
-                                    fail name "output differs between OMP_NUM_THREADS=1 and 4 (lane form is not thread-independent)"
+                                    fail name "output differs between OMP_NUM_THREADS=1 and 4 (a reassociated form took something from a team)"
                                 elif stripTiming again <> stripTiming onOut then
-                                    fail name "output differs across two runs at a fixed thread count"
+                                    fail name "output differs across two runs of the same binary at a fixed thread count"
                                 else
                                     pass name (sprintf "%s: |diff| = %g; identical at 1 vs 4 threads and across 2 runs"
                                                    (if exact then "exact" else "vs serial") diff)
                     | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
 
         // Emission controls. Without these the value arms could all pass by the
-        // knob never firing at all.
-        let fprEmitCases : (string * string * bool) list =
-            // (label, source, lanes expected with the knob ON)
-            [ ("builtin_reduce_lanes",
-               fprSrcReduce (laneLit 17 awkward), true)
-              ("prodsum_lanes",
-               fprSrcProdsum (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), true)
+        // knob never firing at all -- AND, now that there are two forms, a site
+        // could silently swap one for the other and every value arm would still
+        // pass. Each case therefore pins WHICH form its site emits, which is a
+        // per-site MEASUREMENT (see the comment at each `fpReassocEnabled ()`
+        // site in CodeGen.fs) and not an arbitrary choice: a regression that
+        // flips one of these is a performance regression the values cannot see.
+        let fprEmitCases : (string * string * string) list =
+            // (label, source, expected form: "simd" | "lanes" | "unchanged")
+            [ // reduce over a MATERIALIZED array -> lanes (measured 1.12x
+              // bandwidth-bound / 1.90x cache-resident over the simd form).
+              ("builtin_reduce_lanes",
+               fprSrcReduce (laneLit 17 awkward), "lanes")
+              // prodsum's fiber IIFE -> simd (2.60x on the gemv fiber and 3.36x
+              // at three streams, where the lanes gave 0.96x and 1.80x).
+              ("prodsum_simd",
+               fprSrcProdsum (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), "simd")
+              ("prodsum3_simd",
+               fprSrcProdsum3 (laneLit 17 awkward)
+                              (laneLit 17 (fun i -> awkward (i + 3)))
+                              (laneLit 17 (fun i -> awkward (i + 7))), "simd")
+              // reduce-over-deferred-computation (the dot shape) -> simd (1.64x
+              // bandwidth-bound / 3.81x cache-resident; the lanes were at
+              // PARITY with the serial chain in both regimes).
+              ("dot_reduce_over_computation_simd",
+               fprSrcDot (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), "simd")
+              // A `comm`-declared kernel is licensed but its combine is a CALL,
+              // so no reduction clause can name it: BOTH sites fall back to the
+              // lanes. This is the arm that keeps `fpReassocLaneStmts` live at
+              // the reduce-over-computation site.
+              ("comm_reduce_lanes",
+               fprSrcCommReduce (laneLit 17 awkward), "lanes")
+              ("comm_dot_over_computation_lanes",
+               fprSrcCommDot (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), "lanes")
               // Unlicensed: body is not a bare builtin op and no `comm` is
               // declared, so the knob grants nothing. `where omp` is absent too,
               // so this is the serial arm either way.
               ("unlicensed_kernel_stays_serial",
                "function myK(a: Float64, b: Float64) = (a + b) * 1.0000001\n"
                  + sprintf "let A = [%s]\n" (laneLit 17 awkward)
-                 + "let s = reduce(A, myK)\n", false)
-              // reduce-over-deferred-computation (the dot shape). Without this
-              // control the dot value arms above would pass by never firing:
-              // the fold nest and the lane form agree to the last ULP on
-              // 15-element data, so agreement alone proves nothing.
-              ("dot_reduce_over_computation_lanes",
-               fprSrcDot (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), true) ]
-        for (label, src, expectLanes) in fprEmitCases do
+                 + "let s = reduce(A, myK)\n", "unchanged") ]
+        for (label, src, expectForm) in fprEmitCases do
             let name = "fp_reassoc_emission_" + label
             match withReassoc true (fun () -> withBlasOff (fun () -> emitOnly name src)),
                   withReassoc false (fun () -> withBlasOff (fun () -> emitOnly name src)) with
@@ -1299,28 +1386,50 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             | _, Error e -> fail name (sprintf "emit (knob off): %s" e)
             | Ok onCpp, Ok offCpp ->
                 let hasLanes (s: string) = s.Contains "__rlane" || s.Contains "__pl0"
-                if offCpp |> hasLanes then
-                    fail name "knob OFF emitted lane accumulators (the default must never reassociate)"
-                elif expectLanes && not (hasLanes onCpp) then
-                    fail name "knob ON emitted no lane accumulators (the gate never fired; value arms would be vacuous)"
-                elif not expectLanes && onCpp <> offCpp then
-                    fail name "unlicensed kernel: knob ON changed the emission (the knob is not a licence)"
+                // The macro, not a raw `#pragma`: cpp/blade_portability.hpp owns
+                // the spelling (and its OpenMP-4.0 gate), and codegen emits only
+                // the macro -- so a raw pragma appearing here would itself be
+                // the regression.
+                let hasSimd (s: string) = s.Contains "BLADE_OMP_SIMD_REDUCTION"
+                if hasLanes offCpp || hasSimd offCpp then
+                    fail name "knob OFF emitted a reassociated form (the default must never reassociate)"
                 else
-                    pass name (if expectLanes then "lanes only with the knob on"
-                               else "byte-identical with the knob on (unlicensed, stays serial)")
+                    match expectForm with
+                    | "lanes" when not (hasLanes onCpp) ->
+                        fail name "knob ON emitted no lane accumulators (the gate never fired, or the site swapped to simd)"
+                    | "lanes" when hasSimd onCpp ->
+                        fail name "knob ON emitted BOTH forms at a lane site"
+                    | "simd" when not (hasSimd onCpp) ->
+                        fail name "knob ON emitted no omp simd reduction (the gate never fired, or the site swapped to lanes)"
+                    | "simd" when hasLanes onCpp ->
+                        fail name "knob ON emitted lane accumulators at a simd site (the measured-worse form)"
+                    | "unchanged" when onCpp <> offCpp ->
+                        fail name "unlicensed kernel: knob ON changed the emission (the knob is not a licence)"
+                    | "lanes" -> pass name "K-lane form, only with the knob on"
+                    | "simd" -> pass name "omp simd reduction form, only with the knob on"
+                    | "unchanged" -> pass name "byte-identical with the knob on (unlicensed, stays serial)"
+                    | other -> fail name (sprintf "test bug: unknown expected form %s" other)
 
         // ---- The lane COUNT is a function of the operand-stream count -------
         // `laneCountForStreams` divides a fixed register/ILP budget among the
         // concurrent value streams one lane iteration keeps live: K = 8 at one
         // and two streams (the repo's measured anchor), K = floor(16/s) beyond.
-        // The count is part of the fold's EVALUATION ORDER, so it is pinned
-        // here as emitted text, not left to be inferred from a timing.
+        // The count is part of the lane form's EVALUATION ORDER, so it is
+        // pinned here as emitted text, not left to be inferred from a timing.
+        //
+        // THE SOURCES CHANGED WITH THE FORMS, THE RULE DID NOT. `prodsum` used
+        // to be where the arity-aware count was observable; it now emits `omp
+        // simd`, where the partial count is the vectorizer's and there is
+        // nothing to pin. The rule is still live -- and still observable --
+        // wherever the LANE form is what gets emitted, which is any
+        // `comm`-declared kernel, so the multi-stream arms move to a comm fold
+        // over a deferred computation of the same arity.
         //
         // The three-stream arm is the one with a measurement behind it: 8 lanes
-        // on `prodsum(a, b, c)` ran 2.6x SLOWER than 5 lanes in the comoment3
-        // shape (61 vars x 2003 samples, `Array<double,1>` peels through the
-        // named kernel), while 8 lanes on the two-operand form helped. A
-        // regression that silently restores 8 here restores that.
+        // on a three-stream body ran 2.2-2.7x SLOWER than 5 lanes in the
+        // comoment3 shape (61 vars x 2003 samples), while 8 lanes on the
+        // two-stream form helped. A regression that silently restores 8 here
+        // restores that.
         let distinctLanes (prefix: string) (s: string) =
             System.Text.RegularExpressions.Regex.Matches(s, prefix + @"(\d+)")
             |> Seq.cast<System.Text.RegularExpressions.Match>
@@ -1329,14 +1438,13 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         let fprLaneCountCases : (string * string * string * int) list =
             // (label, source, lane-local prefix, expected distinct lanes)
             [ ("reduce_one_stream", fprSrcReduce (laneLit 33 awkward), "__rlane", 8)
-              ("prodsum_two_streams",
-               fprSrcProdsum (laneLit 33 awkward) (laneLit 33 (fun i -> awkward (i + 3))), "__pl", 8)
-              ("prodsum3_three_streams",
-               fprSrcProdsum3 (laneLit 33 awkward)
+              ("comm_reduce_one_stream", fprSrcCommReduce (laneLit 33 awkward), "__rlane", 8)
+              ("comm_dot_two_streams",
+               fprSrcCommDot (laneLit 33 awkward) (laneLit 33 (fun i -> awkward (i + 3))), "__rlane", 8)
+              ("comm_dot3_three_streams",
+               fprSrcCommDot3 (laneLit 33 awkward)
                               (laneLit 33 (fun i -> awkward (i + 3)))
-                              (laneLit 33 (fun i -> awkward (i + 7))), "__pl", 5)
-              ("dot_two_streams",
-               fprSrcDot (laneLit 33 awkward) (laneLit 33 (fun i -> awkward (i + 3))), "__rlane", 8) ]
+                              (laneLit 33 (fun i -> awkward (i + 7))), "__rlane", 5) ]
         for (label, src, prefix, expected) in fprLaneCountCases do
             let name = "fp_reassoc_lane_count_" + label
             match withReassoc true (fun () -> withBlasOff (fun () -> emitOnly name src)) with

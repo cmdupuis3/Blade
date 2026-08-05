@@ -130,3 +130,38 @@
     #define BLADE_OMP_PARALLEL_FOR_DYNAMIC
   #endif
 #endif
+
+// ---------------------------------------------------------------------------
+// BLADE_OMP_SIMD_REDUCTION(spec) -- "vectorize the loop that immediately
+// follows, accumulating into `acc` through `op`", where `spec` is an OpenMP
+// reduction-spec such as `+:__ps`. This is the BLADE_FP_REASSOC accumulation
+// form (CodeGen.fs `fpReassocSimdStmts`): the knob's licence to reassociate a
+// serial floating-point accumulation chain, spent by handing the chain to the
+// vectorizer instead of by hand-interleaving named lane accumulators.
+//
+// NO THREADS. `omp simd` is a SIMD construct, not a worksharing one: it creates
+// no team, so it is legal inside an already-parallel region (where the emitters
+// routinely land -- the comm-triangular covariance loop) and adds nothing to a
+// serial one but vector width.
+//
+// PARAMETERIZED, so unlike the two macros above it cannot be a fixed _Pragma:
+// the operator and the accumulator's name are both emission-site facts. The
+// two-step stringize is the standard idiom (`_Pragma` takes a string literal;
+// `#spec` makes one out of the argument's tokens). `spec` must therefore be
+// comma-free, which every `<op>:<name>` reduction-spec is.
+//
+// GATED ON OpenMP 4.0 (`_OPENMP >= 201307`), not merely on `_OPENMP`: `simd`
+// entered the standard in 4.0, and MSVC's `/openmp` is still 2.0 (`_OPENMP` =
+// 200203), where `#pragma omp simd` is an unknown-pragma diagnostic. Under a
+// pre-4.0 OpenMP -- or none -- the expansion is EMPTY and the loop below runs
+// as the ordinary serial accumulation, which is correct, just unvectorized.
+// Same argument as BLADE_IVDEP: the header picks the spelling, the emission
+// site discharges the licence (`foldReorderLicensed` + the knob).
+#ifndef BLADE_OMP_SIMD_REDUCTION
+  #if defined(_OPENMP) && (_OPENMP >= 201307)
+    #define BLADE_OMP_SIMD_PRAGMA_(x) _Pragma(#x)
+    #define BLADE_OMP_SIMD_REDUCTION(spec) BLADE_OMP_SIMD_PRAGMA_(omp simd reduction(spec))
+  #else
+    #define BLADE_OMP_SIMD_REDUCTION(spec)
+  #endif
+#endif
