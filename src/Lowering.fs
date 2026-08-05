@@ -1995,15 +1995,29 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // call site. Runs after Poly so per-param/per-arg unification is
         // straightforward -- each pack has already been expanded.
         let irModule = IR.monomorphizeHMFunctions irModule env.Builder
-        // SHAPE monomorphization: a function over a symbolic extent
-        // (`Idx<n>`) gets a specialized copy per distinct call-site extent
-        // signature, with the cosmetic `IRParam` extent placeholders
-        // rewritten to `IRLit`. Must run AFTER both monomorphizers (each
-        // creates call sites this one reads, and neither carries extents
-        // itself) and before the combinator-producing rewrites below, so
-        // the array types those build inherit the literals rather than
-        // needing a second rewrite.
-        let irModule = IR.shapeMonomorphizeModule irModule env.Builder
+        currentExports <- Map.add moduleName exports currentExports
+        irModules <- irModules @ [irModule]
+
+    // SHAPE monomorphization: a function over a symbolic extent (`Idx<n>`)
+    // gets a specialized copy per distinct call-site extent signature, with
+    // the cosmetic `IRParam` extent placeholders rewritten to `IRLit`. Must
+    // run AFTER both monomorphizers (each creates call sites this one reads,
+    // and neither carries extents itself) and before the combinator-producing
+    // rewrites below, so the array types those build inherit the literals
+    // rather than needing a second rewrite.
+    //
+    // It is the one pass here that runs over the WHOLE PROGRAM rather than per
+    // module, which is what lets a literal-shaped call in module A specialize
+    // a function defined in module B. That needs every module's arity/HM
+    // monomorphization to have happened first -- hence the split loop -- and
+    // costs nothing else: a module's exports are fixed by `lowerTypedModule`
+    // before any of these passes run, so hoisting them out of the loop cannot
+    // change what a later module sees, and for a single-module program the
+    // builder mints exactly the same ids in exactly the same order as before.
+    let irModules = IR.shapeMonomorphizeModules irModules env.Builder
+
+    let irModules =
+        irModules |> List.map (fun irModule ->
         // Rewrite raw array-typed binops into object_for combinators now
         // that pack-element operand types are concrete (post Poly+HM):
         // `A[i] + A[j]` on rank>=1 pack elements couldn't be recognized as
@@ -2017,9 +2031,8 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         let irModule = IR.liftInlineFormsModule irModule env.Builder
         // mask+contains fusion always runs a linear scan; the semijoin
         // hash-set is a separate, not-yet-implemented optimization.
-        currentExports <- Map.add moduleName exports currentExports
-        irModules <- irModules @ [irModule]
-    
+        irModule)
+
     { Modules = irModules }
 
 // Typecheck warning surfacing (shared by every CLI lane)

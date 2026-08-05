@@ -1,0 +1,23 @@
+// TEST: Cross-module shape specialization
+// MODULE: Main
+// Three shapes against Shapes.vsum (two literal, plus the chained call), a
+// literal-shaped array-returning call, and one deliberately non-qualifying
+// call. The values are identical whether or not a copy was made — that is the
+// point of the pin: specialization must be invisible here.
+module Main
+import Shapes
+
+let w5: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let w3: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+
+let a = Shapes.vsum(w5)
+let b = Shapes.vsum(w3)
+// The cascade: vscale's baked return extent is the argument extent of the
+// vsum call wrapped around it.
+let c = Shapes.vsum(Shapes.vscale(w5))
+// Disagreeing occurrences of `n` -- declines, keeps the generic copy.
+let d = Shapes.vsum2(w5, w3)
+// EXPECT: a = 15
+// EXPECT: b = 6
+// EXPECT: c = 30
+// EXPECT: d = 21

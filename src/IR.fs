@@ -1827,7 +1827,9 @@ type IRModule = {
     /// in `Functions`, and codegen keys order on the ORIGIN's id, so a copy
     /// is emitted at exactly its origin's program point -- no per-pass
     /// main-locality reasoning required. Empty for modules with no
-    /// synthesized copies; populated by `shapeMonomorphizeModule`.
+    /// synthesized copies; populated by `shapeMonomorphizeModules`, which
+    /// records a copy in the module that DEFINES its origin even when the call
+    /// site that earned it lives in another module.
     DerivedFuncOrigins: Map<IRId, IRId>
 }
 
@@ -6472,11 +6474,26 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
 // function, and decline recursive/mutually recursive functions outright --
 // bounded by real call-site diversity and capped in the compiler.
 
-/// Most specialized copies any one function may earn. Past this, further call
-/// sites keep the generic copy -- declines are counted and surfaced under
+/// Most specialized copies any one function may earn, counted across the whole
+/// PROGRAM (the pass spans modules). Past this, further call sites keep the
+/// generic copy -- declines are counted and surfaced under
 /// BLADE_DEBUG_SHAPE_SPEC, never as a user diagnostic (a missed optimization
 /// is not a program defect).
-let private SHAPE_SPEC_CAP = 4
+///
+/// `BLADE_SHAPE_SPEC_CAP` overrides it. Unset (or unparseable) is 4, the
+/// measured-safe default the corpus never reaches. There is deliberately NO
+/// "unlimited" setting: the cap is the standing termination backstop for the
+/// worklist -- a self-recursive or mutually recursive candidate can otherwise
+/// keep minting signatures -- so `0`, a negative value and anything above 64
+/// all clamp to 64 rather than opening the door to unbounded code growth.
+let private shapeSpecCap () =
+    match System.Environment.GetEnvironmentVariable("BLADE_SHAPE_SPEC_CAP") with
+    | null | "" -> 4
+    | s ->
+        match System.Int32.TryParse s with
+        | true, v when v > 0 -> min v 64
+        | true, _ -> 64
+        | _ -> 4
 
 /// `BLADE_DEBUG_SHAPE_SPEC=1` prints the per-module specialize/cap/decline
 /// census. Orchestration/diagnostic aid only; silent by default.
@@ -6620,6 +6637,12 @@ let private shapeSymbolicOccurrences (paramTys: IRType list) : Map<string, int> 
     paramTys |> List.iter goTy
     acc |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
 
+/// Just the NAME SET a type mentions. Occurrence counts are load-bearing only
+/// for the parameter list (full-coverage rule); the name-provenance gate below
+/// asks a membership question and nothing more.
+let private shapeSymbolicNames (ty: IRType) : Set<string> =
+    shapeSymbolicOccurrences [ty] |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+
 /// Walk a (parameter type, argument type) pair in lockstep, recording for each
 /// symbolic parameter extent the literal the argument pins it to. Positions
 /// that fail to line up structurally simply record nothing, which -- because a
@@ -6707,12 +6730,63 @@ let private shapeSpecWorthwhile (func: IRFuncDef) : bool =
         e) func.Body |> ignore
     found
 
-/// Function ids that can reach themselves through the module's static call
-/// graph (direct self-recursion or a mutual cycle). This pass declines to
-/// specialize these: a spec body's recursive call would name the ORIGINAL id, and
-/// rewriting it to the spec is only sound when the recursive call pins the
-/// same signature -- an analysis this pass does not do.
-let private shapeRecursiveIds (funcs: IRFuncDef list) : Set<IRId> =
+/// PROVENANCE GATE. A spec bakes its literals by NAME, over every index record
+/// in the body -- but a symbolic extent name sitting in a body type is not
+/// necessarily the function's OWN. Two functions that both write `Idx<n>` mint
+/// byte-identical `IRParam ("n", …)` placeholders, and a call's result type
+/// carries the CALLEE's names into the caller's body, where the local it is
+/// bound to keeps them. Baking the enclosing signature's literal into one of
+/// those installs a bound the array does not have.
+///
+/// That is not hypothetical: `f(B: Idx<n>)` holding `let z = scale(w)` with
+/// `scale(A: Idx<n>) -> Idx<n>` and a 3-element `w`, specialized at `n = 5`,
+/// emitted `for (__ri = 1; __ri < 5; …)` over a 3-cell `z` -- a silent
+/// out-of-bounds read (right answer only because the slack pool cells were 0).
+///
+/// The fix cannot be per-node attribution: at this layer the two `n`s are
+/// indistinguishable. So the spec is REFUSED whenever the body introduces a
+/// name the signature is about to bake from anywhere other than the function's
+/// own parameters. A body acquires foreign names through exactly two doors --
+/// a call's result type, and a reference to a module-level binding -- and both
+/// are checked here. A call is waved through when its OWN signature pins that
+/// name to the very literal being baked, which is the ordinary case (`f` and
+/// its callee sharing an extent because the caller forwarded its array), so the
+/// gate costs the corpus nothing while closing the collision.
+let private shapeSpecNamesAreOwn
+        (funcById: Map<IRId, IRFuncDef>)
+        (bindingIds: Set<IRId>)
+        (subst: Map<string, int64>)
+        (body: IRExpr) : bool =
+    let dom = subst |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+    let mutable ok = true
+    mapIRExpr (fun e ->
+        (match e with
+         | IRApp (IRVar (fid, _), args, retTy) ->
+             let intro = Set.intersect dom (shapeSymbolicNames retTy)
+             if not (Set.isEmpty intro) then
+                 // The call site is read with the ENCLOSING substitution
+                 // applied to its arguments -- that is the form the spec body
+                 // will hold, and the arguments are the caller's own values, so
+                 // rewriting them is exactly right.
+                 let pinned =
+                     match Map.tryFind fid funcById with
+                     | Some callee ->
+                         shapeSignatureAt callee (args |> List.map (shapeRewriteExpr subst)) |> Map.ofList
+                     | None -> Map.empty
+                 for nm in intro do
+                     match Map.tryFind nm pinned with
+                     | Some v when v = subst.[nm] -> ()
+                     | _ -> ok <- false
+         | IRVar (vid, ty) when Set.contains vid bindingIds ->
+             if not (Set.isEmpty (Set.intersect dom (shapeSymbolicNames ty))) then ok <- false
+         | _ -> ())
+        e) body |> ignore
+    ok
+
+/// Transitive static call-graph reachability, `caller id -> every function id
+/// it can reach`. Spans the whole program: a cycle may run through two modules
+/// just as easily as one.
+let private shapeCallReach (funcs: IRFuncDef list) : Map<IRId, Set<IRId>> =
     let ids = funcs |> List.map (fun f -> f.Id) |> Set.ofList
     let direct =
         funcs
@@ -6733,7 +6807,76 @@ let private shapeRecursiveIds (funcs: IRFuncDef list) : Set<IRId> =
         if next <> reach then
             changed <- true
             reach <- next
+    reach
+
+/// Function ids that can reach themselves (direct self-recursion or a mutual
+/// cycle).
+let private shapeRecursiveIdsOf (reach: Map<IRId, Set<IRId>>) : Set<IRId> =
     reach |> Map.toList |> List.choose (fun (k, vs) -> if Set.contains k vs then Some k else None) |> Set.ofList
+
+/// Every call site a body makes to a named function, as (callee id, args).
+let private shapeCallSitesIn (body: IRExpr) : (IRId * IRExpr list) list =
+    let mutable acc = []
+    mapIRExpr (fun e ->
+        (match e with
+         | IRApp (IRVar (fid, _), args, _) -> acc <- (fid, args) :: acc
+         | _ -> ())
+        e) body |> ignore
+    acc
+
+/// Does this call hand the callee the CALLER's own extents, unchanged and in
+/// place? True when every extent-carrying parameter position of the callee
+/// receives an argument whose index record carries a bare symbolic extent name
+/// drawn from the caller's OWN parameter list -- no literal, no arithmetic, no
+/// name from anywhere else.
+///
+/// This is the identity extent substitution that makes a signature CLOSED under
+/// a recursive call: specializing the caller rewrites those argument records to
+/// the very literals the signature names, so the call re-pins the same
+/// signature and rewrites to the spec itself. A call that CHANGES an extent
+/// (the `n - 1` shape) is exactly the non-uniform case, and it is refused here:
+/// the argument extent stops being a literal, so the recursive call would keep
+/// the generic copy while the enclosing spec's own types claim the baked bound.
+let private shapeCallForwardsExtents (callerNames: Set<string>) (calleeParamTys: IRType list) (args: IRExpr list) : bool =
+    if args.Length <> calleeParamTys.Length then false else
+    let mutable ok = true
+    let obsIx (p: IRIndexType) (a: IRIndexType) =
+        match p.Extent with
+        | ShapeSymbolicExtent _ ->
+            let sameAxis = p.Rank = a.Rank && p.Symmetry = a.Symmetry && p.IxKind = a.IxKind
+            match a.Extent with
+            | ShapeSymbolicExtent k when sameAxis && Set.contains k callerNames -> ()
+            | _ -> ok <- false
+        | _ -> ()
+    // Structural mirror of `shapeObservations`, but a position that fails to
+    // line up is a REFUSAL here rather than a silent no-op: the question is
+    // "can I prove this forwards", and an unreadable position proves nothing.
+    let rec go (p: IRType) (a: IRType) =
+        match p, a with
+        | IRTArrow (ps, pr, _), IRTArrow (as_, ar, _) when ps.Length = as_.Length ->
+            List.iter2 (fun pslot aslot ->
+                match pslot, aslot with
+                | SIdx pi, SIdx ai | SIdxVirt pi, SIdxVirt ai
+                | SIdx pi, SIdxVirt ai | SIdxVirt pi, SIdx ai -> obsIx pi ai
+                | SVal pt, SVal at -> go pt at
+                | _ -> ok <- false) ps as_
+            go pr ar
+        | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length -> List.iter2 go pts ats
+        | IRTComputation pt, IRTComputation at
+        | IRTPoly (pt, _), IRTPoly (at, _)
+        | IRTUnitAnnotated (pt, _), IRTUnitAnnotated (at, _)
+        | IRTIdxTagged (pt, _), IRTIdxTagged (at, _) -> go pt at
+        | IRTUnitAnnotated (pt, _), _ -> go pt a
+        | _, IRTUnitAnnotated (at, _) -> go p at
+        | IRTIdxTagged (pt, _), _ -> go pt a
+        | _, IRTIdxTagged (at, _) -> go p at
+        | _ -> if not (Set.isEmpty (shapeSymbolicNames p)) then ok <- false
+    List.iter2 (fun (pty: IRType) arg ->
+        if not (Set.isEmpty (shapeSymbolicNames pty)) then
+            match exprTypeIfKnown arg with
+            | Some aty -> go pty aty
+            | None -> ok <- false) calleeParamTys args
+    ok
 
 /// One planned specialization: the callee it copies, the name->literal map the
 /// copy bakes, and the fresh id/name the copy will carry.
@@ -6747,17 +6890,88 @@ type private ShapeSpec = {
 /// Give every symbolic-extent function a literal-extent copy per distinct
 /// call-site shape. Runs after arity and HM monomorphization (both can
 /// create the call sites this reads) and before codegen.
-let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
+///
+/// PROGRAM-level, not per-module. Blade's module system is thin: one source
+/// file is one module, `import` binds the DEFINING module's function ids
+/// straight into the importer's environment, ids come from a single builder so
+/// they are program-global, and codegen concatenates every module into one
+/// merged unit before emitting. A call from module A to module B is therefore
+/// an ordinary `IRApp` over B's id, and the only thing that ever blocked
+/// specializing it was that the pass ran once per module. It now sees them all:
+/// candidates come from every module, call sites are harvested from every
+/// module, and a spec is placed in the module that DEFINES its origin --
+/// immediately after it, so the `DerivedFuncOrigins` emission-order rule keeps
+/// holding across the merge (the merged map is the union, and B's ids precede
+/// A's because a module can only import what was lowered before it).
+let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRModule list =
     let debug = shapeSpecDebug ()
-    let recursiveIds = shapeRecursiveIds modul.Functions
+    let cap = shapeSpecCap ()
+    let allFuncs = modules |> List.collect (fun m -> m.Functions)
+    let funcById = allFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let bindingIds =
+        modules |> List.collect (fun m -> m.Bindings |> List.map (fun b -> b.Id)) |> Set.ofList
+    let ownNamesOf (f: IRFuncDef) =
+        shapeSymbolicOccurrences (f.Params |> List.map (fun p -> p.Type))
+        |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+
+    // RECURSION. The blanket decline is replaced by the narrow sound case: a
+    // cycle may specialize when every call INSIDE the cycle forwards the
+    // caller's own parameter extents through unchanged (see
+    // `shapeCallForwardsExtents`). Then each member's signature is closed under
+    // the cycle -- specializing one rewrites its intra-cycle calls to the specs
+    // of the same shape -- and the fixpoint below reaches that closure on its
+    // own, because the forwarded argument records carry the baked literals.
+    //
+    // The whole cycle must qualify, not just the entry: admitting f while some
+    // g on the cycle calls back with a CHANGED extent would leave f's spec
+    // reachable from a copy whose types no longer describe the arrays it holds.
+    // A cycle through a lifted lambda never qualifies (the lambda's parameter
+    // list does not carry the enclosing function's names), which is the
+    // conservative answer.
+    let reach = shapeCallReach allFuncs
+    let recursiveIds = shapeRecursiveIdsOf reach
+    let cycleOf (id: IRId) =
+        match Map.tryFind id reach with
+        | Some outs -> outs |> Set.filter (fun g -> g = id || (match Map.tryFind g reach with
+                                                               | Some back -> Set.contains id back
+                                                               | None -> false))
+        | None -> Set.singleton id
+    // Memoized: every member of one cycle asks the same question, and each
+    // answer costs a walk of every member's body.
+    let admittedCycles = System.Collections.Generic.Dictionary<IRId, bool>()
+    let cycleAdmits (id: IRId) : bool =
+        match admittedCycles.TryGetValue id with
+        | true, v -> v
+        | _ ->
+            let cycle = cycleOf id
+            let ok =
+                cycle |> Set.forall (fun mid ->
+                    match Map.tryFind mid funcById with
+                    | None -> false
+                    | Some caller ->
+                        let callerNames = ownNamesOf caller
+                        shapeCallSitesIn caller.Body
+                        |> List.forall (fun (calleeId, args) ->
+                            if not (Set.contains calleeId cycle) then true
+                            else
+                                match Map.tryFind calleeId funcById with
+                                | Some callee ->
+                                    shapeCallForwardsExtents callerNames
+                                        (callee.Params |> List.map (fun p -> p.Type)) args
+                                | None -> false))
+            admittedCycles.[id] <- ok
+            ok
+
     let candidates =
-        modul.Functions
+        allFuncs
         |> List.filter (fun f ->
             not f.IsArityPoly
-            && not (Set.contains f.Id recursiveIds)
+            && (not (Set.contains f.Id recursiveIds) || cycleAdmits f.Id)
             && not (Map.isEmpty (shapeSymbolicOccurrences (f.Params |> List.map (fun p -> p.Type))))
             && shapeSpecWorthwhile f)
-    if candidates.IsEmpty then modul else
+    let recursiveDeclines =
+        recursiveIds |> Set.filter (fun id -> not (cycleAdmits id))
+    if candidates.IsEmpty then modules else
     let candMap = candidates |> List.map (fun f -> (f.Id, f)) |> Map.ofList
 
     // Planned specs, keyed exactly as monomorphizeModule's specMap is:
@@ -6766,6 +6980,8 @@ let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // Distinct signatures turned away by the cap (a set, not a tally: the
     // fixpoint re-visits the same declined site every round).
     let mutable capDeclines : Set<IRId * (string * int64) list> = Set.empty
+    // Distinct signatures turned away by the name-provenance gate.
+    let mutable nameDeclines : Set<IRId * (string * int64) list> = Set.empty
 
     /// Rewrite one call site against the CURRENT spec map. Pure, so the
     /// scan below can apply it to a throwaway copy of every body and read
@@ -6801,8 +7017,8 @@ let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         changed <- false
         rounds <- rounds + 1
         let bodies =
-            (modul.Functions |> List.map (fun f -> f.Body))
-            @ (modul.Bindings |> List.map (fun b -> b.Value))
+            (allFuncs |> List.map (fun f -> f.Body))
+            @ (modules |> List.collect (fun m -> m.Bindings |> List.map (fun b -> b.Value)))
             @ (specMap |> Map.toList |> List.map (snd >> specBody))
         let sites =
             bodies
@@ -6819,11 +7035,19 @@ let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
             |> List.distinct
         for (fid, sign) in sites do
             if not (Map.containsKey (fid, sign) specMap) then
+                let orig = candMap.[fid]
+                // Provenance gate: refuse a signature whose literals would be
+                // baked into a name this body did not own (see
+                // `shapeSpecNamesAreOwn`). Checked per (function, signature)
+                // rather than per function -- the same body is safe at one
+                // shape and unsafe at another.
+                if not (shapeSpecNamesAreOwn funcById bindingIds (Map.ofList sign) orig.Body) then
+                    nameDeclines <- Set.add (fid, sign) nameDeclines
+                else
                 let existing = specMap |> Map.filter (fun (k, _) _ -> k = fid) |> Map.count
-                if existing >= SHAPE_SPEC_CAP then
+                if existing >= cap then
                     capDeclines <- Set.add (fid, sign) capDeclines
                 else
-                    let orig = candMap.[fid]
                     let specId = builder.FreshId()
                     let suffix = sign |> List.map (fun (n, v) -> sprintf "_%s%d" n v) |> String.concat ""
                     specMap <- Map.add (fid, sign)
@@ -6834,10 +7058,38 @@ let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                                        specMap
                     changed <- true
 
+    // Census, per DEFINING module: candidates counted where they are defined,
+    // specs where they are placed, declines charged to the module owning the
+    // callee. One module in, one line out -- the format the orchestration
+    // scripts diff -- and identical numbers to the per-module pass for a
+    // single-module program.
+    let ownerOfFunc =
+        modules
+        |> List.mapi (fun i m -> m.Functions |> List.map (fun f -> (f.Id, i)))
+        |> List.concat |> Map.ofList
+    let reportCensus () =
+        if debug then
+            modules |> List.iteri (fun i m ->
+                let inThis (id: IRId) = (match Map.tryFind id ownerOfFunc with Some j -> j = i | None -> false)
+                let cands = candidates |> List.filter (fun f -> inThis f.Id)
+                if not cands.IsEmpty then
+                    let mySpecs = specMap |> Map.toList |> List.filter (fun ((fid, _), _) -> inThis fid)
+                    let countDecl (s: Set<IRId * (string * int64) list>) =
+                        s |> Set.filter (fun (fid, _) -> inThis fid) |> Set.count
+                    if mySpecs.IsEmpty then
+                        eprintfn "[shape-spec] %s: %d candidate(s), 0 specialized" m.Name cands.Length
+                    else
+                        let perFunc =
+                            mySpecs |> List.map (fun ((fid, _), s) -> (fid, s.Orig.Name))
+                            |> List.groupBy id |> List.map (fun ((_, n), g) -> sprintf "%s x%d" n g.Length)
+                        eprintfn "[shape-spec] %s: %d candidate(s), %d spec(s) [%s], %d cap-decline(s), %d name-decline(s), %d recursive decline(s), %d round(s)"
+                                 m.Name cands.Length mySpecs.Length (String.concat "; " perFunc)
+                                 (countDecl capDeclines) (countDecl nameDeclines)
+                                 (recursiveDeclines |> Set.filter inThis |> Set.count) rounds)
+
     if Map.isEmpty specMap then
-        (if debug then
-            eprintfn "[shape-spec] %s: %d candidate(s), 0 specialized" modul.Name candidates.Length)
-        modul
+        reportCensus ()
+        modules
     else
 
     // Materialize the copies. Param VarIds are deliberately NOT freshened
@@ -6867,33 +7119,44 @@ let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // here, keyed by the ORIGIN's id (IRModule.DerivedFuncOrigins), so it
     // lands at exactly its origin's program point and is visible to precisely
     // the call sites the origin was.
+    // The copy lands in the module that DEFINES the origin, which is what makes
+    // the rule survive going cross-module: the merged emission stream keys a
+    // derived id on its origin's, so B's copy sits at B's program point even
+    // though A's call site is what asked for it.
     let specsByOrigin =
         specMap |> Map.toList |> List.map snd |> List.groupBy (fun s -> s.Orig.Id) |> Map.ofList
-    let newFunctions =
-        modul.Functions
-        |> List.collect (fun f ->
-            let f' = { f with Body = rewriteCallSites f.Body }
-            match Map.tryFind f.Id specsByOrigin with
-            | Some specs -> f' :: (specs |> List.map materialize)
-            | None -> [f'])
-    let newBindings = modul.Bindings |> List.map (fun b -> { b with Value = rewriteCallSites b.Value })
-    let derivedOrigins =
-        specMap
-        |> Map.toList
-        |> List.fold (fun acc (_, s) -> Map.add s.SpecId s.Orig.Id acc) modul.DerivedFuncOrigins
+    let rewritten =
+        modules |> List.map (fun modul ->
+            let newFunctions =
+                modul.Functions
+                |> List.collect (fun f ->
+                    let f' = { f with Body = rewriteCallSites f.Body }
+                    match Map.tryFind f.Id specsByOrigin with
+                    | Some specs -> f' :: (specs |> List.map materialize)
+                    | None -> [f'])
+            let newBindings = modul.Bindings |> List.map (fun b -> { b with Value = rewriteCallSites b.Value })
+            let derivedOrigins =
+                specMap
+                |> Map.toList
+                |> List.fold (fun acc (_, s) ->
+                    if newFunctions |> List.exists (fun f -> f.Id = s.SpecId)
+                    then Map.add s.SpecId s.Orig.Id acc else acc) modul.DerivedFuncOrigins
+            { modul with
+                Functions = newFunctions
+                Bindings = newBindings
+                DerivedFuncOrigins = derivedOrigins })
 
-    if debug then
-        let perFunc =
-            specMap |> Map.toList |> List.map (fun ((fid, _), s) -> (fid, s.Orig.Name))
-            |> List.groupBy id |> List.map (fun ((_, n), g) -> sprintf "%s x%d" n g.Length)
-        eprintfn "[shape-spec] %s: %d candidate(s), %d spec(s) [%s], %d cap-decline(s), %d recursive decline(s), %d round(s)"
-                 modul.Name candidates.Length specMap.Count (String.concat "; " perFunc)
-                 (Set.count capDeclines) (Set.count recursiveIds) rounds
+    reportCensus ()
+    rewritten
 
-    { modul with
-        Functions = newFunctions
-        Bindings = newBindings
-        DerivedFuncOrigins = derivedOrigins }
+/// Single-module entry point, for callers that hold one `IRModule` rather than
+/// a whole program. The lowering pipeline uses the plural form -- a program's
+/// modules must be handed over TOGETHER or a cross-module call site cannot see
+/// the definition it wants specialized.
+let shapeMonomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
+    match shapeMonomorphizeModules [modul] builder with
+    | [m] -> m
+    | _ -> modul
 
 // Pretty Printing
 

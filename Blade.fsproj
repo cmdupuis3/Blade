@@ -307,6 +307,10 @@
     <Compile Include="tests/CudaTests.fs" />
     <Compile Include="tests/OmpTests.fs" />
     <Compile Include="tests/LinAlgTests.fs" />
+    <!-- Shape-monomorphization reach: which call sites earn a specialized copy
+         (cross-module, self-recursive) and which must still decline. Emission
+         text only — the decision is invisible in the values. -->
+    <Compile Include="tests/ShapeSpecTests.fs" />
     <!-- Eigensolver dispatch emission + the inferEigh rejections (Phase 6 /
          Round B2). Separate block from LinAlgTests because the two gates,
          headers and defines are separate by design — and because this one must
