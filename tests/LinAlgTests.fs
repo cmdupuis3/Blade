@@ -559,6 +559,13 @@ let private emissionCases : (string * bool * string * string list * string list)
 
 let runLinAlgEmissionTests () : BlockResult =
     printHeader "LinAlg Dispatch Emission"
+    // Several cases here pin `#pragma omp parallel for` -- the "the nest keeps
+    // its pragma rather than being dispatched" half of the precedence rule.
+    // `BLADE_OMP_THREADS=1|0|off` (CodeGen.ompThreadEmissionEnabled) is a BUILD
+    // knob meant to be set globally on a serial deployment box, and it would
+    // delete exactly those pragmas -- turning a precedence assertion into a
+    // spurious red. Pinned unset for the block; same use-guard as `pinBlas`.
+    use _ompThreads = pinEnv "BLADE_OMP_THREADS" null
     let mutable passed = 0
     let mutable failed = 0
     let mutable failedNames = []

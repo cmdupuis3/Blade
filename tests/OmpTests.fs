@@ -34,6 +34,30 @@ open Blade.Tests.Expect
 // These assert on the generated C++ STRING rather than on runtime behaviour, so
 // they need no toolchain and run in the default suite.
 
+/// Pin one environment variable for the duration of a scope, restoring the
+/// prior value on exit. Same use-guard idiom as `DiffOracle.pinFpContractOff`
+/// and `LinAlgTests.pinEnv`, and it works for the same reason: every gate it
+/// targets is read PER CALL, so a mid-process set takes effect immediately. A
+/// `null` value UNSETS the variable.
+let private pinEnv (name: string) (value: string) =
+    let prior = System.Environment.GetEnvironmentVariable(name)
+    System.Environment.SetEnvironmentVariable(name, value)
+    { new System.IDisposable with
+        member _.Dispose() = System.Environment.SetEnvironmentVariable(name, prior) }
+
+/// Pin `BLADE_OMP_THREADS` UNSET for a whole block.
+///
+/// WHY EVERY OMP BLOCK NEEDS THIS. `BLADE_OMP_THREADS=1|0|off` is a BUILD knob
+/// (CodeGen.ompThreadEmissionEnabled) that suppresses every thread-level OpenMP
+/// construct, and it is meant to be set GLOBALLY on a deployment box. A user
+/// with it set in their environment would otherwise turn these suites VACUOUS
+/// rather than red: `blade test omp-pragma` would find no pragmas to assert on,
+/// `omp-coverage` would find no teams to observe, and both would report their
+/// own emptiness as success. Pinning it unset makes every block below measure
+/// the DEFAULT emission whatever the ambient environment says; the arms that
+/// deliberately exercise the knob pin it back on for their own scope.
+let private pinOmpThreadsUnset () = pinEnv "BLADE_OMP_THREADS" null
+
 /// Lower + generate, returning the C++ source. No compiler involved.
 let private cppOf (testName: string) (src: string) : Result<string, string> =
     try
@@ -362,10 +386,138 @@ let private ompPlacementCases : (string * string * string) list =
     [ ("outer_licence_pragma_on_i0", kern "omp(a: 1)" + arrays + apply, "__i0")
       ("inner_licence_pragma_on_i1", kern "omp(b: 1)" + arrays + apply, "__i1") ]
 
+// ============================================================================
+// BLADE_OMP_THREADS -- the serial-emission BUILD knob
+// ============================================================================
+//
+// The LICENCE in source ("this kernel is safe to thread") and the BUILD KNOB
+// ("this deployment spends licensed parallelism") are separate decisions; the
+// knob turns the second off without touching the first. See
+// `CodeGen.ompThreadEmissionEnabled` for the measurement that motivated it (a
+// pragma'd row map at OMP_NUM_THREADS=1 runs 1.86x SLOWER than the same code
+// emitted without the pragma -- GCC's outlining is a compile-time cost no
+// runtime thread count recovers).
+//
+// Every case below runs the SAME sources the blocks above run, so a licence
+// that stopped reaching codegen would fail there first and these would not
+// silently take its place.
+
+/// What each formerly-threaded site emits with the knob on. `mustNotContain`
+/// carries the actual claim in every case: the point of the knob is the ABSENCE
+/// of team-creating constructs, and `omp_get_*` absence is what says the
+/// program acquired no OpenMP runtime dependency either.
+let private ompThreadsKnobCases : (string * string * string list * string list) list =
+    // (name, source, mustContain, mustNotContain)
+    // Non-power-of-two extents throughout, per the repo's stride discipline.
+    let arrays = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\nlet B = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]\n"
+    let arr = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    let marker = "// [omp] requested but emitted serial: BLADE_OMP_THREADS=1"
+    [ // ---- loop nests: genNestPragma's three forms all go away --------------
+      ("knob_licensed_map_emits_no_team",
+       "function cov(a: Float64, b: Float64) where omp(a: 1) = a * b\n" + arrays +
+       "let m = object_for(cov) <@> (A, B) |> compute\n",
+       [ marker; "for (size_t __i0 = 0; __i0 < 7; __i0++) {" ],
+       [ "#pragma omp parallel"; "omp_get_" ])
+      ("knob_collapse_form_suppressed",
+       "function k(a: Float64, b: Float64) where omp(a: 1, b: 1) = a * b + 1.0\n" +
+       "let P = [1.5, 2.5, 3.5, 4.5, 5.5]\nlet Q = [0.25, 0.5, 0.75, 1.25]\n" +
+       "let M = object_for(k) <@> (P, Q) |> compute\n",
+       [ marker ], [ "#pragma omp parallel"; "collapse("; "omp_get_" ])
+      // The triangular arm: `schedule(dynamic)` is a `parallel for` clause, so
+      // it goes with the construct rather than surviving on a serial loop.
+      ("knob_triangular_dynamic_suppressed",
+       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\n" +
+       "let L = method_for(A, A, A)\n" +
+       "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y + z\n" +
+       "let R = L <@> k |> compute\n",
+       [ marker; "for (size_t __i1 = 0; __i1 < 13 - __i0; __i1++) {" ],
+       [ "#pragma omp parallel"; "schedule(dynamic)"; "omp_get_" ])
+      // ---- the flat elementwise fast path KEEPS ITS VECTORIZATION ----------
+      // `parallel for simd` is two constructs; only the first opens a team.
+      // Dropping to `BLADE_IVDEP` here would throw away a vectorization the
+      // knob was never about, so this case is the one that pins the split.
+      ("knob_flat_elementwise_keeps_omp_simd",
+       "function k(a: Float64) where omp(a: 2) = a * 2.0\n" +
+       "let M = [[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]]\n" +
+       "let m = object_for(k) <@> (M) |> compute\n",
+       [ marker; "#pragma omp simd" ],
+       [ "#pragma omp parallel"; "omp_get_" ])
+      // ---- reduce Path A: same split, through the portable macro -----------
+      ("knob_reduce_path_a_keeps_simd_reduction",
+       arr + "let s = reduce(A, lambda(a, b) where omp -> a + b)\n",
+       [ marker; "BLADE_OMP_SIMD_REDUCTION(+:s)" ],
+       [ "#pragma omp parallel"; "omp_get_" ])
+      ("knob_reduce_path_a_product",
+       arr + "let s = reduce(A, lambda(a, b) where omp -> a * b)\n",
+       [ "BLADE_OMP_SIMD_REDUCTION(*:s)" ],
+       [ "#pragma omp parallel"; "omp_get_" ])
+      // ---- reduce Path B: nothing to keep, so the serial arm ---------------
+      // Path B IS the threading (an explicit team with per-thread partials), so
+      // unlike Path A there is no vector half to preserve. The kernel lands on
+      // the arm an UNLICENSED kernel takes, and the marker is what keeps the
+      // dropped clause from being silent there.
+      ("knob_reduce_path_b_named_comm_serial",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
+       "let s = reduce(A, myAdd)\n",
+       [ marker; "// reduce: accumulator loop, eager" ],
+       [ "#pragma omp"; "omp_get_"; "__rpart_s" ])
+      ("knob_reduce_over_computation_serial",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
+       "let B = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n" +
+       "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
+       [ marker ],
+       [ "#pragma omp"; "omp_get_"; "outer level chunked" ])
+      // ---- the intrinsic emitters (gram / matmul) --------------------------
+      // These emit the portable MACRO, not a `#pragma` line, because their
+      // output can be space-joined into a one-line IIFE -- which is also why
+      // their suppression marker is a BLOCK comment. Both facts are pinned.
+      ("knob_native_matmul_gram_macros_suppressed",
+       "import math as m\n" +
+       "type M35 = Array<Float64 like Idx<3>, Idx<5>>\n" +
+       "type M57 = Array<Float64 like Idx<5>, Idx<7>>\n" +
+       "let A: M35 = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]\n" +
+       "let B: M57 = [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0], [15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0], [22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0], [29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0]]\n" +
+       "let P = m.matmul(A, B)\nlet G = gram(A, A)\n",
+       [ "/* [omp] thread pragma suppressed: BLADE_OMP_THREADS=1"
+         // the loops themselves are untouched -- only the macro line moved
+         "for (size_t __mi = 0; __mi < 3; __mi++) {"
+         "for (size_t __gi = 0; __gi < 3; __gi++) {"
+         // ivdep is a VECTORIZATION assertion, not a thread construct: it stays
+         "BLADE_IVDEP" ],
+       [ "BLADE_OMP_PARALLEL_FOR"; "#pragma omp parallel"; "omp_get_" ]) ]
+
+/// The strongest statement the knob makes: with it on, a LICENSED program emits
+/// the SAME C++ as the identical program with the clause deleted. "Serial
+/// emission" is not "some other serial shape" -- `pragmaLevel` goes to None, so
+/// `ompLastLevel` goes to -1 and `BLADE_IVDEP` lands exactly where the
+/// unlicensed nest puts it, and every downstream decision follows.
+///
+/// Compared modulo the `[omp]` census markers, which the licensed program emits
+/// BY DESIGN (a dropped clause must not be silent) and the unlicensed one has
+/// nothing to report.
+let private ompThreadsEquivalenceCases : (string * string * string) list =
+    // (name, licensed source, the same program with the clause deleted)
+    let arrays = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\nlet B = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]\n"
+    let tri = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\nlet L = method_for(A, A, A)\n"
+    [ ("knob_equals_unlicensed_map",
+       "function cov(a: Float64, b: Float64) where omp(a: 1) = a * b\n" + arrays +
+       "let m = object_for(cov) <@> (A, B) |> compute\n",
+       "function cov(a: Float64, b: Float64) = a * b\n" + arrays +
+       "let m = object_for(cov) <@> (A, B) |> compute\n")
+      ("knob_equals_unlicensed_triangular",
+       tri + "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y + z\n" +
+       "let R = L <@> k |> compute\n",
+       tri + "let k = lambda(x, y, z) where comm(x, y, z) -> x * y + z\n" +
+       "let R = L <@> k |> compute\n") ]
+
 /// Assert that `omp` reaches codegen as a pragma for every spelling of a
 /// kernel, and reaches it for NO spelling that omitted the clause.
 let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
     printHeader "OpenMP Pragma Emission"
+    // Everything in this block asserts the DEFAULT emission, so the serial
+    // build knob is pinned unset for it -- see `pinOmpThreadsUnset`. The
+    // knob's own arms at the bottom re-pin it ON for their own scope.
+    use _ompThreadsPin = pinOmpThreadsUnset ()
     let mutable passed = 0
     let mutable failed = 0
     let mutable failedNames = []
@@ -500,6 +652,69 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
                 passed <- passed + 1
                 resultLine Pass name "BL4016"
             else fail name (sprintf "expected BL4016, got: %s" (String.concat ", " codes))
+    // ---- BLADE_OMP_THREADS=1: what each formerly-threaded site emits ----
+    // The pin is scoped to these arms and restored immediately, so nothing
+    // above (or in any later block) can see it. Same discipline as the
+    // BLADE_FP_REASSOC / BLADE_BLAS pins in the omp-reduce block.
+    for (name, src, mustContain, mustNotContain) in ompThreadsKnobCases do
+        let emitted =
+            use _knob = pinEnv "BLADE_OMP_THREADS" "1"
+            cppOf name src
+        match emitted with
+        | Error e -> fail name e
+        | Ok cpp ->
+            let flat =
+                cpp.Split('\n') |> Array.map (fun l -> l.TrimStart()) |> String.concat "\n"
+            let missing = mustContain |> List.filter (fun s -> not (flat.Contains s))
+            let present = mustNotContain |> List.filter flat.Contains
+            if not missing.IsEmpty then
+                fail name (sprintf "knob-on C++ lacks: %s"
+                               (String.concat " | " (missing |> List.map (fun s -> s.Replace("\n", " \\n ")))))
+            elif not present.IsEmpty then
+                fail name (sprintf "knob-on C++ still contains: %s" (String.concat " | " present))
+            else
+                passed <- passed + 1
+                resultLine Pass name "serial emission as expected"
+    // ---- and the same programs with the knob OFF still get their pragma ----
+    // Without this pair the arms above could pass by the SOURCE having lost its
+    // licence rather than by the knob suppressing it.
+    for (name, src, _, _) in ompThreadsKnobCases do
+        let ctlName = name + "_control_knob_off"
+        match cppOf ctlName src with
+        | Error e -> fail ctlName e
+        | Ok cpp ->
+            let threaded =
+                cpp.Contains "#pragma omp parallel" || cpp.Contains "BLADE_OMP_PARALLEL_FOR"
+            if not threaded then
+                fail ctlName "knob OFF emitted no thread construct either (the source lost its licence; the knob arm above is vacuous)"
+            elif cpp.Contains "BLADE_OMP_THREADS" then
+                fail ctlName "knob OFF emitted a suppression marker"
+            else
+                passed <- passed + 1
+                resultLine Pass ctlName "threaded with the knob off"
+    // ---- knob-on emission == the SAME PROGRAM WITHOUT THE CLAUSE ----
+    for (name, licensedSrc, unlicensedSrc) in ompThreadsEquivalenceCases do
+        // The same testName for both, so the generated banner/timing lines
+        // (which embed it) cannot be what differs.
+        let licensed =
+            use _knob = pinEnv "BLADE_OMP_THREADS" "1"
+            cppOf name licensedSrc
+        match licensed, cppOf name unlicensedSrc with
+        | Error e, _ -> fail name (sprintf "knob-on emit: %s" e)
+        | _, Error e -> fail name (sprintf "unlicensed emit: %s" e)
+        | Ok onCpp, Ok unlicCpp ->
+            // The census markers are the ONE intended difference: the licensed
+            // program has a dropped clause to report and the unlicensed one has
+            // nothing to say.
+            let dropMarkers (s: string) =
+                s.Split('\n') |> Array.filter (fun l -> not (l.Contains "[omp]")) |> String.concat "\n"
+            if dropMarkers onCpp <> dropMarkers unlicCpp then
+                fail name "knob-on emission differs from the same program without the omp clause"
+            elif not (onCpp.Contains "[omp] requested but emitted serial: BLADE_OMP_THREADS=1") then
+                fail name "knob-on emission carries no census marker (a dropped clause must not be silent)"
+            else
+                passed <- passed + 1
+                resultLine Pass name "byte-identical to the unlicensed program (modulo the census marker)"
     printFooter "OpenMP Pragma" [sprintf "%d passed" passed; sprintf "%d failed" failed]
     { Block = "OpenMP Pragma"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
@@ -521,6 +736,12 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
 let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
     let caps = capabilities.Value
     printHeader "OpenMP Thread-Coverage Tests"
+    // This block's whole question is "does an emitted pragma form a real team",
+    // which a globally-set BLADE_OMP_THREADS=1 would answer by deleting the
+    // pragma -- and the block would then report its own vacuity as a pass (zero
+    // [omp-coverage] lines is already a hard failure below, so it would in fact
+    // report it as a FAILURE unrelated to any real regression). Pinned unset.
+    use _ompThreadsPin = pinOmpThreadsUnset ()
     if not caps.HasGpp then
         printfn "Skipped: g++ not found (cannot compile the -fopenmp coverage programs)."
         // Skipped = 1, not 0: a Skipped = 0 return made a toolchain-less box
@@ -935,6 +1156,12 @@ let private scalarBindings (stdout: string) : Map<string, float> =
 let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
     let caps = capabilities.Value
     printHeader "OpenMP Comm-Licensed Reductions"
+    // Pinned unset for the block: every differential below compares an
+    // `omp`-licensed build against its serial twin, and a global
+    // BLADE_OMP_THREADS=1 would make both sides the SAME serial program --
+    // every arm would pass while measuring nothing. The knob's own arm at the
+    // end re-pins it for its own scope.
+    use _ompThreadsPin = pinOmpThreadsUnset ()
     if not caps.HasGpp then
         printfn "Skipped: g++ not found (cannot compile the -fopenmp reduction programs)."
         { Block = "OpenMP Reduce"; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
@@ -1505,6 +1732,67 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                     fail collapseName "collapse(2) map produced wrong values under 4 threads"
                 else
                     pass collapseName "compiles under g++ and computes correctly (ivdep/collapse interaction)"
+
+        // ---- BLADE_OMP_THREADS: same numbers, different threading ----------
+        // The knob is a THREADING decision, never a numeric one: what it
+        // changes is whether a team is created, and the emitted arithmetic on
+        // each side is one the suite already accepts (the licensed omp form, or
+        // the serial form its own differentials compare against). So a
+        // knob-on/knob-off pair must agree to the same tolerance an
+        // omp-vs-serial pair does -- and this arm is the one that COMPILES AND
+        // RUNS both, which no text assertion in the omp-pragma block can do.
+        //
+        // Non-integer data, deliberately: on integer-valued f64 every
+        // summation order is exact and the comparison could not tell a genuine
+        // agreement from an arithmetic that got lost. The Path A arm is the
+        // sharp one -- suppressed Path A keeps `omp simd reduction`, so both
+        // sides reassociate, just at different widths.
+        let withOmpThreads (v: string) (f: unit -> 'a) : 'a =
+            let prior = System.Environment.GetEnvironmentVariable("BLADE_OMP_THREADS")
+            System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", v)
+            try f ()
+            finally System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", prior)
+        let knobN = 33
+        let knobLit = laneLit knobN awkward
+        let knobDecl = sprintf "let A = [%s]\n" knobLit
+        let knobCases : (string * string) list =
+            // (label, source) -- one per suppression shape the knob has.
+            [ ("path_a_builtin_sum",
+               knobDecl + "let s = reduce(A, lambda(a, b) where omp -> a + b)\n")
+              ("path_b_named_comm",
+               commFn + knobDecl + "let s = reduce(A, myAdd)\n")
+              ("path_b_reduce_over_computation",
+               commFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n") ]
+        for (label, src) in knobCases do
+            let name = "omp_threads_knob_" + label
+            match withOmpThreads "1" (fun () -> compileProgram outputDir (name + "_serial") src),
+                  withOmpThreads null (fun () -> compileProgram outputDir (name + "_threaded") src) with
+            | Error e, _ -> fail name (sprintf "knob-on build: %s" e)
+            | _, Error e -> fail name (sprintf "knob-off build: %s" e)
+            | Ok serialExe, Ok threadedExe ->
+                // The knob-on binary is run at OMP_NUM_THREADS=4 ON PURPOSE:
+                // it has no parallel construct left, so the runtime setting
+                // must be inert. If it is not, a team survived somewhere.
+                match runProgram serialExe forcedThreads, runProgram threadedExe forcedThreads with
+                | Error e, _ -> fail name (sprintf "knob-on run: %s" e)
+                | _, Error e -> fail name (sprintf "knob-off run: %s" e)
+                | Ok serialOut, Ok threadedOut ->
+                    match Map.tryFind "s" (scalarBindings serialOut),
+                          Map.tryFind "s" (scalarBindings threadedOut) with
+                    | Some sv, Some tv ->
+                        let diff = abs (sv - tv)
+                        let tol = 1e-9 * max 1.0 (abs tv)
+                        if diff > tol then
+                            fail name (sprintf "knob-on %.17g vs knob-off %.17g (|diff| = %g)" sv tv diff)
+                        else
+                            match runProgram serialExe "1" with
+                            | Error e -> fail name (sprintf "knob-on run at 1 thread: %s" e)
+                            | Ok at1 ->
+                                if stripTiming at1 <> stripTiming serialOut then
+                                    fail name "knob-on output depends on OMP_NUM_THREADS (a thread construct survived suppression)"
+                                else
+                                    pass name (sprintf "|diff| = %g; knob-on output independent of OMP_NUM_THREADS" diff)
+                    | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
 
         printFooter "OpenMP Reduce" [sprintf "%d passed" passed; sprintf "%d failed" failed]
         { Block = "OpenMP Reduce"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

@@ -241,6 +241,48 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Lazy computation | Core | `compute` and `read` |
 | OpenBLAS lowering for `gram()` (`cblas_dsyrk` same-array / `cblas_dgemm` distinct) | Experimental | Real `Float64` only; opt-in via `BLADE_BLAS=1` (or `OPENBLAS_DIR` set; `BLADE_BLAS=0` forces off). Output layout unchanged (packed symmetric / dense) — BLAS fills a staging buffer, repack lands Blade storage. Emitted `#include <cblas.h>` keys Build.fs's `-I`/link resolution (`OPENBLAS_DIR`, netcdf-style). Measured: gram p=1024×n=16384, 8.6 s loops → 0.55 s 1-thread / 0.15 s 16-thread; values agree to ~1e-14 rel |
 | Comm-licensed parallel reductions: bare `omp` on a fold kernel | Core | See below; `tests/OmpTests.fs` (`blade test omp-reduce`, `omp-pragma`, `omp-coverage`), corpus `loops/110–111`, `diagnostics/049` |
+| Serial-emission build knob `BLADE_OMP_THREADS` | Core | See 16.0; `CodeGen.ompThreadEmissionEnabled` |
+
+### 16.0 `BLADE_OMP_THREADS` — spending the licence per deployment
+
+`omp` / `omp(a: n)` in source is a **licence**: a statement about the kernel
+(which dimensions are safe to thread, which folds are safe to reassociate). It
+is part of the program. Whether a given **build** spends that licence is a
+property of the machine the binary will run on, and that is what this
+environment variable decides. One source, per-deployment builds.
+
+| `BLADE_OMP_THREADS` | Emission |
+|---|---|
+| unset, or `2`, `8`, … , or anything unparseable | **Default.** Thread pragmas are emitted wherever the source licensed them; the degree of parallelism remains the runtime's `OMP_NUM_THREADS` |
+| `1`, `0`, `off` | **Serial emission.** Every thread-level construct is suppressed — `parallel for`, `collapse`, `schedule(dynamic)`, the reductions' explicit teams, and the native `gram`/`matmul` threading macros |
+
+**Why it is not the same as `OMP_NUM_THREADS=1` at runtime.** GCC outlines a
+`parallel for` body into a separate function called through the OpenMP runtime;
+that is a *compile-time* decision whose cost is paid even when the team turns
+out to hold one thread. Measured on a licensed row map:
+
+| | |
+|---|---|
+| pragma emitted, `OMP_NUM_THREADS=1` | 488 µs |
+| **no pragma emitted** | **263 µs** (1.86× faster) |
+| pragma emitted, multi-threaded | 187 µs (parity with hand-written C++) |
+
+**`omp simd` is never suppressed.** A `simd` construct creates no team and is
+not outlined, so it costs nothing at one thread. Sites that emitted
+`parallel for simd` therefore drop to `omp simd`, and the Path A reduction below
+drops to `omp simd reduction(<op>:acc)` — the thread half goes, the vector half
+stays.
+
+**Guarantees.** Serial emission changes *what is emitted*, never *which programs
+compile* and never the values: a suppressed nest is byte-identical to the same
+program with the clause deleted, and each decline leaves a
+`// [omp] requested but emitted serial: BLADE_OMP_THREADS=…` line in the
+generated C++, so a dropped clause is never silent. A numeric value ≥ 2 does
+**not** bake `num_threads(n)` into the binary — v1 leaves the degree to the
+runtime deliberately, since Path B's determinism contract is stated in terms of
+the team size it actually gets. `-fopenmp` stays on the compile line in both
+modes (`omp simd` needs it). MPI is out of scope: under `where mpi, omp(...)`
+only the `omp` half is gated.
 
 ### 16.1 Parallel reductions (`reduce(xs, k)` with `omp` on `k`)
 

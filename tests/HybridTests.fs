@@ -16,6 +16,17 @@ open Blade.Tests.TestHarness
 
 let runHybridTests () =
     printHeader "Mixed Parallelism (hybrid) Tests"
+    // The `where mpi, omp(...)` cases below assert the OMP half of the hybrid
+    // reaches codegen. `BLADE_OMP_THREADS=1|0|off` (a BUILD knob,
+    // CodeGen.ompThreadEmissionEnabled, meant to be set globally on a serial
+    // deployment box) suppresses exactly that half -- MPI is out of its scope --
+    // so an ambient setting would make these assertions fail for a reason that
+    // is not a regression. Pinned unset for the block; restored on exit.
+    use _ompThreads =
+        let prior = System.Environment.GetEnvironmentVariable("BLADE_OMP_THREADS")
+        System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", null)
+        { new System.IDisposable with
+            member _.Dispose() = System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", prior) }
     let mutable passed = 0
     let mutable failed = 0
     let check (name: string) (condition: bool) (detail: string) =

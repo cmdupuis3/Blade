@@ -436,6 +436,96 @@ let private laneCountForStreams (s: int) : int =
     if s <= 2 then foldLaneCount
     else max 2 ((2 * foldLaneCount) / s)
 
+// ---- Thread-level OpenMP emission knob (BLADE_OMP_THREADS) ------------------
+
+/// May this BUILD emit THREAD-level OpenMP constructs at all?
+///
+///   unset / "2" / "8" / anything unparseable -> YES (the default: status quo,
+///                                              emit thread pragmas wherever
+///                                              the source licensed them)
+///   "1" / "0" / "off"                        -> NO  (serial emission)
+///
+/// THE DESIGN PRINCIPLE, stated here because this is the only place it is
+/// enforced: the `omp` / `omp(a: n)` LICENCE IN SOURCE and this BUILD KNOB
+/// answer two different questions and must not be conflated.
+///
+///   * The LICENCE is a statement about the KERNEL -- which dimensions are
+///     safe to carry threads, which folds are safe to reassociate. It is a
+///     property of the mathematics the program expresses, it is checked
+///     (BL4016 refuses an unlicensed parallel fold), and it STAYS IN SOURCE
+///     unchanged whatever this knob says.
+///   * The KNOB decides whether a licensed parallelism is SPENT in this
+///     particular build. That is a property of the machine the binary will run
+///     on, not of the program. ONE SOURCE, PER-DEPLOYMENT BUILDS.
+///
+/// WHY THE KNOB EXISTS AT ALL, and why `OMP_NUM_THREADS=1` at RUNTIME is not
+/// the same thing. GCC's `parallel for` outlines the loop body into a separate
+/// function called through the OpenMP runtime; that outlining is a COMPILE-TIME
+/// decision and its cost is paid even when the team turns out to have one
+/// thread. Measured on the fiberdot row-map shape:
+///
+///     pragma emitted, OMP_NUM_THREADS=1   488 us
+///     no pragma emitted (serial)          263 us   <- 1.86x FASTER
+///     pragma emitted, multi-threaded      187 us   (parity with hand C++)
+///
+/// So on a single-core (or thread-pinned) deployment the licensed pragma is
+/// pure loss and no runtime setting recovers it -- only not emitting it does.
+///
+/// `omp simd` IS NOT SUPPRESSED, in either mode, and that is the whole reason
+/// this predicate is named "thread emission" rather than "omp emission". A
+/// `simd` construct creates no team, calls no runtime, and is not outlined --
+/// it is a vectorization hint the compiler consumes in place. It therefore
+/// costs nothing at one thread and is kept unconditionally, which is why the
+/// suppressed forms below are `omp simd` / `BLADE_OMP_SIMD_REDUCTION` rather
+/// than "no pragma at all" wherever vectorization was already licensed.
+///
+/// A NUMERIC VALUE >= 2 DOES NOT BAKE `num_threads(n)`, deliberately, in v1.
+/// Emission is unchanged from the default and the DEGREE of parallelism stays
+/// the runtime's `OMP_NUM_THREADS`. The knob's v1 job is the binary
+/// emit/don't-emit decision that runtime cannot make; baking a team size would
+/// additionally freeze into the binary a number the deployment usually wants to
+/// set per run, and would change Path B's chunk count -- which its determinism
+/// contract is stated in terms of. `>= 2` is accepted (rather than rejected) so
+/// a deployment can write the true thread count in one place and have both this
+/// and `OMP_NUM_THREADS` read it.
+///
+/// `-fopenmp` STAYS IN THE BUILD FLAGS IN BOTH MODES (Build.compileCppWithExtra):
+/// `omp simd` needs it, and it costs nothing in a program with no parallel
+/// construct. A future refinement could pass `-fopenmp-simd` instead when this
+/// returns false, which would additionally drop the libgomp link; that is a
+/// Build.fs change and is not attempted here.
+///
+/// SET IT GLOBALLY. This is process-environment state, read per emission, so
+/// `BLADE_OMP_THREADS=1` in the environment governs every compile that process
+/// performs -- which is the intended usage (one setting per deployment box).
+/// The omp test blocks pin it UNSET around their own scoped compiles so a
+/// globally-serial box does not make them vacuous.
+///
+/// A FUNCTION, never a module-level `let`, for exactly the reason stated at
+/// `fpReassocEnabled`: a module-level binding freezes the environment read at
+/// first touch and would make a mid-process pin (a test's scoped guard)
+/// silently ineffective. Every consultation re-reads.
+let ompThreadEmissionEnabled () : bool =
+    match System.Environment.GetEnvironmentVariable("BLADE_OMP_THREADS") with
+    | "1" | "0" | "off" -> false
+    | _ -> true
+
+/// The reason string every site hands to the emitted-C++ marker when this knob
+/// is what suppressed a thread construct. ONE spelling, so a census over
+/// generated code (`grep "[omp]"`) finds every declined site with one pattern
+/// and can tell a knob decline from a licence decline.
+let ompThreadsSuppressedReason () : string =
+    sprintf "BLADE_OMP_THREADS=%s -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected)"
+        (System.Environment.GetEnvironmentVariable("BLADE_OMP_THREADS"))
+
+/// The same marker as a BLOCK comment, for the INTRINSIC emitters (gram /
+/// matmul / the materialize*Form family), whose lines can be SPACE-JOINED into
+/// a single-line IIFE at expression positions -- where a `//` comment would
+/// swallow the rest of the statement. Same argument as the `dispatchMarkerTag`
+/// block comments at those sites.
+let ompThreadsSuppressedBlockMarker () : string =
+    sprintf "/* [omp] thread pragma suppressed: %s */" (ompThreadsSuppressedReason ())
+
 /// Collector: did THIS program assembly emit a `blade_linalg::` dispatch call?
 /// Set by the gram / matmul emitters during genModule; the program assemblers
 /// append the `#include "blade_linalg.hpp"` line after body generation (the
@@ -4208,7 +4298,15 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // TRIANGULAR: row `__gi`'s `__gjr` span is `m - __gi`, so
                     // per-iteration work shrinks and a static split would leave
                     // the low-index threads holding most of the triangle.
-                    [ sprintf "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
+                    //
+                    // BUILD KNOB: a serial-emission build replaces the macro
+                    // with a block-comment marker of the same line count. The
+                    // macro IS the whole thread construct here (the loops
+                    // themselves are unchanged and already correct serially),
+                    // so nothing else about this arm moves. See
+                    // `ompThreadEmissionEnabled`.
+                    [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
+                       else ompThreadsSuppressedBlockMarker ())
                       sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
                       sprintf "    %s" (lRowDecl "__growi" "__gi")
                       sprintf "    for (size_t __gjr = 0; __gjr < %s - __gi; __gjr++) {" mExtent
@@ -4250,7 +4348,9 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // balanced. Loop ORDER is unchanged -- `A[i][k]` and
                     // `B[j][k]` are both unit-stride in `k`, so gram has nothing
                     // to gain from the i-t-j reorder matmul needs.
-                    [ sprintf "BLADE_OMP_PARALLEL_FOR"
+                    // BUILD KNOB -- see the same-array arm above.
+                    [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
+                       else ompThreadsSuppressedBlockMarker ())
                       sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
                       sprintf "    %s" (lRowDecl "__growi" "__gi")
                       sprintf "    for (size_t __gj = 0; __gj < %s; __gj++) {" pExtent
@@ -4397,7 +4497,14 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                 // operands, so there is no loop-carried dependence across `__mj`
                 // at all. (The gram arms get no ivdep -- their inner loop is a
                 // reduction. See the note there.)
-                [ sprintf "BLADE_OMP_PARALLEL_FOR"
+                //
+                // BUILD KNOB: a serial-emission build swaps the macro for a
+                // block-comment marker. `BLADE_IVDEP` on the `__mj` loop below
+                // is UNTOUCHED -- it is a vectorization assertion, not a thread
+                // construct, and the knob is about teams. See
+                // `ompThreadEmissionEnabled`.
+                [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
+                   else ompThreadsSuppressedBlockMarker ())
                   sprintf "for (size_t __mi = 0; __mi < %s; __mi++) {" mExtent
                   sprintf "    %s* BLADE_RESTRICT __mcrow = &%s[__mi][0];" outElemStr varName
                   sprintf "    for (size_t __mj = 0; __mj < %s; __mj++) { __mcrow[__mj] = %s(); }" nExtent outElemStr
@@ -5174,7 +5281,15 @@ let genNestPragma (bindings: LoopIndexBinding list) (pragmaIndent: string) : str
     match bindings with
     | [] -> ""
     | outer :: rest ->
-        if not outer.IsParallel then ""
+        // BUILD KNOB. Every construct this function can return creates a TEAM,
+        // so a serial-emission build returns "" from all of them -- the same
+        // answer an unlicensed nest gets, which is the point: the nest is then
+        // byte-identical to the one the same source without `omp` produces.
+        // The decline is NOT silent: the caller's `ompSuppressedMarker` names
+        // this knob (see `ompThreadsSuppressedReason`). See
+        // `ompThreadEmissionEnabled` for why the licence stays in source.
+        if not (ompThreadEmissionEnabled ()) then ""
+        elif not outer.IsParallel then ""
         else
             // A level is "rectangular" iff its bound is independent of outer indices.
             let isRectangular (b: LoopIndexBinding) =
@@ -5775,8 +5890,15 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // level 0, since `omp(a: n)` can licence an inner level and leave the
     // outermost serial. Gating on the head binding would then instrument a nest
     // whose parallel region lives further in, and report it as never-threaded.
+    //
+    // The BUILD KNOB (`ompThreadEmissionEnabled`) forces this to None, which is
+    // what makes a serial-emission build emit EXACTLY the unlicensed nest: no
+    // pragma, `ompLastLevel = -1` so `BLADE_IVDEP` lands where it would have
+    // without the clause, and no coverage instrumentation (there is no team to
+    // observe). The dropped clause is reported by the marker below.
     let pragmaLevel =
-        if codeGen.FoldWrapper.IsSome then None else pragmaLevelOf codeGen.Bindings
+        if codeGen.FoldWrapper.IsSome || not (ompThreadEmissionEnabled ()) then None
+        else pragmaLevelOf codeGen.Bindings
     // "This nest runs inside a parallel team", which gates the thread-coverage
     // instrumentation. A Path B fold nest qualifies without carrying a `for`
     // pragma on any level: its team is the explicit region opened below, and the
@@ -5784,14 +5906,26 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // `parallel for` nest -- which is what lets `blade test omp-coverage` answer
     // "is the reduce's parallel region genuine" with ground truth instead of
     // pragma text.
-    let outerIsParallel = pragmaLevel.IsSome || codeGen.FoldChunk.IsSome
+    // (`ompThreadEmissionEnabled` guards the FoldChunk half for the same reason
+    // it guards `pragmaLevel`: with the knob off no team is opened anywhere in
+    // this nest, so there is nothing for the coverage instrumentation to see.)
+    let outerIsParallel =
+        pragmaLevel.IsSome || (codeGen.FoldChunk.IsSome && ompThreadEmissionEnabled ())
     // Path B: a comm-licensed fold nest. `pragmaLevel` stays None on
     // purpose -- a `parallel for` over the outer level would race on the shared
     // accumulator, which is exactly why folds were blanket-suppressed. What
     // replaces it is an explicit team with PRIVATE accumulators and a
     // fixed-order combine, emitted around the nest below. Names are tagged with
     // the fold binding so several folds can share one C++ scope.
-    let foldChunk = codeGen.FoldChunk
+    // The BUILD KNOB drops the chunk plan HERE, at the consumer, and nowhere
+    // else: the region below is an explicit `#pragma omp parallel` calling
+    // `omp_get_max_threads`/`omp_get_num_threads`, i.e. exactly the thread
+    // machinery a serial-emission build must contain none of, and this is the
+    // only place it is spent. The producer (`genReduceComputeBinding`'s
+    // `chunkable`) deliberately still SETS the plan, because `FoldChunk.IsSome`
+    // is read elsewhere as a FACT about the fold -- see the note there.
+    // Without the plan the nest is the ordinary serial fold.
+    let foldChunk = if ompThreadEmissionEnabled () then codeGen.FoldChunk else None
     let fcTag = match foldChunk with Some p -> p.Tag | None -> ""
     let fcRn = sprintf "__rn_%s" fcTag
     let fcT = sprintf "__rT_%s" fcTag
@@ -5958,7 +6092,13 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         let suppressedMarker =
             if isOuter then
                 let reason =
-                    if codeGen.FoldWrapper.IsSome then
+                    // The BUILD KNOB is reported FIRST when it is what declined:
+                    // with serial emission on, every other reason is unreachable
+                    // as an explanation (the nest would have been serial anyway),
+                    // and naming the knob is what tells a reader that the same
+                    // source built without it WOULD be threaded.
+                    if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
+                    elif codeGen.FoldWrapper.IsSome then
                         "fold accumulates into a shared scalar, which is not race-safe"
                     else "the omp(...) depth licenses no level of this nest"
                 // "Emitted" means the nest gets a pragma SOMEWHERE, not
@@ -5968,6 +6108,13 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                 // prologue above, not a `for` pragma on any level.
                 ompSuppressedMarker codeGen.OmpRequested
                                     (pragmaLevel.IsSome || foldChunk.IsSome) reason (ind depth)
+                // A Path B fold nest requested omp through `FoldChunk`, not
+                // through `OmpRequested` (which the fold path leaves unset), so
+                // a knob-suppressed chunk plan would otherwise vanish without a
+                // trace. This is the census line for exactly that case.
+                @ (if codeGen.FoldChunk.IsSome && not (ompThreadEmissionEnabled ())
+                   then [ ind depth + sprintf "// [omp] requested but emitted serial: %s" (ompThreadsSuppressedReason ()) ]
+                   else [])
             else []
         atOuterLevel <- false
         // MPI slab mode: the outermost level iterates this rank's slab
@@ -6498,9 +6645,28 @@ let tryGenFlatElementwiseNest
             // discharged by the same fact: exactly one array write per
             // iteration, through the fresh output pool, at the monotone flat
             // index -- no loop-carried dependence of any kind.
+            //
+            // BUILD KNOB. A serial-emission build drops the THREAD half and
+            // keeps the VECTOR half: `#pragma omp simd`. That is not a
+            // compromise, it is the decomposition -- `parallel for simd` is two
+            // constructs, only the first of which outlines the body and opens a
+            // team, and the dependence fact both rest on (one write per
+            // iteration, fresh output pool, monotone flat index) is the same
+            // fact. Falling back to `BLADE_IVDEP` here would have thrown away
+            // vectorization the knob was never about. See
+            // `ompThreadEmissionEnabled`.
+            let threadsOn = ompThreadEmissionEnabled ()
             let pragma =
-                if allParallel then "#pragma omp parallel for simd"
+                if allParallel && threadsOn then "#pragma omp parallel for simd"
+                elif allParallel then "#pragma omp simd"
                 else "BLADE_IVDEP"
+            // Census line, so a licensed-but-serialized flat loop is not silent.
+            // It sits BEFORE the pragma: nothing may come between an OpenMP
+            // construct and the `for` it governs.
+            let pragmaMarker =
+                if allParallel && not threadsOn
+                then [ ind (indent + 1) + sprintf "// [omp] requested but emitted serial: %s" (ompThreadsSuppressedReason ()) ]
+                else []
             let shapeNote =
                 sg
                 |> List.map (fun g ->
@@ -6516,8 +6682,9 @@ let tryGenFlatElementwiseNest
                 @ [ ind (indent + 1) + sprintf "%s* BLADE_RESTRICT %s = nested_array_utilities::pool_base(%s.data);"
                                            outElem (poolOf codeGen.OutputName) codeGen.OutputName ]
                 @ (operandDecls |> List.map (fun d -> ind (indent + 1) + d))
-                @ [ ind (indent + 1) + sprintf "const size_t __fp_cells = %dUL;" cells
-                    ind (indent + 1) + pragma
+                @ [ ind (indent + 1) + sprintf "const size_t __fp_cells = %dUL;" cells ]
+                @ pragmaMarker
+                @ [ ind (indent + 1) + pragma
                     ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++)"
                     ind (indent + 2) + sprintf "%s[__fk] = %s;" (poolOf codeGen.OutputName) body.CppExpr
                     ind indent + "}" ])
@@ -8838,7 +9005,15 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
               sprintf "    size_t __blade_mpi_hi_%s = __blade_mpi_lo_%s + __blade_mpi_q_%s + ((size_t)__blade_mpi_rank < __blade_mpi_r_%s ? 1 : 0);" name name name name ]
         let loop =
             [ sprintf "    %s* __blade_mpi_out_%s = nested_array_utilities::pool_base(%s.data);" elemCpp name name ]
-            @ (if innerOmp then [ "    #pragma omp parallel for" ] else [])
+            // BUILD KNOB gates the OMP HALF OF THE HYBRID ONLY. The rank
+            // decomposition above (`__blade_mpi_lo/hi`, the Allgatherv below) is
+            // MPI and is out of scope: `BLADE_OMP_THREADS` says nothing about
+            // how many RANKS this build uses, only whether a rank's local work
+            // is threaded. So `where mpi, omp(...)` under serial emission is
+            // exactly `where mpi`. See `ompThreadEmissionEnabled`.
+            @ (if innerOmp && ompThreadEmissionEnabled () then [ "    #pragma omp parallel for" ]
+               elif innerOmp then [ sprintf "    // [omp] requested but emitted serial: %s" (ompThreadsSuppressedReason ()) ]
+               else [])
             @ [ sprintf "    for (size_t __blade_c = __blade_mpi_lo_%s; __blade_c < __blade_mpi_hi_%s; __blade_c++) {" name name
                 // Per-cell unrank (O(r log n)). Odometer advance -- unrank once
                 // at lo, then increment lexicographically -- is the amortized-
@@ -10203,7 +10378,12 @@ let genFusedNestPragma (bindings: LoopIndexBinding list) (staggered: bool) (prag
     match bindings with
     | [] -> ""
     | outer :: rest ->
-        if not staggered then genNestPragma bindings pragmaIndent
+        // BUILD KNOB, same rule as genNestPragma (which the non-staggered arm
+        // defers to and which is gated on its own): both spellings below open a
+        // team, so a serial-emission build returns "" and the caller's marker
+        // names the knob. See `ompThreadEmissionEnabled`.
+        if not (ompThreadEmissionEnabled ()) then ""
+        elif not staggered then genNestPragma bindings pragmaIndent
         else
             let isRectangular (b: LoopIndexBinding) =
                 b.BoundDependencies.IsEmpty && b.StrictOffset = 0
@@ -10280,6 +10460,13 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
     let emitOuterOmp = hostParallel && primary.FoldWrapper.IsNone
     // Streamed fiber reads share per-source handles and per-argument
     // buffers -- not thread-safe under a host-parallel outer loop.
+    //
+    // DELIBERATELY NOT GATED on `ompThreadEmissionEnabled`: the refusal is
+    // about the SOURCE (an `omp` clause over streamed reads is an
+    // incompatibility the user wrote), so it must not depend on a build knob.
+    // The invariant `BLADE_OMP_THREADS` preserves is that it changes WHAT IS
+    // EMITTED and never WHICH PROGRAMS COMPILE -- a program that is refused on
+    // one deployment build is refused on all of them.
     if emitOuterOmp && not (Map.isEmpty streamed) then
         raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "streamed provider reads are not thread-safe under omp -- bind with .read (streamed sources: %s)"
             (streamed |> Map.toList |> List.map fst |> String.concat ", "))))
@@ -10346,7 +10533,9 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
         let suppressedMarker =
             if atOuterLevel then
                 let reason =
-                    if primary.FoldWrapper.IsSome then
+                    // BUILD KNOB first -- see the same rule in genLoopNestStreamed.
+                    if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
+                    elif primary.FoldWrapper.IsSome then
                         "fold accumulates into a shared scalar, which is not race-safe"
                     else "the fused nest's joined backend decision is not host-parallel"
                 ompSuppressedMarker
@@ -13460,6 +13649,35 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     // pointer -- computed once here for both parallel paths. (The serial path
     // keeps using `boundExpr` inline, byte-identical to before.)
     let rnName = sprintf "__rn_%s" name
+    // BUILD KNOB, applied ONE LEVEL ABOVE the two paths because they need
+    // DIFFERENT suppressions and the difference is not arbitrary:
+    //
+    //   Path A is `parallel for simd reduction(op:acc)` -- TWO constructs. Only
+    //     `parallel for` opens a team; `simd reduction` is vectorization the
+    //     `omp` licence already paid for and the knob is not about. So Path A
+    //     stays Path A, minus the team: the `BLADE_OMP_SIMD_REDUCTION` form
+    //     `fpReassocSimdStmts` already emits at the BLADE_FP_REASSOC sites.
+    //     REUSED rather than re-spelled, so the suppressed Path A and the knob's
+    //     own simd sites cannot drift into two different summation shapes.
+    //   Path B is a hand-written team (`#pragma omp parallel num_threads`,
+    //     `omp_get_max_threads`, per-thread partials). There is no vector half
+    //     to keep -- the whole construction IS the threading -- so it is
+    //     suppressed wholesale by making `parallelFold` invisible below, which
+    //     lands the fold on the SAME serial/lane arms an unlicensed kernel
+    //     takes. No `omp_get_*` call survives anywhere in the output.
+    //
+    // See `ompThreadEmissionEnabled` for why this is a build decision.
+    let ompThreadsOn = ompThreadEmissionEnabled ()
+    // Census line for a Path B fold this build serialized. The arms it lands on
+    // (lane / plain serial) are the ones an UNLICENSED kernel takes and emit
+    // nothing about omp on their own, so without this the dropped clause would
+    // be invisible -- the same silence `ompSuppressedMarker` exists to prevent
+    // in the loop nests. Empty for Path A (which emits its own marker beside the
+    // simd form it keeps) and for a kernel that never asked for omp.
+    let pathBSuppressedNote =
+        if parallelFold.IsSome && not ompThreadsOn
+        then [ sprintf "%s// [omp] requested but emitted serial: %s" ind (ompThreadsSuppressedReason ()) ]
+        else []
     let code =
         match resolveCallable kernelExpr with
         | Some callable when callable.Params.Length = 2 ->
@@ -13476,7 +13694,26 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 match initExpr with
                 | Some initE -> (exprToCppCtx ctx initE, "0")
                 | None -> (elemAt "0", "1")
-            match pathAOp, parallelFold with
+            match pathAOp, (if ompThreadsOn then parallelFold else None) with
+            | Some (op, redOp), _ when not ompThreadsOn ->
+                // Path A, THREADS SUPPRESSED. The team is gone; the vectorized
+                // reduction stays, in the shared `BLADE_OMP_SIMD_REDUCTION`
+                // spelling (portable to pre-4.0 OpenMP, where it expands to
+                // nothing and the loop below is the plain serial chain).
+                //
+                // `ompApiUsedCell` is deliberately NOT set: this form calls no
+                // omp_* runtime function, so the program must not acquire an
+                // <omp.h> dependency it does not have -- which is also what lets
+                // "serial emission contains no `omp_get_`" be checkable by
+                // grepping the output.
+                elemErrCode @ guardLines @ [
+                    sprintf "%s// reduce: comm-licensed reduction (builtin '%s'), flat sweep" ind (binOpToCpp op)
+                    sprintf "%s// [omp] requested but emitted serial: %s" ind (ompThreadsSuppressedReason ())
+                    sprintf "%sconst size_t %s = %s;" ind rnName boundExpr
+                    sprintf "%s%s %s = %s;" ind elemStr name seedStr
+                ]
+                @ (fpReassocSimdStmts redOp name "__ri" loopStart rnName [] elemAt
+                   |> List.map (fun s -> ind + s))
             | Some (op, redOp), _ ->
                 // Path A. No wrapper: the reduction clause requires the update
                 // statement to have the `x = x op expr` shape, so the builtin op
@@ -13617,7 +13854,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 let (laneStmts, resultLane) =
                     fpReassocLaneStmts kLanes elemStr "__rlane" "__ri" "__rlo" "__rhi" elemAt
                         (fun acc rhs -> sprintf "%s = %s(%s, %s);" acc wname acc rhs)
-                elemErrCode @ guardLines @ wrapperLines @ [
+                elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote @ [
                     sprintf "%s// reduce: accumulator loop, eager (%d-lane, BLADE_FP_REASSOC)" ind kLanes
                     sprintf "%s%s %s = %s;" ind elemStr name seedStr
                     sprintf "%s{" ind
@@ -13637,7 +13874,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     sprintf "%s}" ind
                 ]
             | None, None ->
-            elemErrCode @ guardLines @ wrapperLines @ [
+            elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote @ [
                 sprintf "%s// reduce: accumulator loop, eager" ind
                 sprintf "%s%s %s = %s;" ind elemStr name seedStr
                 sprintf "%sfor (size_t __ri = %s; __ri < %s; __ri++) {" ind loopStart boundExpr
@@ -13723,6 +13960,18 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                     // the chunked range. Inner levels may be anything, including
                     // triangular: each thread runs the full inner nest for the
                     // outer indices it owns, exactly as the serial nest would.
+                    //
+                    // `ompThreadEmissionEnabled` is DELIBERATELY NOT consulted
+                    // here. The knob suppresses this plan at its CONSUMER
+                    // (`genLoopNestStreamed`, which is where the team would be
+                    // opened), not at this producer, because `FoldChunk.IsSome`
+                    // is also read as a FACT by the dispatch patterns
+                    // (`LinAlgPatterns` L1/L2/L3 decline on it) and by the flat
+                    // elementwise fast path. Clearing it here would make a
+                    // serial-emission build take DIFFERENT ROUTES, not just emit
+                    // different text -- e.g. handing an omp-licensed fold to a
+                    // BLAS dispatch it declines today. The knob's invariant is
+                    // that route selection is identical in both modes.
                     let chunkable =
                         callable.IsOmpParallel
                         && foldReorderLicensed callable
