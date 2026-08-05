@@ -1537,17 +1537,23 @@ let private denseCellCountExpr (ty: IRType) (name: string) : string =
 let internal solveSingularMessage =
     "solve(A, b): the matrix is SINGULAR -- LU factorization found an exactly-zero pivot"
 
-/// One dimension's extent as a C++ expression, read off the OPERAND'S OWN index
-/// record: a literal when the record carries one, otherwise the runtime
-/// `<name>.extents[dim]` read that every intrinsic emitter used unconditionally
-/// before this existed.
+/// One dimension's extent, read off the OPERAND'S OWN index record. THE RULE
+/// LIVES HERE; `literalOrRuntimeExtentOfArray` below is its string shape.
 ///
-/// This is `genLoopBoundExpr`'s first arm (`IRLit (IRLitInt n) -> "%d"`) and
-/// `tryGenGemvDispatch`'s inline copy, factored so the loop NEST and the
-/// INTRINSIC emitters cannot disagree about a bound that is by construction the
-/// same number. The nest has baked literals since Phase 4; the intrinsics did
-/// not, which is the whole of the reported "runtime .extents[] read despite a
-/// literal Idx<n>" symptom at these sites.
+/// Two callers need the two different answers, which is why the rule is split
+/// out rather than folded into the renderer: a loop bound wants TEXT with a
+/// runtime fallback, while a `static constexpr` return-extents table has to
+/// know STRUCTURALLY whether every axis is literal. Deciding the latter by
+/// inspecting the rendered text would make an emitted table's storage class
+/// depend on string formatting.
+///
+/// This is `genLoopBoundExpr`'s first arm (`IRLit (IRLitInt n) -> "%d"`),
+/// factored so the loop NEST and the INTRINSIC/dispatch emitters cannot
+/// disagree about a bound that is by construction the same number. The nest has
+/// baked literals since Phase 4; the intrinsics did not, which is the whole of
+/// the reported "runtime .extents[] read despite a literal Idx<n>" symptom at
+/// those sites. The gemv and syrk dispatches each carried their own inline copy
+/// of this match until they were routed through here.
 ///
 /// SOUNDNESS. `IR.shapeMonomorphizeModule` writes a literal into `Extent` only
 /// when every occurrence of that symbolic name was pinned to the SAME literal,
@@ -1556,22 +1562,62 @@ let internal solveSingularMessage =
 /// about the runtime array, not a hope about it, and `<name>.extents[dim]` holds
 /// that same value: the allocation's extents table is filled FROM this record.
 ///
-/// TWO DECLINES, both to `.extents[]` (the pre-existing behaviour, never a
-/// guess):
-///   * fewer index records than `dim` -- nothing to read.
-///   * `Rank > 1` -- a packed multi-component record (`SymIdx<2, m>` is ONE
-///     record covering TWO dense axes), so record position `dim` and extents
-///     slot `dim` are not the same axis and baking would silently misalign.
+/// RECORD POSITION IS NOT AXIS POSITION, and this is where that used to bite.
+/// A packed multi-component record is ONE record covering SEVERAL dense axes
+/// (`SymIdx<2, m>` is one record, two axes), so `List.item dim IndexTypes` is
+/// the wrong record the moment any record ahead of `dim` has arity > 1. The
+/// earlier rule sidestepped that by declining outright whenever the record at
+/// the naive position had `Rank <> 1` -- safe, but it also declined the case it
+/// was reading correctly, which is every axis of a compact operand (`decompact`
+/// bounds itself by `A.extents[0]` over an `AntiIdx<r, n>` slot).
+///
+/// The mapping is a PREFIX-SUM WALK over record arities, the same walk
+/// `IR.typeOf`'s decompact arm already does to find the record owning a given
+/// dimension. It is exact rather than conservative because a record of arity r
+/// contributes r dense axes that ALL carry that record's extent -- `IR.typeOf`
+/// states this by construction, expanding a wreath slot into
+/// `List.replicate axes { ... Extent = baseExtent ... }` -- and the emitted
+/// extents TABLE is filled in that same dense-axis space (an n=3 antisymmetric
+/// rank-2 operand emits `A_extents[0] = 3; A_extents[1] = 3;`). So the record's
+/// `Extent` and `<name>.extents[dim]` are two spellings of one number for every
+/// axis the record covers, which is exactly the licence this function needs.
+///
+/// Arity is read as `max 1 ix.Rank`, matching `IR.typeOf`'s walk and the
+/// `sumBy (fun ix -> max 1 ix.Rank)` dense-rank count used by the array-form
+/// emitters, so a 0/absent arity spans one axis here and everywhere else.
+///
+/// ONE DECLINE remains, to `.extents[]` (the pre-existing behaviour, never a
+/// guess): the walk runs off the end of the record list, i.e. the operand has
+/// fewer dense axes than `dim` -- nothing to read.
+///
+/// Non-dense storage classes are NOT special-cased here. A compound/sparse
+/// operand has no `.extents` member at all and a `RaggedRow` carries `.len`, so
+/// the runtime fallback is equally wrong for them; every caller therefore tests
+/// its own storage class BEFORE reaching this (see `genReduceForm`'s
+/// `isCompoundOperand`/`isRaggedRowOperand` pair for the canonical shape), and
+/// adding a redundant guard here would only hide a caller that forgot to.
+let private literalExtentOfArray (arr: IRArrayType) (dim: int) : int64 option =
+    // Walk records, accumulating the dense axes each one spans, until `dim`
+    // falls inside one. Running off the end = fewer axes than `dim`.
+    let rec ownerOf (axesSoFar: int) (remaining: IRIndexType list) : IRIndexType option =
+        match remaining with
+        | [] -> None
+        | ix :: rest ->
+            let span = max 1 ix.Rank
+            if dim < axesSoFar + span then Some ix else ownerOf (axesSoFar + span) rest
+    match ownerOf 0 arr.IndexTypes with
+    | Some ix -> (match ix.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
+    | None -> None
+
+/// `literalExtentOfArray` as a C++ expression: the literal when the record
+/// settles the axis, else the runtime `<name>.extents[dim]` read that every
+/// intrinsic emitter used to hardcode. The payoff is not the removed load (any
+/// compiler hoists an invariant one) but the TRIP COUNT -- see the note on the
+/// `IRType` wrapper below.
 let private literalOrRuntimeExtentOfArray (arr: IRArrayType) (name: string) (dim: int) : string =
-    let runtime = sprintf "%s.extents[%d]" name dim
-    if List.length arr.IndexTypes <= dim then runtime
-    else
-        let ix = List.item dim arr.IndexTypes
-        if ix.Rank <> 1 then runtime
-        else
-            match ix.Extent with
-            | IRLit (IRLitInt n) -> sprintf "%d" n
-            | _ -> runtime
+    match literalExtentOfArray arr dim with
+    | Some n -> sprintf "%d" n
+    | None -> sprintf "%s.extents[%d]" name dim
 
 /// The word a dispatch marker comment leads with, for a route resolved by
 /// `LinAlgPatterns.resolveNodeRoute`. Names the BACKEND because that's the only
@@ -1659,9 +1705,9 @@ let foldReorderLicensed (callable: IRCallable) : bool =
 /// operand's own index record carries one, else the runtime `.extents[dim]`
 /// read that every intrinsic emitter used to hardcode.
 ///
-/// This is the rule `tryGenGemvDispatch` already applies to its `n` (see the
-/// note there), lifted so the intrinsic/IIFE emitters can share it instead of
-/// each restating `.extents[0]`. Baking is sound because Phase 4
+/// This is the rule the gemv/syrk dispatches apply to their `n`, lifted so the
+/// intrinsic/IIFE emitters can share it instead of each restating
+/// `.extents[0]`. Baking is sound because Phase 4
 /// (`IR.shapeMonomorphizeModule`) writes a literal into `IRIndexTypeG.Extent`
 /// only when EVERY occurrence of the symbolic name was pinned to the SAME
 /// literal, and `shapeRewriteType` confines the rewrite to `Extent` -- it never
@@ -1675,9 +1721,9 @@ let foldReorderLicensed (callable: IRCallable) : bool =
 /// fiber sweep that an opaque `.extents[0]` leaves as a counted loop.
 let literalOrRuntimeExtent (ty: IRType) (name: string) (dim: int) : string =
     // Delegates to the IRArrayType core (defined earlier, next to the gram/
-    // matmul emitters' uses) so the packed-record decline (`Rank <> 1`) is
-    // enforced identically at every site; two parallel implementations of this
-    // rule briefly existed and disagreed on exactly that guard.
+    // matmul emitters' uses) so the dense-axis -> record mapping is done
+    // identically at every site; parallel implementations of this rule have
+    // twice existed and both times disagreed on exactly that mapping.
     match ty with
     | ArrayElem at -> literalOrRuntimeExtentOfArray at name dim
     | _ -> sprintf "%s.extents[%d]" name dim
@@ -3167,6 +3213,7 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
     let srcBound =
         match inferExprType arrExpr with
         | ArrayElem a when isRaggedRowType a -> sprintf "%s.len" arrName
+        | ArrayElem a -> literalOrRuntimeExtentOfArray a arrName 0
         | _ -> sprintf "%s.extents[0]" arrName
     if maskRank <> 1 then
         Some ([sprintf "#error \"Blade codegen: mask over a rank-%d array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)\"" maskRank], [])
@@ -3316,7 +3363,12 @@ and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         match inferExprType arrExpr with
         | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
         | _ -> false
-    let srcBound = if isR1Compound then sprintf "%s.idx->cardinality" arrName else sprintf "%s.extents[0]" arrName
+    let srcBound =
+        if isR1Compound then sprintf "%s.idx->cardinality" arrName
+        else
+            match inferExprType arrExpr with
+            | ArrayElem at -> literalOrRuntimeExtentOfArray at arrName 0
+            | _ -> sprintf "%s.extents[0]" arrName
     let srcAt (i: string) = if isR1Compound then sprintf "%s.data[%s]" arrName i else sprintf "%s[%s]" arrName i
     let (wrapperCode, keyCall) =
         match resolveCallable keyExpr with
@@ -3366,12 +3418,15 @@ and materializeTransposeForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let allocDecl =
             arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = rank; Name = varName
                          Symm = "nullptr"; Strict = None; Extents = extentsName }
-        // Nested copy loops over the SOURCE extents.
+        // Nested copy loops over the SOURCE extents. Bounds go through the
+        // shared literal-or-runtime rule, so a source with statically pinned
+        // axes copies under literal trip counts (the extents TABLE above is a
+        // shape record consumed once by allocate<> and stays a runtime copy).
         let openLoops =
             [ for d in 0 .. rank - 1 ->
                 let ind = String.replicate d "    "
-                sprintf "%sfor (size_t %s = 0; %s < %s.extents[%d]; %s++) {"
-                    ind (srcVar d) (srcVar d) arrName d (srcVar d) ]
+                sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {"
+                    ind (srcVar d) (srcVar d) (literalOrRuntimeExtentOfArray arrTy arrName d) (srcVar d) ]
         // dst's dimension d is fed by source dimension swapDim(d).
         let srcIdx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (srcVar d) ] |> String.concat ""
         let dstIdx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (srcVar (swapDim d)) ] |> String.concat ""
@@ -3418,12 +3473,22 @@ and materializeStackForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
             // `for` init, so sibling nests at the same level reuse the names
             // without colliding.
             let loopVar d = sprintf "__sk%s_%d" varName d
+            // Each nest reads its OWN source's index records, not the first
+            // source's: TypeCheck has proven the operands share extents at
+            // runtime, but not that they were all pinned to literals by shape
+            // monomorphization, so a source that knows its own trip count
+            // should bake it whatever its siblings managed.
+            let srcTypes = arrs |> List.map inferExprType
             let copyNest (k: int) (srcName: string) =
+                let srcBoundAt d =
+                    match List.item k srcTypes with
+                    | ArrayElem st -> literalOrRuntimeExtentOfArray st srcName d
+                    | _ -> sprintf "%s.extents[%d]" srcName d
                 let opens =
                     [ for d in 0 .. srcRank - 1 ->
                         let ind = String.replicate d "    "
-                        sprintf "%sfor (size_t %s = 0; %s < %s.extents[%d]; %s++) {"
-                            ind (loopVar d) (loopVar d) srcName d (loopVar d) ]
+                        sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {"
+                            ind (loopVar d) (loopVar d) (srcBoundAt d) (loopVar d) ]
                 let srcIdx = [ for d in 0 .. srcRank - 1 -> sprintf "[%s]" (loopVar d) ] |> String.concat ""
                 let bodyInd = String.replicate srcRank "    "
                 let body = [ sprintf "%s%s[%d]%s = %s%s;" bodyInd varName k srcIdx srcName srcIdx ]
@@ -3462,12 +3527,20 @@ and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                              Symm = "nullptr"; Strict = None; Extents = extentsName }
             let offName = sprintf "%s_joff" varName
             let loopVar d = sprintf "__jn%s_%d" varName d
-            let copyNest (srcName: string) =
+            // Per-source records, same reasoning as stack: the concatenated
+            // axis differs between operands by construction, so the first
+            // source's extents are not the others' even in principle.
+            let srcTypes = arrs |> List.map inferExprType
+            let copyNest (k: int) (srcName: string) =
+                let srcBoundAt d =
+                    match List.item k srcTypes with
+                    | ArrayElem st -> literalOrRuntimeExtentOfArray st srcName d
+                    | _ -> sprintf "%s.extents[%d]" srcName d
                 let opens =
                     [ for d in 0 .. rank - 1 ->
                         let ind = String.replicate d "    "
-                        sprintf "%sfor (size_t %s = 0; %s < %s.extents[%d]; %s++) {"
-                            ind (loopVar d) (loopVar d) srcName d (loopVar d) ]
+                        sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {"
+                            ind (loopVar d) (loopVar d) (srcBoundAt d) (loopVar d) ]
                 let srcIdx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (loopVar d) ] |> String.concat ""
                 let dstIdx =
                     [ for d in 0 .. rank - 1 ->
@@ -3478,7 +3551,7 @@ and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                 let closes = [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
                 opens @ body @ closes @ [ sprintf "%s += %s.extents[%d];" offName srcName dim ]
             Some (extentDecl @ [allocDecl; sprintf "size_t %s = 0;" offName]
-                  @ (srcNames |> List.collect copyNest),
+                  @ (srcNames |> List.mapi copyNest |> List.concat),
                   [MatPool (varName, elemTypeStr, rank, "nullptr", None)])
          | _ -> None)
 
@@ -3577,7 +3650,16 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let leadVar j = sprintf "__dc%s_S%d" varName j
         let leadSubs = [ for j in 0 .. leadingN - 1 -> sprintf "[%s]" (leadVar j) ] |> String.concat ""
         let extentsName = sprintf "%s_extents" varName
-        let nExpr = sprintf "%s.extents[0]" arrName
+        // `n` is the shared extent of EVERY axis of the fission, and this one
+        // binding renders every bound the emitter produces -- the gather nests,
+        // the scatter nests, and the output extents table. Reading it through
+        // the shared rule is what lets a compact source bake: its sole record is
+        // the group (`AntiIdx<r, n>`, arity r), whose extent is dense axis 0's,
+        // and the prefix-sum walk in `literalOrRuntimeExtentOfArray` is what
+        // makes that legible. Decompaction is precisely the case where the
+        // literal pays: the freed axes re-range over the full [0, n) and the
+        // inner ones are short.
+        let nExpr = literalOrRuntimeExtentOfArray arrTy arrName 0
         (match sym with
          | SymSymmetric when r >= 2 ->
             // ----- General symmetric fission (gather) -----
@@ -6495,13 +6577,11 @@ let private tryGenGemvDispatch
                 // n = A's TRAILING extent: the peel gives the row
                 // `A.extents + 1`, and prodsum bounds itself by that row's
                 // extents[0]. Rendered from the operand TYPE when literal,
-                // matching how the nest renders its own bounds.
+                // matching how the nest renders its own bounds -- through the
+                // shared rule, which is where this site's own copy of it went.
                 let nExtent =
                     match operandTypes with
-                    | [ aTy ] ->
-                        (match (List.item 1 aTy.IndexTypes).Extent with
-                         | IRLit (IRLitInt n) -> sprintf "%d" n
-                         | _ -> sprintf "%s.extents[1]" aName)
+                    | [ aTy ] -> literalOrRuntimeExtentOfArray aTy aName 1
                     | _ -> sprintf "%s.extents[1]" aName
                 // Pool capacity for the shim's contiguity probe.
                 // `blade_gemv` stages A through an `in_view`, exactly as the L3
@@ -6578,10 +6658,7 @@ let private tryGenSyrkDispatch
                 // gemv: rendered from the operand TYPE when literal.
                 let nExtent =
                     match operandTypes with
-                    | aTy :: _ ->
-                        (match (List.item 1 aTy.IndexTypes).Extent with
-                         | IRLit (IRLitInt n) -> sprintf "%d" n
-                         | _ -> sprintf "%s.extents[1]" aName)
+                    | aTy :: _ -> literalOrRuntimeExtentOfArray aTy aName 1
                     | _ -> sprintf "%s.extents[1]" aName
                 let aCells =
                     match operandTypes with
@@ -10362,56 +10439,93 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
         // for-range body) each arm below registers BOTH the pool and this heap
         // extents table, so the pair is released together at scope exit. At
         // main's top level there is no frame and both keep program lifetime.
-        let heapExtents (rank: int) (dims: string list) =
-            (sprintf "%ssize_t* %s_extents = new size_t[%d];" ind name rank)
-            :: (dims |> List.mapi (fun d e -> sprintf "%s%s_extents[%d] = %s;" ind name d e))
+        //
+        // WHEN EVERY EXTENT IS LITERAL none of that management is needed: a
+        // `static constexpr const size_t[R]` table has STATIC storage duration,
+        // which satisfies the constraint above strictly more safely than the
+        // heap does -- it outlives every wrapper naming it and every copy of
+        // that wrapper unconditionally, there is nothing to free, and nothing
+        // to get wrong if a frame is torn down early. It is the same table form
+        // the rectangular array-literal path already hands back across a
+        // function return (`static constexpr`, chosen there for exactly this
+        // reason), and `allocate<>` takes `const size_t extents[]`, so the
+        // pointer the wrapper stores is unchanged in type and in reads.
+        // A MIXED table keeps the heap: a constexpr initializer cannot name a
+        // runtime `.extents[]` read, and half-baking would need two tables.
+        //
+        // Returns the declaration lines and the name to register as OWNED --
+        // `None` for the static table, which is what suppresses the free.
+        let retExtents (rank: int) (dims: (string * bool) list) : string list * string option =
+            if dims |> List.forall snd then
+                ([ sprintf "%sstatic constexpr const size_t %s_extents[%d] = { %s };"
+                       ind name rank (dims |> List.map fst |> String.concat ", ") ],
+                 None)
+            else
+                ((sprintf "%ssize_t* %s_extents = new size_t[%d];" ind name rank)
+                 :: (dims |> List.mapi (fun d (e, _) -> sprintf "%s%s_extents[%d] = %s;" ind name d e)),
+                 Some (name + "_extents"))
+        // One derivation of each operand extent, feeding BOTH the copy-loop
+        // bound and the return-extents table -- the loop and the shape it
+        // describes cannot disagree because they are the same expression.
+        let operandTypes = arrays |> List.map inferExprType
+        let extentAt (pos: int) (dim: int) : string * bool =
+            let nm = List.item pos arrayNames
+            match List.tryItem pos operandTypes with
+            | Some (ArrayElem at) ->
+                (literalOrRuntimeExtentOfArray at nm dim, (literalExtentOfArray at dim).IsSome)
+            | _ -> (sprintf "%s.extents[%d]" nm dim, false)
         match objInfo.InputRanks, arrayNames with
         | [1; 1], [arrA; arrB] ->
             // Outer product: result[i][j] = kernel(A[i], B[j])
-            let extentsDecl =
-                heapExtents 2 [sprintf "%s.extents[0]" arrA; sprintf "%s.extents[0]" arrB]
+            let a0 = extentAt 0 0
+            let b0 = extentAt 1 0
+            let (aExt, bExt) = (fst a0, fst b0)
+            let (extentsDecl, ownedExtents) = retExtents 2 [a0; b0]
             let allocDecl = sprintf "%sArray<%s, 2> %s = { allocate<promote<%s, 2>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
             let loopCode = [
-                sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
-                sprintf "%s    for (size_t __i1 = 0; __i1 < %s.extents[0]; __i1++) {" ind arrB
+                sprintf "%sfor (size_t __i0 = 0; __i0 < %s; __i0++) {" ind aExt
+                sprintf "%s    for (size_t __i1 = 0; __i1 < %s; __i1++) {" ind bExt
                 sprintf "%s        %s[__i0][__i1] = %s(%s[__i0], %s[__i1]);" ind name wname arrA arrB
                 sprintf "%s    }" ind
                 sprintf "%s}" ind
             ]
             // Statement-position materializer (sole caller is genBinding's
             // IRApp(IRObjectFor) arm, directly or via genFuncBody's
-            // hoistLoopApps lift), so the pool AND its heap extents table are
-            // scope-owned. Dense/nullptr mirrors the allocate<> above.
+            // hoistLoopApps lift), so the pool AND its extents table are
+            // scope-owned -- unless the table is static, which owns nothing.
+            // Dense/nullptr mirrors the allocate<> above.
             registerPoolAlloc AllocDense elemTypeStr 2 "nullptr"
-                (name + "_extents") name (Some (name + "_extents"))
+                (name + "_extents") name ownedExtents
             extentsDecl @ [allocDecl; ""] @ wrapperLines @ loopCode
 
         | [0; 0], [arrA; arrB] ->
             // Elementwise: result[i] = kernel(A[i], B[i])
-            let extentsDecl = heapExtents 1 [sprintf "%s.extents[0]" arrA]
+            let a0 = extentAt 0 0
+            let (extentsDecl, ownedExtents) = retExtents 1 [a0]
             let allocDecl = sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
             let loopCode = [
-                sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
+                sprintf "%sfor (size_t __i0 = 0; __i0 < %s; __i0++) {" ind (fst a0)
                 sprintf "%s    %s[__i0] = %s(%s[__i0], %s[__i0]);" ind name wname arrA arrB
                 sprintf "%s}" ind
             ]
             registerPoolAlloc AllocDense elemTypeStr 1 "nullptr"
-                (name + "_extents") name (Some (name + "_extents"))
+                (name + "_extents") name ownedExtents
             extentsDecl @ [allocDecl; ""] @ wrapperLines @ loopCode
 
         | [0], [arrA] ->
             // Single-array elementwise map (array<->scalar broadcast):
             // result[i] = kernel(A[i]). The scalar is baked into the 1-param
             // kernel, so only the array is iterated.
-            let extentsDecl = heapExtents 1 [sprintf "%s.extents[0]" arrA]
+            let a0 = extentAt 0 0
+            let (extentsDecl, ownedExtents) = retExtents 1 [a0]
             let allocDecl = sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
             let loopCode = [
-                sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
+                sprintf "%sfor (size_t __i0 = 0; __i0 < %s; __i0++) {" ind (fst a0)
                 sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name wname arrA
                 sprintf "%s}" ind
             ]
             registerPoolAlloc AllocDense elemTypeStr 1 "nullptr"
-                (name + "_extents") name (Some (name + "_extents"))
+                (name + "_extents") name ownedExtents
             extentsDecl @ [allocDecl; ""] @ wrapperLines @ loopCode
 
         | _ ->
@@ -10500,6 +10614,22 @@ let genComposeApply
                 (elemTypeToCpp (IRTScalar ETFloat64),
                  codegenError ctx ind ">>@: empty array list - likely an IR-builder bug")
 
+        // Both stages sweep the SAME shape (stage 2 borrows stage 1's extents,
+        // which borrow the input's), so the input's records settle the trip
+        // count for both. Only the LITERAL is shared: each stage still names
+        // its own array in the runtime fallback, so the emitted read keeps
+        // pointing at the operand that stage actually iterates.
+        let stageLiteral =
+            match arrays with
+            | a :: _ ->
+                (match inferExprType a with
+                 | ArrayElem at -> literalExtentOfArray at 0
+                 | _ -> None)
+            | [] -> None
+        let stageBoundOf (srcName: string) =
+            match stageLiteral with
+            | Some n -> sprintf "%d" n
+            | None -> srcName + ".extents[0]"
         match kernelName1, kernelName2 with
         | Some k1, Some k2 ->
             // Both kernels are named C++ lambdas - direct call loops
@@ -10508,7 +10638,7 @@ let genComposeApply
                 sprintf "%sconst size_t* %s_extents = %s.extents;" ind s1Name arrName
                 arrayAlloc { Ind = ind; Elem = elemType; Rank = arrRank; Name = s1Name
                              Symm = "nullptr"; Strict = None; Extents = s1Name + "_extents" }
-                forLoop ind "__i0" (arrName + ".extents[0]")
+                forLoop ind "__i0" (stageBoundOf arrName)
                 sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind s1Name k1 arrName
                 sprintf "%s}" ind
             ]
@@ -10525,7 +10655,7 @@ let genComposeApply
                 sprintf "%sconst size_t* %s_extents = %s.extents;" ind name s1Name
                 arrayAlloc { Ind = ind; Elem = elemType; Rank = arrRank; Name = name
                              Symm = "nullptr"; Strict = None; Extents = name + "_extents" }
-                forLoop ind "__i0" (s1Name + ".extents[0]")
+                forLoop ind "__i0" (stageBoundOf s1Name)
                 sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name k2 s1Name
                 sprintf "%s}" ind
             ]
@@ -11902,10 +12032,16 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
              | ArrayElem at when isFreeableDenseArrayType at ->
                  registerPoolAlloc AllocDense elemType arrRank "nullptr" (name + "_extents") name None
              | _ -> ())
+            // Stage 2 sweeps stage 1's shape; stage 1's own type is what says
+            // whether that shape is statically pinned.
+            let s2Bound =
+                match s1Type with
+                | ArrayElem at -> literalOrRuntimeExtentOfArray at s1Name 0
+                | _ -> sprintf "%s.extents[0]" s1Name
             let s2Code = [
                 sprintf "%sconst size_t* %s_extents = %s.extents;" ind name s1Name
                 sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };" ind elemType arrRank name elemType arrRank name name
-                sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind s1Name
+                sprintf "%sfor (size_t __i0 = 0; __i0 < %s; __i0++) {" ind s2Bound
                 sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name kName s1Name
                 sprintf "%s}" ind
             ]
@@ -12049,7 +12185,13 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             let mutable depth = ctx.Indent
             let indD d = String.replicate d "    "
             for i in 0 .. rank - 1 do
-                let bound = sprintf "%s.extents[%d]" name i
+                // The result's own declared type carries the pinned extents;
+                // `name` is the just-allocated output, so its records are the
+                // binding's.
+                let bound =
+                    match binding.Type with
+                    | ArrayElem at -> literalOrRuntimeExtentOfArray at name i
+                    | _ -> sprintf "%s.extents[%d]" name i
                 loopLines <- loopLines @ [sprintf "%sfor (size_t __i%d = 0; __i%d < %s; __i%d++) {" (indD depth) i i bound i]
                 depth <- depth + 1
             
@@ -12172,7 +12314,10 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 let mutable depth = ctx.Indent
                 let indD d = String.replicate d "    "
                 for i in 0 .. rank - 1 do
-                    loopLines <- loopLines @ [sprintf "%sfor (size_t __i%d = 0; __i%d < %s.extents[%d]; __i%d++) {" (indD depth) i i name i i]
+                    // `arr` is the guarded array's type; the result borrows its
+                    // shape wholesale (aliased extents, same rank).
+                    let bound = literalOrRuntimeExtentOfArray arr name i
+                    loopLines <- loopLines @ [sprintf "%sfor (size_t __i%d = 0; __i%d < %s; __i%d++) {" (indD depth) i i bound i]
                     depth <- depth + 1
                 let idxStr = [for i in 0 .. rank - 1 -> sprintf "[__i%d]" i] |> String.concat ""
                 loopLines <- loopLines @ [sprintf "%s%s%s = (%s) ? %s%s : %s;" (indD depth) name idxStr condName bodyName idxStr zeroStr]
@@ -13202,7 +13347,13 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     let boundExpr =
         if isRaggedRowOperand then sprintf "%s.len" arrName
         elif isCompoundOperand then sprintf "(%s.idx->cardinality * %s.trailing_stride)" arrName arrName
-        else sprintf "%s.extents[0]" arrName
+        // Dense operand: the shared literal-or-runtime rule, exactly as the
+        // expression-form reduce already does. The two forms emit the same
+        // fold over the same array and must agree on its trip count.
+        else
+            match inferExprType arrExpr with
+            | ArrayElem at -> literalOrRuntimeExtentOfArray at arrName 0
+            | _ -> sprintf "%s.extents[0]" arrName
     let elemAt (i: string) =
         if isCompoundOperand then sprintf "%s.data[%s]" arrName i
         else sprintf "%s[%s]" arrName i
