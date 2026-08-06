@@ -1,4 +1,5 @@
 // TEST: Antisym suggestion (dense until pinned)
+// WARN: BL4010
 // The unpinned twin of symmetry/020: the SAME kernel with no where-clause.
 // Stage 3 deduces PNeg on the adjacent pair and both positions receive the
 // same array, so the compiler proposes the pin (`where anticomm(x, y)`, a

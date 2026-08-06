@@ -3,6 +3,11 @@
 // accumulator per leaf, each accumulating at its OWN depth —
 //   for i0 { p1 += x; for i1 { p2 += x*y; for i2 { p3 += x*y*z } } }
 // so p1 = sum(A), p2 = sum(A)^2, p3 = sum(A)^3 in a single pass structure.
+// WARN: BL4010
+// k2/k3 are commutative and every slot receives A, so the storage suggestion
+// fires. The DENSE nest is exactly what is under test — p2 = sum(A)^2 counts
+// the full square — and acting on the suggestion does not merely shrink the
+// storage, it refuses the program: reduce() over a compact output is BL3999.
 let A = [1.0, 2.0, 3.0]
 let k1 = lambda(x) -> x
 let k2 = lambda(x, y) -> x * y

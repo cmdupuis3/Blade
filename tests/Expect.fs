@@ -479,6 +479,40 @@ let parseDiagPins (source: string) : DiagPin list * string list =
             pins.Add pin
     (List.ofSeq pins, List.ofSeq contains)
 
+/// Warning pins — the WARNING-side twin of `parseDiagPins`. Formats:
+///   // WARN: BL4003                      a checker-warning CODE (repeatable)
+///   // WARN-CODEGEN: <substring>         a codegen-warning message substring
+///
+/// Deliberately weaker than `// ERROR:`: a code token only, no `@ line:col`
+/// span. A warning's span is not what a test is asserting — that this file
+/// still earns THIS diagnosis is — and pinning spans would make every warning
+/// pin a line-number dependency that any edit above it breaks.
+///
+/// Matching is count-insensitive in both directions: one `// WARN: BL4003`
+/// licenses every BL4003 the file emits. Warning multiplicity is a function of
+/// how many sites in the file trip the same rule, which is not the property the
+/// pin is there to fix; requiring a pin per occurrence would turn "added
+/// another symmetric kernel" into a corpus edit.
+///
+/// Text after the code token is ignored as prose, so
+/// `// WARN: BL4010   (pack comm suggestion)` pins BL4010. This cannot create a
+/// false pass: an unrecognised second code on the same line is not pinned, and
+/// the runner's unpinned-warning check then fails the test.
+let parseWarnPins (source: string) : string list * string list =
+    let codes = ResizeArray<string>()
+    let codegen = ResizeArray<string>()
+    for raw in source.Split('\n') do
+        let t = raw.TrimEnd('\r').Trim()
+        if t.StartsWith "// WARN-CODEGEN:" then
+            let sub = t.Substring(16).Trim()
+            if sub <> "" then codegen.Add sub
+        elif t.StartsWith "// WARN:" then
+            let spec = t.Substring(8).Trim()
+            match spec.Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries) with
+            | [||] -> ()
+            | parts -> codes.Add (parts.[0].Trim())
+    (List.ofSeq codes, List.ofSeq codegen)
+
 /// Every `name = value` pair of a program's output, IN ORDER and WITH
 /// REPETITIONS. `parseActualValues` folds this into a Map (last wins), which is
 /// lossy; the value gate needs the unfolded list to notice that it happened.

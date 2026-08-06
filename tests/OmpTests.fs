@@ -59,9 +59,16 @@ let private pinEnv (name: string) (value: string) =
 let private pinOmpThreadsUnset () = pinEnv "BLADE_OMP_THREADS" null
 
 /// Lower + generate, returning the C++ source. No compiler involved.
+///
+/// `lowerCaptured`, not `lower`: these cases assert EMISSION SHAPE, and several
+/// of their kernels (a commutative body applied to one array twice) legitimately
+/// earn a BL4010 storage suggestion. `lower` would print it straight to stderr
+/// from inside the pipeline, un-attributed, in the middle of a run whose tests
+/// all pass — the same leak the corpus lanes now capture. There is no pin
+/// mechanism for these hand-written sources, so the warnings are simply dropped.
 let private cppOf (testName: string) (src: string) : Result<string, string> =
     try
-        match lower src with
+        match fst (lowerCaptured src) with
         | Error e -> Error (sprintf "lower: %s" e)
         | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir testName))
     with ex -> Error (sprintf "codegen raised: %s" ex.Message)

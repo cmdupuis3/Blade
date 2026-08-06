@@ -1,4 +1,7 @@
 // TEST: Fusion All Omp Bang
+// BL4010: k2 deduces comm over (A, A); this test pins the BACKEND agreement,
+// and its values are the dense ones, so the storage suggestion is pinned.
+// WARN: BL4010
 // <&!> is HARD fusion: every leaf must carry the SAME backend at the shared
 // level. Here BOTH leaves request omp, so the merged nest is emitted with an
 // outer omp pragma (agreement satisfied). Pins the all-omp <&!> path.

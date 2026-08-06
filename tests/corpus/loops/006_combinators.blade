@@ -1,4 +1,7 @@
 // TEST: Combinators
+// BL4010: f deduces comm and both slots of L1/L2 get the same array; the
+// suggestion is inert here (nothing is computed), so it is pinned, not taken.
+// WARN: BL4010
 let A = [1.0, 2.0]
 let B = [3.0, 4.0]
 let L1 = method_for(A, A)

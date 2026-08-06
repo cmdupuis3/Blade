@@ -1120,7 +1120,14 @@ let inferInlineElemTypeStr (opName: string) (form: IRExpr) : string =
         | _ -> form
     match inferExprType arrExpr with
     | ArrayElem a -> elemTypeToCpp a.ElemType
-    | IRTScalar et -> primTypeToCpp et
+    // AnyPrimElem, not IRTScalar: a scalar under a TRANSPARENT wrapper --
+    // IRTUnitAnnotated (physical units) or IRTIdxTagged (nominal index tag)
+    // -- is a perfectly resolved element type. Both wrappers preserve their
+    // inner type and erase at codegen (elemTypeToCpp/irTypeToCpp already
+    // unwrap them), so matching only the bare form made a kernel-local
+    // `let d = a - b` over Float<meters> elements collect a spurious
+    // "likely a typechecker or IR bug" warning.
+    | AnyPrimElem et -> primTypeToCpp et
     | t ->
         let cell = exprWarningsCell ()
         cell.Value <- cell.Value @

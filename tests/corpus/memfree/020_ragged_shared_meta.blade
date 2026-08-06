@@ -24,7 +24,7 @@ let rec acc: Array<Float like Steps> =
     | zero -> zero
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: prefix(n - 1) + rmeta(RS, n)
-let sfinal = acc(4)
+let sfinal = acc((4 : Steps))
 let rrow = RS(1)
 let rrowsum = reduce(rrow, (+))
 let rtail = RS(2)(3)

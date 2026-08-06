@@ -38,6 +38,8 @@ import ml as ml
 // conjuncts written, a certified caller calling a certified callee (corpus
 // 003's shape, at a point group), and they return the same numbers.
 // ============================================================================
+// Both proposals are seam proposals, so their warnings are assertions.
+// WARN: BL4011
 let static EC = [("E", 1)]
 let static WE = ml.pg_hom_dim("C4", EC, EC)
 // EXPECT: WE = 2

@@ -17,6 +17,8 @@ import ml as ml
 // never a C4 candidate. That is the same restriction argument corpus 045 §4
 // pins from the checking side.
 // ============================================================================
+// The suggestion channel IS this test, so the warning it emits is an assertion.
+// WARN: BL4011
 let static EC = [("E", 1)]
 let static WE = ml.pg_hom_dim("C4", EC, EC)
 // EXPECT: WE = 2

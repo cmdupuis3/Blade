@@ -2,6 +2,10 @@
 // A where-clause is a real reference: the unfold pass's static-function
 // DCE must scan struct constraints (it once deleted functions referenced
 // only from where-clauses, leaving the runtime guard calling nothing).
+// WARN: BL4010
+// The staged former's x*y is commutative with A in both slots, so the storage
+// suggestion fires; it is incidental to the DCE claim, and the dense s2 is what
+// the EXPECT reads, so it is pinned rather than acted on.
 static function cap(k: Int) -> Int = k + 1
 static function rep(x, k) = if k == 1 then x else (x, rep(x, k - 1))
 struct Bounded {

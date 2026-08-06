@@ -8,6 +8,9 @@
 // the standard loop nest knows nothing about per-row lengths. Co-iteration
 // semantics for ragged operands are a rewrite-spec question.
 // REJECT-AT: codegen
+// WARN-CODEGEN: mixing ragged operands with other arrays
+// The gate announces itself as a codegen warning before it plants the #error,
+// so the refusal this probe pins arrives on both channels.
 // Annotated RAGGED (019's closed form): unannotated, rows 2, 1 now infer
 // SymIdx<2, 2> (formalism §3.9), and this file's gate is about a RAGGED
 // operand reaching the multi-array nest.

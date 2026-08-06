@@ -23,9 +23,9 @@ let rec otraj: Array<Float like Outer, C> =
             | zero -> zero
             | zero :: s2 -> zero :: start
             | pre2 :: m -> pre2 :: bump(pre2(m - 1), m)
-        itraj(3)
+        itraj((3 : Inner))
       }
-let fin = otraj(3)
+let fin = otraj((3 : Outer))
 let mass = reduce(fin, (+))
 // EXPECT: otraj = [1, 1, 1, 1, 1.6, 1.9, 2.2, 2.5, 2.2, 2.8, 3.4, 4, 2.8, 3.7, 4.6, 5.5]
 // EXPECT: fin = [2.8, 3.7, 4.6, 5.5]

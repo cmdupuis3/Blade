@@ -24,7 +24,7 @@ let rec traj: Array<Float like Steps, C> =
     | zero -> zero
     | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
     | prefix :: n -> prefix :: stepp(prefix(n - 1), n)
-let fin = traj(4)
+let fin = traj((4 : Steps))
 let mass = reduce(fin, (+))
 // EXPECT: SRC = [1, 2, 3, 4]
 // EXPECT: traj = [1, 2, 3, 4, 1.101, 2.202, 3.303, 4.404, 1.203, 2.405, 3.607, 4.809, 1.306, 2.609, 3.912, 5.215, 1.41, 2.814, 4.218, 5.622]

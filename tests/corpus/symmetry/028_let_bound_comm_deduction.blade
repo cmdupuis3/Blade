@@ -1,4 +1,5 @@
 // TEST: Let-bound kernel body deduces commutative (dense until pinned)
+// WARN: BL4010
 // THE flagship shape for stage-3's binding-form descent. Blade has no
 // `let x = v in body` expression — the bind-then-use kernel is the brace block
 // `{ let d = x - y  <newline>  d * d }` — and every parity walker used to

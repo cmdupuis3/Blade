@@ -20,7 +20,7 @@ let rec traj: Array<Float like Steps, C> =
     | zero -> zero
     | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
     | prefix :: n -> prefix :: fchain(prefix(n - 1), n)
-let fin = traj(4)
+let fin = traj((4 : Steps))
 let mass = reduce(fin, (+))
 // EXPECT: traj = [1, 2, 3, 4, 1.25, 2.25, 3.25, 4.25, 1.875, 2.875, 3.875, 4.875, 2.6875, 3.6875, 4.6875, 5.6875, 3.59375, 4.59375, 5.59375, 6.59375]
 // EXPECT: fin = [3.59375, 4.59375, 5.59375, 6.59375]

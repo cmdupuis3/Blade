@@ -18,6 +18,9 @@ import ml as ml
 // carrying the proposed conjunct, and both twins check and return the same
 // numbers. A suggestion is a warning; a warning changes no value.
 // ============================================================================
+// The recalled suggestions ARE this test, so the warnings they emit are
+// assertions.
+// WARN: BL4011
 let static S = [(0, 0, 1), (1, 1, 1)]
 let static WD = ml.hom_dim(S, S)
 // EXPECT: WD = 2

@@ -1,4 +1,7 @@
 // TEST: Fusion Soft Join Omp
+// BL4010: cov deduces comm over (A, A); this test pins the BACKEND join, and
+// its values are the dense ones, so the storage suggestion is pinned.
+// WARN: BL4010
 // <&> is a SOFT loop join: a leaf with no backend clause defers to an
 // explicit sibling. Here mean is unannotated and cov requests omp, so the
 // shared outer loop of the merged staggered nest becomes omp — one

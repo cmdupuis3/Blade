@@ -19,11 +19,10 @@
 //   s3 = 100 + 70 = 170
 //   sq = 1+4+9+16+25 = 55
 //
-// The `sq` case raises BL4010 ("kernel deduces commutative and both positions
-// receive the same array") — EXPECTED and harmless: the advice is about compact
-// symmetric OUTPUT storage, and a rank-1 co-iteration zip has no symmetric
-// output to opt into. The case is here because one array in two operand roles
-// is the shape a naive emitter would try to declare a pointer for twice.
+// The `sq` case is here because one array in two operand roles is the shape a
+// naive emitter would try to declare a pointer for twice. It draws no
+// compact-storage suggestion: a zip co-iterates, so there is no symmetric
+// output to opt into.
 let x: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let y: Array<Float64 like Idx<5>> = [2.0, 3.0, 4.0, 5.0, 6.0]
 

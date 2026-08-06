@@ -30,6 +30,52 @@ them as assets: edit deliberately, never regenerate mechanically.
   the total count are still checked, only the row split is unobservable.
 - Files run in ordinal filename order — keep the `NNN_` prefix.
 
+## Pin forms
+
+Every assertion a test makes is a `//` comment line, parsed by tests/Expect.fs
+and enforced by the one verdict function in tests/Runner.fs. A pin that does
+not parse FAILS the test — a dropped assertion is worse than no assertion.
+
+| Pin | Asserts |
+| --- | --- |
+| `// EXPECT: <var> = <value>` | the program printed this value |
+| `// ABORT: <substring>` | an `(aborts)` probe's output contains this |
+| `// REJECT-AT: lower \| codegen` | the stage a `(rejects)` probe must be refused at |
+| `// ERROR: BLxxxx [@ l:c[-l:c]]` | a `(rejects)` probe is refused with this diagnostic |
+| `// ERROR-CONTAINS: <substring>` | the refusal message contains this |
+| `// WARN: BLxxxx` | the compiler emits this warning CODE |
+| `// WARN-CODEGEN: <substring>` | codegen emits a warning containing this |
+
+`// WARN:` and `// WARN-CODEGEN:` are the warning-side pins, and unlike the
+others they are enforced in **both** directions:
+
+- A warning that fires with no pin FAILS the test
+  (`unpinned warning[BL4003]: ...`). Warnings used to be printed straight to
+  the console from inside the compiler — un-attributed, interleaved with
+  parallel progress lines, ~754 per run — which made them indistinguishable
+  from noise. A test that means to warn must now say so.
+- A pin that never fires FAILS the test
+  (`expected // WARN: BL4010 but no such warning fired`), so a pin cannot
+  outlive the rule that motivated it: delete the check and its pins go loud
+  rather than silently becoming comments.
+
+A **pinned** warning is not printed at all; an unpinned one appears only in the
+failing test's detail line. A clean run therefore prints no warning text.
+
+Notes:
+
+- `// WARN:` takes a bare code — no `@ line:col` span. Text after the code is
+  ignored as prose, so `// WARN: BL4010  (storage suggestion)` is fine.
+- Matching is count-insensitive: one `// WARN: BL4003` licenses every BL4003
+  the file emits, because multiplicity tracks how many sites trip the rule,
+  which is not what the pin is asserting.
+- `(rejects)` probes are held to the same rule. The checker's warning channels
+  survive its error path, so a program refused at typecheck has still earned
+  whatever it emitted before the refusal.
+- Multi-file tests take the **union** of the pins across their member sources:
+  a cross-module program is typechecked as one program, so its warnings cannot
+  be attributed to a single file.
+
 ## Categories
 
 Loaded by tests/Corpus.fs; named in the Test_*.fs modules (e.g. Test_Basic.fs

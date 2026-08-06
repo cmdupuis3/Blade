@@ -1,6 +1,10 @@
 // TEST: Static For Former
 // `static for (...)` — the for-spelling of the former carries the marker
 // through its desugar; the staged argument list elaborates identically.
+// WARN: BL4010
+// x*y is commutative and both staged slots are A, so the storage suggestion
+// fires. The dense 2x2 former is the thing being pinned — `where comm` would
+// compact it to a triangle and drop cells the EXPECT names.
 static function rep(x, k) = if k == 1 then x else (x, rep(x, k - 1))
 let A = [2.0, 3.0]
 let sf = static for (rep(A, 2)) <@> lambda(x, y) -> x * y |> compute

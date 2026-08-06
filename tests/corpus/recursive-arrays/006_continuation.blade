@@ -14,11 +14,11 @@ let rec legA: Array<Float like A> =
     | zero :: s -> zero :: 1.0
     | prefix :: n -> prefix :: prefix(n - 1) * 2.0
 // EXPECT: legA = [1, 2, 4, 8]
-let mid = legA(3)
+let mid = legA((3 : A))
 // EXPECT: mid = 8.0
 let rec legB: Array<Float like B> =
     match legB with
     | zero -> zero
-    | zero :: s -> zero :: legA(3) * 2.0
+    | zero :: s -> zero :: legA((3 : A)) * 2.0
     | prefix :: n -> prefix :: prefix(n - 1) * 2.0
 // EXPECT: legB = [16, 32, 64]

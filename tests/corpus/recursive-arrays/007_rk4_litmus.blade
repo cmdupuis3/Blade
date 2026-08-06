@@ -25,5 +25,5 @@ let rec traj: Array<Float like T, X> =
     | zero :: s -> zero :: [1.0, 2.0]
     | prefix :: n -> prefix :: rk4(prefix(n - 1))
 // EXPECT: traj = [1, 2, 0.9048375, 1.809675, 0.81873090140625, 1.6374618028125]
-let final = traj(2)
+let final = traj((2 : T))
 // EXPECT: final = [0.81873090140625, 1.6374618028125]

@@ -18,6 +18,17 @@ import ml as ml
 // prefix dependence, no imperative loop, no double buffer); periodic stencils
 // read the field through module-level wrap tables; the folds are formers +
 // reduces. Pins from the sgs/ oracle (`dump-burgers`), initial condition baked.
+//
+// Two warning channels fire here and both are structural, not stale idiom:
+//   BL4003 -- the subscripts this file computes are untagged Int64 with no
+//     cast available: the wrap-table reads `u(ip(i))` (an Int64 table by
+//     design) and the 64->16 remap `f(4 * j + k)` (cross-tag arithmetic).
+//   BL4014 — the inference channel proposes `where ml.galilean(ub)` on the
+//     UNCERTIFIED helper `smag_g`. Only `tau_model` is meant to carry a
+//     certificate here (the header's "the ONE certified piece"), so the
+//     proposal is noted, not taken.
+// WARN: BL4003
+// WARN: BL4014
 // ============================================================================
 type XD = Idx<64>
 type L = Idx<16>

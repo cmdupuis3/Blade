@@ -24,6 +24,12 @@ import ad as ad
 // 27 weights with the loss measured that step); sgd_step slices the weights,
 // allocates its own zeroed grad buffers, calls ad.grad(loss), and returns the
 // descended weights. Trajectories are block-local (never auto-printed).
+//
+// BL4003: the state-vector idiom reads its slots with bare integer literals
+// (`s(0)..s(26)` unpacking the 27 weights, and the row reads after the loop).
+// Each is a real untagged subscript with a real fix -- `(0 : State)` -- but one
+// cast per slot is pure noise at this width, so the note is pinned, not taken.
+// WARN: BL4003
 // ============================================================================
 
 // ---- graph structure: complete digraph on 5 nodes -------------------------

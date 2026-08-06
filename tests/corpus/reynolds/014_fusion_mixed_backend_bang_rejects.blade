@@ -1,4 +1,8 @@
 // TEST: Fusion Mixed Backend Bang (rejects)
+// BL4010: cov deduces comm over (A, A) -- inert for this probe, which is
+// about the backend mismatch. Codegen pin is a substring of the #error text.
+// WARN: BL4010
+// WARN-CODEGEN: mixed serial/omp leaves under <&!>
 // <&!> requires identical backends at the shared level. mean is serial (no
 // clause) and cov requests omp — a mismatch. Mandatory fusion cannot silently
 // pick one, so the compiler rejects loudly with steering to <&> (which would

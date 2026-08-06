@@ -28,6 +28,6 @@ let total = {
         | zero -> zero
         | zero :: s -> zero :: 0.0
         | prefix :: n -> prefix :: prefix(n - 1) + chunk(n)
-    acc(799999)
+    acc((799999 : Steps))
 }
 // EXPECT: total = 319999600000

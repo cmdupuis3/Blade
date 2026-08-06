@@ -2121,6 +2121,53 @@ let lowerDiag (fileName: string option) (source: string)
                     Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
     result, sm
 
+/// Harness twin of `lower`: the same parse -> typecheck -> lower pipeline and
+/// the same `Result`, but the typecheck warnings come back as coded
+/// `Diagnostic`s instead of being rendered to stderr.
+///
+/// It exists because `lower`'s unconditional `printTypeCheckWarnings` is a
+/// LEAK when the caller is the test suite: ~4k corpus files per run sprayed
+/// their warnings into the console with no SourceMap and no file name (so each
+/// one rendered as a bare `--> line:col`), interleaved with the parallel
+/// progress lines of whichever tests happened to be running. Handing the
+/// warnings back lets the runner hold each test's warnings against that test's
+/// own `// WARN:` pins.
+///
+/// Two deliberate differences from `lower`:
+///
+///   * The drain happens on the typecheck-ERROR arm too, where `lower` prints
+///     nothing. The warning channels survive the checker's error path — that
+///     is exactly what `Cli.compileFile` relies on at its `Error ds` arm — so a
+///     program that earned warnings before being refused really did earn them,
+///     and the pin discipline can hold a reject-probe to them like any other
+///     test.
+///   * Nothing is printed, ever. Whether a warning is expected is a question
+///     only the caller can answer.
+///
+/// On the Ok arm the drain happens BEFORE `lowerTypedProgram`, exactly where
+/// `lower` prints, so the captured set is the set `lower` would have printed.
+/// On a PARSE error nothing is drained: the checker never ran, so it never
+/// reset the (AsyncLocal, reset-per-`typeCheck`) channels, and draining them
+/// would hand this file the PREVIOUS file's warnings.
+let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnostics.Diagnostic list =
+    match Blade.Parser.parseProgram source with
+    | Ok program ->
+        match Blade.TypeCheck.typeCheck program with
+        | Ok (typedProgram, builder, _) ->
+            let warnings = typeCheckWarningDiagnostics false
+            let result =
+                // Lowering can THROW on a failed compile-time provider load; keep
+                // this convenience entry point from surfacing an unhandled exception.
+                try Ok (lowerTypedProgram typedProgram (Some program) builder)
+                with ex -> Error ex.Message
+            result, warnings
+        | Error errors ->
+            let warnings = typeCheckWarningDiagnostics false
+            let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
+            Error (String.concat "\n" msgs), warnings
+    | Error e ->
+        Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message), []
+
 /// Lower multiple source files into a single IR program with cross-module imports
 let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, string> =
     match Blade.Parser.parseMultiSource sources with
@@ -2135,3 +2182,25 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
+
+/// The multi-source twin of `lowerCaptured`, on exactly the same terms: same
+/// pipeline as `lowerMultiSource`, warnings returned rather than printed,
+/// drained on the typecheck-error arm as well as the Ok arm, and NOT drained
+/// after a parse error (where the checker never ran to reset the channels).
+let lowerMultiSourceCaptured (sources: (string * string) list)
+    : Result<IRProgram, string> * Blade.Diagnostics.Diagnostic list =
+    match Blade.Parser.parseMultiSource sources with
+    | Ok program ->
+        match Blade.TypeCheck.typeCheck program with
+        | Ok (typedProgram, builder, _) ->
+            let warnings = typeCheckWarningDiagnostics false
+            let result =
+                try Ok (lowerTypedProgram typedProgram (Some program) builder)
+                with ex -> Error ex.Message
+            result, warnings
+        | Error errors ->
+            let warnings = typeCheckWarningDiagnostics false
+            let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
+            Error (String.concat "\n" msgs), warnings
+    | Error e ->
+        Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message), []

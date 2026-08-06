@@ -22,7 +22,7 @@ let rec traj: Array<Float like Steps, C> =
     | zero -> zero
     | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
     | prefix :: n -> prefix :: chain4(prefix(n - 1))
-let fin = traj(3)
+let fin = traj((3 : Steps))
 let mass = reduce(fin, (+))
 // EXPECT: SRC = [1, 2, 3, 4]
 // EXPECT: topcall = [0.9048375, 1.809675, 2.7145125, 3.61935]

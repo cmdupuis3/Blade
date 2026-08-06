@@ -1,4 +1,7 @@
 // TEST: Parallel Merged Fusion
+// BL4010: k2/k3 deduce comm over repeated A; the dense towers below are the
+// subject, so the storage suggestion is pinned rather than taken.
+// WARN: BL4010
 // <&> means "fuse when legal": leaves of different arity over the same array
 // have prefix-compatible loop structures, so the parallel tree merges into
 // the SAME staggered nest <&!> would emit (061 pins the mandatory form).

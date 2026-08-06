@@ -1,4 +1,7 @@
 // TEST: Implicit Method For Tuple
+// The implicit former IS the subject, so the steering note is pinned, not
+// silenced -- writing `method_for(...)` explicitly would erase the test.
+// WARN: BL4004
 // Stage-1 implicit formers: `(A, B) <@> kernel` synthesizes the method_for
 // the keyword would have produced (right-operand-first: the lambda on the
 // right is decisively a kernel). Same outer-product semantics as the explicit

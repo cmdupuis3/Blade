@@ -20,6 +20,12 @@ import ad as ad
 //
 // SGD is a recursive array over epochs (state-vector idiom); trajectories are
 // block-local (never auto-printed).
+//
+// BL4003: the state-vector idiom reads its slots with bare integer literals
+// (`s(0)..` unpacking the weights, and the row reads after the loop). Each is a
+// real untagged subscript with a real fix -- `(0 : State)` -- but one cast per
+// slot is pure noise at this width, so the note is pinned, not taken.
+// WARN: BL4003
 // ============================================================================
 
 // ---- static specs, configs, and derived dimensions --------------------------

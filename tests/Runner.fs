@@ -56,12 +56,36 @@ type FullTestResult = {
     /// indistinguishable from "no pins to check", and that is fine: the pin
     /// checker returns "satisfied" for an unpinned source either way.
     ProducedDiags: Blade.Diagnostics.Diagnostic list
+    /// `// WARN: BLxxxx` pins: the checker-warning CODES this test is expected
+    /// to emit (Expect.parseWarnPins). Enforced in BOTH directions, so this is
+    /// the only licence under which a warning may fire at all.
+    WarnPins: string list
+    /// `// WARN-CODEGEN: <substring>` pins: the codegen warnings this test is
+    /// expected to emit, matched by message substring.
+    WarnCodegenPins: string list
+    /// The checker warnings the front end actually produced — CAPTURED by
+    /// `Lowering.lowerCaptured` rather than printed. Empty after a parse error
+    /// (the checker never ran); possibly NON-empty after a typecheck error,
+    /// because the warning channels survive the checker's error path, which is
+    /// why a "(rejects)" probe is held to its warnings too.
+    CapturedWarnings: Blade.Diagnostics.Diagnostic list
+    /// The codegen warnings `genSelfContainedProgramFromIR` returned. Empty
+    /// unless C++ was actually generated.
+    ProducedCodegenWarnings: string list
 }
 
+/// The IR-only dump lane (`blade test --ir-only`). Uses `lowerCaptured` so the
+/// checker's warnings are not sprayed by `lower` from inside the pipeline;
+/// this lane then prints them ATTRIBUTED, under the test's own header, because
+/// it is an explicit inspection lane whose whole output is a dump. It is not
+/// part of the default `blade test` run, so this cannot reintroduce the leak.
 let testLower source =
-    match lower source with
+    let (result, warnings) = lowerCaptured source
+    match result with
     | Ok ir ->
         printfn "Lower: OK"
+        for w in warnings do
+            printfn "  [warn %s] %s" w.Code (w.Message.Replace("\r\n", " ").Replace("\n", " "))
         for m in ir.Modules do
             printfn "  Module: %s" m.Name
             printfn "  Functions: %d" m.Functions.Length
@@ -125,48 +149,57 @@ type private FsPipelineOutcome =
 /// shares the serialization the module-level codegen caches require — and only
 /// for a source that actually carries pins, so the unpinned majority of the
 /// corpus pays nothing for it.
-let private runFsharpPipelineLocked (source: string) (testName: string) (outputDir: string) (compileAndRun: bool) (wantDiags: bool) : FsPipelineOutcome =
+///
+/// Warnings are CAPTURED here, not printed: `lowerCaptured` hands them back so
+/// the verdict can hold them against the source's `// WARN:` pins. They come
+/// from the FIRST front-end pass only — the `lowerDiag` pass below re-runs the
+/// checker and therefore re-fills the same (AsyncLocal, reset-per-`typeCheck`)
+/// warning channels, so draining after it would count every warning twice on
+/// exactly the pinned reject-probes that can least afford it.
+let private runFsharpPipelineLocked (source: string) (testName: string) (outputDir: string) (compileAndRun: bool) (wantDiags: bool) : FsPipelineOutcome * Blade.Diagnostics.Diagnostic list =
     lock fsharpPipelineLock (fun () ->
-        let irResult = lower source
-        match irResult with
-        | Error e ->
-            let diags =
-                if not wantDiags then []
-                else
-                    // Same front end, same source, structured renderer. Both
-                    // entry points refuse on the same three grounds (parse,
-                    // typecheck, a throwing provider load), so this cannot
-                    // report a rejection that `lower` did not also see.
-                    match fst (lowerDiag None source) with
-                    | Error ds -> ds
-                    | Ok _ -> []
-            FpIRError (e, diags)
-        | Ok ir ->
-            match IR.validateIR ir with
-            | Error validationErrors -> FpIRValidationError validationErrors
+        let (irResult, capturedWarnings) = lowerCaptured source
+        let outcome =
+            match irResult with
+            | Error e ->
+                let diags =
+                    if not wantDiags then []
+                    else
+                        // Same front end, same source, structured renderer. Both
+                        // entry points refuse on the same three grounds (parse,
+                        // typecheck, a throwing provider load), so this cannot
+                        // report a rejection that `lower` did not also see.
+                        match fst (lowerDiag None source) with
+                        | Error ds -> ds
+                        | Ok _ -> []
+                FpIRError (e, diags)
             | Ok ir ->
-                if not compileAndRun then FpIROnly ir
-                else
-                    let safeName = sanitizeFileName testName
-                    try
-                        let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
-                        // Backend requirement is inferred from the settled
-                        // codegen output. CUDA codegen emits device kernels
-                        // (.cu, compiled by nvcc); CPU codegen does not
-                        // (.cpp, g++). The extension matches so the host
-                        // toolchain recognizes device syntax.
-                        let backendReq = inferBackendReq cppCode
-                        let ext = match backendReq with RequiresCuda -> ".cu" | RequiresMpi | CpuOnly -> ".cpp"
-                        let srcFile = Path.Combine(outputDir, safeName + ext)
-                        File.WriteAllText(srcFile, cppCode)
-                        // Codegen emits `#error "Blade codegen: ..."` when it
-                        // deliberately refuses to render a construct. That
-                        // directive — not the mere fact that g++ returned
-                        // nonzero — is what a REJECT-AT: codegen probe pins.
-                        let emittedErrorGuard = cppCode.Contains "#error"
-                        FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, emittedErrorGuard)
-                    with ex ->
-                        FpGenError (ir, sprintf "Generation failed: %s" ex.Message)
+                match IR.validateIR ir with
+                | Error validationErrors -> FpIRValidationError validationErrors
+                | Ok ir ->
+                    if not compileAndRun then FpIROnly ir
+                    else
+                        let safeName = sanitizeFileName testName
+                        try
+                            let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                            // Backend requirement is inferred from the settled
+                            // codegen output. CUDA codegen emits device kernels
+                            // (.cu, compiled by nvcc); CPU codegen does not
+                            // (.cpp, g++). The extension matches so the host
+                            // toolchain recognizes device syntax.
+                            let backendReq = inferBackendReq cppCode
+                            let ext = match backendReq with RequiresCuda -> ".cu" | RequiresMpi | CpuOnly -> ".cpp"
+                            let srcFile = Path.Combine(outputDir, safeName + ext)
+                            File.WriteAllText(srcFile, cppCode)
+                            // Codegen emits `#error "Blade codegen: ..."` when it
+                            // deliberately refuses to render a construct. That
+                            // directive — not the mere fact that g++ returned
+                            // nonzero — is what a REJECT-AT: codegen probe pins.
+                            let emittedErrorGuard = cppCode.Contains "#error"
+                            FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, emittedErrorGuard)
+                        with ex ->
+                            FpGenError (ir, sprintf "Generation failed: %s" ex.Message)
+        outcome, capturedWarnings
     )
 
 /// Run a full test: IR lowering + C++ generation + compilation + execution
@@ -183,6 +216,12 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
     // is a line scan) so the summary can count which probes still lack them.
     let (diagPins, diagContains) = parseDiagPins source
     let wantDiags = not (diagPins.IsEmpty && diagContains.IsEmpty)
+
+    // Warning pins. Same line scan, same "parsed for every test" rule as the
+    // reject-reason pins above — but unlike them these are enforced in BOTH
+    // directions (see warningPinMisses), because a warning nobody pinned is
+    // exactly the thing that used to leak into the console un-attributed.
+    let (warnPins, warnCodegenPins) = parseWarnPins source
 
     // Malformed-pin policy. Expect.parseMalformedExpectLines reports EVERY
     // `// EXPECT:` line it could not turn into a pin, including lines with no
@@ -209,7 +248,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
     // the deep AST/IR recursion (e.g. ppl jet elaboration) can overflow — so
     // the pipeline runs on a large-stack thread. The lock still serializes it,
     // so at most one such thread does the deep work at a time. See Runtime.fs.
-    let pipelineOutcome =
+    let (pipelineOutcome, capturedWarnings) =
         Blade.Runtime.runOnLargeStack (fun () ->
             runFsharpPipelineLocked source testName outputDir compileAndRun wantDiags)
 
@@ -228,6 +267,15 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
         | FpIRError (_, ds) -> ds
         | _ -> []
 
+    // Hoisted for the same reason: only the generated-source branch can carry
+    // codegen warnings, and every other branch must read as "none produced"
+    // rather than as unknown — a `// WARN-CODEGEN:` pin on a test that never
+    // reached codegen must fail, not pass vacuously.
+    let producedCodegenWarnings =
+        match pipelineOutcome with
+        | FpCppGenerated (_, _, ws, _, _) -> ws
+        | _ -> []
+
     match pipelineOutcome with
     | FpIRError (e, _) ->
         { TestName = testName; IRResult = Error e; CppGenerated = false;
@@ -235,7 +283,9 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
           ValueCheckResult = Error ["IR failed"]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
           RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
           EmittedErrorGuard = emittedErrorGuard
-          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
+          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
+          WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
+          CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
     | FpIRValidationError validationErrors ->
         for e in validationErrors do printfn "  %s" e
         { TestName = testName; IRResult = Error (validationErrors |> String.concat "; "); CppGenerated = false;
@@ -243,14 +293,18 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
           ValueCheckResult = Error ["IR validation failed"]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
           RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
           EmittedErrorGuard = emittedErrorGuard
-          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
+          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
+          WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
+          CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
     | FpIROnly ir ->
         { TestName = testName; IRResult = Ok ir; CppGenerated = false;
           CppFile = None; CompileResult = Error "Skipped"; RunResult = Error "Skipped";
           ValueCheckResult = Error ["Skipped"]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
           RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
           EmittedErrorGuard = emittedErrorGuard
-          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
+          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
+          WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
+          CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
     | FpGenError (ir, msg) ->
         { TestName = testName; IRResult = Ok ir; CppGenerated = false;
           CppFile = None; CompileResult = Error msg;
@@ -258,11 +312,16 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
           HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
           RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
           EmittedErrorGuard = emittedErrorGuard
-          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
-    | FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, _) ->
-        for w in codegenWarnings do
-            printfn "  [CodeGen Warning] %s" w
-
+          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
+          WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
+          CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
+    | FpCppGenerated (ir, srcFile, _codegenWarnings, backendReq, _) ->
+        // Codegen warnings are NOT printed here. They rode into
+        // `producedCodegenWarnings` above and are judged against the source's
+        // `// WARN-CODEGEN:` pins by the verdict; an expected one is silent and
+        // an unexpected one surfaces in the failing test's detail line. Printing
+        // them unconditionally put un-attributed text into a run whose tests all
+        // passed, which is the leak this discipline removes.
         let caps = capabilities.Value
 
         // Step 3: Compile (outside lock — separate subprocess). The
@@ -281,7 +340,9 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
               ValueCheckResult = Error [runErr]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
               RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
               EmittedErrorGuard = emittedErrorGuard
-              DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
+              DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
+              WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
+              CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
         | Ok exeFile ->
             // Step 4: Run — but a CUDA-requiring test on a GPU-less box can
             // compile yet not execute. Validate the compile, skip the run.
@@ -293,7 +354,9 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
                   HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
                   RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
                   EmittedErrorGuard = emittedErrorGuard
-                  DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
+                  DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
+                  WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
+                  CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
             else
                 let runResult = runExecutable exeFile
 
@@ -311,7 +374,9 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
                   ValueCheckResult = valueCheckResult; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
                   RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
                   EmittedErrorGuard = emittedErrorGuard
-                  DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
+                  DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
+                  WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
+                  CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
 
 /// A test whose name ends in "(aborts)" is a runtime-abort probe: the CORRECT
 /// outcome is that it compiles cleanly and then exits nonzero at runtime (a
@@ -440,6 +505,81 @@ let private rejectReasonMisses (result: FullTestResult) : string list =
                 sprintf "expected the rejection to mention '%s' but %s" s actual)
         (List.ofSeq codeMisses) @ containsMisses
 
+/// The first line of a possibly multi-line message, for a one-line detail.
+let private firstLineOf (s: string) =
+    let one = s.Replace("\r\n", "\n")
+    match one.IndexOf '\n' with
+    | -1 -> one.Trim()
+    | i -> one.Substring(0, i).Trim()
+
+/// THE warning-pin rule, and the ONLY place it is decided. Both the corpus
+/// verdict (classifyWithDetailAs) and the multi-file runner call this, so the
+/// two cannot drift into different notions of "this warning was expected".
+///
+/// Strict in BOTH directions, for both warning channels:
+///
+///   * every warning that FIRED must be covered by a pin. A warning nobody
+///     pinned used to be printed straight to stderr from inside `lower` —
+///     un-attributed (no file name, just `--> line:col`) and interleaved with
+///     the progress lines of whatever else was running in parallel — which
+///     made ~754 of them per run indistinguishable from noise. Requiring a pin
+///     is what turns "the suite emits warnings" into "these named tests emit
+///     these named warnings, on purpose".
+///   * every pin must have FIRED. Without this half, a pin outlives the rule
+///     that motivated it: delete the check that emits BL4010 and every
+///     `// WARN: BL4010` in the corpus silently becomes a comment. This is the
+///     same both-directions discipline Test_DiagCorpus applies to `// ERROR:`.
+///
+/// Count-insensitive: one pin licenses every warning of that code. See
+/// Expect.parseWarnPins for why multiplicity is deliberately not pinned.
+///
+/// Note this returns MISSES, so an unpinned source with no warnings and a
+/// pinned source whose pins all fired both come back empty — the overwhelming
+/// majority of the corpus pays nothing and reads no differently than before.
+let warningPinMisses (warnPins: string list) (codegenPins: string list)
+                     (warnings: Blade.Diagnostics.Diagnostic list)
+                     (codegenWarnings: string list) : string list =
+    let pinnedCodes = Set.ofList warnPins
+    let firedCodes = warnings |> List.map (fun d -> d.Code) |> Set.ofList
+    let unpinned =
+        warnings
+        |> List.filter (fun d -> not (pinnedCodes.Contains d.Code))
+        |> List.map (fun d -> sprintf "unpinned warning[%s]: %s" d.Code (firstLineOf d.Message))
+        |> List.distinct
+    let unfired =
+        warnPins
+        |> List.distinct
+        |> List.filter (fun c -> not (firedCodes.Contains c))
+        |> List.map (sprintf "expected // WARN: %s but no such warning fired")
+    let unpinnedCodegen =
+        codegenWarnings
+        |> List.filter (fun w -> not (codegenPins |> List.exists (fun p -> w.Contains p)))
+        |> List.map (fun w -> sprintf "unpinned codegen warning: %s" (firstLineOf w))
+        |> List.distinct
+    let unfiredCodegen =
+        codegenPins
+        |> List.distinct
+        |> List.filter (fun p -> not (codegenWarnings |> List.exists (fun w -> w.Contains p)))
+        |> List.map (sprintf "expected // WARN-CODEGEN: '%s' but no codegen warning matched")
+    unpinned @ unfired @ unpinnedCodegen @ unfiredCodegen
+
+/// The warning-pin misses for a full-pipeline test result.
+///
+/// The CODEGEN half goes vacuous when no C++ was generated, because there the
+/// stage that produces those warnings never ran: on a toolchain-less box
+/// `runFullTest` is called with compileAndRun = false and stops at FpIROnly, and
+/// a `// WARN-CODEGEN:` pin would otherwise report "no codegen warning matched"
+/// as a FAILURE on every such box. That is the same "the stage did not run, so
+/// it did not fail" rule the codegen-stage reject-probe already follows (it
+/// Skips rather than Fails when there is no source). The CHECKER half is
+/// unconditional: the front end always runs, so its warnings are always earned.
+let private resultWarningPinMisses (result: FullTestResult) : string list =
+    if result.CppGenerated then
+        warningPinMisses result.WarnPins result.WarnCodegenPins
+                         result.CapturedWarnings result.ProducedCodegenWarnings
+    else
+        warningPinMisses result.WarnPins [] result.CapturedWarnings []
+
 /// Per-stage status strings, in pipeline order. "OK" / "FAIL" / "SKIP", plus
 /// "EXIT(n)" for a nonzero run. The value stage is present only when the test
 /// carries pins. Both the verdict and the printed detail read this one list.
@@ -528,6 +668,17 @@ let classifyWithDetailAs (forceRejectProbe: bool) (result: FullTestResult) : Bla
         Blade.Tests.TestHarness.Fail,
         sprintf "unparseable EXPECT pin(s): %s"
             (result.MalformedExpectLines |> String.concat " | ")
+
+    elif not (resultWarningPinMisses result).IsEmpty then
+        // Rule 1b, and deliberately AHEAD of the probe branches. A "(rejects)"
+        // probe that is refused for its pinned reason is a Pass and returns
+        // immediately, so a warning check placed after that branch would never
+        // run on the very files most likely to warn — the checker's warning
+        // channels survive its error path, so a refused program has still
+        // EARNED whatever it emitted before the refusal. Checking here holds
+        // every test to the same rule, whatever kind of test it is.
+        Blade.Tests.TestHarness.Fail,
+        String.concat " ; " (resultWarningPinMisses result)
 
     elif isRejectProbe result || forceRejectProbe then
         match result.RejectStage with
@@ -730,9 +881,14 @@ let runMultiFileTests (name: string) (tests: (string * (string * string) list) l
     
     for (testName, sources) in tests do
         printSubHeader testName
-        match lowerMultiSource sources with
+        // Captured, then printed attributed under this test's header — same
+        // reasoning as testLower: an inspection lane, not part of the suite.
+        let (lowered, warnings) = lowerMultiSourceCaptured sources
+        match lowered with
         | Ok ir ->
             printfn "Lower: OK (%d modules)" ir.Modules.Length
+            for w in warnings do
+                printfn "  [warn %s] %s" w.Code (w.Message.Replace("\r\n", " ").Replace("\n", " "))
             for m in ir.Modules do
                 printfn "  Module: %s — %d functions, %d bindings" m.Name m.Functions.Length m.Bindings.Length
             passed <- passed + 1
@@ -766,7 +922,15 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
     let mutable failedNames = []
 
     for (testName, sources) in tests do
-        match lowerMultiSource sources with
+        // Warning pins are the UNION over the member sources. A cross-module
+        // program is typechecked as one program, so the warning it earns cannot
+        // be attributed to one file, and the pin that licenses it is equally at
+        // home in whichever member motivated it.
+        let (warnPins, warnCodegenPins) =
+            let pairs = sources |> List.map (snd >> parseWarnPins)
+            (pairs |> List.collect fst, pairs |> List.collect snd)
+        let (lowered, capturedWarnings) = lowerMultiSourceCaptured sources
+        match lowered with
         | Error e ->
             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName (sprintf "lower: %s" e)
             failed <- failed + 1
@@ -782,8 +946,6 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
             let safeName = sanitizeFileName testName
             try
                 let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
-                for w in codegenWarnings do
-                    printfn "    [CodeGen Warning] %s" w
                 // Same backend inference as the single-file pipeline:
                 // .cu + nvcc when device kernels are emitted, else .cpp + g++.
                 let backendReq = inferBackendReq cppCode
@@ -791,7 +953,19 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                 let cppFile = Path.Combine(outputDir, safeName + ext)
                 File.WriteAllText(cppFile, cppCode)
 
-                if gppAvailable then
+                // Same warning-pin rule as the single-file verdict, from the
+                // same function, so the two lanes cannot disagree about what
+                // counts as an expected warning. Checked before the compile
+                // because an unpinned warning fails the test either way and
+                // saying so costs nothing.
+                let warnMisses =
+                    warningPinMisses warnPins warnCodegenPins capturedWarnings codegenWarnings
+                if not warnMisses.IsEmpty then
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName
+                        (String.concat " ; " warnMisses)
+                    failed <- failed + 1
+                    failedNames <- failedNames @ [testName]
+                elif gppAvailable then
                     match compileForBackend capabilities.Value backendReq cppFile outputDir with
                     | Error e when isSkipError e ->
                         Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Skip testName e
@@ -1055,10 +1229,17 @@ let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outpu
     let mutable generated = 0
     
     for (testName, source) in tests do
-        match lower source with
+        // Captured rather than sprayed from inside `lower`; this lane prints
+        // them attributed below, next to the test they belong to. Like
+        // --ir-only this is an explicit inspection lane, not part of the
+        // default `blade test` run.
+        let (lowered, warnings) = lowerCaptured source
+        match lowered with
         | Error e ->
             printfn "  [IR:FAIL] %s" testName
             printfn "    Error: %s" e
+            for w in warnings do
+                printfn "    [warn %s] %s" w.Code (w.Message.Replace("\r\n", " ").Replace("\n", " "))
             irFailed <- irFailed + 1
         | Ok ir ->
             match IR.validateIR ir with
@@ -1069,10 +1250,16 @@ let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outpu
                 irFailed <- irFailed + 1
             | Ok ir ->
             irPassed <- irPassed + 1
+            for w in warnings do
+                printfn "    [warn %s] %s" w.Code (w.Message.Replace("\r\n", " ").Replace("\n", " "))
             let safeName = sanitizeFileName testName
             let cppFile = Path.Combine(outputDir, safeName + ".cpp")
             try
                 let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                // Kept: this is the generate-and-inspect lane (`blade test
+                // --gen`), whose entire output is per-test detail, and it is
+                // not part of the default `blade test` run. The suite lanes'
+                // copies of this print are gone in favour of `// WARN-CODEGEN:`.
                 for w in codegenWarnings do
                     printfn "  [CodeGen Warning] %s" w
                 File.WriteAllText(cppFile, cppCode)

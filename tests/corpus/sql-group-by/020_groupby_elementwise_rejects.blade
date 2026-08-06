@@ -8,6 +8,9 @@
 // outputs have no downstream consumers yet). Mapping BEFORE grouping is
 // semantically equivalent and supported.
 // REJECT-AT: codegen
+// WARN-CODEGEN: map over a group_by result
+// The gate announces itself as a codegen warning before it plants the #error,
+// so the refusal this probe pins arrives on both channels.
 let region = [0, 1, 0]
 let temps = [10.0, 20.0, 30.0]
 let gk = group_keys(region)

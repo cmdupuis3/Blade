@@ -23,8 +23,8 @@ let rec acc: Array<Float like Steps> =
     | zero -> zero
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: prefix(n - 1) + stepf(n)
-let sfinal = acc(4)
-let sread = STG(2)
+let sfinal = acc((4 : Steps))
+let sread = STG((2 : C))
 let stotal = reduce(STG, (+))
 // EXPECT: STG = [8, 9, 10, 11]
 // EXPECT: acc = [0, 7, 18, 33, 52]

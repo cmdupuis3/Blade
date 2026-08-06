@@ -1876,7 +1876,26 @@ let private slotPerArg (arrTy: IRArrayType) : IRIndexType list =
     | h :: rest when h.IxKind = IxKCompound -> List.replicate (max 1 h.Rank) h @ rest
     | l -> l
 
-let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: TypedExpr list) : TypeResult<unit> =
+/// Is this subscript target a COMPILER-SYNTHESIZED buffer? Desugarings that
+/// build their own scratch arrays (`let rec`'s `__rec_x` / `__slice_x` /
+/// `__seed_x` / `__lag<k>_x`, rank-k `reduce`'s `__rksrc<uid>`) walk them with
+/// their own generated counters, which are plain Int64 -- the desugarer owns
+/// both the buffer and the walk, so the index space is correct by
+/// construction. The untagged-index NOTE below is advice to the AUTHOR ("cast,
+/// or iterate via range<Tag>"), and on a `__`-named buffer there is no source
+/// spelling that could take it: a `let rec` with ZERO subscripts in the source
+/// still drew one note per tagged axis. Same rule, and the same reason, as the
+/// `tagName.StartsWith "__"` guard below and BL4010's `__of13_0` guard: a
+/// diagnostic the user cannot act on is noise. The ERROR arms are unaffected
+/// -- only the advisory warning is suppressed, and only on names the surface
+/// grammar reserves for the compiler.
+let private isSynthesizedBuffer (tArr: TypedExpr) : bool =
+    match tArr.Kind with
+    | TExprVar (name, _, _) -> name.StartsWith "__"
+    | _ -> false
+
+let private checkArrayIndexTags (env: TypeEnv) (tArr: TypedExpr) (arrTy: IRArrayType) (tArgs: TypedExpr list) : TypeResult<unit> =
+    let synthetic = isSynthesizedBuffer tArr
     let slots = slotPerArg arrTy
     let n = min tArgs.Length slots.Length
     let tagMismatch =
@@ -1900,9 +1919,10 @@ let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Type
                     // BL4003 (index type violation) -- the warning twin of this
                     // very site: the ERROR branch two cases up raises
                     // IndexTagMismatchNamed, which is already BL4003.
-                    emitWarning env "BL4003" tArg.Span (sprintf
-                        "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
-                        tagName tagName tagName)
+                    if not synthetic then
+                        emitWarning env "BL4003" tArg.Span (sprintf
+                            "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
+                            tagName tagName tagName)
                     None
                 | _ -> None
             | _ -> None)
@@ -2155,7 +2175,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                  // BLOCK-SPEC base under a depth >= 2 class"), this door already
                  // enforces it instead of being the one subscript form that
                  // silently does not.
-                 checkArrayIndexTags env arrTy tArgs
+                 checkArrayIndexTags env tFunc arrTy tArgs
                  |> Result.map (fun () ->
                      let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
                      mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType)
@@ -2190,7 +2210,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         else
             foldEnumIdxLabels env arrTy tArgs
             |> Result.bind (fun tArgs ->
-            checkArrayIndexTags env arrTy tArgs
+            checkArrayIndexTags env tFunc arrTy tArgs
             |> Result.map (fun () ->
                 let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
                 mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType))
@@ -2206,7 +2226,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         |> Result.bind (fun () ->
         foldEnumIdxLabels env arrTy tArgs
         |> Result.bind (fun tArgs ->
-        checkArrayIndexTags env arrTy tArgs
+        checkArrayIndexTags env tFunc arrTy tArgs
         |> Result.bind (fun () ->
             let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
             // Tabulated-head consumption: the FIRST slot is one rank-k axis
@@ -2552,7 +2572,7 @@ let rec private revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : TypeR
         | TExprIndex (arr, args, _) ->
             match env.Subst.Resolve arr.Type with
             | ArrayElem at when args.Length <= at.IndexTypes.Length ->
-                checkArrayIndexTags env at args
+                checkArrayIndexTags env arr at args
             | _ -> Ok ()
         | _ -> Ok ())
 
@@ -4952,10 +4972,14 @@ and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
                         // step with checkArrayIndexTags above.
                         | IRTIdxTagged (_, IRefAny)
                         | IRTScalar (ETInt32 | ETInt64) ->
-                            // BL4003, same as checkArrayIndexTags' twin.
-                            emitWarning env "BL4003" tI.Span (sprintf
-                                "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
-                                tagName tagName tagName)
+                            // BL4003, same as checkArrayIndexTags' twin --
+                            // including its synthesized-buffer suppression, so
+                            // the one-bracket spelling cannot drift from the
+                            // call spelling on a desugarer's own scratch array.
+                            if not (isSynthesizedBuffer tT) then
+                                emitWarning env "BL4003" tI.Span (sprintf
+                                    "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
+                                    tagName tagName tagName)
                             None
                         | _ -> None
                     | _ -> None
@@ -7019,7 +7043,20 @@ and buildApplyInfo (env: TypeEnv)
     // compaction). Output stays DENSE until the user pins -- the suggestion is
     // the compiler proposing, never deciding. PInv proposes the inclusive
     // triangle (`comm`), PNeg the strict one (`anticomm`, zero diagonal).
-    if List.isEmpty iterGroups && not (List.isEmpty stage3Pairs) then
+    //
+    // OUTER PRODUCTS ONLY. The suggestion's whole content is "your output is a
+    // square with a redundant half; pin the symmetry and store the triangle",
+    // and that presupposes the two operand slots span two SEPARATE axes. A
+    // ZIPPED apply co-iterates: `zip(A, A) <@> lambda(x, y) -> x * y` walks ONE
+    // axis feeding both slots, so the output is rank-1 and there is no triangle
+    // in existence to compact (pinning `where comm` on it changes nothing --
+    // sql-reduce/017). `sharedIndexTypes` is non-empty exactly for the zipped
+    // arms (both inferMethodFor zip shapes via zipSharedRecords, and
+    // inferObjectFor's `hasZip` split); every outer-product former passes `[]`,
+    // so this gate cannot reach a real square. Note `A * A` desugars to a zip
+    // too, and is likewise co-iteration, not a suppressed true positive.
+    let isCoIterApply = not (List.isEmpty sharedIndexTypes)
+    if List.isEmpty iterGroups && not (List.isEmpty stage3Pairs) && not isCoIterApply then
         List.indexed stage3Pairs
         |> List.iter (fun (i, par) ->
             if (par = Blade.Deduce.PInv || par = Blade.Deduce.PNeg)

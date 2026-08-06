@@ -23,5 +23,5 @@ let rec pascal: Array<Float like R, C> =
     | zero :: s -> zero :: [1.0, 0.0, 0.0, 0.0, 0.0]
     | prefix :: n -> prefix :: next_row(prefix(n - 1))
 // EXPECT: pascal = [1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 2, 1, 0, 0, 1, 3, 3, 1, 0, 1, 4, 6, 4, 1]
-let last_row = pascal(4)
+let last_row = pascal((4 : R))
 // EXPECT: last_row = [1, 4, 6, 4, 1]

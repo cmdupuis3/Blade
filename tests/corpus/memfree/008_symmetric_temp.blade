@@ -18,7 +18,7 @@ let rec acc: Array<Float like Steps> =
     | zero -> zero
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: prefix(n - 1) + symfold(n) * 0.001
-let sfinal = acc(4)
+let sfinal = acc((4 : Steps))
 // EXPECT: SRC = [1, 2, 3, 4]
 // EXPECT: sym0 = 23
 // EXPECT: acc = [0, 0.024, 0.049, 0.075, 0.102]

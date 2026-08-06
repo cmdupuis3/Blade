@@ -19,6 +19,8 @@ import ml as ml
 // The two `EXPECT`s below are the same numbers, which is the other half of the
 // claim: a suggestion is a warning, and a warning changes no value.
 // ============================================================================
+// The suggestion channel IS this test, so the warning it emits is an assertion.
+// WARN: BL4011
 let static SIN = [(0, 0, 2), (1, 1, 1)]
 let static SOUT = [(0, 0, 1), (1, 1, 2)]
 let static WD = ml.hom_dim(SIN, SOUT)
