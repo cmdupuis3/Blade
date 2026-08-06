@@ -92,6 +92,7 @@ let printUsage () =
     printfn "  test strict-pins                  Run the --strict-pins CLI gate block standalone"
     printfn "  test surfacing                    Run the warning-surfacing block standalone"
     printfn "  test ide-serve                    Run the `ide serve` NDJSON protocol block standalone"
+    printfn "  test ide-eval                     Run the notebook session-eval block standalone"
     printfn "  test ide-references               Run the `references[]` navigation payload block standalone"
     printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
     printfn "  test interp [category]            Diff the tree-walking interpreter against the compiled binary"
@@ -290,319 +291,89 @@ let private runExeIn (cwd: string) (exeFile: string) : Result<int * string * str
     with ex ->
         Error (sprintf "Execution exception: %s" ex.Message)
 
-// REPL display: type-annotated echoes. The compiled session prints raw `name
-// = value` lines; the REPL joins those with an in-process parse+typecheck of
-// the SAME source to display types:
-//   - primitives inline:                  a = Int64: 5
-//   - other types (arrays, tuples, functions) on the next line, tabbed:
-//         v = [1, 2, 3]
-//             Array<Int64, Idx<3>>
-//   - functions echo their signature; abstract (type-variable) positions
-//     render with source names (`T`, `T^2`), inference-bound positions render
-//     the concrete type substituted in.
-module ReplTypes =
-    open System.Collections.Generic
-    open System.Text.RegularExpressions
-    open Blade.Ast
-    open Blade.Types
-    open Blade.IR
-    open Blade.TypedAst
+/// The engine `blade repl` drives, shared with `ide serve`'s notebook lane:
+/// the accumulating snippet list, rebind-in-place splicing, interp-first
+/// evaluation and the ReplTypes annotation map all live in src/ReplSession.fs
+/// (it has to compile before IdeServe.fs). What stays HERE is the interactive
+/// front end -- prompts, classification branches, and every printed string.
+module RS = Blade.ReplSession
+module ReplTypes = Blade.ReplSession.ReplTypes
 
-    /// What the REPL knows about one top-level name.
-    type Info =
-        | RVal of IRType
-        | RFunc of signature: string
-
-    /// Render a function signature: `(Int64, T) -> T`. Concrete positions
-    /// print concretely; abstract positions print their source type-variable
-    /// names (fresh letters for inference-invented ones); recovery/naming
-    /// live in Blade.Ide, shared with `ide check`'s hover types.
-    let funcSig (src: FunctionDecl option) (tf: TypedFunctionDecl) : string =
-        let seed =
-            match src with
-            | Some f when f.Params.Length = tf.Params.Length ->
-                [ for (p, tp) in List.zip f.Params tf.Params do
-                    match p.Type with
-                    | Some ann -> yield! Blade.Ide.collectVarNames ann tp.Type
-                    | None -> ()
-                  match f.ReturnType with
-                  | Some ann -> yield! Blade.Ide.collectVarNames ann tf.ReturnType
-                  | None -> () ]
-            | _ -> []
-        let pp = Blade.Ide.abstractRenderer seed
-        let ps = tf.Params |> List.map (fun p -> pp p.Type)
-        sprintf "(%s) -> %s" (String.concat ", " ps) (pp tf.ReturnType)
-
-    /// Build the top-level name -> display info map from an ALREADY-lowered
-    /// session (the same front-end pass compileRunEcho's interpreter runs, so
-    /// it never lowers twice). Value bindings prefer the LOWERED types: HM
-    /// calls monomorphize during lowering, so the typed AST can still carry
-    /// T?n inference vars where the IR is concrete.
-    let sessionInfoOf (lowered: Blade.Interp.Repl.LoweredSession) : Map<string, Info> =
-        let prog = lowered.Prog
-        let tp = lowered.Typed
-        let srcFuncs =
-            [ for m in prog.Modules do
-                for ld in m.Decls do
-                    match ld.Value with
-                    | DeclFunction f -> yield (f.Name, f)
-                    | _ -> () ]
-            |> Map.ofList
-        let irTypes =
-            Map.ofList
-                [ for m in lowered.Ir.Modules do
-                    for b in m.Bindings do
-                        yield (b.Name, b.Type) ]
-        let valTy (name: string) (fallback: IRType) =
-            match Map.tryFind name irTypes with
-            | Some t -> t
-            | None -> fallback
-        let mutable acc = Map.empty
-        for m in tp.Modules do
-            for d in m.Decls do
-                match d with
-                | TDeclLet b | TDeclStatic b ->
-                    acc <- Map.add b.Name (RVal (valTy b.Name b.Type)) acc
-                    for (n, _, t) in b.SubBindings do
-                        acc <- Map.add n (RVal (valTy n t)) acc
-                | TDeclFunction f ->
-                    acc <- Map.add f.Name
-                               (RFunc (funcSig (Map.tryFind f.Name srcFuncs) f)) acc
-                | _ -> ()
-        acc
-
-    /// Parse + typecheck + lower session source (one pass) and return
-    /// top-level name -> display info. Failures yield an empty map (values
-    /// still print, just unannotated). Used for the bare-identifier "is this
-    /// a session function?" probe; the candidate path reuses the
-    /// interpreter's own LoweredSession via sessionInfoOf instead, so it never lowers twice.
-    let sessionInfo (source: string) : Map<string, Info> =
-        try
-            match Blade.Interp.Repl.lowerSession None false source with
-            | Error _ -> Map.empty
-            | Ok lowered -> sessionInfoOf lowered
-        with _ -> Map.empty
-
-    /// Primitive = annotate inline ("Int64: 5"); everything else goes on the
-    /// next line, tabbed.
-    let rec isPrimitive (t: IRType) : bool =
-        match t with
-        | IRTScalar _ | IRTNat _ -> true
-        | IRTIdxTagged (inner, _) | IRTUnitAnnotated (inner, _) -> isPrimitive inner
-        | _ -> false
-
-    let private eqLineRe = Regex(@"^([A-Za-z_][A-Za-z0-9_]*) = (.*)$", RegexOptions.Compiled)
-
-    /// Split a bracketed body at the commas sitting at nesting depth zero, so a
-    /// row (`[1, 2]`) or a complex cell (`(1, 0)`) stays ONE part. Depth counts
-    /// `[` and `(` alike; commas inside quotes are literal.
-    let private splitTopLevelCommas (inner: string) : string list =
-        let parts = ResizeArray<string>()
-        let cur = System.Text.StringBuilder()
-        let mutable depth = 0
-        let mutable inQuotes = false
-        for c in inner do
-            if c = '"' then
-                inQuotes <- not inQuotes
-                cur.Append(c) |> ignore
-            elif inQuotes then cur.Append(c) |> ignore
-            else
-                match c with
-                | '[' | '(' -> depth <- depth + 1; cur.Append(c) |> ignore
-                | ']' | ')' -> depth <- depth - 1; cur.Append(c) |> ignore
-                | ',' when depth = 0 ->
-                    parts.Add(cur.ToString())
-                    cur.Clear() |> ignore
-                | _ -> cur.Append(c) |> ignore
-        if cur.Length > 0 then parts.Add(cur.ToString())
-        parts |> List.ofSeq
-
-    /// How many entries the REPL shows per bracket level before eliding.
-    let private elideAfter = 5
-
-    /// The REPL's display cap: at EVERY bracket level, show the first
-    /// `elideAfter` entries and truncate the rest to `...`. DISPLAY ONLY --
-    /// the program's own stdout is untouched (`blade run` prints every cell,
-    /// which is what the corpus pins read). Text-level on purpose: works for
-    /// any printed shape without re-deriving the value.
-    let rec private elideValue (s: string) : string =
-        let t = s.Trim()
-        if not (t.Length >= 2 && t.StartsWith "[" && t.EndsWith "]") then t
-        else
-            let inner = t.Substring(1, t.Length - 2).Trim()
-            if inner = "" then "[]"
-            else
-                let parts = splitTopLevelCommas inner
-                let kept = parts |> List.truncate elideAfter |> List.map elideValue
-                let shown = if parts.Length > elideAfter then kept @ [ "..." ] else kept
-                "[" + String.concat ", " shown + "]"
-
-    /// Rewrite one raw output line for display. `transient` is the synthetic
-    /// binding a bare REPL expression was wrapped in; its name is stripped so the value echoes alone.
-    let annotate (info: Map<string, Info>) (transient: string option) (line: string) : string =
-        let m = eqLineRe.Match line
-        if not m.Success then line
-        else
-            let name = m.Groups.[1].Value
-            let value = elideValue m.Groups.[2].Value
-            let isTransient = (transient = Some name)
-            match Map.tryFind name info with
-            | Some (RVal t) ->
-                let tyStr = Blade.Ide.abstractRenderer [] t
-                if isPrimitive t then
-                    if isTransient then sprintf "%s: %s" tyStr value
-                    else sprintf "%s = %s: %s" name tyStr value
-                else
-                    if isTransient then sprintf "%s\n\t%s" value tyStr
-                    else sprintf "%s = %s\n\t%s" name value tyStr
-            | Some (RFunc _) -> line
-            | None -> if isTransient then value else line
+/// The g++ fallback lane, handed to the engine because `compileToExe` sits on
+/// top of Build.fs and is unreachable from a file that compiles this early.
+/// The two failure messages are composed exactly as the REPL has always
+/// printed them, so the caller only has to add `[snippet not kept]`.
+let private compiledReplLane (srcPath: string) (cwd: string) : Result<int * string * string, string> =
+    match compileToExe srcPath None false false with
+    | Error e -> Error e
+    | Ok exePath ->
+        match runExeIn cwd exePath with
+        | Error e -> Error (sprintf "Runtime error: %s" e)
+        | Ok triple -> Ok triple
 
 let replLoop () : int =
     printfn "Blade REPL (v%s) -- each submission echoes its last binding's (typed) value." compilerVersion
     printfn "A bare expression (e.g. `a`, `a + 1`) evaluates and echoes without joining the session."
     printfn "Commands: :reset (clear session)  :show (print session)  :quit"
     printfn "Multi-line: unbalanced brackets continue on the next line, or use :paste ... :end"
-    let sessionDir = Path.Combine(Path.GetTempPath(), "blade-repl-" + Guid.NewGuid().ToString("N").Substring(0, 8))
-    Directory.CreateDirectory sessionDir |> ignore
-    let srcPath = Path.Combine(sessionDir, "session.blade")
-    let userCwd = Directory.GetCurrentDirectory()
-    let session = ResizeArray<string>()
+    let engine = RS.ReplSession(Directory.GetCurrentDirectory())
+    let session = engine.Snippets
     let mutable lastLines : string[] = [||]
-
-    // Top-level name a snippet (re)defines, for rebind replacement.
-    let bindingNameRe =
-        System.Text.RegularExpressions.Regex(
-            @"^\s*(?:let\s+(?:mut\s+|static\s+)?|static\s+function\s+|function\s+|type\s+)([A-Za-z_][A-Za-z0-9_]*)")
-    let bindingName (snippet: string) =
-        let m = bindingNameRe.Match snippet
-        if m.Success then Some m.Groups.[1].Value else None
-
-    // The generated main prints a "<name> completed in Xs" timing line whose
-    // value changes every run -- exclude it from the output diff.
-    let isTimingLine (l: string) =
-        System.Text.RegularExpressions.Regex.IsMatch(l, @"completed in [0-9.eE+~-]+m?s\s*$")
-
-    // A snippet is a declaration iff it opens with a declaration keyword;
-    // anything else is a bare expression to evaluate and echo.
-    let declRe =
-        System.Text.RegularExpressions.Regex(
-            @"^\s*(let|static|function|type|struct|interface|impl|unit|import|from|module)\b")
-    let identRe =
-        System.Text.RegularExpressions.Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
-
-    // A reassignment `x = e` (or `x[i] = e`, `x.f = e`, `x += e`, etc.): an
-    // lvalue followed by an assignment operator. `=(?!=)` matches `=` but not
-    // `==`, so `b == 1` stays a bare expression. Group 1 (leading identifier)
-    // is the ROOT variable to echo. Checked after declRe so `let ...` stays a declaration.
-    let assignRe =
-        System.Text.RegularExpressions.Regex(
-            @"^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]*\])*\s*(?:\+=|-=|\*=|/=|=(?!=))")
-
-    // A raw run-output line is `name = value`; grab the leading name so we can
-    // single out just the one binding we mean to echo.
-    let outNameRe =
-        System.Text.RegularExpressions.Regex(
-            @"^([A-Za-z_][A-Za-z0-9_]*) = ",
-            System.Text.RegularExpressions.RegexOptions.Compiled)
 
     /// Evaluate `candidate` and echo ONLY `targetName`'s value line, type-
     /// annotated. Every earlier user binding, and every synthetic
     /// `__`-internal binding, stays hidden.
     ///
-    /// INTERP-FIRST: the candidate lowers ONCE (Repl.lowerSession, shared
-    /// with the type-annotation map below), then runs under the tree-walking
-    /// interpreter. On a supported exit its output is authoritative and no
-    /// g++ is invoked -- a typical turn drops from ~1-5s to <100ms. If the
-    /// interpreter can't yet evaluate some node (125) or hits its own bug
-    /// (70) it falls back to a g++ compile+run for this one input.
+    /// The evaluation itself (one lowering, interpreter first, g++ only where
+    /// the interpreter falls short) is the engine's; this is the PRINTING half
+    /// of the old compileRunEcho, and every stream it writes to -- rendered
+    /// diagnostics, the fallback notice, the annotated echo, `[snippet not
+    /// kept]` -- is in the same order it always was.
     ///
     /// `transient` is the synthetic name a bare expression was wrapped in
     /// (stripped in display), else None. Returns Some (lines, printedCount,
     /// info) on a clean exit, or None if the snippet must not be kept.
     let compileRunEcho (candidate: ResizeArray<string>) (targetName: string option) (transient: string option)
         : (string[] * int * Map<string, ReplTypes.Info>) option =
-        let src = String.concat "\n\n" candidate + "\n"
-        File.WriteAllText(srcPath, src)
         let useColor = not Console.IsErrorRedirected
-        match Blade.Interp.Repl.lowerSession (Some srcPath) useColor src with
-        | Error rendered ->
+        match engine.EvalCandidate(candidate, targetName, eprintfn "%s") with
+        | RS.CandidateRejected (ds, sm) ->
             // Front-end / validate rejection: same diagnostics as compileToExe's Error arm.
-            eprintfn "%s" rendered
+            eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
             eprintfn "[snippet not kept]"
             None
-        | Ok lowered ->
-            let info = ReplTypes.sessionInfoOf lowered
-            let display l = ReplTypes.annotate info transient l
-            // Given a (code, stdout, stderr) triple from either the interpreter or the compiled fallback, filter to targetName and echo.
-            let emit (code: int) (stdout: string) (stderr: string) =
-                let lines =
-                    stdout.Replace("\r\n", "\n").Split('\n')
-                    |> Array.filter (fun l -> not (isTimingLine l))
-                let mutable printed = 0
-                match targetName with
-                | Some tgt ->
-                    lines
-                    |> Array.tryFind (fun l ->
-                        let m = outNameRe.Match l
-                        m.Success && m.Groups.[1].Value = tgt)
-                    |> Option.iter (fun l -> printfn "%s" (display l); printed <- 1)
-                | None -> ()
-                if stderr.Trim() <> "" then eprintfn "%s" (stderr.Trim())
-                if code = 0 then Some (lines, printed, info)
-                else
-                    eprintfn "[exit %d -- snippet not kept]" code
-                    None
-            // g++ compile+run for this ONE input (the fallback lane).
-            let viaCompiled () =
-                match compileToExe srcPath None false false with
-                | Error e ->
-                    eprintfn "%s" e
-                    eprintfn "[snippet not kept]"
-                    None
-                | Ok exePath ->
-                    match runExeIn userCwd exePath with
-                    | Error e ->
-                        eprintfn "Runtime error: %s" e
-                        eprintfn "[snippet not kept]"
-                        None
-                    | Ok (code, stdout, stderr) -> emit code stdout stderr
-            match Blade.Interp.Repl.evalSession lowered "session" with
-            | Blade.Interp.Repl.InterpDone r ->
-                // Interpreter is authoritative (exit 0 or guard panic 1); surface the same TypeCheck warnings the g++ path prints.
-                printTypeCheckWarnings (not Console.IsErrorRedirected) None false
-                emit r.ExitCode r.Stdout r.Stderr
-            | Blade.Interp.Repl.InterpFellShort _ ->
-                // Interpreter can't evaluate this input yet: one-time notice, then the g++ path.
-                eprintfn "-- falling back to compiled evaluation for this input --"
-                viaCompiled ()
-
-    // Classification looks at the first non-comment, non-blank line so a
-    // doc-commented declaration isn't mistaken for a bare expression.
-    let classifyTarget (s: string) =
-        s.Replace("\r\n", "\n").Split('\n')
-        |> Array.tryFind (fun l ->
-            let t = l.TrimStart()
-            t <> "" && not (t.StartsWith "//"))
-        |> Option.defaultValue ""
+        | RS.CandidateFailed msg ->
+            eprintfn "%s" msg
+            eprintfn "[snippet not kept]"
+            None
+        | RS.CandidateRan r ->
+            // Interpreter lane: surface the same TypeCheck warnings the g++
+            // path prints for itself, in the same place (before the echo).
+            (match r.Warnings with
+             | [] -> ()
+             | ds -> eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor None ds))
+            let mutable printed = 0
+            match r.Echo with
+            | Some l -> printfn "%s" (ReplTypes.annotate r.Info transient l); printed <- 1
+            | None -> ()
+            if r.Stderr.Trim() <> "" then eprintfn "%s" (r.Stderr.Trim())
+            if r.ExitCode = 0 then Some (r.Lines, printed, r.Info)
+            else
+                eprintfn "[exit %d -- snippet not kept]" r.ExitCode
+                None
 
     let evaluate (snippet: string) =
         let trimmed = snippet.Trim()
         if trimmed = "" then () else
-        if declRe.IsMatch (classifyTarget trimmed) then
+        if RS.declRe.IsMatch (RS.classifyTarget trimmed) then
             // Declaration: rebinding replaces the earlier definition IN PLACE
             // so later snippets referencing the name see the update.
-            let candidate = ResizeArray(session)
-            match bindingName trimmed with
-            | Some name ->
-                let idx = candidate.FindIndex(fun s -> bindingName s = Some name)
-                if idx >= 0 then candidate.[idx] <- trimmed else candidate.Add trimmed
-            | None -> candidate.Add trimmed
+            let (candidate, _) = engine.DeclarationCandidate trimmed
             // The submission's "return value" is its LAST top-level binding
             // (a :paste block may declare several); echo only that one.
             let lastTarget =
                 trimmed.Replace("\r\n", "\n").Split('\n')
-                |> Array.choose bindingName
+                |> Array.choose RS.bindingName
                 |> Array.tryLast
             match compileRunEcho candidate lastTarget None with
             | None -> ()
@@ -619,30 +390,19 @@ let replLoop () : int =
                     | _ -> ()
                 | _ -> ()
                 if printed = 0 then printfn "(ok)"   // defs print nothing new
-                session.Clear()
-                session.AddRange candidate
+                engine.Commit candidate
                 lastLines <- lines
-        elif assignRe.IsMatch (classifyTarget trimmed) then
-            // Reassignment (`b = b + 1`, `b += 1`, etc.): a bare assignment
-            // does not parse at top level, but wrapping it in a hidden
-            // binding does -- the wrapper's value IS the ExprAssign, which
-            // mutates the target's existing cell. Unlike bare expressions we
-            // KEEP the wrapper so the mutation persists; successive
-            // assignments append under fresh __assignN names, so `b = b + 1`
-            // twice accumulates 1->2->3.
-            let candidate = ResizeArray(session)
-            let hidden =
-                let inUse = candidate |> Seq.choose bindingName |> Set.ofSeq
-                Seq.initInfinite (fun i -> if i = 0 then "__assign" else sprintf "__assign%d" i)
-                |> Seq.find (fun n -> not (Set.contains n inUse))
-            candidate.Add (sprintf "let %s = %s" hidden trimmed)
-            let root = (assignRe.Match trimmed).Groups.[1].Value
+        elif RS.assignRe.IsMatch (RS.classifyTarget trimmed) then
+            // Reassignment (`b = b + 1`, `b += 1`, etc.): the engine wraps it
+            // in a hidden binding whose value IS the ExprAssign, and KEEPS the
+            // wrapper so the mutation persists.
+            let (candidate, _, _) = engine.AssignmentCandidate trimmed
+            let root = (RS.assignRe.Match trimmed).Groups.[1].Value
             match compileRunEcho candidate (Some root) None with
             | None -> ()                                    // static/unknown/etc -> not kept
             | Some (lines, printed, _) ->
                 if printed = 0 then printfn "(ok)"          // e.g. array reassign isn't auto-printed
-                session.Clear()
-                session.AddRange candidate
+                engine.Commit candidate
                 lastLines <- lines
         else
             // Bare expression: `blade run` semantics only print top-level
@@ -651,7 +411,7 @@ let replLoop () : int =
             // expression echoes again rather than diffing to silence.
             let curInfo = lazy (ReplTypes.sessionInfo (String.concat "\n\n" session + "\n"))
             let asFuncName =
-                if identRe.IsMatch trimmed then
+                if RS.identRe.IsMatch trimmed then
                     match Map.tryFind trimmed curInfo.Value with
                     | Some (ReplTypes.RFunc s) -> Some s
                     | _ -> None
@@ -662,12 +422,7 @@ let replLoop () : int =
                 // signature straight from the typechecker.
                 printfn "%s\n\t%s" trimmed s
             | None ->
-                let transient =
-                    let inUse = session |> Seq.choose bindingName |> Set.ofSeq
-                    Seq.initInfinite (fun i -> if i = 0 then "it" else sprintf "it%d" i)
-                    |> Seq.find (fun n -> not (Set.contains n inUse))
-                let candidate = ResizeArray(session)
-                candidate.Add (sprintf "let %s = %s" transient trimmed)
+                let (candidate, _, transient) = engine.ExpressionCandidate trimmed
                 match compileRunEcho candidate (Some transient) (Some transient) with
                 | None -> ()
                 | Some (_, printed, info) ->
@@ -710,14 +465,14 @@ let replLoop () : int =
         | line when buffer.Count = 0 && line.Trim() = ":paste" -> pasteMode <- true
         | line when buffer.Count = 0 && (line.Trim() = ":quit" || line.Trim() = ":q") -> finished <- true
         | line when buffer.Count = 0 && line.Trim() = ":reset" ->
-            session.Clear()
+            engine.Reset()
             lastLines <- [||]
             printfn "(session cleared)"
         | line when buffer.Count = 0 && line.Trim() = ":show" ->
             // Hide the synthetic `let __assign... = <reassignment>` wrappers the assignment path appends.
             let visible =
                 session
-                |> Seq.filter (fun s -> bindingName s |> Option.forall (fun n -> not (n.StartsWith "__assign")))
+                |> Seq.filter (fun s -> RS.bindingName s |> Option.forall (fun n -> not (n.StartsWith "__assign")))
                 |> List.ofSeq
             if List.isEmpty visible then printfn "(empty session)"
             else printfn "%s" (String.concat "\n\n" visible)
@@ -726,7 +481,7 @@ let replLoop () : int =
             if bracketBalance (String.concat "\n" buffer) <= 0 then
                 evaluate (String.concat "\n" buffer)
                 buffer.Clear()
-    try Directory.Delete(sessionDir, true) with _ -> ()
+    engine.Cleanup()
     0
 
 /// End-to-end CLI smoke test: compile and run a one-line .edgi from a FRESH
@@ -1340,6 +1095,280 @@ let private runIdeServeTests () : TH.BlockResult =
       Skipped = skipped
       FailedNames = failedNames }
 
+/// The notebook lane: `ide serve`'s `eval` / `resetSession` commands, driven
+/// through the same in-process `serveLoop` seam the block above uses. Every
+/// case here rides the INTERPRETER, so the block needs no g++ and no spawn.
+///
+/// What is under test is REPL SEMANTICS on a structured wire: that a session
+/// accumulates, that rebinding splices in place so dependents recompute, that
+/// a rejected candidate leaves the session exactly as it was, that two
+/// sessions sharing a name share nothing else, and that diagnostics arrive in
+/// the CELL's coordinates rather than the assembled session file's -- the one
+/// piece of arithmetic a notebook cannot do for itself.
+let private runIdeEvalTests () : TH.BlockResult =
+    let blockName = "IdeEval"
+    TH.printHeader "ide serve eval (session semantics, bindings, cell-local diagnostics)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    let esc = Blade.Ide.jsonEscape
+    let evalReq (id: int) (session: string) (source: string) =
+        sprintf "{\"id\":%d,\"cmd\":\"eval\",\"session\":\"%s\",\"source\":\"%s\"}"
+                id (esc session) (esc source)
+    let resetReq (id: int) (session: string) =
+        sprintf "{\"id\":%d,\"cmd\":\"resetSession\",\"session\":\"%s\"}" id (esc session)
+    let checkReq (id: int) (file: string) (source: string) =
+        sprintf "{\"id\":%d,\"cmd\":\"check\",\"tier\":\"fast\",\"file\":\"%s\",\"source\":\"%s\"}"
+                id (esc file) (esc source)
+    let shutdownReq = "{\"cmd\":\"shutdown\"}"
+    /// One conversation, one serveLoop, one sessions dictionary -- so every
+    /// scenario below has to send its whole story in a single call.
+    let drive (requests: string list) : int * string list * string =
+        let input = new StringReader(String.concat "\n" requests + "\n")
+        let output = new StringWriter()
+        let code = Blade.IdeServe.serveLoop compilerVersion (input :> TextReader) (output :> TextWriter)
+        let raw = output.ToString()
+        let parts = raw.Split('\n') |> Array.toList
+        (code, (parts |> List.filter (fun p -> p <> "")), raw)
+    let entryDir = Directory.GetCurrentDirectory()
+    try
+        // 1. The base case: a declaration is kept, and its binding comes back
+        // with the IR-concrete type and the printed value beside it.
+        let (code, responses, _) = drive [ evalReq 1 "nb" "let x = 2"; shutdownReq ]
+        let name = "eval keeps a declaration and echoes its typed binding"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"id\":1" && r.Contains "\"kept\":true"
+                   && r.Contains "\"exitCode\":0" && r.Contains "\"lane\":\"interp\""
+                   && r.Contains "\"elapsedMs\":"
+                   && r.Contains "{\"name\":\"x\",\"type\":\"Int64\",\"value\":\"2\"}"
+                   && r.Contains "\"diagnostics\":[]" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 2. A bare expression evaluates against the session without joining
+        // it, and reports under the EMPTY name -- the transient wrapper's own
+        // name is an implementation detail the client never sees.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let x = 2"; evalReq 2 "nb" "x + 1"
+                    evalReq 3 "nb" "x + 1"; shutdownReq ]
+        let name = "a bare expression echoes under the empty name and is not kept"
+        match responses with
+        | [_; first; again] when code = 0
+                                 && first.Contains "\"kept\":true"
+                                 && first.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"3\"}"
+                                 // Not joining the session is what lets the
+                                 // same expression echo twice instead of
+                                 // diffing to silence the second time.
+                                 && again.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"3\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 3. THE session test. Rebinding `x` replaces the earlier snippet IN
+        // PLACE, so the dependent expression recomputes rather than seeing a
+        // shadowed duplicate (which would not even compile).
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let x = 2"; evalReq 2 "nb" "let y = x * 10"
+                    evalReq 3 "nb" "let x = 5"; evalReq 4 "nb" "y"; shutdownReq ]
+        let name = "rebinding a name splices in place and dependents recompute"
+        match responses with
+        | [_; before; rebind; after] when code = 0
+                                          && before.Contains "\"value\":\"20\""
+                                          && rebind.Contains "{\"name\":\"x\",\"type\":\"Int64\",\"value\":\"5\"}"
+                                          && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"50\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 4. Two notebooks, one serve process, the same name in both: the
+        // sessions are keyed independently or this whole design is unusable.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nbA" "let x = 2"; evalReq 2 "nbB" "let x = 99"
+                    evalReq 3 "nbA" "x"; evalReq 4 "nbB" "x"; shutdownReq ]
+        let name = "two sessions with clashing names do not leak into each other"
+        match responses with
+        | [_; _; a; b] when code = 0
+                            && a.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"2\"}"
+                            && b.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"99\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 5. resetSession is the notebook's "restart kernel": every prior
+        // binding goes, and an unknown key is a no-op rather than an error
+        // (restart fires before the first cell has ever run).
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let x = 2"; resetReq 2 "nb"; evalReq 3 "nb" "x"
+                    resetReq 4 "never-seen"; shutdownReq ]
+        let name = "resetSession clears the session and tolerates unknown keys"
+        match responses with
+        | [_; ok; gone; unknown] when code = 0
+                                      && ok = "{\"id\":2,\"ok\":true}"
+                                      && gone.Contains "\"kept\":false"
+                                      && gone.Contains "Unbound variable: x"
+                                      && unknown = "{\"id\":4,\"ok\":true}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 6. A rejected candidate is data, not damage: diagnostics come back
+        // in the CELL's coordinates (the error is on the submission's SECOND
+        // line, four lines into the assembled session file), no bindings are
+        // claimed, and the session evaluates afterwards exactly as before.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let x = 2"
+                    evalReq 2 "nb" "let bad = 1\nlet worse = undefined_name_xyz"
+                    evalReq 3 "nb" "x + 1"; shutdownReq ]
+        let name = "a rejected snippet reports cell-local spans and leaves the session intact"
+        match responses with
+        | [_; bad; after] when code = 0
+                               && bad.Contains "\"kept\":false" && bad.Contains "\"bindings\":[]"
+                               && bad.Contains "\"severity\":\"error\",\"line\":2,\"col\":13"
+                               && bad.Contains "Unbound variable: undefined_name_xyz"
+                               && not (bad.Contains "elsewhere in session")
+                               && after.Contains "\"kept\":true"
+                               && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"3\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 7. Sessions share the loop with the editor's own checking. A check
+        // in between must neither see the session nor disturb it -- each eval
+        // re-lowers from its own snippet list, and typeCheck resets its
+        // AsyncLocal channels on the way in.
+        let tmpDir = Path.Combine(Path.GetTempPath(), "blade_ideeval_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(tmpDir) |> ignore
+        let otherPath = Path.Combine(tmpDir, "other.blade")
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let x = 2"
+                    checkReq 2 otherPath "let unrelated = 41 + 1\n"
+                    evalReq 3 "nb" "x + 1"; shutdownReq ]
+        let name = "a check interleaved between two evals disturbs neither"
+        match responses with
+        | [_; checked_; after] when code = 0
+                                    && checked_.Contains "\"id\":2" && checked_.Contains "\"tier\":\"fast\""
+                                    && checked_.Contains "\"diagnostics\":[]"
+                                    && checked_.Contains "\"name\":\"unrelated\""
+                                    && not (checked_.Contains "\"name\":\"x\"")
+                                    && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"3\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 8. The remap's hard case. A rebind splices MID-session, so the
+        // failure it causes can land in a LATER snippet -- a position with no
+        // meaning in this cell. Those clamp to 1:1 and say where they really
+        // came from, instead of squiggling an innocent line.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let xs = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" "let tot = reduce(xs, (+))"
+                    evalReq 3 "nb" "let xs = 1.0"
+                    evalReq 4 "nb" "tot"; shutdownReq ]
+        let name = "a rebind that breaks a LATER snippet clamps and says so"
+        match responses with
+        | [_; _; broken; after] when code = 0
+                                     && broken.Contains "\"kept\":false"
+                                     && broken.Contains "\"line\":1,\"col\":1,\"endLine\":1,\"endCol\":1"
+                                     && broken.Contains "elsewhere in session: reduce()"
+                                     // ...and the session still holds the ARRAY.
+                                     && after.Contains "{\"name\":\"\",\"type\":\"Float64\",\"value\":\"6\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 9. The display cap travels with the value: a notebook shows what the
+        // REPL shows, five entries per bracket level and then `...`.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let v = [1, 2, 3, 4, 5, 6, 7]"; shutdownReq ]
+        let name = "binding values carry the REPL's display elision"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"value\":\"[1, 2, 3, 4, 5, ...]\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 10. Framing, on a response whose own content contains newlines: the
+        // multi-line submission escapes INTO the line, never through it.
+        let (code, responses, raw) =
+            drive [ evalReq 1 "nb" "let a = 1\nlet b = undefined_name_xyz"; shutdownReq ]
+        let name = "an eval response is exactly one newline-terminated line"
+        if code = 0 && responses.Length = 1 && raw.EndsWith "\n" && raw.Split('\n').Length = 2 then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "%d newline-separated parts" (raw.Split('\n').Length))
+
+        // 11. A function declaration has no run output at all; its binding
+        // still carries the signature the REPL would have echoed.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "function twice(p) = p * 2"; evalReq 2 "nb" "twice"; shutdownReq ]
+        let name = "a function binding reports its signature and no value"
+        match responses with
+        | [decl; probe] when code = 0
+                             && decl.Contains "{\"name\":\"twice\",\"type\":\"(Float64) -> Float64\",\"value\":\"\"}"
+                             && probe.Contains "{\"name\":\"twice\",\"type\":\"(Float64) -> Float64\",\"value\":\"\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 12. A :paste-shaped cell declares several names at once. All of them
+        // are bindings this cell made, in source order.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let m = 3\nlet n = m + 4"; shutdownReq ]
+        let name = "a multi-declaration cell reports every name it bound"
+        match responses with
+        | [r] when code = 0
+                   && r.Contains "\"bindings\":[{\"name\":\"m\",\"type\":\"Int64\",\"value\":\"3\"},{\"name\":\"n\",\"type\":\"Int64\",\"value\":\"7\"}]" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 13. Malformed eval requests answer like every other malformed
+        // request -- and an UNKNOWN cmd still errors, which is the capability
+        // probe both sides of the extension/compiler skew rely on.
+        let (code, responses, _) =
+            drive [ "{\"id\":31,\"cmd\":\"eval\",\"session\":\"nb\"}"
+                    "{\"id\":32,\"cmd\":\"eval\",\"source\":\"let x = 1\"}"
+                    "{\"id\":33,\"cmd\":\"resetSession\"}"
+                    "{\"id\":34,\"cmd\":\"evaluate\",\"session\":\"nb\",\"source\":\"let x = 1\"}"
+                    evalReq 35 "nb" "let x = 1"; shutdownReq ]
+        let name = "incomplete eval requests error without stopping the loop"
+        match responses with
+        | [noSource; noSession; noKey; unknownCmd; good] when
+                code = 0
+                && noSource.Contains "\"id\":31" && noSource.Contains "requires a \\\"source\\\""
+                && noSession.Contains "\"id\":32" && noSession.Contains "requires a \\\"session\\\""
+                && noKey.Contains "\"id\":33" && noKey.Contains "requires a \\\"session\\\""
+                && unknownCmd.Contains "\"id\":34" && unknownCmd.Contains "evaluate"
+                && good.Contains "\"kept\":true" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 14. A runtime guard is a real program fault, not a rejection: the
+        // interpreter's output is authoritative (no g++ is consulted), the
+        // snippet is still not kept, and the panic reaches the client as a
+        // diagnostic as well as on stderr -- a client that builds its error
+        // card from the first diagnostic would otherwise have nothing to say.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let z = 1 / 0"; evalReq 2 "nb" "let ok = 6"; shutdownReq ]
+        let name = "a runtime panic is not kept and names itself"
+        match responses with
+        | [panic; after] when code = 0
+                              && panic.Contains "\"kept\":false" && panic.Contains "\"exitCode\":1"
+                              && panic.Contains "\"lane\":\"interp\"" && panic.Contains "\"bindings\":[]"
+                              && panic.Contains "\"stderr\":\"error[BL8007]"
+                              && panic.Contains "\"severity\":\"error\",\"line\":1,\"col\":1"
+                              && panic.Contains "integer division or modulo by zero"
+                              && after.Contains "{\"name\":\"ok\",\"type\":\"Int64\",\"value\":\"6\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        try Directory.Delete(tmpDir, true) with _ -> ()
+    finally
+        Directory.SetCurrentDirectory entryDir
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    let parts =
+        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+    TH.printFooter blockName parts
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = skipped
+      FailedNames = failedNames }
+
 /// The `references[]` array behind go-to-definition, find-all-references and
 /// rename, driven through `ideCheckSource` in-process (no file on disk, no
 /// toolchain). What is really under test is the JOIN: an entry is one BINDER,
@@ -1533,7 +1562,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
 let private runFullSuite opts =
     runAllTestsFullWith
         [runCliSmokeTests; runStrictPinTests; runSurfacingTests
-         runIdeServeTests; runIdeReferencesTests] opts
+         runIdeServeTests; runIdeEvalTests; runIdeReferencesTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 let private dispatchTest (rest: string list) : int =
@@ -1565,6 +1594,10 @@ let private dispatchTest (rest: string list) : int =
     | [ "ide-serve" ] | [ "ideserve" ] ->
         // The NDJSON daemon protocol, driven in-process. No toolchain, no spawn.
         let failed = (runIdeServeTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "ide-eval" ] | [ "ideeval" ] ->
+        // The notebook lane: session semantics over NDJSON, interpreter only.
+        let failed = (runIdeEvalTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "ide-references" ] | [ "idereferences" ] | [ "ide-refs" ] ->
         // The navigation payload: definition/use spans, shadowing, name tokens.
@@ -1878,6 +1911,10 @@ let private dispatchInner (args: string[]) : int =
     // Share the compiler version with the test-harness output helpers so every
     // block header reads "(vX.Y.Z)" consistently, including standalone runs.
     Blade.Tests.TestHarness.version <- compilerVersion
+    // The REPL engine compiles long before the toolchain driver it needs for
+    // its g++ fallback; hand it over once, here, so every front end that
+    // reaches an unsupported node from this process gets the same lane.
+    Blade.ReplSession.installCompiledLane compiledReplLane
     // `--strict-pins` is a build MODE, not a positional argument, and only
     // means anything for the four verbs that own a typecheck. Strip it from
     // the argv the verb patterns match on so every arm shape accepts it in

@@ -223,6 +223,13 @@
     <!-- Interpreter-backed REPL seam: lowerSession (one shared front-end pass)
          wraps Interp/Run.fs; consumed by Cli.replLoop. -->
     <Compile Include="src/Interp/Repl.fs" />
+    <!-- The REPL's eval-once ENGINE (accumulating snippet list, rebind-in-place
+         splicing, interp-first evaluation, ReplTypes annotation). Extracted
+         from Cli.replLoop so `ide serve`'s notebook `eval` command drives the
+         identical semantics; must follow Interp/Repl.fs (its lowering seam) and
+         precede IdeServe.fs (its second front end). The g++ fallback lane is
+         INJECTED by Cli.fs, which owns compileToExe. -->
+    <Compile Include="src/ReplSession.fs" />
     <!-- `blade ide serve`: the NDJSON daemon wrapping Ide.fs's payload. Must
          follow Lowering.fs (the full tier monomorphizes) as well as Ide.fs,
          which is why it cannot live inside Ide.fs; must precede Cli.fs, which

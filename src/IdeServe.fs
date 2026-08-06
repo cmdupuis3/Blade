@@ -10,6 +10,22 @@
 //   -> {"cmd":"shutdown"}        (no response; also exits cleanly on stdin EOF)
 //   <- {"id":N|null,"error":"<message>"} for anything malformed
 //
+// ...plus the NOTEBOOK lane, which evaluates cells with REPL semantics:
+//
+//   -> {"id":N,"cmd":"eval","session":"<key>","source":"<cell>","cwd":"<dir>"?}
+//   <- {"id":N,"kept":B,"exitCode":E,"lane":"interp"|"gpp","elapsedMs":M,
+//       "stdout":"..","stderr":"..","bindings":[{name,type,value}],
+//       "diagnostics":[{severity,line,col,endLine,endCol,message,code?}]}
+//   -> {"id":N,"cmd":"resetSession","session":"<key>"}   <- {"id":N,"ok":true}
+//
+// One Blade.ReplSession per `session` key -- a notebook's cells accumulate,
+// two notebooks never see each other, and every session dies with the process.
+// Diagnostic coordinates are CELL-LOCAL: the compiler reports against the
+// assembled session file and the engine rebases them onto the submission.
+// An UNKNOWN cmd still answers `{"id":N,"error":...}`, which is how an old
+// extension probes a new compiler and vice versa -- so that arm is contract,
+// not just courtesy.
+//
 // stderr stays free-form logging: the client ignores it.
 //
 // The two tiers are where the pipeline STOPS. Fast = parse + typecheck +
@@ -77,6 +93,41 @@ let private tryInt (root: JsonElement) (name: string) : int option =
              | true, n -> Some n
              | _ -> None)
 
+// The notebook lane's response encoder. Hand-rolled like the error response
+// above: one line, no pretty printing, `Ide.jsonEscape` on every string that
+// came from user source or a diagnostic.
+
+let private laneName (l: Blade.ReplSession.Lane) =
+    match l with
+    | Blade.ReplSession.LaneInterp -> "interp"
+    | Blade.ReplSession.LaneGpp -> "gpp"
+
+let private evalResponse (id: int) (r: Blade.ReplSession.EvalResult) : string =
+    let sb = StringBuilder()
+    let esc = Blade.Ide.jsonEscape
+    sb.AppendFormat(
+        "{{\"id\":{0},\"kept\":{1},\"exitCode\":{2},\"lane\":\"{3}\",\"elapsedMs\":{4}",
+        id, (if r.Kept then "true" else "false"), r.ExitCode, laneName r.Lane, r.ElapsedMs) |> ignore
+    sb.AppendFormat(",\"stdout\":\"{0}\",\"stderr\":\"{1}\",\"bindings\":[",
+                    esc r.Stdout, esc r.Stderr) |> ignore
+    r.Bindings
+    |> List.iteri (fun i b ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.AppendFormat("{{\"name\":\"{0}\",\"type\":\"{1}\",\"value\":\"{2}\"}}",
+                        esc b.Name, esc b.Type, esc b.Value) |> ignore)
+    sb.Append "],\"diagnostics\":[" |> ignore
+    r.Diagnostics
+    |> List.iteri (fun i d ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.AppendFormat(
+            "{{\"severity\":\"{0}\",\"line\":{1},\"col\":{2},\"endLine\":{3},\"endCol\":{4},\"message\":\"{5}\"",
+            d.Severity, d.Line, d.Col, d.EndLine, d.EndCol, esc d.Message) |> ignore
+        if d.Code <> "" then
+            sb.AppendFormat(",\"code\":\"{0}\"", esc d.Code) |> ignore
+        sb.Append '}' |> ignore)
+    sb.Append "]}" |> ignore
+    sb.ToString()
+
 // The loop
 
 /// One request at a time, deliberately: `Parser.currentFile` /
@@ -122,6 +173,35 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
         // the same verdict, and the process outlives the check.
         let (json, _) = Blade.Ide.ideCheckSourceWith env upgrade file source
         respond json
+    // One engine per `session` key, alive for the life of the process. The
+    // sessions hold nothing but source snippets and a temp directory, so an
+    // interleaved `check` cannot disturb them: each eval re-lowers the whole
+    // session from its own list, and typeCheck resets its AsyncLocal channels
+    // on the way in.
+    let sessions = System.Collections.Generic.Dictionary<string, Blade.ReplSession.ReplSession>()
+    let runEval (id: int) (key: string) (source: string) (cwd: string option) =
+        // The notebook's folder, so a provider's relative data path resolves
+        // where the user's data actually is. Same guarded move as `check`,
+        // which resolves against the request file's directory instead.
+        match cwd with
+        | Some dir when Directory.Exists dir ->
+            (try Directory.SetCurrentDirectory dir with _ -> ())
+        | _ -> ()
+        // The same per-request hygiene the check handler applies: a PREVIOUS
+        // request's provider stores must not follow this evaluation, and
+        // `provenance` would otherwise grow without bound.
+        Blade.ProviderRegistry.IdeStores.reset ()
+        Blade.ProviderStatics.provenance.Clear ()
+        let session =
+            match sessions.TryGetValue key with
+            | true, s -> s
+            | _ ->
+                let s = Blade.ReplSession.ReplSession(Directory.GetCurrentDirectory())
+                sessions.[key] <- s
+                s
+        // Only the g++ lane reads this, and only to run the built executable.
+        session.RunCwd <- Directory.GetCurrentDirectory()
+        respond (evalResponse id (session.EvalOnce source))
     /// Handle one line; false means "stop the loop".
     let handle (line: string) : bool =
         use doc = JsonDocument.Parse line
@@ -151,6 +231,26 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                      | other ->
                          errorResponse (Some i)
                              (sprintf "unknown tier '%s' (expected \"fast\" or \"full\")" other))
+                true
+            | Some "eval" ->
+                (match id, tryStr root "session", tryStr root "source" with
+                 | None, _, _ -> errorResponse None "\"eval\" requires an integer \"id\""
+                 | Some i, None, _ -> errorResponse (Some i) "\"eval\" requires a \"session\" key"
+                 | Some i, _, None -> errorResponse (Some i) "\"eval\" requires a \"source\" string"
+                 | Some i, Some key, Some source -> runEval i key source (tryStr root "cwd"))
+                true
+            | Some "resetSession" ->
+                // Idempotent by design: "restart kernel" fires before the
+                // notebook has evaluated anything, and an unknown key simply
+                // has no state to clear.
+                (match id, tryStr root "session" with
+                 | None, _ -> errorResponse None "\"resetSession\" requires an integer \"id\""
+                 | Some i, None -> errorResponse (Some i) "\"resetSession\" requires a \"session\" key"
+                 | Some i, Some key ->
+                     (match sessions.TryGetValue key with
+                      | true, s -> s.Reset()
+                      | _ -> ())
+                     respond (sprintf "{\"id\":%d,\"ok\":true}" i))
                 true
             | Some other ->
                 errorResponse id (sprintf "unknown cmd '%s'" other)
@@ -187,6 +287,10 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
             ()
         0
     finally
+        // Each session owns a temp directory; the loop outliving them all is
+        // the only chance to remove it.
+        for kv in sessions do kv.Value.Cleanup()
+        sessions.Clear()
         match entryDir with
         | Some d -> (try Directory.SetCurrentDirectory d with _ -> ())
         | None -> ()

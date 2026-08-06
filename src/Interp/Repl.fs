@@ -37,22 +37,22 @@ type LoweredSession =
 /// Parse -> typecheck -> lower -> validateIR: byte-for-byte the chain
 /// Cli.compileFile drives (lowerDiag's parse/typecheck/lower plus the BL6001
 /// validate step), but capturing every intermediate so the caller can
-/// annotate types and run the interpreter from one pass. On any rejection it
-/// returns the rustc-style rendered diagnostics string, identical to what
-/// compileFile prints. `useColor` mirrors `not Console.IsErrorRedirected`.
-let lowerSession (fileName: string option) (useColor: bool) (source: string)
-    : Result<LoweredSession, string> =
+/// annotate types and run the interpreter from one pass. On any rejection the
+/// diagnostics stay CODED and SPANNED, beside the SourceMap that renders them
+/// -- a notebook has to place squiggles, and only the interactive REPL wants
+/// the rustc-style block.
+let lowerSessionDiag (fileName: string option) (source: string)
+    : Result<LoweredSession, Blade.Diagnostics.Diagnostic list * Blade.Diagnostics.SourceMap> =
     let key = defaultArg fileName "<input>"
     let sm = Blade.Diagnostics.SourceMap.ofSources [ key, source ]
-    let renderDs (ds: Blade.Diagnostics.Diagnostic list) =
-        Blade.Diagnostics.Render.renderAll useColor (Some sm) ds
+    let reject (ds: Blade.Diagnostics.Diagnostic list) = Error (ds, sm)
     match Blade.Parser.parseProgramWithFile fileName source with
     | Error e ->
-        Error (renderDs [ Blade.Parser.diagnosticOfParseError fileName e ])
+        reject [ Blade.Parser.diagnosticOfParseError fileName e ]
     | Ok prog ->
         match Blade.TypeCheck.typeCheck prog with
         | Error errors ->
-            Error (renderDs (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError))
+            reject (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
         | Ok (tp, builder, warnings) ->
             // Lowering can THROW (not just return Error) when a provider load
             // fails at compile time (e.g. `netcdf.load("missing.nc")`). Catch
@@ -61,14 +61,24 @@ let lowerSession (fileName: string option) (useColor: bool) (source: string)
             match (try Ok (Blade.Lowering.lowerTypedProgram tp (Some prog) builder)
                    with ex -> Error ex.Message) with
             | Error msg ->
-                Error (renderDs [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan msg ])
+                reject [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan msg ]
             | Ok ir ->
             match Blade.IR.validateIR ir with
             | Error errs ->
-                Error (renderDs (errs |> List.map (fun s ->
-                    Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s)))
+                reject (errs |> List.map (fun s ->
+                    Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s))
             | Ok validated ->
                 Ok { Prog = prog; Typed = tp; Builder = builder; Ir = validated; Warnings = warnings }
+
+/// `lowerSessionDiag` plus the render: a rejection comes back as the
+/// rustc-style diagnostics string, identical to what compileFile prints.
+/// `useColor` mirrors `not Console.IsErrorRedirected`. The two entry points
+/// share one pipeline so the rendered and structured forms cannot drift.
+let lowerSession (fileName: string option) (useColor: bool) (source: string)
+    : Result<LoweredSession, string> =
+    match lowerSessionDiag fileName source with
+    | Ok lowered -> Ok lowered
+    | Error (ds, sm) -> Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
 
 /// How the REPL should treat one interpreter run.
 type ReplOutcome =
