@@ -40,11 +40,12 @@ let tyFloatArr (n: int) = TyArray (tyFloat, [ TyIdx (iLit n) ])
 let mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl =
     { Name = name
       TypeParams = []
-      Params = ps |> List.map (fun (n, t) -> { Name = n; Type = Some t; Mutability = Immutable })
+      Params = ps |> List.map (fun (n, t) -> { Name = n; Type = Some t; Mutability = Immutable; NameSpan = noSpan })
       WhereClause = None
       ReturnType = Some retTy
       Body = body
-      IsStatic = false }
+      IsStatic = false
+      NameSpan = noSpan }
 
 let absE e = syn (ExprApp (v "abs", [e]))
 let sqrtE e = syn (ExprApp (v "sqrt", [e]))

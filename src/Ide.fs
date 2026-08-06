@@ -28,6 +28,24 @@
 // argument/result types rendered in the compiler's `Array<Elem like
 // Idx...>` notation, collected by walking the zonked typed tree:
 //   "calls": [ { name, line, col, endLine, endCol, args: [..], ret } ]
+//
+// references[]: one entry per BINDER -- its name token and every use that
+// resolves to it -- which is what definition, find-references and rename read:
+//   "references": [ { name, kind, def: {line,col,endLine,endCol} | null,
+//                     uses: [ {line,col,endLine,endCol} ] } ]
+// kind is "function" | "value" | "param" | "local" | "type". Entries are keyed
+// internally by the binder's IRId, so two shadowing `x`s are two entries with
+// disjoint use lists; a binder with no uses still gets an entry (it is still
+// renameable). Uses come from the typed tree (`TExprVar` carries the resolved
+// binder id and the identifier's own span), definitions from the parser's name
+// tokens. `bindings[]` additionally gained `endLine`/`endCol`, closing the
+// DECLARATION span its `line`/`col` already opened.
+//
+// The same payload also serves `blade ide serve` (IdeServe.fs), which checks
+// an UNSAVED buffer instead of a file and adds three fields: top-level "id"
+// and "tier" for request correlation, and per-binding "concreteType" when the
+// full tier's monomorphization resolved a type the typed AST left abstract.
+// One-shot `ide check --json` emits none of them, byte-for-byte as before.
 
 module Blade.Ide
 
@@ -42,7 +60,10 @@ open Blade.TypedAst
 
 // JSON emission (hand-rolled: tiny payload, zero dependencies)
 
-let private jsonEscape (s: string) =
+/// Public because the NDJSON serve loop (IdeServe.fs) builds its own
+/// envelope/error lines and must escape them identically -- one escaper, so
+/// a control character can never split a response across two lines.
+let jsonEscape (s: string) =
     let sb = StringBuilder(s.Length + 8)
     for c in s do
         match c with
@@ -80,6 +101,12 @@ type private BindingInfo = {
     Kind: string
     Line: int
     Col: int
+    /// Closing corner of the SAME span `Line`/`Col` open -- the declaration,
+    /// not the name token (changing what `line`/`col` mean would move every
+    /// existing hover). Emitted additively; `references[]` is where a client
+    /// goes for name-token spans.
+    EndLine: int
+    EndCol: int
     TypeStr: string
     Doc: string
     Params: ParamInfo list   // non-empty only for functions
@@ -91,6 +118,13 @@ type private BindingInfo = {
     /// Provenance for a top-level provider read (`let x = store.vars.v |>
     /// alias.read`): (store binding name, "vars.v" / "dims.v"). None otherwise.
     ProviderRead: (string * string) option
+    /// Full-tier upgrade: the type MONOMORPHIZATION resolved, when it is
+    /// strictly more concrete than `TypeStr`. None on the fast tier and on
+    /// bindings lowering left unchanged.
+    ConcreteType: string option
+    /// Is this a top-level value binding (the only kind `IRModule.Bindings`
+    /// can name)? Routing only -- never emitted.
+    IsTopLevelValue: bool
 }
 
 // A single member of a loaded provider store (a `dims` or `vars` field).
@@ -163,6 +197,30 @@ type private KernelIdeInfo = {
     KMinRanks: (string * int) list
 }
 
+// references[]: one entry per BINDER, with the span of its name token and the
+// spans of every use that resolves to it. Keyed internally by the binder's
+// IRId, never by name -- which is exactly what makes two shadowing `x`s two
+// entries with disjoint use lists instead of one merged blob.
+
+/// A 1-based four-corner span, the shape every `references[]` position takes.
+type private RefSpan = {
+    RLine: int
+    RCol: int
+    REndLine: int
+    REndCol: int
+}
+
+type private RefInfo = {
+    RName: string
+    /// "function" | "value" | "param" | "local" | "type".
+    RKind: string
+    /// The NAME TOKEN, not the declaration -- what F2 rewrites and F12 jumps
+    /// to. None where no span survived; such an entry is emitted only if it
+    /// still has uses to offer.
+    RDef: RefSpan option
+    RUses: RefSpan list
+}
+
 /// Clamp a span to 1-based sanity; noSpan (all zeros) becomes 1:1-1:1.
 let private clampSpan (s: Span) =
     let line = max 1 s.StartLine
@@ -190,11 +248,28 @@ let private certFactRecords () : DeducedInfo list =
             DName = fact.Group
             DLeft = String.concat "," fact.Deps })
 
-let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list)
+/// Request-correlation fields the NDJSON serve protocol prepends to the
+/// payload. Both None for one-shot `ide check --json`, whose output stays
+/// byte-for-byte what it was (the extension's fallback path parses it).
+type Envelope = {
+    Id: int option
+    Tier: string option
+}
+
+let noEnvelope : Envelope = { Id = None; Tier = None }
+
+let private renderJson (env: Envelope) (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list)
                        (deduced: DeducedInfo list) (calls: CallInfo list)
-                       (kernels: KernelIdeInfo list) =
+                       (kernels: KernelIdeInfo list) (references: RefInfo list) =
     let sb = StringBuilder()
-    sb.Append "{\"version\":1,\"diagnostics\":[" |> ignore
+    sb.Append '{' |> ignore
+    match env.Id with
+    | Some i -> sb.AppendFormat("\"id\":{0},", i) |> ignore
+    | None -> ()
+    match env.Tier with
+    | Some t -> sb.AppendFormat("\"tier\":\"{0}\",", jsonEscape t) |> ignore
+    | None -> ()
+    sb.Append "\"version\":1,\"diagnostics\":[" |> ignore
     diags
     |> List.iteri (fun i d ->
         if i > 0 then sb.Append ',' |> ignore
@@ -211,6 +286,9 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
         sb.AppendFormat(
             "{{\"name\":\"{0}\",\"kind\":\"{1}\",\"line\":{2},\"col\":{3},\"type\":\"{4}\"",
             jsonEscape b.Name, jsonEscape b.Kind, b.Line, b.Col, jsonEscape b.TypeStr) |> ignore
+        match b.ConcreteType with
+        | Some t -> sb.AppendFormat(",\"concreteType\":\"{0}\"", jsonEscape t) |> ignore
+        | None -> ()
         if b.Doc <> "" then
             sb.AppendFormat(",\"doc\":\"{0}\"", jsonEscape b.Doc) |> ignore
         match b.ProviderRead with
@@ -247,6 +325,9 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
                 sb.AppendFormat("\"{0}\"", jsonEscape c) |> ignore)
             sb.Append ']' |> ignore
         | None -> ()
+        // Last, so the leading field run stays byte-identical for clients
+        // (and tests) that match on it.
+        sb.AppendFormat(",\"endLine\":{0},\"endCol\":{1}", b.EndLine, b.EndCol) |> ignore
         sb.Append '}' |> ignore)
     sb.Append "],\"providers\":[" |> ignore
     let appendMembers (label: string) (ms: ProviderMemberInfo list) =
@@ -333,6 +414,27 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
             if j > 0 then sb.Append ',' |> ignore
             sb.AppendFormat("{{\"param\":\"{0}\",\"rank\":{1}}}", jsonEscape p, r) |> ignore)
         sb.Append "]}" |> ignore)
+    // One entry per binder: `def` is the name token (null when none survived),
+    // `uses` every resolved reference to THAT binder. Definition, references
+    // and rename all read this array and nothing else.
+    sb.Append "],\"references\":[" |> ignore
+    let appendRefSpan (r: RefSpan) =
+        sb.AppendFormat("{{\"line\":{0},\"col\":{1},\"endLine\":{2},\"endCol\":{3}}}",
+                        r.RLine, r.RCol, r.REndLine, r.REndCol) |> ignore
+    references
+    |> List.iteri (fun i r ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.AppendFormat("{{\"name\":\"{0}\",\"kind\":\"{1}\",\"def\":",
+                        jsonEscape r.RName, jsonEscape r.RKind) |> ignore
+        (match r.RDef with
+         | Some d -> appendRefSpan d
+         | None -> sb.Append "null" |> ignore)
+        sb.Append ",\"uses\":[" |> ignore
+        r.RUses
+        |> List.iteri (fun j u ->
+            if j > 0 then sb.Append ',' |> ignore
+            appendRefSpan u)
+        sb.Append "]}" |> ignore)
     sb.Append "]}" |> ignore
     sb.ToString()
 
@@ -340,7 +442,7 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
 /// produce. The certificate producers reset their channel on the way in,
 /// so a test cannot observe a staged fact through `ideCheck` end to end.
 let deducedJsonForTests () : string =
-    renderJson [] [] [] (certFactRecords ()) [] []
+    renderJson noEnvelope [] [] [] (certFactRecords ()) [] [] []
 
 // Type rendering
 
@@ -805,16 +907,70 @@ let private paramDocIn (doc: string) (pname: string) : string =
 // declaration order. scopeKey is "" at module level, the function name
 // inside a function body.
 
-let rec private patternNames (p: Pattern) : string list =
+/// Every name a binding pattern binds, each with the span of its OWN name
+/// token: a PatVar leaf's `Span` is exactly the identifier (the parser builds
+/// it with `mkPat (headSpan tokens)`), which is what rename has to rewrite.
+let rec private patternNameSpans (p: Pattern) : (string * Span) list =
     match p.Kind with
-    | PatternKind.PatVar name -> [name]
-    | PatternKind.PatTuple ps -> ps |> List.collect patternNames
-    | PatternKind.PatCons (a, b) -> patternNames a @ patternNames b
-    | PatternKind.PatTyped (inner, _) -> patternNames inner
-    | PatternKind.PatGuarded (inner, _) -> patternNames inner
-    | PatternKind.PatStruct (_, fields) -> fields |> List.collect (snd >> patternNames)
-    | PatternKind.PatVariant (_, inner) -> inner |> Option.map patternNames |> Option.defaultValue []
+    | PatternKind.PatVar name -> [(name, p.Span)]
+    | PatternKind.PatTuple ps -> ps |> List.collect patternNameSpans
+    | PatternKind.PatCons (a, b) -> patternNameSpans a @ patternNameSpans b
+    | PatternKind.PatTyped (inner, _) -> patternNameSpans inner
+    | PatternKind.PatGuarded (inner, _) -> patternNameSpans inner
+    | PatternKind.PatStruct (_, fields) -> fields |> List.collect (snd >> patternNameSpans)
+    | PatternKind.PatVariant (_, inner) -> inner |> Option.map patternNameSpans |> Option.defaultValue []
     | PatternKind.PatWildcard | PatternKind.PatLit _ -> []
+
+let private patternNames (p: Pattern) : string list =
+    patternNameSpans p |> List.map fst
+
+/// Find a name token INSIDE a source region, as the first whole-word match
+/// strictly within the region's bounds. Two jobs:
+///
+///   * the binders whose AST node has no span slot to carry a name span --
+///     `for i in ...` heads (StmtForIn keeps only a string) and `type X = ...`
+///     declarations (TypeDecl is a bare DU); both put the name right after a
+///     keyword, so the first match in the declaration IS the binding site;
+///   * narrowing a reference span that covers more than its identifier -- the
+///     parser hands a parenthesized `(A)` the parens' span, and rename would
+///     otherwise replace the parentheses too.
+///
+/// Comment tails are cut first, so a mention in a trailing `//` can never win.
+let private locateName (lines: string[]) (region: Span) (name: string) : Span option =
+    if name = "" || lines.Length = 0 || region.StartLine < 1 then None
+    else
+        let re = Regex(@"\b" + Regex.Escape name + @"\b")
+        let startLine = region.StartLine
+        let endLine = min lines.Length (max startLine region.EndLine)
+        let rec scan (ln: int) =
+            if ln > endLine || ln > lines.Length then None
+            else
+                let raw = lines.[ln - 1]
+                let uncommented = match raw.IndexOf "//" with
+                                  | -1 -> raw
+                                  | i -> raw.Substring(0, i)
+                // EndCol is EXCLUSIVE throughout the compiler (Lexer.Token), so
+                // the region's last character sits at index EndCol - 2.
+                let text =
+                    if ln = endLine then uncommented.Substring(0, min uncommented.Length (max 0 (region.EndCol - 1)))
+                    else uncommented
+                let from = if ln = startLine then min (max 0 (region.StartCol - 1)) text.Length else 0
+                let m = re.Match(text, from)
+                if m.Success then
+                    Some { StartLine = ln; StartCol = m.Index + 1
+                           EndLine = ln; EndCol = m.Index + m.Length + 1
+                           File = region.File }
+                else scan (ln + 1)
+        scan startLine
+
+/// The names a `type` declaration introduces (a mutual group introduces one
+/// per member).
+let private typeDeclNames (td: TypeDecl) : string list =
+    match td with
+    | TyDeclAlias (n, _, _) -> [n]
+    | TyDeclSum (n, _, _) -> [n]
+    | TyDeclStruct (n, _, _, _, _) -> [n]
+    | TyDeclMutualGroup (members, _) -> members |> List.map fst
 
 /// Binding-keyword kind from the surface syntax (TypedBinding.IsMutable is
 /// not usable here: module-level bindings come back mutable regardless).
@@ -1179,7 +1335,7 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
         match spans.TryGetValue key with
         | true, q when q.Count > 0 ->
             let (span, srcKind) = q.Dequeue()
-            let (line, col, _, _) = clampSpan span
+            let (line, col, endLine, endCol) = clampSpan span
             let kind = srcKind |> Option.defaultValue e.EKind
             let block = docAt line
             // A parameter's doc is its `name: ...` line in the enclosing
@@ -1203,9 +1359,15 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
                     { PName = n; PType = t; PDoc = paramDocIn block n; PMinRank = mr })
             let providerRead = if e.Scope = "" then Map.tryFind e.EName provRead else None
             yield { Name = e.EName; Kind = kind; Line = line; Col = col
+                    EndLine = endLine; EndCol = endCol
                     TypeStr = e.ETypeStr; Doc = doc; Params = ps; Ret = e.ERet
                     Where = e.EWhere; DeducedComm = e.EDeducedComm
-                    ProviderRead = providerRead }
+                    ProviderRead = providerRead
+                    ConcreteType = None
+                    // Params and function-body locals carry their function's
+                    // scope; functions themselves carry a return type. What
+                    // is left is exactly what an IR module binding can name.
+                    IsTopLevelValue = (e.Scope = "" && e.ERet.IsNone) }
         | _ -> () ]
 
 // Lambda-kernel deduction sites (IdeDeductions side-channel, span-keyed).
@@ -1224,11 +1386,279 @@ let private collectKernels () : KernelIdeInfo list =
                     KDeclaredW = k.KDeclared
                     KMinRanks = k.KRanks } ]
 
-// Entry point
+// References (definition + use spans)
 
-/// `blade ide check --json <file>`: JSON diagnostics + binding types on
-/// stdout. Exit 0 = clean, 1 = errors (the JSON is emitted either way).
-let ideCheck (filePath: string) : int =
+let private refSpanOf (s: Span) : RefSpan =
+    let (line, col, endLine, endCol) = clampSpan s
+    { RLine = line; RCol = col; REndLine = endLine; REndCol = endCol }
+
+/// The identifier actually WRITTEN at a name span, falling back to the typed
+/// name. Interface-impl methods reach the typed AST mangled (`scale` inside
+/// `impl Scalable for Box` becomes `Box__scale`), and a rename driven off that
+/// name would paste the mangling into the source. The span always knows better;
+/// anything that isn't a plain identifier is refused so a drifted span can
+/// never invent a name.
+let private nameAt (lines: string[]) (sp: Span) (fallback: string) : string =
+    if sp.StartLine < 1 || sp.StartLine > lines.Length || sp.EndLine <> sp.StartLine then fallback
+    else
+        let line = lines.[sp.StartLine - 1]
+        let a = sp.StartCol - 1
+        let b = min line.Length (sp.EndCol - 1)
+        if a < 0 || b <= a then fallback
+        else
+            let text = line.Substring(a, b - a)
+            let isIdent =
+                text.Length > 0
+                && (System.Char.IsLetter text.[0] || text.[0] = '_')
+                && text |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
+            if isIdent then text else fallback
+
+/// Every binder a reference entry can point at, as (IRId, name, kind, name
+/// token). Three sources, each exact for what it covers:
+///
+///   * functions and parameters -- TypedFunctionDecl/TypedParam now carry the
+///     parser's `NameSpan`, so no join is needed at all (this also covers
+///     LAMBDA parameters, wherever in the tree the lambda sits);
+///   * let-style binders (module lets/statics, function-body lets, their
+///     destructured leaves, for-in loop variables) -- the untyped side owns
+///     the name spans and the typed side owns the IRIds, joined by (scope,
+///     name) queue in declaration order, which is how `bindings[]` has always
+///     paired the two walks. Both walks visit the same nodes in the same
+///     order, so two shadowing `x`s dequeue their own spans positionally.
+///
+/// Anything the walks disagree about simply produces no binder, and its uses
+/// are dropped downstream -- never a def pointing at the wrong identifier.
+let private collectBinders (prog: Ast.Program) (tp: TypedProgram) (lines: string[])
+                           : (IRId * string * string * Span) list =
+    let acc = ResizeArray<IRId * string * string * Span>()
+    let letSpans = Dictionary<string, Queue<Span>>()
+    let enqueue (scope: string) (name: string) (span: Span) =
+        let key = scope + " " + name
+        match letSpans.TryGetValue key with
+        | true, q -> q.Enqueue span
+        | _ ->
+            let q = Queue<Span>()
+            q.Enqueue span
+            letSpans.[key] <- q
+    // --- untyped side: name spans, in declaration order
+    let rec srcStmts (scope: string) (stmts: Stmt list) (declSpan: Span) =
+        for s in stmts do
+            let (span, inner) =
+                match s with
+                | StmtSpanned (inner, sp) -> (sp, unwrapStmt inner)
+                | other -> (declSpan, unwrapStmt other)
+            match inner with
+            | StmtLet b -> for (n, sp) in patternNameSpans b.Pattern do enqueue scope n sp
+            | StmtForIn (v, _, body) ->
+                enqueue scope v (defaultArg (locateName lines span v) noSpan)
+                srcStmts scope body span
+            | _ -> ()
+    let srcFunc (f: FunctionDecl) (declSpan: Span) =
+        match f.Body.Kind with
+        | ExprKind.ExprBlock (stmts, _) -> srcStmts f.Name stmts declSpan
+        | _ -> ()
+    for m in prog.Modules do
+        for ld in m.Decls do
+            match ld.Value with
+            | DeclLet b | DeclStatic b ->
+                for (n, sp) in patternNameSpans b.Pattern do enqueue "" n sp
+            | DeclFunction f -> srcFunc f ld.Span
+            | DeclImpl impl -> for f in impl.Methods do srcFunc f ld.Span
+            | _ -> ()
+    // --- typed side: IRIds, in the same order, consuming the queues
+    let take (scope: string) (name: string) (kind: string) (id: IRId) =
+        match letSpans.TryGetValue (scope + " " + name) with
+        | true, q when q.Count > 0 ->
+            let sp = q.Dequeue()
+            if sp.StartLine > 0 then acc.Add((id, name, kind, sp))
+        | _ -> ()
+    let rec tyStmts (scope: string) (stmts: TypedStmt list) =
+        for s in stmts do
+            match s with
+            | TStmtLet b ->
+                take scope b.Name "local" b.VarId
+                for (n, id, _) in b.SubBindings do take scope n "local" id
+            | TStmtForIn (v, id, _, _, body) ->
+                take scope v "local" id
+                tyStmts scope body
+            | _ -> ()
+    let tyFunc (f: TypedFunctionDecl) =
+        if f.NameSpan.StartLine > 0 then
+            acc.Add((f.FuncId, nameAt lines f.NameSpan f.Name, "function", f.NameSpan))
+        for p in f.Params do
+            if p.NameSpan.StartLine > 0 then acc.Add((p.VarId, p.Name, "param", p.NameSpan))
+        match f.Body.Kind with
+        | TExprBlock (stmts, _) -> tyStmts f.Name stmts
+        | _ -> ()
+    // Lambda params come from a full-tree sweep rather than the decl walk: a
+    // kernel can sit anywhere in an expression. Elaborator-synthesized lambdas
+    // carry noSpan params and drop out here.
+    let rec lambdaParams (te: TypedExpr) =
+        (match te.Kind with
+         | TExprLambda info ->
+             for p in info.Params do
+                 if p.NameSpan.StartLine > 0 then acc.Add((p.VarId, p.Name, "param", p.NameSpan))
+         | _ -> ())
+        for c in Blade.TypeCheck.typedExprChildren te do lambdaParams c
+    for m in tp.Modules do
+        for d in m.Decls do
+            match d with
+            | TDeclLet b | TDeclStatic b ->
+                take "" b.Name "value" b.VarId
+                for (n, id, _) in b.SubBindings do take "" n "local" id
+            | TDeclFunction f -> tyFunc f
+            | TDeclImpl impl -> for f in impl.Methods do tyFunc f
+            | _ -> ()
+    for m in tp.Modules do
+        for d in m.Decls do
+            match d with
+            | TDeclLet b | TDeclStatic b -> lambdaParams b.Value
+            | TDeclFunction f -> lambdaParams f.Body
+            | TDeclImpl impl -> for f in impl.Methods do lambdaParams f.Body
+            | _ -> ()
+    List.ofSeq acc
+
+/// Every variable USE with a live source span, bucketed by the IRId it
+/// resolved to. `TExprVar` carries both the identifier's exact span and the
+/// binder's id, so this is a plain walk -- no name matching anywhere.
+let private collectVarUses (prog: Ast.Program) (tp: TypedProgram) : Dictionary<IRId, ResizeArray<Span>> =
+    // The eight elaborators build their nodes through `Ast.syn`, which stamps
+    // the ambient `synthSpan` -- the span of the WHOLE declaration being
+    // expanded -- onto every one of them. So a synthesized variable reference
+    // surfaces as a "use" covering an entire decl. No real identifier can do
+    // that, so a span matching a declaration's exactly is a phantom.
+    let declSpans = HashSet<int * int * int * int>()
+    for m in prog.Modules do
+        for ld in m.Decls do declSpans.Add(clampSpan ld.Span) |> ignore
+    let acc = Dictionary<IRId, ResizeArray<Span>>()
+    // An eta-expanded wrapper and the node it wraps can report the same
+    // reference twice; one entry per (binder, position).
+    let seen = HashSet<IRId * (int * int * int * int)>()
+    let rec walk (te: TypedExpr) =
+        (match te.Kind with
+         | TExprVar (name, varId, _) when te.Span.StartLine > 0 && not (name.StartsWith "__") ->
+             let key = clampSpan te.Span
+             if not (declSpans.Contains key) && seen.Add((varId, key)) then
+                 match acc.TryGetValue varId with
+                 | true, xs -> xs.Add te.Span
+                 | _ ->
+                     let xs = ResizeArray<Span>()
+                     xs.Add te.Span
+                     acc.[varId] <- xs
+         | _ -> ())
+        for c in Blade.TypeCheck.typedExprChildren te do walk c
+    for m in tp.Modules do
+        for d in m.Decls do
+            match d with
+            | TDeclLet b | TDeclStatic b -> walk b.Value
+            | TDeclFunction f -> walk f.Body
+            | TDeclImpl impl -> for f in impl.Methods do walk f.Body
+            | _ -> ()
+    acc
+
+/// Join binders to their uses. A use bucket whose IRId matches no binder is
+/// DROPPED rather than emitted with `def: null`: every such bucket is either a
+/// variant tag (the checker mints a FRESH VarId at each tag use, so they arrive
+/// as a crowd of singletons with nothing to rename), a match-case pattern
+/// binding (no name span reaches this far yet), or a compiler-generated binder.
+/// None of them can answer go-to-definition, and a rename over them would edit
+/// text the compiler never agreed was one symbol.
+let private collectReferences (prog: Ast.Program) (tp: TypedProgram) (lines: string[]) : RefInfo list =
+    let uses = collectVarUses prog tp
+    // A use is kept only when the SOURCE TEXT at its span IS the binder's name.
+    // Two things make that check earn its keep: the parser gives a
+    // parenthesized reference `(A)` the parens' span, which is narrowed here to
+    // the identifier; and the checker can hand two binders the SAME IRId (the
+    // recursive-array elaborator does, in big files), which would otherwise
+    // pull a stranger's references into an entry. Rename rewrites these spans
+    // literally, so a span that does not spell the name is worse than absent.
+    let verifiedUse (name: string) (sp: Span) : Span option =
+        if nameAt lines sp "" = name then Some sp else locateName lines sp name
+    let bound =
+        collectBinders prog tp lines
+        |> List.filter (fun (_, name, _, _) -> not (name.StartsWith "__"))
+        |> List.map (fun (id, name, kind, span) ->
+            let def = refSpanOf span
+            let us =
+                match uses.TryGetValue id with
+                | true, xs ->
+                    xs
+                    |> Seq.choose (verifiedUse name)
+                    |> Seq.map refSpanOf
+                    // The checker synthesizes a subject `ExprVar` at the
+                    // pattern's own span for struct/bound guards; a definition
+                    // is not a use of itself.
+                    |> Seq.filter (fun u -> u <> def)
+                    |> Seq.distinct
+                    |> List.ofSeq
+                | _ -> []
+            { RName = name; RKind = kind; RDef = Some def; RUses = us })
+        // `ad.grad(f)` CLONES f's declaration, parameters and all, so one
+        // source parameter can end up owning two IRIds. The same name at the
+        // same source position is one symbol as far as an editor is concerned:
+        // merge the use lists rather than offer the user a choice of two.
+        |> List.groupBy (fun r -> (r.RName, r.RKind, r.RDef))
+        |> List.map (fun (_, group) ->
+            { List.head group with
+                RUses = group |> List.collect (fun r -> r.RUses) |> List.distinct })
+    // `type X = ...` names: no IRId exists and no TExprVar ever names one, so
+    // these are standalone def-only entries -- still worth emitting, since a
+    // type alias is renameable and belongs in the outline.
+    let types =
+        [ for m in prog.Modules do
+            for ld in m.Decls do
+                match ld.Value with
+                | DeclType td ->
+                    for n in typeDeclNames td do
+                        if not (n.StartsWith "__") then
+                            match locateName lines ld.Span n with
+                            | Some sp -> yield { RName = n; RKind = "type"; RDef = Some (refSpanOf sp); RUses = [] }
+                            | None -> ()
+                | _ -> () ]
+    (bound @ types)
+    // An entry with neither a definition nor a use says nothing.
+    |> List.filter (fun r -> r.RDef.IsSome || not r.RUses.IsEmpty)
+    |> List.sortBy (fun r ->
+        match r.RDef with
+        | Some d -> (d.RLine, d.RCol, r.RName)
+        | None -> (System.Int32.MaxValue, 0, r.RName))
+
+// Entry points
+
+/// The FULL-tier seam: parse+typecheck cannot reach monomorphization from
+/// here, because this file compiles before Lowering.fs. So the serve loop
+/// (IdeServe.fs, which compiles after it) hands the pass in as a function.
+/// Ok = top-level value-binding name -> concrete type, ALREADY rendered by
+/// this module's printers so spellings match the rest of the payload;
+/// Error = (BL code, message) pairs for lowering-stage failures, which are
+/// real errors a `blade run` of the same source would hit.
+type FullTierUpgrade =
+    Ast.Program -> TypedProgram -> IRBuilder -> Result<Map<string, string>, (string * string) list>
+
+/// Attach `concreteType` where monomorphization beat the typed AST. Only
+/// top-level value bindings are candidates (an IR module binding names
+/// nothing else), and only a genuinely different spelling is emitted -- the
+/// client treats the field's presence as "prefer this".
+let private applyConcrete (concrete: Map<string, string>) (bindings: BindingInfo list) =
+    if concrete.IsEmpty then bindings
+    else
+        bindings
+        |> List.map (fun b ->
+            if not b.IsTopLevelValue then b
+            else
+                match Map.tryFind b.Name concrete with
+                | Some t when t <> b.TypeStr -> { b with ConcreteType = Some t }
+                | _ -> b)
+
+/// The whole `ide check` pipeline over IN-MEMORY source, returning the JSON
+/// payload plus the exit code instead of printing: `ide serve` checks an
+/// unsaved buffer, so the source can never be read from disk.
+///
+/// `env` carries the serve protocol's id/tier (absent for the one-shot
+/// command). `upgrade` is Some only for the full tier, and runs only after a
+/// CLEAN typecheck -- a file with type errors has nothing to monomorphize.
+let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
+                       (filePath: string) (source: string) : string * int =
     let mutable exitCode = 0
     let diags = ResizeArray<Diag>()
     let mutable bindings = []
@@ -1236,125 +1666,159 @@ let ideCheck (filePath: string) : int =
     let mutable deduced = []
     let mutable calls = []
     let mutable kernels = []
-    if not (File.Exists filePath) then
-        diags.Add { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
-                    Message = sprintf "File not found: %s" filePath; Code = "" }
+    let mutable references = []
+    match Blade.Parser.parseProgramWithFile (Some filePath) source with
+    | Error e ->
+        let line = max 1 e.Line
+        let col = max 1 e.Col
+        let endLine = max line e.EndLine
+        let endCol = if e.EndCol >= 1 then e.EndCol else col
+        diags.Add { Severity = "error"; Line = line; Col = col; EndLine = endLine; EndCol = endCol
+                    Message = e.Message; Code = e.Code }
         exitCode <- 1
-    else
-        let source = File.ReadAllText filePath
-        match Blade.Parser.parseProgramWithFile (Some filePath) source with
-        | Error e ->
-            let line = max 1 e.Line
-            let col = max 1 e.Col
-            let endLine = max line e.EndLine
-            let endCol = if e.EndCol >= 1 then e.EndCol else col
-            diags.Add { Severity = "error"; Line = line; Col = col; EndLine = endLine; EndCol = endCol
-                        Message = e.Message; Code = e.Code }
+    | Ok program ->
+        // Fresh provider-module registry (the load site records into it
+        // during typeCheck; collectProviderStores reads it).
+        Blade.ProviderRegistry.IdeStores.reset ()
+        // Suggestions and warnings are NOT error-exclusive: a file with
+        // a type error earned every nudge before hitting it. All three
+        // channels are AsyncLocal, so Error reads them like Ok does.
+        let drainWarningChannels () =
+            // Confirm-and-pin suggestions (stage 3/4) arrive twice: as
+            // plain strings in typeCheck's Ok payload, and as structured
+            // (message, kernel-span) pairs in PinSuggestions -- emit the
+            // structured form, BL4010 at the kernel's real span.
+            let pinSuggestions = Blade.TypeCheck.PinSuggestions.get ()
+            // Stage-6a equivariance-certificate suggestions: BL4011 at
+            // the DECL span, ghost-rendering `where ml.equiv(G)`.
+            let certSuggestions = Blade.ML.Equiv.CertSuggestions.get ()
+            // The galilean twin: BL4014, ghost-rendering `where
+            // ml.galilean(u, ...)`. Separate channel (different
+            // elaborator seam); re-joined here, equiv-first.
+            let galCertSuggestions = Blade.ML.Galilean.GalCertSuggestions.get ()
+            for (msg, span) in pinSuggestions do
+                let (line, col, endLine, endCol) = clampSpan span
+                diags.Add { Severity = "warning"; Line = line; Col = col
+                            EndLine = endLine; EndCol = endCol
+                            Message = msg; Code = "BL4010" }
+            for (msg, span) in certSuggestions do
+                let (line, col, endLine, endCol) = clampSpan span
+                diags.Add { Severity = "warning"; Line = line; Col = col
+                            EndLine = endLine; EndCol = endCol
+                            Message = msg; Code = "BL4011" }
+            for (msg, span) in galCertSuggestions do
+                let (line, col, endLine, endCol) = clampSpan span
+                diags.Add { Severity = "warning"; Line = line; Col = col
+                            EndLine = endLine; EndCol = endCol
+                            Message = msg; Code = "BL4014" }
+            // The checker's own warnings, coded and spanned. BL4010 is
+            // skipped: PinSuggestions above already emitted exactly
+            // those (BL4011/BL4014 never ride this channel).
+            for d in Blade.TypeCheck.WarningLog.get () |> List.distinct do
+                if d.Code <> "BL4010" then
+                    let (line, col, endLine, endCol) = clampSpan d.Span
+                    diags.Add { Severity = "warning"; Line = line; Col = col
+                                EndLine = endLine; EndCol = endCol
+                                Message = d.Message; Code = d.Code }
+        // What the checker PROVED, as distinct from what the source
+        // declared. Two producers land in one flat array keyed by
+        // `kind`: `TypeCheck.DeducedFacts` (rank/comm/anticomm/packComm)
+        // is the checker's own deduction; `ML.Equiv.CertFacts`
+        // (equiv/galilean) is the stage-6a certificate inference. The
+        // certificate fields map by MEANING: DOwner is the certificate's
+        // function, DName the group name, DLeft its dependency closure.
+        let drainDeducedFacts () =
+            deduced <-
+                try
+                    let checkerFacts =
+                        Blade.TypeCheck.DeducedFacts.get ()
+                        |> List.map (fun (f, span) ->
+                            let empty = emptyDeduced span
+                            match f with
+                            | Blade.TypeEnv.DeducedRank (owner, param, index, rank) ->
+                                { empty with DKind = "rank"; DOwner = owner; DName = param
+                                             DIndex = index; DRank = rank }
+                            | Blade.TypeEnv.DeducedPairSym (owner, left, right, index, isAnti) ->
+                                { empty with DKind = (if isAnti then "anticomm" else "comm")
+                                             DOwner = owner; DLeft = left; DRight = right
+                                             DIndex = index }
+                            | Blade.TypeEnv.DeducedPackComm (owner, pack) ->
+                                { empty with DKind = "packComm"; DOwner = owner; DName = pack })
+                    checkerFacts @ certFactRecords ()
+                with _ -> []
+        match Blade.TypeCheck.typeCheck program with
+        | Error errors ->
+            for e in errors do
+                let (line, col, endLine, endCol) = clampSpan e.Span
+                let code = (Blade.TypeEnv.diagnosticOfCompileError e).Code
+                let msg =
+                    let baseMsg = Blade.TypeEnv.formatTypeError e.Error
+                    match e.Context with
+                    | [] -> baseMsg
+                    | ctx -> sprintf "%s (%s)" baseMsg (String.concat "; " (List.rev ctx))
+                diags.Add { Severity = "error"; Line = line; Col = col
+                            EndLine = endLine; EndCol = endCol; Message = msg; Code = code }
             exitCode <- 1
-        | Ok program ->
-            // Fresh provider-module registry (the load site records into it
-            // during typeCheck; collectProviderStores reads it).
-            Blade.ProviderRegistry.IdeStores.reset ()
-            // Suggestions and warnings are NOT error-exclusive: a file with
-            // a type error earned every nudge before hitting it. All three
-            // channels are AsyncLocal, so Error reads them like Ok does.
-            let drainWarningChannels () =
-                // Confirm-and-pin suggestions (stage 3/4) arrive twice: as
-                // plain strings in typeCheck's Ok payload, and as structured
-                // (message, kernel-span) pairs in PinSuggestions -- emit the
-                // structured form, BL4010 at the kernel's real span.
-                let pinSuggestions = Blade.TypeCheck.PinSuggestions.get ()
-                // Stage-6a equivariance-certificate suggestions: BL4011 at
-                // the DECL span, ghost-rendering `where ml.equiv(G)`.
-                let certSuggestions = Blade.ML.Equiv.CertSuggestions.get ()
-                // The galilean twin: BL4014, ghost-rendering `where
-                // ml.galilean(u, ...)`. Separate channel (different
-                // elaborator seam); re-joined here, equiv-first.
-                let galCertSuggestions = Blade.ML.Galilean.GalCertSuggestions.get ()
-                for (msg, span) in pinSuggestions do
-                    let (line, col, endLine, endCol) = clampSpan span
-                    diags.Add { Severity = "warning"; Line = line; Col = col
-                                EndLine = endLine; EndCol = endCol
-                                Message = msg; Code = "BL4010" }
-                for (msg, span) in certSuggestions do
-                    let (line, col, endLine, endCol) = clampSpan span
-                    diags.Add { Severity = "warning"; Line = line; Col = col
-                                EndLine = endLine; EndCol = endCol
-                                Message = msg; Code = "BL4011" }
-                for (msg, span) in galCertSuggestions do
-                    let (line, col, endLine, endCol) = clampSpan span
-                    diags.Add { Severity = "warning"; Line = line; Col = col
-                                EndLine = endLine; EndCol = endCol
-                                Message = msg; Code = "BL4014" }
-                // The checker's own warnings, coded and spanned. BL4010 is
-                // skipped: PinSuggestions above already emitted exactly
-                // those (BL4011/BL4014 never ride this channel).
-                for d in Blade.TypeCheck.WarningLog.get () |> List.distinct do
-                    if d.Code <> "BL4010" then
-                        let (line, col, endLine, endCol) = clampSpan d.Span
-                        diags.Add { Severity = "warning"; Line = line; Col = col
-                                    EndLine = endLine; EndCol = endCol
-                                    Message = d.Message; Code = d.Code }
-            // What the checker PROVED, as distinct from what the source
-            // declared. Two producers land in one flat array keyed by
-            // `kind`: `TypeCheck.DeducedFacts` (rank/comm/anticomm/packComm)
-            // is the checker's own deduction; `ML.Equiv.CertFacts`
-            // (equiv/galilean) is the stage-6a certificate inference. The
-            // certificate fields map by MEANING: DOwner is the certificate's
-            // function, DName the group name, DLeft its dependency closure.
-            let drainDeducedFacts () =
-                deduced <-
-                    try
-                        let checkerFacts =
-                            Blade.TypeCheck.DeducedFacts.get ()
-                            |> List.map (fun (f, span) ->
-                                let empty = emptyDeduced span
-                                match f with
-                                | Blade.TypeEnv.DeducedRank (owner, param, index, rank) ->
-                                    { empty with DKind = "rank"; DOwner = owner; DName = param
-                                                 DIndex = index; DRank = rank }
-                                | Blade.TypeEnv.DeducedPairSym (owner, left, right, index, isAnti) ->
-                                    { empty with DKind = (if isAnti then "anticomm" else "comm")
-                                                 DOwner = owner; DLeft = left; DRight = right
-                                                 DIndex = index }
-                                | Blade.TypeEnv.DeducedPackComm (owner, pack) ->
-                                    { empty with DKind = "packComm"; DOwner = owner; DName = pack })
-                        checkerFacts @ certFactRecords ()
-                    with _ -> []
-            match Blade.TypeCheck.typeCheck program with
-            | Error errors ->
-                for e in errors do
-                    let (line, col, endLine, endCol) = clampSpan e.Span
-                    let code = (Blade.TypeEnv.diagnosticOfCompileError e).Code
-                    let msg =
-                        let baseMsg = Blade.TypeEnv.formatTypeError e.Error
-                        match e.Context with
-                        | [] -> baseMsg
-                        | ctx -> sprintf "%s (%s)" baseMsg (String.concat "; " (List.rev ctx))
-                    diags.Add { Severity = "error"; Line = line; Col = col
-                                EndLine = endLine; EndCol = endCol; Message = msg; Code = code }
-                exitCode <- 1
-                drainWarningChannels ()
-                drainDeducedFacts ()
-                // Errors don't have to mean zero hovers: if the checker ran
-                // and produced a PARTIAL typed program, surface bindings for
-                // the parts that DID check, so errors still get tooltips.
-                match Blade.TypeCheck.IdePartial.get () with
-                | Some (typedProg, _) ->
-                    let sourceLines = source.Replace("\r\n", "\n").Split('\n')
-                    bindings <- (try joinBindings program typedProg sourceLines with _ -> [])
-                    providers <- (try collectProviderStores program with _ -> [])
-                    calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
-                    kernels <- (try collectKernels () with _ -> [])
-                | None -> ()
-            | Ok (typedProg, _, _) ->
-                drainWarningChannels ()
-                drainDeducedFacts ()
+            drainWarningChannels ()
+            drainDeducedFacts ()
+            // Errors don't have to mean zero hovers: if the checker ran
+            // and produced a PARTIAL typed program, surface bindings for
+            // the parts that DID check, so errors still get tooltips.
+            match Blade.TypeCheck.IdePartial.get () with
+            | Some (typedProg, _) ->
                 let sourceLines = source.Replace("\r\n", "\n").Split('\n')
-                bindings <- joinBindings program typedProg sourceLines
-                // Guarded so provider structure can never break the JSON output.
+                bindings <- (try joinBindings program typedProg sourceLines with _ -> [])
                 providers <- (try collectProviderStores program with _ -> [])
                 calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
                 kernels <- (try collectKernels () with _ -> [])
-    printfn "%s" (renderJson (List.ofSeq diags) bindings providers deduced calls kernels)
+                references <- (try collectReferences program typedProg sourceLines with _ -> [])
+            | None -> ()
+        | Ok (typedProg, builder, _) ->
+            drainWarningChannels ()
+            drainDeducedFacts ()
+            let sourceLines = source.Replace("\r\n", "\n").Split('\n')
+            bindings <- joinBindings program typedProg sourceLines
+            // Guarded so provider structure can never break the JSON output.
+            providers <- (try collectProviderStores program with _ -> [])
+            calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
+            kernels <- (try collectKernels () with _ -> [])
+            references <- (try collectReferences program typedProg sourceLines with _ -> [])
+            // FULL tier, last: everything above is read off the typed AST, so
+            // running monomorphization only after they're collected keeps the
+            // fast payload identical whether or not the upgrade runs (or throws).
+            match upgrade with
+            | None -> ()
+            | Some up ->
+                let outcome =
+                    try up program typedProg builder
+                    with ex -> Error [("BL9001", ex.Message)]
+                match outcome with
+                | Ok concrete -> bindings <- applyConcrete concrete bindings
+                | Error failures ->
+                    // A file that typechecked but will not lower: these are
+                    // errors `blade run` would report, so they belong in the
+                    // diagnostics the editor squiggles. No span survives the
+                    // IR stages, so they land at 1:1.
+                    for (code, msg) in failures do
+                        diags.Add { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
+                                    Message = msg; Code = code }
+                    exitCode <- 1
+    (renderJson env (List.ofSeq diags) bindings providers deduced calls kernels references, exitCode)
+
+/// Fast tier over in-memory source, no envelope: the plain `ide check` payload.
+let ideCheckSource (filePath: string) (source: string) : string * int =
+    ideCheckSourceWith noEnvelope None filePath source
+
+/// `blade ide check --json <file>`: JSON diagnostics + binding types on
+/// stdout. Exit 0 = clean, 1 = errors (the JSON is emitted either way).
+let ideCheck (filePath: string) : int =
+    let (json, exitCode) =
+        if not (File.Exists filePath) then
+            let missing =
+                { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
+                  Message = sprintf "File not found: %s" filePath; Code = "" }
+            (renderJson noEnvelope [missing] [] [] [] [] [] [], 1)
+        else
+            ideCheckSource filePath (File.ReadAllText filePath)
+    printfn "%s" json
     exitCode

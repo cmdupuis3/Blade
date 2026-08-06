@@ -1275,7 +1275,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
         fd.Params
         @ (classes |> List.choose (fun (p, c) ->
              match c with
-             | DiffArray -> Some { Name = dName p.Name; Type = p.Type; Mutability = Mutable }
+             | DiffArray -> Some { Name = dName p.Name; Type = p.Type; Mutability = Mutable; NameSpan = noSpan }
              | _ -> None))
     { Name = fname + gradSuffix
       TypeParams = fd.TypeParams
@@ -1283,7 +1283,8 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
       WhereClause = None
       ReturnType = retTy
       Body = inheritSpan fd.Body (ExprBlock (fwd @ cotDecls @ revStmts, Some retExpr))
-      IsStatic = false }))))))))))
+      IsStatic = false
+      NameSpan = noSpan }))))))))))
 
 // Call-site rewriting + program expansion
 

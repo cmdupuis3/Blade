@@ -3123,7 +3123,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let uid = env.Builder.FreshId()
                 let name = sprintf "__pa%d_w" uid
                 let newArgs = args |> List.mapi (fun i a -> if i = wildPos then inheritSpan a (ExprVar name) else a)
-                inferLambda env [{ Name = name; Type = None }] None (inheritSpan func (ExprApp (func, newArgs)))
+                inferLambda env [{ Name = name; Type = None; NameSpan = noSpan }] None (inheritSpan func (ExprApp (func, newArgs)))
                 |> Result.bind (fun tLam ->
                     unify env.Subst tLam.Type (mkFuncArrow [paramTys.[wildPos]] retTy)
                     |> Result.map (fun () -> tLam))
@@ -3131,7 +3131,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             let residual = paramTys |> List.skip args.Length
             let uid = env.Builder.FreshId()
             let names = residual |> List.mapi (fun i _ -> sprintf "__pa%d_%d" uid i)
-            let lamParams = names |> List.map (fun n -> { Name = n; Type = None } : LambdaParam)
+            let lamParams = names |> List.map (fun n -> { Name = n; Type = None; NameSpan = noSpan } : LambdaParam)
             let bodyApp = inheritSpan func (ExprApp (func, args @ (names |> List.map (fun n -> inheritSpan func (ExprVar n)))))
             inferLambda env lamParams None bodyApp
             |> Result.bind (fun tLam ->
@@ -5725,7 +5725,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     | Ok resUnits ->
                         let sp = mergeSpan left.Span right.Span
                         let kbody = mkExpr sp (ExprBinOp (Elementwise, op, mkExpr sp (ExprVar "__zl"), mkExpr sp (ExprVar "__zr")))
-                        let klam = mkExpr sp (ExprLambda ([{ Name = "__zl"; Type = None }; { Name = "__zr"; Type = None }], None, kbody))
+                        let klam = mkExpr sp (ExprLambda ([{ Name = "__zl"; Type = None; NameSpan = noSpan }; { Name = "__zr"; Type = None; NameSpan = noSpan }], None, kbody))
                         let kzip = mkExpr sp (ExprMethodFor [mkExpr sp (ExprZip [left; right])])
                         let synth = mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply, kzip, klam))))
                         inferExpr env synth |> Result.map (stampElemUnits env resUnits)
@@ -5789,7 +5789,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 let synth =
                     mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
                         mkExpr sp (ExprMethodFor [arrExpr]),
-                        mkExpr sp (ExprLambda ([{ Name = "__bx"; Type = elemAnn }], None, body))))))
+                        mkExpr sp (ExprLambda ([{ Name = "__bx"; Type = elemAnn; NameSpan = noSpan }], None, body))))))
                 inferExpr env synth |> Result.map (stampElemUnits env resUnits)
             | _ ->
             // env.Builder: inferArithType mints fresh index-type ids for a
@@ -6387,7 +6387,7 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
     | ExprKind.ExprVar name when isUnaryIntrinsic name && (lookupVar name env).IsNone ->
         let uid = env.Builder.FreshId()
         let pname = sprintf "__k%d_0" uid
-        let lamParams : LambdaParam list = [ { Name = pname; Type = None } ]
+        let lamParams : LambdaParam list = [ { Name = pname; Type = None; NameSpan = noSpan } ]
         let bodyApp =
             inheritSpan kernelExpr
                 (ExprApp (kernelExpr, [ inheritSpan kernelExpr (ExprVar pname) ]))
@@ -6407,7 +6407,7 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                          && not (paramTys |> List.exists (fun t -> match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)) ->
                 let uid = env.Builder.FreshId()
                 let names = paramTys |> List.mapi (fun i _ -> sprintf "__k%d_%d" uid i)
-                let lamParams = names |> List.map (fun n -> { Name = n; Type = None } : LambdaParam)
+                let lamParams = names |> List.map (fun n -> { Name = n; Type = None; NameSpan = noSpan } : LambdaParam)
                 let bodyApp =
                     inheritSpan kernelExpr
                         (ExprApp (kernelExpr, names |> List.map (fun n -> inheritSpan kernelExpr (ExprVar n))))
@@ -6494,8 +6494,8 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                      | _ -> false
         let paramTy = IRTScalar ETFloat64
         let lambdaInfo : TypedLambdaInfo = {
-            Params = [{ Name = "a"; Type = paramTy; Index = 0; VarId = aId }
-                      { Name = "b"; Type = paramTy; Index = 1; VarId = bId }]
+            Params = [{ Name = "a"; Type = paramTy; Index = 0; VarId = aId; NameSpan = noSpan }
+                      { Name = "b"; Type = paramTy; Index = 1; VarId = bId; NameSpan = noSpan }]
             Body = mkTyped (TExprBinOp (Elementwise, op,
                       mkTyped (TExprVar ("a", aId, None)) paramTy,
                       mkTyped (TExprVar ("b", bId, None)) paramTy)) paramTy
@@ -6539,7 +6539,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         let nArrays = mfInfo.Arrays.Length
         let params_ = List.init nArrays (fun i ->
             let pid = env.Builder.FreshId()
-            { Name = sprintf "__z%d" i; Type = paramTy; Index = i; VarId = pid })
+            { Name = sprintf "__z%d" i; Type = paramTy; Index = i; VarId = pid; NameSpan = noSpan })
         let lambdaInfo : TypedLambdaInfo = {
             Params = params_
             Body = mkTyped zeroLit paramTy
@@ -6727,7 +6727,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             let nArrays = flatArrays.Length
             let params_ = List.init nArrays (fun i ->
                 let pid = env.Builder.FreshId()
-                { Name = sprintf "__z%d" i; Type = paramTy; Index = i; VarId = pid })
+                { Name = sprintf "__z%d" i; Type = paramTy; Index = i; VarId = pid; NameSpan = noSpan })
             let lambdaInfo : TypedLambdaInfo = {
                 Params = params_
                 Body = mkTyped zeroLit paramTy
@@ -6760,7 +6760,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             let n = flatArrays.Length
             let uid = env.Builder.FreshId()
             let names = List.init n (fun i -> sprintf "__of%d_%d" uid i)
-            let lamParams = names |> List.map (fun nm -> ({ Name = nm; Type = None } : LambdaParam))
+            let lamParams = names |> List.map (fun nm -> ({ Name = nm; Type = None; NameSpan = noSpan } : LambdaParam))
             let bodyApp =
                 mkExpr span (ExprApp (mkExpr span (ExprVar fnName),
                                       names |> List.map (fun nm -> mkExpr span (ExprVar nm))))
@@ -7881,7 +7881,7 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
                  | Some t -> lowerTypeExpr env t
                  | None -> env.Subst.Fresh()  // Infer from usage
         paramEnv <- bindVarSimple p.Name varId ty paramEnv
-        { Name = p.Name; Type = ty; Index = i; VarId = varId } : TypedParam)
+        { Name = p.Name; Type = ty; Index = i; VarId = varId; NameSpan = p.NameSpan } : TypedParam)
 
     let boundNames = parms |> List.map (fun p -> p.Name) |> Set.ofList
     let freeVars = collectFreeVars boundNames body
@@ -8616,7 +8616,7 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
             (match elemZero, (if slots |> List.forall Option.isSome then Some (List.map Option.get slots) else None) with
              | Some zBody, Some idxTys ->
                  let params_ : LambdaParam list =
-                     idxTys |> List.mapi (fun i _ -> { Name = sprintf "__zero_i%d" i; Type = None })
+                     idxTys |> List.mapi (fun i _ -> { Name = sprintf "__zero_i%d" i; Type = None; NameSpan = noSpan })
                  let former = mkExpr sp (ExprKind.ExprFor (ForArrays ([], Some (mkExpr sp (ExprKind.ExprRange idxTys))), [], None))
                  let lam = mkExpr sp (ExprKind.ExprLambda (params_, None, zBody))
                  let synth = mkExpr sp (ExprKind.ExprCompute (mkExpr sp (ExprKind.ExprBinOp (Elementwise, OpApply, former, lam))))
@@ -8699,7 +8699,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
             match slotsOpt with
             | Some slotTys when total > 4096L ->
                 let ps : LambdaParam list =
-                    slotTys |> List.mapi (fun i _ -> { Name = sprintf "__%s%d_%s" tag i def.Name; Type = None })
+                    slotTys |> List.mapi (fun i _ -> { Name = sprintf "__%s%d_%s" tag i def.Name; Type = None; NameSpan = noSpan })
                 synAt (ExprCompute (synAt (ExprBinOp (Elementwise, OpApply,
                     synAt (ExprMethodFor [synAt (ExprRange slotTys)]),
                     synAt (ExprLambda (ps, None, zed))))))
@@ -10838,13 +10838,13 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 if p.Name = "self" && p.Type.IsNone then selfType
                                 else paramTypes.[i]
                             bodyEnv <- bindVarSimple p.Name varId ty bodyEnv
-                            { Name = p.Name; Type = ty; Index = i; VarId = varId } : TypedParam)
+                            { Name = p.Name; Type = ty; Index = i; VarId = varId; NameSpan = p.NameSpan } : TypedParam)
                         match inferExpr bodyEnv method.Body with
                         | Ok tBody ->
                             let _ = unify env'.Subst tBody.Type retType
                             let commGroups =
                                 extractCommGroups
-                                    (method.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type } : LambdaParam))
+                                    (method.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; NameSpan = p.NameSpan } : LambdaParam))
                                     method.WhereClause
                             let tf : TypedFunctionDecl = {
                                 Name = mangledName; FuncId = funcVarId
@@ -10852,6 +10852,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 Params = typedParams; ReturnType = tBody.Type
                                 WhereClause = method.WhereClause; Body = tBody
                                 CommGroups = commGroups; IsStatic = false
+                                NameSpan = method.NameSpan
                             }
                             typedMethods <- typedMethods @ [tf]
                         | Error e -> methodErr <- Some e
@@ -11110,7 +11111,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
          | IRTDist _ ->
              env.Provenance.[varId] <- Set.singleton (Blade.Constraints.paramProvenanceToken funcDecl.Name p.Name)
          | _ -> ())
-        { Name = p.Name; Type = paramTypes.[i]; Index = i; VarId = varId } : TypedParam)
+        { Name = p.Name; Type = paramTypes.[i]; Index = i; VarId = varId; NameSpan = p.NameSpan } : TypedParam)
 
     // Open the license scope for the body; closed after `result` is
     // computed (both success and error paths flow past the exit below).
@@ -11174,7 +11175,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             wrappedBodyR |> Result.bind (fun tBody ->
             let commGroups =
                 extractCommGroups
-                    (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type } : LambdaParam))
+                    (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; NameSpan = p.NameSpan } : LambdaParam))
                     funcDecl.WhereClause
             // Register the function's comm groups so a later kernel-use site
             // (etaExpandFunctionKernel / deferred-former eta) can surface them
@@ -11188,7 +11189,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // back to dense storage).
             let antisymGroups =
                 extractAntisymGroups
-                    (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type } : LambdaParam))
+                    (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; NameSpan = p.NameSpan } : LambdaParam))
                     funcDecl.WhereClause
             if not (List.isEmpty antisymGroups) then
                 env.FuncAntisymGroups.[funcDecl.Name] <- antisymGroups
@@ -11410,6 +11411,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 Params = resolvedParams; ReturnType = resolvedRet
                 WhereClause = funcDecl.WhereClause; Body = tBody
                 CommGroups = commGroups; IsStatic = funcDecl.IsStatic
+                NameSpan = funcDecl.NameSpan
             }
             Ok (TDeclFunction tf, envWithFunc))))
 

@@ -223,6 +223,11 @@
     <!-- Interpreter-backed REPL seam: lowerSession (one shared front-end pass)
          wraps Interp/Run.fs; consumed by Cli.replLoop. -->
     <Compile Include="src/Interp/Repl.fs" />
+    <!-- `blade ide serve`: the NDJSON daemon wrapping Ide.fs's payload. Must
+         follow Lowering.fs (the full tier monomorphizes) as well as Ide.fs,
+         which is why it cannot live inside Ide.fs; must precede Cli.fs, which
+         dispatches the verb and owns the serve regression block. -->
+    <Compile Include="src/IdeServe.fs" />
     <Compile Include="src/Build.fs" />
     <Compile Include="tests/TestHarness.fs" />
     <Compile Include="tests/Expect.fs" />

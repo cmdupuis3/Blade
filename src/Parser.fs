@@ -2140,13 +2140,16 @@ and parseLambda (tokens: Token list) : ParseResult<Expr> =
         success (mkE tokens remaining (ExprLambda (parms, whereClause, body))) remaining
 
 and parseLambdaParam (tokens: Token list) : ParseResult<LambdaParam> =
+    // The head token IS the name, so its span is kept for navigation before
+    // the optional annotation is consumed.
+    let nameSpan = headSpan tokens
     expectIdent tokens >>= fun name afterName ->
     match peek afterName with
     | Some TokColon ->
         advance afterName |> parseTypeExpr >>= fun ty remaining ->
-        success { Name = name; Type = Some ty } remaining
+        success { Name = name; Type = Some ty; NameSpan = nameSpan } remaining
     | _ ->
-        success { Name = name; Type = None } afterName
+        success { Name = name; Type = None; NameSpan = nameSpan } afterName
 
 and parseLet (tokens: Token list) : ParseResult<Expr> =
     // let [const|mut] pattern [: type] = value. Blade has no ML-style
@@ -2642,7 +2645,10 @@ and parseRecArrayBinding (tokens: Token list) : ParseResult<Binding> =
                     let sp = rangeSpan tokens afterArm3
                     success {
                         Mutability = BindLet
-                        Pattern = mkPat sp (PatVar name)
+                        // The PATTERN is the name token, not the whole `let rec
+                        // ... match ... with` block the value spans -- otherwise
+                        // rename would rewrite the entire declaration.
+                        Pattern = mkPat (headSpan tokens) (PatVar name)
                         Type = Some ty
                         Value = mkExpr sp (ExprRecArray {
                             Name = name; SeedArm = Some (step1, slice1)
@@ -2652,7 +2658,7 @@ and parseRecArrayBinding (tokens: Token list) : ParseResult<Binding> =
                 let sp = rangeSpan tokens afterArm2
                 success {
                     Mutability = BindLet
-                    Pattern = mkPat sp (PatVar name)
+                    Pattern = mkPat (headSpan tokens) (PatVar name)
                     Type = Some ty
                     Value = mkExpr sp (ExprRecArray {
                         Name = name; SeedArm = None
@@ -2697,6 +2703,7 @@ and parseLetStmt (tokens: Token list) : ParseResult<Stmt> =
 // Declaration Parsing
 
 let parseParamDecl (tokens: Token list) : ParseResult<ParamDecl> =
+    let nameSpan = headSpan tokens
     expectIdent tokens >>= fun name afterName ->
     match peek afterName with
     | Some TokColon ->
@@ -2709,11 +2716,14 @@ let parseParamDecl (tokens: Token list) : ParseResult<ParamDecl> =
             | Some (TokKeyword KwMut) -> Mutable, advance (advance afterName)
             | _ -> Immutable, advance afterName
         parseTypeExpr afterAnnot >>= fun ty remaining ->
-        success { Name = name; Type = Some ty; Mutability = mutability } remaining
+        success { Name = name; Type = Some ty; Mutability = mutability; NameSpan = nameSpan } remaining
     | _ ->
-        success { Name = name; Type = None; Mutability = Immutable } afterName
+        success { Name = name; Type = None; Mutability = Immutable; NameSpan = nameSpan } afterName
 
 let parseFunctionDecl (tokens: Token list) : ParseResult<Decl> =
+    // `tokens` starts AT the name (the `function` keyword is consumed by the
+    // dispatcher), so the head token is exactly what F12 should land on.
+    let nameSpan = headSpan tokens
     expectIdent tokens >>= fun name afterName ->
     expect TokLParen afterName >>= fun _ afterLParen ->
     sepBy parseParamDecl TokComma afterLParen >>= fun parms afterParms ->
@@ -2757,6 +2767,7 @@ let parseFunctionDecl (tokens: Token list) : ParseResult<Decl> =
         ReturnType = retType
         Body = body
         IsStatic = false
+        NameSpan = nameSpan
     }) remaining
 
 let parseTopLevelLet (tokens: Token list) : ParseResult<Decl> =

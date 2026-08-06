@@ -55,6 +55,9 @@ let printUsage () =
     printfn "  check <file.edgi>                 Type-check only (no code generation)"
     printfn "  ide check --json <file.edgi>      Type-check and emit JSON diagnostics + binding types"
     printfn "                                    (machine-readable, for editor tooling)"
+    printfn "  ide serve                         Persistent editor daemon: NDJSON check requests on"
+    printfn "                                    stdin, one JSON response line each on stdout"
+    printfn "                                    (tier fast = typecheck; full = + monomorphization)"
     printfn "  repl                              Interactive session: each input recompiles and"
     printfn "                                    re-runs the accumulated program, printing new values"
     printfn "                                    with types; bare expressions evaluate and echo"
@@ -88,6 +91,8 @@ let printUsage () =
     printfn "  test timing                       Run the differential timing block standalone"
     printfn "  test strict-pins                  Run the --strict-pins CLI gate block standalone"
     printfn "  test surfacing                    Run the warning-surfacing block standalone"
+    printfn "  test ide-serve                    Run the `ide serve` NDJSON protocol block standalone"
+    printfn "  test ide-references               Run the `references[]` navigation payload block standalone"
     printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
     printfn "  test interp [category]            Diff the tree-walking interpreter against the compiled binary"
     printfn ""
@@ -1107,10 +1112,428 @@ let private runSurfacingTests () : TH.BlockResult =
       Skipped = skipped
       FailedNames = failedNames }
 
+/// `blade ide serve`, driven IN-PROCESS through `serveLoop`'s TextReader /
+/// TextWriter seam -- no spawn, no g++, no editor. What is under test is the
+/// PROTOCOL (framing, id/tier echo, error containment) and the daemon's
+/// hardest promise: that nothing leaks from one request into the next, since
+/// the compiler's side-channels were written for a process that exits.
+let private runIdeServeTests () : TH.BlockResult =
+    let blockName = "IdeServe"
+    TH.printHeader "ide serve (NDJSON protocol, tiers, and per-request isolation)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    let esc = Blade.Ide.jsonEscape
+    let checkReq (id: int) (tier: string) (file: string) (source: string) =
+        sprintf "{\"id\":%d,\"cmd\":\"check\",\"tier\":\"%s\",\"file\":\"%s\",\"source\":\"%s\"}"
+                id tier (esc file) (esc source)
+    let pingReq (id: int) = sprintf "{\"id\":%d,\"cmd\":\"ping\"}" id
+    let shutdownReq = "{\"cmd\":\"shutdown\"}"
+    /// Feed a whole conversation and split the transcript on the framing
+    /// newline. The trailing "" is the proof that the LAST response was
+    /// newline-terminated too; anything else in the tail would be an unframed
+    /// write. Returns (exit code, responses, raw transcript).
+    let drive (requests: string list) : int * string list * string =
+        let input = new StringReader(String.concat "\n" requests + "\n")
+        let output = new StringWriter()
+        let code = Blade.IdeServe.serveLoop compilerVersion (input :> TextReader) (output :> TextWriter)
+        let raw = output.ToString()
+        let parts = raw.Split('\n') |> Array.toList
+        (code, (parts |> List.filter (fun p -> p <> "")), raw)
+    // An HM-polymorphic value binding: the typed AST keeps `T` for both lets
+    // (the scheme is only instantiated per call site), while monomorphization
+    // during lowering resolves them. Exactly the fast/full split.
+    let hmSource = "function id(x: T) -> T = x\nlet r = id(42)\nlet s = id(3.5)\n"
+    // Earns a BL4010 pin suggestion plus a `covariance` binding -- the marks
+    // whose ABSENCE proves the next request started clean.
+    let warnSource =
+        "function mymean(row) = reduce(row, (+)) / extents(row)\n\
+         function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
+         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let result = object_for(covariance) <@> (data, data) |> compute\n"
+    let tmpDir = Path.Combine(Path.GetTempPath(), "blade_ideserve_" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory(tmpDir) |> ignore
+    // serveLoop chdirs per request (provider relative paths) and restores on
+    // exit; belt-and-braces here so a regression in that restore cannot
+    // contaminate every later block in the suite.
+    let entryDir = Directory.GetCurrentDirectory()
+    try
+        let hmPath = Path.Combine(tmpDir, "hm.blade")
+        let warnPath = Path.Combine(tmpDir, "warn.blade")
+        let cleanPath = Path.Combine(tmpDir, "clean.blade")
+
+        // 1. ping: the capability probe the extension uses to choose the serve
+        // lane over the one-shot lane.
+        let (code, responses, _) = drive [pingReq 7; shutdownReq]
+        let name = "ping answers with ok/serve/version and echoes the id"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"id\":7" && r.Contains "\"ok\":true"
+                   && r.Contains "\"serve\":1" && r.Contains (sprintf "\"version\":\"%s\"" compilerVersion) ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 2. Fast tier: today's payload, on the BUFFER. `hmPath` is never
+        // written to disk, so bindings can only have come from `source`.
+        let (code, responses, raw) = drive [checkReq 11 "fast" hmPath hmSource; shutdownReq]
+        let fastBody = match responses with [r] -> r | _ -> ""
+        let name = "check tier=fast: id/tier echoed, bindings from the unsaved buffer"
+        if code = 0 && not (File.Exists hmPath)
+           && fastBody.Contains "\"id\":11" && fastBody.Contains "\"tier\":\"fast\""
+           && fastBody.Contains "\"diagnostics\":[]" && fastBody.Contains "\"name\":\"r\""
+           && not (fastBody.Contains "concreteType") then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 3. Framing: one \n-terminated line per response, and the payload's
+        // own multi-line function signatures escaped INTO it, not through it.
+        let name = "each response is exactly one newline-terminated line"
+        if raw.EndsWith "\n" && raw.Split('\n').Length = 2 && fastBody.Contains "\\n" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "%d newline-separated parts" (raw.Split('\n').Length))
+
+        // 4. Full tier: monomorphization upgrades both HM values, and only
+        // where it actually knows more than the typed AST did.
+        let (code, responses, _) = drive [checkReq 12 "full" hmPath hmSource; shutdownReq]
+        let fullBody = match responses with [r] -> r | _ -> ""
+        let name = "check tier=full: HM value bindings gain concreteType"
+        if code = 0 && fullBody.Contains "\"tier\":\"full\""
+           && fullBody.Contains "\"concreteType\":\"Int64\""
+           && fullBody.Contains "\"concreteType\":\"Float64\"" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "exit %d, response: %s" code fullBody)
+
+        // 5. `type` is never rewritten in place: the client wants both, and
+        // decides which to show.
+        let name = "full tier keeps the fast `type` beside the upgrade"
+        if fullBody.Contains "\"name\":\"r\",\"kind\":\"let\",\"line\":2,\"col\":1,\"type\":\"T\",\"concreteType\":\"Int64\"" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "response: %s" fullBody)
+
+        // 6. A file that TYPECHECKS but will not lower. The fast half of the
+        // payload must survive intact (the editor keeps its hovers), the tier
+        // stays "full", and the lowering failure arrives as a real diagnostic
+        // -- `blade run` would report exactly this. Hermetic: the store is
+        // missing on purpose, and the message doubles as proof that the loop
+        // resolved the provider path against the REQUEST file's directory.
+        let provPath = Path.Combine(tmpDir, "prov.blade")
+        let provSource =
+            "import csv as csv\nlet store = csv.load(\"no_such_store.csv\")\nlet a = 1\n"
+        let (code, responses, _) =
+            drive [ checkReq 15 "full" provPath provSource; pingReq 16; shutdownReq ]
+        let name = "full tier: a lowering failure joins diagnostics, payload and loop intact"
+        match responses with
+        | [broken; pong] when code = 0 && broken.Contains "\"tier\":\"full\""
+                              && broken.Contains "\"code\":\"BL6002\""
+                              && broken.Contains "no_such_store.csv"
+                              && broken.Contains "\"name\":\"a\""
+                              && broken.Contains (Path.GetFileName tmpDir)
+                              && pong.Contains "\"id\":16" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 7. A parse error is data, not an incident: diagnostics come back and
+        // the loop takes the next request.
+        let (code, responses, _) = drive [checkReq 13 "fast" hmPath "let ="; pingReq 14; shutdownReq]
+        let name = "a parse error yields diagnostics and the loop survives it"
+        match responses with
+        | [bad; pong] when code = 0 && bad.Contains "\"id\":13"
+                           && bad.Contains "\"severity\":\"error\"" && bad.Contains "\"bindings\":[]"
+                           && pong.Contains "\"id\":14" && pong.Contains "\"ok\":true" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 8. THE daemon test. `warnSource` leaves a BL4010 suggestion, a
+        // `covariance` binding and a kernel behind; the next request is a
+        // different file and must inherit none of it.
+        let (code, responses, _) =
+            drive [ checkReq 21 "fast" warnPath warnSource
+                    checkReq 22 "fast" cleanPath "let a = 1\n"
+                    shutdownReq ]
+        let name = "consecutive checks of different files share no state"
+        match responses with
+        | [first; second] when code = 0
+                               && first.Contains "BL4010" && first.Contains "\"name\":\"covariance\""
+                               && second.Contains "\"id\":22" && second.Contains "\"diagnostics\":[]"
+                               && not (second.Contains "BL4010")
+                               && not (second.Contains "covariance")
+                               && second.Contains "\"kernels\":[]" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 9. Malformed input: an error line, correlated where possible, and a
+        // loop that keeps going.
+        let (code, responses, _) =
+            drive [ "{not json}"; "{\"id\":31,\"cmd\":\"fly\"}"; "{\"id\":32,\"cmd\":\"check\"}"
+                    pingReq 33; shutdownReq ]
+        let name = "malformed and unknown requests answer with errors, never crash"
+        match responses with
+        | [junk; unknown; incomplete; pong] when code = 0
+                                                 && junk.Contains "\"id\":null" && junk.Contains "\"error\""
+                                                 && unknown.Contains "\"id\":31" && unknown.Contains "fly"
+                                                 && incomplete.Contains "\"id\":32" && incomplete.Contains "\"error\""
+                                                 && pong.Contains "\"id\":33" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 10. Both exits: the verb stops reading immediately, and a closed
+        // stdin is the same clean 0.
+        let (code, responses, _) = drive [shutdownReq; pingReq 41]
+        let name = "shutdown exits 0 and leaves the trailing request unread"
+        if code = 0 && responses.IsEmpty then record name TH.Pass ""
+        else record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        let (code, responses, _) = drive [pingReq 42]
+        let name = "stdin EOF exits 0 after answering everything it read"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"id\":42" -> record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 11. The refactor's own invariant: `ide check --json` still prints
+        // exactly what `ideCheckSource` returns, so the extension's one-shot
+        // fallback lane is unaffected by the serve work.
+        File.WriteAllText(hmPath, hmSource)
+        let (json, srcCode) = Blade.Ide.ideCheckSource hmPath hmSource
+        let (swOut, oldOut) = (new StringWriter(), Console.Out)
+        let cliCode = try Console.SetOut swOut; Blade.Ide.ideCheck hmPath finally Console.SetOut oldOut
+        let name = "ide check --json still prints ideCheckSource's payload verbatim"
+        if srcCode = cliCode && swOut.ToString().TrimEnd('\r', '\n') = json then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "exit %d vs %d" srcCode cliCode)
+
+        // 12. ...including the missing-file arm, which lives only in the
+        // printing wrapper now.
+        let (code, out, _) =
+            let (swOut, swErr) = (new StringWriter(), new StringWriter())
+            let (oldOut, oldErr) = (Console.Out, Console.Error)
+            try
+                Console.SetOut swOut
+                Console.SetError swErr
+                let r = Blade.Ide.ideCheck (Path.Combine(tmpDir, "nope.blade"))
+                (r, swOut.ToString(), swErr.ToString())
+            finally
+                Console.SetOut oldOut
+                Console.SetError oldErr
+        let name = "ide check --json on a missing file still emits JSON and exit 1"
+        if code = 1 && out.Contains "File not found" && out.Contains "\"bindings\":[]" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "exit %d, json: %s" code (out.Trim()))
+    finally
+        Directory.SetCurrentDirectory entryDir
+        try Directory.Delete(tmpDir, true) with _ -> ()
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    let parts =
+        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+    TH.printFooter blockName parts
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = skipped
+      FailedNames = failedNames }
+
+/// The `references[]` array behind go-to-definition, find-all-references and
+/// rename, driven through `ideCheckSource` in-process (no file on disk, no
+/// toolchain). What is really under test is the JOIN: an entry is one BINDER,
+/// so two shadowing `x`s have to come back as two entries with DISJOINT use
+/// lists, and every span has to be the name TOKEN rather than the declaration
+/// wrapped around it -- rename rewrites these spans literally.
+let private runIdeReferencesTests () : TH.BlockResult =
+    let blockName = "IdeReferences"
+    TH.printHeader "ide references (definition/use spans, shadowing, name tokens)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    /// One flat line per entry -- "name kind def [uses]" -- which is exactly
+    /// the information a navigation provider consumes, and short enough that
+    /// the expectations below can be whole-list equalities.
+    let refsOf (source: string) : string list =
+        let (json, _) = Blade.Ide.ideCheckSource "refs.blade" source
+        use doc = System.Text.Json.JsonDocument.Parse json
+        let spanText (e: System.Text.Json.JsonElement) =
+            sprintf "%d:%d-%d:%d"
+                (e.GetProperty("line").GetInt32()) (e.GetProperty("col").GetInt32())
+                (e.GetProperty("endLine").GetInt32()) (e.GetProperty("endCol").GetInt32())
+        [ for r in doc.RootElement.GetProperty("references").EnumerateArray() do
+            let def = r.GetProperty "def"
+            let defText =
+                if def.ValueKind = System.Text.Json.JsonValueKind.Null then "null" else spanText def
+            let uses = r.GetProperty("uses").EnumerateArray() |> Seq.map spanText |> List.ofSeq
+            yield sprintf "%s %s %s [%s]"
+                    (r.GetProperty("name").GetString()) (r.GetProperty("kind").GetString())
+                    defText (String.concat " " uses) ]
+    let expect name (source: string) (expected: string list) =
+        let actual = refsOf source
+        if actual = expected then record name TH.Pass ""
+        else record name TH.Fail (sprintf "got %A" actual)
+
+    // 1. The base case: a value binding, and both of its uses on the next line.
+    expect "a let binding reports its name token and every use"
+        "let x = 10\nlet y = x + x\n"
+        [ "x value 1:5-1:6 [2:9-2:10 2:13-2:14]"
+          "y value 2:5-2:6 []" ]
+
+    // 2. THE test. Same name, two binders: the module-level `x` is never read,
+    // and the one shadowing it inside the function owns the only use. Keyed by
+    // name instead of IRId, this would be one entry with a merged use list and
+    // rename would corrupt the file.
+    expect "a shadowed name yields two entries with disjoint uses"
+        "let x = 1\nfunction shadow(p) = {\n    let x = p + 1\n    x * 2\n}\n"
+        [ "x value 1:5-1:6 []"
+          "shadow function 2:10-2:16 []"
+          "p param 2:17-2:18 [3:13-3:14]"
+          "x local 3:9-3:10 [4:5-4:6]" ]
+
+    // 3. Function name and parameters, all from the parser's name tokens (the
+    // decl's own span covers signature and body together and is useless here).
+    expect "function and parameter definitions are name tokens, not declarations"
+        "function scale(a, k) = a * k\n"
+        [ "scale function 1:10-1:15 []"
+          "a param 1:16-1:17 [1:24-1:25]"
+          "k param 1:19-1:20 [1:28-1:29]" ]
+
+    // 4. A binding inside a function body is "local", and its use resolves to
+    // it rather than to anything at module level.
+    expect "a function-body let is kind \"local\""
+        "function body(n) = {\n    let acc = n + 1\n    acc * acc\n}\n"
+        [ "body function 1:10-1:14 []"
+          "n param 1:15-1:16 [2:15-2:16]"
+          "acc local 2:9-2:12 [3:5-3:8 3:11-3:14]" ]
+
+    // 5. Kernel parameters: a lambda can sit anywhere in an expression, so
+    // these come from a full-tree sweep rather than the declaration walk.
+    expect "lambda kernel parameters are reported like any other param"
+        "let data = [[1.0, 2.0], [3.0, 4.0]]\n\
+         let out = object_for(lambda(u, w) -> u * w) <@> (data, data) |> compute\n"
+        [ "data value 1:5-1:9 [2:50-2:54 2:56-2:60]"
+          "out value 2:5-2:8 []"
+          "u param 2:29-2:30 [2:38-2:39]"
+          "w param 2:32-2:33 [2:42-2:43]" ]
+
+    // 6. `type` names have no IRId and nothing ever refers to one through a
+    // variable node, so they are def-only entries located in the source text.
+    expect "a type declaration is a def-only entry of kind \"type\""
+        "type Small = Idx<4>\nlet g = 1\n"
+        [ "Small type 1:6-1:11 []"
+          "g value 2:5-2:6 []" ]
+
+    // 7. Nothing compiler-generated leaks. The elaborators stamp the WHOLE
+    // declaration's span onto every node they synthesize, so a phantom shows
+    // up as a span wider than its own identifier -- the check below is exactly
+    // that: every span is one line and exactly as wide as the name.
+    let broadSource =
+        "function mymean(row) = reduce(row, (+)) / extents(row)\n\
+         function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
+         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let result = object_for(covariance) <@> (data, data) |> compute\n"
+    let broad = refsOf broadSource
+    let name = "no synthesized names and no declaration-wide phantom spans"
+    let widthOk (line: string) =
+        // "name kind L:C-L:C [L:C-L:C ...]"
+        let parts = line.Split(' ')
+        let nameLen = parts.[0].Length
+        let spans =
+            line.Substring(line.IndexOf(parts.[2]))
+            |> fun s -> s.Replace("[", " ").Replace("]", " ").Split([|' '|], StringSplitOptions.RemoveEmptyEntries)
+        spans
+        |> Array.forall (fun sp ->
+            match sp.Split([|':'; '-'|]) with
+            | [| l1; c1; l2; c2 |] -> l1 = l2 && int c2 - int c1 = nameLen
+            | _ -> false)
+    if not broad.IsEmpty
+       && broad |> List.forall (fun l -> not (l.StartsWith "__"))
+       && broad |> List.forall widthOk then
+        record name TH.Pass ""
+    else
+        record name TH.Fail (sprintf "got %A" broad)
+
+    // 8. A file with a type error still navigates: the checker's PARTIAL typed
+    // program feeds references exactly as it already feeds bindings and calls.
+    expect "a type error still yields references for the parts that checked"
+        "let good = 5\nfunction useit(v) = v + good\nlet bad: Int64 = \"nope\"\n"
+        [ "good value 1:5-1:9 [2:25-2:29]"
+          "useit function 2:10-2:15 []"
+          "v param 2:16-2:17 [2:21-2:22]" ]
+
+    // 9. A binding nobody reads is still renameable, so it still gets an entry.
+    expect "an unused binding keeps an entry with an empty use list"
+        "let orphan = 42\n"
+        [ "orphan value 1:5-1:11 []" ]
+
+    // 10. `let rec` used to stamp the whole `match ... with` block onto its
+    // pattern; a rename over that span would have eaten the declaration.
+    expect "a `let rec` definition is the name token, not the whole declaration"
+        "type Step = Idx<5>\n\
+         let rec q: Array<Float64 like Step> = match q with\n\
+         | zero -> zero\n\
+         | prefix :: n -> prefix :: 1.0\n\
+         let out = q\n"
+        [ "Step type 1:6-1:10 []"
+          "q value 2:9-2:10 [5:11-5:12]"
+          "out value 5:5-5:8 []" ]
+
+    // 11. An interface-impl method reaches the typed AST MANGLED (`Box__scale`),
+    // which is not text that appears anywhere in the file; the name is taken
+    // from the span instead, or rename would paste the mangling into the source.
+    expect "an impl method is reported under its written name, not its mangled one"
+        // Assembled line by line: the indentation is load-bearing for the
+        // expected columns, and F#'s string continuations would eat it.
+        (String.concat "\n"
+            [ "interface Scalable {"
+              "    function scale(self, factor: Float64) -> Float64"
+              "}"
+              "struct Box {"
+              "    width: Float64,"
+              "    height: Float64"
+              "}"
+              "impl Scalable for Box {"
+              "    function scale(self, factor: Float64) -> Float64 = self.width * factor"
+              "}"
+              "" ])
+        [ "Box type 4:8-4:11 []"
+          "scale function 9:14-9:19 []"
+          "self param 9:20-9:24 [9:56-9:60]"
+          "factor param 9:26-9:32 [9:69-9:75]" ]
+
+    // 12. The `bindings[]` companion change: `endLine`/`endCol` close the
+    // DECLARATION span that `line`/`col` already opened, appended last so the
+    // leading field run every existing client matches on is byte-identical.
+    let (json, _) = Blade.Ide.ideCheckSource "refs.blade" "let x = 10\n"
+    let name = "bindings[] gained end corners without disturbing the leading fields"
+    if json.Contains "\"name\":\"x\",\"kind\":\"let\",\"line\":1,\"col\":1,\"type\":\"Int64\""
+       && json.Contains "\"endLine\":1,\"endCol\":11" then
+        record name TH.Pass ""
+    else
+        record name TH.Fail json
+
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    let parts =
+        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+    TH.printFooter blockName parts
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = skipped
+      FailedNames = failedNames }
+
 /// Run the full suite, appending the CLI smoke block and the strict-pin block
 /// (which live in this file -- see runAllTestsFullWith's doc comment for why they're passed in).
 let private runFullSuite opts =
-    runAllTestsFullWith [runCliSmokeTests; runStrictPinTests; runSurfacingTests] opts
+    runAllTestsFullWith
+        [runCliSmokeTests; runStrictPinTests; runSurfacingTests
+         runIdeServeTests; runIdeReferencesTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 let private dispatchTest (rest: string list) : int =
@@ -1138,6 +1561,14 @@ let private dispatchTest (rest: string list) : int =
     | [ "surfacing" ] ->
         // Warning/suggestion surfacing: codes, streams, and survival of the checker's error path.
         let failed = (runSurfacingTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "ide-serve" ] | [ "ideserve" ] ->
+        // The NDJSON daemon protocol, driven in-process. No toolchain, no spawn.
+        let failed = (runIdeServeTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "ide-references" ] | [ "idereferences" ] | [ "ide-refs" ] ->
+        // The navigation payload: definition/use spans, shadowing, name tokens.
+        let failed = (runIdeReferencesTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "linalg" ] ->
         // gram/matmul/dot/gemv route to blade_linalg:: when the BLAS gate is
@@ -1506,6 +1937,9 @@ let private dispatchInner (args: string[]) : int =
     | [| "ide"; "check"; "--json"; file |]
     | [| "ide"; "check"; file; "--json" |]
     | [| "ide"; "check"; file |] -> Blade.Ide.ideCheck file
+
+    // The same payload, served: one long-lived process, NDJSON both ways.
+    | [| "ide"; "serve" |] -> Blade.IdeServe.serve compilerVersion
 
     | _ when args.Length >= 1 && args.[0] = "test" ->
         dispatchTest (args.[1..] |> Array.toList)

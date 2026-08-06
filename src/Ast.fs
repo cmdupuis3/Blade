@@ -479,6 +479,10 @@ and ForSource =
 and LambdaParam = {
     Name: Ident
     Type: TypeExpr option
+    /// Span of the parameter's NAME TOKEN alone (not the `name: Type` pair),
+    /// for go-to-definition and rename. `noSpan` on the params elaborators
+    /// synthesize -- they have no source text to point at.
+    NameSpan: Span
 }
 
 and MatchCase = {
@@ -533,12 +537,18 @@ type FunctionDecl = {
     ReturnType: TypeExpr option
     Body: Expr
     IsStatic: bool
+    /// Span of the function's NAME TOKEN alone; the decl's own `Located.Span`
+    /// covers signature and body together, which is the wrong thing to
+    /// highlight or rename. `noSpan` on generated decls (grad, math, ml).
+    NameSpan: Span
 }
 
 and ParamDecl = {
     Name: Ident
     Type: TypeExpr option
     Mutability: Mutability
+    /// Span of the parameter's NAME TOKEN alone -- see LambdaParam.NameSpan.
+    NameSpan: Span
 }
 
 type TypeDecl =

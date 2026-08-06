@@ -62,11 +62,11 @@ let private ptuple (ps: Pattern list) = synPat (PatTuple ps)
 let private zipMap2 (a: Expr) (b: Expr) (body: Expr) =
     computeE (applyE
         (methodForE [syn (ExprZip [a; b])])
-        (lambdaE [{ Name = "__u"; Type = None }; { Name = "__w"; Type = None }] None body))
+        (lambdaE [{ Name = "__u"; Type = None; NameSpan = noSpan }; { Name = "__w"; Type = None; NameSpan = noSpan }] None body))
 let private map1 (a: Expr) (body: Expr) =
     computeE (applyE
         (methodForE [a])
-        (lambdaE [{ Name = "__u"; Type = None }] None body))
+        (lambdaE [{ Name = "__u"; Type = None; NameSpan = noSpan }] None body))
 
 // "cumulant" is NOT a former name: it is a checker-level projection on
 // Dist-typed values (TypeCheck.inferCumulantProj), so elaboration lets it flow through untouched.
@@ -140,7 +140,7 @@ let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
     let pName s = sprintf "__ppl_P_%s_%s" uniq (tag s)
     let kName s = sprintf "__ppl_poolk_%s_%s" uniq (tag s)
     let xName i = sprintf "__x%d" i
-    let ps = [ for i in 0 .. rows.Length - 1 -> { Name = xName i; Type = None } ]
+    let ps = [ for i in 0 .. rows.Length - 1 -> { Name = xName i; Type = None; NameSpan = noSpan } ]
     let kDecls =
         sets |> List.map (fun s ->
             let body = s |> List.map (fun i -> v (xName i)) |> List.reduce mulE
@@ -403,7 +403,7 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
             | _ ->
                 // Multiaxis / unresolvable leading extent: per-cell pipeline.
                 let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
-                let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
+                let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); NameSpan = noSpan })
                 let whereC = if k >= 2 then commWhere paramNames else None
                 let body = divE (prodsumE (paramNames |> List.map v)) (fLit (float n))
                 let lName = sprintf "__ppl_L_%s" outName
@@ -447,7 +447,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                             | _ -> fLit 0.0 ]
                     pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
                 | _ ->
-                    let ps = ["__x1"; "__x2"] |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
+                    let ps = ["__x1"; "__x2"] |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); NameSpan = noSpan })
                     [ mkDecl lName (methodForE [v aName; v aName])
                       mkDecl kName (lambdaE ps (commWhere ["__x1"; "__x2"]) (centralPairBody (float n)))
                       { Value = DeclLet { binding with Value = computeE (applyE (v lName) (v kName)) }; Span = span } ])
@@ -496,8 +496,8 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                                              (mulE (poolMoment pool [i]) (poolMoment pool [dx + j])) ] ]
                     Ok (pd @ [ { Value = DeclLet { binding with Value = cells }; Span = span } ])
                 | _ ->
-                    let px = { Name = "__x1"; Type = Some (TyArray (elemX, [fibX])) }
-                    let py = { Name = "__x2"; Type = Some (TyArray (elemY, [fibY])) }
+                    let px = { Name = "__x1"; Type = Some (TyArray (elemX, [fibX])); NameSpan = noSpan }
+                    let py = { Name = "__x2"; Type = Some (TyArray (elemY, [fibY])); NameSpan = noSpan }
                     Ok [ mkDecl lName (methodForE [v xName; v yName])
                          mkDecl kName (lambdaE [px; py] None (centralPairBody (float nX)))
                          { Value = DeclLet { binding with Value = computeE (applyE (v lName) (v kName)) }; Span = span } ]))
@@ -528,7 +528,7 @@ let private formerPipeline (span: Span) (outName: string) (outBinding: Binding o
     let lName = sprintf "__ppl_L_%s" outName
     let kName = sprintf "__ppl_k_%s" outName
     let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
-    let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
+    let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); NameSpan = noSpan })
     let whereC = if k >= 2 then commWhere paramNames else None
     let outValue = computeE (applyE (v lName) (v kName))
     let outDecl =
@@ -616,7 +616,7 @@ let private elabDist (ctx: Ctx) (span: Span) (dName: string) (args: Expr list)
             let stageDecls =
                 [ for k in 1 .. r do
                     let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
-                    let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
+                    let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); NameSpan = noSpan })
                     let whereC = if k >= 2 then commWhere paramNames else None
                     yield { Value = DeclLet { Pattern = pvar (lName k); Type = None; Value = methodForE (List.replicate k (v aName)); Mutability = BindLet }; Span = span }
                     yield { Value = DeclLet { Pattern = pvar (kName k); Type = None; Value = lambdaE ps whereC (cumulantKernelBody k (float n)); Mutability = BindLet }; Span = span } ]
@@ -741,7 +741,7 @@ let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (bindin
             | _ ->
                 // delta*delta^T as a packed symmetric outer square (scalar comm kernel)
                 let ddL = mkDecl ddLN (methodForE [v deltaN; v deltaN])
-                let ddK = mkDecl ddKN (lambdaE [{ Name = "__a"; Type = None }; { Name = "__b"; Type = None }]
+                let ddK = mkDecl ddKN (lambdaE [{ Name = "__a"; Type = None; NameSpan = noSpan }; { Name = "__b"; Type = None; NameSpan = noSpan }]
                                                (commWhere ["__a"; "__b"])
                                                (mulE (v "__a") (v "__b")))
                 let dd = mkDecl ddN (computeE (applyE (v ddLN) (v ddKN)))
@@ -753,7 +753,7 @@ let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (bindin
                 let merged =
                     computeE (applyE
                         (methodForE [syn (ExprZip [v cA; v cB; v ddN])])
-                        (lambdaE [{ Name = "__ca"; Type = None }; { Name = "__cb"; Type = None }; { Name = "__dd"; Type = None }] None body))
+                        (lambdaE [{ Name = "__ca"; Type = None; NameSpan = noSpan }; { Name = "__cb"; Type = None; NameSpan = noSpan }; { Name = "__dd"; Type = None; NameSpan = noSpan }] None body))
                 [ deltaDecl; ddL; ddK; dd
                   { Value = DeclLet { binding with Value = merged }; Span = span } ]))
     | _ ->
@@ -1031,8 +1031,8 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                     let xParams = [ for i in 1 .. p -> sprintf "__x%d" i ]
                     let yParams = [ for i in p + 1 .. r -> sprintf "__x%d" i ]
                     let ps =
-                        (xParams |> List.map (fun nm -> { Name = nm; Type = Some (TyArray (elemX, [fibX])) }))
-                        @ (yParams |> List.map (fun nm -> { Name = nm; Type = Some (TyArray (elemX, [fibY])) }))
+                        (xParams |> List.map (fun nm -> { Name = nm; Type = Some (TyArray (elemX, [fibX])); NameSpan = noSpan }))
+                        @ (yParams |> List.map (fun nm -> { Name = nm; Type = Some (TyArray (elemX, [fibY])); NameSpan = noSpan }))
                     let commGroups = [ xParams; yParams ] |> List.filter (fun g -> g.Length >= 2)
                     let whereC =
                         if commGroups.IsEmpty then None
@@ -1838,7 +1838,7 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
         | ExprKind.ExprVar f ->
             match Map.tryFind f funcs with
             | Some fd ->
-                let ps = fd.Params |> List.map (fun p -> { Name = p.Name; Type = None } : LambdaParam)
+                let ps = fd.Params |> List.map (fun p -> { Name = p.Name; Type = None; NameSpan = noSpan } : LambdaParam)
                 Ok (Some (ps, fd.Body))
             | None -> Ok None
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, prefixArgs) when Map.containsKey f funcs ->
@@ -1860,7 +1860,7 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
                     List.zip (bound |> List.map (fun p -> p.Name)) prefixArgs
                     |> Map.ofList
                 let body = fd.Body |> substVars renameMap |> substVars bindMap
-                let ps = freshNames |> List.map (fun n -> { Name = n; Type = None } : LambdaParam)
+                let ps = freshNames |> List.map (fun n -> { Name = n; Type = None; NameSpan = noSpan } : LambdaParam)
                 Ok (Some (ps, body))
         | _ -> Ok None
     let parseErr =

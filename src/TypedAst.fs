@@ -25,6 +25,10 @@ type TypedParam = {
     Type: IRType
     Index: int
     VarId: IRId
+    /// Source span of the parameter's NAME TOKEN, carried through from
+    /// Ast.ParamDecl/LambdaParam so `references[]` can point go-to-definition
+    /// at it. `noSpan` on synthesized params (the kernels elaborators invent).
+    NameSpan: Span
 }
 
 type TypedLambdaInfo = {
@@ -352,6 +356,8 @@ and TypedFunctionDecl = {
     Body: TypedExpr
     CommGroups: int list list
     IsStatic: bool
+    /// Source span of the function's NAME TOKEN (see Ast.FunctionDecl.NameSpan).
+    NameSpan: Span
 }
 
 // Typed type definitions, resolved from raw TypeDecl.
