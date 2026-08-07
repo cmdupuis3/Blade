@@ -1,0 +1,13 @@
+// TEST: Quantity Slot Rejects Structural Argument (rejects)
+// ERROR: BL3010
+// Matching DIMENSIONS do not imply the quantity: a Float<mps> value is
+// rejected by a Float<speed> parameter until the caller ascribes it
+// (`twice((m : speed))`). The dims agree perfectly; what is missing is the
+// caller's assertion.
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit speed: mps
+function twice(x: Float<speed>) -> Float<speed> = x + x
+let m: Float<mps> = 4.0
+let r = twice(m)

@@ -1,0 +1,9 @@
+// TEST: Factory Ambiguous Positional After Tag (rejects)
+// ERROR: BL3014
+// When tagged args are present, untagged (positional) ones must come
+// FIRST, in declared order -- an untagged straggler after a tagged arg has
+// no unambiguous slot, so it rejects rather than guessing.
+Unit levels: 1
+Unit cmap: 1
+function plot(x: Float, n: Float<levels> = 10.0, c: Float<cmap> = 0.0) -> Float = x + n * 100.0 + c * 7.0
+let r = plot(1.0, 3.0: cmap, 2.0)

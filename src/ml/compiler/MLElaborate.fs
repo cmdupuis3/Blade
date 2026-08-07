@@ -101,7 +101,7 @@ let private tyPgIrrepsArr (group: string) (s: Blade.ML.PointSpec.PgSpec) : TypeE
 let private mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl =
     { Name = name
       TypeParams = []
-      Params = ps |> List.map (fun (n, t) -> { Name = n; Type = Some t; Mutability = Immutable; NameSpan = noSpan })
+      Params = ps |> List.map (fun (n, t) -> { Name = n; Type = Some t; Mutability = Immutable; Default = None; NameSpan = noSpan })
       WhereClause = None
       ReturnType = Some retTy
       Body = body

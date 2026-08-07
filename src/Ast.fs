@@ -127,6 +127,18 @@ type ParallelStrategy =
     // strategy carries no payload; decomposition options can be added later.
     | Mpi
 
+/// A unit-of-measure expression: the shared grammar of Unit-declaration
+/// right-hand sides AND compound unit annotations in TYPE-ARGUMENT position
+/// (`Float<meter / second^2>`). Defined ahead of TypeExpr because
+/// TyUnitExpr embeds it (it references nothing but Ident, so hoisting it out
+/// of the UnitDecl group below is free).
+type UnitExpr =
+    | UnitNamed of Ident
+    | UnitMul of UnitExpr * UnitExpr
+    | UnitDiv of UnitExpr * UnitExpr
+    | UnitPow of UnitExpr * int
+    | UnitOne                            // the unity literal `1`: empty dims (Unit levels: 1, Unit hz = 1/seconds)
+
 type TypeExpr =
     // Primitive types
     | TyInt32
@@ -261,6 +273,15 @@ type TypeExpr =
     | TyHalo of inner: TypeExpr * offsets: Expr
     | TyConstrained of TypeExpr * Constraint list
     | TyPoly of TypeExpr  // Poly<T^r>: arity polymorphism
+    // COMPOUND unit expression in type-argument position:
+    // `Float<meter/second>`, `Float<second^-1>`, `Float<(meter*second)^2>`,
+    // `Float<1>`. Produced only by parseTypeArg's unit-expression routing —
+    // a LONE name stays TyNamed and `name^POSITIVE-INT` stays TyVar (both
+    // unit-disambiguated at lowering), so existing grammar is untouched.
+    // Resolved through env.Units at lowering: STRUCTURAL composition only;
+    // a quantity name inside is BL3011 (terminality, same rule as Unit
+    // declaration right-hand sides — see unitAnnoTerminalError).
+    | TyUnitExpr of UnitExpr
 
 /// The second argument of `SymIdx<k, _>` / `AntisymIdx<k, _>`: the base index
 /// space the k-th symmetric (antisymmetric) power is taken over.
@@ -479,6 +500,12 @@ and ForSource =
 and LambdaParam = {
     Name: Ident
     Type: TypeExpr option
+    /// Default value expression (`s = 2.0` / `s: Float = 2.0`). The trailing
+    /// rule (defaults only after all required params) and the required-
+    /// params-only scope rule are enforced at declaration (BL3012); absence
+    /// resolves statically at each call/apply site, so nothing option-like
+    /// survives into codegen or the interpreter.
+    Default: Expr option
     /// Span of the parameter's NAME TOKEN alone (not the `name: Type` pair),
     /// for go-to-definition and rename. `noSpan` on the params elaborators
     /// synthesize -- they have no source text to point at.
@@ -547,6 +574,8 @@ and ParamDecl = {
     Name: Ident
     Type: TypeExpr option
     Mutability: Mutability
+    /// Default value expression -- see LambdaParam.Default.
+    Default: Expr option
     /// Span of the parameter's NAME TOKEN alone -- see LambdaParam.NameSpan.
     NameSpan: Span
 }
@@ -620,13 +649,9 @@ type UnitDecl = {
 
 and UnitDef =
     | UnitBase                           // base unit
-    | UnitDerived of UnitExpr            // derived from other units
-
-and UnitExpr =
-    | UnitNamed of Ident
-    | UnitMul of UnitExpr * UnitExpr
-    | UnitDiv of UnitExpr * UnitExpr
-    | UnitPow of UnitExpr * int
+    | UnitDerived of UnitExpr            // derived from other units (structural alias)
+    | UnitQuantity of UnitExpr           // Unit speed: mps — nominal quantity entailing the RHS dims
+    // (UnitExpr itself is defined ahead of TypeExpr — TyUnitExpr embeds it.)
 
 /// How names from an imported module are brought into scope
 type ImportStyle =

@@ -1,0 +1,11 @@
+// TEST: Quantity Terminal In Compound Annotation (rejects)
+// ERROR: BL3011
+// Quantities are terminal in TYPE annotations exactly as in Unit
+// declarations: `Float<speed/second>` composes a quantity name inside a
+// unit expression, which the one-level nominal rule forbids. A LONE
+// quantity name (`Float<speed>`, units/026) keeps working.
+Unit meter
+Unit second
+Unit mps = meter / second
+Unit speed: mps
+let bad: Float<speed/second> = 1.0

@@ -1,0 +1,27 @@
+// TEST: Cross-module unit export
+// MODULE: Main
+module Main
+import Units
+
+/// The imported `newton` really is kg*m/s^2, not an opaque base unit: the
+/// product below is only well-typed if the exponent vectors agree.
+Unit accel = meter / second^2
+
+let mass: Float<kilogram> = 2.0
+let a: Float<accel> = 3.0
+let force: Float<newton> = mass * a
+let extra: Float<newton> = 4.0
+let total = force + extra
+// EXPECT: force = 6
+// EXPECT: total = 10
+
+/// Derived-on-derived: joule = newton*meter crosses the boundary too.
+let d: Float<meter> = 5.0
+let work: Float<joule> = force * d
+// EXPECT: work = 30
+
+/// A reciprocal unit, and the dimensionless product that proves it.
+let f: Float<hertz> = 2.0
+let t: Float<second> = 3.0
+let cycles = f * t
+// EXPECT: cycles = 6

@@ -556,6 +556,15 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprContains (a, v) ->
         IRContains (lowerTypedExpr env a, lowerTypedExpr env v)
+
+    | TExprDisplayEmit (head, quoted, data, metaTail) ->
+        IRDisplayEmit (head, quoted, lowerTypedExpr env data, metaTail)
+
+    | TExprDisplayJson (rank, data) ->
+        IRDisplayJson (rank, lowerTypedExpr env data)
+
+    | TExprDisplayNum data ->
+        IRDisplayNum (lowerTypedExpr env data)
     
     | TExprGroupBy (values, grouping) ->
         IRGroupBy (lowerTypedExpr env values, lowerTypedExpr env grouping)
@@ -1371,17 +1380,25 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         ([Choice3Of3 irTd], env)
     
     | TDeclUnit unitDecl ->
-        // Register unit in environment (same logic as untyped pipeline)
+        // Register unit in environment (same logic as the typecheck pipeline,
+        // minus the hard errors: typecheck already rejected a terminal-quantity
+        // misuse, so this pass only needs a defensive fallback).
+        let baseSig = unitOfDims (Map.ofList [(unitDecl.Name, 1)])
         let sig' =
             match unitDecl.Definition with
-            | None | Some UnitBase ->
-                Map.ofList [(unitDecl.Name, 1)]
+            | None | Some UnitBase -> baseSig
             | Some (UnitDerived expr) ->
                 match TypeEnv.resolveUnitExpr env.UnitDefs expr with
                 | Ok resolved -> resolved
-                | Error msg ->
-                    eprintfn "Unit error: %s" msg
-                    Map.ofList [(unitDecl.Name, 1)]
+                | Error err ->
+                    eprintfn "Unit error: %s" (TypeEnv.ppUnitResolveErr err)
+                    baseSig
+            | Some (UnitQuantity expr) ->
+                match TypeEnv.resolveUnitExpr env.UnitDefs expr with
+                | Ok resolved -> { resolved with Nominal = Some unitDecl.Name }
+                | Error err ->
+                    eprintfn "Unit error: %s" (TypeEnv.ppUnitResolveErr err)
+                    { baseSig with Nominal = Some unitDecl.Name }
         let env' = { env with UnitDefs = Map.add unitDecl.Name sig' env.UnitDefs }
         ([], env')
     
@@ -2121,6 +2138,46 @@ let lowerDiag (fileName: string option) (source: string)
                     Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
     result, sm
 
+/// Multi-FILE twin of `lowerDiag`. `sources` is (path, source) in dependency
+/// order with the ENTRY LAST -- what `ModuleResolve.resolveEntry` returns --
+/// and every span keeps its own file, so the SourceMap (keyed on the same
+/// paths) renders snippets for members as readily as for the entry.
+///
+/// Parsing goes through `ModuleResolve.parseResolved` rather than
+/// `Parser.parseMultiSource` because the latter renames a header-less module
+/// after its FILE NAME, which is right for the corpus harness and wrong for an
+/// absolute path; see the note there.
+let lowerDiagMulti (sources: (string * string) list)
+    : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    let sm = Blade.Diagnostics.SourceMap.ofSources sources
+    let result =
+        match Blade.ModuleResolve.parseResolved sources with
+        | Error d -> Error [ d ]
+        | Ok program ->
+            match Blade.TypeCheck.typeCheck program with
+            | Error errors ->
+                Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
+            | Ok (typedProgram, builder, warnings) ->
+                try Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+                with ex ->
+                    Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+    result, sm
+
+/// The CLI's front door: resolve `filePath`'s imports to files, then lower the
+/// whole set.
+///
+/// A file whose imports all resolve to builtin pseudo-modules (or that has no
+/// imports at all) takes `lowerDiag` UNCHANGED -- same call, same SourceMap
+/// key, same everything -- so the overwhelmingly common single-file case
+/// cannot have been perturbed by the module layer existing.
+let lowerFileDiag (filePath: string) (source: string)
+    : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    let r = Blade.ModuleResolve.resolveEntry filePath source
+    match r.Errors, r.Files with
+    | [], [ _single ] -> lowerDiag (Some filePath) source
+    | [], files -> lowerDiagMulti (Blade.ModuleResolve.sourcesOf files)
+    | ds, _ -> Error ds, Blade.ModuleResolve.sourceMapOf r
+
 /// Harness twin of `lower`: the same parse -> typecheck -> lower pipeline and
 /// the same `Result`, but the typecheck warnings come back as coded
 /// `Diagnostic`s instead of being rendered to stderr.
@@ -2150,7 +2207,23 @@ let lowerDiag (fileName: string option) (source: string)
 /// reset the (AsyncLocal, reset-per-`typeCheck`) channels, and draining them
 /// would hand this file the PREVIOUS file's warnings.
 let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnostics.Diagnostic list =
-    match Blade.Parser.parseProgram source with
+    // Resolve FILE-BACKED imports (stdlib `units.SI`, `plot`, ...) exactly
+    // like the path-bearing entry points do, so the corpus lane exercises the
+    // same program the run/serve lanes compile. The synthetic entry path
+    // anchors the stdlib probe at the working directory (the corpus runs from
+    // the repo root, where <cwd>/stdlib exists); pseudo-modules (ml, display,
+    // ...) are exempt inside the resolver, and a source with no file imports
+    // resolves to just itself -- the historical single-source pipeline.
+    // Before this, `import units.SI` in a corpus test was a silent no-op and
+    // every unit name it was supposed to bring in degraded to a bare float.
+    let entryPath =
+        System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "__corpus_entry__.blade")
+    let r = Blade.ModuleResolve.resolveEntry entryPath source
+    match r.Errors with
+    | (d: Blade.Diagnostics.Diagnostic) :: _ ->
+        Error (sprintf "%s: %s" d.Code d.Message), []
+    | [] ->
+    match Blade.ModuleResolve.parseResolved (Blade.ModuleResolve.sourcesOf r.Files) with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
         | Ok (typedProgram, builder, _) ->
@@ -2165,8 +2238,8 @@ let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnosti
             let warnings = typeCheckWarningDiagnostics false
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs), warnings
-    | Error e ->
-        Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message), []
+    | Error d ->
+        Error (sprintf "Parse error: %s" d.Message), []
 
 /// Lower multiple source files into a single IR program with cross-module imports
 let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, string> =

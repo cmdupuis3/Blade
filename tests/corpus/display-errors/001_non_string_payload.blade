@@ -1,0 +1,10 @@
+// TEST: Display emit non-string payload (rejects)
+// ERROR: BL3001
+// ============================================================================
+// Negative test: `display.emit`'s payload is an ordinary `String` parameter,
+// so handing it an Int64 is an ordinary type error -- not a special
+// display-module diagnostic. The elaborator rewrites the call unconditionally;
+// the checker's `checkExpr ... ETString` is what rejects it.
+// ============================================================================
+import display as d
+let bad = d.emit("text/plain", 42)

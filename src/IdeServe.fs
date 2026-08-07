@@ -15,7 +15,14 @@
 //   -> {"id":N,"cmd":"eval","session":"<key>","source":"<cell>","cwd":"<dir>"?}
 //   <- {"id":N,"kept":B,"exitCode":E,"lane":"interp"|"gpp","elapsedMs":M,
 //       "stdout":"..","stderr":"..","bindings":[{name,type,value}],
-//       "diagnostics":[{severity,line,col,endLine,endCol,message,code?}]}
+//       "diagnostics":[{severity,line,col,endLine,endCol,message,code?}],
+//       "display":[{v,mime,encoding,data,meta}]}
+//
+// `display` (Blade-REPL/docs/display-frames.md section 2) carries the rich
+// MIME outputs -- plots -- this submission produced, in production order. The
+// field is OMITTED when the submission produced none, which is what keeps
+// every pre-display-frames client and every non-plotting program on exactly
+// the bytes they had before.
 //   -> {"id":N,"cmd":"resetSession","session":"<key>"}   <- {"id":N,"ok":true}
 //
 // ...and the notebook's SQUIGGLE clock, which typechecks every cell at once:
@@ -132,7 +139,11 @@ let private laneName (l: Blade.ReplSession.Lane) =
     | Blade.ReplSession.LaneInterp -> "interp"
     | Blade.ReplSession.LaneGpp -> "gpp"
 
-let private evalResponse (id: int) (r: Blade.ReplSession.EvalResult) : string =
+/// Public (not private like its siblings) so tests/Test_Display.fs can pin the
+/// WIRE BYTES of the `display` array rather than re-deriving them: the frames
+/// are spliced in as raw JSON, which is exactly the thing a paraphrase would
+/// get wrong.
+let evalResponse (id: int) (r: Blade.ReplSession.EvalResult) : string =
     let sb = StringBuilder()
     let esc = Blade.Ide.jsonEscape
     sb.AppendFormat(
@@ -155,7 +166,22 @@ let private evalResponse (id: int) (r: Blade.ReplSession.EvalResult) : string =
         if d.Code <> "" then
             sb.AppendFormat(",\"code\":\"{0}\"", esc d.Code) |> ignore
         sb.Append '}' |> ignore)
-    sb.Append "]}" |> ignore
+    sb.Append ']' |> ignore
+    // Display frames (docs/display-frames.md section 2). Each entry is ALREADY a
+    // complete JSON object -- it travelled as one on stdout and
+    // Blade.Display.Frame built it -- so it is spliced in verbatim, NOT
+    // escaped: escaping it here would turn the array into an array of strings
+    // and the reader would reject every one. The field is emitted only when
+    // non-empty, so a program that never plots produces a byte-identical
+    // response to the one this compiler produced before display frames existed.
+    if not r.Display.IsEmpty then
+        sb.Append ",\"display\":[" |> ignore
+        r.Display
+        |> List.iteri (fun i f ->
+            if i > 0 then sb.Append ',' |> ignore
+            sb.Append f |> ignore)
+        sb.Append ']' |> ignore
+    sb.Append '}' |> ignore
     sb.ToString()
 
 // The loop
@@ -246,6 +272,15 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                 s
         // Only the g++ lane reads this, and only to run the built executable.
         session.RunCwd <- Directory.GetCurrentDirectory()
+        // Display-frame `meta.id`s are `<tag><ordinal>`, and the ordinal
+        // restarts every run. That is what lets a session's re-run update the
+        // editor's existing plots in place -- but two notebooks open at once
+        // would then both claim `blade-1` and merge each other's plots. A tag
+        // derived from the session key keeps them apart while staying STABLE
+        // across that session's own re-runs. Set per request because one
+        // process serves every open notebook; requests are handled strictly one
+        // at a time (see the loop's doc comment), so this cannot interleave.
+        Blade.Display.Frame.SessionTag <- Blade.Display.Frame.tagForSession key
         respond (evalResponse id (session.EvalOnce source))
     /// Handle one line; false means "stop the loop".
     let handle (line: string) : bool =

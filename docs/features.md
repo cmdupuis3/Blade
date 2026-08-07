@@ -218,7 +218,8 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 |---------|--------|-----------------|
 | Newline statement separation, delimiter-aware; optional `;`; inline vs block bodies | Core |  |
 | Modules (`module` declarations) | Core |  |
-| Imports (`import` / `from` / `as` keywords) | Planned | multifile compilation not landed |
+| Imports (`import` / `from` / `as` keywords) | Core | dotted names resolve to files: `import units.SI` -> `units/SI.blade`, searched under the stdlib roots (`$BLADE_STDLIB`, then `stdlib/` beside the binary and upwards) then the importing file's directory; transitive, cycle- and duplicate-checked (`src/ModuleResolve.fs`, `blade test module-resolve`) |
+| Standard library (`stdlib/`) | Partly Done | `units.SI` only: the 7 SI base units + the coherent derived units. No prefixed/offset units — the unit algebra carries dimensions, not scale factors |
 | Pseudo-native mathematics (rank-0 collapse foundation; `A + B` needs no constructor commitment) | Core |  |
 | Named infix operators `a :name: b` (uniform lowest precedence) | Planned |  |
 | `print` / expression output | Core | EXPECT-comment test convention |

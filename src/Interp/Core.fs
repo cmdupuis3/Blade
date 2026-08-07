@@ -648,6 +648,84 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRCompute _ | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRContains _ ->
         evalArrayNode st env expr
 
+    // ---- display.emit: the IR's one EFFECTFUL expression (docs/display-frames.md).
+    //      Buffered rather than written, because the interpreter assembles all
+    //      of stdout after every binding has evaluated -- Run.execProgram
+    //      flushes the buffer ahead of the binding prints, which is exactly
+    //      where the compiled binary's std::cout writes land (inside main()'s
+    //      body, before the timing line). Same bytes, same order, both lanes.
+    | IRDisplayEmit (head, quoted, dataExpr, metaTail) ->
+        (match evalExpr st env dataExpr with
+         | VString s -> VBool (Blade.Display.Frame.emit head quoted s metaTail)
+         | _ -> raise (InterpUnsupported "display.emit: payload did not evaluate to a String"))
+
+    // ---- display.json_array / display.json_num: JSON text of a numeric
+    //      array / scalar. Formatting parity is the contract:
+    //      CppFormat.formatFloat15 is the byte-exact mirror of the C++
+    //      helpers' `setprecision(15)` stream (blade_display::json1/json2 in
+    //      Blade.Display.Frame.cppRuntime), so the differential gate pins
+    //      the two lanes together exactly as it does for prints.
+    | IRDisplayJson (rank, dataExpr) ->
+        (match forceValue st env (evalExpr st env dataExpr) with
+         | VArray ba ->
+             let elemStr (store: Store) (i: int) : string =
+                 match store with
+                 | SFloat a -> Blade.Interp.CppFormat.formatFloat15 a.[i]
+                 | SInt a -> string a.[i]
+                 | SObj vs ->
+                     (match vs.[i] with
+                      | VFloat f -> Blade.Interp.CppFormat.formatFloat15 f
+                      | VFloat32 f -> Blade.Interp.CppFormat.formatFloat32 f
+                      | VInt n -> string n
+                      | VInt32 n -> string n
+                      | _ -> raise (InterpUnsupported "display.json_array: non-numeric element"))
+                 | _ -> raise (InterpUnsupported "display.json_array: unsupported element store")
+             let sb = System.Text.StringBuilder()
+             (match rank, ba.Data with
+              | 1, store ->
+                  let n = int ba.Extents.[0]
+                  sb.Append '[' |> ignore
+                  for i in 0 .. n - 1 do
+                      if i > 0 then sb.Append ',' |> ignore
+                      sb.Append(elemStr store i) |> ignore
+                  sb.Append ']' |> ignore
+              | 2, SNested rows ->
+                  let nr = int ba.Extents.[0]
+                  let nc = int ba.Extents.[1]
+                  sb.Append '[' |> ignore
+                  for i in 0 .. nr - 1 do
+                      if i > 0 then sb.Append ',' |> ignore
+                      sb.Append '[' |> ignore
+                      for j in 0 .. nc - 1 do
+                          if j > 0 then sb.Append ',' |> ignore
+                          sb.Append(elemStr rows.[i] j) |> ignore
+                      sb.Append ']' |> ignore
+                  sb.Append ']' |> ignore
+              | 2, store ->
+                  // Flat row-major backing (computed rank-2 results).
+                  let nr = int ba.Extents.[0]
+                  let nc = int ba.Extents.[1]
+                  sb.Append '[' |> ignore
+                  for i in 0 .. nr - 1 do
+                      if i > 0 then sb.Append ',' |> ignore
+                      sb.Append '[' |> ignore
+                      for j in 0 .. nc - 1 do
+                          if j > 0 then sb.Append ',' |> ignore
+                          sb.Append(elemStr store (i * nc + j)) |> ignore
+                      sb.Append ']' |> ignore
+                  sb.Append ']' |> ignore
+              | r, _ -> raise (InterpUnsupported (sprintf "display.json_array: unsupported rank %d" r)))
+             VString (sb.ToString())
+         | _ -> raise (InterpUnsupported "display.json_array: operand did not evaluate to an array"))
+
+    | IRDisplayNum dataExpr ->
+        (match forceValue st env (evalExpr st env dataExpr) with
+         | VFloat f -> VString (Blade.Interp.CppFormat.formatFloat15 f)
+         | VFloat32 f -> VString (Blade.Interp.CppFormat.formatFloat32 f)
+         | VInt n -> VString (string n)
+         | VInt32 n -> VString (string n)
+         | _ -> raise (InterpUnsupported "display.json_num: operand did not evaluate to a numeric scalar"))
+
     // ---- group_by(vals, gk) -> a ragged (CSR) array. Materializes via the Loops
     //      backend (it reads the VGroupKeys from `gk` + gathers the values).
     //      group_keys itself is intercepted at BINDING level (evalBinding) where

@@ -310,6 +310,27 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                                       IRefNamed argName)
                     | _ -> baseType
                 | None -> baseType  // not a unit, ignore
+            | [TyUnitExpr ue] ->
+                // COMPOUND unit annotation (`Float<meter/second^2>`,
+                // `Float<second^-1>`, `Float<1>`): structural composition
+                // through the same resolver Unit-declaration RHSs use.
+                // Lowering stays total: a terminal-quantity misuse (BL3011,
+                // surfaced by unitAnnoTerminalError at the annotation
+                // consumers) or an unknown name degrades to the bare base,
+                // exactly like an unknown unit name in the arm above.
+                (match resolveUnitExpr env.Units ue with
+                 | Ok sig' -> IRTUnitAnnotated (baseType, sig')
+                 | Error _ -> baseType)
+            | [TyVar (argName, Some n)] when Map.containsKey argName env.Units ->
+                // `Float<meter^2>`: the positive-exponent power spelling
+                // parses as a rank-marked type VARIABLE (grammar collision
+                // with `T^2`); the name being a registered unit disambiguates
+                // -- the same units-first policy as the bare-name arm.
+                // Terminal quantities reject via the consumer check; resolver
+                // failure degrades to the bare base.
+                (match resolveUnitExpr env.Units (UnitPow (UnitNamed argName, n)) with
+                 | Ok sig' -> IRTUnitAnnotated (baseType, sig')
+                 | Error _ -> baseType)
             | _ -> baseType
         let tryResolveUnitArg baseType args = tryResolveTagArg baseType baseType args
         match name with
@@ -319,13 +340,16 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         | "Float32" -> tryResolveUnitArg (IRTScalar ETFloat32) args
         | "Complex64" -> tryResolveUnitArg (IRTScalar ETComplex64) args
         | "Complex128" -> tryResolveUnitArg (IRTScalar ETComplex128) args
-        | "Bool" -> IRTScalar ETBool
+        // Bool/String route through tryResolveUnitArg like the numeric bases
+        // (previously they silently DROPPED type args), so `Bool<flag>` and
+        // `String<title>` carry their (typically dimensionless-quantity) tag.
+        | "Bool" -> tryResolveUnitArg (IRTScalar ETBool) args
         | "Void" -> IRTUnit
         // Nat resolves a unit arg like the other numeric bases so
         // `Nat<angular_momentum>` carries its tag instead of silently
         // dropping it (non-unit args keep returning bare Nat, as before).
         | "Nat" -> tryResolveTagArg (IRTNat None) (IRTScalar ETInt64) args
-        | "String" -> IRTScalar ETString
+        | "String" -> tryResolveUnitArg (IRTScalar ETString) args
         | "Char" -> IRTScalar ETInt32
         | "Poly" ->
             // Each Poly occurrence gets its own fresh arity variable name --
@@ -337,6 +361,15 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             match args with
             | [inner] -> IRTPoly (lowerTypeExpr env inner, arityName)
             | _ -> IRTPoly (IRTScalar ETFloat64, arityName)
+        | _ when args.IsEmpty && Map.containsKey name env.Units ->
+            // BARE unit/quantity name in type position (`10 : levels`,
+            // `4.0 : speed`, param `x: speed`). Checked BEFORE the named-type
+            // fallback (previously this fell through to IRTNamed and failed as
+            // an unknown type). The inner scalar is a fresh inference var: the
+            // checked expression's bare type flows in bidirectionally (the
+            // permissive asymmetric unify arm binds it), so the ascription
+            // adopts the value's scalar while stamping the signature.
+            IRTUnitAnnotated (env.Subst.Fresh(), Map.find name env.Units)
         | _ ->
             match lookupTypeDef name env with
             | Some (TDIAlias resolvedTy) -> resolvedTy
@@ -564,6 +597,16 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         // gets its own identifier in the type rep.
         let arityName = sprintf "r%d" (env.Builder.FreshId())
         IRTPoly (lowerTypeExpr env inner, arityName)
+    | TyUnitExpr ue ->
+        // A compound unit expression standing ALONE in type position. The
+        // parser only produces TyUnitExpr inside a type-argument list, where
+        // the enclosing TyNamed arm consumes it via tryResolveTagArg -- but
+        // the node is a TypeExpr, so lower it totally: annotate a fresh
+        // inferred scalar, exactly like a bare unit name in type position
+        // (the checked expression's bare type flows in bidirectionally).
+        (match resolveUnitExpr env.Units ue with
+         | Ok sig' -> IRTUnitAnnotated (env.Subst.Fresh(), sig')
+         | Error _ -> env.Subst.Fresh())
     | TyConstrained (inner, _) -> lowerTypeExpr env inner
     | TyEquivIdx (_dim, _group, _rep) ->
         let idx = { Id = env.Builder.FreshId(); Rank = 1; Extent = IRParam ("equiv", 0, IRTNat None)
@@ -2389,15 +2432,41 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 | _ -> None)
         let unitClash =
             let n = min paramTys.Length tArgs.Length
+            // (sig, concrete): `concrete` is false while the (element) type is
+            // still an unresolved inference variable — the strict quantity
+            // check below must not reject a type that simply isn't KNOWN yet
+            // (e.g. a kernel body calling a helper before params are bound).
             let sigOf t =
                 match env.Subst.Resolve t with
-                | ArrayElem at -> IR.getUnits at.ElemType
-                | resolved -> IR.getUnits resolved
+                | ArrayElem at ->
+                    let e = env.Subst.Resolve at.ElemType
+                    (IR.getUnits e, (match e with IRTInfer _ -> false | _ -> true))
+                | IRTInfer _ -> (None, false)
+                | resolved -> (IR.getUnits resolved, true)
+            let describeArg (au: UnitSig option) =
+                match au with
+                | None -> "bare (it carries no unit signature)"
+                | Some a ->
+                    match a.Nominal with
+                    | Some qn -> sprintf "the quantity '%s'" qn
+                    | None -> sprintf "structurally dimensioned (%s)" (ppUnitSig a)
             List.zip (List.truncate n paramTys) (List.truncate n tArgs)
             |> List.mapi (fun i (pTy, arg) -> (i, sigOf pTy, sigOf arg.Type))
-            |> List.tryPick (fun (i, pu, au) ->
+            |> List.tryPick (fun (i, (pu, _), (au, aConcrete)) ->
                 match pu, au with
-                | Some pu, Some au when not (unitCompatible pu au) -> Some (i, pu, au)
+                | Some pu, Some au when not (unitCompatible pu au) ->
+                    Some (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
+                // STRICT quantity slots (BL3010): a parameter declared with a
+                // QUANTITY (Nominal = Some) rejects any CONCRETE argument not
+                // carrying that nominal — bare and structurally-dimensioned
+                // args alike; the caller must ascribe. Structural (None)
+                // parameters keep the permissive behavior above exactly.
+                | Some pu, _ when pu.Nominal.IsSome
+                                  && aConcrete
+                                  && (match au with
+                                      | Some a -> a.Nominal <> pu.Nominal
+                                      | None -> true) ->
+                    Some (QuantityArgMismatch (i + 1, pu.Nominal.Value, describeArg au))
                 | _ -> None)
         // A Poly<T^r> pack param makes the arrow variadic -- its declared
         // param count says nothing about legal call-site arg counts, so
@@ -2419,8 +2488,8 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             Error (IndexRankMismatch (sprintf "argument %d, index slot %d" (i + 1) slot,
                                       ppIndexType pi, max 1 pi.Rank,
                                       ppIndexType ai, max 1 ai.Rank))
-        | None, None, Some (i, pu, au), _ ->
-            Error (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
+        | None, None, Some unitErr, _ ->
+            Error unitErr
         | None, None, None, Some (i, pr, ar, pTy, aTy) ->
             Error (ArgRankMismatch (i + 1, pr, ar,
                                     ppIRType (env.Subst.Resolve pTy),
@@ -2459,7 +2528,19 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 // Not partial application: ExprApp eta-expands 0 < k < n
                 // before dispatching, so this is `f()` on an n-ary function
                 // or an under-applied struct field -- genuine arity errors.
-                Error (ArityMismatch (paramTys.Length, tArgs.Length))
+                // "Too few" means fewer than the REQUIRED params: for a
+                // defaults-carrying callee (whose fills the desugar already
+                // handled for required <= k < total) report the required
+                // count, not the full param count.
+                let expectedMin =
+                    match tFunc.Kind with
+                    | TExprVar (name, _, _) ->
+                        (match env.FuncDefaults.TryGetValue name with
+                         | true, ps ->
+                             ps |> List.takeWhile (fun (_, _, d) -> Option.isNone d) |> List.length
+                         | _ -> paramTys.Length)
+                    | _ -> paramTys.Length
+                Error (ArityMismatch (expectedMin, tArgs.Length))
             else
                 Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
     | _ ->
@@ -2522,6 +2603,9 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprArrayNegate a -> [a]
         | TExprArrayConjugate a -> [a]
         | TExprContains (a, v) -> [a; v]
+        | TExprDisplayEmit (_, _, d, _) -> [d]
+        | TExprDisplayJson (_, d) -> [d]
+        | TExprDisplayNum d -> [d]
         | TExprGroupKeys keys -> keys
         | TExprStruct (_, fields) -> fields |> List.map snd
         | TExprIndex (arr, idxs, _) -> arr :: idxs
@@ -2676,6 +2760,302 @@ let compactClassInheritError
         (match List.tryItem argPos conjCommutes with
          | Some true -> None
          | _ -> Some (HermitianMapNotReal paramName))
+
+/// The QUANTITY nominal a surface type annotation names, when it names one:
+/// a bare quantity (`levels`) or a tagged base (`Float<speed>`,
+/// `Int64<levels>`, `String<title>`, ...). Structural units (Nominal = None)
+/// and non-unit names answer None.
+let private surfaceTypeQuantity (env: TypeEnv) (ty: TypeExpr) : string option =
+    let quantityOf name =
+        match Map.tryFind name env.Units with
+        | Some (s: UnitSig) -> s.Nominal
+        | None -> None
+    match ty with
+    | TyNamed (q, []) -> quantityOf q
+    | TyNamed (_, [TyNamed (q, [])]) -> quantityOf q
+    | _ -> None
+
+/// The QUANTITY nominal a call ARGUMENT carries, judged at surface level:
+/// an ascription (`20 : levels`, `v : Float<speed>`) or a variable whose
+/// (resolved) type already carries the nominal. Compound expressions and
+/// call results are NOT probed -- they route positionally unless ascribed.
+let private argQuantityTag (env: TypeEnv) (a: Expr) : string option =
+    match a.Kind with
+    | ExprKind.ExprTyped (_, ty) -> surfaceTypeQuantity env ty
+    | ExprKind.ExprVar n ->
+        (match lookupVar n env with
+         | Some vi ->
+             (match IR.getUnits (env.Subst.Resolve vi.Type) with
+              | Some u -> u.Nominal
+              | None -> None)
+         | None -> None)
+    | _ -> None
+
+/// Terminality check for unit annotations in TYPE position -- the annotation
+/// twin of registerUnit's BL3011 rule. A quantity name inside a COMPOUND
+/// unit expression (`Float<speed/second>`, `Float<speed^2>`) rejects: the
+/// nominal layer is exactly one level deep, so only a LONE quantity name
+/// (`Float<speed>`) may appear in a type argument. Descends aggregate
+/// component positions the way boundedAggregateError does. Lowering itself
+/// stays TOTAL (it degrades to the bare base type), so the annotation
+/// CONSUMERS -- ascriptions, let annotations, function signatures -- call
+/// this to surface the error.
+let rec private unitAnnoTerminalError (env: TypeEnv) (ty: TypeExpr) : TypeError option =
+    let quantityIn name =
+        match Map.tryFind name env.Units with
+        | Some (s: UnitSig) -> s.Nominal
+        | None -> None
+    let rec inUnitExpr (ue: UnitExpr) : string option =
+        match ue with
+        | UnitNamed n -> quantityIn n
+        | UnitMul (a, b) | UnitDiv (a, b) ->
+            inUnitExpr a |> Option.orElseWith (fun () -> inUnitExpr b)
+        | UnitPow (a, _) -> inUnitExpr a
+        | UnitOne -> None
+    match ty with
+    | TyUnitExpr ue ->
+        inUnitExpr ue |> Option.map (fun q -> QuantityTerminal (q, "<type annotation>"))
+    | TyVar (name, Some _) ->
+        // `Float<speed^2>` parses as a rank-marked type var; a quantity name
+        // there is the power spelling of the same terminality violation.
+        quantityIn name |> Option.map (fun q -> QuantityTerminal (q, "<type annotation>"))
+    | TyNamed (_, args) -> args |> List.tryPick (unitAnnoTerminalError env)
+    | TyBounded (b, _, _) -> unitAnnoTerminalError env b
+    | TyArray (elem, _) -> unitAnnoTerminalError env elem
+    | TyDist (_, elem, _) -> unitAnnoTerminalError env elem
+    | TyTuple ts -> ts |> List.tryPick (unitAnnoTerminalError env)
+    | TyFunc (args, ret) ->
+        (args |> List.tryPick (unitAnnoTerminalError env))
+        |> Option.orElseWith (fun () -> unitAnnoTerminalError env ret)
+    | TyConstrained (inner, _) -> unitAnnoTerminalError env inner
+    | TyPoly inner -> unitAnnoTerminalError env inner
+    | _ -> None
+
+/// DEFAULT PARAMETER FILL (surface call-site desugar). A call omitting
+/// trailing DEFAULTED parameters rewrites into an ordinary full-arity call
+/// BEFORE any typing happens, so codegen and the interpreter only ever see
+/// plain calls and lets -- absence resolves statically, nothing option-like
+/// exists at runtime.
+///
+///   f(a0, a1)  with  f(x, y, s: T = d)   ==>   f(a0, a1, (d : T))
+///
+/// A fill is ascribed with the parameter's declared annotation, which makes
+/// a defaulted QUANTITY slot an INTRODUCTION position: the ascription mints
+/// the slot's nominal onto the default (with the dims check ascription
+/// carries), so no BL3010 fires for the API author's own default while
+/// caller-supplied bare arguments are still rejected.
+///
+/// When a fill references required params (the `auto_levels(z)` pattern),
+/// the call wraps in a block that binds each REFERENCED supplied argument
+/// exactly once -- first to a fresh temp (so every argument expression still
+/// evaluates in CALLER scope; a later arg may use a name that collides with
+/// an earlier param), then to the parameter's own name, which is the name
+/// the default expression references:
+///
+///   { let __dflt7_0 = a0; let z = __dflt7_0; f(z, (auto_levels(z) : T)) }
+///
+/// Defaults evaluate at call entry, left-to-right, seeing the caller's
+/// evaluated required-argument values.
+///
+/// FACTORY BY-NOMINAL ROUTING. When the callee's defaulted trailing group
+/// contains QUANTITY-typed slots (Nominal = Some, distinct per slot --
+/// BL3013), a trailing argument carrying a quantity nominal (an ascription
+/// `20 : levels` / `v : Float<speed>`, or a variable whose type already
+/// carries the nominal) routes TO THAT SLOT regardless of its position among
+/// the trailing args. Untagged trailing args keep positional fill and must
+/// PRECEDE every tagged one (an untagged straggler after a tag is ambiguous
+/// -- BL3014); a tag matching no slot and a slot supplied twice are BL3014
+/// too. A callee with no quantity slots keeps pure positional semantics --
+/// quantity-typed VALUES may legitimately flow into structural slots.
+///
+/// Returns None when this call needs no rewriting (unknown callee, no
+/// defaults, full-arity in declared order, fewer than required args, or a
+/// `_` placeholder -- partial application owns those); Some (Error e) when
+/// routing itself is invalid.
+let private tryFillDefaultArgs (env: TypeEnv) (callSpan: Span) (func: Expr) (args: Expr list) : TypeResult<Expr> option =
+    let calleeName =
+        match func.Kind with
+        | ExprKind.ExprVar n -> n
+        | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, fname) -> alias + "." + fname
+        | _ -> "lambda"
+    let paramInfos =
+        match func.Kind with
+        | ExprKind.ExprVar name ->
+            (match env.FuncDefaults.TryGetValue name with
+             | true, ps -> Some ps
+             | _ -> None)
+        // Module-QUALIFIED callee (`plot.contourf(...)`): declarations inside
+        // an imported module registered their defaults under the BARE
+        // function name (checkFunctionDecl runs inside that module), so the
+        // field name is the lookup key. Shares FuncDefaults' documented
+        // name-keyed shadowing weakness.
+        | ExprKind.ExprField ({ Kind = ExprKind.ExprVar _ }, fname) ->
+            (match env.FuncDefaults.TryGetValue fname with
+             | true, ps -> Some ps
+             | _ -> None)
+        // Immediately-applied lambda literal: its params are right here.
+        | ExprKind.ExprLambda (parms, _, _) when parms |> List.exists (fun p -> p.Default.IsSome) ->
+            Some (parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
+        | _ -> None
+    match paramInfos with
+    | None -> None
+    | Some ps ->
+        let total = ps.Length
+        let required = ps |> List.takeWhile (fun (_, _, d) -> Option.isNone d) |> List.length
+        let k = args.Length
+        let hasWildcard =
+            args |> List.exists (fun a -> match a.Kind with ExprKind.ExprWildcard -> true | _ -> false)
+        if hasWildcard || k < required then None
+        else
+        let trailingSlots = ps |> List.skip required   // all defaulted (trailing rule)
+        let slotQs =
+            trailingSlots |> List.map (fun (_, tyOpt, _) -> tyOpt |> Option.bind (surfaceTypeQuantity env))
+        let trailingArgs = if k > required then args |> List.skip required else []
+        let argTags =
+            // Tags engage only when the callee HAS quantity slots (see doc).
+            if slotQs |> List.exists Option.isSome
+            then trailingArgs |> List.map (argQuantityTag env)
+            else trailingArgs |> List.map (fun _ -> None)
+        let anyTagged = argTags |> List.exists Option.isSome
+        if not anyTagged && k >= total then None      // full-arity positional call: untouched
+        else
+        // Per trailing slot, in DECLARED order: Some suppliedArg | None (use default).
+        let assembled : TypeResult<Expr option list> =
+            if not anyTagged then
+                Ok [ for j in 0 .. trailingSlots.Length - 1 ->
+                        if j < trailingArgs.Length then Some (List.item j trailingArgs) else None ]
+            else
+                let firstTag = argTags |> List.findIndex Option.isSome
+                let straggler =
+                    argTags
+                    |> List.mapi (fun i t -> (i, t))
+                    |> List.tryPick (fun (i, t) -> if i > firstTag && t.IsNone then Some i else None)
+                match straggler with
+                | Some i -> Error (FactoryAmbiguousMix (calleeName, required + i + 1))
+                | None ->
+                    let nPos = firstTag   // untagged prefix fills leading trailing slots positionally
+                    if nPos > trailingSlots.Length then
+                        Error (ArityMismatch (total, k))
+                    else
+                    let assignments = System.Collections.Generic.Dictionary<int, Expr>()
+                    for j in 0 .. nPos - 1 do assignments.[j] <- List.item j trailingArgs
+                    let mutable err = None
+                    trailingArgs
+                    |> List.skip nPos
+                    |> List.iteri (fun i a ->
+                        if err.IsNone then
+                            let tag = (List.item (nPos + i) argTags).Value
+                            match slotQs |> List.tryFindIndex (fun q -> q = Some tag) with
+                            | None ->
+                                err <- Some (FactoryUnknownTag (calleeName, tag, slotQs |> List.choose id))
+                            | Some j ->
+                                if assignments.ContainsKey j then
+                                    let (slotName, _, _) = List.item j trailingSlots
+                                    err <- Some (FactoryDupFill (calleeName, tag, slotName))
+                                else
+                                    assignments.[j] <- a)
+                    match err with
+                    | Some e -> Error e
+                    | None ->
+                        Ok [ for j in 0 .. trailingSlots.Length - 1 ->
+                                match assignments.TryGetValue j with
+                                | true, a -> Some a
+                                | _ -> None ]
+        match assembled with
+        | Error e -> Some (Error e)
+        | Ok slotAssign ->
+        // Nothing to do (every slot supplied, already in declared order):
+        // return None so the re-entry after a rewrite terminates.
+        let isIdentity =
+            slotAssign.Length = trailingArgs.Length
+            && List.forall2
+                (fun s a -> match s with Some x -> System.Object.ReferenceEquals(x, a) | None -> false)
+                slotAssign trailingArgs
+        if isIdentity then None
+        else
+        let mkFill (slot: string * TypeExpr option * Expr option) =
+            let (_, tyOpt, dfltOpt) = slot
+            let d = Option.get dfltOpt   // every trailing slot has a default (trailing rule)
+            match tyOpt with
+            | Some ty -> { d with Kind = ExprKind.ExprTyped (d, ty) }
+            | None -> d
+        let slotExprsAndFills =
+            List.zip trailingSlots slotAssign
+            |> List.map (fun (slot, assigned) ->
+                match assigned with
+                | Some a -> (a, false)
+                | None -> (mkFill slot, true))
+        let finalTrailing = slotExprsAndFills |> List.map fst
+        let fills = slotExprsAndFills |> List.filter snd |> List.map fst
+        let requiredArgs = args |> List.truncate required
+        let requiredNames = ps |> List.truncate required |> List.map (fun (n, _, _) -> n)
+        // Only fills can reference params, and only REQUIRED ones (scope rule).
+        let referencedNames =
+            let free =
+                fills
+                |> List.map (collectFreeVars Set.empty)
+                |> List.fold Set.union Set.empty
+            requiredNames |> List.filter (fun n -> Set.contains n free) |> Set.ofList
+        if Set.isEmpty referencedNames then
+            Some (Ok (mkExpr callSpan (ExprKind.ExprApp (func, requiredArgs @ finalTrailing))))
+        else
+            let uid = env.Builder.FreshId()
+            let refIdx =
+                requiredNames
+                |> List.mapi (fun i n -> (i, n))
+                |> List.filter (fun (_, n) -> Set.contains n referencedNames)
+            let mkLet name (value: Expr) =
+                StmtLet { Mutability = BindLet
+                          Pattern = { Kind = PatVar name; Span = value.Span }
+                          Type = None
+                          Value = value }
+            let tempName i = sprintf "__dflt%d_%d" uid i
+            let tempStmts = refIdx |> List.map (fun (i, _) -> mkLet (tempName i) (List.item i requiredArgs))
+            let aliasStmts =
+                refIdx |> List.map (fun (i, n) ->
+                    mkLet n (mkExpr (List.item i requiredArgs).Span (ExprKind.ExprVar (tempName i))))
+            let callRequired =
+                requiredArgs |> List.mapi (fun i a ->
+                    if refIdx |> List.exists (fun (j, _) -> j = i)
+                    then mkExpr a.Span (ExprKind.ExprVar (List.item i requiredNames))
+                    else a)
+            let call = mkExpr callSpan (ExprKind.ExprApp (func, callRequired @ finalTrailing))
+            Some (Ok (mkExpr callSpan (ExprKind.ExprBlock (tempStmts @ aliasStmts, Some call))))
+
+/// CHAINED FACTORY SUGAR: `f(x, y)(a : q1)(b : q2)` flattens into the single
+/// call `f(x, y, a : q1, b : q2)` BEFORE dispatch, when the base callee is a
+/// defaults-carrying function (env.FuncDefaults) and EVERY argument of every
+/// trailing application is quantity-tagged. Comma groups and chains are
+/// equivalent (`f(x)(a : q1, b : q2)` too). Genuine arrow over-application
+/// never matches -- a curried function carries no defaults entry, or its
+/// trailing args are not quantity-tagged -- so the existing curry/eta paths
+/// keep those shapes exactly.
+let private tryFlattenFactoryChain (env: TypeEnv) (func: Expr) (args: Expr list) : (Expr * Expr list) option =
+    match func.Kind with
+    | ExprKind.ExprApp _ ->
+        let rec collect (f: Expr) (groups: Expr list list) =
+            match f.Kind with
+            | ExprKind.ExprApp (inner, innerArgs) -> collect inner (innerArgs :: groups)
+            | _ -> (f, groups)
+        let baseFn, groups = collect func [args]
+        let isDefaultsCallee =
+            match baseFn.Kind with
+            | ExprKind.ExprVar name -> env.FuncDefaults.ContainsKey name
+            // Module-qualified base (`plot.contourf(...)(...)`): defaults are
+            // registered under the bare name (see tryFillDefaultArgs).
+            | ExprKind.ExprField ({ Kind = ExprKind.ExprVar _ }, fname) -> env.FuncDefaults.ContainsKey fname
+            | _ -> false
+        if not isDefaultsCallee then None
+        else
+            let trailingGroups = List.tail groups
+            let allTagged =
+                trailingGroups
+                |> List.forall (fun g ->
+                    not (List.isEmpty g)
+                    && g |> List.forall (fun a -> (argQuantityTag env a).IsSome))
+            if List.isEmpty trailingGroups || not allTagged then None
+            else Some (baseFn, List.concat groups)
+    | _ -> None
 
 /// Entry for every expression: stamps the ambient expression span (for
 /// error location, see TypeEnv.locateError) and back-fills the source span
@@ -2855,8 +3235,17 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
               | _ -> Error (ProviderWriteNamedBinding alias))
          | _ -> Error (ProviderWriteArgs alias))
 
-    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar n }, field) }, args)
+    | ExprKind.ExprApp (({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar n }, field) } as qualFuncE), args)
         when (lookupVar (sprintf "%s.%s" n field) env).IsSome ->
+        // DEFAULT PARAMETER FILL + by-nominal routing for module-QUALIFIED
+        // callees (`plot.contourf(x, y, z, 3: cmap)`): this arm short-circuits
+        // the general ExprApp arm below, so the fill must run here too --
+        // without it an omitted-slot call reaches codegen under-applied.
+        // The rewritten full-arity call re-enters this arm and passes through.
+        match tryFillDefaultArgs env expr.Span qualFuncE args with
+        | Some (Ok rewritten) -> inferExpr env rewritten
+        | Some (Error e) -> Error e
+        | None ->
         let qualName = sprintf "%s.%s" n field
         let info = (lookupVar qualName env).Value
         let useTy =
@@ -3037,6 +3426,118 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let arrTy = mkArrayArrow indices (IRTScalar ETFloat64) None
                 mkTyped (TExprRandGen (kind, tKey, dims)) arrTy)
 
+    // ---- __display_emit(head, quoted, data, metaTail): display module ----
+    // Compiler-internal (double-underscore reserved): emitted by the `display`
+    // elaboration stage from `alias.emit(mime, data[, meta])`. Three of the
+    // four arguments are elaboration-time constants the elaborator already
+    // validated (the frame's JSON head, the payload-quoting flag, and the user
+    // meta object minus its braces -- see Blade.Display.Frame); only `data` is
+    // a runtime value, and it must be a String. Self-typed Bool: the call
+    // answers `true` so it can sit in an ordinary binding or echo as a bare
+    // REPL expression. A `data` of any other type is an ordinary type error
+    // reported by checkExpr against ETString.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__display_emit" }, [headE; quotedE; dataE; metaE])
+            when (lookupVar "__display_emit" env).IsNone ->
+        (match headE.Kind, quotedE.Kind, metaE.Kind with
+         | ExprKind.ExprLit (LitString head), ExprKind.ExprLit (LitBool quoted), ExprKind.ExprLit (LitString metaTail) ->
+            checkExpr env (IRTScalar ETString) dataE
+            |> Result.map (fun tData ->
+                mkTyped (TExprDisplayEmit (head, quoted, tData, metaTail)) (IRTScalar ETBool))
+         | _ ->
+            Error (Other "display.emit: internal marker arguments must be literals (this is a compiler bug -- write display.emit(mime, data) instead of calling __display_emit directly)"))
+
+    // ---- __display_json_array(A): display module JSON serialization ----
+    // A rank-1 or rank-2 PLAIN-DENSE numeric array rendered as JSON text
+    // (String). The rank is pinned on the typed node so both back ends pick
+    // the 1-D/2-D serializer without re-resolving; unit annotations on the
+    // element type are transparent (stripUnits) -- a Float<meter> array
+    // serializes like a Float array. Compact/ragged storage is rejected with
+    // a decompact steer: JSON has no triangular layout, and silently
+    // densifying here would hide an allocation.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__display_json_array" }, [arrE])
+            when (lookupVar "__display_json_array" env).IsNone ->
+        inferExpr env arrE |> Result.bind (fun tArr ->
+            // An abstract-rank parameter (`x: Float64^1`) is still an
+            // inference var carrying only its EXACT-rank arity constraint;
+            // shape the var here exactly like requireArrayArgMinRank does,
+            // so the body's serializer rank is pinned at the declaration and
+            // shape monomorphization sees an ordinary array param.
+            (match env.Subst.Resolve tArr.Type with
+             | IRTInfer vid ->
+                 (match env.Subst.GetArityConstraint vid with
+                  | Some k when k = 1 || k = 2 ->
+                      let freshIdx (i: int) = {
+                          Id = env.Builder.FreshId(); Rank = 1
+                          Extent = IRParam (sprintf "__json_inferred_n%d" i, 0, IRTNat None)
+                          Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                          Kind = SDimension; Dependencies = []
+                      }
+                      let freshArrType = {
+                          ElemType = env.Builder.FreshInferType()
+                          IndexTypes = List.init k freshIdx
+                          IsVirtual = false; Identity = None
+                      }
+                      unify env.Subst tArr.Type (mkArrayLike freshArrType) |> ignore
+                  | _ -> ())
+             | _ -> ())
+            match env.Subst.Resolve tArr.Type with
+            | ArrayElem at when at.IndexTypes.Length >= 1 && at.IndexTypes.Length <= 2 ->
+                if not (at.IndexTypes |> List.forall isPlainDenseIx) then
+                    Error (Other "display.json_array: the array must be plain dense on every axis (compact symmetric/ragged storage has no JSON layout) -- decompact(A, d) first")
+                else
+                    (match IR.stripUnits (env.Subst.Resolve at.ElemType) with
+                     | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32)
+                     // Unresolved element (an abstract-rank param shaped just
+                     // above, or a generic slice): defer -- the concrete call
+                     // site supplies it, and both serializers reject
+                     // non-numeric elements there.
+                     | IRTInfer _ ->
+                         Ok (mkTyped (TExprDisplayJson (at.IndexTypes.Length, tArr)) (IRTScalar ETString))
+                     | other ->
+                         Error (Other (sprintf "display.json_array: element type must be numeric (Float64/Float32/Int64/Int32), got %s" (ppIRType other))))
+            | ArrayElem at ->
+                Error (Other (sprintf "display.json_array: rank-1 and rank-2 arrays only (got rank %d)" at.IndexTypes.Length))
+            | other ->
+                Error (Other (sprintf "display.json_array: expected a rank-1 or rank-2 numeric array, got %s" (ppIRType other))))
+
+    // ---- __display_unit_label(x): elaboration-time unit/quantity label ----
+    // Collapses to a STRING LITERAL naming the operand's unit signature: the
+    // quantity's nominal name when it carries one, the structural dims
+    // rendering otherwise, "" when bare. Arrays answer for their ELEMENT
+    // units (the axis-label use case). No typed/IR node survives -- both
+    // lanes see an ordinary string literal, so parity is definitional.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__display_unit_label" }, [e])
+            when (lookupVar "__display_unit_label" env).IsNone ->
+        inferExpr env e |> Result.map (fun tE ->
+            let sigOf =
+                match env.Subst.Resolve tE.Type with
+                | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
+                | resolved -> IR.getUnits resolved
+            let label =
+                match sigOf with
+                | Some u ->
+                    (match u.Nominal with
+                     | Some n -> n
+                     | None ->
+                         let norm = unitNormalize u
+                         if Map.isEmpty norm.Dims then "" else ppUnitSig norm)
+                | None -> ""
+            mkTyped (TExprLit (LitString label)) (IRTScalar ETString))
+
+    // ---- __display_json_num(x): display module scalar JSON rendering ----
+    // A numeric scalar rendered as JSON text, same 15-significant-digit
+    // byte-parity formatting as json_array's elements. Unit/quantity
+    // annotations are transparent, so a factory can serialize its
+    // `Int64<levels>` slot directly.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__display_json_num" }, [numE])
+            when (lookupVar "__display_json_num" env).IsNone ->
+        inferExpr env numE |> Result.bind (fun tNum ->
+            match IR.stripUnits (env.Subst.Resolve tNum.Type) with
+            | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32) ->
+                Ok (mkTyped (TExprDisplayNum tNum) (IRTScalar ETString))
+            | other ->
+                Error (Other (sprintf "display.json_num: expected a numeric scalar, got %s" (ppIRType other))))
+
     // ---- cumulant(d, k): dist component projection, order-guarded ----
     // The order guard as a TYPE error (ppl/NOTES.md typed-Dist arc): k must
     // be a static int in 1..r where r is the dist's carried order. Works in
@@ -3083,6 +3584,24 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferSolve env aExpr bExpr
 
     | ExprKind.ExprApp (func, args) ->
+        // CHAINED FACTORY SUGAR first: `f(x)(a : q1)(b : q2)` flattens to
+        // the single call `f(x, a : q1, b : q2)` when the base is a
+        // defaults-carrying function and every trailing-application arg is
+        // quantity-tagged. Everything below then sees the flat call.
+        let func, args =
+            match tryFlattenFactoryChain env func args with
+            | Some (baseFn, flatArgs) -> (baseFn, flatArgs)
+            | None -> (func, args)
+        // DEFAULT PARAMETER FILL + by-nominal routing: must run BEFORE the
+        // partial-application eta-expansion below -- for a defaults-carrying
+        // callee, omitting a trailing argument means "use the default", not
+        // "curry". Calls with fewer than the REQUIRED count (and `_`
+        // placeholders) fall through to the existing partial-application
+        // machinery unchanged; invalid routing errors here.
+        match tryFillDefaultArgs env expr.Span func args with
+        | Some (Ok rewritten) -> inferExpr env rewritten
+        | Some (Error e) -> Error e
+        | None ->
         inferExpr env func |> Result.bind (fun tFunc ->
         // Prefix partial application (formalism 6.2.3): applying an n-ary
         // FUNCTION to 0 < k < n args eta-expands to a lambda over the
@@ -3123,7 +3642,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let uid = env.Builder.FreshId()
                 let name = sprintf "__pa%d_w" uid
                 let newArgs = args |> List.mapi (fun i a -> if i = wildPos then inheritSpan a (ExprVar name) else a)
-                inferLambda env [{ Name = name; Type = None; NameSpan = noSpan }] None (inheritSpan func (ExprApp (func, newArgs)))
+                inferLambda env [{ Name = name; Type = None; Default = None; NameSpan = noSpan }] None (inheritSpan func (ExprApp (func, newArgs)))
                 |> Result.bind (fun tLam ->
                     unify env.Subst tLam.Type (mkFuncArrow [paramTys.[wildPos]] retTy)
                     |> Result.map (fun () -> tLam))
@@ -3131,7 +3650,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             let residual = paramTys |> List.skip args.Length
             let uid = env.Builder.FreshId()
             let names = residual |> List.mapi (fun i _ -> sprintf "__pa%d_%d" uid i)
-            let lamParams = names |> List.map (fun n -> { Name = n; Type = None; NameSpan = noSpan } : LambdaParam)
+            let lamParams = names |> List.map (fun n -> { Name = n; Type = None; Default = None; NameSpan = noSpan } : LambdaParam)
             let bodyApp = inheritSpan func (ExprApp (func, args @ (names |> List.map (fun n -> inheritSpan func (ExprVar n)))))
             inferLambda env lamParams None bodyApp
             |> Result.bind (fun tLam ->
@@ -3531,6 +4050,12 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         // unify failure). For non-special-cased shapes, checkExpr
         // falls through to inferExpr + unify, preserving plain-cast
         // behavior.
+        // A quantity name inside a COMPOUND unit annotation is terminal
+        // (BL3011) -- checked on the surface type, since lowering degrades
+        // rather than errors.
+        match unitAnnoTerminalError env tyAnno with
+        | Some err -> Error err
+        | None ->
         let annoTy = lowerTypeExpr env tyAnno
         checkExpr env annoTy e |> Result.map (fun tE ->
             { tE with Type = annoTy })
@@ -3942,7 +4467,7 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
 /// cannot read (named function, captured value) is left alone.
 and reduceKernelUnitCheck (env: TypeEnv) (tKernel: TypedExpr) (elemTy: IRType) : TypeResult<unit> =
     match IR.getUnits (env.Subst.Resolve elemTy) with
-    | Some eu when not (Map.isEmpty (unitNormalize eu)) ->
+    | Some eu when not (Map.isEmpty (unitNormalize eu).Dims) ->
         let kernelUnits =
             match (resolveTypedExpr env tKernel).Kind with
             | TExprSection op -> Some (unitRulesForOp op (Some eu) (Some eu))
@@ -5725,7 +6250,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     | Ok resUnits ->
                         let sp = mergeSpan left.Span right.Span
                         let kbody = mkExpr sp (ExprBinOp (Elementwise, op, mkExpr sp (ExprVar "__zl"), mkExpr sp (ExprVar "__zr")))
-                        let klam = mkExpr sp (ExprLambda ([{ Name = "__zl"; Type = None; NameSpan = noSpan }; { Name = "__zr"; Type = None; NameSpan = noSpan }], None, kbody))
+                        let klam = mkExpr sp (ExprLambda ([{ Name = "__zl"; Type = None; Default = None; NameSpan = noSpan }; { Name = "__zr"; Type = None; Default = None; NameSpan = noSpan }], None, kbody))
                         let kzip = mkExpr sp (ExprMethodFor [mkExpr sp (ExprZip [left; right])])
                         let synth = mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply, kzip, klam))))
                         inferExpr env synth |> Result.map (stampElemUnits env resUnits)
@@ -5789,7 +6314,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 let synth =
                     mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
                         mkExpr sp (ExprMethodFor [arrExpr]),
-                        mkExpr sp (ExprLambda ([{ Name = "__bx"; Type = elemAnn; NameSpan = noSpan }], None, body))))))
+                        mkExpr sp (ExprLambda ([{ Name = "__bx"; Type = elemAnn; Default = None; NameSpan = noSpan }], None, body))))))
                 inferExpr env synth |> Result.map (stampElemUnits env resUnits)
             | _ ->
             // env.Builder: inferArithType mints fresh index-type ids for a
@@ -5871,19 +6396,25 @@ and unitRulesForOp (op: BinOp) (lUnits: UnitSig option) (rUnits: UnitSig option)
     | OpAdd | OpSub ->
         match lUnits, rUnits with
         | Some lu, Some ru ->
-            if unitCompatible lu ru then Ok (Some lu)
+            // unitCompatible also demands NOMINAL agreement (same quantity,
+            // or one side structural); unitJoin keeps whichever nominal is
+            // present, so `speed + m/s-value` stays `speed`.
+            if unitCompatible lu ru then Ok (Some (unitJoin lu ru))
             else Error (UnitMismatch ((if op = OpAdd then "addition" else "subtraction"), ppUnitSig lu, ppUnitSig ru))
         | Some u, None | None, Some u -> Ok (Some u)
         | None, None -> Ok None
     | OpMul ->
+        // Multiplicative composition DROPS the nominal layer (a quantity is
+        // an identity, not a factor): the one-sided arms strip it explicitly
+        // since the sig passes through unitMul only when both sides carry one.
         match lUnits, rUnits with
         | Some lu, Some ru -> Ok (Some (unitMul lu ru))
-        | Some u, None | None, Some u -> Ok (Some u)
+        | Some u, None | None, Some u -> Ok (Some { u with Nominal = None })
         | None, None -> Ok None
     | OpDiv | OpMod ->
         match lUnits, rUnits with
         | Some lu, Some ru -> Ok (Some (unitDiv lu ru))
-        | Some u, None -> Ok (Some u)
+        | Some u, None -> Ok (Some { u with Nominal = None })
         | None, Some u -> Ok (Some (unitDiv unitDimensionless u))
         | None, None -> Ok None
     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
@@ -5934,7 +6465,7 @@ and staticPowExponent (e: TypedExpr) : int option =
 and unitRulesForCaret (lUnits: UnitSig option) (rUnits: UnitSig option) (powExp: int option) : TypeResult<UnitSig option> =
     let dimensioned u =
         match u with
-        | Some s when not (Map.isEmpty (unitNormalize s)) -> Some s
+        | Some s when not (Map.isEmpty (unitNormalize s).Dims) -> Some s
         | _ -> None
     match dimensioned rUnits with
     | Some ru ->
@@ -5998,7 +6529,7 @@ and stampElemUnits env (resUnits: UnitSig option) (t: TypedExpr) : TypedExpr =
 and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : TypeResult<UnitSig option> =
     let dimensioned =
         match u with
-        | Some s when not (Map.isEmpty (unitNormalize s)) -> Some s
+        | Some s when not (Map.isEmpty (unitNormalize s).Dims) -> Some s
         | _ -> None
     let requireDimensionless (context: string) =
         match dimensioned with
@@ -6009,11 +6540,13 @@ and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : TypeResult<UnitSig o
     | OpNot | OpArg -> Ok None
     | OpMath "abs" -> Ok u
     | OpMath "sqrt" ->
+        // sqrt DROPS the nominal layer like the other non-degree-1
+        // compositions (sqrt of a quantity is not that quantity).
         match u with
         | Some s ->
             let n = unitNormalize s
-            if n |> Map.forall (fun _ ex -> ex % 2 = 0)
-            then Ok (Some (n |> Map.map (fun _ ex -> ex / 2)))
+            if n.Dims |> Map.forall (fun _ ex -> ex % 2 = 0)
+            then Ok (Some (unitOfDims (n.Dims |> Map.map (fun _ ex -> ex / 2))))
             else Ok None
         | None -> Ok None
     | OpMath (("floor" | "ceil") as name) ->
@@ -6038,7 +6571,7 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
     let combineBranches context (a: UnitSig option) (b: UnitSig option) =
         match a, b with
         | Some ua, Some ub ->
-            if unitCompatible ua ub then Ok (Some ua)
+            if unitCompatible ua ub then Ok (Some (unitJoin ua ub))
             else Error (UnitMismatch (context, ppUnitSig ua, ppUnitSig ub))
         | Some u, None | None, Some u -> Ok (Some u)
         | None, None -> Ok None
@@ -6387,7 +6920,7 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
     | ExprKind.ExprVar name when isUnaryIntrinsic name && (lookupVar name env).IsNone ->
         let uid = env.Builder.FreshId()
         let pname = sprintf "__k%d_0" uid
-        let lamParams : LambdaParam list = [ { Name = pname; Type = None; NameSpan = noSpan } ]
+        let lamParams : LambdaParam list = [ { Name = pname; Type = None; Default = None; NameSpan = noSpan } ]
         let bodyApp =
             inheritSpan kernelExpr
                 (ExprApp (kernelExpr, [ inheritSpan kernelExpr (ExprVar pname) ]))
@@ -6407,7 +6940,7 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                          && not (paramTys |> List.exists (fun t -> match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)) ->
                 let uid = env.Builder.FreshId()
                 let names = paramTys |> List.mapi (fun i _ -> sprintf "__k%d_%d" uid i)
-                let lamParams = names |> List.map (fun n -> { Name = n; Type = None; NameSpan = noSpan } : LambdaParam)
+                let lamParams = names |> List.map (fun n -> { Name = n; Type = None; Default = None; NameSpan = noSpan } : LambdaParam)
                 let bodyApp =
                     inheritSpan kernelExpr
                         (ExprApp (kernelExpr, names |> List.map (fun n -> inheritSpan kernelExpr (ExprVar n))))
@@ -6494,8 +7027,8 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                      | _ -> false
         let paramTy = IRTScalar ETFloat64
         let lambdaInfo : TypedLambdaInfo = {
-            Params = [{ Name = "a"; Type = paramTy; Index = 0; VarId = aId; NameSpan = noSpan }
-                      { Name = "b"; Type = paramTy; Index = 1; VarId = bId; NameSpan = noSpan }]
+            Params = [{ Name = "a"; Type = paramTy; Index = 0; VarId = aId; Default = None; NameSpan = noSpan }
+                      { Name = "b"; Type = paramTy; Index = 1; VarId = bId; Default = None; NameSpan = noSpan }]
             Body = mkTyped (TExprBinOp (Elementwise, op,
                       mkTyped (TExprVar ("a", aId, None)) paramTy,
                       mkTyped (TExprVar ("b", bId, None)) paramTy)) paramTy
@@ -6539,7 +7072,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         let nArrays = mfInfo.Arrays.Length
         let params_ = List.init nArrays (fun i ->
             let pid = env.Builder.FreshId()
-            { Name = sprintf "__z%d" i; Type = paramTy; Index = i; VarId = pid; NameSpan = noSpan })
+            { Name = sprintf "__z%d" i; Type = paramTy; Index = i; VarId = pid; Default = None; NameSpan = noSpan })
         let lambdaInfo : TypedLambdaInfo = {
             Params = params_
             Body = mkTyped zeroLit paramTy
@@ -6727,7 +7260,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             let nArrays = flatArrays.Length
             let params_ = List.init nArrays (fun i ->
                 let pid = env.Builder.FreshId()
-                { Name = sprintf "__z%d" i; Type = paramTy; Index = i; VarId = pid; NameSpan = noSpan })
+                { Name = sprintf "__z%d" i; Type = paramTy; Index = i; VarId = pid; Default = None; NameSpan = noSpan })
             let lambdaInfo : TypedLambdaInfo = {
                 Params = params_
                 Body = mkTyped zeroLit paramTy
@@ -6760,7 +7293,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             let n = flatArrays.Length
             let uid = env.Builder.FreshId()
             let names = List.init n (fun i -> sprintf "__of%d_%d" uid i)
-            let lamParams = names |> List.map (fun nm -> ({ Name = nm; Type = None; NameSpan = noSpan } : LambdaParam))
+            let lamParams = names |> List.map (fun nm -> ({ Name = nm; Type = None; Default = None; NameSpan = noSpan } : LambdaParam))
             let bodyApp =
                 mkExpr span (ExprApp (mkExpr span (ExprVar fnName),
                                       names |> List.map (fun nm -> mkExpr span (ExprVar nm))))
@@ -6904,6 +7437,44 @@ and buildApplyInfo (env: TypeEnv)
     (tLoop: TypedExpr) (tKernel: TypedExpr)
     (isReynolds: bool) (isReynoldsAntisym: bool)
     : TypeResult<TypedExpr> =
+
+    // DEFAULTED TRAILING KERNEL PARAMS: when the kernel declares more params
+    // than the sources supply rows and every EXCESS trailing param carries a
+    // default, the apply is a defaults fill -- the omitted params become
+    // body-entry lets over their (declaration-typed) default exprs, so each
+    // kernel invocation evaluates them at entry with the row params bound:
+    //   method_for(A) <@> lambda(x, s = 2.0) -> x * s
+    //     ==  method_for(A) <@> lambda(x) -> { let s = 2.0; x * s }
+    // The let reuses the param's own VarId, so body references resolve
+    // unchanged. Done FIRST so every downstream consumer (deduction, ranks,
+    // param unification, grouping) sees the shrunk, ordinary kernel. The
+    // co-iteration INDEX-PARAM form (params = arrays + shared index slots)
+    // is checked first and wins -- its trailing params are index receivers,
+    // not omitted defaults.
+    let lambdaInfo =
+        let expectedRows =
+            arrayTypes |> List.sumBy (fun (at: IRArrayType) ->
+                if at.IsVirtual then at.IndexTypes |> List.sumBy (fun idx -> idx.Rank) else 1)
+        let idxParamCount = sharedIndexTypes |> List.sumBy (fun r -> r.Rank)
+        let coIterIndexForm =
+            not sharedIndexTypes.IsEmpty
+            && idxParamCount > 0
+            && not (arrayTypes |> List.exists (fun at -> at.IsVirtual))
+            && lambdaInfo.Params.Length = arrays.Length + idxParamCount
+        if not coIterIndexForm
+           && expectedRows > 0
+           && lambdaInfo.Params.Length > expectedRows
+           && (lambdaInfo.Params |> List.skip expectedRows |> List.forall (fun p -> p.Default.IsSome)) then
+            let kept = lambdaInfo.Params |> List.truncate expectedRows
+            let dropped = lambdaInfo.Params |> List.skip expectedRows
+            let newBody =
+                (dropped, lambdaInfo.Body)
+                ||> List.foldBack (fun p body ->
+                    { Kind = TExprLet (p.Name, p.VarId, Option.get p.Default, body)
+                      Type = body.Type
+                      Span = body.Span })
+            { lambdaInfo with Params = kept; Body = newBody }
+        else lambdaInfo
 
     let commGroups = lambdaInfo.CommGroups
     // Declared `where anticomm(...)` positions. Same axis grouping and the
@@ -7484,7 +8055,45 @@ and buildApplyInfo (env: TypeEnv)
                 [perRowType at kRank])
         |> List.concat
 
+    // STRICT quantity slots for KERNEL parameters (BL3010, the <@> twin of
+    // the dispatch-seam check in dispatchAppOrIndex): a lambda param DECLARED
+    // with a quantity type (`lambda(x: Float<speed>) -> ...`) rejects a row
+    // whose element signature does not carry that nominal. Unannotated params
+    // (still inference vars, sig None) and structural-unit params keep the
+    // permissive unification below exactly.
+    let kernelQuantityClash =
+        if lambdaInfo.Params.Length = expandedRows.Length then
+            let sigOf (t: IRType) =
+                match env.Subst.Resolve t with
+                | ArrayElem at ->
+                    let e = env.Subst.Resolve at.ElemType
+                    (IR.getUnits e, (match e with IRTInfer _ -> false | _ -> true))
+                | IRTInfer _ -> (None, false)
+                | resolved -> (IR.getUnits resolved, true)
+            List.zip resolvedParamTypes expandedRows
+            |> List.mapi (fun i (paramTy, row) -> (i, sigOf paramTy, sigOf row))
+            |> List.tryPick (fun (i, (pu, _), (ru, rConcrete)) ->
+                match pu with
+                | Some pu when pu.Nominal.IsSome
+                               && rConcrete
+                               && (match ru with
+                                   | Some r -> r.Nominal <> pu.Nominal
+                                   | None -> true) ->
+                    let got =
+                        match ru with
+                        | None -> "bare (it carries no unit signature)"
+                        | Some r ->
+                            match r.Nominal with
+                            | Some qn -> sprintf "the quantity '%s'" qn
+                            | None -> sprintf "structurally dimensioned (%s)" (ppUnitSig r)
+                    Some (QuantityArgMismatch (i + 1, pu.Nominal.Value, got))
+                | _ -> None)
+        else None
+
     let kernelParamUnifyResult =
+        match kernelQuantityClash with
+        | Some err -> Error err
+        | None ->
         if lambdaInfo.Params.Length = expandedRows.Length then
             // Use resolved types so the unify call sees the same shape we used
             // to compute kRank. (Reading param.Type directly could be stale.)
@@ -7881,15 +8490,89 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
                  | Some t -> lowerTypeExpr env t
                  | None -> env.Subst.Fresh()  // Infer from usage
         paramEnv <- bindVarSimple p.Name varId ty paramEnv
-        { Name = p.Name; Type = ty; Index = i; VarId = varId; NameSpan = p.NameSpan } : TypedParam)
+        { Name = p.Name; Type = ty; Index = i; VarId = varId; Default = None; NameSpan = p.NameSpan } : TypedParam)
+
+    // ---- Parameter defaults (BL3012 rules + typing) ----
+    // Trailing rule, required-params-only scope rule, then each default
+    // typed against its param's (possibly inferred) type with the params in
+    // scope. The typed expr rides on TypedParam.Default for the kernel-apply
+    // seam (buildApplyInfo binds an omitted trailing param as a body-entry
+    // TExprLet over it); direct calls re-type the SURFACE default instead.
+    let defaultsResult : TypeResult<TypedParam list> =
+        match parms |> List.tryFindIndex (fun p -> p.Default.IsSome) with
+        | None -> Ok typedParams
+        | Some fd ->
+            let firstDefaultedName = (List.item fd parms).Name
+            let orderErr =
+                parms
+                |> List.mapi (fun i p -> (i, p))
+                |> List.tryPick (fun (i, p) ->
+                    if i > fd && p.Default.IsNone
+                    then Some (DefaultParamOrder ("lambda", p.Name, firstDefaultedName))
+                    else None)
+            match orderErr with
+            | Some e -> Error e
+            | None ->
+                let defaultedNames =
+                    parms |> List.filter (fun p -> p.Default.IsSome) |> List.map (fun p -> p.Name) |> Set.ofList
+                let scopeErr =
+                    parms |> List.tryPick (fun p ->
+                        match p.Default with
+                        | Some d ->
+                            let bad = Set.intersect (collectFreeVars Set.empty d) defaultedNames
+                            if Set.isEmpty bad then None
+                            else Some (DefaultParamScope ("lambda", p.Name, Set.minElement bad))
+                        | None -> None)
+                match scopeErr with
+                | Some e -> Error e
+                | None ->
+                // FACTORY rule (BL3013), lambda spelling: quantity-typed
+                // defaulted slots must carry distinct quantities (see
+                // checkFunctionDecl for the rationale).
+                let dupQuantityErr =
+                    List.zip typedParams parms
+                    |> List.choose (fun (tp, p) ->
+                        match p.Default with
+                        | Some _ ->
+                            (match IR.getUnits (env.Subst.Resolve tp.Type) with
+                             | Some u -> u.Nominal |> Option.map (fun q -> (q, tp.Name))
+                             | None -> None)
+                        | None -> None)
+                    |> List.groupBy fst
+                    |> List.tryPick (fun (q, members) ->
+                        match members with
+                        | (_, p1) :: (_, p2) :: _ ->
+                            Some (FactoryDupQuantityDecl ("lambda", q, p1, p2))
+                        | _ -> None)
+                match dupQuantityErr with
+                | Some e -> Error e
+                | None ->
+                    List.zip typedParams parms
+                    |> List.map (fun (tp, p) ->
+                        match p.Default with
+                        | Some d ->
+                            checkExpr paramEnv tp.Type d
+                            |> Result.map (fun td -> { tp with Default = Some td })
+                        | None -> Ok tp)
+                    |> sequenceResults
 
     let boundNames = parms |> List.map (fun p -> p.Name) |> Set.ofList
-    let freeVars = collectFreeVars boundNames body
+    // A default's free variables are captures too: at the kernel-apply seam
+    // the default is spliced into the BODY (a body-entry let), so a name it
+    // reads from the enclosing scope must ride the capture list or the
+    // lifted kernel would emit a dangling reference.
+    let freeVars =
+        let bodyFree = collectFreeVars boundNames body
+        parms
+        |> List.choose (fun p -> p.Default)
+        |> List.map (collectFreeVars boundNames)
+        |> List.fold Set.union bodyFree
     let captures = buildCaptures scopeEnv freeVars
     // An `omp(v: n)` naming no parameter is silently dropped downstream; say so.
     checkOmpVarNames env (typedParams |> List.map (fun p -> p.Name)) whereClause "this lambda"
 
     let result =
+        defaultsResult |> Result.bind (fun typedParams ->
         inferExpr paramEnv body |> Result.bind (fun tBody ->
             // A lambda body is a value-forming boundary: reject a wildcard `_`
             // that escaped into it (its only legitimate role is a compound-index
@@ -7911,7 +8594,7 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
                 SelfBinding = None
             }
             let funcTy = mkFuncArrow (typedParams |> List.map (fun p -> p.Type)) tBody.Type
-            Ok (mkTyped (TExprLambda info) funcTy))
+            Ok (mkTyped (TExprLambda info) funcTy)))
 
     env.Subst.PopTypeVarScope(savedScope)
     result
@@ -8104,12 +8787,21 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         // section 4.18.3 parallel for string-valued index tags (EnumIdx with
         // string values). Same context-driven coercion as the int case.
         Ok (mkTyped (TExprLit lit) resolved)
+    | ExprKind.ExprLit (LitString _ as lit), IRTUnitAnnotated (IRTScalar ETString, _) ->
+        // Quantity-tagged string position (`let s: String<title> = "K"`,
+        // `"K" : title`): the literal adopts the annotation, same
+        // context-driven rule as the numeric/Nat unit arms above.
+        Ok (mkTyped (TExprLit lit) resolved)
     | ExprKind.ExprLit (LitFloat _ as lit), IRTScalar et ->
         match et with
         | ETFloat32 | ETFloat64 -> Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ -> Error (TypeMismatch (resolved, IRTScalar ETFloat64))
     | ExprKind.ExprLit (LitBool _ as lit), IRTScalar ETBool ->
         Ok (mkTyped (TExprLit lit) (IRTScalar ETBool))
+    | ExprKind.ExprLit (LitBool _ as lit), IRTUnitAnnotated (IRTScalar ETBool, _) ->
+        // Quantity-tagged bool position (`let f: Bool<flag> = true`): same
+        // literal-adoption rule as the string arm above.
+        Ok (mkTyped (TExprLit lit) resolved)
 
     // A NEGATED numeric literal is a literal: `-1` retypes to the expected
     // scalar exactly as `1` does. Without this arm the negation falls through
@@ -8260,7 +8952,11 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
                 | None ->
                     match e with
                     | IndexRankMismatch _ -> Error e
-                    | _ -> Error (TypeMismatch (expected, tE.Type)))
+                    // Re-resolve at REPORT time: the failed unify may still
+                    // have bound inner vars (e.g. the fresh scalar under a
+                    // bare-quantity ascription), and the entry-time `resolved`
+                    // predates them.
+                    | _ -> Error (TypeMismatch (env.Subst.Resolve expected, env.Subst.Resolve tE.Type)))
 
 // ---- Shared helpers for both let paths (let-as-expression and top-level DeclLet) ----
 
@@ -8509,6 +9205,16 @@ and private boundedAggregateError (env: TypeEnv) (site: string) (ty: TypeExpr) :
 /// bidirectional checking and store the annotation as the canonical type;
 /// without, plain synthesis.
 and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExpr> =
+    // A defaults-carrying LAMBDA bound to a simple name: record its surface
+    // params so call sites can fill omitted trailing args (the same surface
+    // desugar named functions use). All four let paths (expression-form,
+    // block statement, top-level DeclLet, DeclStatic) funnel through here.
+    // Name-keyed like FuncConstraints, same known shadowing weakness.
+    (match binding.Pattern.Kind, binding.Value.Kind with
+     | PatVar name, ExprKind.ExprLambda (parms, _, _)
+            when parms |> List.exists (fun p -> p.Default.IsSome) ->
+         env.FuncDefaults.[name] <- (parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
+     | _ -> ())
     // A let binding is a value-forming boundary. A wildcard `_` is a hole, not a
     // value: it is only meaningful as a compound-index coordinate (consumed by
     // dispatchAppOrIndex before it reaches here). If one survives into the bound
@@ -8532,6 +9238,12 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         | ExprKind.ExprRecArray def ->
             inferRecArray env annot annotTy def binding.Value.Span
         | _ ->
+        // A quantity name inside a COMPOUND unit annotation is terminal
+        // (BL3011) -- surface-checked, since lowering degrades rather than
+        // errors (annotTy above already lowered to the bare base).
+        match unitAnnoTerminalError env annot with
+        | Some err -> Error err
+        | None ->
         if irTypeHasRaggedNoPrior annotTy then
             Error (Other "RaggedIdx requires at least one prior index in the array's index list: the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4), so there is nothing for a leading RaggedIdx to vary over. Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>.")
         elif irTypeHasBadDistOrder annotTy then
@@ -8619,7 +9331,7 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
             (match elemZero, (if slots |> List.forall Option.isSome then Some (List.map Option.get slots) else None) with
              | Some zBody, Some idxTys ->
                  let params_ : LambdaParam list =
-                     idxTys |> List.mapi (fun i _ -> { Name = sprintf "__zero_i%d" i; Type = None; NameSpan = noSpan })
+                     idxTys |> List.mapi (fun i _ -> { Name = sprintf "__zero_i%d" i; Type = None; Default = None; NameSpan = noSpan })
                  let former = mkExpr sp (ExprKind.ExprFor (ForArrays ([], Some (mkExpr sp (ExprKind.ExprRange idxTys))), [], None))
                  let lam = mkExpr sp (ExprKind.ExprLambda (params_, None, zBody))
                  let synth = mkExpr sp (ExprKind.ExprCompute (mkExpr sp (ExprKind.ExprBinOp (Elementwise, OpApply, former, lam))))
@@ -8702,7 +9414,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
             match slotsOpt with
             | Some slotTys when total > 4096L ->
                 let ps : LambdaParam list =
-                    slotTys |> List.mapi (fun i _ -> { Name = sprintf "__%s%d_%s" tag i def.Name; Type = None; NameSpan = noSpan })
+                    slotTys |> List.mapi (fun i _ -> { Name = sprintf "__%s%d_%s" tag i def.Name; Type = None; Default = None; NameSpan = noSpan })
                 synAt (ExprCompute (synAt (ExprBinOp (Elementwise, OpApply,
                     synAt (ExprMethodFor [synAt (ExprRange slotTys)]),
                     synAt (ExprLambda (ps, None, zed))))))
@@ -10841,13 +11553,13 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 if p.Name = "self" && p.Type.IsNone then selfType
                                 else paramTypes.[i]
                             bodyEnv <- bindVarSimple p.Name varId ty bodyEnv
-                            { Name = p.Name; Type = ty; Index = i; VarId = varId; NameSpan = p.NameSpan } : TypedParam)
+                            { Name = p.Name; Type = ty; Index = i; VarId = varId; Default = None; NameSpan = p.NameSpan } : TypedParam)
                         match inferExpr bodyEnv method.Body with
                         | Ok tBody ->
                             let _ = unify env'.Subst tBody.Type retType
                             let commGroups =
                                 extractCommGroups
-                                    (method.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; NameSpan = p.NameSpan } : LambdaParam))
+                                    (method.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; Default = None; NameSpan = p.NameSpan } : LambdaParam))
                                     method.WhereClause
                             let tf : TypedFunctionDecl = {
                                 Name = mangledName; FuncId = funcVarId
@@ -10878,8 +11590,11 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             }
             Ok (TDeclImpl timpl, env)
     | DeclUnit unitDecl ->
-        let env' = registerUnit env unitDecl
-        Ok (TDeclUnit unitDecl, env')
+        // registerUnit errors only on a TERMINAL-quantity misuse (BL3011:
+        // `Unit x = speed * m` / `Unit q: speed`); unknown names keep the
+        // historical warn-and-fallback path inside registerUnit.
+        registerUnit env unitDecl
+        |> Result.map (fun env' -> (TDeclUnit unitDecl, env'))
     | DeclImport (qname, style) when (not qname.IsEmpty) && qname.Head = "Providers" ->
         // The pre-module provider spelling (`import Providers.NetCDF as X`)
         // is a hard break: providers are ordinary modules now.
@@ -10933,6 +11648,16 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         match Map.tryFind name exports.StaticFunctions with
                         | Some fd ->
                             e <- { e with StaticFunctions = Map.add name fd e.StaticFunctions }
+                        | None -> ()
+                        // Units, the same way the QUALIFIED arm above imports
+                        // them (unit names have no qualified spelling -- an
+                        // annotation is `Float<newton>`, never `Float<SI.newton>`
+                        // -- so the only difference between the two arms is
+                        // ALL of them vs the ones named). Without this,
+                        // `from units.SI import newton` silently binds nothing
+                        // and `Float<newton>` degrades to no annotation at all.
+                        match Map.tryFind name exports.Units with
+                        | Some us -> e <- { e with Units = Map.add name us e.Units }
                         | None -> ()
                     e
             | None ->
@@ -11003,6 +11728,16 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             funcDecl.ReturnType |> Option.bind (boundedAggregateError env (sprintf "the return type of function '%s'" funcDecl.Name)))
     if badBound.IsSome then
         Error badBound.Value
+    else
+    // A quantity name inside a COMPOUND unit annotation on a param or the
+    // return type is terminal (BL3011) -- surface-checked here, since
+    // lowering degrades to the bare base rather than erroring.
+    let badUnitAnno =
+        (funcDecl.Params |> List.tryPick (fun p -> p.Type |> Option.bind (unitAnnoTerminalError env)))
+        |> Option.orElseWith (fun () ->
+            funcDecl.ReturnType |> Option.bind (unitAnnoTerminalError env))
+    if badUnitAnno.IsSome then
+        Error badUnitAnno.Value
     else
     let funcType = mkFuncArrow paramTypes retType
     // Reuse pre-pass varId if this function was already pre-registered (static functions)
@@ -11114,7 +11849,90 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
          | IRTDist _ ->
              env.Provenance.[varId] <- Set.singleton (Blade.Constraints.paramProvenanceToken funcDecl.Name p.Name)
          | _ -> ())
-        { Name = p.Name; Type = paramTypes.[i]; Index = i; VarId = varId; NameSpan = p.NameSpan } : TypedParam)
+        { Name = p.Name; Type = paramTypes.[i]; Index = i; VarId = varId; Default = None; NameSpan = p.NameSpan } : TypedParam)
+
+    // ---- Parameter defaults (BL3012 rules + declaration-time typing) ----
+    // Trailing rule; required-params-only scope rule; then each default
+    // type-checked against its param's declared (lowered) type with the
+    // params in scope, so a bad default errors HERE even if never called.
+    // A quantity-typed slot's default is an INTRODUCTION position: checkExpr
+    // against the annotated type is the permissive direction (the call-site
+    // desugar re-ascribes the surface default, minting the nominal). Call
+    // sites re-type the SURFACE exprs, so the typed results are discarded.
+    let defaultsErr =
+        match funcDecl.Params |> List.tryFindIndex (fun p -> p.Default.IsSome) with
+        | None -> None
+        | Some fd ->
+            let firstDefaultedName = (List.item fd funcDecl.Params).Name
+            let orderErr =
+                funcDecl.Params
+                |> List.mapi (fun i p -> (i, p))
+                |> List.tryPick (fun (i, p) ->
+                    if i > fd && p.Default.IsNone
+                    then Some (DefaultParamOrder (sprintf "function '%s'" funcDecl.Name, p.Name, firstDefaultedName))
+                    else None)
+            match orderErr with
+            | Some e -> Some e
+            | None ->
+                let defaultedNames =
+                    funcDecl.Params |> List.filter (fun p -> p.Default.IsSome)
+                    |> List.map (fun p -> p.Name) |> Set.ofList
+                let scopeErr =
+                    funcDecl.Params |> List.tryPick (fun p ->
+                        match p.Default with
+                        | Some d ->
+                            let bad = Set.intersect (collectFreeVars Set.empty d) defaultedNames
+                            if Set.isEmpty bad then None
+                            else Some (DefaultParamScope (sprintf "function '%s'" funcDecl.Name, p.Name, Set.minElement bad))
+                        | None -> None)
+                match scopeErr with
+                | Some e -> Some e
+                | None ->
+                // FACTORY rule (BL3013): quantity-typed defaulted slots must
+                // carry DISTINCT quantities -- by-nominal call-site routing
+                // (`f(x, 3 : levels)`) needs each nominal to name exactly one
+                // slot. Judged on the LOWERED param types, so `Float<speed>`
+                // and a bare `speed` annotation agree.
+                let dupQuantityErr =
+                    let slots =
+                        funcDecl.Params
+                        |> List.mapi (fun i p -> (i, p))
+                        |> List.choose (fun (i, p) ->
+                            match p.Default with
+                            | Some _ ->
+                                (match IR.getUnits (env.Subst.Resolve paramTypes.[i]) with
+                                 | Some u -> u.Nominal |> Option.map (fun q -> (q, p.Name))
+                                 | None -> None)
+                            | None -> None)
+                    slots
+                    |> List.groupBy fst
+                    |> List.tryPick (fun (q, members) ->
+                        match members with
+                        | (_, p1) :: (_, p2) :: _ ->
+                            Some (FactoryDupQuantityDecl (sprintf "function '%s'" funcDecl.Name, q, p1, p2))
+                        | _ -> None)
+                match dupQuantityErr with
+                | Some e -> Some e
+                | None ->
+                    funcDecl.Params
+                    |> List.mapi (fun i p -> (i, p))
+                    |> List.tryPick (fun (i, p) ->
+                        match p.Default with
+                        | Some d ->
+                            (match checkExpr bodyEnv paramTypes.[i] d with
+                             | Ok _ -> None
+                             | Error e -> Some e)
+                        | None -> None)
+    match defaultsErr with
+    | Some e ->
+        env.Subst.PopTypeVarScope(savedScope)
+        Error e
+    | None ->
+    // Register the surface param list (name, annotation, default) so call
+    // sites can fill omitted trailing args -- BEFORE the body is checked,
+    // so recursive calls inside the body may omit them too.
+    if funcDecl.Params |> List.exists (fun p -> p.Default.IsSome) then
+        env.FuncDefaults.[funcDecl.Name] <- (funcDecl.Params |> List.map (fun p -> (p.Name, p.Type, p.Default)))
 
     // Open the license scope for the body; closed after `result` is
     // computed (both success and error paths flow past the exit below).
@@ -11178,7 +11996,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             wrappedBodyR |> Result.bind (fun tBody ->
             let commGroups =
                 extractCommGroups
-                    (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; NameSpan = p.NameSpan } : LambdaParam))
+                    (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; Default = None; NameSpan = p.NameSpan } : LambdaParam))
                     funcDecl.WhereClause
             // Register the function's comm groups so a later kernel-use site
             // (etaExpandFunctionKernel / deferred-former eta) can surface them
@@ -11192,7 +12010,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // back to dense storage).
             let antisymGroups =
                 extractAntisymGroups
-                    (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; NameSpan = p.NameSpan } : LambdaParam))
+                    (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; Default = None; NameSpan = p.NameSpan } : LambdaParam))
                     funcDecl.WhereClause
             if not (List.isEmpty antisymGroups) then
                 env.FuncAntisymGroups.[funcDecl.Name] <- antisymGroups
@@ -12401,6 +13219,12 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     | Ok program ->
     match Blade.Spectra.Elaborate.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["spectra elaboration"]))
+    | Ok program ->
+    // display LAST of the module elaborations: a frame is a side effect on an
+    // already-elaborated payload, so nothing downstream needs to see the
+    // surface `alias.emit(...)` call.
+    match Blade.Display.Elaborate.expand program with
+    | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["display elaboration"]))
     | Ok program ->
     match Blade.Grad.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["grad expansion"]))

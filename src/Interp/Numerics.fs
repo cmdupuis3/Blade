@@ -521,9 +521,16 @@ let private evalLogical (op: IRBinOp) (l: Value) (r: Value) : Value =
 /// the C++ CodeGen emits (promotion, wraparound, complex coercion).
 let evalBinOp (op: IRBinOp) (l: Value) (r: Value) : Value =
     match op with
+    // String concatenation: `+` on two Strings is std::string operator+ in
+    // the compiled lane -- byte-identical by construction (no formatting).
+    // Ahead of the numeric arms so a VString operand never reaches asF64.
+    | IRAdd ->
+        (match l, r with
+         | VString a, VString b -> VString (a + b)
+         | _ -> evalArith op l r)
     | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe -> evalCompare op l r
     | IRAnd | IROr -> evalLogical op l r
-    | IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret -> evalArith op l r
+    | IRSub | IRMul | IRDiv | IRMod | IRCaret -> evalArith op l r
 
 /// abs(x): std::abs, whose C++ overload preserves the operand's numeric type
 /// (llabs->int64, fabs->double, fabsf->float, hypot->double magnitude for

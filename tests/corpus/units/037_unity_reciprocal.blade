@@ -1,0 +1,12 @@
+// TEST: Unity In Structural Alias
+// The unity literal composes structurally: `Unit hz = 1 / seconds` is the
+// reciprocal alias {seconds: -1}. Multiplying hz by seconds cancels to a
+// dims-empty (Unitless) signature that adds freely with bare numbers.
+Unit seconds
+Unit hz = 1 / seconds
+let f: Float<hz> = 2.0
+let t: Float<seconds> = 4.0
+let cycles = f * t
+let n = cycles + 1.0
+// EXPECT: cycles = 8
+// EXPECT: n = 9

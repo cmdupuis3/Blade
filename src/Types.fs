@@ -347,59 +347,101 @@ let isRaggedRowKind (k: IxKind) : bool =
     | IxKDepInner | IxKGroupMember -> true
     | _ -> false
 
-/// Unit of measure signature: product of base units with integer exponents
-/// (e.g. velocity = {meters: 1, seconds: -1}); dimensionless = empty map.
-type UnitSig = Map<string, int>
+/// Unit of measure signature. `Dims` is the STRUCTURAL layer: a product of
+/// base units with integer exponents (e.g. velocity = {meters: 1, seconds:
+/// -1}); dimensionless = empty map. `Nominal` is the QUANTITY layer: a
+/// nominal identity declared via `Unit speed: mps`, entailing exactly the
+/// dims it was declared with. Structural units and plain aliases carry
+/// Nominal = None; the nominal layer is exactly one level deep (quantity
+/// names are TERMINAL in unit algebra).
+type UnitSig = { Nominal: string option; Dims: Map<string, int> }
 
-/// Unit arithmetic: dimensionless (empty map)
-let unitDimensionless : UnitSig = Map.empty
+/// Unit arithmetic: dimensionless (no nominal, empty dims)
+let unitDimensionless : UnitSig = { Nominal = None; Dims = Map.empty }
 
-/// Normalize: remove zero-exponent entries
+/// A structural (non-nominal) signature over the given dims.
+let unitOfDims (dims: Map<string, int>) : UnitSig = { Nominal = None; Dims = dims }
+
+/// Normalize: remove zero-exponent entries (nominal untouched)
 let unitNormalize (u: UnitSig) : UnitSig =
-    u |> Map.filter (fun _ exp -> exp <> 0)
+    { u with Dims = u.Dims |> Map.filter (fun _ exp -> exp <> 0) }
 
-/// Unit multiplication: add exponents
+/// Unit multiplication: add exponents. Multiplicative composition DROPS the
+/// nominal layer: a quantity is an identity, not a factor, so `speed * s`
+/// yields the structural product of the dims.
 let unitMul (a: UnitSig) (b: UnitSig) : UnitSig =
     let merged =
         Map.fold (fun acc k v ->
             let existing = Map.tryFind k acc |> Option.defaultValue 0
-            Map.add k (existing + v) acc) a b
-    unitNormalize merged
+            Map.add k (existing + v) acc) a.Dims b.Dims
+    unitNormalize { Nominal = None; Dims = merged }
 
-/// Unit division: subtract exponents
+/// Unit division: subtract exponents (drops nominal, like unitMul)
 let unitDiv (a: UnitSig) (b: UnitSig) : UnitSig =
     let merged =
         Map.fold (fun acc k v ->
             let existing = Map.tryFind k acc |> Option.defaultValue 0
-            Map.add k (existing - v) acc) a b
-    unitNormalize merged
+            Map.add k (existing - v) acc) a.Dims b.Dims
+    unitNormalize { Nominal = None; Dims = merged }
 
-/// Unit power: scale all exponents
+/// Unit power: scale all exponents (drops nominal, like unitMul)
 let unitPow (u: UnitSig) (n: int) : UnitSig =
     if n = 0 then unitDimensionless
-    else u |> Map.map (fun _ exp -> exp * n) |> unitNormalize
+    else unitNormalize { Nominal = None; Dims = u.Dims |> Map.map (fun _ exp -> exp * n) }
 
-/// Check if two unit signatures are compatible (equal)
+/// Check if two unit signatures are compatible: dims must be equal, and the
+/// nominal layers must AGREE -- both the same quantity, or at least one side
+/// structural (None). Two DIFFERENT quantities are incompatible even over
+/// identical dims (that is what the nominal layer is for).
 let unitCompatible (a: UnitSig) (b: UnitSig) : bool =
-    unitNormalize a = unitNormalize b
+    (unitNormalize a).Dims = (unitNormalize b).Dims
+    && (match a.Nominal, b.Nominal with
+        | Some na, Some nb -> na = nb
+        | _ -> true)
 
-/// Pretty-print a unit signature
+/// Merge two COMPATIBLE signatures (post-unitCompatible), keeping whichever
+/// nominal is present: additive ops over `speed + m/s` stay `speed`.
+let unitJoin (a: UnitSig) (b: UnitSig) : UnitSig =
+    match a.Nominal with
+    | Some _ -> a
+    | None -> { a with Nominal = b.Nominal }
+
+/// Pretty-print a unit signature (error-message form). A quantity prints as
+/// its nominal name; a structural signature prints its dims product; the
+/// empty structural signature prints "dimensionless".
 let ppUnitSig (u: UnitSig) : string =
-    if Map.isEmpty u then "dimensionless"
-    else
-        let pos = u |> Map.filter (fun _ e -> e > 0) |> Map.toList
-        let neg = u |> Map.filter (fun _ e -> e < 0) |> Map.toList
-        let ppTerm (name, exp) =
-            if exp = 1 then name
-            elif exp = -1 then name
-            else sprintf "%s^%d" name exp
-        let posStr = pos |> List.map ppTerm |> String.concat " * "
-        let negStr = neg |> List.map (fun (n, e) -> ppTerm (n, -e)) |> String.concat " * "
-        match pos, neg with
-        | [], [] -> "dimensionless"
-        | _, [] -> posStr
-        | [], _ -> sprintf "1 / (%s)" negStr
-        | _, _ -> sprintf "%s / %s" posStr (if neg.Length > 1 then sprintf "(%s)" negStr else negStr)
+    match u.Nominal with
+    | Some n -> n
+    | None ->
+        let dims = u.Dims
+        if Map.isEmpty dims then "dimensionless"
+        else
+            let pos = dims |> Map.filter (fun _ e -> e > 0) |> Map.toList
+            let neg = dims |> Map.filter (fun _ e -> e < 0) |> Map.toList
+            let ppTerm (name, exp) =
+                if exp = 1 then name
+                elif exp = -1 then name
+                else sprintf "%s^%d" name exp
+            let posStr = pos |> List.map ppTerm |> String.concat " * "
+            let negStr = neg |> List.map (fun (n, e) -> ppTerm (n, -e)) |> String.concat " * "
+            match pos, neg with
+            | [], [] -> "dimensionless"
+            | _, [] -> posStr
+            | [], _ -> sprintf "1 / (%s)" negStr
+            | _, _ -> sprintf "%s / %s" posStr (if neg.Length > 1 then sprintf "(%s)" negStr else negStr)
+
+/// Pretty-print a unit signature in TYPE-ARGUMENT position (`Float64<...>`).
+/// A quantity renders as its nominal name; a structural signature as its dims;
+/// an empty structural signature -- dims cancelled via division, e.g.
+/// `speed/speed` or `m/m` -- renders as `Unitless`, distinct from a bare type
+/// that never had units. Display provenance only: Unitless does not affect
+/// unification (a dims-empty sig unifies freely either way).
+let ppUnitSigType (u: UnitSig) : string =
+    match u.Nominal with
+    | Some n -> n
+    | None ->
+        if Map.isEmpty ((unitNormalize u).Dims) then "Unitless"
+        else ppUnitSig u
 
 /// Value carried by an EnumIdx alias declaration: all-int or all-string
 /// (mixed rejected at typecheck). All-int lowers to int64_t, all-string to

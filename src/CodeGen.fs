@@ -2294,6 +2294,25 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 @ laneStmts
                 @ [ sprintf "return %s;" resultLane ]
             sprintf "[&]() { %s }()" (String.concat " " body)
+    | IRDisplayEmit (head, quoted, dataExpr, metaTail) ->
+        // One display-frame line on stdout (docs/display-frames.md), answering
+        // bool. The head / quoting flag / meta tail are elaboration-time
+        // constants; only the payload is computed here. The helper is
+        // Blade.Display.Frame.cppRuntime's MIRROR of Frame.emit -- keep the
+        // two in step or the differential gate says so.
+        sprintf "blade_display::emit(%s, %s, %s, %s, %s)"
+            (escapeStringLit head)
+            (if quoted then "true" else "false")
+            (exprToCppCore subst names dataExpr)
+            (escapeStringLit metaTail)
+            (escapeStringLit Blade.Display.Frame.SessionTag)
+    | IRDisplayJson (rank, dataExpr) ->
+        // JSON text of a rank-1/rank-2 numeric array. The helper streams with
+        // setprecision(15) -- the print block's own rule -- so the
+        // interpreter's CppFormat.formatFloat15 mirror gives byte parity.
+        sprintf "blade_display::json%d(%s)" rank (exprToCppCore subst names dataExpr)
+    | IRDisplayNum dataExpr ->
+        sprintf "blade_display::jsonnum(%s)" (exprToCppCore subst names dataExpr)
     | IRContains (arrExpr, valueExpr) ->
         // Linear-scan membership test as an IIFE returning bool.
         let arrStr = exprToCppCore subst names arrExpr
@@ -7002,7 +7021,13 @@ let genIncludes () : string list =
      "using namespace nested_array_utilities;"
      "using std::cout;"
      "using std::endl;"
-     ""
+     ""]
+    // Display-frame emitter (docs/display-frames.md). Header-only, static
+    // inline and free when unused, so it is emitted unconditionally rather
+    // than behind a per-program feature scan.
+    @ Blade.Display.Frame.cppRuntime ()
+    @
+    [""
      "#define TIME std::chrono::high_resolution_clock::now()"
      "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()"
      ""]
@@ -7166,7 +7191,11 @@ let genIncludesExternal () : string list =
      "#include \"blade_runtime.hpp\""        // blade_rt::panic + BLADE_FRAME shadow stack
      "using std::cout;"
      "using std::endl;"
-     ""
+     ""]
+    // Display-frame emitter -- see the sibling include block above.
+    @ Blade.Display.Frame.cppRuntime ()
+    @
+    [""
      "#define TIME std::chrono::high_resolution_clock::now()"
      "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()"
      ""]
@@ -11691,7 +11720,15 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | IRBind (comp, cont) ->
         genBindChainBinding ctx binding builder comp cont
     | IRTuple _ | IRComplex _ | IRFieldAccess _ | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIf _ | IRApp _ | IRParam _ | IRMatch _
-    | IRPure _ | IRIndex _ | IRExtent _ | IRContains _ ->
+    // display.emit is a Bool-valued scalar like the rest of this group -- the
+    // frame write is a side effect of evaluating it, and it lands in main()'s
+    // BODY, ahead of the timing line and the print block. That position is what
+    // the interpreter mirrors (Interp/Run.fs flushes its frame buffer before
+    // printBindings), which is what keeps the differential gate happy.
+    | IRPure _ | IRIndex _ | IRExtent _ | IRContains _ | IRDisplayEmit _
+    // json_array / json_num answer a String scalar; the same scalar-binding
+    // path serves them (their C++ is a single blade_display::json* call).
+    | IRDisplayJson _ | IRDisplayNum _ ->
         genScalarExprBinding ctx binding builder
     
     | IRCompose _ ->

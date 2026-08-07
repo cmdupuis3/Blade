@@ -1,0 +1,150 @@
+// The International System of Units (SI), as Blade units of measure.
+//
+// `import units.SI` brings every name below into scope as a unit, so
+// `Float<newton>`, `Float<joule>` and friends type-check against each other
+// through the ordinary unit algebra:
+//
+//     import units.SI
+//     let m: Float<kilogram> = 2.0
+//     let a: Float<meter * second^-2> = 9.81
+//     let w: Float<newton> = m * a          // checks
+//
+// COHERENT UNITS ONLY. Blade units carry a DIMENSION, not a scale: a
+// declaration is an equation between exponent vectors, and there is nowhere to
+// put a numeric factor. `Unit kilometer = meter` would not mean "1000 metres",
+// it would mean "kilometre IS metre" -- a silent alias that makes a wrong
+// program type-check. So this module defines only the SI units whose defining
+// equation has the factor 1: the seven base units and the coherent derived
+// units built from them. Deliberately absent, and why:
+//
+//   * every prefixed unit (kilometre, milligram, megawatt, ...) -- factor 10^n;
+//   * minute / hour / day / degree -- factors 60, 3600, 86400, pi/180;
+//   * litre, tonne, bar, electronvolt, dalton, astronomical unit -- factors;
+//   * degree Celsius -- a factor of 1 but an OFFSET of 273.15, which the unit
+//     algebra cannot express at all (it is affine, not linear).
+//
+// Convert at the boundary with a plain multiplication and annotate the result:
+// `let d: Float<meter> = km_value * 1000.0`.
+module units.SI
+
+// The seven base units
+//
+// Each is a base dimension: an independent axis of the exponent vector every
+// other unit here is written against.
+
+/// Length. SI base unit, symbol m.
+Unit meter
+
+/// Mass. SI base unit, symbol kg. Note the SI base unit of mass is the
+/// KILOgram, not the gram, so the coherent derived units below (newton,
+/// joule, ...) are written against `kilogram` directly.
+Unit kilogram
+
+/// Time. SI base unit, symbol s.
+Unit second
+
+/// Electric current. SI base unit, symbol A.
+Unit ampere
+
+/// Thermodynamic temperature. SI base unit, symbol K. Absolute: there is no
+/// `celsius` here, because a Celsius reading differs from a kelvin reading by
+/// an additive offset and the unit algebra multiplies.
+Unit kelvin
+
+/// Amount of substance. SI base unit, symbol mol.
+Unit mole
+
+/// Luminous intensity. SI base unit, symbol cd.
+Unit candela
+
+// Coherent derived units
+//
+// Every definition below is an identity among the base units with the factor
+// 1, so annotating a value with the named unit and annotating it with the
+// spelled-out product are the same type.
+
+/// Frequency, symbol Hz = s^-1. Periodic phenomena, cycles per second.
+Unit hertz = second^-1
+
+/// Force, symbol N = kg*m/s^2.
+Unit newton = kilogram * meter / second^2
+
+/// Pressure and stress, symbol Pa = N/m^2 = kg/(m*s^2).
+Unit pascal = newton / meter^2
+
+/// Energy, work, and heat, symbol J = N*m = kg*m^2/s^2.
+Unit joule = newton * meter
+
+/// Power and radiant flux, symbol W = J/s = kg*m^2/s^3.
+Unit watt = joule / second
+
+/// Electric charge, symbol C = A*s.
+Unit coulomb = ampere * second
+
+/// Electric potential difference, symbol V = W/A = kg*m^2/(s^3*A).
+Unit volt = watt / ampere
+
+/// Capacitance, symbol F = C/V.
+Unit farad = coulomb / volt
+
+/// Electric resistance, symbol ohm = V/A.
+Unit ohm = volt / ampere
+
+/// Electric conductance, symbol S = A/V. The reciprocal of `ohm`.
+Unit siemens = ampere / volt
+
+/// Magnetic flux, symbol Wb = V*s.
+Unit weber = volt * second
+
+/// Magnetic flux density, symbol T = Wb/m^2.
+Unit tesla = weber / meter^2
+
+/// Inductance, symbol H = Wb/A.
+Unit henry = weber / ampere
+
+/// Catalytic activity, symbol kat = mol/s.
+Unit katal = mole / second
+
+// The two dimensionless derived units
+//
+// SI defines the radian as m/m and the steradian as m^2/m^2, both of which
+// cancel: an angle in radians IS a pure number, which is exactly why sin/cos
+// take one. Blade agrees -- `Float<radian>` and an unannotated `Float64` are
+// the same type here, so `sin(theta)` accepts a `Float<radian>` and no cast is
+// needed anywhere. The names are still worth having: they document intent at a
+// declaration site, and they let `lumen` and `lux` be written the SI way.
+//
+// Do NOT reach for a base-unit `Unit radian` to get angle checking. It would
+// buy a little safety at the cost of rejecting every transcendental call on an
+// angle, which is most of what angles are for.
+
+/// Plane angle, symbol rad = m/m. Dimensionless by SI definition.
+Unit radian = meter / meter
+
+/// Solid angle, symbol sr = m^2/m^2. Dimensionless by SI definition.
+Unit steradian = meter^2 / meter^2
+
+/// Luminous flux, symbol lm = cd*sr. Equal to `candela`, since `steradian`
+/// cancels -- that is the SI definition, not an approximation.
+Unit lumen = candela * steradian
+
+/// Illuminance, symbol lx = lm/m^2.
+Unit lux = lumen / meter^2
+
+// Ionising radiation
+//
+// `becquerel`, `gray` and `sievert` are dimensionally equal to `hertz`,
+// `gray` and each other respectively. SI keeps the separate names because
+// they mark different QUANTITIES, and so does this module; the checker sees
+// through to the exponents, so a becquerel and a hertz are interchangeable to
+// it, as they are in SI.
+
+/// Activity referred to a radionuclide, symbol Bq = s^-1.
+Unit becquerel = second^-1
+
+/// Absorbed dose of ionising radiation, symbol Gy = J/kg = m^2/s^2.
+Unit gray = joule / kilogram
+
+/// Dose equivalent, symbol Sv = J/kg. Dimensionally `gray`; the distinct name
+/// marks the biological weighting, which is a factor applied by the user.
+Unit sievert = joule / kilogram

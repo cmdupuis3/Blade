@@ -1,0 +1,16 @@
+// TEST: Quantity Slot Default Adoption
+// A defaulted param whose type carries a QUANTITY treats its default as an
+// INTRODUCTION position: the API author declared the slot type right
+// there, so the bare default adopts the slot's nominal (with the dims
+// check ascription carries) and no BL3010 fires. Callers may omit it, or
+// supply an ascribed value.
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit speed: mps
+function boost(v: Float<speed>, dv: Float<speed> = 1.0) -> Float<speed> = v + dv
+let v0 = 4.0: speed
+let b1 = boost(v0)
+let b2 = boost(v0, (2.5 : speed))
+// EXPECT: b1 = 5
+// EXPECT: b2 = 6.5

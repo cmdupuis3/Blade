@@ -382,7 +382,19 @@ type EvalResult =
       Stdout: string
       Stderr: string
       Bindings: Binding list
-      Diagnostics: EvalDiagnostic list }
+      Diagnostics: EvalDiagnostic list
+      /// Display frames this submission produced, in emission order: the raw
+      /// JSON text of each, exactly as it travelled on stdout
+      /// (Blade.Display.Frame). `ide serve` writes them as the eval response's
+      /// `display` array (docs/display-frames.md section 2); they are LIFTED OUT of
+      /// `Stdout` above, so a client showing both never sees a frame twice.
+      ///
+      /// A session re-runs every accumulated snippet on each submission, so an
+      /// earlier cell's frames reappear here. That is deliberate and is the
+      /// contract in the spec's section 10: their generated `meta.id`s are stable
+      /// across re-runs, so the panel merges equal ids into the plot it already
+      /// has, and the notebook lane skips an already-seen id for cell outputs.
+      Display: string list }
 
 /// The compiled fallback lane: session source path -> working directory ->
 /// (exit code, stdout, stderr), or an already-composed failure message.
@@ -655,7 +667,7 @@ type ReplSession(runCwd: string) =
         let trimmed = source.Trim()
         let blank =
             { Kept = true; ExitCode = 0; Lane = LaneInterp; ElapsedMs = 0
-              Stdout = ""; Stderr = ""; Bindings = []; Diagnostics = [] }
+              Stdout = ""; Stderr = ""; Bindings = []; Diagnostics = []; Display = [] }
         if trimmed = "" then blank else
         // `Trim()` may have eaten leading blank lines; the client's cell
         // coordinates still count them.
@@ -675,10 +687,11 @@ type ReplSession(runCwd: string) =
             | CandidateRejected (ds, _) ->
                 { Kept = false; ExitCode = 1; Lane = LaneInterp; ElapsedMs = 0
                   Stdout = ""; Stderr = ""; Bindings = []
-                  Diagnostics = ds |> List.map (remapDiagnostic candidate placement) }
+                  Diagnostics = ds |> List.map (remapDiagnostic candidate placement)
+                  Display = [] }
             | CandidateFailed msg ->
                 { Kept = false; ExitCode = 1; Lane = LaneGpp; ElapsedMs = 0
-                  Stdout = ""; Stderr = msg; Bindings = []; Diagnostics = [] }
+                  Stdout = ""; Stderr = msg; Bindings = []; Diagnostics = []; Display = [] }
             | CandidateRan r ->
                 let valueOf (name: string) =
                     r.Lines
@@ -699,12 +712,25 @@ type ReplSession(runCwd: string) =
                     | None -> ""
                 let kept = (r.ExitCode = 0)
                 if kept && commit then this.Commit candidate
+                // Display frames leave the text stream here, once, for every
+                // lane: both the interpreter and the compiled binary put them
+                // on stdout (that is what makes the REPL channel work at all),
+                // so the serve channel is a pure line filter rather than a
+                // second emission path.
+                let frames = r.Lines |> Array.choose (fun l ->
+                    if l.StartsWith Blade.Display.Frame.Sentinel
+                    then Some (l.Substring Blade.Display.Frame.Sentinel.Length)
+                    else None)
                 { Kept = kept
+                  Display = List.ofArray frames
                   ExitCode = r.ExitCode
                   Lane = r.Lane
                   ElapsedMs = r.ElapsedMs
                   Stdout =
-                    let userOut = r.Lines |> Array.filter (fun l -> not (outNameRe.IsMatch l))
+                    let userOut =
+                        r.Lines
+                        |> Array.filter (fun l ->
+                            not (outNameRe.IsMatch l) && not (l.StartsWith Blade.Display.Frame.Sentinel))
                     let joined = String.concat "\n" userOut
                     if joined.Trim() = "" then "" else joined
                   Stderr = r.Stderr.Trim()

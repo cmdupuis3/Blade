@@ -568,6 +568,91 @@ let isNamedTypeArg (tokens: Token list) : bool =
         (match t1.Kind with TokIdent _ -> true | _ -> false) && t2.Kind = TokOp "="
     | _ -> false
 
+// Unit-expression grammar (shared by Unit-declaration right-hand sides and
+// compound type-argument annotations like `Float<meter/second^2>`). Defined
+// HERE, ahead of the parseTypeExpr group, because parseTypeArg routes into
+// it; parseUnitDecl (further down) calls it too. A unit expression never
+// contains `,` or `>`, so a sub-parse inside a type-argument list always
+// stops cleanly before the enclosing constructor's delimiters.
+
+/// Parse a unit expression: meters / seconds, kg * velocity, meters^2
+let rec parseUnitExpr (tokens: Token list) : ParseResult<UnitExpr> =
+    parseUnitTerm tokens >>= fun left rest ->
+    parseUnitExprTail left rest
+
+and parseUnitExprTail (left: UnitExpr) (tokens: Token list) : ParseResult<UnitExpr> =
+    match peek tokens with
+    | Some (TokOp "*") ->
+        parseUnitTerm (advance tokens) >>= fun right rest ->
+        parseUnitExprTail (UnitMul (left, right)) rest
+    | Some (TokOp "/") ->
+        parseUnitTerm (advance tokens) >>= fun right rest ->
+        parseUnitExprTail (UnitDiv (left, right)) rest
+    | _ -> success left tokens
+
+and parseUnitTerm (tokens: Token list) : ParseResult<UnitExpr> =
+    parseUnitAtom tokens >>= fun atom rest ->
+    match peek rest with
+    | Some (TokOp "^") ->
+        let afterCaret = advance rest
+        match peek afterCaret with
+        | Some (TokInt n) -> success (UnitPow (atom, int n)) (advance afterCaret)
+        // Negative exponent (`seconds^-1`, `meters^-2`): the lexer emits the
+        // minus as its own operator token, so glue it back on here --
+        // reciprocal units (frequencies, decay coefficients) are too common
+        // to force through the a/b spelling.
+        | Some (TokOp "-") ->
+            (match peek (advance afterCaret) with
+             | Some (TokInt n) -> success (UnitPow (atom, -(int n))) (advance (advance afterCaret))
+             | _ ->
+                 let line, col = currentPos (advance afterCaret)
+                 error "Expected integer exponent after '^' in unit expression" line col)
+        | _ ->
+            let line, col = currentPos afterCaret
+            error "Expected integer exponent after '^' in unit expression" line col
+    | _ -> success atom rest
+
+and parseUnitAtom (tokens: Token list) : ParseResult<UnitExpr> =
+    match peek tokens with
+    | Some (TokIdent name) -> success (UnitNamed name) (advance tokens)
+    // The unity literal `1`: empty dims. Enables the dimensionless-quantity
+    // form (`Unit levels: 1`) and reciprocal aliases (`Unit hz = 1 / seconds`).
+    | Some (TokInt 1L) -> success UnitOne (advance tokens)
+    | Some (TokInt n) ->
+        let line, col = currentPos tokens
+        error (sprintf "Only the unity literal '1' is a unit expression (got %d); other magnitudes are values, not units" n) line col
+    | Some TokLParen ->
+        parseUnitExpr (advance tokens) >>= fun expr afterExpr ->
+        expect TokRParen afterExpr >>= fun _ remaining ->
+        success expr remaining
+    | _ ->
+        let line, col = currentPos tokens
+        error "Expected unit name, '1', or '(' in unit expression" line col
+
+/// Lookahead for a COMPOUND unit expression in type-argument position.
+/// Deliberately conservative -- it claims only shapes the type grammar
+/// cannot already mean, so every existing type-argument spelling parses
+/// exactly as before:
+///   - a LONE unit name stays TyNamed (`Float<meter>`, `Float<speed>`);
+///   - `name^INT` stays TyVar (`T^2`); a unit name there is disambiguated
+///     at LOWERING (units-first policy), not in the grammar;
+///   - claimed here: `name * ...` / `name / ...`, `name^-INT` (negative
+///     exponents never parsed before), `name^INT` followed by `*`/`/`,
+///     a leading unity `1`, and a parenthesized group opening with
+///     `(name *|/|^ ...` (a tuple type never continues a name that way).
+let isUnitExprArg (tokens: Token list) : bool =
+    match tokens |> List.truncate 4 |> List.map (fun t -> t.Kind) with
+    | TokInt 1L :: _ -> true
+    | TokIdent _ :: TokOp "*" :: _ -> true
+    | TokIdent _ :: TokOp "/" :: _ -> true
+    | TokIdent _ :: TokOp "^" :: TokOp "-" :: _ -> true
+    | TokIdent _ :: TokOp "^" :: TokInt _ :: TokOp "*" :: _ -> true
+    | TokIdent _ :: TokOp "^" :: TokInt _ :: TokOp "/" :: _ -> true
+    | TokLParen :: TokIdent _ :: TokOp "*" :: _ -> true
+    | TokLParen :: TokIdent _ :: TokOp "/" :: _ -> true
+    | TokLParen :: TokIdent _ :: TokOp "^" :: _ -> true
+    | _ -> false
+
 let rec parseTypeExpr (tokens: Token list) : ParseResult<TypeExpr> =
     parseTypeAtom tokens >>= fun first rest ->
     match peek rest with
@@ -728,6 +813,15 @@ and parseTypeArg (tokens: Token list) : ParseResult<TypeArg> =
         let argName = match (List.head tokens).Kind with TokIdent n -> n | _ -> ""
         parseSimpleExpr (advance (advance tokens)) >>= fun value remaining ->
         success (TANamed (argName, value)) remaining
+    elif isUnitExprArg tokens then
+        // COMPOUND unit annotation (`meter/second`, `second^-1`, `1`,
+        // `(meter*second)^2`): the full Unit-declaration grammar, resolved
+        // through env.Units at lowering. The sub-parse stops at anything
+        // that is not `* / ^`, so it can never eat the `,` or closing `>`
+        // of the enclosing constructor. Lone names and `name^INT` are NOT
+        // claimed (see isUnitExprArg), so existing spellings are untouched.
+        parseUnitExpr tokens >>= fun ue remaining ->
+        success (TAPositional (TyUnitExpr ue)) remaining
     else
         parseTypeExpr tokens >>= fun ty remaining ->
         success (TAPositional ty) remaining
@@ -2144,12 +2238,22 @@ and parseLambdaParam (tokens: Token list) : ParseResult<LambdaParam> =
     // the optional annotation is consumed.
     let nameSpan = headSpan tokens
     expectIdent tokens >>= fun name afterName ->
+    // Optional default value: `name = expr` / `name: Type = expr`. The
+    // expression parser stops at `,` and `)`, so the param list's own
+    // delimiters are unaffected.
+    let withDefault ty afterTy =
+        match peek afterTy with
+        | Some (TokOp "=") ->
+            parseExprImpl (advance afterTy) >>= fun dflt remaining ->
+            success { Name = name; Type = ty; Default = Some dflt; NameSpan = nameSpan } remaining
+        | _ ->
+            success { Name = name; Type = ty; Default = None; NameSpan = nameSpan } afterTy
     match peek afterName with
     | Some TokColon ->
-        advance afterName |> parseTypeExpr >>= fun ty remaining ->
-        success { Name = name; Type = Some ty; NameSpan = nameSpan } remaining
+        advance afterName |> parseTypeExpr >>= fun ty afterTy ->
+        withDefault (Some ty) afterTy
     | _ ->
-        success { Name = name; Type = None; NameSpan = nameSpan } afterName
+        withDefault None afterName
 
 and parseLet (tokens: Token list) : ParseResult<Expr> =
     // let [const|mut] pattern [: type] = value. Blade has no ML-style
@@ -2705,6 +2809,16 @@ and parseLetStmt (tokens: Token list) : ParseResult<Stmt> =
 let parseParamDecl (tokens: Token list) : ParseResult<ParamDecl> =
     let nameSpan = headSpan tokens
     expectIdent tokens >>= fun name afterName ->
+    // Optional default value after the (optional) annotation:
+    // `x: Type = expr` or `x = expr`. Trailing/scope rules are the type
+    // checker's (BL3012); the grammar only collects the expression.
+    let withDefault ty mutability afterTy =
+        match peek afterTy with
+        | Some (TokOp "=") ->
+            parseExprImpl (advance afterTy) >>= fun dflt remaining ->
+            success { Name = name; Type = ty; Mutability = mutability; Default = Some dflt; NameSpan = nameSpan } remaining
+        | _ ->
+            success { Name = name; Type = ty; Mutability = mutability; Default = None; NameSpan = nameSpan } afterTy
     match peek afterName with
     | Some TokColon ->
         // Optional mutability marker before the type: `x: mut T` (formalism
@@ -2715,10 +2829,10 @@ let parseParamDecl (tokens: Token list) : ParseResult<ParamDecl> =
             match peek (advance afterName) with
             | Some (TokKeyword KwMut) -> Mutable, advance (advance afterName)
             | _ -> Immutable, advance afterName
-        parseTypeExpr afterAnnot >>= fun ty remaining ->
-        success { Name = name; Type = Some ty; Mutability = mutability; NameSpan = nameSpan } remaining
+        parseTypeExpr afterAnnot >>= fun ty afterTy ->
+        withDefault (Some ty) mutability afterTy
     | _ ->
-        success { Name = name; Type = None; Mutability = Immutable; NameSpan = nameSpan } afterName
+        withDefault None Immutable afterName
 
 let parseFunctionDecl (tokens: Token list) : ParseResult<Decl> =
     // `tokens` starts AT the name (the `function` keyword is consumed by the
@@ -3125,62 +3239,24 @@ let parseQualifiedName (tokens: Token list) : ParseResult<QualifiedName> =
         error "Expected module name" line col
 
 // Unit of Measure Declarations
+//
+// (The unit-expression grammar itself -- parseUnitExpr and friends -- now
+// lives ahead of the parseTypeExpr group, because compound type arguments
+// like `Float<meter/second^2>` route into it via parseTypeArg.)
 
-/// Parse a unit expression: meters / seconds, kg * velocity, meters^2
-let rec parseUnitExpr (tokens: Token list) : ParseResult<UnitExpr> =
-    parseUnitTerm tokens >>= fun left rest ->
-    parseUnitExprTail left rest
-
-and parseUnitExprTail (left: UnitExpr) (tokens: Token list) : ParseResult<UnitExpr> =
-    match peek tokens with
-    | Some (TokOp "*") ->
-        parseUnitTerm (advance tokens) >>= fun right rest ->
-        parseUnitExprTail (UnitMul (left, right)) rest
-    | Some (TokOp "/") ->
-        parseUnitTerm (advance tokens) >>= fun right rest ->
-        parseUnitExprTail (UnitDiv (left, right)) rest
-    | _ -> success left tokens
-
-and parseUnitTerm (tokens: Token list) : ParseResult<UnitExpr> =
-    parseUnitAtom tokens >>= fun atom rest ->
-    match peek rest with
-    | Some (TokOp "^") ->
-        let afterCaret = advance rest
-        match peek afterCaret with
-        | Some (TokInt n) -> success (UnitPow (atom, int n)) (advance afterCaret)
-        // Negative exponent (`seconds^-1`, `meters^-2`): the lexer emits the
-        // minus as its own operator token, so glue it back on here --
-        // reciprocal units (frequencies, decay coefficients) are too common
-        // to force through the a/b spelling.
-        | Some (TokOp "-") ->
-            (match peek (advance afterCaret) with
-             | Some (TokInt n) -> success (UnitPow (atom, -(int n))) (advance (advance afterCaret))
-             | _ ->
-                 let line, col = currentPos (advance afterCaret)
-                 error "Expected integer exponent after '^' in unit expression" line col)
-        | _ ->
-            let line, col = currentPos afterCaret
-            error "Expected integer exponent after '^' in unit expression" line col
-    | _ -> success atom rest
-
-and parseUnitAtom (tokens: Token list) : ParseResult<UnitExpr> =
-    match peek tokens with
-    | Some (TokIdent name) -> success (UnitNamed name) (advance tokens)
-    | Some TokLParen ->
-        parseUnitExpr (advance tokens) >>= fun expr afterExpr ->
-        expect TokRParen afterExpr >>= fun _ remaining ->
-        success expr remaining
-    | _ ->
-        let line, col = currentPos tokens
-        error "Expected unit name or '(' in unit expression" line col
-
-/// Parse a unit declaration: Unit meters  or  Unit velocity = meters / seconds
+/// Parse a unit declaration:
+///   Unit meters                       — base dimension
+///   Unit velocity = meters / seconds  — structural alias (canonicalized, name discarded)
+///   Unit speed: mps                   — QUANTITY: nominal identity entailing the RHS dims
 let parseUnitDecl (tokens: Token list) : ParseResult<Decl> =
     expectIdent tokens >>= fun name afterName ->
     match peek afterName with
     | Some (TokOp "=") ->
         parseUnitExpr (advance afterName) >>= fun expr remaining ->
         success (DeclUnit { Name = name; Definition = Some (UnitDerived expr) }) remaining
+    | Some TokColon ->
+        parseUnitExpr (advance afterName) >>= fun expr remaining ->
+        success (DeclUnit { Name = name; Definition = Some (UnitQuantity expr) }) remaining
     | _ ->
         success (DeclUnit { Name = name; Definition = None }) afterName
 

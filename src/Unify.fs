@@ -100,6 +100,42 @@ type TypeError =
     | StackJoinCompactSlot of op: string * slot: int
     // Unit mismatch (BL3006)
     | UnitMismatch of context: string * left: string * right: string
+    // Quantity (nominal unit) violations
+    /// BL3010: a function parameter declared with a QUANTITY (nominal unit)
+    /// received an argument that does not carry that quantity — bare and
+    /// structurally-dimensioned arguments are both rejected; the caller must
+    /// ascribe (`x : speed`). `got` describes the argument's signature.
+    | QuantityArgMismatch of pos: int * quantity: string * got: string
+    /// BL3011: a quantity name used inside unit algebra (`Unit x = speed * m`)
+    /// or as the RHS of another quantity (`Unit q: speed`). Quantities are
+    /// TERMINAL: the nominal layer is exactly one level deep.
+    | QuantityTerminal of quantity: string * declName: string
+    // Parameter defaults (BL3012)
+    /// A required (default-less) parameter follows a defaulted one: defaults
+    /// are TRAILING (classic rule), or omitted-argument calls would be
+    /// ambiguous. `func` is "<lambda>" for anonymous lambdas.
+    | DefaultParamOrder of func: string * requiredParam: string * defaultedParam: string
+    /// A parameter's default expression references another DEFAULTED
+    /// parameter. Defaults may reference the required parameters only —
+    /// they evaluate left-to-right at call entry with just the required
+    /// arguments bound.
+    | DefaultParamScope of func: string * param: string * referenced: string
+    // Factory quantity slots
+    /// BL3013 (declaration): two DEFAULTED params of one function carry the
+    /// SAME quantity nominal. By-nominal argument routing needs each quantity
+    /// to name exactly one slot, so this rejects at the declaration even if
+    /// the function is never called.
+    | FactoryDupQuantityDecl of func: string * quantity: string * param1: string * param2: string
+    /// BL3014 (call site): one quantity slot received two arguments -- two
+    /// tagged args with the same nominal, or a tagged arg targeting a slot
+    /// already claimed by the positional prefix.
+    | FactoryDupFill of callee: string * quantity: string * slot: string
+    /// BL3014 (call site): a quantity-tagged trailing argument matches none
+    /// of the callee's quantity slots. `candidates` names the slots it has.
+    | FactoryUnknownTag of callee: string * quantity: string * candidates: string list
+    /// BL3014 (call site): an untagged (positional) trailing argument appears
+    /// AFTER a quantity-tagged one -- its slot would be a guess.
+    | FactoryAmbiguousMix of callee: string * pos: int
     // Invalid builtin/intrinsic argument (BL3007)
     | IntrinsicBindArrayFailed of op: string
     | IntrinsicNeedsArray of op: string
@@ -753,8 +789,15 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     // unit-checked. The asymmetric arms stay permissive: bare values flow
     // freely into/out of annotated positions (how units are introduced).
     | IRTUnitAnnotated (inner1, u1), IRTUnitAnnotated (inner2, u2) ->
-        if unitCompatible u1 u2 then unify subst inner1 inner2
-        else Error (UnitMismatch ("assignment", ppUnitSig u1, ppUnitSig u2))
+        // Inner types first, then the signature check. The order matters only
+        // for diagnostics: a bare-quantity ascription (`t : speed`) carries a
+        // FRESH inner var, and binding it before a signature rejection lets
+        // the error render `Float64<speed>` rather than `T?n<speed>`.
+        // (unitCompatible also demands NOMINAL agreement: same quantity, or
+        // at least one side structural.)
+        unify subst inner1 inner2 |> Result.bind (fun () ->
+            if unitCompatible u1 u2 then Ok ()
+            else Error (UnitMismatch ("assignment", ppUnitSig u1, ppUnitSig u2)))
     | IRTUnitAnnotated (inner, _), other | other, IRTUnitAnnotated (inner, _) -> unify subst inner other
     | _ -> Error (TypeMismatch (t1, t2))
 

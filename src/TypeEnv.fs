@@ -166,6 +166,14 @@ type TypeEnv = {
     /// Custom where-clause conjuncts per function: funcName -> (paramNames,
     /// conjuncts). Populated by checkFunctionDecl; consulted at call sites for discharge.
     FuncConstraints: System.Collections.Generic.Dictionary<string, string list * (string * string list) list>
+    /// Parameter metadata for callables with DEFAULT parameter values:
+    /// callee name -> (paramName, surface type annotation, surface default)
+    /// per param, in declaration order. Populated by checkFunctionDecl and by
+    /// let bindings whose value is a defaults-carrying lambda; consulted by
+    /// the surface call-site desugar (omitted trailing args re-type the
+    /// default at the call site). Name-keyed like FuncConstraints, and shares
+    /// its known shadowing weakness. Shared by reference.
+    FuncDefaults: System.Collections.Generic.Dictionary<string, (string * TypeExpr option * Expr option) list>
     /// Mutually constrained alias groups: groupId -> group info.
     MutualGroups: Map<string, MutualGroupInfo>
     /// Member alias name -> owning groupId, for annotation scanning.
@@ -252,6 +260,7 @@ let emptyEnv () = {
     Warnings = ResizeArray<string>()
     Provenance = System.Collections.Generic.Dictionary<IRId, Set<string>>()
     FuncConstraints = System.Collections.Generic.Dictionary<string, string list * (string * string list) list>()
+    FuncDefaults = System.Collections.Generic.Dictionary<string, (string * TypeExpr option * Expr option) list>()
     MutualGroups = Map.empty
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
@@ -473,6 +482,22 @@ class IS implemented, and the dense result folds like any other array." op level
     | JoinShapeMismatch (pos, detail) -> sprintf "join: argument %d does not match argument 1 (%s). join(A, B, d) requires equal rank, equal element type, and equal extents on EVERY axis except the joined dimension d." pos detail
     | StackJoinCompactSlot (op, slot) -> sprintf "%s: index slot %d is a compact, ragged, or compound group. %s materializes a dense rectangular result, so its operands must be dense (plain Idx) on every axis -- decompact the axis first." op slot op
     | UnitMismatch (context, left, right) -> sprintf "Unit mismatch in %s: %s vs %s" context left right
+    | QuantityArgMismatch (pos, quantity, got) ->
+        sprintf "argument %d: the parameter's declared type carries the quantity '%s', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is %s. Ascribe it at the call site (e.g. `x : %s`); matching dimensions alone do not imply the quantity." pos quantity got quantity
+    | QuantityTerminal (quantity, declName) ->
+        sprintf "unit '%s': the quantity '%s' cannot be used inside a unit expression. Quantities are TERMINAL -- the nominal layer is exactly one level deep -- so a quantity name can neither be composed (`Unit x = %s * m`) nor re-derived from (`Unit q: %s`). Compose from the structural units the quantity was declared over instead." declName quantity quantity quantity
+    | DefaultParamOrder (func, requiredParam, defaultedParam) ->
+        sprintf "%s: parameter '%s' has no default but follows the defaulted parameter '%s'. Defaults are TRAILING: once a parameter has a default, every later parameter needs one too (otherwise an omitted-argument call is ambiguous). Reorder the parameters or give '%s' a default." func requiredParam defaultedParam requiredParam
+    | DefaultParamScope (func, param, referenced) ->
+        sprintf "%s: the default for parameter '%s' references '%s', which is itself a defaulted parameter. A default may reference the REQUIRED parameters only -- defaults evaluate left-to-right at call entry with just the required arguments bound, so another default's value is not available." func param referenced
+    | FactoryDupQuantityDecl (func, quantity, param1, param2) ->
+        sprintf "%s: defaulted parameters '%s' and '%s' both carry the quantity '%s'. By-nominal argument routing (`f(x, 3 : %s)`) needs each quantity to name exactly ONE defaulted slot -- give the second slot a distinct quantity, or make it a plain (non-quantity) parameter." func param1 param2 quantity quantity
+    | FactoryDupFill (callee, quantity, slot) ->
+        sprintf "call to '%s': the quantity slot '%s' (quantity '%s') is supplied twice -- a second argument tagged '%s' (or a positional argument already claiming that slot) conflicts with an earlier one. Each slot takes at most one argument." callee slot quantity quantity
+    | FactoryUnknownTag (callee, quantity, candidates) ->
+        sprintf "call to '%s': an argument is tagged with the quantity '%s', but '%s' has no defaulted slot of that quantity. Its quantity slots are: %s." callee quantity callee (if List.isEmpty candidates then "none" else String.concat ", " candidates)
+    | FactoryAmbiguousMix (callee, pos) ->
+        sprintf "call to '%s': argument %d has no quantity tag but appears AFTER a quantity-tagged argument, so its slot would be a guess. Positional (untagged) arguments must come first, in declared order; tag the stragglers (`v : quantity`) or reorder the call." callee pos
     | IntrinsicBindArrayFailed op -> sprintf "%s(): failed to bind array type after unification" op
     | IntrinsicNeedsArray op -> sprintf "%s() requires an array as argument" op
     | IntrinsicScalarOnly name -> sprintf "%s applies to scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(x) -> %s(x) |> compute)." name name
@@ -621,6 +646,11 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | InvalidArrayCapture _ -> "BL3005"
             // Promoted variants (Stage 5)
             | UnitMismatch _ -> "BL3006"
+            | QuantityArgMismatch _ -> "BL3010"
+            | QuantityTerminal _ -> "BL3011"
+            | DefaultParamOrder _ | DefaultParamScope _ -> "BL3012"
+            | FactoryDupQuantityDecl _ -> "BL3013"
+            | FactoryDupFill _ | FactoryUnknownTag _ | FactoryAmbiguousMix _ -> "BL3014"
             | IntrinsicBindArrayFailed _ | IntrinsicNeedsArray _ | IntrinsicScalarOnly _
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
@@ -800,13 +830,33 @@ let isEnumType (env: TypeEnv) (parentName: string) : bool =
 let registerVariantTag tag parentName payload (env: TypeEnv) =
     { env with VariantTags = Map.add tag (parentName, payload) env.VariantTags }
 
-/// Resolve a UnitExpr AST node to a canonical UnitSig
-let rec resolveUnitExpr (units: Map<string, UnitSig>) (expr: UnitExpr) : Result<UnitSig, string> =
+/// Why a UnitExpr failed to resolve. Split so registerUnit can keep the
+/// historical warn-and-fallback behavior for an UNKNOWN name while turning a
+/// TERMINAL-quantity misuse into a hard declaration-site error (BL3011).
+type UnitResolveErr =
+    | UResolveUnknown of name: string
+    /// A quantity (nominal) name referenced inside unit algebra. Quantities
+    /// are terminal: the nominal layer is exactly one level deep.
+    | UResolveTerminal of quantity: string
+
+/// Render a UnitResolveErr for the legacy warn-and-fallback channels.
+let ppUnitResolveErr (e: UnitResolveErr) : string =
+    match e with
+    | UResolveUnknown name -> sprintf "Unknown unit '%s'" name
+    | UResolveTerminal q -> sprintf "Quantity '%s' cannot appear in a unit expression (quantities are terminal)" q
+
+/// Resolve a UnitExpr AST node to a canonical UnitSig. Quantity names
+/// (Nominal = Some) are REJECTED in every position — a quantity is an
+/// identity, not a factor, so it can neither be composed (`speed * m`) nor
+/// re-derived from (`Unit q: speed`).
+let rec resolveUnitExpr (units: Map<string, UnitSig>) (expr: UnitExpr) : Result<UnitSig, UnitResolveErr> =
     match expr with
     | UnitNamed name ->
         match Map.tryFind name units with
+        | Some sig' when sig'.Nominal.IsSome -> Error (UResolveTerminal name)
         | Some sig' -> Ok sig'
-        | None -> Error (sprintf "Unknown unit '%s'" name)
+        | None -> Error (UResolveUnknown name)
+    | UnitOne -> Ok unitDimensionless
     | UnitMul (a, b) ->
         resolveUnitExpr units a |> Result.bind (fun sa ->
         resolveUnitExpr units b |> Result.map (fun sb ->
@@ -819,20 +869,34 @@ let rec resolveUnitExpr (units: Map<string, UnitSig>) (expr: UnitExpr) : Result<
         resolveUnitExpr units a |> Result.map (fun sa ->
             unitPow sa n)
 
-/// Register a unit declaration in the environment
-let registerUnit (env: TypeEnv) (decl: UnitDecl) : TypeEnv =
-    let sig' =
+/// Register a unit declaration in the environment. Errors only on a
+/// TERMINAL-quantity misuse (BL3011) — an unknown unit name keeps the
+/// historical warn-and-fallback behavior so existing programs are untouched.
+let registerUnit (env: TypeEnv) (decl: UnitDecl) : Result<TypeEnv, TypeError> =
+    // Base-unit fallback: canonical form is {name: 1}
+    let baseSig () = unitOfDims (Map.ofList [(decl.Name, 1)])
+    let sigResult =
         match decl.Definition with
-        | None | Some UnitBase ->
-            // Base unit: canonical form is {name: 1}
-            Map.ofList [(decl.Name, 1)]
+        | None | Some UnitBase -> Ok (baseSig ())
         | Some (UnitDerived expr) ->
             match resolveUnitExpr env.Units expr with
-            | Ok resolved -> resolved
-            | Error msg ->
-                eprintfn "Unit error: %s" msg
-                Map.ofList [(decl.Name, 1)]  // fallback to base unit
-    { env with Units = Map.add decl.Name sig' env.Units }
+            | Ok resolved -> Ok resolved
+            | Error (UResolveTerminal q) -> Error (QuantityTerminal (q, decl.Name))
+            | Error err ->
+                eprintfn "Unit error: %s" (ppUnitResolveErr err)
+                Ok (baseSig ())  // fallback to base unit
+        | Some (UnitQuantity expr) ->
+            // Quantity: nominal identity entailing the RHS dims. The RHS is
+            // resolved through the same terminal-checking path, so a quantity
+            // on the RHS of another quantity rejects here too.
+            match resolveUnitExpr env.Units expr with
+            | Ok resolved -> Ok { resolved with Nominal = Some decl.Name }
+            | Error (UResolveTerminal q) -> Error (QuantityTerminal (q, decl.Name))
+            | Error err ->
+                eprintfn "Unit error: %s" (ppUnitResolveErr err)
+                Ok { baseSig () with Nominal = Some decl.Name }
+    sigResult |> Result.map (fun sig' ->
+        { env with Units = Map.add decl.Name sig' env.Units })
 
 // 2b. Generalization (needs VarInfo defined above)
 

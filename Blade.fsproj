@@ -7,6 +7,13 @@
 
   <ItemGroup>
     <Compile Include="src/Runtime.fs" />
+    <!-- Display frames: the {mime, data} rich-output wire format
+         (Blade-REPL/docs/display-frames.md). Dependency-free string work, so
+         it sits at the very front and is shared by everything that has to
+         agree on the bytes: the display elaborator, TypeCheck's intrinsic,
+         Interp (emission), CodeGen (its C++ mirror), and the REPL/serve
+         session layer (extraction). -->
+    <Compile Include="src/display/DisplayFrame.fs" />
     <Compile Include="src/Ast.fs" />
     <!-- Unified diagnostics: the Diagnostic record + BLxxxx registry +
          renderers. Needs only Ast.Span; every later phase constructs
@@ -177,6 +184,11 @@
     <Compile Include="src/math/compiler/MathDecls.fs" />
     <Compile Include="src/math/compiler/MathElaborate.fs" />
     <Compile Include="src/rand/compiler/RandElaborate.fs" />
+    <!-- display compiler layer (Blade.Display.Elaborate): `display.emit(mime,
+         data)` -> the `__display_emit` intrinsic. Needs Ast + DisplayFrame
+         only; core touchpoint is the DisplayElaborate.expand pipeline stage in
+         TypeCheck.typeCheck. -->
+    <Compile Include="src/display/compiler/DisplayElaborate.fs" />
     <!-- Spectra compiler layer (Blade.Spectra.*): FFT + arity-polymorphic
          polyspectra elaborated to plain Blade source. Lives under
          spectra/compiler/ beside the BladeSpectra oracle (a SEPARATE
@@ -199,6 +211,14 @@
     <Compile Include="src/TypeEnv.fs" />
     <Compile Include="src/Zonk.fs" />
     <Compile Include="src/TypeCheck.fs" />
+    <!-- File-based module resolution: dotted import name -> .blade path, plus
+         the transitive closure of an entry file's imports in dependency order.
+         Needs Parser (import discovery) and ProviderRegistry/ProviderStatics
+         (which names are provider pseudo-modules and must NOT be looked for on
+         disk); must precede its three consumers — Ide.fs (`ide check` /
+         `ide serve` resolve too), Lowering.fs (the multi-file diagnostics
+         entry) and Cli.fs (compile / run / check / emit). -->
+    <Compile Include="src/ModuleResolve.fs" />
     <Compile Include="src/Ide.fs" />
     <Compile Include="src/Lowering.fs" />
     <Compile Include="src/EmitCpp.fs" />
@@ -251,6 +271,11 @@
     <Compile Include="tests/Test_SumTypes.fs" />
     <Compile Include="tests/Test_Interfaces.fs" />
     <Compile Include="tests/Test_Modules.fs" />
+    <!-- File-based module resolution (src/ModuleResolve.fs) and stdlib/units/SI.blade.
+         Cannot be a corpus category: every case starts from a FILE ON DISK,
+         which is the only way to reach the search path, the transitive walk and
+         the cycle/duplicate checks. (Also `blade test module-resolve`.) -->
+    <Compile Include="tests/Test_ModuleResolve.fs" />
     <Compile Include="tests/Test_Guards.fs" />
     <Compile Include="tests/Test_Bracketed.fs" />
     <Compile Include="tests/Test_IndexTypes.fs" />
@@ -311,6 +336,12 @@
     <Compile Include="tests/Test_Ppl.fs" />
     <Compile Include="tests/Test_Math.fs" />
     <Compile Include="tests/Test_Rand.fs" />
+    <!-- Display frames: the two corpus categories plus the in-process block
+         that pins the frame BYTES and both channels (the REPL sentinel line on
+         raw interpreter stdout, and `ide serve`'s display array on the real
+         response encoder). Must follow IdeServe.fs, which is compiled with the
+         src/ files far above. -->
+    <Compile Include="tests/Test_Display.fs" />
     <Compile Include="tests/Test_Spectra.fs" />
     <Compile Include="tests/Test_Fallback.fs" />
     <Compile Include="tests/Test_Sgs.fs" />
@@ -350,6 +381,20 @@
        the binary so the suite runs regardless of the working directory. -->
   <ItemGroup>
     <None Include="tests/corpus/**/*.blade">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- The Blade standard library, in Blade source. ModuleResolve.fs looks for
+       a `stdlib/` directory next to the running binary first (then walks up,
+       so a dev tree finds <repo>/stdlib from bin/<config>/net7.0 too), which
+       is why this copy exists: it makes `Blade.exe run` on a file that says
+       `import units.SI` work from any working directory, with no environment
+       variable set. The glob has no Link metadata, so each file keeps its
+       relative path and lands at bin/config/net7.0/stdlib/units/SI.blade, the
+       same arrangement tests/corpus/** already uses. BLADE_STDLIB overrides. -->
+  <ItemGroup>
+    <None Include="stdlib/**/*.blade">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

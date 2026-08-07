@@ -83,6 +83,7 @@ let printUsage () =
     printfn "  test linalg                       Run the blade_linalg dispatch-emission block standalone"
     printfn "  test lapack                       Run the blade_lapack eigensolver-dispatch block standalone"
     printfn "  test multifile                    Run the cross-module (multi-file) corpus standalone"
+    printfn "  test module-resolve               Run the file-based module resolver + units.SI block"
     printfn "  test shapespec                    Run the shape-specialization reach block standalone"
     printfn "  test cuda                         Run the CUDA kernel block standalone"
     printfn "  test mpi                          Run the MPI decomposition block standalone"
@@ -147,7 +148,10 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
         let testName = Path.GetFileNameWithoutExtension(filePath)
         // Errors come back as coded, spanned Diagnostics, rendered rustc-style with source snippets.
         let useColor = not Console.IsErrorRedirected
-        match lowerDiag (Some filePath) source with
+        // `lowerFileDiag` resolves file-based imports (`import units.SI` ->
+        // stdlib/units/SI.blade) first and lowers the whole set. With nothing
+        // to resolve it IS `lowerDiag (Some filePath) source`.
+        match lowerFileDiag filePath source with
         | Error ds, sm ->
             // A file with a hard error has still EARNED every warning the checker produced before it failed.
             printTypeCheckWarnings useColor (Some sm) false
@@ -353,6 +357,21 @@ let replLoop () : int =
             (match r.Warnings with
              | [] -> ()
              | ds -> eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor None ds))
+            // Display frames (Blade-REPL/docs/display-frames.md section 4) go to
+            // stdout, whole lines at column 0, BEFORE the echo and therefore
+            // before the next prompt -- which is the frame terminator the
+            // editor's REPL client scans for. This loop otherwise prints only
+            // the echoed binding, so without this arm the pty channel would
+            // carry no frames at all.
+            //
+            // Every accumulated snippet re-runs on every submission, so an
+            // earlier submission's frames re-appear here. That is the spec's
+            // section 10 replay contract: `meta.id`s are stable across re-runs,
+            // so the panel merges them into the plots it already has. A human
+            // reading a raw `blade repl` sees one long line per frame; the
+            // editor strips them before the terminal ever shows them.
+            for l in r.Lines do
+                if l.StartsWith Blade.Display.Frame.Sentinel then printfn "%s" l
             let mutable printed = 0
             match r.Echo with
             | Some l -> printfn "%s" (ReplTypes.annotate r.Info transient l); printed <- 1
@@ -547,11 +566,24 @@ let checkFile (filePath: string) (strictPins: bool) : int =
     else
         let source = File.ReadAllText(filePath)
         let useColor = not Console.IsErrorRedirected
-        let sm = Blade.Diagnostics.SourceMap.ofSources [ filePath, source ]
-        match Blade.Parser.parseProgramWithFile (Some filePath) source with
-        | Error e ->
-            eprintfn "%s" (Blade.Diagnostics.Render.render useColor (Some sm)
-                               (Blade.Parser.diagnosticOfParseError (Some filePath) e))
+        // Same two-step as compileFile's `lowerFileDiag`: resolve file-based
+        // imports, then check the whole set as ONE program. With nothing to
+        // resolve, `sources` is [(filePath, source)] and `parseResolved` is
+        // `parseProgramWithFile (Some filePath) source` -- byte for byte the
+        // pre-module behavior, including the SourceMap key.
+        let resolution = Blade.ModuleResolve.resolveEntry filePath source
+        let sources =
+            match resolution.Errors, resolution.Files with
+            | [], [ _single ] -> [ filePath, source ]
+            | _, files -> Blade.ModuleResolve.sourcesOf files
+        let sm = Blade.Diagnostics.SourceMap.ofSources sources
+        if not (List.isEmpty resolution.Errors) then
+            eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) resolution.Errors)
+            1
+        else
+        match Blade.ModuleResolve.parseResolved sources with
+        | Error d ->
+            eprintfn "%s" (Blade.Diagnostics.Render.render useColor (Some sm) d)
             1
         | Ok program ->
             match Blade.TypeCheck.typeCheck program with
@@ -1828,6 +1860,14 @@ let private dispatchTest (rest: string list) : int =
         // a cross-module shape specialization.
         let failed = (runMultiFileTestsFull "Multi-File Modules" multiFileTests "./generated_cpp_tests").Failed
         if failed = 0 then 0 else 1
+    | [ "module-resolve" ] | [ "moduleresolve" ] | [ "modres" ] ->
+        // File-based module resolution + stdlib/units/SI.blade: search path,
+        // transitive walk, cycle/duplicate/missing refusals, and the
+        // byte-identity claim for a file with no imports. Needs real files, so
+        // it writes a scratch tree under TEMP; front-end only apart from one
+        // value case that skips without g++.
+        let failed = (Blade.Tests.ModuleResolveTests.runModuleResolveTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "shapespec" ] | [ "shape-spec" ] ->
         // Which call sites earn a shape-specialized copy and which decline.
         // Pure lowering + codegen, no toolchain.
@@ -1843,6 +1883,12 @@ let private dispatchTest (rest: string list) : int =
     | [ "normalize" ] ->
         // IR-level F# unit tests for the type normalizer. No Blade source pipeline.
         let failed = (runNormalizeTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "display-frames" ] ->
+        // Display-frame BYTES + both channels (REPL sentinel line, `ide serve`
+        // display array). Drives the interpreter and the session engine
+        // directly -- no g++, no editor.
+        let failed = (Blade.Tests.Display.runDisplayTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "unify" ] ->
         // TypeCheck-level F# unit tests for the unify fast path: constructs
@@ -2097,6 +2143,9 @@ let private dispatchTest (rest: string list) : int =
             | "ppl" -> Some ("PPL", pplTests)
             | "math" -> Some ("Math", mathTests)
             | "rand" -> Some ("Rand", randTests)
+            | "display" -> Some ("Display", Blade.Tests.Display.displayTests)
+            | "display-errors" | "displayerrors" ->
+                Some ("Display Errors", asRejectProbes Blade.Tests.Display.displayErrorTests)
             | "spectra" -> Some ("Spectra", spectraTests)
             | "fallback" -> Some ("Fallback", fallbackTests)
             | "stack-join" | "stackjoin" -> Some ("Stack/Join", stackJoinTests)

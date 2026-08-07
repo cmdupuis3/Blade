@@ -1,0 +1,12 @@
+// TEST: Factory String Quantity Tag
+// A String-based quantity slot (`Unit title: 1`) fills by nominal like any
+// other: `"K": title` routes to the title slot even though a levels-tagged
+// arg precedes it (swapped relative to declared order). Omitting both slots
+// takes both defaults.
+Unit title: 1
+Unit levels: 1
+function label(x: Float, t: String<title> = "none", n: Float<levels> = 1.0) -> Float = if t == "K" then x * n else x * 100.0
+let r1 = label(2.0, 5.0: levels, "K": title)
+let r2 = label(2.0)
+// EXPECT: r1 = 10
+// EXPECT: r2 = 200

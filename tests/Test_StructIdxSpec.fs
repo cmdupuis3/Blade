@@ -131,7 +131,7 @@ let private staticLet (name: string) (value: Expr) =
 let private staticFn (name: string) (ps: string list) (body: Expr) =
     at noSpan (DeclFunction {
         Name = name; TypeParams = []
-        Params = ps |> List.map (fun p -> { Name = p; Type = None; Mutability = Immutable; NameSpan = noSpan })
+        Params = ps |> List.map (fun p -> { Name = p; Type = None; Mutability = Immutable; Default = None; NameSpan = noSpan })
         WhereClause = None; ReturnType = None; Body = body; IsStatic = true; NameSpan = noSpan })
 
 /// Run the real static resolver over a decl list and hand back the env — the

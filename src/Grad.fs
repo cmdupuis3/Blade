@@ -1275,7 +1275,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
         fd.Params
         @ (classes |> List.choose (fun (p, c) ->
              match c with
-             | DiffArray -> Some { Name = dName p.Name; Type = p.Type; Mutability = Mutable; NameSpan = noSpan }
+             | DiffArray -> Some { Name = dName p.Name; Type = p.Type; Mutability = Mutable; Default = None; NameSpan = noSpan }
              | _ -> None))
     { Name = fname + gradSuffix
       TypeParams = fd.TypeParams

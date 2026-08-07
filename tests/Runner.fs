@@ -169,7 +169,16 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                         // entry points refuse on the same three grounds (parse,
                         // typecheck, a throwing provider load), so this cannot
                         // report a rejection that `lower` did not also see.
-                        match fst (lowerDiag None source) with
+                        // Resolving entry (lowerFileDiag, synthetic cwd-anchored
+                        // path), matching lowerCaptured: a pinned probe that
+                        // imports a STDLIB module (`import plot`) must be
+                        // diagnosed against the same resolved program the first
+                        // pass refused, or the pin compares against an
+                        // unresolved-name artifact instead of the real error.
+                        let entryPath =
+                            System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(),
+                                                   "__corpus_entry__.blade")
+                        match fst (Lowering.lowerFileDiag entryPath source) with
                         | Error ds -> ds
                         | Ok _ -> []
                 FpIRError (e, diags)

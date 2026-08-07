@@ -1,0 +1,9 @@
+// TEST: Display emit malformed mime (rejects)
+// ERROR: BL5700
+// ============================================================================
+// Negative test: the mime literal must actually be a `type/subtype`. Catching
+// it here rather than on the wire matters because a reader treats a malformed
+// frame as plain text and only logs -- the failure would otherwise be silent.
+// ============================================================================
+import display as d
+let bad = d.emit("plotly", "{}")

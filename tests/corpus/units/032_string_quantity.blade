@@ -1,0 +1,10 @@
+// TEST: String Quantity Tag
+// `Unit title: 1` is a dimensionless QUANTITY usable on String: the
+// ascribed literal satisfies a String<title> parameter (strict slot), and
+// the value behaves as an ordinary string at runtime (units fully erase).
+Unit title: 1
+let s = ("K" : title)
+function greet(name: String<title>) -> String<title> = name
+let g = greet(s)
+let ok = if g == "K" then 1 else 0
+// EXPECT: ok = 1
