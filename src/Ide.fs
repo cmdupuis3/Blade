@@ -248,15 +248,31 @@ let private certFactRecords () : DeducedInfo list =
             DName = fact.Group
             DLeft = String.concat "," fact.Deps })
 
+/// Where one notebook cell's text landed in the assembled session source:
+/// a 1-based inclusive line range, plus the absolute line and prefix width
+/// of a synthetic wrapper binding when that cell needed one. A cell whose
+/// definition was superseded by a later rebind gets an EMPTY range no
+/// payload entry can fall inside.
+type CellWindow = {
+    StartLine: int
+    EndLine: int
+    WrapLine: int option
+    WrapCol: int option
+}
+
 /// Request-correlation fields the NDJSON serve protocol prepends to the
-/// payload. Both None for one-shot `ide check --json`, whose output stays
+/// payload. All None for one-shot `ide check --json`, whose output stays
 /// byte-for-byte what it was (the extension's fallback path parses it).
+/// `Windows` is set only by `checkCells`, whose caller assembled several
+/// notebook cells into the one source this payload describes and needs to
+/// know which lines belong to which cell.
 type Envelope = {
     Id: int option
     Tier: string option
+    Windows: CellWindow list option
 }
 
-let noEnvelope : Envelope = { Id = None; Tier = None }
+let noEnvelope : Envelope = { Id = None; Tier = None; Windows = None }
 
 let private renderJson (env: Envelope) (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list)
                        (deduced: DeducedInfo list) (calls: CallInfo list)
@@ -268,6 +284,26 @@ let private renderJson (env: Envelope) (diags: Diag list) (bindings: BindingInfo
     | None -> ()
     match env.Tier with
     | Some t -> sb.AppendFormat("\"tier\":\"{0}\",", jsonEscape t) |> ignore
+    | None -> ()
+    // Cell windows ride ahead of the payload proper: a client rebasing
+    // diagnostics wants the map before it starts reading positions. All
+    // numbers, so nothing here needs escaping. The wrap pair is absent, not
+    // null, for a cell that took no synthetic wrapper.
+    match env.Windows with
+    | Some ws ->
+        sb.Append "\"windows\":[" |> ignore
+        ws
+        |> List.iteri (fun i w ->
+            if i > 0 then sb.Append ',' |> ignore
+            sb.AppendFormat("{{\"startLine\":{0},\"endLine\":{1}", w.StartLine, w.EndLine) |> ignore
+            match w.WrapLine with
+            | Some l -> sb.AppendFormat(",\"wrapLine\":{0}", l) |> ignore
+            | None -> ()
+            match w.WrapCol with
+            | Some c -> sb.AppendFormat(",\"wrapCol\":{0}", c) |> ignore
+            | None -> ()
+            sb.Append '}' |> ignore)
+        sb.Append "]," |> ignore
     | None -> ()
     sb.Append "\"version\":1,\"diagnostics\":[" |> ignore
     diags

@@ -236,6 +236,16 @@ let assignRe =
 /// single out just the one binding we mean to echo.
 let outNameRe = Regex(@"^([A-Za-z_][A-Za-z0-9_]*) = ", RegexOptions.Compiled)
 
+/// Every identifier-shaped token in a snippet -- the best-effort dependency
+/// probe rebind placement uses (same textual stance as bindingName/declRe: a
+/// name inside a comment or string can fool it; a false positive only ever
+/// moves a rebind later than strictly necessary, never changes which names
+/// it sees).
+let private identTokensRe = Regex(@"[A-Za-z_][A-Za-z0-9_]*", RegexOptions.Compiled)
+
+let private referencedNames (snippet: string) : Set<string> =
+    identTokensRe.Matches snippet |> Seq.map (fun m -> m.Value) |> Set.ofSeq
+
 /// Classification looks at the first non-comment, non-blank line so a
 /// doc-commented declaration isn't mistaken for a bare expression.
 let classifyTarget (s: string) =
@@ -457,16 +467,46 @@ type ReplSession(runCwd: string) =
 
     /// The candidate a DECLARATION produces: rebinding replaces the earlier
     /// definition IN PLACE so later snippets referencing the name see the
-    /// update (duplicate lets are a C++ redeclaration error). Returns the list
-    /// and the index the snippet landed at.
+    /// update (duplicate lets are a C++ redeclaration error) -- except when
+    /// the new text references a name bound LATER in the session, where the
+    /// rebind moves just past its last dependency instead (see the inline
+    /// comment). Returns the list and the index the snippet landed at.
     member _.DeclarationCandidate(trimmed: string) : ResizeArray<string> * int =
         let candidate = ResizeArray(snippets)
         match bindingName trimmed with
         | Some name ->
             let idx = candidate.FindIndex(fun s -> bindingName s = Some name)
             if idx >= 0 then
-                candidate.[idx] <- trimmed
-                (candidate, idx)
+                // Rebind. Splicing IN PLACE is right whenever the new text only
+                // leans on names bound before the old position -- but a rebind
+                // may reference a binding added AFTER it (split one cell into
+                // two, then rebind the first: `let pairs = xloop <@> ...` where
+                // `xloop` joined the session after `pairs` did). In place, that
+                // reference sits above its definition in the flat session file
+                // and the candidate is rejected as unbound -- so place the new
+                // text just after the LAST later snippet it references. Only
+                // safe when no snippet in between references THIS name; if one
+                // does, the dependency is genuinely circular in a flat file and
+                // in-place (with its honest unbound/type error) stands.
+                let refs = referencedNames trimmed
+                let lastDep =
+                    [ idx + 1 .. candidate.Count - 1 ]
+                    |> List.filter (fun j ->
+                        match bindingName candidate.[j] with
+                        | Some n -> Set.contains n refs
+                        | None -> false)
+                    |> List.tryLast
+                match lastDep with
+                | Some j when [ idx + 1 .. j ] |> List.forall (fun k ->
+                                  not (Set.contains name (referencedNames candidate.[k]))) ->
+                    candidate.RemoveAt idx
+                    // The removal shifted everything after `idx` down one, so
+                    // inserting AT `j` lands immediately after the dependency.
+                    candidate.Insert(j, trimmed)
+                    (candidate, j)
+                | _ ->
+                    candidate.[idx] <- trimmed
+                    (candidate, idx)
             else
                 candidate.Add trimmed
                 (candidate, candidate.Count - 1)
@@ -661,3 +701,142 @@ type ReplSession(runCwd: string) =
                 evalWith candidate
                          { Index = idx; Prefix = (sprintf "let %s = " transient).Length; LeadPad = leadPad }
                          (Some transient) [ ("", transient) ] false
+
+// Whole-notebook assembly: many cells in, one source out.
+//
+// `EvalOnce` above feeds the compiler one cell at a time and lets the session
+// accumulate. Typechecking a notebook AS THE USER TYPES cannot afford that --
+// it wants one source built from every code cell and one payload back -- but
+// every cell has to land exactly where an eval would have put it, or the
+// squiggles disagree with the kernel that will later run the same cells. So
+// the assembly below reuses the very rules the eval path uses: `classifyTarget`
+// and `declRe`/`assignRe` to decide a cell's shape, `bindingName` to find the
+// definition a rebind supersedes, and `DeclarationCandidate`'s dependency-aware
+// placement to decide where the rebind goes. This is the ONLY implementation of
+// those rules on the notebook path -- the extension used to keep its own copy of
+// them, which is exactly how the two drifted apart.
+//
+// Nothing here is committed anywhere: no ReplSession, no temp file, no snippet
+// list. The only outputs are the assembled text and one window per cell.
+
+/// One cell's contribution to the assembled source: the cell it came from, the
+/// text it contributes (empty for a definition a later rebind superseded), and,
+/// where a synthetic wrapper was prepended, the line index WITHIN this text that
+/// carries it plus the prefix's character count.
+type private CellSlot =
+    { Cell: int
+      Text: string
+      Wrap: (int * int) option }
+
+/// Assemble ordered CODE cell sources (the client filters markdown out) into
+/// one session source plus one `Blade.Ide.CellWindow` per cell, in input order,
+/// naming the 1-based inclusive line range each cell's text occupies. Stateless
+/// by construction: call it with the same cells and you get the same answer.
+let assembleCells (cells: string list) : string * Blade.Ide.CellWindow list =
+    let slots = ResizeArray<CellSlot>()
+    cells
+    |> List.iteri (fun k raw ->
+        // Line counting downstream assumes \n, and the client's cell text may
+        // still carry the editor's CRLFs.
+        let src = raw.Replace("\r\n", "\n")
+        if declRe.IsMatch (classifyTarget src) then
+            match bindingName src with
+            // A `// doc` line ahead of the keyword defeats bindingName exactly
+            // as it does in the eval path: unnamed means unmatchable, so the
+            // cell simply appends.
+            | None -> slots.Add { Cell = k; Text = src; Wrap = None }
+            | Some name ->
+                let idx = slots.FindIndex(fun s -> bindingName s.Text = Some name)
+                if idx < 0 then slots.Add { Cell = k; Text = src; Wrap = None }
+                else
+                    // A rebind, placed by DeclarationCandidate's rule: in place,
+                    // unless the new text leans on a name bound LATER, in which
+                    // case it moves just past its last dependency -- and only
+                    // when nothing in between still references THIS name, where
+                    // the dependency is circular in a flat file and in place
+                    // (with its honest error) stands.
+                    let refs = referencedNames src
+                    let lastDep =
+                        [ idx + 1 .. slots.Count - 1 ]
+                        |> List.filter (fun j ->
+                            match bindingName slots.[j].Text with
+                            | Some n -> Set.contains n refs
+                            | None -> false)
+                        |> List.tryLast
+                    let displaced = slots.[idx].Cell
+                    let at =
+                        match lastDep with
+                        | Some j when [ idx + 1 .. j ] |> List.forall (fun m ->
+                                          not (Set.contains name (referencedNames slots.[m].Text))) ->
+                            slots.RemoveAt idx
+                            // The removal shifted everything after `idx` down
+                            // one, so inserting AT `j` lands immediately after
+                            // the dependency.
+                            slots.Insert(j, { Cell = k; Text = src; Wrap = None })
+                            j
+                        | _ ->
+                            slots.[idx] <- { Cell = k; Text = src; Wrap = None }
+                            idx
+                    // The superseded cell still owes the client a window, and
+                    // windows may not overlap: an empty slot directly above the
+                    // winner gives it one blank line of its own, which no
+                    // payload position can land inside.
+                    slots.Insert(at, { Cell = displaced; Text = ""; Wrap = None })
+        else
+            // A reassignment or a bare expression. The file grammar admits only
+            // declarations at top level, so either would fail to PARSE here and
+            // poison the check for every other cell -- hence the same hidden
+            // binding the eval lanes wrap them in. Named per cell, so it is
+            // unique by construction and needs none of the in-use scan `it` and
+            // `__assign` require: those are committed to a live session, and
+            // this assembly commits nothing.
+            let lines = src.Split('\n')
+            // The wrapper goes on the first SIGNIFICANT line -- the same line
+            // `classifyTarget` classified on -- so a cell that opens with a
+            // comment still gets a parseable binding.
+            let significant =
+                lines
+                |> Array.tryFindIndex (fun l ->
+                    let t = l.TrimStart()
+                    t <> "" && not (t.StartsWith "//"))
+            match significant with
+            | Some li ->
+                let prefix = sprintf "let __cell%d = " k
+                let wrapped = Array.copy lines
+                wrapped.[li] <- prefix + wrapped.[li]
+                let text = String.concat "\n" wrapped
+                slots.Add { Cell = k; Text = text; Wrap = Some (li, prefix.Length) }
+            // Blank or comments only: there is no expression to wrap, and an
+            // unwrapped comment parses fine.
+            | None -> slots.Add { Cell = k; Text = src; Wrap = None })
+    let source = String.concat "\n" (slots |> Seq.map (fun s -> s.Text)) + "\n"
+    // One walk converts each slot into the absolute range it occupies: the join
+    // contributes exactly one newline between neighbours, so the next slot opens
+    // on the line after this one closes.
+    let byCell = System.Collections.Generic.Dictionary<int, Blade.Ide.CellWindow>()
+    let mutable line = 1
+    for s in slots do
+        // Copied out of the mutable cursor: the wrapper's absolute line is
+        // computed inside a closure, which cannot capture a mutable local.
+        let startLine = line
+        let endLine = startLine + lineCount s.Text - 1
+        let w : Blade.Ide.CellWindow =
+            { StartLine = startLine
+              EndLine = endLine
+              WrapLine = s.Wrap |> Option.map (fun (li, _) -> startLine + li)
+              WrapCol = s.Wrap |> Option.map snd }
+        byCell.[s.Cell] <- w
+        line <- endLine + 1
+    // Back into CELL order, one window each: every cell owns exactly one slot by
+    // construction (a superseded one keeps its empty placeholder), so the lookup
+    // cannot miss -- and if it ever did, a 1:1 window is a better answer on the
+    // wire than an exception.
+    let unplaced : Blade.Ide.CellWindow =
+        { StartLine = 1; EndLine = 1; WrapLine = None; WrapCol = None }
+    let windows =
+        cells
+        |> List.mapi (fun k _ ->
+            match byCell.TryGetValue k with
+            | true, w -> w
+            | _ -> unplaced)
+    (source, windows)

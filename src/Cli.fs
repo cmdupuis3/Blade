@@ -93,6 +93,7 @@ let printUsage () =
     printfn "  test surfacing                    Run the warning-surfacing block standalone"
     printfn "  test ide-serve                    Run the `ide serve` NDJSON protocol block standalone"
     printfn "  test ide-eval                     Run the notebook session-eval block standalone"
+    printfn "  test ide-cells                    Run the notebook checkCells assembly block standalone"
     printfn "  test ide-references               Run the `references[]` navigation payload block standalone"
     printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
     printfn "  test interp [category]            Diff the tree-walking interpreter against the compiled binary"
@@ -1369,6 +1370,211 @@ let private runIdeEvalTests () : TH.BlockResult =
       Skipped = skipped
       FailedNames = failedNames }
 
+/// `checkCells`: the notebook lane's CHECK half, driven in-process like the
+/// rest. The extension no longer assembles a notebook itself -- it ships the
+/// ordered cell sources and reads back one window per cell -- so what is
+/// under test is the assembly this repo now owns. The load-bearing case is a
+/// REBIND: the later definition has to govern every downstream cell, because
+/// the alternative (keeping the earlier one, which is what the extension's
+/// own copy used to do) types the whole tail of a notebook off a superseded
+/// literal. Plus the invariants a client cannot check for itself: one window
+/// per cell, windows that never overlap, and a check that commits nothing to
+/// an eval session.
+let private runIdeCellsTests () : TH.BlockResult =
+    let blockName = "IdeCells"
+    TH.printHeader "ide serve checkCells (notebook assembly, per-cell windows)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    let esc = Blade.Ide.jsonEscape
+    let cellsReq (id: int) (tier: string) (file: string) (cells: string list) =
+        let arr = cells |> List.map (fun c -> sprintf "\"%s\"" (esc c)) |> String.concat ","
+        sprintf "{\"id\":%d,\"cmd\":\"checkCells\",\"tier\":\"%s\",\"file\":\"%s\",\"cells\":[%s]}"
+                id tier (esc file) arr
+    let evalReq (id: int) (session: string) (source: string) =
+        sprintf "{\"id\":%d,\"cmd\":\"eval\",\"session\":\"%s\",\"source\":\"%s\"}"
+                id (esc session) (esc source)
+    let shutdownReq = "{\"cmd\":\"shutdown\"}"
+    let drive (requests: string list) : int * string list * string =
+        let input = new StringReader(String.concat "\n" requests + "\n")
+        let output = new StringWriter()
+        let code = Blade.IdeServe.serveLoop compilerVersion (input :> TextReader) (output :> TextWriter)
+        let raw = output.ToString()
+        let parts = raw.Split('\n') |> Array.toList
+        (code, (parts |> List.filter (fun p -> p <> "")), raw)
+    // Structural readers rather than substring matching: the point of these
+    // assertions is the ARITHMETIC (which window a binding landed in), and a
+    // literal JSON fragment would pin the layout instead of the property.
+    let intProp (e: System.Text.Json.JsonElement) (name: string) =
+        match e.TryGetProperty name with
+        | true, v -> Some (v.GetInt32())
+        | _ -> None
+    let strProp (e: System.Text.Json.JsonElement) (name: string) =
+        match e.TryGetProperty name with
+        | true, v when v.ValueKind = System.Text.Json.JsonValueKind.String -> Some (v.GetString())
+        | _ -> None
+    /// windows[] as (startLine, endLine, wrapLine option, wrapCol option).
+    let windowsOf (json: string) =
+        use doc = System.Text.Json.JsonDocument.Parse json
+        match doc.RootElement.TryGetProperty "windows" with
+        | true, ws ->
+            [ for w in ws.EnumerateArray() ->
+                (defaultArg (intProp w "startLine") 0, defaultArg (intProp w "endLine") 0,
+                 intProp w "wrapLine", intProp w "wrapCol") ]
+        | _ -> []
+    /// A named binding's (line, type), if the payload reported one.
+    let bindingOf (json: string) (name: string) =
+        use doc = System.Text.Json.JsonDocument.Parse json
+        match doc.RootElement.TryGetProperty "bindings" with
+        | true, bs ->
+            bs.EnumerateArray()
+            |> Seq.tryFind (fun b -> strProp b "name" = Some name)
+            |> Option.map (fun b -> (defaultArg (intProp b "line") 0, defaultArg (strProp b "type") ""))
+        | _ -> None
+    let diagCount (json: string) =
+        use doc = System.Text.Json.JsonDocument.Parse json
+        match doc.RootElement.TryGetProperty "diagnostics" with
+        | true, ds -> ds.GetArrayLength()
+        | _ -> -1
+    let inWindow (startL, endL, _, _) line = line >= startL && line <= endL
+    let tmpDir = Path.Combine(Path.GetTempPath(), "blade_idecells_" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory(tmpDir) |> ignore
+    let entryDir = Directory.GetCurrentDirectory()
+    try
+        let nbPath = Path.Combine(tmpDir, "demo.bladenb")
+        // The sample notebook's own shape, and the one the extension got
+        // wrong: a bare-expression cell sits BETWEEN two definitions of `xs`,
+        // so neither "drop the earlier" nor "drop the later" is enough on its
+        // own -- the later text has to take the earlier one's place.
+        let demoCells =
+            [ "let xs = [1.0, 2.0, 3.0]"
+              "reduce(xs, (+)) |> compute"
+              "let xs = [10.0, 20.0, 30.0, 40.0]"
+              "let xloop = method_for(xs, xs)" ]
+
+        // 1. The shape contract: one window per cell, in cell order.
+        let (code, responses, _) = drive [ cellsReq 1 "fast" nbPath demoCells; shutdownReq ]
+        let body = match responses with [r] -> r | _ -> ""
+        let wins = windowsOf body
+        let name = "checkCells echoes id/tier and returns one window per cell"
+        if code = 0 && body.Contains "\"id\":1" && body.Contains "\"tier\":\"fast\""
+           && List.length wins = List.length demoCells then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "exit %d, %d windows for %d cells: %A"
+                                         code (List.length wins) (List.length demoCells) wins)
+
+        // 2. Windows partition the assembled source: a payload entry can
+        // belong to at most one cell, or the client's fan-out would show the
+        // same diagnostic twice.
+        let name = "windows are well-formed and never overlap"
+        let ordered = wins |> List.map (fun (s, e, _, _) -> (s, e)) |> List.sortBy fst
+        let wellFormed = ordered |> List.forall (fun (s, e) -> s >= 1 && e >= s)
+        let disjoint =
+            ordered |> List.pairwise |> List.forall (fun ((_, e1), (s2, _)) -> s2 > e1)
+        if wellFormed && disjoint then record name TH.Pass ""
+        else record name TH.Fail (sprintf "%A" ordered)
+
+        // 3. THE test. The rebind wins, so `xs` is the four-element literal
+        // and it is reported inside the cell that WROTE it -- cell 2, not the
+        // superseded cell 0.
+        let name = "a rebound name is governed by the later definition"
+        match bindingOf body "xs", wins with
+        | Some (line, ty), _ when ty.Contains "Idx<4>" && not (ty.Contains "Idx<3>")
+                                  && inWindow (List.item 2 wins) line
+                                  && not (inWindow (List.item 0 wins) line) ->
+            record name TH.Pass ""
+        | b, _ -> record name TH.Fail (sprintf "xs binding %A, windows %A" b wins)
+
+        // 4. The in-between use has to BIND -- that is the whole reason the
+        // later text moves up rather than the earlier one surviving.
+        let name = "the assembled source typechecks: the in-between use is not unbound"
+        if diagCount body = 0 then record name TH.Pass ""
+        else record name TH.Fail (sprintf "%d diagnostics: %s" (diagCount body) body)
+
+        // 5. A bare-expression cell cannot stand at top level in the file
+        // grammar, so it carries a synthetic binding -- and the client needs
+        // the prefix width to shift that line's columns back.
+        let name = "a bare-expression cell is wrapped and reports wrapLine/wrapCol"
+        match List.item 1 wins with
+        | (s, _, Some wl, Some wc) when wl = s && wc > 0 && (bindingOf body "__cell1").IsSome ->
+            record name TH.Pass ""
+        | w -> record name TH.Fail (sprintf "cell 1 window %A" w)
+
+        // 6. ...and only that cell does. A declaration cell is already legal.
+        let name = "declaration cells carry no wrapper"
+        let declWins = [ List.item 0 wins; List.item 2 wins; List.item 3 wins ]
+        if declWins |> List.forall (fun (_, _, wl, wc) -> wl.IsNone && wc.IsNone) then
+            record name TH.Pass ""
+        else record name TH.Fail (sprintf "%A" declWins)
+
+        // 7. Isolation, the promise `check` already makes: checkCells fires on
+        // every keystroke, so committing anything to a session would corrupt
+        // the notebook the user is actually running.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let x = 2"
+                    cellsReq 2 "fast" nbPath [ "let unrelated = 9" ]
+                    evalReq 3 "nb" "x"; shutdownReq ]
+        let name = "checkCells commits nothing to an eval session"
+        match responses with
+        | [_; checkBody; after] when code = 0
+                                     && checkBody.Contains "\"name\":\"unrelated\""
+                                     && not (checkBody.Contains "\"name\":\"x\"")
+                                     && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"2\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 8. The full tier reaches monomorphization here exactly as it does
+        // for a single file -- a notebook is where HM values are most common.
+        let (code, responses, _) =
+            drive [ cellsReq 4 "full" nbPath [ "function id(x: T) -> T = x"; "let r = id(42)" ]; shutdownReq ]
+        let fullBody = match responses with [r] -> r | _ -> ""
+        let name = "checkCells tier=full upgrades HM bindings with concreteType"
+        if code = 0 && fullBody.Contains "\"tier\":\"full\"" && fullBody.Contains "\"concreteType\":\"Int64\"" then
+            record name TH.Pass ""
+        else record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 9. The malformed-request arms, in the same shape the other commands
+        // answer with -- an old extension probing a new compiler reads these.
+        let (code, responses, _) =
+            drive [ "{\"cmd\":\"checkCells\",\"file\":\"a\",\"cells\":[]}"
+                    "{\"id\":41,\"cmd\":\"checkCells\",\"cells\":[]}"
+                    sprintf "{\"id\":42,\"cmd\":\"checkCells\",\"file\":\"%s\"}" (esc nbPath)
+                    shutdownReq ]
+        let name = "checkCells rejects a missing id, file, or cells array"
+        match responses with
+        | [noId; noFile; noCells] when code = 0
+                                       && noId.Contains "\"id\":null" && noId.Contains "requires an integer"
+                                       && noFile.Contains "\"id\":41" && noFile.Contains "requires a \\\"file\\\""
+                                       && noCells.Contains "\"id\":42" && noCells.Contains "requires a \\\"cells\\\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 10. An empty notebook is a real state (a fresh .bladenb) and must
+        // answer like any other, not fault.
+        let (code, responses, _) = drive [ cellsReq 51 "fast" nbPath []; shutdownReq ]
+        let name = "an empty cell list answers with an empty windows array"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"id\":51" && windowsOf r = [] -> record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        try Directory.Delete(tmpDir, true) with _ -> ()
+    finally
+        Directory.SetCurrentDirectory entryDir
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    let parts =
+        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+    TH.printFooter blockName parts
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = skipped
+      FailedNames = failedNames }
+
 /// The `references[]` array behind go-to-definition, find-all-references and
 /// rename, driven through `ideCheckSource` in-process (no file on disk, no
 /// toolchain). What is really under test is the JOIN: an entry is one BINDER,
@@ -1562,7 +1768,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
 let private runFullSuite opts =
     runAllTestsFullWith
         [runCliSmokeTests; runStrictPinTests; runSurfacingTests
-         runIdeServeTests; runIdeEvalTests; runIdeReferencesTests] opts
+         runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 let private dispatchTest (rest: string list) : int =
@@ -1598,6 +1804,10 @@ let private dispatchTest (rest: string list) : int =
     | [ "ide-eval" ] | [ "ideeval" ] ->
         // The notebook lane: session semantics over NDJSON, interpreter only.
         let failed = (runIdeEvalTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "ide-cells" ] | [ "idecells" ] ->
+        // The notebook lane's check half: assembly + per-cell windows.
+        let failed = (runIdeCellsTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "ide-references" ] | [ "idereferences" ] | [ "ide-refs" ] ->
         // The navigation payload: definition/use spans, shadowing, name tokens.

@@ -333,30 +333,25 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
     for b in irModule.Bindings do
         // isPrintable: a faithful mirror of CodeGen.genPrintStatements'
         // per-binding gate. A binding does not print if it is deferred, is a
-        // streamed provider read, or is an unmaterialized loop/compute value
-        // (IRMethodFor / IRObjectFor / a bare IRCompute of a non-combinator).
-        // IRCompute of a combinator IS materialized and prints (an array).
+        // streamed provider read, or is an unmaterialized loop value
+        // (IRMethodFor / IRObjectFor, computed or not).
+        // |> compute of a DEFERRED combinator is a forced materialization and
+        // always prints; |> compute of anything ELSE prints exactly when the
+        // wrapped value itself would (mirrors genPrintStatements'
+        // printableValue byte-for-byte -- an eager reduce/scalar is unchanged
+        // by compute). Unmaterialized loop values never print.
+        let rec printableValue (v: IRExpr) =
+            match v with
+            | IRCompute (IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRVar _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeMeth _ | IRBind _ | IRGuard _ | IRSequence _) -> true
+            | IRCompute inner -> printableValue inner
+            | IRMethodFor _ | IRObjectFor _ -> false
+            | _ -> true
         let isPrintable =
             if Set.contains b.Id deferredIds && not (forcedIds.Contains b.Id) then false
             elif (match Map.tryFind b.Id irModule.ProviderReads with
                   | Some spec -> spec.Streamed
                   | None -> false) then false
-            else
-                match b.Value with
-                | IRCompute (IRApplyCombinator _) -> true
-                | IRCompute (IRComposeApply _) -> true
-                | IRCompute (IRParallel _) -> true
-                | IRCompute (IRFusion _) -> true
-                | IRCompute (IRVar _) -> true
-                | IRCompute (IRFunctorMap _) -> true
-                | IRCompute (IRChoice _) -> true
-                | IRCompute (IRFallback _) -> true
-                | IRCompute (IRComposeMeth _) -> true
-                | IRCompute (IRBind _) -> true
-                | IRCompute (IRGuard _) -> true
-                | IRCompute (IRSequence _) -> true
-                | IRCompute _ | IRMethodFor _ | IRObjectFor _ -> false
-                | _ -> true
+            else printableValue b.Value
 
         if isPrintable then
             // Type dispatch mirrors genPrintStatements after IR.stripUnits.

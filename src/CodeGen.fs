@@ -16055,6 +16055,17 @@ let genPrintStatements (modul: IRModule) : string list =
     // body generation.
     let forcedIds = (forcedDeferredIdsCell ()).Value
     modul.Bindings |> List.collect (fun b ->
+        // |> compute of a DEFERRED combinator is a forced materialization and
+        // always prints; |> compute of anything ELSE prints exactly when the
+        // wrapped value itself would (an eager reduce/scalar is unchanged by
+        // compute -- `let s = reduce(xs, (+)) |> compute` must echo like the
+        // computeless form). Unmaterialized loop values never print.
+        let rec printableValue (v: IRExpr) =
+            match v with
+            | IRCompute (IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRVar _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeMeth _ | IRBind _ | IRGuard _ | IRSequence _) -> true
+            | IRCompute inner -> printableValue inner
+            | IRMethodFor _ | IRObjectFor _ -> false
+            | _ -> true
         let isPrintable =
             if Set.contains b.Id deferredIds && not (Set.contains b.Id forcedIds) then false
             // A STREAMED provider read has no materialized array (fiber
@@ -16062,22 +16073,7 @@ let genPrintStatements (modul: IRModule) : string list =
             elif (match Map.tryFind b.Id modul.ProviderReads with
                   | Some spec -> spec.Streamed
                   | None -> false) then false
-            else
-            match b.Value with
-            | IRCompute (IRApplyCombinator _) -> true
-            | IRCompute (IRComposeApply _) -> true
-            | IRCompute (IRParallel _) -> true
-            | IRCompute (IRFusion _) -> true
-            | IRCompute (IRVar _) -> true
-            | IRCompute (IRFunctorMap _) -> true
-            | IRCompute (IRChoice _) -> true
-            | IRCompute (IRFallback _) -> true
-            | IRCompute (IRComposeMeth _) -> true
-            | IRCompute (IRBind _) -> true
-            | IRCompute (IRGuard _) -> true
-            | IRCompute (IRSequence _) -> true
-            | IRCompute _ | IRMethodFor _ | IRObjectFor _ -> false
-            | _ -> true
+            else printableValue b.Value
         
         let hasSymmetry =
             match IR.stripUnits b.Type with
