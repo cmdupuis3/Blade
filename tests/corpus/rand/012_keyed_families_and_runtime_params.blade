@@ -1,0 +1,30 @@
+// TEST: Rand Keyed Families And Runtime Params
+// Two properties the moment tests (005-011) cannot see, because a moment check
+// passes just as well on a stream that silently re-seeds:
+//
+// KEYING. The keyed contract holds for a family with a data-dependent draw
+// budget, not just for the fixed-budget uniform of 001/004. `a` and `b` are the
+// same gamma call twice and must be element-for-element identical; `c` differs
+// only in the key and must diverge. A rejection loop that consulted anything
+// outside the per-call mt19937_64 stream would break `a == b` here while
+// leaving every moment in 006 intact.
+//
+// RUNTIME PARAMETERS. Only the SHAPE of a rand fill is static; the
+// distribution parameters are ordinary Float64 expressions, evaluated once at
+// the binding's position. `rate` is computed rather than written as a literal,
+// and `d` must therefore reproduce 005's `e` (same key 11, same rate 2.0) to
+// the last bit -- which pins BOTH that a runtime parameter reaches the fill
+// intact and that it is not accidentally rounded or re-evaluated per draw.
+import rand as r
+let a = r.gamma(77, 2.0, 1.0, 4)
+let b = r.gamma(77, 2.0, 1.0, 4)
+let c = r.gamma(78, 2.0, 1.0, 4)
+let rate = 1.0 + 1.0
+let d = r.exponential(11, rate, 6)
+let sa = reduce(a, (+))
+let sc = reduce(c, (+))
+let differ = abs(sa - sc) > 0.0001
+// EXPECT: a = [5.75216582868514, 3.7240948561034, 2.40163305871248, 0.944732080787101]
+// EXPECT: b = [5.75216582868514, 3.7240948561034, 2.40163305871248, 0.944732080787101]
+// EXPECT: d = [0.0604477795738267, 0.138024564764191, 0.655442350547204, 0.00934226141163601, 1.25975764472306, 0.171979344668618]
+// EXPECT: differ = true

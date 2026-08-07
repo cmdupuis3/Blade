@@ -1,0 +1,27 @@
+// TEST: Rand Gamma Moments
+// Gamma(shape, rate) by Marsaglia-Tsang. Moments of Gamma(3, 2):
+//   mean = shape/rate     = 1.5
+//   var  = shape/rate^2   = 0.75
+// over 4096 draws. SE(mean) = sqrt(var/n) = sqrt(0.75/4096) ~ 0.0135, so the
+// 0.05 mean tolerance is ~3.7 SE; the variance tolerance 0.1 is comparably wide.
+// Variance is E[x^2] - E[x]^2 over the sample, as in 003.
+//
+// This is the shape >= 1 path, where the rejection loop consumes one normal
+// (two uniforms) per iteration plus one uniform whenever v > 0 -- a
+// data-dependent draw budget, which is exactly why the F# mirror has to branch
+// in the same order as the header. Support is (0, inf), pinned by allPos.
+import rand as r
+let x = r.gamma(3, 3.0, 2.0, 4096)
+let s = reduce(x, (+))
+let mean = s / 4096.0
+let sq = method_for(x) <@> lambda(q) -> q * q |> compute
+let ss = reduce(sq, (+))
+let var = ss / 4096.0 - mean * mean
+let meanOk = abs(mean - 1.5) < 0.05
+let varOk = abs(var - 0.75) < 0.1
+let pos = method_for(x) <@> lambda(q) -> if q > 0.0 then 1.0 else 0.0 |> compute
+let nPos = reduce(pos, (+))
+let allPos = abs(nPos - 4096.0) < 0.5
+// EXPECT: meanOk = true
+// EXPECT: varOk = true
+// EXPECT: allPos = true

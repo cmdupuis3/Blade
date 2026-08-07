@@ -80,14 +80,14 @@ let private printableModule (program: IRProgram) : IRModule =
             Bindings = many |> List.collect (fun m -> m.Bindings)
             MutableArrayLets = many |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty }
 
-// Random-fill bindings (rand.uniform / rand.normal, RandomInits/RandGen).
+// Random-fill bindings (rand.<fam>, RandomInits/RandGen).
 //
-// Lowering records a `let A = rand.<kind>(key, shape)` binding with a unit
-// placeholder Value and its RandGen(kind, keyIR) in IRModule.RandomInits
-// (Lowering.fs ~L1676-1697). CodeGen materializes it at the binding's position
-// via genRandGenBinding (CodeGen.fs ~L8156-8184): allocate the dense pool,
-// then ONE `blade_rand::<kind>(pool_base(A.data), card, (int64_t)(key))` call
-// (card = product of extents, row-major flat pool, one draw per slot). The
+// Lowering records a `let A = rand.<kind>(key, params.., shape)` binding with a
+// unit placeholder Value and its RandGen(kind, keyIR, parIRs) in
+// IRModule.RandomInits. CodeGen materializes it at the binding's position via
+// genRandGenBinding: allocate the dense pool, then ONE
+// `blade_rand::<kind>(pool_base(A.data), card, (int64_t)(key)[, (double)(p)..])`
+// call (card = product of extents, row-major flat pool, one draw per slot). The
 // interpreter mirrors this so output prints byte-for-byte like the compiled
 // binary; RandMirror.draws reproduces the mt19937_64 stream bit-exactly.
 
@@ -103,14 +103,28 @@ let private keyToInt64 (v: Value) : int64 =
     | VChar c -> int64 (int c)
     | _ -> 0L
 
-/// Materialize a `rand.uniform` / `rand.normal` binding as CodeGen.genRandGenBinding
-/// emits it. Component extents come from the binding's ArrayElem type (one entry
-/// per rank component, all static IRLitInt -- codegen `#error`s otherwise). card
-/// = product of extents; the key IRExpr is evaluated in the ROOT env (it may
-/// reference earlier bindings) and cast to int64; RandMirror draws `card`
-/// values keyed by it. The flat SFloat pool is reshaped via ArrayOps.mkDenseArray,
-/// exactly as every other dense interpreter array is shaped.
-let private materializeRandGen (state: Core.InterpState) (root: Env) (binding: IRBinding) (kind: string) (keyExpr: IRExpr) : Value =
+/// Widen a distribution-parameter value to float, exactly as codegen's
+/// `(double)(p)` cast (the checker already types these against Float64, so the
+/// integer arms only cover a literal that promoted).
+let private parToFloat (v: Value) : float =
+    match v with
+    | VFloat f -> f
+    | VFloat32 f -> float f
+    | VInt n -> float n
+    | VInt32 n -> float n
+    | VBool b -> if b then 1.0 else 0.0
+    | VChar c -> float (int c)
+    | _ -> 0.0
+
+/// Materialize a `rand.<fam>` binding as CodeGen.genRandGenBinding emits it.
+/// Component extents come from the binding's ArrayElem type (one entry per rank
+/// component, all static IRLitInt -- codegen `#error`s otherwise). card
+/// = product of extents; the key and the family's runtime Float64 parameters are
+/// evaluated in the ROOT env (they may reference earlier bindings) and cast as
+/// codegen casts them; RandMirror draws `card` values keyed by it. The flat
+/// SFloat pool is reshaped via ArrayOps.mkDenseArray, exactly as every other
+/// dense interpreter array is shaped.
+let private materializeRandGen (state: Core.InterpState) (root: Env) (binding: IRBinding) (kind: string) (keyExpr: IRExpr) (parExprs: IRExpr list) : Value =
     match binding.Type with
     | ArrayElem arrTy ->
         let extents =
@@ -122,9 +136,12 @@ let private materializeRandGen (state: Core.InterpState) (root: Env) (binding: I
                      | _ -> raise (Core.InterpUnsupported "rand binding with a non-literal extent")))
         let card = extents |> List.fold (*) 1L
         let key = keyToInt64 (Core.evalExpr state root keyExpr)
+        // Params are evaluated ONCE, before the fill, left-to-right -- matching
+        // the single C++ call whose arguments are evaluated before the loop.
+        let pars = parExprs |> List.map (fun p -> parToFloat (Core.evalExpr state root p))
         // .NET arrays are int-indexed, so the draw count is int-bounded exactly
         // as the pool it fills; card stays int64 to match codegen's `1L` fold.
-        let data = RandMirror.draws kind key (int card)
+        let data = RandMirror.draws kind key pars (int card)
         state.Cells <- state.Cells + card
         VArray (ArrayOps.mkDenseArray arrTy.ElemType arrTy.IndexTypes (Array.ofList extents) (SFloat data))
     | _ -> raise (Core.InterpUnsupported "rand binding is not an array type")
@@ -289,8 +306,8 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
                     raise (Core.InterpUnsupported "provider write (alias.write -- side effect; flag-gated later)")
                 | None ->
                 match Map.tryFind b.Id m.RandomInits with
-                | Some (RandGen (kind, keyExpr)) ->
-                    materializeRandGen state root b kind keyExpr
+                | Some (RandGen (kind, keyExpr, parExprs)) ->
+                    materializeRandGen state root b kind keyExpr parExprs
                 | Some (FillModulus _) ->
                     // fill_random(mod) fills with C `rand() % mod`: nondeterministic
                     // and NOT mirrored by RandMirror (only the deterministic
