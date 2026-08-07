@@ -23,6 +23,11 @@
 //     routed through ucrtbase.dll. Backend choice is a data table (mathBackend),
 //     so any function can be re-pinned to the ucrt shim if a future battery
 //     reveals a managed divergence.
+//   * lgamma is the one intrinsic with NEITHER escape hatch: .NET has no gamma
+//     function to call and no library is shared with the compiled side. Codegen
+//     therefore does not emit std::lgamma at all -- both sides run the same
+//     hand-rolled Lanczos series (lgammaLanczos here, blade_rt::lgamma in
+//     src/cpp/blade_runtime.hpp), which must be kept identical by hand.
 //
 // Compiled inside Blade.fsproj after IR.fs/CodeGen.fs. Depends on Value.fs, the
 // IR op discriminators (IRBinOp/IRUnaryOp, IR.fs:25/36), ElemType (Types.fs:285),
@@ -63,24 +68,31 @@ module private Ucrt =
 
 /// Per-intrinsic backend. `Managed` = .NET Math.* (exact/correctly-rounded and
 /// identical to ucrt for these; cheaper, no marshalling). `Ucrt` = ucrtbase.dll
-/// P/Invoke (provably what g++ calls). The choice is data -- flip an entry to
-/// Ucrt to eliminate any residual managed-divergence risk for that function.
+/// P/Invoke (provably what g++ calls). `BladeRt` = neither library, but a
+/// series hand-rolled IDENTICALLY here and in src/cpp/blade_runtime.hpp,
+/// for the one intrinsic where no shared library exists to borrow. The choice
+/// is data -- flip an entry to Ucrt to eliminate any residual
+/// managed-divergence risk for that function.
 type MathBackend =
     | Managed
     | Ucrt
+    | BladeRt
 
 /// Backend selection. Transcendentals + pow/atan2/hypot default to Ucrt (the
 /// zero-risk, provably-g++-identical path); the exact algebraic/rounding ops
 /// (sqrt, floor, ceil) use Managed (IEEE-correctly-rounded => identical
 /// everywhere, and avoid marshalling). hypot has NO managed equivalent, so it is
-/// Ucrt unconditionally.
+/// Ucrt unconditionally. lgamma has neither a managed equivalent NOR a shared
+/// library with the compiled side (codegen does not emit std::lgamma for it) --
+/// both sides run the same hand-rolled series, hence BladeRt.
 let mathBackend : Map<string, MathBackend> =
     Map.ofList [
         "exp", Ucrt;  "log", Ucrt;   "sin", Ucrt;  "cos", Ucrt;  "tan", Ucrt
         "sinh", Ucrt; "cosh", Ucrt;  "tanh", Ucrt
         "asin", Ucrt; "acos", Ucrt;  "atan", Ucrt
         "sqrt", Managed; "floor", Managed; "ceil", Managed
-        "pow", Ucrt;  "atan2", Ucrt; "hypot", Ucrt ]
+        "pow", Ucrt;  "atan2", Ucrt; "hypot", Ucrt
+        "lgamma", BladeRt ]
 
 let private managed1 (name: string) (x: float) : float =
     match name with
@@ -102,10 +114,54 @@ let private ucrt1 (name: string) (x: float) : float =
     | "fabs" | "abs" -> Ucrt.fabs x
     | _ -> nan
 
+/// log Gamma(x) for x > 0: the Lanczos approximation (g = 7, n = 9),
+/// transcribed statement for statement from `blade_rt::lgamma` in
+/// src/cpp/blade_runtime.hpp -- read that comment for WHY this is hand-rolled
+/// rather than a library call on either side (short version: .NET has no gamma
+/// function at all, so there is no shared implementation to borrow the way
+/// every other intrinsic here borrows ucrtbase). Same coefficients, same
+/// association, same order: change one side and you MUST change the other, or
+/// the interpreter stops being a byte-for-byte twin.
+///
+/// `log` is pinned to ucrtbase DIRECTLY rather than routed through `math1`,
+/// because the C++ side calls std::log unconditionally -- what has to match is
+/// the header, not the mathBackend entry for the separate `log(x)` intrinsic.
+///
+/// Domain: x > 0 (`not (x > 0.0)` also catches NaN). Non-positive PANICS, the
+/// twin of the header's blade_rt::panic; the reflection formula is deliberately
+/// absent, since log-densities never need it.
+let lgammaLanczos (x: float) : float =
+    if not (x > 0.0) then
+        raise (InterpPanic("BL8008", "lgamma: argument must be positive", None, 0))
+    // Gamma(1) = Gamma(2) = 1 exactly; the series lands a few ulp off zero.
+    elif x = 1.0 || x = 2.0 then 0.0
+    else
+        // Denominators over x, not over z = x - 1: see the header's note on
+        // the cancellation in `(x - 1) + k` for small x.
+        let mutable s = 0.99999999999980993
+        s <- s + 676.5203681218851     / x
+        s <- s + -1259.1392167224028   / (x + 1.0)
+        s <- s + 771.32342877765313    / (x + 2.0)
+        s <- s + -176.61502916214059   / (x + 3.0)
+        s <- s + 12.507343278686905    / (x + 4.0)
+        s <- s + -0.13857109526572012  / (x + 5.0)
+        s <- s + 9.9843695780195716e-6 / (x + 6.0)
+        s <- s + 1.5056327351493116e-7 / (x + 7.0)
+        let t = x + 6.5   // (x - 1) + g + 0.5, with g = 7
+        // 0.9189385332046727 = log(2*pi) / 2
+        0.9189385332046727 + (x - 0.5) * (Ucrt.log t) - t + (Ucrt.log s)
+
+/// The BladeRt backend's dispatch table (see lgammaLanczos above).
+let private bladeRt1 (name: string) (x: float) : float =
+    match name with
+    | "lgamma" -> lgammaLanczos x
+    | _ -> nan
+
 /// Apply a single-argument real intrinsic through its selected backend.
 let math1 (name: string) (x: float) : float =
     match Map.tryFind name mathBackend with
     | Some Ucrt -> ucrt1 name x
+    | Some BladeRt -> bladeRt1 name x
     | _ -> managed1 name x
 
 /// b ^ e, matching CodeGen's `pow(l, r)` emission (unqualified `pow`).

@@ -200,6 +200,11 @@ module Codes =
             // emitted LU loop nest, by the LAPACK ?gesv arm's non-zero `info`,
             // and by the interpreter's twin -- see CodeGen.solveSingularMessage.
             "BL8007", "singular matrix"
+            // A scalar math intrinsic was called outside its domain. Currently
+            // only lgamma(x <= 0), which refuses rather than returning a silent
+            // NaN; raised identically by blade_rt::lgamma (blade_runtime.hpp)
+            // and by the interpreter's twin (Interp/Numerics.lgammaLanczos).
+            "BL8008", "math intrinsic domain error"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"
