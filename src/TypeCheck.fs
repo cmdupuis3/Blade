@@ -8074,11 +8074,14 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         match et with
         | ETInt32 | ETInt64 ->
             Ok (mkTyped (TExprLit lit) (IRTScalar et))
+        | ETFloat32 | ETFloat64 ->
+            // F#-style type-directed widening: an int LITERAL in an explicitly
+            // float-typed position adopts the float type (`let x: Float64 = 1`
+            // is 1.0, `complex(0, 0)` works). Literals only -- an int-typed
+            // VALUE still never flows to a float position implicitly.
+            // lowerLiteralValued reconciles the value (emits IRLitFloat).
+            Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ ->
-            // Blade design rule: NO implicit int->float promotion at literal
-            // construction (`complex(0, 0)` and `let x: Float64 = 1` are
-            // rejected -- write `0.0`). Kept strict deliberately; flexing a
-            // literal into a generic `T`/`T^k` is separate (the IRTInfer arm).
             Error (TypeMismatch (resolved, IRTScalar ETInt64))
     | ExprKind.ExprLit (LitInt _ as lit), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) ->
         // section 4.18.3: untyped int literal acquires the index tag from annotation

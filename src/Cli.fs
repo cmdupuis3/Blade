@@ -1267,7 +1267,7 @@ let private runIdeEvalTests () : TH.BlockResult =
                                      && broken.Contains "\"line\":1,\"col\":1,\"endLine\":1,\"endCol\":1"
                                      && broken.Contains "elsewhere in session: reduce()"
                                      // ...and the session still holds the ARRAY.
-                                     && after.Contains "{\"name\":\"\",\"type\":\"Float64\",\"value\":\"6\"}" ->
+                                     && after.Contains "{\"name\":\"\",\"type\":\"Float64\",\"value\":\"6.0\"}" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 

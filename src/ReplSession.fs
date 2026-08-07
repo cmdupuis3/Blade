@@ -178,6 +178,49 @@ module ReplTypes =
                 let shown = if parts.Length > elideAfter then kept @ [ "..." ] else kept
                 "[" + String.concat ", " shown + "]"
 
+    /// Bare-integer text -- the shape a whole-valued float prints as under the
+    /// byte-pinned C++-parity formatter (`4.0` prints "4", `-0.0` prints "-0").
+    let private bareIntRe = Regex(@"^-?[0-9]+$", RegexOptions.Compiled)
+
+    /// Whether a type's printed numeric cells are FLOATING POINT, seen through
+    /// unit/index-tag wrappers and into array element types. Complex counts:
+    /// its "(re,im)" components are floats. Named (struct) elements do not --
+    /// their printed fields can mix widths this text pass can't tell apart.
+    let rec private printsAsFloat (t: IRType) : bool =
+        match t with
+        | IRTScalar (ETFloat64 | ETFloat32 | ETComplex128 | ETComplex64) -> true
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> printsAsFloat inner
+        | ArrayElem at -> printsAsFloat at.ElemType
+        | _ -> false
+
+    /// Give every bare-integer cell in a (possibly bracketed/elided) display
+    /// string an F#-style ".0" suffix: `4` -> `4.0`, `[1, 2, 3.5]` ->
+    /// `[1.0, 2.0, 3.5]`, `(1,0)` -> `(1.0,0.0)`. Non-integer tokens
+    /// (`2.5`, `1e+20`, `inf`, `nan`, `...`) and unrecognized shapes pass
+    /// through untouched. Bracket entries rejoin with ", " and paren
+    /// components with "," -- exactly the separators the array and complex
+    /// emitters use, so the reconstruction is textually faithful.
+    let rec private addDecimalPoints (s: string) : string =
+        let t = s.Trim()
+        if bareIntRe.IsMatch t then t + ".0"
+        elif t.Length >= 2 && t.StartsWith "[" && t.EndsWith "]" then
+            let inner = t.Substring(1, t.Length - 2).Trim()
+            if inner = "" then "[]"
+            else "[" + (splitTopLevelCommas inner |> List.map addDecimalPoints |> String.concat ", ") + "]"
+        elif t.Length >= 2 && t.StartsWith "(" && t.EndsWith ")" then
+            let inner = t.Substring(1, t.Length - 2)
+            "(" + (splitTopLevelCommas inner |> List.map addDecimalPoints |> String.concat ",") + ")"
+        else t
+
+    /// DISPLAY ONLY: F#-style numeric rendering for the REPL echo and the
+    /// notebook `bindings[]`. The underlying run output is the byte-pinned
+    /// C++-parity print, where a whole-valued float renders with no decimal
+    /// point ("x = 4" for `let x = 4.0`) -- correct for the differential gate,
+    /// misleading in a typed echo. A float-typed value re-marks its integer
+    /// cells with ".0"; int-typed values are untouched.
+    let displayValue (t: IRType) (v: string) : string =
+        if printsAsFloat t then addDecimalPoints v else v
+
     /// Rewrite one raw output line for display. `transient` is the synthetic
     /// binding a bare REPL expression was wrapped in; its name is stripped so the value echoes alone.
     let annotate (info: Map<string, Info>) (transient: string option) (line: string) : string =
@@ -189,6 +232,7 @@ module ReplTypes =
             let isTransient = (transient = Some name)
             match Map.tryFind name info with
             | Some (RVal t) ->
+                let value = displayValue t value
                 let tyStr = Blade.Ide.abstractRenderer [] t
                 if isPrimitive t then
                     if isTransient then sprintf "%s: %s" tyStr value
@@ -643,6 +687,10 @@ type ReplSession(runCwd: string) =
                         if m.Success && m.Groups.[1].Value = name then
                             Some (ReplTypes.elideValue (l.Substring m.Length))
                         else None)
+                    |> Option.map (fun v ->
+                        match Map.tryFind name r.Info with
+                        | Some (ReplTypes.RVal t) -> ReplTypes.displayValue t v
+                        | _ -> v)
                     |> Option.defaultValue ""
                 let typeOf (name: string) =
                     match Map.tryFind name r.Info with
