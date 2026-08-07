@@ -1,0 +1,50 @@
+// TEST: Intrinsics LGamma
+// ============================================================================
+// lgamma(x) = log Gamma(x): the one scalar intrinsic Blade implements ITSELF
+// instead of deferring to libm. Codegen emits `blade_rt::lgamma` -- a
+// hand-rolled Lanczos series (g = 7, n = 9) in cpp/blade_runtime.hpp -- and
+// the interpreter runs a statement-for-statement transcription of the same
+// series (Interp/Numerics.lgammaLanczos).
+//
+// The reason is the byte-for-byte interpreter twin. Every other intrinsic is
+// mirrored by P/Invoking the very ucrtbase.dll that g++'s <cmath> forwards to;
+// .NET has no gamma function to mirror at all, so `std::lgamma` would have no
+// twin and the differential gate could not hold. A series written out in plain
+// double arithmetic is the only form both evaluators can run identically, and
+// the two are pinned bit-identical over ~26k inputs (spot values, a 20001-point
+// linear sweep, and a 6001-point geometric sweep across 1e-30..1e30).
+//
+// The values below are what BOTH paths produce. They track std::lgamma to
+// ~1e-15 relative away from the function's zeros at x = 1 and x = 2, which are
+// returned EXACTLY -- by the same equality test on both sides, so exactness
+// costs nothing in agreement. lgamma gates the Gamma/Poisson/Beta log-densities
+// in docs/plan-ppl-proper.md (sections 2 and 8).
+//
+// Deliberately NOT in StaticEval's fold table (unlike exp/log/sqrt, see 004):
+// a compile-time fold would run .NET's arithmetic, and nothing would then hold
+// it to the runtime series. Every call here therefore evaluates at run time.
+// ============================================================================
+let half = lgamma(0.5)
+let one = lgamma(1.0)
+let two = lgamma(2.0)
+let g25 = lgamma(2.5)
+let g5 = lgamma(5.0)
+let g1025 = lgamma(10.25)
+let tiny = lgamma(0.001)
+let big = lgamma(100.0)
+// Integer operands promote, like every other intrinsic (see 004).
+let promoted = lgamma(6)
+// Kernel position: the eta-expansion that carries `sqrt` into `<@>` (see 007)
+// carries lgamma too, through the same blade_rt::lgamma emission.
+let A = [1.0, 2.0, 3.0, 4.0]
+let logfact = lgamma <@> A |> compute
+// EXPECT: half = 0.5723649429246995
+// EXPECT: one = 0
+// EXPECT: two = 0
+// EXPECT: g25 = 0.28468287047292096
+// EXPECT: g5 = 3.178053830347944
+// EXPECT: g1025 = 13.36802367147605
+// EXPECT: tiny = 6.907178885383855
+// EXPECT: big = 359.13420536957534
+// EXPECT: promoted = 4.7874917427820485
+// EXPECT: logfact = [0.0, 0.0, 0.6931471805599463, 1.791759469228055]

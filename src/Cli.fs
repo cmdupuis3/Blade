@@ -2073,6 +2073,7 @@ let private dispatchTest (rest: string list) : int =
         let categoryTests =
             match cat.ToLower().TrimStart('-') with
             | "basic" -> Some ("Basic", basicTests)
+            | "intrinsics" -> Some ("Intrinsics", intrinsicsTests)
             | "ad" -> Some ("AD", adTests)
             | "loops" -> Some ("Loops", loopTests)
             | "symmetry" -> Some ("Symmetry", symmetryTests)
