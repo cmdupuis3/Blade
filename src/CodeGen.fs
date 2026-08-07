@@ -12898,18 +12898,23 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     (guardProviderWrite ind (flatten @ writeCode @ cleanup), ctx)
 
 
-/// rand.uniform/normal(key, shape): allocate the dense Float64 array (self-typed
+/// rand.<fam>(key, params.., shape): allocate the dense Float64 array (self-typed
 /// from the shape) and fill its flat contiguous pool with `card` deterministic
 /// draws keyed by `key`, via the blade_rand runtime. All rand arrays are dense
 /// SymNone, so pool_base gives the full pool and the draw count is the product
 /// of extents. Mirrors the fill_random dense path but uses a flat pool fill.
+///
+/// The family's runtime Float64 parameters follow the key as trailing
+/// `(double)`-cast arguments, in surface order; a zero-parameter family
+/// (uniform/normal) emits the original three-argument call unchanged, so this
+/// extension is byte-compatible with the pre-existing emission for those two.
 and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
-    let kind, keyExpr =
+    let kind, keyExpr, parExprs =
         match ctx.RandomInits.[binding.Id] with
-        | RandGen (k, key) -> k, key
-        | FillModulus _ -> "uniform", IRLit (IRLitInt 0L)  // unreachable: dispatch guards this
+        | RandGen (k, key, pars) -> k, key, pars
+        | FillModulus _ -> "uniform", IRLit (IRLitInt 0L), []  // unreachable: dispatch guards this
     match binding.Type with
     | ArrayElem arrTy ->
         let elemCpp = elemTypeToCpp arrTy.ElemType
@@ -12926,9 +12931,13 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             let allocLine =
                 sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s), %s };"
                     ind elemCpp rank name elemCpp rank extentsName extentsName
+            let parArgs =
+                parExprs
+                |> List.map (fun p -> sprintf ", (double)(%s)" (exprToCpp ctx.VarNames p))
+                |> String.concat ""
             let fillLine =
-                sprintf "%sblade_rand::%s(nested_array_utilities::pool_base(%s.data), (size_t)%dLL, (int64_t)(%s));"
-                    ind kind name card (exprToCpp ctx.VarNames keyExpr)
+                sprintf "%sblade_rand::%s(nested_array_utilities::pool_base(%s.data), (size_t)%dLL, (int64_t)(%s)%s);"
+                    ind kind name card (exprToCpp ctx.VarNames keyExpr) parArgs
             ([extentsArr; allocLine; fillLine], addVarName binding.Id name ctx)
     | _ ->
         ([sprintf "%s#error \"rand binding '%s' is not an array type\"" ind name], addVarName binding.Id name ctx)

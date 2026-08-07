@@ -2505,7 +2505,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprBlocked (_, bs) -> [bs]
         | TExprPure e | TExprCompute e | TExprRead e | TExprFillRandom e | TExprRank e
         | TExprExtents e | TExprReynolds (e, _) -> [e]
-        | TExprRandGen (_, key, _) -> [key]
+        | TExprRandGen (_, key, pars, _) -> key :: pars
         | TExprGuard (c, b) -> [c; b]
         | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
         | TExprGroupBy (a, p) | TExprSort (a, p)
@@ -3010,15 +3010,37 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__dist_pack" }, args) when not args.IsEmpty ->
         inferDistPack env args
 
-    // ---- __rand_uniform / __rand_normal(key, d1, ..., dn): rand module ----
+    // ---- __rand_<fam>(key, p1, .., pk, d1, ..., dn): rand module ----
     // Compiler-internal (double-underscore reserved): emitted by the `rand`
-    // elaboration stage from `alias.uniform/normal(key, shape)`. `key` is an
-    // Int64 stream key; the trailing args are the (elaborator-resolved) static
-    // extents. Self-typed as a dense Float64 array of that shape -- no annotation
-    // needed. Lowering records (kind, key) in RandomInits; codegen emits
-    // allocate<> + the runtime blade_rand fill.
-    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar (("__rand_uniform" | "__rand_normal") as fn) }, (keyE :: dimArgs)) when not dimArgs.IsEmpty ->
-        let kind = if fn = "__rand_uniform" then "uniform" else "normal"
+    // elaboration stage from `alias.<fam>(key, params.., shape)`. `key` is an
+    // Int64 stream key; the next `nPars` args are the family's RUNTIME Float64
+    // scalar parameters (any Float64-typed expression -- only the shape must be
+    // static); the trailing args are the (elaborator-resolved) static extents.
+    // Self-typed as a dense Float64 array of that shape -- no annotation needed,
+    // and Float64 for every family including the integer-valued poisson and
+    // bernoulli (see the element-type note in cpp/rand_runtime.hpp). Lowering
+    // records (kind, key, pars) in RandomInits; codegen emits allocate<> + the
+    // runtime blade_rand fill.
+    //
+    // The per-family parameter count is fixed HERE (not by the elaborator), so
+    // it is enforced on the intrinsic itself and any future direct emitter of
+    // __rand_* -- e.g. the ppl module -- is held to the same arity.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar (("__rand_uniform" | "__rand_normal" | "__rand_exponential"
+                                                   | "__rand_gamma" | "__rand_poisson" | "__rand_bernoulli"
+                                                   | "__rand_beta") as fn) }, (keyE :: rest)) when not rest.IsEmpty ->
+        let kind, nPars =
+            match fn with
+            | "__rand_uniform"     -> "uniform", 0
+            | "__rand_normal"      -> "normal", 0
+            | "__rand_exponential" -> "exponential", 1
+            | "__rand_gamma"       -> "gamma", 2
+            | "__rand_poisson"     -> "poisson", 1
+            | "__rand_bernoulli"   -> "bernoulli", 1
+            | _                    -> "beta", 2
+        if List.length rest <= nPars then
+            Error (Other (sprintf "rand.%s: expected %d distribution parameter(s) and a shape" kind nPars))
+        else
+        let parArgs, dimArgs = List.splitAt nPars rest
         // Extents must be static ints (the elaborator resolves them to literals).
         let dimResults =
             dimArgs |> List.map (fun d ->
@@ -3029,13 +3051,21 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         match dimResults |> List.fold (fun acc r -> match acc, r with Ok xs, Ok x -> Ok (xs @ [x]) | Error e, _ -> Error e | _, Error e -> Error e) (Ok []) with
         | Error e -> Error (Other e)
         | Ok dims ->
+            // Params check against Float64 (an int literal promotes; an
+            // array-typed argument is refused by the check, not silently taken).
+            let parResults =
+                parArgs |> List.fold (fun acc p ->
+                    acc |> Result.bind (fun ps ->
+                        checkExpr env (IRTScalar ETFloat64) p |> Result.map (fun tp -> ps @ [tp])))
+                    (Ok [])
+            parResults |> Result.bind (fun tPars ->
             checkExpr env (IRTScalar ETInt64) keyE |> Result.map (fun tKey ->
                 let indices =
                     dims |> List.map (fun n ->
                         { Id = env.Builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 n))
                           Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] })
                 let arrTy = mkArrayArrow indices (IRTScalar ETFloat64) None
-                mkTyped (TExprRandGen (kind, tKey, dims)) arrTy)
+                mkTyped (TExprRandGen (kind, tKey, tPars, dims)) arrTy))
 
     // ---- cumulant(d, k): dist component projection, order-guarded ----
     // The order guard as a TYPE error (ppl/NOTES.md typed-Dist arc): k must

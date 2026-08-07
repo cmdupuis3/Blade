@@ -523,9 +523,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
 
     | TExprRandGen _ ->
         // Materialized only as a top-level let-binding value, where TDeclLet
-        // intercepts it (records the key/kind in RandomInits, allocates the
-        // self-typed array). Reaching here means it was used inline / nested.
-        failwith "rand.uniform/normal(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n))"
+        // intercepts it (records the kind/key/params in RandomInits, allocates
+        // the self-typed array). Reaching here means it was used inline / nested.
+        failwith "rand.<fam>(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n))"
 
     | TExprCompound _ ->
         // Only meaningful as a top-level let-binding value, where TDeclLet
@@ -1817,13 +1817,16 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (FillModulus modIR) currentEnv.RandomInits }
         | TDeclLet binding when (match binding.Value.Kind with TExprRandGen _ -> true | _ -> false) ->
-            // rand.uniform/normal(key, shape): materialized via allocate<> +
+            // rand.<fam>(key, params.., shape): materialized via allocate<> +
             // the runtime blade_rand fill (RandomInits/RandGen intercept).
-            // The key is lowered and recorded. Mirrors the fill_random arm.
-            let kind, keyIR =
+            // The key and the family's runtime Float64 params are lowered in
+            // the CURRENT env (so they may reference earlier bindings, exactly
+            // as the key may) and recorded. Mirrors the fill_random arm.
+            let kind, keyIR, parIRs =
                 match binding.Value.Kind with
-                | TExprRandGen (k, key, _) -> k, lowerTypedExpr currentEnv key
-                | _ -> "uniform", IRLit (IRLitInt 0L)  // unreachable: guarded by the `when` above
+                | TExprRandGen (k, key, pars, _) ->
+                    k, lowerTypedExpr currentEnv key, (pars |> List.map (lowerTypedExpr currentEnv))
+                | _ -> "uniform", IRLit (IRLitInt 0L), []  // unreachable: guarded by the `when` above
             let bd = {
                 Id = binding.VarId
                 Name = binding.Name
@@ -1834,7 +1837,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             }
             bindings <- bindings @ [bd]
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
-            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (RandGen (kind, keyIR)) currentEnv.RandomInits }
+            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (RandGen (kind, keyIR, parIRs)) currentEnv.RandomInits }
         | TDeclLet binding when (match binding.Value.Kind with TExprCompound _ -> true | _ -> false) ->
             // Compound-construction constructor: materialized via P0
             // (genCompoundIndexFromMask) + a dense->compact scatter (the

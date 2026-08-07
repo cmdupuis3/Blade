@@ -209,11 +209,16 @@ and TypedExprKind =
     // let-binding value. Lowering records it in RandomInits; `modulus` is the
     // argument to rand() % modulus.
     | TExprFillRandom of modulus: TypedExpr
-    // rand.uniform/normal(key, shape): internal builtin, deterministic
+    // rand.<fam>(key, params..., shape): internal builtin, deterministic
     // random-array constructor, self-typed from the shape argument. Lowering
-    // records (kind, key) in RandomInits. `kind` is "uniform" | "normal";
-    // `dims` are the static extents.
-    | TExprRandGen of kind: string * key: TypedExpr * dims: int list
+    // records (kind, key, pars) in RandomInits. `kind` is the family name
+    // ("uniform" | "normal" | "exponential" | "gamma" | "poisson" |
+    // "bernoulli" | "beta"); `pars` are the family's runtime Float64 scalar
+    // parameters in surface order (empty for uniform/normal, one for
+    // exponential/poisson/bernoulli, two for gamma/beta) -- ordinary typed
+    // expressions, evaluated once per fill, NOT per draw; `dims` are the
+    // static extents.
+    | TExprRandGen of kind: string * key: TypedExpr * pars: TypedExpr list * dims: int list
     | TExprGuard of cond: TypedExpr * body: TypedExpr
     | TExprZero
     | TExprReynolds of kernel: TypedExpr * isAntisymmetric: bool
