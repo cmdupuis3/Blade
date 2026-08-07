@@ -1,0 +1,25 @@
+// TEST: Family Gaussian Tower
+import ppl as ppl
+// Named-family constructors (docs/plan-ppl-proper.md P1): gaussian(mu, s2, r)
+// elaborates to the order-r cumulant tower straight from the closed form —
+// κ1 = mu, κ2 = s2, higher cumulants vanish — in the flat-univariate
+// representation dist_atoms carries, so the registry algebra composes:
+//   dist_expect: E[X²] = mu² + s2 = 2.25 + 2 = 4.25
+//   dist_map:    an affine map is a degree-1 jet (exact) — 2X+1 is
+//                gaussian(2·1.5+1, 2²·2) = gaussian(4, 8).
+let d = ppl.gaussian(1.5, 2.0, 4)
+let k1 = ppl.cumulant(d, 1)
+let k2 = ppl.cumulant(d, 2)
+let k3 = ppl.cumulant(d, 3)
+let k4 = ppl.cumulant(d, 4)
+let e2 = ppl.dist_expect(d, 0.0, 0.0, 1.0)
+let dm = ppl.dist_map(d, 2, lambda(x) -> 2.0 * x + 1.0)
+let dm1 = ppl.cumulant(dm, 1)
+let dm2 = ppl.cumulant(dm, 2)
+// EXPECT: k1 = [1.5]
+// EXPECT: k2 = [2.0]
+// EXPECT: k3 = [0.0]
+// EXPECT: k4 = [0.0]
+// EXPECT: e2 = 4.25
+// EXPECT: dm1 = [4.0]
+// EXPECT: dm2 = [8.0]

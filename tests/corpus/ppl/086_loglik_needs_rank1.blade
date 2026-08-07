@@ -1,0 +1,12 @@
+// TEST: Loglik Needs Rank-1 Sample Vector (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: a univariate family sums a rank-1 sample vector
+import ppl as ppl
+// loglik sums over the sample axis — the LAST declared index, per the
+// module's shape contract. A leading variable axis has no univariate
+// loglik reading (which coordinate would the density apply to?), so the
+// former refuses with steering instead of silently flattening.
+type VarIdx = Idx<2>
+type TimeIdx = Idx<3>
+let A: Array<Float64 like VarIdx, TimeIdx> = [[0.5, 1.5, 2.5], [1.0, 2.0, 3.0]]
+let ll = ppl.loglik(gaussian(1.0, 2.0), A)

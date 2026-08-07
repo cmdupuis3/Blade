@@ -1,0 +1,11 @@
+// TEST: Logpdf Lognormal
+import ppl as ppl
+// lognormal(mu, s2) at x: -log x - ½·log(2π·s2) - (log x - mu)²/(2·s2).
+// At x = 1 the log x terms vanish and the value coincides with the
+// standard-normal constant; at x = 2 the (log 2)²/2 curvature term shows.
+let l1 = ppl.logpdf(lognormal(0.0, 1.0), 1.0)
+let l2 = ppl.logpdf(lognormal(0.0, 1.0), 2.0)
+let l3 = ppl.logpdf(lognormal(0.5, 2.0), 1.5)
+// EXPECT: l1 = -0.918938533204673
+// EXPECT: l2 = -1.85231222072372
+// EXPECT: l3 = -1.67321144303906
