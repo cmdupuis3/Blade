@@ -1,4 +1,5 @@
-// Blade runtime error support: shadow call stack + panic. Host-only;
+// Blade runtime error support: shadow call stack + panic, plus the scalar
+// math the interpreter cannot borrow from libm (lgamma). Host-only;
 // device compilation sees no-op stubs.
 //
 // The shadow call stack is a thread_local array of Frames (correct under
@@ -13,6 +14,7 @@
 #pragma once
 #include <iostream>
 #include <cstdlib>
+#include <cmath>
 #if !defined(__CUDA_ARCH__)
 namespace blade_rt {
   struct Frame { const char* fn; const char* file; int line; };
@@ -57,6 +59,61 @@ namespace blade_rt {
       std::cerr << "\n";
     }
     std::exit(1);
+  }
+
+  // ---- lgamma(x) = log Gamma(x), x > 0. Lanczos approximation, g = 7, n = 9.
+  //
+  // HAND-ROLLED ON PURPOSE; this is deliberately NOT std::lgamma. The
+  // tree-walking interpreter (src/Interp/Numerics.fs) must reproduce every
+  // double these binaries print, BIT FOR BIT. It manages that for the other
+  // intrinsics by P/Invoking the very ucrtbase.dll that MinGW's libstdc++
+  // forwards <cmath> to -- a trick with no counterpart here, because .NET has
+  // no gamma function at all to fall back on and the ucrt/glibc lgamma
+  // implementations are not the same function. A series written out in plain
+  // sequential double arithmetic is the only form BOTH sides can execute
+  // identically, so this function is transcribed statement for statement into
+  // Interp/Numerics.fs `lgammaLanczos`. KEEP THE TWO IN LOCKSTEP: same
+  // coefficients, same association, no reassociation, no reordering. (Byte
+  // identity also needs FMA contraction off, which is what the differential
+  // gates already pin -- BLADE_FP_CONTRACT=off, see src/Build.fs:38.)
+  //
+  // DOMAIN: x > 0 only. `!(x > 0.0)` also catches NaN. Log-densities (Gamma /
+  // Poisson / Beta, the callers this exists for) never need a non-positive
+  // argument, so the reflection formula that would extend it to x < 0 is
+  // deliberately absent: one fewer thing to keep bit-identical, and a
+  // non-positive argument is a caller bug that panics rather than seeping
+  // through as a silent NaN.
+  //
+  // The panic is also why a generated body calling this KEEPS its shadow
+  // frame: `blade_rt::` is deliberately absent from CodeGen's
+  // panicFreeNamespaces (CodeGen.fs:15178), so the frame analysis classifies
+  // such a body as UNKNOWN and resolveShadowFrames leaves its BLADE_FRAME in
+  // place. That is the reason this must live HERE and nowhere else -- the
+  // tripwire in tests/Test_Diagnostics.fs fails if any other src/cpp header
+  // names blade_rt::panic.
+  inline double lgamma(double x) {
+    if (!(x > 0.0))
+      panic("BL8008", "lgamma: argument must be positive", nullptr, 0);
+    // Gamma(1) = Gamma(2) = 1 exactly; the series lands a few ulp off zero.
+    // The same two comparisons run on the interpreter side, so this stays
+    // exact on both.
+    if (x == 1.0 || x == 2.0) return 0.0;
+    // The series is usually written over z = x - 1 with denominators (z + k);
+    // it is written over x here instead (same values, z + k == x + (k-1)),
+    // because forming `(x - 1) + k` cancels catastrophically for small x --
+    // (1e-8 - 1) + 1 is not 1e-8 -- and costs ~9 digits below x ~ 1e-6.
+    double s = 0.99999999999980993;
+    s += 676.5203681218851     / x;
+    s += -1259.1392167224028   / (x + 1.0);
+    s += 771.32342877765313    / (x + 2.0);
+    s += -176.61502916214059   / (x + 3.0);
+    s += 12.507343278686905    / (x + 4.0);
+    s += -0.13857109526572012  / (x + 5.0);
+    s += 9.9843695780195716e-6 / (x + 6.0);
+    s += 1.5056327351493116e-7 / (x + 7.0);
+    const double t = x + 6.5;   // (x - 1) + g + 0.5, with g = 7
+    // 0.9189385332046727 = log(2*pi) / 2
+    return 0.9189385332046727 + (x - 0.5) * std::log(t) - t + std::log(s);
   }
 }
 #define BLADE_FRAME(fn, file, line) blade_rt::Scope __blade_frame_(fn, file, line)
