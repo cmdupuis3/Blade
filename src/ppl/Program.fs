@@ -432,6 +432,489 @@ let freeCumulants (data: float[][]) (rmax: int) : SymTensor.T[] =
         fk.[n - 1] <- out
     fk
 
+// ---------------------------------------------------------------------------
+// Prototype 5: closed-form densities, Edgeworth / Cornish-Fisher, conjugates
+// ---------------------------------------------------------------------------
+
+/// Full-precision formatting for the pin sheet (src/ppl/ORACLE_PINS.md).
+/// 17 significant digits round-trips an IEEE double exactly.
+let g17 (x: float) : string =
+    if System.Double.IsNegativeInfinity x then "-inf"
+    elif System.Double.IsPositiveInfinity x then "inf"
+    elif System.Double.IsNaN x then "nan"
+    elif x = 0.0 then "0"                     // collapses -0.0, which pins badly
+    else sprintf "%.17g" x
+
+/// Shortest round-tripping form -- used for the INPUT columns (x, p, and the
+/// worked-example data), where "0.1" is what a corpus author will type and
+/// "0.10000000000000001" is only noise. Outputs always use g17.
+let gs (x: float) : string =
+    if x = 0.0 then "0" else x.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+
+let fmtTower (cum: float[]) = cum |> Array.map g17 |> String.concat ", "
+
+/// Worked examples shared by the conjugate self-tests and `dump-conjugate`,
+/// so the pin sheet and the assertions can never drift apart.
+let nnPriorMean, nnPriorVar, nnLikVar = 0.0, 4.0, 2.0
+let nnData = [| 1.2; 0.7; 2.3; -0.4; 1.9 |]
+let bbPriorA, bbPriorB, bbN, bbK = 2.0, 3.0, 10, 7
+let gpPriorA, gpPriorB = 2.0, 1.0
+let gpCounts = [| 3.0; 1.0; 4.0; 1.0; 5.0 |]
+let nigM0, nigK0, nigA0, nigB0 = 0.0, 1.0, 2.0, 3.0
+
+let private sumOf (a: float[]) = Array.sum a
+let private sumSqOf (a: float[]) = a |> Array.sumBy (fun x -> x * x)
+
+/// Trapezoid grid over [lo, hi] with an UNNORMALIZED log-weight; returns the
+/// nodes and normalized probabilities. Log-space with a max subtraction so
+/// wide-support likelihoods cannot underflow.
+let private normalizedGrid (lo: float) (hi: float) (m: int) (logw: float -> float) =
+    let h = (hi - lo) / float (m - 1)
+    let xs = Array.init m (fun i -> lo + float i * h)
+    let lw = xs |> Array.map logw
+    let mx = lw |> Array.max
+    let w =
+        Array.init m (fun i ->
+            let t = if System.Double.IsNegativeInfinity lw.[i] then 0.0 else exp (lw.[i] - mx)
+            let tr = if i = 0 || i = m - 1 then 0.5 else 1.0
+            t * tr)
+    let s = Array.sum w
+    (xs, w |> Array.map (fun x -> x / s))
+
+let private expectOn (xs: float[]) (p: float[]) (g: float -> float) =
+    let mutable acc = 0.0
+    for i in 0 .. xs.Length - 1 do acc <- acc + p.[i] * g xs.[i]
+    acc
+
+/// (mean, variance) of the identity coordinate under a normalized grid.
+let private meanVarOn (xs: float[]) (p: float[]) =
+    let m = expectOn xs p id
+    let m2 = expectOn xs p (fun x -> x * x)
+    (m, m2 - m * m)
+
+/// Numeric total mass of a continuous density on [lo, hi] -- the independent
+/// normalization check for the closed-form logpdfs.
+let private mass (lo: float) (hi: float) (m: int) (lp: float -> float) =
+    let h = (hi - lo) / float (m - 1)
+    let mutable acc = 0.0
+    for i in 0 .. m - 1 do
+        let x = lo + float i * h
+        let v = lp x
+        let f = if System.Double.IsNegativeInfinity v then 0.0 else exp v
+        acc <- acc + (if i = 0 || i = m - 1 then 0.5 else 1.0) * f
+    acc * h
+
+/// Total mass under the substitution x = u^2 (dx = 2u du), which turns the
+/// integrable x^(shape-1) pole of a sub-unit-shape Gamma into a bounded,
+/// smooth integrand that plain trapezoid can actually resolve.
+let private massSqrt (hi: float) (m: int) (lp: float -> float) =
+    let ulo, uhi = 1e-12, sqrt hi
+    let h = (uhi - ulo) / float (m - 1)
+    let mutable acc = 0.0
+    for i in 0 .. m - 1 do
+        let u = ulo + float i * h
+        let v = lp (u * u)
+        let f = if System.Double.IsNegativeInfinity v then 0.0 else exp v * 2.0 * u
+        acc <- acc + (if i = 0 || i = m - 1 then 0.5 else 1.0) * f
+    acc * h
+
+/// Composite Simpson weight (unnormalized; the h/3 factor cancels whenever the
+/// result is normalized). Requires an odd node count.
+let private simpsonW (m: int) (i: int) =
+    if i = 0 || i = m - 1 then 1.0 elif i % 2 = 1 then 4.0 else 2.0
+
+let testDensity () =
+    section "prototype 5: lgamma + closed-form log-densities"
+    // --- lgamma: exact values, factorials, reflection, duplication ---
+    checkClose "lgamma(1) = 0" 1e-14 0.0 (Density.lgamma 1.0)
+    checkClose "lgamma(2) = 0" 1e-14 0.0 (Density.lgamma 2.0)
+    checkClose "lgamma(0.5) = log sqrt(pi)" 1e-14 0.5723649429247001 (Density.lgamma 0.5)
+    checkClose "lgamma(5) = log 24" 1e-13 3.1780538303479458 (Density.lgamma 5.0)
+    checkClose "lgamma(6) = log 120" 1e-13 4.787491742782046 (Density.lgamma 6.0)
+    for n in 0 .. 15 do
+        checkCloseRel (sprintf "lgamma(%d) = log %d!" (n + 1) n) 1e-13 1e-13
+                      (log (Combinatorics.factorial n)) (Density.logFactorial n)
+    // reflection: lgamma(x) + lgamma(1-x) = log(pi / sin(pi x))
+    for x in [ 0.1; 0.3; 0.45 ] do
+        checkCloseRel (sprintf "lgamma reflection at %g" x) 1e-13 1e-13
+                      (log (System.Math.PI / sin (System.Math.PI * x)))
+                      (Density.lgamma x + Density.lgamma (1.0 - x))
+    // Legendre duplication: lgamma(2z) = lgamma z + lgamma(z+1/2) + (2z-1)log2 - log(pi)/2
+    for z in [ 0.7; 1.7; 3.2; 9.5 ] do
+        checkCloseRel (sprintf "lgamma duplication at %g" z) 1e-13 1e-13
+                      (Density.lgamma (2.0 * z))
+                      (Density.lgamma z + Density.lgamma (z + 0.5)
+                       + (2.0 * z - 1.0) * log 2.0 - 0.5 * log System.Math.PI)
+
+    // --- spot values ---
+    checkClose "gaussian logpdf(0; 0, 1)" 1e-15 -0.9189385332046727 (Density.gaussianLogpdf 0.0 1.0 0.0)
+    checkClose "gaussian logpdf(1.5; 0.5, 4)" 1e-14
+               (-0.5 * (log (2.0 * System.Math.PI) + log 4.0) - 0.125)
+               (Density.gaussianLogpdf 0.5 4.0 1.5)
+    checkClose "exponential logpdf(1; 2)" 1e-15 (log 2.0 - 2.0) (Density.exponentialLogpdf 2.0 1.0)
+    checkClose "uniform logpdf(1; 0, 2)" 1e-15 (-log 2.0) (Density.uniformLogpdf 0.0 2.0 1.0)
+    checkClose "lognormal logpdf(1; 0, 1)" 1e-15 -0.9189385332046727 (Density.lognormalLogpdf 0.0 1.0 1.0)
+    checkClose "bernoulli logpmf(1; 0.3)" 1e-15 (log 0.3) (Density.bernoulliLogpmf 0.3 1.0)
+    checkClose "bernoulli sums to 1" 1e-15 1.0
+               (exp (Density.bernoulliLogpmf 0.3 0.0) + exp (Density.bernoulliLogpmf 0.3 1.0))
+
+    // --- cross-family identities (independent of the lgamma path where possible) ---
+    for x in [ 0.1; 0.5; 1.0; 2.5; 5.0 ] do
+        checkClose (sprintf "Gamma(1, 2.5) == Exp(2.5) at %g" x) 1e-13
+                   (Density.exponentialLogpdf 2.5 x) (Density.gammaLogpdf 1.0 2.5 x)
+        // integer shape: closed form with an exact factorial, no lgamma
+        let k, r = 4, 1.7
+        checkCloseRel (sprintf "Gamma(4, 1.7) vs factorial form at %g" x) 1e-13 1e-13
+                      (float k * log r + float (k - 1) * log x - r * x - log (Combinatorics.factorial (k - 1)))
+                      (Density.gammaLogpdf (float k) r x)
+        // lognormal is the gaussian of log x, minus the Jacobian
+        checkClose (sprintf "LogNormal(0.5, 0.25) vs gaussian(log x) at %g" x) 1e-13
+                   (Density.gaussianLogpdf 0.5 0.25 (log x) - log x)
+                   (Density.lognormalLogpdf 0.5 0.25 x)
+    for x in [ 0.05; 0.25; 0.5; 0.75; 0.95 ] do
+        checkClose (sprintf "Beta(1, 1) == Uniform(0, 1) at %g" x) 1e-14
+                   (Density.uniformLogpdf 0.0 1.0 x) (Density.betaLogpdf 1.0 1.0 x)
+        // integer shapes: 1/B(a,b) = (a+b-1)! / ((a-1)!(b-1)!)
+        let a, b = 3, 5
+        checkCloseRel (sprintf "Beta(3, 5) vs binomial form at %g" x) 1e-13 1e-13
+                      (float (a - 1) * log x + float (b - 1) * log (1.0 - x)
+                       + log (Combinatorics.factorial (a + b - 1))
+                       - log (Combinatorics.factorial (a - 1)) - log (Combinatorics.factorial (b - 1)))
+                      (Density.betaLogpdf (float a) (float b) x)
+    for k in 0 .. 8 do
+        checkCloseRel (sprintf "Poisson(4.5) vs factorial form at %d" k) 1e-13 1e-13
+                      (float k * log 4.5 - 4.5 - log (Combinatorics.factorial k))
+                      (Density.poissonLogpmf 4.5 (float k))
+
+    // --- normalization: every continuous density integrates to 1, each PMF sums to 1 ---
+    checkClose "int gaussian(1.5, 4) = 1" 1e-10 1.0 (mass -20.0 23.0 200001 (Density.gaussianLogpdf 1.5 4.0))
+    checkClose "int exponential(2.5) = 1" 1e-7 1.0 (mass 0.0 40.0 400001 (Density.exponentialLogpdf 2.5))
+    checkClose "int uniform(-2, 3) = 1" 1e-6 1.0 (mass -4.0 5.0 900001 (Density.uniformLogpdf -2.0 3.0))
+    checkClose "int lognormal(0, 1) = 1" 1e-7 1.0 (mass 1e-9 400.0 2000001 (Density.lognormalLogpdf 0.0 1.0))
+    checkClose "int gamma(3.5, 2) = 1" 1e-9 1.0 (mass 1e-12 40.0 400001 (Density.gammaLogpdf 3.5 2.0))
+    // shape < 1 has an integrable pole at 0: integrate in u = sqrt(x)
+    checkClose "int gamma(0.5, 1) = 1" 1e-9 1.0 (massSqrt 400.0 400001 (Density.gammaLogpdf 0.5 1.0))
+    checkClose "int beta(2, 3) = 1" 1e-9 1.0 (mass 0.0 1.0 200001 (Density.betaLogpdf 2.0 3.0))
+    let poissonMass = [ 0 .. 80 ] |> List.sumBy (fun k -> exp (Density.poissonLogpmf 4.5 (float k)))
+    checkClose "sum poisson(4.5) = 1" 1e-12 1.0 poissonMass
+
+    // --- support boundaries report -inf, not NaN or an exception ---
+    let isNegInf (v: float) = System.Double.IsNegativeInfinity v
+    check "exponential below support" (isNegInf (Density.exponentialLogpdf 1.0 -0.5))
+    check "uniform below support" (isNegInf (Density.uniformLogpdf 0.0 2.0 -0.1))
+    check "uniform above support" (isNegInf (Density.uniformLogpdf 0.0 2.0 2.1))
+    check "lognormal at 0" (isNegInf (Density.lognormalLogpdf 0.0 1.0 0.0))
+    check "gamma at 0" (isNegInf (Density.gammaLogpdf 1.0 1.0 0.0))
+    check "beta at 0" (isNegInf (Density.betaLogpdf 2.0 3.0 0.0))
+    check "beta at 1" (isNegInf (Density.betaLogpdf 2.0 3.0 1.0))
+    check "poisson at a non-integer" (isNegInf (Density.poissonLogpmf 2.0 2.5))
+    check "poisson at a negative count" (isNegInf (Density.poissonLogpmf 2.0 -1.0))
+    check "bernoulli off support" (isNegInf (Density.bernoulliLogpmf 0.3 2.0))
+    checkThrows "gaussian rejects a non-positive variance"
+                (fun () -> Density.gaussianLogpdf 0.0 0.0 1.0 |> ignore)
+    checkThrows "gamma rejects a non-positive rate"
+                (fun () -> Density.gammaLogpdf 2.0 0.0 1.0 |> ignore)
+
+    // loglik is the summed logpdf over the sample axis
+    checkClose "loglik = sum of logpdfs" 1e-13
+               (nnData |> Array.sumBy (Density.gaussianLogpdf 1.0 2.0))
+               (Density.loglik (Density.Gaussian (1.0, 2.0)) nnData)
+
+/// The textbook Edgeworth bracket through order eps^4, written out by hand
+/// from the standard term list, as an independent check on the generated
+/// coefficients. Standardized cumulants l3..l6; `groups` selects how many
+/// eps-groups to keep (1 => l3 only, ..., 4 => the full list).
+let private textbookFactor (l3: float) (l4: float) (l5: float) (l6: float) (groups: int) (z: float) =
+    let he = Expansion.hermiteTable 12 z
+    let mutable acc = 1.0
+    if groups >= 1 then
+        acc <- acc + l3 / 6.0 * he.[3]
+    if groups >= 2 then
+        acc <- acc + l4 / 24.0 * he.[4] + l3 * l3 / 72.0 * he.[6]
+    if groups >= 3 then
+        acc <- acc + l5 / 120.0 * he.[5] + l3 * l4 / 144.0 * he.[7]
+                   + l3 * l3 * l3 / 1296.0 * he.[9]
+    if groups >= 4 then
+        acc <- acc + l6 / 720.0 * he.[6]
+                   + (l3 * l5 / 720.0 + l4 * l4 / 1152.0) * he.[8]
+                   + l3 * l3 * l4 / 1728.0 * he.[10]
+                   + l3 * l3 * l3 * l3 / 31104.0 * he.[12]
+    acc
+
+let testEdgeworth () =
+    section "prototype 5: Edgeworth / Gram-Charlier density"
+    // Hermite recurrence spot values
+    let he = Expansion.hermiteTable 6 1.5
+    checkClose "He_2(1.5)" 1e-14 1.25 he.[2]
+    checkClose "He_3(1.5)" 1e-14 (1.5 ** 3.0 - 3.0 * 1.5) he.[3]
+    checkClose "He_4(1.5)" 1e-14 (1.5 ** 4.0 - 6.0 * 1.5 ** 2.0 + 3.0) he.[4]
+    checkClose "He_6(0)" 1e-14 -15.0 (Expansion.hermite 6 0.0)
+
+    // 1) A pure Gaussian tower reproduces the exact Gaussian density: every
+    //    correction term must vanish, at r = 2 and at r = 6 with explicit zeros.
+    let gTower2 = [ 2.0; 3.0 ]
+    let gTower6 = [ 2.0; 3.0; 0.0; 0.0; 0.0; 0.0 ]
+    for x in [ -1.0; 0.0; 2.0; 4.0; 6.0 ] do
+        let exact = exp (Density.gaussianLogpdf 2.0 3.0 x)
+        checkClose (sprintf "Edgeworth r=2 gaussian at %g" x) 1e-15 exact (Expansion.edgeworthPdf gTower2 x)
+        checkClose (sprintf "Edgeworth r=6 zero-tower gaussian at %g" x) 1e-15 exact (Expansion.edgeworthPdf gTower6 x)
+        checkClose (sprintf "Edgeworth bracket = 1 at %g" x) 1e-15 1.0 (Expansion.edgeworthFactor gTower6 x)
+
+    // 2) The GENERATED coefficients equal the hand-written textbook term list,
+    //    group by group. kappa_2 = 1 so lambda_k = kappa_k.
+    let l3, l4, l5, l6 = 0.7, -1.3, 2.1, -0.9
+    for z in [ -2.0; -0.5; 0.0; 0.8; 1.7 ] do
+        for groups in 1 .. 4 do
+            let tower = 0.0 :: 1.0 :: [ l3; l4; l5; l6 ] |> List.truncate (groups + 2)
+            checkCloseRel (sprintf "generated == textbook, groups=%d, z=%g" groups z) 1e-12 1e-12
+                          (textbookFactor l3 l4 l5 l6 groups z)
+                          (Expansion.edgeworthFactor tower z)
+    // and with a non-trivial mu/sigma the bracket is the same function of z
+    let sd = 1.7
+    let mu = -0.4
+    let scaled = [ mu; sd * sd; l3 * sd ** 3.0; l4 * sd ** 4.0; l5 * sd ** 5.0; l6 * sd ** 6.0 ]
+    for z in [ -1.0; 0.0; 1.3 ] do
+        checkCloseRel (sprintf "standardization invariance at z=%g" z) 1e-12 1e-12
+                      (textbookFactor l3 l4 l5 l6 4 z)
+                      (Expansion.edgeworthFactor scaled (mu + sd * z))
+        checkCloseRel (sprintf "scaled density = bracket * phi / sd at z=%g" z) 1e-12 1e-12
+                      (Expansion.stdNormalPdf z * textbookFactor l3 l4 l5 l6 4 z / sd)
+                      (Expansion.edgeworthPdf scaled (mu + sd * z))
+
+    // 3) Honest-approximation territory: Exp(1) has kappa_k = (k-1)!, so the
+    //    standardized cumulants (2, 6, 24, 120) are large and the series is
+    //    only useful in the bulk. Report the achieved error; the assertions
+    //    below pin the measured bulk accuracy, not an aspiration.
+    let expTower4 = [ 1.0; 1.0; 2.0; 6.0 ]
+    let expTower6 = [ 1.0; 1.0; 2.0; 6.0; 24.0; 120.0 ]
+    printfn "  Exp(1) Edgeworth vs exact e^-x (x = 0.2 .. 2.2; * marks the asserted bulk):"
+    printfn "      x        exact          r=4 approx     r=4 err        r=6 approx     r=6 err"
+    // The "bulk" is the central band z in [-0.4, 0.4] (Exp(1) has mu = sd = 1).
+    // Outside it the series degrades fast -- x = 0.2 sits only 0.2 sd from the
+    // hard support edge at 0, where no Gaussian-anchored expansion can work.
+    let inBulk (x: float) = x >= 0.6 - 1e-9 && x <= 1.4 + 1e-9
+    let mutable maxErr4 = 0.0
+    let mutable maxErr6 = 0.0
+    let mutable bulk4 = 0.0
+    let mutable bulk6 = 0.0
+    for i in 0 .. 20 do
+        let x = 0.2 + 0.1 * float i
+        let exact = exp (-x)
+        let a4 = Expansion.edgeworthPdf expTower4 x
+        let a6 = Expansion.edgeworthPdf expTower6 x
+        maxErr4 <- max maxErr4 (abs (a4 - exact))
+        maxErr6 <- max maxErr6 (abs (a6 - exact))
+        if inBulk x then
+            bulk4 <- max bulk4 (abs (a4 - exact))
+            bulk6 <- max bulk6 (abs (a6 - exact))
+        if i % 2 = 0 then
+            printfn "   %6.2f %s %12.8f   %12.8f   %+11.3e   %12.8f   %+11.3e"
+                    x (if inBulk x then "*" else " ") exact a4 (a4 - exact) a6 (a6 - exact)
+    printfn "    max |err|: whole grid r=4 %.4g / r=6 %.4g; bulk r=4 %.4g / r=6 %.4g"
+            maxErr4 maxErr6 bulk4 bulk6
+    check (sprintf "Exp(1) r=4 bulk max error %.4g < 0.02" bulk4) (bulk4 < 0.02)
+    check (sprintf "Exp(1) r=6 bulk max error %.4g < 0.005" bulk6) (bulk6 < 0.005)
+    check (sprintf "Exp(1) r=6 beats r=4 in the bulk (%.4g < %.4g)" bulk6 bulk4) (bulk6 < bulk4)
+    // ... and it is genuinely an approximation: the tail goes negative, which
+    // is exactly what dist_negativity measures on the compiler side.
+    check "Exp(1) r=6 Edgeworth goes negative somewhere in [3, 6]"
+          ([ 3.0; 3.5; 4.0; 4.5; 5.0; 5.5; 6.0 ] |> List.exists (fun x -> Expansion.edgeworthPdf expTower6 x < 0.0))
+
+let testCornishFisher () =
+    section "prototype 5: Cornish-Fisher quantiles"
+    // AS241 against published standard-normal quantiles
+    checkClose "Phi^-1(0.5)" 1e-15 0.0 (Expansion.normalQuantile 0.5)
+    checkClose "Phi^-1(0.75)" 1e-14 0.6744897501960817 (Expansion.normalQuantile 0.75)
+    checkClose "Phi^-1(0.95)" 1e-14 1.6448536269514722 (Expansion.normalQuantile 0.95)
+    checkClose "Phi^-1(0.975)" 1e-14 1.959963984540054 (Expansion.normalQuantile 0.975)
+    checkClose "Phi^-1(0.99)" 1e-14 2.3263478740408408 (Expansion.normalQuantile 0.99)
+    checkClose "Phi^-1(0.999)" 1e-13 3.090232306167813 (Expansion.normalQuantile 0.999)
+    checkClose "Phi^-1(1e-10)" 1e-12 -6.361340902404056 (Expansion.normalQuantile 1e-10)
+    for p in [ 0.001; 0.05; 0.2; 0.4999 ] do
+        checkClose (sprintf "Phi^-1 antisymmetry at %g" p) 1e-14
+                   (-(Expansion.normalQuantile p)) (Expansion.normalQuantile (1.0 - p))
+    checkThrows "Phi^-1 rejects p = 0" (fun () -> Expansion.normalQuantile 0.0 |> ignore)
+    checkThrows "Phi^-1 rejects p = 1" (fun () -> Expansion.normalQuantile 1.0 |> ignore)
+
+    // 1) A Gaussian tower gives the exact Gaussian quantiles (all corrections
+    //    vanish), at r = 2 and r = 6 with explicit zeros.
+    let ps = [ 0.05; 0.25; 0.5; 0.75; 0.95 ]
+    let mu, v = 2.0, 3.0
+    for p in ps do
+        let exact = mu + sqrt v * Expansion.normalQuantile p
+        checkClose (sprintf "CF r=2 gaussian at p=%g" p) 1e-14 exact (Expansion.cornishFisher [ mu; v ] p)
+        checkClose (sprintf "CF r=6 zero-tower gaussian at p=%g" p) 1e-14 exact
+                   (Expansion.cornishFisher [ mu; v; 0.0; 0.0; 0.0; 0.0 ] p)
+
+    // 2) The series inversion equals the classic closed-form expansion:
+    //      w = z + (z^2-1) l3/6
+    //            + (z^3-3z) l4/24 - (2z^3-5z) l3^2/36
+    //            + (z^4-6z^2+3) l5/120 - (z^4-5z^2+2) l3 l4/24
+    //            + (12z^4-53z^2+17) l3^3/324
+    let l3, l4, l5 = 0.7, -1.3, 2.1
+    let classic (z: float) (groups: int) =
+        let mutable w = z
+        if groups >= 1 then w <- w + (z * z - 1.0) * l3 / 6.0
+        if groups >= 2 then
+            w <- w + (z ** 3.0 - 3.0 * z) * l4 / 24.0 - (2.0 * z ** 3.0 - 5.0 * z) * l3 * l3 / 36.0
+        if groups >= 3 then
+            w <- w + (z ** 4.0 - 6.0 * z * z + 3.0) * l5 / 120.0
+                   - (z ** 4.0 - 5.0 * z * z + 2.0) * l3 * l4 / 24.0
+                   + (12.0 * z ** 4.0 - 53.0 * z * z + 17.0) * l3 * l3 * l3 / 324.0
+        w
+    for p in [ 0.01; 0.05; 0.25; 0.5; 0.75; 0.95; 0.99 ] do
+        let z = Expansion.normalQuantile p
+        for groups in 1 .. 3 do
+            let tower = 0.0 :: 1.0 :: [ l3; l4; l5 ] |> List.truncate (groups + 2)
+            checkCloseRel (sprintf "CF series inversion == classic, groups=%d, p=%g" groups p) 1e-11 1e-12
+                          (classic z groups) (Expansion.cornishFisher tower p)
+    // affine equivariance: CF(mu + sigma X) = mu + sigma CF(X)
+    let sd = 1.7
+    let mu2 = -0.4
+    let scaled = [ mu2; sd * sd; l3 * sd ** 3.0; l4 * sd ** 4.0; l5 * sd ** 5.0 ]
+    for p in ps do
+        checkCloseRel (sprintf "CF affine equivariance at p=%g" p) 1e-11 1e-12
+                      (mu2 + sd * Expansion.cornishFisher [ 0.0; 1.0; l3; l4; l5 ] p)
+                      (Expansion.cornishFisher scaled p)
+    // monotone in p on a skewed tower, and honest about its own accuracy
+    let expTower6 = [ 1.0; 1.0; 2.0; 6.0; 24.0; 120.0 ]
+    let qs = ps |> List.map (Expansion.cornishFisher expTower6)
+    check "CF of the Exp(1) tower is increasing in p" (qs = List.sort qs)
+    printfn "  Exp(1) Cornish-Fisher vs exact -log(1-p):"
+    for p in ps do
+        let exact = -log (1.0 - p)
+        let q4 = Expansion.cornishFisher [ 1.0; 1.0; 2.0; 6.0 ] p
+        let q6 = Expansion.cornishFisher expTower6 p
+        printfn "    p=%.2f  exact %8.5f   r=4 %8.5f (%+.3e)   r=6 %8.5f (%+.3e)"
+                p exact q4 (q4 - exact) q6 (q6 - exact)
+
+let testConjugate () =
+    section "prototype 5: conjugate posteriors vs brute-force quadrature"
+    // 1) Normal-Normal, known variance.
+    let n = nnData.Length
+    let nnPost = Conjugate.normalNormal nnPriorMean nnPriorVar nnLikVar n (sumOf nnData)
+    let nnLogw (mu: float) =
+        Density.gaussianLogpdf nnPriorMean nnPriorVar mu
+        + (nnData |> Array.sumBy (Density.gaussianLogpdf mu nnLikVar))
+    let (xs, ps) = normalizedGrid -20.0 22.0 400001 nnLogw
+    let (gm, gv) = meanVarOn xs ps
+    checkCloseRel "Normal-Normal posterior mean vs quadrature" 1e-10 1e-12 gm nnPost.PostMean
+    checkCloseRel "Normal-Normal posterior var vs quadrature" 1e-10 1e-12 gv nnPost.PostVar
+    let nnTower = Conjugate.normalNormalTower nnPost 4
+    checkArrayClose "Normal-Normal tower = gaussian cumulants" 1e-14
+                    [| nnPost.PostMean; nnPost.PostVar; 0.0; 0.0 |] nnTower
+
+    // 2) Beta-Bernoulli.
+    let bbPost = Conjugate.betaBernoulli bbPriorA bbPriorB bbN bbK
+    check "Beta-Bernoulli hyperparameters" (bbPost.A = 9.0 && bbPost.B = 6.0)
+    let bbLogw (p: float) =
+        Density.betaLogpdf bbPriorA bbPriorB p
+        + float bbK * Density.bernoulliLogpmf p 1.0
+        + float (bbN - bbK) * Density.bernoulliLogpmf p 0.0
+    let (bx, bp) = normalizedGrid 1e-12 (1.0 - 1e-12) 200001 bbLogw
+    let (bm, bv) = meanVarOn bx bp
+    checkCloseRel "Beta-Bernoulli posterior mean vs quadrature" 1e-9 1e-12 bm (Conjugate.betaMean bbPost)
+    checkCloseRel "Beta-Bernoulli posterior var vs quadrature" 1e-9 1e-12 bv (Conjugate.betaVar bbPost)
+
+    // 3) Gamma-Poisson.
+    let gpPost = Conjugate.gammaPoisson gpPriorA gpPriorB gpCounts.Length (sumOf gpCounts)
+    check "Gamma-Poisson hyperparameters" (gpPost.Shape = 16.0 && gpPost.Rate = 6.0)
+    let gpLogw (lam: float) =
+        Density.gammaLogpdf gpPriorA gpPriorB lam
+        + (gpCounts |> Array.sumBy (fun k -> Density.poissonLogpmf lam k))
+    let (lx, lp) = normalizedGrid 1e-9 30.0 300001 gpLogw
+    let (lm, lv) = meanVarOn lx lp
+    checkCloseRel "Gamma-Poisson posterior mean vs quadrature" 1e-9 1e-12 lm (gpPost.Shape / gpPost.Rate)
+    checkCloseRel "Gamma-Poisson posterior var vs quadrature" 1e-9 1e-12 lv (gpPost.Shape / (gpPost.Rate ** 2.0))
+    let gpTower = Conjugate.gammaPoissonTower gpPost 4
+    checkArrayClose "Gamma-Poisson tower = gamma cumulants" 1e-13
+                    (Dist.gammaCumulants gpPost.Shape gpPost.Rate 4) gpTower
+
+    // 4) Normal-InverseGamma (unknown mean AND variance): 2-D brute force over
+    //    (mu, sigma2), the sigma2 axis on a log grid with its Jacobian.
+    let nigPost =
+        Conjugate.normalInvGamma nigM0 nigK0 nigA0 nigB0 n (sumOf nnData) (sumSqOf nnData)
+    let nigLogw (mu: float) (s: float) =
+        let v = exp s
+        Density.invGammaLogpdf nigA0 nigB0 v
+        + Density.gaussianLogpdf nigM0 (v / nigK0) mu
+        + (nnData |> Array.sumBy (Density.gaussianLogpdf mu v))
+        + s                                  // Jacobian d(sigma2)/ds = sigma2
+    // The mu margin is a Student-t with 2*alpha_n = 9 degrees of freedom, so
+    // its second moment has an algebraic tail: the mu window has to reach far
+    // (about 56 scale units here) before truncation stops dominating the
+    // Simpson error. sigma2 rides a log grid with its Jacobian.
+    let nm, ns = 2001, 1201
+    let mlo, mhi = -25.0, 27.0
+    let slo, shi = log 0.005, log 2000.0
+    let hm = (mhi - mlo) / float (nm - 1)
+    let hs = (shi - slo) / float (ns - 1)
+    let mus = Array.init nm (fun i -> mlo + float i * hm)
+    let ss = Array.init ns (fun j -> slo + float j * hs)
+    let lw = Array.init nm (fun i -> Array.init ns (fun j -> nigLogw mus.[i] ss.[j]))
+    let mx = lw |> Array.collect id |> Array.max
+    let w =
+        Array.init nm (fun i ->
+            Array.init ns (fun j -> simpsonW nm i * simpsonW ns j * exp (lw.[i].[j] - mx)))
+    let total = w |> Array.sumBy Array.sum
+    let expect2 (g: float -> float -> float) =
+        let mutable acc = 0.0
+        for i in 0 .. nm - 1 do
+            for j in 0 .. ns - 1 do
+                acc <- acc + w.[i].[j] * g mus.[i] (exp ss.[j])
+        acc / total
+    let eMu = expect2 (fun m _ -> m)
+    let eMu2 = expect2 (fun m _ -> m * m)
+    let eV = expect2 (fun _ v -> v)
+    let ePrec = expect2 (fun _ v -> 1.0 / v)
+    checkCloseRel "Normal-InvGamma E[mu] vs quadrature" 1e-7 1e-9 eMu (Conjugate.nigMeanMu nigPost)
+    checkCloseRel "Normal-InvGamma Var[mu] vs quadrature" 1e-6 1e-9 (eMu2 - eMu * eMu) (Conjugate.nigVarMu nigPost)
+    checkCloseRel "Normal-InvGamma E[sigma2] vs quadrature" 1e-7 1e-9 eV (Conjugate.nigMeanSigma2 nigPost)
+    checkCloseRel "Normal-InvGamma E[1/sigma2] vs quadrature" 1e-8 1e-10 ePrec (Conjugate.nigMeanPrecision nigPost)
+    let nigTower = Conjugate.normalInvGammaPrecisionTower nigPost 4
+    checkClose "Normal-InvGamma precision tower kappa_1 = alpha/beta" 1e-13
+               (Conjugate.nigMeanPrecision nigPost) nigTower.[0]
+    checkClose "Normal-InvGamma precision tower kappa_2 = alpha/beta^2" 1e-13
+               (nigPost.Alpha / (nigPost.Beta ** 2.0)) nigTower.[1]
+
+// ---------------------------------------------------------------------------
+
+/// Standard case matrix for `dump-logpdf` -- 2-3 parameter points per family,
+/// 5 evaluation points each.
+let private logpdfMatrix : (Density.Family * float list) list =
+    [ Density.Gaussian (0.0, 1.0),      [ -2.0; -0.5; 0.0; 1.0; 2.5 ]
+      Density.Gaussian (1.5, 4.0),      [ -2.0; -0.5; 0.0; 1.0; 2.5 ]
+      Density.Exponential 1.0,          [ 0.1; 0.5; 1.0; 2.5; 5.0 ]
+      Density.Exponential 2.5,          [ 0.1; 0.5; 1.0; 2.5; 5.0 ]
+      Density.Uniform (0.0, 1.0),       [ -1.0; 0.0; 0.5; 1.0; 2.0 ]
+      Density.Uniform (-2.0, 3.0),      [ -3.0; -2.0; 0.5; 3.0; 4.0 ]
+      Density.LogNormal (0.0, 1.0),     [ 0.25; 0.5; 1.0; 2.0; 5.0 ]
+      Density.LogNormal (0.5, 0.25),    [ 0.25; 0.5; 1.0; 2.0; 5.0 ]
+      Density.Gamma (2.0, 1.0),         [ 0.1; 0.5; 1.0; 2.5; 5.0 ]
+      Density.Gamma (3.5, 2.0),         [ 0.1; 0.5; 1.0; 2.5; 5.0 ]
+      Density.Gamma (0.5, 1.0),         [ 0.1; 0.5; 1.0; 2.5; 5.0 ]
+      Density.Poisson 1.0,              [ 0.0; 1.0; 2.0; 5.0; 10.0 ]
+      Density.Poisson 4.5,              [ 0.0; 1.0; 2.0; 5.0; 10.0 ]
+      Density.Beta (2.0, 3.0),          [ 0.05; 0.25; 0.5; 0.75; 0.95 ]
+      Density.Beta (0.5, 0.5),          [ 0.05; 0.25; 0.5; 0.75; 0.95 ]
+      Density.Beta (1.0, 1.0),          [ 0.05; 0.25; 0.5; 0.75; 0.95 ]
+      Density.Bernoulli 0.3,            [ 0.0; 1.0 ]
+      Density.Bernoulli 0.9,            [ 0.0; 1.0 ] ]
+
+/// Named towers for `dump-edgeworth` / `dump-cf`, each truncated to the orders
+/// the expansions actually consume.
+let private towerMatrix : (string * float[] * float list) list =
+    [ "gaussian(0, 1) r=2", Dist.gaussianCumulants 0.0 1.0 2, [ -2.0; -1.0; 0.0; 1.0; 2.0 ]
+      "gaussian(0, 1) r=6", Dist.gaussianCumulants 0.0 1.0 6, [ -2.0; -1.0; 0.0; 1.0; 2.0 ]
+      "exponential(1) r=4", Dist.exponentialCumulants 1.0 4, [ 0.25; 0.5; 1.0; 2.0; 3.0 ]
+      "exponential(1) r=6", Dist.exponentialCumulants 1.0 6, [ 0.25; 0.5; 1.0; 2.0; 3.0 ]
+      "gamma(3, 1) r=4", Dist.gammaCumulants 3.0 1.0 4, [ 1.0; 2.0; 3.0; 4.0; 6.0 ]
+      "gamma(3, 1) r=6", Dist.gammaCumulants 3.0 1.0 6, [ 1.0; 2.0; 3.0; 4.0; 6.0 ]
+      "poisson(4) r=4", Dist.poissonCumulants 4.0 4, [ 2.0; 3.0; 4.0; 5.0; 6.0 ]
+      "poisson(4) r=6", Dist.poissonCumulants 4.0 6, [ 2.0; 3.0; 4.0; 5.0; 6.0 ] ]
+
+let private cfProbabilities = [ 0.05; 0.25; 0.5; 0.75; 0.95 ]
+
 [<EntryPoint>]
 let main argv =
     match argv with
@@ -564,6 +1047,93 @@ let main argv =
         let jv6 = Dist.jetPushforwardVec distB4 g0v jetsV 3 true
         for k in 1 .. 3 do printfn "jv6_k%d = [%s]" k (fmtJoint jv6 k)
         0
+    | [| "dump-logpdf" |] ->
+        // Closed-form log-densities: every named family at 2-3 parameter
+        // points, 5 evaluation points each (2 for the Bernoulli support).
+        // -inf marks a point outside the support.
+        for (fam, xs) in logpdfMatrix do
+            printfn "-- %s" (Density.familyName fam)
+            for x in xs do
+                printfn "  x=%s  logpdf=%s" (gs x) (g17 (Density.logpdf fam x))
+        printfn "-- lgamma (Lanczos g=7, n=9)"
+        for x in [ 0.1; 0.5; 1.0; 1.5; 2.0; 3.5; 5.0; 10.0; 0.5 + 1e-3 ] do
+            printfn "  x=%s  lgamma=%s" (gs x) (g17 (Density.lgamma x))
+        0
+    | [| "dump-edgeworth" |] ->
+        // Edgeworth/Gram-Charlier density from a univariate cumulant tower.
+        // NOT a density in general -- the tail can go negative, which is the
+        // honesty check dist_negativity measures on the compiler side.
+        for (name, tower, xs) in towerMatrix do
+            printfn "-- %s: kappa = [%s]" name (fmtTower tower)
+            let t = List.ofArray tower
+            for x in xs do
+                printfn "  x=%s  edgeworth_pdf=%s" (gs x) (g17 (Expansion.edgeworthPdf t x))
+        printfn "-- exponential(1) r=6 tail (negativity probe)"
+        for x in [ 3.0; 4.0; 5.0; 6.0; 7.0 ] do
+            printfn "  x=%s  edgeworth_pdf=%s" (gs x)
+                    (g17 (Expansion.edgeworthPdf (List.ofArray (Dist.exponentialCumulants 1.0 6)) x))
+        0
+    | [| "dump-cf" |] ->
+        // Cornish-Fisher quantiles from a univariate cumulant tower, plus the
+        // standard-normal quantiles (Wichura AS241) they are built on.
+        printfn "-- standard normal quantile (AS241 PPND16)"
+        for p in cfProbabilities @ [ 0.01; 0.99; 0.975; 0.999 ] do
+            printfn "  p=%s  z=%s" (gs p) (g17 (Expansion.normalQuantile p))
+        for (name, tower, _) in towerMatrix do
+            printfn "-- %s: kappa = [%s]" name (fmtTower tower)
+            let t = List.ofArray tower
+            for p in cfProbabilities do
+                printfn "  p=%s  cf_quantile=%s" (gs p) (g17 (Expansion.cornishFisher t p))
+        0
+    | [| "dump-conjugate" |] ->
+        // Conjugate posteriors: prior hyperparameters + sufficient statistics
+        // in, posterior hyperparameters out. One worked example per pair.
+        let n = nnData.Length
+        let nnPost = Conjugate.normalNormal nnPriorMean nnPriorVar nnLikVar n (sumOf nnData)
+        printfn "-- Normal-Normal (known variance)"
+        printfn "  prior: N(m0=%s, v0=%s), likelihood variance sigma2=%s"
+                (gs nnPriorMean) (gs nnPriorVar) (gs nnLikVar)
+        printfn "  data: [%s] (n=%d, sum=%s)"
+                (nnData |> Array.map gs |> String.concat ", ") n (g17 (sumOf nnData))
+        printfn "  post_mean=%s" (g17 nnPost.PostMean)
+        printfn "  post_var=%s" (g17 nnPost.PostVar)
+        printfn "  tower r=4 = [%s]" (fmtTower (Conjugate.normalNormalTower nnPost 4))
+
+        let bbPost = Conjugate.betaBernoulli bbPriorA bbPriorB bbN bbK
+        printfn "-- Beta-Bernoulli"
+        printfn "  prior: Beta(a0=%s, b0=%s); data: n=%d, k=%d" (gs bbPriorA) (gs bbPriorB) bbN bbK
+        printfn "  post_a=%s" (g17 bbPost.A)
+        printfn "  post_b=%s" (g17 bbPost.B)
+        printfn "  post_mean=%s" (g17 (Conjugate.betaMean bbPost))
+        printfn "  post_var=%s" (g17 (Conjugate.betaVar bbPost))
+
+        let gpPost = Conjugate.gammaPoisson gpPriorA gpPriorB gpCounts.Length (sumOf gpCounts)
+        printfn "-- Gamma-Poisson"
+        printfn "  prior: Gamma(a0=%s, b0=%s) on the rate" (gs gpPriorA) (gs gpPriorB)
+        printfn "  data: [%s] (n=%d, sum=%s)"
+                (gpCounts |> Array.map gs |> String.concat ", ") gpCounts.Length (g17 (sumOf gpCounts))
+        printfn "  post_shape=%s" (g17 gpPost.Shape)
+        printfn "  post_rate=%s" (g17 gpPost.Rate)
+        printfn "  post_mean=%s" (g17 (gpPost.Shape / gpPost.Rate))
+        printfn "  post_var=%s" (g17 (gpPost.Shape / (gpPost.Rate ** 2.0)))
+        printfn "  tower r=4 = [%s]" (fmtTower (Conjugate.gammaPoissonTower gpPost 4))
+
+        let nigPost =
+            Conjugate.normalInvGamma nigM0 nigK0 nigA0 nigB0 n (sumOf nnData) (sumSqOf nnData)
+        printfn "-- Normal-InverseGamma (unknown mean and variance)"
+        printfn "  prior: m0=%s, k0=%s, a0=%s, b0=%s" (gs nigM0) (gs nigK0) (gs nigA0) (gs nigB0)
+        printfn "  data: [%s] (n=%d, sum=%s, sumsq=%s)"
+                (nnData |> Array.map gs |> String.concat ", ") n (g17 (sumOf nnData)) (g17 (sumSqOf nnData))
+        printfn "  post_m=%s" (g17 nigPost.M)
+        printfn "  post_kappa=%s" (g17 nigPost.Kappa)
+        printfn "  post_alpha=%s" (g17 nigPost.Alpha)
+        printfn "  post_beta=%s" (g17 nigPost.Beta)
+        printfn "  post_mean_mu=%s" (g17 (Conjugate.nigMeanMu nigPost))
+        printfn "  post_var_mu=%s" (g17 (Conjugate.nigVarMu nigPost))
+        printfn "  post_mean_sigma2=%s" (g17 (Conjugate.nigMeanSigma2 nigPost))
+        printfn "  post_mean_precision=%s" (g17 (Conjugate.nigMeanPrecision nigPost))
+        printfn "  precision tower r=4 = [%s]" (fmtTower (Conjugate.normalInvGammaPrecisionTower nigPost 4))
+        0
     | _ ->
     testCombinatorics ()
     testSymTensor ()
@@ -571,6 +1141,10 @@ let main argv =
     testDistTower ()
     testJetPushforward ()
     testJetPushforwardVec ()
+    testDensity ()
+    testEdgeworth ()
+    testCornishFisher ()
+    testConjugate ()
     testStreaming ()
     testStability ()
     demoDerivedFormulas ()
