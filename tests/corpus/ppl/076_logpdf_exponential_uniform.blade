@@ -1,0 +1,15 @@
+// TEST: Logpdf Exponential Uniform
+import ppl as ppl
+// exponential(rate) at x: log(rate) - rate·x.
+// uniform(a, b) at x: the ON-SUPPORT constant -log(b-a) — deliberately no
+// branching (an if would leave the AD-able subset; membership of x in
+// [a, b] is the caller's contract). A width < 1 makes the log-density
+// positive: -log(½) = +log 2, pinned to catch a sign slip.
+let e1 = ppl.logpdf(exponential(2.0), 0.5)
+let e2 = ppl.logpdf(exponential(2.0), 3.0)
+let u1 = ppl.logpdf(uniform(1.0, 3.0), 2.9)
+let u2 = ppl.logpdf(uniform(0.0, 0.5), 0.3)
+// EXPECT: e1 = -0.306852819440055
+// EXPECT: e2 = -5.30685281944005
+// EXPECT: u1 = -0.693147180559945
+// EXPECT: u2 = 0.693147180559945

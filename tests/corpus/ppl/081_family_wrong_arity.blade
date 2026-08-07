@@ -1,0 +1,8 @@
+// TEST: Family Wrong Arity (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: the value-position constructor is gaussian(mu, s2, r)
+import ppl as ppl
+// A constructor call missing its order (or a parameter) is refused with
+// the full signature — including the pointer that the no-order spelling
+// belongs to logpdf/loglik argument position, the likely confusion.
+let d = ppl.gaussian(1.0, 4)

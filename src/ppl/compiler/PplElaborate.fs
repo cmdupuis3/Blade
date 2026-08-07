@@ -70,7 +70,11 @@ let private map1 (a: Expr) (body: Expr) =
 
 // "cumulant" is NOT a former name: it is a checker-level projection on
 // Dist-typed values (TypeCheck.inferCumulantProj), so elaboration lets it flow through untouched.
-let private formerNames = set [ "moments"; "comoments"; "cumulants"; "independent"; "dist"; "dist_add"; "dist_scale"; "comoments_merge"; "mstate"; "mstate_merge"; "mstate_cumulants"; "mixed_cumulants"; "dist_affine"; "dist_jet"; "dist_jet_closed"; "dist_map"; "dist_map_closed"; "free_cumulants"; "dist_expect"; "dist_reweight"; "dist_mix"; "dist_atoms"; "dist_negativity" ]
+// The named-family constructors (gaussian..bernoulli, plus log-density-only
+// beta) and the log-density formers (logpdf/loglik) are formers too: the
+// family list here mirrors familyParams below (kept literal so this set
+// stays the one place the qualified-surface/misplaced-use machinery reads).
+let private formerNames = set [ "moments"; "comoments"; "cumulants"; "independent"; "dist"; "dist_add"; "dist_scale"; "comoments_merge"; "mstate"; "mstate_merge"; "mstate_cumulants"; "mixed_cumulants"; "dist_affine"; "dist_jet"; "dist_jet_closed"; "dist_map"; "dist_map_closed"; "free_cumulants"; "dist_expect"; "dist_reweight"; "dist_mix"; "dist_atoms"; "dist_negativity"; "gaussian"; "exponential"; "gamma"; "poisson"; "uniform"; "lognormal"; "bernoulli"; "beta"; "logpdf"; "loglik" ]
 
 // Partition lattice: cumulants are Moebius-weighted sums over set partitions;
 // Bell(r) partitions, 2^r - 1 distinct blocks, each block's moment bound once and shared.
@@ -1698,6 +1702,286 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
     | _ ->
         Error "dist_negativity expects dist_negativity(d, x1, ..., xs): a dist binding and at least two support points"
 
+// Named distribution families (docs/plan-ppl-proper.md P1): closed-form
+// cumulant towers in VALUE position and log-densities through logpdf/loglik.
+// A family application is a SYNTACTIC form with two readings:
+//   value position     `let d = gaussian(mu, s2, r)` -- the order-r
+//                      univariate tower, FLAT 1-cell components (the
+//                      dist_atoms representation: register-only, no
+//                      __dist_pack -- its erasure type declares SymIdx-packed
+//                      components and flat ArrayLits aren't). The registry
+//                      algebra composes: cumulant() projects at elaboration,
+//                      dist_add/dist_scale/dist_jet/dist_map/tower Bayes read
+//                      through distKappaRead. Parameters are arbitrary
+//                      runtime scalars (cumulant formulas are plain
+//                      arithmetic); the ORDER is static, capped at 6.
+//                      Sources = empty: a closed-form family carries no data
+//                      provenance, so dist_add needs no independence
+//                      declaration (the dist_atoms convention).
+//   argument position  `logpdf(gaussian(mu, s2), x)` -- a (tag, params) pair
+//                      the log-density formers read symbolically (the
+//                      dist_map-lambda precedent); no tower materializes and
+//                      no order argument is taken.
+// Log-densities are the ON-SUPPORT closed forms -- no branching, because an
+// if/match would leave the AD-able subset (Grad.fs:27-50); x outside the
+// support is the caller's contract (uniform's logpdf is the in-support
+// constant -log(b-a)). loglik emits a scalar accumulation loop
+// (`let mut` + for + `+=`), never a combinator pipeline, so a later phase
+// can hand the body to ad.grad unchanged.
+
+/// Constructor-capable families: parameter names in signature order.
+/// (Mirrored literally in formerNames above -- keep the two in sync.)
+let private familyParams : Map<string, string list> =
+    Map.ofList [
+        "gaussian",    ["mu"; "s2"]
+        "exponential", ["rate"]
+        "gamma",       ["shape"; "rate"]
+        "poisson",     ["lam"]
+        "uniform",     ["a"; "b"]
+        "lognormal",   ["mu"; "s2"]
+        "bernoulli",   ["p"] ]
+
+let private familyNames : Set<string> = familyParams |> Map.toList |> List.map fst |> Set.ofList
+
+let private familySig (fam: string) : string =
+    sprintf "%s(%s)" fam (String.concat ", " familyParams.[fam])
+
+/// x * x * ... * x, k >= 1 copies: repeated multiplication keeps arbitrary
+/// scalar parameter exprs inside plain arithmetic (the dist_scale convention).
+let private powN (e: Expr) (k: int) : Expr =
+    List.replicate (k - 1) e |> List.fold mulE e
+
+/// ppl.<family>(params..., r) in VALUE position: the order-r univariate
+/// cumulant tower. Closed cumulant ladders where they exist; lognormal and
+/// bernoulli go through raw moments + Moebius inversion (mobiusComponentDecls).
+let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string) (args: Expr list)
+    : Result<Located<Decl> list * DistInfo, string> =
+    let pNames = familyParams.[fam]
+    let arity = pNames.Length
+    if args.Length <> arity + 1 then
+        Error (sprintf "%s: the value-position constructor is %s(%s, r) -- %d parameter(s) then a static order in 1..6, got %d argument(s). (In logpdf/loglik argument position the family takes no order: %s.)"
+                       fam fam (String.concat ", " pNames) arity args.Length (familySig fam))
+    else
+        match evalExpr ctx.Statics maxSteps (List.last args) with
+        | Ok (SVInt x) when x >= 1L && x <= 6L ->
+            let r = int x
+            let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let pName i = sprintf "__ppl_fam_%s_p%d" dName i
+            let pDecls = args |> List.take arity |> List.mapi (fun i e -> bind (pName i) e)
+            let p i = v (pName i)
+            let direct (kappa: int -> Expr) =
+                [ for k in 1 .. r -> bind (distComponentName dName k) (arrLitE [ kappa k ]) ]
+            let compDecls =
+                match fam with
+                | "gaussian" ->
+                    // kappa_1 = mu, kappa_2 = s2, higher cumulants vanish.
+                    direct (fun k -> if k = 1 then p 0 elif k = 2 then p 1 else fLit 0.0)
+                | "exponential" ->
+                    // kappa_k = (k-1)! / rate^k
+                    direct (fun k -> divE (fLit (factorial (k - 1))) (powN (p 0) k))
+                | "gamma" ->
+                    // kappa_k = shape * (k-1)! / rate^k
+                    direct (fun k -> mulE (p 0) (divE (fLit (factorial (k - 1))) (powN (p 1) k)))
+                | "poisson" ->
+                    // every cumulant equals lambda
+                    direct (fun _ -> p 0)
+                | "uniform" ->
+                    // kappa_1 = (a+b)/2; even kappa_n = B_n (b-a)^n / n over the
+                    // Bernoulli numbers (B_2, B_4, B_6 = 1/6, -1/30, 1/42 ->
+                    // divisors 12, -120, 252); odd orders >= 3 vanish.
+                    let w = subE (p 1) (p 0)
+                    direct (fun k ->
+                        match k with
+                        | 1 -> divE (addE (p 0) (p 1)) (fLit 2.0)
+                        | 2 -> divE (powN w 2) (fLit 12.0)
+                        | 4 -> divE (powN w 4) (fLit (-120.0))
+                        | 6 -> divE (powN w 6) (fLit 252.0)
+                        | _ -> fLit 0.0)
+                | "lognormal" ->
+                    // raw moments m_j = exp(j*mu + j^2*s2/2), then Moebius inversion.
+                    let mName j = sprintf "__ppl_fam_%s_m%d" dName j
+                    let mDecls =
+                        [ for j in 1 .. r ->
+                            bind (mName j)
+                                 (appE (v "exp") [ addE (mulE (fLit (float j)) (p 0))
+                                                        (mulE (fLit (float (j * j) / 2.0)) (p 1)) ]) ]
+                    let mRead j = if j = 0 then fLit 1.0 else v (mName j)
+                    mDecls @ mobiusComponentDecls span dName r mRead
+                | "bernoulli" ->
+                    // every raw moment is p; Moebius inversion gives the tower.
+                    let mRead j = if j = 0 then fLit 1.0 else p 0
+                    mobiusComponentDecls span dName r mRead
+                | _ -> []   // unreachable: fam ranges over familyParams keys
+            let info = { Order = r
+                         Components = [ for k in 1 .. r -> distComponentName dName k ]
+                         Sources = Set.empty
+                         Dim = Some 1
+                         Flat = true }
+            Ok (pDecls @ compDecls, info)
+        | Ok (SVInt x) ->
+            Error (sprintf "%s: the order must be in 1..6 (got %d) -- Bell-number kernel growth beyond that needs the shared-subexpression pass" fam x)
+        | _ ->
+            Error (sprintf "%s: the order must be a compile-time integer (a literal, `let static`, or static-function call)" fam)
+
+// Log-densities. Wave 1 ships the lgamma-free closed forms; gamma/poisson/
+// beta/bernoulli are RECOGNIZED but pending on the lgamma intrinsic (a
+// sibling change) -- each lands as one new arm in elabLogPdf/elabLogLik plus
+// its removal from logDensityPending.
+
+let private logDensityPending : Set<string> = Set.ofList [ "gamma"; "poisson"; "beta"; "bernoulli" ]
+
+/// log(2 pi s2), the Gaussian/lognormal normalizer.
+let private log2piE (s2: Expr) : Expr = appE (v "log") [ mulE (fLit (2.0 * System.Math.PI)) s2 ]
+
+/// Argument-position family recognition: `gaussian(mu, s2)` as a syntactic
+/// (tag, param exprs) -- the dist_map-lambda precedent. A user definition of
+/// the family's name shadows it (same rule as the formers), which makes the
+/// argument opaque here.
+let private familyArg (former: string) (active: string -> bool) (e: Expr) : Result<string * Expr list, string> =
+    let known = Set.add "beta" familyNames
+    match e.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, ps) when Set.contains f known && active f -> Ok (f, ps)
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) when Set.contains f known ->
+        Error (sprintf "%s: '%s' is shadowed by a user definition in this module, so the argument is not a family constructor here" former f)
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) ->
+        Error (sprintf "%s: unknown family '%s' -- available: gaussian(mu, s2), exponential(rate), uniform(a, b), lognormal(mu, s2); gamma/poisson/beta/bernoulli await the lgamma intrinsic" former f)
+    | _ ->
+        Error (sprintf "%s: the first argument must be a family constructor application written syntactically, e.g. %s(gaussian(mu, s2), ...)" former former)
+
+/// Family + parameter validation shared by logpdf/loglik: pending-lgamma
+/// steering, arity, and the stray-order-argument steer.
+let private checkDensityFamily (ctx: Ctx) (former: string) (fam: string) (ps: Expr list) : Result<unit, string> =
+    if Set.contains fam logDensityPending then
+        Error (sprintf "%s: %s logpdf requires the lgamma intrinsic (pending); available: gaussian, exponential, uniform, lognormal" former fam)
+    else
+        let arity = familyParams.[fam].Length
+        if ps.Length = arity then Ok ()
+        elif ps.Length = arity + 1 && (match evalExpr ctx.Statics maxSteps (List.last ps) with Ok (SVInt _) -> true | _ -> false) then
+            Error (sprintf "%s: %s takes no order argument in log-density position -- the family is symbolic here (%s); the order-r tower is the value-position constructor `let d = %s(..., r)`" former fam (familySig fam) fam)
+        else
+            Error (sprintf "%s: %s expects %d parameter(s) (%s), got %d" former fam arity (String.concat ", " familyParams.[fam]) ps.Length)
+
+/// logpdf(family(params), x): the scalar log-density at x -- closed-form
+/// arithmetic over once-bound parameters, ON-SUPPORT by design (no branching;
+/// see the section comment).
+let private elabLogPdf (active: string -> bool) (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    match args with
+    | [famE; xExpr] ->
+        familyArg "logpdf" active famE |> Result.bind (fun (fam, ps) ->
+        checkDensityFamily ctx "logpdf" fam ps |> Result.map (fun () ->
+            let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let pName i = sprintf "__ppl_lp_%s_p%d" outName i
+            let xName = sprintf "__ppl_lp_%s_x" outName
+            let pDecls = ps |> List.mapi (fun i e -> bind (pName i) e)
+            let p i = v (pName i)
+            let x = v xName
+            let extra, value =
+                match fam with
+                | "gaussian" ->
+                    // -log(2 pi s2)/2 - (x - mu)^2 / (2 s2)
+                    let dN = sprintf "__ppl_lp_%s_d" outName
+                    ([ bind dN (subE x (p 0)) ],
+                     subE (mulE (fLit (-0.5)) (log2piE (p 1)))
+                          (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
+                | "exponential" ->
+                    // log(rate) - rate x
+                    ([], subE (appE (v "log") [p 0]) (mulE (p 0) x))
+                | "uniform" ->
+                    // the in-support constant -log(b - a)
+                    ([], subE (fLit 0.0) (appE (v "log") [subE (p 1) (p 0)]))
+                | "lognormal" ->
+                    // -log(x) - log(2 pi s2)/2 - (log(x) - mu)^2 / (2 s2)
+                    let lxN = sprintf "__ppl_lp_%s_lx" outName
+                    let dN = sprintf "__ppl_lp_%s_d" outName
+                    ([ bind lxN (appE (v "log") [x]); bind dN (subE (v lxN) (p 0)) ],
+                     subE (subE (mulE (fLit (-0.5)) (log2piE (p 1))) (v lxN))
+                          (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
+                | _ -> ([], fLit 0.0)   // unreachable: checkDensityFamily gates
+            pDecls @ [bind xName xExpr] @ extra
+                @ [ { Value = DeclLet { binding with Value = value }; Span = span } ]))
+    | _ ->
+        Error "logpdf expects logpdf(family(params), x): a symbolic family argument and the evaluation point"
+
+/// loglik(family(params), A): the summed log-density over A's sample axis
+/// (its last -- and only -- declared index; the shape comes from the
+/// declared annotation or the computed method_for shape, never from a
+/// literal). Emitted as an AD-able scalar accumulation loop with the
+/// per-family constants hoisted out of the loop; uniform needs no loop at
+/// all (the on-support sum is -n log(b-a)). Leading variable axes are
+/// refused: a univariate family has no per-coordinate loglik.
+let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    match args with
+    | [famE; { Kind = ExprKind.ExprVar aName }] ->
+        familyArg "loglik" active famE |> Result.bind (fun (fam, ps) ->
+        checkDensityFamily ctx "loglik" fam ps |> Result.bind (fun () ->
+        match Map.tryFind aName ctx.Arrays with
+        | None ->
+            Error (sprintf "loglik: '%s' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape" aName)
+        | Some (_, idxs) when idxs.Length <> 1 ->
+            Error (sprintf "loglik: '%s' carries %d declared axes -- a univariate family sums a rank-1 sample vector (Array<Float like SampleIdx>); slice or push forward (dist_map/dist_affine) first" aName idxs.Length)
+        | Some (_, idxs) ->
+            let fiber = idxs.Head
+            match resolveExtent ctx.Aliases ctx.Statics fiber with
+            | None -> Error (sprintf "loglik: '%s' sample axis extent must be statically known (Idx<n> directly or through aliases)" aName)
+            | Some n ->
+                let nF = float n
+                let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+                let pName i = sprintf "__ppl_ll_%s_p%d" outName i
+                let pDecls = ps |> List.mapi (fun i e -> bind (pName i) e)
+                let p i = v (pName i)
+                let accN i = sprintf "__ppl_ll_%s_acc%d" outName i
+                let iN = sprintf "__ppl_ll_%s_i" outName
+                // The loop var is a plain Int64 read against a tagged sample
+                // axis; route the read through a synthesized `__` alias so
+                // BL4003's synthesized-buffer gate applies (the read is
+                // compiler-generated -- the user has no cast to write).
+                let srcN = sprintf "__ppl_ll_%s_src" outName
+                let aRead = appE (v srcN) [v iN]
+                let sMut nm vl = StmtLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindMut }
+                let accAdd i term = StmtExpr (syn (ExprAssign (v (accN i), addE (v (accN i)) term)))
+                let loop (accs: int) (body: Stmt list) (final: Expr) : Expr =
+                    syn (ExprBlock (
+                            [ for i in 0 .. accs - 1 -> sMut (accN i) (fLit 0.0) ]
+                            @ [ StmtForIn (iN, syn (ExprDotDot (iLit 0, iLit n)), body) ],
+                            Some final))
+                let value =
+                    match fam with
+                    | "gaussian" ->
+                        // -n/2 log(2 pi s2) - sum (x_i - mu)^2 / (2 s2)
+                        let dN = sprintf "__ppl_ll_%s_d" outName
+                        loop 1
+                             [ sLet dN (subE aRead (p 0)); accAdd 0 (mulE (v dN) (v dN)) ]
+                             (subE (mulE (fLit (-nF / 2.0)) (log2piE (p 1)))
+                                   (divE (v (accN 0)) (mulE (fLit 2.0) (p 1))))
+                    | "exponential" ->
+                        // n log(rate) - rate sum x_i
+                        loop 1 [ accAdd 0 aRead ]
+                             (subE (mulE (fLit nF) (appE (v "log") [p 0])) (mulE (p 0) (v (accN 0))))
+                    | "uniform" ->
+                        // the in-support constant: -n log(b - a); the data drops out
+                        mulE (fLit (-nF)) (appE (v "log") [subE (p 1) (p 0)])
+                    | "lognormal" ->
+                        // -n/2 log(2 pi s2) - sum log x_i - sum (log x_i - mu)^2 / (2 s2)
+                        let lxN = sprintf "__ppl_ll_%s_lx" outName
+                        let dN = sprintf "__ppl_ll_%s_d" outName
+                        loop 2
+                             [ sLet lxN (appE (v "log") [aRead])
+                               accAdd 0 (v lxN)
+                               sLet dN (subE (v lxN) (p 0))
+                               accAdd 1 (mulE (v dN) (v dN)) ]
+                             (subE (subE (mulE (fLit (-nF / 2.0)) (log2piE (p 1))) (v (accN 0)))
+                                   (divE (v (accN 1)) (mulE (fLit 2.0) (p 1))))
+                    | _ -> fLit 0.0   // unreachable: checkDensityFamily gates
+                // uniform reads no data: no alias, or it would print as an unused copy.
+                let srcDecls = if fam = "uniform" then [] else [ bind srcN (v aName) ]
+                Ok (pDecls @ srcDecls @ [ { Value = DeclLet { binding with Value = value }; Span = span } ])))
+    | [_; _] ->
+        Error "loglik: the second argument must be a named module-level array (the sample vector)"
+    | _ ->
+        Error "loglik expects loglik(family(params), A): a symbolic family argument and a rank-1 sample array"
+
 // dist_map: the symbolic front-end over dist_jet -- differentiate a lambda at elaboration time, evaluate the derivatives at
 // the runtime mean, and delegate to the jet pushforward. A polynomial's derivative chain terminates in structural zeros
 // (finite jet = exact pushforward); any other map needs an explicit truncation degree the program must own.
@@ -2548,13 +2832,18 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                         elabComomentsMerge ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist" }, args) } } when active "dist" ->
                         elabDist ctx d.Span dName args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
+                    // A FLAT operand (constructor/pushforward towers) makes the
+                    // result flat: register-only, like dist_jet -- __dist_pack's
+                    // erasure type declares rank-k SymIdx-packed components and
+                    // the flat combine outputs are rank-1, so packing one is a
+                    // codegen type clash. cumulant() projects at elaboration.
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_add" }, args) } } when active "dist_add" ->
-                        elabDistCombine "+" (fun _ -> 1.0) ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
+                        elabDistCombine "+" (fun _ -> 1.0) ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds @ (if info.Flat then [] else [distPackDecl d.Span dName info]), Map.add dName info dists, mstates))
                     // Dist operators (+ / - / scalar *) flow through untouched: dists are values (distPackDecl), and the
                     // checker's inferDistBinOp dispatches operators in any expression position, gated on the independence
                     // state this module exports (Independence.addDeclared/addSources below).
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_scale" }, args) } } when active "dist_scale" ->
-                        elabDistScale ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
+                        elabDistScale ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds @ (if info.Flat then [] else [distPackDecl d.Span dName info]), Map.add dName info dists, mstates))
                     // The Faa di Bruno pushforward: a univariate order-q dist with FLAT 1-cell components. Registered but NOT
                     // packed: __dist_pack's erasure type declares SymIdx-packed components, and flat ArrayLits aren't.
                     // cumulant(d, k) on flat dists projects at elaboration (arm below).
@@ -2580,6 +2869,20 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                         elabDistAtoms ctx d.Span dName args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_negativity" }, args) } } as b) when active "dist_negativity" ->
                         elabDistNegativity ctx d.Span b dists args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    // Named-family constructors (plan P1): closed-form cumulant
+                    // towers, registered flat-univariate exactly like dist_atoms
+                    // (value erased, components live; cumulant() projects at
+                    // elaboration through the __ppl_cumulant arm below).
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fam }, args) } } when Set.contains fam familyNames && active fam ->
+                        elabFamilyDist ctx d.Span fam dName args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
+                    // beta is log-density-only (and pending lgamma): no tower ladder to construct.
+                    | DeclLet { Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "beta" }, _) } } when active "beta" ->
+                        Error "beta: no cumulant-tower constructor -- beta appears only in log-density position, and beta logpdf requires the lgamma intrinsic (pending); available towers: gaussian, exponential, gamma, poisson, uniform, lognormal, bernoulli"
+                    // Log-densities (plan P1): scalar logpdf; loglik as the AD-able accumulation loop.
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "logpdf" }, args) } } as b) when active "logpdf" ->
+                        elabLogPdf active ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "loglik" }, args) } } as b) when active "loglik" ->
+                        elabLogLik active ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     // cumulant(d, k) on a FLAT registry dist (a pushforward
                     // result): no packed value exists for the checker's
                     // Dist-typed projection to see, so project here; the

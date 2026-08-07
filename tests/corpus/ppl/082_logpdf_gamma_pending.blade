@@ -1,0 +1,10 @@
+// TEST: Logpdf Gamma Pending (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: gamma logpdf requires the lgamma intrinsic (pending); available: gaussian, exponential, uniform, lognormal
+import ppl as ppl
+// gamma/poisson/beta/bernoulli densities need lgamma, which is not in the
+// language yet (a hand-rolled Lanczos with a bit-exact F# interp mirror is
+// the planned route). The family is RECOGNIZED and refused with steering
+// rather than falling through to an unknown-name error — the tower
+// constructor gamma(shape, rate, r) is unaffected.
+let l = ppl.logpdf(gamma(2.0, 3.0), 1.0)

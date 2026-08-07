@@ -1,0 +1,18 @@
+// TEST: Loglik Gaussian Consistency
+import ppl as ppl
+// ppl.loglik(family(params), A): the summed log-density over A's sample
+// axis, emitted as an AD-able scalar accumulation loop (let mut + for +
+// +=, never a combinator — Grad.fs rejects those) with the per-family
+// constants hoisted: -n/2·log(2π·s2) - Σ(x_i-mu)²/(2·s2).
+// Self-consistency within one program: the loop total equals the sum of
+// the three pointwise logpdfs (up to float re-association, inside the
+// harness tolerance).
+type TimeIdx = Idx<3>
+let A: Array<Float64 like TimeIdx> = [0.5, 1.5, 2.5]
+let ll = ppl.loglik(gaussian(1.0, 2.0), A)
+let p0 = ppl.logpdf(gaussian(1.0, 2.0), 0.5)
+let p1 = ppl.logpdf(gaussian(1.0, 2.0), 1.5)
+let p2 = ppl.logpdf(gaussian(1.0, 2.0), 2.5)
+let diff = ll - (p0 + p1 + p2)
+// EXPECT: ll = -4.48403637045394
+// EXPECT: diff = 0.0

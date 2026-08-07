@@ -1,0 +1,20 @@
+// TEST: Family Poisson Add
+import ppl as ppl
+// Cumulants of independent sums add, and every Poisson cumulant equals λ:
+// poisson(3) + poisson(1) = poisson(4) at ALL orders. Constructor towers
+// carry no data sources (Sources = ∅, the dist_atoms convention), so
+// dist_add needs no independence declaration — closed-form families are
+// independent by construction.
+let p1 = ppl.poisson(3.0, 4)
+let p2 = ppl.poisson(1.0, 4)
+let p13 = ppl.cumulant(p1, 3)
+let s = ppl.dist_add(p1, p2)
+let s1 = ppl.cumulant(s, 1)
+let s2 = ppl.cumulant(s, 2)
+let s3 = ppl.cumulant(s, 3)
+let s4 = ppl.cumulant(s, 4)
+// EXPECT: p13 = [3.0]
+// EXPECT: s1 = [4.0]
+// EXPECT: s2 = [4.0]
+// EXPECT: s3 = [4.0]
+// EXPECT: s4 = [4.0]

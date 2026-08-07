@@ -1,0 +1,8 @@
+// TEST: Logpdf Order Argument (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: takes no order argument in log-density position
+import ppl as ppl
+// In logpdf/loglik argument position the family is symbolic — carrying the
+// value-position order argument along is refused with steering toward both
+// correct spellings rather than read as a third parameter.
+let l = ppl.logpdf(gaussian(0.0, 1.0, 4), 0.5)
