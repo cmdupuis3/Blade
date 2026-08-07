@@ -46,6 +46,13 @@ module Density =
     let rec lgamma (x: float) : float =
         if System.Double.IsNaN x then nan
         elif x <= 0.0 && x = floor x then posinf          // poles at 0, -1, -2, ...
+        elif x = 1.0 || x = 2.0 then 0.0
+            // Gamma(1) = Gamma(2) = 1, so lgamma has exact zeros here. The
+            // Lanczos evaluation lands within ~1e-15 of them, which is inside
+            // spec but poisons every pin that ought to be clean: beta(1,1)
+            // logpdf, poisson log-pmf at k = 0, Gamma(1,r) == Exp(r). Pinning
+            // the two known zeros is the usual practice (Cephes, Boost) and
+            // makes those identities hold bit for bit.
         elif x < 0.5 then
             // reflection; abs() because we return log |Gamma|
             log (System.Math.PI / abs (sin (System.Math.PI * x))) - lgamma (1.0 - x)
