@@ -1,0 +1,24 @@
+// TEST: Rand Exponential
+// Exp(rate) by inverse CDF, -log(1-u)/rate: ONE uniform per draw, so the draw
+// budget matches rand.uniform exactly and the transform is monotone in u.
+//
+// Three assertions, all deterministic booleans/pins because the RNG is keyed:
+//   - the 6 pinned draws are a CHANGE-DETECTOR for the transform (the same role
+//     001's uniform pins play), not an independent correctness proof;
+//   - every draw is strictly positive -- the support of Exp is (0, inf), and
+//     u in [0,1) means 1-u in (0,1], so log() never sees 0 and no floor is
+//     needed (unlike Box-Muller's u1);
+//   - the sample mean of 4096 draws at rate=2 is ~1/rate = 0.5. SE = 0.5/sqrt(4096)
+//     ~ 0.0078, so the 0.05 tolerance is ~6 SE.
+import rand as r
+let e = r.exponential(11, 2.0, 6)
+let x = r.exponential(101, 2.0, 4096)
+let s = reduce(x, (+))
+let mean = s / 4096.0
+let meanOk = abs(mean - 0.5) < 0.05
+let pos = method_for(x) <@> lambda(q) -> if q > 0.0 then 1.0 else 0.0 |> compute
+let nPos = reduce(pos, (+))
+let allPos = abs(nPos - 4096.0) < 0.5
+// EXPECT: e = [0.0604477795738267, 0.138024564764191, 0.655442350547204, 0.00934226141163601, 1.25975764472306, 0.171979344668618]
+// EXPECT: meanOk = true
+// EXPECT: allPos = true
