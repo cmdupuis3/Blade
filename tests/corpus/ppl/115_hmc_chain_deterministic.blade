@@ -1,0 +1,40 @@
+// TEST: HMC Chain Deterministic
+import ppl as ppl
+import ad as ad
+// ppl.hmc(logpost, x0, n, eps, L, key): fixed-leapfrog HMC over the same
+// recursive-array chain shape as mh, with PREGENERATED randomness -- momenta
+// __rand_normal(key + 3000017, n), accept draws __rand_uniform(key + 4000037,
+// n); new site constants, so an mh chain under the SAME user key stays
+// decorrelated from the hmc chain (pinned below). The gradient rides the
+// ad.grad surface form the elaborator emits (hence `import ad`), expanded by
+// the Grad pass into logpost__grad returning (primal, gradient) -- both
+// leapfrog endpoint log-posteriors come free from the same calls. Energy
+// convention: H = -logpost + p^2/2, accept when log u < dH.
+//
+// Everything here is a keyed change-detector (the rand-corpus idiom): the
+// full length-12 chain is pinned bit-for-bit, same key twice must agree to
+// the last bit, a different key must diverge. The target is a hand-written
+// standard normal (grad = -x), so the L = 4 velocity-Verlet sweep is
+// hand-checkable: from q0 = 0.3 with p0 = pfill(1) = 1.81257773199805,
+// eps = 0.5 -- half step p = 1.73757773199805, then (q, p) walks
+// (1.16878887, 1.15318330) -> (1.74538052, 0.28049304) ->
+// (1.88562704, -0.66232048) -> final q = 1.55446680, half step out
+// p_L = -1.05093718; dH = (lp(q_L) - lp(q0)) + (p0^2 - p_L^2)/2 =
+// -1.163183 + 1.090485 = -0.072698, and log u(1) = log(0.563491520914506) =
+// -0.573716 < dH, so c(1) = 1.55446679771693 is an accepted move.
+function lp(x: Float64) -> Float64 = 0.0 - x * x / 2.0
+let c = ppl.hmc(lp, 0.3, 12, 0.5, 4, 7)
+// EXPECT: c = [0.3, 1.55446679771693, -1.73273537664278, 1.14314789300297, -0.791043304715732, -0.0210114592462533, 0.121332778956579, -0.586640830627569, -0.401308221384211, 0.19003069065344, -0.617026492427945, 0.821100917303481]
+let c2 = ppl.hmc(lp, 0.3, 12, 0.5, 4, 7)
+let c3 = ppl.hmc(lp, 0.3, 12, 0.5, 4, 8)
+let cmh = ppl.mh(lp, 0.3, 12, 1.0, 7)
+// EXPECT: c0 = 0.3
+let c0 = c(0)
+let same_key_same_tail = abs(c(11) - c2(11)) + abs(c(6) - c2(6)) < 1.0e-300
+// EXPECT: same_key_same_tail = true
+let other_key_differs = abs(c(11) - c3(11)) + abs(c(6) - c3(6)) > 0.0000001
+// EXPECT: other_key_differs = true
+// Same user key, different sampler: the hmc site constants (3000017/4000037)
+// are disjoint from mh's (1000003/2000003), so the streams decorrelate.
+let mh_decorrelated = abs(c(11) - cmh(11)) + abs(c(6) - cmh(6)) > 0.0000001
+// EXPECT: mh_decorrelated = true
