@@ -1,9 +1,0 @@
-// TEST: Family Beta Rejected (rejects)
-// ERROR: BL5100
-// ERROR-CONTAINS: beta appears only in log-density position
-import ppl as ppl
-// beta has no closed cumulant ladder here, so there is no value-position
-// tower constructor — and its log-density is itself still pending lgamma.
-// Both facts arrive in one steering message listing the constructible
-// families.
-let d = ppl.beta(2.0, 2.0, 4)

@@ -1,0 +1,42 @@
+// TEST: Edgeworth Exponential Oracle
+import ppl as ppl
+// The Edgeworth density on genuinely skewed towers, pinned verbatim against
+// the oracle's dump-edgeworth blocks (src/ppl/ORACLE_PINS.md): exponential(1)
+// at r = 4 and r = 6, gamma(3, 1) r = 6, poisson(4) r = 4. The x = 3
+// exponential values are NEGATIVE -- the documented failure mode of the
+// expansion in the tails (the density is not a probability density there;
+// dist_negativity is the module's meter for exactly that). The compiler side
+// generates its series from the same formal construction as the oracle, so
+// agreement here is the wave's central acceptance criterion.
+let e4 = ppl.exponential(1.0, 4)
+let a1 = ppl.dist_pdf_approx(e4, 0.25)
+let a2 = ppl.dist_pdf_approx(e4, 0.5)
+let a3 = ppl.dist_pdf_approx(e4, 1.0)
+let a4 = ppl.dist_pdf_approx(e4, 2.0)
+let a5 = ppl.dist_pdf_approx(e4, 3.0)
+let e6 = ppl.exponential(1.0, 6)
+let b1 = ppl.dist_pdf_approx(e6, 0.25)
+let b2 = ppl.dist_pdf_approx(e6, 0.5)
+let b3 = ppl.dist_pdf_approx(e6, 1.0)
+let b4 = ppl.dist_pdf_approx(e6, 2.0)
+let b5 = ppl.dist_pdf_approx(e6, 3.0)
+let gm = ppl.gamma(3.0, 1.0, 6)
+let c1 = ppl.dist_pdf_approx(gm, 2.0)
+let c2 = ppl.dist_pdf_approx(gm, 6.0)
+let po = ppl.poisson(4.0, 4)
+let d1 = ppl.dist_pdf_approx(po, 4.0)
+let d2 = ppl.dist_pdf_approx(po, 6.0)
+// EXPECT: a1 = 0.576334599666391
+// EXPECT: a2 = 0.55957605321652115
+// EXPECT: a3 = 0.36569709036797998
+// EXPECT: a4 = 0.17475663437493688
+// EXPECT: a5 = -0.010498243488675462
+// EXPECT: b1 = 0.68003297004616781
+// EXPECT: b2 = 0.59392564238737422
+// EXPECT: b3 = 0.36708230661937258
+// EXPECT: b4 = 0.15964591114622201
+// EXPECT: b5 = -0.014199013184088373
+// EXPECT: c1 = 0.27004113847494321
+// EXPECT: c2 = 0.039956815923425412
+// EXPECT: d1 = 0.19531549144653476
+// EXPECT: d2 = 0.10502201585032264

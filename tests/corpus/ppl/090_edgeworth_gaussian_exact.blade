@@ -1,0 +1,26 @@
+// TEST: Edgeworth Gaussian Exact
+import ppl as ppl
+// dist_pdf_approx on a GAUSSIAN tower is the exact Gaussian pdf: r = 2
+// carries no correction terms at all, and at r = 6 every lambda_k is a
+// structural zero, so the two towers below must agree with each other AND
+// with phi(x) -- the first thing the oracle's dump-edgeworth block pins.
+// This is the identity that anchors the whole approximate bridge.
+let g2 = ppl.gaussian(0.0, 1.0, 2)
+let a = ppl.dist_pdf_approx(g2, 0.0)
+let b = ppl.dist_pdf_approx(g2, 1.0)
+let c = ppl.dist_pdf_approx(g2, -2.0)
+let g6 = ppl.gaussian(0.0, 1.0, 6)
+let a6 = ppl.dist_pdf_approx(g6, 0.0)
+let b6 = ppl.dist_pdf_approx(g6, 1.0)
+let c6 = ppl.dist_pdf_approx(g6, -2.0)
+// A non-standard Gaussian exercises the standardization: N(1.5, 4) at
+// x = 0.5 is phi(-0.5)/2 = 0.35206532676429952/2.
+let gn = ppl.gaussian(1.5, 4.0, 2)
+let d = ppl.dist_pdf_approx(gn, 0.5)
+// EXPECT: a = 0.3989422804014327
+// EXPECT: b = 0.24197072451914337
+// EXPECT: c = 0.053990966513188063
+// EXPECT: a6 = 0.3989422804014327
+// EXPECT: b6 = 0.24197072451914337
+// EXPECT: c6 = 0.053990966513188063
+// EXPECT: d = 0.17603266338214976

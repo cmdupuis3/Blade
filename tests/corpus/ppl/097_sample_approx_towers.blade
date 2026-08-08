@@ -1,0 +1,22 @@
+// TEST: Sample Approx Towers
+import ppl as ppl
+// dist_sample_approx(d, key, n): a keyed __rand_uniform fill mapped through
+// PPND16 and the tower's Cornish-Fisher polynomial -- approximate sampling
+// for ANY univariate tower, with no family-specific runtime fill. On a
+// GAUSSIAN r = 2 tower the transform is exact: draws are mu + sd·PPND(u)
+// with u the rand/001 key-12345 uniforms, so `sa` is a change-detector for
+// both the fill seam and the quantile arithmetic; `sa2` pins determinism.
+// On the exponential(1) r = 6 tower the draws follow the CF-approximated
+// law: with key 777 and n = 2048 the sample mean sits near E[X] = 1 (fixed
+// key, deterministic boolean; pinned exactly beside it).
+let gt = ppl.gaussian(1.5, 4.0, 2)
+let sa = ppl.dist_sample_approx(gt, 12345, 4)
+let sa2 = ppl.dist_sample_approx(gt, 12345, 4)
+let ex6 = ppl.exponential(1.0, 6)
+let se = ppl.dist_sample_approx(ex6, 777, 2048)
+let sm = reduce(se, (+)) / 2048.0
+let meanOk = abs(sm - 1.0) < 0.1
+// EXPECT: sa = [2.78119227293432, 3.83811494321247, 1.73179489527066, 0.813185936880394]
+// EXPECT: sa2 = [2.78119227293432, 3.83811494321247, 1.73179489527066, 0.813185936880394]
+// EXPECT: sm = 1.01285770936499
+// EXPECT: meanOk = true
