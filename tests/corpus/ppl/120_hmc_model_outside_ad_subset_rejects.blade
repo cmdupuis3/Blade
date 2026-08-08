@@ -1,0 +1,15 @@
+// TEST: HMC Model Outside AD Subset (rejects)
+// ERROR: BL5500
+// ERROR-CONTAINS: if/else is not supported in differentiated code
+import ppl as ppl
+import ad as ad
+// The plan's deliberate boundary probe: HMC coverage is bounded by the
+// AD-able subset (src/Grad.fs:27-50) -- if/match in the MODEL is refused by
+// grad itself, cleanly, when it differentiates the elaborator-emitted
+// ad.grad(logpost) sites. ppl.logpdf/ppl.loglik model bodies stay inside
+// the subset by construction; a hand-written branch does not. The refusal
+// is BL5500 (grad elaboration), not BL5100: hmc's own guards pass -- the
+// honest boundary is grad's. Note mh would accept this exact model (its
+// sampler never differentiates), which is the documented mh/hmc split.
+function lp(x: Float64) -> Float64 = if x > 0.0 then 0.0 - x else x
+let c = ppl.hmc(lp, 0.0, 64, 0.5, 4, 7)
