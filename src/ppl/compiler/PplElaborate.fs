@@ -71,10 +71,12 @@ let private map1 (a: Expr) (body: Expr) =
 // "cumulant" is NOT a former name: it is a checker-level projection on
 // Dist-typed values (TypeCheck.inferCumulantProj), so elaboration lets it flow through untouched.
 // The named-family constructors (gaussian..beta), the log-density formers
-// (logpdf/loglik), exact family sampling (sample), and the approximate tower
-// bridge (dist_pdf_approx/dist_quantile_approx/dist_sample_approx) are formers
-// too: the family list here mirrors familyParams below (kept literal so this
-// set stays the one place the qualified-surface/misplaced-use machinery reads).
+// (logpdf/loglik), exact family sampling (sample), the approximate tower
+// bridge (dist_pdf_approx/dist_quantile_approx/dist_sample_approx), and the
+// P4 sampling-inference surface (mh + chain_mean/chain_var/autocorr/ess/rhat;
+// see the section comment at elabMh) are formers too: the family list here
+// mirrors familyParams below (kept literal so this set stays the one place
+// the qualified-surface/misplaced-use machinery reads).
 let private formerNames = set [ "moments"; "comoments"; "cumulants"; "independent"; "dist"; "dist_add"; "dist_scale"; "comoments_merge"; "mstate"; "mstate_merge"; "mstate_cumulants"; "mixed_cumulants"; "dist_affine"; "dist_jet"; "dist_jet_closed"; "dist_map"; "dist_map_closed"; "free_cumulants"; "dist_expect"; "dist_reweight"; "dist_mix"; "dist_atoms"; "dist_negativity"; "gaussian"; "exponential"; "gamma"; "poisson"; "uniform"; "lognormal"; "bernoulli"; "beta"; "logpdf"; "loglik"; "sample"; "dist_pdf_approx"; "dist_quantile_approx"; "dist_sample_approx"; "mh"; "chain_mean"; "chain_var"; "autocorr"; "ess"; "rhat" ]
 
 // Partition lattice: cumulants are Moebius-weighted sums over set partitions;
