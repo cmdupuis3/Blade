@@ -191,3 +191,30 @@ IRTTuple [kappa_1 .. kappa_r]      ERASURE (zonking)         Zonk.fs:120-128
 (nothing — it's just a tuple      Lowering / IR / CodeGen
  of packed SymIdx arrays now)       never see IRTDist
 ```
+
+## 7. Flat vs. packed producers (elaboration-time only, below the type)
+
+One more producer-side distinction is worth naming even though it never
+reaches the checker: at elaboration time (`PplElaborate.fs`'s `DistInfo`
+registry), a `Dist`'s `kappa_k` component (`k >= 2`) is either
+**method_for-packed** (a genuine `SymIdx<k, D>`-shaped array, read through
+logical multi-index reads — what `dist(A, r)` and the streaming-state
+formers produce off real sample data) or **flat** (`DistInfo.Flat = true`: a
+lex-canonical `ArrayLit` read by offset, no packed storage class at all —
+what a closed-form producer with no data to sweep emits directly). Both
+shapes satisfy the exact same checker-level type (`distComponentType`, §4
+above): the distinction is invisible above the elaborator, purely a detail
+of how `distKappaRead` (PplElaborate.fs:939) fetches a given cell.
+
+Before this arc, flat components were the exception (`dist_atoms`, and the
+scalar/vector Faà di Bruno jet pushforward results). The P1-P5 additions
+made flat components the *common* case: every named-family constructor
+(§2.7 of `docs/features/ppl.md`), `ppl.bayes`'s posterior tower, and
+`dist_condition`'s conditioned tower all register `Flat = true` — none of
+them has a sample array to sweep, so there is nothing to pack. `distKappaRead`
+is what lets every downstream consumer (`cumulant`, `dist_add`/`dist_scale`,
+`dist_map`/`dist_jet`, the approximate bridge, tower Bayes) stay agnostic to
+which regime produced the tower it is reading; `tests/corpus/ppl/094` pins
+this agnosticism directly, checking that a `dist(A, 4)` (packed) and a
+`dist_atoms(4, ...)` (flat) over the same six points produce bit-identical
+approximate-bridge reads through the two different `distKappaRead` paths.
