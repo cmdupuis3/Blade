@@ -678,11 +678,24 @@ and parseUnitAtom (tokens: Token list) : ParseResult<UnitExpr> =
 ///     at LOWERING (units-first policy), not in the grammar;
 ///   - claimed here: `name * ...` / `name / ...`, `name^-INT` (negative
 ///     exponents never parsed before), `name^INT` followed by `*`/`/`,
-///     a leading unity `1`, and a parenthesized group opening with
-///     `(name *|/|^ ...` (a tuple type never continues a name that way).
+///     a leading unity `1`, a leading MAGNITUDE followed by `*`/`/`
+///     (`86400 * second`, `2 * pi / day`, `0.5 * meter`), and a
+///     parenthesized group opening with `(name *|/|^ ...` (a tuple type
+///     never continues a name that way).
+///
+/// The magnitude arms exist so an annotation can spell the same thing a
+/// `Unit` RHS can. Without them a scale factor parses only when it is not
+/// the FIRST token (`Float<day / 2>` worked, `Float<2 * pi / day>` did not),
+/// which is precisely the position a conversion target gets written in. No
+/// type argument in the language starts with a numeric literal followed by
+/// `*` or `/`, so nothing else can mean this.
 let isUnitExprArg (tokens: Token list) : bool =
     match tokens |> List.truncate 4 |> List.map (fun t -> t.Kind) with
     | TokInt 1L :: _ -> true
+    | TokInt _ :: TokOp "*" :: _ -> true
+    | TokInt _ :: TokOp "/" :: _ -> true
+    | TokFloat _ :: TokOp "*" :: _ -> true
+    | TokFloat _ :: TokOp "/" :: _ -> true
     | TokIdent _ :: TokOp "*" :: _ -> true
     | TokIdent _ :: TokOp "/" :: _ -> true
     | TokIdent _ :: TokOp "^" :: TokOp "-" :: _ -> true

@@ -2847,6 +2847,19 @@ let private argQuantityTag (env: TypeEnv) (a: Expr) : string option =
 /// Lowering itself stays TOTAL (it degrades to the bare base type), so the
 /// annotation CONSUMERS -- ascriptions, let annotations, function signatures
 /// -- call this to surface the error.
+/// Scalar bases whose type argument is a UNIT (or index-tag) slot -- mirrors
+/// the dispatch in lowerTypeExpr. These constructors take no GENERIC
+/// parameter, which is what makes the slot checkable: the only things that
+/// can inhabit it are a unit, a quantity, an index-type or enum tag
+/// (`Nat<LatIdx>`), and the tag wildcard `_`. A name that is none of those is
+/// a misspelling, so here -- and ONLY here -- `name` and `name^INT` can be
+/// rejected without colliding with `Float<speed>` and `T^2`.
+/// (`Char`/`Void` take no argument at all, so they are absent.)
+let private unitSlotBases =
+    Set.ofList
+        [ "Int"; "Int32"; "Int64"; "Float"; "Float64"; "Double"; "Float32"
+          "Complex64"; "Complex128"; "Bool"; "Nat"; "String" ]
+
 let rec private unitAnnoError (env: TypeEnv) (ty: TypeExpr) : TypeError option =
     let quantityIn name =
         match Map.tryFind name env.Units with
@@ -2871,10 +2884,25 @@ let rec private unitAnnoError (env: TypeEnv) (ty: TypeExpr) : TypeError option =
     | TyVar (name, Some _) ->
         // `Float<speed^2>` parses as a rank-marked type var; a quantity name
         // there is the power spelling of the same terminality violation.
-        // NOT extended to BL3015: an unresolvable name here is exactly the
-        // `T^2` spelling, so rejecting it would reject every rank-marked
-        // type variable. The grammar cannot tell the two apart.
+        // BL3015 is NOT raised from this arm -- reached from an arbitrary
+        // position, an unresolvable name here is the `T^2` type-variable
+        // spelling. It is raised from the unitSlotBases arm below, which
+        // knows the slot cannot hold a type variable.
         quantityIn name |> Option.map (fun q -> QuantityTerminal (q, unitAnnoContext))
+    | TyNamed (ctor, args) when unitSlotBases.Contains ctor ->
+        args |> List.tryPick (fun arg ->
+            match arg with
+            | (TyNamed (argName, []) | TyVar (argName, Some _))
+                    when not (Map.containsKey argName env.Units)
+                         && (lookupTypeDef argName env).IsNone ->
+                // `Float<secnd>`, `Float<secnd^2>`, `Int32<secnd>`: the name
+                // resolves to no unit, quantity, index type, or enum, and the
+                // slot admits nothing else. Any typedef at all suppresses
+                // this -- the conservative direction. `Nat<_>` parses as
+                // TyWildcard and never matches here.
+                Some (UnknownUnitName
+                        (argName, unitAnnoContext, unitSpellingCandidates env.Units argName))
+            | _ -> unitAnnoError env arg)
     | TyNamed (_, args) -> args |> List.tryPick (unitAnnoError env)
     | TyBounded (b, _, _) -> unitAnnoError env b
     | TyArray (elem, _) -> unitAnnoError env elem
