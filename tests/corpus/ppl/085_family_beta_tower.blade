@@ -1,0 +1,25 @@
+// TEST: Family Beta Tower
+import ppl as ppl
+// Formerly the beta-constructor reject probe. Beta raw moments are plain
+// arithmetic -- m_j = prod_{i<j} (a+i)/(a+b+i) -- so the tower rides the same
+// moment-route as lognormal/bernoulli (Moebius inversion, flat-univariate
+// components), no lgamma needed. Hand-derived checks for beta(2, 3):
+//   k1 = a/(a+b)                  = 0.4
+//   k2 = ab/((a+b)^2 (a+b+1))     = 6/150  = 0.04
+//   k3 = 2ab(b-a)/((a+b)^3 (a+b+1)(a+b+2)) = 12/5250 = 0.00228571428571...
+//   E[X^2] = m2 = m1 (a+1)/(a+b+1) = 0.2 (via dist_expect)
+// And the cross-family identity beta(1, 1) == uniform(0, 1): k2 = 1/12.
+let d = ppl.beta(2.0, 3.0, 3)
+let k1 = ppl.cumulant(d, 1)
+let k2 = ppl.cumulant(d, 2)
+let k3 = ppl.cumulant(d, 3)
+let m2 = ppl.dist_expect(d, 0.0, 0.0, 1.0)
+let f = ppl.beta(1.0, 1.0, 2)
+let f1 = ppl.cumulant(f, 1)
+let f2 = ppl.cumulant(f, 2)
+// EXPECT: k1 = [0.4]
+// EXPECT: k2 = [0.04]
+// EXPECT: k3 = [0.0022857142857142857]
+// EXPECT: m2 = 0.2
+// EXPECT: f1 = [0.5]
+// EXPECT: f2 = [0.083333333333333329]

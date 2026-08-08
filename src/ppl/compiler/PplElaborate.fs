@@ -70,11 +70,12 @@ let private map1 (a: Expr) (body: Expr) =
 
 // "cumulant" is NOT a former name: it is a checker-level projection on
 // Dist-typed values (TypeCheck.inferCumulantProj), so elaboration lets it flow through untouched.
-// The named-family constructors (gaussian..bernoulli, plus log-density-only
-// beta) and the log-density formers (logpdf/loglik) are formers too: the
-// family list here mirrors familyParams below (kept literal so this set
-// stays the one place the qualified-surface/misplaced-use machinery reads).
-let private formerNames = set [ "moments"; "comoments"; "cumulants"; "independent"; "dist"; "dist_add"; "dist_scale"; "comoments_merge"; "mstate"; "mstate_merge"; "mstate_cumulants"; "mixed_cumulants"; "dist_affine"; "dist_jet"; "dist_jet_closed"; "dist_map"; "dist_map_closed"; "free_cumulants"; "dist_expect"; "dist_reweight"; "dist_mix"; "dist_atoms"; "dist_negativity"; "gaussian"; "exponential"; "gamma"; "poisson"; "uniform"; "lognormal"; "bernoulli"; "beta"; "logpdf"; "loglik" ]
+// The named-family constructors (gaussian..beta), the log-density formers
+// (logpdf/loglik), exact family sampling (sample), and the approximate tower
+// bridge (dist_pdf_approx/dist_quantile_approx/dist_sample_approx) are formers
+// too: the family list here mirrors familyParams below (kept literal so this
+// set stays the one place the qualified-surface/misplaced-use machinery reads).
+let private formerNames = set [ "moments"; "comoments"; "cumulants"; "independent"; "dist"; "dist_add"; "dist_scale"; "comoments_merge"; "mstate"; "mstate_merge"; "mstate_cumulants"; "mixed_cumulants"; "dist_affine"; "dist_jet"; "dist_jet_closed"; "dist_map"; "dist_map_closed"; "free_cumulants"; "dist_expect"; "dist_reweight"; "dist_mix"; "dist_atoms"; "dist_negativity"; "gaussian"; "exponential"; "gamma"; "poisson"; "uniform"; "lognormal"; "bernoulli"; "beta"; "logpdf"; "loglik"; "sample"; "dist_pdf_approx"; "dist_quantile_approx"; "dist_sample_approx" ]
 
 // Partition lattice: cumulants are Moebius-weighted sums over set partitions;
 // Bell(r) partitions, 2^r - 1 distinct blocks, each block's moment bound once and shared.
@@ -1718,10 +1719,11 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
 //                      Sources = empty: a closed-form family carries no data
 //                      provenance, so dist_add needs no independence
 //                      declaration (the dist_atoms convention).
-//   argument position  `logpdf(gaussian(mu, s2), x)` -- a (tag, params) pair
-//                      the log-density formers read symbolically (the
-//                      dist_map-lambda precedent); no tower materializes and
-//                      no order argument is taken.
+//   argument position  `logpdf(gaussian(mu, s2), x)` (and the same slot in
+//                      loglik/sample) -- a (tag, params) pair the family-aware
+//                      formers read symbolically (the dist_map-lambda
+//                      precedent); no tower materializes and no order
+//                      argument is taken.
 // Log-densities are the ON-SUPPORT closed forms -- no branching, because an
 // if/match would leave the AD-able subset (Grad.fs:27-50); x outside the
 // support is the caller's contract (uniform's logpdf is the in-support
@@ -1739,7 +1741,8 @@ let private familyParams : Map<string, string list> =
         "poisson",     ["lam"]
         "uniform",     ["a"; "b"]
         "lognormal",   ["mu"; "s2"]
-        "bernoulli",   ["p"] ]
+        "bernoulli",   ["p"]
+        "beta",        ["a"; "b"] ]
 
 let private familyNames : Set<string> = familyParams |> Map.toList |> List.map fst |> Set.ofList
 
@@ -1752,8 +1755,9 @@ let private powN (e: Expr) (k: int) : Expr =
     List.replicate (k - 1) e |> List.fold mulE e
 
 /// ppl.<family>(params..., r) in VALUE position: the order-r univariate
-/// cumulant tower. Closed cumulant ladders where they exist; lognormal and
-/// bernoulli go through raw moments + Moebius inversion (mobiusComponentDecls).
+/// cumulant tower. Closed cumulant ladders where they exist; lognormal,
+/// bernoulli, and beta go through raw moments + Moebius inversion
+/// (mobiusComponentDecls).
 let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
     let pNames = familyParams.[fam]
@@ -1811,6 +1815,21 @@ let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string)
                     // every raw moment is p; Moebius inversion gives the tower.
                     let mRead j = if j = 0 then fLit 1.0 else p 0
                     mobiusComponentDecls span dName r mRead
+                | "beta" ->
+                    // raw moments climb one factor at a time -- m_j = m_{j-1} *
+                    // (a+j-1)/(a+b+j-1), m_0 = 1 -- then Moebius inversion.
+                    // Plain arithmetic all the way down: no lgamma is needed for
+                    // the TOWER (only the log-density touches it), so the
+                    // constructor rides the same moment route as lognormal.
+                    let mName j = sprintf "__ppl_fam_%s_m%d" dName j
+                    let mDecls =
+                        [ for j in 1 .. r ->
+                            let prev = if j = 1 then fLit 1.0 else v (mName (j - 1))
+                            bind (mName j)
+                                 (mulE prev (divE (addE (p 0) (fLit (float (j - 1))))
+                                                  (addE (addE (p 0) (p 1)) (fLit (float (j - 1)))))) ]
+                    let mRead j = if j = 0 then fLit 1.0 else v (mName j)
+                    mDecls @ mobiusComponentDecls span dName r mRead
                 | _ -> []   // unreachable: fam ranges over familyParams keys
             let info = { Order = r
                          Components = [ for k in 1 .. r -> distComponentName dName k ]
@@ -1823,43 +1842,64 @@ let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string)
         | _ ->
             Error (sprintf "%s: the order must be a compile-time integer (a literal, `let static`, or static-function call)" fam)
 
-// Log-densities. Wave 1 ships the lgamma-free closed forms; gamma/poisson/
-// beta/bernoulli are RECOGNIZED but pending on the lgamma intrinsic (a
-// sibling change) -- each lands as one new arm in elabLogPdf/elabLogLik plus
-// its removal from logDensityPending.
-
-let private logDensityPending : Set<string> = Set.ofList [ "gamma"; "poisson"; "beta"; "bernoulli" ]
+// Log-densities. The lgamma-free closed forms (gaussian/exponential/uniform/
+// lognormal) shipped first; gamma/poisson/beta/bernoulli landed once lgamma
+// became a real intrinsic (hand-rolled Lanczos in blade_runtime.hpp with the
+// bit-exact interp mirror; domain x > 0, BL8008 panic otherwise -- every
+// lgamma argument below is positive whenever the family's parameters are).
+//
+// AD-ability caveat: the four lgamma-gated densities are NOT yet AD-able.
+// lgamma has no derivative rule in Grad (its derivative is digamma, which a
+// sibling branch is adding; no Grad rules are added here), so ad.grad over a
+// gamma/poisson/beta/bernoulli logpdf or loglik is refused by Grad's
+// intrinsic gate until digamma lands. The lgamma-free four remain inside the
+// AD-able subset (Grad.fs:27-50) as before -- loglik still emits the scalar
+// `let mut` + for + `+=` accumulation loop for every family, so the
+// gamma/poisson/beta forms become HMC-able the moment the digamma rule
+// exists, with no re-elaboration needed.
 
 /// log(2 pi s2), the Gaussian/lognormal normalizer.
 let private log2piE (s2: Expr) : Expr = appE (v "log") [ mulE (fLit (2.0 * System.Math.PI)) s2 ]
+
+// Scalar intrinsic/branching construction helpers for the density and
+// approximate-bridge formers (the loop-object helpers live at the top).
+let private logE (x: Expr) : Expr = appE (v "log") [x]
+let private expE (x: Expr) : Expr = appE (v "exp") [x]
+let private sqrtE (x: Expr) : Expr = appE (v "sqrt") [x]
+let private absE (x: Expr) : Expr = appE (v "abs") [x]
+let private lgammaE (x: Expr) : Expr = appE (v "lgamma") [x]
+let private negE (x: Expr) : Expr = subE (fLit 0.0) x
+let private ltE a b = syn (ExprBinOp (Elementwise, OpLt, a, b))
+let private leE a b = syn (ExprBinOp (Elementwise, OpLe, a, b))
+let private ifE c t f = syn (ExprIf (c, t, f))
 
 /// Argument-position family recognition: `gaussian(mu, s2)` as a syntactic
 /// (tag, param exprs) -- the dist_map-lambda precedent. A user definition of
 /// the family's name shadows it (same rule as the formers), which makes the
 /// argument opaque here.
 let private familyArg (former: string) (active: string -> bool) (e: Expr) : Result<string * Expr list, string> =
-    let known = Set.add "beta" familyNames
     match e.Kind with
-    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, ps) when Set.contains f known && active f -> Ok (f, ps)
-    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) when Set.contains f known ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, ps) when Set.contains f familyNames && active f -> Ok (f, ps)
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) when Set.contains f familyNames ->
         Error (sprintf "%s: '%s' is shadowed by a user definition in this module, so the argument is not a family constructor here" former f)
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) ->
-        Error (sprintf "%s: unknown family '%s' -- available: gaussian(mu, s2), exponential(rate), uniform(a, b), lognormal(mu, s2); gamma/poisson/beta/bernoulli await the lgamma intrinsic" former f)
+        Error (sprintf "%s: unknown family '%s' -- available: gaussian(mu, s2), exponential(rate), gamma(shape, rate), poisson(lam), uniform(a, b), lognormal(mu, s2), bernoulli(p), beta(a, b)" former f)
     | _ ->
         Error (sprintf "%s: the first argument must be a family constructor application written syntactically, e.g. %s(gaussian(mu, s2), ...)" former former)
 
-/// Family + parameter validation shared by logpdf/loglik: pending-lgamma
-/// steering, arity, and the stray-order-argument steer.
-let private checkDensityFamily (ctx: Ctx) (former: string) (fam: string) (ps: Expr list) : Result<unit, string> =
-    if Set.contains fam logDensityPending then
-        Error (sprintf "%s: %s logpdf requires the lgamma intrinsic (pending); available: gaussian, exponential, uniform, lognormal" former fam)
+/// Family + parameter validation shared by logpdf/loglik/sample: arity and
+/// the stray-order-argument steer. `position` names the symbolic slot in the
+/// steering text ("log-density position" / "sample position").
+let private checkSymbolicFamily (ctx: Ctx) (former: string) (position: string) (fam: string) (ps: Expr list) : Result<unit, string> =
+    let arity = familyParams.[fam].Length
+    if ps.Length = arity then Ok ()
+    elif ps.Length = arity + 1 && (match evalExpr ctx.Statics maxSteps (List.last ps) with Ok (SVInt _) -> true | _ -> false) then
+        Error (sprintf "%s: %s takes no order argument in %s -- the family is symbolic here (%s); the order-r tower is the value-position constructor `let d = %s(..., r)`" former fam position (familySig fam) fam)
     else
-        let arity = familyParams.[fam].Length
-        if ps.Length = arity then Ok ()
-        elif ps.Length = arity + 1 && (match evalExpr ctx.Statics maxSteps (List.last ps) with Ok (SVInt _) -> true | _ -> false) then
-            Error (sprintf "%s: %s takes no order argument in log-density position -- the family is symbolic here (%s); the order-r tower is the value-position constructor `let d = %s(..., r)`" former fam (familySig fam) fam)
-        else
-            Error (sprintf "%s: %s expects %d parameter(s) (%s), got %d" former fam arity (String.concat ", " familyParams.[fam]) ps.Length)
+        Error (sprintf "%s: %s expects %d parameter(s) (%s), got %d" former fam arity (String.concat ", " familyParams.[fam]) ps.Length)
+
+let private checkDensityFamily (ctx: Ctx) (former: string) (fam: string) (ps: Expr list) : Result<unit, string> =
+    checkSymbolicFamily ctx former "log-density position" fam ps
 
 /// logpdf(family(params), x): the scalar log-density at x -- closed-form
 /// arithmetic over once-bound parameters, ON-SUPPORT by design (no branching;
@@ -1897,6 +1937,26 @@ let private elabLogPdf (active: string -> bool) (ctx: Ctx) (span: Span) (outName
                     ([ bind lxN (appE (v "log") [x]); bind dN (subE (v lxN) (p 0)) ],
                      subE (subE (mulE (fLit (-0.5)) (log2piE (p 1))) (v lxN))
                           (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
+                | "gamma" ->
+                    // (shape-1) log(x) - rate x + shape log(rate) - lgamma(shape)
+                    ([], subE (addE (subE (mulE (subE (p 0) (fLit 1.0)) (logE x))
+                                         (mulE (p 1) x))
+                                   (mulE (p 0) (logE (p 1))))
+                              (lgammaE (p 0)))
+                | "poisson" ->
+                    // k log(lam) - lam - lgamma(k + 1)
+                    ([], subE (subE (mulE x (logE (p 0))) (p 0))
+                              (lgammaE (addE x (fLit 1.0))))
+                | "beta" ->
+                    // (a-1) log(x) + (b-1) log(1-x) - (lgamma a + lgamma b - lgamma(a+b))
+                    ([], subE (addE (mulE (subE (p 0) (fLit 1.0)) (logE x))
+                                    (mulE (subE (p 1) (fLit 1.0)) (logE (subE (fLit 1.0) x))))
+                              (subE (addE (lgammaE (p 0)) (lgammaE (p 1)))
+                                    (lgammaE (addE (p 0) (p 1)))))
+                | "bernoulli" ->
+                    // x log(p) + (1-x) log(1-p)
+                    ([], addE (mulE x (logE (p 0)))
+                              (mulE (subE (fLit 1.0) x) (logE (subE (fLit 1.0) (p 0)))))
                 | _ -> ([], fLit 0.0)   // unreachable: checkDensityFamily gates
             pDecls @ [bind xName xExpr] @ extra
                 @ [ { Value = DeclLet { binding with Value = value }; Span = span } ]))
@@ -1973,6 +2033,31 @@ let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName
                                accAdd 1 (mulE (v dN) (v dN)) ]
                              (subE (subE (mulE (fLit (-nF / 2.0)) (log2piE (p 1))) (v (accN 0)))
                                    (divE (v (accN 1)) (mulE (fLit 2.0) (p 1))))
+                    | "gamma" ->
+                        // (shape-1) sum log x_i - rate sum x_i + n (shape log rate - lgamma shape)
+                        loop 2 [ accAdd 0 (logE aRead); accAdd 1 aRead ]
+                             (addE (subE (mulE (subE (p 0) (fLit 1.0)) (v (accN 0)))
+                                         (mulE (p 1) (v (accN 1))))
+                                   (mulE (fLit nF) (subE (mulE (p 0) (logE (p 1))) (lgammaE (p 0)))))
+                    | "poisson" ->
+                        // log(lam) sum k_i - n lam - sum lgamma(k_i + 1); the
+                        // lgamma sum stays in the loop (k_i-dependent).
+                        loop 2 [ accAdd 0 aRead; accAdd 1 (lgammaE (addE aRead (fLit 1.0))) ]
+                             (subE (subE (mulE (logE (p 0)) (v (accN 0)))
+                                         (mulE (fLit nF) (p 0)))
+                                   (v (accN 1)))
+                    | "beta" ->
+                        // (a-1) sum log x_i + (b-1) sum log(1-x_i) - n log B(a, b)
+                        loop 2 [ accAdd 0 (logE aRead); accAdd 1 (logE (subE (fLit 1.0) aRead)) ]
+                             (subE (addE (mulE (subE (p 0) (fLit 1.0)) (v (accN 0)))
+                                         (mulE (subE (p 1) (fLit 1.0)) (v (accN 1))))
+                                   (mulE (fLit nF) (subE (addE (lgammaE (p 0)) (lgammaE (p 1)))
+                                                         (lgammaE (addE (p 0) (p 1))))))
+                    | "bernoulli" ->
+                        // log(p) sum x_i + log(1-p) (n - sum x_i)
+                        loop 1 [ accAdd 0 aRead ]
+                             (addE (mulE (logE (p 0)) (v (accN 0)))
+                                   (mulE (logE (subE (fLit 1.0) (p 0))) (subE (fLit nF) (v (accN 0)))))
                     | _ -> fLit 0.0   // unreachable: checkDensityFamily gates
                 // uniform reads no data: no alias, or it would print as an unused copy.
                 let srcDecls = if fam = "uniform" then [] else [ bind srcN (v aName) ]
@@ -1981,6 +2066,480 @@ let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName
         Error "loglik: the second argument must be a named module-level array (the sample vector)"
     | _ ->
         Error "loglik expects loglik(family(params), A): a symbolic family argument and a rank-1 sample array"
+
+// =========================================================================
+// The approximate tower bridge (docs/plan-ppl-proper.md section 2) -- an
+// honest approximate density/quantile for ANY carried univariate tower,
+// family-constructed or data-estimated alike:
+//
+//   dist_pdf_approx(d, x)       Edgeworth/Gram-Charlier density from
+//                               kappa_1..kappa_r. NOT a probability density
+//                               in general: the expansion can go negative in
+//                               the tails -- dist_negativity is the honesty
+//                               meter for exactly that (pair them).
+//   dist_quantile_approx(d, p)  Cornish-Fisher quantile: the formal series
+//                               inverse of the Edgeworth CDF, on top of the
+//                               standard-normal quantile (Wichura AS241
+//                               PPND16, emitted as plain arithmetic).
+//   dist_sample_approx(d, k, n) a keyed __rand_uniform fill mapped through
+//                               the Cornish-Fisher transform -- approximate
+//                               tower sampling, deterministic given the key,
+//                               landable before any family-specific runtime
+//                               fill exists.
+//
+// Both expansions are generated from the same formal-series construction the
+// reference oracle uses (src/ppl/Density.fs, module Expansion) -- the
+// eps-truncation bookkeeping below mirrors it line for line, only over a
+// symbolic coefficient ring (sparse polynomials in z, phi(z), and the
+// standardized cumulants lambda_3..lambda_6) instead of floats, so the
+// collapsed series can be emitted as straight-line arithmetic over
+// runtime-read kappas. r = 2 carries no correction terms: the Edgeworth
+// density of a Gaussian tower is the exact Gaussian pdf and Cornish-Fisher
+// degenerates to mu + sd * PPND(p) exactly. An order-r tower supports terms
+// through eps^(r-2); r > 6 (unreachable through today's constructors, all of
+// which cap at 6) and r < 2 refuse rather than truncate silently.
+//
+// kappa_2 <= 0 (lawful for quasi-distribution towers -- dist_atoms admits
+// negative variance) is NOT refused at elaboration: sd = sqrt(kappa_2)
+// evaluates to NaN at runtime and the NaN propagates through every read,
+// which is the honest answer for a tower with no Gaussian anchor.
+// =========================================================================
+
+// ---- sparse polynomials over (z, phi(z), lambda_3..lambda_6) ----
+
+/// Monomial key: z power, phi(z) power, lambda_3..lambda_6 powers.
+type private AxMono = int * int * int list
+
+let private axMonoOne : AxMono = (0, 0, [0; 0; 0; 0])
+let private axZeroP : Map<AxMono, float> = Map.empty
+let private axConst (c: float) : Map<AxMono, float> =
+    if c = 0.0 then Map.empty else Map.ofList [ (axMonoOne, c) ]
+let private axZ : Map<AxMono, float> = Map.ofList [ ((1, 0, [0; 0; 0; 0]), 1.0) ]
+let private axPhi : Map<AxMono, float> = Map.ofList [ ((0, 1, [0; 0; 0; 0]), 1.0) ]
+let private axLam (k: int) : Map<AxMono, float> =
+    Map.ofList [ ((0, 0, [ for i in 0 .. 3 -> if i = k - 3 then 1 else 0 ]), 1.0) ]
+
+let private axAdd (a: Map<AxMono, float>) (b: Map<AxMono, float>) : Map<AxMono, float> =
+    b |> Map.fold (fun acc m c ->
+        let c2 = (defaultArg (Map.tryFind m acc) 0.0) + c
+        if c2 = 0.0 then Map.remove m acc else Map.add m c2 acc) a
+let private axScale (c: float) (a: Map<AxMono, float>) : Map<AxMono, float> =
+    if c = 0.0 then axZeroP else a |> Map.map (fun _ x -> c * x)
+let private axSub (a: Map<AxMono, float>) (b: Map<AxMono, float>) = axAdd a (axScale -1.0 b)
+let private axMul (a: Map<AxMono, float>) (b: Map<AxMono, float>) : Map<AxMono, float> =
+    a |> Map.fold (fun acc (za, pa, la) ca ->
+        b |> Map.fold (fun acc2 (zb, pb, lb) cb ->
+            let m = (za + zb, pa + pb, List.map2 (+) la lb)
+            let c2 = (defaultArg (Map.tryFind m acc2) 0.0) + ca * cb
+            if c2 = 0.0 then Map.remove m acc2 else Map.add m c2 acc2) acc) axZeroP
+
+// ---- truncated power series in the bookkeeping parameter eps (index =
+// eps power), coefficients in the polynomial ring above; the float twin
+// lives in the oracle's Density.fs Eps module ----
+
+let private aeZero (n: int) : Map<AxMono, float>[] = Array.create (n + 1) axZeroP
+let private aeKonst (n: int) (p: Map<AxMono, float>) : Map<AxMono, float>[] =
+    let a = aeZero n
+    a.[0] <- p
+    a
+let private aeAdd a b : Map<AxMono, float>[] = Array.map2 axAdd a b
+let private aeSub a b : Map<AxMono, float>[] = Array.map2 axSub a b
+let private aeScaleF (c: float) (a: Map<AxMono, float>[]) = Array.map (axScale c) a
+let private aeScaleP (p: Map<AxMono, float>) (a: Map<AxMono, float>[]) = Array.map (axMul p) a
+let private aeMul (a: Map<AxMono, float>[]) (b: Map<AxMono, float>[]) : Map<AxMono, float>[] =
+    let n = a.Length - 1
+    let out = aeZero n
+    for i in 0 .. n do
+        if not (Map.isEmpty a.[i]) then
+            for j in 0 .. n - i do
+                out.[i + j] <- axAdd out.[i + j] (axMul a.[i] b.[j])
+    out
+/// a / b by forward substitution. b's head must be a single monomial (it is
+/// phi(z) in the Cornish-Fisher solve) and every division must be exact --
+/// anything else is a compiler bug, not a user error.
+let private aeDiv (a: Map<AxMono, float>[]) (b: Map<AxMono, float>[]) : Map<AxMono, float>[] =
+    let n = a.Length - 1
+    let q = aeZero n
+    let (m0, c0) =
+        match Map.toList b.[0] with
+        | [ one ] -> one
+        | _ -> failwith "ppl approx bridge: series division by a non-monomial head (compiler bug)"
+    let divMono (p: Map<AxMono, float>) : Map<AxMono, float> =
+        p |> Map.toList |> List.map (fun ((z, ph, l), c) ->
+            let (z0, p0, l0) = m0
+            let z2 = z - z0
+            let p2 = ph - p0
+            let l2 = List.map2 (-) l l0
+            if z2 < 0 || p2 < 0 || List.exists (fun x -> x < 0) l2 then
+                failwith "ppl approx bridge: inexact monomial division in the Cornish-Fisher solve (compiler bug)"
+            ((z2, p2, l2), c / c0))
+        |> Map.ofList
+    for i in 0 .. n do
+        let mutable s = a.[i]
+        for j in 1 .. i do
+            s <- axSub s (axMul b.[j] q.[i - j])
+        q.[i] <- divMono s
+    q
+/// Substitute eps = 1.
+let private aeCollapse (a: Map<AxMono, float>[]) : Map<AxMono, float> = Array.fold axAdd axZeroP a
+
+/// Probabilists' Hermite polynomials He_0(z)..He_n(z) in the z symbol.
+let private hermiteZ (n: int) : Map<AxMono, float>[] =
+    let h = Array.create (max 1 (n + 1)) axZeroP
+    h.[0] <- axConst 1.0
+    if n >= 1 then h.[1] <- axZ
+    for m in 1 .. n - 1 do
+        h.[m + 1] <- axSub (axMul axZ h.[m]) (axScale (float m) h.[m - 1])
+    h
+
+/// Coefficients c_j of phi_Z(t) = e^(-t^2/2) sum_j c_j (it)^j as eps-series
+/// over the lambda ring, truncated at eps^(r-2) -- the symbolic twin of the
+/// oracle's charCoeffs (Density.fs), same maxJ = 3n bound, same loop shape.
+let private axCharCoeffs (r: int) : Map<AxMono, float>[][] =
+    let n = r - 2
+    let maxJ = 3 * n
+    let s = Array.init (maxJ + 1) (fun _ -> aeZero n)
+    for k in 3 .. r do
+        if k - 2 <= n && k <= maxJ then
+            s.[k].[k - 2] <- axScale (1.0 / factorial k) (axLam k)
+    let res = Array.init (maxJ + 1) (fun _ -> aeZero n)
+    res.[0].[0] <- axConst 1.0
+    let mutable pow = Array.init (maxJ + 1) (fun _ -> aeZero n)
+    pow.[0].[0] <- axConst 1.0
+    for m in 1 .. n do
+        let next = Array.init (maxJ + 1) (fun _ -> aeZero n)
+        for i in 0 .. maxJ do
+            for k in 3 .. maxJ do
+                if i + k <= maxJ then
+                    next.[i + k] <- aeAdd next.[i + k] (aeMul pow.[i] s.[k])
+        pow <- next
+        let w = 1.0 / factorial m
+        for j in 0 .. maxJ do
+            res.[j] <- aeAdd res.[j] (aeScaleF w pow.[j])
+    res
+
+/// Collapsed (eps = 1) Edgeworth bracket coefficients: index j -> the
+/// lambda-only polynomial multiplying He_j(z), as (coefficient, lambda
+/// exponents) term lists (deterministic Map order).
+let private axEdgeworthCoeffs (r: int) : (float * int list) list [] =
+    axCharCoeffs r
+    |> Array.map (fun series ->
+        aeCollapse series
+        |> Map.toList
+        |> List.map (fun ((z, p, lams), c) ->
+            if z <> 0 || p <> 0 then failwith "ppl approx bridge: Edgeworth coefficient escaped the lambda ring (compiler bug)"
+            (c, lams)))
+
+/// The collapsed Cornish-Fisher correction U with x_p = mu + sd*(z + U),
+/// grouped by z power: z degree -> lambda term list. Mirrors the oracle's
+/// series-Newton (Density.fs cornishFisher) iteration for iteration; the
+/// phi(z) factors cancel exactly in the solve, which the fold asserts.
+/// Caller guarantees r >= 3 (r = 2 has no correction at all).
+let private axCornishFisherU (r: int) : Map<int, (float * int list) list> =
+    let n = r - 2
+    let c = axCharCoeffs r
+    let maxJ = 3 * n
+    let heZ = hermiteZ (maxJ + 1)
+    let mutable u = aeZero n
+    for _ in 1 .. n + 4 do
+        let w = aeAdd (aeKonst n axZ) u
+        let heW = Array.init (maxJ + 1) (fun _ -> aeZero n)
+        heW.[0] <- aeKonst n (axConst 1.0)
+        if maxJ >= 1 then heW.[1] <- w
+        for m in 1 .. maxJ - 1 do
+            heW.[m + 1] <- aeSub (aeMul w heW.[m]) (aeScaleF (float m) heW.[m - 1])
+        // Phi(z+u) - Phi(z) = sum_{i>=1} (-1)^(i-1) He_(i-1)(z) phi(z) u^i / i!
+        let mutable dPhi = aeZero n
+        let mutable up = aeKonst n (axConst 1.0)
+        for i in 1 .. n do
+            up <- aeMul up u
+            let sgn = if (i - 1) % 2 = 0 then 1.0 else -1.0
+            dPhi <- aeAdd dPhi (aeScaleP (axScale (sgn / factorial i) (axMul heZ.[i - 1] axPhi)) up)
+        // phi(z+u) = sum_{i>=0} (-1)^i He_i(z) phi(z) u^i / i!
+        let mutable phiW = aeZero n
+        up <- aeKonst n (axConst 1.0)
+        for i in 0 .. n do
+            if i > 0 then up <- aeMul up u
+            let sgn = if i % 2 = 0 then 1.0 else -1.0
+            phiW <- aeAdd phiW (aeScaleP (axScale (sgn / factorial i) (axMul heZ.[i] axPhi)) up)
+        let mutable tail = aeZero n
+        for j in 1 .. maxJ do
+            tail <- aeAdd tail (aeMul c.[j] heW.[j - 1])
+        let g = aeSub dPhi (aeMul phiW tail)
+        let mutable dens = aeZero n
+        for j in 0 .. maxJ do
+            dens <- aeAdd dens (aeMul c.[j] heW.[j])
+        u <- aeSub u (aeDiv g (aeMul phiW dens))
+    aeCollapse u
+    |> Map.toList
+    |> List.fold (fun acc ((z, p, lams), coeff) ->
+        if p <> 0 then failwith "ppl approx bridge: phi(z) failed to cancel in the Cornish-Fisher series (compiler bug)"
+        let cur = defaultArg (Map.tryFind z acc) []
+        Map.add z (cur @ [ (coeff, lams) ]) acc) Map.empty
+
+/// A lambda-monomial term list as an Expr over the bound lambda decls.
+let private axTermsExpr (lam: int -> Expr) (terms: (float * int list) list) : Expr =
+    match terms with
+    | [] -> fLit 0.0
+    | _ ->
+        terms
+        |> List.map (fun (c, pows) ->
+            pows
+            |> List.mapi (fun i pw -> (i + 3, pw))
+            |> List.filter (fun (_, pw) -> pw > 0)
+            |> List.fold (fun acc (k, pw) -> mulE acc (powN (lam k) pw)) (fLit c))
+        |> List.reduce addE
+
+// ---- standard normal quantile: Wichura AS241 PPND16, coefficient tables
+// copied verbatim from the oracle (Density.fs normalQuantile) so the two
+// implementations agree to reordering-of-arithmetic ----
+
+let private ppndCentralNum = [ 2509.0809287301226727; 33430.575583588128105; 67265.770927008700853; 45921.953931549871457; 13731.693765509461125; 1971.5909503065514427; 133.14166789178437745; 3.387132872796366608 ]
+let private ppndCentralDen = [ 5226.495278852854561; 28729.085735721942674; 39307.89580009271061; 21213.794301586595867; 5394.1960214247511077; 687.1870074920579083; 42.313330701600911252; 1.0 ]
+let private ppndMidNum = [ 7.7454501427834140764e-4; 0.0227238449892691845833; 0.24178072517745061177; 1.27045825245236838258; 3.64784832476320460504; 5.7694972214606914055; 4.6303378461565452959; 1.42343711074968357734 ]
+let private ppndMidDen = [ 1.05075007164441684324e-9; 5.475938084995344946e-4; 0.0151986665636164571966; 0.14810397642748007459; 0.68976733498510000455; 1.6763848301838038494; 2.05319162663775882187; 1.0 ]
+let private ppndFarNum = [ 2.01033439929228813265e-7; 2.71155556874348757815e-5; 0.00124266094738807843860; 0.026532189526576123093; 0.29656057182850489123; 1.7848265399172913358; 5.4637849111641143699; 6.6579046435011037772 ]
+let private ppndFarDen = [ 2.04426310338993978564e-15; 1.4215117583164458887e-7; 1.8463183175100546818e-5; 7.868691311456132591e-4; 0.0148753612908506148525; 0.13692988092273580531; 0.59983220655588793769; 1.0 ]
+
+/// ((c_hi * r + c_next) * r + ...) -- the exact nesting the oracle writes out.
+let private hornerE (cs: float list) (r: Expr) : Expr =
+    match cs with
+    | [] -> fLit 0.0
+    | c :: rest -> rest |> List.fold (fun acc k -> addE (mulE acc r) (fLit k)) (fLit c)
+
+/// The central branch q * A(rc)/B(rc), rc = 0.180625 - q^2 (|q| <= 0.425).
+let private ppndCentral (q: Expr) : Expr =
+    let rc = subE (fLit 0.180625) (mulE q q)
+    mulE q (divE (hornerE ppndCentralNum rc) (hornerE ppndCentralDen rc))
+
+/// The tail value from r1 = sqrt(-log(min(p, 1-p))): moderate branch at
+/// r1 <= 5, far branch beyond (sign applied by the caller).
+let private ppndTail (r1: Expr) : Expr =
+    let rm = subE r1 (fLit 1.6)
+    let rf = subE r1 (fLit 5.0)
+    ifE (leE r1 (fLit 5.0))
+        (divE (hornerE ppndMidNum rm) (hornerE ppndMidDen rm))
+        (divE (hornerE ppndFarNum rf) (hornerE ppndFarDen rf))
+
+/// PPND16 as ONE expression over p -- kernel position (no local bindings in a
+/// kernel body, so shared sub-terms are duplicated structurally; they are
+/// pure arithmetic and the duplication is per-source-site, not per-element
+/// state). Scalar position binds the pieces as decls instead (quantile former).
+let private ppndExprOf (p: Expr) : Expr =
+    let q = subE p (fLit 0.5)
+    let r0 = ifE (ltE q (fLit 0.0)) p (subE (fLit 1.0) p)
+    let r1 = sqrtE (negE (logE r0))
+    let vt = ppndTail r1
+    ifE (leE (absE q) (fLit 0.425)) (ppndCentral q) (ifE (ltE q (fLit 0.0)) (negE vt) vt)
+
+// ---- the three approximate-bridge formers ----
+
+/// Shared setup: registry lookup, univariate + order gates, and the
+/// standardization decls mu = kappa_1, sd = sqrt(kappa_2) (NaN when
+/// kappa_2 < 0 -- see the section comment), lambda_k = kappa_k / sd^k.
+/// Reads go through distKappaRead, so packed (dist(A, r)) and flat
+/// (family constructors, jet/Bayes results) towers both work.
+let private approxSetupDecls (former: string) (ctx: Ctx) (span: Span) (tag: string)
+    (dists: Map<string, DistInfo>) (dn: string)
+    : Result<Located<Decl> list * int * Expr * Expr * (int -> Expr), string> =
+    match Map.tryFind dn dists with
+    | None -> Error (sprintf "%s expects %s(d, ...) with a previously declared dist binding d" former former)
+    | Some info ->
+        univariateOnly former ctx info |> Result.bind (fun () ->
+        if info.Order < 2 then
+            Error (sprintf "%s: the expansion is anchored on kappa_2 and '%s' carries only order %d -- insufficient stochastic order. Construct with order >= 2 (dist(A, 2..6) or a family constructor)." former dn info.Order)
+        elif info.Order > 6 then
+            Error (sprintf "%s: the Edgeworth/Cornish-Fisher series are generated up to order 6 and '%s' carries %d -- rebuild or project the tower at order <= 6" former dn info.Order)
+        else
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let r = info.Order
+            let muN = sprintf "__ppl_ax_%s_mu" tag
+            let sdN = sprintf "__ppl_ax_%s_sd" tag
+            let lamN k = sprintf "__ppl_ax_%s_l%d" tag k
+            let decls =
+                [ bind muN (distKappaRead info [0])
+                  bind sdN (sqrtE (distKappaRead info [0; 0])) ]
+                @ [ for k in 3 .. r ->
+                      bind (lamN k) (divE (distKappaRead info (List.replicate k 0)) (powN (v sdN) k)) ]
+            Ok (decls, r, v muN, v sdN, (fun k -> v (lamN k))))
+
+/// Emit the z-grouped Cornish-Fisher correction coefficients as decls and a
+/// Horner builder for U(z) over them. Caller guarantees r >= 3.
+let private cfCorrectionDecls (span: Span) (tag: string) (lam: int -> Expr) (r: int)
+    : Located<Decl> list * (Expr -> Expr) =
+    let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+    let grouped = axCornishFisherU r
+    let maxDeg = grouped |> Map.toList |> List.map fst |> List.max
+    let cName i = sprintf "__ppl_cf_%s_c%d" tag i
+    let decls =
+        [ for i in 0 .. maxDeg do
+            match Map.tryFind i grouped with
+            | Some terms -> yield bind (cName i) (axTermsExpr lam terms)
+            | None -> () ]
+    let horner (z: Expr) =
+        let cRef i = if Map.containsKey i grouped then v (cName i) else fLit 0.0
+        let rec go i acc = if i < 0 then acc else go (i - 1) (addE (cRef i) (mulE z acc))
+        go (maxDeg - 1) (cRef maxDeg)
+    (decls, horner)
+
+/// dist_pdf_approx(d, x): phi(z) * [sum_j c_j(lambda) He_j(z)] / sd at
+/// z = (x - mu)/sd -- He_j by the recurrence as decls, the c_j as collapsed
+/// lambda polynomials.
+let private elabDistPdfApprox (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
+    (dists: Map<string, DistInfo>) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    match args with
+    | [{ Kind = ExprKind.ExprVar dn }; xExpr] ->
+        approxSetupDecls "dist_pdf_approx" ctx span ("ea_" + outName) dists dn
+        |> Result.map (fun (setup, r, mu, sd, lam) ->
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let maxJ = 3 * (r - 2)
+            let cs = axEdgeworthCoeffs r
+            let xN = sprintf "__ppl_ea_%s_x" outName
+            let zN = sprintf "__ppl_ea_%s_z" outName
+            let fN = sprintf "__ppl_ea_%s_f" outName
+            let heName j = sprintf "__ppl_ea_%s_he%d" outName j
+            let z = v zN
+            let heDecls =
+                [ for j in 0 .. maxJ ->
+                    let value =
+                        if j = 0 then fLit 1.0
+                        elif j = 1 then z
+                        else subE (mulE z (v (heName (j - 1)))) (mulE (fLit (float (j - 1))) (v (heName (j - 2))))
+                    bind (heName j) value ]
+            let factor =
+                [ for j in 0 .. maxJ do
+                    match cs.[j] with
+                    | [] -> ()
+                    | terms -> yield mulE (axTermsExpr lam terms) (v (heName j)) ]
+                |> List.reduce addE   // c_0 = 1 always survives
+            let sqrt2pi = sqrt (2.0 * System.Math.PI)
+            let value = divE (mulE (divE (expE (mulE (mulE (fLit -0.5) z) z)) (fLit sqrt2pi)) (v fN)) sd
+            setup
+            @ [ bind xN xExpr
+                bind zN (divE (subE (v xN) mu) sd) ]
+            @ heDecls
+            @ [ bind fN factor
+                { Value = DeclLet { binding with Value = value }; Span = span } ])
+    | _ ->
+        Error "dist_pdf_approx expects dist_pdf_approx(d, x): a previously declared univariate dist binding and the evaluation point"
+
+/// dist_quantile_approx(d, p): mu + sd*(z + U(z, lambda)) at z = PPND16(p),
+/// AS241 pieces bound as scalar decls (branching stays in ExprIf decl RHSs).
+let private elabDistQuantileApprox (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
+    (dists: Map<string, DistInfo>) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    match args with
+    | [{ Kind = ExprKind.ExprVar dn }; pExpr] ->
+        approxSetupDecls "dist_quantile_approx" ctx span ("cf_" + outName) dists dn
+        |> Result.map (fun (setup, r, mu, sd, lam) ->
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let nm suffix = sprintf "__ppl_cf_%s_%s" outName suffix
+            let pN, qN, r0N, r1N, ceN, vtN, zN = nm "p", nm "q", nm "r0", nm "r1", nm "ce", nm "vt", nm "z"
+            let z = v zN
+            let ppndDecls =
+                [ bind pN pExpr
+                  bind qN (subE (v pN) (fLit 0.5))
+                  bind r0N (ifE (ltE (v qN) (fLit 0.0)) (v pN) (subE (fLit 1.0) (v pN)))
+                  bind r1N (sqrtE (negE (logE (v r0N))))
+                  bind ceN (ppndCentral (v qN))
+                  bind vtN (ppndTail (v r1N))
+                  bind zN (ifE (leE (absE (v qN)) (fLit 0.425)) (v ceN)
+                               (ifE (ltE (v qN) (fLit 0.0)) (negE (v vtN)) (v vtN))) ]
+            let tailDecls, value =
+                if r = 2 then [], addE mu (mulE sd z)
+                else
+                    let (cDecls, horner) = cfCorrectionDecls span outName lam r
+                    cDecls, addE mu (mulE sd (addE z (horner z)))
+            setup @ ppndDecls @ tailDecls
+            @ [ { Value = DeclLet { binding with Value = value }; Span = span } ])
+    | _ ->
+        Error "dist_quantile_approx expects dist_quantile_approx(d, p): a previously declared univariate dist binding and a probability"
+
+/// Static sample-count resolution shared by sample/dist_sample_approx.
+let private staticSampleCount (ctx: Ctx) (former: string) (nExpr: Expr) : Result<int, string> =
+    match evalExpr ctx.Statics maxSteps nExpr with
+    | Ok (SVInt x) when x >= 1L -> Ok (int x)
+    | Ok (SVInt x) -> Error (sprintf "%s: the sample count must be >= 1 (got %d)" former x)
+    | _ -> Error (sprintf "%s: the sample count must be a compile-time integer (a literal, `let static`, or static-function call) -- shapes are static everywhere in Blade; only the key and distribution parameters may be runtime values" former)
+
+/// dist_sample_approx(d, key, n): a keyed uniform fill mapped through PPND16
+/// and then the Cornish-Fisher transform -- two elementwise passes, both
+/// backends free, deterministic given the key.
+let private elabDistSampleApprox (ctx: Ctx) (span: Span) (sName: string) (binding: Binding)
+    (dists: Map<string, DistInfo>) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    match args with
+    | [{ Kind = ExprKind.ExprVar dn }; keyE; nExpr] ->
+        staticSampleCount ctx "dist_sample_approx" nExpr |> Result.bind (fun m ->
+        approxSetupDecls "dist_sample_approx" ctx span ("sa_" + sName) dists dn
+        |> Result.map (fun (setup, r, mu, sd, lam) ->
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let uN = sprintf "__ppl_sa_%s_u" sName
+            let zN = sprintf "__ppl_sa_%s_z" sName
+            let cDecls, body =
+                if r = 2 then [], addE mu (mulE sd (v "__u"))
+                else
+                    let (cds, horner) = cfCorrectionDecls span ("sa_" + sName) lam r
+                    cds, addE mu (mulE sd (addE (v "__u") (horner (v "__u"))))
+            setup
+            @ [ bind uN (appE (v "__rand_uniform") [keyE; iLit m])
+                bind zN (map1 (v uN) (ppndExprOf (v "__u"))) ]
+            @ cDecls
+            @ [ { Value = DeclLet { binding with Value = map1 (v zN) body }; Span = span } ]))
+    | _ ->
+        Error "dist_sample_approx expects dist_sample_approx(d, key, n): a previously declared univariate dist binding, an Int64 stream key, and a static sample count"
+
+// ---- ppl.sample: exact family sampling over the __rand_* intrinsics ----
+// sample(family(params), key, n) elaborates to the matching keyed batch fill
+// (docs/plan-ppl-proper.md section 3): legal without `import rand` because
+// the __rand_* intrinsics are checker-level builtins, and the checker's own
+// arity table re-validates the parameter count on the intrinsic itself.
+// exponential/gamma/poisson/bernoulli/beta lower to their direct fills
+// (parameters are runtime Float64 scalars, passed through verbatim -- the
+// rand-elaborator convention); gaussian/lognormal/uniform are synthesized as
+// elementwise transforms over the normal/uniform fills:
+//   gaussian(mu, s2)  -> mu + sqrt(s2) * __rand_normal(key, n)
+//   lognormal(mu, s2) -> exp(gaussian construction)
+//   uniform(a, b)     -> a + (b - a) * __rand_uniform(key, n)
+// The result is a rank-1 Array<Float64 like Idx<n>>; __rand_* output stays
+// non-differentiable (the rand/grad boundary is unchanged).
+let private elabPplSample (active: string -> bool) (ctx: Ctx) (span: Span) (sName: string) (binding: Binding) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    match args with
+    | [famE; keyE; nExpr] ->
+        familyArg "sample" active famE |> Result.bind (fun (fam, ps) ->
+        checkSymbolicFamily ctx "sample" "sample position" fam ps |> Result.bind (fun () ->
+        staticSampleCount ctx "sample" nExpr |> Result.map (fun m ->
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let direct fill = [ { Value = DeclLet { binding with Value = appE (v fill) (keyE :: ps @ [iLit m]) }; Span = span } ]
+            match fam with
+            | "exponential" -> direct "__rand_exponential"
+            | "gamma"       -> direct "__rand_gamma"
+            | "poisson"     -> direct "__rand_poisson"
+            | "bernoulli"   -> direct "__rand_bernoulli"
+            | "beta"        -> direct "__rand_beta"
+            | "gaussian" | "lognormal" ->
+                let muN = sprintf "__ppl_sm_%s_mu" sName
+                let sdN = sprintf "__ppl_sm_%s_sd" sName
+                let fN = sprintf "__ppl_sm_%s_fill" sName
+                let affine = addE (v muN) (mulE (v sdN) (v "__u"))
+                let body = if fam = "gaussian" then affine else expE affine
+                [ bind muN ps.[0]
+                  bind sdN (sqrtE ps.[1])
+                  bind fN (appE (v "__rand_normal") [keyE; iLit m])
+                  { Value = DeclLet { binding with Value = map1 (v fN) body }; Span = span } ]
+            | "uniform" ->
+                let aN = sprintf "__ppl_sm_%s_a" sName
+                let wN = sprintf "__ppl_sm_%s_w" sName
+                let fN = sprintf "__ppl_sm_%s_fill" sName
+                [ bind aN ps.[0]
+                  bind wN (subE ps.[1] (v aN))
+                  bind fN (appE (v "__rand_uniform") [keyE; iLit m])
+                  { Value = DeclLet { binding with Value = map1 (v fN) (addE (v aN) (mulE (v wN) (v "__u"))) }; Span = span } ]
+            | _ -> [])))   // unreachable: familyArg gates on familyNames
+    | _ ->
+        Error "sample expects sample(family(params), key, n): a symbolic family argument, an Int64 stream key, and a static sample count"
 
 // dist_map: the symbolic front-end over dist_jet -- differentiate a lambda at elaboration time, evaluate the derivatives at
 // the runtime mean, and delegate to the jet pushforward. A polynomial's derivative chain terminates in structural zeros
@@ -2875,14 +3434,25 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     // elaboration through the __ppl_cumulant arm below).
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fam }, args) } } when Set.contains fam familyNames && active fam ->
                         elabFamilyDist ctx d.Span fam dName args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
-                    // beta is log-density-only (and pending lgamma): no tower ladder to construct.
-                    | DeclLet { Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "beta" }, _) } } when active "beta" ->
-                        Error "beta: no cumulant-tower constructor -- beta appears only in log-density position, and beta logpdf requires the lgamma intrinsic (pending); available towers: gaussian, exponential, gamma, poisson, uniform, lognormal, bernoulli"
                     // Log-densities (plan P1): scalar logpdf; loglik as the AD-able accumulation loop.
                     | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "logpdf" }, args) } } as b) when active "logpdf" ->
                         elabLogPdf active ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "loglik" }, args) } } as b) when active "loglik" ->
                         elabLogLik active ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    // The approximate tower bridge (plan section 2): Edgeworth
+                    // density, Cornish-Fisher quantile, and the uniform-fill
+                    // Cornish-Fisher sampler -- scalar/array projections off a
+                    // registered univariate tower, packed or flat alike.
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_pdf_approx" }, args) } } as b) when active "dist_pdf_approx" ->
+                        elabDistPdfApprox ctx d.Span outName b dists args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_quantile_approx" }, args) } } as b) when active "dist_quantile_approx" ->
+                        elabDistQuantileApprox ctx d.Span outName b dists args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar sName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_sample_approx" }, args) } } as b) when active "dist_sample_approx" ->
+                        elabDistSampleApprox ctx d.Span sName b dists args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    // Exact family sampling (plan P2 surface): sample(family(params), key, n)
+                    // lowers to the matching __rand_* intrinsic fill.
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar sName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "sample" }, args) } } as b) when active "sample" ->
+                        elabPplSample active ctx d.Span sName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     // cumulant(d, k) on a FLAT registry dist (a pushforward
                     // result): no packed value exists for the checker's
                     // Dist-typed projection to see, so project here; the
