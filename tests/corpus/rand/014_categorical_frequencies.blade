@@ -1,0 +1,45 @@
+// TEST: Rand Categorical Frequencies
+// The distribution itself: drawing index i must happen with probability
+// W_i / sum(W). With W = [1, 1, 2, 4] the targets are exactly 0.125, 0.125,
+// 0.25 and 0.5 -- all binary-exact, so nothing here depends on how the
+// normalization rounds.
+//
+// COUNTING WITHOUT CONDITIONALS. The count of category j is obtained by
+// gathering a ONE-HOT array at the drawn indices and summing: e_j[i] is 1.0
+// exactly when i == j, so the sum over all draws IS the count. This reuses the
+// subscript path (the same one 017 exercises) instead of needing an equality
+// test inside the kernel, and it doubles as a second, independent witness that
+// the Int64 draws really are usable as subscripts.
+//
+// TOLERANCE. n = 4096, so the standard error is sqrt(p(1-p)/4096): about
+// 0.0052 for the two 0.125 categories, 0.0068 for 0.25 and 0.0078 for 0.5.
+// 0.02 is between 2.5 and 3.8 SE. These are DETERMINISTIC checks -- the key is
+// fixed, so each frequency is a fixed number, and the band is sized to be
+// comfortable for this stream rather than to be a live statistical test.
+import rand as r
+let W: Array<Float64 like Idx<4>> = [1.0, 1.0, 2.0, 4.0]
+let x = r.categorical(51, W, 4096)
+let e0: Array<Float64 like Idx<4>> = [1.0, 0.0, 0.0, 0.0]
+let e1: Array<Float64 like Idx<4>> = [0.0, 1.0, 0.0, 0.0]
+let e2: Array<Float64 like Idx<4>> = [0.0, 0.0, 1.0, 0.0]
+let e3: Array<Float64 like Idx<4>> = [0.0, 0.0, 0.0, 1.0]
+let f0 = reduce(method_for(x) <@> lambda(i) -> e0[i] |> compute, (+)) / 4096.0
+let f1 = reduce(method_for(x) <@> lambda(i) -> e1[i] |> compute, (+)) / 4096.0
+let f2 = reduce(method_for(x) <@> lambda(i) -> e2[i] |> compute, (+)) / 4096.0
+let f3 = reduce(method_for(x) <@> lambda(i) -> e3[i] |> compute, (+)) / 4096.0
+let ok0 = abs(f0 - 0.125) < 0.02
+let ok1 = abs(f1 - 0.125) < 0.02
+let ok2 = abs(f2 - 0.25) < 0.02
+let ok3 = abs(f3 - 0.5) < 0.02
+// The four counts partition the draws, so the frequencies must sum to exactly
+// 1: a gather that dropped or double-counted a draw would still pass the four
+// bands individually but breaks here.
+let total = f0 + f1 + f2 + f3
+let partitions = abs(total - 1.0) < 0.0000001
+let head = r.categorical(51, W, 8)
+// EXPECT: head = [2, 0, 3, 3, 2, 2, 2, 3]
+// EXPECT: ok0 = true
+// EXPECT: ok1 = true
+// EXPECT: ok2 = true
+// EXPECT: ok3 = true
+// EXPECT: partitions = true

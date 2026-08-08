@@ -1,0 +1,20 @@
+// TEST: Rand Categorical Nonstatic Weights (rejects)
+// ERROR: BL3999
+// ERROR-CONTAINS: weights array must have a STATIC extent
+// The array-parameter channel's one hard requirement. Codegen emits the
+// weights as a POINTER PLUS A LENGTH -- `pool_base(W.data), (size_t)k` -- and
+// the interpreter mirror needs the same k to run its cumulative scan, so k has
+// to be known at compile time. A function parameter typed `Idx<n>` has a
+// symbolic extent, and there is no k to emit.
+//
+// This is refused in the CHECKER arm (where the extent is pinned), not by the
+// elaborator: the elaborator passes parameters through verbatim without typing
+// them, so it never sees that this one is an array at all. Note the shape
+// argument `8` is perfectly static -- it is only the WEIGHTS extent that is
+// not, which is what distinguishes this from the pre-existing static-shape
+// rejection every family already has.
+import rand as r
+function pick(W: Array<Float64 like Idx<n>>) -> Array<Int64 like Idx<8>> =
+    r.categorical(11, W, 8)
+let Wc: Array<Float64 like Idx<3>> = [1.0, 1.0, 2.0]
+let out = pick(Wc)
