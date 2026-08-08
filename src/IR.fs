@@ -1780,10 +1780,18 @@ type ProviderWriteSpec = {
 /// order -- ordinary IRExprs evaluated ONCE at the binding's position (not per
 /// draw), emitted as trailing `(double)` arguments after the key. Empty for
 /// uniform/normal; one for exponential/poisson/bernoulli; two for gamma/beta.
+///
+/// `weights` is the array-valued parameter channel, `Some` only for
+/// `categorical` (which has no scalar pars). It pairs the lowered rank-1
+/// Float64 array expression with the STATIC extent the checker pinned: codegen
+/// emits `pool_base(<expr>.data), (size_t)<len>` in the parameter position, so
+/// the length travels with the pointer rather than being re-derived from the
+/// expression's type at each consumer.
 type RandomFillSpec =
     | FillModulus of IRExpr              // fill_random(mod)
-    // rand.<kind>(key, pars..); kind = uniform | normal | exponential | gamma | poisson | bernoulli | beta
-    | RandGen of kind: string * key: IRExpr * pars: IRExpr list
+    // rand.<kind>(key, pars..[, weights]); kind = uniform | normal | exponential
+    // | gamma | poisson | bernoulli | beta | categorical
+    | RandGen of kind: string * key: IRExpr * pars: IRExpr list * weights: (IRExpr * int) option
 
 type IRModule = {
     Name: string

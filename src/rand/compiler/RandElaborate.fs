@@ -12,11 +12,14 @@
 ///   rand.poisson(key, lam, n)            -- Poisson(lam), Knuth
 ///   rand.bernoulli(key, p, n)            -- Bernoulli(p), as 0.0/1.0
 ///   rand.beta(key, a, b, n)              -- Beta(a, b), from two gammas
+///   rand.categorical(key, W, n)          -- index in [0,|W|), P(i) ~ W_i; Int64 elements
 ///
 /// `key` is an Int64 stream key (same key => same draws). The distribution parameters are ordinary RUNTIME Float64
 /// expressions -- they need not be static, and are evaluated once per fill. `shape` is a static int or a list of static
 /// ints (`let static` names or literals) and is always the LAST argument. Every family yields Float64 elements,
-/// including the integer-valued poisson/bernoulli (see cpp/rand_runtime.hpp for why).
+/// including the integer-valued poisson/bernoulli (see cpp/rand_runtime.hpp for why) -- except `categorical`, which
+/// yields Int64 because its draws are subscripts. `categorical`'s `W` is a rank-1 Float64 array (unnormalized weights
+/// are fine) with a STATIC extent, not a scalar; it is the one array-valued parameter in the surface.
 ///
 /// Unlike the math module this pass synthesizes no Blade source -- a counter-free RNG is not expressible in Blade
 /// (no unsigned/bitwise ops), so the RNG lives in the C++ runtime and this pass only rewrites the call.
@@ -55,25 +58,35 @@ let private resolveShape (statics: StaticEnv) (what: string) (shapeE: Expr) : Re
                 else Error (sprintf "%s: shape extents must be positive (got %d)" what n))))
         (Ok [])
 
-/// The `rand` surface: (op, internal builtin, count of runtime Float64 distribution parameters).
+/// The `rand` surface: (op, internal builtin, count of non-shape parameter arguments).
 /// Every op has the shape `rand.<op>(key, p1, .., pk, shape)` -- key first, shape LAST, the family's
-/// parameters in between. The parameters are ordinary runtime SCALAR expressions (only the shape is
-/// static); the checker fixes the same arity on the intrinsic, so this table is the surface spelling,
-/// not the authority. Adding a scalar-parameter family = one row here, one row in the checker arm, a
-/// C++ fill, and a mirror.
+/// parameters in between. This pass does not type the parameters at all; it counts them, passes them
+/// through verbatim, and lets the checker arm decide what each one must be. The checker fixes the same
+/// arity on the intrinsic, so this table is the surface spelling, not the authority.
 ///
-/// DEFERRED: `categorical(weights, k)`. It does not fit this table, because every parameter channel
-/// here is a Float64 SCALAR -- carried as a `TypedExpr` in TExprRandGen, an `IRExpr` in RandGen, a
-/// `(double)`-cast argument in codegen and a `float` in RandMirror.draws. An array-valued weights
-/// parameter needs a SECOND, differently-shaped channel end to end: the checker would have to accept
-/// (and pin the extent of) an `Array<Float64 like Idx<k>>` argument, codegen would pass
-/// `pool_base(W.data)` plus a length rather than a scalar, and the interpreter would have to unwrap a
-/// VArray to a flat float[]. It also raises an output-type question the other families dodge:
-/// categorical yields INDICES, and returning them as Float64 (as poisson's counts are) leaves them
-/// unusable as subscripts without a coercion the rand surface does not have. Both are real design
-/// decisions rather than more of the same plumbing, so categorical is left for the P2 follow-up that
-/// introduces the array-parameter channel -- which is also when SMC resampling (the plan's motivating
-/// consumer) actually needs it.
+/// Those parameters are ordinary runtime SCALAR Float64 expressions (only the shape is static) for
+/// every family EXCEPT `categorical`, whose single parameter is an ARRAY: a rank-1 Float64 weights
+/// array whose extent the checker pins statically. Adding a scalar-parameter family = one row here,
+/// one row in the checker arm, a C++ fill, and a mirror.
+///
+/// CATEGORICAL, formerly deferred here, resolved the two design questions that kept it out of wave 1:
+///
+///  1. ARRAY PARAMETER CHANNEL. Every other parameter is a Float64 scalar -- a `TypedExpr` in
+///     TExprRandGen, an `IRExpr` in RandGen, a `(double)`-cast argument in codegen, a `float` in
+///     RandMirror.draws. Weights get a SECOND, differently-shaped channel carried alongside rather
+///     than inside `pars`: an explicit `weights` field paired with the checker-pinned static extent,
+///     emitted by codegen as `pool_base(W.data), (size_t)k` and unwrapped by the interpreter from a
+///     VArray's SFloat store. The extent must be a literal because the length travels with the
+///     pointer; a symbolic extent is refused in the checker arm.
+///  2. OUTPUT TYPE. Categorical yields INDICES, so it returns Int64 rather than joining
+///     poisson/bernoulli in the all-Float64 convention -- Float64 indices would need a coercion the
+///     rand surface does not have, defeating the purpose. This is the first non-`double` fill, and it
+///     cost less than expected: codegen's allocation was already generic in `elemTypeToCpp`, so the
+///     checker choosing ETInt64 selects an `int64_t` pool by itself. Only the fill signature
+///     (`int64_t* out`) and the mirror's return type (`int64[]` into an SInt store) are new.
+///
+/// The drawn indices DO subscript arrays directly -- `method_for(idx) <@> lambda(i) -> w[i]` gathers,
+/// pinned by corpus test 017 -- so no index-tag seam blocks the motivating SMC-resampling use.
 let private ops : (string * string * int) list =
     [ "uniform",     "__rand_uniform",     0
       "normal",      "__rand_normal",      0
@@ -81,7 +94,8 @@ let private ops : (string * string * int) list =
       "gamma",       "__rand_gamma",       2   // shape, rate
       "poisson",     "__rand_poisson",     1   // lam
       "bernoulli",   "__rand_bernoulli",   1   // p
-      "beta",        "__rand_beta",        2 ] // a, b
+      "beta",        "__rand_beta",        2   // a, b
+      "categorical", "__rand_categorical", 1 ] // weights (ARRAY, not a scalar)
 
 /// Per-op parameter names, for the arity error message only.
 let private paramNames (op: string) : string list =
@@ -91,6 +105,7 @@ let private paramNames (op: string) : string list =
     | "poisson"     -> ["lam"]
     | "bernoulli"   -> ["p"]
     | "beta"        -> ["a"; "b"]
+    | "categorical" -> ["weights"]
     | _             -> []
 
 /// Elaborate one qualified rand op. `keyE` and the distribution parameters are passed through verbatim

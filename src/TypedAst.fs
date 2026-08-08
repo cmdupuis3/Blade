@@ -211,14 +211,28 @@ and TypedExprKind =
     | TExprFillRandom of modulus: TypedExpr
     // rand.<fam>(key, params..., shape): internal builtin, deterministic
     // random-array constructor, self-typed from the shape argument. Lowering
-    // records (kind, key, pars) in RandomInits. `kind` is the family name
-    // ("uniform" | "normal" | "exponential" | "gamma" | "poisson" |
-    // "bernoulli" | "beta"); `pars` are the family's runtime Float64 scalar
-    // parameters in surface order (empty for uniform/normal, one for
-    // exponential/poisson/bernoulli, two for gamma/beta) -- ordinary typed
+    // records (kind, key, pars, weights) in RandomInits. `kind` is the family
+    // name ("uniform" | "normal" | "exponential" | "gamma" | "poisson" |
+    // "bernoulli" | "beta" | "categorical"); `pars` are the family's runtime
+    // Float64 SCALAR parameters in surface order (empty for uniform/normal, one
+    // for exponential/poisson/bernoulli, two for gamma/beta) -- ordinary typed
     // expressions, evaluated once per fill, NOT per draw; `dims` are the
     // static extents.
-    | TExprRandGen of kind: string * key: TypedExpr * pars: TypedExpr list * dims: int list
+    //
+    // `weights` is the SECOND parameter channel, and is `Some` only for
+    // `categorical` (whose `pars` is correspondingly empty). It is an
+    // ARRAY-valued parameter -- a rank-1 Float64 array -- carried separately
+    // from `pars` because it is shaped differently at every stage downstream:
+    // codegen passes a pool pointer plus a length where a scalar par passes one
+    // `(double)` cast, and the interpreter unwraps a VArray where a scalar par
+    // evaluates to a number. Folding it into `pars` would make every consumer
+    // re-discover which entries are arrays.
+    //
+    // The paired int is the weights array's STATIC extent, pinned by the
+    // checker off the argument's own type. It rides along rather than being
+    // re-read from the TypedExpr's type downstream so that the "is this extent
+    // static?" question is asked (and refused) in exactly one place.
+    | TExprRandGen of kind: string * key: TypedExpr * pars: TypedExpr list * weights: (TypedExpr * int) option * dims: int list
     | TExprGuard of cond: TypedExpr * body: TypedExpr
     | TExprZero
     | TExprReynolds of kernel: TypedExpr * isAntisymmetric: bool
