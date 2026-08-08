@@ -1,0 +1,8 @@
+// TEST: MH Log-Posterior Type (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: must take a scalar Float latent
+import ppl as ppl
+// The latent is a Float scalar; an Int-annotated parameter cannot receive
+// the Gaussian-perturbed proposal, so the wiring is refused up front.
+function lp_int(k: Int64) -> Float64 = 0.0 - 1.0 * k * k
+let c = ppl.mh(lp_int, 0.0, 64, 1.0, 7)

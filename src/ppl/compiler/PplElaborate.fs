@@ -75,7 +75,7 @@ let private map1 (a: Expr) (body: Expr) =
 // bridge (dist_pdf_approx/dist_quantile_approx/dist_sample_approx) are formers
 // too: the family list here mirrors familyParams below (kept literal so this
 // set stays the one place the qualified-surface/misplaced-use machinery reads).
-let private formerNames = set [ "moments"; "comoments"; "cumulants"; "independent"; "dist"; "dist_add"; "dist_scale"; "comoments_merge"; "mstate"; "mstate_merge"; "mstate_cumulants"; "mixed_cumulants"; "dist_affine"; "dist_jet"; "dist_jet_closed"; "dist_map"; "dist_map_closed"; "free_cumulants"; "dist_expect"; "dist_reweight"; "dist_mix"; "dist_atoms"; "dist_negativity"; "gaussian"; "exponential"; "gamma"; "poisson"; "uniform"; "lognormal"; "bernoulli"; "beta"; "logpdf"; "loglik"; "sample"; "dist_pdf_approx"; "dist_quantile_approx"; "dist_sample_approx" ]
+let private formerNames = set [ "moments"; "comoments"; "cumulants"; "independent"; "dist"; "dist_add"; "dist_scale"; "comoments_merge"; "mstate"; "mstate_merge"; "mstate_cumulants"; "mixed_cumulants"; "dist_affine"; "dist_jet"; "dist_jet_closed"; "dist_map"; "dist_map_closed"; "free_cumulants"; "dist_expect"; "dist_reweight"; "dist_mix"; "dist_atoms"; "dist_negativity"; "gaussian"; "exponential"; "gamma"; "poisson"; "uniform"; "lognormal"; "bernoulli"; "beta"; "logpdf"; "loglik"; "sample"; "dist_pdf_approx"; "dist_quantile_approx"; "dist_sample_approx"; "mh"; "chain_mean"; "chain_var"; "autocorr"; "ess"; "rhat" ]
 
 // Partition lattice: cumulants are Moebius-weighted sums over set partitions;
 // Bell(r) partitions, 2^r - 1 distinct blocks, each block's moment bound once and shared.
@@ -1871,6 +1871,7 @@ let private lgammaE (x: Expr) : Expr = appE (v "lgamma") [x]
 let private negE (x: Expr) : Expr = subE (fLit 0.0) x
 let private ltE a b = syn (ExprBinOp (Elementwise, OpLt, a, b))
 let private leE a b = syn (ExprBinOp (Elementwise, OpLe, a, b))
+let private gtE a b = syn (ExprBinOp (Elementwise, OpGt, a, b))
 let private ifE c t f = syn (ExprIf (c, t, f))
 
 /// Argument-position family recognition: `gaussian(mu, s2)` as a syntactic
@@ -1901,6 +1902,61 @@ let private checkSymbolicFamily (ctx: Ctx) (former: string) (position: string) (
 let private checkDensityFamily (ctx: Ctx) (former: string) (fam: string) (ps: Expr list) : Result<unit, string> =
     checkSymbolicFamily ctx former "log-density position" fam ps
 
+/// Shared logpdf synthesis: the ordered scalar bindings and the final value
+/// expression, names keyed by `tok`. Decl position (elabLogPdf) wraps the
+/// bindings as module lets under the user's decl; expression position
+/// (rewriteBodyFormers, plan section 4's density-form model bodies) wraps
+/// them as statement lets in a block, so the same closed forms serve both.
+let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr) : (string * Expr) list * Expr =
+    let pName i = sprintf "__ppl_lp_%s_p%d" tok i
+    let xName = sprintf "__ppl_lp_%s_x" tok
+    let pBinds = ps |> List.mapi (fun i e -> (pName i, e))
+    let p i = v (pName i)
+    let x = v xName
+    let extra, value =
+        match fam with
+        | "gaussian" ->
+            // -log(2 pi s2)/2 - (x - mu)^2 / (2 s2)
+            let dN = sprintf "__ppl_lp_%s_d" tok
+            ([ (dN, subE x (p 0)) ],
+             subE (mulE (fLit (-0.5)) (log2piE (p 1)))
+                  (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
+        | "exponential" ->
+            // log(rate) - rate x
+            ([], subE (appE (v "log") [p 0]) (mulE (p 0) x))
+        | "uniform" ->
+            // the in-support constant -log(b - a)
+            ([], subE (fLit 0.0) (appE (v "log") [subE (p 1) (p 0)]))
+        | "lognormal" ->
+            // -log(x) - log(2 pi s2)/2 - (log(x) - mu)^2 / (2 s2)
+            let lxN = sprintf "__ppl_lp_%s_lx" tok
+            let dN = sprintf "__ppl_lp_%s_d" tok
+            ([ (lxN, appE (v "log") [x]); (dN, subE (v lxN) (p 0)) ],
+             subE (subE (mulE (fLit (-0.5)) (log2piE (p 1))) (v lxN))
+                  (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
+        | "gamma" ->
+            // (shape-1) log(x) - rate x + shape log(rate) - lgamma(shape)
+            ([], subE (addE (subE (mulE (subE (p 0) (fLit 1.0)) (logE x))
+                                 (mulE (p 1) x))
+                           (mulE (p 0) (logE (p 1))))
+                      (lgammaE (p 0)))
+        | "poisson" ->
+            // k log(lam) - lam - lgamma(k + 1)
+            ([], subE (subE (mulE x (logE (p 0))) (p 0))
+                      (lgammaE (addE x (fLit 1.0))))
+        | "beta" ->
+            // (a-1) log(x) + (b-1) log(1-x) - (lgamma a + lgamma b - lgamma(a+b))
+            ([], subE (addE (mulE (subE (p 0) (fLit 1.0)) (logE x))
+                            (mulE (subE (p 1) (fLit 1.0)) (logE (subE (fLit 1.0) x))))
+                      (subE (addE (lgammaE (p 0)) (lgammaE (p 1)))
+                            (lgammaE (addE (p 0) (p 1)))))
+        | "bernoulli" ->
+            // x log(p) + (1-x) log(1-p)
+            ([], addE (mulE x (logE (p 0)))
+                      (mulE (subE (fLit 1.0) x) (logE (subE (fLit 1.0) (p 0)))))
+        | _ -> ([], fLit 0.0)   // unreachable: checkDensityFamily gates
+    (pBinds @ [ (xName, xExpr) ] @ extra, value)
+
 /// logpdf(family(params), x): the scalar log-density at x -- closed-form
 /// arithmetic over once-bound parameters, ON-SUPPORT by design (no branching;
 /// see the section comment).
@@ -1911,54 +1967,8 @@ let private elabLogPdf (active: string -> bool) (ctx: Ctx) (span: Span) (outName
         familyArg "logpdf" active famE |> Result.bind (fun (fam, ps) ->
         checkDensityFamily ctx "logpdf" fam ps |> Result.map (fun () ->
             let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-            let pName i = sprintf "__ppl_lp_%s_p%d" outName i
-            let xName = sprintf "__ppl_lp_%s_x" outName
-            let pDecls = ps |> List.mapi (fun i e -> bind (pName i) e)
-            let p i = v (pName i)
-            let x = v xName
-            let extra, value =
-                match fam with
-                | "gaussian" ->
-                    // -log(2 pi s2)/2 - (x - mu)^2 / (2 s2)
-                    let dN = sprintf "__ppl_lp_%s_d" outName
-                    ([ bind dN (subE x (p 0)) ],
-                     subE (mulE (fLit (-0.5)) (log2piE (p 1)))
-                          (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
-                | "exponential" ->
-                    // log(rate) - rate x
-                    ([], subE (appE (v "log") [p 0]) (mulE (p 0) x))
-                | "uniform" ->
-                    // the in-support constant -log(b - a)
-                    ([], subE (fLit 0.0) (appE (v "log") [subE (p 1) (p 0)]))
-                | "lognormal" ->
-                    // -log(x) - log(2 pi s2)/2 - (log(x) - mu)^2 / (2 s2)
-                    let lxN = sprintf "__ppl_lp_%s_lx" outName
-                    let dN = sprintf "__ppl_lp_%s_d" outName
-                    ([ bind lxN (appE (v "log") [x]); bind dN (subE (v lxN) (p 0)) ],
-                     subE (subE (mulE (fLit (-0.5)) (log2piE (p 1))) (v lxN))
-                          (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
-                | "gamma" ->
-                    // (shape-1) log(x) - rate x + shape log(rate) - lgamma(shape)
-                    ([], subE (addE (subE (mulE (subE (p 0) (fLit 1.0)) (logE x))
-                                         (mulE (p 1) x))
-                                   (mulE (p 0) (logE (p 1))))
-                              (lgammaE (p 0)))
-                | "poisson" ->
-                    // k log(lam) - lam - lgamma(k + 1)
-                    ([], subE (subE (mulE x (logE (p 0))) (p 0))
-                              (lgammaE (addE x (fLit 1.0))))
-                | "beta" ->
-                    // (a-1) log(x) + (b-1) log(1-x) - (lgamma a + lgamma b - lgamma(a+b))
-                    ([], subE (addE (mulE (subE (p 0) (fLit 1.0)) (logE x))
-                                    (mulE (subE (p 1) (fLit 1.0)) (logE (subE (fLit 1.0) x))))
-                              (subE (addE (lgammaE (p 0)) (lgammaE (p 1)))
-                                    (lgammaE (addE (p 0) (p 1)))))
-                | "bernoulli" ->
-                    // x log(p) + (1-x) log(1-p)
-                    ([], addE (mulE x (logE (p 0)))
-                              (mulE (subE (fLit 1.0) x) (logE (subE (fLit 1.0) (p 0)))))
-                | _ -> ([], fLit 0.0)   // unreachable: checkDensityFamily gates
-            pDecls @ [bind xName xExpr] @ extra
+            let (binds, value) = logPdfParts outName fam ps xExpr
+            (binds |> List.map (fun (n, e) -> bind n e))
                 @ [ { Value = DeclLet { binding with Value = value }; Span = span } ]))
     | _ ->
         Error "logpdf expects logpdf(family(params), x): a symbolic family argument and the evaluation point"
@@ -1970,12 +1980,8 @@ let private elabLogPdf (active: string -> bool) (ctx: Ctx) (span: Span) (outName
 /// per-family constants hoisted out of the loop; uniform needs no loop at
 /// all (the on-support sum is -n log(b-a)). Leading variable axes are
 /// refused: a univariate family has no per-coordinate loglik.
-let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
-    : Result<Located<Decl> list, string> =
-    match args with
-    | [famE; { Kind = ExprKind.ExprVar aName }] ->
-        familyArg "loglik" active famE |> Result.bind (fun (fam, ps) ->
-        checkDensityFamily ctx "loglik" fam ps |> Result.bind (fun () ->
+let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (aName: string)
+    : Result<(string * Expr) list * Expr, string> =
         match Map.tryFind aName ctx.Arrays with
         | None ->
             Error (sprintf "loglik: '%s' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape" aName)
@@ -1987,17 +1993,16 @@ let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName
             | None -> Error (sprintf "loglik: '%s' sample axis extent must be statically known (Idx<n> directly or through aliases)" aName)
             | Some n ->
                 let nF = float n
-                let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-                let pName i = sprintf "__ppl_ll_%s_p%d" outName i
-                let pDecls = ps |> List.mapi (fun i e -> bind (pName i) e)
+                let pName i = sprintf "__ppl_ll_%s_p%d" tok i
+                let pBinds = ps |> List.mapi (fun i e -> (pName i, e))
                 let p i = v (pName i)
-                let accN i = sprintf "__ppl_ll_%s_acc%d" outName i
-                let iN = sprintf "__ppl_ll_%s_i" outName
+                let accN i = sprintf "__ppl_ll_%s_acc%d" tok i
+                let iN = sprintf "__ppl_ll_%s_i" tok
                 // The loop var is a plain Int64 read against a tagged sample
                 // axis; route the read through a synthesized `__` alias so
                 // BL4003's synthesized-buffer gate applies (the read is
                 // compiler-generated -- the user has no cast to write).
-                let srcN = sprintf "__ppl_ll_%s_src" outName
+                let srcN = sprintf "__ppl_ll_%s_src" tok
                 let aRead = appE (v srcN) [v iN]
                 let sMut nm vl = StmtLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindMut }
                 let accAdd i term = StmtExpr (syn (ExprAssign (v (accN i), addE (v (accN i)) term)))
@@ -2010,7 +2015,7 @@ let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName
                     match fam with
                     | "gaussian" ->
                         // -n/2 log(2 pi s2) - sum (x_i - mu)^2 / (2 s2)
-                        let dN = sprintf "__ppl_ll_%s_d" outName
+                        let dN = sprintf "__ppl_ll_%s_d" tok
                         loop 1
                              [ sLet dN (subE aRead (p 0)); accAdd 0 (mulE (v dN) (v dN)) ]
                              (subE (mulE (fLit (-nF / 2.0)) (log2piE (p 1)))
@@ -2024,8 +2029,8 @@ let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName
                         mulE (fLit (-nF)) (appE (v "log") [subE (p 1) (p 0)])
                     | "lognormal" ->
                         // -n/2 log(2 pi s2) - sum log x_i - sum (log x_i - mu)^2 / (2 s2)
-                        let lxN = sprintf "__ppl_ll_%s_lx" outName
-                        let dN = sprintf "__ppl_ll_%s_d" outName
+                        let lxN = sprintf "__ppl_ll_%s_lx" tok
+                        let dN = sprintf "__ppl_ll_%s_d" tok
                         loop 2
                              [ sLet lxN (appE (v "log") [aRead])
                                accAdd 0 (v lxN)
@@ -2060,12 +2065,105 @@ let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName
                                    (mulE (logE (subE (fLit 1.0) (p 0))) (subE (fLit nF) (v (accN 0)))))
                     | _ -> fLit 0.0   // unreachable: checkDensityFamily gates
                 // uniform reads no data: no alias, or it would print as an unused copy.
-                let srcDecls = if fam = "uniform" then [] else [ bind srcN (v aName) ]
-                Ok (pDecls @ srcDecls @ [ { Value = DeclLet { binding with Value = value }; Span = span } ])))
+                let srcBinds = if fam = "uniform" then [] else [ (srcN, v aName) ]
+                Ok (pBinds @ srcBinds, value)
+
+let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    match args with
+    | [famE; { Kind = ExprKind.ExprVar aName }] ->
+        familyArg "loglik" active famE |> Result.bind (fun (fam, ps) ->
+        checkDensityFamily ctx "loglik" fam ps |> Result.bind (fun () ->
+        logLikParts ctx outName fam ps aName |> Result.map (fun (binds, value) ->
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            (binds |> List.map (fun (nm, e) -> bind nm e))
+                @ [ { Value = DeclLet { binding with Value = value }; Span = span } ])))
     | [_; _] ->
         Error "loglik: the second argument must be a named module-level array (the sample vector)"
     | _ ->
         Error "loglik expects loglik(family(params), A): a symbolic family argument and a rank-1 sample array"
+
+/// Expression-position density formers, for top-level FUNCTION BODIES only
+/// (docs/plan-ppl-proper.md section 4: a model is an ordinary named function
+/// from latents to a Float log-density, assembled from log-prob terms). Each
+/// call site rewrites in place to a block of statement lets around the same
+/// closed forms the decl-position formers emit -- logpdf stays straight-line
+/// scalar arithmetic and loglik keeps its AD-able accumulation loop, so a
+/// model body remains inside the Grad subset for the HMC wave. Every OTHER
+/// former stays decl-RHS only (pass 3's misplaced check still walks these
+/// bodies and refuses what this pass did not rewrite).
+let private rewriteBodyFormers (active: string -> bool) (ctx: Ctx) (fnName: string) (body: Expr)
+    : Result<Expr, string> =
+    let mutable err : string option = None
+    let mutable site = 0
+    let fail msg e = (if err.IsNone then err <- Some msg); e
+    let blockOf (binds: (string * Expr) list) (value: Expr) =
+        syn (ExprBlock (binds |> List.map (fun (nm, e) -> sLet nm e), Some value))
+    let rec go (e: Expr) : Expr =
+        let r = go
+        let rStmt s =
+            let rec goS s =
+                match s with
+                | StmtLet b -> StmtLet { b with Value = r b.Value }
+                | StmtAssign (l, op, rr) -> StmtAssign (r l, op, r rr)
+                | StmtExpr x -> StmtExpr (r x)
+                | StmtForIn (var, range, sbody) -> StmtForIn (var, r range, List.map goS sbody)
+                | StmtSpanned (inner, sp) -> StmtSpanned (goS inner, sp)
+            goS s
+        match e.Kind with
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "logpdf" }, args) when active "logpdf" ->
+            let tok = sprintf "%s_%d" fnName site
+            site <- site + 1
+            (match args with
+             | [famE; xExpr] ->
+                 (familyArg "logpdf" active famE |> Result.bind (fun (fam, ps) ->
+                  checkDensityFamily ctx "logpdf" fam ps |> Result.map (fun () ->
+                     let (binds, value) = logPdfParts tok fam (List.map r ps) (r xExpr)
+                     blockOf binds value)))
+                 |> function Ok e' -> e' | Error m -> fail m e
+             | _ -> fail "logpdf expects logpdf(family(params), x): a symbolic family argument and the evaluation point" e)
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "loglik" }, args) when active "loglik" ->
+            let tok = sprintf "%s_%d" fnName site
+            site <- site + 1
+            (match args with
+             | [famE; { Kind = ExprKind.ExprVar aName }] ->
+                 (familyArg "loglik" active famE |> Result.bind (fun (fam, ps) ->
+                  checkDensityFamily ctx "loglik" fam ps |> Result.bind (fun () ->
+                  logLikParts ctx tok fam (List.map r ps) aName |> Result.map (fun (binds, value) ->
+                     blockOf binds value))))
+                 |> function Ok e' -> e' | Error m -> fail m e
+             | [_; _] -> fail "loglik: the second argument must be a named module-level array (the sample vector)" e
+             | _ -> fail "loglik expects loglik(family(params), A): a symbolic family argument and a rank-1 sample array" e)
+        | ExprKind.ExprApp (f, args) -> inheritSpan e (ExprApp (r f, List.map r args))
+        | ExprKind.ExprBinOp (m, op, a, b) -> inheritSpan e (ExprBinOp (m, op, r a, r b))
+        | ExprKind.ExprUnaryOp (op, a) -> inheritSpan e (ExprUnaryOp (op, r a))
+        | ExprKind.ExprTyped (a, t) -> inheritSpan e (ExprTyped (r a, t))
+        | ExprKind.ExprAssign (l, rr) -> inheritSpan e (ExprAssign (r l, r rr))
+        | ExprKind.ExprTuple es -> inheritSpan e (ExprTuple (List.map r es))
+        | ExprKind.ExprArrayLit es -> inheritSpan e (ExprArrayLit (List.map r es))
+        | ExprKind.ExprDotDot (a, b) -> inheritSpan e (ExprDotDot (r a, r b))
+        | ExprKind.ExprIf (c, t, f) -> inheritSpan e (ExprIf (r c, r t, r f))
+        | ExprKind.ExprLet (b, bodyE) -> inheritSpan e (ExprLet ({ b with Value = r b.Value }, r bodyE))
+        | ExprKind.ExprLambda (ps, w, bodyE) -> inheritSpan e (ExprLambda (ps, w, r bodyE))
+        | ExprKind.ExprMatch (s, cases) ->
+            inheritSpan e (ExprMatch (r s, cases |> List.map (fun c -> { c with Guard = Option.map r c.Guard; Body = r c.Body })))
+        | ExprKind.ExprBlock (stmts, fin) -> inheritSpan e (ExprBlock (List.map rStmt stmts, Option.map r fin))
+        | ExprKind.ExprCompute a -> inheritSpan e (ExprCompute (r a))
+        | ExprKind.ExprPure a -> inheritSpan e (ExprPure (r a))
+        | ExprKind.ExprReduce (a, k, init) -> inheritSpan e (ExprReduce (r a, r k, Option.map r init))
+        | ExprKind.ExprMethodFor es -> inheritSpan e (ExprMethodFor (List.map r es))
+        | ExprKind.ExprZip es -> inheritSpan e (ExprZip (List.map r es))
+        | ExprKind.ExprField (obj, fld) -> inheritSpan e (ExprField (r obj, fld))
+        | ExprKind.ExprTupleIndex (t, i) -> inheritSpan e (ExprTupleIndex (r t, r i))
+        | ExprKind.ExprReplicate (c, b) -> inheritSpan e (ExprReplicate (r c, r b))
+        | ExprKind.ExprGuard (c, b) -> inheritSpan e (ExprGuard (r c, r b))
+        // Everything else is left untouched: a density former buried in a
+        // node this walker does not descend is still caught by pass 3.
+        | _ -> e
+    let body' = go body
+    match err with
+    | Some m -> Error m
+    | None -> Ok body'
 
 // =========================================================================
 // The approximate tower bridge (docs/plan-ppl-proper.md section 2) -- an
@@ -2540,6 +2638,358 @@ let private elabPplSample (active: string -> bool) (ctx: Ctx) (span: Span) (sNam
             | _ -> [])))   // unreachable: familyArg gates on familyNames
     | _ ->
         Error "sample expects sample(family(params), key, n): a symbolic family argument, an Int64 stream key, and a static sample count"
+
+// =========================================================================
+// P4 -- sampling inference (docs/plan-ppl-proper.md section 5): the chain
+// machinery and its diagnostics.
+//
+//   mh(logpost, x0, n, scale, key)   random-walk Metropolis. The chain is the
+//       language's own sequential construct -- a RECURSIVE ARRAY whose slice
+//       calls a synthesized step function (the corpus-blessed block-wrapped
+//       `let rec` + per-step function shape, sgs/015 / ml-e2e/001):
+//         let <name> = {
+//             let rec __c: Array<Float64 like Idx<n>> =
+//                 match __c with
+//                 | zero -> zero
+//                 | zero :: s -> zero :: x0
+//                 | prefix :: t -> prefix :: __step(prefix(t - 1), t)
+//             __c }
+//       All randomness is pregenerated OUTSIDE the chain as two keyed batch
+//       fills of length n -- proposals __rand_normal(key + 1000003, n) and
+//       accept draws __rand_uniform(key + 2000003, n) -- so the sweep itself
+//       is deterministic arithmetic. Distinct additive site constants are
+//       enough key discipline here: the rand runtime reseeds mt19937_64
+//       through the SplitMix64/mix64 finalizer per call, which decorrelates
+//       even ADJACENT keys (the rand/004 pin), so any two distinct offsets
+//       give independent streams; the constants are >= 1e6 apart so two
+//       user keys for two chains cannot collide with each other's offsets
+//       unless they differ by exactly 1000000. Element 0 of each fill is
+//       unused (the seed slice consumes no randomness); step t reads fill
+//       slot t. The step function holds the proposal and the accept/reject
+//       CONDITIONAL EXPRESSION -- legal here, nothing in the sampler loop is
+//       ever differentiated -- and is the seam the HMC wave replaces with a
+//       leapfrog step; `logpost` is called BY NAME (recursive-array slices
+//       call ordinary same-module functions; no inlining needed, unlike
+//       dist_map's symbolic differentiation which must see one closed
+//       expression). Convention: chain(0) = x0; chain(t), t >= 1, are the
+//       MH states, so a length-n chain carries n-1 transitions.
+//
+//   chain_mean(c, burn) / chain_var(c, burn)   moments of the post-burn
+//       suffix c(burn..n-1); population normalization (/m, matching the
+//       module's moment estimators). Emitted as the elabLogLik scalar
+//       accumulation-loop idiom over a `__` read alias.
+//   autocorr(c, maxlag)   lag-0..maxlag autocorrelation array: rho_k =
+//       sum_{t<n-k} (x_t - m)(x_{t+k} - m) / sum_t (x_t - m)^2 (the biased
+//       estimator, standard for ESS); rho_0 = 1 by construction. A constant
+//       chain has zero denominator and honestly reports NaN.
+//   ess(c)   effective sample size via Geyer's INITIAL POSITIVE SEQUENCE:
+//       pair sums G_k = rho_{2k} + rho_{2k+1} for k = 0..P-1 with
+//       P = min((n-2)/2, 128) pairs; truncate at the FIRST non-positive
+//       pair (it and everything after contribute nothing); tau = -1 +
+//       2 * sum of surviving G_k; ess = n / tau. No initial-convex
+//       monotonicity pass, and tau is not clamped (an antithetic chain may
+//       lawfully report ess > n).
+//   rhat(c1, c2)   split-Rhat over two equal-length chains: each splits in
+//       half -> J = 4 segments of m = n/2; within W = mean of the 4 sample
+//       variances (/(m-1)); between B = m * variance of the 4 segment means
+//       (/(J-1)); Rhat = sqrt(((m-1)/m * W + B/m) / W).
+//
+// The diagnostics accept an mh chain from this module (length registered at
+// elaboration) or any module-level rank-1 Float array with a static extent
+// (annotated or computed) -- hand pins ride literal arrays. autocorr/ess/
+// rhat lower to synthesized top-level FUNCTIONS whose bodies are the
+// mut-array + element-write + for-loop shape grad() already generates and
+// the whole pipeline supports; chain_mean/chain_var are module-block
+// accumulation loops. Not yet composable: `dist(chain, r)` needs a declared
+// array annotation, which a former output does not carry -- lifting a chain
+// into a tower stays a follow-up seam.
+// =========================================================================
+
+let private tyFloat64 = TyNamed ("Float64", [])
+let private tyIntP = TyNamed ("Int", [])
+let private tyFloatArr (n: int) = TyArray (tyFloat64, [TyIdx (iLit n)])
+let private mkParamD (nm: string) (ty: TypeExpr) : ParamDecl =
+    { Name = nm; Type = Some ty; Mutability = Immutable; NameSpan = noSpan }
+let private mkFnDecl (span: Span) (name: string) (ps: ParamDecl list) (ret: TypeExpr) (body: Expr) : Located<Decl> =
+    { Value = DeclFunction { Name = name; TypeParams = []; Params = ps; WhereClause = None
+                             ReturnType = Some ret; Body = body; IsStatic = false; NameSpan = noSpan }
+      Span = span }
+let private sMutStmt nm vl = StmtLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindMut }
+let private assignStmt (lhs: Expr) (rhs: Expr) = StmtExpr (syn (ExprAssign (lhs, rhs)))
+let private forIn (var: string) (lo: Expr) (hi: Expr) (body: Stmt list) =
+    StmtForIn (var, syn (ExprDotDot (lo, hi)), body)
+
+/// mh(logpost, x0, n, scale, key) -- see the section comment for the emitted
+/// shape. Returns the decls and the static chain length for the registry.
+let private elabMh (ctx: Ctx) (span: Span) (chainName: string) (binding: Binding)
+    (funcs: Map<string, FunctionDecl>) (args: Expr list)
+    : Result<Located<Decl> list * int, string> =
+    match args with
+    | [lpE; x0E; nE; scaleE; keyE] ->
+        (match lpE.Kind with
+         | ExprKind.ExprVar f -> Ok f
+         | _ -> Error "mh: the first argument must be the NAME of a top-level same-module function (the log-posterior, Float -> Float), e.g. mh(logpost, 0.0, 4096, 1.0, 7)")
+        |> Result.bind (fun f ->
+        match Map.tryFind f funcs with
+        | None ->
+            Error (sprintf "mh: unknown log-posterior '%s' -- it must be a top-level function in this module (Float -> Float); assemble it from ppl.logpdf/ppl.loglik terms" f)
+        | Some fd ->
+            let isFloatTy = function
+                | TyFloat64 | TyFloat32 -> true
+                | TyNamed (("Float" | "Float64" | "Float32" | "Double"), []) -> true
+                | _ -> false
+            if fd.Params.Length <> 1 then
+                Error (sprintf "mh: '%s' takes %d parameter(s) -- this wave samples a SCALAR latent, so the log-posterior must be Float -> Float; fold extra structure into module-level data arrays" f fd.Params.Length)
+            elif not (fd.Params.Head.Type |> Option.forall isFloatTy) then
+                Error (sprintf "mh: '%s' must take a scalar Float latent (its parameter is annotated otherwise)" f)
+            elif not (fd.ReturnType |> Option.forall isFloatTy) then
+                Error (sprintf "mh: '%s' must return a Float log-density (its return type is annotated otherwise)" f)
+            else
+            (match evalExpr ctx.Statics maxSteps nE with
+             | Ok (SVInt x) when x >= 2L -> Ok (int x)
+             | Ok (SVInt x) -> Error (sprintf "mh: the chain length must be >= 2 (got %d) -- element 0 is the initial state" x)
+             | _ -> Error "mh: the chain length must be a compile-time integer (a literal, `let static`, or static-function call) -- shapes are static everywhere in Blade; x0, scale, and the key may be runtime values")
+            |> Result.map (fun n ->
+                let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+                let nm s = sprintf "__ppl_mh_%s_%s" chainName s
+                let x0N, scN, keyN = nm "x0", nm "scale", nm "key"
+                let epsN, uN, stepN, recN = nm "eps", nm "u", nm "step", nm "c"
+                let prevN, tN, propN, dN = "__prev", "__t", "__prop", "__lpd"
+                let stepBody =
+                    syn (ExprBlock (
+                            [ sLet propN (addE (v prevN) (mulE (v scN) (appE (v epsN) [v tN])))
+                              sLet dN (subE (appE (v f) [v propN]) (appE (v f) [v prevN])) ],
+                            Some (ifE (ltE (logE (appE (v uN) [v tN])) (v dN)) (v propN) (v prevN))))
+                let recBinding =
+                    { Mutability = BindLet
+                      Pattern = pvar recN
+                      Type = Some (tyFloatArr n)
+                      Value = syn (ExprRecArray {
+                                    Name = recN
+                                    SeedArm = Some ("__s", v x0N)
+                                    PrefixVar = "__p"
+                                    StepVar = tN
+                                    SliceExpr = appE (v stepN) [appE (v "__p") [subE (v tN) (iLit 1)]; v tN] }) }
+                [ bind x0N x0E
+                  bind scN scaleE
+                  bind keyN keyE
+                  bind epsN (appE (v "__rand_normal") [addE (v keyN) (iLit 1000003); iLit n])
+                  bind uN (appE (v "__rand_uniform") [addE (v keyN) (iLit 2000003); iLit n])
+                  mkFnDecl span stepN [mkParamD prevN tyFloat64; mkParamD tN tyIntP] tyFloat64 stepBody
+                  { Value = DeclLet { binding with Value = syn (ExprBlock ([ StmtLet recBinding ], Some (v recN))) }
+                    Span = span } ], n))
+    | _ ->
+        Error "mh expects mh(logpost, x0, n, scale, key): a top-level log-posterior function name, an initial state, a static chain length, the proposal standard deviation, and an Int64 stream key"
+
+/// A chain argument: an mh chain elaborated earlier in this module (its
+/// length is in the registry) or a module-level rank-1 array with a static
+/// extent (declared annotation or computed method_for shape).
+let private chainSource (ctx: Ctx) (chains: Map<string, int>) (former: string) (e: Expr)
+    : Result<string * int, string> =
+    match e.Kind with
+    | ExprKind.ExprVar nmv ->
+        (match Map.tryFind nmv chains with
+         | Some n -> Ok (nmv, n)
+         | None ->
+             match Map.tryFind nmv ctx.Arrays with
+             | Some (_, [ix]) ->
+                 (match resolveExtent ctx.Aliases ctx.Statics ix with
+                  | Some n -> Ok (nmv, n)
+                  | None -> Error (sprintf "%s: '%s' must have a statically known extent (Idx<n> directly or through aliases)" former nmv))
+             | Some (_, idxs) ->
+                 Error (sprintf "%s: '%s' carries %d declared axes -- chain diagnostics run on rank-1 chains" former nmv idxs.Length)
+             | None ->
+                 Error (sprintf "%s: '%s' must be a ppl.mh chain declared earlier in this module, or a module-level rank-1 array with an Array<Float like Idx<n>> annotation" former nmv))
+    | _ -> Error (sprintf "%s: the chain argument must be a named module-level binding" former)
+
+let private staticNat (ctx: Ctx) (former: string) (what: string) (e: Expr) : Result<int, string> =
+    match evalExpr ctx.Statics maxSteps e with
+    | Ok (SVInt x) when x >= 0L -> Ok (int x)
+    | Ok (SVInt x) -> Error (sprintf "%s: %s must be >= 0 (got %d)" former what x)
+    | _ -> Error (sprintf "%s: %s must be a compile-time integer (a literal, `let static`, or static-function call)" former what)
+
+/// chain_mean(c, burn) / chain_var(c, burn): post-burn moments as the
+/// elabLogLik module-block accumulation idiom, reads through a `__` alias.
+let private elabChainMoment (isVar: bool) (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
+    (chains: Map<string, int>) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    let former = if isVar then "chain_var" else "chain_mean"
+    match args with
+    | [chainE; burnE] ->
+        chainSource ctx chains former chainE |> Result.bind (fun (src, len) ->
+        staticNat ctx former "the burn-in count" burnE |> Result.bind (fun burn ->
+        if burn >= len then
+            Error (sprintf "%s: burn = %d discards the whole length-%d chain -- burn must be < the chain length" former burn len)
+        else
+            let m = float (len - burn)
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let nmOf s = sprintf "__ppl_%s_%s_%s" (if isVar then "cv" else "cm") outName s
+            let srcN, iN, aN, bN = nmOf "src", nmOf "i", nmOf "acc", nmOf "acc2"
+            let read = appE (v srcN) [v iN]
+            let value =
+                if isVar then
+                    // population variance of the suffix: E[x^2] - mean^2
+                    syn (ExprBlock (
+                            [ sMutStmt aN (fLit 0.0)
+                              sMutStmt bN (fLit 0.0)
+                              forIn iN (iLit burn) (iLit len)
+                                  [ assignStmt (v aN) (addE (v aN) read)
+                                    assignStmt (v bN) (addE (v bN) (mulE read read)) ] ],
+                            Some (subE (divE (v bN) (fLit m))
+                                       (mulE (divE (v aN) (fLit m)) (divE (v aN) (fLit m))))))
+                else
+                    syn (ExprBlock (
+                            [ sMutStmt aN (fLit 0.0)
+                              forIn iN (iLit burn) (iLit len) [ assignStmt (v aN) (addE (v aN) read) ] ],
+                            Some (divE (v aN) (fLit m))))
+            Ok [ bind srcN (v src)
+                 { Value = DeclLet { binding with Value = value }; Span = span } ]))
+    | _ ->
+        Error (sprintf "%s expects %s(chain, burn): a chain binding and a static burn-in count" former former)
+
+/// Shared prologue statements: mean and centered-sum-of-squares of a length-n
+/// source read through `srcE` -- `let mut mu; for; let m; let mut v; for`.
+let private meanVarStmts (tok: string) (srcRead: Expr -> Expr) (n: int) : Stmt list * string * string =
+    let muN, mN, vN, tN, dN = sprintf "__mu_%s" tok, sprintf "__m_%s" tok, sprintf "__v_%s" tok, sprintf "__t_%s" tok, sprintf "__d_%s" tok
+    let stmts =
+        [ sMutStmt muN (fLit 0.0)
+          forIn tN (iLit 0) (iLit n) [ assignStmt (v muN) (addE (v muN) (srcRead (v tN))) ]
+          sLet mN (divE (v muN) (fLit (float n)))
+          sMutStmt vN (fLit 0.0)
+          forIn tN (iLit 0) (iLit n)
+              [ sLet dN (subE (srcRead (v tN)) (v mN))
+                assignStmt (v vN) (addE (v vN) (mulE (v dN) (v dN))) ] ]
+    (stmts, mN, vN)
+
+/// autocorr(c, maxlag): a synthesized function (mut array + element writes +
+/// nested for loops, the grad-emission shape) applied to the chain.
+let private elabAutocorr (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
+    (chains: Map<string, int>) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    match args with
+    | [chainE; maxlagE] ->
+        chainSource ctx chains "autocorr" chainE |> Result.bind (fun (src, len) ->
+        staticNat ctx "autocorr" "maxlag" maxlagE |> Result.bind (fun maxlag ->
+        if maxlag < 1 || maxlag >= len then
+            Error (sprintf "autocorr: maxlag must be in 1..%d for a length-%d chain (got %d)" (len - 1) len maxlag)
+        else
+            let fnN = sprintf "__ppl_ac_%s_fn" outName
+            let srcP = "__src"
+            let read (i: Expr) = appE (v srcP) [i]
+            let (pre, mN, vN) = meanVarStmts "0" read len
+            let rN, kN, aN, tN = "__r", "__k", "__a", "__t2"
+            let body =
+                syn (ExprBlock (
+                        pre
+                        @ [ sMutStmt rN (computeE (syn (ExprReplicate (iLit (maxlag + 1), syn (ExprPure (fLit 0.0))))))
+                            assignStmt (appE (v rN) [iLit 0]) (fLit 1.0)
+                            forIn kN (iLit 1) (iLit (maxlag + 1))
+                                [ sMutStmt aN (fLit 0.0)
+                                  forIn tN (iLit 0) (subE (iLit len) (v kN))
+                                      [ assignStmt (v aN)
+                                            (addE (v aN)
+                                                  (mulE (subE (read (v tN)) (v mN))
+                                                        (subE (read (addE (v tN) (v kN))) (v mN)))) ]
+                                  assignStmt (appE (v rN) [v kN]) (divE (v aN) (v vN)) ] ],
+                        Some (v rN)))
+            Ok [ mkFnDecl span fnN [mkParamD srcP (tyFloatArr len)] (tyFloatArr (maxlag + 1)) body
+                 { Value = DeclLet { binding with Value = appE (v fnN) [v src] }; Span = span } ]))
+    | _ ->
+        Error "autocorr expects autocorr(chain, maxlag): a chain binding and a static maximum lag"
+
+/// ess(c): Geyer initial-positive-sequence truncation -- see the section
+/// comment for the exact rule.
+let private elabEss (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
+    (chains: Map<string, int>) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    match args with
+    | [chainE] ->
+        chainSource ctx chains "ess" chainE |> Result.bind (fun (src, len) ->
+        if len < 4 then Error (sprintf "ess: a length-%d chain is too short -- ess needs at least 4 elements" len)
+        else
+            let pairs = min ((len - 2) / 2) 128
+            let fnN = sprintf "__ppl_ess_%s_fn" outName
+            let srcP = "__src"
+            let read (i: Expr) = appE (v srcP) [i]
+            let (pre, mN, vN) = meanVarStmts "0" read len
+            let tauN, stopN, kN, aN, bN, tN, gN = "__tau", "__stop", "__k", "__a", "__b", "__t2", "__g"
+            let lagSum (accN: string) (lag: Expr) =
+                [ sMutStmt accN (fLit 0.0)
+                  forIn tN (iLit 0) (subE (iLit len) lag)
+                      [ assignStmt (v accN)
+                            (addE (v accN)
+                                  (mulE (subE (read (v tN)) (v mN))
+                                        (subE (read (addE (v tN) lag)) (v mN)))) ] ]
+            let evenLag = mulE (iLit 2) (v kN)
+            let oddLag = addE (mulE (iLit 2) (v kN)) (iLit 1)
+            let body =
+                syn (ExprBlock (
+                        pre
+                        @ [ sMutStmt tauN (fLit -1.0)
+                            sMutStmt stopN (fLit 0.0)
+                            forIn kN (iLit 0) (iLit pairs)
+                                (lagSum aN evenLag
+                                 @ lagSum bN oddLag
+                                 @ [ sLet gN (divE (addE (v aN) (v bN)) (v vN))
+                                     assignStmt (v stopN) (ifE (leE (v gN) (fLit 0.0)) (fLit 1.0) (v stopN))
+                                     assignStmt (v tauN) (addE (v tauN) (ifE (gtE (v stopN) (fLit 0.5)) (fLit 0.0) (mulE (fLit 2.0) (v gN)))) ]) ],
+                        Some (divE (fLit (float len)) (v tauN))))
+            Ok [ mkFnDecl span fnN [mkParamD srcP (tyFloatArr len)] tyFloat64 body
+                 { Value = DeclLet { binding with Value = appE (v fnN) [v src] }; Span = span } ])
+    | _ ->
+        Error "ess expects ess(chain): one chain binding"
+
+/// rhat(c1, c2): split-Rhat over two equal-length chains -- see the section
+/// comment for the exact formula.
+let private elabRhat (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
+    (chains: Map<string, int>) (args: Expr list)
+    : Result<Located<Decl> list, string> =
+    match args with
+    | [c1E; c2E] ->
+        chainSource ctx chains "rhat" c1E |> Result.bind (fun (s1, n1) ->
+        chainSource ctx chains "rhat" c2E |> Result.bind (fun (s2, n2) ->
+        if n1 <> n2 then Error (sprintf "rhat: the two chains must have the same static length (got %d and %d)" n1 n2)
+        elif n1 < 4 || n1 % 2 <> 0 then Error (sprintf "rhat: the chain length must be even and >= 4 (got %d) -- each chain splits into two halves" n1)
+        else
+            let len = n1
+            let m = len / 2
+            let mF = float m
+            let fnN = sprintf "__ppl_rhat_%s_fn" outName
+            let aP, bP = "__ca", "__cb"
+            // segment j: (source param, start offset)
+            let segs = [ (aP, 0); (aP, m); (bP, 0); (bP, m) ]
+            let muN j = sprintf "__mu%d" j
+            let mN j = sprintf "__m%d" j
+            let vvN j = sprintf "__vv%d" j
+            let sN j = sprintf "__s%d" j
+            let tN, dN = "__t", "__d"
+            let segStmts =
+                segs |> List.mapi (fun j (srcP, lo) ->
+                    let read = appE (v srcP) [v tN]
+                    [ sMutStmt (muN j) (fLit 0.0)
+                      forIn tN (iLit lo) (iLit (lo + m)) [ assignStmt (v (muN j)) (addE (v (muN j)) read) ]
+                      sLet (mN j) (divE (v (muN j)) (fLit mF))
+                      sMutStmt (vvN j) (fLit 0.0)
+                      forIn tN (iLit lo) (iLit (lo + m))
+                          [ sLet dN (subE read (v (mN j)))
+                            assignStmt (v (vvN j)) (addE (v (vvN j)) (mulE (v dN) (v dN))) ]
+                      sLet (sN j) (divE (v (vvN j)) (fLit (mF - 1.0))) ])
+                |> List.concat
+            let wN, mbN, bigBN, vpN = "__W", "__mb", "__B", "__vp"
+            let sumOver f = [0 .. 3] |> List.map f |> List.reduce addE
+            let finish =
+                [ sLet wN (divE (sumOver (fun j -> v (sN j))) (fLit 4.0))
+                  sLet mbN (divE (sumOver (fun j -> v (mN j))) (fLit 4.0))
+                  sLet bigBN (divE (mulE (fLit mF)
+                                         (sumOver (fun j ->
+                                             mulE (subE (v (mN j)) (v mbN)) (subE (v (mN j)) (v mbN)))))
+                                   (fLit 3.0))
+                  sLet vpN (divE (addE (mulE (fLit (mF - 1.0)) (v wN)) (v bigBN)) (fLit mF)) ]
+            let body = syn (ExprBlock (segStmts @ finish, Some (sqrtE (divE (v vpN) (v wN)))))
+            Ok [ mkFnDecl span fnN [mkParamD aP (tyFloatArr len); mkParamD bP (tyFloatArr len)] tyFloat64 body
+                 { Value = DeclLet { binding with Value = appE (v fnN) [v s1; v s2] }; Span = span } ]))
+    | _ ->
+        Error "rhat expects rhat(c1, c2): two chain bindings of the same static length"
 
 // dist_map: the symbolic front-end over dist_jet -- differentiate a lambda at elaboration time, evaluate the derivatives at
 // the runtime mean, and delegate to the jet pushforward. A polynomial's derivative chain terminates in structural zeros
@@ -3360,6 +3810,27 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
             |> List.fold (fun m (a, k) -> Map.add a (max k (defaultArg (Map.tryFind a m) 0)) m) Map.empty
         let ctx = { Arrays = arrays; Aliases = aliases; Statics = statics; Indep = indep
                     Pools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty }
+        // Pass 1.5: expression-position logpdf/loglik inside top-level
+        // function bodies (the density-form model layer, plan section 4) --
+        // each site becomes a block of statement lets, so `function
+        // logpost(theta) -> Float = logpdf(...) + loglik(...)` is ordinary
+        // straight-line/loop code by the time the checker sees it. Other
+        // formers in bodies still hit pass 3's misplaced-use refusal.
+        let rewrittenRes =
+            rest |> List.fold (fun acc d ->
+                acc |> Result.bind (fun ds ->
+                    match d.Value with
+                    | DeclFunction fd ->
+                        Blade.Ast.synthSpan <- d.Span
+                        rewriteBodyFormers active ctx fd.Name fd.Body
+                        |> Result.map (fun b -> ds @ [ { d with Value = DeclFunction { fd with Body = b } } ])
+                    | _ -> Ok (ds @ [d]))) (Ok [])
+        match rewrittenRes with
+        | Error e -> Error e
+        | Ok rest ->
+        // ppl.mh chains elaborated in this module: chain name -> static
+        // length, consumed by the chain diagnostics formers below.
+        let mutable chainLens : Map<string, int> = Map.empty
         // Pass 2: rewrite decl-RHS former calls, threading the dist registry (dist bindings are compile-time objects: consumed
         // here, their cumulant components materialize as ordinary array decls).
         let expanded =
@@ -3453,6 +3924,23 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     // lowers to the matching __rand_* intrinsic fill.
                     | DeclLet ({ Pattern = { Kind = PatternKind.PatVar sName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "sample" }, args) } } as b) when active "sample" ->
                         elabPplSample active ctx d.Span sName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    // Sampling inference (plan P4): the random-walk Metropolis
+                    // chain and its diagnostics (see the section comment at
+                    // elabMh for the emitted shapes and conventions).
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar chainName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "mh" }, args) } } as b) when active "mh" ->
+                        elabMh ctx d.Span chainName b funcDecls args |> Result.map (fun (nds, n) ->
+                            chainLens <- Map.add chainName n chainLens
+                            (ds @ nds, dists, mstates))
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "chain_mean" }, args) } } as b) when active "chain_mean" ->
+                        elabChainMoment false ctx d.Span outName b chainLens args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "chain_var" }, args) } } as b) when active "chain_var" ->
+                        elabChainMoment true ctx d.Span outName b chainLens args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "autocorr" }, args) } } as b) when active "autocorr" ->
+                        elabAutocorr ctx d.Span outName b chainLens args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "ess" }, args) } } as b) when active "ess" ->
+                        elabEss ctx d.Span outName b chainLens args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "rhat" }, args) } } as b) when active "rhat" ->
+                        elabRhat ctx d.Span outName b chainLens args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     // cumulant(d, k) on a FLAT registry dist (a pushforward
                     // result): no packed value exists for the checker's
                     // Dist-typed projection to see, so project here; the
