@@ -257,6 +257,47 @@ let bindingName (snippet: string) : string option =
     let m = bindingNameRe.Match snippet
     if m.Success then Some m.Groups.[1].Value else None
 
+/// The names a MULTI-LINE submission declares at top level.
+///
+/// `bindingName` is anchored `^\s*`, so it happily matches an INDENTED `let` --
+/// which is right for a `:paste` block of top-level declarations and wrong for
+/// a function body. Running it over every line of
+/// `function f(x) = { let n = ...; let m = ... }` harvested `n` and `m` as if
+/// the submission had bound them: they rode out to the REPL echo and the
+/// notebook's `bindings[]` as scoped names the user never bound, each with an
+/// empty type and value (nothing top-level carries that name to read one from),
+/// and the LAST of them became the echo target instead of the function.
+///
+/// Only a line that STARTS at nesting depth 0 can declare a top-level name.
+/// Depth counts (), [] and {} outside double-quoted strings and `//` comments --
+/// the same best-effort textual stance as the rest of this block (a brace in a
+/// comment can still fool it; the cost is a missed echo, never a wrong binding).
+let topLevelBindingNames (source: string) : string list =
+    let advance (depth: int) (line: string) : int =
+        let mutable d = depth
+        let mutable inQuotes = false
+        let mutable i = 0
+        while i < line.Length do
+            let c = line.[i]
+            if inQuotes then
+                if c = '\\' then i <- i + 1
+                elif c = '"' then inQuotes <- false
+            elif c = '"' then inQuotes <- true
+            elif c = '/' && i + 1 < line.Length && line.[i + 1] = '/' then i <- line.Length
+            elif c = '(' || c = '[' || c = '{' then d <- d + 1
+            elif c = ')' || c = ']' || c = '}' then d <- d - 1
+            i <- i + 1
+        d
+    let acc = ResizeArray<string>()
+    let mutable depth = 0
+    for line in source.Replace("\r\n", "\n").Split('\n') do
+        if depth <= 0 then
+            match bindingName line with
+            | Some n -> acc.Add n
+            | None -> ()
+        depth <- advance depth line
+    List.ofSeq acc
+
 /// The generated main prints a "<name> completed in Xs" timing line whose
 /// value changes every run -- exclude it from the output diff.
 let isTimingLine (l: string) =
@@ -744,10 +785,9 @@ type ReplSession(runCwd: string) =
             let (candidate, idx) = this.DeclarationCandidate trimmed
             // A :paste block may declare several names; every one of them is a
             // binding this submission made, and the LAST is what the REPL echoes.
-            let names =
-                trimmed.Replace("\r\n", "\n").Split('\n')
-                |> Array.choose bindingName
-                |> Array.toList
+            // Top-level only -- a function body's locals are not this
+            // submission's bindings (see topLevelBindingNames).
+            let names = topLevelBindingNames trimmed
             let target = List.tryLast names
             evalWith candidate { Index = idx; Prefix = 0; LeadPad = leadPad }
                      target (names |> List.map (fun n -> (n, n))) true

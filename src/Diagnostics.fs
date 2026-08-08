@@ -165,6 +165,12 @@ module Codes =
             // filled twice, a tag matching no slot, or an untagged positional
             // argument after a tagged one (ambiguous mix).
             "BL3014", "invalid quantity-tagged argument routing"
+            // BL3015: a name on the RHS of a `Unit` declaration that is
+            // neither a declared unit nor a built-in scale constant. A unit
+            // RHS composes what is already in scope; the alternative (mint
+            // the declared name as a fresh base unit) types a misspelling
+            // into a silently wrong dimension.
+            "BL3015", "unknown unit name"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"

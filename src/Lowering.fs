@@ -1381,8 +1381,13 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
     
     | TDeclUnit unitDecl ->
         // Register unit in environment (same logic as the typecheck pipeline,
-        // minus the hard errors: typecheck already rejected a terminal-quantity
-        // misuse, so this pass only needs a defensive fallback).
+        // minus the hard errors). registerUnit already rejected BOTH resolver
+        // failures -- a terminal-quantity misuse (BL3011) and an unknown name
+        // (BL3015) -- so neither Error arm is reachable for input that got
+        // this far. They stay only to keep lowering total; reaching one means
+        // env.UnitDefs here disagrees with env.Units in typecheck, which is an
+        // internal inconsistency and NOT the old warn-and-fallback (that
+        // deliberately compiled a misspelling into a fresh base unit).
         let baseSig = unitOfDims (Map.ofList [(unitDecl.Name, 1)])
         let sig' =
             match unitDecl.Definition with
@@ -1391,13 +1396,15 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
                 match TypeEnv.resolveUnitExpr env.UnitDefs expr with
                 | Ok resolved -> resolved
                 | Error err ->
-                    eprintfn "Unit error: %s" (TypeEnv.ppUnitResolveErr err)
+                    eprintfn "internal: unit '%s' resolved in typecheck but not in lowering: %s"
+                        unitDecl.Name (TypeEnv.ppUnitResolveErr err)
                     baseSig
             | Some (UnitQuantity expr) ->
                 match TypeEnv.resolveUnitExpr env.UnitDefs expr with
                 | Ok resolved -> { resolved with Nominal = Some unitDecl.Name }
                 | Error err ->
-                    eprintfn "Unit error: %s" (TypeEnv.ppUnitResolveErr err)
+                    eprintfn "internal: quantity '%s' resolved in typecheck but not in lowering: %s"
+                        unitDecl.Name (TypeEnv.ppUnitResolveErr err)
                     { baseSig with Nominal = Some unitDecl.Name }
         let env' = { env with UnitDefs = Map.add unitDecl.Name sig' env.UnitDefs }
         ([], env')

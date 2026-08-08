@@ -506,10 +506,39 @@ let rec private indexNamesOf (t: IRType) : (IRId * string) list =
     | IRTTuple ts -> ts |> List.collect indexNamesOf
     | _ -> []
 
+/// Index slots whose EXTENT is an INTERNAL (`__`-prefixed) param -- a
+/// compiler-minted name like `__extents_inferred_n`, which `extents(A)` pins on
+/// an otherwise-unconstrained array parameter. Nothing user-written produces one
+/// and no source can refer to it, so leaking it into a hover or a REPL echo
+/// (`Array<Float64 like Idx<__extents_inferred_n>>`) shows an identifier that
+/// does not exist. `indexNamesOf` already suppresses `__` TAGS; this is the same
+/// rule one level down, on the extent expression a nameless slot falls back to
+/// printing. They render as the `_` wildcard `concreteNames` already uses for
+/// exactly these slots in `calls[]`, so both surfaces read the same way.
+///
+/// PLAIN slots only: `ppIndexTypeIn` treats a nominal name on a COMPACT class as
+/// the whole class's surface spelling, so naming one `_` would print a bare `_`
+/// instead of `SymIdx<2, _>`.
+let rec private internalExtentNames (t: IRType) : (IRId * string) list =
+    let isInternal (idx: IRIndexType) =
+        idx.Symmetry = SymNone
+        && (match idx.Extent with
+            | IRParam (n, _, _) -> n.StartsWith "__"
+            | _ -> false)
+    match t with
+    | ArrayElem arr ->
+        (arr.IndexTypes |> List.choose (fun idx ->
+            if isInternal idx then Some (idx.Id, "_") else None))
+        @ internalExtentNames arr.ElemType
+    | IRTTuple ts -> ts |> List.collect internalExtentNames
+    | _ -> []
+
 /// Public: also the REPL's display printer (Cli.fs) -- index-name-aware
 /// rendering beats bare ppIRType for any type embedding named index types.
 let ppType (t: IRType) : string =
-    ppIRTypeIn (indexNamesOf t |> Map.ofList) t
+    // Internal extents first so a real nominal name for the same slot wins
+    // (Map.ofList keeps the last entry for a duplicate key).
+    ppIRTypeIn (internalExtentNames t @ indexNamesOf t |> Map.ofList) t
 
 /// Multi-line function signature: each parameter and the return type on its
 /// own line (long array types stay readable).

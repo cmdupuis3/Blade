@@ -402,6 +402,11 @@ let locateError (span: Span) (env: TypeEnv) (err: TypeError) : CompileError =
         else span
     { Error = err; Span = span; Context = env.Context; Code = None }
 
+/// Stands in for a declaration name when a unit-expression error comes from a
+/// TYPE ANNOTATION rather than a `Unit` declaration. The annotation consumers
+/// in TypeCheck.fs pass this; formatTypeError words the message around it.
+let unitAnnoContext = "<type annotation>"
+
 /// Format a TypeError as a human-readable string
 let formatTypeError (err: TypeError) : string =
     match err with
@@ -496,6 +501,12 @@ class IS implemented, and the dense result folds like any other array." op level
         sprintf "argument %d: the parameter's declared type carries the quantity '%s', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is %s. Ascribe it at the call site (e.g. `x : %s`); matching dimensions alone do not imply the quantity." pos quantity got quantity
     | QuantityTerminal (quantity, declName) ->
         sprintf "unit '%s': the quantity '%s' cannot be used inside a unit expression. Quantities are TERMINAL -- the nominal layer is exactly one level deep -- so a quantity name can neither be composed (`Unit x = %s * m`) nor re-derived from (`Unit q: %s`). Compose from the structural units the quantity was declared over instead." declName quantity quantity quantity
+    | UnknownUnitName (name, declName, candidates) ->
+        let where =
+            if declName = unitAnnoContext then "unit annotation"
+            else sprintf "unit '%s'" declName
+        sprintf "%s: '%s' is not a declared unit or a known scale constant. A unit expression composes names already in scope -- only a numeric LITERAL may appear without being declared -- so declare '%s' first (`Unit %s`), import the module that exports it, or fix the spelling.%s" where name name name
+            (if List.isEmpty candidates then "" else sprintf " Did you mean: %s?" (String.concat ", " candidates))
     | DefaultParamOrder (func, requiredParam, defaultedParam) ->
         sprintf "%s: parameter '%s' has no default but follows the defaulted parameter '%s'. Defaults are TRAILING: once a parameter has a default, every later parameter needs one too (otherwise an omitted-argument call is ambiguous). Reorder the parameters or give '%s' a default." func requiredParam defaultedParam requiredParam
     | DefaultParamScope (func, param, referenced) ->
@@ -661,6 +672,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | DefaultParamOrder _ | DefaultParamScope _ -> "BL3012"
             | FactoryDupQuantityDecl _ -> "BL3013"
             | FactoryDupFill _ | FactoryUnknownTag _ | FactoryAmbiguousMix _ -> "BL3014"
+            | UnknownUnitName _ -> "BL3015"
             | IntrinsicBindArrayFailed _ | IntrinsicNeedsArray _ | IntrinsicScalarOnly _
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
@@ -840,16 +852,19 @@ let isEnumType (env: TypeEnv) (parentName: string) : bool =
 let registerVariantTag tag parentName payload (env: TypeEnv) =
     { env with VariantTags = Map.add tag (parentName, payload) env.VariantTags }
 
-/// Why a UnitExpr failed to resolve. Split so registerUnit can keep the
-/// historical warn-and-fallback behavior for an UNKNOWN name while turning a
-/// TERMINAL-quantity misuse into a hard declaration-site error (BL3011).
+/// Why a UnitExpr failed to resolve. Both cases are hard declaration-site
+/// errors at a `Unit` RHS -- an unknown name is BL3015, a terminal-quantity
+/// misuse BL3011. The split survives because the ANNOTATION consumers
+/// (compound unit annotations) still degrade rather than reject, and they
+/// distinguish the two: see unitAnnoTerminalError in TypeCheck.fs.
 type UnitResolveErr =
     | UResolveUnknown of name: string
     /// A quantity (nominal) name referenced inside unit algebra. Quantities
     /// are terminal: the nominal layer is exactly one level deep.
     | UResolveTerminal of quantity: string
 
-/// Render a UnitResolveErr for the legacy warn-and-fallback channels.
+/// Render a UnitResolveErr for the channels that still degrade rather than
+/// reject (the defensive lowering fallback; annotation resolution).
 let ppUnitResolveErr (e: UnitResolveErr) : string =
     match e with
     | UResolveUnknown name -> sprintf "Unknown unit '%s'" name
@@ -886,32 +901,61 @@ let rec resolveUnitExpr (units: Map<string, UnitSig>) (expr: UnitExpr) : Result<
         resolveUnitExpr units a |> Result.map (fun sa ->
             unitPow sa n)
 
-/// Register a unit declaration in the environment. Errors only on a
-/// TERMINAL-quantity misuse (BL3011) — an unknown unit name keeps the
-/// historical warn-and-fallback behavior so existing programs are untouched.
+/// Names already in scope that a misspelling plausibly meant. Quantities are
+/// excluded: suggesting one would only trade BL3015 for BL3011. Shared with
+/// the ANNOTATION check in TypeCheck.fs, which raises the same BL3015.
+let unitSpellingCandidates (units: Map<string, UnitSig>) (name: string) : string list =
+    let close (a: string) (b: string) =
+        // One transposition, or a one-character insert/delete/substitute --
+        // enough for `pii`/`pi` and `metre`/`meter`, tight enough that an
+        // unrelated unit never shows up as a suggestion.
+        if abs (a.Length - b.Length) > 1 then false
+        elif a.Length = b.Length then
+            let diffs = Seq.zip a b |> Seq.filter (fun (x, y) -> x <> y) |> Seq.toList
+            match diffs with
+            | [] | [_] -> true
+            | [(x1, y1); (x2, y2)] -> x1 = y2 && x2 = y1  // transposition
+            | _ -> false
+        else
+            let short, long = if a.Length < b.Length then a, b else b, a
+            // One deletion turns `long` into `short`.
+            [0 .. long.Length - 1]
+            |> List.exists (fun i -> long.Remove(i, 1) = short)
+    let lowered = name.ToLowerInvariant()
+    Map.toList units
+    |> List.filter (fun (n, s) -> s.Nominal.IsNone)
+    |> List.map fst
+    |> List.append (Map.toList unitScaleConstants |> List.map fst)
+    |> List.filter (fun n -> n <> name && (n.ToLowerInvariant() = lowered || close n name))
+    |> List.distinct
+    |> List.sort
+
+/// Register a unit declaration in the environment. A `Unit` right-hand side
+/// composes names already in scope, so a name that is neither a declared unit
+/// nor a scale constant is a hard error (BL3015) -- the old warn-and-fallback
+/// minted the declared name as a fresh BASE unit, which typechecks a
+/// misspelling into a silently wrong dimension. A terminal-quantity misuse
+/// stays BL3011.
 let registerUnit (env: TypeEnv) (decl: UnitDecl) : Result<TypeEnv, TypeError> =
-    // Base-unit fallback: canonical form is {name: 1}
+    // Base-unit signature: canonical form is {name: 1}
     let baseSig () = unitOfDims (Map.ofList [(decl.Name, 1)])
+    let resolveErr (err: UnitResolveErr) =
+        match err with
+        | UResolveTerminal q -> QuantityTerminal (q, decl.Name)
+        | UResolveUnknown n -> UnknownUnitName (n, decl.Name, unitSpellingCandidates env.Units n)
     let sigResult =
         match decl.Definition with
         | None | Some UnitBase -> Ok (baseSig ())
         | Some (UnitDerived expr) ->
-            match resolveUnitExpr env.Units expr with
-            | Ok resolved -> Ok resolved
-            | Error (UResolveTerminal q) -> Error (QuantityTerminal (q, decl.Name))
-            | Error err ->
-                eprintfn "Unit error: %s" (ppUnitResolveErr err)
-                Ok (baseSig ())  // fallback to base unit
+            resolveUnitExpr env.Units expr
+            |> Result.mapError resolveErr
         | Some (UnitQuantity expr) ->
             // Quantity: nominal identity entailing the RHS dims. The RHS is
             // resolved through the same terminal-checking path, so a quantity
             // on the RHS of another quantity rejects here too.
-            match resolveUnitExpr env.Units expr with
-            | Ok resolved -> Ok { resolved with Nominal = Some decl.Name }
-            | Error (UResolveTerminal q) -> Error (QuantityTerminal (q, decl.Name))
-            | Error err ->
-                eprintfn "Unit error: %s" (ppUnitResolveErr err)
-                Ok { baseSig () with Nominal = Some decl.Name }
+            resolveUnitExpr env.Units expr
+            |> Result.map (fun resolved -> { resolved with Nominal = Some decl.Name })
+            |> Result.mapError resolveErr
     sigResult |> Result.map (fun sig' ->
         { env with Units = Map.add decl.Name sig' env.Units })
 

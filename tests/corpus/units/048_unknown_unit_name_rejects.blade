@@ -1,0 +1,10 @@
+// TEST: Unknown Unit Name In Derived RHS (rejects)
+// ERROR: BL3015
+// A `Unit` right-hand side composes names already in scope. A name that is
+// neither a declared unit nor a built-in scale constant is a declaration-site
+// error -- it used to warn to stderr and mint `turn` as a fresh BASE unit,
+// which typechecks the misspelling into a dimension unrelated to `radian`
+// and lets the program compile. `pii` is one letter off `pi`, so this is the
+// exact shape the scale-constant spelling makes easy to hit.
+Unit radian
+Unit turn = 2 * pii * radian

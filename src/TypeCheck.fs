@@ -1,4 +1,4 @@
-// TypeCheck.fs - Type Checking and Inference
+﻿// TypeCheck.fs - Type Checking and Inference
 //
 //   - Unification with substitution (inference variables resolve through constraints)
 //   - Extent preservation (Idx<180> keeps extent=180, not placeholder 0)
@@ -315,7 +315,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 // `Float<second^-1>`, `Float<1>`): structural composition
                 // through the same resolver Unit-declaration RHSs use.
                 // Lowering stays total: a terminal-quantity misuse (BL3011,
-                // surfaced by unitAnnoTerminalError at the annotation
+                // surfaced by unitAnnoError at the annotation
                 // consumers) or an unknown name degrades to the bare base,
                 // exactly like an unknown unit name in the arm above.
                 (match resolveUnitExpr env.Units ue with
@@ -2829,44 +2829,62 @@ let private argQuantityTag (env: TypeEnv) (a: Expr) : string option =
          | None -> None)
     | _ -> None
 
-/// Terminality check for unit annotations in TYPE position -- the annotation
-/// twin of registerUnit's BL3011 rule. A quantity name inside a COMPOUND
-/// unit expression (`Float<speed/second>`, `Float<speed^2>`) rejects: the
-/// nominal layer is exactly one level deep, so only a LONE quantity name
-/// (`Float<speed>`) may appear in a type argument. Descends aggregate
-/// component positions the way boundedAggregateError does. Lowering itself
-/// stays TOTAL (it degrades to the bare base type), so the annotation
-/// CONSUMERS -- ascriptions, let annotations, function signatures -- call
-/// this to surface the error.
-let rec private unitAnnoTerminalError (env: TypeEnv) (ty: TypeExpr) : TypeError option =
+/// Well-formedness check for unit annotations in TYPE position -- the
+/// annotation twin of registerUnit's rules, raising the SAME two codes:
+///   BL3011: a quantity name inside a COMPOUND unit expression
+///     (`Float<speed/second>`, `Float<speed^2>`). The nominal layer is
+///     exactly one level deep, so only a LONE quantity name
+///     (`Float<speed>`) may appear in a type argument.
+///   BL3015: a name that resolves to no unit at all (`Float<meter/secnd>`).
+///     Only a numeric LITERAL may appear in a unit expression undeclared;
+///     an identifier must already name something. Without this the
+///     annotation degrades to the BARE type, so the value silently carries
+///     no unit and every later check on it passes.
+/// Both are checked only where the parser already committed to unit syntax
+/// (`TyUnitExpr` -- see isUnitExprArg: a lone name and `name^INT` are NOT
+/// claimed, since they collide with `Float<speed>` and `T^2`). Descends
+/// aggregate component positions the way boundedAggregateError does.
+/// Lowering itself stays TOTAL (it degrades to the bare base type), so the
+/// annotation CONSUMERS -- ascriptions, let annotations, function signatures
+/// -- call this to surface the error.
+let rec private unitAnnoError (env: TypeEnv) (ty: TypeExpr) : TypeError option =
     let quantityIn name =
         match Map.tryFind name env.Units with
         | Some (s: UnitSig) -> s.Nominal
         | None -> None
-    let rec inUnitExpr (ue: UnitExpr) : string option =
+    let rec inUnitExpr (ue: UnitExpr) : TypeError option =
         match ue with
-        | UnitNamed n -> quantityIn n
+        | UnitNamed n ->
+            match Map.tryFind n env.Units with
+            | Some (s: UnitSig) ->
+                s.Nominal |> Option.map (fun q -> QuantityTerminal (q, unitAnnoContext))
+            | None when unitScaleConstants.ContainsKey n -> None
+            | None ->
+                Some (UnknownUnitName (n, unitAnnoContext, unitSpellingCandidates env.Units n))
         | UnitMul (a, b) | UnitDiv (a, b) ->
             inUnitExpr a |> Option.orElseWith (fun () -> inUnitExpr b)
         | UnitPow (a, _) -> inUnitExpr a
-        | UnitOne -> None
+        // A magnitude names nothing, so neither rule can fire on it.
+        | UnitOne | UnitScaleLit _ -> None
     match ty with
-    | TyUnitExpr ue ->
-        inUnitExpr ue |> Option.map (fun q -> QuantityTerminal (q, "<type annotation>"))
+    | TyUnitExpr ue -> inUnitExpr ue
     | TyVar (name, Some _) ->
         // `Float<speed^2>` parses as a rank-marked type var; a quantity name
         // there is the power spelling of the same terminality violation.
-        quantityIn name |> Option.map (fun q -> QuantityTerminal (q, "<type annotation>"))
-    | TyNamed (_, args) -> args |> List.tryPick (unitAnnoTerminalError env)
-    | TyBounded (b, _, _) -> unitAnnoTerminalError env b
-    | TyArray (elem, _) -> unitAnnoTerminalError env elem
-    | TyDist (_, elem, _) -> unitAnnoTerminalError env elem
-    | TyTuple ts -> ts |> List.tryPick (unitAnnoTerminalError env)
+        // NOT extended to BL3015: an unresolvable name here is exactly the
+        // `T^2` spelling, so rejecting it would reject every rank-marked
+        // type variable. The grammar cannot tell the two apart.
+        quantityIn name |> Option.map (fun q -> QuantityTerminal (q, unitAnnoContext))
+    | TyNamed (_, args) -> args |> List.tryPick (unitAnnoError env)
+    | TyBounded (b, _, _) -> unitAnnoError env b
+    | TyArray (elem, _) -> unitAnnoError env elem
+    | TyDist (_, elem, _) -> unitAnnoError env elem
+    | TyTuple ts -> ts |> List.tryPick (unitAnnoError env)
     | TyFunc (args, ret) ->
-        (args |> List.tryPick (unitAnnoTerminalError env))
-        |> Option.orElseWith (fun () -> unitAnnoTerminalError env ret)
-    | TyConstrained (inner, _) -> unitAnnoTerminalError env inner
-    | TyPoly inner -> unitAnnoTerminalError env inner
+        (args |> List.tryPick (unitAnnoError env))
+        |> Option.orElseWith (fun () -> unitAnnoError env ret)
+    | TyConstrained (inner, _) -> unitAnnoError env inner
+    | TyPoly inner -> unitAnnoError env inner
     | _ -> None
 
 /// DEFAULT PARAMETER FILL (surface call-site desugar). A call omitting
@@ -4091,7 +4109,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         // A quantity name inside a COMPOUND unit annotation is terminal
         // (BL3011) -- checked on the surface type, since lowering degrades
         // rather than errors.
-        match unitAnnoTerminalError env tyAnno with
+        match unitAnnoError env tyAnno with
         | Some err -> Error err
         | None ->
         let annoTy = lowerTypeExpr env tyAnno
@@ -9410,7 +9428,7 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         // A quantity name inside a COMPOUND unit annotation is terminal
         // (BL3011) -- surface-checked, since lowering degrades rather than
         // errors (annotTy above already lowered to the bare base).
-        match unitAnnoTerminalError env annot with
+        match unitAnnoError env annot with
         | Some err -> Error err
         | None ->
         if irTypeHasRaggedNoPrior annotTy then
@@ -11792,9 +11810,9 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             }
             Ok (TDeclImpl timpl, env)
     | DeclUnit unitDecl ->
-        // registerUnit errors only on a TERMINAL-quantity misuse (BL3011:
-        // `Unit x = speed * m` / `Unit q: speed`); unknown names keep the
-        // historical warn-and-fallback path inside registerUnit.
+        // registerUnit rejects both resolver failures at the declaration
+        // site: a TERMINAL-quantity misuse (BL3011: `Unit x = speed * m` /
+        // `Unit q: speed`) and an unknown name (BL3015: `Unit t = 2*pii*rad`).
         registerUnit env unitDecl
         |> Result.map (fun env' -> (TDeclUnit unitDecl, env'))
     | DeclImport (qname, style) when (not qname.IsEmpty) && qname.Head = "Providers" ->
@@ -11935,9 +11953,9 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // return type is terminal (BL3011) -- surface-checked here, since
     // lowering degrades to the bare base rather than erroring.
     let badUnitAnno =
-        (funcDecl.Params |> List.tryPick (fun p -> p.Type |> Option.bind (unitAnnoTerminalError env)))
+        (funcDecl.Params |> List.tryPick (fun p -> p.Type |> Option.bind (unitAnnoError env)))
         |> Option.orElseWith (fun () ->
-            funcDecl.ReturnType |> Option.bind (unitAnnoTerminalError env))
+            funcDecl.ReturnType |> Option.bind (unitAnnoError env))
     if badUnitAnno.IsSome then
         Error badUnitAnno.Value
     else

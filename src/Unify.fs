@@ -110,6 +110,10 @@ type TypeError =
     /// or as the RHS of another quantity (`Unit q: speed`). Quantities are
     /// TERMINAL: the nominal layer is exactly one level deep.
     | QuantityTerminal of quantity: string * declName: string
+    /// BL3015: a name on the RHS of a `Unit` declaration that resolves to
+    /// neither a declared unit nor a built-in scale constant. `candidates`
+    /// holds near-miss spellings already in scope, for the message.
+    | UnknownUnitName of name: string * declName: string * candidates: string list
     // Parameter defaults (BL3012)
     /// A required (default-less) parameter follows a defaulted one: defaults
     /// are TRAILING (classic rule), or omitted-argument calls would be
