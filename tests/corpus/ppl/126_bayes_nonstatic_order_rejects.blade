@@ -1,0 +1,12 @@
+// TEST: Bayes Non-Static Order (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: the posterior order must be a compile-time integer
+import ppl as ppl
+// The posterior order is a type-level truncation parameter like every
+// other tower order: it must resolve statically (a literal, `let static`,
+// or static-function call). A plain runtime binding is refused with
+// steering BEFORE any emission -- same contract as the family
+// constructors (corpus 080) and dist/mstate.
+let data: Array<Float64 like Idx<5>> = [1.2, 0.7, 2.3, -0.4, 1.9]
+let r = 4
+let post = ppl.bayes(gaussian(0.0, 4.0), gaussian_lik(2.0), data, r)

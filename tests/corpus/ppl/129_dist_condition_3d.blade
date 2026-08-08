@@ -1,0 +1,41 @@
+// TEST: Dist Condition 3D Schur Complement
+import ppl as ppl
+// The genuinely multivariate case: a 3D order-2 tower conditioned on the
+// MIDDLE coordinate (so the remaining coordinates straddle it -- the
+// rest-index mapping is exercised). Data rows (N = 4, population norm):
+//   x0 = [1, 2, 3, 6]   mean 3, devs [-2, -1, 0, 3]
+//   x1 = [2, 3, 5, 10]  mean 5, devs [-3, -2, 0, 5]
+//   x2 = [0, 1, 1, 2]   mean 1, devs [-1, 0, 0, 1]
+//   k2 = [[3.5, 5.75, 1.25], [_, 9.5, 2.0], [_, _, 0.5]]
+// (var x0 = 14/4; cov01 = (6+2+0+15)/4; cov02 = (2+0+0+3)/4; var x1 =
+// 38/4; cov12 = (3+0+0+5)/4; var x2 = 2/4.)
+//
+// Condition on i = 1 at x = 6 (dev = 1). Independent derivation via the
+// regression coefficients beta_j = cov(x_j, x1)/var(x1):
+//   beta_0 = 5.75/9.5 = 23/38     beta_2 = 2/9.5 = 4/19
+//   mean'_0 = 3 + 23/38           = 137/38 = 3.6052631578947367
+//   mean'_2 = 1 + 4/19            = 23/19  = 1.2105263157894737
+//   cov'_00 = 3.5 - 5.75^2/9.5    = 532/152 - 529/152 = 3/152
+//           = 0.019736842105263158
+//   cov'_02 = 1.25 - 5.75*2/9.5   = 5/4 - 23/19 = 3/76
+//           = 0.039473684210526314
+//   cov'_22 = 0.5 - 2^2/9.5       = 1/2 - 8/19 = 3/38
+//           = 0.07894736842105263
+// The result is a REGISTERED 2-dimensional order-2 dist (flat lex
+// components), so the downstream algebra consumes it: dist_affine with
+// W = [[1, 1]] sums the two conditional coordinates --
+//   kappa'_1 = 137/38 + 46/38 = 183/38 = 4.815789473684211
+//   kappa'_2 = 3/152 + 2*(3/76) + 3/38 = 27/152 = 0.17763157894736842
+type V3 = Idx<3>
+type T4 = Idx<4>
+let A: Array<Float64 like V3, T4> = [[1.0, 2.0, 3.0, 6.0], [2.0, 3.0, 5.0, 10.0], [0.0, 1.0, 1.0, 2.0]]
+let d = ppl.dist(A, 2)
+let c = ppl.dist_condition(d, 1, 6.0)
+let cm = ppl.cumulant(c, 1)
+let cv = ppl.cumulant(c, 2)
+// EXPECT: cm = [3.6052631578947367, 1.2105263157894737]
+// EXPECT: cv = [0.019736842105263158, 0.039473684210526314, 0.07894736842105263]
+let W: Array<Float64 like Idx<1>, Idx<2>> = [[1.0, 1.0]]
+let (s1, s2) = ppl.dist_affine(W, c)
+// EXPECT: s1 = [4.815789473684211]
+// EXPECT: s2 = [0.17763157894736842]

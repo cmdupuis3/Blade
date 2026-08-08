@@ -1,0 +1,16 @@
+// TEST: Dist Condition Order Above Two (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: exact ONLY at order 2
+import ppl as ppl
+// The module's refuse-don't-truncate convention: conditioning is closed on
+// order-2 towers (Gaussian conditionals are Gaussian, with exactly the
+// Schur-complement blocks), but an order-3 conditional is NOT a function
+// of the carried order-3 tower -- it needs the full conditional density.
+// Rather than silently returning the Gaussian answer for a tower that
+// carries (and would appear to honor) skewness, dist_condition refuses
+// with steering toward dist(A, 2).
+type V2 = Idx<2>
+type T4 = Idx<4>
+let A: Array<Float64 like V2, T4> = [[1.0, 2.0, 3.0, 6.0], [2.0, 3.0, 5.0, 10.0]]
+let d = ppl.dist(A, 3)
+let c = ppl.dist_condition(d, 0, 4.0)

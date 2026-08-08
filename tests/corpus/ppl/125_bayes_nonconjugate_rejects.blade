@@ -1,0 +1,12 @@
+// TEST: Bayes Non-Conjugate Pair (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: no conjugate update
+import ppl as ppl
+// ppl.bayes is closed-form or nothing: a gaussian prior with a Poisson
+// likelihood has no conjugate update, so the former refuses with the
+// supported-pairs steer (Normal-Normal known-variance, Beta-Bernoulli,
+// Gamma-Poisson; Normal-InverseGamma named as deferred) rather than
+// silently approximating -- the sampling formers (mh/hmc) are the road for
+// non-conjugate models.
+let data: Array<Float64 like Idx<5>> = [3.0, 1.0, 4.0, 1.0, 5.0]
+let post = ppl.bayes(gaussian(0.0, 4.0), poisson_lik(), data, 2)
