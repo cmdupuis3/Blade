@@ -1,0 +1,15 @@
+// TEST: Pdf Approx Multivariate (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: univariate dists only so far
+import ppl as ppl
+// The Edgeworth/Cornish-Fisher bridge is univariate: a multivariate tower
+// has no single (mu, sd) anchor to standardize against. Same steering as
+// tower Bayes -- marginalize or push forward (dist_map/dist_affine) first.
+// (An r > 6 probe is impossible to write: every tower constructor in the
+// module already caps the carried order at 6, so the bridge's own r > 6
+// refusal is unreachable-by-construction insurance.)
+type VarIdx = Idx<2>
+type TimeIdx = Idx<3>
+let A: Array<Float64 like VarIdx, TimeIdx> = [[1.0, 2.0, 3.0], [2.0, 1.0, 4.0]]
+let d = ppl.dist(A, 2)
+let p = ppl.dist_pdf_approx(d, 1.0)

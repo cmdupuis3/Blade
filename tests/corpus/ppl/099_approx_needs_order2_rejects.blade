@@ -1,0 +1,11 @@
+// TEST: Approx Needs Order Two (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: anchored on kappa_2
+import ppl as ppl
+// An order-1 tower has no kappa_2 for the expansion to standardize on --
+// refused with steering (carry order >= 2) rather than inventing a scale.
+// The runtime cousin, kappa_2 <= 0 on a quasi-distribution tower, is NOT
+// refused: sd = sqrt(kappa_2) is NaN and the NaN propagates -- the honest
+// answer for a tower with no Gaussian anchor.
+let d = ppl.exponential(1.0, 1)
+let q = ppl.dist_quantile_approx(d, 0.5)

@@ -1,0 +1,25 @@
+// TEST: Logpdf Poisson Bernoulli
+import ppl as ppl
+// The two discrete log-PMFs. Poisson: k·log(lam) - lam - lgamma(k+1) --
+// lgamma(k+1) = log(k!) with the k = 0, 1 cases EXACT (lgamma pins its zeros
+// at 1 and 2), so logpdf(poisson(lam), 0) = -lam bit-for-bit (the plan's
+// anchor identity). Bernoulli: x·log(p) + (1-x)·log(1-p), branch-free over
+// the support {0, 1}. Pins from the oracle's dump-logpdf blocks.
+let p1 = ppl.logpdf(poisson(1.0), 0.0)
+let p2 = ppl.logpdf(poisson(1.0), 2.0)
+let p3 = ppl.logpdf(poisson(4.5), 0.0)
+let p4 = ppl.logpdf(poisson(4.5), 5.0)
+let p5 = ppl.logpdf(poisson(4.5), 10.0)
+let b1 = ppl.logpdf(bernoulli(0.3), 0.0)
+let b2 = ppl.logpdf(bernoulli(0.3), 1.0)
+let b3 = ppl.logpdf(bernoulli(0.9), 1.0)
+let b4 = ppl.logpdf(bernoulli(0.9), 0.0)
+// EXPECT: p1 = -1
+// EXPECT: p2 = -1.6931471805599463
+// EXPECT: p3 = -4.5
+// EXPECT: p4 = -1.7671047589006772
+// EXPECT: p5 = -4.5636386053127751
+// EXPECT: b1 = -0.35667494393873245
+// EXPECT: b2 = -1.2039728043259361
+// EXPECT: b3 = -0.10536051565782628
+// EXPECT: b4 = -2.3025850929940459

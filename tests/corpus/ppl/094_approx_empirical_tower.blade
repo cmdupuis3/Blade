@@ -1,0 +1,32 @@
+// TEST: Approx Bridge Empirical Tower
+import ppl as ppl
+// The bridge works on DATA-ESTIMATED towers, not just family constructors --
+// that is its whole point (an empirical tower has no exact density). Two
+// checks:
+//   - dist(A, 2): the r = 2 bridge is the exact Gaussian fit, so the pdf is
+//     phi((x-mu)/sd)/sd and the quantile is mu + sd·PPND(p) with mu = 8/3,
+//     kappa_2 = 35/9 (MLE, /N), sd = 1.9720265943665387.
+//   - dist(A, 4) against dist_atoms over the same six equal-weight points:
+//     identical towers reached through DIFFERENT kappa-read paths (packed
+//     method_for components vs flat 1-cell registry components) must give
+//     identical pdf/quantile values -- the two distKappaRead regimes agree.
+type OneIdx = Idx<1>
+type TimeIdx = Idx<6>
+let A: Array<Float64 like OneIdx, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let d2 = ppl.dist(A, 2)
+let pdf2 = ppl.dist_pdf_approx(d2, 2.0)
+let q2 = ppl.dist_quantile_approx(d2, 0.975)
+let d4 = ppl.dist(A, 4)
+let pdf4 = ppl.dist_pdf_approx(d4, 2.0)
+let q4 = ppl.dist_quantile_approx(d4, 0.25)
+let at = ppl.dist_atoms(4, 1.0, 1.0, 2.0, 1.0, 4.0, 1.0, 6.0, 1.0, 0.0, 1.0, 3.0, 1.0)
+let pdfat = ppl.dist_pdf_approx(at, 2.0)
+let qat = ppl.dist_quantile_approx(at, 0.25)
+let pdfSame = abs(pdf4 - pdfat) < 0.000000000001
+let qSame = abs(q4 - qat) < 0.000000000001
+// EXPECT: pdf2 = 0.191064706193648
+// EXPECT: q2 = 6.53176776818026
+// EXPECT: pdf4 = 0.180731399197857
+// EXPECT: q4 = 1.12331268936115
+// EXPECT: pdfSame = true
+// EXPECT: qSame = true
