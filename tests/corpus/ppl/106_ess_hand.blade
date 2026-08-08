@@ -1,0 +1,26 @@
+// TEST: ESS Hand Values
+import ppl as ppl
+// ess(chain): Geyer initial-positive-sequence truncation. The exact rule as
+// implemented: pair sums G_k = rho_{2k} + rho_{2k+1} for k = 0..P-1 with
+// P = min((n-2)/2, 128); truncate at the FIRST non-positive pair; tau = -1 +
+// 2 * (surviving G_k sum); ess = n / tau. No monotonicity pass, no clamp.
+//
+// ramp [1,2,3,4] (P = 1): rho_1 = 0.25 (the 105 hand value), so G_0 = 1.25,
+//   tau = -1 + 2.5 = 1.5, ess = 4/1.5 = 8/3.
+//   (cross-check: G_0 = (denom + lag1 sum)/denom = (5 + 1.25)/5 = 1.25.)
+// tent [2,4,6,4] (P = 1): rho_1 = 0, G_0 = 1, tau = 1, ess = n = 4 -- a
+//   lag-1-uncorrelated chain reports its full length.
+// wave [1,2,3,1,2,3] (P = 2): d = [-1,0,1,-1,0,1], denom = 4;
+//   lag1 = -1, lag2 = -2, lag3 = 2. G_0 = (4-1)/4 = 0.75 > 0 keeps;
+//   G_1 = (-2+2)/4 = 0 truncates (first NON-POSITIVE pair, and everything
+//   after it, contributes nothing). tau = -1 + 1.5 = 0.5, ess = 6/0.5 = 12:
+//   the anti-correlated pair structure lawfully reports ess > n (no clamp).
+let ramp: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let er = ppl.ess(ramp)
+// EXPECT: er = 2.6666666666666665
+let tent: Array<Float like Idx<4>> = [2.0, 4.0, 6.0, 4.0]
+let et = ppl.ess(tent)
+// EXPECT: et = 4.0
+let wave: Array<Float64 like Idx<6>> = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
+let ew = ppl.ess(wave)
+// EXPECT: ew = 12.0

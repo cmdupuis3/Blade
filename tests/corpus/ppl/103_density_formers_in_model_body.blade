@@ -1,0 +1,33 @@
+// TEST: Density Formers In Model Body
+import ppl as ppl
+// The density-form model layer (plan section 4): logpdf/loglik are legal in
+// EXPRESSION position inside top-level function bodies, where each call site
+// rewrites to a block of statement lets around the same closed forms the
+// decl-position formers emit (loglik keeps its AD-able accumulation loop, so
+// model bodies stay inside the Grad subset for the HMC wave). Anchors are
+// ORACLE_PINS.md dump-logpdf values; the decl-position/body-position
+// equivalence is pinned as an exact-zero difference because both spell the
+// identical arithmetic. Every OTHER former stays decl-RHS only.
+let data: Array<Float64 like Idx<5>> = [1.2, 0.7, 2.3, -0.4, 1.9]
+
+// one site: the standard-normal anchor -1/2 log 2pi
+function prior_lp(t: Float64) -> Float64 = ppl.logpdf(gaussian(0.0, 1.0), t)
+// two sites in one body (unique synthesized names per site)
+function two_terms(t: Float64) -> Float64 =
+    ppl.logpdf(gaussian(0.0, 1.0), t) + ppl.logpdf(exponential(1.0), t)
+// loglik over module data with the latent as a runtime family parameter
+function data_ll(theta: Float64) -> Float64 = ppl.loglik(gaussian(theta, 2.0), data)
+// the lgamma path in a body
+function gamma_lp(t: Float64) -> Float64 = ppl.logpdf(gamma(2.0, 1.0), t)
+
+let a = prior_lp(0.0)
+// EXPECT: a = -0.91893853320467267
+let b = two_terms(1.0)
+// EXPECT: b = -2.4189385332046727
+let c = data_ll(1.0)
+// EXPECT: c = -7.4750606174232268
+let d = gamma_lp(1.0)
+// EXPECT: d = -1.0
+let lp_decl = ppl.logpdf(gaussian(0.0, 1.0), 0.0)
+let same_as_decl = abs(a - lp_decl) < 1.0e-300
+// EXPECT: same_as_decl = true

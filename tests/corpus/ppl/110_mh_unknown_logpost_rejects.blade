@@ -1,0 +1,8 @@
+// TEST: MH Unknown Log-Posterior (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: unknown log-posterior
+import ppl as ppl
+// The first argument is the NAME of a top-level same-module function
+// (dist_map's named-function convention); an unbound name is refused with
+// steering toward the density-form model layer.
+let c = ppl.mh(no_such_model, 0.0, 64, 1.0, 7)

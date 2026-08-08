@@ -1,0 +1,9 @@
+// TEST: Rhat Length Mismatch (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: the two chains must have the same static length
+import ppl as ppl
+// Split-Rhat compares four equal segments; chains of different static
+// lengths have no common segment size, so the pair is refused.
+let a: Array<Float64 like Idx<8>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let b: Array<Float64 like Idx<6>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let r = ppl.rhat(a, b)
