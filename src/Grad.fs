@@ -37,9 +37,10 @@
 ///     exact for the accumulation subset
 ///   - scalar arithmetic + - * / (and `^` by an int literal), unary minus
 ///   - math intrinsics (exp/log/sqrt/trig/hyperbolic; floor/ceil have zero
-///     derivative). NOT lgamma: its derivative is digamma, which the language
-///     does not have, so it is REFUSED rather than silently differentiated to
-///     zero (zeroDerivIntrinsics vs derivRule's None, below)
+///     derivative). NOT lgamma or digamma: lgamma's derivative is digamma and
+///     digamma's is trigamma, and a rule is only as good as the intrinsic it
+///     names, so both are REFUSED rather than silently differentiated to zero
+///     (zeroDerivIntrinsics vs derivRule's None, below)
 ///   - array reads `a(i...)` at integer index expressions
 ///   - calls to other AD-able functions in the same module, INLINED
 ///     (recursion rejected by a depth cap)
@@ -64,9 +65,9 @@ open Blade.Ast
 
 /// Scalar math intrinsics recognized as plain calls (`exp(x)`) when the name
 /// is not user-bound. Unary, real-valued, rendered as std::<name> in C++ --
-/// except `lgamma`, which renders as `blade_rt::lgamma` (CodeGen.unaryOpToCpp)
-/// because std::lgamma has no bit-exact interpreter twin; see
-/// src/cpp/blade_runtime.hpp.
+/// except `lgamma` and `digamma`, which render as `blade_rt::<name>`
+/// (CodeGen.unaryOpToCpp) because they have no bit-exact interpreter twin in
+/// any shared library; see src/cpp/blade_runtime.hpp.
 /// Keep in sync with StaticEval.evalBuiltin and derivRule below.
 let mathIntrinsics : Set<string> =
     Set.ofList [
@@ -75,7 +76,7 @@ let mathIntrinsics : Set<string> =
         "sinh"; "cosh"; "tanh"
         "asin"; "acos"; "atan"
         "floor"; "ceil"
-        "lgamma"
+        "lgamma"; "digamma"
     ]
 
 let isMathIntrinsic (name: string) : bool = Set.contains name mathIntrinsics
@@ -119,9 +120,10 @@ let private zeroDerivIntrinsics : Set<string> = Set.ofList [ "floor"; "ceil" ]
 
 /// d/du of intrinsic(u), as a function of the FORWARD expression u.
 /// Returns None for the zero-derivative intrinsics above AND for any
-/// intrinsic with no rule yet (`lgamma`: its derivative is the digamma
-/// function, which the language does not have) -- adjointOf tells the two
-/// apart via zeroDerivIntrinsics and refuses the latter.
+/// intrinsic with no rule yet (`lgamma`, whose derivative digamma now exists
+/// but is not yet wired here; `digamma`, whose derivative trigamma does not
+/// exist at all) -- adjointOf tells the two apart via zeroDerivIntrinsics and
+/// refuses the latter.
 let private derivRule (name: string) (u: Expr) : Expr option =
     match name with
     | "exp" -> Some (call "exp" [u])

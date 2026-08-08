@@ -1,0 +1,62 @@
+// TEST: Intrinsics Digamma
+// ============================================================================
+// digamma(x) = psi(x) = d/dx log Gamma(x): the second scalar intrinsic Blade
+// implements ITSELF rather than deferring to libm, for a stronger reason than
+// lgamma's. lgamma at least EXISTS in both ucrtbase and glibc (they just are
+// not the same function); digamma exists in NEITHER, and .NET has no gamma
+// family at all. Codegen emits `blade_rt::digamma` (cpp/blade_runtime.hpp) and
+// the interpreter runs a statement-for-statement transcription of the same
+// series (Interp/Numerics.digammaSeries).
+//
+// METHOD: psi(x) = psi(x+1) - 1/x applied until x >= 10, then the asymptotic
+// series log(x) - 1/(2x) - sum B_2n/(2n x^2n) truncated after seven terms.
+// The shift target and the truncation are a MEASURED pair, not a convention --
+// the customary "shift to x >= 6" leaves ~1e-13, two orders short. See the
+// header for the table.
+//
+// The values below are what BOTH paths produce, pinned bit-identical over
+// 228,065 inputs (spot values, a 200,000-point linear sweep of (0, 100], a
+// 6,001-point geometric sweep of 1e-30..1e30, a 20,001-point fine sweep of
+// [9, 11], and a 2,000-point ulp walk either side of the shift boundary).
+// They track an independent long-double reference to <= 1.13e-15.
+//
+// Unlike lgamma (008) NOTHING is pinned at special points: psi has no rational
+// value at any convenient argument -- psi(1) = -gamma -- so there is nothing
+// exact to return and no equality test on either side.
+//
+// Deliberately NOT in StaticEval's fold table, exactly as lgamma is not: a
+// compile-time fold would run .NET arithmetic that nothing holds to the
+// runtime series. Every call here evaluates at run time.
+// ============================================================================
+let half = digamma(0.5)
+let one = digamma(1.0)
+let two = digamma(2.0)
+let quarter = digamma(0.25)
+let three = digamma(3.0)
+let d1025 = digamma(10.25)
+let hundred = digamma(100.0)
+let tiny = digamma(0.001)
+// Straddling the x < 10 shift boundary, the one place a while-loop
+// transcription could diverge between the two evaluators. The pair also
+// witnesses that the recurrence/asymptotic junction is SEAMLESS: they differ
+// by 1.0517e-7 = trigamma(10) * 1e-6, i.e. by the true slope, with no step.
+let belowShift = digamma(9.999999)
+let atShift = digamma(10.0)
+// Integer operands promote, like every other intrinsic (see 004).
+let promoted = digamma(6)
+// Kernel position: the eta-expansion that carries `sqrt` into `<@>` (see 007)
+// carries digamma too, through the same blade_rt::digamma emission.
+let A = [1.0, 2.0, 3.0, 4.0]
+let psis = digamma <@> A |> compute
+// EXPECT: half = -1.9635100260214229
+// EXPECT: one = -0.5772156649015324
+// EXPECT: two = 0.4227843350984674
+// EXPECT: quarter = -4.2274535333762655
+// EXPECT: three = 0.9227843350984674
+// EXPECT: d1025 = 2.277704790686724
+// EXPECT: hundred = 4.600161852738088
+// EXPECT: tiny = -1000.5755719318104
+// EXPECT: belowShift = 2.25175248390038
+// EXPECT: atShift = 2.2517525890667214
+// EXPECT: promoted = 1.7061176684318005
+// EXPECT: psis = [-0.5772156649015324, 0.4227843350984674, 0.9227843350984674, 1.2561176684318005]

@@ -1159,11 +1159,13 @@ let unaryOpToCpp = function
     | IRReal -> "std::real"
     | IRImag -> "std::imag"
     | IRArg -> "std::arg"
-    // lgamma is Blade's OWN (blade_runtime.hpp), not libm's: the interpreter
-    // has to reproduce it bit for bit and can borrow neither ucrtbase's nor
-    // .NET's (there is no .NET gamma). Both sides run the same hand-rolled
-    // Lanczos series -- see the header, and Interp/Numerics.fs lgammaLanczos.
+    // lgamma and digamma are Blade's OWN (blade_runtime.hpp), not libm's: the
+    // interpreter has to reproduce them bit for bit and can borrow neither
+    // ucrtbase's nor .NET's (there is no .NET gamma, and no libm psi at all).
+    // Both sides run the same hand-rolled series -- see the header, and
+    // Interp/Numerics.fs lgammaLanczos / digammaSeries.
     | IRMath "lgamma" -> "blade_rt::lgamma"
+    | IRMath "digamma" -> "blade_rt::digamma"
     | IRMath name -> "std::" + name  // function-call form via the generic
                                      // `op(expr)` unary arm
 
