@@ -43,6 +43,10 @@ let private mulE a b = syn (ExprBinOp (Elementwise, OpMul, a, b))
 let private subE a b = syn (ExprBinOp (Elementwise, OpSub, a, b))
 let private powE a b = syn (ExprBinOp (Elementwise, OpCaret, a, b))
 let private sLet n value = StmtLet { Pattern = synPat (PatVar n); Type = None; Value = value; Mutability = BindLet }
+let private sMutStmt nm vl = StmtLet { Pattern = synPat (PatVar nm); Type = None; Value = vl; Mutability = BindMut }
+let private assignStmt (lhs: Expr) (rhs: Expr) = StmtExpr (syn (ExprAssign (lhs, rhs)))
+let private forIn (var: string) (lo: Expr) (hi: Expr) (body: Stmt list) =
+    StmtForIn (var, syn (ExprDotDot (lo, hi)), body)
 let private meanE arr n = divE (syn (ExprReduce (arr, syn (ExprSection OpAdd), None))) (fLit n)
 let private prodsumE args = syn (ExprApp (v "prodsum", args))
 let private commWhere (names: string list) =
@@ -77,7 +81,7 @@ let private map1 (a: Expr) (body: Expr) =
 // rhat; see the section comment at elabMh) are formers too: the family list
 // here mirrors familyParams below (kept literal so this set stays the one
 // place the qualified-surface/misplaced-use machinery reads).
-let private formerNames = set [ "moments"; "comoments"; "cumulants"; "independent"; "dist"; "dist_add"; "dist_scale"; "comoments_merge"; "mstate"; "mstate_merge"; "mstate_cumulants"; "mixed_cumulants"; "dist_affine"; "dist_jet"; "dist_jet_closed"; "dist_map"; "dist_map_closed"; "free_cumulants"; "dist_expect"; "dist_reweight"; "dist_mix"; "dist_atoms"; "dist_negativity"; "gaussian"; "exponential"; "gamma"; "poisson"; "uniform"; "lognormal"; "bernoulli"; "beta"; "logpdf"; "loglik"; "sample"; "dist_pdf_approx"; "dist_quantile_approx"; "dist_sample_approx"; "mh"; "hmc"; "chain_mean"; "chain_var"; "autocorr"; "ess"; "rhat" ]
+let private formerNames = set [ "moments"; "comoments"; "cumulants"; "independent"; "dist"; "dist_add"; "dist_scale"; "comoments_merge"; "mstate"; "mstate_merge"; "mstate_cumulants"; "mixed_cumulants"; "dist_affine"; "dist_jet"; "dist_jet_closed"; "dist_map"; "dist_map_closed"; "free_cumulants"; "dist_expect"; "dist_reweight"; "dist_mix"; "dist_atoms"; "dist_negativity"; "gaussian"; "exponential"; "gamma"; "poisson"; "uniform"; "lognormal"; "bernoulli"; "beta"; "logpdf"; "loglik"; "sample"; "dist_pdf_approx"; "dist_quantile_approx"; "dist_sample_approx"; "mh"; "hmc"; "chain_mean"; "chain_var"; "autocorr"; "ess"; "rhat"; "bayes"; "gaussian_lik"; "bernoulli_lik"; "poisson_lik"; "dist_condition" ]
 
 // Partition lattice: cumulants are Moebius-weighted sums over set partitions;
 // Bell(r) partitions, 2^r - 1 distinct blocks, each block's moment bound once and shared.
@@ -1606,6 +1610,75 @@ let private elabDistMix (ctx: Ctx) (span: Span) (dName: string)
     | _ ->
         Error "dist_mix expects dist_mix(w1, d1, w2, d2): two weights (any pure scalar expressions) and two dist bindings"
 
+/// dist_condition(d, i, x) (plan section 6, P5): condition a MULTIVARIATE
+/// order-2 tower on coordinate i taking value x -- the Schur complement on
+/// the kappa_2 block, over the remaining coordinates in ascending order:
+///   mean'_j = mu_j + k2[j,i]/k2[i,i] * (x - mu_i)
+///   cov'_ab = k2[a,b] - k2[a,i] k2[i,b] / k2[i,i]
+/// EXACT ONLY AT ORDER 2: an order-2 tower is the Gaussian truncation, and
+/// Gaussian conditionals are again Gaussian with exactly these two blocks --
+/// so conditioning is CLOSED on order-2 towers. At order r > 2 the
+/// conditional cumulants are not a function of the carried tower at all
+/// (they need the full conditional density, not its truncation), so higher
+/// orders are refused rather than silently truncated, the module
+/// convention. The result registers as a FLAT (D-1)-dimensional order-2
+/// dist (lex cell order, the pushforward representation), so cumulant()/
+/// moments()/dist_affine compose downstream, and a D=2 input conditions to
+/// an ordinary univariate tower (dist_expect, the approx bridge). k2[i,i]
+/// is a runtime value: conditioning on a zero-variance coordinate is the
+/// usual runtime division hazard, not a compile-time refusal.
+let private elabDistCondition (ctx: Ctx) (span: Span) (dName: string)
+    (dists: Map<string, DistInfo>) (args: Expr list)
+    : Result<Located<Decl> list * DistInfo, string> =
+    match args with
+    | [{ Kind = ExprKind.ExprVar dn }; iE; xE] ->
+        match Map.tryFind dn dists with
+        | None -> Error "dist_condition expects dist_condition(d, i, x) with a previously declared dist binding d"
+        | Some info ->
+            distDim ctx info |> Result.bind (fun dim ->
+            if dim = 1 then
+                Error (sprintf "dist_condition: '%s' is univariate -- conditioning fixes one coordinate of a JOINT tower and returns the rest, and a 1-dimensional tower has no rest. Construct a joint dist(A, 2) over a multi-variable array first; for updating a univariate prior on data, use ppl.bayes." dn)
+            elif info.Order = 1 then
+                Error (sprintf "dist_condition: '%s' carries only the mean (order 1) -- conditioning is the Schur complement on the kappa_2 block, so construct with dist(A, 2)." dn)
+            elif info.Order > 2 then
+                Error (sprintf "dist_condition: '%s' carries order %d, and conditioning is exact ONLY at order 2 (the Gaussian truncation, whose conditionals stay order-2 with the Schur-complement blocks); an order-%d conditional is not a function of the carried tower, and the module refuses rather than truncates. Construct with dist(A, 2)." dn info.Order info.Order)
+            else
+            match evalExpr ctx.Statics maxSteps iE with
+            | Ok (SVInt ii) when ii >= 0L && ii < int64 dim ->
+                let i = int ii
+                let rest = [ 0 .. dim - 1 ] |> List.filter (fun j -> j <> i)
+                let k1 j = distKappaRead info [j]
+                let k2 a b = distKappaRead info [min a b; max a b]
+                let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+                let xN = sprintf "__ppl_cond_%s_x" dName
+                let sN = sprintf "__ppl_cond_%s_s" dName
+                let devN = sprintf "__ppl_cond_%s_dev" dName
+                let meanCells =
+                    [ for j in rest ->
+                        addE (k1 j) (mulE (divE (k2 j i) (v sN)) (v devN)) ]
+                let covCells =
+                    [ for t in canonicalTuples (dim - 1) 2 ->
+                        let a = rest.[t.[0]]
+                        let b = rest.[t.[1]]
+                        subE (k2 a b) (divE (mulE (k2 a i) (k2 b i)) (v sN)) ]
+                let comps = [ distComponentName dName 1; distComponentName dName 2 ]
+                let outInfo = { Order = 2
+                                Components = comps
+                                Sources = info.Sources
+                                Dim = Some (dim - 1)
+                                Flat = true }
+                Ok ([ bind xN xE
+                      bind sN (k2 i i)
+                      bind devN (subE (v xN) (k1 i))
+                      bind comps.[0] (arrLitE meanCells)
+                      bind comps.[1] (arrLitE covCells) ], outInfo)
+            | Ok (SVInt ii) ->
+                Error (sprintf "dist_condition: coordinate %d is out of range for the %d-dimensional dist '%s' (coordinates are 0..%d)" ii dim dn (dim - 1))
+            | _ ->
+                Error "dist_condition: the coordinate must be a compile-time integer (a literal, `let static`, or static-function call)")
+    | _ ->
+        Error "dist_condition expects dist_condition(d, i, x): a previously declared dist binding, a static coordinate, and the observed value (any pure scalar expression)"
+
 // Signed atomic towers: quasi-distributions as first-class values.
 //   dist_atoms(r, x1, w1, ..., xk, wk)  the order-r tower of the atomic
 //                                       measure sum_i w_i delta(x_i),
@@ -2084,6 +2157,136 @@ let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName
         Error "loglik: the second argument must be a named module-level array (the sample vector)"
     | _ ->
         Error "loglik expects loglik(family(params), A): a symbolic family argument and a rank-1 sample array"
+
+// Conjugate posterior updates (plan section 6, P5): bayes(prior(hyper),
+// <family>_lik(params), A, r) -- the closed-form posterior AS AN ORDINARY
+// FAMILY TOWER. Pure source synthesis mirroring src/ppl/Density.fs
+// Conjugate (the oracle's dump-conjugate verb): the sufficient statistic
+// comes off the data by loglik's accumulation idiom (the data's only use),
+// the posterior hyperparameters are once-bound scalar arithmetic, and the
+// tower itself is re-emitted through the ordinary family constructor
+// (elabFamilyDist), so the result is a registered flat univariate dist that
+// every tower consumer (cumulant/dist_expect/dist_map/the approx bridge)
+// composes with. Supported pairs (prior + likelihood -> posterior family):
+//   gaussian(m0, v0)   + gaussian_lik(s2) -> gaussian   (Normal-Normal, s2 KNOWN)
+//   beta(a, b)         + bernoulli_lik()  -> beta       (Beta-Bernoulli)
+//   gamma(shape, rate) + poisson_lik()    -> gamma      (Gamma-Poisson)
+// Normal-InverseGamma (unknown mean AND variance) is deliberately deferred:
+// its prior is not a family tower (no nig constructor exists -- the
+// mu-margin is Student-t, whose cumulants past order 2*alpha do not exist),
+// and its posterior is a 4-hyperparameter object of which only the
+// PRECISION margin is a Gamma tower -- a tuple-former surface, not this
+// prior-in/posterior-out one.
+
+let private likParams : Map<string, string list> =
+    Map.ofList [
+        "gaussian_lik",  ["s2"]
+        "bernoulli_lik", []
+        "poisson_lik",   [] ]
+
+let private likNames : Set<string> = likParams |> Map.toList |> List.map fst |> Set.ofList
+
+let private bayesPairsText =
+    "gaussian(m0, v0) + gaussian_lik(s2) (Normal-Normal, known likelihood variance), beta(a, b) + bernoulli_lik() (Beta-Bernoulli), gamma(shape, rate) + poisson_lik() (Gamma-Poisson)"
+
+/// Likelihood-position recognition for bayes: `<family>_lik(params...)`,
+/// syntactic like familyArg, with the same shadowing rule.
+let private likArg (active: string -> bool) (e: Expr) : Result<string * Expr list, string> =
+    match e.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, ps) when Set.contains f likNames && active f ->
+        let arity = likParams.[f].Length
+        if ps.Length = arity then Ok (f, ps)
+        else Error (sprintf "bayes: %s expects %d parameter(s) (%s), got %d" f arity (String.concat ", " likParams.[f]) ps.Length)
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) when Set.contains f likNames ->
+        Error (sprintf "bayes: '%s' is shadowed by a user definition in this module, so the argument is not a likelihood former here" f)
+    | _ ->
+        Error "bayes: the second argument must be a likelihood former written syntactically -- gaussian_lik(s2), bernoulli_lik(), or poisson_lik()"
+
+/// The bayes data contract IS loglik's sample-axis contract: a named
+/// module-level rank-1 array with a statically known extent.
+let private bayesSampleVector (ctx: Ctx) (aName: string) : Result<int, string> =
+    match Map.tryFind aName ctx.Arrays with
+    | None ->
+        Error (sprintf "bayes: '%s' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape" aName)
+    | Some (_, idxs) when idxs.Length <> 1 ->
+        Error (sprintf "bayes: '%s' carries %d declared axes -- a conjugate update consumes a rank-1 sample vector (Array<Float like SampleIdx>); slice or push forward first" aName idxs.Length)
+    | Some (_, idxs) ->
+        match resolveExtent ctx.Aliases ctx.Statics idxs.Head with
+        | None -> Error (sprintf "bayes: '%s' sample axis extent must be statically known (Idx<n> directly or through aliases)" aName)
+        | Some n -> Ok n
+
+let private elabBayes (active: string -> bool) (ctx: Ctx) (span: Span) (dName: string) (args: Expr list)
+    : Result<Located<Decl> list * DistInfo, string> =
+    match args with
+    | [priorE; likE; { Kind = ExprKind.ExprVar aName }; rExpr] ->
+        familyArg "bayes" active priorE |> Result.bind (fun (priorFam, priorPs) ->
+        checkSymbolicFamily ctx "bayes" "prior position" priorFam priorPs |> Result.bind (fun () ->
+        likArg active likE |> Result.bind (fun (likFam, likPs) ->
+        (match priorFam, likFam with
+         | "gaussian", "gaussian_lik" | "beta", "bernoulli_lik" | "gamma", "poisson_lik" -> Ok ()
+         | _ ->
+             Error (sprintf "bayes: no conjugate update for a %s prior with a %s likelihood -- supported pairs: %s. (Normal-InverseGamma, unknown mean AND variance, is deferred: its posterior is a 4-hyperparameter object whose mu-margin is Student-t, not a family tower.)" priorFam likFam bayesPairsText))
+        |> Result.bind (fun () ->
+        (match evalExpr ctx.Statics maxSteps rExpr with
+         | Ok (SVInt x) when x >= 1L && x <= 6L -> Ok (int x)
+         | Ok (SVInt x) -> Error (sprintf "bayes: the posterior order must be in 1..6 (got %d) -- Bell-number kernel growth beyond that needs the shared-subexpression pass" x)
+         | _ -> Error "bayes: the posterior order must be a compile-time integer (a literal, `let static`, or static-function call)")
+        |> Result.bind (fun r ->
+        bayesSampleVector ctx aName |> Result.bind (fun n ->
+            let nF = float n
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let nm s = sprintf "__ppl_by_%s_%s" dName s
+            // Prior/likelihood parameters bound once (arbitrary pure scalar
+            // exprs; the Normal-Normal update reads v0 and s2 twice).
+            let prN i = nm (sprintf "pr%d" i)
+            let lkN i = nm (sprintf "lk%d" i)
+            let paramDecls =
+                (priorPs |> List.mapi (fun i e -> bind (prN i) e))
+                @ (likPs |> List.mapi (fun i e -> bind (lkN i) e))
+            let pr i = v (prN i)
+            let lk i = v (lkN i)
+            // The one sufficient statistic every pair needs beyond the static
+            // n: the sample-axis sum (= #successes for Bernoulli data) --
+            // loglik's accumulation idiom, read through a `__` alias so the
+            // synthesized-buffer gate applies.
+            let srcN, sumN, iN, accN = nm "src", nm "sum", nm "i", nm "acc"
+            let sumVal =
+                syn (ExprBlock (
+                        [ sMutStmt accN (fLit 0.0)
+                          forIn iN (iLit 0) (iLit n)
+                              [ assignStmt (v accN) (addE (v accN) (appE (v srcN) [v iN])) ] ],
+                        Some (v accN)))
+            let statDecls = [ bind srcN (v aName); bind sumN sumVal ]
+            let S = v sumN
+            // Posterior hyperparameters (Density.fs Conjugate's formulas,
+            // same expression shapes as the oracle), then the ordinary
+            // family-constructor emission of the posterior tower.
+            let hyperDecls, postFam, postArgs =
+                match priorFam with
+                | "gaussian" ->
+                    // vn = 1/(1/v0 + n/s2); mn = vn * (m0/v0 + sum/s2)
+                    let vnN = nm "vn"
+                    ([ bind vnN (divE (fLit 1.0) (addE (divE (fLit 1.0) (pr 1)) (divE (fLit nF) (lk 0)))) ],
+                     "gaussian",
+                     [ mulE (v vnN) (addE (divE (pr 0) (pr 1)) (divE S (lk 0))); v vnN ])
+                | "beta" ->
+                    // a_n = a + k; b_n = b + (n - k), k = #successes
+                    ([], "beta", [ addE (pr 0) S; addE (pr 1) (subE (fLit nF) S) ])
+                | _ ->
+                    // gamma: shape_n = shape + sum k_i; rate_n = rate + n
+                    ([], "gamma", [ addE (pr 0) S; addE (pr 1) (fLit nF) ])
+            elabFamilyDist ctx span postFam dName (postArgs @ [iLit r])
+            |> Result.map (fun (famDecls, info) ->
+                // The posterior is a deterministic function of A: carry it as
+                // the source so combining two same-data posteriors demands
+                // the (unsatisfiable) independence license instead of
+                // silently adding dependent cumulants.
+                (paramDecls @ statDecls @ hyperDecls @ famDecls,
+                 { info with Sources = Set.singleton aName }))))))))
+    | [_; _; _; _] ->
+        Error "bayes: the third argument must be a named module-level array (the sample vector)"
+    | _ ->
+        Error "bayes expects bayes(prior(hyper), <family>_lik(params), A, r): a conjugate prior family, its likelihood former, a rank-1 data array, and a static posterior order in 1..6"
 
 /// Expression-position density formers, for top-level FUNCTION BODIES only
 /// (docs/plan-ppl-proper.md section 4: a model is an ordinary named function
@@ -2817,11 +3020,6 @@ let private mkFnDecl (span: Span) (name: string) (ps: ParamDecl list) (ret: Type
     { Value = DeclFunction { Name = name; TypeParams = []; Params = ps; WhereClause = None
                              ReturnType = Some ret; Body = body; IsStatic = false; NameSpan = noSpan }
       Span = span }
-let private sMutStmt nm vl = StmtLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindMut }
-let private assignStmt (lhs: Expr) (rhs: Expr) = StmtExpr (syn (ExprAssign (lhs, rhs)))
-let private forIn (var: string) (lo: Expr) (hi: Expr) (body: Stmt list) =
-    StmtForIn (var, syn (ExprDotDot (lo, hi)), body)
-
 /// Shared logpost-name guards for mh/hmc: the first argument must NAME a
 /// top-level same-module Float -> Float function. `example` seeds the
 /// steering text with the former's own call shape.
@@ -4161,6 +4359,12 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                         elabDistReweight ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_mix" }, args) } } when active "dist_mix" ->
                         elabDistMix ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
+                    // Multivariate Gaussian conditioning (plan P5): Schur
+                    // complement on the kappa_2 block; registers a flat
+                    // (D-1)-dimensional order-2 dist, register-only like the
+                    // pushforwards (flat components are not __dist_pack-able).
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_condition" }, args) } } when active "dist_condition" ->
+                        elabDistCondition ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     // Signed atomic towers: quasi-dists as registered values; negativity as a scalar meter.
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_atoms" }, args) } } when active "dist_atoms" ->
                         elabDistAtoms ctx d.Span dName args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
@@ -4177,6 +4381,11 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                         elabLogPdf active ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "loglik" }, args) } } as b) when active "loglik" ->
                         elabLogLik active ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
+                    // Conjugate posterior updates (plan P5): the closed-form
+                    // posterior as a registered family tower, flat univariate
+                    // like the constructors it reuses.
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "bayes" }, args) } } when active "bayes" ->
+                        elabBayes active ctx d.Span dName args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     // The approximate tower bridge (plan section 2): Edgeworth
                     // density, Cornish-Fisher quantile, and the uniform-fill
                     // Cornish-Fisher sampler -- scalar/array projections off a

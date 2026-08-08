@@ -1,0 +1,51 @@
+// TEST: Bayes vs MCMC Agreement
+import ppl as ppl
+import ad as ad
+// THE P5 closing loop (docs/plan-ppl-proper.md sections 6 and 10): the
+// SAME posterior three ways, agreeing. The model is corpus 108/116's exact
+// ORACLE_PINS Normal-Normal block -- prior N(0, 4), known likelihood
+// variance 2, data [1.2, 0.7, 2.3, -0.4, 1.9] -- whose closed-form
+// posterior ppl.bayes now computes EXACTLY: N(1.0363636363636362,
+// 0.36363636363636365). Against it, under those tests' keys:
+//   * the mh chain (key 1234, scale 1.0), lifted back into a tower by the
+//     dist(chain, 2) round-trip and read through dist_expect -- the
+//     full-chain estimates land at mean 1.05704 / var 0.34888;
+//   * the hmc chain (key 1234, eps 0.25, L 4) through the chain-moment
+//     diagnostics at burn 512 -- estimates 1.03523 / 0.35138 (the values
+//     corpus 116 documents for this key).
+// Both land within mean 0.05 / var 0.06 of the exact answer (the margins
+// corpus 108 justifies: a wrong posterior misses by 1.04 in mean and 3.6
+// in variance, MCSE ~ 0.02), pinned as deterministic booleans AGAINST THE
+// BAYES SCALARS THEMSELVES -- exact and sampled inference meeting in one
+// boolean. The exact side is also pinned absolutely.
+let data: Array<Float64 like Idx<5>> = [1.2, 0.7, 2.3, -0.4, 1.9]
+function logpost(theta: Float64) -> Float64 =
+    ppl.logpdf(gaussian(0.0, 4.0), theta) + ppl.loglik(gaussian(theta, 2.0), data)
+
+// Exact: the conjugate posterior tower, projected to scalars.
+let post = ppl.bayes(gaussian(0.0, 4.0), gaussian_lik(2.0), data, 2)
+let pm = ppl.dist_expect(post, 0.0, 1.0)
+let pm2 = ppl.dist_expect(post, 0.0, 0.0, 1.0)
+let pv = pm2 - pm * pm
+// EXPECT: pm = 1.0363636363636362
+// EXPECT: pv = 0.36363636363636365
+
+// Sampled, road 1: mh chain -> dist(chain, 2) round-trip -> dist_expect.
+let cmh = ppl.mh(logpost, 0.0, 4096, 1.0, 1234)
+let dmh = ppl.dist(cmh, 2)
+let sm = ppl.dist_expect(dmh, 0.0, 1.0)
+let sm2 = ppl.dist_expect(dmh, 0.0, 0.0, 1.0)
+let sv = sm2 - sm * sm
+let mh_mean_agrees = abs(sm - pm) < 0.05
+// EXPECT: mh_mean_agrees = true
+let mh_var_agrees = abs(sv - pv) < 0.06
+// EXPECT: mh_var_agrees = true
+
+// Sampled, road 2: hmc chain -> chain-moment diagnostics (burn 512).
+let chmc = ppl.hmc(logpost, 0.0, 4096, 0.25, 4, 1234)
+let hm = ppl.chain_mean(chmc, 512)
+let hv = ppl.chain_var(chmc, 512)
+let hmc_mean_agrees = abs(hm - pm) < 0.05
+// EXPECT: hmc_mean_agrees = true
+let hmc_var_agrees = abs(hv - pv) < 0.06
+// EXPECT: hmc_var_agrees = true

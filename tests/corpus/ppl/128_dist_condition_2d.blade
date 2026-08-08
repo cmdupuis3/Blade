@@ -1,0 +1,32 @@
+// TEST: Dist Condition 2D Regression Line
+import ppl as ppl
+// dist_condition(d, i, x) (docs/plan-ppl-proper.md P5): Schur complement
+// on the kappa_2 block of a MULTIVARIATE order-2 tower. The 2D case is the
+// regression line, by hand: data rows x = [1, 2, 3, 6], y = [2, 3, 5, 10],
+// so (population-normalized, the module convention)
+//   mean = [3, 5]
+//   var(x)    = (4+1+0+9)/4          = 14/4  = 3.5
+//   cov(x, y) = (6+2+0+15)/4         = 23/4  = 5.75
+//   var(y)    = (9+4+0+25)/4         = 38/4  = 9.5
+// Conditioning on coordinate 0 (x) at x = 4 (dev = 1):
+//   E[y|x=4]   = 5 + (5.75/3.5)*1 = 5 + 23/14 = 93/14
+//              = 6.642857142857143
+//   Var[y|x=4] = 9.5 - 5.75^2/3.5 = 532/56 - 529/56 = 3/56
+//              = 0.05357142857142857
+// A D=2 input conditions down to an ordinary UNIVARIATE tower, so the
+// registered result feeds dist_expect directly:
+//   E[Y]   = 93/14
+//   E[Y^2] = 3/56 + (93/14)^2 = 3/56 + 8649/196 = 44.18112244897959
+type V2 = Idx<2>
+type T4 = Idx<4>
+let A: Array<Float64 like V2, T4> = [[1.0, 2.0, 3.0, 6.0], [2.0, 3.0, 5.0, 10.0]]
+let d = ppl.dist(A, 2)
+let c = ppl.dist_condition(d, 0, 4.0)
+let cm = ppl.cumulant(c, 1)
+let cv = ppl.cumulant(c, 2)
+// EXPECT: cm = [6.642857142857143]
+// EXPECT: cv = [0.05357142857142857]
+let ey = ppl.dist_expect(c, 0.0, 1.0)
+let ey2 = ppl.dist_expect(c, 0.0, 0.0, 1.0)
+// EXPECT: ey = 6.642857142857143
+// EXPECT: ey2 = 44.18112244897959

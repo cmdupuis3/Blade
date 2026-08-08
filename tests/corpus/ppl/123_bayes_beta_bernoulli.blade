@@ -1,0 +1,32 @@
+// TEST: Bayes Beta-Bernoulli Posterior Tower
+import ppl as ppl
+// ppl.bayes on the exact ORACLE_PINS.md dump-conjugate Beta-Bernoulli
+// block: prior Beta(a0=2, b0=3); data n=10 trials, k=7 successes (spelled
+// as the 0/1 sample vector below, k = its sum). Posterior hyperparameters:
+//   a_n = a0 + k = 9        b_n = b0 + (n - k) = 6
+// (the oracle's post_a=9, post_b=6). The oracle publishes closed-form
+// moments only (Beta has no cumulant constructor in the prototype's
+// Dist.fs); the TOWER pins below are recomputed BY HAND from Beta(9, 6)
+// through the same raw-moment ladder + Moebius inversion the beta family
+// constructor emits, m_j = m_{j-1} (a+j-1)/(a+b+j-1):
+//   m1 = 9/15 = 3/5   m2 = m1*10/16 = 3/8   m3 = m2*11/17 = 33/136
+//   m4 = m3*12/18 = 11/68
+//   kappa_1 = m1 = 0.6                       (oracle post_mean = 0.6)
+//   kappa_2 = m2 - m1^2 = 3/8 - 9/25 = 3/200 = 0.015   (oracle post_var)
+//   kappa_3 = m3 - 3 m2 m1 + 2 m1^3 = -6/17000
+//           = -0.00035294117647058824
+//   kappa_4 = m4 - 4 m3 m1 - 3 m2^2 + 12 m2 m1^2 - 6 m1^4 = -43/680000
+//           = -6.323529411764706e-5
+// (cross-checks: skewness 2(b-a)sqrt(a+b+1)/((a+b+2)sqrt(ab)) = -0.19213
+// gives kappa_3 = skew*sd^3 = -3.5294e-4; excess kurtosis -0.28105 gives
+// kappa_4 = -6.3235e-5).
+let bdata: Array<Float64 like Idx<10>> = [1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0]
+let post = ppl.bayes(beta(2.0, 3.0), bernoulli_lik(), bdata, 4)
+let b1 = ppl.cumulant(post, 1)
+let b2 = ppl.cumulant(post, 2)
+let b3 = ppl.cumulant(post, 3)
+let b4 = ppl.cumulant(post, 4)
+// EXPECT: b1 = [0.6]
+// EXPECT: b2 = [0.015]
+// EXPECT: b3 = [-0.00035294117647058824]
+// EXPECT: b4 = [-6.323529411764706e-5]

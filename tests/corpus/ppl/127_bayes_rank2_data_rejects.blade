@@ -1,0 +1,12 @@
+// TEST: Bayes Rank-2 Data (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: a conjugate update consumes a rank-1 sample vector
+import ppl as ppl
+// The bayes data contract is loglik's sample-axis contract: one declared
+// axis, the sample axis, statically extented. A rank-2 array is ambiguous
+// (which axis is the sample axis?) and refused with steering toward
+// slicing -- every supported pair is a UNIVARIATE conjugate update.
+type VarIdx = Idx<2>
+type TimeIdx = Idx<3>
+let A: Array<Float64 like VarIdx, TimeIdx> = [[1.0, 2.0, 3.0], [2.0, 1.0, 4.0]]
+let post = ppl.bayes(gaussian(0.0, 4.0), gaussian_lik(2.0), A, 2)
