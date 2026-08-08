@@ -37,9 +37,11 @@
 ///     exact for the accumulation subset
 ///   - scalar arithmetic + - * / (and `^` by an int literal), unary minus
 ///   - math intrinsics (exp/log/sqrt/trig/hyperbolic; floor/ceil have zero
-///     derivative). NOT lgamma: its derivative is digamma, which the language
-///     does not have, so it is REFUSED rather than silently differentiated to
-///     zero (zeroDerivIntrinsics vs derivRule's None, below)
+///     derivative). lgamma differentiates to digamma, which makes the
+///     gamma/beta/poisson log-likelihoods AD-able. NOT digamma itself: its
+///     derivative is trigamma, which the language does not have, so it is
+///     REFUSED rather than silently differentiated to zero
+///     (zeroDerivIntrinsics vs derivRule's None, below)
 ///   - array reads `a(i...)` at integer index expressions
 ///   - calls to other AD-able functions in the same module, INLINED
 ///     (recursion rejected by a depth cap)
@@ -64,9 +66,9 @@ open Blade.Ast
 
 /// Scalar math intrinsics recognized as plain calls (`exp(x)`) when the name
 /// is not user-bound. Unary, real-valued, rendered as std::<name> in C++ --
-/// except `lgamma`, which renders as `blade_rt::lgamma` (CodeGen.unaryOpToCpp)
-/// because std::lgamma has no bit-exact interpreter twin; see
-/// src/cpp/blade_runtime.hpp.
+/// except `lgamma` and `digamma`, which render as `blade_rt::<name>`
+/// (CodeGen.unaryOpToCpp) because they have no bit-exact interpreter twin in
+/// any shared library; see src/cpp/blade_runtime.hpp.
 /// Keep in sync with StaticEval.evalBuiltin and derivRule below.
 let mathIntrinsics : Set<string> =
     Set.ofList [
@@ -75,7 +77,7 @@ let mathIntrinsics : Set<string> =
         "sinh"; "cosh"; "tanh"
         "asin"; "acos"; "atan"
         "floor"; "ceil"
-        "lgamma"
+        "lgamma"; "digamma"
     ]
 
 let isMathIntrinsic (name: string) : bool = Set.contains name mathIntrinsics
@@ -119,7 +121,7 @@ let private zeroDerivIntrinsics : Set<string> = Set.ofList [ "floor"; "ceil" ]
 
 /// d/du of intrinsic(u), as a function of the FORWARD expression u.
 /// Returns None for the zero-derivative intrinsics above AND for any
-/// intrinsic with no rule yet (`lgamma`: its derivative is the digamma
+/// intrinsic with no rule yet (`digamma`: its derivative is the trigamma
 /// function, which the language does not have) -- adjointOf tells the two
 /// apart via zeroDerivIntrinsics and refuses the latter.
 let private derivRule (name: string) (u: Expr) : Expr option =
@@ -136,7 +138,17 @@ let private derivRule (name: string) (u: Expr) : Expr option =
     | "asin" -> Some (div (fLit 1.0) (call "sqrt" [sub (fLit 1.0) (mul u u)]))
     | "acos" -> Some (neg (div (fLit 1.0) (call "sqrt" [sub (fLit 1.0) (mul u u)])))
     | "atan" -> Some (div (fLit 1.0) (add (fLit 1.0) (mul u u)))
+    // d/dx log Gamma(x) = psi(x). The chain rule closes here because digamma
+    // is itself an intrinsic (blade_rt::digamma), so the emitted adjoint is
+    // an ordinary Blade expression the rest of the pipeline already handles.
+    // This is what makes gamma / beta / poisson log-likelihoods -- whose
+    // normalizers are all lgamma -- differentiable, and so HMC-able.
+    | "lgamma" -> Some (call "digamma" [u])
     | "floor" | "ceil" -> None
+    // digamma is now the frontier: d/dx psi(x) = psi'(x) is trigamma, which
+    // the language does not have, so it is REFUSED below rather than silently
+    // differentiated to zero. Adding trigamma would move this line, not
+    // change the shape of the rule.
     | _ -> None
 
 // Normalized statement model
@@ -1037,7 +1049,7 @@ let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list
          | None ->
              // An intrinsic with no derivative rule. REFUSING is the point:
              // falling through to `Ok []` here would hand back a gradient that
-             // silently drops this term (`lgamma` would differentiate to zero).
+             // silently drops this term (`digamma` would differentiate to zero).
              Error (sprintf "'%s' has no derivative rule, so it cannot appear in a differentiated function (its derivative is not expressible in the AD-able subset). Compute it outside the function passed to ad.grad, or pass the value in as a parameter" name)
          | Some d ->
              let pre, c = bindCot rc cot
