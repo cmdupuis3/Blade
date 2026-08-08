@@ -30,6 +30,16 @@
 ///                header or the two streams desynchronize at the first
 ///                rejection and never recover.
 ///   beta         two gammas, in the order (a, then b).
+///   categorical  1 uniform, unconditionally (including the degenerate-weights
+///                branch, which draws before returning 0).
+///
+/// ELEMENT TYPE. Every family here returns `float[]` EXCEPT `categorical`, which
+/// returns `int64[]` because its fill writes an `int64_t` pool (see the element
+/// type note in rand_runtime.hpp). That is why the dispatch is split into
+/// `draws` (float families) and `drawsCategorical`, rather than one function
+/// with a widened return: the two feed different interpreter stores (SFloat vs
+/// SInt) and a common `float[]` return would reintroduce exactly the Float64
+/// index the int64 pool exists to avoid.
 module Blade.Interp.RandMirror
 
 // Core stream (copy of spectra/Rand.fs BladeSpectra.Rand).
@@ -196,6 +206,33 @@ let bernoulli (key: int64) (p: float) (n: int) : float[] =
 let beta (key: int64) (a: float) (b: float) (n: int) : float[] =
     fill key n (fun g -> nextBeta g a b)
 
+/// blade_rand::categorical(out, n, key, w, k): `n` indices in [0, k) with
+/// P(i) proportional to w_i. Mirrors the header body statement for statement --
+/// the clamp of non-positive/NaN weights to 0, the running left-to-right scan,
+/// the in-place division by the total, the degenerate short-circuit that still
+/// consumes its uniform, and the strict `u >= cum[j]` walk with the j+1 < k
+/// clamp. Note this fill does NOT go through `fill`: it returns int64 and it
+/// hoists a per-call scan the way the C++ body does.
+let categorical (key: int64) (weights: float[]) (n: int) : int64[] =
+    let g = Mt19937_64(mix64 (uint64 key))
+    let k = weights.Length
+    let cum = Array.zeroCreate<float> k
+    let mutable acc = 0.0
+    for i in 0 .. k - 1 do
+        acc <- acc + (if weights.[i] > 0.0 then weights.[i] else 0.0)
+        cum.[i] <- acc
+    let total = acc
+    let degenerate = not (total > 0.0)
+    if not degenerate then
+        for i in 0 .. k - 1 do cum.[i] <- cum.[i] / total
+    Array.init n (fun _ ->
+        let u = nextUniform g
+        if degenerate then 0L
+        else
+            let mutable j = 0
+            while j + 1 < k && u >= cum.[j] do j <- j + 1
+            int64 j)
+
 /// Dispatch on the runtime `kind` string that codegen records in
 /// RandGen (IR.fs RandomFillSpec), with the already-evaluated runtime Float64
 /// parameters in surface order. Matches the internal builtin call surface
@@ -214,8 +251,21 @@ let draws (kind: string) (key: int64) (pars: float list) (n: int) : float[] =
     | "beta", [a; b]            -> beta key a b n
     | ("uniform" | "normal" | "exponential" | "gamma" | "poisson" | "bernoulli" | "beta"), _ ->
         failwithf "RandMirror.draws: rand kind '%s' got %d parameter(s)" kind (List.length pars)
+    | "categorical", _ ->
+        // Not a widening oversight: categorical draws are int64 and belong to
+        // `drawsCategorical`. Reaching here means a caller routed the array-
+        // parameter family through the scalar-parameter dispatch.
+        failwith "RandMirror.draws: 'categorical' is an int64 fill -- use drawsCategorical"
     | other, _ ->
         failwithf "RandMirror.draws: unknown rand kind '%s' (expected uniform | normal | exponential | gamma | poisson | bernoulli | beta)" other
+
+/// Int64 counterpart of `draws` for the one array-parameter family. Kept
+/// separate rather than folded into `draws` because the return type differs
+/// (see the element-type note in this module's header).
+let drawsCategorical (kind: string) (key: int64) (weights: float[]) (n: int) : int64[] =
+    match kind with
+    | "categorical" -> categorical key weights n
+    | other -> failwithf "RandMirror.drawsCategorical: unknown int64 rand kind '%s' (expected categorical)" other
 
 // RandomFillSpec executor.
 

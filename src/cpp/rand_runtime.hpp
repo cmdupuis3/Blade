@@ -16,19 +16,33 @@
 //   blade_rand::poisson    (double* out, size_t n, int64_t key, double lam)
 //   blade_rand::bernoulli  (double* out, size_t n, int64_t key, double p)
 //   blade_rand::beta       (double* out, size_t n, int64_t key, double a, double b)
+//   blade_rand::categorical(int64_t* out, size_t n, int64_t key, const double* w, size_t k)
 //
-// ELEMENT TYPE. Every fill writes `double`, including the two integer-valued
-// families (poisson counts, bernoulli 0/1). This is deliberate: one `double*`
-// out-pointer contract keeps the codegen seam (genRandGenBinding allocates a
-// dense Float64 pool and hands over pool_base) and the interpreter mirror
-// (RandMirror's `float[]`) uniform across all families, at the cost of an
-// exactly-representable integer round-trip. Counts below 2^53 are exact, so
-// nothing is lost numerically; a future Int64 fill would need its own pool
-// type, allocation arm, and mirror, which is not worth it for the P2 surface.
+// ELEMENT TYPE. Every fill EXCEPT `categorical` writes `double`, including the
+// two integer-valued families (poisson counts, bernoulli 0/1). That is
+// deliberate: one `double*` out-pointer contract keeps the codegen seam
+// (genRandGenBinding allocates a dense Float64 pool and hands over pool_base)
+// and the interpreter mirror (RandMirror's `float[]`) uniform across those
+// families, at the cost of an exactly-representable integer round-trip. Counts
+// below 2^53 are exact, so nothing is lost numerically there.
+//
+// `categorical` is the exception, and writes `int64_t`. Its output is not a
+// measurement that happens to be integral -- it is a SUBSCRIPT, and the whole
+// point of drawing it is to index the array the weights came from. A Float64
+// index would need a coercion the rand surface does not have, so this family
+// carries its own out-pointer type. The seam that made this cheap is that
+// codegen was already element-type-generic: genRandGenBinding allocates
+// `Array<elemTypeToCpp(ElemType), rank>`, so the checker choosing
+// `IRTScalar ETInt64` for this one family is what selects an `int64_t` pool,
+// and the fill signature follows. The interpreter mirror correspondingly
+// returns `int64[]` into an SInt store rather than `float[]`/SFloat.
 //
 // PARAMETERS are runtime doubles: the Blade surface accepts any Float64-typed
 // expression for rate/shape/lam/p/a/b (only the SHAPE must be static). They are
 // passed after the key so the (out, n, key) prefix stays identical everywhere.
+// `categorical` instead takes an ARRAY parameter -- a pointer to the rank-1
+// Float64 weights pool plus its (static, checker-pinned) length -- passed in
+// the same position, after the key.
 //
 // `key` is the stream key: same key => same sequence; nearby keys decorrelate
 // (SplitMix64 finalizer). The key-first signature is the seam for a future
@@ -46,6 +60,7 @@
 #include <cstddef>
 #include <cmath>
 #include <random>
+#include <vector>
 
 namespace blade_rand {
 
@@ -199,6 +214,65 @@ inline void bernoulli(double* out, size_t n, int64_t key, double p) {
 inline void beta(double* out, size_t n, int64_t key, double a, double b) {
     std::mt19937_64 g(mix64(static_cast<uint64_t>(key)));
     for (size_t i = 0; i < n; ++i) out[i] = next_beta(g, a, b);
+}
+
+// Categorical(w): an INDEX in [0, k) with P(i) = w_i / sum(w). The weights need
+// not be normalized. Unlike every other family this one has no `next_*` helper:
+// the normalized cumulative scan is loop-invariant, so it is computed ONCE per
+// fill and shared by all `n` draws, and a per-draw helper would either recompute
+// it or need the scan threaded through it.
+//
+// DRAW BUDGET: exactly ONE uniform per element, unconditionally -- including the
+// degenerate branch below, which still draws before returning. That keeps the
+// stream position a function of `n` alone, so the mirror stays in step no matter
+// what the weights are.
+//
+// WEIGHT VALIDATION follows the wave-1 convention exactly: these fills never
+// panic and never validate (gamma with shape <= 0 does not check, it just lets
+// the arithmetic produce what it produces), and the one guard that exists --
+// beta's `s <= 0` -> 0.0 -- is there to keep the output PRINTABLE rather than to
+// report an error. Two guards here are of that same kind:
+//   * A negative or NaN weight contributes 0 to the scan (`w[i] > 0.0` is false
+//     for both). This is not error reporting; a non-monotone cumulative array
+//     would make the inverse-CDF walk meaningless, so clamping is what gives the
+//     walk a defined answer at all. A negative weight is therefore silently read
+//     as zero probability.
+//   * If the total is not positive (all weights zero/negative/NaN), every draw
+//     returns index 0. Like beta's guard this keeps the fill printable and
+//     in-range instead of producing a NaN or an out-of-bounds subscript.
+// Neither case is diagnosed. Callers wanting rejection must check the weights in
+// Blade before the call.
+//
+// SCALE INVARIANCE: scaling every weight by a power of two leaves the draws
+// BIT-identical (the scan and the division by the total scale exactly), which is
+// what the corpus scale-invariance test pins. For a general scale factor the
+// draws agree up to the rounding of the scan, as with any float reduction.
+inline void categorical(int64_t* out, size_t n, int64_t key, const double* w, size_t k) {
+    std::mt19937_64 g(mix64(static_cast<uint64_t>(key)));
+    // One-time cumulative scan, running sum left to right (the mirror sums in
+    // this same order -- a different association would round differently).
+    std::vector<double> cum(k);
+    double acc = 0.0;
+    for (size_t i = 0; i < k; ++i) {
+        acc += (w[i] > 0.0) ? w[i] : 0.0;
+        cum[i] = acc;
+    }
+    const double total = acc;
+    const bool degenerate = !(total > 0.0);
+    if (!degenerate) {
+        for (size_t i = 0; i < k; ++i) cum[i] /= total;
+    }
+    // After normalization cum[k-1] == 1.0 exactly and every u is < 1.0, so the
+    // walk always finds a j; the `j + 1 < k` bound is a belt-and-braces clamp.
+    // Zero-weight indices are unreachable: they leave cum flat, and the strict
+    // `u >= cum[j]` step walks past every flat run.
+    for (size_t i = 0; i < n; ++i) {
+        double u = next_uniform(g);
+        if (degenerate) { out[i] = 0; continue; }
+        size_t j = 0;
+        while (j + 1 < k && u >= cum[j]) ++j;
+        out[i] = static_cast<int64_t>(j);
+    }
 }
 
 } // namespace blade_rand
