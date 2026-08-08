@@ -1923,15 +1923,12 @@ let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string)
 // bit-exact interp mirror; domain x > 0, BL8008 panic otherwise -- every
 // lgamma argument below is positive whenever the family's parameters are).
 //
-// AD-ability caveat: the four lgamma-gated densities are NOT yet AD-able.
-// lgamma has no derivative rule in Grad (its derivative is digamma, which a
-// sibling branch is adding; no Grad rules are added here), so ad.grad over a
-// gamma/poisson/beta/bernoulli logpdf or loglik is refused by Grad's
-// intrinsic gate until digamma lands. The lgamma-free four remain inside the
-// AD-able subset (Grad.fs:27-50) as before -- loglik still emits the scalar
-// `let mut` + for + `+=` accumulation loop for every family, so the
-// gamma/poisson/beta forms become HMC-able the moment the digamma rule
-// exists, with no re-elaboration needed.
+// AD-ability: all eight families are inside the AD-able subset. lgamma has a
+// derivative rule in Grad (digamma; corpus ad/015, ppl/117 exercise HMC over
+// gamma/poisson models). The frontier is digamma itself -- no trigamma
+// exists, so second derivatives of lgamma-gated densities are refused by
+// Grad's intrinsic gate. loglik emits the scalar `let mut` + for + `+=`
+// accumulation loop for every family.
 
 /// log(2 pi s2), the Gaussian/lognormal normalizer.
 let private log2piE (s2: Expr) : Expr = appE (v "log") [ mulE (fLit (2.0 * System.Math.PI)) s2 ]
