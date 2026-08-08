@@ -1,0 +1,51 @@
+// TEST: Reduce Over a Product of Two COMPOUND Operands
+// `(x - xbar) * (y - ybar)` desugars to compute(method_for(zip(x - xbar,
+// y - ybar)) <@> lambda) exactly like the bare `A * B` of 019 -- but here BOTH
+// zip operands are compound expressions rather than plain names, over ABSTRACT
+// `T^1` parameters whose shape lives in the substitution rather than in a
+// concrete literal (019's operands are array literals, which resolve
+// structurally and never reach the bad path -- this case only bites inside a
+// rank-polymorphic function body).
+// inferMethodFor read each operand's shape off the RAW TypedExpr.Type, which
+// for a synthesized inner pipeline is still an unresolved IRTInfer var (only
+// the substitution knows it was unified with the rank-1 array the pipeline
+// produces). ArrayElem missed, getArrayType's non-variable fallback handed back
+// a ZERO-record array type, zipSharedRecords saw minRank 0 and returned no
+// shared records -- so the co-iteration collapsed to rank 0 and the product
+// typed as a SCALAR. `reduce` over it then rejected with "requires an array as
+// first argument", and merely naming the two operands first made the same
+// program compile (getArrayType's ExprVar arm looks the shape up in env).
+// Shapes are now resolved through Subst before they are read, so naming an
+// operand is no longer load-bearing.
+function covariance(x: T^1, y: T^1) = {
+    let n = extents(x)
+    let xbar = reduce(x, (+)) / n
+    let ybar = reduce(y, (+)) / n
+    reduce((x - xbar) * (y - ybar), (+)) / n
+}
+// naming the two differences must agree with leaving them inline
+function covariance_named(x: T^1, y: T^1) = {
+    let n = extents(x)
+    let xbar = reduce(x, (+)) / n
+    let ybar = reduce(y, (+)) / n
+    let dx = x - xbar
+    let dy = y - ybar
+    reduce(dx * dy, (+)) / n
+}
+let A = [1.0, 2.0, 3.0, 4.0]
+let B = [2.0, 4.0, 6.0, 8.0]
+let C = [10.0, 7.0, 4.0, 1.0]
+// A centers to [-1.5, -0.5, 0.5, 1.5], B to [-3, -1, 1, 3]:
+// (4.5 + 0.5 + 0.5 + 4.5) / 4
+let cov = covariance(A, B)
+// self case -- population variance of A: (2.25 + 0.25 + 0.25 + 2.25) / 4
+let vari = covariance(A, A)
+// C = 13 - 3A, so cov(A, C) = -3 * var(A)
+let anti = covariance(A, C)
+let cov_named = covariance_named(A, B)
+let anti_named = covariance_named(A, C)
+// EXPECT: cov = 2.5
+// EXPECT: vari = 1.25
+// EXPECT: anti = -3.75
+// EXPECT: cov_named = 2.5
+// EXPECT: anti_named = -3.75

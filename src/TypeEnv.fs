@@ -131,6 +131,15 @@ type TypeEnv = {
     ImplMethods: Map<string * string, IRId * IRType>
     /// Unit name -> canonical UnitSig
     Units: Map<string, UnitSig>
+    /// The MAGNITUDE an enclosing annotation says the value being checked is
+    /// supposed to have, threaded down from the annotated-let seam. Read by
+    /// the scalar +/- conversion seam so each operand converts straight into
+    /// the unit that was asked for -- ONE factor per operand -- instead of
+    /// joining at the left operand and correcting the sum afterwards, which
+    /// rounds twice and computes in a magnitude nobody chose. Applied only
+    /// when it agrees dimensionally with what the operands actually produce,
+    /// so it can never turn a real unit error into a conversion.
+    UnitTarget: UnitSig option
     /// Context stack for error reporting, e.g. ["in function 'foo'"]
     Context: string list
     /// Exports from modules type-checked earlier in this compilation
@@ -251,6 +260,7 @@ let emptyEnv () = {
     Interfaces = Map.empty
     ImplMethods = Map.empty
     Units = Map.empty
+    UnitTarget = None
     Context = []
     ModuleExports = Map.empty
     StaticFunctions = Map.empty
@@ -855,8 +865,15 @@ let rec resolveUnitExpr (units: Map<string, UnitSig>) (expr: UnitExpr) : Result<
         match Map.tryFind name units with
         | Some sig' when sig'.Nominal.IsSome -> Error (UResolveTerminal name)
         | Some sig' -> Ok sig'
+        // Irrational scale constants (`pi`) resolve only AFTER the unit
+        // table, so a user's own `Unit pi` still shadows the built-in and no
+        // existing program changes meaning. Dimensionless: a constant
+        // contributes a magnitude, never a dim.
+        | None when unitScaleConstants.ContainsKey name ->
+            Ok (unitOfDimsScaled Map.empty (scaleOfConst name))
         | None -> Error (UResolveUnknown name)
     | UnitOne -> Ok unitDimensionless
+    | UnitScaleLit (num, den) -> Ok (unitOfDimsScaled Map.empty (scaleOfRational num den))
     | UnitMul (a, b) ->
         resolveUnitExpr units a |> Result.bind (fun sa ->
         resolveUnitExpr units b |> Result.map (fun sb ->

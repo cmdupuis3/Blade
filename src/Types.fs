@@ -347,60 +347,219 @@ let isRaggedRowKind (k: IxKind) : bool =
     | IxKDepInner | IxKGroupMember -> true
     | _ -> false
 
+/// The MAGNITUDE of a unit relative to the base-unit product named by its
+/// `Dims` -- what makes `day` differ from `second` when both are {second: 1}.
+/// Kept EXACT and SYMBOLIC: a rational Num/Den times a product of named
+/// irrational constants with integer exponents. `86400 * second` is
+/// {86400/1, {}}; `2 * pi * radian` is {2/1, {pi: 1}}.
+///
+/// Nothing rounds during unit ALGEBRA -- mul/div/pow compose the rationals
+/// exactly and ADD the constant exponents -- so `turn / turn` cancels to
+/// exactly 1 rather than to 6.28.../6.28.... A float appears only when a
+/// conversion factor is materialized at a seam (scaleToCppFactor), and `pi`
+/// materializes as the BACKEND's constant rather than a decimal we wrote
+/// down, so the C++ value is correctly rounded.
+type UnitScale = {
+    Num: bigint
+    /// Strictly positive; the sign of the rational lives on Num.
+    Den: bigint
+    /// Irrational factors by integer exponent, e.g. pi^1. Zero exponents are
+    /// normalized away, so `Map.isEmpty` means "purely rational".
+    Consts: Map<string, int>
+}
+
+/// Reduce to lowest terms, force Den > 0, and drop zero constant exponents.
+/// Every UnitScale in circulation is normalized, so structural equality is
+/// exact scale equality -- which is what the seam checks compare.
+let private normScale (num: bigint) (den: bigint) (consts: Map<string, int>) : UnitScale =
+    if den.IsZero then
+        // Only reachable from `x / 0` in a unit RHS; the parser rejects a
+        // zero literal before this, so this is a belt-and-braces invariant.
+        failwith "unit scale: zero denominator"
+    let signFix = if den.Sign < 0 then bigint -1 else bigint 1
+    let num = num * signFix
+    let den = abs den
+    let g =
+        let g0 = System.Numerics.BigInteger.GreatestCommonDivisor (abs num, den)
+        if g0.IsZero then bigint 1 else g0
+    { Num = num / g
+      Den = den / g
+      Consts = consts |> Map.filter (fun _ e -> e <> 0) }
+
+/// The unity scale: every unit declared without an explicit factor has it.
+let scaleOne : UnitScale = { Num = bigint 1; Den = bigint 1; Consts = Map.empty }
+
+let scaleOfRational (num: bigint) (den: bigint) : UnitScale = normScale num den Map.empty
+
+/// A named irrational factor (`pi`), carried symbolically to emission.
+let scaleOfConst (name: string) : UnitScale = normScale (bigint 1) (bigint 1) (Map.ofList [(name, 1)])
+
+let scaleIsOne (s: UnitScale) : bool =
+    s.Num.IsOne && s.Den.IsOne && Map.isEmpty s.Consts
+
+let private mergeConsts f (a: Map<string, int>) (b: Map<string, int>) =
+    Map.fold (fun acc k v ->
+        let existing = Map.tryFind k acc |> Option.defaultValue 0
+        Map.add k (f existing v) acc) a b
+
+let scaleMul (a: UnitScale) (b: UnitScale) : UnitScale =
+    normScale (a.Num * b.Num) (a.Den * b.Den) (mergeConsts (+) a.Consts b.Consts)
+
+let scaleDiv (a: UnitScale) (b: UnitScale) : UnitScale =
+    // b.Num moves to the denominator, so a zero numerator on the divisor is
+    // the one way normScale's zero-denominator guard can fire.
+    normScale (a.Num * b.Den) (a.Den * b.Num) (mergeConsts (-) a.Consts b.Consts)
+
+let scalePow (s: UnitScale) (n: int) : UnitScale =
+    if n = 0 then scaleOne
+    elif n > 0 then
+        normScale (System.Numerics.BigInteger.Pow (s.Num, n))
+                  (System.Numerics.BigInteger.Pow (s.Den, n))
+                  (s.Consts |> Map.map (fun _ e -> e * n))
+    else
+        let k = -n
+        normScale (System.Numerics.BigInteger.Pow (s.Den, k))
+                  (System.Numerics.BigInteger.Pow (s.Num, k))
+                  (s.Consts |> Map.map (fun _ e -> e * n))
+
+/// Render a scale for diagnostics: `86400`, `1/60`, `2 * pi`, `pi^2 / 4`.
+/// The rational numerator is elided when it is 1 and a constant carries the
+/// numerator instead, so `2 * pi` does not print as `2 * pi` with a stray 1.
+let ppUnitScale (s: UnitScale) : string =
+    let ppConst (n, e) = if abs e = 1 then n else sprintf "%s^%d" n (abs e)
+    let numConsts = s.Consts |> Map.toList |> List.filter (fun (_, e) -> e > 0) |> List.map ppConst
+    let denConsts = s.Consts |> Map.toList |> List.filter (fun (_, e) -> e < 0) |> List.map ppConst
+    let numParts =
+        (if s.Num.IsOne && not (List.isEmpty numConsts) then [] else [string s.Num]) @ numConsts
+    let denParts = (if s.Den.IsOne then [] else [string s.Den]) @ denConsts
+    let numStr = if List.isEmpty numParts then "1" else String.concat " * " numParts
+    if List.isEmpty denParts then numStr
+    else sprintf "%s / %s" numStr (String.concat " * " denParts)
+
+/// Irrational constants usable as unit scale factors, by double value.
+/// `System.Math.PI` is the correctly-rounded double for pi, bit-identical to
+/// C++'s `M_PI` on every platform Blade targets -- and codegen renders a
+/// double through `floatToCppLiteral`, which is shortest-ROUND-TRIP, so the
+/// constant reaches the compiler as the exact same bits rather than as a
+/// decimal either side truncated. That is what lets a conversion factor be
+/// an ordinary float literal without a symbolic-constant IR node.
+///
+/// `pi` resolves only AFTER `env.Units`, so a user's own `Unit pi` still wins
+/// and no existing program changes meaning.
+let unitScaleConstants : Map<string, float> =
+    Map.ofList [ ("pi", System.Math.PI) ]
+
+/// The double a conversion by this scale multiplies by: the numerator
+/// product, then each denominator factor divided out in turn. Integers go in
+/// as exact doubles and the division happens once, in IEEE, so `1/60` is the
+/// correctly-rounded quotient rather than a decimal truncated on the way out.
+///
+/// An unknown constant yields nan; resolveUnitExpr rejects those names before
+/// a signature carrying one can be built, so it is unreachable in practice.
+let scaleToFloat (s: UnitScale) : float =
+    let constTerms sign =
+        s.Consts
+        |> Map.toList
+        |> List.filter (fun (_, e) -> sign * e > 0)
+        |> List.collect (fun (n, e) ->
+            List.replicate (abs e) (Map.tryFind n unitScaleConstants |> Option.defaultValue nan))
+    let num = (float s.Num) :: constTerms 1 |> List.fold (*) 1.0
+    (float s.Den) :: constTerms -1 |> List.fold (/) num
+
 /// Unit of measure signature. `Dims` is the STRUCTURAL layer: a product of
 /// base units with integer exponents (e.g. velocity = {meters: 1, seconds:
 /// -1}); dimensionless = empty map. `Nominal` is the QUANTITY layer: a
 /// nominal identity declared via `Unit speed: mps`, entailing exactly the
 /// dims it was declared with. Structural units and plain aliases carry
 /// Nominal = None; the nominal layer is exactly one level deep (quantity
-/// names are TERMINAL in unit algebra).
-type UnitSig = { Nominal: string option; Dims: Map<string, int> }
+/// names are TERMINAL in unit algebra). `Scale` is the MAGNITUDE layer: how
+/// many of the Dims product one of this unit is (`day` = 86400 `second`).
+///
+/// Dims and Scale are deliberately independent: two signatures with equal
+/// Dims and different Scale are the SAME physical quantity in different
+/// magnitudes, so they are CONVERTIBLE (unitCompatible) but not
+/// interchangeable (unitSameScale). Values are never canonicalized into base
+/// units -- a `Float64<day>` holds a day-magnitude number -- so a conversion
+/// factor is materialized only where two magnitudes actually meet.
+type UnitSig = { Nominal: string option; Dims: Map<string, int>; Scale: UnitScale }
 
-/// Unit arithmetic: dimensionless (no nominal, empty dims)
-let unitDimensionless : UnitSig = { Nominal = None; Dims = Map.empty }
+/// Unit arithmetic: dimensionless (no nominal, empty dims, unity scale)
+let unitDimensionless : UnitSig = { Nominal = None; Dims = Map.empty; Scale = scaleOne }
 
-/// A structural (non-nominal) signature over the given dims.
-let unitOfDims (dims: Map<string, int>) : UnitSig = { Nominal = None; Dims = dims }
+/// A structural (non-nominal) signature over the given dims, unity scale.
+let unitOfDims (dims: Map<string, int>) : UnitSig = { Nominal = None; Dims = dims; Scale = scaleOne }
 
-/// Normalize: remove zero-exponent entries (nominal untouched)
+/// A structural signature over the given dims at an explicit magnitude.
+let unitOfDimsScaled (dims: Map<string, int>) (scale: UnitScale) : UnitSig =
+    { Nominal = None; Dims = dims; Scale = scale }
+
+/// Normalize: remove zero-exponent entries (nominal and scale untouched)
 let unitNormalize (u: UnitSig) : UnitSig =
     { u with Dims = u.Dims |> Map.filter (fun _ exp -> exp <> 0) }
 
-/// Unit multiplication: add exponents. Multiplicative composition DROPS the
-/// nominal layer: a quantity is an identity, not a factor, so `speed * s`
-/// yields the structural product of the dims.
+/// Unit multiplication: add exponents, MULTIPLY scales. Multiplicative
+/// composition DROPS the nominal layer: a quantity is an identity, not a
+/// factor, so `speed * s` yields the structural product of the dims.
+///
+/// The scale riding along is what makes `*` and `/` conversion-FREE:
+/// `Float64<day> * Float64<meter/second>` needs no runtime work, because the
+/// 86400 lands in the result TYPE rather than in the emitted expression.
 let unitMul (a: UnitSig) (b: UnitSig) : UnitSig =
     let merged =
         Map.fold (fun acc k v ->
             let existing = Map.tryFind k acc |> Option.defaultValue 0
             Map.add k (existing + v) acc) a.Dims b.Dims
-    unitNormalize { Nominal = None; Dims = merged }
+    unitNormalize { Nominal = None; Dims = merged; Scale = scaleMul a.Scale b.Scale }
 
-/// Unit division: subtract exponents (drops nominal, like unitMul)
+/// Unit division: subtract exponents, DIVIDE scales (drops nominal, like unitMul)
 let unitDiv (a: UnitSig) (b: UnitSig) : UnitSig =
     let merged =
         Map.fold (fun acc k v ->
             let existing = Map.tryFind k acc |> Option.defaultValue 0
             Map.add k (existing - v) acc) a.Dims b.Dims
-    unitNormalize { Nominal = None; Dims = merged }
+    unitNormalize { Nominal = None; Dims = merged; Scale = scaleDiv a.Scale b.Scale }
 
-/// Unit power: scale all exponents (drops nominal, like unitMul)
+/// Unit power: scale all exponents and raise the magnitude (drops nominal).
+/// `(1000 * meter)^2` is 1e6 meter^2 -- the scale must be raised to the same
+/// power as the dims or `km^2` would silently read as `1000 m^2`.
 let unitPow (u: UnitSig) (n: int) : UnitSig =
     if n = 0 then unitDimensionless
-    else unitNormalize { Nominal = None; Dims = u.Dims |> Map.map (fun _ exp -> exp * n) }
+    else
+        unitNormalize { Nominal = None
+                        Dims = u.Dims |> Map.map (fun _ exp -> exp * n)
+                        Scale = scalePow u.Scale n }
 
-/// Check if two unit signatures are compatible: dims must be equal, and the
+/// Check if two unit signatures are CONVERTIBLE: dims must be equal, and the
 /// nominal layers must AGREE -- both the same quantity, or at least one side
 /// structural (None). Two DIFFERENT quantities are incompatible even over
 /// identical dims (that is what the nominal layer is for).
+///
+/// Deliberately scale-BLIND: `day` and `second` are compatible, since a
+/// factor relates them. Whether a seam may bridge that factor silently is a
+/// separate question each seam answers with unitSameScale.
 let unitCompatible (a: UnitSig) (b: UnitSig) : bool =
     (unitNormalize a).Dims = (unitNormalize b).Dims
     && (match a.Nominal, b.Nominal with
         | Some na, Some nb -> na = nb
         | _ -> true)
 
-/// Merge two COMPATIBLE signatures (post-unitCompatible), keeping whichever
-/// nominal is present: additive ops over `speed + m/s` stay `speed`.
+/// Do two signatures share a MAGNITUDE, so that values of one can stand in
+/// for the other with no conversion factor? Every UnitScale is normalized,
+/// so this is exact rational-and-symbolic equality, never a float compare.
+let unitSameScale (a: UnitSig) (b: UnitSig) : bool = a.Scale = b.Scale
+
+/// The factor that converts a value FROM signature `src` INTO signature
+/// `dst` (multiply by it). Meaningful only for unitCompatible signatures.
+/// Computed as one exact ratio -- `day -> second` is 86400/1, not a
+/// round-trip through a canonical base -- so a value crosses at most one
+/// multiply and never visits an intermediate magnitude that could overflow.
+let unitConversionFactor (src: UnitSig) (dst: UnitSig) : UnitScale =
+    scaleDiv src.Scale dst.Scale
+
+/// Merge two CONVERTIBLE signatures (post-unitCompatible), keeping whichever
+/// nominal is present: additive ops over `speed + m/s` stay `speed`. The
+/// LEFT operand's magnitude wins, matching the nominal preference: `day +
+/// second` is a number of days.
 let unitJoin (a: UnitSig) (b: UnitSig) : UnitSig =
     match a.Nominal with
     | Some _ -> a
@@ -414,8 +573,7 @@ let ppUnitSig (u: UnitSig) : string =
     | Some n -> n
     | None ->
         let dims = u.Dims
-        if Map.isEmpty dims then "dimensionless"
-        else
+        let dimsStr =
             let pos = dims |> Map.filter (fun _ e -> e > 0) |> Map.toList
             let neg = dims |> Map.filter (fun _ e -> e < 0) |> Map.toList
             let ppTerm (name, exp) =
@@ -425,10 +583,17 @@ let ppUnitSig (u: UnitSig) : string =
             let posStr = pos |> List.map ppTerm |> String.concat " * "
             let negStr = neg |> List.map (fun (n, e) -> ppTerm (n, -e)) |> String.concat " * "
             match pos, neg with
-            | [], [] -> "dimensionless"
-            | _, [] -> posStr
-            | [], _ -> sprintf "1 / (%s)" negStr
-            | _, _ -> sprintf "%s / %s" posStr (if neg.Length > 1 then sprintf "(%s)" negStr else negStr)
+            | [], [] -> None
+            | _, [] -> Some posStr
+            | [], _ -> Some (sprintf "1 / (%s)" negStr)
+            | _, _ -> Some (sprintf "%s / %s" posStr (if neg.Length > 1 then sprintf "(%s)" negStr else negStr))
+        // A magnitude is part of the identity, so it prints: without it a
+        // `day` vs `second` mismatch would render "second vs second".
+        match dimsStr, scaleIsOne u.Scale with
+        | None, true -> "dimensionless"
+        | None, false -> ppUnitScale u.Scale
+        | Some d, true -> d
+        | Some d, false -> sprintf "%s * %s" (ppUnitScale u.Scale) d
 
 /// Pretty-print a unit signature in TYPE-ARGUMENT position (`Float64<...>`).
 /// A quantity renders as its nominal name; a structural signature as its dims;
@@ -440,7 +605,10 @@ let ppUnitSigType (u: UnitSig) : string =
     match u.Nominal with
     | Some n -> n
     | None ->
-        if Map.isEmpty ((unitNormalize u).Dims) then "Unitless"
+        // A SCALED dimensionless (`2 * pi`, from `Unit turn = 2 * pi`) is not
+        // Unitless: the magnitude survives cancellation of the dims and still
+        // drives conversions, so it has to render.
+        if Map.isEmpty ((unitNormalize u).Dims) && scaleIsOne u.Scale then "Unitless"
         else ppUnitSig u
 
 /// Value carried by an EnumIdx alias declaration: all-int or all-string

@@ -796,8 +796,20 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
         // (unitCompatible also demands NOMINAL agreement: same quantity, or
         // at least one side structural.)
         unify subst inner1 inner2 |> Result.bind (fun () ->
-            if unitCompatible u1 u2 then Ok ()
-            else Error (UnitMismatch ("assignment", ppUnitSig u1, ppUnitSig u2)))
+            if not (unitCompatible u1 u2) then
+                Error (UnitMismatch ("assignment", ppUnitSig u1, ppUnitSig u2))
+            // Same dims, different MAGNITUDE (`day` into a `second` slot).
+            // Convertible, but unify is a pure type-level relation with no
+            // expression in hand to multiply, so it cannot bridge the factor
+            // here -- reject and name it rather than let the raw number
+            // through. The scalar +/-/comparison seam is where a conversion
+            // is actually inserted.
+            elif not (unitSameScale u1 u2) then
+                Error (Other (sprintf
+                        "assignment relates %s and %s: same dimensions, but magnitudes differing by the factor %s. Scale the value explicitly, or annotate it as %s"
+                        (ppUnitSig u1) (ppUnitSig u2)
+                        (ppUnitScale (unitConversionFactor u2 u1)) (ppUnitSig u1)))
+            else Ok ())
     | IRTUnitAnnotated (inner, _), other | other, IRTUnitAnnotated (inner, _) -> unify subst inner other
     | _ -> Error (TypeMismatch (t1, t2))
 

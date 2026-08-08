@@ -1,0 +1,15 @@
+// TEST: Unit Scale Integer Truncation (rejects)
+// ERROR: BL3999
+// An INTEGER value converts only by an exact integer factor. The
+// unannotated sum joins at the LEFT operand (km), so the meter operand
+// would scale by 1/1000 and truncate to zero. Rejecting beats silently
+// returning zeros; the message names both escapes (a float element type, or
+// an annotation putting the result in meter, where the factor is x1000 and
+// exact). Note the asymmetry is real and intended: `b + a` below would be
+// accepted, because converting meter -> km is what loses information, not
+// km -> meter.
+Unit meter
+Unit km = 1000 * meter
+let a: Int64<km> = 5
+let b: Int64<meter> = 30
+let c = a + b

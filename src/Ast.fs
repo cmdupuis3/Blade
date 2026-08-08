@@ -138,6 +138,14 @@ type UnitExpr =
     | UnitDiv of UnitExpr * UnitExpr
     | UnitPow of UnitExpr * int
     | UnitOne                            // the unity literal `1`: empty dims (Unit levels: 1, Unit hz = 1/seconds)
+    /// A MAGNITUDE factor: empty dims at a scale other than 1 (`Unit day =
+    /// 86400 * second`, `Unit minute = second * 60`). Held as an exact
+    /// rational -- a decimal literal is recovered from its shortest
+    /// round-trip spelling, so `0.0254 * meter` is 254/10000 and not the
+    /// binary double that literal happens to land on. `UnitOne` is the
+    /// num = den = 1 case, kept separate because it predates this node and
+    /// reads better in the reciprocal idiom `1 / seconds`.
+    | UnitScaleLit of num: bigint * den: bigint
 
 type TypeExpr =
     // Primitive types

@@ -1699,6 +1699,35 @@ let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
     | _ ->
         { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None }
 
+/// Read a loop operand's array SHAPE for a method_for / co-iteration former.
+///
+/// Resolve through Subst before matching (the same discipline buildApplyInfo
+/// applies to kernel param types): an operand that is a COMPOUND expression --
+/// `zip(A - m, B - m)`, the desugaring of `(A - m) * (B - m)` -- carries a type
+/// that is still an unresolved IRTInfer var here, because only the substitution
+/// knows it was unified with the rank-1 array the inner pipeline produces.
+/// Matching the raw type let `ArrayElem` miss and dropped the operand to
+/// `getArrayType`'s non-variable fallback, whose ZERO index records made
+/// zipSharedRecords see minRank 0 and return no shared records -- collapsing the
+/// co-iteration to rank 0, so an elementwise product of two compound operands
+/// typed as a SCALAR and `reduce` over it rejected with "requires an array as
+/// first argument". Naming the operands hid the bug, since getArrayType's
+/// ExprVar arm recovers a rank-1 record from env.
+///
+/// The ELEMENT type keeps getArrayType's Float64 default whenever it is still
+/// unresolved. Inside a rank-polymorphic body a `T^1` parameter's element is
+/// only pinned at the call site, so the honest answer here is an inference var
+/// -- and codegen has no C++ spelling for one (it emits a
+/// BLADE_UNRESOLVED_ELEM_TYPE placeholder). Defaulting matches what the
+/// getArrayType fallback already supplied on this path.
+let loopOperandArrayType (env: TypeEnv) (fallback: unit -> IRArrayType) (ty: IRType) : IRArrayType =
+    match env.Subst.Resolve ty with
+    | ArrayElem at ->
+        match env.Subst.Resolve at.ElemType with
+        | IRTInfer _ -> { at with ElemType = IRTScalar ETFloat64 }
+        | _ -> at
+    | _ -> fallback ()
+
 // 8. Helpers
 
 let sequenceResults (results: TypeResult<'a> list) : TypeResult<'a list> =
@@ -2456,6 +2485,15 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 match pu, au with
                 | Some pu, Some au when not (unitCompatible pu au) ->
                     Some (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
+                // Convertible but at a different MAGNITUDE. Argument passing
+                // is a seam that does not (yet) insert a factor, so name the
+                // difference instead of handing the callee a raw number in
+                // the wrong magnitude.
+                | Some pu, Some au when not (unitSameScale pu au) ->
+                    Some (Other (sprintf
+                            "argument %d expects %s but got %s: same dimensions, magnitudes differing by the factor %s"
+                            (i + 1) (ppUnitSig pu) (ppUnitSig au)
+                            (ppUnitScale (unitConversionFactor au pu))))
                 // STRICT quantity slots (BL3010): a parameter declared with a
                 // QUANTITY (Nominal = Some) rejects any CONCRETE argument not
                 // carrying that nominal — bare and structurally-dimensioned
@@ -4479,7 +4517,11 @@ and reduceKernelUnitCheck (env: TypeEnv) (tKernel: TypedExpr) (elemTy: IRType) :
             computed |> Result.bind (fun ku ->
                 let preserves =
                     match ku with
-                    | Some u -> unitCompatible u eu
+                    // Magnitude counts as part of "preserves": a fold is
+                    // typed at its element's signature, so a kernel that
+                    // returned a different magnitude would mislabel the
+                    // accumulator with no factor anywhere to fix it.
+                    | Some u -> unitCompatible u eu && unitSameScale u eu
                     | None -> false
                 if preserves then Ok ()
                 else
@@ -6245,7 +6287,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                             && indexShapesAgree aL.IndexTypes aR.IndexTypes)
                     | _ -> false
                 if zipable then
-                    match unitRulesForOpWith op (elemUnits lRes) (elemUnits rRes) (Some tR) with
+                    match unitRulesForArrayOp "an elementwise array operator" op (elemUnits lRes) (elemUnits rRes) (Some tR) with
                     | Error e -> Error e
                     | Ok resUnits ->
                         let sp = mergeSpan left.Span right.Span
@@ -6285,7 +6327,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 let arrU = elemUnits (if arrayOnLeft then lRes else rRes)
                 let scalU = IR.getUnits (if arrayOnLeft then rRes else lRes)
                 let luB, ruB = if arrayOnLeft then (arrU, scalU) else (scalU, arrU)
-                match unitRulesForOpWith op luB ruB (Some tR) with
+                match unitRulesForArrayOp "an elementwise array/scalar operator" op luB ruB (Some tR) with
                 | Error e -> Error e
                 | Ok resUnits ->
                 let sp = mergeSpan left.Span right.Span
@@ -6320,8 +6362,52 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // env.Builder: inferArithType mints fresh index-type ids for a
             // synthesized outer-product result (same allocator deduceOutputType
             // uses for the method_for output type).
-            inferArithType env.Builder mode op tL.Type tR.Type (Some tR) |> Result.map (fun resTy ->
-                mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)))
+            inferArithType env.Builder mode op tL.Type tR.Type (Some tR) |> Result.bind (fun resTy ->
+                // THE conversion seam. `*` and `/` need nothing: unitMul and
+                // unitDiv fold the magnitudes into the result TYPE, so the
+                // emitted code is untouched. Only the ops that require two
+                // operands to share a magnitude bridge one at run time.
+                //
+                // The target is the result's own signature, so the factor is
+                // judged by what the expression is supposed to BE -- which is
+                // the annotation when there is one, and otherwise the left
+                // operand (unitJoin's existing preference). Comparisons read
+                // the left operand directly: their result is Bool and carries
+                // no signature to aim at.
+                let natural =
+                    match op with
+                    | OpAdd | OpSub -> IR.getUnits (env.Subst.Resolve resTy)
+                    | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
+                        IR.getUnits (env.Subst.Resolve tL.Type)
+                    | _ -> None
+                // An enclosing annotation names the magnitude the result is
+                // SUPPOSED to be, so aim the operands straight at it: one
+                // factor each, computed in the magnitude the programmer
+                // chose. Guarded by unitCompatible, so an annotation of a
+                // different DIMENSION never becomes a conversion -- it falls
+                // back to the natural signature and rejects as it always did.
+                let target =
+                    match env.UnitTarget, natural with
+                    | Some t, Some n when unitCompatible t n -> Some t
+                    | _ -> natural
+                match target with
+                | None -> Ok (mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)
+                | Some dst ->
+                    let ctx =
+                        match op with
+                        | OpAdd -> "addition" | OpSub -> "subtraction"
+                        | _ -> "comparison"
+                    // The result now carries the magnitude actually computed
+                    // in, which is `dst` whenever an annotation redirected
+                    // it; leaving resTy at the natural join would label an
+                    // hours value as days. Comparisons keep resTy (Bool).
+                    let resTy' =
+                        match op, env.Subst.Resolve resTy with
+                        | (OpAdd | OpSub), IRTUnitAnnotated (inner, _) -> IRTUnitAnnotated (inner, dst)
+                        | _ -> resTy
+                    convertScaleTo env ctx dst tL |> Result.bind (fun tL' ->
+                    convertScaleTo env ctx dst tR |> Result.map (fun tR' ->
+                        mkTyped (TExprBinOp (mode, op, tL', tR')) resTy')))))
 
 /// Checker-level Dist operator dispatch.
 /// Scalar * Dist (either side) is kappa_k(c*X) = c^k kappa_k(X) -- pure
@@ -6493,6 +6579,85 @@ and unitRulesForOpWith (op: BinOp) (lUnits: UnitSig option) (rUnits: UnitSig opt
     | OpCaret -> unitRulesForCaret lUnits rUnits (rExpr |> Option.bind staticPowExponent)
     | _ -> unitRulesForOp op lUnits rUnits
 
+/// Unit rules for the ARRAY elementwise synthesis sites (zip and
+/// array<->scalar). Identical to unitRulesForOpWith plus a magnitude guard:
+/// those sites annotate the synthesized kernel's params with the element
+/// type STRIPPED of units, so the body's binop sees no signatures and the
+/// scalar conversion seam cannot fire inside the lambda. An element
+/// magnitude difference therefore has to reject here rather than reach
+/// codegen as arithmetic on raw numbers.
+and unitRulesForArrayOp (context: string) (op: BinOp) (lu: UnitSig option) (ru: UnitSig option) (rExpr: TypedExpr option) : TypeResult<UnitSig option> =
+    let scaleGuard =
+        match op, lu, ru with
+        | (OpAdd | OpSub | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe), Some a, Some b
+                when unitCompatible a b -> requireSameScale context a b
+        | _ -> Ok ()
+    scaleGuard |> Result.bind (fun () -> unitRulesForOpWith op lu ru rExpr)
+
+/// Materialize the MAGNITUDE conversion a seam needs: multiply `t` by the
+/// exact factor carrying its own signature into `dst`. Returns `t` untouched
+/// when the magnitudes already agree, which is every program written before
+/// scaled units existed.
+///
+/// The factor is ONE ratio (src.Scale / dst.Scale) computed exactly and only
+/// then rounded, so `day -> hour` is 24.0 rather than 86400.0/3600.0
+/// evaluated in floating point. A value therefore crosses at most a single
+/// multiply and never round-trips through a canonical base -- which is what
+/// keeps a `Float64<nanosecond>` from being inflated to seconds and back,
+/// losing at both ends.
+///
+/// INTEGER operands convert only by an exact INTEGER factor. `hour -> second`
+/// (x2600) is exact; `second -> hour` would truncate, so it rejects and says
+/// so rather than quietly returning zeros.
+/// A source signature that is NOT convertible to `dst` is a plain unit
+/// mismatch and must be reported as one. This matters because the ascription
+/// caller reaches here having checked the value against the annotation with
+/// its unit STRIPPED -- so this is the only remaining place a dimension
+/// clash at that seam can be caught, and letting it fall through would
+/// silently retype `Float<seconds>` as `Float<meters>`.
+and convertScaleTo (env: TypeEnv) (context: string) (dst: UnitSig) (t: TypedExpr) : TypeResult<TypedExpr> =
+    let resolved = env.Subst.Resolve t.Type
+    match IR.getUnits resolved with
+    // A BARE value carries no claim and adopts the target unit freely --
+    // the literal ergonomics every existing program relies on.
+    | None -> Ok t
+    | Some src when not (unitCompatible src dst) ->
+        Error (UnitMismatch (context, ppUnitSig dst, ppUnitSig src))
+    | Some src when unitCompatible src dst && not (unitSameScale src dst) ->
+        let factor = unitConversionFactor src dst
+        let scaled et lit =
+            Ok (mkTyped (TExprBinOp (Elementwise, OpMul, t, mkTyped (TExprLit lit) (IRTScalar et)))
+                        (IRTUnitAnnotated (IRTScalar et, dst)))
+        match IR.stripUnits resolved with
+        | IRTScalar ((ETInt32 | ETInt64) as et) ->
+            let exact =
+                factor.Den.IsOne && Map.isEmpty factor.Consts
+                && abs factor.Num <= bigint System.Int64.MaxValue
+            if exact then scaled et (LitInt (int64 factor.Num))
+            else
+                Error (Other (sprintf
+                        "converting %s to %s in %s would scale an integer by %s, which is not a whole number; use a float element type, or annotate the result as %s"
+                        (ppUnitSig src) (ppUnitSig dst) context (ppUnitScale factor) (ppUnitSig src)))
+        | IRTScalar ((ETFloat32 | ETFloat64) as et) -> scaled et (LitFloat (scaleToFloat factor))
+        | other ->
+            Error (Other (sprintf
+                    "%s relates %s and %s, which differ by the factor %s, but a %s value cannot carry a unit conversion"
+                    context (ppUnitSig src) (ppUnitSig dst) (ppUnitScale factor) (IR.ppIRType other)))
+    | _ -> Ok t
+
+/// Reject a magnitude difference at a seam that does NOT yet insert a
+/// conversion (array elementwise, argument passing, ascription, folds).
+/// unitCompatible is scale-blind on purpose -- it answers "convertible?" --
+/// so without this guard those seams would accept `day` where `second` is
+/// wanted and compute on the raw numbers. Loud beats silent.
+and requireSameScale (context: string) (expected: UnitSig) (actual: UnitSig) : TypeResult<unit> =
+    if unitSameScale expected actual then Ok ()
+    else
+        Error (Other (sprintf
+                "%s relates %s and %s: same dimensions, but magnitudes differing by the factor %s. Blade inserts a unit conversion only in scalar +, -, and comparisons; here the operands must already share a magnitude"
+                context (ppUnitSig expected) (ppUnitSig actual)
+                (ppUnitScale (unitConversionFactor actual expected))))
+
 /// Overwrite the ELEMENT unit annotation of an array-typed result from a
 /// synthesized kernel pipeline with the signature the unit rules computed.
 /// Without this the kernel return type leaks the LEFT operand's unit
@@ -6571,8 +6736,12 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
     let combineBranches context (a: UnitSig option) (b: UnitSig option) =
         match a, b with
         | Some ua, Some ub ->
-            if unitCompatible ua ub then Ok (Some (unitJoin ua ub))
-            else Error (UnitMismatch (context, ppUnitSig ua, ppUnitSig ub))
+            if not (unitCompatible ua ub) then Error (UnitMismatch (context, ppUnitSig ua, ppUnitSig ub))
+            // This walk RECOMPUTES signatures over an already-typed kernel
+            // body; it rewrites nothing, so a magnitude difference between
+            // branches has no place to put a factor.
+            elif not (unitSameScale ua ub) then requireSameScale context ua ub |> Result.map (fun () -> None)
+            else Ok (Some (unitJoin ua ub))
         | Some u, None | None, Some u -> Ok (Some u)
         | None, None -> Ok None
     let ofType (t: IRType) = IR.getUnits (env.Subst.Resolve t)
@@ -9340,7 +9509,42 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
              | _ ->
                  Error (Other "zero at this array annotation cannot be materialized: every axis must be a plain rank-1 index with a nominal name or a static extent, and the element type must be numeric, bool, or complex. Spell the fill explicitly (`for () in range<...> <@> lambda(...) -> <zero literal> |> compute`) for packed, ragged, or non-static shapes."))
         | _ ->
-        checkExpr env annotTy binding.Value |> Result.bind (fun tv ->
+        // THE ascription conversion seam, and the one that makes an
+        // annotation choose the magnitude: `let c: Float64<hour> = <days>`.
+        //
+        // Bidirectional checking bottoms out at `unify`, a pure relation over
+        // types with no expression in hand, so it cannot bridge a magnitude
+        // itself -- it can only accept or reject. So when the annotation
+        // names a NON-UNITY magnitude, check the value against the annotation
+        // with its unit stripped (bare `Float64`), which leaves every other
+        // type-directed rule -- literal retyping, widening, array shape --
+        // working exactly as before, then convert the synthesized magnitude
+        // into the one that was asked for.
+        //
+        // Gated to a STRUCTURAL unit on a plain SCALAR, which is the only
+        // shape a magnitude can attach to. That deliberately excludes the
+        // two annotation kinds whose meaning comes from reaching
+        // checkExprInner still wearing their unit: a QUANTITY (nominal names
+        // are terminal and never scaled) and a `Nat<...>` (whose literal arm
+        // is keyed on the annotated form). The relaxation cannot be gated on
+        // the ANNOTATION's scale alone -- `let d: Float64<second> = <days>`
+        // has a unity annotation and a scaled value.
+        let scaledAnnot =
+            match annotTy with
+            | IRTUnitAnnotated (IRTScalar _, u) when u.Nominal.IsNone -> Some u
+            | _ -> None
+        let checkedValue =
+            match scaledAnnot with
+            | None -> checkExpr env annotTy binding.Value
+            | Some dst ->
+                // UnitTarget lets an additive RHS convert its operands
+                // straight into `dst`; convertScaleTo then finds nothing left
+                // to do. It stays a fallback, not a replacement: an RHS that
+                // is not an additive binop (a bare variable, a call) still
+                // gets its single conversion here.
+                checkExpr { env with UnitTarget = Some dst } (IR.stripUnits annotTy) binding.Value
+                |> Result.bind (convertScaleTo env "assignment" dst)
+        checkedValue |> Result.bind (fun tv ->
             // Prefer the annotation as the canonical type -- it can be more
             // specific than what the value synthesized to.
             rejectEscapedWildcard { tv with Type = annotTy })
@@ -10338,10 +10542,10 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
         zipExprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tZipArrays ->
             let identities = zipExprs |> List.map (fun arr ->
                 match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+            // Resolved shape, defaulted element -- see loopOperandArrayType. This
+            // is the arm a compound zip operand reaches (`(A - m) * (B - m)`).
             let arrayTypes = tZipArrays |> List.mapi (fun i ta ->
-                match ta.Type with
-                | ArrayElem at -> at
-                | _ -> getArrayType env zipExprs.[i])
+                loopOperandArrayType env (fun () -> getArrayType env zipExprs.[i]) ta.Type)
             // Shared iteration records. Single-record operands (dense rank-1 or
             // packed symmetric) use the first-record rule unchecked.
             // MULTI-record operands (dense rank >= 2) co-iterate the FULL product
@@ -10381,10 +10585,11 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
                     match te.Kind with
                     | TExprVar (name, _, _) -> AIDVariable name
                     | _ -> AIDLiteral (env.Builder.FreshId()))
+                // Same stale-IRTInfer hazard as the zip arm above.
                 let arrayTypes = zipExprs |> List.map (fun te ->
-                    match te.Type with
-                    | ArrayElem at -> at
-                    | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+                    loopOperandArrayType env
+                        (fun () -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+                        te.Type)
                 match zipSharedRecords arrayTypes with
                 | Error e -> Error e
                 | Ok sharedRecords ->
@@ -10404,10 +10609,9 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
         | _ ->
         let identities = arrays |> List.map (fun arr ->
             match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+        // Same stale-IRTInfer hazard as the zip arms above.
         let arrayTypes = tArrays |> List.mapi (fun i ta ->
-            match ta.Type with
-            | ArrayElem at -> at
-            | _ -> getArrayType env arrays.[i])
+            loopOperandArrayType env (fun () -> getArrayType env arrays.[i]) ta.Type)
         let sDimsPerArray = computeSDimsPerArray arrayTypes
         let totalSDims = List.sum sDimsPerArray
 
@@ -10952,9 +11156,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                 match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
             // For co-iteration, all arrays use the shared index space
             let arrayTypes = tArrays |> List.mapi (fun i ta ->
-                match ta.Type with
-                | ArrayElem at -> at
-                | _ -> getArrayType env arrays.[i])
+                loopOperandArrayType env (fun () -> getArrayType env arrays.[i]) ta.Type)
             // Real per-array S-dim counts (see the zip arms: the IRTInfer
             // fallback in buildApplyInfo needs true ranks to compute the
             // kernel slice rank when this loop reaches it via inferApply).

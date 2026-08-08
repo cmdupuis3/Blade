@@ -575,6 +575,36 @@ let isNamedTypeArg (tokens: Token list) : bool =
 // contains `,` or `>`, so a sub-parse inside a type-argument list always
 // stops cleanly before the enclosing constructor's delimiters.
 
+/// Recover the EXACT rational a decimal literal denotes, from its shortest
+/// round-trip spelling rather than from the binary double it parsed to:
+/// `0.0254` is 254/10000, not the dyadic fraction that literal lands on.
+/// "R" round-trips, so the digits recovered are exactly the ones that could
+/// have been written. None for a non-finite or zero factor (caller rejects).
+let rationalOfFloatLiteral (v: float) : (bigint * bigint) option =
+    if System.Double.IsNaN v || System.Double.IsInfinity v || v = 0.0 then None
+    else
+        let s = v.ToString ("R", System.Globalization.CultureInfo.InvariantCulture)
+        // Split off an exponent suffix first ("1.5E-05"), then the point.
+        let mantissa, exp10 =
+            match s.IndexOfAny [| 'e'; 'E' |] with
+            | -1 -> s, 0
+            | i -> s.Substring (0, i), int (s.Substring (i + 1))
+        let neg = mantissa.StartsWith "-"
+        let mantissa = if neg then mantissa.Substring 1 else mantissa
+        let intPart, fracPart =
+            match mantissa.IndexOf '.' with
+            | -1 -> mantissa, ""
+            | i -> mantissa.Substring (0, i), mantissa.Substring (i + 1)
+        match System.Numerics.BigInteger.TryParse (intPart + fracPart) with
+        | false, _ -> None
+        | true, digits ->
+            let num = if neg then -digits else digits
+            // Net power of ten: fraction digits push down, the exponent
+            // suffix pushes either way.
+            let p = exp10 - fracPart.Length
+            if p >= 0 then Some (num * System.Numerics.BigInteger.Pow (bigint 10, p), bigint 1)
+            else Some (num, System.Numerics.BigInteger.Pow (bigint 10, -p))
+
 /// Parse a unit expression: meters / seconds, kg * velocity, meters^2
 let rec parseUnitExpr (tokens: Token list) : ParseResult<UnitExpr> =
     parseUnitTerm tokens >>= fun left rest ->
@@ -618,9 +648,19 @@ and parseUnitAtom (tokens: Token list) : ParseResult<UnitExpr> =
     // The unity literal `1`: empty dims. Enables the dimensionless-quantity
     // form (`Unit levels: 1`) and reciprocal aliases (`Unit hz = 1 / seconds`).
     | Some (TokInt 1L) -> success UnitOne (advance tokens)
-    | Some (TokInt n) ->
+    // A MAGNITUDE factor (`Unit day = 86400 * second`). Dimensionless, so it
+    // composes through the same mul/div/pow arms as any other atom; what it
+    // contributes is the scale, not a dim.
+    | Some (TokInt 0L) ->
         let line, col = currentPos tokens
-        error (sprintf "Only the unity literal '1' is a unit expression (got %d); other magnitudes are values, not units" n) line col
+        error "A unit scale factor cannot be zero (a zero-magnitude unit has no inverse)" line col
+    | Some (TokInt n) -> success (UnitScaleLit (bigint n, bigint 1)) (advance tokens)
+    | Some (TokFloat v) ->
+        (match rationalOfFloatLiteral v with
+         | Some (num, den) -> success (UnitScaleLit (num, den)) (advance tokens)
+         | None ->
+             let line, col = currentPos tokens
+             error (sprintf "'%g' is not usable as a unit scale factor (must be finite and non-zero)" v) line col)
     | Some TokLParen ->
         parseUnitExpr (advance tokens) >>= fun expr afterExpr ->
         expect TokRParen afterExpr >>= fun _ remaining ->

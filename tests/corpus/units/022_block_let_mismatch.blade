@@ -1,7 +1,9 @@
 // TEST: Unit Block Let Mismatch (rejects)
-// ERROR: BL3001
+// ERROR: BL3006
 // A block-scoped annotated binding rejects a differently-united
-// initializer, exactly like the top-level form (units/014).
+// initializer, exactly like the top-level form (units/014) -- including
+// the BL3006 (unit mismatch, not type mismatch) code it now reports; see
+// units/014 for why the annotated-let seam moved off plain unification.
 Unit meters
 Unit seconds
 let t: Float<seconds> = 5.0
