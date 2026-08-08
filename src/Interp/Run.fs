@@ -116,15 +116,38 @@ let private parToFloat (v: Value) : float =
     | VChar c -> float (int c)
     | _ -> 0.0
 
+/// Unwrap the categorical weights argument to the flat `double*` pool codegen
+/// hands the runtime. The checker guarantees a dense rank-1 Float64 array, so
+/// its store is a plain SFloat; anything else means the guarantee was lost
+/// upstream and is raised rather than coerced. `k` is the checker-pinned extent
+/// codegen passes as the length -- a disagreement with the actual pool would
+/// desynchronize interpreter and binary, so it is caught here instead.
+let private weightsPool (v: Value) (k: int) : float[] =
+    match v with
+    | VArray ba ->
+        match ba.Data with
+        | SFloat data when data.Length = k -> data
+        | SFloat data ->
+            raise (Core.InterpUnsupported
+                     (sprintf "rand.categorical weights pool has %d elements but the pinned extent is %d" data.Length k))
+        | _ -> raise (Core.InterpUnsupported "rand.categorical weights are not a dense Float64 pool")
+    | _ -> raise (Core.InterpUnsupported "rand.categorical weights did not evaluate to an array")
+
 /// Materialize a `rand.<fam>` binding as CodeGen.genRandGenBinding emits it.
 /// Component extents come from the binding's ArrayElem type (one entry per rank
 /// component, all static IRLitInt -- codegen `#error`s otherwise). card
-/// = product of extents; the key and the family's runtime Float64 parameters are
-/// evaluated in the ROOT env (they may reference earlier bindings) and cast as
-/// codegen casts them; RandMirror draws `card` values keyed by it. The flat
-/// SFloat pool is reshaped via ArrayOps.mkDenseArray, exactly as every other
-/// dense interpreter array is shaped.
-let private materializeRandGen (state: Core.InterpState) (root: Env) (binding: IRBinding) (kind: string) (keyExpr: IRExpr) (parExprs: IRExpr list) : Value =
+/// = product of extents; the key, the family's runtime Float64 parameters and
+/// (for categorical) the weights array are evaluated in the ROOT env (they may
+/// reference earlier bindings) and cast as codegen casts them; RandMirror draws
+/// `card` values keyed by it. The flat pool is reshaped via
+/// ArrayOps.mkDenseArray, exactly as every other dense interpreter array is.
+///
+/// STORE TYPE follows the binding's element type, which is the same fork the
+/// C++ pool type takes: categorical fills an SInt store from `int64[]` draws,
+/// every other family an SFloat store from `float[]` draws. Routing categorical
+/// through the float path would print its indices as `0` vs `0.0`-formatted
+/// doubles and break byte-parity with the binary.
+let private materializeRandGen (state: Core.InterpState) (root: Env) (binding: IRBinding) (kind: string) (keyExpr: IRExpr) (parExprs: IRExpr list) (weightsExpr: (IRExpr * int) option) : Value =
     match binding.Type with
     | ArrayElem arrTy ->
         let extents =
@@ -141,9 +164,14 @@ let private materializeRandGen (state: Core.InterpState) (root: Env) (binding: I
         let pars = parExprs |> List.map (fun p -> parToFloat (Core.evalExpr state root p))
         // .NET arrays are int-indexed, so the draw count is int-bounded exactly
         // as the pool it fills; card stays int64 to match codegen's `1L` fold.
-        let data = RandMirror.draws kind key pars (int card)
+        let store =
+            match weightsExpr with
+            | Some (wExpr, k) ->
+                let w = weightsPool (Core.evalExpr state root wExpr) k
+                SInt (RandMirror.drawsCategorical kind key w (int card))
+            | None -> SFloat (RandMirror.draws kind key pars (int card))
         state.Cells <- state.Cells + card
-        VArray (ArrayOps.mkDenseArray arrTy.ElemType arrTy.IndexTypes (Array.ofList extents) (SFloat data))
+        VArray (ArrayOps.mkDenseArray arrTy.ElemType arrTy.IndexTypes (Array.ofList extents) store)
     | _ -> raise (Core.InterpUnsupported "rand binding is not an array type")
 
 // Provider reads (`let A = view |> alias.read` over a netcdf/zarr var).
@@ -306,8 +334,8 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
                     raise (Core.InterpUnsupported "provider write (alias.write -- side effect; flag-gated later)")
                 | None ->
                 match Map.tryFind b.Id m.RandomInits with
-                | Some (RandGen (kind, keyExpr, parExprs)) ->
-                    materializeRandGen state root b kind keyExpr parExprs
+                | Some (RandGen (kind, keyExpr, parExprs, weightsExpr)) ->
+                    materializeRandGen state root b kind keyExpr parExprs weightsExpr
                 | Some (FillModulus _) ->
                     // fill_random(mod) fills with C `rand() % mod`: nondeterministic
                     // and NOT mirrored by RandMirror (only the deterministic

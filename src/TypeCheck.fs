@@ -2505,7 +2505,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprBlocked (_, bs) -> [bs]
         | TExprPure e | TExprCompute e | TExprRead e | TExprFillRandom e | TExprRank e
         | TExprExtents e | TExprReynolds (e, _) -> [e]
-        | TExprRandGen (_, key, pars, _) -> key :: pars
+        | TExprRandGen (_, key, pars, weights, _) -> (key :: pars) @ (weights |> Option.map fst |> Option.toList)
         | TExprGuard (c, b) -> [c; b]
         | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
         | TExprGroupBy (a, p) | TExprSort (a, p)
@@ -3016,31 +3016,48 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // Int64 stream key; the next `nPars` args are the family's RUNTIME Float64
     // scalar parameters (any Float64-typed expression -- only the shape must be
     // static); the trailing args are the (elaborator-resolved) static extents.
-    // Self-typed as a dense Float64 array of that shape -- no annotation needed,
-    // and Float64 for every family including the integer-valued poisson and
-    // bernoulli (see the element-type note in cpp/rand_runtime.hpp). Lowering
-    // records (kind, key, pars) in RandomInits; codegen emits allocate<> + the
-    // runtime blade_rand fill.
+    // Self-typed as a dense array of that shape -- no annotation needed. The
+    // element type is Float64 for every scalar-parameter family, including the
+    // integer-valued poisson and bernoulli, and Int64 for `categorical` alone
+    // (see the element-type note in cpp/rand_runtime.hpp: its draws are
+    // subscripts, not measurements). Lowering records (kind, key, pars, weights)
+    // in RandomInits; codegen emits allocate<> + the runtime blade_rand fill,
+    // and picks the C++ pool type straight off this ElemType.
+    //
+    // `categorical` also carries the ARRAY parameter channel: its single
+    // non-shape argument is a rank-1 Float64 weights array, and this arm is
+    // where its extent is PINNED -- the extent has to be a static literal
+    // because codegen passes a compile-time length beside the pool pointer and
+    // the interpreter mirror needs the same length to scan. A symbolic extent
+    // is refused here rather than producing a fill whose k is unknown.
     //
     // The per-family parameter count is fixed HERE (not by the elaborator), so
     // it is enforced on the intrinsic itself and any future direct emitter of
     // __rand_* -- e.g. the ppl module -- is held to the same arity.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar (("__rand_uniform" | "__rand_normal" | "__rand_exponential"
                                                    | "__rand_gamma" | "__rand_poisson" | "__rand_bernoulli"
-                                                   | "__rand_beta") as fn) }, (keyE :: rest)) when not rest.IsEmpty ->
-        let kind, nPars =
+                                                   | "__rand_beta" | "__rand_categorical") as fn) }, (keyE :: rest)) when not rest.IsEmpty ->
+        // nPars = scalar Float64 parameters; hasWeights = the array channel.
+        // No family uses both today, but the two are counted independently so
+        // the argument split does not assume that.
+        let kind, nPars, hasWeights =
             match fn with
-            | "__rand_uniform"     -> "uniform", 0
-            | "__rand_normal"      -> "normal", 0
-            | "__rand_exponential" -> "exponential", 1
-            | "__rand_gamma"       -> "gamma", 2
-            | "__rand_poisson"     -> "poisson", 1
-            | "__rand_bernoulli"   -> "bernoulli", 1
-            | _                    -> "beta", 2
-        if List.length rest <= nPars then
-            Error (Other (sprintf "rand.%s: expected %d distribution parameter(s) and a shape" kind nPars))
+            | "__rand_uniform"     -> "uniform", 0, false
+            | "__rand_normal"      -> "normal", 0, false
+            | "__rand_exponential" -> "exponential", 1, false
+            | "__rand_gamma"       -> "gamma", 2, false
+            | "__rand_poisson"     -> "poisson", 1, false
+            | "__rand_bernoulli"   -> "bernoulli", 1, false
+            | "__rand_categorical" -> "categorical", 0, true
+            | _                    -> "beta", 2, false
+        // Surface order is key, [weights], scalar pars.., shape.
+        let nLead = nPars + (if hasWeights then 1 else 0)
+        if List.length rest <= nLead then
+            Error (Other (sprintf "rand.%s: expected %d distribution parameter(s) and a shape" kind nLead))
         else
-        let parArgs, dimArgs = List.splitAt nPars rest
+        let leadArgs, dimArgs = List.splitAt nLead rest
+        let weightsArg = if hasWeights then Some (List.head leadArgs) else None
+        let parArgs = if hasWeights then List.tail leadArgs else leadArgs
         // Extents must be static ints (the elaborator resolves them to literals).
         let dimResults =
             dimArgs |> List.map (fun d ->
@@ -3051,6 +3068,46 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         match dimResults |> List.fold (fun acc r -> match acc, r with Ok xs, Ok x -> Ok (xs @ [x]) | Error e, _ -> Error e | _, Error e -> Error e) (Ok []) with
         | Error e -> Error (Other e)
         | Ok dims ->
+            // The weights channel: inferred (not checked against a demand --
+            // its extent is what we are trying to LEARN), then required to be a
+            // rank-1 Float64 array with a static positive extent. AnyPrimElem
+            // so a unit-annotated Float64 still passes: units erase at codegen
+            // and the pool is a `double` pool either way.
+            // Split out of the pipeline below so each refusal is one flat arm:
+            // rank, element type and extent-staticness are three separate
+            // reasons and each gets its own message.
+            let pinWeights (tW: TypedExpr) : TypeResult<TypedExpr * int> =
+                match env.Subst.Resolve(tW.Type) with
+                | ArrayElem arrTy ->
+                    let rank = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+                    if rank <> 1 then
+                        Error (Other (sprintf "rand.%s: weights must be a rank-1 array (got rank %d)" kind rank))
+                    else
+                        match env.Subst.Resolve(arrTy.ElemType) with
+                        | AnyPrimElem ETFloat64 ->
+                            match arrTy.IndexTypes with
+                            | [ix] ->
+                                match ix.Extent with
+                                | IRLit (IRLitInt k) when k > 0L -> Ok (tW, int k)
+                                | IRLit (IRLitInt k) ->
+                                    Error (Other (sprintf "rand.%s: weights extent must be positive (got %d)" kind k))
+                                | _ ->
+                                    Error (Other (sprintf "rand.%s: the weights array must have a STATIC extent -- codegen passes its length beside the pool pointer, so a symbolic or parameter extent cannot be filled" kind))
+                            | _ -> Error (Other (sprintf "rand.%s: weights must be a rank-1 Float64 array" kind))
+                        | AnyPrimElem et ->
+                            Error (Other (sprintf "rand.%s: weights must have Float64 elements (got %A)" kind et))
+                        | _ ->
+                            Error (Other (sprintf "rand.%s: weights must be a rank-1 Float64 array" kind))
+                | _ ->
+                    Error (Other (sprintf "rand.%s: weights must be a rank-1 Float64 array, not a scalar" kind))
+            let weightsResult : TypeResult<(TypedExpr * int) option> =
+                match weightsArg with
+                | None -> Ok None
+                | Some wE ->
+                    inferExpr env wE
+                    |> Result.bind pinWeights
+                    |> Result.map Some
+            weightsResult |> Result.bind (fun tWeights ->
             // Params check against Float64 (an int literal promotes; an
             // array-typed argument is refused by the check, not silently taken).
             let parResults =
@@ -3064,8 +3121,11 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     dims |> List.map (fun n ->
                         { Id = env.Builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 n))
                           Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] })
-                let arrTy = mkArrayArrow indices (IRTScalar ETFloat64) None
-                mkTyped (TExprRandGen (kind, tKey, tPars, dims)) arrTy))
+                // Element type: Int64 for categorical (its draws are indices),
+                // Float64 for every other family.
+                let elemTy = if kind = "categorical" then IRTScalar ETInt64 else IRTScalar ETFloat64
+                let arrTy = mkArrayArrow indices elemTy None
+                mkTyped (TExprRandGen (kind, tKey, tPars, tWeights, dims)) arrTy)))
 
     // ---- cumulant(d, k): dist component projection, order-guarded ----
     // The order guard as a TYPE error (ppl/NOTES.md typed-Dist arc): k must

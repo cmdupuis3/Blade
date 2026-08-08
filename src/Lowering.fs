@@ -1822,11 +1822,18 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             // The key and the family's runtime Float64 params are lowered in
             // the CURRENT env (so they may reference earlier bindings, exactly
             // as the key may) and recorded. Mirrors the fill_random arm.
-            let kind, keyIR, parIRs =
+            //
+            // The categorical weights array lowers in the same env for the same
+            // reason -- it is always an earlier binding -- and carries the
+            // checker-pinned static extent through unchanged.
+            let kind, keyIR, parIRs, weightsIR =
                 match binding.Value.Kind with
-                | TExprRandGen (k, key, pars, _) ->
-                    k, lowerTypedExpr currentEnv key, (pars |> List.map (lowerTypedExpr currentEnv))
-                | _ -> "uniform", IRLit (IRLitInt 0L), []  // unreachable: guarded by the `when` above
+                | TExprRandGen (k, key, pars, weights, _) ->
+                    k,
+                    lowerTypedExpr currentEnv key,
+                    (pars |> List.map (lowerTypedExpr currentEnv)),
+                    (weights |> Option.map (fun (w, n) -> (lowerTypedExpr currentEnv w, n)))
+                | _ -> "uniform", IRLit (IRLitInt 0L), [], None  // unreachable: guarded by the `when` above
             let bd = {
                 Id = binding.VarId
                 Name = binding.Name
@@ -1837,7 +1844,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             }
             bindings <- bindings @ [bd]
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
-            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (RandGen (kind, keyIR, parIRs)) currentEnv.RandomInits }
+            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (RandGen (kind, keyIR, parIRs, weightsIR)) currentEnv.RandomInits }
         | TDeclLet binding when (match binding.Value.Kind with TExprCompound _ -> true | _ -> false) ->
             // Compound-construction constructor: materialized via P0
             // (genCompoundIndexFromMask) + a dense->compact scatter (the
