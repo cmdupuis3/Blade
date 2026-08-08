@@ -2795,15 +2795,17 @@ let private elabPplSample (active: string -> bool) (ctx: Ctx) (span: Span) (sNam
 //       variances (/(m-1)); between B = m * variance of the 4 segment means
 //       (/(J-1)); Rhat = sqrt(((m-1)/m * W + B/m) / W).
 //
-// The diagnostics accept an mh chain from this module (length registered at
-// elaboration) or any module-level rank-1 Float array with a static extent
-// (annotated or computed) -- hand pins ride literal arrays. autocorr/ess/
-// rhat lower to synthesized top-level FUNCTIONS whose bodies are the
+// The diagnostics accept an mh/hmc chain from this module (length registered
+// at elaboration) or any module-level rank-1 Float array with a static
+// extent (annotated or computed) -- hand pins ride literal arrays. autocorr/
+// ess/rhat lower to synthesized top-level FUNCTIONS whose bodies are the
 // mut-array + element-write + for-loop shape grad() already generates and
 // the whole pipeline supports; chain_mean/chain_var are module-block
-// accumulation loops. Not yet composable: `dist(chain, r)` needs a declared
-// array annotation, which a former output does not carry -- lifting a chain
-// into a tower stays a follow-up seam.
+// accumulation loops. `dist(chain, r)` -- the round-trip that unifies the
+// module -- composes too: a chain carries no declared annotation, so the
+// dist dispatch arm consults the chain registry and wraps the rank-1 chain
+// to Idx<1> x Idx<n> (the corpus-096 range-kernel idiom) before the
+// ordinary dist elaboration.
 // =========================================================================
 
 let private tyFloat64 = TyNamed ("Float64", [])
@@ -3998,10 +4000,45 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                         | None -> acc
                     | _ -> acc
                 | _ -> acc) Map.empty
+        // Pre-scan: dist-over-chain wrappers. Pass 2 synthesizes an
+        // Idx<1> x Idx<n> wrapper for `dist(chain, r)` over an mh/hmc chain
+        // (see the dist dispatch arm); the wrapper's shape must be in the
+        // SHARED ctx.Arrays built here, because downstream tower consumers
+        // holding that ctx (distDim under dist_expect/dist_reweight, the
+        // approx bridge) resolve the dist's source shape through it. Names
+        // that never elaborate (a chain decl that later refuses) are
+        // harmless, the poolMax convention.
+        let chainLenScan =
+            rest |> List.choose (fun d ->
+                match d.Value with
+                | DeclLet { Pattern = { Kind = PatternKind.PatVar cn }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, cargs) } }
+                    when (f = "mh" || f = "hmc") && active f ->
+                    (match cargs with
+                     | [_; _; nE; _; _] when f = "mh" ->
+                         (match evalExpr statics maxSteps nE with
+                          | Ok (SVInt x) when x >= 2L -> Some (cn, int x)
+                          | _ -> None)
+                     | [_; _; nE; _; _; _] when f = "hmc" ->
+                         (match evalExpr statics maxSteps nE with
+                          | Ok (SVInt x) when x >= 2L -> Some (cn, int x)
+                          | _ -> None)
+                     | _ -> None)
+                | _ -> None)
+            |> Map.ofList
+        let distChainWraps =
+            rest |> List.choose (fun d ->
+                match d.Value with
+                | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist" }, [{ Kind = ExprKind.ExprVar cn }; _]) } }
+                    when active "dist" ->
+                    chainLenScan
+                    |> Map.tryFind cn
+                    |> Option.map (fun n -> (sprintf "__ppl_dist_%s_chain" dName, (tyFloat64, [TyIdx (iLit 1); TyIdx (iLit n)])))
+                | _ -> None)
         let arrays =
             collectArrays rest
             |> Map.fold (fun acc k s -> Map.add k s acc) inferredArrays
             |> fun annotated -> aliasArrays |> Map.fold (fun acc k s -> Map.add k s acc) annotated
+            |> fun withAliases -> distChainWraps |> List.fold (fun acc (k, s) -> Map.add k s acc) withAliases
         // Pre-scan: the maximal multiset size each source array needs across
         // all its single-array formers in this module, so the first former
         // emits ONE maximal pool the rest reuse. Names that turn out to be
@@ -4069,7 +4106,29 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "comoments_merge" }, args) } } as b) when active "comoments_merge" ->
                         elabComomentsMerge ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist" }, args) } } when active "dist" ->
-                        elabDist ctx d.Span dName args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
+                        // The P4 round-trip: dist over an mh/hmc chain. A
+                        // chain binding is rank-1 with no declared annotation
+                        // (neither of arrayShape's routes sees it), but its
+                        // length is in the chain registry -- wrap it to
+                        // Idx<1> x Idx<n> through the same range-kernel form
+                        // corpus 096 writes by hand, register the wrapper's
+                        // shape, and elaborate dist over the wrapper.
+                        (match args with
+                         | [{ Kind = ExprKind.ExprVar cn }; rExpr] when Map.containsKey cn chainLens ->
+                             let n = chainLens.[cn]
+                             let wrapN = sprintf "__ppl_dist_%s_chain" dName
+                             let wrapVal =
+                                 computeE (applyE
+                                     (methodForE [syn (ExprRange [TyIdx (iLit 1); TyIdx (iLit n)])])
+                                     (lambdaE [ { Name = "__i"; Type = None; NameSpan = noSpan }
+                                                { Name = "__j"; Type = None; NameSpan = noSpan } ] None
+                                              (appE (v cn) [v "__j"])))
+                             let wrapDecl = { Value = DeclLet { Pattern = pvar wrapN; Type = None; Value = wrapVal; Mutability = BindLet }; Span = d.Span }
+                             let ctx2 = { ctx with Arrays = Map.add wrapN (tyFloat64, [TyIdx (iLit 1); TyIdx (iLit n)]) ctx.Arrays }
+                             elabDist ctx2 d.Span dName [mkExpr d.Span (ExprVar wrapN); rExpr]
+                             |> Result.map (fun (nds, info) -> (ds @ [wrapDecl] @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
+                         | _ ->
+                             elabDist ctx d.Span dName args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates)))
                     // A FLAT operand (constructor/pushforward towers) makes the
                     // result flat: register-only, like dist_jet -- __dist_pack's
                     // erasure type declares rank-k SymIdx-packed components and
