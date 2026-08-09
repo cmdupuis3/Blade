@@ -1,0 +1,35 @@
+// TEST: Parens Disambiguate The Grouping
+// docs/plan-tuples-vs-arg-packs.md 6c rule 4. Matching is GREEDY left to
+// right, which makes it deterministic and therefore predictable; the other
+// grouping is written with explicit parentheses. That escape exists only
+// because structure survives one-level matching -- under 6b's deep-flatten
+// every parenthesization of the same leaves was literally the same pack, so
+// there was no second grouping to reach for.
+
+function f(y: Tuple<2>, z: Float64) -> Float64 = y[0] + y[1] * 10.0 + z * 100.0
+
+let t1 = 1.0, 2.0
+let a = 3.0
+let b = 4.0
+
+// GREEDY: y prefers the tuple node t1, then z takes the next node.
+let greedy = f(t1, a)
+// EXPECT: greedy = 321
+
+// The regroup arm, same signature, no tuple node in sight: y takes the two
+// plain nodes. This is the pairing that makes `f(t1, a)` and `f(1.0, 2.0, a)`
+// the same call.
+let regrouped = f(1.0, 2.0, a)
+// EXPECT: regrouped = 321
+
+// `f(t1, a, b)` is an ERROR under the greedy rule -- y takes t1, z takes a, and
+// b is left over. Pinned in diagnostics/064, not here.
+//
+// THE OTHER GROUPING, written: y is `(t1, a)`, a pair whose first component is
+// itself a pair. It needs the written nested type for the same element-slot
+// reason as tuples/012, but the point is the SHAPE: the two readings of the
+// same three values are both expressible now, and the parens pick.
+function g(y: ((Float64, Float64), Float64), z: Float64) -> Float64 =
+    y[0][0] + y[0][1] * 10.0 + y[1] * 100.0 + z * 1000.0
+let grouped = g((t1, a), b)
+// EXPECT: grouped = 4321

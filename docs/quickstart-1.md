@@ -95,16 +95,34 @@ has.
 
 ## 3. Tuples and Currying
 
-Tuples are the other collection type:
+Tuples are the other collection type. A bare comma **constructs** one — no
+parentheses needed:
 
 ```F#
-let myTuple = (a, b, c)
-let e, d, f = myTuple          // destructuring
-let head :: tail = (a, b, c)   // partial destructuring
+let a = 1
+let b = 2
+let c = 3
+let myTuple = a, b, c          // construction
+let (e, d, f) = myTuple        // destructuring — needs the parens
+let head :: tail = myTuple     // partial destructuring
 tail == (b, c)
 ```
 ```
 True
+```
+
+The unparenthesized destructuring form does *not* exist — `let e, d, f =
+myTuple` is a parse error (`BL1001`), even though the construction on the line
+above it is spelled the same way. Only the pattern side requires parens.
+
+A tuple doesn't need to be destructured at all; `t[k]` projects one component:
+
+```F#
+let t = b, c        // width-2 tuple, same construction
+t[0] + t[1]
+```
+```
+5
 ```
 
 Destructuring a collection one element at a time is "currying". It applies to
@@ -165,9 +183,10 @@ a
 12
 ```
 
-The opposite end is `let const` (immutable everywhere); plain `let` is the
-middle: mutable in its own scope, protected from callees. Reassigning a
-`const`, or mutating a non-`mut` parameter, is a compile error.
+The opposite end is `let static` (a compile-time value, immutable
+everywhere); plain `let` is the middle: mutable in its own scope, protected
+from callees. Reassigning a `static` binding, or mutating a non-`mut`
+parameter, is a compile error.
 
 Anonymous functions use `lambda`:
 
@@ -203,12 +222,23 @@ Not what numpy does! That cross-iteration operator is spelled `[+]` in Blade;
 plain `+` stays elementwise, like other languages:
 
 ```F#
-let add((a: T^0, b: T^0)) = a + b
+function add(p: Tuple<2>) = p[0] + p[1]
 method_for(zip(A, B)) <@> add   // A + B   (zip first: elementwise)
 
-let add(a: T^0, b: T^0) = a + b
-method_for(A, B) <@> add        // A [+] B (outer-product style)
+function add2(a: T^0, b: T^0) -> T^0 = a + b
+method_for(A, B) <@> add2       // A [+] B (outer-product style)
 ```
+
+The **loop former** decides *iteration*: `zip(A, B)` co-iterates the two
+arrays over one shared index space; `A, B` (no `zip`) iterates every pair —
+the outer product. The **kernel's written parameter shape** decides
+*packing*: `p: Tuple<2>` takes the whole co-iterated pair as one value
+(project its parts with `p[0]`/`p[1]`); two plain parameters take one
+component each. A kernel's parameter list is a *width schema* over the loop's
+operands — an unannotated parameter consumes one operand, a `Tuple<k>`
+parameter consumes `k` — so `add`'s single `Tuple<2>` parameter and `add2`'s
+two plain parameters are just two different schemas over the same pair, and
+either schema works with either loop former as long as the widths add up.
 
 `zip` reduces what Blade sees to one shared index space before iteration. So
 why would we ever want the bracketed operators?

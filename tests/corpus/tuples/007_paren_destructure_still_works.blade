@@ -1,0 +1,39 @@
+// TEST: Paren Destructure Of Bare Comma Tuple
+// The binder side of plan issue #10 is DEFERRED: `let a, b = t` still does
+// not parse, and the parenthesized `let (a, b) = t` form -- which 87 corpus
+// files depend on -- must keep working, including over a tuple built by the
+// new bare-comma RHS.
+//
+// This is the compatibility pin for the construction change: the RHS grammar
+// moved, the pattern grammar did not, and the two still meet.
+
+let b = 1.0
+let c = 2.0
+
+// Bare-comma construction, parenthesized destructure.
+let t = b, c
+let (u, v) = t
+// EXPECT: u = 1
+// EXPECT: v = 2
+
+// Directly on a bare-comma RHS, no intermediate name.
+let (p, q) = (c, b)
+// EXPECT: p = 2
+// EXPECT: q = 1
+
+// Blade tuple patterns flatten across nesting (basic/024 pins the rule); a
+// bare-comma tuple of a tuple is no different, since the comma builds exactly
+// the node the parenthesized literal builds.
+let inner = 1.0, 2.0
+let outer = inner, 3.0
+let (d, e, f) = outer
+// EXPECT: d = 1
+// EXPECT: e = 2
+// EXPECT: f = 3
+
+// Width 3 destructure of a width-3 bare-comma tuple.
+let three = 7.0, 8.0, 9.0
+let (g, h, i) = three
+// EXPECT: g = 7
+// EXPECT: h = 8
+// EXPECT: i = 9

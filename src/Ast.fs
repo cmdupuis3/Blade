@@ -50,6 +50,16 @@ type BinOp =
     | OpDiv       // /
     | OpMod       // %
     | OpCaret     // ^ (power/exponentiation)
+    | OpMath2 of string  // BINARY scalar math intrinsic: atan2/log_base. No
+                         // surface OPERATOR spells this -- the surface form is
+                         // a plain call `atan2(y, x)`, which TypeCheck rewrites
+                         // to this op when the name is not user-bound (exactly
+                         // how `exp(x)` becomes the OpMath unary op). It is a
+                         // BinOp rather than a dedicated node so the whole
+                         // elementwise pipeline -- zip lifting, array/scalar
+                         // broadcast, the unit tables, loop synthesis -- applies
+                         // unchanged, and it renders as a CALL like the other
+                         // function-form binop, `^` (pow).
     // Comparison
     | OpEq        // ==
     | OpNeq       // !=
@@ -189,6 +199,27 @@ type TypeExpr =
     | TyFunc of args: TypeExpr list * ret: TypeExpr
     // Tuple type: (T1, T2, ...)
     | TyTuple of TypeExpr list
+    /// `Tuple<N>`: the WIDTH-ONLY tuple annotation
+    /// (docs/plan-tuples-vs-arg-packs.md 6b, Design C). N is a positive
+    /// integer literal >= 2 checked by the parser -- `Tuple<0>`/`Tuple<1>`
+    /// and symbolic widths are rejected there, so every node that reaches
+    /// the checker is well-formed. Element types are INFERRED: it lowers to
+    /// `IRTTuple` of N fresh inference variables (TypeCheck.lowerTypeExpr),
+    /// exactly what `TyTuple` of N written element types would produce, so
+    /// unification, printing and codegen see one representation.
+    ///
+    /// The node is a LEAF -- it has no child TypeExpr -- which is why the
+    /// repo-wide "a new type shape silently opts out of every TypeExpr walk
+    /// lacking an arm" hazard is benign here: every such walk recurses to
+    /// find units / index types / named types INSIDE a type, and there is
+    /// nothing inside this one. Deliberately NOT a `TyNamed ("Tuple", ...)`,
+    /// so it can never be mistaken for a unit-carrying base (unitSlotBases)
+    /// or a user type.
+    ///
+    /// Kept distinct from `TyTuple` rather than desugared at parse time
+    /// because the width-schema matcher (the next stage) must dispatch on
+    /// WRITTEN syntax only -- see 5.1 of the plan.
+    | TyTupleWidth of int
     // Type variable (for parametric polymorphism)
     // Ident is a single uppercase letter (T, U, V, ...)
     // int option is the arity: None or Some 0 = scalar, Some k = rank-k array
@@ -558,7 +589,9 @@ and Binding = {
 }
 
 and BindingMut =
-    | BindConst    // let const
+    | BindConst    // INTERNAL immutable marker: minted by `let static` and the
+                   // local `function` desugar. NOT surface syntax -- there is
+                   // no `const` keyword in Blade (removed 2026-08-08).
     | BindLet      // let
     | BindMut      // let mut
 

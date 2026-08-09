@@ -21,7 +21,7 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 
 | Feature | Usage | Status | Description / Notes |
 |---------|-------|--------|---------------------|
-| Let-binding | `let static`/`let`/`let mut` | Core | `static` denotes "statically evaluable" and is conflated with "const" |
+| Let-binding | `let static`/`let`/`let mut` | Core | `static` denotes "statically evaluable" and is also the immutable tier — there is no separate `const` keyword |
 | Parameter borrowing | `x: T` immutable, `x: mut T` mutable | Core |  |
 | `static` literals | `let static a = 5` | Core |  |
 | `static function` |  | Core | compile-time evaluable; usable in type positions (`Idx<triangle(n)>`) |

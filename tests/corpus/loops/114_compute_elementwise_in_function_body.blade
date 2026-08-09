@@ -1,0 +1,30 @@
+// TEST: Compute Elementwise In Function Body
+// ============================================================================
+// `|> compute` on an elementwise array expression inside a FUNCTION body.
+// The elementwise array ops re-synthesize THEMSELVES as
+// `compute(method_for(..) <@> k)`, so a user-written `|> compute` on one
+// arrived doubly wrapped. Module level hid it (the compute binding peels the
+// wrappers recursively); a function body did not, and the emitted C++ carried
+// a codegen-error token instead of the loop. `compute` is idempotent now, so
+// both `dx` spellings below lower identically -- the pin is that the computed
+// one agrees with the uncomputed one, VALUE and all: var([1,2,3,4]) = 1.25.
+// ============================================================================
+function varC(x: T^1) = {
+    let n = 1.0 * extents(x)
+    let xbar = reduce(x, (+)) / n
+    let dx = (x - xbar) |> compute
+    prodsum(dx, dx) / n
+}
+
+function varU(x: T^1) = {
+    let n = 1.0 * extents(x)
+    let xbar = reduce(x, (+)) / n
+    let dx = x - xbar
+    prodsum(dx, dx) / n
+}
+
+let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let computed = varC(a)
+let uncomputed = varU(a)
+// EXPECT: computed = 1.25
+// EXPECT: uncomputed = 1.25

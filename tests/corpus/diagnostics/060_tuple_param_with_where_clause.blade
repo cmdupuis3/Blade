@@ -1,0 +1,27 @@
+// TEST: Diag Tuple Param With Where Clause (diag)
+// ERROR: BL3999
+// ERROR-CONTAINS: `Tuple<N>` parameter is not supported
+// ============================================================================
+// A `Tuple<N>` kernel parameter is realized at the apply seam by replacing it
+// with its k row parameters plus a body-entry `let p = (..)` -- the same
+// mechanism the defaults fill uses (docs/plan-tuples-vs-arg-packs.md 6b). That
+// renumbers parameter POSITIONS and removes the tuple parameter's NAME from
+// the list, and every `where` conjunct addresses parameters by one or the
+// other: `comm`/`anticomm` are index lists, the parallel strategies are
+// resolved by name in Lowering.
+//
+// Both failure modes would be SILENT. A comm group landing on the wrong index
+// degrades to dense storage with no diagnostic; a dropped `omp` clause emits a
+// serial nest whose C++ is indistinguishable from a program that never asked
+// (the BL9001 dropped-parallel guard at the apply seam exists because that was
+// a real, long-lived bug). So the combination is refused rather than remapped
+// on a guess -- `comm` between two PAIRS has no settled meaning to remap TO.
+//
+// The escape is in the message and is always available: write the parameters
+// flat, one per operand, which is what every `where`-carrying kernel in the
+// corpus already does.
+// ============================================================================
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+let f = lambda(p: Tuple<2>, q) where comm(p, q) -> p[0] * p[1] * q
+let g = object_for(f) <@> (A, B, A) |> compute

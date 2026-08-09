@@ -367,8 +367,18 @@ let many parser (tokens: Token list) =
         | Error _ -> Ok (List.rev acc, toks)
     loop [] tokens
 
+/// Errors that `sepBy` (and the let-annotation slot) must PROPAGATE rather
+/// than treat as "the list ends here". A code qualifies only if it can be
+/// raised exclusively after the parse has committed -- BL1004 fires only once
+/// the two-token lookahead `Tuple <` has matched in TYPE position, so there
+/// is no legitimate backtrack it could be cutting off. Without this the
+/// precise diagnostic is swallowed and the caller re-reports far away
+/// ("Expected ')' but got identifier 't'" at the parameter NAME).
+let isHardParseError (e: ParseError) : bool = e.Code = "BL1004"
+
 let sepBy parser sep (tokens: Token list) =
     match parser tokens with
+    | Error e when isHardParseError e -> Error e
     | Error _ -> Ok ([], tokens)
     | Ok (first, rest) ->
         let rec loop acc toks =
@@ -377,6 +387,7 @@ let sepBy parser sep (tokens: Token list) =
             | Ok (_, afterSep) ->
                 match parser afterSep with
                 | Ok (v, rest') -> loop (v :: acc) rest'
+                | Error e when isHardParseError e -> Error e
                 | Error _ -> Ok (List.rev acc, toks)
         loop [first] rest
 
@@ -797,6 +808,45 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         | [single] -> success single remaining
         | _ -> success (TyTuple types) remaining
 
+    // `Tuple<-2>`: the lexer glues `<-` into ONE token, so a negative width
+    // never reaches the arm below. Caught here so it gets the width
+    // diagnostic rather than falling through to `TyNamed "Tuple"` and
+    // failing at the `=` with an unrelated message.
+    | Some (TokIdent "Tuple") when (match peek (advance tokens) with Some (TokOp "<-") -> true | _ -> false) ->
+        let (line, col) = currentPos (advance tokens)
+        errorC "BL1004" "A tuple width cannot be negative: `Tuple<N>` requires an integer literal N >= 2" line col
+
+    | Some (TokIdent "Tuple") when (match peek (advance tokens) with Some (TokOp "<") -> true | _ -> false) ->
+        // `Tuple<N>`: the width-only tuple annotation (Design C,
+        // docs/plan-tuples-vs-arg-packs.md 6b). Element types are inferred;
+        // only the width is written.
+        //
+        // Reserved-name story: this follows `Dist`'s SOFT-keyword precedent
+        // (the arm just above) rather than `Array`'s hard lexer keyword. The
+        // builtin wins in TYPE position whenever the two-token lookahead
+        // `Tuple <` matches, so a user `type Tuple<...>` can never shadow it
+        // there; a bare `Tuple` with no `<`, and every VALUE named `Tuple`,
+        // still falls through to the ordinary TyNamed / identifier paths.
+        // Making it a lexer keyword would have broken those.
+        let (ltLine, ltCol) = currentPos (advance tokens)
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        (match peek afterLt with
+         | Some (TokInt n) ->
+             // Width must be a positive integer LITERAL >= 2. A 1-tuple does
+             // not exist in Blade (`(e)` is grouping, formalism.md:1275) and
+             // the 0-tuple has no annotation spelling, so both are refused
+             // here rather than lowered into a degenerate IRTTuple. A
+             // symbolic width would make pack widths inference-dependent,
+             // which 6b rules out explicitly.
+             if n < 2L then
+                 let (line, col) = currentPos afterLt
+                 errorC "BL1004" (sprintf "Tuple<%d> is not a tuple width: `Tuple<N>` requires an integer literal N >= 2 (there is no 1-tuple -- `(e)` is grouping -- and no 0-tuple annotation)" n) line col
+             else
+                 expectGt (advance afterLt) >>= fun _ remaining ->
+                 success (TyTupleWidth (int n)) remaining
+         | _ ->
+             errorC "BL1004" "`Tuple<N>` requires an integer literal width N >= 2 (element types are inferred; write `(T1, T2)` to spell them out)" ltLine ltCol)
+
     | Some (TokIdent "Dist") when (match peek (advance tokens) with Some (TokOp "<") -> true | _ -> false) ->
         // Dist<order, Elem like I1, ..., Ik>: the typed dist tower
         // (ppl/NOTES.md). Order leads because it's an expression (any
@@ -844,7 +894,20 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
             afterLt |> sepBy parseTypeArg TokComma >>= fun args afterArgs ->
             expectGt afterArgs >>= fun _ remaining ->
             let line, col = currentPos afterLt
-            buildTypeApp name args line col remaining
+            buildTypeApp name args line col remaining >>= fun applied afterApplied ->
+            // A TRAILING caret after a type application is the abstract-array
+            // spelling with a unit-carrying element: `T<day>^1` is a rank-1
+            // abstract array of `T` annotated `day`, `T<day>^0` the scalar.
+            // The caret is what marks the type-VARIABLE reading of the head;
+            // without it `T<x>` keeps its ordinary named-type meaning, and a
+            // real base name under a caret (`Float<day>^1`) stays concrete.
+            // Lowering (TypeCheck.lowerTypeExpr, TyAbstractArray) decides
+            // which of the two the head is.
+            match peek afterApplied with
+            | Some (TokOp "^") ->
+                advance afterApplied |> parseRankExpr >>= fun rankExpr afterRank ->
+                success (TyAbstractArray (applied, rankExpr, None)) afterRank
+            | _ -> success applied afterApplied
         | _ ->
             success (TyNamed (name, [])) afterName
 
@@ -2308,24 +2371,62 @@ and parseLambdaParam (tokens: Token list) : ParseResult<LambdaParam> =
     | _ ->
         withDefault None afterName
 
+/// The right-hand side of a `let`, with the BARE-COMMA tuple construction of
+/// docs/plan-tuples-vs-arg-packs.md 6b: `let t = b, c` builds the 2-tuple
+/// `(b, c)`, `let t = a, b, c` the 3-tuple, and so on for any width >= 2.
+/// This is the CONSTRUCTION half of plan issue #10 only -- the binder side
+/// (`let a, b = t`) stays deferred, and the parenthesized `let (a, b) = t`
+/// destructure is untouched.
+///
+/// Each component parses at full expression precedence and stops at the
+/// comma (a comma is a separator, never an operator), so `let t = f(x), g(y)`
+/// is a 2-tuple of two CALLS, not `f(x, g(y))`. The node produced is exactly
+/// the `ExprTuple` a parenthesized literal produces, so the two spellings are
+/// the same program from the checker down.
+///
+/// Shared by all three let-parse sites (`parseLet`, `parseLetStmt`,
+/// `parseTopLevelLet`) so they cannot drift.
+/// The optional `: T` annotation slot of a `let`, shared by all three let
+/// sites. Historically each site inlined `match parseTypeExpr ... with Error
+/// _ -> None, afterPat` -- a type-parse failure is SWALLOWED and the site
+/// re-reports at the `=`, which turns a precise annotation diagnostic into a
+/// misleading "Expected '=' but got ':'" pointing at the colon.
+///
+/// `isHardParseError` codes are propagated instead of swallowed -- the same
+/// rule `sepBy` applies, for the same reason: a BL1004 can only be raised
+/// once the slot is unambiguously an annotation, so the fallback's tolerance
+/// for non-annotation colons is unchanged.
+and parseLetAnnotation (afterPat: Token list) : ParseResult<TypeExpr option> =
+    match peek afterPat with
+    | Some TokColon ->
+        match parseTypeExpr (advance afterPat) with
+        | Ok (t, rest) -> success (Some t) rest
+        | Error e when isHardParseError e -> Error e
+        | Error _ -> success None afterPat
+    | _ -> success None afterPat
+
+and parseLetRhs (tokens: Token list) : ParseResult<Expr> =
+    parseExprImpl tokens >>= fun first afterFirst ->
+    match peek afterFirst with
+    | Some TokComma ->
+        advance afterFirst |> sepBy parseExprImpl TokComma >>= fun rest afterRest ->
+        success (mkExpr (rangeSpan tokens afterRest) (ExprTuple (first :: rest))) afterRest
+    | _ -> success first afterFirst
+
 and parseLet (tokens: Token list) : ParseResult<Expr> =
-    // let [const|mut] pattern [: type] = value. Blade has no ML-style
+    // let [mut] pattern [: type] = value. Blade has no ML-style
     // "let x = v in body" -- `in` is only used for virtual arrays in for-loops.
+    // There is NO `const` in the surface language: BindConst exists only as
+    // the internal immutability marker minted by `let static` and the local
+    // `function` desugar.
     let mutability, afterMut =
         match peek tokens with
-        | Some (TokKeyword KwConst) -> BindConst, advance tokens
         | Some (TokKeyword KwMut) -> BindMut, advance tokens
         | _ -> BindLet, tokens
     
     parsePattern afterMut >>= fun pat afterPat ->
-    let ty, afterTy =
-        match peek afterPat with
-        | Some TokColon ->
-            match parseTypeExpr (advance afterPat) with
-            | Ok (t, rest) -> Some t, rest
-            | Error _ -> None, afterPat
-        | _ -> None, afterPat
-    
+    parseLetAnnotation afterPat >>= fun ty afterTy ->
+
     expect (TokOp "=") afterTy >>= fun _ afterEq ->
 
     let afterEq = skipNL afterEq
@@ -2338,7 +2439,7 @@ and parseLet (tokens: Token list) : ParseResult<Expr> =
         let sp = rangeSpan tokens afterValue
         success (mkExpr sp (ExprLet (binding, mkExpr sp (ExprLit LitUnit)))) afterValue
     | _ ->
-        parseExprImpl afterEq >>= fun value afterValue ->
+        parseLetRhs afterEq >>= fun value afterValue ->
         let binding = { Mutability = mutability; Pattern = pat; Type = ty; Value = value }
         let sp = rangeSpan tokens afterValue
         success (mkExpr sp (ExprLet (binding, mkExpr sp (ExprLit LitUnit)))) afterValue
@@ -2697,14 +2798,16 @@ and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
         | _ -> Ok (None, afterRParen)
     whereResult >>= fun whereClause afterWhere ->
 
-    let retType, afterRet =
-        match peek afterWhere with
-        | Some (TokOp "->") ->
-            match parseTypeExpr (advance afterWhere) with
-            | Ok (t, rest) -> Some t, skipNL rest
-            | Error _ -> None, afterWhere
-        | _ -> None, afterWhere
-    
+    // A swallowed type-parse failure re-reports at the `=`; `isHardParseError`
+    // codes are precise enough that losing them would be strictly worse.
+    (match peek afterWhere with
+     | Some (TokOp "->") ->
+         (match parseTypeExpr (advance afterWhere) with
+          | Ok (t, rest) -> success (Some t) (skipNL rest)
+          | Error e when isHardParseError e -> Error e
+          | Error _ -> success None afterWhere)
+     | _ -> success None afterWhere) >>= fun retType afterRet ->
+
     expect (TokOp "=") afterRet >>= fun _ afterEq ->
     parseInlineOrBlock afterEq >>= fun body remaining ->
 
@@ -2834,21 +2937,14 @@ and parseLetStmt (tokens: Token list) : ParseResult<Stmt> =
     | _ ->
     let mutability, afterMut =
         match peek tokens with
-        | Some (TokKeyword KwConst) -> BindConst, advance tokens
         | Some (TokKeyword KwMut) -> BindMut, advance tokens
         | _ -> BindLet, tokens
 
     parsePattern afterMut >>= fun pat afterPat ->
-    let ty, afterTy =
-        match peek afterPat with
-        | Some TokColon ->
-            match parseTypeExpr (advance afterPat) with
-            | Ok (t, rest) -> Some t, rest
-            | Error _ -> None, afterPat
-        | _ -> None, afterPat
+    parseLetAnnotation afterPat >>= fun ty afterTy ->
 
     expect (TokOp "=") afterTy >>= fun _ afterEq ->
-    parseExprImpl afterEq >>= fun value remaining ->
+    parseLetRhs afterEq >>= fun value remaining ->
 
     success (StmtLet {
         Mutability = mutability
@@ -2910,19 +3006,18 @@ let parseFunctionDecl (tokens: Token list) : ParseResult<Decl> =
         | _ -> Ok (None, afterRParen)
     whereResult >>= fun whereClause afterWhere ->
 
-    // Return type: either : Type or -> Type
-    let retType, afterRet =
-        match peek afterWhere with
-        | Some TokColon ->
-            match parseTypeExpr (advance afterWhere) with
-            | Ok (t, rest) -> Some t, skipNL rest
-            | Error _ -> None, afterWhere
-        | Some (TokOp "->") ->
-            match parseTypeExpr (advance afterWhere) with
-            | Ok (t, rest) -> Some t, skipNL rest
-            | Error _ -> None, afterWhere
-        | _ -> None, afterWhere
-    
+    // Return type: either : Type or -> Type. A swallowed type-parse failure
+    // re-reports at the `=`; `isHardParseError` codes propagate instead.
+    let parseRet (afterArrow: Token list) : ParseResult<TypeExpr option> =
+        match parseTypeExpr afterArrow with
+        | Ok (t, rest) -> success (Some t) (skipNL rest)
+        | Error e when isHardParseError e -> Error e
+        | Error _ -> success None afterWhere
+    (match peek afterWhere with
+     | Some TokColon -> parseRet (advance afterWhere)
+     | Some (TokOp "->") -> parseRet (advance afterWhere)
+     | _ -> success None afterWhere) >>= fun retType afterRet ->
+
     expect (TokOp "=") afterRet >>= fun _ afterEq ->
     parseInlineOrBlock afterEq >>= fun body remaining ->
     
@@ -2945,22 +3040,15 @@ let parseTopLevelLet (tokens: Token list) : ParseResult<Decl> =
     | _ ->
     let mutability, afterMut =
         match peek tokens with
-        | Some (TokKeyword KwConst) -> BindConst, advance tokens
         | Some (TokKeyword KwMut) -> BindMut, advance tokens
         | _ -> BindLet, tokens
-    
+
     parsePattern afterMut >>= fun pat afterPat ->
-    let ty, afterTy =
-        match peek afterPat with
-        | Some TokColon ->
-            match parseTypeExpr (advance afterPat) with
-            | Ok (t, rest) -> Some t, rest
-            | Error _ -> None, afterPat
-        | _ -> None, afterPat
-    
+    parseLetAnnotation afterPat >>= fun ty afterTy ->
+
     expect (TokOp "=") afterTy >>= fun _ afterEq ->
-    parseExprImpl afterEq >>= fun value remaining ->
-    
+    parseLetRhs afterEq >>= fun value remaining ->
+
     success (DeclLet {
         Mutability = mutability
         Pattern = pat

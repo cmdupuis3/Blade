@@ -1,0 +1,26 @@
+// TEST: Diag One Param Kernel Over Zip (diag)
+// ERROR: BL3002
+// ERROR-CONTAINS: annotate the single parameter `Tuple<2>`
+// ============================================================================
+// THE ONE GENUINELY UNDECIDABLE SHAPE (docs/plan-tuples-vs-arg-packs.md 5.2,
+// and 3.5's M3): one UNANNOTATED parameter over a width-k pack. Both readings
+// are well-formed and they disagree --
+//   the docs' reading (formalism 131, quickstart-1 205): `p` is the pair,
+//     so `p * 2.0` is a type error;
+//   the flattened reading: the kernel needs 2 parameters, so it is an
+//     arity error.
+// and the compiler used to do a THIRD thing: bind `p` to A's element, iterate
+// the co-iteration axis, and return [2, 4, 6] with B silently dropped.
+//
+// No local rule can choose. The body cannot vote either: kernel bodies are
+// inferred BEFORE their parameters are bound (5.1), so at the moment of the
+// decision `lambda(p) -> p * 2.0` and `lambda(p) -> p[0] + p[1]` are the same
+// syntax. Design C's answer is to demand the annotation -- the same discipline
+// `Float<speed>` quantity parameters already impose (BL3010) -- and the
+// message must name BOTH escapes, which is what ERROR-CONTAINS pins.
+//
+// The two spellings it steers to are pinned working in tuples/011.
+// ============================================================================
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+let g = method_for(zip(A, B)) <@> lambda(p) -> p * 2.0 |> compute

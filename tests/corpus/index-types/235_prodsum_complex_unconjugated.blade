@@ -1,0 +1,24 @@
+// TEST: Prodsum Complex Unconjugated
+// Semantics pin (docs/plan-array-expression-fixes.md §3, RULED 2026-08-08 by
+// the coordinator): prodsum(a, b) is Sigma a_t * b_t with NO implicit
+// conjugation, even when the element type is complex. prodsum(e, e) must
+// equal Sigma e_t^2, NOT the Hermitian inner product Sigma |e_t|^2 -- the
+// Lomb-Scargle kernel depends on the unconjugated reading to recover
+// Sigma e^(2i*omega*t) from a single complex multiply.
+//   e = [1+0i, 0+1i, -1+1i]
+//   unconjugated (RULED): e0^2 + e1^2 + e2^2
+//     = (1,0) + (-1,0) + (0,-2) = (0,-2)
+//   conjugated (WOULD be wrong under this ruling): |e0|^2 + |e1|^2 + |e2|^2
+//     = 1 + 1 + 2 = (4,0)
+// If this test instead observes (4,0) (or 4), prodsum is conjugating on
+// complex operands -- that contradicts the ruling above and needs to be
+// raised, not silently "fixed" by editing this pin.
+// Validated 2026-08-08: current compiler returns (0,-2), so this pin records
+// existing behavior as well as the ruling.
+let e: Array<Complex128 like Idx<3>> = [
+    complex(1.0, 0.0),
+    complex(0.0, 1.0),
+    complex(-1.0, 1.0)
+]
+let total = prodsum(e, e)
+// EXPECT: total = (0,-2)

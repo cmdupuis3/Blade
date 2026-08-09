@@ -2165,6 +2165,10 @@ let private dispatchTest (rest: string list) : int =
             | "modules" -> Some ("Modules", moduleTests)
             | "guards" -> Some ("Guards", guardTests)
             | "bracketed" -> Some ("Bracketed", bracketedTests)
+            // The `Tuple<N>` surface layer (docs/plan-tuples-vs-arg-packs.md
+            // 6b). Mixed category: positives plus "(rejects)" probes, so no
+            // asRejectProbes wrapper.
+            | "tuples" -> Some ("Tuples", tupleTests)
             | "indextypes" -> Some ("Index Types", indexTypeTests)
             | "static" -> Some ("Static", staticTests)
             | "units" -> Some ("Units", unitTests)

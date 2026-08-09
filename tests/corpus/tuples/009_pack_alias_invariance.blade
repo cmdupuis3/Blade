@@ -1,0 +1,71 @@
+// TEST: Pack Alias Invariance
+// WARN: BL4004
+// The SUBSTITUTION LAW of the width-schema design
+// (docs/plan-tuples-vs-arg-packs.md 6b): a pack is its flat LEAF sequence, so
+// `K <@> (A, B)`, `let P = (A, B); K <@> P` and `let Q = P; K <@> Q` are ONE
+// program. Naming a value may not change what it means.
+//
+// This is the doc's headline counterexample (3.1, M1) turned into a pin. The
+// pack decision used to be taken syntactically at three sites at three
+// different ALIAS DEPTHS -- `resolveTypedExpr` follows a binding exactly one
+// hop -- so before the matcher landed:
+//   K <@> (A, B)   splatted (depth 0 syntactic match)      -> the outer product
+//   K <@> P        splatted (depth 1, resolveTypedExpr)    -> the outer product
+//   K <@> Q        did NOT splat (depth 2 is past the hop) -> `blade check` OK,
+//                  then g++: '__v6' was not declared in this scope
+// Every line below is now the same 2x3 grid, and the whole file is the
+// regression test for reintroducing a fixed-depth resolve anywhere in the pack
+// path.
+
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+
+let P = (A, B)
+let Q = P
+let R = Q
+
+let K = object_for(lambda(a, b) -> a * b)
+
+let d0 = K <@> (A, B) |> compute
+let d1 = K <@> P |> compute
+let d2 = K <@> Q |> compute
+let d3 = K <@> R |> compute
+// EXPECT: d0 = [[10, 20, 30], [20, 40, 60]]
+// EXPECT: d1 = [[10, 20, 30], [20, 40, 60]]
+// EXPECT: d2 = [[10, 20, 30], [20, 40, 60]]
+// EXPECT: d3 = [[10, 20, 30], [20, 40, 60]]
+
+// M4, the LEFT-hand mirror at depth ZERO. The implicit-former arm matched the
+// UNTYPED `ExprTuple`, so it did not follow bindings at all and the two sides
+// of one operator disagreed about how far to look through a `let`. Both sides
+// now go through the same leaf expansion in `inferMethodFor`.
+let e0 = (A, B) <@> lambda(x, y) -> x * y |> compute
+let e1 = P <@> lambda(x, y) -> x * y |> compute
+// EXPECT: e0 = [[10, 20, 30], [20, 40, 60]]
+// EXPECT: e1 = [[10, 20, 30], [20, 40, 60]]
+
+// M5: a tuple written INSIDE `method_for`'s own comma list. `parseMethodFor`
+// parses its own list, so the inner parens made ONE operand of tuple type --
+// one pair of parentheses, silently different program (check OK, g++ failed on
+// an undeclared temp). Leaf expansion makes the parens inert, as ruling 2 says
+// they must be.
+let f0 = method_for((A, B)) <@> lambda(a, b) -> a * b |> compute
+// EXPECT: f0 = [[10, 20, 30], [20, 40, 60]]
+
+// A FLAT pack of three is three operands. Nesting is NOT equivalent to this
+// under the adopted depth ruling (6c): `(A, (B, C))` is two nodes, and an
+// unannotated parameter facing the tuple node is an error demanding an
+// annotation (diagnostics/061). Only the flat spelling belongs in this file.
+//
+// Recorded because it changed: 6b's superseded free-monoid ruling made
+// `(A, (B, C))` and `((A, B), C)` deep-flatten to these same three leaves, so
+// all three spellings ran and agreed. 6c takes that equivalence back --
+// unconditional flattening cost nested tuples as data, `Poly`'s top-level
+// arity, and any chance of parens meaning something. The equivalence survives
+// CONDITIONALLY, licensed by a `Tuple<2>` annotation, in tuples/010.
+let C: Array<Float64 like Idx<2>> = [5.0, 6.0]
+let g0 = object_for(lambda(a, b, c) -> a + b + c) <@> (A, B, C) |> compute
+// EXPECT: g0 = [16, 17, 26, 27, 36, 37, 17, 18, 27, 28, 37, 38]
+// The 2*3*2 = 12 cells are the COUNT half of the pin: under-arity used to run
+// and produce a plausible array of the wrong length (3.4), so a width claim
+// that is only about values would not catch the bug this file guards.

@@ -1144,6 +1144,24 @@ let binOpToCpp = function
     | IREq -> "==" | IRNeq -> "!=" 
     | IRLt -> "<" | IRLe -> "<=" | IRGt -> ">" | IRGe -> ">="
     | IRAnd -> "&&" | IROr -> "||"
+    | IRMath2 name -> name   // call-shaped, like IRCaret; see renderMath2
+
+/// Render a BINARY math intrinsic. Call-shaped rather than infix, the same
+/// exception `^` already needs (`pow(l, r)`), so every IRBinOp emission site
+/// routes IRMath2 here before reaching binOpToCpp.
+///   atan2(y, x)    -> std::atan2(y, x)
+///   log_base(x, b) -> (std::log(x) / std::log(b))
+/// There is no std::log_base; the quotient IS the definition, and emitting it
+/// inline keeps the interpreter's mirror (Numerics.evalArith) a one-liner over
+/// the same two std::log calls. Both operands are real by construction
+/// (TypeCheck rejects complex ones), so no complex coercion is needed. In the
+/// CUDA device dialect the names go UNQUALIFIED, matching renderUnaryOpTyped's
+/// real-operand rule -- CUDA's device overloads live in the global namespace.
+let renderMath2 (name: string) (lStr: string) (rStr: string) : string =
+    let q (fn: string) = if inCudaDeviceDialect () then fn else "std::" + fn
+    match name with
+    | "log_base" -> sprintf "(%s(%s) / %s(%s))" (q "log") lStr (q "log") rStr
+    | _ -> sprintf "%s(%s, %s)" (q name) lStr rStr
 
 /// Convert unary operator to C++ string
 let unaryOpToCpp = function
@@ -1290,8 +1308,10 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRBinOp (_, op, l, r) ->
         let lStr = exprToCppSimple names l
         let rStr = exprToCppSimple names r
-        if op = IRCaret then sprintf "pow(%s, %s)" lStr rStr
-        else emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
+        match op with
+        | IRCaret -> sprintf "pow(%s, %s)" lStr rStr
+        | IRMath2 name -> renderMath2 name lStr rStr
+        | _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
         let inner = exprToCppSimple names e
         if isComplexType (inferExprType e) then sprintf "%s(%s)" (complexFnName "conj") inner
@@ -2062,10 +2082,10 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRBinOp (_, op, l, r) ->
         let lStr = exprToCppCore subst names l
         let rStr = exprToCppCore subst names r
-        if op = IRCaret then
-            sprintf "pow(%s, %s)" lStr rStr
-        else
-            emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
+        match op with
+        | IRCaret -> sprintf "pow(%s, %s)" lStr rStr
+        | IRMath2 name -> renderMath2 name lStr rStr
+        | _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
         // conj is std::conj/thrust::conj on complex operands; the identity on
         // reals (mathematically conj(x)=x for real x, and std::conj(double)

@@ -491,12 +491,30 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRPure (lowerTypedExpr env e)
     
     | TExprCompute e ->
+        // ALREADY-EAGER FOLD: `|> compute` over a form that materializes on its
+        // own is the identity, and the IRCompute wrapper actively HIDES it.
+        // The bracketed outer product `A [op] B` lowers (lowerTypedBinOp's
+        // both-operands-are-arrays branch) to a completed application
+        // `IRApp(IRObjectFor kernel, [IRTuple [A; B]])`, which genBinding's
+        // IRApp(IRObjectFor) arm and genFuncBody's hoistLoopApps both expand
+        // into a real loop nest. Wrapped in IRCompute it instead reaches
+        // genComputeBinding, which dispatches only the deferred combinator
+        // shapes and otherwise falls through to genScalarBinding -- rendering
+        // the loop object as the LOOP_OBJECT_USED_AS_VALUE sentinel. Drop the
+        // no-op wrapper so the existing expansion paths see the application.
+        // Narrow on purpose: only the BARE application folds; IRLet-wrapped
+        // forms (the broadcast path's hoisted scalar) already work as-is.
+        //
         // CONSTANT-FILL FOLD: `replicate(N, pure(lit)) |> compute` with a
         // concrete count and a literal body is exactly an N-element array
         // literal -- lower it as IRArrayLit so it rides the array-literal
         // machinery everywhere (the general IRSequence realization is
         // main-body-only). Non-literal counts and non-constant bodies keep
         // the general combinator path.
+        let computeWrap (x: IRExpr) =
+            match x with
+            | IRApp (IRObjectFor _, _, _) -> x
+            | _ -> IRCompute x
         (match e.Kind with
          | TExprReplicate (cnt, body) ->
              (match cnt.Kind, body.Kind, texpr.Type with
@@ -505,8 +523,8 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
                          && (match inner.Kind with TExprLit _ -> true | _ -> false) ->
                   let copies = List.replicate (int n) (lowerTypedExpr env inner)
                   IRArrayLit (copies, arrTy)
-              | _ -> IRCompute (lowerTypedExpr env e))
-         | _ -> IRCompute (lowerTypedExpr env e))
+              | _ -> computeWrap (lowerTypedExpr env e))
+         | _ -> computeWrap (lowerTypedExpr env e))
     
     | TExprRead e ->
         // |> read will force the deferred provider read that load_as
@@ -921,6 +939,11 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
         | OpAdd -> (IRAdd, true) | OpSub -> (IRSub, false)
         | OpMul -> (IRMul, true) | OpDiv -> (IRDiv, false)
         | OpMod -> (IRMod, false) | OpCaret -> (IRCaret, false)
+        // atan2/log_base are order-sensitive, hence not commutative. No surface
+        // SECTION syntax reaches them (they are call-shaped, not operators),
+        // but map them anyway so the `_ -> IRAdd` fallback below can never
+        // silently turn one into an addition.
+        | OpMath2 name -> (IRMath2 name, false)
         | OpEq -> (IREq, true) | OpNeq -> (IRNeq, true)
         | OpLt -> (IRLt, false) | OpLe -> (IRLe, false)
         | OpGt -> (IRGt, false) | OpGe -> (IRGe, false)
@@ -986,6 +1009,11 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
         | OpLt -> IRLt | OpLe -> IRLe
         | OpGt -> IRGt | OpGe -> IRGe
         | OpAnd -> IRAnd | OpOr -> IROr
+        // Reachable from lowerTypedBinOp's array<->scalar broadcast path:
+        // without this arm a broadcast `atan2(A, c)` that ever reached lowering
+        // directly would emit `A + c`. TypeCheck re-synthesizes the array forms
+        // as an explicit kernel today, so this is a backstop, not a live path.
+        | OpMath2 name -> IRMath2 name
         | _ -> IRAdd
     // Same resolved-type extraction as lowerTypedSection: pull the partial
     // application's param/return scalar types from the typed function type
@@ -1026,7 +1054,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
     let isArithOp = match op with
                     | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
                     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
-                    | OpAnd | OpOr -> true
+                    | OpAnd | OpOr | OpMath2 _ -> true
                     | _ -> false
     let leftIsArray = match leftExpr.Type with ArrayElem _ -> true | _ -> false
     let rightIsArray = match rightExpr.Type with ArrayElem _ -> true | _ -> false
@@ -1038,7 +1066,8 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
                    | OpDiv -> IRDiv | OpMod -> IRMod | OpCaret -> IRCaret
                    | OpEq -> IREq | OpNeq -> IRNeq
                    | OpLt -> IRLt | OpLe -> IRLe | OpGt -> IRGt | OpGe -> IRGe
-                   | OpAnd -> IRAnd | OpOr -> IROr | _ -> IRAdd
+                   | OpAnd -> IRAnd | OpOr -> IROr
+                   | OpMath2 name -> IRMath2 name | _ -> IRAdd
         // Lambda params for arithmetic ops require concrete scalar types;
         // default to Float64 if the array's elem type isn't a primitive
         // (e.g. struct or unresolved infer), since codegen would otherwise
@@ -1160,7 +1189,8 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
     | OpGe -> IRBinOp (irMode, IRGe, l, r)
     | OpAnd -> IRBinOp (irMode, IRAnd, l, r)
     | OpOr -> IRBinOp (irMode, IROr, l, r)
-    
+    | OpMath2 name -> IRBinOp (irMode, IRMath2 name, l, r)
+
     | OpApply ->
         // For <@>, symmetry info should already be in TExprApply
         // This case handles when we still have raw binop (shouldn't happen in typed AST)

@@ -1,0 +1,58 @@
+// TEST: Bare Comma Tuple Construction
+// The CONSTRUCTION half of plan issue #10 (docs/plan-tuples-vs-arg-packs.md
+// 6b, Design C): a bare comma on the right of a `let` builds a tuple, at any
+// width >= 2. Design C makes this load-bearing -- `Tuple<N>` annotations are
+// only useful if there is an unparenthesized way to write the value.
+//
+// The binder side (`let a, b = t`) stays DEFERRED; only the RHS changed.
+// Parser.parseLetRhs is shared by all three let sites, so the top-level form
+// here and the block form below cannot drift.
+
+let b = 1.0
+let c = 2.0
+
+// Width 2, top-level. `t` itself is Unit-invisible to the auto-printer (a
+// tuple binding prints nothing), so the pin is on the projections -- which
+// is also what makes this a ROUND TRIP: construct with a comma, read back
+// with `t[k]`.
+let t = b, c
+let t0 = t[0]
+let t1 = t[1]
+// EXPECT: t0 = 1
+// EXPECT: t1 = 2
+
+// Width 3. Nothing about the rule is 2-specific.
+let a3 = 10.0, 20.0, 30.0
+let s3 = a3[0] + a3[1] + a3[2]
+// EXPECT: s3 = 60
+
+// PRECEDENCE. Each component parses at full expression precedence and stops
+// at the comma, so this is a 2-tuple of two CALLS, not the single call
+// `dbl(3.0, dbl(4.0))`. If the comma bound tighter than application the two
+// readings would differ by an arity error, so this pins the split.
+function dbl(v: Float64) -> Float64 = v * 2.0
+let pc = dbl(3.0), dbl(4.0)
+let pcv = pc[0] + pc[1]
+// EXPECT: pcv = 14
+
+// Operators inside a component, for the same reason: `+` binds tighter than
+// the comma, so this is (3, 30), not 3 + (2, 30).
+let po = b + 2.0, c * 15.0
+let po0 = po[0]
+let po1 = po[1]
+// EXPECT: po0 = 3
+// EXPECT: po1 = 30
+
+// BLOCK let (Parser.parseLetStmt), the second of the three sites.
+function inBlock(x: Float64) -> Float64 = {
+    let p = x, x * 2.0
+    p[0] + p[1]
+}
+let blockSum = inBlock(3.0)
+// EXPECT: blockSum = 9
+
+// The parenthesized literal is unchanged and produces the SAME node
+// (ExprTuple), so the two spellings are one program from the checker down.
+let paren = (4.0, 5.0)
+let parenv = paren[0] + paren[1]
+// EXPECT: parenv = 9

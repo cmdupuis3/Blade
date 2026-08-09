@@ -24,6 +24,10 @@ type IRBinOp =
     | IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret  // ^ for power
     | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe
     | IRAnd | IROr
+    /// Binary math intrinsic (atan2 / log_base), lowered from Ast.OpMath2.
+    /// Renders as a CALL, not an infix operator -- the same shape IRCaret
+    /// already needs (`pow(l, r)`). Always real-valued Float64.
+    | IRMath2 of string
 
 /// Mode for binary array operations
 type IRBinOpMode =
@@ -4129,6 +4133,20 @@ let rec unifyParamWithArg (paramTy: IRType) (argTy: IRType) (acc: Map<int, IRTyp
             | _ -> acc'
         let acc' = List.zip pSlots aSlots |> List.fold unifySlot acc
         unifyParamWithArg pRet aRet acc'
+    // A unit annotation on ONE side only. Last, so the both-annotated arm
+    // above still wins; these mirror `Unify.unify`'s permissive asymmetric
+    // unit arms, which is what lets a BARE value flow into an annotated
+    // position in the first place -- `f(x: Float<day>)` accepts a bare
+    // literal or a bare array. Learning bindings has to see through the
+    // wrapper for the same reason: with a unit-carrying ABSTRACT parameter
+    // (`T<day>^1`, whose element is `IRTUnitAnnotated (IRTInfer n, day)`) a
+    // bare argument left `n` unlearned, so specialization never substituted
+    // it and the var reached the IR validator as BL6001 "unresolved type
+    // variable" -- a program that passed `blade check` and then died. No
+    // unit CHECK is skipped here: compatibility is settled in TypeCheck, at
+    // the call site, long before monomorphization runs.
+    | IRTUnitAnnotated (pi, _), _ -> unifyParamWithArg pi argTy acc
+    | _, IRTUnitAnnotated (ai, _) -> unifyParamWithArg paramTy ai acc
     | _ -> acc  // Concrete types or unhandled compound -- no bindings learned
 
 /// Walk a type collecting all IRTInfer IDs found inside (recursively).
@@ -5411,6 +5429,11 @@ let rec typeOf (expr: IRExpr) : IRType =
     | IRBinOp (_, op, left, right) ->
         (match op with
          | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> IRTScalar ETBool
+         // atan2 / log_base are real-valued regardless of operand widths (the
+         // C++ overload set promotes integer operands to double), so they do
+         // NOT follow the promote-the-operands rule below -- `atan2(1, 1)` over
+         // two Int64s is a double, not an int.
+         | IRMath2 _ -> IRTScalar ETFloat64
          | _ ->
              match typeOf left, typeOf right with
              | IRTScalar e1, IRTScalar e2 ->
@@ -5970,6 +5993,34 @@ let liftChildEvaluatedOnce (builder: IRBuilder) (child: IRExpr) : (IRId * IRType
     else
         (peeled, inner)
 
+/// Like `liftChild`, but ALSO hoists a SYNTHESIZED ELEMENTWISE LOOP
+/// APPLICATION -- `IRApp(IRObjectFor ..., [A])`, what an array/scalar
+/// broadcast `x - s` lowers to when TypeCheck's `method_for(A) <@>
+/// lambda(__bx) -> ...` re-synthesis does not fire (it is skipped when the
+/// scalar operand's type is still an unresolved inference variable, e.g.
+/// `reduce(x, (+)) / n` with an Int64 `n`). That form materializes only from a
+/// let-RHS -- genBinding's IRApp(IRObjectFor) arm and genFuncBody's
+/// hoistLoopApps are the two expansion sites -- so left inline in a consuming
+/// operand slot it reaches exprToCpp and renders as the
+/// LOOP_OBJECT_USED_AS_VALUE sentinel.
+///
+/// Deliberately NARROWER than `liftChildEvaluatedOnce`: it adds only this one
+/// shape, not the whole `isNestedLoopComputeArg` family. In particular a bare
+/// `IRCompute` operand is left alone -- a forced FUNCTOR MAP (`exp <$> (L <@>
+/// k)`) still has to reach the consumer whole, since hoisting it splits the
+/// wrapper off the loop it wraps and the consumer then reads a binding that
+/// was never emitted under that id.
+let liftChildIncludingLoopApp (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
+    let (peeled, inner) = peelLetChain child
+    match inner with
+    | IRApp (IRObjectFor _, _, _) ->
+        let id = builder.FreshId()
+        let ty = typeOf inner
+        (peeled @ [(id, ty, inner)], IRVar (id, ty))
+    | _ ->
+        let (b, e) = liftChild builder inner
+        (peeled @ b, e)
+
 /// Lift a list of children, accumulating bindings.
 let liftChildren (builder: IRBuilder) (children: IRExpr list) : (IRId * IRType * IRExpr) list * IRExpr list =
     children |> List.fold (fun (binds, acc) child ->
@@ -6057,12 +6108,19 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         wrapLets binds (IRDisplayJson (r, dataFinal))
     | IRDisplayNum data -> IRDisplayNum (liftExpr builder data)
 
-    // Single-child consumers where the array slot can hold an inline form
+    // Single-child consumers where the array slot can hold an inline form.
+    //
+    // Both use liftChildIncludingLoopApp, not liftChild: neither emitter has a
+    // rendering for a synthesized elementwise loop application, so an operand
+    // holding one (`x - s`, when TypeCheck's method_for re-synthesis is skipped
+    // -- see that helper's note) reached exprToCpp and rendered as codegen's
+    // LOOP_OBJECT_USED_AS_VALUE sentinel. Hoisting it to its own let-RHS is
+    // what writing the intermediate `let` by hand already does.
     | IRReduce (arr, kernel, init) ->
         let arr' = liftExpr builder arr
         let kernel' = liftExpr builder kernel
         let init' = init |> Option.map (liftExpr builder)
-        let (binds, arrFinal) = liftChild builder arr'
+        let (binds, arrFinal) = liftChildIncludingLoopApp builder arr'
         wrapLets binds (IRReduce (arrFinal, kernel', init'))
     | IRReduceCompute (comp, kernel, seed) ->
         // The computation child is a deferred combinator (apply/fusion
@@ -6075,7 +6133,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (allBinds, finals) =
             args |> List.fold (fun (bs, fs) a ->
                 let a' = liftExpr builder a
-                let (b, aFinal) = liftChild builder a'
+                let (b, aFinal) = liftChildIncludingLoopApp builder a'
                 (bs @ b, fs @ [aFinal])) ([], [])
         wrapLets allBinds (IRProdSum finals)
     | IRExtent (arr, dim) ->
@@ -7640,6 +7698,8 @@ let ppBinOp = function
     | IRGe -> ">="
     | IRAnd -> "&&"
     | IROr -> "||"
+    | IRMath2 name -> name   // call-shaped; ppIRExpr renders it infix-ish, which
+                             // is only ever read by IR dumps
 
 let ppBinOpWithMode mode op =
     let opStr = ppBinOp op

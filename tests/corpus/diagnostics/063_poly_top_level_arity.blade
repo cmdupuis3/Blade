@@ -1,0 +1,32 @@
+// TEST: Diag Poly Pack Counts Top Level (diag)
+// ERROR: BL3002
+// ERROR-CONTAINS: counts top-level operands
+// ============================================================================
+// `Poly<T^k>` STRUCTURE PRESERVATION, restored (docs/plan-tuples-vs-arg-packs.md
+// 6c; formalism.md:787 "arity counts top level; comm does not penetrate
+// sub-tuples").
+//
+// MEASURED, and this is the pin's whole point: under 6b's deep-flatten the pack
+// `(A, (B, C))` reached the deferred former as THREE operands, so `psum` was
+// eta-expanded and monomorphized at arity 3 and `(A, (B, C))` was
+// indistinguishable from `(A, B, C)` through a pack kernel. The documented
+// top-level rule was measurably false. It is true again: the same pack is now
+// arity 2, with a tuple-typed second argument.
+//
+// Being arity 2 is not the same as WORKING. A tuple argument to a `Poly` pack
+// is 3.8's M9 and is broken in every spelling; here the operand is a tuple of
+// ARRAYS, which has nothing to iterate as a unit. Before this refusal it
+// type-checked clean and died in g++ on an undeclared temporary
+// (`psum_arity_2_...(A____i0, __v18)`), so the refusal replaces a
+// check-OK/g++-fail, not a working program.
+//
+// The message steers to the two things that do work, both pinned: pass the
+// components as separate operands (arity/022, arity/025 -- the shipping Poly
+// path), or use a kernel whose parameter in that position is annotated
+// `Tuple<2>` (tuples/010, tuples/012).
+// ============================================================================
+function psum(args: Poly<T^0>) -> T^0 = args[0] + args[1]
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let B: Array<Float64 like Idx<2>> = [10.0, 20.0]
+let C: Array<Float64 like Idx<2>> = [100.0, 200.0]
+let nested = object_for(psum) <@> (A, (B, C)) |> compute

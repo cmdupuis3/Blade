@@ -12,11 +12,30 @@ type TypeError =
     | UnboundVariable of string
     | TypeMismatch of expected: IRType * actual: IRType
     | ArityMismatch of expected: int * actual: int
+    /// BL3002, kernel-apply seam. The WIDTH SCHEMA did not cover the pack
+    /// (docs/plan-tuples-vs-arg-packs.md 6c, Design C): a parameter list is a
+    /// schema over the pack's flat leaf sequence -- unannotated params consume
+    /// one leaf, `Tuple<k>` consumes k -- and the totals must agree. Its own
+    /// variant rather than `ArityMismatch` because "expected N args, got M" is
+    /// the wrong sentence here: the number that has to move may be the number
+    /// of PARAMS, the number of OPERANDS, or an annotation. Replaces the
+    /// `else Ok ()` that promised the check was "handled elsewhere" and made
+    /// under-arity a silent operand drop (3.4, M2). Payload = whole message.
+    | KernelPackArity of message: string
     /// Rank disagreement between a declared parameter and the argument
     /// supplied at a DIRECT application. Raised by dispatchAppOrIndex's
     /// FuncElem arm, which does not unify args against params (see the
     /// comment there); `pos` is 1-based.
     | ArgRankMismatch of pos: int * expected: int * actual: int * expectedTy: string * actualTy: string
+    /// BL3001. The ELEMENT-CLASS twin of ArgRankMismatch, from the same
+    /// (non-unifying) seam: at a DIRECT application the argument's type and
+    /// the parameter's declared type are in different, mutually unreachable
+    /// classes (text vs number, bool vs number, struct vs scalar, ...). Only
+    /// raised when BOTH sides are already concrete -- an open inference var
+    /// on either side declines to be classified, so HM instantiation of a
+    /// `T^k` parameter is untouched. `func` names the callee for the message;
+    /// `pos` is 1-based.
+    | ArgTypeMismatch of pos: int * func: string * expected: string * actual: string
     | InvalidArrayCapture of varName: string
     | InvalidApplication of funcType: IRType
     | PatternTypeMismatch of pattern: string * expected: IRType

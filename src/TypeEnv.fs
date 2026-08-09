@@ -124,6 +124,14 @@ type TypeEnv = {
     Builder: IRBuilder
     OuterScope: Map<string, VarInfo>
     InPolyContext: bool
+    /// True while a LAMBDA body is being type-inferred. Unit checks that fire
+    /// at scalar position read it to DEFER premature rejections: an unresolved
+    /// kernel param contributes "no units" to the first-pass walk, so an
+    /// annotation computed against it is provisional until buildApplyInfo
+    /// unifies the params and reruns kernelBodyUnits (the authoritative pass).
+    /// NOT set for named-function declaration bodies: their unannotated params
+    /// are dimensionless by contract, so decl-time strictness is correct there.
+    InLambdaBody: bool
     CurrentCommGroups: int list list
     /// Interface name -> InterfaceDecl
     Interfaces: Map<string, InterfaceDecl>
@@ -246,6 +254,19 @@ type TypeEnv = {
     /// (`reduce(xs, f)` where `f` carries `where omp`) -- a side channel since
     /// BODY lives nowhere else in TypeEnv. Codegen re-derives the same predicate from IRCallable (CodeGen.foldKernelBuiltinOp); the two must agree.
     FuncFoldBuiltin: System.Collections.Generic.Dictionary<string, bool>
+    /// WIDTH SCHEMA side channel (docs/plan-tuples-vs-arg-packs.md 6c, Design
+    /// C): parameters DECLARED `Tuple<N>`, keyed by the parameter's binder
+    /// VarId -> N. A parameter list is a width schema over the pack's flat leaf
+    /// sequence -- unannotated = 1, `Tuple<k>` = k -- and the matcher must read
+    /// the WRITTEN annotation, never the inferred type (ruling 1: tuple-ness is
+    /// always written). The lowered type `IRTTuple [v1..vk]` cannot be trusted
+    /// for this: an unannotated param unifies INTO a tuple as soon as the pack
+    /// binds it, so reading widths off the resolved type would make pack widths
+    /// inference-dependent -- the exact cliff 5.1 rules out. Populated at
+    /// inferLambda / checkFunctionDecl from `TyTupleWidth`; read by
+    /// buildApplyInfo's schema matcher and by the direct-call arg pairing.
+    /// Shared by reference.
+    DeclaredTupleWidths: System.Collections.Generic.Dictionary<IRId, int>
 }
 
 let emptyEnv () = {
@@ -256,6 +277,7 @@ let emptyEnv () = {
     Builder = IRBuilder()
     OuterScope = Map.empty
     InPolyContext = false
+    InLambdaBody = false
     CurrentCommGroups = []
     Interfaces = Map.empty
     ImplMethods = Map.empty
@@ -283,6 +305,7 @@ let emptyEnv () = {
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
     FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
     FuncFoldBuiltin = System.Collections.Generic.Dictionary<string, bool>()
+    DeclaredTupleWidths = System.Collections.Generic.Dictionary<IRId, int>()
 }
 
 /// Structured twin of `TypeEnv.Warnings`: every warning as a coded, spanned
@@ -413,12 +436,16 @@ let formatTypeError (err: TypeError) : string =
     | UnboundVariable name -> sprintf "Unbound variable: %s" name
     | TypeMismatch (exp, act) -> sprintf "Type mismatch: expected %s, got %s" (ppIRType exp) (ppIRType act)
     | ArityMismatch (exp, act) -> sprintf "Arity mismatch: expected %d args, got %d" exp act
+    | KernelPackArity msg -> msg
     | ArgRankMismatch (pos, expRank, actRank, expTy, actTy) ->
         let describe rank ty =
             if rank = 0 then sprintf "a scalar (%s)" ty
             else sprintf "a rank-%d array (%s)" rank ty
         sprintf "argument %d: rank mismatch: the parameter expects %s but the argument is %s. A call site neither broadcasts nor reduces rank -- pass a value of the declared rank, or change the parameter's declared type."
                 pos (describe expRank expTy) (describe actRank actTy)
+    | ArgTypeMismatch (pos, func, expTy, actTy) ->
+        sprintf "argument %d of %s: type mismatch: the parameter is declared %s but the argument is %s. A call site performs no conversion between these -- pass a value of the declared type, or change the parameter's declared type."
+                pos func expTy actTy
     | InvalidArrayCapture name -> sprintf "Lambda cannot capture array '%s'" name
     | InvalidApplication funcTy -> sprintf "Cannot apply non-function type: %A" funcTy
     | PatternTypeMismatch (pat, ty) -> sprintf "Pattern '%s' incompatible with type %A" pat ty
@@ -660,8 +687,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
         | None ->
             match e.Error with
             | UnboundVariable _ -> "BL2001"
-            | TypeMismatch _ | ArgRankMismatch _ -> "BL3001"
-            | ArityMismatch _ -> "BL3002"
+            | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ -> "BL3001"
+            | ArityMismatch _ | KernelPackArity _ -> "BL3002"
             | InvalidApplication _ -> "BL3003"
             | PatternTypeMismatch _ -> "BL3004"
             | InvalidArrayCapture _ -> "BL3005"

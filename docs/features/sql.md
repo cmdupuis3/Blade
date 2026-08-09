@@ -246,13 +246,22 @@ Tests: `sql-sort` (2) + type-recovery probe.
 ## 10. `reduce(A[, kernel])` — aggregation
 
 ```blade
-reduce : Array<T like I..., J> × (T × T -> T) -> <result over I...>
+reduce : Array<T like I...> × (T × T -> T) -> T
 reduce(A) ≡ reduce(A, (+))
 ```
 
-Folds the innermost dimension. Composes inline in arithmetic
-(`100.0 + reduce(A)`) and inside kernels (per-group aggregation, captured-array
-reduction).
+Folds **every** element of `A` to a single scalar, regardless of rank, in
+declared (row-major) order — it is a full fold, not an innermost-axis one:
+`reduce([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], (+))` is `66.0`, not
+`[6.0, 60.0]`. For a row-wise (innermost-axis) reduction, map a reducing
+kernel over the rows instead:
+
+```blade
+A <@> lambda(r) -> reduce(r, (+))   // one scalar per row of A
+```
+
+Composes inline in arithmetic (`100.0 + reduce(A)`) and inside kernels
+(per-group aggregation, captured-array reduction).
 
 **Empty-input rule** (3-arg form landed, arc 4): `reduce(A, op, init)` seeds
 the fold with `init` (`init ⊕ a₀ ⊕ a₁ ⊕ ...`), `init` unifies with the element
@@ -264,6 +273,30 @@ defined empty fold).
 
 Tests: `sql-reduce` (10, incl. init basic / static-empty / dynamic-empty),
 `sql-regressions/003–004`.
+
+## 10a. `prodsum(A, B)` — fused dot-product reduction
+
+```blade
+prodsum : Array<T like I...> × Array<T like I...> -> T
+```
+
+Elementwise-multiplies two same-shape arrays and folds the products to a
+single scalar in one pass — the standard dot product for real element types.
+Used both at top level and as the row-reducing kernel inside a
+`method_for(zip(A, B))` apply, the standard idiom for a batch of dot products
+/ Gram matrices (`tests/corpus/loops/085_zip_rank2_row_prodsum.blade`).
+
+**Complex operands are NOT conjugated** (ruled 2026-08-08, not an oversight).
+`prodsum(e, e)` on a `Complex128` array means `Σ eₜ²`, not the Hermitian
+inner product `Σ|eₜ|²` — neither argument is implicitly `conj`-ed. A caller
+that wants the Hermitian form must conjugate explicitly with `conj` before
+reducing. A generalized Lomb–Scargle DFT kernel relies on the unconjugated
+reading to recover `Σ e^{2iωt}` from a single complex multiply; the Hermitian
+reading would silently collapse that to `n`.
+
+Semantics pin: `tests/corpus/index-types/235_prodsum_complex_unconjugated.blade`
+(validated 2026-08-08 against the compiler: `prodsum(z, z)` over
+`[1, i, -1+i]` returns `(0,-2)` = Σz², not the Hermitian `4`).
 
 ## 11. `extents(A)` — COUNT / dimensions
 

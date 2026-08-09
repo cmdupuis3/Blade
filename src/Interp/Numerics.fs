@@ -44,6 +44,7 @@ open Blade.Interp.Value
 module private Ucrt =
     [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double exp(double x)
     [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double log(double x)
+    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double log10(double x)
     [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double sqrt(double x)
     [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double sin(double x)
     [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double cos(double x)
@@ -76,7 +77,8 @@ type MathBackend =
 /// Ucrt unconditionally.
 let mathBackend : Map<string, MathBackend> =
     Map.ofList [
-        "exp", Ucrt;  "log", Ucrt;   "sin", Ucrt;  "cos", Ucrt;  "tan", Ucrt
+        "exp", Ucrt;  "log", Ucrt;   "log10", Ucrt
+        "sin", Ucrt;  "cos", Ucrt;  "tan", Ucrt
         "sinh", Ucrt; "cosh", Ucrt;  "tanh", Ucrt
         "asin", Ucrt; "acos", Ucrt;  "atan", Ucrt
         "sqrt", Managed; "floor", Managed; "ceil", Managed
@@ -84,7 +86,8 @@ let mathBackend : Map<string, MathBackend> =
 
 let private managed1 (name: string) (x: float) : float =
     match name with
-    | "exp" -> Math.Exp x | "log" -> Math.Log x | "sqrt" -> Math.Sqrt x
+    | "exp" -> Math.Exp x | "log" -> Math.Log x | "log10" -> Math.Log10 x
+    | "sqrt" -> Math.Sqrt x
     | "sin" -> Math.Sin x | "cos" -> Math.Cos x | "tan" -> Math.Tan x
     | "sinh" -> Math.Sinh x | "cosh" -> Math.Cosh x | "tanh" -> Math.Tanh x
     | "asin" -> Math.Asin x | "acos" -> Math.Acos x | "atan" -> Math.Atan x
@@ -94,7 +97,8 @@ let private managed1 (name: string) (x: float) : float =
 
 let private ucrt1 (name: string) (x: float) : float =
     match name with
-    | "exp" -> Ucrt.exp x | "log" -> Ucrt.log x | "sqrt" -> Ucrt.sqrt x
+    | "exp" -> Ucrt.exp x | "log" -> Ucrt.log x | "log10" -> Ucrt.log10 x
+    | "sqrt" -> Ucrt.sqrt x
     | "sin" -> Ucrt.sin x | "cos" -> Ucrt.cos x | "tan" -> Ucrt.tan x
     | "sinh" -> Ucrt.sinh x | "cosh" -> Ucrt.cosh x | "tanh" -> Ucrt.tanh x
     | "asin" -> Ucrt.asin x | "acos" -> Ucrt.acos x | "atan" -> Ucrt.atan x
@@ -530,6 +534,15 @@ let evalBinOp (op: IRBinOp) (l: Value) (r: Value) : Value =
          | _ -> evalArith op l r)
     | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe -> evalCompare op l r
     | IRAnd | IROr -> evalLogical op l r
+    // Binary math intrinsics. Real-only by construction (TypeCheck rejects
+    // complex operands), always Float64, so they bypass evalArith's promotion
+    // and complex machinery entirely and mirror CodeGen.renderMath2 directly:
+    // `std::atan2(l, r)` and `(std::log(l) / std::log(r))`. The quotient is a
+    // plain IEEE double division in both lanes.
+    | IRMath2 "atan2" -> VFloat (mathAtan2 (asF64 l) (asF64 r))
+    | IRMath2 "log_base" -> VFloat (math1 "log" (asF64 l) / math1 "log" (asF64 r))
+    | IRMath2 name ->
+        raise (InterpPanic("BL8010", sprintf "unknown binary math intrinsic '%s'" name, None, 0))
     | IRSub | IRMul | IRDiv | IRMod | IRCaret -> evalArith op l r
 
 /// abs(x): std::abs, whose C++ overload preserves the operand's numeric type

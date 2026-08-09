@@ -38,6 +38,26 @@ module PinSuggestions =
     let get () : (string * Span) list =
         match box slot.Value with null -> [] | _ -> List.rev slot.Value
 
+/// The TOP-LEVEL WIDTH of a parameter's WRITTEN type annotation, in nodes of
+/// the pack's spine (docs/plan-tuples-vs-arg-packs.md 6c). `Tuple<k>` is the
+/// width-only spelling; a fully written `(T1, ..., Tk)` says the same thing
+/// with the element types filled in, so both count k -- that is what turns
+/// 3.6's M6 (a tuple-annotated kernel param) from a miscompile into the main
+/// path. Everything else is width 1. Nesting INSIDE the annotation is not
+/// counted: `((A,B),(C,D))` is width 2, not 4 (diagnostics/062).
+///
+/// Deliberately over the SURFACE `TypeExpr`, not over the lowered `IRType`:
+/// both spellings lower to `IRTTuple`, but so does an UNANNOTATED param the
+/// moment a tuple-typed row unifies into it. Reading widths off the lowered
+/// type would therefore make pack widths inference-dependent, which is exactly
+/// the ordering cliff 5.1 rules out (kernel bodies are inferred before their
+/// params are bound). Ruling 1: tuple-ness is always written.
+let declaredTupleWidth (t: TypeExpr option) : int option =
+    match t with
+    | Some (TyTupleWidth n) when n >= 2 -> Some n
+    | Some (TyTuple ts) when ts.Length >= 2 -> Some ts.Length
+    | _ -> None
+
 /// Fourth family member -- see `TypeEnv.WarningLog` for the storage and why it
 /// has to live down there (its only writer is `emitWarning`, and TypeEnv cannot
 /// reference upward). Re-exported here so that
@@ -238,6 +258,23 @@ let rec substituteAndLowerExtent (env: TypeEnv) (paramName: Ident) (subst: IRExp
                 IRParam ("?", 0, IRTNat None)
 
 // 4. AST TypeExpr -> IRType (with extent preservation)
+
+/// Names that can never be a type VARIABLE: the built-in scalar bases and the
+/// built-in constructors. Deliberately the same list `prescanTypeVarNames`
+/// tests, and used for the same decision from the other side -- the
+/// `T<u>^k` head (array-expression plan bug #8) is a variable exactly when
+/// the name is neither one of these nor a declared type. Kept next to
+/// `lowerTypeExpr` because that is where the head is classified; the
+/// `unitSlotBases` set further down answers a different question (which
+/// bases OWN a unit slot) and is not interchangeable.
+let isConcreteTypeBaseName (name: string) : bool =
+    match name with
+    | "Int" | "Int32" | "Int64"
+    | "Float" | "Float32" | "Float64" | "Double"
+    | "Complex64" | "Complex128"
+    | "Bool" | "Void" | "Nat" | "String" | "Char"
+    | "Poly" | "Array" | "Dist" -> true
+    | _ -> false
 
 let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     match ty with
@@ -466,6 +503,49 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         | _ -> IRTDist (-1, elem, axes)
 
     | TyAbstractArray (elemTy, rankExpr, _symmOpt) ->
+        // `T<u>^k` -- a UNIT-CARRYING type variable (array-expression plan
+        // bug #8). The trailing caret is what marks the head as a variable:
+        // without it `T<x>` keeps its ordinary named-type reading, and a head
+        // that names a real type (`Float<day>^1`, or any declared struct /
+        // alias) is concrete and lowers through the ordinary element path
+        // below. The element becomes IRTUnitAnnotated over the SCALAR type
+        // variable -- exactly the shape a concrete `Float<u>` element
+        // produces -- so every unit walk (IR.getUnits and the arithmetic /
+        // kernel rules built on it) reads it identically, and a caller's
+        // `Array<Float<u'> like I>` meets it element-to-element in `unify`,
+        // where the unit-compatibility check already lives. Nothing here is
+        // a new unit mechanism; it is the existing one, reached from an
+        // abstract signature.
+        //
+        // Name resolution follows the `Float<u>` slot exactly (the three
+        // spellings tryResolveTagArg admits): a bare unit name, a compound
+        // unit expression, and the `u^n` power spelling that parses as a
+        // rank-marked type var. An unresolvable name yields None here and is
+        // REPORTED by unitAnnoError's TyAbstractArray arm (BL3015), which
+        // knows this slot cannot hold anything but a unit.
+        let unitOfArgs (args: TypeExpr list) : UnitSig option =
+            match args with
+            | [TyNamed (argName, [])] -> Map.tryFind argName env.Units
+            | [TyUnitExpr ue] ->
+                (match resolveUnitExpr env.Units ue with Ok s -> Some s | Error _ -> None)
+            | [TyVar (argName, Some n)] when Map.containsKey argName env.Units ->
+                (match resolveUnitExpr env.Units (UnitPow (UnitNamed argName, n)) with
+                 | Ok s -> Some s
+                 | Error _ -> None)
+            | _ -> None
+        // (variable name, element type) when the head is a unit-carrying type
+        // variable. A bare `T` (TyVar) is NOT one: it keeps the existing
+        // whole-array-is-the-variable reading, arity constraint and all.
+        let unitVarElem =
+            match elemTy with
+            | TyNamed (vname, args) when not args.IsEmpty
+                                         && not (isConcreteTypeBaseName vname)
+                                         && (lookupTypeDef vname env).IsNone ->
+                unitOfArgs args
+                |> Option.map (fun u ->
+                    (vname,
+                     IRTUnitAnnotated (env.Subst.LookupOrCreateTypeVar (vname, 0, env.Builder), u)))
+            | _ -> None
         match evalConstExpr env rankExpr with
         | Some rank ->
             let r = int rank
@@ -473,25 +553,47 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 match elemTy with
                 | TyVar (n, _) -> Some n
                 | _ -> None
-            match elemVarName with
-            | Some name ->
+            match elemVarName, unitVarElem with
+            | Some name, _ ->
                 // Type variable with arity: route through type var scope
                 env.Subst.LookupOrCreateTypeVar(name, r, env.Builder)
-            | None ->
+            | None, Some (_, unitElem) when r = 0 ->
+                // `T<u>^0`: the scalar type variable, unit stamped on.
+                unitElem
+            | _ ->
                 if r = 0 then
                     lowerTypeExpr env elemTy  // Rank-0: just the scalar
                 else
-                    let elem = lowerElemType env elemTy
+                    let elem =
+                        match unitVarElem with
+                        | Some (_, unitElem) -> unitElem
+                        | None -> lowerElemType env elemTy
+                    // Every abstract axis is genuinely UNKNOWN, so it takes
+                    // `lowerExtentExpr`'s own unknown-extent spelling rather
+                    // than a made-up name like `n`: two abstract parameters
+                    // of the same rank are independently shaped (`t:
+                    // T<time>^1, w: T<freq>^1` are different lengths), and a
+                    // real name would read as the `Idx<n>, Idx<n>` tie and
+                    // print as a variable the user never wrote. Nothing
+                    // consumes it: extents are never compared in `unify`, and
+                    // codegen bakes only LITERAL extents, falling back to the
+                    // runtime `.extents[dim]` read for everything else.
                     let indices = [0 .. r - 1] |> List.map (fun _ ->
-                        { Id = env.Builder.FreshId(); Rank = 1; Extent = IRParam ("n", 0, IRTNat None)
+                        { Id = env.Builder.FreshId(); Rank = 1
+                          Extent = IRParam ("?", 0, IRTNat None)
                           Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] })
                     mkArrayArrow indices elem None
         | None ->
             // Non-constant rank (e.g., T^r where r is a variable)
-            match elemTy with
-            | TyVar (name, _) ->
+            match elemTy, unitVarElem with
+            | TyVar (name, _), _ ->
                 // Can't resolve arity statically -- create unconstrained type var
                 env.Subst.LookupOrCreateTypeVar(name)
+            | _, Some (vname, IRTUnitAnnotated (_, u)) ->
+                // `T<u>^r`: rank unknown, so no array shape can be built.
+                // The unit still rides the unconstrained variable, the same
+                // shape a bare quantity annotation produces.
+                IRTUnitAnnotated (env.Subst.LookupOrCreateTypeVar(vname), u)
             | _ ->
                 lowerElemType env elemTy  // Arity-polymorphic fallback
 
@@ -499,6 +601,15 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         mkFuncArrow (args |> List.map (lowerTypeExpr env)) (lowerTypeExpr env ret)
 
     | TyTuple tys -> IRTTuple (tys |> List.map (lowerTypeExpr env))
+
+    // `Tuple<N>` (docs/plan-tuples-vs-arg-packs.md 6c): width written,
+    // element types inferred. Lowers to the SAME `IRTTuple` a written
+    // `(T1, ..., TN)` produces, with N fresh inference variables in the
+    // element slots -- so unify's equal-length `IRTTuple` rule
+    // (Unify.fs:710) supplies both the width check (a width mismatch is an
+    // ordinary TypeMismatch, no new diagnostic) and the element inference.
+    // The parser guarantees n >= 2.
+    | TyTupleWidth n -> IRTTuple (List.init n (fun _ -> env.Subst.Fresh()))
 
     | TyVar (name, arityOpt) ->
         // Type variable with optional arity annotation.
@@ -2177,6 +2288,157 @@ let concreteRankOf (subst: Subst) (ty: IRType) : int option =
         | _ -> None
     go ty
 
+/// Coarse VALUE CLASS of a type -- "what kind of thing this is at runtime"
+/// -- when the type is concrete enough to know. `None` means "unknown,
+/// stand down"; callers compare two `Some` classes only, so an unresolved
+/// type never manufactures a mismatch. That is what keeps HM alive here: a
+/// `T^k` parameter resolves to an open IRTInfer at the call site and simply
+/// declines to be classified, so no call site ever binds it.
+///
+/// Deliberately COARSE. The numeric tower is ONE class (an Int64 literal
+/// legitimately reaches a Float64 parameter, and Float-into-Int is the
+/// annotation seam's business, not this one); units and index tags are
+/// transparent, so bare-literal unit LIFTING (`f(2.0)` into a `Float64<day>`
+/// parameter, f1ba7b2) still works and BL3010 keeps its own, earlier say;
+/// arrays decline because rank is `concreteRankOf`'s job; tuples decline
+/// because tuple WIDTH belongs to the pack/tuple schema
+/// (docs/plan-tuples-vs-arg-packs.md), not to an element-class test.
+let concreteClassOf (subst: Subst) (ty: IRType) : string option =
+    let rec go t =
+        match subst.Resolve t with
+        | IRTUnitAnnotated (inner, _) -> go inner
+        | IRTIdxTagged (inner, _) -> go inner
+        | IRTScalar ETString -> Some "text"
+        | IRTScalar ETBool -> Some "boolean"
+        | IRTScalar ETUnit -> Some "unit"
+        | IRTUnit -> Some "unit"
+        | IRTScalar _ -> Some "number"
+        | IRTDist _ -> Some "distribution"
+        | IRTNamed _ -> Some "named type"
+        | FuncElem _ -> Some "function"
+        | _ -> None
+    go ty
+
+/// Pair each argument with the parameter it binds, 1:1 and positional,
+/// truncated to the shorter list: (0-based parameter position, param type,
+/// arg type).
+///
+/// Stays 1:1 under the width schema (docs/plan-tuples-vs-arg-packs.md 6c), and
+/// that is the design, not an omission: `regroupArgsByWidth` runs FIRST at the
+/// FuncElem arm and hands every check below an argument list already regrouped
+/// to one node per parameter. So the pairing rule lives in exactly one place,
+/// and each per-pair check here keeps comparing one parameter against one
+/// value. If a future change moves regrouping later, this is the function that
+/// has to learn about widths instead.
+let appArgPairs (paramTys: IRType list) (argTys: IRType list)
+                : (int * IRType * IRType) list =
+    let n = min paramTys.Length argTys.Length
+    List.zip (List.truncate n paramTys) (List.truncate n argTys)
+    |> List.mapi (fun i (pTy, aTy) -> (i, pTy, aTy))
+
+/// WIDTH SCHEMA at the DIRECT-CALL seam (docs/plan-tuples-vs-arg-packs.md 6c).
+/// The argument list is a list of NODES -- one per written argument, nesting
+/// preserved -- matched greedily against the parameter list read as a width
+/// schema. A `Tuple<k>` parameter (declared `Tuple<k>` or `(T1, .., Tk)`; both
+/// lower to `IRTTuple`) prefers one k-wide tuple node and otherwise regroups k
+/// consecutive nodes, so `addPair(b, c)`, `addPair((b, c))` and
+/// `let t = b, c; addPair(t)` are the same call.
+///
+/// Deliberately one-directional. The reverse -- expanding a tuple ARGUMENT into
+/// k scalar arguments for k scalar parameters -- is NOT done, because `f(t)` on
+/// a 2-parameter `f` is already partial application (Parser/ExprApp eta-expands
+/// it), and the language cannot have both readings. Every arm below fires only
+/// where the plain pairing has no reading at all, so it can turn an error into
+/// a call but never redirect one that already type-checks. That is also why
+/// 6c rule 3's `f((a, b)) == f(a, b)` holds at the OPERAND seam but not here:
+/// at a call, the left-hand side is partial application and already means
+/// something. Reported as a deviation rather than silently.
+let regroupArgsByWidth (env: TypeEnv) (paramTys: IRType list) (tArgs: TypedExpr list)
+                       : TypedExpr list =
+    let subst = env.Subst
+    let widthOf (t: IRType) =
+        match subst.Resolve t with
+        | IRTTuple ts when ts.Length >= 2 -> ts.Length
+        | _ -> 1
+    /// The components of a single tuple-typed argument, seen through any number
+    /// of alias hops (the same fixpoint `resolveTypedExprDeep` applies at the
+    /// operand seam, inlined because that one lives in the later `and` group).
+    let tupleParts (e: TypedExpr) : TypedExpr list option =
+        let rec chase (fuel: int) (x: TypedExpr) =
+            if fuel <= 0 then x
+            else
+                match x.Kind with
+                | TExprVar (name, _, _) ->
+                    (match lookupVar name env with
+                     | Some info ->
+                         (match info.TypedValue with
+                          | Some v when not (System.Object.ReferenceEquals(v, x)) -> chase (fuel - 1) v
+                          | _ -> x)
+                     | None -> x)
+                | _ -> x
+        match (chase 64 e).Kind with
+        | TExprTuple es when es.Length >= 2 -> Some es
+        | _ -> None
+    let widths = paramTys |> List.map widthOf
+    // Greedy left-to-right fold over a NODE list (6c rule 2): a `Tuple<k>`
+    // parameter PREFERS one tuple node of top-level width k, and otherwise
+    // regroups k consecutive nodes. Nesting is preserved either way -- the
+    // regrouped tuple keeps whatever the nodes were. `None` when the schema
+    // does not fit these nodes.
+    let fold (nodes: TypedExpr list) : TypedExpr list option =
+        let mutable rest = nodes
+        let mutable ok = true
+        let out =
+            widths
+            |> List.map (fun w ->
+                if not ok then []
+                elif w = 1 then
+                    match rest with
+                    | a :: t -> rest <- t; [a]
+                    | [] -> ok <- false; []
+                else
+                    match rest with
+                    | a :: t when (match subst.Resolve a.Type with
+                                   | IRTTuple ts -> ts.Length = w
+                                   | _ -> false) ->
+                        rest <- t; [a]
+                    | _ when rest.Length >= w ->
+                        let taken = rest |> List.truncate w
+                        rest <- rest |> List.skip w
+                        [ { Kind = TExprTuple taken
+                            Type = IRTTuple (taken |> List.map (fun (a: TypedExpr) -> a.Type))
+                            Span = (List.head taken).Span } ]
+                    | _ -> ok <- false; [])
+            |> List.concat
+        if ok && List.isEmpty rest then Some out else None
+    if List.sum widths = paramTys.Length then tArgs        // no tuple parameter
+    elif tArgs.Length = paramTys.Length then tArgs
+        // Already 1:1 -- and this IS 6c rule 3's precedence (a): a lone
+        // `Tuple<m>` parameter facing a lone m-tuple argument DIRECT-BINDS, so
+        // `lam(((a,b),(c,d)))` against `lambda(r: Tuple<2>)` gives r the pair
+        // of pairs rather than splicing it into two.
+    else
+        match fold tArgs with
+        | Some out -> out
+        | None ->
+            // Precedence (b): the ONE-LEVEL SPLICE. A whole argument list that
+            // is a single tuple node opens once and the schema is re-offered
+            // the components -- `f(((a,b),(c,d)))` against
+            // `f(p: Tuple<2>, q: Tuple<2>)`. Tried only AFTER the unspliced
+            // fold, so the direct match always wins; and it can only rescue a
+            // call that had no reading at all, never redirect one that did.
+            let spliced =
+                match tArgs with
+                | [single] ->
+                    (match tupleParts single with
+                     | Some parts -> parts
+                     | None -> tArgs)
+                | _ -> tArgs
+            if spliced.Length = tArgs.Length then tArgs
+            else match fold spliced with
+                 | Some out -> out
+                 | None -> tArgs
+
 /// The rank comparison itself, over a parameter list and an argument list:
 /// the first position whose two ranks are both known and disagree, as
 /// (0-based position, param rank, arg rank, param type, arg type).
@@ -2197,12 +2459,38 @@ let firstArgRankClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
             match subst.Resolve t with IRTPoly _ -> true | _ -> false)
     if isVariadic || argTys.Length < paramTys.Length then None
     else
-        let n = min paramTys.Length argTys.Length
-        List.zip (List.truncate n paramTys) (List.truncate n argTys)
-        |> List.mapi (fun i (pTy, aTy) -> (i, pTy, aTy))
+        appArgPairs paramTys argTys
         |> List.tryPick (fun (i, pTy, aTy) ->
             match concreteRankOf subst pTy, concreteRankOf subst aTy with
             | Some pr, Some ar when pr <> ar -> Some (i, pr, ar, pTy, aTy)
+            | _ -> None)
+
+/// The element-CLASS comparison, the twin of `firstArgRankClash` over the
+/// same pairs: the first position whose two classes are both known and
+/// disagree, as (0-based position, param type, arg type). Same two
+/// stand-downs, for the same reasons -- a variadic `Poly<T^r>` pack makes
+/// positional pairing meaningless, and under-application is an arity error
+/// whose own message must not be buried.
+///
+/// This is the CHECK-time half of a hole that used to reach g++: a direct
+/// application does NOT unify arguments against parameters (see the comment
+/// in dispatchAppOrIndex's FuncElem arm), so nothing else at this seam
+/// noticed `f("hello")` against a `Float64` parameter. Unifying here is not
+/// an option: a `function` declaration's type is created ONCE with SHARED
+/// type variables across every call site (checkFunctionDecl binds it with
+/// bindVarSimple, no scheme), so unifying at one site would over-constrain
+/// the next. Comparing resolved CLASSES binds nothing.
+let firstArgTypeClash (subst: Subst) (paramTys: IRType list) (argTys: IRType list)
+                      : (int * IRType * IRType) option =
+    let isVariadic =
+        paramTys |> List.exists (fun t ->
+            match subst.Resolve t with IRTPoly _ -> true | _ -> false)
+    if isVariadic || argTys.Length < paramTys.Length then None
+    else
+        appArgPairs paramTys argTys
+        |> List.tryPick (fun (i, pTy, aTy) ->
+            match concreteClassOf subst pTy, concreteClassOf subst aTy with
+            | Some pc, Some ac when pc <> ac -> Some (i, pTy, aTy)
             | _ -> None)
 
 let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
@@ -2421,6 +2709,12 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 Ok (mkTyped (TExprIndex (tFunc, tArgs, identity))
                             (mkArrayLike { arrTy with IndexTypes = remaining })))))
     | FuncElem (paramTys, retTy) ->
+        // WIDTH SCHEMA first, so every check below (and the arity accounting,
+        // and the emitted TExprApp) sees the regrouped list: `g(b, c)` against
+        // `g(t: Tuple<2>)` is one argument, the pair. No-op unless the callee
+        // declares a tuple parameter AND the flat pairing does not fit, so the
+        // ordinary call path is untouched.
+        let tArgs = regroupArgsByWidth env paramTys tArgs
         // Four checks direct-application would otherwise skip (params are
         // NOT unified against args here, unlike kernel application); each
         // catches a mismatch g++ rejects that Blade would typecheck clean:
@@ -2533,6 +2827,18 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                                     ppIRType (env.Subst.Resolve pTy),
                                     ppIRType (env.Subst.Resolve aTy)))
         | None, None, None, None ->
+            // The FIFTH check, last because every one above it names the
+            // defect more precisely: element CLASS. See firstArgTypeClash.
+            match firstArgTypeClash env.Subst paramTys (tArgs |> List.map (fun a -> a.Type)) with
+            | Some (i, pTy, aTy) ->
+                let callee =
+                    match tFunc.Kind with
+                    | TExprVar (name, _, _) -> sprintf "'%s'" name
+                    | _ -> "this function"
+                Error (ArgTypeMismatch (i + 1, callee,
+                                        ppIRType (env.Subst.Resolve pTy),
+                                        ppIRType (env.Subst.Resolve aTy)))
+            | None ->
             // Rank propagation (the INFERENCE half of argRankClash's
             // CHECKING): impose the callee param's rank as a LOWER BOUND on
             // still-unresolved argument vars, so an unannotated caller param
@@ -2662,6 +2968,22 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprAlign (es, _) -> es
         | TExprPartialApp (_, a, _) -> [a]
 
+/// True if any node in the typed subtree still has an UNRESOLVED type (an
+/// inference variable, possibly under a unit-annotation wrapper). Inside a
+/// lambda body this marks unit signatures as PROVISIONAL: an unresolved kernel
+/// param contributes no units to first-pass typing, so a first-pass annotation
+/// computed against one can be wrong in either direction until buildApplyInfo
+/// unifies the params and reruns kernelBodyUnits. Consumers defer unit
+/// REJECTIONS (never acceptances of a concrete violation) on this signal.
+let rec typedExprHasUnresolvedType (env: TypeEnv) (expr: TypedExpr) : bool =
+    let rec tyUnresolved (t: IRType) =
+        match env.Subst.Resolve t with
+        | IRTInfer _ -> true
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> tyUnresolved inner
+        | _ -> false
+    tyUnresolved expr.Type
+    || (typedExprChildren expr |> List.exists (typedExprHasUnresolvedType env))
+
 /// True if the typed expression contains an unconsumed wildcard hole anywhere
 /// in its subtree. A wildcard is legitimate only as a compound-index coordinate,
 /// where dispatchAppOrIndex consumes it into a residual node before it reaches a
@@ -2714,6 +3036,23 @@ let isComplexMathIntrinsic (name: string) : bool = Blade.Grad.isComplexMathIntri
 /// signature to read the arity from.
 let isUnaryIntrinsic (name: string) : bool =
     isMathIntrinsic name || name = "abs" || name = "real" || name = "imag" || name = "arg"
+
+/// BINARY plain-call intrinsics (atan2, log_base). Kept out of
+/// `isUnaryIntrinsic` on purpose: that predicate is what tells
+/// `etaExpandFunctionKernel` the arity is 1, so a binary name listed there
+/// would eta-expand to a one-parameter lambda and then fail arity inside its
+/// own body. The canonical list lives in Grad.fs beside the adjoint rules.
+let isBinaryIntrinsic (name: string) : bool = Blade.Grad.isBinaryMathIntrinsic name
+
+/// Rejection message shared by the two orientations of the same unimplemented
+/// shape: a `zip(...)` sitting beside other arrays in ONE operand pack
+/// (`object_for(k) <@> (A, zip(B, C))`, `method_for(A, zip(B, C)) <@> k`).
+/// A zip should contribute ONE axis and deliver k values to the kernel; the
+/// object_for path instead flattened it into the pack (a silent extra outer
+/// axis) and the method_for path carried it to codegen unmaterialized.
+/// Single-operand zip application is the supported co-iteration form.
+let zipInMultiArrayPackMsg =
+    "zip cannot appear as one operand of a multi-array loop; co-iterating a zip inside an outer loop is not yet supported -- hoist the zip to its own <@>, or pass the zipped arrays as separate operands"
 
 /// A variable is a provider-module alias when it is bound opaque to a
 /// registered provider's module name (`import netcdf as nc` binds
@@ -2904,6 +3243,18 @@ let rec private unitAnnoError (env: TypeEnv) (ty: TypeExpr) : TypeError option =
                         (argName, unitAnnoContext, unitSpellingCandidates env.Units argName))
             | _ -> unitAnnoError env arg)
     | TyNamed (_, args) -> args |> List.tryPick (unitAnnoError env)
+    // `T<u>^k` (array-expression plan bug #8): under a caret the head is a
+    // type VARIABLE, so its argument slot admits nothing but a unit -- the
+    // same situation as a `unitSlotBases` base, with the variable standing in
+    // for it. Routed through that arm verbatim (substituting a base name that
+    // owns a unit slot) so the two spellings cannot drift: an unresolvable
+    // name is BL3015 here just as in `Float<secnd>`. A concrete head keeps
+    // its ordinary reading and recurses normally.
+    | TyAbstractArray ((TyNamed (ctor, (_ :: _ as args))), _, _)
+            when not (isConcreteTypeBaseName ctor)
+                 && (lookupTypeDef ctor env).IsNone ->
+        unitAnnoError env (TyNamed ("Float", args))
+    | TyAbstractArray (elem, _, _) -> unitAnnoError env elem
     | TyBounded (b, _, _) -> unitAnnoError env b
     | TyArray (elem, _) -> unitAnnoError env elem
     | TyDist (_, elem, _) -> unitAnnoError env elem
@@ -3342,6 +3693,32 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 match useTy with
                 | FuncElem (_, ret) -> ret
                 | _ -> env.Subst.Fresh()
+            // This arm builds the node itself instead of going through
+            // dispatchAppOrIndex, so it inherits NONE of that seam's
+            // argument checks -- `MathLib.double("nope")` type-checked clean
+            // and died in g++. The element-class check is repeated here
+            // rather than the arm being rerouted: dispatchAppOrIndex would
+            // also impose arity/rank accounting on every qualified callee
+            // (providers, `plot.*`, stdlib arrays), which is a larger change
+            // than an argument-type hole warrants. If this arm is ever
+            // rerouted, DELETE this block -- do not leave two copies.
+            //
+            // Same reason the WIDTH SCHEMA regrouping is repeated here
+            // (docs/plan-tuples-vs-arg-packs.md 6c): a qualified callee with a
+            // `Tuple<k>` parameter must slice the flat argument list exactly
+            // like an unqualified one, or `M.addPair(b, c)` and `addPair(b, c)`
+            // stop being the same call. Same delete-if-rerouted note applies.
+            let tArgs =
+                regroupArgsByWidth env
+                    (match useTy with FuncElem (ps, _) -> ps | _ -> []) tArgs
+            match firstArgTypeClash env.Subst
+                      (match useTy with FuncElem (ps, _) -> ps | _ -> [])
+                      (tArgs |> List.map (fun a -> a.Type)) with
+            | Some (i, pTy, aTy) ->
+                Error (ArgTypeMismatch (i + 1, sprintf "'%s'" qualName,
+                                        ppIRType (env.Subst.Resolve pTy),
+                                        ppIRType (env.Subst.Resolve aTy)))
+            | None ->
             Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy))
 
     // ---- Method call: obj.method(args) -> impl resolution ----
@@ -3380,6 +3757,18 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // real; pin it to Float64, the intrinsic's natural domain.
                 unify env.Subst tArg.Type (IRTScalar ETFloat64) |> Result.bind (fun () ->
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
+            | IRTUnitAnnotated _ when env.InLambdaBody && typedExprHasUnresolvedType env tArg ->
+                // PROVISIONAL annotation inside a lambda body: the argument's
+                // subtree still contains unresolved inference variables (kernel
+                // params before apply-site unification), and an unresolved
+                // operand contributes "no units" to first-pass typing -- so the
+                // annotation seen here can be exactly a dimensioned CAPTURE's
+                // signature even when the product cancels once the param's unit
+                // is known (`lambda(w) -> cos(w * tz)`, w : 1/day, tz : day).
+                // DEFER: buildApplyInfo's kernelBodyUnits reruns the same
+                // per-op table after param unification and rejects for real.
+                // Result is typed bare Float64, matching the accept path below.
+                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64))
             | resolvedArg ->
                 // Unit propagation at scalar position, same table as the
                 // kernel-body walk (unitRulesForUnaryOp): sqrt halves
@@ -3450,6 +3839,21 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | other ->
                 Error (IntrinsicNeedsComplex (name, ppIRType other)))
 
+    // ---- atan2(y, x) / log_base(x, b): BINARY math intrinsics ----
+    // Same surface shape and shadowing rule as the unary intrinsics (a user
+    // `function atan2(...)` wins), one arity up. The work is in
+    // inferBinaryIntrinsic; the second arm turns a wrong-arity call into an
+    // intrinsic-specific message instead of "unbound variable atan2".
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [aExpr; bExpr])
+            when isBinaryIntrinsic name && (lookupVar name env).IsNone ->
+        inferBinaryIntrinsic env name aExpr bExpr
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args)
+            when isBinaryIntrinsic name && (lookupVar name env).IsNone ->
+        Error (Other (sprintf "%s takes exactly 2 arguments (got %d): %s"
+                        name args.Length
+                        (if name = "atan2" then "atan2(y, x) is the quadrant-correct angle of the point (x, y)"
+                         else "log_base(x, b) is log x / log b")))
+
     // ---- complex(re, im): complex literal constructor ----
     // The one way to construct a complex value. As a plain call this
     // composes under any operator without the precedence trap a 2-tuple
@@ -3459,9 +3863,48 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // construction time). Infers Complex128; checking against an expected
     // Complex64 adopts the narrow width (checkExpr arm).
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "complex" }, [reExpr; imExpr]) when (lookupVar "complex" env).IsNone ->
-        checkExpr env (IRTScalar ETFloat64) reExpr |> Result.bind (fun tRe ->
-        checkExpr env (IRTScalar ETFloat64) imExpr |> Result.map (fun tIm ->
-            mkTyped (TExprComplexLit (tRe, tIm)) (IRTScalar ETComplex128)))
+        (match checkExpr env (IRTScalar ETFloat64) reExpr, checkExpr env (IRTScalar ETFloat64) imExpr with
+         | Ok tRe, Ok tIm -> Ok (mkTyped (TExprComplexLit (tRe, tIm)) (IRTScalar ETComplex128))
+         | scalarRe, scalarIm ->
+            // ARRAY LIFT. A component that is an ARRAY makes `complex` an
+            // elementwise constructor, lifted exactly the way the elementwise
+            // binops lift themselves (inferBinOp's zip and array/scalar arms):
+            // re-synthesize as `method_for(...) <@> lambda(..) -> complex(..)
+            // |> compute` and re-drive inference, so the zip/shape rules, the
+            // loop machinery and codegen are the ones already proven for
+            // `A + B` -- and the result is literally the workaround users
+            // write by hand today. Both arrays co-iterate; one array against
+            // a scalar broadcasts (the scalar's SURFACE expr is embedded so
+            // capture analysis sees its variable references, per the
+            // array/scalar binop arm's note). Only reached once the scalar
+            // construction has already been rejected, so scalar `complex` is
+            // unchanged.
+            let arrayOperand (e: Expr) =
+                match inferExpr env e with
+                | Ok t -> (match env.Subst.Resolve t.Type with ArrayElem _ -> true | _ -> false)
+                | Error _ -> false
+            let sp = mergeSpan reExpr.Span imExpr.Span
+            let cparam n : LambdaParam = { Name = n; Type = Some TyFloat64; Default = None; NameSpan = noSpan }
+            let cvar n = mkExpr sp (ExprVar n)
+            let cbody re im = mkExpr sp (ExprApp (mkExpr sp (ExprVar "complex"), [re; im]))
+            let apply former ps body =
+                inferExpr env (mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
+                    former, mkExpr sp (ExprLambda (ps, None, body)))))))
+            match arrayOperand reExpr, arrayOperand imExpr with
+            | true, true ->
+                apply (mkExpr sp (ExprMethodFor [mkExpr sp (ExprZip [reExpr; imExpr])]))
+                      [cparam "__cre"; cparam "__cim"]
+                      (cbody (cvar "__cre") (cvar "__cim"))
+            | true, false ->
+                apply (mkExpr sp (ExprMethodFor [reExpr])) [cparam "__cre"] (cbody (cvar "__cre") imExpr)
+            | false, true ->
+                apply (mkExpr sp (ExprMethodFor [imExpr])) [cparam "__cim"] (cbody reExpr (cvar "__cim"))
+            | false, false ->
+                // Neither component is an array: report the scalar rejection.
+                match scalarRe, scalarIm with
+                | Error e, _ -> Error e
+                | _, Error e -> Error e
+                | _ -> Error (ComplexArity 2))
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "complex" }, args) when (lookupVar "complex" env).IsNone ->
         Error (ComplexArity args.Length)
 
@@ -3957,8 +4400,24 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             Ok (mkTyped (TExprPure tE) (IRTComputation tE.Type)))
     | ExprKind.ExprCompute e ->
         inferExpr env e |> Result.bind (fun tE ->
-            let inner = match tE.Type with IRTComputation t -> t | t -> t
-            Ok (mkTyped (TExprCompute tE) inner))
+            // IDEMPOTENCE. `compute` forces a computation to a value; forcing a
+            // value again is the identity, and the second wrapper is not free:
+            // it lowers to IRCompute(IRCompute(IRApplyCombinator)), a shape
+            // genFuncBodyScoped's let dispatch (which matches ONE IRCompute)
+            // falls through, landing on the inline expression form and its
+            // "array-valued elementwise kernel body" rejection. This is not a
+            // user writing `compute` twice: the ELEMENTWISE ARRAY OPS
+            // re-synthesize themselves as `compute(method_for(..) <@> k)`
+            // (inferBinOp's zip and array/scalar-broadcast arms), so any
+            // `A - s |> compute` arrives here already computed. At module
+            // level genComputeBinding peels IRCompute recursively and the
+            // double wrap was invisible; inside a FUNCTION body it was a hard
+            // codegen failure. Fold it at the source instead.
+            match tE.Kind with
+            | TExprCompute _ -> Ok tE
+            | _ ->
+                let inner = match tE.Type with IRTComputation t -> t | t -> t
+                Ok (mkTyped (TExprCompute tE) inner))
     | ExprKind.ExprRead e ->
         // |> read forces a deferred provider read; the result is the operand's
         // (possibly view-modified) array, so the type passes through unchanged.
@@ -6554,6 +7013,40 @@ and unitRulesForOp (op: BinOp) (lUnits: UnitSig option) (rUnits: UnitSig option)
         | Some lu, Some ru when not (unitCompatible lu ru) ->
             Error (UnitMismatch ("comparison", ppUnitSig lu, ppUnitSig ru))
         | _ -> Ok None
+    // atan2(y, x) is the angle of the point (x, y): the operands enter only as
+    // the RATIO y/x, so any shared signature cancels and the result is always
+    // dimensionless -- `atan2(dy: m, dx: m)` is a perfectly good slope angle.
+    // Two rejections, and both must live HERE rather than in the array-op
+    // guard, because unlike `+` there is no rewrite site that could insert a
+    // conversion factor into an intrinsic call:
+    //   - incompatible DIMENSIONS (atan2(1 m, 1 s)): the ratio is not a number.
+    //   - compatible dimensions at different SCALE (atan2(1 day, 86400 s)):
+    //     the ratio is 1/86400 or 1 depending on a factor nobody applied.
+    // A one-sided signature is accepted, mirroring `+`: an operand with no
+    // annotation makes no claim.
+    | OpMath2 "atan2" ->
+        (match lUnits, rUnits with
+         | Some lu, Some ru ->
+             if not (unitCompatible lu ru) then
+                 Error (UnitMismatch ("atan2(y, x) arguments (both must carry the same unit -- the intrinsic sees only the ratio y/x)",
+                                      ppUnitSig lu, ppUnitSig ru))
+             elif not (unitSameScale lu ru) then
+                 requireSameScale "atan2(y, x) arguments" lu ru |> Result.map (fun () -> None)
+             else Ok None
+         | _ -> Ok None)
+    // log_base(x, b) = log x / log b: two transcendentals, so BOTH operands are
+    // dimensionless-only for exactly the reason unitRulesForUnaryOp gives for
+    // `log`. Result is dimensionless.
+    | OpMath2 _ ->
+        let dimensioned u =
+            match u with
+            | Some s when not (Map.isEmpty (unitNormalize s).Dims) -> Some s
+            | _ -> None
+        (match dimensioned lUnits, dimensioned rUnits with
+         | Some s, _ | _, Some s ->
+             Error (UnitMismatch ("log_base(x, b) argument (a logarithm sums powers of its argument, so it is defined only on dimensionless values; divide by a reference quantity first)",
+                                  "dimensionless", ppUnitSig s))
+         | None, None -> Ok None)
     // `^` needs the exponent VALUE, which this signature does not carry.
     // Reaching the exponent-free form with a dimensioned base is therefore a
     // rejection, not a silent drop: a call site that can see the right
@@ -6639,6 +7132,105 @@ and unitRulesForArrayOp (context: string) (op: BinOp) (lu: UnitSig option) (ru: 
                 when unitCompatible a b -> requireSameScale context a b
         | _ -> Ok ()
     scaleGuard |> Result.bind (fun () -> unitRulesForOpWith op lu ru rExpr)
+
+/// atan2(y, x) and log_base(x, b): the two BINARY math intrinsics. Surface
+/// form is a plain call, shadowable by a user binding exactly like the unary
+/// intrinsics and `complex`.
+///
+/// MECHANISM. The typed node is an ordinary `TExprBinOp (Elementwise,
+/// OpMath2 name, ...)` -- not a dedicated 2-argument node -- so the entire
+/// existing binary pipeline carries them: the unit tables above, lowering's
+/// op map, and codegen's binop emission, where they join `^` as the second
+/// binop that renders as a CALL rather than infix. Nothing about loops,
+/// captures or kernels had to learn a new shape.
+///
+/// ARRAY LIFT. An array operand makes the intrinsic elementwise, re-synthesized
+/// as `method_for(...) <@> lambda(..) -> name(..) |> compute` and re-inferred --
+/// the identical synthesize-and-infer route `complex(A, B)` takes, so zip
+/// co-iteration, array/scalar broadcast in BOTH orders, packed storage and
+/// codegen are the ones already proven for `A + B`.
+///
+/// UNITS are judged HERE, at the synthesis site, for both routes: the
+/// synthesized lambda annotates its parameters Float64, which strips the
+/// element signatures, so a check deferred into the body would see nothing.
+/// The rules themselves live in unitRulesForOp's OpMath2 arms (atan2: one
+/// shared signature, cancels; log_base: both dimensionless). Result is
+/// dimensionless either way, so nothing needs stamping back onto the pipeline.
+and inferBinaryIntrinsic (env: TypeEnv) (name: string) (aExpr: Expr) (bExpr: Expr) : TypeResult<TypedExpr> =
+    let sp = mergeSpan aExpr.Span bExpr.Span
+    inferExpr env aExpr |> Result.bind (fun tA ->
+    inferExpr env bExpr |> Result.bind (fun tB ->
+        let rA = env.Subst.Resolve tA.Type
+        let rB = env.Subst.Resolve tB.Type
+        let isArr t = match t with ArrayElem _ -> true | _ -> false
+        // Element units for an array operand, scalar units otherwise -- the two
+        // routes below judge units off the same pair.
+        let opUnits t =
+            match t with
+            | ArrayElem at -> IR.getUnits at.ElemType
+            | other -> IR.getUnits other
+        unitRulesForArrayOp (sprintf "%s arguments" name) (OpMath2 name) (opUnits rA) (opUnits rB) None
+        |> Result.bind (fun _ ->
+            if isArr rA || isArr rB then
+                let bparam n : LambdaParam = { Name = n; Type = Some TyFloat64; Default = None; NameSpan = noSpan }
+                let bvar n = mkExpr sp (ExprVar n)
+                let bbody x y = mkExpr sp (ExprApp (mkExpr sp (ExprVar name), [x; y]))
+                let apply former ps body =
+                    inferExpr env (mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
+                        former, mkExpr sp (ExprLambda (ps, None, body)))))))
+                match isArr rA, isArr rB with
+                | true, true ->
+                    apply (mkExpr sp (ExprMethodFor [mkExpr sp (ExprZip [aExpr; bExpr])]))
+                          [bparam "__m2a"; bparam "__m2b"]
+                          (bbody (bvar "__m2a") (bvar "__m2b"))
+                | true, false ->
+                    // Array <-> scalar broadcast. The scalar's SURFACE expr is
+                    // embedded (not its typed node) so capture analysis sees the
+                    // variable references, per the array/scalar binop arm's note.
+                    apply (mkExpr sp (ExprMethodFor [aExpr])) [bparam "__m2a"] (bbody (bvar "__m2a") bExpr)
+                | _ ->
+                    apply (mkExpr sp (ExprMethodFor [bExpr])) [bparam "__m2b"] (bbody aExpr (bvar "__m2b"))
+            else
+                // SCALAR. Neither intrinsic has a std::complex overload, so a
+                // complex operand is rejected the way floor/ceil reject one.
+                let reject (t: IRType) =
+                    match IR.stripUnits t with
+                    | IRTScalar (ETComplex64 | ETComplex128) -> Some (IntrinsicNotComplex name)
+                    | IRTScalar ETBool | IRTScalar ETString -> Some (IntrinsicNeedsNumeric name)
+                    | _ -> None
+                match reject rA, reject rB with
+                | Some e, _ -> Error e
+                | _, Some e -> Error e
+                | None, None ->
+                    // An UNRESOLVED operand pins to Float64 -- the operand
+                    // really is real, so pinning rejects a complex binding here
+                    // instead of letting it reach codegen as
+                    // std::atan2(complex, complex), a C++ error rather than a
+                    // Blade one.
+                    //
+                    // NOT inside a lambda body, though. There the operand is a
+                    // kernel parameter that apply-site unification has not bound
+                    // yet, and binding it to BARE Float64 would erase the
+                    // element's unit annotation -- after which buildApplyInfo's
+                    // kernelBodyUnits walk re-runs this same op's unit rule
+                    // against no signatures and silently accepts
+                    // `zip(D: m, T: s) <@> lambda(d, t) -> atan2(d, t)`. Defer
+                    // instead (what `log` does, and why `log` rejects that shape
+                    // while the PINNING floor/ceil arm above does not): the
+                    // param binds to the real element type and the unit walk
+                    // sees it. The result type is Float64 either way, so
+                    // deferring costs nothing else.
+                    let pin (t: TypedExpr) =
+                        match env.Subst.Resolve t.Type with
+                        | IRTInfer _ when not env.InLambdaBody ->
+                            unify env.Subst t.Type (IRTScalar ETFloat64)
+                        | _ -> Ok ()
+                    pin tA |> Result.bind (fun () ->
+                    pin tB |> Result.map (fun () ->
+                        // Float64 regardless of operand widths: the C++ overload
+                        // set promotes integers, so atan2(1, 1) is a double.
+                        mkTyped (TExprBinOp (Elementwise, OpMath2 name, tA, tB)) (IRTScalar ETFloat64)))
+        )))
 
 /// Materialize the MAGNITUDE conversion a seam needs: multiply `t` by the
 /// exact factor carrying its own signature into `dst`. Returns `t` untouched
@@ -6841,7 +7433,84 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
     | TExprIndex (arr, _, _) -> Ok (elemOfType arr.Type)
     | TExprReduce (arr, _, _) -> Ok (elemOfType arr.Type)
     | TExprField _ | TExprTupleIndex _ -> Ok (ofType e.Type)
+    // NESTED ELEMENTWISE MAP inside a kernel body (`lambda(w) -> { let e =
+    // exp <@> (i * w * ts); ... }`). Without an arm here this fell to the
+    // no-claim catch-all, which is why the nested apply's OWN unit check had
+    // to reject eagerly -- and it ran during the OUTER lambda's body
+    // inference, while `w` was still an unresolved infer var contributing no
+    // units, so it judged a PROVISIONAL element signature (exactly the
+    // dimensioned capture's own, `day`) and rejected a product that cancels.
+    // That inner check now defers (buildApplyInfo); this arm is the recheck
+    // that keeps the deferral from becoming a false acceptance. It is also
+    // strictly more informative than the old catch-all: an array-typed
+    // operand carries no TOP-level unit annotation, so the plain scalar walk
+    // read every nested map as "no claim".
+    | TExprApply info -> nestedApplyElemUnits env bound info
+    // `compute` is unit-transparent: it forces a computation to a value.
+    | TExprCompute inner -> kernelBodyUnits env bound inner
     | _ -> Ok None
+
+/// ELEMENT-level sibling of `kernelBodyUnits`, for the array operands of a
+/// nested map. The scalar walk answers about SCALAR positions and reads a
+/// node's TOP-level annotation, which an array type never carries (`getUnits`
+/// only sees `IRTUnitAnnotated`), so it reports None for every array operand.
+/// This reads through to the ELEMENT signature instead, and the two are
+/// mutually recursive because an operand can itself be a synthesized
+/// elementwise map (`i * w * ts` re-synthesizes as a broadcast map whose
+/// stamped element annotation is the provisional one we must not trust).
+and nestedOperandElemUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedExpr) : TypeResult<UnitSig option> =
+    let elemOfType (t: IRType) =
+        match env.Subst.Resolve t with
+        | ArrayElem at -> IR.getUnits at.ElemType
+        | resolved -> IR.getUnits resolved
+    match e.Kind with
+    | TExprCompute inner -> nestedOperandElemUnits env bound inner
+    | TExprApply info -> nestedApplyElemUnits env bound info
+    // RECOMPUTE rather than read the stamp: a synthesized elementwise binop
+    // (`w * ts`) carries a first-pass element annotation computed while the
+    // captured param was unresolved. Leaves stay elem-aware, so a scalar
+    // operand contributes its own signature and an array its element's.
+    | TExprBinOp (_, op, l, r) ->
+        nestedOperandElemUnits env bound l |> Result.bind (fun lu ->
+        nestedOperandElemUnits env bound r |> Result.bind (fun ru ->
+        unitRulesForOpWith op lu ru (Some r)))
+    | TExprUnaryOp (op, inner) ->
+        nestedOperandElemUnits env bound inner |> Result.bind (unitRulesForUnaryOp op)
+    | TExprVar (_, varId, _) ->
+        match Map.tryFind varId bound with
+        | Some u -> Ok u
+        | None -> Ok (elemOfType e.Type)
+    | _ -> Ok (elemOfType e.Type)
+
+/// The element signature a nested `<@>` map PRODUCES: bind the kernel's params
+/// to its operands' element signatures (recomputed, not read off the
+/// provisional stamps) and walk the kernel body with the ordinary machinery.
+/// For an eta-expanded unary intrinsic (`exp <@> A` becomes
+/// `lambda(__k) -> exp(__k)`) this bottoms out in the same
+/// `unitRulesForUnaryOp` application the scalar path uses, so the transcendental
+/// rule is enforced once, at the point where the operand units are finally real.
+/// Anything not modelled (non-lambda kernel, arity disagreement, co-iteration
+/// index params) returns None -- no claim, exactly as before.
+and nestedApplyElemUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (info: TypedApplyInfo) : TypeResult<UnitSig option> =
+    let rec kernelLambda (k: TypedExpr) =
+        match k.Kind with
+        | TExprLambda li -> Some li
+        | TExprReynolds (inner, _) -> kernelLambda inner
+        | _ -> None
+    let rec collect acc rest =
+        match rest with
+        | [] -> Ok (List.rev acc)
+        | a :: tl ->
+            nestedOperandElemUnits env bound a
+            |> Result.bind (fun u -> collect (u :: acc) tl)
+    collect [] info.Arrays
+    |> Result.bind (fun inputUnits ->
+        match kernelLambda info.Kernel with
+        | Some li when li.Params.Length = inputUnits.Length ->
+            let bound' =
+                List.fold2 (fun m (p: TypedParam) u -> Map.add p.VarId u m) bound li.Params inputUnits
+            kernelBodyUnits env bound' li.Body
+        | _ -> Ok None)
 
 /// `rExpr` is the right operand's typed expr, carried only so the `^` unit
 /// rule can read its exponent VALUE (see unitRulesForCaret); every other op
@@ -7053,6 +7722,72 @@ and resolveTypedExpr (env: TypeEnv) (texpr: TypedExpr) : TypedExpr =
         | None -> texpr
     | _ -> texpr
 
+/// `resolveTypedExpr` to a FIXPOINT. The one-hop version is why `let P = (A,B)`
+/// and `let Q = P` are different programs today (docs/plan-tuples-vs-arg-packs.md
+/// 3.1, M1: `K <@> P` splats, `K <@> Q` does not, and the second miscompiles).
+/// Substitution has to hold, so alias depth may not be observable. Fuelled
+/// rather than cycle-tracked: a binding chain is acyclic by construction (a
+/// `let` cannot mention itself), and the fuel is the cheap backstop if some
+/// future binder form breaks that.
+and resolveTypedExprDeep (env: TypeEnv) (texpr: TypedExpr) : TypedExpr =
+    let rec chase (fuel: int) (e: TypedExpr) =
+        if fuel <= 0 then e
+        else
+            match e.Kind with
+            | TExprVar _ ->
+                let r = resolveTypedExpr env e
+                if System.Object.ReferenceEquals(r, e) then e else chase (fuel - 1) r
+            | _ -> e
+    chase 64 texpr
+
+/// The TOP-LEVEL TUPLE WIDTH of a value, by its STATIC type, seen through any
+/// number of alias hops (docs/plan-tuples-vs-arg-packs.md 6c, rule 1). `None`
+/// for anything that is not a tuple. This is the only thing the matcher reads
+/// off a node: its spine width, never its depth.
+and tupleNodeWidth (env: TypeEnv) (e: TypedExpr) : int option =
+    match env.Subst.Resolve e.Type with
+    | IRTTuple ts when ts.Length >= 2 -> Some ts.Length
+    | _ -> None
+
+/// The COMPONENTS of a tuple node, if they can be named as expressions.
+/// A tuple-typed value whose alias chain does not end at a written tuple (a
+/// `<&!>` fusion result, say) has a width but no component expressions; the
+/// callers report that rather than inventing projections.
+and tupleNodeParts (env: TypeEnv) (e: TypedExpr) : TypedExpr list option =
+    match (resolveTypedExprDeep env e).Kind with
+    | TExprTuple es when es.Length >= 2 -> Some es
+    | _ -> None
+
+/// The SPINE of a pack (docs/plan-tuples-vs-arg-packs.md 6c, rules 1 and 3).
+///
+/// Each element of a written operand list is ONE NODE, and its internal
+/// structure is DATA that survives -- this is the one-level rule that replaced
+/// 6b's free-monoid deep-flatten. The single transformation applied here is
+/// rule 3's ONE-LEVEL SPLICE: a pack that is a single tuple node opens into its
+/// components, which is what makes `f((a, b)) == f(a, b)` and, with the alias
+/// fixpoint below it, what makes `K <@> (A, B)`, `let P = (A, B); K <@> P` and
+/// `let Q = P; K <@> Q` one program (3.1's M1, 3.2's M4).
+///
+/// It does NOT recurse: `(A, (B, C))` splices to the two nodes `A` and
+/// `(B, C)`, and the second stays a tuple. Under 6b it became three leaves,
+/// which silently equated `(A, (B, C))` with `(A, B, C)`, destroyed nested
+/// tuples as data, and broke `Poly`'s documented "arity counts top level"
+/// (formalism.md:787). 6c's ruling restores all three, at the cost of the
+/// cross-level recount (`Tuple<4>` over `((a,b),(c,d))`, which is now an error
+/// steering to the flat spelling).
+///
+/// A node that came through an alias is reported as the ALIAS EXPRESSION, not
+/// the chased binding: identities (`AIDVariable name`) are read off these
+/// nodes, and a plain non-tuple binding must keep naming itself exactly as it
+/// does today. Only the outermost tuple structure is seen through.
+and packSpine (env: TypeEnv) (operands: TypedExpr list) : TypedExpr list =
+    match operands with
+    | [single] ->
+        match tupleNodeParts env single with
+        | Some parts -> parts
+        | None -> operands
+    | _ -> operands
+
 /// The `<$>` half of the compact-class inheritance check (see
 /// compactClassInheritError). `f <$> c` applies f to every element of c, so f
 /// must commute with the mirror involution of c's storage class before the
@@ -7140,6 +7875,20 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
             inheritSpan kernelExpr
                 (ExprApp (kernelExpr, [ inheritSpan kernelExpr (ExprVar pname) ]))
         Some (inferLambda env lamParams None bodyApp)
+    // A BINARY intrinsic in kernel position: `method_for(zip(Y, X)) <@> atan2`,
+    // `object_for(log_base)`. Same construction as the unary arm one arity up;
+    // arity is 2 by construction (isBinaryIntrinsic), which is exactly why the
+    // binary names are kept OUT of isUnaryIntrinsic -- that predicate is read
+    // as "arity 1" and would build a one-parameter wrapper here.
+    | ExprKind.ExprVar name when isBinaryIntrinsic name && (lookupVar name env).IsNone ->
+        let uid = env.Builder.FreshId()
+        let pnames = [ sprintf "__k%d_0" uid; sprintf "__k%d_1" uid ]
+        let lamParams : LambdaParam list =
+            pnames |> List.map (fun n -> { Name = n; Type = None; Default = None; NameSpan = noSpan })
+        let bodyApp =
+            inheritSpan kernelExpr
+                (ExprApp (kernelExpr, pnames |> List.map (fun n -> inheritSpan kernelExpr (ExprVar n))))
+        Some (inferLambda env lamParams None bodyApp)
     | ExprKind.ExprVar name ->
         match lookupVar name env with
         // TypedValue = None is exactly the case resolveTypedExpr cannot turn
@@ -7155,7 +7904,23 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                          && not (paramTys |> List.exists (fun t -> match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)) ->
                 let uid = env.Builder.FreshId()
                 let names = paramTys |> List.mapi (fun i _ -> sprintf "__k%d_%d" uid i)
-                let lamParams = names |> List.map (fun n -> { Name = n; Type = None; Default = None; NameSpan = noSpan } : LambdaParam)
+                // WIDTH SCHEMA carry-over (docs/plan-tuples-vs-arg-packs.md
+                // 6b): the wrapper's params are 1:1 with the callee's, so a
+                // callee parameter declared `Tuple<k>` (or `(T1,..,Tk)`) must
+                // reach the apply seam still declaring width k -- otherwise
+                // `object_for(addPair) <@> (A, B)` reads as one unannotated
+                // param over a 2-pack and lands on 5.2's annotation demand,
+                // while the identical lambda spelling works. Re-spelling it
+                // `Tuple<k>` (rather than copying the IRType) keeps the ONE
+                // rule that a width is always WRITTEN.
+                let lamParams =
+                    List.map2 (fun n pTy ->
+                        let annot =
+                            match env.Subst.Resolve pTy with
+                            | IRTTuple ts when ts.Length >= 2 -> Some (TyTupleWidth ts.Length)
+                            | _ -> None
+                        { Name = n; Type = annot; Default = None; NameSpan = noSpan } : LambdaParam)
+                        names paramTys
                 let bodyApp =
                     inheritSpan kernelExpr
                         (ExprApp (kernelExpr, names |> List.map (fun n -> inheritSpan kernelExpr (ExprVar n))))
@@ -7303,6 +8068,13 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexTypes lambdaInfo tLeft tZeroKernel false false
 
     // object_for(<combinator>) <@> (c1, c2, ...) -> left-fold or map+combine
+    //
+    // DELIBERATELY EXEMPT from the pack spine expansion the two arms below use
+    // (docs/plan-tuples-vs-arg-packs.md 3.10). This is not a kernel pack at
+    // all: the elements are COMPUTATIONS being folded, and
+    // `object_for(<@>) <@> ((L1, f1), (L2, f2))` reads each element as a
+    // (loop, kernel) PAIR -- deep-flattening would destroy exactly the nesting
+    // this arm requires. It keeps the one-level shallow match on purpose.
     | TExprObjectFor objInfo, _ when
         (match objInfo.Kernel.Kind with TExprSection _ -> true | _ -> false) ->
         let op = match objInfo.Kernel.Kind with TExprSection op -> op | _ -> OpAdd
@@ -7381,16 +8153,35 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
     // Preserves TExprObjectFor as the loop provenance (no synthetic TExprMethodFor)
     // Detects zip() arguments and expands them into co-iteration groups
     | TExprObjectFor objInfo, _ ->
-        // Extract array typed exprs from right side
-        let rawExprs = match rR.Kind with
-                       | TExprTuple elems -> elems
-                       | _ -> [tRight]
+        // ---- SPINE EXPANSION (docs/plan-tuples-vs-arg-packs.md 6c) ----
+        // The KERNEL-side half of the one pack site (inferMethodFor has the
+        // former-side half). Replaces the `resolveTypedExpr`-then-match-
+        // TExprTuple splat, which took exactly ONE alias hop and so made
+        // `K <@> P` and `let Q = P; K <@> Q` different programs (3.1, M1).
+        // Nested nodes SURVIVE here and are matched against the schema in
+        // buildApplyInfo's spine matcher.
+        let rawExprs = packSpine env [tRight]
         // Resolve variables to detect indirect zip (let Z = zip(A,B); ... <@> Z)
-        let resolvedExprs = rawExprs |> List.map (resolveTypedExpr env)
+        let resolvedExprs = rawExprs |> List.map (resolveTypedExprDeep env)
 
         // Check if ANY argument is a zip -- flatten zip children into co-iteration groups
         let hasZip = resolvedExprs |> List.exists (fun e ->
             match e.Kind with TExprZip _ -> true | _ -> false)
+
+        // GUARD: a zip as ONE operand of a MULTI-operand pack. The flattening
+        // below splices the zip's children into the array pack as ordinary
+        // operands, so `object_for(k) <@> (A, zip(B, C))` builds a THREE-way
+        // outer product (|A|*|B|*|C| cells) instead of co-iterating B and C
+        // over one axis -- silently, with a kernel arity that happens to match.
+        // The method_for orientation of the same shape carries the zip to
+        // codegen unmaterialized (undeclared `arr1`). Co-iterating a zip
+        // inside an outer loop is not implemented; reject both orientations
+        // rather than return the wrong grid. An all-zip pack
+        // (`(zip(A,B), zip(C,D))`) is a plain co-iteration and stays legal.
+        if hasZip && (resolvedExprs |> List.exists (fun e ->
+                        match e.Kind with TExprZip _ -> false | _ -> true)) then
+            Error (Other zipInMultiArrayPackMsg)
+        else
 
         let (flatArrays, sharedRecords) =
             if hasZip then
@@ -7587,9 +8378,10 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // IsComposeApply = true): codegen's genComposeApply chases the chain
         // and emits one fused nest, so only the type and the recorded
         // identities improve here, not the runtime plan.
-        let arrayExprs = match rR.Kind with
-                         | TExprTuple elems -> elems
-                         | _ -> [tRight]
+        // Same spine expansion as the two pack sites above (6c): a compose
+        // chain must not disagree with a direct apply about how a tuple operand
+        // opens.
+        let arrayExprs = packSpine env [tRight]
         // Left-assoc chain -> ordered stages: Compose(Compose(o1,o2),o3) = [o1;o2;o3].
         let rec stagesOf (e: TypedExpr) : TypedExpr list =
             match (resolveTypedExpr env e).Kind with
@@ -7653,6 +8445,129 @@ and buildApplyInfo (env: TypeEnv)
     (isReynolds: bool) (isReynoldsAntisym: bool)
     : TypeResult<TypedExpr> =
 
+    // ---- THE SPINE MATCHER (docs/plan-tuples-vs-arg-packs.md 6c, rule 2) ----
+    // The operand pack arrives here as a SPINE: one node per top-level element,
+    // with nested tuples still intact. This is where the schema and the spine
+    // meet -- and it has to be here rather than at the former, because
+    // `method_for(...)` is built before the kernel is known.
+    //
+    // Greedy, left to right:
+    //   * an UNANNOTATED parameter takes one non-tuple node. Facing a tuple
+    //     node it is an error demanding an annotation -- 5.2's rule one level
+    //     out: the pack reading and the whole-tuple reading both type and
+    //     disagree, and the body cannot vote (5.1).
+    //   * a `Tuple<k>` parameter PREFERS one tuple node of top-level width k
+    //     (direct bind), and otherwise consumes k consecutive non-tuple nodes
+    //     (regroup). Preferring the node is what makes `(A, (B,C))` and
+    //     `(A, B, C)` agree against `lambda(x, y: Tuple<2>)` -- the CONDITIONAL
+    //     equivalence 6c restores, in place of 6b's unconditional one.
+    //
+    // Greedy is deterministic, and the other grouping is now spellable, because
+    // structure survives: `(t1, a, b)` against `[y: Tuple<2>, z]` takes t1 for
+    // y, and `((t1, a), b)` is how you say the other thing (rule 4).
+    //
+    // Whatever a `Tuple<k>` parameter binds, the LOOP still iterates k operands
+    // -- a tuple of arrays has nothing to iterate as a unit -- so a directly
+    // bound tuple node opens into its k components here, and the tuple is
+    // rebuilt per iteration by the surface rewrite further down. Direct bind
+    // and regroup therefore produce the SAME loop; what differs is which
+    // spellings are legal, which is the whole point of the ruling.
+    //
+    // Runs ONLY when some node is tuple-typed. Every pack without one is
+    // byte-identical to before, which is what keeps this off the hot path.
+    let spineMatch : TypeResult<(TypedExpr list * ArrayIdentity list * IRArrayType list * int list) option> =
+        if not (arrays |> List.exists (fun a -> (tupleNodeWidth env a).IsSome)) then Ok None
+        else
+            let widthOf (p: TypedParam) =
+                match env.DeclaredTupleWidths.TryGetValue p.VarId with
+                | true, w -> w
+                | _ -> 1
+            // A SYNTHESIZED parameter (`__`-prefixed: the eta wrappers built for
+            // a named-function kernel, the Poly deferred former, sections, zero)
+            // is not a name the user can annotate, so the annotation demand is
+            // not addressed to anyone -- it gets its own message naming the
+            // OPERAND instead.
+            //
+            // `Poly` reaches here having already counted TOP-LEVEL arity
+            // (formalism.md:787), which is the property 6c restores: the pack
+            // width the deferred former eta-expands to is the number of NODES,
+            // so `(A, (B,C))` is arity 2 with a tuple second argument, not
+            // arity 3. Passing that tuple to a `Poly` pack is 3.8's M9 and is
+            // broken in every spelling, so it is refused here rather than
+            // allowed to reach codegen as an undeclared temporary (measured:
+            // `psum_arity_2_...(A____i0, __v18)` with `__v18` never declared).
+            let rec walk (ps: TypedParam list) (ns: TypedExpr list)
+                         (acc: TypedExpr list) : TypeResult<TypedExpr list> =
+                match ps, ns with
+                | [], [] -> Ok (List.rev acc)
+                | [], _ -> Ok (List.rev acc @ ns)   // arity is settled downstream
+                | _, [] -> Ok (List.rev acc)        // ditto (defaults may fill)
+                | p :: pt, n :: nt ->
+                    let w = widthOf p
+                    // An operator SECTION's two params are synthesized as plain
+                    // `a`/`b` rather than `__`-prefixed, so it needs its own
+                    // test: `(+)` has no parameter list to annotate either.
+                    let synthetic =
+                        p.Name.StartsWith "__"
+                        || (match tKernel.Kind with TExprSection _ -> true | _ -> false)
+                    match tupleNodeWidth env n, w with
+                    | Some tw, 1 when not synthetic ->
+                        Error (KernelPackArity
+                                 (sprintf "kernel parameter '%s' is unannotated but the operand in that position is a %d-tuple. Tuple-ness is never inferred: annotate the parameter `Tuple<%d>` to take the group as one tuple, or write %d parameters and pass the components separately."
+                                          p.Name tw tw tw))
+                    | Some tw, 1 ->
+                        Error (KernelPackArity
+                                 (sprintf "this kernel takes the %d-tuple in operand position %d as ONE argument (its parameter list counts top-level operands), and a tuple of arrays has nothing to iterate. Pass the components as separate operands, or use a kernel whose parameter in that position is annotated `Tuple<%d>`."
+                                          tw (arrays.Length - nt.Length) tw))
+                    | Some tw, k when tw = k ->
+                        // DIRECT BIND. Opened into components for the loop; the
+                        // tuple is rebuilt at kernel entry by the surface rewrite.
+                        (match tupleNodeParts env n with
+                         | Some parts -> walk pt nt (List.rev parts @ acc)
+                         | None ->
+                             Error (KernelPackArity
+                                      (sprintf "kernel parameter '%s' is declared `Tuple<%d>` and the operand in that position is a %d-tuple VALUE whose components cannot be named (a fused or computed tuple). Bind the components to their own names and pass them as separate operands."
+                                               p.Name k tw)))
+                    | Some tw, k ->
+                        Error (KernelPackArity
+                                 (sprintf "kernel parameter '%s' is declared `Tuple<%d>` but the operand in that position is a %d-tuple. Widths are matched at the TOP LEVEL only -- a `Tuple<%d>` cannot re-count across nesting. Write the operands flat, or change the annotation to `Tuple<%d>`."
+                                          p.Name k tw k tw))
+                    | None, 1 -> walk pt nt (n :: acc)
+                    | None, k ->
+                        // REGROUP: k consecutive nodes, none of which may itself
+                        // be a tuple (that would be the cross-level recount).
+                        let avail = n :: nt
+                        let taken = avail |> List.truncate k
+                        if taken.Length < k || (taken |> List.exists (fun t -> (tupleNodeWidth env t).IsSome)) then
+                            Error (KernelPackArity
+                                     (sprintf "kernel parameter '%s' is declared `Tuple<%d>` and cannot be filled from this position: the operands here are neither one %d-tuple nor %d plain operands. Parenthesize the grouping you mean -- matching is greedy left to right, so `((x, y), z)` and `(x, (y, z))` are different packs."
+                                              p.Name k k k))
+                        else
+                            walk pt (avail |> List.skip k) (List.rev taken @ acc)
+            walk lambdaInfo.Params arrays []
+            |> Result.map (fun expanded ->
+                if expanded.Length = arrays.Length then None
+                else
+                    let ids =
+                        expanded |> List.map (fun (ta: TypedExpr) ->
+                            match ta.Kind with
+                            | TExprVar (name, _, _) -> AIDVariable name
+                            | _ -> AIDLiteral (env.Builder.FreshId()))
+                    let ats =
+                        expanded |> List.map (fun (ta: TypedExpr) ->
+                            match ta.Type with
+                            | ArrayElem at -> at
+                            | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+                    Some (expanded, ids, ats, computeSDimsPerArray ats))
+
+    match spineMatch with
+    | Error e -> Error e
+    | Ok spineExpansion ->
+    let (arrays, identities, arrayTypes, sDimsPerArray) =
+        match spineExpansion with
+        | Some (a, i, at, sd) -> (a, i, at, sd)
+        | None -> (arrays, identities, arrayTypes, sDimsPerArray)
+
     // DEFAULTED TRAILING KERNEL PARAMS: when the kernel declares more params
     // than the sources supply rows and every EXCESS trailing param carries a
     // default, the apply is a defaults fill -- the omitted params become
@@ -7676,12 +8591,33 @@ and buildApplyInfo (env: TypeEnv)
             && idxParamCount > 0
             && not (arrayTypes |> List.exists (fun at -> at.IsVirtual))
             && lambdaInfo.Params.Length = arrays.Length + idxParamCount
+        // WIDTH-AWARE prefix (docs/plan-tuples-vs-arg-packs.md 6c, 5.3's
+        // "defaulted kernel params" seam): the satisfied prefix is the one
+        // whose WIDTHS sum to expectedRows, not its first `expectedRows`
+        // entries -- `lambda(x, y: Tuple<2>, s = 1.0)` over 3 rows keeps two
+        // params, not three. With every width 1 this is `expectedRows`
+        // exactly, so the ordinary case is unchanged.
+        let widthOf (p: TypedParam) =
+            match env.DeclaredTupleWidths.TryGetValue p.VarId with
+            | true, w -> w
+            | _ -> 1
+        let satisfiedPrefix =
+            let mutable acc = 0
+            let mutable n = 0
+            for p in lambdaInfo.Params do
+                if acc < expectedRows then
+                    acc <- acc + widthOf p
+                    n <- n + 1
+            if acc = expectedRows then Some n else None
         if not coIterIndexForm
            && expectedRows > 0
-           && lambdaInfo.Params.Length > expectedRows
-           && (lambdaInfo.Params |> List.skip expectedRows |> List.forall (fun p -> p.Default.IsSome)) then
-            let kept = lambdaInfo.Params |> List.truncate expectedRows
-            let dropped = lambdaInfo.Params |> List.skip expectedRows
+           && (match satisfiedPrefix with
+               | Some n -> n < lambdaInfo.Params.Length
+                           && (lambdaInfo.Params |> List.skip n |> List.forall (fun p -> p.Default.IsSome))
+               | None -> false) then
+            let n = Option.get satisfiedPrefix
+            let kept = lambdaInfo.Params |> List.truncate n
+            let dropped = lambdaInfo.Params |> List.skip n
             let newBody =
                 (dropped, lambdaInfo.Body)
                 ||> List.foldBack (fun p body ->
@@ -7690,6 +8626,97 @@ and buildApplyInfo (env: TypeEnv)
                       Span = body.Span })
             { lambdaInfo with Params = kept; Body = newBody }
         else lambdaInfo
+
+    // ---- TUPLE PARAMS: the schema's re-nesting half ----
+    // docs/plan-tuples-vs-arg-packs.md 6c. A `Tuple<k>` parameter consumes k
+    // consecutive leaves and receives them AS A TUPLE. It is realized here, in
+    // the surface, by the same body-entry-let mechanism the defaults fill
+    // above uses: the tuple param is replaced by k fresh row params and the
+    // body opens with `let p = (__tp_0, ..., __tp_{k-1})`, reusing p's own
+    // VarId so every body reference (`p[0]`) resolves unchanged.
+    //
+    // Doing it as a SURFACE rewrite rather than in codegen is what keeps this
+    // ~30 lines: after it, the schema is all-width-1, so ranks, deduction,
+    // grouping, unification, lowering and emission are the flattened path they
+    // already were, and `t[i]` is the existing TExprTupleIndex -> std::get<i>.
+    // It is the Poly whole-pack arm's move (2.5: eta-expand to the pack width,
+    // re-absorb inside) at a width the annotation makes static. The
+    // std::make_tuple the let builds is a register shuffle every optimizer
+    // folds away -- and it is the ONLY shape that needs no new IR node.
+    //
+    // The synthesized params take p's OWN element types (its annotation
+    // lowered to `IRTTuple [a1..ak]`), so unifying them against the rows
+    // downstream also pins the annotation's element slots -- the tuple the let
+    // builds then has exactly p's declared type, with nothing left to reconcile.
+    let declaredParamCount = lambdaInfo.Params.Length
+    let declaredParamWidths =
+        lambdaInfo.Params |> List.map (fun p ->
+            match env.DeclaredTupleWidths.TryGetValue p.VarId with
+            | true, w -> w
+            | _ -> 1)
+    let declaredTotalWidth = List.sum declaredParamWidths
+    // A `where` clause on a kernel that also declares a tuple parameter is
+    // REFUSED rather than silently mis-applied. Every clause addresses
+    // parameters POSITIONALLY (CommGroups / AntisymGroups are index lists) or
+    // BY NAME (`omp(a: n)`, resolved downstream in Lowering), and the expansion
+    // below renumbers the positions and removes the tuple parameter's name from
+    // the list -- so a surviving clause would land on the wrong slot or on
+    // nothing, and both failures are silent (a dropped comm group degrades to
+    // dense storage with no diagnostic; that exact bug is why the BL9001
+    // dropped-parallel guard further down exists). Nothing in the corpus writes
+    // this shape, and "comm(p, q)" between two PAIRS is not obviously meaningful
+    // anyway -- so say so instead of guessing a remapping.
+    let tupleParamWhereClash =
+        if declaredTotalWidth = declaredParamCount then None
+        elif not (List.isEmpty lambdaInfo.CommGroups)
+             || not (List.isEmpty lambdaInfo.AntisymGroups)
+             || not (List.isEmpty lambdaInfo.Parallel) then
+            Some (Other "a `where` clause on a kernel that also declares a `Tuple<N>` parameter is not supported: `comm`/`anticomm` address parameters by POSITION and the parallel strategies by NAME, and a tuple parameter changes both. Write the parameters flat (one per operand) to use a `where` clause here.")
+        else None
+    match tupleParamWhereClash with
+    | Some e -> Error e
+    | None ->
+    let lambdaInfo =
+        if declaredTotalWidth = declaredParamCount then lambdaInfo
+        else
+            let uid = env.Builder.FreshId()
+            let mutable nextIdx = 0
+            let mutable wraps : (TypedParam * TypedParam list) list = []
+            let newParams =
+                List.map2 (fun (p: TypedParam) w ->
+                    if w = 1 then
+                        let p' = { p with Index = nextIdx }
+                        nextIdx <- nextIdx + 1
+                        [p']
+                    else
+                        let elemTys =
+                            match env.Subst.Resolve p.Type with
+                            | IRTTuple ts when ts.Length = w -> ts
+                            | _ -> List.init w (fun _ -> env.Subst.Fresh())
+                        let subs =
+                            elemTys |> List.map (fun ty ->
+                                let sp : TypedParam =
+                                    { Name = sprintf "__tp%d_%s_%d" uid p.Name nextIdx
+                                      Type = ty; Index = nextIdx
+                                      VarId = env.Builder.FreshId()
+                                      Default = None; NameSpan = p.NameSpan }
+                                nextIdx <- nextIdx + 1
+                                sp)
+                        wraps <- wraps @ [(p, subs)]
+                        subs) lambdaInfo.Params declaredParamWidths
+                |> List.concat
+            let newBody =
+                (wraps, lambdaInfo.Body)
+                ||> List.foldBack (fun (p, subs) body ->
+                    let tupleTy = IRTTuple (subs |> List.map (fun sp -> sp.Type))
+                    let tupleExpr =
+                        { Kind = TExprTuple (subs |> List.map (fun sp ->
+                                    { Kind = TExprVar (sp.Name, sp.VarId, None)
+                                      Type = sp.Type; Span = body.Span }))
+                          Type = tupleTy; Span = body.Span }
+                    { Kind = TExprLet (p.Name, p.VarId, tupleExpr, body)
+                      Type = body.Type; Span = body.Span })
+            { lambdaInfo with Params = newParams; Body = newBody }
 
     let commGroups = lambdaInfo.CommGroups
     // Declared `where anticomm(...)` positions. Same axis grouping and the
@@ -8270,6 +9297,30 @@ and buildApplyInfo (env: TypeEnv)
                 [perRowType at kRank])
         |> List.concat
 
+    // ---- THE WIDTH-SCHEMA MATCH ----
+    // docs/plan-tuples-vs-arg-packs.md 6c. The parameter
+    // list is a WIDTH SCHEMA over the pack's flat leaf sequence: an
+    // unannotated parameter consumes one leaf, a `Tuple<k>` parameter consumes
+    // k. Totals must agree, or it is a hard error.
+    //
+    // `expandedRows` IS the leaf sequence at this seam. Its two existing rules
+    // are preserved verbatim because they are what makes the leaf count right:
+    // a REAL array contributes one row (its per-row slice), a VIRTUAL source
+    // (`range<I, J>`) contributes one row PER INDEX SLOT -- which is why the
+    // co-iteration index-param form needs no special case here (the synthetic
+    // range operand appended above already widened the leaf sequence by
+    // exactly the number of index params). `zip` contributed its children as
+    // separate operands upstream, so it is already k leaves.
+    //
+    // The SLICING half already happened: the tuple-param expansion at the top
+    // of this function turned every `Tuple<k>` param into k row params plus a
+    // body-entry let. So by here the schema is all-width-1 and the match is a
+    // length comparison again -- but now it is CHECKED (`declaredTotalWidth`
+    // is what the pack must supply), where it used to be waved through.
+    let schemaRows : IRType list option =
+        if lambdaInfo.Params.Length <> expandedRows.Length then None
+        else Some expandedRows
+
     // STRICT quantity slots for KERNEL parameters (BL3010, the <@> twin of
     // the dispatch-seam check in dispatchAppOrIndex): a lambda param DECLARED
     // with a quantity type (`lambda(x: Float<speed>) -> ...`) rejects a row
@@ -8277,7 +9328,9 @@ and buildApplyInfo (env: TypeEnv)
     // (still inference vars, sig None) and structural-unit params keep the
     // permissive unification below exactly.
     let kernelQuantityClash =
-        if lambdaInfo.Params.Length = expandedRows.Length then
+        match schemaRows with
+        | None -> None
+        | Some expandedRows ->
             let sigOf (t: IRType) =
                 match env.Subst.Resolve t with
                 | ArrayElem at ->
@@ -8303,21 +9356,67 @@ and buildApplyInfo (env: TypeEnv)
                             | None -> sprintf "structurally dimensioned (%s)" (ppUnitSig r)
                     Some (QuantityArgMismatch (i + 1, pu.Nominal.Value, got))
                 | _ -> None)
-        else None
+
+    // A PACK parameter (`Poly<T^k>`) absorbs the whole argument list and has no
+    // fixed width, so the schema does not describe it. Every supported spelling
+    // eta-expands to the pack width BEFORE reaching this seam (the deferred-
+    // former arm in inferApply), so a Poly param surviving here means some
+    // other route built the kernel -- stand down rather than invent a width.
+    // Disjoint from the tuple arm by construction: Unify has no
+    // `IRTPoly ~ IRTTuple` rule (5.3).
+    let hasPolyParam =
+        resolvedParamTypes |> List.exists (fun t ->
+            match t with IRTPoly _ -> true | _ -> false)
 
     let kernelParamUnifyResult =
         match kernelQuantityClash with
         | Some err -> Error err
         | None ->
-        if lambdaInfo.Params.Length = expandedRows.Length then
+        match schemaRows with
+        | Some rows ->
             // Use resolved types so the unify call sees the same shape we used
             // to compute kRank. (Reading param.Type directly could be stale.)
-            (List.zip resolvedParamTypes expandedRows)
+            (List.zip resolvedParamTypes rows)
             |> List.fold (fun acc (paramTy, row) ->
                 acc |> Result.bind (fun () -> unify env.Subst paramTy row))
                 (Ok ())
-        else
-            Ok ()  // Arity mismatch handled elsewhere; don't double-report.
+        | None when hasPolyParam || lambdaInfo.Params.IsEmpty || expandedRows.IsEmpty ->
+            Ok ()
+        | None ->
+            // THE HARD ARITY ERROR. This slot used to read
+            //   `Ok ()  // Arity mismatch handled elsewhere`
+            // and "elsewhere" did not exist (2.4): under-arity silently dropped
+            // operands and still iterated their axes (3.4's 12-cell program),
+            // over-arity passed `check` and died in g++ on an undeclared temp.
+            // Both are now this message.
+            let widthDesc =
+                if declaredTotalWidth = declaredParamCount then
+                    sprintf "%d parameter%s" declaredParamCount
+                            (if declaredParamCount = 1 then "" else "s")
+                else
+                    sprintf "%d parameter%s of total width %d"
+                            declaredParamCount
+                            (if declaredParamCount = 1 then "" else "s")
+                            declaredTotalWidth
+            let steer =
+                if declaredParamCount = 1 && declaredTotalWidth = 1 && expandedRows.Length > 1 then
+                    // 5.2's genuinely undecidable shape: one unannotated param
+                    // over a width-k pack. The pack reading and the tuple
+                    // reading are both well-formed and disagree, and the body
+                    // cannot vote (it is inferred before the param is bound).
+                    // Demand the annotation, exactly as BL3010 does for
+                    // quantities.
+                    sprintf " Write %d parameters to take the operands separately, or annotate the single parameter `Tuple<%d>` to receive them as one tuple."
+                            expandedRows.Length expandedRows.Length
+                elif declaredTotalWidth > expandedRows.Length then
+                    " Drop the extra parameters, or supply more operands."
+                else
+                    " Add parameters for the extra operands, or group them into a parameter annotated `Tuple<N>`."
+            Error (KernelPackArity
+                     (sprintf "kernel arity: this application supplies %d operand%s to a kernel with %s.%s"
+                              expandedRows.Length
+                              (if expandedRows.Length = 1 then "" else "s")
+                              widthDesc steer))
 
     match kernelParamUnifyResult with
     | Error e -> Error e
@@ -8364,7 +9463,22 @@ and buildApplyInfo (env: TypeEnv)
         // are bound to the input element types (see kernelBodyUnits). The
         // computed signature replaces whatever annotation the return type
         // resolution leaked, and op mismatches inside the body reject here.
-        kernelBodyUnits env Map.empty lambdaInfo.Body
+        // NESTED-APPLY DEFERRAL, the array sibling of the scalar OpMath
+        // deferral. This apply may itself be nested inside an enclosing
+        // lambda body that is STILL being inferred (`lambda(w) -> { let e =
+        // exp <@> (i * w * ts); ... }`): our params have just unified with the
+        // operands' element types, but those element types were stamped while
+        // the ENCLOSING param was an unresolved infer var contributing no
+        // units -- so a signature computed here can be exactly the dimensioned
+        // capture's own even when the product cancels. Defer the REJECTION
+        // (never an acceptance) to the enclosing kernel's own second pass,
+        // whose TExprApply arm rechecks this map with the outer params bound.
+        // Requires the operands to still contain unresolved types, so a
+        // fully-resolved violation still rejects here and now.
+        (match kernelBodyUnits env Map.empty lambdaInfo.Body with
+         | Error _ when env.InLambdaBody
+                        && (arrays |> List.exists (typedExprHasUnresolvedType env)) -> Ok None
+         | r -> r)
         |> Result.bind (fun bodyUnits ->
         // Infer output element type from kernel return type, falling back to input arrays.
         // Returns IRType (Phase B2). Primitives are wrapped IRTScalar.
@@ -8461,14 +9575,34 @@ and buildApplyInfo (env: TypeEnv)
                     maybeUpgrade node (elemOfType b2.Type)
                 | _ -> t
             walk lambdaInfo.Body
+        // The re-stamped body overrides the resolved return type in BOTH
+        // directions.
+        //   real -> complex: the collapse hit the return type too (the body was
+        //     typed while its params were unresolved).
+        //   complex -> real: the four complex -> real intrinsics. `abs <@>
+        //     complexArray` eta-expands to lambda(__k) -> abs(__k), and the
+        //     scalar `abs` arm types a deferred operand's application AT the
+        //     operand's own type var -- which is the lambda's return-type var.
+        //     Unifying the param with Complex128 therefore made the RESOLVED
+        //     return complex, so `abs` came out complex-with-zero-imag and
+        //     propagated into every downstream binding. The walk above already
+        //     corrected the body node to its real answer; adopt it. Narrow on
+        //     purpose: only when the body's TOP node is one of those four
+        //     intrinsics applied to a complex operand.
+        let adoptBodyElem (r: IRType) =
+            let bodyIsComplexToReal =
+                match restampedBody.Kind with
+                | TExprUnaryOp ((OpMath "abs" | OpReal | OpImag | OpArg), operand) ->
+                    (match IR.stripUnits (env.Subst.Resolve operand.Type) with
+                     | IRTScalar (ETComplex64 | ETComplex128) -> true
+                     | _ -> false)
+                | _ -> false
+            match IR.stripUnits r, IR.stripUnits restampedBody.Type with
+            | IRTScalar (ETFloat32 | ETFloat64 | ETInt32 | ETInt64), (IRTScalar (ETComplex64 | ETComplex128) as ct) -> ct
+            | IRTScalar (ETComplex64 | ETComplex128), (IRTScalar (ETFloat32 | ETFloat64) as rt) when bodyIsComplexToReal -> rt
+            | _ -> r
         let outputElemType =
-            let resolved =
-                let r = env.Subst.Resolve(lambdaInfo.ReturnType)
-                // Adopt the re-stamped body's complex type when the collapse
-                // hit the return type too.
-                match IR.stripUnits r, IR.stripUnits restampedBody.Type with
-                | IRTScalar (ETFloat32 | ETFloat64 | ETInt32 | ETInt64), (IRTScalar (ETComplex64 | ETComplex128) as ct) -> ct
-                | _ -> r
+            let resolved = adoptBodyElem (env.Subst.Resolve(lambdaInfo.ReturnType))
             match resolved with
             | IRTScalar _ as t -> restampScalar t                  // stamp walk-computed units
             | ArrayElem arr -> arr.ElemType                         // already IRType
@@ -8583,11 +9717,7 @@ and buildApplyInfo (env: TypeEnv)
                 // too: with a stale Float64 stamp the lifted C++ function
                 // would declare a double return around a std::complex body.
                 Body = restampedBody
-                ReturnType =
-                    let r = env.Subst.Resolve lambdaInfo.ReturnType
-                    match IR.stripUnits r, IR.stripUnits restampedBody.Type with
-                    | IRTScalar (ETFloat32 | ETFloat64 | ETInt32 | ETInt64), (IRTScalar (ETComplex64 | ETComplex128) as ct) -> ct
-                    | _ -> r }
+                ReturnType = adoptBodyElem (env.Subst.Resolve lambdaInfo.ReturnType) }
 
         // Store the kernel with resolved types in the typed AST. Lowering
         // walks this typed lambda and emits a lifted IRCallable referenced
@@ -8677,6 +9807,15 @@ and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
             // Recurse into args regardless -- `Array<T like Idx<n>>` has
             // `T` in a nested position.
             args |> List.iter scan
+        // `T<u>^k` (array-expression plan bug #8): the caret makes the head a
+        // type VARIABLE even though it carries a unit argument, so the
+        // args-empty rule above would miss it. The argument is a UNIT, not a
+        // type, so it is deliberately not scanned.
+        | TyAbstractArray (TyNamed (name, args), _, _)
+                when not args.IsEmpty
+                     && not (isBuiltinScalar name)
+                     && (lookupTypeDef name env).IsNone ->
+            env.Subst.RegisterTypeVarName(name)
         | TyAbstractArray (elemTy, _, _) -> scan elemTy
         | TyFunc (args, ret) -> args |> List.iter scan; scan ret
         | TyTuple ts -> ts |> List.iter scan
@@ -8704,6 +9843,12 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
         let ty = match p.Type with
                  | Some t -> lowerTypeExpr env t
                  | None -> env.Subst.Fresh()  // Infer from usage
+        // WIDTH SCHEMA (docs/plan-tuples-vs-arg-packs.md 6c): record the
+        // WRITTEN `Tuple<k>` width before the annotation is thrown away by
+        // lowering. Keyed by binder id, so the matcher at buildApplyInfo reads
+        // the declaration rather than the (by then already unified) type.
+        declaredTupleWidth p.Type |> Option.iter (fun w ->
+            env.DeclaredTupleWidths.[varId] <- w)
         paramEnv <- bindVarSimple p.Name varId ty paramEnv
         { Name = p.Name; Type = ty; Index = i; VarId = varId; Default = None; NameSpan = p.NameSpan } : TypedParam)
 
@@ -8788,7 +9933,12 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
 
     let result =
         defaultsResult |> Result.bind (fun typedParams ->
-        inferExpr paramEnv body |> Result.bind (fun tBody ->
+        // Body typing runs with InLambdaBody set: params may still be
+        // inference variables here, so unit checks at scalar position defer
+        // provisional rejections to the kernel-apply second pass (see
+        // typedExprHasUnresolvedType). Defaults above type WITHOUT the flag --
+        // they are decl-time values and keep decl-time strictness.
+        inferExpr { paramEnv with InLambdaBody = true } body |> Result.bind (fun tBody ->
             // A lambda body is a value-forming boundary: reject a wildcard `_`
             // that escaped into it (its only legitimate role is a compound-index
             // coordinate), rather than letting it reach lowering.
@@ -10621,7 +11771,16 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
             Ok (mkTyped (TExprMethodFor info) loopTy))
     | _ ->
     arrays |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArrays ->
-        // Also detect method_for(Z) where Z was bound to a zip
+        // Also detect method_for(Z) where Z was bound to a zip.
+        //
+        // NOT deepened to `resolveTypedExprDeep` alongside the tuple leaf
+        // expansion below, deliberately. `let Z = zip(A,B); let W = Z;
+        // method_for(W)` is broken today at depth 2, but it is ALSO broken at
+        // depth 1 (`method_for(Z)`: the auto-printer calls `.extents` on a
+        // zip binding) -- so deepening the hop here does not fix a program, it
+        // only swaps one g++ failure for a different one. Zip aliasing is its
+        // own defect and wants its own change; R1's depth-invariance is
+        // implemented for TUPLE operands, which is what the pack rule is about.
         match tArrays with
         | [single] when (match (resolveTypedExpr env single).Kind with TExprZip _ -> true | _ -> false) ->
             let resolved = resolveTypedExpr env single
@@ -10652,7 +11811,69 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
                 }
                 Ok (mkTyped (TExprMethodFor info) loopTy)
             | _ -> failwith "unreachable"
+        // GUARD (the method_for twin of the object_for pack guard): a zip
+        // BESIDE other operands. The two single-operand arms above are the
+        // supported co-iteration form; here the zip would become one ordinary
+        // pack slot whose array never materializes, and codegen emits an
+        // undeclared `arr<i>`. Reject with the same message both orientations
+        // share. `for (A, zip(B, C))` desugars through here too.
+        | _ when arrays.Length > 1
+                 && (tArrays |> List.exists (fun ta ->
+                        match (resolveTypedExpr env ta).Kind with TExprZip _ -> true | _ -> false)) ->
+            Error (Other zipInMultiArrayPackMsg)
         | _ ->
+        // ---- SPINE EXPANSION (docs/plan-tuples-vs-arg-packs.md 6c) ----
+        // The loop-former side of the ONE pack site: rule 3's one-level splice,
+        // so `method_for(A, B)`, `method_for((A, B))`, `let P = (A,B);
+        // method_for(P)` and `let Q = P; method_for(Q)` are one program. This
+        // also covers the IMPLICIT former on the left of `<@>` -- `P <@> k`
+        // reaches here as `inferMethodFor env [P]` (inferBinOp's OpApply
+        // normalization), which is why M4 does not need its own site.
+        //
+        // ONE level only. `method_for((A, (B, C)))` splices to the two nodes
+        // `A` and `(B, C)`; the second stays a tuple and is matched against the
+        // kernel's schema in buildApplyInfo (which is where the kernel is
+        // known -- the former is built before it). Under 6b this deep-flattened
+        // to three operands, silently equating it with `method_for(A, B, C)`.
+        //
+        // Taken only when the splice actually changes the operand list, so the
+        // overwhelmingly common no-tuple case keeps the original code path
+        // (identities and the stale-IRTInfer `getArrayType` fallback both read
+        // the SURFACE expr by index, and that indexing is only valid when the
+        // two lists are still aligned).
+        let leafArrays = packSpine env tArrays
+        if leafArrays.Length <> tArrays.Length then
+            // Same zip guard as above, re-asked over the SPINE: a tuple can
+            // now carry a zip into a multi-operand pack.
+            if leafArrays.Length > 1
+               && (leafArrays |> List.exists (fun ta ->
+                      match (resolveTypedExprDeep env ta).Kind with TExprZip _ -> true | _ -> false)) then
+                Error (Other zipInMultiArrayPackMsg)
+            else
+            let identities = leafArrays |> List.map (fun ta ->
+                match ta.Kind with
+                | TExprVar (name, _, _) -> AIDVariable name
+                | _ -> AIDLiteral (env.Builder.FreshId()))
+            // No surface expr to fall back on (a node may have come out of a
+            // tuple VALUE), so the defaulted-shape thunk stands in -- the same
+            // one the let-bound-zip arm above uses for exactly this reason.
+            let arrayTypes = leafArrays |> List.map (fun ta ->
+                loopOperandArrayType env
+                    (fun () -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+                    ta.Type)
+            let sDimsPerArray = computeSDimsPerArray arrayTypes
+            let totalSDims = List.sum sDimsPerArray
+            let info : TypedMethodForInfo = {
+                Arrays = leafArrays; Identities = identities; ArrayTypes = arrayTypes
+                SDimsPerArray = sDimsPerArray; TotalSDims = totalSDims
+                SharedIndexTypes = []
+            }
+            let loopTy = IRTLoop {
+                Kind = LKMethod; Arity = Some leafArrays.Length
+                ArrayTypes = arrayTypes |> List.map mkArrayLike; KernelType = None
+            }
+            Ok (mkTyped (TExprMethodFor info) loopTy)
+        else
         let identities = arrays |> List.map (fun arr ->
             match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
         // Same stale-IRTInfer hazard as the zip arms above.
@@ -12707,6 +13928,12 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     | TyBool | TyString | TyChar | TyUnit -> None
                     | TyBounded (b, _, _) -> why b
                     | TyTuple ts -> ts |> List.tryPick why
+                    // A width-only `Tuple<N>` has INFERRED element types, so
+                    // the static world has no shape to carry. The generic
+                    // catch-all below would say "index and other structured
+                    // types", which misnames it.
+                    | TyTupleWidth _ ->
+                        Some "`Tuple<N>` leaves its element types inferred -- write them out as `(T1, T2)`"
                     | TyNamed (n, _) ->
                         match n with
                         | "Int" | "Int32" | "Int64" | "Float" | "Float64" | "Double"

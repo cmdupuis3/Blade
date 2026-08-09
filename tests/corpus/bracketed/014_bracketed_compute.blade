@@ -1,0 +1,24 @@
+// TEST: Bracketed Compute
+// `A [op] B |> compute` on the VALUE path. The bracketed form lowers to a
+// completed loop application (object_for over the op kernel), which already
+// materializes on its own; the `|> compute` wrapper must not hide it from the
+// loop-nest expansion (it used to, emitting LOOP_OBJECT_USED_AS_VALUE).
+// Rank-2 results print FLAT in row-major order (genPrintArrayFlat).
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+// A(i) * B(j): [1*3, 1*4, 2*3, 2*4]
+let mul = A [*] B |> compute
+// EXPECT: mul = [3, 4, 6, 8]
+// A(i) + B(j): [1+3, 1+4, 2+3, 2+4]
+let add = A [+] B |> compute
+// EXPECT: add = [4, 5, 5, 6]
+// Non-commutative: A(i) - B(j), left operand indexes the OUTER axis.
+let sub = A [-] B |> compute
+// EXPECT: sub = [-2, -3, -1, -2]
+// The computed outer product feeds a downstream combinator: 3+4+6+8.
+let total = reduce(A [*] B |> compute, (+))
+// EXPECT: total = 21
+// Duality pin: the documented desugar `A [op] B = method_for(A, B) <@> (op)`
+// gives the same cells through the explicit spelling.
+let viaMethodFor = method_for(A, B) <@> (*) |> compute
+// EXPECT: viaMethodFor = [3, 4, 6, 8]

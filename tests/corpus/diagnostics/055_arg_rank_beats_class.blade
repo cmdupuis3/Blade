@@ -1,0 +1,13 @@
+// TEST: Diag Direct Call Rank Message Beats Class Message (diag)
+// ERROR: BL3001 @ 12:11
+// ERROR-CONTAINS: rank mismatch
+// PRECEDENCE pin, not a new refusal. Array-vs-scalar at a direct call was
+// ALREADY caught (firstArgRankClash); the element-class check added beside it
+// runs LAST precisely so the rank message -- which names the actual defect --
+// keeps this call site. If the class check ever runs first, this flips to a
+// "declared Float64 but the argument is Array<...>" message and this pin
+// fails, which is the intended alarm.
+type NIdx = Idx<3>
+function f(x: Float64) -> Float64 = x + 1.0
+let xs: Array<Float64 like NIdx> = [1.0, 2.0, 3.0]
+let r = f(xs)

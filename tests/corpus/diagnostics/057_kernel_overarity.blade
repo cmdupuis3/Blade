@@ -1,0 +1,15 @@
+// TEST: Diag Kernel Over Arity (diag)
+// ERROR: BL3002
+// ERROR-CONTAINS: supplies 2 operands to a kernel with 3 parameters
+// ============================================================================
+// The other side of the same hole (docs/plan-tuples-vs-arg-packs.md 3.4): more
+// kernel parameters than pack leaves. Less dangerous than under-arity only
+// because it did not survive to a wrong answer -- it passed `blade check` and
+// then died in g++ with "'__v6' was not declared in this scope", a message
+// naming a compiler temporary and pointing at generated C++.
+//
+// Same one check now catches both directions, and says which way it is off.
+// ============================================================================
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+let g = object_for(lambda(a, b, c) -> a + b + c) <@> (A, B) |> compute

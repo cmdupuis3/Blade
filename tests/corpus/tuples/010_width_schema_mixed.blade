@@ -1,0 +1,65 @@
+// TEST: Width Schema Mixed Params
+// The width-schema matcher itself (docs/plan-tuples-vs-arg-packs.md 6c): a
+// kernel's parameter list is a SCHEMA matched greedily, left to right, against
+// the pack's TOP-LEVEL SPINE -- an unannotated parameter takes one plain node,
+// `Tuple<k>` prefers one k-wide tuple node and otherwise regroups k plain
+// nodes.
+//
+// `lambda(x, y: Tuple<2>)` therefore slices a 3-node pack as 1 + 2, and slices
+// `(A, (B, C))` as 1 + <that node>. Both give y the same pair, which is the
+// CONDITIONAL equivalence `f(a, (b,c)) == f(a, b, c)` -- conditional because
+// the annotation is what licenses it. Without the annotation the two spellings
+// are different packs (diagnostics/061), which is exactly what 6c bought back
+// from 6b's unconditional deep-flatten.
+
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let B: Array<Float64 like Idx<2>> = [10.0, 20.0]
+let C: Array<Float64 like Idx<2>> = [100.0, 200.0]
+
+let K = object_for(lambda(x, y: Tuple<2>) -> x + y[0] + y[1])
+
+// Fully flat: three plain nodes, sliced 1 + 2 by REGROUPING the last two.
+let s0 = K <@> (A, B, C) |> compute
+// The group written as a node: two nodes, and y takes the second DIRECTLY
+// because its top-level width is 2. Same loop, same values as s0.
+let s1 = K <@> (A, (B, C)) |> compute
+// A bound tuple supplying that node, and the same at one more alias hop (the
+// M1 axis crossed with the schema): tuple-ness is read off the STATIC type, so
+// alias depth is still invisible.
+let t = B, C
+let u = t
+let s3 = K <@> (A, t) |> compute
+let s4 = K <@> (A, u) |> compute
+// EXPECT: s0 = [111, 211, 121, 221, 112, 212, 122, 222]
+// EXPECT: s1 = [111, 211, 121, 221, 112, 212, 122, 222]
+// EXPECT: s3 = [111, 211, 121, 221, 112, 212, 122, 222]
+// EXPECT: s4 = [111, 211, 121, 221, 112, 212, 122, 222]
+
+// PARENS NOW MEAN SOMETHING (6c rule 4). Nesting the OTHER pair needs the
+// annotation to move with it -- `((A, B), C)` against this same K is an error,
+// because x is unannotated and the first node is a tuple. Move the annotation
+// and the same pack reads the other grouping:
+let M = object_for(lambda(p: Tuple<2>, z) -> p[0] + p[1] + z)
+let s7 = M <@> ((A, B), C) |> compute
+let s8 = M <@> (A, B, C) |> compute
+// EXPECT: s7 = [111, 211, 121, 221, 112, 212, 122, 222]
+// EXPECT: s8 = [111, 211, 121, 221, 112, 212, 122, 222]
+// (Equal to s0 here only because `+` is associative and commutative over these
+// operands -- the point is that BOTH groupings are now WRITEABLE, which under
+// 6b they were not: every parenthesization collapsed to one program.)
+
+// The tuple param need not be LAST: the schema is a fold over the parameter
+// list, not a trailing-rest rule.
+let L = object_for(lambda(y: Tuple<2>, x) -> y[0] * 10.0 + y[1] + x)
+let s5 = L <@> (A, B, C) |> compute
+// EXPECT: s5 = [120, 220, 130, 230, 130, 230, 140, 240]
+
+// A width-3 parameter absorbing the WHOLE pack -- ruling 2's "`lambda(r:
+// Tuple<4>)` also legal", one arity down.
+let M = object_for(lambda(p: Tuple<3>) -> p[0] + p[1] + p[2])
+let s6 = M <@> (A, B, C) |> compute
+// EXPECT: s6 = [111, 211, 121, 221, 112, 212, 122, 222]
+// Identical to s0, as it must be: same three leaves, same grid, and
+// `x + y[0] + y[1]` and `p[0] + p[1] + p[2]` are the same sum. Only the
+// SLICING of the schema differs, and slicing is not supposed to be observable
+// in the iteration.

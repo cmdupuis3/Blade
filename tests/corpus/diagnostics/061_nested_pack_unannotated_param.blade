@@ -1,0 +1,28 @@
+// TEST: Diag Nested Pack Against Unannotated Param (diag)
+// ERROR: BL3002
+// ERROR-CONTAINS: annotate the parameter `Tuple<2>`
+// ============================================================================
+// 5.2's undecidable shape, one level out (docs/plan-tuples-vs-arg-packs.md 6c
+// rule 2). The pack `(A, (B, C))` is TWO nodes; parameter `b` is unannotated
+// and the node in its position is a 2-tuple. Two readings type and disagree --
+// b is the pair, or the pack was meant flat and is three operands -- and the
+// body cannot vote, because kernel bodies are inferred before their parameters
+// are bound (5.1). So the annotation is demanded, exactly as for the
+// one-parameter-over-a-zip case (diagnostics/058) and for quantities (BL3010).
+//
+// THIS PROGRAM USED TO RUN. Under 6b's superseded free-monoid ruling the pack
+// deep-flattened to three leaves, `(A, (B, C))` was indistinguishable from
+// `(A, B, C)`, and this produced the 12-cell grid. That equivalence is what
+// 6c takes back: making it UNCONDITIONAL cost nested tuples as data, `Poly`'s
+// documented top-level arity, and any possibility of parentheses meaning
+// something. It survives CONDITIONALLY, licensed by the annotation this
+// message asks for -- tuples/010 pins `lambda(x, y: Tuple<2>)` giving the same
+// answer over both spellings.
+//
+// Both escapes named in the message are pinned working: annotate (tuples/010),
+// or write the pack flat (tuples/009).
+// ============================================================================
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+let C: Array<Float64 like Idx<2>> = [5.0, 6.0]
+let g = object_for(lambda(a, b, c) -> a + b + c) <@> (A, (B, C)) |> compute

@@ -1,0 +1,14 @@
+// TEST: Diag Direct Call String Arg For Float Param (diag)
+// ERROR: BL3001
+// ERROR-CONTAINS: argument 1 of 'f'
+// (No `@ line:col` on purpose. The caret at this seam lands on the LAST
+// argument whatever index the message names -- pre-existing behavior shared
+// with the neighbouring rank diagnostic, see diagnostics/055 -- so pinning
+// the column here would cement a position that is arguably wrong.)
+// A DIRECT function application does not unify its arguments against the
+// declared parameters (a `function`'s arrow type is built once, with type
+// variables SHARED across every call site, so unifying at one site would
+// over-constrain the next). Before the element-CLASS check this passed
+// `blade check` and died in g++ with a std::string/double mismatch.
+function f(x: Float64, y: Float64) -> Float64 = x + y
+let r = f("hello", "world")

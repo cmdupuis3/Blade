@@ -208,7 +208,7 @@ static spec = [(L0e, 16), (L1o, 8), (L2e, 4)] // 16 scalars, 8 vectors, 4 rank-2
 ```
 
 Everything downstream is parameterized by static spec arrays — this is the
-`static function` / `let const` machinery of the core language doing
+`static function` / `let static` machinery of the core language doing
 representation theory at compile time.
 
 ### 6. `IrrepsIdx<spec>` — the block-structured index

@@ -1051,7 +1051,9 @@ let private typeDeclNames (td: TypeDecl) : string list =
 let private bindingKind (b: Binding) =
     match b.Mutability with
     | BindMut -> "let mut"
-    | BindConst -> "let const"
+    // BindConst is internal-only (let static / local function desugar);
+    // `const` is not surface syntax.
+    | BindConst -> "let static"
     | BindLet -> "let"
 
 let private collectSourceBindings (prog: Ast.Program) =

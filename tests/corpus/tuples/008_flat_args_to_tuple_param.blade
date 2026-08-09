@@ -1,0 +1,56 @@
+// TEST: Flat Args To Tuple Param
+// This file REPLACES `008_flat_args_to_tuple_param_rejects.blade`, whose
+// header said in so many words: delete this when the width-schema matcher
+// lands. It pinned that `addPair(b, c)` was REFUSED -- today's behaviour at
+// the time, not the intended one -- so that the matcher stage would have to
+// come back here rather than discover the gap later. It has, and the sign of
+// the pin flips.
+//
+// Design C (docs/plan-tuples-vs-arg-packs.md 6b) reads a FUNCTION's parameter
+// list as the same width schema a kernel's is: `t: Tuple<2>` consumes two
+// flat leaves OR one already-tuple-typed argument. So all three spellings are
+// one call.
+
+function addPair(t: Tuple<2>) -> Float64 = t[0] + t[1]
+
+let b = 1.0
+let c = 2.0
+let t = b, c
+
+let flat = addPair(b, c)
+let paren = addPair((b, c))
+let bound = addPair(t)
+// EXPECT: flat = 3
+// EXPECT: paren = 3
+// EXPECT: bound = 3
+
+// MIXED schema at a direct call: the fold is per-parameter, so a width-1
+// parameter beside a width-2 one slices 1 + 2 out of the flat list.
+function mix(a: Float64, p: Tuple<2>) -> Float64 = a * 100.0 + p[0] * 10.0 + p[1]
+let d = 3.0
+let u = c, d
+let m0 = mix(b, c, d)
+let m1 = mix(b, (c, d))
+let m2 = mix(b, u)
+// EXPECT: m0 = 123
+// EXPECT: m1 = 123
+// EXPECT: m2 = 123
+
+// The fully written tuple type is the same schema entry as the width-only one.
+function written(p: (Float64, Float64)) -> Float64 = p[0] + p[1]
+let w0 = written(3.0, 4.0)
+let w1 = written((3.0, 4.0))
+// EXPECT: w0 = 7
+// EXPECT: w1 = 7
+
+// CURRYING IS NOT DISTURBED, and this is the reason the regrouping is
+// deliberately ONE-DIRECTIONAL. The reverse rewrite -- expanding a tuple
+// argument into k scalar leaves for k scalar parameters -- is NOT performed,
+// because `f(t)` on a 2-parameter `f` already MEANS partial application and
+// the language cannot have both readings of it. Regrouping only ever fires
+// where the 1:1 pairing has no reading at all, so it can turn an error into a
+// call but never change a call that already type-checks.
+function two(x: Float64, y: Float64) -> Float64 = x + y
+let partial = two(1.0)
+let applied = partial(2.0)
+// EXPECT: applied = 3

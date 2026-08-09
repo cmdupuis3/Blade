@@ -249,9 +249,10 @@ let internal trySyntacticBuiltin (name: string) =
 /// fold.
 let knownBuiltinNames () : Set<string> =
     let core =
-        [ "exp"; "log"; "sqrt"; "sin"; "cos"; "tan"
+        [ "exp"; "log"; "log10"; "sqrt"; "sin"; "cos"; "tan"
           "sinh"; "cosh"; "tanh"; "asin"; "acos"; "atan"
-          "floor"; "ceil"; "abs"; "min"; "max"; "length"; "prodsum" ]
+          "floor"; "ceil"; "atan2"; "log_base"
+          "abs"; "min"; "max"; "length"; "prodsum" ]
     Set.unionMany [ Set.ofList core
                     externalBuiltins.Keys |> Set.ofSeq
                     syntacticBuiltins.Keys |> Set.ofSeq ]
@@ -744,15 +745,26 @@ and private evalBuiltin env fuel depth (name: string) (args: Expr list) : Result
         let asFloat = function SVInt n -> Some (float n) | SVFloat f -> Some f | _ -> None
         let mathFns : Map<string, float -> float> =
             Map.ofList [
-                "exp", exp; "log", log; "sqrt", sqrt
+                "exp", exp; "log", log; "log10", log10; "sqrt", sqrt
                 "sin", sin; "cos", cos; "tan", tan
                 "sinh", sinh; "cosh", cosh; "tanh", tanh
                 "asin", asin; "acos", acos; "atan", atan
                 "floor", floor; "ceil", ceil
             ]
+        // Binary math intrinsics (Grad.binaryMathIntrinsics). Same whitelist
+        // discipline as the unary table, one arity up; log_base folds through
+        // the same log/log quotient CodeGen emits, so a static fold and a
+        // runtime evaluation agree.
+        let mathFns2 : Map<string, float -> float -> float> =
+            Map.ofList [
+                "atan2", (fun y x -> atan2 y x)
+                "log_base", (fun x b -> log x / log b)
+            ]
         match name, argVals with
         | _, [v] when (Map.containsKey name mathFns) && (asFloat v).IsSome ->
             Ok (SVFloat (mathFns.[name] (asFloat v).Value))
+        | _, [a; b] when (Map.containsKey name mathFns2) && (asFloat a).IsSome && (asFloat b).IsSome ->
+            Ok (SVFloat (mathFns2.[name] (asFloat a).Value (asFloat b).Value))
         | "abs", [SVInt n] -> Ok (SVInt (abs n))
         | "abs", [SVFloat f] -> Ok (SVFloat (abs f))
         | "min", [SVInt a; SVInt b] -> Ok (SVInt (min a b))

@@ -1,0 +1,20 @@
+// TEST: Nested Map Complex Unit Residue Rejects
+// ERROR: BL3006
+// ============================================================================
+// The complex twin of unit-errors/004, and the one that pins the DEFERRAL as
+// a deferral rather than a surrender. `i * w * ts * ts` takes the array/scalar
+// broadcast path (`i * w` resolves Complex128, so the scalar operand is
+// concrete and the broadcast arm fires), which stamps the provisional `day`
+// the nested apply used to reject on. That rejection now defers -- and the
+// enclosing kernel's recheck must still refuse this one, because the residue
+// is real: 1/day * day * day = day.
+// ============================================================================
+Unit second
+Unit day = 86400 * second
+let i = complex(0.0, 1.0)
+let ts: Array<Float<day> like Idx<3>> = [1.0, 2.0, 3.0]
+let ws: Array<Float<1/day> like Idx<2>> = [1.0, 2.0]
+let out = ws <@> lambda(w) -> {
+    let e = exp <@> (i * w * ts * ts)
+    reduce(e, (+))
+} |> compute

@@ -65,7 +65,7 @@ open Blade.Ast
 /// Keep in sync with StaticEval.evalBuiltin and derivRule below.
 let mathIntrinsics : Set<string> =
     Set.ofList [
-        "exp"; "log"; "sqrt"
+        "exp"; "log"; "log10"; "sqrt"
         "sin"; "cos"; "tan"
         "sinh"; "cosh"; "tanh"
         "asin"; "acos"; "atan"
@@ -73,6 +73,21 @@ let mathIntrinsics : Set<string> =
     ]
 
 let isMathIntrinsic (name: string) : bool = Set.contains name mathIntrinsics
+
+/// BINARY math intrinsics -- plain two-argument calls (`atan2(y, x)`) that
+/// TypeCheck rewrites to `TExprBinOp (Elementwise, OpMath2 name, ...)` when the
+/// name is not user-bound. Deliberately a SEPARATE set from `mathIntrinsics`:
+/// that one is documented unary and `TypeCheck.isUnaryIntrinsic` /
+/// `etaExpandFunctionKernel` read it for an arity they cannot otherwise
+/// recover, so widening it would eta-expand `atan2` to one parameter.
+/// Real-only (neither has a std::complex overload), and their result is
+/// always dimensionless -- see TypeCheck.unitRulesForOp's OpMath2 arms.
+/// Keep in sync with StaticEval.evalBuiltin, `adjointOf`'s binary-intrinsic
+/// arm below, and CodeGen's IRMath2 rendering.
+let binaryMathIntrinsics : Set<string> =
+    Set.ofList [ "atan2"; "log_base" ]
+
+let isBinaryMathIntrinsic (name: string) : bool = Set.contains name binaryMathIntrinsics
 
 /// Subset of the intrinsics that have std::complex overloads in <complex>
 /// and so are permitted on complex operands (result is complex, same
@@ -109,6 +124,10 @@ let private derivRule (name: string) (u: Expr) : Expr option =
     match name with
     | "exp" -> Some (call "exp" [u])
     | "log" -> Some (div (fLit 1.0) u)
+    // d/du log10(u) = 1/(u ln 10). `log(10.0)` is left symbolic rather than
+    // spelled as a decimal so the emitted derivative carries the same rounding
+    // as the forward pass's std::log10 base; both back ends constant-fold it.
+    | "log10" -> Some (div (fLit 1.0) (mul u (call "log" [fLit 10.0])))
     | "sqrt" -> Some (div (fLit 1.0) (mul (fLit 2.0) (call "sqrt" [u])))
     | "sin" -> Some (call "cos" [u])
     | "cos" -> Some (neg (call "sin" [u]))
@@ -1020,6 +1039,31 @@ let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list
          | Some d ->
              let pre, c = bindCot rc cot
              adjointOf rc u (mul c d) |> Result.map (fun ss -> pre @ ss))
+    // BINARY intrinsics. Their partials are handled here rather than in
+    // `derivRule`, whose signature (name -> Expr -> Expr option) is
+    // structurally unary: it returns ONE derivative of ONE forward operand, so
+    // a two-argument rule has nowhere to live in that table without changing
+    // every caller. The chain rule is applied per operand right here, which is
+    // what the table's consumer does anyway.
+    //   atan2(y, x): d/dy =  x/(x^2+y^2),  d/dx = -y/(x^2+y^2)
+    //   log_base(x, b) = log x / log b:
+    //                    d/dx = 1/(x log b),  d/db = -log x/(b (log b)^2)
+    // Without this arm both would fall to the `Ok []` catch-all below and
+    // silently contribute a ZERO gradient.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [a; b]) when isBinaryMathIntrinsic name
+                                       && not (Map.containsKey name rc.Ctx.Decls) ->
+        let pre, c = bindCot rc cot
+        let (dA, dB) =
+            match name with
+            | "atan2" ->
+                let denom = add (mul a a) (mul b b)
+                (div b denom, neg (div a denom))
+            | _ ->  // log_base(x, b)
+                let lb = call "log" [b]
+                (div (fLit 1.0) (mul a lb),
+                 neg (div (call "log" [a]) (mul b (mul lb lb))))
+        adjointOf rc a (mul c dA) |> Result.bind (fun sa ->
+        adjointOf rc b (mul c dB) |> Result.map (fun sb -> pre @ sa @ sb))
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar _ }, _) ->
         // array read of a non-diff array, or int-typed call -- no adjoint
         Ok []

@@ -1,0 +1,53 @@
+import units.SI
+
+Unit day = 86400 * second
+Unit flux
+
+Unit time: day
+Unit angular_frequency: 1 / day
+
+let i = complex(0.0, 1.0)
+
+function covariance(x: T^1, y: T^1) where comm(x, y) = {
+    let n = extents(x)
+    prodsum(x - reduce(x, (+)) / n, y - reduce(y, (+)) / n) / n
+}
+
+/// Generalized Lomb-Scargle DFT: the complex, phase-preserving form of the
+/// Scargle (1982) periodogram, for unevenly sampled data.
+///
+/// `t_zero` is the shared phase epoch -- "time since xyz". Hold it constant
+/// across a field of series and the returned phases are directly comparable.
+function lsdft(s_raw: U^1, t_raw: T<time>^1,
+               omegas: T<angular_frequency>^1, t_zero: T<time>^0 = 0.0)
+where omp(omegas: 1) = {
+    let n = extents(t_raw)
+    let s = s_raw - reduce(s_raw, (+)) / n
+    let s_var = covariance(s, s)
+
+    // Analytically inert: a and b below are invariant under this shift. It is
+    // here only to keep w*t small when t_raw carries an absolute epoch (Julian
+    // dates cost ~6 digits without it). The phase reference is the rotation at
+    // the end, not this subtraction.
+    let ts = t_raw - t_zero
+
+    omegas <@> lambda(w) -> {
+        // The only loop over the time axis. Everything below is scalar.
+        let e = exp <@> (i * w * ts)        // e^{iwt}
+        let Z1 = prodsum(s, e)              // sum_t s_t e^{iwt}
+        let Z2 = prodsum(e, e)              // sum_t e^{2iwt} -- one complex multiply
+
+        // tau enters only as w*tau = arg(Z2)/2: the 1/(2w) inside tau cancels
+        // the w that multiplies it, so tau is never formed and w = 0 is not a
+        // singularity.
+        let P = Z1 * exp(-i * arg(Z2) / 2)  // sum_t s_t e^{iw(t-tau)}
+
+        // sum cos^2(w(t-tau)) = (n + |Z2|)/2 and sum sin^2 = (n - |Z2|)/2,
+        // exactly -- tau is *defined* to null the cross term, so neither
+        // denominator needs a reduction of its own.
+        let a = real(P) / sqrt((n + abs(Z2)) / 2)
+        let b = imag(P) / sqrt((n - abs(Z2)) / 2)
+
+        complex(a, b) * exp(i * w * t_zero) / sqrt(2.0 * s_var)
+    }
+}

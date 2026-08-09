@@ -128,7 +128,7 @@ Over `ArrayExpr` (results are `ArrayExpr`):
 
 | Combinator | Signature sketch | Semantics |
 |-----------|------------------|-----------|
-| `zip(A₁..Aₙ)` | → Tuple elements over shared k = min rank prefix | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; output symmetry = intersection where all inputs agree; kernel receives ONE tuple argument |
+| `zip(A₁..Aₙ)` | → Tuple elements over shared k = min rank prefix | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; output symmetry = intersection where all inputs agree; kernel receives one flat parameter per array by default (`lambda(a,b)`), or the whole `n`-tuple as one value if its parameter is written `Tuple<n>` (§2.8) |
 | `align(A₁..Aₙ, spec)` | → `AlignedExpr` | zip + stencil metadata (dims, offsets, boundary ∈ Shrink/Pad/Periodic/Reflect); kernel receives N separate arguments |
 | `stencil(A, {d: offsets}, boundary)` | sugar | desugars to `align` of `shift`s |
 | `stack(A₁..Aₙ)` | → rank+1, fresh leading symmetry class | `stack(A,B,C)(k)` selects array k |
@@ -143,11 +143,100 @@ Over `ArrayExpr` (results are `ArrayExpr`):
 
 | Syntax | Mutable in scope | Passable to `mut` param |
 |--------|------------------|-------------------------|
-| `let const x = e` | no | no |
+| `let static x = e` | no | no |
 | `let x = e` | yes | no |
 | `let mut x = e` | yes | yes |
 
 All parameters pass by reference; `mut` on a parameter permits callee mutation.
+
+### 2.8 Tuples and argument packs
+
+An operand list — a loop former's arguments, a kernel's call-site pack — is
+matched against a kernel's parameter list on its **top-level spine**: each
+written group or tuple-typed value (alias-invariant by its static type, not
+by how many `let`s named it) is one *node*, and nesting **inside** a node is
+preserved, not flattened. `f(a, (b, c))` and `f(a, b, c)` are therefore
+different packs in general — two nodes vs. three — and become the *same*
+program only when the parameter schema licenses it (below); written
+parenthesization is otherwise meaningful. Alias depth is unobservable the
+same way: given `let P = (A, B); let Q = P`, the pack `K <@> Q` equals
+`K <@> (A, B)` — naming a pack does not change what it means.
+
+`Tuple<N>` (`N` an integer literal, `N >= 2`) is the width-only tuple
+annotation. It fixes only how many *top-level* slots a value or parameter
+occupies — nesting inside the annotated value is not counted, so a
+`Tuple<4>` cannot re-count across two nested `Tuple<2>`s (`((a,b),(c,d))` is
+two nodes, not four; write the flat spelling `(a,b,c,d)` instead — the one
+thing this ruling gives up). Element types stay inferred. A bare comma
+**constructs** a tuple at any binding site — `let t = b, c` has type
+`Tuple<2>` — matching the parenthesized literal `(b, c)` byte-for-byte from
+the checker down; only the *pattern* side still requires parens (`let (a, b)
+= t` destructures, `let a, b = t` does not). A literal `(a, b)` written
+directly as an argument is a tuple value the same way — it needn't be
+let-bound first.
+
+**Kernel and function parameter lists are width schemas**, matched
+**greedily, left to right**, against the pack's top-level spine, with no
+backtracking. At each schema position: an unannotated parameter takes one
+plain node; if that node is instead a tuple, it is a hard error (`BL3002`,
+"tuple-ness is never inferred") demanding either an annotation or a flat
+rewrite. A `Tuple<k>` parameter tries, in order: **(1) direct bind** — one
+tuple node whose own top-level width is exactly `k` binds as a single value,
+preserving whatever is nested inside it; **(2) splice** — failing that, if
+the schema wants `k` separate plain parameters there and the pack instead
+offers one tuple node of width `k`, it unpacks once into its `k` components
+(this is `f((a,b)) == f(a,b)` and the `K <@> P` alias case); **(3) regroup**
+— failing both, `k` *consecutive plain* nodes combine into the one `Tuple<k>`
+parameter (no tuple node was written at all, e.g. `(A, B, C)` sliced 1 + 2).
+A leftover node or parameter after the scan is an arity error. Because
+matching never backtracks, it is fully determined by what was written —
+`f(t1, a, b)` (a tuple node, then two plain values) and `f(1.0, 2.0, a)`
+(three plain values) read differently against `f(y: Tuple<2>, z: Float64)`,
+and the reading you don't get is available by writing the other grouping
+explicitly (`f((t1, a), b)` against a matching written type) — parentheses
+disambiguate precisely because structure survives. Components read with
+`t[k]` projection, chainable into nested structure (`t[0][1]`; `t.0` does not
+exist; tuple *patterns* like `lambda((a, b))` still don't parse). This makes
+the pack/tuple distinction **always a written one** — never inferred from a
+kernel body — because a kernel's parameters are matched against the pack only
+*after* its body has already been type-checked against fresh variables; an
+inferred reading would make that matching order-dependent and unsound.
+
+Nested tuples are real data under direct binding — a `Tuple<2>` parameter
+facing one 2-wide tuple node receives the whole node, not its splice, so a
+fully written nested type such as `((Float64,Float64),(Float64,Float64))`
+carries a pair of pairs through to the body and `r[0][1]` chains correctly.
+(The width-only `Tuple<2>` spelling does *not* yet carry this: its element
+slots are fresh inference variables nothing at a direct call writes into, so
+a nested value passed through one defaults its slot to a scalar and the
+projection chain fails in codegen, not in `check` — a known, separate gap in
+the direct-call argument seam, not of one-level matching itself.) Symmetrically, **a direct call never splices**: at
+`two(x: Float64, y: Float64)`, one tuple argument (`two(pair)`) is read as
+the whole first parameter under currying's existing partial-application
+rule, never as two scalars for `x` and `y` — so it lands as an ordinary type
+mismatch against `x`'s declared type rather than a splice. The paren-dropping
+splice (`f((a,b)) == f(a,b)`) is a property of the operand/kernel seam
+(`K <@> P`, loop formers) only; write direct calls flat, or against a
+parameter `Tuple`-annotated to receive the whole argument.
+
+The same annotation reads one level down inside a loop former: given
+`zip(B, C)`, `method_for(zip(B, C)) <@> lambda(p: Tuple<2>) -> ...` binds `p`
+to the co-iterated pair per iteration, equivalent to the flattened
+`lambda(a, b) -> ...` spelling over the same zip — an opt-in way to receive
+"one tuple argument" per iteration, rather than a second competing default.
+
+Two shapes are refused rather than guessed at:
+
+- A `where` clause (`comm`, `omp`, ...) together with a `Tuple<N>` kernel
+  parameter is refused (`BL3999`): `comm`/`anticomm` address parameters by
+  position and the parallel strategies by name, and realizing a `Tuple<N>`
+  parameter as its `k` row parameters renumbers both. Write the parameters
+  flat to use a `where` clause.
+- `zip(...)` cannot appear beside another array in one operand pack —
+  `(A, zip(B, C))` is refused (`BL3999`), both loop orientations. Co-iterating
+  a zip nested inside an outer loop is a real feature, just not implemented
+  yet; hoist the zip to its own `<@>`, or pass its arrays as separate
+  operands.
 
 ## 3. Index Types
 
@@ -485,7 +574,7 @@ where comm(xᵢ, xⱼ), omp(x₁: 2), tdim({ extent: e, symm: k, name: "freq" })
 
 Return type follows `where` because it may depend on constraints (`comm` can
 produce `SymIdx` outputs). Nested `function` declarations desugar to
-`let const` lambdas.
+immutable lambda bindings (internally the same marker `let static` uses).
 
 ### 5.2 Lambdas
 
@@ -532,8 +621,8 @@ not currently a surface construct.
 
 ### 5.4 Static functions and type-level computation
 
-`static function` may capture only `let const`/static values and is callable
-at compile time; `let const` values close over literals, other consts, and
+`static function` may capture only `let static`/static values and is callable
+at compile time; `let static` values close over literals, other statics, and
 static applications. Static functions appear in type positions
 (`Idx<triangle(n)>`). No totality proofs (vs Idris/Agda); explicit marking
 (vs C++ constexpr's syntactic restrictions). `static type` functions
@@ -786,7 +875,13 @@ the pack via the poly former `method_for(range<Idx<arity(p)>>)`. Recursive
 kernels need no explicit base case: `f(())`
 returns f's identity element. Nested tuples preserve structure (`arity` counts
 top level; `comm` does not penetrate sub-tuples; no deep indexing —
-destructure instead).
+destructure instead): `object_for(f) <@> (A, (B, C))` is arity **2**, not 3 —
+`(B, C)` is one tuple-typed argument, distinct from
+`object_for(f) <@> (A, B, C)`'s arity 3 (§2.8). A tuple-typed operand at a
+`Poly` position is one argument, not iterable components, so passing an
+actual tuple *of arrays* there is refused (`BL3002`): pass the components as
+separate operands, or use a kernel whose parameter there is annotated
+`Tuple<k>` instead of folded into the `Poly` pack.
 
 ### 8.3 Identity groups
 
@@ -1259,7 +1354,8 @@ library concern.
 
 §5 covers semantics. Grammar reminders: `where` before return type; `omp`/
 `cuda`/`tdim` clauses; `lambda(args) -> body`; `static` values/functions;
-`static type` functions; local `function` = `let const` lambda.
+`static type` functions; local `function` = an immutable lambda binding
+(internally the same marker `let static` uses).
 
 ### 15.4 Control and data
 
