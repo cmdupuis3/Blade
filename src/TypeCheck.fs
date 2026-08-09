@@ -10212,9 +10212,28 @@ and buildApplyInfo (env: TypeEnv)
                     when (match env.Subst.Resolve operand.Type with ArrayElem _ -> true | _ -> false) ->
                 Some (match op with OpReal -> "real" | OpImag -> "imag" | _ -> "arg")
             | _ -> typedExprChildren e |> List.tryPick findBadComplexAccessor
+        // The test is the body's RESULT TYPE, not its syntactic shape. Keying
+        // on `TExprCompute` at the top caught only the spelling that happens to
+        // wear its compute on the outside: a CALL returning an array
+        // (`lambda(x) -> scaleRow(x)`) has the same array-valued body, slipped
+        // past, and compiled to a program that ran clean and printed `[[], []]`
+        // -- a silent wrong answer, which is strictly worse than the codegen
+        // backstop the block-bodied spelling hits.
+        //
+        // The passthrough exemption named above is preserved explicitly: a body
+        // that IS one of the kernel's params (`lambda(row) -> row`) hands back a
+        // row codegen already has, so it needs no materialization.
+        let bodyIsArrayValued =
+            match env.Subst.Resolve lambdaInfo.Body.Type with
+            | ArrayElem _ -> true
+            | _ -> false
+        let bodyIsBarePassthrough =
+            match lambdaInfo.Body.Kind with TExprVar _ -> true | _ -> false
         let arrayValuedComputeBody =
             kernelOutputRank >= 1 &&
-            (match lambdaInfo.Body.Kind with TExprCompute _ -> true | _ -> false)
+            (match lambdaInfo.Body.Kind with
+             | TExprCompute _ -> true
+             | _ -> bodyIsArrayValued && not bodyIsBarePassthrough)
         match findBadComplexAccessor lambdaInfo.Body with
         | Some name -> Error (IntrinsicComplexScalarOnly name)
         | None ->
