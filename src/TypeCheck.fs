@@ -7349,6 +7349,51 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         // Arithmetic, comparison, logical
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
+            // DEMAND SITE for the caret shorthand. A bare `T^k` parameter is an
+            // arity-k inference VAR, not an IRTArray (LookupOrCreateTypeVar):
+            // the caret pins the RANK and the shape is materialized only when
+            // some demand supplies it. `prodsum`, `reduce` and `extents` are
+            // demands; an ARITHMETIC operator was not -- so `s * 2.0` on
+            // `s: U^1` matched neither the both-arrays zip arm nor the
+            // array/scalar broadcast arm below (both test `ArrayElem`, which an
+            // IRTInfer is not) and fell into inferArithType's SCALAR promotion,
+            // typing the whole result `Float64`. Nothing failed at the
+            // declaration -- the var stayed unbound -- so the scalar return type
+            // surfaced far away at a caller. Whether a body typed depended on
+            // whether something ELSE in it (an `extents(s)`, a `prodsum(s,..)`)
+            // happened to materialize the var first: ordering, not meaning.
+            //
+            // An arity constraint k >= 1 is a WRITTEN declaration that the value
+            // is a rank-k array, so shaping it here decides nothing the
+            // signature had not already decided. Left alone: arity 0 (`T^0` /
+            // bare `T`, which register no constraint) and unconstrained vars (an
+            // unannotated kernel param, which may still resolve to a scalar).
+            //
+            // ONLY against a CONCRETE partner. `head + packsum1(tail)` inside a
+            // `Poly<T^1>` recursion has an arity-1 var on BOTH sides; shaping
+            // both would send it down the both-arrays zip synthesis, whose
+            // second operand is a CALL with no name to bind, and codegen emits
+            // an undeclared `arr1`. A pack element only wants a shape when the
+            // other operand already has one, which is exactly the case the
+            // broadcast/zip arms below can serve.
+            let concreteOperand (t: IRType) =
+                match env.Subst.Resolve t with
+                | ArrayElem _ -> true
+                // `T<u>^0` -- a unit-annotated scalar var, scalar by
+                // construction (the `rankZeroQuantity` reading below).
+                | IRTUnitAnnotated (IRTInfer _, _) -> true
+                | r -> (match IR.stripUnits r with IRTScalar _ -> true | _ -> false)
+            let materializeCaretOperand (t: TypedExpr) =
+                match env.Subst.Resolve t.Type with
+                | IRTInfer vid ->
+                    (match env.Subst.GetArityConstraint vid with
+                     | Some k when k >= 1 -> requireArrayArgMinRank env t "arith" k |> ignore
+                     | _ -> ())
+                | _ -> ()
+            let lConcrete = concreteOperand tL.Type
+            let rConcrete = concreteOperand tR.Type
+            if rConcrete then materializeCaretOperand tL
+            if lConcrete then materializeCaretOperand tR
             let lRes = env.Subst.Resolve tL.Type
             let rRes = env.Subst.Resolve tR.Type
             let isDist t = match t with IRTDist _ -> true | _ -> false
