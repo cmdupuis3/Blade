@@ -1681,6 +1681,43 @@ let genCallableWrapper (names: Map<IRId, string>) (suffix: string) (callable: IR
         [sprintf "auto %s = [&](%s) { return %s(%s); };" wrapperName paramSig safeName allArgs]
     (code, wrapperName)
 
+/// Whether a callee's return value is a pool the CALLER owns. `FreshPool` means
+/// every return hands back storage this call allocated; `NotFresh` means it may
+/// alias a parameter, a capture, or a view, so freeing it at the call site would
+/// free storage the callee's caller still uses. Absent from the facts map reads
+/// as `NotFresh` -- unproven means leaked, never freed.
+///
+/// Declared HERE, ahead of the loop emitters, rather than beside its classifier
+/// (`computeFreshReturnFacts`, further down): stage S3's array-valued kernel
+/// return frees the row the callee handed back, once per outer cell, and that
+/// free is only sound for a `FreshPool` callee. The classifier still lives with
+/// the rest of the deterministic-deallocation block; only the fact TYPE, its
+/// cell and the lookup moved up.
+type FreshReturn =
+    | NotFresh
+    | FreshPool
+
+/// Per-module fresh-return facts, installed by genModule / genModuleSplit after
+/// the callables table (freshReturnOf resolves through it). AsyncLocal for the
+/// same per-parallel-test-task isolation as exprWarningsCell.
+let private freshReturnFactsStorage =
+    System.Threading.AsyncLocal<Map<IRId, FreshReturn> ref>()
+
+let freshReturnFactsCell () : Map<IRId, FreshReturn> ref =
+    let v = freshReturnFactsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        freshReturnFactsStorage.Value <- fresh
+        fresh
+    else v
+
+/// The fresh-return fact for whatever callable an expression in callee position
+/// resolves to (module function or synthetic). Unresolvable => NotFresh.
+let freshReturnOf (calleeExpr: IRExpr) : FreshReturn =
+    match resolveCallable calleeExpr with
+    | Some c -> (freshReturnFactsCell ()).Value |> Map.tryFind c.Id |> Option.defaultValue NotFresh
+    | None -> NotFresh
+
 // ---------------------------------------------------------------------------
 // Kernel body: expression-shaped, or call the lifted callable?
 // (docs/plan-kernel-body-materialization.md sections 3 and 5, stage S2)
@@ -1759,18 +1796,20 @@ let rec private branchingReturnMaterializes (e: IRExpr) : bool =
 ///     param names, and while the call form survives that substitution, no
 ///     measured program combines Reynolds with a materializing body; keep the
 ///     loud refusal rather than ship an unexercised path;
-///   * an ARRAY-returning callable -- assigning an `Array<T,R>` into a scalar
-///     output cell is manifestation M-C, owned by stage S3 and guarded at
-///     typecheck until then;
 ///   * an unresolvable kernel, or one with no params.
+///
+/// An ARRAY-returning callable is NO LONGER an abstention (stage S3): the call
+/// form is exactly how a whole row gets produced per outer cell, and
+/// `genLoopNestStreamed`'s row-write arm copies the returned pool into the
+/// output row. That pairing is deliberate -- the S0 typecheck guard
+/// (`arrayValuedComputeBody`) and this abstention came out in the same change.
 let routeKernelBodyThroughCall (info: ApplyInfo) (cg: LoopNestCodeGen) : LoopNestCodeGen =
     if cg.HasReynolds || cg.IsAntisymmetric then cg
     elif kernelBodyIsExpressionShaped cg.KernelExpr then cg
     else
         match resolveKernel info.Kernel with
         | Some rk when not (List.isEmpty rk.Callable.Params)
-                       && not rk.Reynolds.HasReynolds
-                       && (match rk.Callable.RetType with ArrayElem _ -> false | _ -> true) ->
+                       && not rk.Reynolds.HasReynolds ->
             let paramTypes = rk.Callable.Params |> List.map (fun p -> p.Type)
             let funcTy = mkFuncArrow paramTypes rk.Callable.RetType
             let args = rk.Callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type))
@@ -6534,6 +6573,72 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         match outRowDecl with
         | Some _ -> (outRowName, sprintf "[%s]" (List.last codeGen.Bindings).IndexName)
         | None -> (codeGen.OutputName, outputIdx)
+    // ARRAY-VALUED KERNEL RETURN (stage S3, manifestation M-C1). When the
+    // kernel returns an array, the output type carries the kernel's
+    // T-dimensions after the iterated ones, so `arrayRank > nest depth` and the
+    // per-iteration product is a whole ROW, not a cell. `out[i] = <call>` (what
+    // the pre-S3 emitter wrote) assigns an `Array<T,m>` wrapper into a slot the
+    // C++ side types as a scalar or a row pointer -- the shape that compiled,
+    // ran, and printed `[[], []]`.
+    //
+    // Instead: evaluate the row once, copy its pool into the output pool at the
+    // row's offset, and free it when the callee owned it. The destination is
+    // computed from `<name>_extents` -- the SAME table the allocation used, now
+    // carrying the trailing T-dims -- rather than from a chained `out[i][j]`
+    // subscript, so it is one formula for any inner rank and needs nothing from
+    // the wrapper's operator[] typing.
+    //
+    // Gated to DENSE rectangular outputs: the flat row-major offset below is
+    // exact only when no axis is packed. A symmetric/compound/sparse output
+    // with an array-valued kernel falls through to the old cell assignment,
+    // which the C++ compiler then rejects -- loud, and out of scope here.
+    //
+    // FREEING is conditional on `freshReturnOf`. A kernel that CONSTRUCTS its
+    // row (the S2 call form over a materializing body) hands back storage this
+    // call allocated, so not freeing it leaks one row per outer cell. A kernel
+    // that PASSES ITS INPUT ROW THROUGH (`lambda(r) -> r`) hands back a view of
+    // the operand -- freeing that would destroy the input. `NotFresh` (which is
+    // also what an unresolvable callee reads as) leaks rather than guesses,
+    // matching the surrounding block's rule 3.
+    let rowWriteLines : string list option =
+        match codeGen.OutputType with
+        | ArrayElem at when codeGen.FoldWrapper.IsNone
+                            && not (isCompoundArrayType at)
+                            && not (isSparseArrayType at)
+                            && not (hasRealSymmetry codeGen.OutputSymmVec)
+                            && not (List.isEmpty codeGen.Bindings)
+                            && arrayRank at > List.length codeGen.Bindings ->
+            let rank = arrayRank at
+            let outer = List.length codeGen.Bindings
+            let extentsName = sprintf "%s_extents" codeGen.OutputName
+            let elemStr = elemTypeToCpp at.ElemType
+            let innerCells =
+                [ outer .. rank - 1 ] |> List.map (sprintf "%s[%d]" extentsName) |> String.concat " * "
+            // Row-major flattening of the OUTER indices (inner indices are 0):
+            // (((i0) * e1 + i1) * e2 + i2) ...
+            let flatOuter =
+                codeGen.Bindings
+                |> List.mapi (fun i b -> (i, b.IndexName))
+                |> List.fold (fun acc (i, nm) ->
+                        if i = 0 then nm
+                        else sprintf "(%s) * %s[%d] + %s" acc extentsName i nm) ""
+            let freeLine =
+                let callee = match codeGen.KernelExpr with IRApp (f, _, _) -> Some f | _ -> None
+                match callee with
+                | Some f when freshReturnOf f = FreshPool ->
+                    [ sprintf "    deallocate<typename promote<%s, %d>::type, nullptr>(__rowv.data, __rowv.extents);"
+                          elemStr (rank - outer) ]
+                | _ -> []
+            Some ([
+                    "{"
+                    sprintf "    auto __rowv = %s;" reynoldsResult.CppExpr
+                    sprintf "    const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" elemStr
+                    sprintf "    const size_t __rowc = (size_t)(%s);" innerCells
+                    sprintf "    %s* __rowd = nested_array_utilities::pool_base(%s.data) + ((%s) * __rowc);"
+                        elemStr codeGen.OutputName flatOuter
+                    "    for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];"
+                  ] @ freeLine @ [ "}" ])
+        | _ -> None
     let assignLine =
         match codeGen.FoldWrapper, foldChunk with
         // Path B: accumulate into the THREAD-PRIVATE scalar, seeding it
@@ -6549,7 +6654,9 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // wrapper into the caller-declared scalar accumulator.
         | Some wname, None -> sprintf "%s = %s(%s, %s);" codeGen.OutputName wname codeGen.OutputName reynoldsResult.CppExpr
         | None, _ -> sprintf "%s%s %s %s;" writeTarget writeIdx assignOp reynoldsResult.CppExpr
-    lines <- lines @ [ind depth + assignLine]
+    match rowWriteLines with
+    | Some rw -> for l in rw do lines <- lines @ [ind depth + l]
+    | None -> lines <- lines @ [ind depth + assignLine]
     // Carousel rotation: shift the window by one ordinal and load the single
     // new leading value for the next center.
     match carousel with
@@ -7497,29 +7604,6 @@ let computeRaggedRowLengths (elements: IRExpr list) : int list =
 // consumers call `registerMaterializedAllocs`; IIFE consumers drop the list
 // and leak (no scope exit to hang a free on).
 
-/// Whether a callee's return value is a pool the CALLER owns. `FreshPool` means
-/// every return hands back storage this call allocated; `NotFresh` means it may
-/// alias a parameter, a capture, or a view, so freeing it at the call site would
-/// free storage the callee's caller still uses. Absent from the facts map reads
-/// as `NotFresh` -- unproven means leaked, never freed.
-type FreshReturn =
-    | NotFresh
-    | FreshPool
-
-/// Per-module fresh-return facts, installed by genModule / genModuleSplit after
-/// the callables table (freshReturnOf resolves through it). AsyncLocal for the
-/// same per-parallel-test-task isolation as exprWarningsCell.
-let private freshReturnFactsStorage =
-    System.Threading.AsyncLocal<Map<IRId, FreshReturn> ref>()
-
-let freshReturnFactsCell () : Map<IRId, FreshReturn> ref =
-    let v = freshReturnFactsStorage.Value
-    if isNull (box v) then
-        let fresh = ref Map.empty
-        freshReturnFactsStorage.Value <- fresh
-        fresh
-    else v
-
 /// Flatten a body's nested IRLet chains into (id, value) pairs plus the residual
 /// return expression. Deliberately a verbatim mirror of genFuncBody's local
 /// `deepUnroll`, including the nested-value hoist: the escape analysis must see
@@ -7542,13 +7626,6 @@ let rec deepUnrollBody (expr: IRExpr) : (IRId * IRExpr) list * IRExpr =
 let rec allSubExprs (e: IRExpr) : IRExpr list =
     match e with
     | ExprShape (children, _) -> e :: (children |> List.collect allSubExprs)
-
-/// The fresh-return fact for whatever callable an expression in callee position
-/// resolves to (module function or synthetic). Unresolvable => NotFresh.
-let freshReturnOf (calleeExpr: IRExpr) : FreshReturn =
-    match resolveCallable calleeExpr with
-    | Some c -> (freshReturnFactsCell ()).Value |> Map.tryFind c.Id |> Option.defaultValue NotFresh
-    | None -> NotFresh
 
 /// Classify every array-returning module function as FreshPool or NotFresh.
 /// Only array-typed returns are in the domain; anything else is absent and reads
@@ -10134,20 +10211,85 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     let withRows =
                         rowDecls |> List.fold (fun m (vid, sub, _) -> Map.add vid sub m) ctx.VarNames
                     callable.Captures |> List.fold (fun m c -> Map.add c.Id c.Name m) withRows
-                let bodyStr = exprToCpp nameMap callable.Body
+                // S2 routing, in the peel's own idiom: a body that materializes
+                // an array cannot render as one C++ expression, so call the
+                // lifted callable instead of inlining its text. The peel's row
+                // declarations already bind each param name, and the lifted
+                // signature takes those same RaggedRow/Array row types, so the
+                // call is the row decls handed straight through.
+                let bodyExpr =
+                    if kernelBodyIsExpressionShaped callable.Body then callable.Body
+                    else
+                        let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+                        IRApp (IRVar (callable.Id, mkFuncArrow paramTypes callable.RetType),
+                               callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type)),
+                               callable.RetType)
+                let bodyStr = exprToCpp nameMap bodyExpr
                 let opNames = info.Arrays |> List.map (exprToCppCtx ctx) |> String.concat ", "
+                // ARRAY-VALUED KERNEL RETURN over a GROUPED co-iteration (stage
+                // S3, manifestation M-C3 -- lswosa's `family_spectra` shape).
+                // The kernel collapses each pair of rows to a whole DENSE row
+                // (a per-segment spectrum), so the output is
+                // [ngroups] x [kernel T-dims]: rank >= 2, one group per outer
+                // cell. `outputIsRowShaped` above has already taken the
+                // genuinely grouped-shaped results away, so everything reaching
+                // here has dense trailing axes and a flat row-major pool.
+                //
+                // The trailing extents come from the OUTPUT TYPE, the same
+                // source the dense nest uses; the scalar form below is
+                // unchanged (rank 1, raw `new T[ngroups]`).
+                let outRank =
+                    match info.OutputType with
+                    | ArrayElem a -> arrayRank a
+                    | _ -> 1
                 let code =
-                    [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s" ind opNames gkName
-                      sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
-                      sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name
-                      sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
-                    @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
-                    @ [ sprintf "%s    %s[__g] = %s;" ind name bodyStr
-                        sprintf "%s}" ind ]
+                    if outRank >= 2 then
+                        let innerDims =
+                            match info.OutputType with
+                            | ArrayElem a ->
+                                a.IndexTypes
+                                |> List.skip 1
+                                |> List.map (fun ix ->
+                                    match tryEvalIntIR ix.Extent with
+                                    | Some n -> sprintf "%d" n
+                                    | None -> exprToCppCtx ctx ix.Extent)
+                            | _ -> []
+                        let innerCells =
+                            [ 1 .. outRank - 1 ] |> List.map (sprintf "%s_extents[%d]" name) |> String.concat " * "
+                        let freeLine =
+                            match bodyExpr with
+                            | IRApp (f, _, _) when freshReturnOf f = FreshPool ->
+                                [ sprintf "%s        deallocate<typename promote<%s, %d>::type, nullptr>(__rowv.data, __rowv.extents);"
+                                      ind outElemStr (outRank - 1) ]
+                            | _ -> []
+                        [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows" ind opNames gkName
+                          sprintf "%ssize_t %s_extents[%d] = {%s};" ind name outRank
+                              ((ngroupsExpr :: innerDims) |> String.concat ", ")
+                          sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
+                              ind outElemStr outRank name outElemStr outRank name name
+                          sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+                        @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
+                        @ [ sprintf "%s    {" ind
+                            sprintf "%s        auto __rowv = %s;" ind bodyStr
+                            sprintf "%s        const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" ind outElemStr
+                            sprintf "%s        const size_t __rowc = (size_t)(%s);" ind innerCells
+                            sprintf "%s        %s* __rowd = nested_array_utilities::pool_base(%s.data) + (__g * __rowc);" ind outElemStr name
+                            sprintf "%s        for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];" ind ]
+                        @ freeLine
+                        @ [ sprintf "%s    }" ind
+                            sprintf "%s}" ind ]
+                    else
+                        [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s" ind opNames gkName
+                          sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
+                          sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name
+                          sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+                        @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
+                        @ [ sprintf "%s    %s[__g] = %s;" ind name bodyStr
+                            sprintf "%s}" ind ]
                 // Raw `new T[n]` backing with stack extents, as the
                 // single-operand peel registers for its scalar-output form.
                 (match outElem with
-                 | IRTScalar _ -> registerAlloc (RawArrayData (name, None))
+                 | IRTScalar _ when outRank < 2 -> registerAlloc (RawArrayData (name, None))
                  | _ -> ())
                 Some code
             | _ -> None
@@ -10504,6 +10646,38 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                             (prod, false)
                         | None ->
                             (sprintf "%s.extents[%d]" b.ExtentArrayRef b.ExtentDimRef, false))
+            // ARRAY-VALUED KERNEL RETURN (stage S3, manifestation M-C1). The
+            // loop bindings describe the OUTER grid only -- one level per
+            // iterated S-dimension -- but when the kernel returns an array the
+            // deduced output type carries the kernel's T-dimensions after them
+            // (deduceOutputType has always appended `kernelTDims`), so
+            // `outputRank` exceeds the binding count. Emitting the table from
+            // the bindings alone is precisely the M-C1 bug: a rank-2 grid got
+            // `{ 2 }`, the inner extent read as 0, and the program printed
+            // `[[], []]` with no diagnostic.
+            //
+            // The missing trailing extents come from the OUTPUT TYPE's own
+            // trailing index types -- the same source, and the same fix, as
+            // func-arrays/011's rank-2 literal of computed rows (there: the
+            // declared/row-inferred array type's trailing IndexTypes). Reading
+            // them off `codeGen.OutputType` rather than off `info.KernelTDims`
+            // keeps the table and the `Array<T, outputRank>` allocation derived
+            // from ONE type, so they cannot disagree about rank.
+            let extentDims =
+                let outerCount = List.length extentDims
+                if outputRank <= outerCount then extentDims
+                else
+                    match codeGen.OutputType with
+                    | ArrayElem at when List.length at.IndexTypes = outputRank ->
+                        let trailing =
+                            at.IndexTypes
+                            |> List.skip outerCount
+                            |> List.map (fun ix ->
+                                match tryEvalIntIR ix.Extent with
+                                | Some n -> (sprintf "%d" n, true)
+                                | None -> (exprToCppCtx tempCtx ix.Extent, false))
+                        extentDims @ trailing
+                    | _ -> extentDims
             let (extentDecls, ownedExtents) = emitExtentsTable ind extentsName outputRank extentDims
 
             // Generate allocation as Array<T,N> wrapper. extentsName is either
