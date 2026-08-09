@@ -8409,6 +8409,34 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy (rExpr: TypedExpr
                     mkArrayLike { arrL with ElemType = promoteElem arrL.ElemType s }
                 | (IRTScalar _ as s), ArrayElem arrR ->
                     mkArrayLike { arrR with ElemType = promoteElem arrR.ElemType s }
+                // UNRESOLVED operand beside a concrete array. An unannotated
+                // kernel parameter is an inference var while its body is typed
+                // -- it only unifies with the iterated element type later, in
+                // buildApplyInfo -- so `w * xs` inside `ws <@> lambda(w) -> ...`
+                // arrives here with `w` unresolved. BOTH readings of the var
+                // agree on the SHAPE: if it resolves to a scalar this is a
+                // broadcast over `xs`, and if it resolves to a row it is a zip
+                // against `xs`; either way the result is an array shaped like
+                // the concrete operand. Only the ELEMENT type is unknowable
+                // now, so it stays the array's (the complex re-stamp in
+                // buildApplyInfo is what upgrades a kernel result whose param
+                // later resolves complex).
+                //
+                // The array-on-the-LEFT spelling (`xs * w`) has always answered
+                // this way, by falling through to `lBare`; without the mirror,
+                // `w * xs` answered with the VAR, and the difference was pure
+                // operand order. Downstream that read as a scalar: the enclosing
+                // `exp <@> (w * xs)` saw a non-array operand, mapped it as a
+                // scalar, and a later `prodsum(xs, e)` refused an `e` that
+                // should have been an array -- reported against the `<@>` site,
+                // far from the multiplication that decided it.
+                //
+                // A caret (`T^k`, k >= 1) operand never reaches here as a var:
+                // `materializeCaretOperand` above shapes it against the concrete
+                // partner first, so this arm sees only genuinely unconstrained
+                // vars. Elementwise only -- Outer keeps its own left-operand
+                // convention.
+                | IRTInfer _, ArrayElem _ -> rBare
                 // Scalar complex promotion (mixed real/complex or mixed-width
                 // complex): must precede the float rules so complex wins.
                 | IRTScalar le, IRTScalar re
