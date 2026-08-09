@@ -1,0 +1,24 @@
+// TEST: Kernel Lambda Calls Capturing Function
+// The function-typed half of 058. `g` reads a module binding, so it is
+// main-local (emitted as a std::function inside main). `f`'s kernel CALLS
+// `g`, so the lifted kernel's capture list is [g] -- a function-typed
+// capture, which lands in funcIds and is subtracted from the module-binding
+// test on purpose. Main-locality therefore has to travel as a fixpoint EDGE
+// instead: `f` names the kernel, the kernel captures `g`, so `f` inherits an
+// edge to `g` and follows it into main. Before that, `f` emitted as a free
+// C++ function whose loop nest called the main-local `g`, failing with
+// "'g' was not declared in this scope".
+//
+// This is the shape examples/lswosa.blade hits: a kernel calling `hanning`
+// and `wosa_lsdft`, both of which 058's rule makes main-local.
+let K = 4.0
+function g(x: Float64) -> Float64 = x + K
+function f(a: Array<Float64 like Idx<n>>) -> Array<Float64 like Idx<n>>
+= method_for(a) <@> lambda(x) -> g(x) |> compute
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let ys = f(xs)
+let y0 = ys(0)
+let y2 = ys(2)
+// EXPECT: ys = [5, 6, 7]
+// EXPECT: y0 = 5
+// EXPECT: y2 = 7

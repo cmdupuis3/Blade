@@ -1,0 +1,21 @@
+// TEST: Array Returning Kernel Call Body (rejects)
+// REJECT-AT: lower
+// ERROR-CONTAINS: array-valued elementwise kernel body
+// The SILENT face of the array-valued-kernel-body refusal. The guard keyed
+// on the body's top node being TExprCompute, which caught only the spelling
+// that wears its compute on the outside. A CALL returning an array --
+// `lambda(x) -> scaleRow(x)` -- has the same array-valued body but slipped
+// past, COMPILED, RAN CLEAN, and printed `g = [[], []]` instead of
+// [[10, 20, 30], [20, 40, 60]]: a silent wrong answer, strictly worse than
+// the loud codegen backstop the block-bodied spelling hits.
+//
+// The guard now keys on the body's RESOLVED TYPE. The passthrough exemption
+// survives: `lambda(row) -> row` hands back a row codegen already has, needs
+// no materialization, and still runs (its own arm of this pin would be a
+// value test; see the guard comment at TypeCheck.fs arrayValuedComputeBody).
+// When kernel-body materialization lands (S2/S3 of the staging plan), this
+// pin converts to a value test: g = [[10, 20, 30], [20, 40, 60]].
+let b: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+function scaleRow(x: Float64) -> Array<Float64 like Idx<3>> = (b <@> lambda(y) -> x * y) |> compute
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let g = method_for(a) <@> lambda(x) -> scaleRow(x) |> compute

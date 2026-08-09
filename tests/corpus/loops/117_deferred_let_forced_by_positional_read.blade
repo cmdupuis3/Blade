@@ -1,0 +1,42 @@
+// TEST: Deferred Let Forced By Positional Read
+// ============================================================================
+// A `let` bound to an unforced combinator (`exp <@> a`, no `|> compute`) is
+// DEFERRED: the emitter registers its name and emits no statement. That is
+// correct when nothing reads it positionally -- a later `|> compute`, or
+// fusion into a reduce, consumes the form itself. It is wrong the moment a
+// consumer renders it BY NAME: `prodsum(a, e)` emits a fused loop that
+// subscripts `e[__pt]`, naming an identifier that was never declared.
+//
+// Two seams, both pinned here:
+//   (1) FUNCTION BODY -- genFuncBodyScoped never populated
+//       ctx.DeferredComputations, so it had no forcing mechanism at all.
+//       This is the `'__v29' was not declared in this scope` behind
+//       examples/lsdft.blade's `let e = exp <@> (i * w * ts)`.
+//   (2) MODULE LEVEL -- collectDeferredPositionalReads walked prodsum's
+//       operands but never noted them, and genBinding's IRProdSum arm
+//       bypassed the pre-pass that does the forcing.
+//
+// The rule is loops/095's, applied to slots it missed: a by-name read
+// materializes its producer first. A deferred let that is merely absorbed
+// (fused, forced later, or unused) still emits nothing -- this is not
+// "materialize everything".
+//
+// Value, not just compilation: sum x*e^x over [1,2,3] = 77.75300479588336
+// in Python. Both spellings must agree with it and with each other.
+// ============================================================================
+type X = Idx<3>
+
+function g(a: Array<Float like X>) -> Float = {
+    let e = exp <@> a
+    prodsum(a, e)
+}
+
+let v: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let in_function = g(v)
+
+let a2: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let e2 = exp <@> a2
+let at_module = prodsum(a2, e2)
+
+// EXPECT: in_function = 77.7530047958834
+// EXPECT: at_module = 77.7530047958834

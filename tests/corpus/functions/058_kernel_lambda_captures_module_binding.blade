@@ -1,0 +1,26 @@
+// TEST: Kernel Lambda Captures Module Binding
+// A named function whose body is `<@> lambda |> compute`, where the KERNEL
+// captures a module-level binding. By codegen time the lambda has been lifted
+// into its own IRCallable with Captures = [scale], and `scaleAll`'s body
+// retains only IRVar(lambdaId) -- so `scale`'s IRId never appears
+// syntactically in the body and collectVarRefsIR cannot see it.
+// computeMainLocalFuncIds missed that, `scaleAll` emitted as a free C++
+// function, and its inlined loop nest spelled `scale` -- a main() local --
+// failing with "'scale' was not declared in this scope". (The shape
+// specialization `scaleAll_shape_n3` failed the same way.) A body now also
+// inherits the capture obligations of every callable it NAMES.
+//
+// `scale` is a plain `let`, NOT `let static`: a static folds into the kernel
+// as a literal and the capture never forms.
+// The negative control is 011: there the kernel captures a PARAM, which the
+// function already supplies, so it must stay a free C++ function.
+let scale = 2.0
+function scaleAll(arr: Array<Float64 like Idx<n>>) -> Array<Float64 like Idx<n>>
+= method_for(arr) <@> lambda(x) -> x * scale |> compute
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let ys = scaleAll(xs)
+let y0 = ys(0)
+let y2 = ys(2)
+// EXPECT: ys = [2, 4, 6]
+// EXPECT: y0 = 2
+// EXPECT: y2 = 6

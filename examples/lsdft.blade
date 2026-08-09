@@ -8,7 +8,12 @@ Unit angular_frequency: 1 / day
 
 let i = complex(0.0, 1.0)
 
-function variance(x: T^1) = {
+// Spelled `Array<T like Idx<n>>` rather than `T^1`: a caret param's element
+// type is materialized as a fresh inference var that loses the HM-polymorphic
+// flag, so `T^1` silently defaults to Float64 and a Complex128 caller dies in
+// g++. The explicit spelling keeps `T` polymorphic. (The caret half of that
+// defect is known and unfixed; its candidate patch regresses recursive packs.)
+function variance(x: Array<T like Idx<n>>) = {
     let n = extents(x)
     let d = x - reduce(x, (+)) / n
     prodsum(d, d) / n
