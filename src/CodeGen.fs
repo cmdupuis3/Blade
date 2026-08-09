@@ -1727,6 +1727,19 @@ let rec kernelBodyIsExpressionShaped (body: IRExpr) : bool =
     if isNonExpressionNode body then false
     else childrenOf body |> List.forall kernelBodyIsExpressionShaped
 
+/// True iff a RETURN expression branches (`if`/`match`) and at least one of the
+/// leaves it can return is a materializing form. Follows only the return spine
+/// -- branch arms and let-chain tails -- because that is the set of leaves the
+/// return arm would have to find a destination for. Consumed by
+/// `genFuncBodyScoped`'s return dispatch (stage S4) to refuse that shape with an
+/// accurate message instead of letting each arm reach an unrelated sentinel.
+let rec private branchingReturnMaterializes (e: IRExpr) : bool =
+    match e with
+    | IRIf (_, t, f) -> branchingReturnMaterializes t || branchingReturnMaterializes f
+    | IRMatch (_, cases) -> cases |> List.exists (fun c -> branchingReturnMaterializes c.Body)
+    | IRLet (_, _, body) -> branchingReturnMaterializes body
+    | leaf -> isNonExpressionNode leaf
+
 /// Route a nest whose kernel body is not expression-shaped through a CALL to the
 /// lifted callable: the body becomes `IRApp(IRVar(callable.Id, ...), params)`,
 /// which `exprToCppCore`'s IRApp arm renders as `__lambda_N(<peeled args>,
@@ -15501,6 +15514,45 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // The returned pool leaves with the value; free everything else.
             suppressAllocName retVarName
             stmts @ combCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
+        | (IRIf _ | IRMatch _) when branchingReturnMaterializes retExpr ->
+            // A BRANCHING return whose arms each materialize an array
+            // (`if flag then xs <@> k1 else xs <@> k2`). S4's return force
+            // reaches these leaves, but the emitter cannot: every materializing
+            // arm above binds a `__retN` with its OWN allocation and extents,
+            // and a C++ ternary has nowhere to put two of them -- they need one
+            // destination declared before the branch, with the branch lowered to
+            // a STATEMENT if/else and each arm's pool spared from the scope's
+            // frees. That is a separate piece of work (S3's output-sizing
+            // machinery is the natural home for the shared destination).
+            //
+            // This program never compiled: before S4 the arms were bare
+            // combinators and `exprToCppCore` refused them with
+            // UNEVALUATED_COMPUTATION_USED_AS_VALUE. Refuse it HERE instead, so
+            // the message names the actual limitation rather than an unrelated
+            // inline-combinator ceiling reached three layers down.
+            let errLines =
+                codegenError ctx indent
+                    "a branching return (if/match) whose arms each materialize an array is not supported yet: \
+each arm needs its own allocation and there is no shared destination to write them into. \
+Bind the branches to a let first (`let r = if c then ... else ...` over already-computed arrays), \
+or return a scalar and materialize at the call site"
+            stmts @ errLines
+        | IRCompute (IRComposeApply _) ->
+            // The IRComposeApply half of the arm above. S4 forces a bare
+            // `(o1 >>@ o2) <@> A` in RETURN position exactly as it forces a bare
+            // apply, so this shape now arrives here; genBinding's
+            // genComputeBinding peels the IRCompute and routes to
+            // genComposeApply -- the same statement form module level uses.
+            // exprToCpp has no expression rendering for it.
+            let retVarName = sprintf "__ret%d" (builder.FreshId())
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1 }
+            let tempBinding = {
+                Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
+                Value = retExpr; IsConst = false; IsMutable = true
+            }
+            let (compCode, _) = genBinding bodyCtx tempBinding builder
+            suppressAllocName retVarName
+            stmts @ compCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
         | IRReduceCompute _ ->
             // Same reason as the IRCompute(IRApplyCombinator) arm above, for the
             // fused-reduce terminal: `reduce(A <@> k, (+))` in RETURN position of

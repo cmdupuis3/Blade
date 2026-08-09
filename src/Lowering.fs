@@ -248,6 +248,45 @@ let rec forceBareCombinatorLets (expr: IRExpr) : IRExpr =
         IRMatch (scrut, cases |> List.map (fun c -> { c with Body = forceBareCombinatorLets c.Body }))
     | _ -> expr
 
+/// The RETURN half of the same rule (docs/plan-kernel-body-materialization.md
+/// manifestation M-D, stage S4): **the callee forces**. A callable whose return
+/// expression is a bare `IRApplyCombinator`/`IRComposeApply` gets an `IRCompute`,
+/// so `function f(xs) = { xs <@> lambda(x) -> x * 2.0 }` materializes inside `f`
+/// instead of returning
+/// `BLADE_CODEGEN_ERROR_UNEVALUATED_COMPUTATION_USED_AS_VALUE`.
+///
+/// WHY "THE CALLEE FORCES" AND NOT "THE CALLER'S COMPUTE REACHES INSIDE".
+/// Three measured facts (plan section 1, M-D) settle it: the emitted signature
+/// is ALREADY `Array<double,1> f(...)`, so the ABI promises a materialized
+/// array; laziness demonstrably never crosses a named-function boundary today
+/// (`reduce(mk(a), (+))` and `mk(a) <&> mk2(a)` die with the same sentinel, so
+/// there is no lazy return to preserve); and `compute` is idempotent at
+/// inference, so a caller-side `f(a) |> compute` stays a legal no-op. Sinking
+/// the caller's `compute` into the callee would instead make the return type
+/// vary by call site -- a monomorphization axis with no payoff.
+///
+/// SPINE, not tree. A return leaf hides behind a let chain (`{ let s = ...;
+/// xs <@> k }`), an `if`, or a `match`, so all three are followed to their
+/// tails. `IRForRange` is deliberately NOT followed: a for-body's tail is a
+/// statement, not a return value, and forcing there would materialize a fresh
+/// array per iteration and discard it. Let RHSs are `forceBareCombinatorLets`'
+/// business (S2) -- this pass only ever touches tail position, so running the
+/// two in sequence is exactly "force every leaf on the statement spine".
+let rec forceReturnCombinator (expr: IRExpr) : IRExpr =
+    match expr with
+    | IRApplyCombinator _ | IRComposeApply _ -> IRCompute expr
+    | IRLet (id, value, body) -> IRLet (id, value, forceReturnCombinator body)
+    | IRIf (c, t, e) -> IRIf (c, forceReturnCombinator t, forceReturnCombinator e)
+    | IRMatch (scrut, cases) ->
+        IRMatch (scrut, cases |> List.map (fun c -> { c with Body = forceReturnCombinator c.Body }))
+    | _ -> expr
+
+/// The two body passes a callable's lowered body gets, in the order their
+/// scopes compose: S2 forces every bare combinator bound by a `let` anywhere on
+/// the statement spine, then S4 forces the bare combinator in each RETURN leaf.
+let forceCallableBody (body: IRExpr) : IRExpr =
+    forceReturnCombinator (forceBareCombinatorLets body)
+
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     match texpr.Kind with
@@ -771,21 +810,20 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
 
     let body' = lowerTypedExpr paramEnv info.Body
 
-    // If the body's top-level shape is value-position-illegal as a
-    // standalone function return, wrap it in IRCompute. This applies only to
-    // bare IRApplyCombinator -- `method_for { ... }` and similar combinator
-    // forms that need a destination to materialize into. genFuncBody's
-    // return-position match handles `IRCompute(IRApplyCombinator _)` by
-    // synthesizing an internal let binding and running the full combinator
-    // codegen; use-site rendering is identical either way, so the wrap
-    // doesn't change behavior at existing use sites.
+    // A body shape that is value-position-illegal as a standalone function
+    // return is wrapped in IRCompute -- bare IRApplyCombinator/IRComposeApply,
+    // the combinator forms that need a destination to materialize into.
+    // genFuncBody's return-position match handles `IRCompute(IRApplyCombinator
+    // _)` by synthesizing an internal let binding and running the full
+    // combinator codegen; use-site rendering is identical either way, so the
+    // wrap doesn't change behavior at existing use sites.
     //
-    // S2: the same rule one level in -- a `let` INSIDE the body whose RHS is a
-    // bare combinator is forced too (see forceBareCombinatorLets).
-    let bodyWrapped =
-        match body' with
-        | IRApplyCombinator _ | IRComposeApply _ -> IRCompute body'
-        | _ -> forceBareCombinatorLets body'
+    // S2 forces a `let` INSIDE the body whose RHS is a bare combinator; S4
+    // generalizes the wrap above from "the body's TOP node" to "each RETURN
+    // leaf" (behind a let chain / if / match), which is the same rule this
+    // site always intended. `forceCallableBody` is the pair, and the two
+    // callable-construction sites now share it verbatim.
+    let bodyWrapped = forceCallableBody body'
 
     // Build unified IRCallable. info.ReturnType comes from TypeCheck, so the
     // lambda has a concrete return type; we trust that annotation. Lambda-level
@@ -1297,11 +1335,13 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
         paramEnv <- bindTypedVar p.Name p.VarId paramEnv
         { Name = p.Name; Type = p.Type; Index = p.Index; VarId = p.VarId } : IRParam)
 
-    // S2: a function body is a body in exactly the sense lowerTypedLambda's
-    // wrap is about -- a `let` bound to a bare combinator here has no forcing
-    // site downstream either (docs/plan-kernel-body-materialization.md section 2).
-    // The RETURN position is deliberately NOT wrapped here: that is M-D, stage S4.
-    let body = forceBareCombinatorLets (lowerTypedExpr paramEnv decl.Body)
+    // A function body is a body in exactly the sense lowerTypedLambda's wrap is
+    // about: a `let` bound to a bare combinator has no forcing site downstream
+    // (S2), and neither does the RETURN expression (S4, manifestation M-D) --
+    // `function f(xs) = { xs <@> lambda(x) -> x * 2.0 }` used to return the
+    // UNEVALUATED_COMPUTATION_USED_AS_VALUE sentinel. Same pair as the lambda
+    // site, so the two share `forceCallableBody`.
+    let body = forceCallableBody (lowerTypedExpr paramEnv decl.Body)
 
     // Source-level functions live at top level and have no enclosing scope to
     // capture from, so Captures = []. The function-only metadata (name, id,
