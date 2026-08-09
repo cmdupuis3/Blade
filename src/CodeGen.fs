@@ -146,6 +146,67 @@ let symmDeclsCell () : string list ref =
         fresh
     else v
 
+/// Collector for module-level bindings PROMOTED to namespace scope (S0 of the
+/// kernel-body-materialization plan, docs/plan-kernel-body-materialization.md
+/// section 6). A module-level `let` is normally a `main()` local, while lifted
+/// kernels and user functions are namespace-scope -- so a namespace-scope
+/// function that must NAME a module-level binding (to forward it as a capture
+/// argument, or because the kernel body was inlined into its loop) emits an
+/// undeclared identifier. Promotion moves only the DECLARATION out to namespace
+/// scope; the initialization stays at its original point inside `main()` as a
+/// plain assignment, so evaluation order, timing phases and allocation scopes
+/// are untouched. Mirrors symmDeclsCell; reset at program assembly.
+let private moduleGlobalDeclsStorage =
+    System.Threading.AsyncLocal<string list ref>()
+
+let moduleGlobalDeclsCell () : string list ref =
+    let v = moduleGlobalDeclsStorage.Value
+    if isNull (box v) then
+        let fresh = ref []
+        moduleGlobalDeclsStorage.Value <- fresh
+        fresh
+    else v
+
+/// Split a module-level binding's emitted code into (namespace-scope
+/// declaration, rewritten body) when its definition is a single ordinary
+/// `TYPE NAME = RHS;` line -- the shape every scalar and every
+/// `Array<T,N>`/`Ragged<T>` wrapper binding emits. Returns None (caller keeps
+/// the status quo) for anything else: an `auto`/`const`/`constexpr`/reference
+/// declaration, a binding with no definition line (deferred computations, unit
+/// values) or more than one, since none of those can be split into a
+/// default-construct-then-assign pair.
+///
+/// The declaration's TYPE is read back out of the emitted text rather than
+/// recomputed, so this helper can never disagree with the emitter about it.
+/// Namespace-scope objects are zero-initialized before `main` runs and the
+/// assignment happens at exactly the original program point, so the promoted
+/// binding holds the same value at every point the un-promoted one did.
+let tryHoistModuleBindingDecl (name: string) (lines: string list) : (string * string list) option =
+    let pattern =
+        sprintf "^(?<ind>\\s*)(?<ty>[A-Za-z_][A-Za-z0-9_:<>,\\* ]*?)\\s+%s\\s*=\\s*(?<rhs>.*;)\\s*$"
+                (System.Text.RegularExpressions.Regex.Escape name)
+    let re = System.Text.RegularExpressions.Regex(pattern)
+    let reserved = set ["auto"; "const"; "constexpr"; "static"; "register"; "volatile"; "return"; "else"]
+    let matches =
+        lines
+        |> List.mapi (fun i l -> (i, re.Match l))
+        |> List.filter (fun (_, m) ->
+            m.Success &&
+            (let ty = m.Groups.["ty"].Value.Trim()
+             ty <> "" && not (ty.Contains "&") &&
+             (ty.Split([|' '|], System.StringSplitOptions.RemoveEmptyEntries)
+              |> Array.forall (fun w -> not (reserved.Contains w)))))
+    match matches with
+    | [ (idx, m) ] ->
+        let ty = m.Groups.["ty"].Value.Trim()
+        let decl = sprintf "%s %s;" ty name
+        let rewritten =
+            lines |> List.mapi (fun i l ->
+                if i = idx then sprintf "%s%s = %s" (m.Groups.["ind"].Value) name (m.Groups.["rhs"].Value)
+                else l)
+        Some (decl, rewritten)
+    | _ -> None
+
 /// Append a namespace-scope symm-array decl to the hoist collector (idempotent
 /// per distinct name). Returns the name for the allocate<> call site's template
 /// argument, now a valid constant expression under MSVC since it's file-scope.
@@ -15772,6 +15833,78 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
         if acc' = acc then acc else close acc'
     close direct
 
+/// The module-level bindings that MUST be nameable at namespace scope -- S0 of
+/// docs/plan-kernel-body-materialization.md section 6.
+///
+/// A callable's captures are forwarded (or, for an inlined kernel body, read
+/// directly) in the scope of whoever references it. For a MAIN-LOCAL referrer
+/// that scope is inside `main()`, where every module-level binding is already
+/// a local, so nothing is needed. For a FILE-SCOPE referrer -- a top-level
+/// `function`, or a lifted kernel emitted as a free C++ function -- the module
+/// binding has no name at all, and the emitted call/loop names an undeclared
+/// identifier.
+///
+/// So: for every file-scope callable `f`, every callable `c` that `f`'s body
+/// references contributes its module-level captures, minus the ones `f` can
+/// already name (its own params and its own capture params -- a lifted kernel
+/// forwards its inner kernel's captures through its own signature, which is
+/// why nesting terminates here rather than cascading).
+///
+/// The set is deliberately DEMAND-driven: a module binding captured only by
+/// kernels whose call sites all sit in `main()` is left exactly where it was.
+let private computeModuleCaptureHoistIds
+        (modul: IRModule) (mainLocalFuncIds: Set<IRId>) : Set<IRId> =
+    let moduleBindingIds = modul.Bindings |> List.map (fun b -> b.Id) |> Set.ofList
+    if Set.isEmpty moduleBindingIds then Set.empty
+    else
+    let byId = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    modul.Functions
+    |> List.filter (fun f -> not (Set.contains f.Id mainLocalFuncIds))
+    |> List.collect (fun f ->
+        let nameable =
+            Set.union
+                (f.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
+                (f.Captures |> List.map (fun c -> c.Id) |> Set.ofList)
+        collectVarRefsIR f.Body
+        |> Set.toList
+        |> List.collect (fun rid ->
+            if rid = f.Id then []
+            else
+                match Map.tryFind rid byId with
+                | Some c ->
+                    c.Captures
+                    |> List.map (fun cap -> cap.Id)
+                    |> List.filter (fun cid ->
+                        Set.contains cid moduleBindingIds && not (Set.contains cid nameable))
+                | None -> []))
+    |> Set.ofList
+
+/// Emit one module-level binding, promoting its DECLARATION to namespace scope
+/// when `hoistIds` demands it and the emitted shape allows the split (see
+/// `tryHoistModuleBindingDecl`). Falls back to the unmodified emission -- the
+/// pre-S0 status quo -- for any binding whose definition is not a single
+/// ordinary `TYPE NAME = RHS;` line.
+let private genModuleBinding
+        (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder)
+        (hoistIds: Set<IRId>) : string list * CodeGenContext =
+    let (code, ctx') = genBinding ctx binding builder
+    if not (Set.contains binding.Id hoistIds) then (code, ctx')
+    else
+        let name = bindingCppName binding
+        match tryHoistModuleBindingDecl name code with
+        | Some (decl, rewritten) ->
+            let cell = moduleGlobalDeclsCell ()
+            if not (List.contains decl cell.Value) then cell.Value <- cell.Value @ [decl]
+            (rewritten, ctx')
+        | None ->
+            // Status quo, plus a breadcrumb: this binding stays a main() local
+            // even though a namespace-scope body wants to name it. Nothing is
+            // broken TODAY only because the call that would name it is not
+            // generated yet; when it is, the C++ error lands here.
+            (code @ [ sprintf "%s// (module binding '%s' is demanded at namespace scope but its emitted \
+shape has no single `TYPE %s = ...;` definition line to split -- see tryHoistModuleBindingDecl)"
+                              (indentStr ctx) name name ], ctx')
+
 /// The bindings-and-functions emission order, as ONE definition shared by
 /// `genModule` and `genModuleSplit` so the two can never drift.
 ///
@@ -15876,11 +16009,15 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // helper, also used by genModuleSplit).
     let forwardDecls = genForwardDecls fileScopeFuncs
 
+    // S0 (plan section 6): module-level bindings a file-scope callable must be
+    // able to NAME get their declaration promoted to namespace scope.
+    let hoistIds = computeModuleCaptureHoistIds modul mainLocalFuncIds
+
     let (funcCode, bindCode, finalCtx) =
         allItems |> List.fold (fun (fc, bc, c) (_, item) ->
             match item with
             | Choice1Of2 binding ->
-                let (code, c') = genBinding c binding builder
+                let (code, c') = genModuleBinding c binding builder hoistIds
                 (fc, bc @ code @ [""], c')
             | Choice2Of2 funcDef ->
                 if Set.contains funcDef.Id mainLocalFuncIds then
@@ -15936,6 +16073,8 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
             | Choice2Of2 funcDef when not (Set.contains funcDef.Id mainLocalFuncIds) -> Some funcDef
             | _ -> None)
     let forwardDecls = genForwardDecls fileScopeFuncs
+    // S0 (plan section 6): same namespace-scope promotion as genModule.
+    let hoistIds = computeModuleCaptureHoistIds modul mainLocalFuncIds
     // Single split point: emit in strict ID order (NO reordering), and once
     // the first compute binding is seen, every subsequent item stays in the
     // compute phase. This preserves all cross-binding dependencies -- a consumer
@@ -15961,7 +16100,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     match onlyBinding with
                     | Some target -> seen || binding.Name = target
                     | None -> seen || isComputeBinding binding
-                let (code, c') = genBinding c binding builder
+                let (code, c') = genModuleBinding c binding builder hoistIds
                 if nowCompute then
                     (fc, sc, cc @ code @ [""], true, c')
                 else
@@ -16678,6 +16817,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     // Reset the CUDA kernel collector; genCudaKernel appends during genModule.
     (cudaKernelDefsCell ()).Value <- []
     (symmDeclsCell ()).Value <- []
+    (moduleGlobalDeclsCell ()).Value <- []
     (streamBufDeclsCell ()).Value <- Set.empty
     (forcedDeferredIdsCell ()).Value <- Set.empty
     (linalgUsedCell ()).Value <- false
@@ -16747,11 +16887,14 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
             let trimmed = sigLine.Replace("__declspec(dllexport) ", "").TrimEnd()
             (if trimmed.EndsWith("{") then trimmed.Substring(0, trimmed.Length - 1).TrimEnd() else trimmed) + ";")
     let symmDecls = (symmDeclsCell ()).Value
+    // S0: module-level bindings promoted to namespace scope (declaration only;
+    // main() still initializes them at their original program point).
+    let moduleGlobalDecls = (moduleGlobalDeclsCell ()).Value
 
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     let mainFunc = genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul) testName bodyIndented []
 
-    (includes @ [""] @ mpiDecls @ symmDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
+    (includes @ [""] @ mpiDecls @ symmDecls @ moduleGlobalDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
 
 /// The .cu file content for the most recently assembled program, or None if no
 /// CUDA kernel was emitted. Call AFTER genMainProgram/genProgramFromIR (the
@@ -16835,6 +16978,8 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // Reset the symm-decl hoist collector; symmetric outputs append namespace-
     // scope symm arrays during genModule, emitted in the preamble below.
     (symmDeclsCell ()).Value <- []
+    // Reset the S0 module-global promotion collector (see moduleGlobalDeclsCell).
+    (moduleGlobalDeclsCell ()).Value <- []
     (streamBufDeclsCell ()).Value <- Set.empty
     // Reset the forced-deferred collector; forceDeferredArrayInput populates it
     // during genModule and genPrintStatements (called AFTER body generation)
@@ -16929,8 +17074,10 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // Namespace-scope symm arrays hoisted out of main() (MSVC constant-address
     // requirement -- see hoistSymmDecl).
     let symmDecls = (symmDeclsCell ()).Value
+    // S0: module-level bindings promoted to namespace scope (declaration only).
+    let moduleGlobalDecls = (moduleGlobalDeclsCell ()).Value
 
-    (includes @ typeDefs @ [""] @ mpiDecls @ symmDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainBody) |> String.concat "\n"
+    (includes @ typeDefs @ [""] @ mpiDecls @ symmDecls @ moduleGlobalDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainBody) |> String.concat "\n"
 
 /// Generate a C++ program with external runtime header
 /// Returns (mainFileContent, headerFileContent)
@@ -16954,6 +17101,8 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     // Reset the forced-deferred collector before body generation; the
     // genPrintStatements call below (correctly AFTER genModule) reads it.
     (forcedDeferredIdsCell ()).Value <- Set.empty
+    // Reset the S0 module-global promotion collector (see moduleGlobalDeclsCell).
+    (moduleGlobalDeclsCell ()).Value <- []
     (linalgUsedCell ()).Value <- false
     (cudaLinalgUsedCell ()).Value <- false
     (lapackUsedCell ()).Value <- false
@@ -16991,7 +17140,9 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     let printCode = genPrintStatements modul
     let mainFunc = genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul) testName bodyIndented printCode
 
-    let mainFile = (includes @ typeDefs @ [""] @ mpiDecls @ funcDefs @ mainFunc) |> String.concat "\n"
+    // S0: module-level bindings promoted to namespace scope (declaration only).
+    let moduleGlobalDecls = (moduleGlobalDeclsCell ()).Value
+    let mainFile = (includes @ typeDefs @ [""] @ mpiDecls @ moduleGlobalDecls @ funcDefs @ mainFunc) |> String.concat "\n"
     let headerFile = genRuntimeHeader ()
     (mainFile, headerFile)
 

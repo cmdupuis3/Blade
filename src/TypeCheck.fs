@@ -2148,6 +2148,37 @@ let requireArrayArgMinRank (env: TypeEnv) (tArr: TypedExpr) (opName: string) (mi
 let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResult<IRArrayType> =
     requireArrayArgMinRank env tArr opName 1
 
+/// S1 (docs/plan-kernel-body-materialization.md, M-B): materialize a
+/// caret-shorthand `T^k` operand into the rank-k array it is already pinned to
+/// be.
+///
+/// A `T^k` parameter is an arity-constrained inference VAR, not an IRTArray
+/// (Subst.LookupOrCreateTypeVar): the caret pins the RANK and the array shape
+/// is only built when some demand supplies it. Every array INTRINSIC issues
+/// that demand (`requireArrayArg`; see inferProdSum's note for the long
+/// version) -- but the two seams that make an array-valued INTERMEDIATE
+/// (an elementwise binop, and a nested `<@>` whose operand is the var) both
+/// gate their array-producing arms on the operand RESOLVING to an array, so
+/// against an unmaterialized var they fall to the scalar arm and the
+/// intermediate is scalar-typed. Every array consumer downstream then honestly
+/// refuses a value that IS an array.
+///
+/// This is NOT a guess. Unify.fs's arity invariant already says an arity-k var
+/// can bind to nothing but a rank-k array (anything else is an outright type
+/// error there), so supplying the shape early can only pre-compute a binding
+/// unification would have been forced into later. Errors are therefore
+/// swallowed: the demand is an optimization of WHEN, never of WHETHER, and a
+/// failure leaves the var exactly as it was for the pre-existing diagnostic to
+/// report. Non-arity vars are left alone -- an unannotated kernel parameter is
+/// one of those and may still resolve to a scalar.
+let materializeArityVar (env: TypeEnv) (tArg: TypedExpr) (opName: string) : unit =
+    match env.Subst.Resolve tArg.Type with
+    | IRTInfer vid ->
+        (match env.Subst.GetArityConstraint vid with
+         | Some k when k >= 1 -> requireArrayArgMinRank env tArg opName k |> ignore
+         | _ -> ())
+    | _ -> ()
+
 /// Tag-check helper: validate that each index argument's nominal tag (if any)
 /// agrees with the corresponding array slot's nominal tag. Slot tags starting
 /// with "__" are internal synthetic markers and skipped. Untagged ints into
@@ -7349,15 +7380,35 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         // Arithmetic, comparison, logical
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
-            let lRes = env.Subst.Resolve tL.Type
-            let rRes = env.Subst.Resolve tR.Type
+            let lRes0 = env.Subst.Resolve tL.Type
+            let rRes0 = env.Subst.Resolve tR.Type
             let isDist t = match t with IRTDist _ -> true | _ -> false
-            if isDist lRes || isDist rRes then
+            if isDist lRes0 || isDist rRes0 then
                 // Typed-Dist operator dispatch (checker-level; the surface
                 // operand exprs are re-synthesized into the expansion, so
                 // this works in any expression position -- see inferDistBinOp).
-                inferDistBinOp env op left right lRes rRes
+                inferDistBinOp env op left right lRes0 rRes0
             else
+            // S1 SEAM 1 (docs/plan-kernel-body-materialization.md, M-B).
+            // Both array-producing arms below -- the two-array zip and the
+            // array/scalar broadcast -- are gated on an operand RESOLVING to
+            // an array. A caret-shorthand `T^k` row parameter never does on
+            // its own, so `r * 2.0` inside `lambda(r: T^1) -> ...` fell to the
+            // scalar fallback and typed the row product `IRTScalar Float64`;
+            // every array consumer of that intermediate then refused it.
+            // Issue the same demand the array intrinsics issue, BEFORE the
+            // arms are chosen. See materializeArityVar: the arity constraint
+            // already forces a rank-k array, so this changes when the shape
+            // appears, not whether it may.
+            (match op with
+             | (OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
+               | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
+               | OpAnd | OpOr) when mode = Elementwise ->
+                 materializeArityVar env tL "elementwise"
+                 materializeArityVar env tR "elementwise"
+             | _ -> ())
+            let lRes = env.Subst.Resolve tL.Type
+            let rRes = env.Subst.Resolve tR.Type
             // Elementwise op on TWO ARRAYS: re-synthesize as the zip
             // co-iteration pipeline -- method_for(zip(l, r)) <@>
             // lambda(u, w) -> u op w |> compute -- and re-infer
@@ -7500,7 +7551,59 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // env.Builder: inferArithType mints fresh index-type ids for a
             // synthesized outer-product result (same allocator deduceOutputType
             // uses for the method_for output type).
-            inferArithType env.Builder mode op tL.Type tR.Type (Some tR) |> Result.bind (fun resTy ->
+            inferArithType env.Builder mode op tL.Type tR.Type (Some tR) |> Result.bind (fun resTy0 ->
+                // S1 SEAM 2 (docs/plan-kernel-body-materialization.md, M-B, the
+                // concrete-operand triple). One operand is a real array, the
+                // other an UNRESOLVED inference var -- the shape an enclosing
+                // kernel's own parameter has while its body is being inferred
+                // (`ws <@> lambda(w) -> { let e = exp <@> (w * ts); ... }`).
+                // inferArithType's Elementwise table has no arm for that pair,
+                // so it fell through to `| _ -> lBare` and handed back THE VAR
+                // ITSELF as the product's type. Two things followed, both
+                // wrong: the nested `<@>` saw a non-array operand, degraded it
+                // to a rank-0 record, and typed `e` a scalar, so `prodsum(e,e)`
+                // refused a value that is an array; and any consumer that DID
+                // issue an array demand (prodsum, reduce) satisfied it by
+                // binding the ALIASED var -- i.e. by making the enclosing
+                // kernel's scalar parameter an array, which lowering then
+                // emitted as a bogus zip over the parameter.
+                //
+                // The result SHAPE is knowable without settling which arm
+                // applies: whether `w` turns out to be a scalar (broadcast) or
+                // an array (zip), an elementwise op against a rank-r array
+                // yields that same rank-r shape -- a zip requires the shapes to
+                // agree. So stamp the shape and nothing else. The node stays a
+                // plain TExprBinOp, so lowering still reads the RESOLVED
+                // operands and picks broadcast or zip exactly as before.
+                //
+                // Element type follows the array operand, which is
+                // `promoteElem`'s own answer when the other side carries no
+                // information. A var that later resolves complex against a real
+                // array is the pre-existing mixed real/complex promotion gap
+                // (issue #18), not something this seam can settle -- and the
+                // spelling that pins it (`i * w * ts`, complex first) already
+                // reaches the resolved-scalar broadcast arm above.
+                //
+                // Narrow on purpose: only the case where inferArithType handed
+                // back a bare VAR is repaired. `ts * w` (array on the LEFT)
+                // already answers with the array -- `| _ -> lBare` happens to be
+                // right in that orientation -- and is left untouched, wrapper
+                // and all.
+                let resTy =
+                    let unboundVar t =
+                        match IR.stripUnits t with
+                        | IRTInfer vid -> (env.Subst.GetArityConstraint vid).IsNone
+                        | _ -> false
+                    let reshape (arr: IRArrayType) =
+                        match IR.getUnits resTy0 with
+                        | Some u -> mkArrayLike { arr with ElemType = IRTUnitAnnotated (IR.stripUnits arr.ElemType, u) }
+                        | None -> mkArrayLike arr
+                    if mode <> Elementwise || not isZipOp || not (unboundVar resTy0) then resTy0
+                    else
+                        match lRes, rRes with
+                        | ArrayElem arr, other when unboundVar other -> reshape arr
+                        | other, ArrayElem arr when unboundVar other -> reshape arr
+                        | _ -> resTy0
                 // THE conversion seam. `*` and `/` need nothing: unitMul and
                 // unitDiv fold the magnitudes into the result TYPE, so the
                 // emitted code is untouched. Only the ops that require two
@@ -8869,8 +8972,16 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             match arr.Kind with
             | TExprVar (name, _, _) -> AIDVariable name
             | _ -> AIDLiteral (env.Builder.FreshId()))
+        // S1 SEAM 3 (docs/plan-kernel-body-materialization.md, M-B): the
+        // operand-shape fallback just below degrades anything that is not
+        // already an IRTArray to a RANK-0 record, which types the whole apply
+        // scalar. A caret-shorthand `T^k` operand (`lambda(r: T^1) -> exp <@> r`)
+        // is an arity-constrained var, not an IRTArray, so it landed there and
+        // the nested map's result was typed a scalar. Supply the shape the
+        // arity constraint already forces -- see materializeArityVar.
+        flatArrays |> List.iter (fun arr -> materializeArityVar env arr "map")
         let arrayTypes = flatArrays |> List.map (fun arr ->
-            match arr.Type with
+            match env.Subst.Resolve arr.Type with
             | ArrayElem at -> at
             | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
         // Real per-array S-dim counts in BOTH modes: the co-iteration case needs
@@ -10212,14 +10323,40 @@ and buildApplyInfo (env: TypeEnv)
                     when (match env.Subst.Resolve operand.Type with ArrayElem _ -> true | _ -> false) ->
                 Some (match op with OpReal -> "real" | OpImag -> "imag" | _ -> "arg")
             | _ -> typedExprChildren e |> List.tryPick findBadComplexAccessor
+        // S0 BROADENING of rejection (2), docs/plan-kernel-body-materialization.md
+        // M-C1. The test used to ALSO require the body's TOP node to be a
+        // `TExprCompute`, which is one of at least three ways to spell an
+        // array-valued return. The other two -- a BLOCK body
+        // (`-> { (fs <@> k) |> compute }`) and a CALL body (`-> spec(r, fs)`)
+        // -- slipped straight through, and the dense `method_for` case then
+        // COMPILED AND RAN: `kernelTDims` is computed above and threaded to
+        // `ApplyInfo.KernelOutputRank`, but no emitter consumes it to SIZE the
+        // output, so a rank-2 grid got a ONE-entry extents table ({ 2 }), the
+        // inner extent read as 0, and the program printed `[[], []]` with no
+        // diagnostic on any channel. Same silent-wrong-answer class as
+        // func-arrays/011's rank-2 literal of computed rows.
+        //
+        // What output rank >= 1 can do today is nothing safely, so the test is
+        // now the RESOLVED RETURN TYPE and the spelling is irrelevant. A bare
+        // array-param PASSTHROUGH stays exempt: the kernel builds no new array,
+        // the row it hands back is the row the iteration already owns, and that
+        // is the one shape the existing emitters do get right.
+        //
+        // TEMPORARY. S3 sizes the output from `kernelTDims` and deletes this
+        // guard along with its pin
+        // (diagnostics/069_array_valued_kernel_return_rejects).
         let arrayValuedComputeBody =
-            kernelOutputRank >= 1 &&
-            (match lambdaInfo.Body.Kind with TExprCompute _ -> true | _ -> false)
+            let rec isRowPassthrough (e: TypedExpr) =
+                match e.Kind with
+                | TExprVar _ -> true
+                | TExprBlock ([], Some last) -> isRowPassthrough last
+                | _ -> false
+            kernelOutputRank >= 1 && not (isRowPassthrough lambdaInfo.Body)
         match findBadComplexAccessor lambdaInfo.Body with
         | Some name -> Error (IntrinsicComplexScalarOnly name)
         | None ->
         if arrayValuedComputeBody then
-            Error (Other "array-valued elementwise kernel body is not supported inside a kernel; reduce the row to a scalar with prodsum or reduce, or compute the elementwise product at top level")
+            Error (Other (sprintf "array-valued kernel return is not supported: this kernel's body has a rank-%d array type, so every cell of the output grid would hold a whole array, and nothing sizes that grid's inner axes today (it would be built with a short extents table and print empty rows). Reduce the row to a scalar with prodsum or reduce, or build the array at top level." kernelOutputRank))
         else
         // After param-type unification, inference variables that flowed into
         // the body's TExprIndex sites may now resolve to nominally-tagged
@@ -12726,6 +12863,11 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
         else
         let identities = arrays |> List.map (fun arr ->
             match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+        // S1 SEAM 3, method_for orientation (see the object_for site): a
+        // caret-shorthand `T^k` operand is an arity-constrained var, so
+        // loopOperandArrayType takes its `fallback ()` branch and the loop
+        // iterates a shape nobody declared. Supply the forced shape first.
+        tArrays |> List.iter (fun ta -> materializeArityVar env ta "method_for")
         // Same stale-IRTInfer hazard as the zip arms above.
         let arrayTypes = tArrays |> List.mapi (fun i ta ->
             loopOperandArrayType env (fun () -> getArrayType env arrays.[i]) ta.Type)

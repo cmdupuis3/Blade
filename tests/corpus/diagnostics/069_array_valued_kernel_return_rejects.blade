@@ -1,0 +1,37 @@
+// TEST: Array Valued Kernel Return Rejects
+// ERROR: BL3999
+// ERROR-CONTAINS: array-valued kernel return is not supported
+// ============================================================================
+// TEMPORARY -- SCHEDULED FOR DELETION AT S3.
+// docs/plan-kernel-body-materialization.md stage S0, manifestation M-C1. This
+// pin exists only to hold the line until S3 sizes the output grid from
+// `kernelTDims`; at that point the guard in TypeCheck (`arrayValuedComputeBody`)
+// goes away and THIS FILE IS DELETED, replaced by a value test pinning
+// grid = [[14, 28, 42, 56], [77, 154, 231, 308]]. Same instruction, and the
+// same reason, as the header of units/065.
+//
+// What it is holding the line against: this exact program COMPILED AND RAN and
+// printed `grid = [[], []]`, with no diagnostic on any channel. `kernelTDims` /
+// `kernelOutputRank` are computed at the apply seam and threaded all the way to
+// `ApplyInfo.KernelOutputRank`, but no emitter consumes them to size the
+// output, so a rank-2 grid was emitted with a ONE-entry extents table (`{ 2 }`)
+// and the inner extent read as 0. Byte for byte the failure
+// func-arrays/011 documents for rank-2 literals of computed rows.
+//
+// The old guard fired only when the lambda body's TOP node was a
+// `TExprCompute`, which is one of at least three spellings of an array-valued
+// return. The CALL body below (`-> spec(r, fs)`) and a BLOCK body
+// (`-> { (fs <@> k) |> compute }`) both slipped past it. The guard is now
+// return-TYPE based, so the spelling no longer matters.
+//
+// Note this program only reaches the guard at all because of S1: `spec`'s
+// return type has to RESOLVE to an array for `kernelOutputRank` to be >= 1.
+// ============================================================================
+let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let fs: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+
+function spec(r: Array<Float like Idx<3>>, f: Array<Float like Idx<4>>) = {
+    (f <@> lambda(x) -> x * prodsum(r, r)) |> compute
+}
+
+let grid = method_for(m) <@> lambda(r: Array<Float like Idx<3>>) -> spec(r, fs) |> compute

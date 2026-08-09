@@ -1,0 +1,53 @@
+// TEST: Kernel Body Array Intermediate (rejects)
+// REJECT-AT: codegen
+// WARN-CODEGEN: array-valued elementwise kernel body not supported inside a kernel
+// ============================================================================
+// docs/plan-kernel-body-materialization.md stage S1, manifestation M-B, as its
+// minimal program: an array-valued INTERMEDIATE inside a kernel body.
+//
+// CONVERT TO A VALUE TEST AT S2. The expected values are
+//   out = [56, 308]
+// i.e. 4 * prodsum(row, row) for each row: 4 * (1+4+9) = 56, 4 * (16+25+36) =
+// 308. Everything the TYPE checker owes this program is now delivered -- `w` is
+// a rank-1 array, `prodsum(w, w)` is a scalar, the kernel's return type is a
+// scalar, and the output grid is rank 1 -- and what is left is exactly the
+// codegen half of issue #3: the loop emitter renders the kernel body as one C++
+// EXPRESSION (`genKernelExprWithReynolds` -> `exprToCpp`), so the nested
+// materialization lands in `genApplyCombinatorExpr`, whose entire body is an
+// `exprError`. Hence the sentinel
+//   BLADE_CODEGEN_ERROR_ARRAY-VALUED_ELEMENTWISE_KERNEL_BODY_NOT_SUPPORTED_...
+// S2's call-don't-inline routing makes the lifted `__lambda_N` -- which the
+// same build ALREADY emits, and emits correctly -- the thing the loop calls,
+// and this becomes a value test. DELETE the WARN-CODEGEN pin in that same
+// change: the harness enforces pins in both directions, so a pin that outlives
+// the sentinel it names fails the test.
+//
+// WHY IT USED TO DIE EARLIER, and what the stage is asserting. The row param
+// `r: T^1` is an arity-constrained inference VAR, not an IRTArray, and the
+// array-producing arms of the elementwise binop are gated on the operand
+// RESOLVING to an array. So `r * 2.0` fell to the scalar arm, `w` was typed
+// `IRTScalar ETFloat64`, and `prodsum(w, w)` honestly refused with
+// "prodsum() requires array arguments" -- a type error about a value that IS
+// an array. If that regresses, this probe is refused at LOWER and this pin
+// fails, which is the whole point of pinning the stage rather than the text.
+//
+// The `|> compute` on the intermediate is decorative: the same program without
+// it types identically (see the discriminating matrix in the plan's section 1).
+//
+// KNOWN RED, and red for a reason that has nothing to do with this program:
+// `// REJECT-AT: codegen` requires a literal `#error` line in the emitted C++
+// (Runner.fs's EmittedErrorGuard), and `exprError` does not emit one -- it
+// emits a bare BLADE_CODEGEN_ERROR_ identifier and lets g++ fail on the
+// undeclared name. units/065 and units/073, the two existing probes of this
+// same ceiling, are red today for exactly this reason. All three go green
+// together: either at S2 (the sentinel stops firing and all three become value
+// tests) or the moment `exprError` also emits `#error "Blade codegen: ..."`.
+// The FUNCTION-body twin of this program, which codegen does handle, is pinned
+// green as functions/059_array_intermediate_over_caret_param.
+// ============================================================================
+let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+let out = method_for(m) <@> lambda(r: T^1) -> {
+    let w = (r * 2.0) |> compute
+    prodsum(w, w)
+} |> compute
