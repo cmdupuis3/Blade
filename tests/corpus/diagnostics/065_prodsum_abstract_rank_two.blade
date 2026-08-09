@@ -1,0 +1,16 @@
+// TEST: Diag prodsum Over An Abstract RANK-2 Parameter (diag)
+// ERROR: BL3999
+// ERROR-CONTAINS: rank-1 arrays (fibers)
+// ============================================================================
+// The refusing half of functions/057. `T^1` is materialized into the rank-1
+// fiber prodsum folds; `T^2` declares a rank prodsum does not fold, and the
+// caret already said so -- so it takes the SAME refusal a concrete rank-2
+// array takes, with the same steer to the innermost slice.
+//
+// Pinned because the shape is easy to get wrong in the other direction:
+// synthesizing a rank-1 array against an arity-2 variable refuses too, but in
+// `unify`, which reports the raw internal arrow type instead of this guidance.
+// ============================================================================
+function bad(a: T^2, b: T^2) = prodsum(a, b)
+let m: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let v = bad(m, m)

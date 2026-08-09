@@ -5088,6 +5088,31 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                  | Some e -> Ok e
                  | None -> Error (Other "prodsum() requires at least one array argument"))
             | t :: more ->
+                // A `T^k` parameter is an arity-k inference VAR, not an
+                // IRTArray (Subst.LookupOrCreateTypeVar): the caret pins the
+                // RANK, and the array shape is only materialized when some
+                // demand supplies it. `requireArrayArg` is that demand for
+                // every other array intrinsic, and prodsum used to skip it and
+                // read the raw resolution instead -- so `prodsum(a, b)` over
+                // `a: T^1, b: T^1` answered "requires array arguments" unless
+                // something ELSE in the body (an `extents(a)`, a call whose
+                // callee's parameter is concrete) happened to pin the var
+                // first. That is why `covariance` above typechecks and the
+                // same call one line up does not.
+                //
+                // Only an UNBOUND operand is synthesized, and only where the
+                // rank it was pinned to is the rank prodsum folds. A concrete
+                // non-array, and a `T^k` with k <> 1, both fall through to the
+                // honest refusals below -- synthesizing a rank-1 shape against
+                // an arity-2 var would refuse in `unify` instead, which reports
+                // the raw IRTArrow rather than prodsum's own rank guidance.
+                let materialize =
+                    match env.Subst.Resolve t.Type with
+                    | IRTInfer vid when env.Subst.GetArityConstraint vid = Some 1
+                                        || (env.Subst.GetArityConstraint vid).IsNone ->
+                        requireArrayArg env t "prodsum" |> Result.map ignore
+                    | _ -> Ok ()
+                materialize |> Result.bind (fun () ->
                 match env.Subst.Resolve t.Type with
                 // Fold refusal first, for reduce()'s reason (see there).
                 | ArrayElem arrTy when arrTy.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
@@ -5120,8 +5145,13 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                                more))
                 | ArrayElem _ ->
                     Error (Other "prodsum() supports only rank-1 arrays (fibers); pass each operand's innermost slice")
+                // A `T^k` operand with k <> 1: the caret already declared the
+                // rank, so this is the same refusal as a concrete rank-k array
+                // and reads better than "requires array arguments" would.
+                | IRTInfer vid when (env.Subst.GetArityConstraint vid |> Option.exists (fun k -> k <> 1)) ->
+                    Error (Other "prodsum() supports only rank-1 arrays (fibers); pass each operand's innermost slice")
                 | _ ->
-                    Error (Other "prodsum() requires array arguments")
+                    Error (Other "prodsum() requires array arguments"))
         go None None tArgs |> Result.map (fun elemTy ->
             mkTyped (TExprProdSum tArgs) elemTy))
 
@@ -6817,10 +6847,30 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // std::function emitted AFTER its use site (invalid C++).
             let scalarish t =
                 match t with IRTScalar _ -> true | _ -> false
+            // `T<u>^0` -- the rank-0 abstract parameter -- lowers to a
+            // unit-annotated inference VARIABLE, not an IRTScalar
+            // (lowerTypeExpr's TyAbstractArray arm stamps the unit onto the
+            // scalar type var). It is a scalar by construction: the caret says
+            // rank 0. Without this it missed `scalarish`, the broadcast arm
+            // never fired, and the fallback below stamped the op's unit around
+            // the whole ARRAY result -- `Array<T<time> like Idx<n>><time>`, a
+            // shape no `ArrayElem` match can see through, so every later array
+            // demand ("prodsum() requires array arguments", "reduce() requires
+            // an array") refused a value that IS an array. An UNANNOTATED
+            // `T^0` never showed it: with no unit there is nothing to wrap, so
+            // the fallback returned the bare array and the program typed.
+            //
+            // Deliberately narrow: a bare `IRTInfer` is NOT admitted here. An
+            // unannotated kernel parameter is one of those and may still
+            // resolve to an array, which is a zip, not a broadcast.
+            let rankZeroQuantity t =
+                match t with
+                | IRTUnitAnnotated (IRTInfer _, _) -> true
+                | _ -> false
             let arrayScalar =
                 match lRes, rRes with
-                | ArrayElem _, r when scalarish (IR.stripUnits r) -> Some true    // array on left
-                | l, ArrayElem _ when scalarish (IR.stripUnits l) -> Some false   // array on right
+                | ArrayElem _, r when scalarish (IR.stripUnits r) || rankZeroQuantity r -> Some true    // array on left
+                | l, ArrayElem _ when scalarish (IR.stripUnits l) || rankZeroQuantity l -> Some false   // array on right
                 | _ -> None
             match arrayScalar with
             | Some arrayOnLeft when mode = Elementwise && isZipOp ->

@@ -1,0 +1,31 @@
+// TEST: prodsum() Over Abstract-Rank (`T^1`) Parameters
+// ============================================================================
+// `T^1` is an arity-1 inference VARIABLE, not an array type: the caret pins
+// the RANK, and the array shape is materialized when a demand supplies it.
+// Every other array intrinsic asks through the one helper that does that
+// (`requireArrayArg`); prodsum read the raw resolution instead and answered
+// "prodsum() requires array arguments" for a parameter that plainly declares
+// rank 1.
+//
+// It hid behind the ORDER of the body. `covariance` below typechecked all
+// along, because `extents(x)` on the line above already shaped both variables;
+// `dot` -- the same call with nothing ahead of it -- did not. That is the
+// asymmetry this pins: both spellings must type, and a rank the caret did NOT
+// declare as 1 must still refuse (functions/058).
+// ============================================================================
+function dot(a: T^1, b: T^1) = prodsum(a, b)
+function selfDot(a: T^1) = prodsum(a, a)
+function covariance(x: T^1, y: T^1) where comm(x, y) = {
+    let n = extents(x)
+    prodsum(x - reduce(x, (+)) / n, y - reduce(y, (+)) / n) / n
+}
+
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let ys: Array<Float64 like Idx<3>> = [4.0, 5.0, 6.0]
+let d = dot(xs, ys)
+let s = selfDot(xs)
+let cv = covariance(xs, ys)
+
+// EXPECT: d = 32
+// EXPECT: s = 14
+// EXPECT: cv = 0.666666666666667
