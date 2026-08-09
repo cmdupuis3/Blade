@@ -2128,6 +2128,24 @@ let requireArrayArgMinRank (env: TypeEnv) (tArr: TypedExpr) (opName: string) (mi
             Kind = SDimension
             Dependencies = []
         }
+        // NOTE (measured, 2026-08-09) -- this synthesis is where a `T^k`
+        // DECLARATION parameter loses its HM element polymorphism: giving `T`
+        // its shape rewrites it to `Array<E, ..>` where `E` is a plain fresh
+        // var, so zonk defaults `E` to whatever the first call site wanted and
+        // the function exists at exactly one element type. `function
+        // variance(x: T^1) = { let n = extents(x); ... }` called on a real and
+        // then a complex series fails in g++; `function dbl(xs: T^1) = xs <@>
+        // ... ` (no array demand in the body) does not, because nothing gives
+        // `T` a shape and the IR monomorphizer sees it whole. PRE-EXISTING --
+        // identical under master @3500258. The obvious repair (mint `E` in the
+        // substitution's id space and carry the polymorphic mark, propagating
+        // it on var-to-var binds) was implemented and measured: it fixes the
+        // direct case (`variance` at two element types) and then fails one
+        // level down in IR validation, because lifted lambdas and module
+        // bindings holding the still-open var are not cloned per specialization
+        // (`functions/055`, `functions/059`, and `lsdft`'s own frequency kernel
+        // all go BL6001). It needs the IR-side clone-and-specialize pass to
+        // cover those shapes first; see the report accompanying this comment.
         let freshElem = env.Builder.FreshInferType()
         let freshArrType = {
             ElemType = freshElem
@@ -5772,12 +5790,50 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                      | Some a, Some b when a <> b ->
                          Error (ProdsumExtentMismatch (a, b))
                      | _ ->
-                        let unifyElem =
-                            match elemTy with
-                            | Some e -> unify env.Subst e arrTy.ElemType
-                            | None -> Ok ()
-                        unifyElem |> Result.bind (fun () ->
-                            go (Some (elemTy |> Option.defaultValue arrTy.ElemType))
+                        // ELEMENT TYPES PROMOTE, THEY DO NOT UNIFY (issue #18,
+                        // docs/plan-array-expression-fixes.md row 18).
+                        //
+                        // `prodsum` is sum_i a_i * b_i, and `*` between a real
+                        // and a complex operand promotes -- the operands keep
+                        // their own element types and only the RESULT widens.
+                        // Unifying them instead made the two operands' element
+                        // types the same type, which is a claim prodsum never
+                        // makes. In `lsdft`, `prodsum(s, e)` with `s : U^1` and
+                        // `e` complex bound `U := Complex128` from inside the
+                        // function's own body: `blade check` still said OK for a
+                        // real-valued caller, but the emitted signature read
+                        // `lsdft(tuple<Array<complex<double>>, ...>)` while the
+                        // call site passed `Array<double>` -- a check-time
+                        // soundness gap that only g++ caught.
+                        //
+                        // So: two concrete element types JOIN through the same
+                        // `promoteElemType` the scalar and broadcast seams use
+                        // (Float64 |_| Complex128 = Complex128), and a still-
+                        // generic operand element contributes nothing and is
+                        // LEFT FREE for the call site to fix. Anything
+                        // promotion cannot join (Float64 with String) falls
+                        // through to `unify`, which reports it exactly as
+                        // before -- the refusals are unchanged, only the
+                        // accepted mixed-numeric case moves.
+                        let joinElem (acc: IRType) (next: IRType) : Result<IRType, TypeError> =
+                            match IR.stripUnits (env.Subst.Resolve acc),
+                                  IR.stripUnits (env.Subst.Resolve next) with
+                            | IRTScalar a, IRTScalar b when a = b -> Ok acc
+                            | IRTScalar a, IRTScalar b ->
+                                (match IR.promoteElemType a b with
+                                 | Some p -> Ok (IRTScalar p)
+                                 | None -> unify env.Subst acc next |> Result.map (fun () -> acc))
+                            // One side still generic: the concrete side is the
+                            // best answer available, and binding the var to it
+                            // is the #18 miscompile.
+                            | IRTScalar _, IRTInfer _ -> Ok acc
+                            | IRTInfer _, IRTScalar _ -> Ok next
+                            | _ -> unify env.Subst acc next |> Result.map (fun () -> acc)
+                        (match elemTy with
+                         | Some e -> joinElem e arrTy.ElemType
+                         | None -> Ok arrTy.ElemType)
+                        |> Result.bind (fun joined ->
+                            go (Some joined)
                                (match staticN with Some _ -> staticN | None -> thisN)
                                more))
                 | ArrayElem _ ->
@@ -5790,7 +5846,48 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                 | _ ->
                     Error (Other "prodsum() requires array arguments"))
         go None None tArgs |> Result.map (fun elemTy ->
-            mkTyped (TExprProdSum tArgs) elemTy))
+            // WIDEST OPERAND LEADS. `IRProdSum` carries no result type of its
+            // own: codegen sizes the accumulator from the FIRST operand
+            // (`inferExprType (List.head args)`, CodeGen.fs's IRProdSum arm),
+            // which was exactly right while every operand shared one element
+            // type and is wrong the moment they promote -- `prodsum(s, e)` with
+            // real `s` and complex `e` accumulated into a `double` and g++
+            // refused `__ps += s[t] * e[t]`.
+            //
+            // Rotating the operand that already carries the joined type to the
+            // front costs nothing and asserts nothing new: prodsum is
+            // sum_t prod_L a_L[t], the product is commutative, and the
+            // summation order over t -- the only order floating-point
+            // accumulation is sensitive to -- is untouched. It fires ONLY when
+            // the operands' element types actually differ, so no program that
+            // compiles today changes shape or rounding.
+            //
+            // Ragged/grouped operands opt out: codegen also reads the loop
+            // BOUND off the head (`.len` for a peeled row, `.extents[0]`
+            // otherwise), and swapping a peeled row out of that position would
+            // change which rule applies.
+            let bareElemOf (t: TypedExpr) =
+                match env.Subst.Resolve t.Type with
+                | ArrayElem a -> Some (IR.stripUnits (env.Subst.Resolve a.ElemType))
+                | _ -> None
+            let anyRagged =
+                tArgs |> List.exists (fun t ->
+                    match env.Subst.Resolve t.Type with
+                    | ArrayElem a ->
+                        a.IndexTypes |> List.exists (fun ix ->
+                            isRaggedRowKind ix.IxKind || isRaggedFamilyKind ix.IxKind)
+                    | _ -> false)
+            let joined = IR.stripUnits (env.Subst.Resolve elemTy)
+            let ordered =
+                if anyRagged || tArgs.Length < 2 || bareElemOf (List.head tArgs) = Some joined then tArgs
+                else
+                    match tArgs |> List.tryFindIndex (fun a -> bareElemOf a = Some joined) with
+                    | Some idx when idx > 0 ->
+                        tArgs.[idx] :: (tArgs |> List.indexed
+                                              |> List.filter (fun (j, _) -> j <> idx)
+                                              |> List.map snd)
+                    | _ -> tArgs
+            mkTyped (TExprProdSum ordered) elemTy))
 
 /// __dist_pack(kappa1, ..., kappar): construct a Dist<r, tau like axes> value from
 /// its cumulant component arrays. Compiler-internal -- the PPL elaboration
@@ -10387,41 +10484,32 @@ and buildApplyInfo (env: TypeEnv)
                     when (match env.Subst.Resolve operand.Type with ArrayElem _ -> true | _ -> false) ->
                 Some (match op with OpReal -> "real" | OpImag -> "imag" | _ -> "arg")
             | _ -> typedExprChildren e |> List.tryPick findBadComplexAccessor
-        // S0 BROADENING of rejection (2), docs/plan-kernel-body-materialization.md
-        // M-C1. The test used to ALSO require the body's TOP node to be a
-        // `TExprCompute`, which is one of at least three ways to spell an
-        // array-valued return. The other two -- a BLOCK body
-        // (`-> { (fs <@> k) |> compute }`) and a CALL body (`-> spec(r, fs)`)
-        // -- slipped straight through, and the dense `method_for` case then
-        // COMPILED AND RAN: `kernelTDims` is computed above and threaded to
-        // `ApplyInfo.KernelOutputRank`, but no emitter consumes it to SIZE the
-        // output, so a rank-2 grid got a ONE-entry extents table ({ 2 }), the
-        // inner extent read as 0, and the program printed `[[], []]` with no
-        // diagnostic on any channel. Same silent-wrong-answer class as
-        // func-arrays/011's rank-2 literal of computed rows.
+        // AN ARRAY-VALUED KERNEL RETURN IS NOW SUPPORTED (stage S3,
+        // docs/plan-kernel-body-materialization.md manifestation M-C). The S0
+        // guard that stood here -- "kernelOutputRank >= 1 and the body is not a
+        // bare row passthrough" -> reject -- is gone, together with its pin
+        // (diagnostics/069_array_valued_kernel_return_rejects, deleted; its
+        // value twin is loops/121).
         //
-        // What output rank >= 1 can do today is nothing safely, so the test is
-        // now the RESOLVED RETURN TYPE and the spelling is irrelevant. A bare
-        // array-param PASSTHROUGH stays exempt: the kernel builds no new array,
-        // the row it hands back is the row the iteration already owns, and that
-        // is the one shape the existing emitters do get right.
+        // What it was holding the line against, and what replaced it:
+        // `kernelTDims` is computed just above and `deduceOutputType` has always
+        // appended it to the output TYPE, so the deduced grid was already
+        // rank-(outer+inner). Nothing sized the emitted grid to match: codegen
+        // built the extents table from the LOOP BINDINGS alone, so a rank-2 grid
+        // got a one-entry table ({ 2 }), the inner extent read as 0, and the
+        // program printed `[[], []]` with no diagnostic anywhere -- the same
+        // silent-wrong-answer class as func-arrays/011's rank-2 literal of
+        // computed rows. S3 closes exactly that gap in CodeGen (the trailing
+        // T-dim extents now come from the output type, and the nest writes a
+        // whole row per outer cell); the type side needed no change at all.
         //
-        // TEMPORARY. S3 sizes the output from `kernelTDims` and deletes this
-        // guard along with its pin
-        // (diagnostics/069_array_valued_kernel_return_rejects).
-        let arrayValuedComputeBody =
-            let rec isRowPassthrough (e: TypedExpr) =
-                match e.Kind with
-                | TExprVar _ -> true
-                | TExprBlock ([], Some last) -> isRowPassthrough last
-                | _ -> false
-            kernelOutputRank >= 1 && not (isRowPassthrough lambdaInfo.Body)
+        // Rejection (2) below survives on its own terms: a complex ACCESSOR
+        // (real/imag/arg) applied to an array operand is still refused, because
+        // that is an elementwise array-valued body the inline path collapses to
+        // a scalar -- a different failure from the one S3 fixed.
         match findBadComplexAccessor lambdaInfo.Body with
         | Some name -> Error (IntrinsicComplexScalarOnly name)
         | None ->
-        if arrayValuedComputeBody then
-            Error (Other (sprintf "array-valued kernel return is not supported: this kernel's body has a rank-%d array type, so every cell of the output grid would hold a whole array, and nothing sizes that grid's inner axes today (it would be built with a short extents table and print empty rows). Reduce the row to a scalar with prodsum or reduce, or build the array at top level." kernelOutputRank))
-        else
         // After param-type unification, inference variables that flowed into
         // the body's TExprIndex sites may now resolve to nominally-tagged
         // types (e.g., `r` in `lambda(r) -> by_country(r)` is unified with
@@ -10749,9 +10837,25 @@ and buildApplyInfo (env: TypeEnv)
                 if nShared <= 0 then [] else full |> List.truncate nShared
         let isCoIter = not (List.isEmpty coIterSharedRecords)
         // For co-iteration, output type spans the co-iterated records (not the
-        // operands' outer product).
+        // operands' outer product) -- PLUS the kernel's T-dimensions, exactly as
+        // `deduceOutputType`'s step 4 appends them on the outer-product path.
+        //
+        // S3, manifestation M-C. This override replaces deduceOutputType's
+        // result wholesale, so before S3 it silently dropped the kernel's array
+        // return: `method_for(zip(A, B)) <@> lambda(ra, rb) -> ra * rb` came out
+        // rank 1 (just the co-iterated Y axis) even though every cell holds a
+        // whole X row, and lswosa's `family_spectra` grid came out rank 1
+        // Float64 instead of rank 2 Complex128 -- which is why `transpose(grid,
+        // [0,1])` reported "axis 1 out of range" and `grid <@> mag2` reported a
+        // Complex128/Float64 mismatch one line later. Both are the same missing
+        // append. Fresh ids and Kind = TDimension mirror deduceOutputType so the
+        // two paths produce structurally identical records.
         let outputType =
-            if isCoIter then mkArrayArrow coIterSharedRecords outputElemType None
+            if isCoIter then
+                let outputTDims =
+                    kernelTDims
+                    |> List.map (fun idx -> { idx with Kind = TDimension; Id = env.Builder.FreshId() })
+                mkArrayArrow (coIterSharedRecords @ outputTDims) outputElemType None
             else outputType
         let info : TypedApplyInfo = {
             Loop = tLoop; Kernel = resolvedKernel

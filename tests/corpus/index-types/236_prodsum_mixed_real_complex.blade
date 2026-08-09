@@ -1,0 +1,51 @@
+// TEST: Prodsum Mixed Real Complex
+// ============================================================================
+// Issue #18 (docs/plan-array-expression-fixes.md row 18), the sibling of 235:
+// prodsum's operands PROMOTE, they do not unify.
+//
+// `prodsum(a, b)` is Sigma a_t * b_t, and `*` between a real and a complex
+// operand promotes -- the operands keep their own element types and only the
+// RESULT widens. The checker instead UNIFIED the two element types, which is a
+// claim prodsum never makes. At top level that was an outright false refusal
+// ("Type mismatch: expected Float64, got Complex128"); inside a function it was
+// worse than that, and silent: `prodsum(s, e)` with `s : U^1` and `e` complex
+// bound `U := Complex128` from inside the callee's own body, so `blade check`
+// said OK for a real-valued caller while the emitted signature read
+// `Array<complex<double>>` and only g++ caught it. That is what kept
+// `examples/lsdft.blade` from running.
+//
+// FOUR SPELLINGS, because the unify / direct-application / let-ascription seams
+// enforce separately and a fix in one can miss the others -- all four must
+// agree on the same number.
+//   Sigma re_t * cx_t = 1*(1+1i) + 2*(0+2i) + 3*(2-1i)
+//                     = (1+1i) + (0+4i) + (6-3i) = (7+2i)
+// The last spelling also pins that OPERAND ORDER is irrelevant: the checker
+// rotates the widest operand to the front (codegen sizes prodsum's accumulator
+// from the head operand), and that rotation must not change the value.
+//
+// No conjugation anywhere -- see 235 for the ruling this inherits.
+// ============================================================================
+let re: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let cx: Array<Complex128 like Idx<3>> = [
+    complex(1.0, 1.0),
+    complex(0.0, 2.0),
+    complex(2.0, -1.0)
+]
+
+// (1) plain inference -- the `unify` seam
+let z1 = prodsum(re, cx)
+// EXPECT: z1 = (7,2)
+
+// (2) let-ascription -- the ascription seam
+let z2: Complex128 = prodsum(re, cx)
+// EXPECT: z2 = (7,2)
+
+// (3) generic caret param + direct application -- the `lsdft` shape, and the
+//     one that used to bind the callee's own `T` to Complex128
+function mix(x: T^1, e: Array<Complex128 like Idx<3>>) = prodsum(x, e)
+let z3 = mix(re, cx)
+// EXPECT: z3 = (7,2)
+
+// (4) operand order reversed
+let z4 = prodsum(cx, re)
+// EXPECT: z4 = (7,2)
