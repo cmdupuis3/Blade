@@ -587,6 +587,30 @@ let ompThreadsSuppressedReason () : string =
 let ompThreadsSuppressedBlockMarker () : string =
     sprintf "/* [omp] thread pragma suppressed: %s */" (ompThreadsSuppressedReason ())
 
+/// The census phrase for "this kernel asked for `omp` and got serial code",
+/// shared by BOTH comment forms so they cannot drift. `ompSuppressedMarker`
+/// (the `//` line form, used by the loop-nest emitters) and
+/// `ompSuppressedBlockMarker` (the `/* */` form below) are the only two
+/// spellings, which is what lets one `grep "[omp] requested but emitted
+/// serial"` enumerate every declined site.
+///
+/// Defined HERE, far above `ompSuppressedMarker`, only because F# is
+/// order-dependent and the earliest consumer -- `renderReduceExpr`, an
+/// expression-position emitter -- sits above that function.
+let ompSuppressedPhrase (reason: string) : string =
+    sprintf "[omp] requested but emitted serial: %s" reason
+
+/// The census marker as a BLOCK comment, for emitters whose output is a
+/// SINGLE-LINE IIFE (`[&]() { ... }()`) at an expression position, where a `//`
+/// comment would swallow the rest of the statement. Same argument as
+/// `ompThreadsSuppressedBlockMarker` above; the trailing space is included so
+/// callers can splice it directly after `[&]() { `.
+///
+/// Returns "" when the kernel never asked for `omp`, so a caller can prepend it
+/// unconditionally.
+let ompSuppressedBlockMarker (requested: bool) (reason: string) : string =
+    if requested then sprintf "/* %s */ " (ompSuppressedPhrase reason) else ""
+
 /// Collector: did THIS program assembly emit a `blade_linalg::` dispatch call?
 /// Set by the gram / matmul emitters during genModule; the program assemblers
 /// append the `#include "blade_linalg.hpp"` line after body generation (the
@@ -3192,6 +3216,21 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     // or a wrong team size). The statement forms (genReduceBinding /
     // genReduceComputeBinding) own a whole binding and are what make the
     // parallel region safe; hoist the fold to its own `let` for that shape.
+    //
+    // The decline above is legitimate; being SILENT about it was not. A kernel
+    // carrying `where ... omp` that lands here emits the census marker below,
+    // for the same reason every nest-level decline does (`ompSuppressedMarker`):
+    // "never asked" and "asked, couldn't honour" were byte-identical, so a user
+    // who wrote the clause had no way to tell which happened.
+    //
+    // This is not a rare corner. Since the 2026-08-09 `reduce` ruling
+    // (docs/features/sql.md 10) the DEFAULT is the innermost-axis partial fold,
+    // and `partialFold` (TypeCheck) desugars it into the row-wise
+    // `method_for(src) <@> lambda(row) -> reduce(row, op, init)` -- which puts
+    // the fold in exactly this expression position. So every rank>=2
+    // `reduce(A, <omp-licensed kernel>, init)` written without `axes = rank`
+    // arrives here, and the marker is what tells its author that the clause
+    // bought nothing and `axes = rank` is the spelling that would.
     let arrStr = exprToCppCore subst names arrExpr
     let elemType =
         match inferExprType arrExpr with
@@ -3251,6 +3290,25 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     | Some callable when callable.Params.Length = 2 ->
         let (wrapperCode, wname) = genCallableWrapper names "" callable
         let wrapperStr = wrapperCode |> String.concat " "
+        // Census marker for a dropped `omp` clause (see the note at the top of
+        // this function). A BLOCK comment, because every arm below space-joins
+        // its statements into ONE line -- a `//` would swallow the fold.
+        //
+        // Triggered by the REQUEST (`IsOmpParallel`), not by the licence: the
+        // marker's claim is "you asked and did not get it", which is true of a
+        // licensed and an unlicensed kernel alike. (In practice only licensed
+        // ones arrive -- `checkFoldOmpLicense` refuses the rest with BL4016
+        // before codegen -- so this is the same population the statement form's
+        // `parallelFold.IsSome` selects, reached by the honest predicate.)
+        //
+        // The reason is STRUCTURAL and identical under BLADE_OMP_THREADS: this
+        // site declines in both modes, so naming the knob here would be a lie.
+        // That is also what keeps the knob-equivalence pins meaningful -- a
+        // program whose only omp site is an expression reduce emits the same
+        // text either way.
+        let ompNote =
+            ompSuppressedBlockMarker callable.IsOmpParallel
+                "reduce in expression position (kernel body / inline arithmetic) opens no team -- its context may already be a parallel region; bind the fold to its own `let` (or fold all axes with `axes = rank`) for the parallel form"
         // BLADE_FP_REASSOC, expression form. Same K-lane shape as the statement
         // form, minus the thread chunking: ONE chunk, K lanes, no pragma. That
         // is the right shape here for the reason the note above gives -- an IIFE
@@ -3291,7 +3349,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
                 @ laneStmts
                 @ [ sprintf "__r = %s(__r, %s);" wname resultLane
                     "return __r;" ]
-            sprintf "[&]() { %s%s %s }()" guard wrapperStr (String.concat " " stmts)
+            sprintf "[&]() { %s%s%s %s }()" ompNote guard wrapperStr (String.concat " " stmts)
         let mayLane = fpReassocEnabled () && foldReorderLicensed callable
         match initExpr with
         | Some initE ->
@@ -3301,16 +3359,16 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
             let initStr = exprToCppCore subst names initE
             if mayLane then laneForm "0" initStr ""
             else
-            sprintf "[&]() { %s %s __r = %s; for (size_t __ri = 0; __ri < %s; __ri++) { __r = %s(__r, %s); } return __r; }()"
-                wrapperStr elemStr initStr reduceBound wname (reduceAccAt "__ri")
+            sprintf "[&]() { %s%s %s __r = %s; for (size_t __ri = 0; __ri < %s; __ri++) { __r = %s(__r, %s); } return __r; }()"
+                ompNote wrapperStr elemStr initStr reduceBound wname (reduceAccAt "__ri")
         | None ->
         let guard =
             if reduceNonEmpty then ""
             else sprintf "if (%s == 0) { blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", nullptr, 0); } " reduceBound
         if mayLane then laneForm "1" (reduceAccAt "0") guard
         else
-        sprintf "[&]() { %s%s %s __r = %s; for (size_t __ri = 1; __ri < %s; __ri++) { __r = %s(__r, %s); } return __r; }()"
-            guard wrapperStr elemStr (reduceAccAt "0") reduceBound wname (reduceAccAt "__ri")
+        sprintf "[&]() { %s%s%s %s __r = %s; for (size_t __ri = 1; __ri < %s; __ri++) { __r = %s(__r, %s); } return __r; }()"
+            ompNote guard wrapperStr elemStr (reduceAccAt "0") reduceBound wname (reduceAccAt "__ri")
     | _ ->
         "/* reduce: non-callable kernel (typechecker or IR bug) */"
 
@@ -5679,7 +5737,7 @@ let pragmaLevelOf (bindings: LoopIndexBinding list) : int option =
 let ompSuppressedMarker (requested: bool) (pragmaEmitted: bool) (reason: string)
                         (markerIndent: string) : string list =
     if requested && not pragmaEmitted then
-        [ markerIndent + sprintf "// [omp] requested but emitted serial: %s" reason ]
+        [ markerIndent + "// " + ompSuppressedPhrase reason ]
     else []
 
 /// Does this kernel body lower to something containing a LOOP of its own?

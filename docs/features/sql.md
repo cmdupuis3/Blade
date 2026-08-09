@@ -364,7 +364,13 @@ plain (non-compact) storage — folding the canonical cells and the logical
 are rejected with a `decompact(A, d)` steer — and the kernel must be
 **unit-endomorphic** (`T × T -> T` above is literal: `+`/`-` preserve an
 element's unit, `*`/`/` do not, since folding n of them yields a grade that
-depends on the extent). A multi-axis partial fold (1 < n < rank) additionally
+depends on the extent). **The `omp` fold licence is honoured by the rank-1 fold
+and by the full fold (`axes = rank`) only**: a partial fold is the row-wise
+`<@>` form, whose inner fold sits in expression position and deliberately opens
+no team (its context may already be a parallel region). The clause is not
+silently ignored — the generated C++ carries an `[omp] requested but emitted
+serial` marker at the fold, naming `axes = rank` as the spelling that threads.
+A multi-axis partial fold (1 < n < rank) additionally
 needs the folded slice to be dense, statically sized, untagged and unitless;
 outside that envelope, write the row-wise form with the slice type spelled out.
 
