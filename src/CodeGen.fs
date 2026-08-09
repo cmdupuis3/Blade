@@ -10315,12 +10315,69 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     // bounds have their own standard-nest handling.) Co-iteration semantics
     // for ragged operands -- e.g. aligning a dense per-row array against
     // ragged rows -- are a language-design question for the rewrite spec.
+    //
+    // WHAT THE HAZARD ACTUALLY IS, and why `IxKGroupOuter` alone is not it.
+    // Read the gate's own reason: "knows nothing about PER-ROW LENGTHS ... the
+    // PLACEHOLDER inner extent". That is a statement about storage, and only
+    // one axis kind creates it. A genuine `group_by` result is
+    //     size_t grouped_extents[2] = {gk__ngroups, 0};  // inner extent is ragged
+    //     Array<double*, 1> grouped = { new double*[gk__ngroups], grouped_extents };
+    //     for (__g) grouped[__g] = new double[__sz];     // rows differ in length
+    // -- a row-pointer table whose inner extent is a literal 0 placeholder. The
+    // standard nest would read that 0 as a bound. Hazard, correctly gated.
+    //
+    // A GROUP-DERIVED DENSE RESULT is a different object that merely shares the
+    // provenance tag. `method_for(zip(ga, gb)) <@> <row-consuming kernel>` gives
+    //     size_t dots_extents[1] = {gk__ngroups};
+    //     Array<double, 1> dots = { new double[gk__ngroups], dots_extents };
+    // and its array-valued sibling (stage S3) gives a rank-2
+    //     size_t grid_extents[2] = {gk__ngroups, 2};
+    //     Array<complex<double>, 2> grid = { allocate<...>(grid_extents), ... };
+    // Every extent is REAL, every row is the same length, the pool is flat. The
+    // `IxKGroupOuter` on axis 0 records where the axis came from; it does not
+    // claim ragged storage, and there is no per-row length to know about. An
+    // elementwise map over it is an ordinary dense map -- iteration follows the
+    // input record, and that record is dense.
+    //
+    // So the test is the RAGGED-FAMILY / GROUP-MEMBER axes, the ones whose
+    // extent varies per row. `IxKGroupOuter` is admitted only when it appears
+    // ALONE (no ragged or member axis anywhere in the same operand), which is
+    // exactly the group-derived-dense shape and never `group_by`'s own output
+    // (whose inner axis is IxKGroupMember by construction).
+    //
+    // sql-group-by/020 is untouched by this: mapping a `group_by` result is a
+    // SINGLE array with a 1-param kernel, so it is taken by `tryRaggedPeel`'s
+    // `outputIsGroupShaped` arm ("elementwise map over a group_by result") and
+    // never reaches this gate. Verified: the two refusals carry different text,
+    // and 020 still emits its own.
+    //
+    // SECOND CONDITION, and the reason it is here rather than assumed. The
+    // admission also requires every axis to be an S-DIMENSION. An operand that
+    // carries a `Kind = TDimension` axis is mis-iterated one layer below this
+    // gate -- the grid excludes T-dims, so the nest peels a row and binds the
+    // kernel param to it instead of to a cell. That is NOT a grouping problem:
+    // it reproduces with no grouping at all, on a plain dense rank-2 array
+    // produced by an array-valued kernel (stage S3), and it is blocked in the
+    // TYPE side's operand handling, not here. Admitting a T-dim-carrying
+    // operand would therefore trade this gate's clean refusal for a raw g++
+    // error, so the group-derived shapes that are admitted are exactly the ones
+    // whose axes are all iterable: `dots`-style rank-1 group results, and any
+    // group-outer grid whose remaining axes are ordinary S-dims.
     let raggedStandardNestOperand =
+        let variesPerRow (ix: IRIndexTypeG<IRExpr>) =
+            match ix.IxKind with
+            | IxKRagged | IxKRaggedInline | IxKRaggedOpaque | IxKGroupMember -> true
+            | _ -> false
         info.ArrayTypes |> List.exists (fun at ->
             at.IndexTypes |> List.exists (fun ix ->
                 match ix.IxKind with
                 | IxKRagged | IxKRaggedInline | IxKRaggedOpaque
-                | IxKGroupOuter | IxKGroupMember -> true
+                | IxKGroupMember -> true
+                | IxKGroupOuter ->
+                    // Gated only when a per-row-varying axis rides along with
+                    // it (a real `group_by` result). A lone group-outer axis is
+                    // a dense count-of-groups and iterates like any other array.
+                    at.IndexTypes |> List.exists variesPerRow
                 | _ -> false))
     if raggedStandardNestOperand then
         codegenError ctx ind "method_for over a ragged or grouped operand supports only the single-array, single-row-param form (lambda(g) -> ...) or an elementwise map (lambda(e) -> ...); mixing ragged operands with other arrays or multi-param kernels is not yet supported"
