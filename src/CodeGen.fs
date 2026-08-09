@@ -10163,6 +10163,36 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
         // Build LoopNestCodeGen (handles both outer product and co-iteration)
         let codeGen = buildLoopNestCodeGen info arrayNames name builder
 
+        // S2, kernel-body materialization (docs/plan-kernel-body-
+        // materialization.md): a kernel body that cannot be rendered as an
+        // inline expression -- it holds a combinator form only the
+        // STATEMENT-form emitters can materialize (`let e = exp <@> (...)`,
+        // a re-synthesized elementwise broadcast) -- is emitted as a CALL to
+        // its lifted callable instead of inlined text. The lifted function
+        // compiles these bodies correctly already (genFuncBodyScoped); the
+        // exprToCppCore IRApp arm forwards its captures via
+        // captureForwardName. Scoped tightly: only bodies that would
+        // otherwise emit a BLADE_CODEGEN_ERROR sentinel reroute, so no
+        // working nest changes emission; Reynolds keeps the inline path (a
+        // permutation sum rewrites the body text, which a call cannot).
+        let codeGen =
+            let rec bodyNeedsStatementForm (e: IRExpr) : bool =
+                let mutable found = false
+                mapIRExpr (fun x ->
+                    (match x with
+                     | IRApplyCombinator _ | IRComposeApply _ | IRReduceCompute _
+                     | IRCompute (IRApplyCombinator _) -> found <- true
+                     | _ -> ())
+                    x) e |> ignore
+                found
+            if codeGen.HasReynolds || not (bodyNeedsStatementForm codeGen.KernelExpr) then codeGen
+            else
+                match resolveKernel info.Kernel with
+                | Some rk ->
+                    let args = rk.Callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type))
+                    { codeGen with KernelExpr = IRApp (IRVar (rk.Callable.Id, IRTUnit), args, rk.Callable.RetType) }
+                | None -> codeGen
+
         // STREAMED provider inputs (`alias.stream`): no materialized arrays
         // exist -- the nest inlines per-fiber reads at the S/T boundary.
         // Pre-allocate one destination buffer per streamed fiber binding (a
@@ -15286,8 +15316,16 @@ let private genFuncBodyScoped
         // is still a hardcoded 2-array IIFE special case kept for inline
         // expression contexts that lack a surrounding statement scope (a
         // separate cleanup will fold that into a wrapper around this path).
+        // The BARE combinator return takes the same arm: a function's caller
+        // receives a VALUE (its return type is an array or scalar, never a
+        // loop object), so laziness cannot cross the boundary -- the callee
+        // is the last scope that can force. Without this, a body ending in
+        // `omegas <@> lambda(w) -> ...` with no `|> compute` fell through to
+        // the inline-expression sentinel (UNEVALUATED_COMPUTATION_USED_AS_
+        // VALUE) even though the statement-form emitter handles it exactly
+        // as it handles the computed spelling.
         match retExpr with
-        | IRCompute (IRApplyCombinator info) ->
+        | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
             let retVarName = sprintf "__ret%d" (builder.FreshId())
             let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1 }
             let combCode = genApplyCombinator bodyCtx retVarName info builder
