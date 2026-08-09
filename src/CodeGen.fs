@@ -11675,7 +11675,11 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         // deliberately NOT noted -- those flow into deliberately-deferred forms
         // (the deferred-computation-tuple arm, alias bindings).
         | IRApp (f, args, _) -> walk f; List.iter (fun a -> note a; walk a) args
-        | IRTuple es | IRArrayLit (es, _) | IRProdSum es | IRStack es | IRZip es -> List.iter walk es
+        // prodsum's fused IIFE subscripts EVERY operand by name
+        // (`__ps += a[__pt] * e[__pt]`), so a deferred operand must be forced
+        // first -- same rule as IRIndex, applied to all of them.
+        | IRProdSum es -> List.iter (fun a -> note a; walk a) es
+        | IRTuple es | IRArrayLit (es, _) | IRStack es | IRZip es -> List.iter walk es
         | IRJoin (es, _) -> List.iter walk es
         | IRComplex (re, im) -> walk re; walk im
         | IRFieldAccess (o, _) -> walk o
@@ -11802,9 +11806,13 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genReduceComputeBinding ctx binding builder compExpr kernelExpr seedExpr
     | IRProdSum _ ->
         // Scalar result; the expression renderer emits the fused-loop IIFE.
+        // That IIFE subscripts every operand BY NAME, so a still-deferred
+        // producer must be materialized first (this arm bypasses
+        // genScalarExprBinding, which is where the pre-pass normally runs).
+        let (forceCode, ctx) = forceDeferredPositionalReads ctx builder (sprintf "%s__def" name) binding.Value
         let code = genScalarBinding ctx name binding.Value binding.Type
         let ctx' = addVarName binding.Id name ctx
-        (code, ctx')
+        (forceCode @ code, ctx')
     | IRArrayLit (elements, arrType) ->
         let code = genArrayLiteral ctx name elements arrType
         let ctx' = addVarName binding.Id name ctx
@@ -15087,6 +15095,37 @@ let private genFuncBodyScoped
     // Indentation for genApplyCombinator emissions: the function body lives one
     // level deeper than the function declaration's ctx.Indent.
     let bodyIndent = ctx.Indent + 1
+    // A function-body `let` bound to a STILL-DEFERRED combinator emits no
+    // statement (the IRApplyCombinator arm below), yet any later statement that
+    // reads it POSITIONALLY -- `prodsum(s, e)`, `e[i]`, `extents(e)`, `f(e)` --
+    // renders it BY NAME and names an identifier that was never declared.
+    // Module level solves this through ctx.DeferredComputations + the forcing
+    // helpers; a function body never populates that map, so decide it here with
+    // the SAME by-name rule: seed a probe ctx with the deferred lets and ask
+    // collectDeferredPositionalReads which of them a consumer names. Only those
+    // materialize -- a binding that is merely absorbed (fused into a reduce,
+    // forced later by `|> compute`, or unused) stays deferred exactly as before.
+    let deferredLets =
+        lets |> List.choose (fun (id, v) ->
+            match v with
+            | IRApplyCombinator _ | IRComposeApply _ -> Some (id, v)
+            | _ -> None)
+    let forcedDeferredIds =
+        if List.isEmpty deferredLets then Set.empty
+        else
+            let probeCtx = { ctx with DeferredComputations = Map.ofList deferredLets }
+            let read =
+                ((lets |> List.map snd) @ [retExpr])
+                |> List.collect (collectDeferredPositionalReads probeCtx)
+                |> Set.ofList
+            // `return e` naming a deferred local is a by-name read too. The
+            // collector deliberately does NOT note a bare IRVar (at module level
+            // that shape is a deliberately-deferred ALIAS binding), but a
+            // function RETURN has to hand the caller a materialized array.
+            match retExpr with
+            | IRVar (rid, _) when deferredLets |> List.exists (fun (i, _) -> i = rid) ->
+                Set.add rid read
+            | _ -> read
     let stmts = lets |> List.collect (fun (id, value) ->
         // Every allocation emitted while THIS let renders is owned by it (see
         // setAllocOwner); the fold overwrites the stamp each iteration.
@@ -15135,6 +15174,15 @@ let private genFuncBodyScoped
             // Loop objects are compile-time only -- they're resolved when <@> is processed
             currentNames <- Map.add id varName currentNames
             []
+        | IRApplyCombinator info when Set.contains id forcedDeferredIds ->
+            // Still-deferred combinator that a LATER statement reads BY NAME.
+            // Materialize it here, through the same statement-form path the
+            // `|> compute` arm below uses, or the read names an identifier
+            // this arm never declared.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let code = genApplyCombinator bodyCtx varName info builder
+            currentNames <- Map.add id varName currentNames
+            code
         | IRApplyCombinator _ | IRComposeApply _ ->
             // Unevaluated computations -- deferred until |> compute forces them
             currentNames <- Map.add id varName currentNames
