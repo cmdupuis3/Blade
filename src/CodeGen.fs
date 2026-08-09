@@ -15757,9 +15757,11 @@ let private isComputeBinding (b: IRBinding) : bool =
 /// that has to supply those captures, whether the callee is inlined into this
 /// body's loop nest or called through a genCallableWrapper that forwards them
 /// as arguments. So a body also inherits the capture obligations of every
-/// callable it names. That is the opposite direction from the paragraph above
-/// -- there, a callee's main-locality must not leak outward into a lifted
-/// body; here, a caller inherits its callee's UNMET obligations.
+/// callable it names, split by kind: module-binding captures make it
+/// main-local outright, function-typed captures become extra edges for the
+/// fixpoint below. That is the opposite direction from the paragraph above --
+/// there, a callee's main-locality must not leak outward into a lifted body;
+/// here, a caller inherits its callee's UNMET obligations.
 let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : Set<IRId> =
     let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
     let capturesById =
@@ -15792,6 +15794,20 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
         // otherwise flag every caller; those are handled as edges instead.
         let inherited = Set.difference (inheritedCaptures funcDef) bound
         Set.union spelled inherited |> Set.exists (fun id -> Map.containsKey id ctx0.VarNames)
+    // Function-typed captures of a named callee, as fixpoint edges. Note the
+    // deliberate asymmetry with `capturesModuleBinding`: that one subtracts the
+    // full `bound` (funcIds included), this one keeps funcIds -- they are the
+    // whole point -- and subtracts only what is genuinely bound locally.
+    let inheritedFuncRefs =
+        modul.Functions
+        |> List.map (fun f ->
+            let localBound =
+                Set.union
+                    (f.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
+                    (f.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList)
+            (f.Id, Set.difference (Set.intersect (inheritedCaptures f) funcIds) localBound))
+        |> Map.ofList
+    let refEdges (id: IRId) = Set.union uncapturedFuncRefs.[id] inheritedFuncRefs.[id]
     let direct =
         modul.Functions
         |> List.filter capturesModuleBinding
@@ -15802,7 +15818,7 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
             modul.Functions
             |> List.fold (fun s f ->
                 if Set.contains f.Id s then s
-                elif not (Set.isEmpty (Set.intersect uncapturedFuncRefs.[f.Id] s)) then Set.add f.Id s
+                elif not (Set.isEmpty (Set.intersect (refEdges f.Id) s)) then Set.add f.Id s
                 else s) acc
         if acc' = acc then acc else close acc'
     close direct
