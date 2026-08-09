@@ -1,0 +1,31 @@
+// TEST: Wildcard In Flat Tuple Destructure
+// The FLAT regime -- more pattern leaves than the scrutinee has top-level
+// components, so each leaf takes one FLATTENED leaf (024_flat_tuple_...
+// pins the no-wildcard form) -- is chosen by comparing the pattern's WIDTH
+// against the scrutinee's flat and structural widths.
+//
+// A wildcard makes width and bound-name count diverge, and the mode used to be
+// re-derived from the bound-name count in Lowering: `(_, b, c)` over
+// ((1,2),3) counted 2 names against 3 flat leaves, concluded "not flat", and
+// projected structurally -- handing b the whole (1,2) sub-tuple. The checker
+// now states the width and the per-leaf slot explicitly, so the wildcard
+// covers flat leaf 0 and b/c take leaves 1 and 2.
+let y = ((1, 2), 3)
+
+let (_, b, c) = y
+// EXPECT: b = 2
+// EXPECT: c = 3
+
+// The same scrutinee with the gap at the end: flat leaves 0 and 1.
+let (d, e, _) = y
+// EXPECT: d = 1
+// EXPECT: e = 2
+
+// Nested patterns keep working: `((a,b), c)` binds three names over a
+// two-component scrutinee, which is exactly what puts it in the flat regime.
+// This is the case that made the fix have to preserve width-based mode
+// selection rather than simply numbering the top-level positions.
+let ((f, g), h) = y
+// EXPECT: f = 1
+// EXPECT: g = 2
+// EXPECT: h = 3

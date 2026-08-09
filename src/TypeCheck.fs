@@ -1313,6 +1313,42 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | _ -> Set.empty
 
 /// Extract variable names bound by a pattern.
+/// Slot assignment for a tuple pattern's leaves, shared by every `let`
+/// destructuring site (block statement, top-level decl, `let static`).
+/// Returns one entry per BOUND name, in binding order, as
+/// (name, patternPositionType, slot), plus the total slot count.
+///
+/// A pattern position that binds nothing -- `_`, a literal -- still consumes
+/// its slot. Without that, the leaves after it compact onto the leading
+/// components and read the wrong element (the `let (_, g) = f(x)` bug).
+///
+/// A compound position (a nested tuple) consumes one slot PER NAME it binds,
+/// which is what makes the flat regime work: `let ((a,b), c) = ((1,2),3)`
+/// assigns slots 0,1,2 and, being 3 slots wide against a 2-component
+/// scrutinee, is projected as flat leaves by Lowering. Nested patterns are
+/// still not destructured RECURSIVELY here (their names take fresh type
+/// vars, per the callers' long-standing rule) -- so a nested pattern that
+/// binds fewer names than its position has leaves, e.g. `((_, b), c)`,
+/// remains as unsupported as it was before this helper existed.
+and tuplePatternSlots (pats: Pattern list) : (string * int option * int) list * int =
+    let mutable slot = 0
+    let entries = ResizeArray<string * int option * int>()
+    pats |> List.iteri (fun i p ->
+        match p.Kind with
+        | PatternKind.PatVar n ->
+            entries.Add (n, Some i, slot)
+            slot <- slot + 1
+        | _ ->
+            match patternNames p with
+            | [] ->
+                // binds nothing, but still covers a component
+                slot <- slot + 1
+            | names ->
+                for n in names do
+                    entries.Add (n, None, slot)
+                    slot <- slot + 1)
+    (List.ofSeq entries, slot)
+
 and patternNames (pat: Pattern) : string list =
     match pat.Kind with
     | PatternKind.PatWildcard -> []
@@ -9594,15 +9630,14 @@ and stmtDestructureBindings (env: TypeEnv) (pat: Pattern) (valueTy: IRType)
                     let flat = IR.flattenTupleLeaves resolvedTy
                     if pats.Length = flat.Length then flat else ts
             | _ -> []
-        pats |> List.iteri (fun i p ->
-            match p.Kind with
-            | PatternKind.PatVar n ->
-                let eTy =
-                    if i < typeList.Length then e.Subst.Resolve(typeList.[i])
-                    else e.Subst.Fresh()
-                bindLeaf n eTy
-            | _ -> bindCompound p)
-        Ok (e, subs, DSPositional)
+        let (entries, slots) = tuplePatternSlots pats
+        for (n, posOpt, _) in entries do
+            let eTy =
+                match posOpt with
+                | Some i when i < typeList.Length -> e.Subst.Resolve(typeList.[i])
+                | _ -> e.Subst.Fresh()
+            bindLeaf n eTy
+        Ok (e, subs, DSTupleAt (entries |> List.map (fun (_, _, s) -> s), slots))
     | PatternKind.PatCons (h, t) ->
         // `let head :: tail = tup`. Flatten/typing/reject rules live in
         // consDestructureLeaves, shared with the top-level, `let static` and
@@ -10566,21 +10601,17 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 if pats.Length = flat.Length then flat
                                 else ts  // Fall back to structural, let fresh vars handle overflow
                         | _ -> []
-                    pats |> List.mapi (fun i p -> (i, p))
-                    |> List.fold (fun e (i, p) ->
-                        match p.Kind with
-                        | PatternKind.PatVar n ->
-                            let eTy =
-                                if i < typeList.Length then env.Subst.Resolve(typeList.[i])
-                                else env.Subst.Fresh()
-                            let subId = env.Builder.FreshId()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e
-                        | _ -> patternNames p |> List.fold (fun e2 n ->
-                            let subId = env.Builder.FreshId()
-                            let eTy = env.Subst.Fresh()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e2) e) env'
+                    let (entries, slots) = tuplePatternSlots pats
+                    destructure <- DSTupleAt (entries |> List.map (fun (_, _, s) -> s), slots)
+                    entries
+                    |> List.fold (fun e (n, posOpt, _) ->
+                        let eTy =
+                            match posOpt with
+                            | Some i when i < typeList.Length -> env.Subst.Resolve(typeList.[i])
+                            | _ -> env.Subst.Fresh()
+                        let subId = env.Builder.FreshId()
+                        subBindings <- subBindings @ [(n, subId, eTy)]
+                        bindVarSimple n subId eTy e) env'
                 | PatternKind.PatCons (h, t) ->
                     // `let head :: tail = tup` splits an n-tuple into element 0
                     // and the REMAINDER (`tail` is the (n-1)-tuple, not the
@@ -10777,21 +10808,17 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 let flat = IR.flattenTupleLeaves resolvedTy
                                 if pats.Length = flat.Length then flat else ts
                         | _ -> []
-                    pats |> List.mapi (fun i p -> (i, p))
-                    |> List.fold (fun e (i, p) ->
-                        match p.Kind with
-                        | PatternKind.PatVar n ->
-                            let eTy =
-                                if i < typeList.Length then env.Subst.Resolve(typeList.[i])
-                                else env.Subst.Fresh()
-                            let subId = env.Builder.FreshId()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e
-                        | _ -> patternNames p |> List.fold (fun e2 n ->
-                            let subId = env.Builder.FreshId()
-                            let eTy = env.Subst.Fresh()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e2) e) env'
+                    let (entries, slots) = tuplePatternSlots pats
+                    destructure <- DSTupleAt (entries |> List.map (fun (_, _, s) -> s), slots)
+                    entries
+                    |> List.fold (fun e (n, posOpt, _) ->
+                        let eTy =
+                            match posOpt with
+                            | Some i when i < typeList.Length -> env.Subst.Resolve(typeList.[i])
+                            | _ -> env.Subst.Fresh()
+                        let subId = env.Builder.FreshId()
+                        subBindings <- subBindings @ [(n, subId, eTy)]
+                        bindVarSimple n subId eTy e) env'
                 | PatternKind.PatCons (h, t) ->
                     match consDestructureLeaves env tValue.Type h t with
                     | Error e ->

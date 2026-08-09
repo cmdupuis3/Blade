@@ -358,6 +358,17 @@ and DestructureShape =
     /// Sub-binding i is element i of a tuple (or the field with its own name,
     /// for a struct scrutinee). Also the shape when there is no destructuring.
     | DSPositional
+    /// Tuple pattern with its slot assignment stated explicitly: sub-binding k
+    /// reads slot `components[k]`, and the whole pattern consumes `slots`
+    /// slots. Both numbers are needed because a pattern position that binds
+    /// NOTHING (a wildcard, a literal) still consumes its slot: deriving the
+    /// slot from the sub-binding's list position instead -- which is what
+    /// DSPositional means -- compacts every later binder onto the leading
+    /// components, so `let (_, g) = f(x)` silently bound g to element 0.
+    /// `slots` (not SubBindings.Length) is also what Lowering's flat-vs-
+    /// structural test must count, since that test compares the pattern's
+    /// width against the scrutinee's flat and structural widths.
+    | DSTupleAt of components: int list * slots: int
     /// Cons split over a tuple scrutinee. `::` is right-associative, so a chain
     /// `a :: b :: rest` flattens into leading leaves [a; b] plus one rest leaf.
     /// Every leaf but the last is positional; the last takes the whole

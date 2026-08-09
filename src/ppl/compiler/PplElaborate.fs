@@ -3136,14 +3136,11 @@ let private elabHmc (ctx: Ctx) (span: Span) (chainName: string) (binding: Bindin
                           gradLet (pvar lpaN) gaN (v qN)
                           sMutStmt pmN (addE (v p0N) (mulE (v eps2N) (v gaN)))
                           // L-1 interleaved full steps (loop is empty at
-                          // L = 1). The interior primal __lpb is unused but
-                          // NAMED: a PatWildcard inside a tuple pattern
-                          // compacts the remaining binders onto the wrong
-                          // components in codegen, so `let (_, g)` would
-                          // silently bind g to the PRIMAL.
+                          // L = 1). Only the gradient is wanted here, so the
+                          // interior primal is discarded with a wildcard.
                           forIn lN (iLit 1) (iLit lSteps)
                               [ assignStmt (v qN) (addE (v qN) (mulE (v epsN) (v pmN)))
-                                gradLet (pvar lpbN) gbN (v qN)
+                                gradLet (synPat PatWildcard) gbN (v qN)
                                 assignStmt (v pmN) (addE (v pmN) (mulE (v epsN) (v gbN))) ]
                           // final position update + half step out; __lpn is
                           // logpost(q_L), again free from the gradient call.
