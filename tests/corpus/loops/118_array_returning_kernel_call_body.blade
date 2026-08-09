@@ -1,0 +1,31 @@
+// TEST: Array Returning Kernel Call Body
+// Was a REJECT-AT: lower pin whose header said, verbatim: "When kernel-body
+// materialization lands (S2/S3 of the staging plan), this pin converts to a
+// value test: g = [[10, 20, 30], [20, 40, 60]]." It landed; this is that
+// conversion, with the promised values.
+//
+// What the pin used to be holding. The guard keyed on the body's top node
+// being TExprCompute, which caught only the spelling wearing its compute on
+// the outside; a CALL returning an array -- `lambda(x) -> scaleRow(x)` -- has
+// the same array-valued body, slipped past, COMPILED, RAN CLEAN, and printed
+// `g = [[], []]`. The guard was first broadened to key on the body's RESOLVED
+// TYPE (catching the call- and block-bodied spellings too), and then removed
+// outright once the emitter could size the grid: kernelTDims was always in
+// the deduced output type, but codegen built the extents table from the loop
+// bindings alone, so a rank-2 grid got a one-entry table and the inner extent
+// read as 0. The trailing extents now come from the output type and the nest
+// writes a whole row per outer cell.
+//
+// The passthrough exemption the old header mentions is no longer a special
+// case in the guard -- there is no guard -- but it still works, and the
+// second binding here pins it: `lambda(row) -> row` hands back a row codegen
+// already has.
+let b: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+function scaleRow(x: Float64) -> Array<Float64 like Idx<3>> = (b <@> lambda(y) -> x * y) |> compute
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let g = method_for(a) <@> lambda(x) -> scaleRow(x) |> compute
+// EXPECT: g = [[10, 20, 30], [20, 40, 60]]
+
+let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let p = method_for(m) <@> lambda(row: Array<Float like Idx<3>>) -> row |> compute
+// EXPECT: p = [[1, 2, 3], [4, 5, 6]]

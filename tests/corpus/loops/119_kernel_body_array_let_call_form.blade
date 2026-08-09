@@ -1,0 +1,47 @@
+// TEST: Kernel Body Array Let Call Form
+// ============================================================================
+// The lsdft shape, minus units and complex: a kernel body that MATERIALIZES
+// an array-valued let (`let e = exp <@> (w * xs)`), consumes it with two
+// prodsums, and reduces to a scalar per iteration -- returned as a BARE
+// combinator (no `|> compute`).
+//
+// Two mechanisms under pin, matching docs/plan-kernel-body-materialization.md:
+//   S4 (return forcing): a function's caller receives a VALUE, so the callee
+//     is the last scope that can force -- a bare-combinator return takes the
+//     same statement-form arm as the `|> compute` spelling. Before, it fell
+//     to the inline sentinel (UNEVALUATED_COMPUTATION_USED_AS_VALUE).
+//   S2 (call, don't inline): the loop nest cannot INLINE this kernel body --
+//     an array-materializing let has no expression form, and inlining emitted
+//     a BLADE_CODEGEN_ERROR sentinel. The nest now CALLS the lifted callable
+//     (which compiles such bodies correctly via genFuncBodyScoped), captures
+//     forwarded through the IRApp arm's captureForwardName. The reroute
+//     triggers ONLY on bodies that would otherwise emit a sentinel, so no
+//     previously-working nest changes emission; Reynolds kernels keep the
+//     inline path (a permutation sum rewrites body text, which a call cannot).
+//
+// Values pin the whole chain: for w in {0.5, 2}, e = exp(w*x) over [1,2,3],
+// result = prodsum(xs,e)/sqrt(prodsum(e,e)) -- checked against Python.
+// ============================================================================
+// The samples ride as a module-level CAPTURE and the kernel param is
+// ANNOTATED, matching what lsdft's kernel resolves to. The annotation is no
+// longer load-bearing -- 120 pins the same program with `w` left unannotated,
+// where `w * xs` used to type as the unresolved var and collapse `e` to a
+// scalar ("prodsum() requires array arguments"). That was a separate typecheck
+// seam, not the emission mechanism under pin here; keep this file ANNOTATED so
+// the emission mechanisms above stay pinned independently of it.
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function specish(ws: Array<Float64 like Idx<m>>) = {
+    ws <@> lambda(w: Float64) -> {
+        let e = exp <@> (w * xs)
+        let z1 = prodsum(xs, e)
+        let z2 = prodsum(e, e)
+        z1 / sqrt(z2)
+    }
+}
+let ws: Array<Float64 like Idx<2>> = [0.5, 2.0]
+let r = specish(ws)
+let r0 = r(0)
+let r1 = r(1)
+// EXPECT: r = [3.73632086402877, 3.25873708058511]
+// EXPECT: r0 = 3.73632086402877
+// EXPECT: r1 = 3.25873708058511

@@ -4481,6 +4481,19 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     // Cloned lambdas accumulated across spec generation.
     // See specializeHMFunction's clone logic.
     let lambdaClones = System.Collections.Generic.List<IRCallable>()
+    // EMISSION ORDER for the functions this pass synthesizes, keyed on the
+    // ORIGIN they were derived from (IRModule.DerivedFuncOrigins; the rule and
+    // its rationale live at CodeGen.emissionOrderedItems). Shape
+    // monomorphization has always registered its copies; HM specs and their
+    // lambda clones did not, and their freshly-minted ids sort after every
+    // call site that names them. That is invisible while the caller is a
+    // namespace-scope C++ function -- a forward declaration covers it -- and
+    // FATAL once the caller is one of the `std::function` locals
+    // `computeMainLocalFuncIds` puts inside main(), which get no forward
+    // declaration: "'family_spectra_HM_...' was not declared in this scope".
+    // Measured on examples/lswosa.blade, whose whole call chain is main-local
+    // (it captures module bindings) and HM-specialized at every level.
+    let mutable derivedOrigins : Map<IRId, IRId> = Map.empty
     let mutable changed = true
     let mutable iterationGuard = 0
     let MAX_ITERATIONS = 16  // pathological safety net; real programs converge in 2-3
@@ -4545,6 +4558,12 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                 let (spec, clones) = specializeHMFunction origFunc bindingMap builder availableCallables
                 specMap <- Map.add key spec specMap
                 lambdaClones.AddRange(clones)
+                // Both the spec and every lambda it cloned belong at the
+                // ORIGIN's program point: the spec replaces calls the origin
+                // served, and the clones are referenced only from the spec.
+                derivedOrigins <- Map.add spec.Id origFunc.Id derivedOrigins
+                for c in clones do
+                    derivedOrigins <- Map.add c.Id origFunc.Id derivedOrigins
                 changed <- true
 
     // 3. Build the call-site rewriter using the now-frozen specMap.
@@ -4689,7 +4708,10 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                                 { cap with Type = substTypeInIRType bindings cap.Type }) })
     { modul with
         Functions = newFunctions @ specFuncs @ cloneFuncs
-        Bindings = newBindings }
+        Bindings = newBindings
+        DerivedFuncOrigins =
+            derivedOrigins
+            |> Map.fold (fun acc k v -> Map.add k v acc) modul.DerivedFuncOrigins }
 
 /// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose
 /// operands are BOTH arrays becomes the `method_for(zip ..) <@> kernel |>

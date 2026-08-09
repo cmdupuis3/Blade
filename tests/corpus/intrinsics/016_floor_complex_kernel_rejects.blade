@@ -1,0 +1,16 @@
+// TEST: Intrinsics Floor Complex In Kernel (rejects)
+// ERROR: BL3007
+// The kernel-position twin of intrinsics/013. Scalar position refuses a complex
+// operand eagerly, but in a kernel body the operand is a param that apply-site
+// unification has not bound yet, and floor/ceil/log10 DEFER rather than pin so
+// the unit walk can still see the element's annotation (unit-errors/015). That
+// deferral costs the eager refusal: kernelBodyUnits is units-only, and
+// buildApplyInfo's complex re-stamp keys on the OPERAND's element type without
+// consulting isComplexMathIntrinsic, so it would UPGRADE floor to complex and
+// emit std::floor(std::complex<double>) -- measured, and g++ really does refuse
+// it ("no matching function"). findBadComplexIntrinsic rejects it as Blade
+// instead. `exp <@> Z` and `abs <@> Z` stay legal (intrinsics/008, /009).
+let RE: Array<Float like Idx<3>> = [3.0, 0.0, -1.0]
+let IM: Array<Float like Idx<3>> = [4.0, 2.0, 0.0]
+let Z = (zip(RE, IM) <@> lambda(a, b) -> complex(a, b)) |> compute
+let bad = (method_for(Z) <@> lambda(z) -> floor(z)) |> compute

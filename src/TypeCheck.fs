@@ -4240,11 +4240,32 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // so pinning Float64 now would reject complex kernels; the
                 // kernel re-stamp in buildApplyInfo corrects the result type.
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
-            | IRTInfer _ ->
-                // floor/ceil have no complex overload -- the operand really is
-                // real; pin it to Float64, the intrinsic's natural domain.
+            | IRTInfer _ when not env.InLambdaBody ->
+                // floor/ceil/log10 have no complex overload -- the operand
+                // really is real; pin it to Float64, the intrinsic's natural
+                // domain, which also rejects a later complex binding here
+                // instead of letting it reach codegen as std::floor(complex).
                 unify env.Subst tArg.Type (IRTScalar ETFloat64) |> Result.bind (fun () ->
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
+            | IRTInfer _ ->
+                // NOT inside a lambda body, though -- the same carve-out
+                // inferBinaryIntrinsic's `pin` makes. There the operand is a
+                // kernel parameter that apply-site unification has not bound
+                // yet, and binding it to BARE Float64 would erase the element's
+                // unit annotation -- after which buildApplyInfo's
+                // kernelBodyUnits walk re-runs this op's unit rule against no
+                // signature and silently accepts `D: m <@> lambda(d) ->
+                // floor(d)`. DEFER (what the complex arm above does, and why
+                // `log` rejects that shape while the PINNING arm did not): the
+                // param binds to the real element type and the unit walk sees
+                // it. The complex operand the pin used to catch is caught after
+                // unification instead, by findBadComplexIntrinsic.
+                //
+                // Result is bare Float64, not the operand's variable: these
+                // intrinsics are Float64-valued at any operand width, it
+                // matches the provisional-annotation defer arm below, and the
+                // kernel re-stamp's real-operand arm normalizes to it anyway.
+                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64))
             | IRTUnitAnnotated _ when env.InLambdaBody && typedExprHasProvisionalUnits env tArg ->
                 // PROVISIONAL annotation inside a lambda body: something the
                 // argument depends on is still an unresolved inference variable
@@ -7615,6 +7636,17 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         // Arithmetic, comparison, logical
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
+            // NOTE (merge, 2026-08-09): master reached this same demand site
+            // independently (fix/kernel-capture-module-binding) with a
+            // `concreteOperand`/`materializeCaretOperand` pair. Both arrived at
+            // the same load-bearing restriction -- demand a shape ONLY when the
+            // other operand already pins it, because `packsum1`'s
+            // `head + packsum1(tail)` has an arity-1 var on both sides and
+            // shaping both emits an undeclared `arr1`. This branch's version is
+            // kept: it additionally gates on `mode = Elementwise` and on the
+            // operator, and tests the PRE-materialization snapshots so shaping
+            // one side cannot make the other look pinned. See the S1 SEAM 1
+            // block below.
             let lRes0 = env.Subst.Resolve tL.Type
             let rRes0 = env.Subst.Resolve tR.Type
             let isDist t = match t with IRTDist _ -> true | _ -> false
@@ -8715,6 +8747,34 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy (rExpr: TypedExpr
                     mkArrayLike { arrL with ElemType = promoteElem arrL.ElemType s }
                 | (IRTScalar _ as s), ArrayElem arrR ->
                     mkArrayLike { arrR with ElemType = promoteElem arrR.ElemType s }
+                // UNRESOLVED operand beside a concrete array. An unannotated
+                // kernel parameter is an inference var while its body is typed
+                // -- it only unifies with the iterated element type later, in
+                // buildApplyInfo -- so `w * xs` inside `ws <@> lambda(w) -> ...`
+                // arrives here with `w` unresolved. BOTH readings of the var
+                // agree on the SHAPE: if it resolves to a scalar this is a
+                // broadcast over `xs`, and if it resolves to a row it is a zip
+                // against `xs`; either way the result is an array shaped like
+                // the concrete operand. Only the ELEMENT type is unknowable
+                // now, so it stays the array's (the complex re-stamp in
+                // buildApplyInfo is what upgrades a kernel result whose param
+                // later resolves complex).
+                //
+                // The array-on-the-LEFT spelling (`xs * w`) has always answered
+                // this way, by falling through to `lBare`; without the mirror,
+                // `w * xs` answered with the VAR, and the difference was pure
+                // operand order. Downstream that read as a scalar: the enclosing
+                // `exp <@> (w * xs)` saw a non-array operand, mapped it as a
+                // scalar, and a later `prodsum(xs, e)` refused an `e` that
+                // should have been an array -- reported against the `<@>` site,
+                // far from the multiplication that decided it.
+                //
+                // A caret (`T^k`, k >= 1) operand never reaches here as a var:
+                // `materializeCaretOperand` above shapes it against the concrete
+                // partner first, so this arm sees only genuinely unconstrained
+                // vars. Elementwise only -- Outer keeps its own left-operand
+                // convention.
+                | IRTInfer _, ArrayElem _ -> rBare
                 // Scalar complex promotion (mixed real/complex or mixed-width
                 // complex): must precede the float rules so complex wins.
                 | IRTScalar le, IRTScalar re
@@ -10601,6 +10661,39 @@ and buildApplyInfo (env: TypeEnv)
                     when (match env.Subst.Resolve operand.Type with ArrayElem _ -> true | _ -> false) ->
                 Some (match op with OpReal -> "real" | OpImag -> "imag" | _ -> "arg")
             | _ -> typedExprChildren e |> List.tryPick findBadComplexAccessor
+        // (3) A REAL-ONLY math intrinsic whose operand unified to COMPLEX.
+        //     Scalar position rejects this eagerly, but in a kernel body the
+        //     operand is a param, and both real-only families DEFER rather than
+        //     pin so the unit walk can see the element's annotation
+        //     (floor/ceil/log10's IRTInfer arm, inferBinaryIntrinsic's `pin`).
+        //     Nothing downstream catches it: kernelBodyUnits is units-only, and
+        //     the complex re-stamp below keys on the OPERAND's element type
+        //     without consulting isComplexMathIntrinsic, so it would UPGRADE
+        //     floor to complex and lower to std::floor(std::complex<double>)
+        //     -- measured: g++ answers "no matching function", which is a C++
+        //     error where a Blade one belongs. Reject here instead.
+        //
+        //     Membership in mathIntrinsics, not a name list, is what excludes
+        //     `abs`: it is spelled OpMath "abs" but is not one of the
+        //     intrinsics, and abs of a complex is the legal real magnitude.
+        //     Every binaryMathIntrinsic is real-only by construction, so
+        //     OpMath2 needs no such filter.
+        //
+        //     Only a RESOLVED complex operand fires. An unresolved one belongs
+        //     to an enclosing kernel still being inferred, and its own second
+        //     pass rechecks this body (see the NESTED-APPLY DEFERRAL below).
+        let rec findBadComplexIntrinsic (e: TypedExpr) : string option =
+            let isComplexOperand (o: TypedExpr) =
+                match IR.stripUnits (env.Subst.Resolve o.Type) with
+                | IRTScalar (ETComplex64 | ETComplex128) -> true
+                | _ -> false
+            match e.Kind with
+            | TExprUnaryOp (OpMath name, operand)
+                    when isMathIntrinsic name && not (isComplexMathIntrinsic name)
+                         && isComplexOperand operand -> Some name
+            | TExprBinOp (_, OpMath2 name, l, r)
+                    when isComplexOperand l || isComplexOperand r -> Some name
+            | _ -> typedExprChildren e |> List.tryPick findBadComplexIntrinsic
         // AN ARRAY-VALUED KERNEL RETURN IS NOW SUPPORTED (stage S3,
         // docs/plan-kernel-body-materialization.md manifestation M-C). The S0
         // guard that stood here -- "kernelOutputRank >= 1 and the body is not a
@@ -10626,6 +10719,9 @@ and buildApplyInfo (env: TypeEnv)
         // a scalar -- a different failure from the one S3 fixed.
         match findBadComplexAccessor lambdaInfo.Body with
         | Some name -> Error (IntrinsicComplexScalarOnly name)
+        | None ->
+        match findBadComplexIntrinsic lambdaInfo.Body with
+        | Some name -> Error (IntrinsicNotComplex name)
         | None ->
         // After param-type unification, inference variables that flowed into
         // the body's TExprIndex sites may now resolve to nominally-tagged

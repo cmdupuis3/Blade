@@ -10595,6 +10595,36 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
         // lifted callable before any emitter sees it (routeKernelBodyThroughCall).
         let codeGen = routeKernelBodyThroughCall info (buildLoopNestCodeGen info arrayNames name builder)
 
+        // S2, kernel-body materialization (docs/plan-kernel-body-
+        // materialization.md): a kernel body that cannot be rendered as an
+        // inline expression -- it holds a combinator form only the
+        // STATEMENT-form emitters can materialize (`let e = exp <@> (...)`,
+        // a re-synthesized elementwise broadcast) -- is emitted as a CALL to
+        // its lifted callable instead of inlined text. The lifted function
+        // compiles these bodies correctly already (genFuncBodyScoped); the
+        // exprToCppCore IRApp arm forwards its captures via
+        // captureForwardName. Scoped tightly: only bodies that would
+        // otherwise emit a BLADE_CODEGEN_ERROR sentinel reroute, so no
+        // working nest changes emission; Reynolds keeps the inline path (a
+        // permutation sum rewrites the body text, which a call cannot).
+        let codeGen =
+            let rec bodyNeedsStatementForm (e: IRExpr) : bool =
+                let mutable found = false
+                mapIRExpr (fun x ->
+                    (match x with
+                     | IRApplyCombinator _ | IRComposeApply _ | IRReduceCompute _
+                     | IRCompute (IRApplyCombinator _) -> found <- true
+                     | _ -> ())
+                    x) e |> ignore
+                found
+            if codeGen.HasReynolds || not (bodyNeedsStatementForm codeGen.KernelExpr) then codeGen
+            else
+                match resolveKernel info.Kernel with
+                | Some rk ->
+                    let args = rk.Callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type))
+                    { codeGen with KernelExpr = IRApp (IRVar (rk.Callable.Id, IRTUnit), args, rk.Callable.RetType) }
+                | None -> codeGen
+
         // STREAMED provider inputs (`alias.stream`): no materialized arrays
         // exist -- the nest inlines per-fiber reads at the S/T boundary.
         // Pre-allocate one destination buffer per streamed fiber binding (a
@@ -12141,7 +12171,11 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         // deliberately NOT noted -- those flow into deliberately-deferred forms
         // (the deferred-computation-tuple arm, alias bindings).
         | IRApp (f, args, _) -> walk f; List.iter (fun a -> note a; walk a) args
-        | IRTuple es | IRArrayLit (es, _) | IRProdSum es | IRStack es | IRZip es -> List.iter walk es
+        // prodsum's fused IIFE subscripts EVERY operand by name
+        // (`__ps += a[__pt] * e[__pt]`), so a deferred operand must be forced
+        // first -- same rule as IRIndex, applied to all of them.
+        | IRProdSum es -> List.iter (fun a -> note a; walk a) es
+        | IRTuple es | IRArrayLit (es, _) | IRStack es | IRZip es -> List.iter walk es
         | IRJoin (es, _) -> List.iter walk es
         | IRComplex (re, im) -> walk re; walk im
         | IRFieldAccess (o, _) -> walk o
@@ -12268,9 +12302,13 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genReduceComputeBinding ctx binding builder compExpr kernelExpr seedExpr
     | IRProdSum _ ->
         // Scalar result; the expression renderer emits the fused-loop IIFE.
+        // That IIFE subscripts every operand BY NAME, so a still-deferred
+        // producer must be materialized first (this arm bypasses
+        // genScalarExprBinding, which is where the pre-pass normally runs).
+        let (forceCode, ctx) = forceDeferredPositionalReads ctx builder (sprintf "%s__def" name) binding.Value
         let code = genScalarBinding ctx name binding.Value binding.Type
         let ctx' = addVarName binding.Id name ctx
-        (code, ctx')
+        (forceCode @ code, ctx')
     | IRArrayLit (elements, arrType) ->
         let code = genArrayLiteral ctx name elements arrType
         let ctx' = addVarName binding.Id name ctx
@@ -15591,6 +15629,37 @@ let private genFuncBodyScoped
     // Indentation for genApplyCombinator emissions: the function body lives one
     // level deeper than the function declaration's ctx.Indent.
     let bodyIndent = ctx.Indent + 1
+    // A function-body `let` bound to a STILL-DEFERRED combinator emits no
+    // statement (the IRApplyCombinator arm below), yet any later statement that
+    // reads it POSITIONALLY -- `prodsum(s, e)`, `e[i]`, `extents(e)`, `f(e)` --
+    // renders it BY NAME and names an identifier that was never declared.
+    // Module level solves this through ctx.DeferredComputations + the forcing
+    // helpers; a function body never populates that map, so decide it here with
+    // the SAME by-name rule: seed a probe ctx with the deferred lets and ask
+    // collectDeferredPositionalReads which of them a consumer names. Only those
+    // materialize -- a binding that is merely absorbed (fused into a reduce,
+    // forced later by `|> compute`, or unused) stays deferred exactly as before.
+    let deferredLets =
+        lets |> List.choose (fun (id, v) ->
+            match v with
+            | IRApplyCombinator _ | IRComposeApply _ -> Some (id, v)
+            | _ -> None)
+    let forcedDeferredIds =
+        if List.isEmpty deferredLets then Set.empty
+        else
+            let probeCtx = { ctx with DeferredComputations = Map.ofList deferredLets }
+            let read =
+                ((lets |> List.map snd) @ [retExpr])
+                |> List.collect (collectDeferredPositionalReads probeCtx)
+                |> Set.ofList
+            // `return e` naming a deferred local is a by-name read too. The
+            // collector deliberately does NOT note a bare IRVar (at module level
+            // that shape is a deliberately-deferred ALIAS binding), but a
+            // function RETURN has to hand the caller a materialized array.
+            match retExpr with
+            | IRVar (rid, _) when deferredLets |> List.exists (fun (i, _) -> i = rid) ->
+                Set.add rid read
+            | _ -> read
     let stmts = lets |> List.collect (fun (id, value) ->
         // Every allocation emitted while THIS let renders is owned by it (see
         // setAllocOwner); the fold overwrites the stamp each iteration.
@@ -15652,6 +15721,15 @@ let private genFuncBodyScoped
             // Loop objects are compile-time only -- they're resolved when <@> is processed
             currentNames <- Map.add id varName currentNames
             []
+        | IRApplyCombinator info when Set.contains id forcedDeferredIds ->
+            // Still-deferred combinator that a LATER statement reads BY NAME.
+            // Materialize it here, through the same statement-form path the
+            // `|> compute` arm below uses, or the read names an identifier
+            // this arm never declared.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let code = genApplyCombinator bodyCtx varName info builder
+            currentNames <- Map.add id varName currentNames
+            code
         | IRApplyCombinator _ | IRComposeApply _ ->
             // WAS: "unevaluated computations -- deferred until |> compute forces
             // them", registering the name and emitting NOTHING. That premise is
@@ -15865,8 +15943,16 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         // is still a hardcoded 2-array IIFE special case kept for inline
         // expression contexts that lack a surrounding statement scope (a
         // separate cleanup will fold that into a wrapper around this path).
+        // The BARE combinator return takes the same arm: a function's caller
+        // receives a VALUE (its return type is an array or scalar, never a
+        // loop object), so laziness cannot cross the boundary -- the callee
+        // is the last scope that can force. Without this, a body ending in
+        // `omegas <@> lambda(w) -> ...` with no `|> compute` fell through to
+        // the inline-expression sentinel (UNEVALUATED_COMPUTATION_USED_AS_
+        // VALUE) even though the statement-form emitter handles it exactly
+        // as it handles the computed spelling.
         match retExpr with
-        | IRCompute (IRApplyCombinator info) ->
+        | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
             let retVarName = sprintf "__ret%d" (builder.FreshId())
             let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
             let combCode = genApplyCombinator bodyCtx retVarName info builder
@@ -16368,6 +16454,11 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
         | t -> irTypeToCpp t
 
     let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
+    // Parity with genFuncDef (which folds captures in alongside params): a
+    // source-level `function` always has Captures = [], but the main-locality
+    // fixpoint can route a lifted callable with non-empty Captures here, and
+    // its body's IRVar references must resolve to the same names.
+    let bodyNames = funcDef.Captures |> List.fold (fun m c -> Map.add c.Id c.Name m) bodyNames
     let safeName = sanitizeCppName funcDef.Name
     // std::function type with one param type per Blade param (no companion args).
     let paramTypeList =
@@ -16460,31 +16551,141 @@ let private isComputeBinding (b: IRBinding) : bool =
 /// parameters (lifted lambdas with function-typed captures) do NOT
 /// propagate -- the call-site wrapper closes over those inside main, so the
 /// callee's main-locality never leaks into the lifted function's body.
+///
+/// A body's free variables are not just the ones it SPELLS. By the time this
+/// runs, a kernel lambda has been lifted into its own IRCallable and the body
+/// retains only `IRVar(lambdaId)` -- so a module binding the kernel reads
+/// survives only in that callable's `Captures`, and `collectVarRefsIR` (a
+/// syntactic id walk) cannot see it. Whoever NAMES the callable is the one
+/// that has to supply those captures, whether the callee is inlined into this
+/// body's loop nest or called through a genCallableWrapper that forwards them
+/// as arguments. So a body also inherits the capture obligations of every
+/// callable it names, split by kind: module-binding captures make it
+/// main-local outright, function-typed captures become extra edges for the
+/// fixpoint below. That is the opposite direction from the paragraph above --
+/// there, a callee's main-locality must not leak outward into a lifted body;
+/// here, a caller inherits its callee's UNMET obligations.
 let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : Set<IRId> =
     let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
-    let capturesModuleBinding (funcDef: IRFuncDef) =
-        let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-        let captureIds = funcDef.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList
-        let bound = Set.unionMany [paramIds; captureIds; funcIds]
-        let freeVars = Set.difference (collectVarRefsIR funcDef.Body) bound
-        freeVars |> Set.exists (fun id -> Map.containsKey id ctx0.VarNames)
+    let capturesById =
+        modul.Functions
+        |> List.map (fun f -> (f.Id, f.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList))
+        |> Map.ofList
+    // The callables a body NAMES, as opposed to receives: intersecting with
+    // funcIds drops params (a param's VarId is never a function id) and
+    // subtracting the body's own captures drops function-typed captures.
     let uncapturedFuncRefs =
         modul.Functions
         |> List.map (fun f ->
             let captureIds = f.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList
             (f.Id, Set.difference (Set.intersect (collectVarRefsIR f.Body) funcIds) captureIds))
         |> Map.ofList
+    let inheritedCaptures (funcDef: IRFuncDef) =
+        uncapturedFuncRefs.[funcDef.Id]
+        |> Set.fold (fun acc g ->
+            Set.union acc (Map.tryFind g capturesById |> Option.defaultValue Set.empty)) Set.empty
+    let capturesModuleBinding (funcDef: IRFuncDef) =
+        let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        let captureIds = funcDef.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList
+        let bound = Set.unionMany [paramIds; captureIds; funcIds]
+        let spelled = Set.difference (collectVarRefsIR funcDef.Body) bound
+        // Subtract `bound` AFTER the fold, never inside it: a self-recursive
+        // lifted callable names itself, and a callee whose captures are all
+        // params of THIS function is already satisfied here. Both would
+        // false-positive otherwise. Subtracting funcIds is load-bearing too --
+        // function ids are in ctx0.VarNames, so a function-typed capture would
+        // otherwise flag every caller; those are handled as edges instead.
+        let inherited = Set.difference (inheritedCaptures funcDef) bound
+        Set.union spelled inherited |> Set.exists (fun id -> Map.containsKey id ctx0.VarNames)
+    // Function-typed captures of a named callee, as fixpoint edges. Note the
+    // deliberate asymmetry with `capturesModuleBinding`: that one subtracts the
+    // full `bound` (funcIds included), this one keeps funcIds -- they are the
+    // whole point -- and subtracts only what is genuinely bound locally.
+    let inheritedFuncRefs =
+        modul.Functions
+        |> List.map (fun f ->
+            let localBound =
+                Set.union
+                    (f.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
+                    (f.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList)
+            (f.Id, Set.difference (Set.intersect (inheritedCaptures f) funcIds) localBound))
+        |> Map.ofList
+    let refEdges (id: IRId) = Set.union uncapturedFuncRefs.[id] inheritedFuncRefs.[id]
+    // A callable that captures another FUNCTION'S PARAMETER can never be a
+    // main-local sibling, whatever its module captures say.
+    //
+    // Main-locality works by lexical `[&]` capture: the callable is emitted as
+    // a `std::function` local in main(), so every name it closes over must be
+    // in scope THERE. Module bindings are (they are main's locals). A function
+    // parameter is not -- it exists only inside that function's body -- so the
+    // emitted closure names an undeclared identifier
+    // ("'shift' was not declared in this scope").
+    //
+    // Such a callable is a lifted kernel of an enclosing function: it belongs
+    // at namespace scope, receiving those captures as ordinary capture params
+    // forwarded at the call site inside its parent. Its MODULE captures are
+    // then served by the S0 declaration promotion
+    // (computeModuleCaptureHoistIds), which exists for exactly this shape --
+    // the two mechanisms are alternative answers to "a module binding is a
+    // main() local", and only promotion can serve a namespace-scope referrer.
+    //
+    // Measured on examples/lswosa.blade: `family_spectra`'s grid kernel
+    // captures the enclosing function's `shift`/`seg_span`/`freqs`/`t_zero`
+    // AND transitively inherits `two_pi` from `wosa_lsdft`, so the inherited
+    // module binding alone would have made it main-local.
+    let allParamIds =
+        modul.Functions
+        |> List.collect (fun f -> f.Params |> List.map (fun p -> p.VarId))
+        |> Set.ofList
+    // Tested on captures AND spelled body references, because main-local
+    // emission drops the capture params entirely (that is the point of `[&]`),
+    // so a clone can reach an enclosing param either way. Own params are
+    // subtracted -- they are bound here.
+    let usesEnclosingParam (funcDef: IRFuncDef) =
+        let ownParams = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        let referenced =
+            Set.union
+                (funcDef.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList)
+                (collectVarRefsIR funcDef.Body)
+        Set.difference (Set.intersect referenced allParamIds) ownParams |> Set.isEmpty |> not
+    // Excluded from main-locality ENTIRELY -- not just from `direct`. The
+    // fixpoint below promotes any caller of a main-local callee, and this
+    // kernel calls one (`wosa_lsdft`, which captures `two_pi` directly), so
+    // filtering only the seed left it re-added one round later.
+    let cannotBeMainLocalSeed =
+        modul.Functions |> List.filter usesEnclosingParam |> List.map (fun f -> f.Id) |> Set.ofList
+    // Propagated DOWNWARD along the reference edges: a namespace-scope C++
+    // function cannot call a `std::function` local of main(), so everything
+    // reachable from something that cannot be main-local must also stay at
+    // namespace scope. (The main-local fixpoint below propagates the opposite
+    // way, caller-wards, which is why both directions are needed and why they
+    // are computed as separate closures.) Whatever module bindings these
+    // callees capture are served by the S0 declaration promotion instead.
+    //
+    // Measured on examples/lswosa.blade: with only the seed excluded, the grid
+    // kernel became a namespace-scope function calling `hanning`, which had
+    // stayed a main-local closure because it captures `two_pi`.
+    let cannotBeMainLocal =
+        let rec grow (acc: Set<IRId>) =
+            let acc' =
+                acc |> Set.fold (fun s id ->
+                    match Map.tryFind id uncapturedFuncRefs with
+                    | Some _ -> Set.union s (refEdges id)
+                    | None -> s) acc
+            if acc' = acc then acc else grow acc'
+        grow cannotBeMainLocalSeed
     let direct =
         modul.Functions
         |> List.filter capturesModuleBinding
         |> List.map (fun f -> f.Id)
         |> Set.ofList
+        |> fun s -> Set.difference s cannotBeMainLocal
     let rec close (acc: Set<IRId>) =
         let acc' =
             modul.Functions
             |> List.fold (fun s f ->
-                if Set.contains f.Id s then s
-                elif not (Set.isEmpty (Set.intersect uncapturedFuncRefs.[f.Id] s)) then Set.add f.Id s
+                if Set.contains f.Id s || Set.contains f.Id cannotBeMainLocal then s
+                elif not (Set.isEmpty (Set.intersect (refEdges f.Id) s)) then Set.add f.Id s
                 else s) acc
         if acc' = acc then acc else close acc'
     close direct
@@ -16579,10 +16780,23 @@ shape has no single `TYPE %s = ...;` definition line to split -- see tryHoistMod
 /// so the copy is emitted at exactly the origin's program point and is in scope
 /// for precisely the call sites the origin was in scope for.
 let private emissionOrderedItems (modul: IRModule) : (IRId * Choice<IRBinding, IRFuncDef>) list =
+    // TRANSITIVELY, because derivation composes: shape monomorphization
+    // specializes the copies HM monomorphization produced, so a
+    // `f_HM_..._shape_...` names an HM spec as its origin, and that spec's own
+    // id is itself freshly minted and sorts late. Following one link left the
+    // shape copy after its call sites again -- the same
+    // "'lswosa_HM_..._shape_...' was not declared in this scope" the one-level
+    // rule was written to prevent. Bounded by the number of entries and
+    // guarded against a cycle (which would be a producer bug, not a shape a
+    // program can request).
     let orderKey (id: IRId) =
-        match Map.tryFind id modul.DerivedFuncOrigins with
-        | Some originId -> originId
-        | None -> id
+        let rec follow (cur: IRId) (fuel: int) =
+            if fuel <= 0 then cur
+            else
+                match Map.tryFind cur modul.DerivedFuncOrigins with
+                | Some originId when originId <> cur -> follow originId (fuel - 1)
+                | _ -> cur
+        follow id (Map.count modul.DerivedFuncOrigins + 1)
     let bindingItems = modul.Bindings |> List.map (fun b -> (b.Id, Choice1Of2 b))
     let funcItems = modul.Functions |> List.map (fun f -> (f.Id, Choice2Of2 f))
     bindingItems @ funcItems |> List.sortBy (fst >> orderKey)

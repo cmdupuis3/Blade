@@ -1,0 +1,29 @@
+// TEST: Intrinsics Rounding In Kernel Position
+// ============================================================================
+// The accepting side of the deferral that unit-errors/015 and intrinsics/016
+// guard. floor/ceil/log10 no longer PIN a kernel param to Float64, so two
+// things have to hold that the pin used to decide for them.
+//
+// (1) A dimensionless real array rounds exactly as before -- the deferred node
+//     is stamped Float64 directly, and buildApplyInfo's re-stamp leaves it be.
+//
+// (2) An INTEGER array is now accepted. The pin used to unify the param with
+//     Float64 and then fail apply-site unification with "expected Float64, got
+//     Int64", even though the same floor at SCALAR position took the resolved
+//     operand's catch-all and accepted an Int the whole time. Kernel position
+//     now agrees with scalar position, which is the consistency the pin broke;
+//     C++'s overload set promotes the integer, so the value is unchanged.
+// ============================================================================
+let F: Array<Float like Idx<4>> = [1.5, 2.5, -1.5, 3.0]
+let down = (method_for(F) <@> lambda(x) -> floor(x)) |> compute
+let up = (method_for(F) <@> lambda(x) -> ceil(x)) |> compute
+
+let N: Array<Int64 like Idx<3>> = [7, 8, 9]
+let same = (method_for(N) <@> lambda(n) -> floor(n)) |> compute
+
+let P: Array<Float like Idx<3>> = [10.0, 100.0, 1000.0]
+let decades = (method_for(P) <@> lambda(p) -> log10(p)) |> compute
+// EXPECT: down = [1, 2, -2, 3]
+// EXPECT: up = [2, 3, -1, 3]
+// EXPECT: same = [7, 8, 9]
+// EXPECT: decades = [1, 2, 3]
