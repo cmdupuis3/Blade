@@ -3351,8 +3351,11 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
         //
         // For all other values (scalars, function calls, IRApplyCombinator
         // results, etc.), the existing "auto __v = ..." form is correct.
+        // Lazy: `value` here is ANY let-bound value, not a known inline form, so
+        // the element type must not be asked for until an arm needs it (see
+        // materializeInlineForm's note).
         let inlineElemTypeStr (form: IRExpr) =
-            inferInlineElemTypeStr "IRLet inline form" form
+            lazy (inferInlineElemTypeStr "IRLet inline form" form)
         match materializeInlineForm subst names (sprintf "__v%d" id) (inlineElemTypeStr value) value with
         // Expression position: the materialization is spliced into an IIFE, so
         // there is no statement scope whose exit could carry a free. Drop the
@@ -3415,7 +3418,9 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
             if isUnitExpr value then
                 renderUnitStmts subst names value
             else
-                match materializeInlineForm subst names (sprintf "__v%d" letId) (inferInlineElemTypeStr "statement-position let" value) value with
+                // Lazy for the same reason as renderLetExpr's site above: this
+                // arm sees every statement-position let value, inline form or not.
+                match materializeInlineForm subst names (sprintf "__v%d" letId) (lazy (inferInlineElemTypeStr "statement-position let" value)) value with
                 // Inline statement TEXT for an enclosing IIFE -- same
                 // no-scope-exit situation as renderLetExpr above; drop.
                 | Some (prelude, _) -> prelude |> String.concat " "
@@ -3533,40 +3538,55 @@ and exprToCppWithVar (names: Map<IRId, string>) (varId: IRId) (varName: string) 
 /// descriptors for whatever IT allocated; statement-position consumers hand
 /// those to `registerMaterializedAllocs` to free at scope exit, expression/IIFE
 /// consumers drop them and leak.
-and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (form: IRExpr) : (string list * MaterializedAlloc list) option =
+///
+/// `elemTypeStr` is a `Lazy` and NOT an eager string, because the two
+/// expression-position callers (renderLetExpr, renderUnitStmts' IRLet arm)
+/// cannot pre-filter: they hand over WHATEVER a let is bound to and use the
+/// `None` result to mean "render this the ordinary `auto __v = ...` way".
+/// Resolving an element type for those values eagerly asked the question of
+/// things that legitimately have no single element type -- a tuple binding
+/// (`let t = B, C`) most visibly -- and `inferInlineElemTypeStr` answered by
+/// collecting a "likely a typechecker or IR bug" warning for a string this
+/// function then discarded on the `_ -> None` arm. Deferring it here ties the
+/// question to the arms that actually consume the answer, so the arm list
+/// below is the single definition of which forms need one; a caller cannot
+/// drift out of step with it.
+and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: Lazy<string>) (form: IRExpr) : (string list * MaterializedAlloc list) option =
     match form with
     | IRMask (arrExpr, predExpr) ->
-        materializeMaskForm subst names varName elemTypeStr arrExpr predExpr
+        materializeMaskForm subst names varName elemTypeStr.Value arrExpr predExpr
     | IRIntersect (aExpr, bExpr) ->
-        materializeIntersectForm subst names varName elemTypeStr aExpr bExpr
+        materializeIntersectForm subst names varName elemTypeStr.Value aExpr bExpr
     | IRUnion (aExpr, bExpr) ->
-        materializeUnionForm subst names varName elemTypeStr aExpr bExpr
+        materializeUnionForm subst names varName elemTypeStr.Value aExpr bExpr
     | IRUnique aExpr ->
-        materializeUniqueForm subst names varName elemTypeStr aExpr
+        materializeUniqueForm subst names varName elemTypeStr.Value aExpr
     | IRSort (arrExpr, keyExpr) ->
-        materializeSortForm subst names varName elemTypeStr arrExpr keyExpr
+        materializeSortForm subst names varName elemTypeStr.Value arrExpr keyExpr
     | IRTranspose (arrExpr, d1, d2) ->
-        materializeTransposeForm subst names varName elemTypeStr arrExpr d1 d2
+        materializeTransposeForm subst names varName elemTypeStr.Value arrExpr d1 d2
     | IRStack arrs ->
-        materializeStackForm subst names varName elemTypeStr arrs
+        materializeStackForm subst names varName elemTypeStr.Value arrs
     | IRJoin (arrs, dim) ->
-        materializeJoinForm subst names varName elemTypeStr arrs dim
+        materializeJoinForm subst names varName elemTypeStr.Value arrs dim
     | IRDecompact (arrExpr, dimArg) ->
-        materializeDecompactForm subst names varName elemTypeStr arrExpr dimArg
+        materializeDecompactForm subst names varName elemTypeStr.Value arrExpr dimArg
     | IRArrayNegate arrExpr | IRArrayConjugate arrExpr ->
-        materializeNegateConjugateForm subst names varName elemTypeStr form arrExpr
+        materializeNegateConjugateForm subst names varName elemTypeStr.Value form arrExpr
     | IRGram (lExpr, rExpr, sameArray) ->
-        materializeGramForm subst names varName elemTypeStr lExpr rExpr sameArray
+        materializeGramForm subst names varName elemTypeStr.Value lExpr rExpr sameArray
     | IRMatmul (lExpr, rExpr) ->
-        materializeMatmulForm subst names varName elemTypeStr lExpr rExpr
+        materializeMatmulForm subst names varName elemTypeStr.Value lExpr rExpr
     // `elemTypeStr` is deliberately NOT forwarded: eigh produces TWO pools whose
     // element types can differ (complex Q, real LAM), so a single caller-supplied
     // element string cannot describe the result. The form derives both from the
     // OPERAND's type, which is the only place the pair is jointly determined.
+    // Under the `Lazy` above this arm therefore never forces one either, which
+    // is what inferInlineElemTypeStr's IREigh arm was working around.
     | IREigh operand ->
         materializeEighForm subst names varName operand
     | IRSolve (mExpr, rExpr) ->
-        materializeSolveForm subst names varName elemTypeStr mExpr rExpr
+        materializeSolveForm subst names varName elemTypeStr.Value mExpr rExpr
     | _ -> None
 
 
@@ -10516,7 +10536,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 let elemStr = elemTypeToCpp elemET
                 preCode <- preCode @ autoMaterErr
                 let matStmts =
-                    match materializeInlineForm emptySubst tempCtx.VarNames tmpName elemStr arr with
+                    match materializeInlineForm emptySubst tempCtx.VarNames tmpName (lazy elemStr) arr with
                     // Statement position: the temp is declared in the SAME block
                     // as the loop nest that reads it, and nothing downstream
                     // retains a pointer into it (compound() copies the mask bits
@@ -13796,7 +13816,7 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
         match maskExpr with
         | IRMask _ ->
             let tmpName = sprintf "%s__masksrc" name
-            (match materializeInlineForm emptySubst ctx.VarNames tmpName "bool" maskExpr with
+            (match materializeInlineForm emptySubst ctx.VarNames tmpName (lazy "bool") maskExpr with
              // Deliberately NOT registered: this temp feeds the COMPOUND index
              // construction below, and compound storage / ownership is owned by
              // a separate workstream (the same reason isFreeableDenseArrayType
@@ -13972,7 +13992,7 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         | Some callable when callable.Params.Length = 1 -> []
         | _ -> codegenError ctx ind "mask: predicate must resolve to a single-parameter callable; got something else (typechecker or IR bug)"
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRMask (arrExpr, predExpr)) with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRMask (arrExpr, predExpr)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []  // Unreachable: helper supports IRMask
     let code = forceCode @ elemErrCode @ predErrCode @ [sprintf "%s// mask: count + compact" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -13990,7 +14010,7 @@ and genIntersectBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind aExpr "intersect"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRIntersect (aExpr, bExpr)) with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRIntersect (aExpr, bExpr)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCodeA @ forceCodeB @ elemErrCode @ [sprintf "%s// intersect: build set from B, scan A" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -14008,7 +14028,7 @@ and genUnionBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind aExpr "union"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRUnion (aExpr, bExpr)) with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRUnion (aExpr, bExpr)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCodeA @ forceCodeB @ elemErrCode @ [sprintf "%s// union: all of A, plus elements from B not in A" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -14028,7 +14048,7 @@ and genUniqueBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "unique"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRUnique arrExpr) with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRUnique arrExpr) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ [sprintf "%s// unique: dedup via unordered_set, first-occurrence order" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -14117,7 +14137,7 @@ and genSortBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         | Some callable when callable.Params.Length = 1 -> []
         | _ -> codegenError ctx ind "sort: key must resolve to a single-parameter callable; got something else (typechecker or IR bug)"
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRSort (arrExpr, keyExpr)) with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRSort (arrExpr, keyExpr)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ keyErrCode @ [sprintf "%s// sort: stable_sort on permutation, eager materialization" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -14138,7 +14158,7 @@ and genTransposeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "transpose"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRTranspose (arrExpr, d1, d2)) with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRTranspose (arrExpr, d1, d2)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ [sprintf "%s// transpose: hard (swapped-extent alloc + axis-swapped copy)" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -14163,7 +14183,7 @@ and genStackJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let elemStr = elemTypeToCpp elemET
     let form = match joinDim with Some d -> IRJoin (arrs, d) | None -> IRStack arrs
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr form with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) form with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let note =
@@ -14189,7 +14209,7 @@ and genDecompactBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "decompact"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRDecompact (arrExpr, d)) with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRDecompact (arrExpr, d)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ [sprintf "%s// decompact: hard (dense alloc + symmetry-expanding scatter)" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -14210,7 +14230,7 @@ and genArrayNegateConjugateBinding (ctx: CodeGenContext) (binding: IRBinding) (b
     let elemStr = elemTypeToCpp elemET
     let form = if isConj then IRArrayConjugate arrExpr else IRArrayNegate arrExpr
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr form with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) form with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ [sprintf "%s// array_%s: whole-array eager transform (same-shape alloc + pool loop)" ind label] @ (matStmts |> List.map (fun s -> ind + s))
@@ -14230,7 +14250,7 @@ and genGramBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         | ArrayElem at -> irTypeToCpp at.ElemType
         | _ -> "double"
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) binding.Value with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = [sprintf "%s// gram: A * B^H (Gram product)" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -14249,7 +14269,7 @@ and genMatmulBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         | ArrayElem at -> irTypeToCpp at.ElemType
         | _ -> "double"
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) binding.Value with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = [sprintf "%s// matmul: A * B (dense matrix product)" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -14267,7 +14287,7 @@ and genEighBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     let ind = indentStr ctx
     let name = bindingCppName binding
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name "" binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy "") binding.Value with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code =
@@ -14289,7 +14309,7 @@ and genSolveBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
         | ArrayElem at -> irTypeToCpp at.ElemType
         | _ -> "double"
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) binding.Value with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code =
@@ -15910,7 +15930,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // exprToCpp's IRLet (for kernel-body IIFEs) produces format-
             // neutral statement lines; here we emit them with the function
             // body's indent rather than space-joined inline.
-            let elemStr = inferInlineElemTypeStr "lambda-body inline form" value
+            let elemStr = lazy (inferInlineElemTypeStr "lambda-body inline form" value)
             match materializeInlineForm emptySubst currentNames varName elemStr value with
             | Some (matStmts, allocs) ->
                 // Statement position inside a live function frame: register.
