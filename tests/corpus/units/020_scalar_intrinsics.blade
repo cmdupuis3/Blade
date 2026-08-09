@@ -24,6 +24,18 @@ let m: Float<meters> = 1.0
 let s = a + m
 // EXPECT: s = 4
 
+// The rejecting direction of floor/ceil is only half the rule: DIVIDING by a
+// reference quantity is the sanctioned way to get the count, and the resulting
+// dimensionless ratio rounds like any other number. This is the accepting side
+// the header describes but never exercised, and the scalar half of the pair
+// whose kernel half leaked a unit until unit-errors/015.
+let dist: Float<meters> = 7.5
+let step: Float<meters> = 2.0
+let whole = floor(dist / step)
+let atleast = ceil(dist / step)
+// EXPECT: whole = 3
+// EXPECT: atleast = 4
+
 // A reciprocal-unit value composes like any other signature:
 // hz * seconds is dimensionless-compatible arithmetic against velocity/velocity.
 let f: Float<hz> = 2.0

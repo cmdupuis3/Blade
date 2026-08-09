@@ -1,0 +1,14 @@
+// TEST: Floor Kernel Param Dimensioned (rejects)
+// ERROR: BL3006
+// floor/ceil/log10 have no complex overload, so their scalar arm used to PIN an
+// unresolved operand to Float64 -- and inside a lambda body that operand IS the
+// kernel param, so the pin bound it to BARE Float64 and erased the element's
+// unit before apply-site unification. kernelBodyUnits then re-ran the same
+// per-op table against no signature and accepted. `log(d)` in the identical
+// spelling always rejected, because the complex intrinsics DEFER instead of
+// pinning; the pin is now deferred inside a lambda body too, the same carve-out
+// inferBinaryIntrinsic's `pin` makes for atan2/log_base. Scalar position keeps
+// the pin (and its eager complex rejection) -- units/020 is the accepting side.
+Unit meters
+let D: Array<Float<meters> like Idx<3>> = [1.5, 2.5, 3.5]
+let bad = (method_for(D) <@> lambda(d) -> floor(d)) |> compute

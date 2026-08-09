@@ -4053,11 +4053,32 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // so pinning Float64 now would reject complex kernels; the
                 // kernel re-stamp in buildApplyInfo corrects the result type.
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
-            | IRTInfer _ ->
-                // floor/ceil have no complex overload -- the operand really is
-                // real; pin it to Float64, the intrinsic's natural domain.
+            | IRTInfer _ when not env.InLambdaBody ->
+                // floor/ceil/log10 have no complex overload -- the operand
+                // really is real; pin it to Float64, the intrinsic's natural
+                // domain, which also rejects a later complex binding here
+                // instead of letting it reach codegen as std::floor(complex).
                 unify env.Subst tArg.Type (IRTScalar ETFloat64) |> Result.bind (fun () ->
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
+            | IRTInfer _ ->
+                // NOT inside a lambda body, though -- the same carve-out
+                // inferBinaryIntrinsic's `pin` makes. There the operand is a
+                // kernel parameter that apply-site unification has not bound
+                // yet, and binding it to BARE Float64 would erase the element's
+                // unit annotation -- after which buildApplyInfo's
+                // kernelBodyUnits walk re-runs this op's unit rule against no
+                // signature and silently accepts `D: m <@> lambda(d) ->
+                // floor(d)`. DEFER (what the complex arm above does, and why
+                // `log` rejects that shape while the PINNING arm did not): the
+                // param binds to the real element type and the unit walk sees
+                // it. The complex operand the pin used to catch is caught after
+                // unification instead, by findBadComplexIntrinsic.
+                //
+                // Result is bare Float64, not the operand's variable: these
+                // intrinsics are Float64-valued at any operand width, it
+                // matches the provisional-annotation defer arm below, and the
+                // kernel re-stamp's real-operand arm normalizes to it anyway.
+                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64))
             | IRTUnitAnnotated _ when env.InLambdaBody && typedExprHasProvisionalUnits env tArg ->
                 // PROVISIONAL annotation inside a lambda body: something the
                 // argument depends on is still an unresolved inference variable
@@ -10212,11 +10233,47 @@ and buildApplyInfo (env: TypeEnv)
                     when (match env.Subst.Resolve operand.Type with ArrayElem _ -> true | _ -> false) ->
                 Some (match op with OpReal -> "real" | OpImag -> "imag" | _ -> "arg")
             | _ -> typedExprChildren e |> List.tryPick findBadComplexAccessor
+        // (3) A REAL-ONLY math intrinsic whose operand unified to COMPLEX.
+        //     Scalar position rejects this eagerly, but in a kernel body the
+        //     operand is a param, and both real-only families DEFER rather than
+        //     pin so the unit walk can see the element's annotation
+        //     (floor/ceil/log10's IRTInfer arm, inferBinaryIntrinsic's `pin`).
+        //     Nothing downstream catches it: kernelBodyUnits is units-only, and
+        //     the complex re-stamp below keys on the OPERAND's element type
+        //     without consulting isComplexMathIntrinsic, so it would UPGRADE
+        //     floor to complex and lower to std::floor(std::complex<double>)
+        //     -- measured: g++ answers "no matching function", which is a C++
+        //     error where a Blade one belongs. Reject here instead.
+        //
+        //     Membership in mathIntrinsics, not a name list, is what excludes
+        //     `abs`: it is spelled OpMath "abs" but is not one of the
+        //     intrinsics, and abs of a complex is the legal real magnitude.
+        //     Every binaryMathIntrinsic is real-only by construction, so
+        //     OpMath2 needs no such filter.
+        //
+        //     Only a RESOLVED complex operand fires. An unresolved one belongs
+        //     to an enclosing kernel still being inferred, and its own second
+        //     pass rechecks this body (see the NESTED-APPLY DEFERRAL below).
+        let rec findBadComplexIntrinsic (e: TypedExpr) : string option =
+            let isComplexOperand (o: TypedExpr) =
+                match IR.stripUnits (env.Subst.Resolve o.Type) with
+                | IRTScalar (ETComplex64 | ETComplex128) -> true
+                | _ -> false
+            match e.Kind with
+            | TExprUnaryOp (OpMath name, operand)
+                    when isMathIntrinsic name && not (isComplexMathIntrinsic name)
+                         && isComplexOperand operand -> Some name
+            | TExprBinOp (_, OpMath2 name, l, r)
+                    when isComplexOperand l || isComplexOperand r -> Some name
+            | _ -> typedExprChildren e |> List.tryPick findBadComplexIntrinsic
         let arrayValuedComputeBody =
             kernelOutputRank >= 1 &&
             (match lambdaInfo.Body.Kind with TExprCompute _ -> true | _ -> false)
         match findBadComplexAccessor lambdaInfo.Body with
         | Some name -> Error (IntrinsicComplexScalarOnly name)
+        | None ->
+        match findBadComplexIntrinsic lambdaInfo.Body with
+        | Some name -> Error (IntrinsicNotComplex name)
         | None ->
         if arrayValuedComputeBody then
             Error (Other "array-valued elementwise kernel body is not supported inside a kernel; reduce the row to a scalar with prodsum or reduce, or compute the elementwise product at top level")
