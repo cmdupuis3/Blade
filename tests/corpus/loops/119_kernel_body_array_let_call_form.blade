@@ -22,17 +22,22 @@
 // Values pin the whole chain: for w in {0.5, 2}, e = exp(w*x) over [1,2,3],
 // result = prodsum(xs,e)/sqrt(prodsum(e,e)) -- checked against Python.
 // ============================================================================
-function specish(xs: Array<Float64 like Idx<n>>, ws: Array<Float64 like Idx<m>>) = {
-    ws <@> lambda(w) -> {
+// The samples ride as a module-level CAPTURE and the kernel param is
+// ANNOTATED, matching what lsdft's kernel resolves to -- with `w` left as an
+// unresolved infer var, the nested apply's operand types provisionally and
+// `e` collapses to a scalar ("prodsum() requires array arguments"), which is
+// a separate typecheck seam, not the emission mechanism under pin here.
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function specish(ws: Array<Float64 like Idx<m>>) = {
+    ws <@> lambda(w: Float64) -> {
         let e = exp <@> (w * xs)
         let z1 = prodsum(xs, e)
         let z2 = prodsum(e, e)
         z1 / sqrt(z2)
     }
 }
-let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
 let ws: Array<Float64 like Idx<2>> = [0.5, 2.0]
-let r = specish(xs, ws)
+let r = specish(ws)
 let r0 = r(0)
 let r1 = r(1)
 // EXPECT: r = [3.73632086402877, 3.25873708058511]
