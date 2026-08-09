@@ -1464,6 +1464,27 @@ and private interpretNest
 /// interact). Single leaf = scalar; fusion tree = a structured tuple
 /// mirroring the tree shape (same rationale as forceTreeShaped).
 let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (kernel: IRExpr) (seed: Value) : Value =
+    // HOISTED-OPERAND PRELUDE -- the twin of CodeGen.genReduceComputeBinding's.
+    // The lift pass pulls a synthesized loop application out of the
+    // combinator's `Arrays` slot into its own let, so a deferred computation
+    // whose operand is a broadcast (`reduce(exp <@> (i * w * ts), (+))`, i.e.
+    // units/065's kernel body) arrives here as
+    // `IRLet(v, IRApp(IRObjectFor ...), IRApplyCombinator ...)`. The leaf check
+    // below then saw an IRLet, not an apply, and raised InterpUnsupported for a
+    // well-formed fold the compiled lane now evaluates.
+    //
+    // Bind the hoisted values into the (flat, SSA-keyed) env exactly as Core's
+    // IRLet arm does -- the combinator underneath then resolves its operand by
+    // id -- and fold over that. Only ever turns an InterpUnsupported into a
+    // value: an IRLet-wrapped computation had no other outcome here.
+    let rec peelCompLets e =
+        match e with
+        | IRLet (id, value, body) ->
+            let v = force st env (Core.evalExpr st env value)
+            envBind env id v |> ignore
+            peelCompLets body
+        | _ -> e
+    let comp = peelCompLets comp
     let rec resolveDeferred e =
         match e with
         | IRVar (id, _) -> (match envTryFind env id with Some cell -> (match cell.V with VDeferred (e2, _) -> resolveDeferred e2 | _ -> e) | None -> e)

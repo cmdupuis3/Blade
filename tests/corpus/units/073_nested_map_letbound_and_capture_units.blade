@@ -1,5 +1,4 @@
-// TEST: Nested Map Let-Bound And Capture Units Cancel (rejects)
-// REJECT-AT: codegen
+// TEST: Nested Map Let-Bound And Capture Units Cancel
 // ============================================================================
 // The two routes by which a PROVISIONAL unit reaches a nested map WITHOUT
 // being visible in the map's operand types. units/065 pinned the third
@@ -19,13 +18,17 @@
 //      `w`'s first-pass type is stale (`f` was unresolved when `2.0 * f` was
 //      typed), so nothing in the operands could ever have signalled it.
 //
-// Codegen-stage probe on purpose, same as units/065: the units check must NOT
-// refuse these, so only the known issue #3 ceiling (nested loop object in a
-// kernel body) is left to. A units regression is refused at LOWER and fails
-// this pin. Numerics are pinned separately at top level in units/074, which
-// does lower; once #3 lands, outA/outB here are
-// [1.89188841969345, -0.126920566681172].
-// Residue twins that must still reject: unit-errors/010 and unit-errors/011.
+// This WAS a `REJECT-AT: codegen` probe against the issue #3 ceiling (a nested
+// loop object in a kernel body). S2 removed that ceiling -- the body is
+// emitted through the lifted callable and the kernel-local `let` is forced --
+// so the accept is now pinned by the ARITHMETIC the cancellation licenses
+// rather than by "it typechecks". outA's cells are exactly units/074's s1 and
+// s2, which is the cross-check that the kernel-body spelling and the top-level
+// spelling agree.
+//
+// The residue twins that must still REJECT (at lower, BL3006) are
+// unit-errors/010 and unit-errors/011; a units regression refuses this program
+// at lower and fails the test.
 // ============================================================================
 Unit second
 Unit day = 86400 * second
@@ -45,3 +48,8 @@ let outB = ws <@> lambda(f) -> {
     let sn = (ts <@> lambda(t) -> sin(w * t)) |> compute
     reduce(sn, (+))
 } |> compute
+
+// outA[k] = sum_{t in {1,2,3}} sin(ws[k]*t)   (== units/074's s1, s2)
+// EXPECT: outA = [1.89188841969345, -0.126920566681172]
+// outB[k] = sum_{t in {1,2,3}} sin(2*ws[k]*t), so outB[0] == outA[1]
+// EXPECT: outB = [-0.126920566681172, -0.304017166684981]

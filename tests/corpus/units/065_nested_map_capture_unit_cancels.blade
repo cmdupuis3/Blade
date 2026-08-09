@@ -1,5 +1,4 @@
-// TEST: Nested Map Capture Unit Cancels (rejects)
-// REJECT-AT: codegen
+// TEST: Nested Map Capture Unit Cancels
 // ============================================================================
 // The ARRAY sibling of units/052. There the cancelling product sat directly in
 // a scalar transcendental call; here it feeds a NESTED elementwise map
@@ -9,14 +8,23 @@
 // element signature it judged was therefore provisional: exactly the
 // dimensioned capture's own (`day`), even though 1/day * day cancels.
 //
-// This is a codegen-stage reject-probe ON PURPOSE, and the stage is the whole
-// assertion: the units check must NOT refuse these two lines, so the only
-// thing left to refuse them is the KNOWN issue #3 ceiling (a nested loop
-// object in a kernel body -- REDUCE_OVER_A_DEFERRED_COMPUTATION /
-// LOOP_OBJECT_USED_AS_VALUE). If the unit walk ever regresses to rejecting
-// the cancellation, the probe is refused at LOWER instead and this pin fails.
-// Turn it into a value test when #3 lands. The residue twins that must still
-// reject are unit-errors/004 (real) and unit-errors/005 (complex).
+// This WAS a `REJECT-AT: codegen` probe, whose own header said "turn it into a
+// value test when #3 lands". S2 landed it: the kernel body is emitted through
+// the lifted `__lambda_N` (call-don't-inline), the kernel-local `let e` is
+// FORCED at lowering rather than silently dropped, and the fused reduce over
+// the hoisted broadcast operand no longer refuses. So the units claim is now
+// checked the strong way -- by the arithmetic it licenses.
+//
+// WHAT THE VALUES ASSERT. `1/day * day` cancels to dimensionless AND the
+// magnitudes are exact reciprocals, so `w * ts` passes through UNSCALED: with
+// ws = [1, 2] and ts = [1, 2, 3] the exponent is literally w*t, not
+// 86400*w*t. outC is sum_t e^{i w t} and outR is sum_t e^{w t}; a magnitude
+// slip of 86400 would be visible in the first digit. units/074 pins the same
+// arithmetic in the top-level spelling, and units/073 pins the sin twin.
+//
+// The residue twins that must still REJECT (at lower, BL3006) are
+// unit-errors/004 (real) and unit-errors/005 (complex): if the unit walk ever
+// regresses to rejecting the cancellation, this test fails at lower instead.
 // ============================================================================
 Unit second
 Unit day = 86400 * second
@@ -37,3 +45,8 @@ let outR = ws <@> lambda(w) -> {
     let e = exp <@> (w * ts)
     reduce(e, (+))
 } |> compute
+
+// outC[k] = sum_{t in {1,2,3}} e^{i*ws[k]*t}
+// EXPECT: outC = [(-0.865837027279448, 1.89188841969345), (-0.109620170760388, -0.126920566681172)]
+// outR[k] = sum_{t in {1,2,3}} e^{ws[k]*t}   (e+e^2+e^3, e^2+e^4+e^6)
+// EXPECT: outR = [30.1928748505774, 465.41599962481]

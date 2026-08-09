@@ -1,0 +1,43 @@
+// TEST: Kernel Body Nested Capture Depth 2
+// ============================================================================
+// docs/plan-kernel-body-materialization.md section 3's depth-2 capture program:
+// an inner kernel inside an outer kernel inside a FUNCTION body, whose captures
+// arrive from four distinct provenances at once --
+//
+//   t   the inner kernel's own param
+//   w   the OUTER kernel's param
+//   sc  a function-body `let`
+//   two a MODULE-level `let`
+//   aa  the enclosing function's param
+//
+// Before S2 the lifted pair (`__lambda(t, sc, two, w)` and
+// `__lambda(w, aa, sc, two)`) was already emitted correctly and simply never
+// called. This pins that the CALL S2 introduces forwards all four correctly:
+// capture arguments resolve through `captureForwardName` on the emitter's own
+// name map, so a renamed block-local forwards its EMITTED spelling
+// (memory/block-local-capture-forwarding.md) -- the invariant basic/029-033
+// guard at module level and this guards two kernel levels down.
+//
+// It also exercises S0's other half: `two` is a module-level let, which is a
+// `main()` local unless promoted, and the inner kernel that captures it is
+// called from inside the file-scope `outer(...)`. A regression in the
+// namespace-scope promotion is an undeclared identifier here.
+//
+// e[t] = t * w * sc * two = 6*w*t, so prodsum(e, e) = 36 * w^2 * (1+4+9+16)
+//      = 1080 * w^2:  w=0.5 -> 270, w=1.5 -> 2430, w=2.5 -> 6750.
+// ============================================================================
+let two = 2.0
+let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let b: Array<Float like Idx<3>> = [0.5, 1.5, 2.5]
+
+function outer(aa: Array<Float like Idx<4>>, bb: Array<Float like Idx<3>>) = {
+    let sc = 3.0
+    bb <@> lambda(w) -> {
+        let e = (aa <@> lambda(t) -> t * w * sc * two) |> compute
+        prodsum(e, e)
+    } |> compute
+}
+
+let out = outer(a, b)
+
+// EXPECT: out = [270, 2430, 6750]

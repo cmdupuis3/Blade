@@ -793,10 +793,42 @@ let mpiProgramOn () : bool =
     (mpiProgramOnCell ()).Value
 
 
+/// Expression-position codegen refusals, verbatim, for the `#error` directives
+/// the assembler appends to the generated translation unit. Separate from
+/// `exprWarningsCell` because that cell also carries `codegenError`'s messages
+/// (which already emit their own `#error` at the refusal site) and the
+/// unresolved-type notes, none of which should be re-emitted.
+///
+/// WHY this exists. `exprError` alone emits a bare `BLADE_CODEGEN_ERROR_...`
+/// identifier. That does fail the C++ compile -- but as an
+/// "identifier not declared" from g++, not as a Blade refusal. The corpus
+/// runner's `// REJECT-AT: codegen` verdict is decided by
+/// `cppCode.Contains "#error"` (tests/Runner.fs), so without this the entire
+/// expression-position sentinel class could never form a PASSING reject probe.
+/// AsyncLocal per-flow ref for the same per-parallel-test-task isolation as
+/// exprWarningsCell.
+let private exprSentinelsStorage =
+    System.Threading.AsyncLocal<string list ref>()
+
+let exprSentinelsCell () : string list ref =
+    let v = exprSentinelsStorage.Value
+    if isNull (box v) then
+        let fresh = ref []
+        exprSentinelsStorage.Value <- fresh
+        fresh
+    else v
+
 /// Record an expression-level warning and return a C++ expression that causes a compile error.
+/// The identifier is the in-place marker; the companion `#error` directive is
+/// appended to the translation unit by `genSelfContainedProgramFromIR` (an
+/// expression position cannot host a preprocessor directive, which is why the
+/// two halves are split).
 let exprError (msg: string) : string =
     let cell = exprWarningsCell ()
     cell.Value <- cell.Value @ [msg]
+    let sentinels = exprSentinelsCell ()
+    if not (List.contains msg sentinels.Value) then
+        sentinels.Value <- sentinels.Value @ [msg]
     sprintf "BLADE_CODEGEN_ERROR_%s" (msg.Replace(" ", "_").Replace("'", "").Replace("(", "").Replace(")", "").Replace(",", "").Replace(":", "").Replace("\"", "").ToUpper())
 
 // Substitution map for contains-aware mask rendering.
@@ -1648,6 +1680,89 @@ let genCallableWrapper (names: Map<IRId, string>) (suffix: string) (callable: IR
     let code =
         [sprintf "auto %s = [&](%s) { return %s(%s); };" wrapperName paramSig safeName allArgs]
     (code, wrapperName)
+
+// ---------------------------------------------------------------------------
+// Kernel body: expression-shaped, or call the lifted callable?
+// (docs/plan-kernel-body-materialization.md sections 3 and 5, stage S2)
+// ---------------------------------------------------------------------------
+//
+// The loop emitters that serve `<@> |> compute` render the kernel body as ONE
+// C++ expression (`genKernelExprWithReynolds` -> `exprToCpp`). There is no
+// statement scope there, so a body that MATERIALIZES an array -- a kernel-local
+// `let` bound to a computed array -- has nowhere to put the allocation and the
+// fill loop, and `exprToCppCore` refuses it with a sentinel.
+//
+// The lifted form of the SAME body already compiles correctly:
+// `genFuncBodyScoped` is a full statement context (alloc, fill nest, scope-owned
+// free) and the callable is emitted for every kernel regardless. So the fix is
+// not new emission machinery -- it is ROUTING: when the body is not
+// expression-shaped, call the lifted callable instead of inlining its text.
+// `genObjectForApplication` already takes exactly this route for the sibling
+// `IRApp(IRObjectFor ...)` shape.
+//
+// CONSERVATISM DIRECTION. A false "not expression-shaped" costs one non-inlined
+// call per output cell. A false "expression-shaped" reintroduces a sentinel, i.e.
+// a program that does not compile. So the predicate names only the node classes
+// `exprToCppCore` refuses UNCONDITIONALLY -- which is also what makes this change
+// unable to regress a passing test: every body it re-routes emits a
+// `BLADE_CODEGEN_ERROR_` sentinel today, and a sentinel is already a failed
+// compile. Inline forms (mask/sort/intersect/transpose/...) are deliberately NOT
+// in the list: `renderLetExpr` materializes those into an IIFE prelude and they
+// work inline today.
+
+/// True iff `e` is a node `exprToCppCore` refuses outright in expression
+/// position. Deliberately narrow -- see the conservatism note above.
+let private isNonExpressionNode (e: IRExpr) : bool =
+    match e with
+    | IRApplyCombinator _ | IRComposeApply _ -> true     // exprToCppCore: "unevaluated computation used as value"
+    | IRMethodFor _ | IRObjectFor _ -> true              // exprToCppCore: "loop object used as value"
+    | IRReduceCompute _ -> true                          // exprToCppCore: "reduce over a deferred computation ..."
+    | IRCompute (IRApplyCombinator _) -> true            // genApplyCombinatorExpr: unconditional refusal
+    | _ -> false
+
+/// Does the kernel body render as a single C++ expression? False when a
+/// materializing node appears anywhere in it (including as an `IRLet` RHS, which
+/// is the shape stage S2's Lowering half now produces for a kernel-local array).
+let rec kernelBodyIsExpressionShaped (body: IRExpr) : bool =
+    if isNonExpressionNode body then false
+    else childrenOf body |> List.forall kernelBodyIsExpressionShaped
+
+/// Route a nest whose kernel body is not expression-shaped through a CALL to the
+/// lifted callable: the body becomes `IRApp(IRVar(callable.Id, ...), params)`,
+/// which `exprToCppCore`'s IRApp arm renders as `__lambda_N(<peeled args>,
+/// <captures>)` -- capture arguments resolved through `captureForwardName` on the
+/// SAME name map the emitter already builds, so a renamed block-local forwards
+/// its EMITTED spelling (memory/block-local-capture-forwarding.md).
+///
+/// Applied at every CodeGen site that builds a `LoopNestCodeGen`, i.e. BEFORE
+/// the flat-elementwise fast path, the nest, the fused tree and the device
+/// emitters see it. That ordering is deliberate: `tryGenFlatElementwiseNest`'s
+/// own gates (notably the OpenMP licence check at "OmpRequested && not
+/// allParallel") still decide flat-vs-nest exactly as before -- this changes WHAT
+/// the body renders as, never WHICH emitter renders it.
+///
+/// Abstains (leaving today's sentinel) for:
+///   * a Reynolds kernel -- the permutation sum is rendered by substituting
+///     param names, and while the call form survives that substitution, no
+///     measured program combines Reynolds with a materializing body; keep the
+///     loud refusal rather than ship an unexercised path;
+///   * an ARRAY-returning callable -- assigning an `Array<T,R>` into a scalar
+///     output cell is manifestation M-C, owned by stage S3 and guarded at
+///     typecheck until then;
+///   * an unresolvable kernel, or one with no params.
+let routeKernelBodyThroughCall (info: ApplyInfo) (cg: LoopNestCodeGen) : LoopNestCodeGen =
+    if cg.HasReynolds || cg.IsAntisymmetric then cg
+    elif kernelBodyIsExpressionShaped cg.KernelExpr then cg
+    else
+        match resolveKernel info.Kernel with
+        | Some rk when not (List.isEmpty rk.Callable.Params)
+                       && not rk.Reynolds.HasReynolds
+                       && (match rk.Callable.RetType with ArrayElem _ -> false | _ -> true) ->
+            let paramTypes = rk.Callable.Params |> List.map (fun p -> p.Type)
+            let funcTy = mkFuncArrow paramTypes rk.Callable.RetType
+            let args = rk.Callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type))
+            { cg with KernelExpr = IRApp (IRVar (rk.Callable.Id, funcTy), args, rk.Callable.RetType) }
+        | _ -> cg
 
 /// Evaluate a DepIdx inner-extent formula for a specific outer index value:
 /// substitute the concrete integer `i` for the outer record's IRVar Id and
@@ -10222,7 +10337,9 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 (ppOrbitLevels tie.OutputLevels) name))
     | None ->
         // Build LoopNestCodeGen (handles both outer product and co-iteration)
-        let codeGen = buildLoopNestCodeGen info arrayNames name builder
+        // S2: a body that materializes an array is routed to a CALL of the
+        // lifted callable before any emitter sees it (routeKernelBodyThroughCall).
+        let codeGen = routeKernelBodyThroughCall info (buildLoopNestCodeGen info arrayNames name builder)
 
         // STREAMED provider inputs (`alias.stream`): no materialized arrays
         // exist -- the nest inlines per-fiber reads at the S/T boundary.
@@ -11191,7 +11308,8 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         // Each leaf's nest is built against its OWN arrays -- allocation
         // extents and kernel-param element bindings both come from here.
         let leafCgs = infos |> List.mapi (fun i info ->
-            buildLoopNestCodeGen info (arrayNamesOf info) leafNames.[i] builder)
+            // S2 routing, same rule as the single-kernel site.
+            routeKernelBodyThroughCall info (buildLoopNestCodeGen info (arrayNamesOf info) leafNames.[i] builder))
         let backends = infos |> List.map classifyLeafBackend
         // Deterministic deallocation, site 2: `declCode` below is built EAGERLY
         // but reaches the output only through `wrap` (the host arms). The device
@@ -11416,7 +11534,8 @@ let tryGenCudaSoftJoin (ctx: CodeGenContext) (name: string) (infos: ApplyInfo li
             | _ -> sprintf "arr%d" i)
     let leafNames = infos |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
     let leafCgs = infos |> List.mapi (fun i info ->
-        buildLoopNestCodeGen info (arrayNamesOf info) leafNames.[i] builder)
+        // S2 routing, same rule as the single-kernel site.
+        routeKernelBodyThroughCall info (buildLoopNestCodeGen info (arrayNamesOf info) leafNames.[i] builder))
     let blocks = backends |> List.map (function BkCuda b -> b | _ -> 256)
     // Per-leaf emission in split mode: simplicial first, then rectangular
     // (the single-kernel dispatch order). Each returns the host output
@@ -14202,6 +14321,34 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     (code, ctx')
 
 and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
+    // HOISTED-OPERAND PRELUDE. The lift pass pulls a synthesized loop
+    // application out of a combinator's `Arrays` slot into its own let
+    // (`liftChildIncludingLoopApp`), so a deferred computation whose operand is
+    // a broadcast -- `reduce(exp <@> (i * w * ts), (+))`, i.e. units/065's shape
+    // once the enclosing kernel body is emitted through the lifted form -- arrives
+    // here as `IRLet(v, IRApp(IRObjectFor ...), IRApplyCombinator ...)`, not as a
+    // bare combinator. The leaf check below then saw an IRLet, not an apply, and
+    // refused a perfectly well-formed fold.
+    //
+    // Emit those bindings as a statement prelude (genBinding is the same
+    // statement-form dispatch a body-level let uses) and fold over the
+    // combinator underneath, with the hoisted names in scope. Only ever turns a
+    // refusal into code: an IRLet-wrapped computation had no other outcome.
+    let rec peelCompLets (accCtx: CodeGenContext) (accLines: string list) (e: IRExpr) =
+        match e with
+        | IRLet (id, value, body) ->
+            let tempBinding = {
+                Id = id; Name = sprintf "__v%d" id; Type = inferExprType value
+                Value = value; IsConst = false; IsMutable = true
+            }
+            let (code, nextCtx) = genBinding accCtx tempBinding builder
+            peelCompLets nextCtx (accLines @ code) body
+        | _ -> (accCtx, accLines, e)
+    let (ctx, prelude, compExpr) = peelCompLets ctx [] compExpr
+    let (code, outCtx) = genReduceComputeBindingCore ctx binding builder compExpr kernelExpr seedExpr
+    (prelude @ code, outCtx)
+
+and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
     // The fused reduction terminal: reduce(deferred, op[, init]). Fold every
@@ -14259,7 +14406,8 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                         | IRBlocked _ -> sprintf "__blk%d" i
                         | _ -> sprintf "arr%d" i)
                 let foldCg (info: ApplyInfo) (accName: string) =
-                    let cg = buildLoopNestCodeGen info (arrayNamesOf info) accName builder
+                    // S2 routing, same rule as the single-kernel site.
+                    let cg = routeKernelBodyThroughCall info (buildLoopNestCodeGen info (arrayNamesOf info) accName builder)
                     { cg with OutputType = callable.RetType; FoldWrapper = Some wname }
                 match infos with
                 | [single] ->
@@ -15197,9 +15345,26 @@ let private genFuncBodyScoped
             currentNames <- Map.add id varName currentNames
             []
         | IRApplyCombinator _ | IRComposeApply _ ->
-            // Unevaluated computations -- deferred until |> compute forces them
-            currentNames <- Map.add id varName currentNames
-            []
+            // WAS: "unevaluated computations -- deferred until |> compute forces
+            // them", registering the name and emitting NOTHING. That premise is
+            // true at MODULE level (genComputeBinding peels IRCompute and the
+            // forcing site consumes the deferred node) and FALSE here: a
+            // function/lambda body has no forcing site, so the name entered
+            // currentNames and every downstream read spelled a C++ identifier
+            // that was never declared -- the `'__v27' was not declared` bug
+            // (docs/plan-kernel-body-materialization.md section 2), with the
+            // dropped node's kernel emitted as a free function and never called.
+            //
+            // Stage S2's Lowering half (Lowering.forceBareCombinatorLets) now
+            // forces every such let at the source of the IR, so this arm is
+            // unreachable. Keep it as a LOUD invariant rather than a silent
+            // drop: a bare combinator arriving here again means a body-lowering
+            // path bypassed the force, and the symptom of the silent form is an
+            // undeclared identifier hundreds of lines away.
+            failwithf "internal: a function-body let (id %d) bound a bare, unforced \
+IRApplyCombinator/IRComposeApply. Lowering.forceBareCombinatorLets must wrap every \
+body-level let RHS of that shape in IRCompute; emitting nothing here would register \
+'%s' as a name with no declaration behind it." id varName
         | IRCompute (IRApplyCombinator info) ->
             // Function-body let-binding of `method_for(...) <@> kernel |> compute`.
             // Use the statement-form genApplyCombinator, which emits the full
@@ -15215,6 +15380,35 @@ let private genFuncBodyScoped
             // mirrors what genBinding does at the module level.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
             let code = genApplyCombinator bodyCtx varName info builder
+            currentNames <- Map.add id varName currentNames
+            code
+        | IRCompute (IRComposeApply _) ->
+            // The IRComposeApply half of the arm above. `(o1 >>@ o2) <@> A` as a
+            // body-level let now arrives forced (Lowering.forceBareCombinatorLets
+            // wraps both combinator shapes), and genBinding's genComputeBinding
+            // peels the IRCompute and routes to genComposeApply -- the same
+            // statement form module level uses. exprToCpp has no expression
+            // rendering for it.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = false; IsMutable = true
+            }
+            let (code, _) = genBinding bodyCtx tempBinding builder
+            currentNames <- Map.add id varName currentNames
+            code
+        | IRReduceCompute _ ->
+            // Fused reduce over a deferred computation (`reduce(A <@> k, (+))`)
+            // as a body-level let. Statement-shaped -- it declares scalar
+            // accumulators and a loop nest -- so it routes through genBinding's
+            // genReduceComputeBinding exactly as at module level. exprToCpp has
+            // no expression form for it and would emit its sentinel.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = false; IsMutable = true
+            }
+            let (code, _) = genBinding bodyCtx tempBinding builder
             currentNames <- Map.add id varName currentNames
             code
         | IRApp (IRObjectFor _, _, _) ->
@@ -15307,6 +15501,23 @@ let private genFuncBodyScoped
             // The returned pool leaves with the value; free everything else.
             suppressAllocName retVarName
             stmts @ combCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
+        | IRReduceCompute _ ->
+            // Same reason as the IRCompute(IRApplyCombinator) arm above, for the
+            // fused-reduce terminal: `reduce(A <@> k, (+))` in RETURN position of
+            // a kernel/function body. Statement-shaped, so bind it to a __retN
+            // through genBinding and return the name; exprToCpp's IRReduceCompute
+            // arm is a sentinel. Reached by every kernel body whose tail is a
+            // reduce over a body-local computation (plan section 1, M-A).
+            let retVarName = sprintf "__ret%d" (builder.FreshId())
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1 }
+            let tempBinding = {
+                Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
+                Value = retExpr; IsConst = false; IsMutable = true
+            }
+            let (redCode, _) = genBinding bodyCtx tempBinding builder
+            // A reduce yields a SCALAR: nothing to spare from the frees, and the
+            // value is already in a local, so the frees may close before return.
+            stmts @ redCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
         | IRArrayLit (elements, arrType) ->
             // Array literal as return value: lift to a local binding, then
             // return. `genArrayLiteral` is the statement-form generator for
@@ -17151,6 +17362,7 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
     // Reset module-level expression warnings (per-task via AsyncLocal cell)
     let cell = exprWarningsCell ()
     cell.Value <- []
+    (exprSentinelsCell ()).Value <- []
     // Deterministic deallocation: see genMainProgram.
     (freshReturnFactsCell ()).Value <- Map.empty
     (copyInPlaceMutsCell ()).Value <- Map.empty
@@ -17180,4 +17392,21 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                 DerivedFuncOrigins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
             }
             genSelfContainedProgram merged testName
+    // Expression-position refusals become real `#error` directives. They are
+    // appended to the END of the translation unit rather than spliced at the
+    // refusal site because the refusal site is an EXPRESSION and a preprocessor
+    // directive cannot live inside one. Position does not matter for the
+    // diagnostic: `#error` fires during preprocessing, before the bare
+    // BLADE_CODEGEN_ERROR_ identifier is ever looked up, so this message -- not
+    // g++'s "not declared in this scope" -- is what the user and the corpus
+    // runner's REJECT-AT: codegen verdict see. A program with no expression
+    // refusal appends nothing, so no currently-compiling program is affected.
+    let sentinels = (exprSentinelsCell ()).Value
+    let code =
+        if List.isEmpty sentinels then code
+        else
+            let directives =
+                sentinels
+                |> List.map (fun m -> sprintf "#error \"Blade codegen: %s\"" (m.Replace("\"", "'")))
+            code + "\n" + (directives |> String.concat "\n") + "\n"
     (code, cell.Value)

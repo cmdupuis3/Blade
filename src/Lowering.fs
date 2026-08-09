@@ -211,6 +211,43 @@ let extractParallelism (strategies: ParallelStrategy list) (paramNames: string l
     let isMpi = strategies |> List.exists (function Mpi -> true | _ -> false)
     (parallelism, isOmp, isCuda, cudaBlock, isMpi)
 
+/// `computeWrap`'s INSERT direction (docs/plan-kernel-body-materialization.md
+/// sections 2 and 5, stage S2). The TExprCompute arm below owns the DROP
+/// direction -- "this node materializes on its own, so the wrapper is a no-op".
+/// This owns the mirror rule: inside a LAMBDA or FUNCTION body, a `let` whose
+/// RHS is a bare (unforced) `IRApplyCombinator`/`IRComposeApply` must be FORCED,
+/// because there is no forcing site downstream of it.
+///
+/// Why the body scope is load-bearing. At MODULE level the deferred protocol is
+/// real: `genComputeBinding` peels `IRCompute` recursively and the consuming
+/// `|> compute` materializes the producer under its own name. Inside a body
+/// there is no such consumer -- `genFuncBodyScoped`'s let dispatch used to
+/// register the name and emit NOTHING (the `'__v27' was not declared` bug), so
+/// every downstream read named an identifier that was never declared and the
+/// kernel that lived only on the dropped node was emitted and never called.
+///
+/// `compute` is idempotent at inference (Theme B), so a user-written `|> compute`
+/// has already produced `IRCompute (IRApplyCombinator ...)` and is NOT matched
+/// here -- `loops/114` (compute-elementwise-in-function-body) is unaffected.
+/// The walk follows only the STATEMENT SPINE (let chains and the control-flow
+/// forms a body's statements can nest in); it never descends into a combinator's
+/// own operand slots, where a deferred node is the working protocol, and never
+/// into a nested lambda (which is already an IRVar to its own callable by the
+/// time this runs, and got this same treatment when IT was lowered).
+let rec forceBareCombinatorLets (expr: IRExpr) : IRExpr =
+    match expr with
+    | IRLet (id, value, body) ->
+        let value' =
+            match value with
+            | IRApplyCombinator _ | IRComposeApply _ -> IRCompute value
+            | _ -> forceBareCombinatorLets value
+        IRLet (id, value', forceBareCombinatorLets body)
+    | IRIf (c, t, e) -> IRIf (c, forceBareCombinatorLets t, forceBareCombinatorLets e)
+    | IRForRange (vid, lo, hi, body) -> IRForRange (vid, lo, hi, forceBareCombinatorLets body)
+    | IRMatch (scrut, cases) ->
+        IRMatch (scrut, cases |> List.map (fun c -> { c with Body = forceBareCombinatorLets c.Body }))
+    | _ -> expr
+
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     match texpr.Kind with
@@ -742,10 +779,13 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
     // synthesizing an internal let binding and running the full combinator
     // codegen; use-site rendering is identical either way, so the wrap
     // doesn't change behavior at existing use sites.
+    //
+    // S2: the same rule one level in -- a `let` INSIDE the body whose RHS is a
+    // bare combinator is forced too (see forceBareCombinatorLets).
     let bodyWrapped =
         match body' with
         | IRApplyCombinator _ | IRComposeApply _ -> IRCompute body'
-        | _ -> body'
+        | _ -> forceBareCombinatorLets body'
 
     // Build unified IRCallable. info.ReturnType comes from TypeCheck, so the
     // lambda has a concrete return type; we trust that annotation. Lambda-level
@@ -1257,7 +1297,11 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
         paramEnv <- bindTypedVar p.Name p.VarId paramEnv
         { Name = p.Name; Type = p.Type; Index = p.Index; VarId = p.VarId } : IRParam)
 
-    let body = lowerTypedExpr paramEnv decl.Body
+    // S2: a function body is a body in exactly the sense lowerTypedLambda's
+    // wrap is about -- a `let` bound to a bare combinator here has no forcing
+    // site downstream either (docs/plan-kernel-body-materialization.md section 2).
+    // The RETURN position is deliberately NOT wrapped here: that is M-D, stage S4.
+    let body = forceBareCombinatorLets (lowerTypedExpr paramEnv decl.Body)
 
     // Source-level functions live at top level and have no enclosing scope to
     // capture from, so Captures = []. The function-only metadata (name, id,
