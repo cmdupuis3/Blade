@@ -1,0 +1,22 @@
+// TEST: GroupBy Zip Different Keys (rejects)
+// ERROR: BL3999
+// Co-iterating grouped arrays is a SAME-KEYS operation: the rows correspond
+// only because one offsets table partitioned both operands. Two independent
+// group_keys calls give two independent partitions -- structurally identical
+// index records, no row correspondence -- so the requirement cannot be a type
+// rule and is discharged on the operand EXPRESSIONS (each operand is chased to
+// its group_by, and the group_keys operands must resolve to the same binding).
+//
+// Same keys, bound once, is the supported spelling (025). Refused at
+// TYPECHECK, so nothing reaches codegen.
+let region = [0, 1, 0, 1]
+let a = [1.0, 2.0, 3.0, 4.0]
+let b = [10.0, 20.0, 30.0, 40.0]
+let gk1 = group_keys(region)
+let gk2 = group_keys(region)
+let ga = group_by(a, gk1)
+let gb = group_by(b, gk2)
+let dots = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
+// EXPECT: BL3999 -- co-iterating grouped arrays requires every operand to be
+// grouped by the SAME group_keys binding. Identical KEY VALUES are not enough:
+// gk1 and gk2 are two separate partitions of the same data.

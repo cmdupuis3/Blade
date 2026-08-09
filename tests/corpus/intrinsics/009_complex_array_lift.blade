@@ -1,0 +1,20 @@
+// TEST: Intrinsics Complex Array Lift
+// ============================================================================
+// `complex(re, im)` lifts elementwise over array components, the way the
+// elementwise binops do: two arrays co-iterate, one array against a scalar
+// broadcasts. It used to be scalar-only (BL3001, "expected Float64, got
+// Array<...>") and users hand-wrote the zip form -- which is precisely what
+// the lift re-synthesizes, so `Z` and `Zman` must agree cell for cell.
+// ============================================================================
+let A: Array<Float like Idx<3>> = [3.0, 0.0, -1.0]
+let B: Array<Float like Idx<3>> = [4.0, 2.0, 0.0]
+let Z = complex(A, B) |> compute
+let Zman = (zip(A, B) <@> lambda(a, b) -> complex(a, b)) |> compute
+let Zre = complex(A, 0.0) |> compute
+let Zim = complex(0.0, A) |> compute
+let mags = (abs <@> Z) |> compute
+// EXPECT: Z = [(3,4), (0,2), (-1,0)]
+// EXPECT: Zman = [(3,4), (0,2), (-1,0)]
+// EXPECT: Zre = [(3,0), (0,0), (-1,0)]
+// EXPECT: Zim = [(0,3), (0,0), (0,-1)]
+// EXPECT: mags = [5, 2, 1]

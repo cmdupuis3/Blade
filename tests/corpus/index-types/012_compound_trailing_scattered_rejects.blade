@@ -1,0 +1,15 @@
+// TEST: Compound Trailing Scattered Wildcard (rejects)
+// ERROR: BL4003
+// The scattered-pin wildcard form B((_, 0)) on a compound with a trailing dim
+// rejects since the flat-subscript conversion; partial reads moved to
+// SparseIdx.
+type Lat = Idx<2>
+type Lon = Idx<3>
+type T = Idx<2>
+let dense: Array<Float64 like Lat, Lon, T> = [
+    [[0.0, 1.0], [10.0, 11.0], [20.0, 21.0]],
+    [[30.0, 31.0], [40.0, 41.0], [50.0, 51.0]]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let g = B((_, 0))
+// EXPECT: typecheck failure - wildcard reads on a compound axis moved to SparseIdx.

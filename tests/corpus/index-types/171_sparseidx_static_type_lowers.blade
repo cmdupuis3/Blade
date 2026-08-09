@@ -1,0 +1,11 @@
+// TEST: SparseIdx type parses and lowers (static keys)
+// Phase-2 plumbing probe: `SparseIdx<K>` over a `let static` tuple list must
+// parse, resolve K under the static contract (SkStatic branch), deduce rank 2
+// from the tuple arity, and lower to an IxKSparse record that passes IR
+// validation (Tag "__sparseidx" round-trips through ixKindOfTag). No reads
+// yet -- indexing/iteration arrive with the phase-4 tests.
+// Keys are deliberately NOT in lex order: sparse keys keep their given order.
+let static K = [(2, 1), (0, 3), (1, 0)]
+type S = SparseIdx<K>
+let x = 1
+// EXPECT: x = 1

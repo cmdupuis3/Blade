@@ -1,0 +1,11 @@
+// TEST: Log10 Dimensioned Operand (rejects)
+// ERROR: BL3006
+// log10 is a transcendental, so it takes the same unit rule as log/exp/sin:
+// the series sums powers of the argument, which is meaningless once the
+// argument carries a dimension. unitRulesForUnaryOp's OpMath catch-all is what
+// applies it, so log10 inherited the rule by being added to
+// Grad.mathIntrinsics -- this pins that the catch-all really does cover a name
+// it was not written for. Divide by a reference quantity first.
+Unit meters
+let d: Float<meters> = 100.0
+let bad = log10(d)

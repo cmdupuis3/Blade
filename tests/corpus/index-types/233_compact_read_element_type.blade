@@ -1,0 +1,31 @@
+// TEST: Compact Read Answers At The Element Type
+// A rank-k compact slot takes k FLAT subscripts, so `A(i, j)` presents two
+// args against ONE index record — which used to miss every arm of the
+// application dispatch and land in the catch-all, where a read gets a FRESH
+// inference variable. Nothing downstream constrained it, so an unconstrained
+// numeric var defaulted to Float64: the VALUE was right and the TYPE was
+// invented. That is what forced the hand-written `: Complex128` annotations in
+// 168 — without them the emitted C++ assigned a std::complex to a double and
+// would not build.
+//
+// Every read here is UNANNOTATED, across the three compact classes and three
+// element types. The pins are the values; the build itself is the type
+// assertion (a wrong element type is a g++ error, not a wrong number).
+let A: Array<Int64 like SymIdx<2, 3>> = [[1, 2, 3], [4, 5], [6]]
+let a01 = A(0, 1)
+let a10 = A(1, 0)
+let K: Array<Int32 like AntisymIdx<2, 3>> = [[1, 2], [3], []]
+let k01 = K(0, 1)
+let k10 = K(1, 0)
+let H: Array<Complex128 like HermitianIdx<2>> = [
+    [complex(1.0, 0.0), complex(2.0, 3.0)],
+    [complex(4.0, 0.0)]
+]
+let h01 = H(0, 1)
+let h10 = H(1, 0)
+// EXPECT: a01 = 2
+// EXPECT: a10 = 2
+// EXPECT: k01 = 1
+// EXPECT: k10 = -1
+// EXPECT: h01 = (2, 3)
+// EXPECT: h10 = (2, -3)

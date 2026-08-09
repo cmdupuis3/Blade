@@ -1,5 +1,5 @@
 // Pins for the point-group counting layer (MLPointSpec.fs) — stage 5b-0 of
-// plan-transforms-as-types §3.6 / §7 stage 5. Everything here is integer:
+// the retired transforms-as-types plan §3.6 / §7 stage 5. Everything here is integer:
 // frozen table data, a closure enumeration, the FS indicators, and the
 // e-weighted Hom formula. The exact-rational Hom-space Reynolds oracle that
 // certifies the EMITTED BASIS against those counts is the separate "PG Oracle"

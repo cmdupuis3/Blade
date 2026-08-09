@@ -1,0 +1,9 @@
+// TEST: OrbIdx Level Rank Zero (rejects)
+// ERROR: BL1999
+// Malformed level: S_0 is not a symmetric group, and OrbRank's validateLevels
+// refuses r < 1 too -- the parser and the bijection layer give a malformed
+// class the SAME verdict rather than the parser accepting something the fold
+// would later reject. (r = 1 is legal syntax and normalizes away; see 190.)
+type R = OrbIdx<[(0,+)], 4>
+let x = 1
+// EXPECT: parse failure -- a level rank of zero is refused.

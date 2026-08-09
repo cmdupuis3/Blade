@@ -1,0 +1,7 @@
+// TEST: Default Referencing Defaulted Param (rejects)
+// ERROR: BL3012
+// A default may reference the REQUIRED parameters only. Defaults evaluate
+// left-to-right at call entry with just the required arguments bound, so
+// another default's value is not available to reference.
+function bad2(a: Float, b: Float = 1.0, c: Float = b + 1.0) -> Float = a + b + c
+let r = bad2(2.0)

@@ -25,6 +25,8 @@ import ml as ml
 // PROPOSE ⊆ CHECK-ACCEPT as always: `residual_tight` carries the pin and
 // checks, and the values are identical.
 // ============================================================================
+// The seam proposal IS this test's baseline, so its warning is an assertion.
+// WARN: BL4011
 let static S = [(0, 0, 1), (1, 1, 1)]
 let static WD = ml.hom_dim(S, S)
 // EXPECT: WD = 2

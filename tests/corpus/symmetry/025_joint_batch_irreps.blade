@@ -1,6 +1,7 @@
 // TEST: Joint Product Symmetry: batch x IrrepsIdx
+// WARN: BL4010
 // ============================================================================
-// Stage 4 of plan-transforms-as-types: joint fusion now admits IrrepsIdx S-dims
+// Stage 4 of the retired transforms-as-types plan: joint fusion now admits IrrepsIdx S-dims
 // alongside plain ones, so `comm` works over a per-node FEATURE MATRIX
 // (batch x irreps) — the array shape equivariant ML actually uses. Before this
 // stage the irreps axis failed the fusion predicate, no cross-argument grouping

@@ -1,0 +1,19 @@
+// TEST: Diag Section Over 3 Pack (diag)
+// ERROR: BL3002
+// ERROR-CONTAINS: supplies 3 operands to a kernel with 2 parameters
+// ============================================================================
+// An operator SECTION is synthesized as a 2-parameter lambda, so it is width 2
+// and joins the schema like any other kernel
+// (docs/plan-tuples-vs-arg-packs.md 5.3). Over a 3-operand pack it used to
+// take the identical silent-wrong-answer path as diagnostics/056 -- measured:
+// `method_for(A, B, C) <@> (+)` produced the same 12 wrong cells as the
+// explicit 2-parameter lambda, C's axis iterated and its values ignored.
+//
+// Sections at width 2 stay working; loops/ and the 33 `<@> (a, b)` corpus
+// files cover that side, and this file is only about the width that used to
+// be waved through.
+// ============================================================================
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+let C: Array<Float64 like Idx<2>> = [5.0, 6.0]
+let g = method_for(A, B, C) <@> (+) |> compute

@@ -21,6 +21,8 @@ import ml as ml
 // The chained twin below pins the closure: with BOTH conjuncts written, the
 // checker accepts the whole chain (corpus 003's composition rule).
 // ============================================================================
+// The suggestion channel IS this test, so the warning it emits is an assertion.
+// WARN: BL4011
 let static S = [(0, 0, 1), (1, 1, 1)]
 let static WD = ml.hom_dim(S, S)
 // EXPECT: WD = 2

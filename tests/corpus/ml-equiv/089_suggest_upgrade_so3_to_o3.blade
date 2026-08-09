@@ -28,6 +28,8 @@ import ml as ml
 // hypothesis genuinely fails, so it draws no lint. "Pinned SO3" is not the
 // trigger; "pinned SO3 and the O3 judgment goes through" is.
 // ============================================================================
+// The upgrade lint IS this test, so the warning it emits is an assertion.
+// WARN: BL4011
 let static S = [(0, 0, 1), (1, 1, 1)]
 let static WD = ml.hom_dim(S, S)
 // EXPECT: WD = 2

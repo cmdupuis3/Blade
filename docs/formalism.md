@@ -4,8 +4,8 @@
 `blade_formalism_v10.md` for language semantics. This document deliberately
 contains *only* semantics: proofs live in [proofs.md](proofs.md) (mirroring the
 machine-checked Coq tower), the feature census in [features.md](features.md),
-feature modules under [features/](features/), plans in [future.md](future.md),
-related work in `blade_literature_survey.md`.
+feature modules under [features/](features/), related work in
+`blade_literature_survey.md`.
 
 **Corrections from v10** (details in proofs.md and the doc-set
 [README](README.md)): product symmetry is *joint* per identity group, not
@@ -128,7 +128,7 @@ Over `ArrayExpr` (results are `ArrayExpr`):
 
 | Combinator | Signature sketch | Semantics |
 |-----------|------------------|-----------|
-| `zip(A₁..Aₙ)` | → Tuple elements over shared k = min rank prefix | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; output symmetry = intersection where all inputs agree; kernel receives ONE tuple argument |
+| `zip(A₁..Aₙ)` | → Tuple elements over shared k = min rank prefix | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; output symmetry = intersection where all inputs agree; kernel receives one flat parameter per array by default (`lambda(a,b)`), or the whole `n`-tuple as one value if its parameter is written `Tuple<n>` (§2.8) |
 | `align(A₁..Aₙ, spec)` | → `AlignedExpr` | zip + stencil metadata (dims, offsets, boundary ∈ Shrink/Pad/Periodic/Reflect); kernel receives N separate arguments |
 | `stencil(A, {d: offsets}, boundary)` | sugar | desugars to `align` of `shift`s |
 | `stack(A₁..Aₙ)` | → rank+1, fresh leading symmetry class | `stack(A,B,C)(k)` selects array k |
@@ -143,11 +143,117 @@ Over `ArrayExpr` (results are `ArrayExpr`):
 
 | Syntax | Mutable in scope | Passable to `mut` param |
 |--------|------------------|-------------------------|
-| `let const x = e` | no | no |
+| `let static x = e` | no | no |
 | `let x = e` | yes | no |
 | `let mut x = e` | yes | yes |
 
 All parameters pass by reference; `mut` on a parameter permits callee mutation.
+
+### 2.8 Tuples and argument packs
+
+An operand list — a loop former's arguments, a kernel's call-site pack — is
+matched against a kernel's parameter list on its **top-level spine**: each
+written group or tuple-typed value (alias-invariant by its static type, not
+by how many `let`s named it) is one *node*, and nesting **inside** a node is
+preserved, not flattened. `f(a, (b, c))` and `f(a, b, c)` are therefore
+different packs in general — two nodes vs. three — and become the *same*
+program only when the parameter schema licenses it (below); written
+parenthesization is otherwise meaningful. Alias depth is unobservable the
+same way: given `let P = (A, B); let Q = P`, the pack `K <@> Q` equals
+`K <@> (A, B)` — naming a pack does not change what it means.
+
+`Tuple<N>` (`N` an integer literal, `N >= 2`) is the width-only tuple
+annotation. It fixes only how many *top-level* slots a value or parameter
+occupies — nesting inside the annotated value is not counted, so a
+`Tuple<4>` cannot re-count across two nested `Tuple<2>`s (`((a,b),(c,d))` is
+two nodes, not four; write the flat spelling `(a,b,c,d)` instead — the one
+thing this ruling gives up). Element types stay inferred.
+**`Tuple<T1, ..., Tk>`** is the same annotation with the component types
+*written*: the argument list disambiguates (a lone integer literal is a
+width, anything else is a component list of width `k >= 2`; the two may not
+be mixed), and it denotes exactly the type the parenthesized
+`(T1, ..., Tk)` denotes — one node, not two that agree. Prefer it whenever a
+component is anything but a plain scalar, because written components are the
+only ones that are actually *checked* (a wrong unit or rank inside a
+component is reported at the call as `argument i, component j`) and the only
+ones that survive to codegen.
+A bare comma **constructs** a tuple at any binding site — `let t = b, c` has
+type `Tuple<2>` — matching the parenthesized literal `(b, c)` byte-for-byte
+from the checker down, and it **destructures** on the pattern side the same
+way: `let a, b = t` binds what `let (a, b) = t` binds. The two halves compose
+without a disambiguating rule — `let a, b = c, d` destructures the pair built
+from `c` and `d` — because the pattern list is bounded by the `:` or `=` that
+must follow it and the value list only begins after that `=`. A pattern whose
+name count matches neither the value's top-level width nor its flattened leaf
+count is an error, not a partial binding. A literal `(a, b)` written directly
+as an argument is a tuple value the same way — it needn't be let-bound first.
+
+**Kernel and function parameter lists are width schemas**, matched
+**greedily, left to right**, against the pack's top-level spine, with no
+backtracking. At each schema position: an unannotated parameter takes one
+plain node; if that node is instead a tuple, it is a hard error (`BL3002`,
+"tuple-ness is never inferred") demanding either an annotation or a flat
+rewrite. A `Tuple<k>` parameter tries, in order: **(1) direct bind** — one
+tuple node whose own top-level width is exactly `k` binds as a single value,
+preserving whatever is nested inside it; **(2) splice** — failing that, if
+the schema wants `k` separate plain parameters there and the pack instead
+offers one tuple node of width `k`, it unpacks once into its `k` components
+(this is `f((a,b)) == f(a,b)` and the `K <@> P` alias case); **(3) regroup**
+— failing both, `k` *consecutive plain* nodes combine into the one `Tuple<k>`
+parameter (no tuple node was written at all, e.g. `(A, B, C)` sliced 1 + 2).
+A leftover node or parameter after the scan is an arity error. Because
+matching never backtracks, it is fully determined by what was written —
+`f(t1, a, b)` (a tuple node, then two plain values) and `f(1.0, 2.0, a)`
+(three plain values) read differently against `f(y: Tuple<2>, z: Float64)`,
+and the reading you don't get is available by writing the other grouping
+explicitly (`f((t1, a), b)` against a matching written type) — parentheses
+disambiguate precisely because structure survives. Components read with
+`t[k]` projection, chainable into nested structure (`t[0][1]`; `t.0` does not
+exist; tuple *patterns* like `lambda((a, b))` still don't parse). This makes
+the pack/tuple distinction **always a written one** — never inferred from a
+kernel body — because a kernel's parameters are matched against the pack only
+*after* its body has already been type-checked against fresh variables; an
+inferred reading would make that matching order-dependent and unsound.
+
+Nested tuples are real data under direct binding — a `Tuple<2>` parameter
+facing one 2-wide tuple node receives the whole node, not its splice, so a
+fully written nested type such as `((Float64,Float64),(Float64,Float64))`
+carries a pair of pairs through to the body and `r[0][1]` chains correctly.
+(The width-only `Tuple<2>` spelling does *not* carry this: its element
+slots are fresh inference variables nothing at a direct call writes into, so
+a nested value passed through one defaults its slot to a scalar and the
+projection chain fails in codegen, not in `check` — a known, separate gap in
+the direct-call argument seam, not of one-level matching itself. Writing the
+components — `Tuple<Tuple<Float64,Float64>,Tuple<Float64,Float64>>`, the same
+type as the parenthesized spelling above — fills the slots and is the
+supported way to say it; the same applies to a tuple of *arrays*, which the
+width-only form cannot express at all.) Symmetrically, **a direct call never splices**: at
+`two(x: Float64, y: Float64)`, one tuple argument (`two(pair)`) is read as
+the whole first parameter under currying's existing partial-application
+rule, never as two scalars for `x` and `y` — so it lands as an ordinary type
+mismatch against `x`'s declared type rather than a splice. The paren-dropping
+splice (`f((a,b)) == f(a,b)`) is a property of the operand/kernel seam
+(`K <@> P`, loop formers) only; write direct calls flat, or against a
+parameter `Tuple`-annotated to receive the whole argument.
+
+The same annotation reads one level down inside a loop former: given
+`zip(B, C)`, `method_for(zip(B, C)) <@> lambda(p: Tuple<2>) -> ...` binds `p`
+to the co-iterated pair per iteration, equivalent to the flattened
+`lambda(a, b) -> ...` spelling over the same zip — an opt-in way to receive
+"one tuple argument" per iteration, rather than a second competing default.
+
+Two shapes are refused rather than guessed at:
+
+- A `where` clause (`comm`, `omp`, ...) together with a `Tuple<N>` kernel
+  parameter is refused (`BL3999`): `comm`/`anticomm` address parameters by
+  position and the parallel strategies by name, and realizing a `Tuple<N>`
+  parameter as its `k` row parameters renumbers both. Write the parameters
+  flat to use a `where` clause.
+- `zip(...)` cannot appear beside another array in one operand pack —
+  `(A, zip(B, C))` is refused (`BL3999`), both loop orientations. Co-iterating
+  a zip nested inside an outer loop is a real feature, just not implemented
+  yet; hoist the zip to its own `<@>`, or pass its arrays as separate
+  operands.
 
 ## 3. Index Types
 
@@ -185,23 +291,17 @@ positions) defining:
 | `CompoundIdx<mask>` | rank(mask) | mask-true tuples | hash of valid tuples |
 
 Indexing is function application with `()`; `A(i, j, k) ≡ A(i)(j)(k)`; `[]` is
-reserved for poly-tuple structural access. A COMPOUND axis is one slot whose
-domain is k-tuples, so it is applied with ONE tuple value: `B((lat, lon))`,
-wildcards inside the tuple (`B((lat, _))`), short tuples pinning a leading
-prefix; a rank-1 compound takes a bare scalar (1-tuples collapse in the
-parser). The flat form `B(lat, lon)` is a type error with a steering
-diagnostic 
-—
- under the `A(i, j) 
-≡
- A(i)(j)` sugar it would claim two slots,
-and it is ambiguous once wildcards meet trailing dims. (Resolves the v10
-§
-4.5-vs-
-§
-5.3 inconsistency in favor of 
-§
-4.5's tuple form.)
+reserved for poly-tuple structural access. A COMPOUND axis indexes FLAT and
+full-arity like SymIdx: a rank-k compound consumes k positional subscripts
+(`B(lat, lon)`), with trailing regular dims appended. A SPARSE axis is one
+slot whose domain is k-tuples, applied with ONE tuple value: `S((lat, lon))`,
+wildcards inside the tuple (`S((lat, _))`), short tuples pinning a leading
+prefix; a rank-1 sparse takes a bare scalar (1-tuples collapse in the
+parser). On a compound, the tuple spelling and every wildcard form are type
+errors steering to SparseIdx — partial reads over an irregular valid set are
+the hash-based sparse type's regime. (Supersedes the earlier tuple-form
+compound convention: with full-arity-only reads, the two-slots ambiguity that
+motivated it is gone.)
 
 ### 3.3 Base index types
 
@@ -256,11 +356,12 @@ implicit zero) and `transform` (value adjustment on non-canonical access).
 ### 3.5 Compound and sparse index types
 
 **`CompoundIdx<mask>`** — for mutually-dependent sparsity (ocean points, not a
-product of valid lats × valid lons). Signature matches mask rank, so currying
-passes through the compound. Identity = whole-mask hash (O(1) type equality);
-storage is contiguous over mask-true tuples; per-element hash gives O(1)
-coordinate lookup. Enumeration = exactly the in-bounds mask-true tuples, each
-once, in lex order (proofs.md §Compound).
+product of valid lats × valid lons). Identity = whole-mask hash (O(1) type
+equality); storage is contiguous over mask-true tuples in lex order — the
+rectilinear mask makes the valid-tuple table **sorted by construction**, which
+is what buys contiguous layout and device-friendly slices; per-element hash
+gives O(1) coordinate lookup. Enumeration = exactly the in-bounds mask-true
+tuples, each once, in lex order (proofs.md §Compound).
 
 Two construction routes:
 
@@ -269,23 +370,37 @@ type OceanIdx = CompoundIdx<ocean_mask>    // static type route
 let view = compound(dense, mask)           // runtime builder route (§15, sql.md)
 ```
 
-**Partial indexing and residual compounds.** Fixing coordinates (including
-wildcards, interior or trailing) yields:
+**Indexing is flat and full-arity, like SymIdx.** A rank-k compound axis
+consumes k positional subscripts — `B(lat, lon)`, with trailing regular dims
+appended (`B(lat, lon, t)`; omitting the trailing index yields the contiguous
+trailing-row sub-view). Reading an absent (mask-false) tuple is a runtime
+error; the storage-keyed fallback is `<|:>`. The historical tuple spelling
+`B((lat, lon))` and every wildcard/partial form (short prefixes, interior
+holes, residual reads) are **type errors steering to SparseIdx** — partial
+indexing over an irregular valid set is the hash-based sparse type's regime,
+where every wildcard position costs the same gather. The residual currying
+table below lives on SparseIdx.
 
-| Free dims remaining | Result index |
-|---------------------|--------------|
-| 1 | plain `Idx<n>` (n = count of valid completions) |
-| ≥ 2 | **residual CompoundIdx** — the residual of a mask is a mask |
+**`SparseIdx<keys>`** — explicit enumeration of valid tuples (CG triples,
+edge lists). `keys` is a rank-1 array of Nat tuples: a `let static` tuple list
+(entries baked at compile time — desync-proof) or a runtime tuple-array
+variable (index built at runtime, mirroring the compound mask). Rank is
+implicit from the tuple arity; there is no rank parameter and no per-axis
+extents — lookup hashes the tuple directly. Keys keep their **given order**
+(never sorted): iteration visits |keys| entries in key order, and the compact
+buffer is laid out in that order. Duplicate keys are a construction error.
 
-Cost is O(valid combinations) to reconstitute (must enumerate completions);
-the curried identity derives from (mask hash, fixed coordinates). Executable
-semantics of the residual: `has_completion` (proofs.md §Compound). Reject
-cases (all-free wildcard application, arity-short wildcard tuples, interior
-holes in trailing windows) are type errors.
-
-**`SparseIdx<entries>`** — explicit enumeration of valid tuples (CG triples,
-edge lists). Tuple indexing only; wildcards return matching entries; iteration
-visits |entries|. Prefer `CompoundIdx` when validity derives from data.
+Tuple indexing with wildcards: a full key is an O(1) hash lookup (a missing
+key is a runtime error); a wildcard/short-prefix partial returns the matching
+entries **by gather** — with no sorted table there is no contiguous-window
+family, so every partial (prefix or scattered alike) is one pass over the
+entry list in key order. Residuals follow the compound currying table: one
+free axis → dense `Idx`, ≥ 2 → a **residual SparseIdx** (the residual of a
+key set is a key set). Construction routes: `range<SparseIdx<keys>>`
+(iterate the key set) and `sparse(values, keys)` (bundle rank-1 values, in
+key order — no scatter). Prefer `CompoundIdx` when validity derives from a
+mask over a rectilinear grid: its lex-sorted table is what buys contiguous
+prefix windows and device-friendly layout.
 
 ### 3.6 Bounded and dependent index types
 
@@ -333,6 +448,44 @@ The index type fixes storage (triangular), iteration (triangular), and access
 (canonicalizing): `cov(3, 1)` and `cov(1, 3)` are the same location. The
 symmetry system (§11) *infers* symmetric index types for outputs from kernel
 commutativity and array identity.
+
+A **literal** for such an array is written in the storage's own shape: one
+bracket level per dimension of the group, each row starting where its parent
+left off. A rank-`r` group over extent `n` has an outer level of `n` rows, and
+a row seeded at coordinate `p` holds `n - p` cells (`n - p - 1` for the strict
+antisymmetric group, whose diagonal is not stored).
+
+```blade
+let A: Array<Int64 like SymIdx<2, 3>>    = [[1, 2, 3], [4, 5], [6]]  // 6 cells
+let K: Array<Int64 like AntisymIdx<2, 3>> = [[1, 2], [3], []]        // 3 cells
+```
+
+`A(1, 0)` is `A(0, 1)` is `2`; `K(1, 0)` is `-K(0, 1)`; `K(1, 1)` is `0`. The
+flat pool is deliberately NOT a second spelling — the nesting is what says
+which cell is which — and neither is the rectangular nest, which names cells
+(`(1, 3)` above) the axis does not have. A HermitianIdx literal takes the
+inclusive triangle with a real leading cell per row: the diagonal is read
+unconjugated, so `A(i,i) = conj(A(i,i))` forces it real.
+
+**The triangular shape is symmetric by default.** An unannotated nest whose
+rows are `n, n-1, ..., 1` infers `SymIdx<2, n>` — that profile IS the class's
+storage, so the literal that spells a symmetric matrix out reads back as one
+(`R(1, 0)` folds to `(0, 1)`). The shape is genuinely shared with ragged data,
+and this rule hands it to the compact class, so ragged data of exactly this
+profile takes its annotation: `Array<T like Idx<n>, RaggedIdx<lens>>`. Any
+other row profile — equal lengths, or lengths that don't step down by one to a
+final 1 — is untouched and still infers rectangular or inline-ragged.
+
+The rule is matched at any rank — `[[[1,2,3],[4,5],[6]], [[7,8],[9]], [[10]]]`
+is `SymIdx<3, 3>` — but it is INCLUSIVE only: the strict profile
+(`n-1, ..., 1, 0`) is `AntisymIdx`'s storage, and antisymmetry is a claim about
+SIGNS, which no shape on its own justifies inferring.
+
+Printing agrees with the literal. Every RANK-2 array — compact, ragged or
+dense — prints its rows bracketed, so `A` above echoes as it was written;
+rank 1 is already one level of brackets and ranks ≥ 3 stay flat. The REPL
+additionally shows only the first five entries per level and elides the rest
+as `...`; that cap is the echo's alone, and `blade run` prints every cell.
 
 ### 3.10 Index values and nominal typing
 
@@ -425,7 +578,12 @@ non-listed arguments are singletons), parallelism spec (`omp(x: depth)` —
 licenses UP TO `depth` S-dim levels of argument x, outermost first, to carry
 threads; a cap on the structural strategy, not a demand, so the emitted pragma
 is the structural choice restricted to licensed levels, and the pragma sits on
-the outermost licensed level even when that is not level 0; `cuda` and
+the outermost licensed level even when that is not level 0; the licensed levels
+are the EXTERNAL ones — those x contributes to a nest built AROUND f, i.e. a
+caller's co-iteration when f is used in kernel position — never a loop f's own
+body generates over x, which is licensed by a clause on that loop's kernel;
+a `Tuple<k>` parameter is one schema node whose levels are its k rows in order,
+so `omp(p: n)` licenses its first n rows; `cuda` and
 other backends substitute), and T-dimension spec (`tdim({extent, symm, name})`
 records) when output dims don't derive from inputs.
 
@@ -438,7 +596,7 @@ where comm(xᵢ, xⱼ), omp(x₁: 2), tdim({ extent: e, symm: k, name: "freq" })
 
 Return type follows `where` because it may depend on constraints (`comm` can
 produce `SymIdx` outputs). Nested `function` declarations desugar to
-`let const` lambdas.
+immutable lambda bindings (internally the same marker `let static` uses).
 
 ### 5.2 Lambdas
 
@@ -469,8 +627,8 @@ that buys still follows the H ∩ Stab law (§11.2):
   without `comm` yields dense symmetrized values (corpus reynolds/022–023 pin
   both behaviors). Whether `reynolds` should SELF-license (K = Σ g∘σ has
   H = Sₙ by construction, so the declaration is derivable) is an open design
-  question — future.md. Antisymmetric Reynolds
-  zeroes diagonals and negates on transposes by storage construction.
+  question. Antisymmetric Reynolds zeroes diagonals and negates on transposes
+  by storage construction.
 - **Distinct arrays**: K is commutative but Stab = {id} — the output is DENSE
   and not index-symmetric (`Out(i,j) = g(A(i),B(j)) + g(B(j),A(i))`, which is
   not `Out(j,i)`; pinned by corpus reynolds/013). Reynolds does not substitute
@@ -481,12 +639,12 @@ tower — `R(i₁,i₂,j₁,j₂) = Σ over index swaps` — which genuinely has
 per-dimension product symmetry with lossless canonical access (proofs.md
 §Core, `reynolds_full_product_symmetry`). That is a different, stronger
 operator (it reads every array at every permuted index, n!^d terms) and is
-not currently a surface construct — see future.md.
+not currently a surface construct.
 
 ### 5.4 Static functions and type-level computation
 
-`static function` may capture only `let const`/static values and is callable
-at compile time; `let const` values close over literals, other consts, and
+`static function` may capture only `let static`/static values and is callable
+at compile time; `let static` values close over literals, other statics, and
 static applications. Static functions appear in type positions
 (`Idx<triangle(n)>`). No totality proofs (vs Idris/Agda); explicit marking
 (vs C++ constexpr's syntactic restrictions). `static type` functions
@@ -532,9 +690,11 @@ the annotation hook only.
   structure (value-checked against independent oracles).
 - `hermitian(A)` — adjoint.
 - `conj(x)` — componentwise conjugation (identity on reals).
-- `reduce(A[, kernel[, init]])` — innermost-dimension fold; default kernel
-  `(+)`; see [features/sql.md](features/sql.md) §10 for typing details and the
-  empty-input rule.
+- `reduce(A[, kernel[, init]][, axes = n])` — right-to-left fold of the
+  innermost `n` dimensions, `n = 1` by default (rank k in, rank k−n out;
+  `n = rank(A)` is the full fold to a scalar); default kernel `(+)`; see
+  [features/sql.md](features/sql.md) §10 for typing details, the axis-count
+  rules and the empty-input rule.
 - `extents(A)` — rank-1: scalar; dense rank-k: tuple, outermost first;
   compound: cardinality. Rejected where a per-dimension scalar doesn't exist
   (ragged/grouped) — use `extents(row)`.
@@ -739,7 +899,13 @@ the pack via the poly former `method_for(range<Idx<arity(p)>>)`. Recursive
 kernels need no explicit base case: `f(())`
 returns f's identity element. Nested tuples preserve structure (`arity` counts
 top level; `comm` does not penetrate sub-tuples; no deep indexing —
-destructure instead).
+destructure instead): `object_for(f) <@> (A, (B, C))` is arity **2**, not 3 —
+`(B, C)` is one tuple-typed argument, distinct from
+`object_for(f) <@> (A, B, C)`'s arity 3 (§2.8). A tuple-typed operand at a
+`Poly` position is one argument, not iterable components, so passing an
+actual tuple *of arrays* there is refused (`BL3002`): pass the components as
+separate operands, or use a kernel whose parameter there is annotated
+`Tuple<k>` instead of folded into the `Poly` pack.
 
 ### 8.3 Identity groups
 
@@ -1212,7 +1378,8 @@ library concern.
 
 §5 covers semantics. Grammar reminders: `where` before return type; `omp`/
 `cuda`/`tdim` clauses; `lambda(args) -> body`; `static` values/functions;
-`static type` functions; local `function` = `let const` lambda.
+`static type` functions; local `function` = an immutable lambda binding
+(internally the same marker `let static` uses).
 
 ### 15.4 Control and data
 
@@ -1235,7 +1402,7 @@ library concern.
 - Interfaces: signatures only; `impl I for S { ... }`; interface composition
   `interface P : M, T { ... }`.
 - Modules: `module` groups declarations; `import`/`from`/`as` reserved for
-  multifile (in progress — future.md).
+  multifile (in progress).
 
 ### 15.5 Loops and combinators
 

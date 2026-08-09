@@ -1,0 +1,13 @@
+// TEST: Symmetric Literal With A Rectangular Row (rejects)
+// ERROR: BL3007
+// ERROR-CONTAINS: but the simplex row there is 2 wide
+// The rectangular nest — the shape a reader who thinks of SymIdx<2,3> as a
+// 3x3 matrix writes. Row 1 of the simplex holds the cells (1,1) and (1,2);
+// a third entry there names (1,3), which is off the axis. The diagnostic must
+// point at the offending ROW, not at the row after it: the walk stops at the
+// first bad cell precisely so the span survives.
+let A: Array<Int64 like SymIdx<2, 3>> = [
+    [1, 2, 3],
+    [4, 5, 6],
+    [7]
+]

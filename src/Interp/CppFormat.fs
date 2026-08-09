@@ -1,38 +1,33 @@
-// ============================================================================
-// Blade interpreter <-> C++ output PARITY layer.
+// Blade interpreter <-> C++ output parity layer.
 //
 // The Blade compiler emits C++ that prints results with
 //     cout << std::setprecision(15);
 //     cout << std::boolalpha;
-// in the DEFAULT float format (no std::fixed / std::scientific). The interpreter
-// (which evaluates Blade programs directly, without going through g++) must
-// reproduce that textual output BYTE-FOR-BYTE so that interpreter output and
-// compiled-binary output are indistinguishable to the test harness / oracle.
+// in the default float format (no std::fixed / std::scientific). The
+// interpreter (which evaluates Blade programs without going through g++)
+// must reproduce that textual output byte-for-byte so interpreter and
+// compiled-binary output are indistinguishable to the differential gate.
+// This module is the single source of truth for that formatting, pinned
+// against a compiled ucrt64 (MinGW) g++ 15.2 probe over a battery of
+// >25,000 bit patterns with zero mismatches. Self-contained: depends only
+// on System / System.Globalization.
 //
-// This module is the single source of truth for that formatting. Every function
-// here was pinned against a compiled ucrt64 (MinGW) g++ 15.2 probe over a battery
-// of >25,000 bit patterns (see Interp/CppFormat.fs validation harness in the
-// scratchpad) with ZERO mismatches.
-//
-// Self-contained: depends only on System / System.Globalization.
-//
-// KEY EMPIRICAL FACTS (ucrt64 iostreams, setprecision(15), defaultfloat):
+// Key empirical facts (ucrt64 iostreams, setprecision(15), defaultfloat):
 //   * default float format == C printf "%.15g": 15 significant digits, switch to
 //     scientific iff the decimal exponent X < -4 or X >= 15, else fixed; trailing
 //     zeros and a bare trailing '.' are stripped; exponent is e+dd / e-dd with a
 //     minimum of two digits (three when needed, e.g. e-323).
 //   * -0.0 prints "-0"; +0.0 prints "0".
 //   * +inf -> "inf", -inf -> "-inf".
-//   * EVERY NaN prints "nan" -- ucrt iostreams never emit a sign or payload, so
+//   * every NaN prints "nan" -- ucrt iostreams never emit a sign or payload, so
 //     the sign bit and the mantissa payload are irrelevant (0x7FF8.., 0xFFF8..,
 //     0xFFFF.. all print "nan").
 //   * cout << float promotes to double, so a float prints the 15-significant-digit
-//     rendering of its EXACT double value (0.1f -> "0.100000001490116").
-//   * std::complex<double> operator<< prints "(re,im)" with NO spaces, each
+//     rendering of its exact double value (0.1f -> "0.100000001490116").
+//   * std::complex<double> operator<< prints "(re,im)" with no spaces, each
 //     component via the same float formatting ((-0,3), (inf,nan), ...).
 //   * cout << bool with boolalpha -> "true"/"false".
 //   * cout << char prints the character glyph (not its numeric code).
-// ============================================================================
 module Blade.Interp.CppFormat
 
 open System
@@ -46,19 +41,14 @@ let private inv = CultureInfo.InvariantCulture
 [<Literal>]
 let private Prec = 15
 
-// ----------------------------------------------------------------------------
-// Core %g assembler.
-//
-// Given the sign string, the 15 significant decimal digits (as a 15-char string
-// whose first character is the leading, nonzero significant digit) and the
-// decimal exponent `x` of that leading digit (i.e. the value is
-//     0.d0 d1 ... d14  * 10^(x+1)   ==   d0.d1...d14 * 10^x,
-// exactly the exponent C's "%e" would report AFTER rounding to 15 digits),
-// produce the "%.15g" text.
-// ----------------------------------------------------------------------------
+// Core %g assembler. Given the sign string, the 15 significant decimal
+// digits (a 15-char string whose first character is the leading nonzero
+// digit) and the decimal exponent `x` of that leading digit (the value is
+// d0.d1...d14 * 10^x, exactly what C's "%e" reports after rounding to 15
+// digits), produce the "%.15g" text.
 let private assemble (sign: string) (digits: string) (x: int) : string =
     if x < -4 || x >= Prec then
-        // ---- scientific: d[.ddd]e{+|-}dd ----
+        // scientific: d[.ddd]e{+|-}dd
         let lead = digits.Substring(0, 1)
         let frac = digits.Substring(1).TrimEnd('0')
         let mant = if frac.Length = 0 then lead else lead + "." + frac
@@ -70,14 +60,14 @@ let private assemble (sign: string) (digits: string) (x: int) : string =
             else string eabs
         sign + mant + "e" + esign + edig
     elif x >= 0 then
-        // ---- fixed, magnitude >= 1: integer part has (x+1) digits ----
+        // fixed, magnitude >= 1: integer part has (x+1) digits
         let intLen = x + 1
         let intPart = digits.Substring(0, intLen)
         let frac = digits.Substring(intLen).TrimEnd('0')
         if frac.Length = 0 then sign + intPart
         else sign + intPart + "." + frac
     else
-        // ---- fixed, magnitude < 1 (x in [-4,-1]): "0." + zeros + digits ----
+        // fixed, magnitude < 1 (x in [-4,-1]): "0." + zeros + digits
         let leadingZeros = String('0', (-x) - 1)
         // digits' leading char is nonzero, so the trimmed fraction is never empty.
         let frac = (leadingZeros + digits).TrimEnd('0')
@@ -96,10 +86,9 @@ let formatFloat15 (x: float) : string =
         let sign = if x < 0.0 then "-" else ""
         let ax = abs x
         // "E14" yields exactly 15 significant digits (1 before, 14 after the
-        // point) rounded to nearest, ties-to-even, from the EXACT value of the
-        // double -- matching ucrt's correctly-rounded %g. Any rounding carry
-        // (9.99..9 -> 10.0..0) is normalized by .NET into the reported exponent.
-        // Form: "d.ddddddddddddddE{+|-}0XX".
+        // point) rounded to nearest, ties-to-even, from the EXACT double value
+        // -- matching ucrt's correctly-rounded %g. A rounding carry (9.99..9 ->
+        // 10.0..0) is normalized by .NET into the reported exponent.
         let s = ax.ToString("E14", inv)
         let eidx = s.IndexOf('E')
         let mantStr = s.Substring(0, eidx)      // "d.dddddddddddddd"

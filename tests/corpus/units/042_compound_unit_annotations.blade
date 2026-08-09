@@ -1,0 +1,28 @@
+// TEST: Compound Unit Annotations
+// Type-argument position now accepts the full unit-expression grammar
+// (names, * /, ^int including negative, parens, unity 1), resolved through
+// the same env.Units machinery as Unit-declaration RHSs. Cross-checks: the
+// compound annotations carry REAL dims (they add against structurally
+// equal compositions and against unit algebra results). Units declared
+// LOCALLY: the corpus lane (lowerCaptured) does not resolve stdlib
+// imports, so an `import units.SI` here would silently degrade the
+// annotations to bare floats and assert nothing; the SI-import pairing is
+// exercised in the run lane (see report) and in units/040.
+Unit meter
+Unit second
+let a: Float<meter/second^2> = 9.81
+let v: Float<meter/second> = 3.0
+let hz: Float<second^-1> = 2.0
+let e: Float<(meter/second)^2> = 9.0
+let area: Float<meter^2> = 4.0
+let esq = v * v
+let echk = esq + e
+let t: Float<second> = 2.0
+let dv = a * t
+let vchk = v + dv
+let m: Float<meter> = 2.0
+let achk = area + m * m
+// EXPECT: echk = 18
+// EXPECT: vchk = 22.62
+// EXPECT: achk = 8
+// EXPECT: hz = 2

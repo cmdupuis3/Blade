@@ -1,0 +1,21 @@
+// TEST: Reduce Omp Builtin
+// Phase 2 of docs/plan-cpp-perf-exploitation.md, Path A: `where omp` on a fold
+// kernel whose body is a recognised builtin commutative+associative op needs no
+// `comm` declaration — `+` and `*` carry both properties outright — and lowers
+// to one `#pragma omp parallel for simd reduction(<op>:acc)` over the flat
+// sweep. The pragma itself is pinned by `blade test omp-pragma`; this file pins
+// the VALUES, because parallelizing is only a fix if the results stay right.
+//
+// INTEGER-VALUED data on purpose: this file is also run by the interpreter
+// differential (`blade test interp loops`), which folds serially and requires
+// byte-identical output. Sums and products of small integers are exact under
+// EVERY association, so the compiled parallel fold and the serial interpreter
+// agree bit-for-bit no matter how the runtime chunks the axis.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+let total = reduce(A, lambda(a, b) where omp -> a + b)
+let seeded = reduce(A, lambda(a, b) where omp -> a + b, 100.0)
+let B = [1.0, 2.0, 3.0, 2.0, 1.0, 2.0]
+let prod = reduce(B, lambda(a, b) where omp -> a * b)
+// EXPECT: total = 78
+// EXPECT: seeded = 178
+// EXPECT: prod = 24

@@ -4,6 +4,11 @@
 // binding `double A____i0 = A[__i0];` once per slot in the same loop body,
 // a g++ redeclaration error. Both the fused reduce terminal and the plain
 // compute pipeline hit it; now the identical declaration is bound once.
+// The self-zip puts the same array in both slots of a kernel that deduces
+// commutative -- but a zip CO-ITERATES, so the output is the rank-1 [1, 4, 9],
+// not a square with a triangle to compact. The compact-storage suggestion
+// (BL4010) is gated on outer-product formers for exactly that reason and does
+// not fire here (pinning `where comm` would change nothing).
 let A = [1.0, 2.0, 3.0]
 let dot = reduce(method_for(zip(A, A)) <@> lambda(x, y) -> x * y, (+))
 let sq = method_for(zip(A, A)) <@> lambda(x, y) -> x * y |> compute

@@ -21,7 +21,7 @@ let rec traj: Array<Float like Steps, C> =
         let forced = dn |> compute
         start + 0.1 * forced
       }
-let fin = traj(4)
+let fin = traj((4 : Steps))
 let mass = reduce(fin, (+))
 // EXPECT: ll = [0, 1, -2, -1]
 // EXPECT: llread = -1

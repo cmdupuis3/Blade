@@ -1,0 +1,81 @@
+// TEST: Tuple Width Param Annotation
+// `Tuple<N>` is the WIDTH-ONLY tuple annotation of Design C
+// (docs/plan-tuples-vs-arg-packs.md 6b): the width is written, the element
+// types are inferred. It lowers to the same IRTTuple a written
+// `(Float64, Float64)` produces, with N fresh inference variables in the
+// element slots, so unify / printing / codegen see one representation.
+//
+// Design C requires tuple-ness to be WRITTEN, never inferred (6b, ruling 1):
+// this annotation is how a parameter says "I take the whole pair".
+
+function addPair(t: Tuple<2>) -> Float64 = t[0] + t[1]
+
+let b = 1.0
+let c = 2.0
+
+// A BOUND tuple as the argument.
+let p = b, c
+let fromBound = addPair(p)
+// EXPECT: fromBound = 3
+
+// A LITERAL tuple as the argument -- ruling 3: a literal `(a, b)` in argument
+// position is a tuple value, it needn't be let-bound, and the two spellings
+// agree by value.
+let fromLiteral = addPair((b, c))
+// EXPECT: fromLiteral = 3
+
+// Width 3, and element types that are NOT all the same: the annotation
+// constrains only the width, so a (Float64, Int64) pair is fine as long as
+// the body's use of each slot types.
+function mixed(t: Tuple<3>) -> Float64 = t[0] + t[2]
+let m = mixed((1.5, 7, 2.5))
+// EXPECT: m = 4
+
+// RETURN-type position takes the annotation too.
+function mkPair(u: Float64) -> Tuple<2> = (u, u + 1.0)
+let r = mkPair(10.0)
+let rv = r[0] + r[1]
+// EXPECT: rv = 21
+
+// LAMBDA parameter position, with the projection inside the lambda BODY.
+let lam = lambda(q: Tuple<2>) -> q[0] * q[1]
+let lv = lam((3.0, 4.0))
+// EXPECT: lv = 12
+
+// The bare-comma construction feeds an annotated parameter directly, which is
+// the pairing Design C is built around.
+let lv2 = addPair(p)
+// EXPECT: lv2 = 3
+
+// KNOWN LIMIT, deliberately not pinned here (it is a check-OK / g++-fail, the
+// same class as plan 3.9): a `Tuple<N>` whose elements are ARRAYS does not
+// monomorphize. The element slots are fresh inference variables and DIRECT
+// CALLS never unify their arguments against parameter types, so the slots stay
+// free and default to `double`:
+//
+//     function first(t: Tuple<2>) -> Array<Float64 like N> = t[0]
+//     let r = first((A, B))   // g++: cannot convert double to Array<double,1>
+//
+// The written spelling `(Array<Float64 like N>, Array<Float64 like N>)` works
+// (func-arrays/008), so this is the argument-checking hole (plan 3.9, ruling
+// 4) showing through a width-only annotation, not a defect of `Tuple<N>`.
+// SCALAR element types do resolve -- every pin above is a scalar.
+//
+// UPDATE (width-schema matcher stage): the earlier note here predicted that
+// "whichever change closes the direct-call argument seam closes this too".
+// MEASURED FALSE. Both the direct-call argument CHECKS (BL3001/BL3002 at the
+// call seam) and the width-schema matcher have landed, and this still fails
+// identically. The reason is that neither of them UNIFIES: the checks compare
+// resolved classes and bind nothing (they cannot bind -- a `function`'s arrow
+// is built once with type variables SHARED across every call site), and the
+// matcher only regroups the argument LIST. Nothing writes a type into the
+// annotation's fresh element slots, so they still default to `double`. Closing
+// this needs per-call-site instantiation of the callee's arrow (a type SCHEME),
+// which is its own item.
+//
+// UPDATE 2: still true OF THIS SPELLING, and now optional. The COMPONENT-TYPED
+// spelling `Tuple<T1, ..., Tk>` (`015`) writes the element types instead of
+// inferring them, so the slots are concrete and the array case above RUNS.
+// The type SCHEME item is what would close the width-only form; until then
+// `Tuple<N>` means "N scalars I have not named" and the component-typed form
+// is what a tuple of arrays is written with.

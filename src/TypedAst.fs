@@ -1,15 +1,8 @@
-// ============================================================================
-// TypedAst.fs - Type-Annotated Abstract Syntax Tree
-// ============================================================================
-//
-// This module defines the typed AST that results from type checking.
-// Every expression node carries its inferred type, enabling:
-// - IDE hover information
-// - Incremental type checking
-// - Clean separation of type inference from IR lowering
-//
-// The TypedAST mirrors the structure of AST but with type annotations
-// and pre-computed symmetry information for combinator applications.
+// The typed AST resulting from type checking. Every expression node carries
+// its inferred type, enabling IDE hover info, incremental type checking, and
+// a clean separation of type inference from IR lowering. Mirrors Ast's
+// structure but with type annotations and pre-computed symmetry information
+// for combinator applications.
 
 module Blade.TypedAst
 
@@ -17,15 +10,7 @@ open Blade.Ast
 open Blade.IR
 open Blade.Types
 
-// ============================================================================
-// Source Location (for error reporting and IDE support)
-// ============================================================================
-
-// Span and noSpan are inherited from Blade.Ast via 'open'
-
-// ============================================================================
-// Typed Variable Information
-// ============================================================================
+// Span and noSpan are inherited from Blade.Ast via 'open'.
 
 type TypedVarInfo = {
     Name: string
@@ -35,51 +20,54 @@ type TypedVarInfo = {
     VarId: IRId
 }
 
-// ============================================================================
-// Typed Lambda Information
-// ============================================================================
-
 type TypedParam = {
     Name: string
     Type: IRType
     Index: int
     VarId: IRId
+    /// Typed default value expression, checked at the lambda declaration with
+    /// the params in scope (it references required params by their VarIds).
+    /// Consumed by the kernel-apply seam, which binds an omitted trailing
+    /// param as a body-entry TExprLet over this expr; direct calls re-type
+    /// the SURFACE default at the call site instead. None on required params
+    /// and every synthesized param.
+    Default: TypedExpr option
+    /// Source span of the parameter's NAME TOKEN, carried through from
+    /// Ast.ParamDecl/LambdaParam so `references[]` can point go-to-definition
+    /// at it. `noSpan` on synthesized params (the kernels elaborators invent).
+    NameSpan: Span
 }
 
-type TypedLambdaInfo = {
+// (`and`, not `type`: TypedParam.Default references TypedExpr, so it joins
+// the TypedLambdaInfo/TypedExpr recursive group.)
+and TypedLambdaInfo = {
     Params: TypedParam list
     Body: TypedExpr
     ReturnType: IRType
     CommGroups: int list list
-    /// `where anticomm(...)` groups, by parameter index — the SIGNED twin of
-    /// CommGroups. Same iteration license (one joint simplex over the group's
-    /// positions), but the licensed output storage is the STRICT simplex
-    /// (AntisymIdx<r, n>: no diagonal, negate on swapped reads) rather than
-    /// the inclusive triangle. Kept SEPARATE from CommGroups so the stage-3
-    /// validators can tell the two declarations apart (a declared comm on a
-    /// PNeg body and a declared anticomm on a PInv body are different errors);
-    /// the consumers that only care about GROUPING merge the two lists.
+    /// `where anticomm(...)` groups, by parameter index: the signed twin of
+    /// CommGroups. Licensed output storage is the strict simplex (AntisymIdx<r,
+    /// n>: no diagonal, negate on swapped reads), not the inclusive triangle.
+    /// Kept separate from CommGroups so validators can distinguish a declared
+    /// comm on a PNeg body from a declared anticomm on a PInv body.
     AntisymGroups: int list list
+    /// Per-parameter sign parity of the body (`Types.KernelSignParity`, decl
+    /// order), feeding `IR.deduceWreathTie`'s soundness gate. Populated only
+    /// when this lambda reaches the seam as a kernel; other construction sites
+    /// leave it empty (read as all-unknown). Lowering copies it onto the
+    /// lifted `IRCallable` so codegen and the interpreter agree on the tie.
+    SignParities: KernelSignParity list
     Captures: TypedVarInfo list
     IsCommutative: bool
-    // Parallelization strategy assignments (list; see WhereClause.Parallel).
-    // Propagated from the lambda's where-clause so lambda-level omp/cuda take
-    // effect. Today 0 or 1 element.
+    // Parallelization strategy assignments (see WhereClause.Parallel),
+    // propagated from the lambda's where-clause. Today 0 or 1 element.
     Parallel: ParallelStrategy list
-    // Self-binding for a NAMED, recursive lambda: Some (name, id) when this
-    // lambda is the value of `let const name = lambda(...)` (including the
-    // nested-`function` desugar) AND its body refers to itself. The name and
-    // id are threaded to Lowering so the lifted callable takes the real name
-    // and an id equal to the one the body's self-reference resolves to (so the
-    // top-level C++ function can call itself). None for an anonymous lambda,
-    // for which self-reference is impossible. See Lowering.lowerTypedLambda /
-    // lowerTypedBlock and TypeCheck.inferBlock's self-binding branch.
+    // Self-binding for a named, recursive lambda: Some (name, id) when this is
+    // `let const name = lambda(...)` (including the nested-`function` desugar)
+    // and its body refers to itself. Threaded to Lowering so the lifted
+    // callable keeps the real name/id and can call itself in emitted C++.
     SelfBinding: (string * IRId) option
 }
-
-// ============================================================================
-// Typed Method-For Information
-// ============================================================================
 
 and TypedMethodForInfo = {
     Arrays: TypedExpr list
@@ -90,10 +78,6 @@ and TypedMethodForInfo = {
     SharedIndexTypes: IRIndexType list  // For co-iteration: shared iteration records (empty = not co-iteration; multi = product space)
 }
 
-// ============================================================================
-// Typed Object-For Information
-// ============================================================================
-
 and TypedObjectForInfo = {
     Kernel: TypedExpr
     CommGroups: int list list
@@ -101,10 +85,7 @@ and TypedObjectForInfo = {
     OutputRank: int
 }
 
-// ============================================================================
-// Typed Application Information (for <@> combinator)
-// ============================================================================
-
+// Application info for the <@> combinator.
 and TypedApplyInfo = {
     Loop: TypedExpr                         // Provenance: TExprMethodFor, TExprObjectFor, or TExprCompose(OpComposeObj,...)
     Kernel: TypedExpr
@@ -123,27 +104,18 @@ and TypedApplyInfo = {
     HasReynolds: bool
     OutputType: IRType
     IsCoIteration: bool
-    /// True when this apply has Loop = TExprCompose(OpComposeObj, _, _) (or
-    /// a TExprVar resolving to one). The TypeCheck arm that builds these
-    /// puts the input arrays in the Kernel slot rather than a callable —
-    /// Lowering uses this flag to route to IRComposeApply instead of
+    /// True when Loop = TExprCompose(OpComposeObj, _, _) (or a TExprVar
+    /// resolving to one), which puts input arrays in the Kernel slot rather
+    /// than a callable; Lowering routes to IRComposeApply instead of
     /// IRApplyCombinator. Defaults to false for ordinary applies.
     IsComposeApply: bool
 }
-
-// ============================================================================
-// Typed Statements (for blocks)
-// ============================================================================
 
 and TypedStmt =
     | TStmtLet of TypedBinding
     | TStmtAssign of lhs: TypedExpr * rhs: TypedExpr
     | TStmtExpr of TypedExpr
     | TStmtForIn of varName: string * varId: IRId * lo: TypedExpr * hi: TypedExpr * body: TypedStmt list
-
-// ============================================================================
-// Typed Expressions
-// ============================================================================
 
 and TypedExpr = {
     Kind: TypedExprKind
@@ -154,10 +126,8 @@ and TypedExpr = {
 and TypedExprKind =
     // Literals
     | TExprLit of Literal
-    // Wildcard hole `_` in expression position (typed sibling of TPatWild). Carries
-    // a hole type so it flows through tuple inference; only meaningful where a
-    // context consumes it (a compound-index coordinate marks a FREE axis). Reaching
-    // lowering/codegen unconsumed is an error.
+    // Wildcard hole `_` (typed sibling of TPatWild). Carries a hole type so it
+    // flows through tuple inference; reaching lowering/codegen unconsumed is an error.
     | TExprWildcard
     
     // Variables and names
@@ -174,11 +144,10 @@ and TypedExprKind =
     // Poly-tuple indexing: args[k]
     | TExprTupleIndex of tuple: TypedExpr * index: TypedExpr
 
-    // Pack tail from cons-destructuring `let head :: tail = pack`. `drop` is the
-    // number of leading elements peeled (1 for `head :: tail`, k for a k-headed
-    // cons). Lowers to IRPolyTail; arity-monomorphization expands it into the
-    // trailing pack params. Only produced when the destructured scrutinee is a
-    // Poly pack (tuples keep the TExprTuple-of-projections desugaring).
+    // Pack tail from cons-destructuring `let head :: tail = pack`; `drop` is
+    // the number of leading elements peeled. Lowers to IRPolyTail, expanded
+    // into trailing pack params by arity-monomorphization. Only for Poly pack
+    // scrutinees (tuples keep the TExprTuple-of-projections desugaring).
     | TExprPolyTail of pack: TypedExpr * drop: int
     
     // Field access
@@ -199,11 +168,9 @@ and TypedExprKind =
     // Tuple construction
     | TExprTuple of TypedExpr list
     
-    // Complex literal: `complex(re, im)`
-    // Distinct from TExprTuple to preserve scalar nature in IR.
-    // The runtime layout is two floats (matching std::complex<double>),
-    // but the type system treats this as a scalar (IRTScalar ETComplex64
-    // or ETComplex128). Lowering routes this to IRLitComplex.
+    // Complex literal `complex(re, im)`. Distinct from TExprTuple to preserve
+    // scalar nature: runtime layout is two floats (std::complex<double>),
+    // typed as scalar IRTScalar ETComplex64/128. Lowering routes to IRLitComplex.
     | TExprComplexLit of re: TypedExpr * im: TypedExpr
     
     // Array literal
@@ -233,7 +200,7 @@ and TypedExprKind =
     | TExprDotDot of lo: TypedExpr * hi: TypedExpr
     | TExprReverse of indexType: IRIndexType
     | TExprBlocked of indexType: IRIndexType * blockSize: TypedExpr
-    // NOTE: halo<Inner, [offsets]> has NO typed node — it typechecks to a
+    // halo<Inner, [offsets]> has no typed node -- it typechecks to a
     // TExprRange over a "__halowin|"-tagged slot (TypeCheck.haloSlotOf); the
     // per-slot center offset is re-derived from the tag at loop building.
     
@@ -246,17 +213,15 @@ and TypedExprKind =
     | TExprPure of TypedExpr
     | TExprCompute of TypedExpr
     | TExprRead of TypedExpr
-    // fill_random(mod): internal builtin -- a random-filled array constructor.
-    // The result array type comes from the binding annotation (bidirectional
-    // check), so this only appears as an annotated let-binding value. Lowering
-    // records it in RandomInits; codegen emits allocate<> + the runtime
-    // fill_random. `modulus` is the argument to rand() % modulus.
+    // fill_random(mod): internal builtin, random-filled array constructor. Type
+    // comes from the binding annotation, so only appears as an annotated
+    // let-binding value. Lowering records it in RandomInits; `modulus` is the
+    // argument to rand() % modulus.
     | TExprFillRandom of modulus: TypedExpr
-    // rand.uniform/normal(key, shape): internal builtin — a deterministic
-    // random-array constructor. Self-typed from the (static) shape argument, so
-    // it needs no annotation. Lowering records (kind, key) in RandomInits;
-    // codegen emits allocate<> + the runtime blade_rand fill. `kind` is
-    // "uniform" | "normal"; `dims` are the static extents.
+    // rand.uniform/normal(key, shape): internal builtin, deterministic
+    // random-array constructor, self-typed from the shape argument. Lowering
+    // records (kind, key) in RandomInits. `kind` is "uniform" | "normal";
+    // `dims` are the static extents.
     | TExprRandGen of kind: string * key: TypedExpr * dims: int list
     | TExprGuard of cond: TypedExpr * body: TypedExpr
     | TExprZero
@@ -269,18 +234,50 @@ and TypedExprKind =
     // Filtered array
     | TExprMask of array: TypedExpr * pred: TypedExpr
     | TExprCompound of dense: TypedExpr * mask: TypedExpr
+    | TExprSparse of values: TypedExpr * keys: TypedExpr
     | TExprIntersect of TypedExpr * TypedExpr
     | TExprUnion of TypedExpr * TypedExpr
     | TExprUnique of array: TypedExpr
     | TExprContains of array: TypedExpr * value: TypedExpr
+    /// `display.emit(mime, data[, meta])`: write one display frame to stdout,
+    /// evaluate to `true`. Everything except `data` is fixed at elaboration
+    /// time (Blade.Display.Elaborate) -- `head` is the frame JSON up to and
+    /// including `"data":`, `quoted` says whether the payload goes out as a
+    /// quoted JSON string or an inline JSON value, `metaTail` is the user
+    /// `meta` object minus its braces. Byte format: Blade.Display.Frame.
+    | TExprDisplayEmit of head: string * quoted: bool * data: TypedExpr * metaTail: string
+    /// `display.json_array(A)`: render a rank-1 or rank-2 numeric array as
+    /// JSON text (String). `rank` is pinned at typecheck so both back ends
+    /// pick the 1-D/2-D serializer without re-resolving the type. Number
+    /// formatting is the byte-parity 15-significant-digit print rule.
+    | TExprDisplayJson of rank: int * data: TypedExpr
+    /// `display.json_num(x)`: render a numeric scalar as JSON text (String),
+    /// same formatting rule as TExprDisplayJson.
+    | TExprDisplayNum of data: TypedExpr
     | TExprGroupBy of values: TypedExpr * grouping: TypedExpr
     | TExprGroupKeys of keys: TypedExpr list
     | TExprSort of array: TypedExpr * key: TypedExpr
     | TExprReduce of array: TypedExpr * kernel: TypedExpr * init: TypedExpr option
-    | TExprProdSum of args: TypedExpr list  // prodsum(x1..xk): fused Σ_t Π_ℓ xℓ(t) over rank-1 arrays
+    | TExprProdSum of args: TypedExpr list  // prodsum(x1..xk): fused sum_t prod_l x_l(t) over rank-1 arrays
     | TExprTranspose of array: TypedExpr * dim1: int * dim2: int
     | TExprDecompact of array: TypedExpr * dim: int
     | TExprGram of left: TypedExpr * right: TypedExpr * isSameArray: bool
+    /// matmul(A, B): A(m x k) * B(k x n) -> dense m x n, routed through
+    /// blade_linalg rather than synthesized as a Blade triple loop.
+    | TExprMatmul of left: TypedExpr * right: TypedExpr
+    /// eigh(S): symmetric/Hermitian eigendecomposition of a rank-2 square
+    /// operand, yielding (Q, LAM): Q's columns the eigenvectors, LAM
+    /// descending. Routed through blade_lapack when available at elaboration
+    /// time; otherwise `math.eigh` expands to Blade Jacobi source instead.
+    | TExprEigh of operand: TypedExpr
+    /// solve(A, b): the general dense linear solve A.x = b by partial-pivoted
+    /// LU, A rank-2 square and b rank-1 of the matching extent, yielding x.
+    /// ALWAYS a first-class node (unlike eigh): the native arm is emitted LU
+    /// loops whose operation order the interpreter's `A.solveArray` mirrors, so
+    /// the byte-identity differential covers the code an ordinary build runs.
+    /// The LAPACK `dgesv` route is an availability-gated replacement for those
+    /// loops, not a precondition for the node existing.
+    | TExprSolve of matrix: TypedExpr * rhs: TypedExpr
     | TExprArrayNegate of array: TypedExpr
     | TExprArrayConjugate of array: TypedExpr
     | TExprExtents of array: TypedExpr
@@ -317,10 +314,6 @@ and TypedExprKind =
     // phases, struct constraint checks); not expressible in surface syntax.
     | TExprConstraintCheck of cond: TypedExpr * message: string
 
-// ============================================================================
-// Typed Pattern Matching
-// ============================================================================
-
 and TypedMatchCase = {
     Pattern: TypedPattern
     Guard: TypedExpr option
@@ -343,10 +336,6 @@ and TypedPatternKind =
     | TPatStruct of typeName: string * fields: (string * TypedPattern) list
     | TPatGuarded of TypedPattern * TypedExpr
 
-// ============================================================================
-// Typed Declarations
-// ============================================================================
-
 and TypedBinding = {
     Name: string
     VarId: IRId
@@ -356,36 +345,29 @@ and TypedBinding = {
     Value: TypedExpr
     /// Destructured sub-bindings: (name, varId, type) for PatTuple/PatCons/PatStruct
     SubBindings: (string * IRId * IRType) list
-    /// How Lowering must derive each SubBindings entry from the primary value.
-    /// See DestructureShape — without it a cons pattern is indistinguishable
-    /// from a tuple pattern by the time lowering runs, and `head :: tail`
-    /// miscompiles into two positional projections.
+    /// How Lowering derives each SubBindings entry -- without it, `head ::
+    /// tail` is indistinguishable from a tuple pattern and miscompiles into
+    /// two positional projections. See DestructureShape.
     Destructure: DestructureShape
-    /// Constraint guards to run right after this binding (mutual-group joint
-    /// checks). IRIds are allocated by the checker directly after the
-    /// SubBinding ids — module emission is IRId-ordered, so lowering-time
-    /// fresh ids would sort to the end and run too late.
+    /// Constraint guards run right after this binding (mutual-group joint
+    /// checks). IRIds are allocated directly after the SubBinding ids, since
+    /// module emission is IRId-ordered and later fresh ids would run too late.
     PostChecks: (IRId * TypedExpr) list
 }
 
-/// How a TypedBinding's SubBindings relate to the primary binding's value.
-///
-/// The tag lives on the BINDING rather than on each sub-binding entry because
-/// SubBindings' element shape `(name, varId, type)` is consumed positionally by
-/// Cli.fs, Ide.fs and Zonk.fs; widening the tuple would ripple through all of
-/// them for information only Lowering needs.
+/// How a TypedBinding's SubBindings relate to its value. Lives on the binding
+/// rather than each sub-binding entry because SubBindings' element shape is
+/// consumed positionally by Cli.fs/Ide.fs/Zonk.fs for information only
+/// Lowering needs.
 and DestructureShape =
-    /// Sub-binding i is element i of a tuple (or, for a struct scrutinee, the
-    /// field with the sub-binding's own name). Also the shape of a binding with
-    /// no destructuring at all.
+    /// Sub-binding i is element i of a tuple (or the field with its own name,
+    /// for a struct scrutinee). Also the shape when there is no destructuring.
     | DSPositional
     /// Cons split over a tuple scrutinee. `::` is right-associative, so a chain
-    /// `a :: b :: rest` is flattened by the checker into leading leaves [a; b]
-    /// plus one REST leaf. Every leaf but the LAST is positional as usual; the
-    /// last one takes the whole remainder — all elements from its own index
-    /// onward, re-tupled — rather than the single element at its index. A
-    /// one-element remainder binds that element bare, because Blade has no
-    /// 1-tuple: `(x)` is just `x`.
+    /// `a :: b :: rest` flattens into leading leaves [a; b] plus one rest leaf.
+    /// Every leaf but the last is positional; the last takes the whole
+    /// remainder (re-tupled), or the bare element if the remainder is one
+    /// element (Blade has no 1-tuple).
     | DSConsRest
 
 and TypedFunctionDecl = {
@@ -398,43 +380,31 @@ and TypedFunctionDecl = {
     Body: TypedExpr
     CommGroups: int list list
     IsStatic: bool
+    /// Source span of the function's NAME TOKEN (see Ast.FunctionDecl.NameSpan).
+    NameSpan: Span
 }
 
-// ============================================================================
-// Typed Type Definitions (resolved from raw TypeDecl)
-// ============================================================================
-
+// Typed type definitions, resolved from raw TypeDecl.
 and TypedTypeDef =
     | TTDAlias of name: string * typeParams: string list * resolved: IRType
     | TTDStruct of name: string * typeParams: string list * fields: (string * IRType) list
     | TTDVariant of name: string * typeParams: string list * variants: (string * IRType option) list
-    /// Index-type alias: `type RegionIdx = Idx<3>` and friends. Distinguished
-    /// from TTDAlias so codegen can emit `using RegionIdx = int64_t;` rather
-    /// than treating it as a generic IRType alias and rendering nonsense.
+    /// Index-type alias (`type RegionIdx = Idx<3>`), distinguished from
+    /// TTDAlias so codegen emits `using RegionIdx = int64_t;` rather than a
+    /// generic IRType alias.
     | TTDIndexType of name: string * idx: IRIndexType
-    /// EnumIdx alias: `type LandType = EnumIdx<[101, 205, 307]>`. Carries the
-    /// concrete value list so reverse-lookup codegen can be generated by
-    /// downstream stages.
+    /// EnumIdx alias (`type LandType = EnumIdx<[101, 205, 307]>`), carrying
+    /// the concrete value list for downstream reverse-lookup codegen.
     | TTDEnumIdx of name: string * idx: IRIndexType * values: EnumValue list
-    /// Mutually constrained alias group: `type P1 = T1 and P2 = T2 where ...`.
-    /// Members lower as ordinary transparent aliases; the joint constraint
-    /// itself lives in TypeEnv.MutualGroups and is emitted at binding sites,
-    /// not here.
+    /// Mutually constrained alias group (`type P1 = T1 and P2 = T2 where ...`);
+    /// the joint constraint itself lives in TypeEnv.MutualGroups, not here.
     | TTDMutualGroup of members: (string * IRType) list
-
-// ============================================================================
-// Typed Impl Declaration
-// ============================================================================
 
 and TypedImplDecl = {
     ForType: TypeExpr
     TypeName: string
     Methods: TypedFunctionDecl list
 }
-
-// ============================================================================
-// Typed Declarations
-// ============================================================================
 
 and TypedDecl =
     | TDeclLet of TypedBinding
@@ -446,10 +416,6 @@ and TypedDecl =
     | TDeclUnit of UnitDecl
     | TDeclImport of QualifiedName * ImportStyle
 
-// ============================================================================
-// Typed Module and Program
-// ============================================================================
-
 type TypedModule = {
     Name: string list option     // Qualified module name
     Decls: TypedDecl list
@@ -458,10 +424,6 @@ type TypedModule = {
 type TypedProgram = {
     Modules: TypedModule list
 }
-
-// ============================================================================
-// Helper Constructors
-// ============================================================================
 
 /// Create a typed expression with a given kind and type
 let mkTyped kind ty : TypedExpr = 

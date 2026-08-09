@@ -68,11 +68,11 @@ module Irreps =
         if lmax < 0 then invalidArg "lmax" "lmax must be >= 0"
         Array.init (lmax + 1) (fun l -> { Ir = irrep l (shParity l); Mult = 1 })
 
-    /// Full Clebsch-Gordan decomposition of s1 ⊗ s2, merged-canonical:
-    /// every entry pair contributes l ∈ [|l1-l2| .. l1+l2] with parity
-    /// p1·p2 and multiplicity m1·m2; contributions aggregate by (l, parity)
+    /// Full Clebsch-Gordan decomposition of s1 (x) s2, merged-canonical:
+    /// every entry pair contributes l  in  [|l1-l2| .. l1+l2] with parity
+    /// p1*p2 and multiplicity m1*m2; contributions aggregate by (l, parity)
     /// and sort ascending by (l, parity) (Even before Odd at equal l).
-    /// Independent twin of the compiler's Blade.ML.Spec.tpSpec — the two
+    /// Independent twin of the compiler's Blade.ML.Spec.tpSpec -- the two
     /// are pinned against the same hand-computed truth, never each other's
     /// output. Completeness: totalDim (tpSpec a b) = totalDim a * totalDim b.
     let tpSpec (s1: SpecEntry[]) (s2: SpecEntry[]) : SpecEntry[] =
@@ -84,10 +84,10 @@ module Irreps =
         |> Array.map (fun ((l, p), cs) -> { Ir = irrep l p; Mult = cs |> Array.sumBy snd })
         |> Array.sortBy (fun e -> (e.Ir.L, e.Ir.P))
 
-    /// dim Hom_G(V_in, V_out) by Schur's lemma: Σ_{(l,p)} multIn·multOut
+    /// dim Hom_G(V_in, V_out) by Schur's lemma: Sigma_{(l,p)} multIn*multOut
     /// over aggregated multiplicities (duplicate spec entries of the same
-    /// irrep pool together — unlike Linear.findBlock's first-match rule).
-    /// homDim = 0 ⇔ the only equivariant linear map is zero.
+    /// irrep pool together -- unlike Linear.findBlock's first-match rule).
+    /// homDim = 0 <=> the only equivariant linear map is zero.
     let homDim (sIn: SpecEntry[]) (sOut: SpecEntry[]) : int =
         let agg (s: SpecEntry[]) =
             s |> Array.fold (fun m e ->

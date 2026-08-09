@@ -1,6 +1,6 @@
 (* ===================================================================== *)
 (* BladePointGroup.v -- THE POINT-GROUP TABLES, CHECKED BY COMPUTATION:   *)
-(* the stage 5b-0 obligations of docs/plan-transforms-as-types.md 3.6     *)
+(* the stage 5b-0 obligations of the retired transforms-as-types plan 3.6 *)
 (* (the "point groups as the second block-spec member" subsection) and    *)
 (* 7's 5b-0 bullet, whose mandate for this file reads: BladePointGroup.v  *)
 (* -- all computational over the witnesses: table closure, FS indicators, *)

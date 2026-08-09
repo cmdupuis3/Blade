@@ -32,6 +32,12 @@ import ad as ad
 // big trajectory never auto-prints). The per-sample squared error is an
 // additive `reduce` grad differentiates exactly.
 // Pins from the sgs/ oracle (`dump-training`): BladeML VJP replica.
+//
+// BL4003: the state-vector idiom reads its 101 slots with bare integer literals
+// (`s(0)..s(99)` unpacking w1/w2). Each is a real untagged subscript with a real
+// fix -- `(0 : State)` -- but one cast per slot is pure noise at this width, so
+// the note is pinned, not taken.
+// WARN: BL4003
 // ============================================================================
 let static GSPEC = [(0, 0, 1), (1, 0, 1), (2, 0, 1)]
 let static TAUSPEC = [(0, 0, 1), (2, 0, 1)]

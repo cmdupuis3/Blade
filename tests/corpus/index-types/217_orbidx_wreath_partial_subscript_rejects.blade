@@ -1,0 +1,25 @@
+// TEST: OrbIdx Wreath Partial Subscript (rejects)
+// ERROR: BL4003
+// THE PARTIAL-READ DECISION, pinned. A dense array answers a short subscript
+// with a sub-array view, and a rank-r compact SymIdx group refuses one -- but
+// it refuses at RUNTIME, inside the interpreter's `indexArray` ("partial
+// (sub-array) read of a compact symmetric array"), with the compiled side
+// falling through to a raw subscript that is simply wrong. v1 does not copy
+// that precedent for wreath classes; it refuses at TYPECHECK, in both backends,
+// with the arity that would have worked.
+//
+// The reason a partial read has no answer here is structural, not a gap: a
+// wreath pool's rows shrink per LEVEL, so a fibre of it is not a class this
+// type system can spell (peeling a level unties its r_d sub-blocks into a
+// JUXTAPOSITION of depth-(d-1) classes -- the §3 lattice, unbuilt). Returning a
+// view of the flat pool would hand back a plausible object with the wrong
+// shape, which is the silent-wrong-shape outcome this refusal exists to
+// prevent. The message names the working route: decompact(W, 0) first, then
+// slice the dense result -- exactly what 215 does.
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+let bad = W(0, 1)
+// EXPECT: typecheck failure — a wreath pool has no partial (sub-array) read.

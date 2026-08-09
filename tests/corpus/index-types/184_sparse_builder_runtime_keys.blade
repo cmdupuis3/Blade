@@ -1,0 +1,13 @@
+// TEST: Sparse Builder Runtime Keys
+// sparse(values, keys) over a RUNTIME rank-1 tuple-array key list: the
+// sparse_index_t is built from the keys array at runtime (SkRuntime), the
+// values copy straight into the compact buffer in key order. Wildcard partial
+// on the result gathers in key order like any sparse.
+type N = Idx<4>
+let keys: Array<(Nat, Nat) like N> = [(2, 1), (0, 3), (1, 0), (4, 1)]
+let vals: Array<Float64 like Idx<4>> = [21.0, 3.0, 10.0, 41.0]
+let S = sparse(vals, keys)
+let y0 = S((4, 1))
+let g = S((_, 1))
+// EXPECT: y0 = 41
+// EXPECT: g = [21, 41]

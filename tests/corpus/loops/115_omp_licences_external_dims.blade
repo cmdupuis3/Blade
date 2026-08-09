@@ -1,0 +1,30 @@
+// TEST: Omp Licences External S-Dims (misconception warns)
+// WARN: BL4001
+// ============================================================================
+// An `omp` clause licenses the EXTERNAL S-dims an argument contributes: the
+// loop levels that argument brings to a nest built AROUND the function, i.e. a
+// caller's co-iteration when the function is used in kernel position. It is
+// NOT a licence for a loop the function's own body generates over that same
+// argument -- that loop belongs to the apply that builds it, and reads its
+// licence from THAT apply's kernel.
+//
+// The confusion is invisible in the output: "asked for omp on the inner loop
+// and got serial" and "never asked" emit byte-identical C++. So the compiler
+// says so (BL4001, the same class as the omp-names-no-parameter warning) when
+// a licensed parameter is an operand of an apply inside the body whose kernel
+// carries no clause of its own -- which is exactly `inner` below.
+//
+// The two CORRECT spellings of the same intent are `loops/116`, which carries
+// no warning pin at all: the silence is the assertion there, and it has to be a
+// separate file because a `// WARN:` pin is count-insensitive and would license
+// a stray second BL4001 in this one.
+//
+// Values are identical either way -- parallelism never changes them.
+// ============================================================================
+let A = [1.0, 2.0, 3.0, 4.0]
+
+function inner(xs: Float64^1) where omp(xs: 1) = {
+    xs <@> lambda(x) -> x * 2.0 |> compute
+}
+let bad = inner(A)
+// EXPECT: bad = [2, 4, 6, 8]

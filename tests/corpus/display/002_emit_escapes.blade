@@ -1,0 +1,16 @@
+// TEST: Display Emit Escapes
+// ============================================================================
+// A `text/*` mime infers `encoding: "utf8"`, so the payload travels as a
+// QUOTED JSON string and has to be escaped. Embedded quotes are the case a
+// naive concatenation gets wrong, and getting it wrong is invisible in one
+// lane alone -- so this file exists mainly to be run down BOTH lanes by
+// `blade test interp`, where Blade.Display.Frame.escape and its generated C++
+// mirror have to produce identical bytes. The full escape table (control
+// characters, backslash, the sentinel's own SOH) is pinned in-process in
+// tests/Test_Display.fs, where the payload does not have to survive Blade's
+// string lexer first.
+// ============================================================================
+import display as d
+let msg = "he said \"hi\" then left"
+let ok = d.emit("text/plain", msg)
+// EXPECT: ok = true

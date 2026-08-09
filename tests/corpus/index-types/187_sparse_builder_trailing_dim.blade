@@ -1,0 +1,21 @@
+// TEST: Sparse Builder Trailing Dim
+// sparse(values, keys) with a values array of rank > 1: the LEADING dim is the
+// key axis and the remaining dims fold into the trailing stride - the direct
+// analogue of compound(dense, mask)'s leading-prefix rule (010 is the compound
+// twin). Each key owns a contiguous block of `trail` elements, so:
+//   S((i, j))     resolves the key and leaves the trailing dim free -> row view
+//   S((i, j), t)  supplies the trailing index too -> scalar
+// Keys are out of lex order, so the row blocks must follow KEY order, not a
+// sorted order: key (2,1) owns [21.0, 21.5], key (0,3) owns [3.0, 3.5], ...
+let static K = [(2, 1), (0, 3), (1, 0)]
+type E = Idx<3>
+type T = Idx<2>
+let vals: Array<Float64 like E, T> = [[21.0, 21.5], [3.0, 3.5], [10.0, 10.5]]
+let S = sparse(vals, K)
+let row = S((0, 3))
+let a = row((1 : T))
+let b = S((2, 1), (0 : T))
+let c = S((1, 0), (1 : T))
+// EXPECT: a = 3.5
+// EXPECT: b = 21
+// EXPECT: c = 10.5

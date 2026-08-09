@@ -15,7 +15,6 @@ Hub for most documentation, including guides, formalisms, and proof explanations
 | [features/sql.md](features/sql.md) | SQL-like / relational operations | Relational feature module |
 | [features/equivariant-nn.md](features/equivariant-nn.md) | Equivariant ML: irreps, CG tensor products, spherical harmonics, message passing | ML feature module |
 | [features/graphs-trees.md](features/graphs-trees.md) | Tree structures and graph types via trace indices | Graph/tree feature module sketch |
-| [future.md](future.md) | Future plans: extensions research directions, Coq roadmap open items, speculation | What Blade *could have* |
 
 Related documents that already existed and stay where they are:
 
@@ -47,11 +46,24 @@ and the new formalism states the corrected versions. Details and citations in
    H ∩ Stab law is now an exactness (iff) result (BladeCompleteness,
    `license_exactness`), so the largest sound grant is exactly H ∩ Stab.
 
-3. **Compound-index application canonicalized (v10 §4.5 double-paren vs §5.3    single-paren) — resolved for the TUPLE form** (revised during the Phase 5 SQL    arc, after v7 surfaced its rationale). A rank-k compound axis is ONE index    slot whose domain is k-tuples, applied with one tuple value: `B((lat, lon))`,    wildcards inside the tuple `B((lat, _))`, short tuples pin a leading prefix,    rank-1 compounds take a bare scalar (1-tuples collapse). The flat form    `B(lat, lon)` is a type error with a steering diagnostic: under    `A(i, j) ≡ A(i)(j)` sugar it would claim two slots, and it turns ambiguous    once wildcards meet trailing dims (`B(a, _, t)`). v10 §5.3's flat examples    are the superseded side.
+3. **Compound-index application canonicalized (v10 §4.5 double-paren vs §5.3
+   single-paren) — resolved for the FLAT form.** A rank-k compound axis indexes
+   like `SymIdx`: k positional subscripts, `B(lat, lon)`, with trailing regular
+   dims appended (`B(lat, lon, t)`; omitting the trailing index yields the
+   trailing-row sub-view). v10 §5.3's flat examples are the surviving side.
+   (The tuple form `B((lat, lon))` was canonical during the Phase 5 SQL arc
+   because wildcards inside the tuple needed a joint domain; with partial
+   reads moved to `SparseIdx` — see 4 — that motivation is gone, and the tuple
+   spelling is now a type error steering there.)
 
-4. **`compound(dense, mask)` and the residual-compound representation documented**
-   (previously implementation-only). Partial indexing of a CompoundIdx yields a
-   FilteredIdx residual (`has_completion` is its executable form; BladeCompound).
+4. **Partial/wildcard indexing belongs to `SparseIdx<keys>`, not `CompoundIdx`.**
+   A compound's mask makes its valid-tuple table lex-sorted by construction, so
+   only leading-prefix pins were cheap there; a sparse key set is hashed and
+   unordered, so every wildcard position costs the same gather. `SparseIdx`
+   takes the tuple-with-wildcard form (`S((lat, _))`, short prefixes, residual
+   reads); the residual of a key set is a key set. `compound(dense, mask)` and
+   `sparse(values, keys)` are the two runtime builders. (`has_completion` is
+   the residual's executable form; BladeCompound.)
 
 5. **Trinity presentation updated (v10 §9.7).** Restated per BladeTrinityAsym: two
    generators (loop reification, dimensional currying) plus forced closure (arity

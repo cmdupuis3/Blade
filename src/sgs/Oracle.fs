@@ -9,7 +9,7 @@ namespace BladeSgs
 /// FROZEN FIELD CONFIG (shared by sgs/004 and sgs/005):
 ///   N = 4 per axis, L = 2pi, h = pi/2, periodic. Four cosine modes, each
 ///   with amplitude orthogonal to the DISCRETE central-difference wavevector
-///   kappa_j = sin(m_j h)/h — so the field is div-free with respect to the
+///   kappa_j = sin(m_j h)/h -- so the field is div-free with respect to the
 ///   grid operator (which is the operator the sgs arc differentiates with),
 ///   not merely analytically:
 ///     A: m=(1,0,0)  a=(0.0, 0.8,-0.5)  phi=0.3
@@ -29,7 +29,7 @@ module Oracle =
     let n = 4
     let h = System.Math.PI / 2.0
 
-    /// The three velocity components at grid point (i, j, k) — these
+    /// The three velocity components at grid point (i, j, k) -- these
     /// expressions MIRROR the Blade source of sgs/004 term for term.
     let u0 (x: float) (y: float) (z: float) : float =
         0.7 * cos (y + 1.1) + 0.6 * cos (x + 3.0 * y + 2.0) + 0.5 * cos (z + 0.7)
@@ -83,7 +83,7 @@ module Oracle =
 
         // ---- 004: probe values + divergence residuals (TOLERANCE pins:
         // the Blade side evaluates cos in the C++ runtime, which is not
-        // bit-identical to .NET libm — verdicts, not exact EXPECTs) ----
+        // bit-identical to .NET libm -- verdicts, not exact EXPECTs) ----
         let probes = [| (0, 0, 0); (1, 2, 3); (3, 1, 2) |]
         for (i, j, k) in probes do
             for c in 0 .. 2 do

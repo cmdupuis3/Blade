@@ -1,0 +1,56 @@
+// TEST: OrbIdx Wreath Read Riemann Signs
+// The MIXED-CHARACTER read: OrbIdx<[(2,-),(2,+)], 4>, antisymmetric within a
+// block and symmetric between blocks -- docs/plan-orbit-index-types.md §3's
+// sharpest case, and the one 206's all-'+' class cannot exercise. Two things
+// appear here that do not exist at '+':
+//
+//   * a mirrored read is SIGNED. The character is the PER-LEVEL PRODUCT
+//     (§5's fold), not a depth-1 NegateOnSwap: mirroring ONE block gives -1,
+//     mirroring BOTH gives (-1)(-1) = +1, and swapping the two blocks is the
+//     outer '+' level, so it contributes nothing. All three are pinned.
+//   * a ZERO SET. A '-' level kills any tuple with two equal sub-blocks, so
+//     R(i,i,k,l) reads 0 with NO stored cell behind it. That 0 is a VALUE, not
+//     an error, and it must stay distinguishable from an out-of-domain tuple --
+//     which is why the artifact layer splits `orb_read_checked`'s bool from the
+//     value and the wiring keeps the split (a digit outside [0,n) diagnoses; a
+//     zero-set tuple answers 0).
+//
+// The kernel is MULTIPLICATION on purpose. The class claims that mirroring one
+// block alone negates the value, so the tie is only sound for a kernel odd in
+// each argument separately: h(-p, q) = -h(p, q). `p * q` is; `p + q` is not.
+// (The additive version is now REFUSED outright by the tie gate — 201 pins
+// that refusal, and 220 the provably-even flavor. While only canonical cells
+// were reachable its pool was indistinguishable from a sound one, which is
+// why 201 could pass as a pool pin before this read path existed.)
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let B = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let h = lambda(p, q) where comm(p, q) -> p * q
+let R = method_for(B, B) <@> h |> compute
+// reynolds(g, Antisymmetric) gives B(i,j) = g(A[i],A[j]) - g(A[j],A[i])
+//   = (2A[i]+A[j]) - (2A[j]+A[i]) = A[i] - A[j], strict pairs only, 6 cells.
+// R(i,j,k,l) = B(i,j) * B(k,l). Hand-derived from THAT, with B(j,i) = -B(i,j)
+// and B(i,i) = 0:
+//   canonical   R(0,1,2,3) = (1-2)*(3-4) = (-1)(-1) =  1
+//   oneMirror   R(1,0,2,3) = ( 1  )*(-1) = -1          (chi = -1)
+//   bothMirror  R(1,0,3,2) = ( 1  )*( 1) =  1          (chi = (-1)(-1) = +1)
+//   blockSwap   R(2,3,0,1) = (-1)*(-1)   =  1          (outer '+', chi = +1)
+//   crossed     R(0,2,1,3) = (1-3)*(2-4) = (-2)(-2) =  4
+//   zeroFirst   R(0,0,1,2): block 1 has equal sub-blocks -> zero set -> 0
+//   zeroSecond  R(1,2,3,3): block 2 does                -> zero set -> 0
+let canonical = R(0, 1, 2, 3)
+let oneMirror = R(1, 0, 2, 3)
+let bothMirror = R(1, 0, 3, 2)
+let blockSwap = R(2, 3, 0, 1)
+let crossed = R(0, 2, 1, 3)
+let zeroFirst = R(0, 0, 1, 2)
+let zeroSecond = R(1, 2, 3, 3)
+// EXPECT: B = [-1, -2, -3, -1, -2, -1]
+// EXPECT: R = [1, 2, 3, 1, 2, 1, 4, 6, 2, 4, 2, 9, 3, 6, 3, 1, 2, 1, 4, 2, 1]
+// EXPECT: canonical = 1
+// EXPECT: oneMirror = -1
+// EXPECT: bothMirror = 1
+// EXPECT: blockSwap = 1
+// EXPECT: crossed = 4
+// EXPECT: zeroFirst = 0
+// EXPECT: zeroSecond = 0

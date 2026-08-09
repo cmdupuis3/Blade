@@ -1,6 +1,6 @@
 // Run deep-recursion-prone work on a thread with a large stack.
 //
-// The compile pipeline walks the AST/IR by mutual recursion — one native
+// The compile pipeline walks the AST/IR by mutual recursion -- one native
 // frame per nesting level (TypeCheck.inferExpr/inferBinOp, CodeGen.exprToCpp,
 // Lowering, IR validation, ...). The ppl jet elaborator (dist_jet/dist_map)
 // generates arithmetic chains ~150+ operators deep, and those blow the default
@@ -19,9 +19,9 @@ open System.Threading
 open System.Runtime.ExceptionServices
 
 /// Reserved stack for compile-pipeline worker threads: 64 MB, ~60x the
-/// observed worst case (≈316 frames / ~1 MB for the deepest elaborated chain).
-/// This is a RESERVATION only — pages commit on demand as recursion touches
-/// them — so the cost is nil until a program actually recurses that deep.
+/// observed worst case (~=316 frames / ~1 MB for the deepest elaborated chain).
+/// This is a RESERVATION only -- pages commit on demand as recursion touches
+/// them -- so the cost is nil until a program actually recurses that deep.
 let largeStackBytes = 64 * 1024 * 1024
 
 /// Run `work` on a dedicated thread with a large stack and return its result.

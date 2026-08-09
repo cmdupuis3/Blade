@@ -23,7 +23,7 @@ module TestHarness =
         check (sprintf "%s (expected %.12g, got %.12g, tol %g)" name expected actual tol)
               (abs (expected - actual) <= tol)
 
-    /// Tolerance = max(relTol * |expected|, absTol) — for statistical checks.
+    /// Tolerance = max(relTol * |expected|, absTol) -- for statistical checks.
     let checkCloseRel (name: string) (relTol: float) (absTol: float) (expected: float) (actual: float) =
         let tol = max (relTol * abs expected) absTol
         checkClose name tol expected actual

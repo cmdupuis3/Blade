@@ -1,0 +1,1 @@
+{"_ARRAY_DIMENSIONS": ["dim0"], "blade": {"spec_version": 2, "layout": "packed", "order": "ascending-lex", "index_types": [{"kind": "orbit", "levels": [[2, "+"], [2, "+"]], "extent": 3}], "decomposition": {"scheme": "flat-ranges"}}}

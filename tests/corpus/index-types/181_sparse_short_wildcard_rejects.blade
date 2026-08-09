@@ -1,0 +1,8 @@
+// TEST: Sparse Short Wildcard Tuple (rejects)
+// ERROR: BL4003
+// Wildcard sparse indexing must use a FULL-arity tuple (SparseWildcardArity):
+// a rank-3 sparse axis needs all 3 coordinates with `_` at the free axes.
+let static K = [(1, 7, 0), (0, 7, 2)]
+let S = method_for(range<SparseIdx<K>>) <@> lambda(i, j, k) -> i * 100 + j * 10 + k |> compute
+let r = S((1, _))
+// EXPECT: typecheck failure — 2-tuple with wildcard into a rank-3 sparse axis.

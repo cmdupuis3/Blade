@@ -1,0 +1,14 @@
+// TEST: Antisym Unknown Parity Kernel (rejects)
+// ERROR: BL4015
+// The other half of 164: not every refused kernel is provably even. exp is not
+// sign-linear at all (exp(-x) is neither exp(x) nor -exp(x)), so signParityOf
+// answers SUnknown — and an UNKNOWN parity must refuse for the same reason a
+// known-even one does. A lattice that only refused the provably-even case
+// would let every unanalyzable kernel through, which is the whole population
+// the check exists for.
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> x - y
+let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let out = method_for(C) <@> lambda(v) -> exp(v) |> compute
+// EXPECT: typecheck failure — an unprovable sign parity cannot certify that
+// the antisymmetric storage class survives the map.

@@ -1,4 +1,4 @@
-/// The Cartesian<->irreps bridge constants (rank-2, 3-D, v1) — the single
+/// The Cartesian<->irreps bridge constants (rank-2, 3-D, v1) -- the single
 /// compiled source of truth for the rep-INTRODUCTION ops
 /// `ml.tensor_to_irreps` / `ml.sym_to_irreps` / `ml.irreps_to_sym` and for
 /// the sgs field formers that share the pack order.
@@ -8,12 +8,12 @@
 ///  - 3x3 Cartesian tensors flatten row-major: g[3i+j] = G_ij (for a
 ///    velocity gradient, G_ij = d_j u_i).
 ///  - Symmetric pack order: [(0,0); (0,1); (0,2); (1,1); (1,2); (2,2)]
-///    (upper triangle, row-major) — `packPairs` below IS the definition.
+///    (upper triangle, row-major) -- `packPairs` below IS the definition.
 ///  - gradSpec = [(0,e,1); (1,e,1); (2,e,1)] (dim 9): trace, then the
 ///    AXIAL pseudovector (vorticity) in Y1 component order (y, z, x) with
 ///    a_x = g21 - g12, then the symmetric-traceless part in Y2 order
 ///    (xy, yz, 3z^2-r^2, xz, x^2-y^2). A rank-2 Cartesian tensor is
-///    odd (x) odd = parity-EVEN throughout — the l=1 block does NOT flip
+///    odd (x) odd = parity-EVEN throughout -- the l=1 block does NOT flip
 ///    under improper elements (the dump-cartesian improper certificate
 ///    detects the wrong (1, odd) assignment at O(1)).
 ///  - tauSpec = [(0,e,1); (2,e,1)] (dim 6) for symmetric tensors.

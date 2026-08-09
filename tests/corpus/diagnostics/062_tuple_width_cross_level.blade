@@ -1,0 +1,24 @@
+// TEST: Diag Tuple Width Cannot Recount Across Nesting (diag)
+// ERROR: BL3002
+// ERROR-CONTAINS: cannot re-count across nesting
+// ============================================================================
+// THE ONE THING 6c GIVES UP, pinned so the trade is visible
+// (docs/plan-tuples-vs-arg-packs.md 6c: "Lost: only the cross-level recount").
+//
+// `((A, B), (C, D))` is TWO nodes, each of top-level width 2. A `Tuple<4>`
+// parameter wants either one 4-wide tuple node or four plain nodes, and there
+// is neither. Under 6b's deep-flatten this was four leaves and `Tuple<4>`
+// swallowed them; that is the same flattening that made `(A, (B,C))` silently
+// equal `(A, B, C)`, so it could not be kept selectively.
+//
+// The message names the escape and it works: write the operands flat, i.e.
+// `(A, B, C, D)`, where four plain nodes regroup into the `Tuple<4>`. The other
+// escape -- match the structure instead of recounting it -- is
+// `lambda(p: Tuple<2>, q: Tuple<2>)`, pinned running in tuples/012.
+// ============================================================================
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let B: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let C: Array<Float64 like Idx<2>> = [5.0, 6.0]
+let D: Array<Float64 like Idx<2>> = [7.0, 8.0]
+let g = object_for(lambda(r: Tuple<4>) -> r[0] + r[1] + r[2] + r[3])
+          <@> ((A, B), (C, D)) |> compute

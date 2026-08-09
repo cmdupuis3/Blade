@@ -1,0 +1,19 @@
+// TEST: Flat Elementwise Sym Compact
+// Phase 3 of docs/plan-cpp-perf-exploitation.md over COMPACT storage. An
+// elementwise map of a symmetric (SymIdx<2,4>) array inherits the class
+// (BL4015), so the map's nest walks the same inclusive triangle the pool
+// stores — C(4+1,2) = 10 canonical cells, contiguous in DFS order. The flat
+// loop over those 10 cells therefore visits exactly the stored cells, with no
+// coordinate arithmetic at all (`// flat elementwise: 10 cells [sym<2,4>]`).
+// The producer nest (reynolds) is NOT flattened: a Reynolds body reads
+// permuted coordinates, which is the opposite of index-free.
+let A = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let S = L <@> reynolds(g) |> compute
+let T = S * 3.0
+// S = 3(x+y) over canonical (i<=j) pairs of [1,2,3,4]:
+//   (0,0)=6 (0,1)=9 (0,2)=12 (0,3)=15 (1,1)=12 (1,2)=15 (1,3)=18
+//   (2,2)=18 (2,3)=21 (3,3)=24
+// EXPECT: S = [6, 9, 12, 15, 12, 15, 18, 18, 21, 24]
+// EXPECT: T = [18, 27, 36, 45, 36, 45, 54, 54, 63, 72]

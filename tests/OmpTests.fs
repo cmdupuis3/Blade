@@ -34,10 +34,41 @@ open Blade.Tests.Expect
 // These assert on the generated C++ STRING rather than on runtime behaviour, so
 // they need no toolchain and run in the default suite.
 
+/// Pin one environment variable for the duration of a scope, restoring the
+/// prior value on exit. Same use-guard idiom as `DiffOracle.pinFpContractOff`
+/// and `LinAlgTests.pinEnv`, and it works for the same reason: every gate it
+/// targets is read PER CALL, so a mid-process set takes effect immediately. A
+/// `null` value UNSETS the variable.
+let private pinEnv (name: string) (value: string) =
+    let prior = System.Environment.GetEnvironmentVariable(name)
+    System.Environment.SetEnvironmentVariable(name, value)
+    { new System.IDisposable with
+        member _.Dispose() = System.Environment.SetEnvironmentVariable(name, prior) }
+
+/// Pin `BLADE_OMP_THREADS` UNSET for a whole block.
+///
+/// WHY EVERY OMP BLOCK NEEDS THIS. `BLADE_OMP_THREADS=1|0|off` is a BUILD knob
+/// (CodeGen.ompThreadEmissionEnabled) that suppresses every thread-level OpenMP
+/// construct, and it is meant to be set GLOBALLY on a deployment box. A user
+/// with it set in their environment would otherwise turn these suites VACUOUS
+/// rather than red: `blade test omp-pragma` would find no pragmas to assert on,
+/// `omp-coverage` would find no teams to observe, and both would report their
+/// own emptiness as success. Pinning it unset makes every block below measure
+/// the DEFAULT emission whatever the ambient environment says; the arms that
+/// deliberately exercise the knob pin it back on for their own scope.
+let private pinOmpThreadsUnset () = pinEnv "BLADE_OMP_THREADS" null
+
 /// Lower + generate, returning the C++ source. No compiler involved.
+///
+/// `lowerCaptured`, not `lower`: these cases assert EMISSION SHAPE, and several
+/// of their kernels (a commutative body applied to one array twice) legitimately
+/// earn a BL4010 storage suggestion. `lower` would print it straight to stderr
+/// from inside the pipeline, un-attributed, in the middle of a run whose tests
+/// all pass — the same leak the corpus lanes now capture. There is no pin
+/// mechanism for these hand-written sources, so the warnings are simply dropped.
 let private cppOf (testName: string) (src: string) : Result<string, string> =
     try
-        match lower src with
+        match fst (lowerCaptured src) with
         | Error e -> Error (sprintf "lower: %s" e)
         | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir testName))
     with ex -> Error (sprintf "codegen raised: %s" ex.Message)
@@ -117,11 +148,268 @@ let private ompDepthCases : (string * string * string) list =
        "let M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
        "let m = object_for(k) <@> (M) |> compute\n",
        "#pragma omp parallel for")
+      // Depth 2 on the same nest threads BOTH levels. Since Phase 3
+      // (docs/plan-cpp-perf-exploitation.md) this nest is index-free
+      // elementwise over one contiguous pool, so it is emitted as a single
+      // flat loop over all cells and the pragma is `parallel for simd` rather
+      // than `collapse(2)` over the two headers. Same licence, same threaded
+      // dimensions — collapse(2) fuses exactly the iteration space the flat
+      // loop already IS, so the fused form subsumes it (and adds SIMD, which
+      // the flat write pattern licenses). The pair this case exists to
+      // separate is unaffected: depth 1 above still threads one level only.
       ("one_arg_two_levels_depth_2",
        "function k(a: Float64) where omp(a: 2) = a * 2.0\n" +
        "let M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
        "let m = object_for(k) <@> (M) |> compute\n",
-       "#pragma omp parallel for collapse(2)") ]
+       "#pragma omp parallel for simd")
+      // TUPLE PARAMETER (docs/plan-tuples-vs-arg-packs.md 6c). A `Tuple<k>`
+      // parameter is ONE schema node whose levels are its k rows in order, and
+      // the apply seam realizes it by replacing it with k row params -- which
+      // deletes the name the licence resolves by. These two cases are the pin
+      // that the licence survives that expansion AND keeps its depth meaning:
+      // one level licensed of a two-row node is a plain `parallel for`, both
+      // levels licensed is `collapse(2)`. Before the split, BOTH of these were
+      // a hard BL3999 refusal (any where-clause + any tuple param).
+      ("tuple_param_depth_1_no_collapse",
+       "let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n" +
+       "let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]\n" +
+       "let f = lambda(p: Tuple<2>) where omp(p: 1) -> p[0] * p[1]\n" +
+       "let m = object_for(f) <@> (A, B) |> compute\n",
+       "#pragma omp parallel for")
+      ("tuple_param_depth_2_collapses",
+       "let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n" +
+       "let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]\n" +
+       "let f = lambda(p: Tuple<2>) where omp(p: 2) -> p[0] * p[1]\n" +
+       "let m = object_for(f) <@> (A, B) |> compute\n",
+       "#pragma omp parallel for collapse(2)")
+      // The same licence reached through the NAMED-function eta wrapper, which
+      // renames the params ONCE (to `__k<uid>_<i>`) before the tuple expansion
+      // renames them again. The two remappings have to compose.
+      ("tuple_param_named_function_depth_1",
+       "function f(p: Tuple<2>) where omp(p: 1) = p[0] * p[1]\n" +
+       "let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n" +
+       "let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]\n" +
+       "let m = object_for(f) <@> (A, B) |> compute\n",
+       "#pragma omp parallel for") ]
+
+/// Comm-licensed parallel REDUCTIONS (Phase 2 of
+/// docs/plan-cpp-perf-exploitation.md). `where ... omp` on a FOLD kernel opts
+/// the reduction into a parallel fold; which SHAPE it gets is decided by the
+/// licence, and the two shapes are textually unmistakable:
+///
+///   Path A — builtin `+`/`*` body: `#pragma omp parallel for simd
+///     reduction(<op>:acc)` over the flat sweep, no runtime API at all.
+///   Path B — any other licensed kernel (and every reduce over a deferred
+///     computation): an explicit team with per-thread partials, which is the
+///     only shape that calls `omp_get_max_threads` / `omp_get_thread_num`.
+///
+/// Asserting `mustNotContain` matters as much as `mustContain` here: the two
+/// paths differ in reassociation guarantees (Path A's combine order is
+/// unspecified; Path B's is fixed by chunk index), so a kernel silently
+/// switching paths changes a property tests downstream rely on.
+let private ompReduceCases : (string * string * string list * string list) list =
+    // (name, source, mustContain, mustNotContain)
+    let arr = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n"
+    [ // Path A: builtin body, no comm needed — `+` carries commutativity and
+      // associativity outright.
+      ("reduce_builtin_lambda_omp",
+       arr + "let s = reduce(A, lambda(a, b) where omp -> a + b)\n",
+       ["#pragma omp parallel for simd reduction(+:s)"],
+       ["omp_get_max_threads"])
+      ("reduce_builtin_product_omp",
+       arr + "let s = reduce(A, lambda(a, b) where omp -> a * b)\n",
+       ["#pragma omp parallel for simd reduction(*:s)"], [])
+      // Negative control: parallelism is OPT-IN. The identical program minus
+      // the clause must emit the old serial accumulator loop.
+      ("reduce_builtin_lambda_no_clause",
+       arr + "let s = reduce(A, lambda(a, b) -> a + b)\n",
+       ["// reduce: accumulator loop, eager"], ["#pragma omp"])
+      // Negative control: an operator section cannot carry a where-clause, so
+      // the most common fold spelling of all stays serial.
+      ("reduce_section_no_clause",
+       arr + "let s = reduce(A, (+))\n",
+       ["// reduce: accumulator loop, eager"], ["#pragma omp"])
+      // Path B via a NAMED function — the eta-prone spelling, and the one whose
+      // body is invisible at the reduce seam (TypeEnv.FuncFoldBuiltin exists for
+      // exactly this). Body is deliberately not a bare builtin op.
+      ("reduce_named_comm_function",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
+       "let s = reduce(A, myAdd)\n",
+       ["#pragma omp parallel num_threads("; "omp_get_thread_num()"],
+       ["#pragma omp parallel for"])
+      // Path B via an inline comm lambda.
+      ("reduce_inline_comm_lambda",
+       arr + "let s = reduce(A, lambda(a, b) where comm(a, b), omp -> (a + b) * 1.0)\n",
+       ["#pragma omp parallel num_threads("], ["#pragma omp parallel for"])
+      // Path B with an explicit init: the seed stays in the shared accumulator
+      // and enters the fixed-order combine first, so nothing about the chunk
+      // shape changes.
+      ("reduce_named_comm_with_init",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
+       "let s = reduce(A, myAdd, 100.0)\n",
+       ["#pragma omp parallel num_threads("], [])
+      // Path B over a DEFERRED computation: no intermediate array is
+      // materialized, and the OUTERMOST level is the one chunked.
+      ("reduce_over_computation_chunked",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
+       "let B = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n" +
+       "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
+       ["comm-licensed parallel fold, outer level chunked"
+        "#pragma omp parallel num_threads("
+        "for (size_t __i0 = __rlo; __i0 < __rhi; __i0++)"], [])
+      // Same computation, clause dropped: back to the materialize-then-fold
+      // desugar, and no parallel region anywhere.
+      ("reduce_over_computation_no_clause",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n" + arr +
+       "let B = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n" +
+       "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
+       [], ["#pragma omp"]) ]
+
+/// The BL-coded refusal for an UNLICENSED `omp` on a fold kernel. Pinned in the
+/// diagnostics corpus too (049_fold_omp_needs_license.blade); repeated here so
+/// the codegen-side block that owns the two emission paths also owns the
+/// statement that there is no third, silent one.
+let private ompReduceDiagCases : (string * string) list =
+    // (name, source) — each must fail to lower, with BL4016 in the message.
+    let arr = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n"
+    [ ("omp_without_comm_antisym_body",
+       arr + "let s = reduce(A, lambda(a, b) where omp -> a - b)\n")
+      ("omp_without_comm_nonbuiltin_body",
+       arr + "let s = reduce(A, lambda(a, b) where omp -> (a + b) * 2.0)\n")
+      ("omp_named_function_without_comm",
+       "function halfSum(a: Float64, b: Float64) where omp = (a + b) * 0.5\n" + arr +
+       "let s = reduce(A, halfSum)\n") ]
+
+/// Emission SHAPE pins for the three decisions that are invisible in values and
+/// unreachable from the pragma-text cases above: how the native (BLAS-gate-off)
+/// gram/matmul arms are threaded and ordered, whether the loop nest annotates a
+/// header it cannot vectorize, and which DIRECTION a threaded triangular outer
+/// level runs in. All three are pure codegen assertions -- no toolchain, no
+/// threads -- for the same reason the cases above are: the emitted text is the
+/// artifact, and a value test cannot see any of it.
+///
+/// `mustNotContain` carries as much weight as `mustContain` in every case here:
+/// each is an OLD emission whose disappearance is the actual claim (the strided
+/// `B[__mt][__mj]` read, the register accumulator, the per-iteration operand
+/// subscripts, an `ivdep` on a loop containing a loop).
+let private emissionShapeCases : (string * string * string list * string list) list =
+    // (name, source, mustContain, mustNotContain)
+    //
+    // Non-power-of-two extents throughout (3x5, 5x7, 4x5): a bound rendered
+    // from the wrong axis is invisible at square or equal extents.
+    let matmulSrc =
+        "import math as m\n" +
+        "type M35 = Array<Float64 like Idx<3>, Idx<5>>\n" +
+        "type M57 = Array<Float64 like Idx<5>, Idx<7>>\n" +
+        "let A: M35 = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]\n" +
+        "let B: M57 = [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0], [15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0], [22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0], [29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0]]\n" +
+        "let P = m.matmul(A, B)\n"
+    let gramSrc =
+        "type M35 = Array<Float64 like Idx<3>, Idx<5>>\n" +
+        "type M45 = Array<Float64 like Idx<4>, Idx<5>>\n" +
+        "let A: M35 = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]\n" +
+        "let C: M45 = [[2.0, 3.0, 5.0, 7.0, 11.0], [13.0, 17.0, 19.0, 23.0, 29.0], [31.0, 37.0, 41.0, 43.0, 47.0], [53.0, 59.0, 61.0, 67.0, 71.0]]\n" +
+        "let G = gram(A, A)\n" +
+        "let H = gram(A, C)\n"
+    // Rank-2 nest whose kernel body is a `prodsum` over the peeled row fibers.
+    // The nest sees TWO levels; the `__pt` loop lives inside the body's IIFE and
+    // is invisible to it -- which is exactly how `ivdep` came to sit on a header
+    // whose body is a loop.
+    let fiber = "Array<Float64 like Idx<5>>"
+    let rowsDecl = "let R = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]\n"
+    let prodsumSrc =
+        rowsDecl +
+        sprintf "let Cv = method_for(R, R) <@> lambda(a: %s, b: %s) -> prodsum(a, b) |> compute\n" fiber fiber
+    let loopFreeSrc =
+        rowsDecl +
+        sprintf "let D = method_for(R, R) <@> lambda(a: %s, b: %s) -> a(0) * b(0) |> compute\n" fiber fiber
+    // Rank-3 triangular comm nest with an omp licence: the `schedule(dynamic)`
+    // outer level. Extent 13 -- prime, and not 3, so a bound that lost a
+    // dependency subtraction is visible.
+    let triSrc =
+        "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\n" +
+        "let L = method_for(A, A, A)\n" +
+        "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y + z\n" +
+        "let R = L <@> k |> compute\n"
+    [ // ---- matmul: i-t-j, in-place row accumulation, threaded outer ----------
+      ("matmul_native_arm_reordered_i_t_j", matmulSrc,
+       [ // outer level threaded (via the portable macro -- see
+         // cpp/blade_portability.hpp for why this is not a `#pragma` line:
+         // these emitters' output can be space-joined into a one-line IIFE).
+         // Spelled with the header it governs so the _DYNAMIC variant cannot
+         // satisfy it by prefix.
+         "BLADE_OMP_PARALLEL_FOR\nfor (size_t __mi = 0; __mi < 3; __mi++) {"
+         // the accumulator is the output row itself, hoisted and restrict-qualified
+         "double* BLADE_RESTRICT __mcrow = &P[__mi][0];"
+         // ... which therefore has to be zeroed first, at the literal n
+         "for (size_t __mj = 0; __mj < 7; __mj++) { __mcrow[__mj] = double(); }"
+         // t OUTSIDE j: this ordering IS the change. Literal `5` = A's trailing
+         // extent, baked from A's own index record rather than read at runtime.
+         "for (size_t __mt = 0; __mt < 5; __mt++) {"
+         "const double __ma = A[__mi][__mt];"
+         "const double* BLADE_RESTRICT __mbrow = &B[__mt][0];"
+         // unit-stride inner loop, and ivdep is TRUE here (fresh output pool)
+         "BLADE_IVDEP"
+         "__mcrow[__mj] += __ma * __mbrow[__mj];" ],
+       [ // the strided column walk that made the old order slow
+         "B[__mt][__mj]"
+         // the register accumulator the old order needed
+         "__macc"
+         // runtime extent reads for bounds the operand types already pin
+         "__mt < A.extents[1]"
+         "__mj < B.extents[1]" ])
+      // ---- gram: both arms threaded, rows hoisted, order UNCHANGED -----------
+      ("gram_native_arms_threaded_and_hoisted", gramSrc,
+       [ // same-array arm is triangular (inner span `3 - __gi`), so dynamic
+         "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
+         "for (size_t __gjr = 0; __gjr < 3 - __gi; __gjr++) {"
+         // distinct arm is rectangular, so the static schedule
+         "BLADE_OMP_PARALLEL_FOR\nfor (size_t __gi = 0; __gi < 3; __gi++) {"
+         // both operand rows hoisted out of the contraction loop
+         "const double* BLADE_RESTRICT __growi = &A[__gi][0];"
+         "const double* BLADE_RESTRICT __growj = &A[__gj][0];"
+         "const double* BLADE_RESTRICT __growj = &C[__gj][0];"
+         // contraction reads go through the hoists; `k` is still innermost and
+         // still bounded by the LITERAL trailing extent
+         "for (size_t __gk = 0; __gk < 5; __gk++) {"
+         "__gacc += __growi[__gk] * nested_array_utilities::conj_scalar(__growj[__gk]);" ],
+       [ // the per-iteration double subscript the hoists replaced
+         "A[__gi][__gk]"
+         "C[__gj][__gk]"
+         // gram's inner loop is a REDUCTION into `__gacc`: a loop-carried
+         // dependence, so `ivdep` there would be a false claim AND inert.
+         // (matmul's inner loop is not a reduction, which is why it gets one.)
+         "BLADE_IVDEP\nfor (size_t __gk" ])
+      // ---- ivdep is declined, loudly, when the body hides a loop -------------
+      ("ivdep_declined_on_prodsum_body", prodsumSrc,
+       [ "// [ivdep] declined: kernel body contains an inner loop" ],
+       [ "BLADE_IVDEP" ])
+      // Control: identical nest shape, loop-free body. Without this the fix
+      // could degenerate into "never emit ivdep", which is not the claim.
+      ("ivdep_kept_on_loop_free_body", loopFreeSrc,
+       [ "BLADE_IVDEP" ],
+       [ "// [ivdep] declined" ])
+      // ---- the threaded triangular outer level runs ASCENDING ----------------
+      // Pinned as a DECISION, not as an accident of never having considered it.
+      // A performance audit proposed reversing this level to descending, on the
+      // theory that `schedule(dynamic)` hands out chunks in iteration order so
+      // descending would be largest-chunk-first (LPT). It is backwards for this
+      // shape: `genForLoopHeader` SUBTRACTS the outer index from a triangular
+      // level's bound (below: `13 - __i0`, `13 - __i1 - __i0`), so work per
+      // outer iteration DECREASES in `__i0` and ascending order is already
+      // largest-first. Reversing would end the schedule on the ~C(13,2)-cell
+      // row instead of the 1-cell row -- turning the good makespan bound into
+      // the bad one. See the derivation at CodeGen.genNestPragma.
+      ("triangular_outer_level_stays_ascending", triSrc,
+       [ "#pragma omp parallel for schedule(dynamic)"
+         "for (size_t __i0 = 0; __i0 < 13; __i0++) {"
+         // the bounds that make ascending the largest-first order
+         "for (size_t __i1 = 0; __i1 < 13 - __i0; __i1++) {"
+         "for (size_t __i2 = 0; __i2 < 13 - __i1 - __i0; __i2++) {" ],
+       [ // the two descending spellings, neither of which is an OpenMP
+         // canonical loop form anyway
+         "__i0-- > 0"
+         "__i0 = 13;" ]) ]
 
 /// Which loop index the pragma precedes, for the inner-licence case. Presence
 /// alone cannot distinguish "parallelized the licensed inner level" from
@@ -134,10 +422,138 @@ let private ompPlacementCases : (string * string * string) list =
     [ ("outer_licence_pragma_on_i0", kern "omp(a: 1)" + arrays + apply, "__i0")
       ("inner_licence_pragma_on_i1", kern "omp(b: 1)" + arrays + apply, "__i1") ]
 
+// ============================================================================
+// BLADE_OMP_THREADS -- the serial-emission BUILD knob
+// ============================================================================
+//
+// The LICENCE in source ("this kernel is safe to thread") and the BUILD KNOB
+// ("this deployment spends licensed parallelism") are separate decisions; the
+// knob turns the second off without touching the first. See
+// `CodeGen.ompThreadEmissionEnabled` for the measurement that motivated it (a
+// pragma'd row map at OMP_NUM_THREADS=1 runs 1.86x SLOWER than the same code
+// emitted without the pragma -- GCC's outlining is a compile-time cost no
+// runtime thread count recovers).
+//
+// Every case below runs the SAME sources the blocks above run, so a licence
+// that stopped reaching codegen would fail there first and these would not
+// silently take its place.
+
+/// What each formerly-threaded site emits with the knob on. `mustNotContain`
+/// carries the actual claim in every case: the point of the knob is the ABSENCE
+/// of team-creating constructs, and `omp_get_*` absence is what says the
+/// program acquired no OpenMP runtime dependency either.
+let private ompThreadsKnobCases : (string * string * string list * string list) list =
+    // (name, source, mustContain, mustNotContain)
+    // Non-power-of-two extents throughout, per the repo's stride discipline.
+    let arrays = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\nlet B = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]\n"
+    let arr = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    let marker = "// [omp] requested but emitted serial: BLADE_OMP_THREADS=1"
+    [ // ---- loop nests: genNestPragma's three forms all go away --------------
+      ("knob_licensed_map_emits_no_team",
+       "function cov(a: Float64, b: Float64) where omp(a: 1) = a * b\n" + arrays +
+       "let m = object_for(cov) <@> (A, B) |> compute\n",
+       [ marker; "for (size_t __i0 = 0; __i0 < 7; __i0++) {" ],
+       [ "#pragma omp parallel"; "omp_get_" ])
+      ("knob_collapse_form_suppressed",
+       "function k(a: Float64, b: Float64) where omp(a: 1, b: 1) = a * b + 1.0\n" +
+       "let P = [1.5, 2.5, 3.5, 4.5, 5.5]\nlet Q = [0.25, 0.5, 0.75, 1.25]\n" +
+       "let M = object_for(k) <@> (P, Q) |> compute\n",
+       [ marker ], [ "#pragma omp parallel"; "collapse("; "omp_get_" ])
+      // The triangular arm: `schedule(dynamic)` is a `parallel for` clause, so
+      // it goes with the construct rather than surviving on a serial loop.
+      ("knob_triangular_dynamic_suppressed",
+       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\n" +
+       "let L = method_for(A, A, A)\n" +
+       "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y + z\n" +
+       "let R = L <@> k |> compute\n",
+       [ marker; "for (size_t __i1 = 0; __i1 < 13 - __i0; __i1++) {" ],
+       [ "#pragma omp parallel"; "schedule(dynamic)"; "omp_get_" ])
+      // ---- the flat elementwise fast path KEEPS ITS VECTORIZATION ----------
+      // `parallel for simd` is two constructs; only the first opens a team.
+      // Dropping to `BLADE_IVDEP` here would throw away a vectorization the
+      // knob was never about, so this case is the one that pins the split.
+      ("knob_flat_elementwise_keeps_omp_simd",
+       "function k(a: Float64) where omp(a: 2) = a * 2.0\n" +
+       "let M = [[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]]\n" +
+       "let m = object_for(k) <@> (M) |> compute\n",
+       [ marker; "#pragma omp simd" ],
+       [ "#pragma omp parallel"; "omp_get_" ])
+      // ---- reduce Path A: same split, through the portable macro -----------
+      ("knob_reduce_path_a_keeps_simd_reduction",
+       arr + "let s = reduce(A, lambda(a, b) where omp -> a + b)\n",
+       [ marker; "BLADE_OMP_SIMD_REDUCTION(+:s)" ],
+       [ "#pragma omp parallel"; "omp_get_" ])
+      ("knob_reduce_path_a_product",
+       arr + "let s = reduce(A, lambda(a, b) where omp -> a * b)\n",
+       [ "BLADE_OMP_SIMD_REDUCTION(*:s)" ],
+       [ "#pragma omp parallel"; "omp_get_" ])
+      // ---- reduce Path B: nothing to keep, so the serial arm ---------------
+      // Path B IS the threading (an explicit team with per-thread partials), so
+      // unlike Path A there is no vector half to preserve. The kernel lands on
+      // the arm an UNLICENSED kernel takes, and the marker is what keeps the
+      // dropped clause from being silent there.
+      ("knob_reduce_path_b_named_comm_serial",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
+       "let s = reduce(A, myAdd)\n",
+       [ marker; "// reduce: accumulator loop, eager" ],
+       [ "#pragma omp"; "omp_get_"; "__rpart_s" ])
+      ("knob_reduce_over_computation_serial",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
+       "let B = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n" +
+       "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
+       [ marker ],
+       [ "#pragma omp"; "omp_get_"; "outer level chunked" ])
+      // ---- the intrinsic emitters (gram / matmul) --------------------------
+      // These emit the portable MACRO, not a `#pragma` line, because their
+      // output can be space-joined into a one-line IIFE -- which is also why
+      // their suppression marker is a BLOCK comment. Both facts are pinned.
+      ("knob_native_matmul_gram_macros_suppressed",
+       "import math as m\n" +
+       "type M35 = Array<Float64 like Idx<3>, Idx<5>>\n" +
+       "type M57 = Array<Float64 like Idx<5>, Idx<7>>\n" +
+       "let A: M35 = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]\n" +
+       "let B: M57 = [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0], [15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0], [22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0], [29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0]]\n" +
+       "let P = m.matmul(A, B)\nlet G = gram(A, A)\n",
+       [ "/* [omp] thread pragma suppressed: BLADE_OMP_THREADS=1"
+         // the loops themselves are untouched -- only the macro line moved
+         "for (size_t __mi = 0; __mi < 3; __mi++) {"
+         "for (size_t __gi = 0; __gi < 3; __gi++) {"
+         // ivdep is a VECTORIZATION assertion, not a thread construct: it stays
+         "BLADE_IVDEP" ],
+       [ "BLADE_OMP_PARALLEL_FOR"; "#pragma omp parallel"; "omp_get_" ]) ]
+
+/// The strongest statement the knob makes: with it on, a LICENSED program emits
+/// the SAME C++ as the identical program with the clause deleted. "Serial
+/// emission" is not "some other serial shape" -- `pragmaLevel` goes to None, so
+/// `ompLastLevel` goes to -1 and `BLADE_IVDEP` lands exactly where the
+/// unlicensed nest puts it, and every downstream decision follows.
+///
+/// Compared modulo the `[omp]` census markers, which the licensed program emits
+/// BY DESIGN (a dropped clause must not be silent) and the unlicensed one has
+/// nothing to report.
+let private ompThreadsEquivalenceCases : (string * string * string) list =
+    // (name, licensed source, the same program with the clause deleted)
+    let arrays = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\nlet B = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]\n"
+    let tri = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\nlet L = method_for(A, A, A)\n"
+    [ ("knob_equals_unlicensed_map",
+       "function cov(a: Float64, b: Float64) where omp(a: 1) = a * b\n" + arrays +
+       "let m = object_for(cov) <@> (A, B) |> compute\n",
+       "function cov(a: Float64, b: Float64) = a * b\n" + arrays +
+       "let m = object_for(cov) <@> (A, B) |> compute\n")
+      ("knob_equals_unlicensed_triangular",
+       tri + "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y + z\n" +
+       "let R = L <@> k |> compute\n",
+       tri + "let k = lambda(x, y, z) where comm(x, y, z) -> x * y + z\n" +
+       "let R = L <@> k |> compute\n") ]
+
 /// Assert that `omp` reaches codegen as a pragma for every spelling of a
 /// kernel, and reaches it for NO spelling that omitted the clause.
 let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
     printHeader "OpenMP Pragma Emission"
+    // Everything in this block asserts the DEFAULT emission, so the serial
+    // build knob is pinned unset for it -- see `pinOmpThreadsUnset`. The
+    // knob's own arms at the bottom re-pin it ON for their own scope.
+    use _ompThreadsPin = pinOmpThreadsUnset ()
     let mutable passed = 0
     let mutable failed = 0
     let mutable failedNames = []
@@ -213,6 +629,128 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
                 resultLine Pass name (sprintf "pragma governs %s" idx)
             | Some idx -> fail name (sprintf "pragma governs %s, expected %s" idx expectedIdx)
             | None -> fail name "no pragma found"
+    // ---- emission SHAPE: native gram/matmul arms, ivdep, loop direction ----
+    // Compared against the source with every line's LEADING INDENT stripped:
+    // these assertions are about which statements are emitted and in what
+    // order, never about how deep the emitter happened to indent them, and a
+    // multi-line pattern would otherwise have to restate the nesting depth of
+    // whatever construct the form was materialized inside.
+    for (name, src, mustContain, mustNotContain) in emissionShapeCases do
+        match cppOf name src with
+        | Error e -> fail name e
+        | Ok cpp ->
+            let flat =
+                cpp.Split('\n') |> Array.map (fun l -> l.TrimStart()) |> String.concat "\n"
+            let missing = mustContain |> List.filter (fun s -> not (flat.Contains s))
+            let present = mustNotContain |> List.filter flat.Contains
+            if not missing.IsEmpty then
+                fail name (sprintf "generated C++ lacks: %s"
+                               (String.concat " | " (missing |> List.map (fun s -> s.Replace("\n", " \\n ")))))
+            elif not present.IsEmpty then
+                fail name (sprintf "generated C++ still contains: %s"
+                               (String.concat " | " (present |> List.map (fun s -> s.Replace("\n", " \\n ")))))
+            else
+                passed <- passed + 1
+                resultLine Pass name "emission shape as expected"
+    // ---- comm-licensed parallel REDUCTIONS: which emission path fired ----
+    for (name, src, mustContain, mustNotContain) in ompReduceCases do
+        match cppOf name src with
+        | Error e -> fail name e
+        | Ok cpp ->
+            let missing = mustContain |> List.filter (fun s -> not (cpp.Contains s))
+            let present = mustNotContain |> List.filter cpp.Contains
+            // A licensed fold calls the OpenMP runtime API, which needs the
+            // header — `#pragma omp` alone does not. Asserted as "included, not
+            // commented out", the shape genIncludes can regress to.
+            let needsHeader = mustContain |> List.exists (fun s -> s.Contains "omp_get_")
+            let headerOk =
+                not needsHeader
+                || (cpp.Split('\n')
+                    |> Array.exists (fun l -> l.Trim().StartsWith "#include <omp.h>"))
+            if not missing.IsEmpty then
+                fail name (sprintf "generated C++ lacks: %s" (String.concat " | " missing))
+            elif not present.IsEmpty then
+                fail name (sprintf "generated C++ unexpectedly contains: %s" (String.concat " | " present))
+            elif not headerOk then
+                fail name "calls the omp_* runtime API but <omp.h> is not included"
+            else
+                passed <- passed + 1
+                resultLine Pass name "emission path as expected"
+    // ---- the unlicensed case is a hard error, not a silent serial fold ----
+    for (name, src) in ompReduceDiagCases do
+        // lowerDiag, not lower: the CODE is the assertion, and the plain
+        // string channel renders the message without it.
+        match fst (Lowering.lowerDiag None src) with
+        | Ok _ -> fail name "compiled cleanly; expected BL4016"
+        | Error diags ->
+            let codes = diags |> List.map (fun (d: Blade.Diagnostics.Diagnostic) -> d.Code)
+            if List.contains "BL4016" codes then
+                passed <- passed + 1
+                resultLine Pass name "BL4016"
+            else fail name (sprintf "expected BL4016, got: %s" (String.concat ", " codes))
+    // ---- BLADE_OMP_THREADS=1: what each formerly-threaded site emits ----
+    // The pin is scoped to these arms and restored immediately, so nothing
+    // above (or in any later block) can see it. Same discipline as the
+    // BLADE_FP_REASSOC / BLADE_BLAS pins in the omp-reduce block.
+    for (name, src, mustContain, mustNotContain) in ompThreadsKnobCases do
+        let emitted =
+            use _knob = pinEnv "BLADE_OMP_THREADS" "1"
+            cppOf name src
+        match emitted with
+        | Error e -> fail name e
+        | Ok cpp ->
+            let flat =
+                cpp.Split('\n') |> Array.map (fun l -> l.TrimStart()) |> String.concat "\n"
+            let missing = mustContain |> List.filter (fun s -> not (flat.Contains s))
+            let present = mustNotContain |> List.filter flat.Contains
+            if not missing.IsEmpty then
+                fail name (sprintf "knob-on C++ lacks: %s"
+                               (String.concat " | " (missing |> List.map (fun s -> s.Replace("\n", " \\n ")))))
+            elif not present.IsEmpty then
+                fail name (sprintf "knob-on C++ still contains: %s" (String.concat " | " present))
+            else
+                passed <- passed + 1
+                resultLine Pass name "serial emission as expected"
+    // ---- and the same programs with the knob OFF still get their pragma ----
+    // Without this pair the arms above could pass by the SOURCE having lost its
+    // licence rather than by the knob suppressing it.
+    for (name, src, _, _) in ompThreadsKnobCases do
+        let ctlName = name + "_control_knob_off"
+        match cppOf ctlName src with
+        | Error e -> fail ctlName e
+        | Ok cpp ->
+            let threaded =
+                cpp.Contains "#pragma omp parallel" || cpp.Contains "BLADE_OMP_PARALLEL_FOR"
+            if not threaded then
+                fail ctlName "knob OFF emitted no thread construct either (the source lost its licence; the knob arm above is vacuous)"
+            elif cpp.Contains "BLADE_OMP_THREADS" then
+                fail ctlName "knob OFF emitted a suppression marker"
+            else
+                passed <- passed + 1
+                resultLine Pass ctlName "threaded with the knob off"
+    // ---- knob-on emission == the SAME PROGRAM WITHOUT THE CLAUSE ----
+    for (name, licensedSrc, unlicensedSrc) in ompThreadsEquivalenceCases do
+        // The same testName for both, so the generated banner/timing lines
+        // (which embed it) cannot be what differs.
+        let licensed =
+            use _knob = pinEnv "BLADE_OMP_THREADS" "1"
+            cppOf name licensedSrc
+        match licensed, cppOf name unlicensedSrc with
+        | Error e, _ -> fail name (sprintf "knob-on emit: %s" e)
+        | _, Error e -> fail name (sprintf "unlicensed emit: %s" e)
+        | Ok onCpp, Ok unlicCpp ->
+            // The census markers are the ONE intended difference: the licensed
+            // program has a dropped clause to report and the unlicensed one has
+            // nothing to say.
+            let dropMarkers (s: string) =
+                s.Split('\n') |> Array.filter (fun l -> not (l.Contains "[omp]")) |> String.concat "\n"
+            if dropMarkers onCpp <> dropMarkers unlicCpp then
+                fail name "knob-on emission differs from the same program without the omp clause"
+            elif not (onCpp.Contains "[omp] requested but emitted serial: BLADE_OMP_THREADS=1") then
+                fail name "knob-on emission carries no census marker (a dropped clause must not be silent)"
+            else
+                passed <- passed + 1
+                resultLine Pass name "byte-identical to the unlicensed program (modulo the census marker)"
     printFooter "OpenMP Pragma" [sprintf "%d passed" passed; sprintf "%d failed" failed]
     { Block = "OpenMP Pragma"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
@@ -234,6 +772,12 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
 let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
     let caps = capabilities.Value
     printHeader "OpenMP Thread-Coverage Tests"
+    // This block's whole question is "does an emitted pragma form a real team",
+    // which a globally-set BLADE_OMP_THREADS=1 would answer by deleting the
+    // pragma -- and the block would then report its own vacuity as a pass (zero
+    // [omp-coverage] lines is already a hard failure below, so it would in fact
+    // report it as a FAILURE unrelated to any real regression). Pinned unset.
+    use _ompThreadsPin = pinOmpThreadsUnset ()
     if not caps.HasGpp then
         printfn "Skipped: g++ not found (cannot compile the -fopenmp coverage programs)."
         // Skipped = 1, not 0: a Skipped = 0 return made a toolchain-less box
@@ -268,10 +812,20 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
             "let L = method_for(A, A, A)\n" +
             "let k = lambda(x, y, z) where comm(x, y), omp(x: 1) -> x * y * z\n" +
             "let result = L <@> k |> compute\n"
+        // Phase 2 Path B: a comm-licensed fold over a DEFERRED computation. Its
+        // parallel region is an explicit team with per-thread partials, not a
+        // `parallel for`, so pragma text alone cannot say whether a team really
+        // forms — this is the ground-truth check that it does.
+        let foldSrc =
+            "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" +
+            "let A = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
+            "let B = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
+            "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n"
         let programs =
             [ ("rect_outer_product", rectSrc)
               ("symmetric_triangular", symSrc)
-              ("mixed_partial_comm", mixedSrc) ]
+              ("mixed_partial_comm", mixedSrc)
+              ("comm_licensed_fold", foldSrc) ]
         let outputDir = "./generated_omp_coverage"
         Directory.CreateDirectory(outputDir) |> ignore
         // Write runtime headers into the output dir so the generated programs'
@@ -318,7 +872,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                 // doubled path). Absolute paths make the working dir irrelevant.
                 let srcAbs = Path.GetFullPath(srcFile)
                 let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 -O2 -fopenmp -o \"%s\" \"%s\"" exeAbs srcAbs)
+                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
                 cpsi.RedirectStandardError <- true
                 cpsi.UseShellExecute <- false
                 use cproc = Process.Start(cpsi)
@@ -465,7 +1019,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
         | Ok srcAbs ->
             let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
             let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 -O2 -fopenmp -o \"%s\" \"%s\"" exeAbs srcAbs)
+            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
             cpsi.RedirectStandardError <- true
             cpsi.UseShellExecute <- false
             use cproc = Process.Start(cpsi)
@@ -534,3 +1088,747 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
 
         printFooter "OpenMP Coverage" [sprintf "%d passed" passed; sprintf "%d error(s)" errors; sprintf "%d warning(s)" warnings]
         { Block = "OpenMP Coverage"; Passed = passed; Failed = errors; Skipped = 0; FailedNames = failedNames }
+
+// ============================================================================
+// Comm-licensed parallel reductions: VALUES under real threads
+// ============================================================================
+//
+// The pragma block above answers "which emission path fired". This one answers
+// the question no string check can: does the parallel fold compute what the
+// serial fold computes, when a real OpenMP runtime really splits the axis?
+//
+// Everything here is a DIFFERENTIAL against the same program with the `omp`
+// clause removed — not against hand-written expected values — so the oracle
+// cannot drift from the feature. Two properties are asserted separately:
+//
+//   * VALUE, within 1e-9 of serial. Float tolerance lives HERE and nowhere
+//     else: the corpus files for this feature (loops/110, loops/111) are also
+//     run by the interpreter differential, which demands byte-identical output,
+//     so they are restricted to integer-valued data where every association is
+//     exact. This block is not part of that gate and may use awkward values,
+//     which is the point — it is where reassociation is actually exercised.
+//
+//   * RUN-TO-RUN IDENTITY at a fixed OMP_NUM_THREADS, for Path B ONLY. Path B's
+//     chunk boundaries and combine order are fixed functions of the team size,
+//     so repeated runs reproduce bit-for-bit; Path A hands the combine to the
+//     OpenMP runtime, whose order is unspecified by the standard, so asserting
+//     it there would be pinning an implementation detail (a legal runtime could
+//     fail it).
+//
+// Also here, and deliberately not a reduce: a COMPILED-AND-RUN case of
+// `where omp(a: 1, b: 1)` on a 2-level dense map. `collapse(2)` fuses the two
+// headers into one iteration space, and g++ rejects `#pragma GCC ivdep` on a
+// header the construct owns ("loop not permitted in intervening code in OpenMP
+// loop body" / "not enough nested loops"). The omp-pragma block asserts the
+// pragma TEXT and never compiles it; the omp-coverage block compiles but with
+// test-mode instrumentation, which disables ivdep by its own gate. Neither can
+// see the interaction — so it gets a plain compile+run here.
+
+/// A single compiled program: source -> exe path, ready to run. `testMode` is
+/// forced OFF (the coverage instrumentation suppresses Phase 1's ivdep, which
+/// is exactly what the collapse case below needs to exercise).
+let private compileProgram (outputDir: string) (name: string) (src: string) : Result<string, string> =
+    try
+        setOmpTestMode false
+        match lower src with
+        | Error e -> Error (sprintf "lower failed: %s" e)
+        | Ok ir0 ->
+            match IR.validateIR ir0 with
+            | Error errs -> Error (sprintf "IR validation failed: %s" (String.concat "; " errs))
+            | Ok ir ->
+                let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir name
+                let srcAbs = Path.GetFullPath(Path.Combine(outputDir, sanitizeFileName name + ".cpp"))
+                File.WriteAllText(srcAbs, cppCode)
+                let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+                let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
+                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
+                cpsi.RedirectStandardError <- true
+                cpsi.UseShellExecute <- false
+                use cproc = Process.Start(cpsi)
+                let cerr = cproc.StandardError.ReadToEndAsync()
+                if not (cproc.WaitForExit(120000)) then
+                    (try cproc.Kill(true) with _ -> ())
+                    Error "compile timed out (120s)"
+                elif cproc.ExitCode <> 0 then Error (sprintf "compile: %s" (cerr.Result.Trim()))
+                else Ok exeAbs
+    with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+
+/// Run a compiled program with OMP_NUM_THREADS forced, returning stdout.
+let private runProgram (exeAbs: string) (threads: string) : Result<string, string> =
+    let rpsi = ProcessStartInfo(exeAbs)
+    rpsi.RedirectStandardOutput <- true
+    rpsi.RedirectStandardError <- true
+    rpsi.UseShellExecute <- false
+    rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+    rpsi.Environment.["OMP_NUM_THREADS"] <- threads
+    use rproc = Process.Start(rpsi)
+    let rout = rproc.StandardOutput.ReadToEndAsync()
+    let rerr = rproc.StandardError.ReadToEndAsync()
+    if not (rproc.WaitForExit(60000)) then
+        (try rproc.Kill(true) with _ -> ())
+        Error "run timed out (60s)"
+    elif rproc.ExitCode <> 0 then
+        Error (sprintf "exit %d: %s" rproc.ExitCode (rerr.Result.Trim()))
+    else Ok rout.Result
+
+/// Every `name = value` scalar line of a program's stdout, as floats. The
+/// auto-printer emits one per top-level binding, which is what the differential
+/// compares.
+let private scalarBindings (stdout: string) : Map<string, float> =
+    stdout.Split('\n')
+    |> Array.choose (fun line ->
+        let m = System.Text.RegularExpressions.Regex.Match(
+                    line.Trim(), @"^([A-Za-z_][A-Za-z0-9_]*) = (-?[0-9.eE+-]+)$")
+        if m.Success then
+            match System.Double.TryParse(m.Groups.[2].Value,
+                                         System.Globalization.NumberStyles.Float,
+                                         System.Globalization.CultureInfo.InvariantCulture) with
+            | true, v -> Some (m.Groups.[1].Value, v)
+            | _ -> None
+        else None)
+    |> Map.ofArray
+
+/// Comm-licensed parallel reduction VALUE tests. Requires g++; skips otherwise.
+let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
+    let caps = capabilities.Value
+    printHeader "OpenMP Comm-Licensed Reductions"
+    // Pinned unset for the block: every differential below compares an
+    // `omp`-licensed build against its serial twin, and a global
+    // BLADE_OMP_THREADS=1 would make both sides the SAME serial program --
+    // every arm would pass while measuring nothing. The knob's own arm at the
+    // end re-pins it for its own scope.
+    use _ompThreadsPin = pinOmpThreadsUnset ()
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile the -fopenmp reduction programs)."
+        { Block = "OpenMP Reduce"; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    else
+        let outputDir = "./generated_omp_reduce"
+        Directory.CreateDirectory(outputDir) |> ignore
+        CodeGen.deployRuntimeHeaders outputDir
+        let forcedThreads = "4"
+        let mutable passed = 0
+        let mutable failed = 0
+        let mutable failedNames = []
+        let fail name detail =
+            failed <- failed + 1
+            failedNames <- failedNames @ [name]
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
+        let pass name detail =
+            passed <- passed + 1
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name detail
+
+        // Awkward, NON-integer data: reassociation is only observable when the
+        // partial sums are not exact. 240 elements so a 4-thread split gives
+        // four genuinely different chunks.
+        let n = 240
+        let vals = [ for i in 1 .. n -> 1.0 / float i + float (i % 7) * 0.3 ]
+        let aLit = vals |> List.map (fun v -> v.ToString("R", System.Globalization.CultureInfo.InvariantCulture)) |> String.concat ", "
+        let arrDecl = sprintf "let A = [%s]\n" aLit
+        // A second array for the deferred-computation (2-level nest) case; kept
+        // short so the fused nest stays a quick compile.
+        let bVals = [ for i in 1 .. 9 -> 0.5 + 1.0 / float (i + 2) ]
+        let bLit = bVals |> List.map (fun v -> v.ToString("R", System.Globalization.CultureInfo.InvariantCulture)) |> String.concat ", "
+        let bDecl = sprintf "let B = [%s]\n" bLit
+        let commFn = "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n"
+        let serialFn = "function myAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n"
+        // Compound (masked) operand: reduce walks the flat `.data` buffer of
+        // present cells, which is the OTHER contiguous 1-D sweep Path A covers.
+        let maskDecl = "let m = mask(A, lambda(x) -> x > 1.0)\nlet C = compound(A, m)\n"
+
+        // (name, ompSource, serialSource, pathB?)
+        let cases : (string * string * string * bool) list =
+            [ ("path_a_builtin_sum_dense",
+               arrDecl + "let s = reduce(A, lambda(a, b) where omp -> a + b)\n",
+               arrDecl + "let s = reduce(A, lambda(a, b) -> a + b)\n",
+               false)
+              ("path_a_builtin_sum_compound",
+               arrDecl + maskDecl + "let s = reduce(C, lambda(a, b) where omp -> a + b)\n",
+               arrDecl + maskDecl + "let s = reduce(C, lambda(a, b) -> a + b)\n",
+               false)
+              ("path_b_named_comm_function",
+               commFn + arrDecl + "let s = reduce(A, myAdd)\n",
+               serialFn + arrDecl + "let s = reduce(A, myAdd)\n",
+               true)
+              ("path_b_named_comm_with_init",
+               commFn + arrDecl + "let s = reduce(A, myAdd, 100.0)\n",
+               serialFn + arrDecl + "let s = reduce(A, myAdd, 100.0)\n",
+               true)
+              ("path_b_inline_comm_lambda",
+               arrDecl + "let s = reduce(A, lambda(a, b) where comm(a, b), omp -> (a + b) * 1.0)\n",
+               arrDecl + "let s = reduce(A, lambda(a, b) where comm(a, b) -> (a + b) * 1.0)\n",
+               true)
+              ("path_b_reduce_over_computation",
+               commFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
+               serialFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
+               true) ]
+
+        for (name, ompSrc, serialSrc, isPathB) in cases do
+            match compileProgram outputDir (name + "_omp") ompSrc,
+                  compileProgram outputDir (name + "_serial") serialSrc with
+            | Error e, _ -> fail name (sprintf "omp build: %s" e)
+            | _, Error e -> fail name (sprintf "serial build: %s" e)
+            | Ok ompExe, Ok serialExe ->
+                match runProgram ompExe forcedThreads, runProgram serialExe "1" with
+                | Error e, _ -> fail name (sprintf "omp run: %s" e)
+                | _, Error e -> fail name (sprintf "serial run: %s" e)
+                | Ok ompOut, Ok serialOut ->
+                    let ompVals = scalarBindings ompOut
+                    let serVals = scalarBindings serialOut
+                    // `s` is the fold's binding in every case above. Its absence
+                    // would make the comparison vacuous, so it is checked.
+                    match Map.tryFind "s" ompVals, Map.tryFind "s" serVals with
+                    | Some pv, Some sv ->
+                        let diff = abs (pv - sv)
+                        let tol = 1e-9 * max 1.0 (abs sv)
+                        if diff > tol then
+                            fail name (sprintf "parallel %.17g vs serial %.17g (|diff| = %g)" pv sv diff)
+                        elif not isPathB then
+                            pass name (sprintf "value matches serial (|diff| = %g)" diff)
+                        else
+                            // Path B determinism: a second run at the same team
+                            // size must reproduce the first byte for byte.
+                            match runProgram ompExe forcedThreads with
+                            | Error e -> fail name (sprintf "second omp run: %s" e)
+                            | Ok again ->
+                                let strip (s: string) =
+                                    s.Split('\n')
+                                    |> Array.filter (fun l -> not (l.Contains "completed in"))
+                                    |> String.concat "\n"
+                                if strip again <> strip ompOut then
+                                    fail name "run-to-run output differs at fixed OMP_NUM_THREADS=4 (chunking is not deterministic)"
+                                else
+                                    pass name (sprintf "value matches serial (|diff| = %g); identical across 2 runs" diff)
+                    | _ ->
+                        fail name "no scalar binding 's' in program output (comparison would be vacuous)"
+
+        // ---- Round C: lane-boundary battery -------------------------------
+        // Path B's chunk is now swept by K strided lane accumulators (K fixed
+        // at codegen; CodeGen.foldLaneCount). Every arm of that sweep has an
+        // element-count boundary, and getting any of them wrong silently drops
+        // or double-counts elements — the fold still prints A number, just the
+        // wrong one. So the battery walks n across all of them:
+        //
+        //   n < K            -> the short-chunk arm (no lanes at all)
+        //   n = K            -> lanes seeded, main loop and tail both empty
+        //   n = K + 1        -> one tail element, landing on lane 0
+        //   n = 2K - 1       -> maximal tail (K-1 elements, lanes 0..K-2)
+        //   n not div by K   -> main loop plus a partial tail
+        //   n < thread count -> chunks smaller than K under a 4-thread request
+        //
+        // K is deliberately NOT read from the compiler here: the battery is
+        // written to straddle any K up to 16, so it keeps its meaning if the
+        // constant is retuned. Values are non-integer (reassociation is real)
+        // and the oracle is the same program with `omp` dropped, at 1e-9.
+        //
+        // An INTEGER-data twin runs at n = 2K-1 and demands EXACT equality —
+        // that is the property the corpus files (loops/110, loops/111) and the
+        // interpreter differential rely on, so it is pinned here directly
+        // rather than inferred.
+        let laneKernelOmp = "function laneAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n"
+        let laneKernelSer = "function laneAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n"
+        let laneLit (count: int) (f: int -> float) =
+            // A decimal point is forced: an integer-valued literal printed by
+            // "R" comes out as `1`, which the checker reads as Int64 and then
+            // refuses against the Float64 kernel.
+            [ for i in 1 .. count ->
+                let s = (f i).ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+                if s.Contains "." || s.Contains "E" then s else s + ".0" ]
+            |> String.concat ", "
+        let awkward i = 1.0 / float i + float (i % 5) * 0.7
+        let laneCases : (string * int * bool) list =
+            // (label, n, integerData)
+            [ ("n1_below_lanes",        1,  false)
+              ("n3_below_lanes",        3,  false)
+              ("n4_at_lanes",           4,  false)
+              ("n5_lanes_plus_one",     5,  false)
+              ("n7_maximal_tail",       7,  false)
+              ("n8_two_full_lanes",     8,  false)
+              ("n15_maximal_tail_k8",  15,  false)
+              ("n17_indivisible",      17,  false)
+              ("n3_below_thread_count", 3,  false)
+              ("n33_indivisible",      33,  false)
+              ("n15_integer_exact",    15,  true) ]
+        for (label, n, integerData) in laneCases do
+            let name = "lane_boundary_" + label
+            let lit = laneLit n (fun i -> if integerData then float (i % 9 + 1) else awkward i)
+            let decl = sprintf "let A = [%s]\n" lit
+            let body = "let s = reduce(A, laneAdd)\n"
+            match compileProgram outputDir (name + "_omp") (laneKernelOmp + decl + body),
+                  compileProgram outputDir (name + "_serial") (laneKernelSer + decl + body) with
+            | Error e, _ -> fail name (sprintf "omp build: %s" e)
+            | _, Error e -> fail name (sprintf "serial build: %s" e)
+            | Ok ompExe, Ok serialExe ->
+                match runProgram ompExe forcedThreads, runProgram serialExe "1" with
+                | Error e, _ -> fail name (sprintf "omp run: %s" e)
+                | _, Error e -> fail name (sprintf "serial run: %s" e)
+                | Ok ompOut, Ok serialOut ->
+                    match Map.tryFind "s" (scalarBindings ompOut), Map.tryFind "s" (scalarBindings serialOut) with
+                    | Some pv, Some sv ->
+                        let diff = abs (pv - sv)
+                        let tol = if integerData then 0.0 else 1e-9 * max 1.0 (abs sv)
+                        if diff > tol then
+                            fail name (sprintf "n=%d: parallel %.17g vs serial %.17g (|diff| = %g, tol = %g)" n pv sv diff tol)
+                        else
+                            // Determinism re-check: the lane count is a compile-time
+                            // constant, so a fixed team size must still reproduce the
+                            // run bit for bit.
+                            match runProgram ompExe forcedThreads with
+                            | Error e -> fail name (sprintf "second omp run: %s" e)
+                            | Ok again ->
+                                let strip (s: string) =
+                                    s.Split('\n')
+                                    |> Array.filter (fun l -> not (l.Contains "completed in"))
+                                    |> String.concat "\n"
+                                if strip again <> strip ompOut then
+                                    fail name (sprintf "n=%d: run-to-run output differs at fixed OMP_NUM_THREADS=4" n)
+                                else
+                                    pass name (sprintf "n=%d %s: |diff| = %g; identical across 2 runs"
+                                                   n (if integerData then "exact" else "vs serial") diff)
+                    | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
+
+        // ---- BLADE_FP_REASSOC: the reassociation opt-in -------------------
+        // The knob licenses the emitter to reassociate a SERIAL floating-point
+        // accumulation chain -- `prodsum`'s fiber sweep, a reduce over a
+        // deferred computation, and an UNQUALIFIED builtin `reduce` (one the
+        // user never marked `omp`).
+        //
+        // TWO EMITTED FORMS, chosen per site by measurement (CodeGen.fs
+        // `fpReassocSimdStmts` / `fpReassocLaneStmts`, each of which carries the
+        // numbers that chose it):
+        //
+        //   omp simd   `#pragma omp simd reduction(<op>:acc)` over the plain
+        //              serial loop. Emitted by the `prodsum` IIFE and by the
+        //              reduce-over-computation nest. Needs a builtin `+`/`*`
+        //              body (a reduction clause names an OPERATOR) and a scalar
+        //              element type.
+        //   K lanes    K independent named accumulators combined in fixed
+        //              ascending order, no pragma at all. Emitted by `reduce`
+        //              over a MATERIALIZED array (both its statement and its
+        //              expression form), and everywhere the simd form is not
+        //              available -- above all for a `comm`-declared kernel,
+        //              whose combine is a CALL.
+        //
+        // Everything above this point, and every other suite, runs with the
+        // knob at its DEFAULT (off), which is what makes "off means
+        // byte-identical" checkable at all. The pin below is per-COMPILE and
+        // restored immediately, so nothing outside these arms can see it. (Test
+        // blocks run sequentially in one process -- see Cli.fs -- so a
+        // process-global env pin is safe here, the same way InterpDiff pins
+        // BLADE_FP_CONTRACT for its block.)
+        //
+        // Three properties are asserted, and they are not the same property:
+        //
+        //   1. VALUE. Knob-on agrees with knob-off to 1e-9 relative on awkward
+        //      non-representable data, and EXACTLY on integer-valued data.
+        //      Integer exactness holds under ANY summation order -- including
+        //      the vectorizer's, which is why it survives the simd form
+        //      unchanged -- and it is the property loops/110-111 and the
+        //      interpreter differential depend on.
+        //   2. DETERMINISM, in the form the contract at `fpReassocEnabled` now
+        //      states it: for a FIXED BINARY the answer is identical across two
+        //      runs and across OMP_NUM_THREADS values. NEITHER form creates a
+        //      team (`omp simd` is a SIMD construct, and the lane form has no
+        //      pragma at all), so thread count cannot enter the answer. What is
+        //      deliberately NOT asserted any more is reproducibility across
+        //      compilers or flags: under the simd form the summation order is
+        //      the vectorizer's, and the project policy is that optimized
+        //      Release builds are not bit-reproducible across builds. (The lane
+        //      arms do still have the stronger property -- a fixed function of
+        //      the data and K -- but it is not separately pinned here, because
+        //      one binary cannot observe it.)
+        //   3. LICENCE + LIVENESS, at the emission level. Positive controls
+        //      prove each site emits the FORM it is supposed to (without them
+        //      the value arms could pass vacuously by never firing, and a site
+        //      could silently swap forms), and a negative control proves an
+        //      UNLICENSED user kernel -- no builtin body, no `comm` -- is
+        //      emitted byte-identically with the knob on.
+        //
+        // n walks every boundary of the strided sweep: below the lanes (1, 3),
+        // maximal tail (7), exactly the lanes (8), one past (9), maximal tail
+        // above one full stride (15), indivisible (17). Getting any of them
+        // wrong drops or double-counts elements silently -- the fold still
+        // prints A number. The boundaries still matter under the simd form: the
+        // vectorizer's own scalar remainder is exercised by exactly the same
+        // awkward trip counts.
+        let withReassoc (on: bool) (f: unit -> 'a) : 'a =
+            let prior = System.Environment.GetEnvironmentVariable("BLADE_FP_REASSOC")
+            System.Environment.SetEnvironmentVariable("BLADE_FP_REASSOC", (if on then "1" else "0"))
+            try f ()
+            finally System.Environment.SetEnvironmentVariable("BLADE_FP_REASSOC", prior)
+        // The dot-shaped arms below (`reduce(<unforced zip>, (+))`) are EXACTLY
+        // the shape `LinAlgPatterns.BlasL1` recognises, so in an environment
+        // where BLAS is enabled (OPENBLAS_DIR set, or `blade test linalg`'s
+        // BLADE_BLAS=1) they would emit one `blade_linalg::blade_dot` call and
+        // never reach the fold nest at all -- the lane assertions would pass
+        // vacuously and the value arms would compare two identical BLAS calls.
+        // Pinned OFF for the whole reassoc block (no arm here wants a dispatch)
+        // and restored immediately, same discipline as the knob pin above.
+        let withBlasOff (f: unit -> 'a) : 'a =
+            let prior = System.Environment.GetEnvironmentVariable("BLADE_BLAS")
+            System.Environment.SetEnvironmentVariable("BLADE_BLAS", "0")
+            try f ()
+            finally System.Environment.SetEnvironmentVariable("BLADE_BLAS", prior)
+        let emitOnly (nm: string) (src: string) : Result<string, string> =
+            try
+                match lower src with
+                | Error e -> Error (sprintf "lower failed: %s" e)
+                | Ok ir0 ->
+                    match IR.validateIR ir0 with
+                    | Error errs -> Error (String.concat "; " errs)
+                    | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir nm))
+            with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+        let stripTiming (s: string) =
+            s.Split('\n') |> Array.filter (fun l -> not (l.Contains "completed in")) |> String.concat "\n"
+
+        // (label, n, integerData, sourceOf n)
+        let fprSrcReduce (lit: string) =
+            sprintf "let A = [%s]\nlet s = reduce(A, lambda(a, b) -> a + b)\n" lit
+        let fprSrcProdsum (lit: string) (lit2: string) =
+            sprintf "let A = [%s]\nlet B = [%s]\nlet s = prodsum(A, B)\n" lit lit2
+        // THREE operand streams: the comoment3 fiber kernel's shape, and the
+        // one the arity-aware lane count (`laneCountForStreams`) puts at K = 5.
+        let fprSrcProdsum3 (l1: string) (l2: string) (l3: string) =
+            sprintf "let A = [%s]\nlet B = [%s]\nlet C = [%s]\nlet s = prodsum(A, B, C)\n" l1 l2 l3
+        // reduce over an UNFORCED zip -- the dot shape. This lowers through
+        // `genReduceComputeBinding` (reduce over a deferred computation), a
+        // different emitter from the two above: its element is not a subscript
+        // but the nest's whole per-iteration body evaluated at the lane index.
+        let fprSrcDot (lit: string) (lit2: string) =
+            sprintf "let x = [%s]\nlet y = [%s]\n" lit lit2
+              + "let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b\n"
+              + "let s = reduce(P, (+))\n"
+        // A `comm`-DECLARED kernel whose body is NOT a bare builtin op. This is
+        // the licence class the simd form cannot spell -- no operator to name in
+        // a reduction clause -- so it is what still gets the K-lane form, at
+        // every site. `+ 0.0` is what keeps `foldKernelBuiltinOp` from
+        // recognising the body while leaving the arithmetic (and hence the
+        // expected value) identical to a plain sum.
+        let fprCommKernel =
+            "function myK(a: Float64, b: Float64) where comm(a, b) = a + b + 0.0\n"
+        let fprSrcCommReduce (lit: string) =
+            fprCommKernel + sprintf "let A = [%s]\nlet s = reduce(A, myK)\n" lit
+        // comm kernel over a deferred computation: the reduce-over-computation
+        // site's lane fallback. The 3-arg form is required there (a fused fold
+        // cannot seed from its first element).
+        let fprSrcCommDot (lit: string) (lit2: string) =
+            fprCommKernel + sprintf "let x = [%s]\nlet y = [%s]\n" lit lit2
+              + "let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b\n"
+              + "let s = reduce(P, myK, 0.0)\n"
+        let fprSrcCommDot3 (l1: string) (l2: string) (l3: string) =
+            fprCommKernel + sprintf "let x = [%s]\nlet y = [%s]\nlet z = [%s]\n" l1 l2 l3
+              + "let P = method_for(zip(x, y, z)) <@> lambda(a: Float64, b: Float64, c: Float64) -> a * b * c\n"
+              + "let s = reduce(P, myK, 0.0)\n"
+        let fprNs = [1; 3; 7; 8; 9; 15; 17]
+        // K = 5 for three streams, so its boundaries are a DIFFERENT set of n:
+        // below the lanes (1, 3), exactly the lanes (5), maximal tail (4, 9),
+        // one past (6), indivisible (11, 17).
+        let fprNs3 = [1; 3; 4; 5; 6; 9; 11; 17]
+        let fprCases : (string * string) list =
+            [ for n in fprNs do
+                yield (sprintf "reduce_n%d" n, fprSrcReduce (laneLit n awkward))
+                yield (sprintf "prodsum_n%d" n,
+                       fprSrcProdsum (laneLit n awkward) (laneLit n (fun i -> awkward (i + 3))))
+                yield (sprintf "dot_n%d" n,
+                       fprSrcDot (laneLit n awkward) (laneLit n (fun i -> awkward (i + 3))))
+              for n in fprNs3 do
+                yield (sprintf "prodsum3_n%d" n,
+                       fprSrcProdsum3 (laneLit n awkward)
+                                      (laneLit n (fun i -> awkward (i + 3)))
+                                      (laneLit n (fun i -> awkward (i + 7))))
+              // Integer-valued twins: EXACT equality is demanded of these.
+              yield ("reduce_n15_integer_exact", fprSrcReduce (laneLit 15 (fun i -> float (i % 9 + 1))))
+              yield ("prodsum_n15_integer_exact",
+                     fprSrcProdsum (laneLit 15 (fun i -> float (i % 9 + 1)))
+                                   (laneLit 15 (fun i -> float (i % 5 + 2))))
+              yield ("prodsum3_n11_integer_exact",
+                     fprSrcProdsum3 (laneLit 11 (fun i -> float (i % 9 + 1)))
+                                    (laneLit 11 (fun i -> float (i % 5 + 2)))
+                                    (laneLit 11 (fun i -> float (i % 3 + 1))))
+              yield ("dot_n15_integer_exact",
+                     fprSrcDot (laneLit 15 (fun i -> float (i % 9 + 1)))
+                               (laneLit 15 (fun i -> float (i % 5 + 2))))
+              // The K-LANE form's own value arms. The four cases above all
+              // reach a site that now emits `omp simd`, so without these the
+              // lane emitter -- still live for every `comm`-declared kernel --
+              // would have no value coverage at all here.
+              for n in fprNs do
+                yield (sprintf "comm_reduce_n%d" n, fprSrcCommReduce (laneLit n awkward))
+                yield (sprintf "comm_dot_n%d" n,
+                       fprSrcCommDot (laneLit n awkward) (laneLit n (fun i -> awkward (i + 3))))
+              yield ("comm_reduce_n15_integer_exact",
+                     fprSrcCommReduce (laneLit 15 (fun i -> float (i % 9 + 1))))
+              yield ("comm_dot_n15_integer_exact",
+                     fprSrcCommDot (laneLit 15 (fun i -> float (i % 9 + 1)))
+                                   (laneLit 15 (fun i -> float (i % 5 + 2)))) ]
+        for (label, src) in fprCases do
+            let name = "fp_reassoc_" + label
+            let exact = label.EndsWith "integer_exact"
+            match withReassoc true (fun () -> withBlasOff (fun () -> compileProgram outputDir (name + "_on") src)),
+                  withReassoc false (fun () -> withBlasOff (fun () -> compileProgram outputDir (name + "_off") src)) with
+            | Error e, _ -> fail name (sprintf "reassoc-on build: %s" e)
+            | _, Error e -> fail name (sprintf "reassoc-off build: %s" e)
+            | Ok onExe, Ok offExe ->
+                match runProgram onExe "1", runProgram offExe "1" with
+                | Error e, _ -> fail name (sprintf "reassoc-on run: %s" e)
+                | _, Error e -> fail name (sprintf "reassoc-off run: %s" e)
+                | Ok onOut, Ok offOut ->
+                    match Map.tryFind "s" (scalarBindings onOut), Map.tryFind "s" (scalarBindings offOut) with
+                    | Some ov, Some fv ->
+                        let diff = abs (ov - fv)
+                        let tol = if exact then 0.0 else 1e-9 * max 1.0 (abs fv)
+                        if diff > tol then
+                            fail name (sprintf "reassoc %.17g vs serial %.17g (|diff| = %g, tol = %g)" ov fv diff tol)
+                        else
+                            // Thread-count independence AND run-to-run identity,
+                            // on the SAME BINARY -- the whole of what the knob
+                            // now promises. Neither form takes anything from a
+                            // team (`omp simd` is a SIMD construct and creates
+                            // none; the lane form has no pragma at all), so both
+                            // must hold outright. Note what is NOT compared: two
+                            // DIFFERENTLY BUILT binaries, which the contract at
+                            // `fpReassocEnabled` no longer claims agree.
+                            match runProgram onExe "4", runProgram onExe "1" with
+                            | Error e, _ -> fail name (sprintf "reassoc-on run at 4 threads: %s" e)
+                            | _, Error e -> fail name (sprintf "reassoc-on second run: %s" e)
+                            | Ok at4, Ok again ->
+                                if stripTiming at4 <> stripTiming onOut then
+                                    fail name "output differs between OMP_NUM_THREADS=1 and 4 (a reassociated form took something from a team)"
+                                elif stripTiming again <> stripTiming onOut then
+                                    fail name "output differs across two runs of the same binary at a fixed thread count"
+                                else
+                                    pass name (sprintf "%s: |diff| = %g; identical at 1 vs 4 threads and across 2 runs"
+                                                   (if exact then "exact" else "vs serial") diff)
+                    | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
+
+        // Emission controls. Without these the value arms could all pass by the
+        // knob never firing at all -- AND, now that there are two forms, a site
+        // could silently swap one for the other and every value arm would still
+        // pass. Each case therefore pins WHICH form its site emits, which is a
+        // per-site MEASUREMENT (see the comment at each `fpReassocEnabled ()`
+        // site in CodeGen.fs) and not an arbitrary choice: a regression that
+        // flips one of these is a performance regression the values cannot see.
+        let fprEmitCases : (string * string * string) list =
+            // (label, source, expected form: "simd" | "lanes" | "unchanged")
+            [ // reduce over a MATERIALIZED array -> lanes (measured 1.12x
+              // bandwidth-bound / 1.90x cache-resident over the simd form).
+              ("builtin_reduce_lanes",
+               fprSrcReduce (laneLit 17 awkward), "lanes")
+              // prodsum's fiber IIFE -> simd (2.60x on the gemv fiber and 3.36x
+              // at three streams, where the lanes gave 0.96x and 1.80x).
+              ("prodsum_simd",
+               fprSrcProdsum (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), "simd")
+              ("prodsum3_simd",
+               fprSrcProdsum3 (laneLit 17 awkward)
+                              (laneLit 17 (fun i -> awkward (i + 3)))
+                              (laneLit 17 (fun i -> awkward (i + 7))), "simd")
+              // reduce-over-deferred-computation (the dot shape) -> simd (1.64x
+              // bandwidth-bound / 3.81x cache-resident; the lanes were at
+              // PARITY with the serial chain in both regimes).
+              ("dot_reduce_over_computation_simd",
+               fprSrcDot (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), "simd")
+              // A `comm`-declared kernel is licensed but its combine is a CALL,
+              // so no reduction clause can name it: BOTH sites fall back to the
+              // lanes. This is the arm that keeps `fpReassocLaneStmts` live at
+              // the reduce-over-computation site.
+              ("comm_reduce_lanes",
+               fprSrcCommReduce (laneLit 17 awkward), "lanes")
+              ("comm_dot_over_computation_lanes",
+               fprSrcCommDot (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), "lanes")
+              // Unlicensed: body is not a bare builtin op and no `comm` is
+              // declared, so the knob grants nothing. `where omp` is absent too,
+              // so this is the serial arm either way.
+              ("unlicensed_kernel_stays_serial",
+               "function myK(a: Float64, b: Float64) = (a + b) * 1.0000001\n"
+                 + sprintf "let A = [%s]\n" (laneLit 17 awkward)
+                 + "let s = reduce(A, myK)\n", "unchanged") ]
+        for (label, src, expectForm) in fprEmitCases do
+            let name = "fp_reassoc_emission_" + label
+            match withReassoc true (fun () -> withBlasOff (fun () -> emitOnly name src)),
+                  withReassoc false (fun () -> withBlasOff (fun () -> emitOnly name src)) with
+            | Error e, _ -> fail name (sprintf "emit (knob on): %s" e)
+            | _, Error e -> fail name (sprintf "emit (knob off): %s" e)
+            | Ok onCpp, Ok offCpp ->
+                let hasLanes (s: string) = s.Contains "__rlane" || s.Contains "__pl0"
+                // The macro, not a raw `#pragma`: cpp/blade_portability.hpp owns
+                // the spelling (and its OpenMP-4.0 gate), and codegen emits only
+                // the macro -- so a raw pragma appearing here would itself be
+                // the regression.
+                let hasSimd (s: string) = s.Contains "BLADE_OMP_SIMD_REDUCTION"
+                if hasLanes offCpp || hasSimd offCpp then
+                    fail name "knob OFF emitted a reassociated form (the default must never reassociate)"
+                else
+                    match expectForm with
+                    | "lanes" when not (hasLanes onCpp) ->
+                        fail name "knob ON emitted no lane accumulators (the gate never fired, or the site swapped to simd)"
+                    | "lanes" when hasSimd onCpp ->
+                        fail name "knob ON emitted BOTH forms at a lane site"
+                    | "simd" when not (hasSimd onCpp) ->
+                        fail name "knob ON emitted no omp simd reduction (the gate never fired, or the site swapped to lanes)"
+                    | "simd" when hasLanes onCpp ->
+                        fail name "knob ON emitted lane accumulators at a simd site (the measured-worse form)"
+                    | "unchanged" when onCpp <> offCpp ->
+                        fail name "unlicensed kernel: knob ON changed the emission (the knob is not a licence)"
+                    | "lanes" -> pass name "K-lane form, only with the knob on"
+                    | "simd" -> pass name "omp simd reduction form, only with the knob on"
+                    | "unchanged" -> pass name "byte-identical with the knob on (unlicensed, stays serial)"
+                    | other -> fail name (sprintf "test bug: unknown expected form %s" other)
+
+        // ---- The lane COUNT is a function of the operand-stream count -------
+        // `laneCountForStreams` divides a fixed register/ILP budget among the
+        // concurrent value streams one lane iteration keeps live: K = 8 at one
+        // and two streams (the repo's measured anchor), K = floor(16/s) beyond.
+        // The count is part of the lane form's EVALUATION ORDER, so it is
+        // pinned here as emitted text, not left to be inferred from a timing.
+        //
+        // THE SOURCES CHANGED WITH THE FORMS, THE RULE DID NOT. `prodsum` used
+        // to be where the arity-aware count was observable; it now emits `omp
+        // simd`, where the partial count is the vectorizer's and there is
+        // nothing to pin. The rule is still live -- and still observable --
+        // wherever the LANE form is what gets emitted, which is any
+        // `comm`-declared kernel, so the multi-stream arms move to a comm fold
+        // over a deferred computation of the same arity.
+        //
+        // The three-stream arm is the one with a measurement behind it: 8 lanes
+        // on a three-stream body ran 2.2-2.7x SLOWER than 5 lanes in the
+        // comoment3 shape (61 vars x 2003 samples), while 8 lanes on the
+        // two-stream form helped. A regression that silently restores 8 here
+        // restores that.
+        let distinctLanes (prefix: string) (s: string) =
+            System.Text.RegularExpressions.Regex.Matches(s, prefix + @"(\d+)")
+            |> Seq.cast<System.Text.RegularExpressions.Match>
+            |> Seq.map (fun m -> int m.Groups.[1].Value)
+            |> Seq.distinct |> Seq.length
+        let fprLaneCountCases : (string * string * string * int) list =
+            // (label, source, lane-local prefix, expected distinct lanes)
+            [ ("reduce_one_stream", fprSrcReduce (laneLit 33 awkward), "__rlane", 8)
+              ("comm_reduce_one_stream", fprSrcCommReduce (laneLit 33 awkward), "__rlane", 8)
+              ("comm_dot_two_streams",
+               fprSrcCommDot (laneLit 33 awkward) (laneLit 33 (fun i -> awkward (i + 3))), "__rlane", 8)
+              ("comm_dot3_three_streams",
+               fprSrcCommDot3 (laneLit 33 awkward)
+                              (laneLit 33 (fun i -> awkward (i + 3)))
+                              (laneLit 33 (fun i -> awkward (i + 7))), "__rlane", 5) ]
+        for (label, src, prefix, expected) in fprLaneCountCases do
+            let name = "fp_reassoc_lane_count_" + label
+            match withReassoc true (fun () -> withBlasOff (fun () -> emitOnly name src)) with
+            | Error e -> fail name (sprintf "emit (knob on): %s" e)
+            | Ok cpp ->
+                let got = distinctLanes prefix cpp
+                if got <> expected then
+                    fail name (sprintf "expected %d lanes (%s0..%s%d), emitted %d"
+                                   expected prefix prefix (expected - 1) got)
+                else pass name (sprintf "%d lanes" got)
+
+        // ---- Phase 1 regression: ivdep must not land inside collapse(2) ----
+        // Text-only assertions cannot see this; only g++ can.
+        let collapseSrc =
+            "function k(a: Float64, b: Float64) where omp(a: 1, b: 1) = a * b + 1.0\n" +
+            "let P = [1.5, 2.5, 3.5, 4.5, 5.5]\n" +
+            "let Q = [0.25, 0.5, 0.75, 1.25]\n" +
+            "let M = object_for(k) <@> (P, Q) |> compute\n"
+        let collapseName = "collapse2_dense_map_compiles"
+        match compileProgram outputDir collapseName collapseSrc with
+        | Error e -> fail collapseName (sprintf "%s" e)
+        | Ok exeAbs ->
+            match runProgram exeAbs forcedThreads with
+            | Error e -> fail collapseName (sprintf "run: %s" e)
+            | Ok out ->
+                // 5x4 outer product through the kernel. A rank-2 array prints
+                // NESTED — `M = [[a, b, ...], [...], ...]` — so the old flat
+                // `\[([^\]]*)\]` parse stopped at the first inner `]` and read
+                // one row, not the array. Match the whole bracketed value and
+                // then read the ROWS, which is also a STRONGER assertion than a
+                // flatten-and-parse would be: it pins the 5x4 shape, not just
+                // the 20 values in DFS order.
+                let expectedRows =
+                    [ for p in [1.5; 2.5; 3.5; 4.5; 5.5] ->
+                        [ for q in [0.25; 0.5; 0.75; 1.25] -> p * q + 1.0 ] ]
+                let parseNum (s: string) =
+                    match System.Double.TryParse(s.Trim(),
+                                                 System.Globalization.NumberStyles.Float,
+                                                 System.Globalization.CultureInfo.InvariantCulture) with
+                    | true, v -> Some v
+                    | _ -> None
+                let rows =
+                    let m = System.Text.RegularExpressions.Regex.Match(out, @"M = (\[\[.*\]\])")
+                    if not m.Success then []
+                    else
+                        System.Text.RegularExpressions.Regex.Matches(m.Groups.[1].Value, @"\[([^\[\]]*)\]")
+                        |> Seq.cast<System.Text.RegularExpressions.Match>
+                        |> Seq.map (fun r -> r.Groups.[1].Value.Split(',') |> Array.toList |> List.choose parseNum)
+                        |> Seq.toList
+                if List.length rows <> List.length expectedRows
+                   || List.exists2 (fun (a: float list) (b: float list) -> a.Length <> b.Length) rows expectedRows then
+                    fail collapseName
+                        (sprintf "expected a %dx%d nested print, parsed rows of lengths %A"
+                             (List.length expectedRows) 4 (rows |> List.map List.length))
+                elif List.exists2 (fun (ra: float list) rb ->
+                                       List.exists2 (fun (a: float) b -> abs (a - b) > 1e-9) ra rb)
+                                  rows expectedRows then
+                    fail collapseName "collapse(2) map produced wrong values under 4 threads"
+                else
+                    pass collapseName "compiles under g++ and computes correctly (ivdep/collapse interaction)"
+
+        // ---- BLADE_OMP_THREADS: same numbers, different threading ----------
+        // The knob is a THREADING decision, never a numeric one: what it
+        // changes is whether a team is created, and the emitted arithmetic on
+        // each side is one the suite already accepts (the licensed omp form, or
+        // the serial form its own differentials compare against). So a
+        // knob-on/knob-off pair must agree to the same tolerance an
+        // omp-vs-serial pair does -- and this arm is the one that COMPILES AND
+        // RUNS both, which no text assertion in the omp-pragma block can do.
+        //
+        // Non-integer data, deliberately: on integer-valued f64 every
+        // summation order is exact and the comparison could not tell a genuine
+        // agreement from an arithmetic that got lost. The Path A arm is the
+        // sharp one -- suppressed Path A keeps `omp simd reduction`, so both
+        // sides reassociate, just at different widths.
+        let withOmpThreads (v: string) (f: unit -> 'a) : 'a =
+            let prior = System.Environment.GetEnvironmentVariable("BLADE_OMP_THREADS")
+            System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", v)
+            try f ()
+            finally System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", prior)
+        let knobN = 33
+        let knobLit = laneLit knobN awkward
+        let knobDecl = sprintf "let A = [%s]\n" knobLit
+        let knobCases : (string * string) list =
+            // (label, source) -- one per suppression shape the knob has.
+            [ ("path_a_builtin_sum",
+               knobDecl + "let s = reduce(A, lambda(a, b) where omp -> a + b)\n")
+              ("path_b_named_comm",
+               commFn + knobDecl + "let s = reduce(A, myAdd)\n")
+              ("path_b_reduce_over_computation",
+               commFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n") ]
+        for (label, src) in knobCases do
+            let name = "omp_threads_knob_" + label
+            match withOmpThreads "1" (fun () -> compileProgram outputDir (name + "_serial") src),
+                  withOmpThreads null (fun () -> compileProgram outputDir (name + "_threaded") src) with
+            | Error e, _ -> fail name (sprintf "knob-on build: %s" e)
+            | _, Error e -> fail name (sprintf "knob-off build: %s" e)
+            | Ok serialExe, Ok threadedExe ->
+                // The knob-on binary is run at OMP_NUM_THREADS=4 ON PURPOSE:
+                // it has no parallel construct left, so the runtime setting
+                // must be inert. If it is not, a team survived somewhere.
+                match runProgram serialExe forcedThreads, runProgram threadedExe forcedThreads with
+                | Error e, _ -> fail name (sprintf "knob-on run: %s" e)
+                | _, Error e -> fail name (sprintf "knob-off run: %s" e)
+                | Ok serialOut, Ok threadedOut ->
+                    match Map.tryFind "s" (scalarBindings serialOut),
+                          Map.tryFind "s" (scalarBindings threadedOut) with
+                    | Some sv, Some tv ->
+                        let diff = abs (sv - tv)
+                        let tol = 1e-9 * max 1.0 (abs tv)
+                        if diff > tol then
+                            fail name (sprintf "knob-on %.17g vs knob-off %.17g (|diff| = %g)" sv tv diff)
+                        else
+                            match runProgram serialExe "1" with
+                            | Error e -> fail name (sprintf "knob-on run at 1 thread: %s" e)
+                            | Ok at1 ->
+                                if stripTiming at1 <> stripTiming serialOut then
+                                    fail name "knob-on output depends on OMP_NUM_THREADS (a thread construct survived suppression)"
+                                else
+                                    pass name (sprintf "|diff| = %g; knob-on output independent of OMP_NUM_THREADS" diff)
+                    | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
+
+        printFooter "OpenMP Reduce" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+        { Block = "OpenMP Reduce"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

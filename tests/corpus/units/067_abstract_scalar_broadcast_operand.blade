@@ -1,0 +1,57 @@
+// TEST: Rank-0 Abstract Unit Parameter As A BROADCAST Operand
+// ============================================================================
+// units/062 puts `T<u>^0` in the two positions a scalar parameter has and
+// folds the array separately. This one puts it on the other side of an
+// ELEMENTWISE operator from the array -- `x - x0`, the shift every centered
+// statistic opens with -- which is the one place its lowering differs.
+//
+// `T<u>^0` is a unit-annotated inference VARIABLE, not an IRTScalar, so it
+// used to miss the array/scalar broadcast rule; the fallback then stamped the
+// operator's unit around the whole ARRAY result (`Array<T<second> like
+// Idx<n>><second>`), a shape no array match sees through. Everything
+// downstream then refused a value that IS an array -- `reduce()` and
+// `prodsum()` both answered "requires an array". An UNANNOTATED `T^0` never
+// showed it (no unit, nothing to wrap), and neither did a DEFAULTED slot: the
+// fill's literal pins the variable to a real scalar before the operator is
+// typed, which is why 062's `t_zero: T<second>^0 = 0.0` typed and the same
+// parameter without a default did not.
+//
+// `chk` is the unit check: `c + t0` composes only if `centered` returned
+// seconds, which it does only if the BROADCAST rule -- not the fallback --
+// produced the shifted array.
+//
+// KNOWN GAP, deliberately not exercised here: ascribing the CALL
+// (`let c: Float<second> = centered(ts, t0)`) instead of letting it infer
+// leaves `T` unresolved in the emitted row temp
+// (`BLADE_UNRESOLVED_TYPE_10000 x____i0 = x[__i0]`). The ascription binds the
+// shared variable after the function body was already zonked, so
+// `hasTypeVarsInParams` no longer sees the callee as HM and no specialization
+// is minted. That is a monomorphization-layer bug, not a typing one, and it
+// needs `T` in BOTH an array-element and a scalar position -- units/062 has
+// the same sharing and the same ascription and passes, because its body has
+// no synthesized broadcast kernel to leave a row temp behind.
+//
+// `q` is deliberately UNANNOTATED for a second reason: prodsum returns its
+// operands' unified element type without composing the two signatures, so a
+// `second` x `second` fold answers `second` rather than `second^2`. That is a
+// separate gap in prodsum's unit rule; pinning it either way here would
+// assert the wrong thing.
+// ============================================================================
+Unit second
+function centered(x: T<second>^1, x0: T<second>^0) = reduce(x - x0, (+))
+// Scalar on the LEFT of the array is the same rule in the other order.
+function fromEpoch(x: T<second>^1, x0: T<second>^0) = reduce(x0 - x, (+))
+// ...and the broadcast result folded through prodsum, the shape lsdft uses.
+function scaledShift(x: T<second>^1, x0: T<second>^0) = prodsum(x - x0, x - x0)
+
+let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let t0: Float<second> = 1.0
+let c = centered(ts, t0)
+let back = fromEpoch(ts, t0)
+let q = scaledShift(ts, t0)
+let chk = c + t0
+
+// EXPECT: c = 3
+// EXPECT: back = -3
+// EXPECT: q = 5
+// EXPECT: chk = 4

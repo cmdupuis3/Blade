@@ -1,0 +1,10 @@
+// TEST: Symmetric Literal As Flat Pool (rejects)
+// ERROR: BL3007
+// ERROR-CONTAINS: compact group
+// The canonical cells in pool order are NOT a second accepted spelling. A flat
+// list is a rank-1 literal, and the length it would have to match is the
+// group's CARDINALITY (6), while the axis's extent is 3 — the exact pair that
+// used to make the wrong count type-check: `[1, 2, 3]` passed the old
+// extent-vs-length test and then hit a `#error` in codegen. Both halves are
+// pinned here and in 226.
+let A: Array<Int64 like SymIdx<2, 3>> = [1, 2, 3, 4, 5, 6]

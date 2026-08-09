@@ -7,7 +7,7 @@ namespace BladeML
 ///   dotnet run --project ml -- dump-oracle
 module OracleDump =
 
-    /// Full round-trip precision, invariant culture — the same spelling
+    /// Full round-trip precision, invariant culture -- the same spelling
     /// discipline the compiler's floatToCppLiteral uses.
     let private f2s (v: float) : string =
         let s = v.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
@@ -20,7 +20,7 @@ module OracleDump =
         printfn "%s = [%s]" name (xs |> Array.map string |> String.concat ", ")
 
     /// The sparse real-CG entries of every path of a TP config, flattened in
-    /// path order — exactly the constant tables the Blade example needs.
+    /// path order -- exactly the constant tables the Blade example needs.
     let private dumpCgTables (label: string) (cfg: TPConfig) =
         let ps = TensorProduct.paths cfg
         printfn "// %s: %d paths" label ps.Length
@@ -85,8 +85,8 @@ module OracleDump =
         printfn "br_final = %s" (f2s res.FinalBr)
 
         // ===== tp_spec full-decomposition pins (corpus ml-ops/009) =====
-        // The FULL CG decomposition of 1o ⊗ 1o via Irreps.tpSpec, pushed
-        // through the reference tensor product on fixed inputs — the value
+        // The FULL CG decomposition of 1o (x) 1o via Irreps.tpSpec, pushed
+        // through the reference tensor product on fixed inputs -- the value
         // pins for the compiler's `ml.tp_spec` round-trip test.
         printfn ""
         printfn "// ===== tp_spec pins (ml-ops/009): full 1o (x) 1o ====="
@@ -109,7 +109,7 @@ module OracleDump =
 
         // ===== equiv-certified pipeline pins (corpus ml-equiv/002) =====
         // y_to(2, 1,2,3) -> TP(sh2 (x) sh2 -> sh2) -> gated -> linear -> norms,
-        // fixed weights — the value pins for the certified-pipeline test.
+        // fixed weights -- the value pins for the certified-pipeline test.
         printfn ""
         printfn "// ===== equiv pipeline pins (ml-equiv/002) ====="
         let sh2spec = Irreps.shSpec 2
@@ -127,7 +127,7 @@ module OracleDump =
         arr "pipe_out" (Activations.norms sh2spec lv)
 
         // ===== derive-layer training pins (corpus ml-equiv/017) =====
-        // Certified model derive_linear -> norms; loss = Σ (norms − tgt)²;
+        // Certified model derive_linear -> norms; loss = Sigma (norms - tgt)^2;
         // 6 recorded losses (pre-update) over 5+1 SGD steps at lr 0.1 via
         // vjpNorms/vjpHomLinear. The Blade twin trains the SAME model
         // through grad() over the compiler-synthesized layers.
@@ -153,8 +153,8 @@ module OracleDump =
         arr "derive_train_w_final" w017
 
     /// dump-equiv: the rotation-CERTIFICATE fixtures (corpus ml-equiv/018+).
-    /// Fixed proper rotation R = Rz(0.7)·Ry(1.1) (the ml-e2e convention);
-    /// per test both routes are printed — f(D_in·x) and D_out·f(x) — as
+    /// Fixed proper rotation R = Rz(0.7)*Ry(1.1) (the ml-e2e convention);
+    /// per test both routes are printed -- f(D_in*x) and D_out*f(x) -- as
     /// pasteable literals, plus the dense block-diagonal D matrices
     /// (Rotations.repMatrix; a full matvec over them reproduces applyRep to
     /// the ulp). These validate the compiler's equiv discipline ONCE; user
@@ -168,7 +168,7 @@ module OracleDump =
                  for j in 0 .. n - 1 do
                      acc <- acc + m.[i * n + j] * x.[j]
                  acc |]
-        printfn "// ===== equiv certificates (fixed R = Rz(0.7)·Ry(1.1)) ====="
+        printfn "// ===== equiv certificates (fixed R = Rz(0.7)*Ry(1.1)) ====="
         arr "rot" (r |> Array.concat)
 
         // ---- 018: derive_linear both ways (011's fixtures) ----
@@ -249,7 +249,7 @@ module OracleDump =
         arr "cert_grad_dw" g0
         arr "cert_grad_dw_rot" g1
 
-    /// dump-cartesian: the Cartesian<->irreps bridge — constants,
+    /// dump-cartesian: the Cartesian<->irreps bridge -- constants,
     /// orthogonality, and rotation/parity certificates (corpus sgs/001-003;
     /// later the pins for the compiler's CartesianBridge.fs).
     ///
@@ -387,7 +387,7 @@ module OracleDump =
         arr "d_gspec" (Rotations.repMatrix gspec r)
         arr "d_tauspec" (Rotations.repMatrix tspec r)
 
-        // ---- 001: symmetric bridge — round-trip + rotation certificate ----
+        // ---- 001: symmetric bridge -- round-trip + rotation certificate ----
         let bS = MathUtils.matVec symToIrr (packSymM sFix)
         let lhsS = MathUtils.matVec symToIrr (packSymM (conj r sFix))
         let rhsS = matvecFlat 6 (Rotations.repMatrix tspec r) bS
@@ -403,7 +403,7 @@ module OracleDump =
         printfn "cert_s_frob = %s" (f2s frobS)
         printfn "cert_s_norm = %s" (f2s (vnorm bS))
 
-        // ---- 002/003: full-gradient bridge — certificate + improper contrast ----
+        // ---- 002/003: full-gradient bridge -- certificate + improper contrast ----
         let bG = MathUtils.matVec bridge9 (flatten9 gFix)
         let lhsG = MathUtils.matVec bridge9 (flatten9 (conj r gFix))
         let rhsG = matvecFlat 9 (Rotations.repMatrix gspec r) bG
@@ -417,7 +417,7 @@ module OracleDump =
         printfn "cert_g_frob = %s" (f2s (vnorm (flatten9 gFix)))
         printfn "cert_g_norm = %s" (f2s (vnorm bG))
         // Improper element inversion.R: Cartesian route is UNCHANGED
-        // ((-R) G (-R)^T = R G R^T — gradients are parity-even), so the
+        // ((-R) G (-R)^T = R G R^T -- gradients are parity-even), so the
         // right-parity irreps route must equal the proper one, while the
         // WRONG assignment (vorticity as (1, odd)) flips the l=1 block.
         let impRight = Rotations.applyRepImproper gspec r bG

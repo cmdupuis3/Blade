@@ -45,7 +45,7 @@ type Mt19937_64(seed: uint64) =
 let bitsToUnit (x: uint64) : float =
     float (x >>> 11) * (1.0 / 9007199254740992.0)
 
-/// blade_rand::uniform — n draws for a stream key.
+/// blade_rand::uniform -- n draws for a stream key.
 let uniform (key: int64) (n: int) : float[] =
     let g = Mt19937_64(mix64 (uint64 key))
     Array.init n (fun _ -> bitsToUnit (g.Next()))

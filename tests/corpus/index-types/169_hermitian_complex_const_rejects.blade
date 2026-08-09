@@ -1,0 +1,18 @@
+// TEST: Hermitian Complex Constant Map (rejects)
+// ERROR: BL4015
+// The Hermitian counterexample 168 is the positive twin of. Adding a COMPLEX
+// constant breaks conjugation-linearity — conj(z + i) = conj(z) - i, not
+// conj(z) + i — so out(1,0) would be read back as conj(H(0,1)^2 + i) when the
+// truth is conj(H(0,1))^2 + i, differing in the sign of that constant's
+// imaginary part. Nothing about the SIGN law would have caught this: the
+// antisymmetric question (is f odd?) and the Hermitian question (does f
+// commute with conj?) are independent, which is why deduceConjCommutes is a
+// separate walker rather than a reading of the sign lattice.
+let A: Array<Complex128 like Idx<2>, Idx<3>> = [
+    [complex(1.0, 1.0), complex(2.0, 0.0), complex(0.0, 1.0)],
+    [complex(3.0, -1.0), complex(1.0, 2.0), complex(2.0, 0.0)]
+]
+let H = gram(A, A)
+let out = method_for(H) <@> lambda(v) -> v + complex(0.0, 1.0) |> compute
+// EXPECT: typecheck failure — a complex additive constant does not commute
+// with conjugation, so the Hermitian storage class cannot be inherited.

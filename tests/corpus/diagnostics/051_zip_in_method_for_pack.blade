@@ -1,0 +1,13 @@
+// TEST: Diag Zip In Method For Pack (diag)
+// ERROR: BL3999
+// ============================================================================
+// The method_for orientation of diagnostics/050: the same unimplemented shape
+// seen from the other side of the compose-apply duality. Here the zip became
+// one ordinary pack slot whose array never materialized, and codegen emitted
+// an undeclared `arr1` into the C++. Both orientations now share one message.
+// `for (w, zip(t, s))` -- the sugar -- desugars through the same path.
+// ============================================================================
+let w: Array<Float like Idx<2>> = [1.0, 2.0]
+let t: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
+let s: Array<Float like Idx<3>> = [10.0, 100.0, 1000.0]
+let grid = method_for(w, zip(t, s)) <@> lambda(f, ti, v) -> v * f * ti |> compute

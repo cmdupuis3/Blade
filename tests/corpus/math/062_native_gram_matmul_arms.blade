@@ -1,0 +1,34 @@
+// TEST: gram/matmul NATIVE arms (BLAS gate off) at non-power-of-two extents
+// The default build has no BLAS, so `gram` and `m.matmul` emit their own loops
+// (materializeGramForm / materializeMatmulForm in src/CodeGen.fs). Those loops
+// were rewritten: outer level threaded, operand rows hoisted behind
+// BLADE_RESTRICT, extents baked from the operands' own index records, and
+// matmul reordered i-j-t -> i-t-j so the `B` read is unit-stride.
+//
+// This file is the VALUE side of that change. Its job is to be a shape the old
+// emitters and the new ones must agree on, so it deliberately avoids every
+// size where an off-by-one hides: 3x5, 5x7 and 4x5, none a power of two, none
+// square, and all three modes present at once --
+//   G : gram same-array   -> packed upper triangle, TRIANGULAR loop, dynamic
+//                            schedule (the arm whose inner span shrinks)
+//   H : gram distinct     -> dense, rectangular, static schedule
+//   P : matmul            -> dense, the reordered arm
+//
+// Every value is integer-valued in f64 and exact in binary, which is what lets
+// the `interp math` differential demand BYTE-identity against
+// Interp/ArrayOps: the reorder preserves each output cell's summation order
+// exactly, so the only thing that could ever differ is FP contraction, and on
+// exactly-representable partial sums FMA and mul+add coincide.
+import math as m
+type M35 = Array<Float64 like Idx<3>, Idx<5>>
+type M57 = Array<Float64 like Idx<5>, Idx<7>>
+type M45 = Array<Float64 like Idx<4>, Idx<5>>
+let A: M35 = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]
+let B: M57 = [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0], [15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0], [22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0], [29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0]]
+let C: M45 = [[2.0, 3.0, 5.0, 7.0, 11.0], [13.0, 17.0, 19.0, 23.0, 29.0], [31.0, 37.0, 41.0, 43.0, 47.0], [53.0, 59.0, 61.0, 67.0, 71.0]]
+let G = gram(A, A)
+let H = gram(A, C)
+let P = m.matmul(A, B)
+// EXPECT: G = [55, 130, 205, 330, 530, 855]
+// EXPECT: H = [106, 341, 635, 977, 246, 846, 1630, 2532, 386, 1351, 2625, 4087]
+// EXPECT: P = [295, 310, 325, 340, 355, 370, 385, 670, 710, 750, 790, 830, 870, 910, 1045, 1110, 1175, 1240, 1305, 1370, 1435]

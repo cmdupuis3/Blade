@@ -1,0 +1,16 @@
+// TEST: Sparse Builder Static Keys
+// sparse(values, keys): bundle a rank-1 values array (IN KEY ORDER — no
+// scatter) with a `let static` key list into a SparseIdx-typed array. Cell r
+// of values belongs to key r, so full-key reads recover the values, and the
+// non-commutative fold pins that the compact buffer kept the given order.
+let static K = [(2, 1), (0, 3), (1, 0)]
+let vals: Array<Float64 like Idx<3>> = [21.0, 3.0, 10.0]
+let S = sparse(vals, K)
+let y0 = S((2, 1))
+let y1 = S((0, 3))
+let y2 = S((1, 0))
+let ord = reduce(S, lambda(a, b) -> a * 100.0 + b)
+// EXPECT: y0 = 21
+// EXPECT: y1 = 3
+// EXPECT: y2 = 10
+// EXPECT: ord = 210310

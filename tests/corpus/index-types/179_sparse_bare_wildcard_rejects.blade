@@ -1,0 +1,8 @@
+// TEST: Sparse Bare Wildcard (rejects)
+// ERROR: BL4003
+// A bare `_` pins no coordinate (SparseBareWildcard). The parser collapses a
+// 1-tuple `(_)` to the bare hole, so this covers both spellings.
+let static K = [(2, 1), (0, 3)]
+let S = method_for(range<SparseIdx<K>>) <@> lambda(i, j) -> i * 10 + j |> compute
+let r = S(_)
+// EXPECT: typecheck failure — bare wildcard pins nothing.

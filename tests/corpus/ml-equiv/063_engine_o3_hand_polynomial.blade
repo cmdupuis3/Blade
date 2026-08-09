@@ -2,7 +2,7 @@
 import ml as ml
 // ============================================================================
 // THE GENERATOR-BASED ENGINE, PART II: HAND-WRITTEN O(3) POLYNOMIALS CERTIFIED
-// (docs/plan-transforms-as-types.md §3.5's uniform rule and LINEARITY
+// (retired transforms-as-types plan §3.5's uniform rule and LINEARITY
 // RESOLUTION, §7 stage 6c).
 //
 // Every body here is one composition refuses, and refuses correctly: raw
@@ -32,6 +32,8 @@ import ml as ml
 //        theorem the −I check catches (corpus 064);
 //   PS = [(0, 1, 1)] is a PSEUDOscalar (l = 0, odd) — the triple product.
 // ============================================================================
+// `cross_loose` below is the uncertified twin, so its suggestion is an assertion.
+// WARN: BL4011
 let static V = [(1, 1, 1)]
 let static VE = [(1, 0, 1)]
 let static PS = [(0, 1, 1)]

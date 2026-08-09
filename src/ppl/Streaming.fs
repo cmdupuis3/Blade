@@ -1,8 +1,8 @@
 namespace MomentAlgebra
 
 /// Prototype 3: streaming/mergeable central comoment accumulators whose
-/// update kernel is DERIVED, not hand-coded — the arbitrary-order
-/// multivariate generalization of Welford's algorithm (Pébay's formulas).
+/// update kernel is DERIVED, not hand-coded -- the arbitrary-order
+/// multivariate generalization of Welford's algorithm (Pebay's formulas).
 ///
 /// Derivation (runs once per (d, r) as plan construction; in Blade this is a
 /// compile-time pass): with delta = mu_B - mu_A and n = n_A + n_B,
@@ -80,7 +80,7 @@ module Streaming =
         elif rank = 1 then 0.0
         else acc.M.[rank - 2].Data.[offset]
 
-    /// Merge two accumulators (pure; used for chunked/parallel reduction —
+    /// Merge two accumulators (pure; used for chunked/parallel reduction --
     /// the streaming analogue of Blade's comm-group reduction).
     let merge (a: Acc) (b: Acc) : Acc =
         if a.Dim <> b.Dim || a.Order <> b.Order then failwith "Streaming.merge: shape mismatch"
@@ -154,10 +154,10 @@ module Streaming =
             SymTensor.set kappa.[0] [| i |] acc.Mean.[i]
         { Dim = d; Order = r; Kappa = kappa }
 
-    /// Human-readable derived merge formula for univariate order p — the
+    /// Human-readable derived merge formula for univariate order p -- the
     /// artifact a Blade compiler pass would document. Grouping the subset
     /// terms by |K| collapses them into binomial coefficients; the printed
-    /// p = 2, 3, 4 lines reproduce Pébay (2008) exactly.
+    /// p = 2, 3, 4 lines reproduce Pebay (2008) exactly.
     let mergeFormulaText (p: int) : string =
         let sb = System.Text.StringBuilder()
         sb.Append(sprintf "M%d' = M%d_A + M%d_B" p p p) |> ignore

@@ -1,6 +1,6 @@
 /// Reference FFT/ifft/power for the spectra module.
 ///
-/// MUST match spectra/compiler/SpectraDecls.fs — the tables and the
+/// MUST match spectra/compiler/SpectraDecls.fs -- the tables and the
 /// arithmetic order are the ulp contract: both sides bake the SAME
 /// System.Math.Cos/Sin table values (the generated code as float literals,
 /// this oracle directly), and perform the SAME operations in the SAME order
@@ -9,7 +9,7 @@
 /// parallel; do not hand-optimize either side.
 module BladeSpectra.Fft
 
-/// Hand-rolled complex pair — NOT System.Numerics.Complex, whose operator
+/// Hand-rolled complex pair -- NOT System.Numerics.Complex, whose operator
 /// implementations we do not control. Naive formulas only.
 type Cplx = { Re: float; Im: float }
 
@@ -59,7 +59,7 @@ let fft (x: float[]) : Cplx[] =
         let tw = fwdTwiddles n (n / 2)
         let sx = Array.zeroCreate<Cplx> n
         // Gather copy-in through the bit-reversal permutation (gather, not
-        // scatter — the generated code mirrors this direction).
+        // scatter -- the generated code mirrors this direction).
         for i in 0 .. n - 1 do
             sx.[i] <- cplx x.[perm.[i]] 0.0
         for st in 1 .. stages do
@@ -97,7 +97,7 @@ let ifft (xs: Cplx[]) : float[] =
         xo.[i] <- xo.[i] / float n
     xo
 
-// ---- power: |FFT(x)|² per bin ----------------------------------------------
+// ---- power: |FFT(x)|^2 per bin ----------------------------------------------
 
 let power (x: float[]) : float[] =
     let sx = fft x
@@ -144,7 +144,7 @@ let private rowPass2 (r: int) (c: int) (mkTw: int -> int -> Cplx[]) (readIn: int
                     sa.[i * c + k] <- cadd sa.[i * c + k] (cmul (readIn i j) twc.[t])
         sa
 
-/// Column pass: DFT along axis 0, `sa` -> fresh `sb` (flat row-major r×c).
+/// Column pass: DFT along axis 0, `sa` -> fresh `sb` (flat row-major rxc).
 let private colPass2 (r: int) (c: int) (mkTw: int -> int -> Cplx[]) (sa: Cplx[]) : Cplx[] =
     let sb = Array.create (r * c) (cplx 0.0 0.0)
     if isPow2 r && r >= 2 then
@@ -178,13 +178,13 @@ let private colPass2 (r: int) (c: int) (mkTw: int -> int -> Cplx[]) (sa: Cplx[])
                     sb.[k * c + j] <- cadd sb.[k * c + j] (cmul sa.[i * c + j] twr.[t])
         sb
 
-/// fft2: unnormalized forward 2-D DFT of a real r×c field (flat row-major).
+/// fft2: unnormalized forward 2-D DFT of a real rxc field (flat row-major).
 let fft2 (r: int) (c: int) (x: float[]) : Cplx[] =
     rowPass2 r c fwdTwiddles (fun i j -> cplx x.[i * c + j] 0.0)
     |> colPass2 r c fwdTwiddles
 
-/// ifft2: real inverse synthesis of an r×c complex spectrum (carries the
-/// 1/(r·c), applied once at copy-out).
+/// ifft2: real inverse synthesis of an rxc complex spectrum (carries the
+/// 1/(r*c), applied once at copy-out).
 let ifft2 (r: int) (c: int) (xs: Cplx[]) : float[] =
     let sb =
         rowPass2 r c invTwiddles (fun i j -> xs.[i * c + j])

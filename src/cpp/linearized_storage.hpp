@@ -1,73 +1,48 @@
 #pragma once
 // linearized_storage.hpp
-// Blade DSL Runtime Support Library — flat linearized storage
+// Blade DSL Runtime Support Library -- flat linearized storage
 //
-// ============================================================================
-// PURPOSE & RELATION TO nested_array_utilities.hpp
-// ============================================================================
-//
-// This header provides an ALTERNATIVE storage representation to the nested
-// pointer-skeleton arrays in nested_array_utilities.hpp. The two differ by
-// philosophy and intended consumer:
-//
-//   nested_array_utilities.hpp  (HOST):
-//     - storage = contiguous data pool + a T*****-style pointer skeleton
-//     - addressing = arr[i][j][k] via pointer dereference chains
-//     - the nested-pointer interface is the point (isomorphic to Blade source)
-//
-//   linearized_storage.hpp  (DEVICE-ORIENTED, this file):
-//     - storage = a BARE flat pool of `cardinality` elements (no skeleton)
-//     - addressing = arithmetic: linearize(tuple) -> flat offset, and the
-//       inverse unlinearize(offset) -> tuple
-//     - no pointer chasing; one contiguous block addressable by computation
+// PURPOSE. An ALTERNATIVE storage representation to the nested
+// pointer-skeleton arrays in nested_array_utilities.hpp: that header (HOST)
+// is a contiguous data pool plus a T*****-style pointer skeleton, addressed
+// as arr[i][j][k] via pointer dereference chains, isomorphic to Blade
+// source. This header (DEVICE-ORIENTED) is a BARE flat pool of
+// `cardinality` elements with no skeleton, addressed by arithmetic --
+// linearize(tuple) -> flat offset and unlinearize(offset) -> tuple.
 //
 // Why a separate scheme: a host-built pointer skeleton holds host addresses,
-// which are meaningless after cudaMemcpy to a device. The device wants a flat
-// block indexed by arithmetic. linearize/unlinearize ARE that arithmetic. The
-// flat allocate here is therefore just `new T[cardinality]` — no skeleton.
+// meaningless after cudaMemcpy to a device, which wants a flat block indexed
+// by arithmetic instead. The flat allocate here is just `new T[cardinality]`
+// -- no skeleton. The flat offset from linearize() is IDENTICAL to the DFS
+// storage order nested_array_utilities.hpp's contiguous pool lays down
+// (verified against that allocator's traversal): the two schemes agree on
+// canonical order, differing only in whether a pointer skeleton sits on top.
 //
-// The flat offset produced by linearize() is IDENTICAL to the DFS storage
-// order that nested_array_utilities.hpp's contiguous pool lays down (verified
-// against that allocator's traversal). So the two schemes agree on canonical
-// order; they differ only in whether a pointer skeleton sits on top.
-//
-// ============================================================================
-// RANKING SCHEME
-// ============================================================================
-//
-// Canonical order is sorted tuples in ascending-lex (the order the allocator's
-// DFS produces):  for r=3 n=4, (0,0,0),(0,0,1),...,(0,3,3),(1,1,1),...,(3,3,3).
-//
-//   Symmetric      (SymIdx<r,n>):   i_0 <= i_1 <= ... <= i_{r-1},  card C(n+r-1, r)
+// RANKING SCHEME. Canonical order is sorted tuples in ascending-lex (the
+// allocator's DFS order): for r=3 n=4, (0,0,0),(0,0,1),...,(0,3,3),
+// (1,1,1),...,(3,3,3).
+//   Symmetric      (SymIdx<r,n>):     i_0 <= i_1 <= ... <= i_{r-1}, card C(n+r-1, r)
 //   Antisymmetric  (AntisymIdx<r,n>): i_0 <  i_1 <  ... <  i_{r-1}, card C(n, r)
+// linearize sums r binomial terms in closed form via the hockey-stick
+// identity (no O(n) inner loop): O(r), independent of n. unlinearize inverts
+// coordinate-by-coordinate via BISECTION over the monotone prefix-count (not
+// a linear scan): O(r * log n), the per-thread cost a GPU thread pays at
+// kernel entry to recover its tuple from its flat thread id.
 //
-// linearize is a sum of r binomial terms, each computed in closed form via the
-// hockey-stick identity (NO O(n) inner loop): O(r) cost, INDEPENDENT of n.
-//
-// unlinearize inverts coordinate-by-coordinate. The coordinate at each position
-// is found by BISECTION over the monotone prefix-count (NOT a linear scan):
-// O(r * log n) cost. This is the per-thread cost a GPU thread pays at kernel
-// entry to recover its tuple from its flat thread id.
-//
-// COST NOTE (honest): the op counts are dominated by integer DIVISION inside
-// the binomial evaluation, which is comparatively expensive on GPUs. The raw
-// "op count" understates real device cost. Whether unlinearize's O(r log n)
-// (with division-heavy inner work) is acceptable for a given (r, n), versus
-// precomputing an unranking table in shared memory, is an EMPIRICAL question
-// to settle with a real kernel — not decided here. This header provides the
-// table-free arithmetic path; a table-based path can be added later if needed.
-//
-// TEARDOWN: the flat pool is a single `delete[]`. No skeleton to free. Generated
-// programs currently do not free (consistent with the rest of the runtime).
+// COST NOTE: op counts are dominated by integer DIVISION inside the binomial
+// evaluation, comparatively expensive on GPUs, so raw op count understates
+// real device cost. Whether O(r log n) with division-heavy inner work beats
+// a precomputed unranking table in shared memory is an empirical question
+// per (r, n), not settled here. TEARDOWN: the flat pool is a single
+// `delete[]`, no skeleton to free; generated programs currently do not free
+// (consistent with the runtime).
 
 #include <cstddef>
 #include <array>
 
 namespace linearized_storage {
 
-    // ========================================================================
-    // Shared combinatorial helpers
-    // ========================================================================
+    // Shared combinatorial helpers.
 
     // Binomial coefficient C(a, b). Uses the symmetric reduction b = min(b,a-b)
     // and incremental multiply/divide to limit intermediate growth.
@@ -82,20 +57,17 @@ namespace linearized_storage {
         return r;
     }
 
-    // ========================================================================
-    // Symmetric: i_0 <= i_1 <= ... <= i_{r-1}, entries in [0, n)
-    // ========================================================================
-    //
-    // Maps to strictly-increasing via d_j = i_j + j (multiset combinadic).
-    // We compute offsets directly on the sorted tuple using the count of
-    // sorted suffixes, closed-form via hockey-stick.
+    // Symmetric: i_0 <= i_1 <= ... <= i_{r-1}, entries in [0, n). Maps to
+    // strictly-increasing via d_j = i_j + j (multiset combinadic); offsets
+    // are computed directly on the sorted tuple using the count of sorted
+    // suffixes, closed-form via hockey-stick.
 
     namespace symmetric {
 
-        // Count of sorted-with-repetition suffixes of length `rem`, with leading
-        // coordinate in [lo, hi), each entry in [., n). Closed form:
-        //   sum_{v=lo}^{hi-1} C((n-v)+rem-1, rem)
-        // collapses by hockey-stick to a single pair of binomials.
+        // Count of sorted-with-repetition suffixes of length `rem`, leading
+        // coordinate in [lo, hi), each entry in [., n): closed form
+        // sum_{v=lo}^{hi-1} C((n-v)+rem-1, rem), collapsed by hockey-stick
+        // to a single pair of binomials.
         constexpr size_t block_count(size_t lo, size_t hi, size_t n, size_t rem) {
             if (rem == 0) return (hi > lo) ? (hi - lo) : 0;  // length-0 suffix
             if (hi <= lo) return 0;
@@ -131,8 +103,7 @@ namespace linearized_storage {
             size_t lo = 0;
             for (size_t p = 0; p < R; p++) {
                 size_t rem = R - p - 1;
-                // Largest c in [lo, n) with block_count(lo, c+1) <= offset, i.e.
-                // the cell whose cumulative prefix count does not exceed offset.
+                // Largest c in [lo, n) with cumulative prefix count <= offset.
                 size_t loB = lo, hiB = n;
                 while (loB < hiB) {
                     size_t mid = loB + (hiB - loB) / 2;
@@ -148,8 +119,7 @@ namespace linearized_storage {
             return idx;
         }
 
-        // Flat allocation: a bare pool of `cardinality(n,r)` elements. No skeleton.
-        // Caller indexes via linearize/unlinearize. Returns T* (single block).
+        // Flat allocation: bare pool of `cardinality(n,r)` elements, no skeleton.
         template<typename T>
         T* allocate(size_t n, size_t r) {
             size_t card = cardinality(n, r);
@@ -158,27 +128,21 @@ namespace linearized_storage {
 
     }  // namespace symmetric
 
-    // ========================================================================
-    // Antisymmetric: i_0 < i_1 < ... < i_{r-1}, entries in [0, n)
-    // ========================================================================
-    //
-    // Strict combinadic (no +j shift; the strictness is intrinsic). Same
-    // ascending-lex canonical order, restricted to strictly increasing tuples.
+    // Antisymmetric: i_0 < i_1 < ... < i_{r-1}, entries in [0, n). Strict
+    // combinadic (no +j shift; strictness is intrinsic), same ascending-lex
+    // canonical order restricted to strictly increasing tuples.
 
     namespace antisymmetric {
 
         // Count of strictly-increasing suffixes of length `rem`, leading
-        // coordinate in [lo, hi), each entry in [., n). For a strict suffix
-        // starting at value v, the remaining (rem) entries are chosen strictly
-        // increasing from (v, n): that's C(n - v - 1, rem). Summed over
-        // v in [lo, hi):  sum_{v=lo}^{hi-1} C(n-v-1, rem)
-        // collapses by hockey-stick to a single pair of binomials.
+        // coordinate in [lo, hi), each entry in [., n). A strict suffix
+        // starting at v has C(n-v-1, rem) completions, summed over v in
+        // [lo, hi): sum_{v=lo}^{hi-1} C(n-v-1, rem) = (w = n-v-1)
+        // sum_{w=n-hi}^{n-lo-1} C(w, rem), collapsing by hockey-stick to
+        // C(n-lo, rem+1) - C(n-hi, rem+1).
         constexpr size_t block_count(size_t lo, size_t hi, size_t n, size_t rem) {
             if (rem == 0) return (hi > lo) ? (hi - lo) : 0;
             if (hi <= lo) return 0;
-            // sum_{v=lo}^{hi-1} C(n-v-1, rem); let w = n-v-1, w runs
-            // (n-hi) .. (n-lo-1). sum_{w=n-hi}^{n-lo-1} C(w, rem)
-            //   = C(n-lo, rem+1) - C(n-hi, rem+1)   (hockey-stick)
             size_t hi_term = binom(n - lo, rem + 1);
             size_t lo_term = binom(n - hi, rem + 1);
             return hi_term - lo_term;

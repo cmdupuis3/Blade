@@ -1,4 +1,7 @@
 // TEST: Fusion Staggered Arity
+// BL4010: k2/k3 deduce comm over repeated A; the dense towers below are the
+// subject, so the storage suggestion is pinned rather than taken.
+// WARN: BL4010
 // <&!> over leaves of DIFFERENT arity (1, 2, 3) over the same array merges
 // into ONE staggered nest: each leaf's assignment sits at its own depth
 //   for i0 { m1[i0]; for i1 { m2[i0][i1]; for i2 { m3[i0][i1][i2] } } }

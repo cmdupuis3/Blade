@@ -1,10 +1,7 @@
-// Blade type-system core (audit §4: Types.fs) — the expression-INDEPENDENT
-// layer: element types, symmetry/kind classifications, unit signatures.
-// Everything here is consumable without depending on IR.fs's 6k-line
-// type/expression knot; Check-side code that only needs these can stop
-// importing all of IR. (IRType/IRIndexType themselves CANNOT move while
-// IRIndexType.Extent is an IRExpr — severing that coupling is a rewrite
-// design decision; this file is the boundary the rewrite extends.)
+// Blade type-system core: the expression-independent layer (element types,
+// symmetry/kind classifiers, unit signatures), usable without IR.fs's
+// 6k-line type/expression knot. IRType/IRIndexType stay in IR.fs since
+// IRIndexType.Extent is an IRExpr; the boundary a decoupling rewrite would extend.
 module Blade.Types
 
 type IRId = int
@@ -15,81 +12,71 @@ type SymmetryClass =
     | SymSymmetric     // Symmetric (i <= j)
     | SymAntisymmetric // Antisymmetric (i < j, negate on swap)
     | SymHermitian     // Hermitian (conjugate on swap)
+    /// ITERATED WREATH (`OrbIdx<[(r1,s1),...,(rd,sd)], n>`, d >= 2 after
+    /// normalization -- docs/plan-orbit-index-types.md section 2): S_r1 wr
+    /// ... wr S_rd on prod(ri) axes, character = product of per-level signs;
+    /// placed via an iterated-binomial fold, not a single combinadic.
+    /// Nullary DELIBERATELY: level list rides Extent as `IROrbitClass`,
+    /// forcing every exhaustive match to decide this case. Depth 1 never
+    /// reaches here -- `OrbIdx<[(r,+/-)],n>` normalizes to Sym/Antisym,
+    /// empty to plain `Idx<n>`.
+    | SymWreath
 
-/// Placement (membership + ranking) class for index types -- the Level-1 axis,
-/// orthogonal to the symmetry-transform axis (SymmetryClass). It answers "which
-/// tuples are stored, and how is a tuple ranked to a flat offset", independent
-/// of any value transform applied on non-canonical access.
-///
-/// For the four built-in classes, placement is a function of the symmetry class:
-/// PlaceDense for SymNone; PlaceCombinatorial for the three symmetries, which
-/// carry their SymmetryClass so ranking/cardinality can distinguish inclusive
-/// (sym/herm) from strict (antisym) combinadics. The placement-vs-symmetry
-/// distinction only DIVERGES with tabulated types (CompoundIdx / SparseIdx),
-/// whose validity is mask-/list-derived rather than a symmetry; those will add a
-/// PlaceTabulated case here, recognized by placementOf from the index type's
-/// definition rather than its SymmetryClass. Adding that case makes the dispatch
-/// functions warn (FS0025) until each handles it -- the intended openness check.
+/// Per-parameter SIGN parity of a kernel, recorded on the callable for the
+/// wreath-tie soundness gate (`IR.deduceWreathTie`); mirrors
+/// `Deduce.SignParity` (IRCallable sits below Deduce.fs in compile order).
+/// TypeCheck is the sole producer; empty means "never computed" (all-KspUnknown).
+type KernelSignParity =
+    | KspOdd      // provably f(.., -x, ..) = -f(.., x, ..) in that parameter
+    | KspEven     // provably f(.., -x, ..) =  f(.., x, ..) in that parameter
+    | KspUnknown  // neither provable
+
+/// Placement (membership + ranking) class for index types -- the Level-1
+/// axis, orthogonal to the symmetry-transform axis (SymmetryClass): which
+/// tuples are stored and how a tuple ranks to a flat offset.
+/// PlaceDense for SymNone; PlaceCombinatorial (carrying SymmetryClass, so
+/// ranking distinguishes inclusive sym/herm from strict antisym) for the
+/// rest. Tabulated types (CompoundIdx/SparseIdx) diverge: validity is
+/// mask-/list-derived, not symmetry-derived. Exhaustiveness (FS0025) here
+/// is deliberate -- adding a case forces every dispatch site to update.
 type PlacementClass =
     | PlaceDense                          // row-major dense (Idx, EnumIdx)
     | PlaceCombinatorial of SymmetryClass // CNS-ranked compact (sym/antisym/herm)
     | PlaceTabulated                      // mask/list-derived, runtime table (CompoundIdx)
 
-/// Core Level-1 classifier on the symmetry axis. The placement-proxy sites
-/// (cardinality, compact grouping, allocator choice) read SymmetryClass today,
-/// so this is the shared entry point; placementOf (below, once IRIndexType is
-/// defined) wraps it for a full index type and is where tabulated detection will
-/// hook in.
+/// Core Level-1 classifier on the symmetry axis; the shared entry point
+/// for placement-proxy sites (cardinality, compact grouping, allocator
+/// choice) that read SymmetryClass today.
 let placementClassOf (sym: SymmetryClass) : PlacementClass =
     match sym with
     | SymNone -> PlaceDense
+    // Wreath is closed-form placed (iterated binomial, one C(.,.) per level)
+    // so it's Combinatorial not Tabulated -- but not a single combinadic
+    // over `Rank`: consumers must read the level list off the Extent
+    // marker, not assume C(n+r-1,r). `bufferGroupCardinality` does this.
+    | SymWreath -> PlaceCombinatorial SymWreath
     | SymSymmetric | SymAntisymmetric | SymHermitian -> PlaceCombinatorial sym
 
-/// ---------------------------------------------------------------------------
-/// ORBIT PLACEMENT (design skeleton -- docs/design-unified-orbit-storage.md).
-/// NOT WIRED IN: nothing constructs or consumes this yet. It is here because it
-/// is the generalization the two cases above are already instances of, and
-/// stating it in the type system is what keeps the tiers of the design honest.
-///
-/// An orbit placement is a TRIPLE: a base tuple space of R index positions, a
-/// POSITION GROUP G <= S_R declaring which slot permutations are interchangeable,
-/// and a linear CHARACTER chi: G -> {+1,-1,conj} giving the value transform on
-/// non-canonical access. `SymmetryClass` above IS chi; `PositionGroup` is the
-/// missing half, which today is implicit ("full S_R over one comm group").
-///
-/// The point of naming G separately is that the CLOSED-FORM RANK depends on G
-/// alone, and only two shapes of G have one:
-///
-///   PgFullSym  -- combinadic / left-justify. C(N+R-1,R) inclusive, C(N,R)
-///                 strict. Discharged by BladeDMWF (lj_correct/unlj_correct)
-///                 and BladeBinomial. This is `comm`/`antisymm` today.
-///   PgProduct  -- per-group ranks composed MIXED RADIX, cell count
-///                 prod_j C(N_j+R_j-1, R_j). Discharged by
-///                 BladeMixedRadix.mixed_radix_bijection / shapeCard_binom.
-///                 This is a multi-group `comm` pin today -- and, per the design
-///                 doc's tier 2, it is ALSO the tied-perm cell layout, which is
-///                 why tying an S_n-equivariant layer's arguments needs no new
-///                 layout and no new proof obligation.
-///   PgOpaque   -- everything else. Orbits under a general finite G have
-///                 stabilizers of varying size, so the cell count is a Burnside
-///                 sum and there is NO reason to expect a closed-form rank
-///                 (BladeCounting.v is the nearest negative result). The honest
-///                 placement is PlaceTabulated. Do not promise a rank here.
-///
-/// The ZERO-SET is a function of BOTH: a tuple whose stabilizer in G contains an
-/// element with chi = -1 must store zero (v = chi(h)*v = -v). That is why
-/// PlaceCombinatorial carries its SymmetryClass, and it is the general form of
-/// the antisymmetric zero-diagonal -- measured to govern the antisym WEIGHT
-/// buffer of a tied equivariant layer verbatim (design doc 2.5, 16/16).
+/// ORBIT PLACEMENT (design skeleton, NOT WIRED IN): generalizes the two
+/// cases above as a TRIPLE -- R positions, POSITION GROUP G <= S_R of
+/// interchangeable slot permutations, CHARACTER chi: G -> {+1,-1,conj}
+/// (`SymmetryClass` above IS chi; `PositionGroup` the missing half).
+/// Closed-form rank only for PgFullSym (C(N+R-1,R) inclusive / C(N,R)
+/// strict -- BladeDMWF/BladeBinomial, today's comm/antisymm) and
+/// PgProduct (prod_j C(N_j+R_j-1,R_j) -- BladeMixedRadix, tied-perm
+/// layout); PgOpaque varies in stabilizer size, a Burnside sum with no
+/// closed form (BladeCounting.v), PlaceTabulated. ZERO-SET: G-stabilizer
+/// chi = -1 forces zero (v = chi(h)*v = -v) -- why PlaceCombinatorial
+/// carries SymmetryClass, generalizing the antisymmetric zero-diagonal.
 type PositionGroup =
     | PgTrivial                       // G = 1                -> dense
     | PgFullSym of rank: int          // G = S_R              -> closed form
     | PgProduct of ranks: int list    // G = prod_j S_{R_j}   -> mixed radix
     | PgOpaque of tag: string         // any other finite G   -> runtime table
 
-/// Placement from the (G, chi) pair. Agrees with `placementClassOf` on every
-/// shipped index type: today's `SymIdx<R,N>` is `PgFullSym R` and today's dense
-/// `Idx<N>` is `PgTrivial`, so this is a strict generalization, not a rewrite.
+/// Placement from the (G, chi) pair. Agrees with `placementClassOf` on
+/// every shipped index type (`SymIdx<R,N>` is `PgFullSym R`, dense
+/// `Idx<N>` is `PgTrivial`) -- a strict generalization, not a rewrite.
 let placementOfOrbit (g: PositionGroup) (chi: SymmetryClass) : PlacementClass =
     match g with
     | PgTrivial -> PlaceDense
@@ -97,17 +84,15 @@ let placementOfOrbit (g: PositionGroup) (chi: SymmetryClass) : PlacementClass =
     | PgProduct _ -> PlaceCombinatorial chi
     | PgOpaque _ -> PlaceTabulated
 
-/// Commutativity/Symmetry state at each loop level (Section 13.1)
-/// Determines whether triangular iteration is valid at this position
+/// Commutativity/Symmetry state at each loop level (Section 13.1):
+/// determines whether triangular iteration is valid at this position.
 type SymcomState =
     | SCNeither       // Independent iteration - no optimization
     | SCSymmetric     // Same array, symmetric dimension - triangular valid
     | SCCommutative   // Different arrays but in comm group - triangular valid
     | SCBoth          // Same array + comm group - triangular valid, best case
 
-// ============================================================================
-// Array Identity Tracking (Critical for Symmetry Exploitation)
-// ============================================================================
+// Array Identity Tracking (critical for symmetry exploitation)
 
 /// Tracks the identity of arrays for commutativity detection
 type ArrayIdentity =
@@ -124,31 +109,29 @@ let sameIdentity a b =
     | AIDLiteral id1, AIDLiteral id2 -> id1 = id2
     | _ -> false
 
-// ============================================================================
 // Index Types with Dependency Tracking
-// ============================================================================
 
-/// Dimension kind - S-dimensions (spatial) vs T-dimensions (temporal/time)
-/// Only S-dimensions participate in symmetry optimization
+/// Dimension kind: S-dimensions (spatial, participate in symmetry
+/// optimization) vs T-dimensions (temporal/time, do not).
 type DimensionKind =
     | SDimension   // Spatial dimension - participates in symmetry
     | TDimension   // Temporal dimension - does not participate in symmetry
 
-/// Reserved KIND of an index type (audit §3.3): the semantic discriminator
-/// that used to be smuggled through `Tag` as "__..." sentinel strings, in
-/// the same namespace as user index-type names. `Tag` is for NAMES; IxKind
-/// is for KINDS. One case per legacy sentinel so the migration is 1:1.
-///
-/// Migration state: constructors still write the legacy sentinel into Tag
-/// alongside the IxKind (some downstream identity/matching logic keys on
-/// Tag equality generically), and the IR validator enforces that the two
-/// encodings AGREE — so they cannot silently diverge. All kind DISPATCH
-/// reads IxKind (directly or via the IxSymmetryLike/IxCompound/... active
-/// pattern); dropping the Tag sentinels entirely is a rewrite-phase step.
+/// Reserved KIND of an index type (audit section 3.3): the discriminator
+/// alongside `Tag` ("__..." sentinel strings sharing a namespace with user
+/// index-type names) -- Tag is for NAMES, IxKind for KINDS. Constructors
+/// mirror the sentinel into Tag too; the IR validator enforces the two AGREE.
+/// All kind DISPATCH reads IxKind, directly or via IxSymmetryLike/
+/// IxCompound/... active patterns.
 type IxKind =
     | IxKPlain              // ordinary index type (user-named or anonymous)
     | IxKCompound           // "__compoundidx": masked product space
     | IxKCompoundDynamic    // "__compoundidx_dynamic": mask known only at runtime
+    | IxKSparse             // "__sparseidx": explicit key enumeration, hash lookup
+    | IxKOrbit              // "__orbidx": iterated-wreath (OrbIdx), depth >= 2.
+                            // (rank,sign) level list rides Extent as IROrbitClass;
+                            // Rank = product of level ranks. Always paired with
+                            // Symmetry = SymWreath (depth <=1 normalizes away).
     | IxKDep                // "__depidx": dependent-extent head marker
     | IxKDepInner           // "__depidx_inner": the dependent inner dimension
     | IxKDepOuter           // "__depidx_outer": the outer dim a DepIdx depends on
@@ -163,22 +146,23 @@ type IxKind =
                             // PARAMETERIZED (spec payload + optional alias name),
                             // so the kind maps from the prefix, not one sentinel
     | IxKPgIrreps           // "__pgirreps:<group>:<name>:<payload>": the SECOND
-                            // block-spec member (point groups, stage 5b-i) —
-                            // same parameterized-tag discipline as IxKIrreps
-                            // over a DIFFERENT frozen prefix. Twin, not reroute:
-                            // the O(3) format above is byte-frozen
+                            // block-spec member (point groups); same
+                            // parameterized-tag discipline as IxKIrreps, over a
+                            // DIFFERENT frozen prefix (O(3) format is byte-frozen).
     | IxKErrorRaggedNoPrior // "__error_ragged_no_prior": typecheck error marker
     | IxKErrorIrrepsBadSpec // "__error_irreps_bad_spec": typecheck error marker
     | IxKErrorPgIrrepsBadSpec // "__error_pgirreps_bad_spec": typecheck error marker
 
-/// The legacy Tag sentinel for a kind (None for IxKPlain). The single
-/// source of the kind<->sentinel correspondence, used by constructors that
-/// still mirror the kind into Tag and by the validator's agreement check.
+/// The Tag sentinel for a kind (None for IxKPlain). The single source of
+/// the kind<->sentinel correspondence, used by constructors that mirror
+/// the kind into Tag and by the validator's agreement check.
 let ixKindSentinel (k: IxKind) : string option =
     match k with
     | IxKPlain -> None
     | IxKCompound -> Some "__compoundidx"
     | IxKCompoundDynamic -> Some "__compoundidx_dynamic"
+    | IxKSparse -> Some "__sparseidx"
+    | IxKOrbit -> Some "__orbidx"
     | IxKDep -> Some "__depidx"
     | IxKDepInner -> Some "__depidx_inner"
     | IxKDepOuter -> Some "__depidx_outer"
@@ -189,22 +173,17 @@ let ixKindSentinel (k: IxKind) : string option =
     | IxKGroupMember -> Some "__group_member"
     | IxKSeq -> Some "__seq"
     | IxKIrreps -> None     // parameterized tag (mkIrrepsTag), no single sentinel;
-                            // an IxKIrreps record whose Tag is missing the prefix
-                            // then FAILS the validator agreement check — intended
+                            // Tag missing the prefix FAILS validator agreement (intended)
     | IxKPgIrreps -> None   // ditto (mkPgIrrepsTag)
     | IxKErrorRaggedNoPrior -> Some "__error_ragged_no_prior"
     | IxKErrorIrrepsBadSpec -> Some "__error_irreps_bad_spec"
     | IxKErrorPgIrrepsBadSpec -> Some "__error_pgirreps_bad_spec"
 
-// ----------------------------------------------------------------------------
-// IrrepsIdx tag encoding. The spec payload rides IN the Tag string — Tag
-// equality is already index-space identity everywhere (unification, SIdx
-// slot matching, group matching), so spec identity needs no side registry
-// and no new IRIndexTypeG field. Format: "__irreps:<name>:<payload>" where
-// <name> is the nominative alias name ("" for anonymous IrrepsIdx<spec>)
-// and <payload> is "l,p,m|l,p,m|..." in spec order. Pure string ops only —
-// core stays ML-free; Blade.ML owns StaticValue->spec decoding.
-// ----------------------------------------------------------------------------
+// IrrepsIdx tag encoding: the spec payload rides IN the Tag string. Tag
+// equality is already index-space identity everywhere, so no side registry
+// or new IRIndexTypeG field is needed. Format: "__irreps:<name>:<payload>",
+// <name> = alias ("" if anonymous), <payload> = "l,p,m|l,p,m|..." in spec
+// order. Pure string ops; core stays ML-free, Blade.ML owns decoding.
 
 let irrepsTagPrefix = "__irreps:"
 
@@ -236,29 +215,16 @@ let (|IrrepsTag|_|) (tag: string) : (string option * (int * int * int) list) opt
                 Some ((if name = "" then None else Some name), List.map Option.get entries)
             else None
 
-// ----------------------------------------------------------------------------
-// PgIrrepsIdx tag encoding — the SECOND block-spec member
-// (docs/plan-transforms-as-types.md §3.6, stage 5b-i). Same discipline as the
-// irreps tag above and a DELIBERATELY SEPARATE format: §3.6's "twin, not
-// reroute" says the O(3) `__irreps:` format is BYTE-FROZEN, so point groups
-// get their own frozen prefix rather than a widened one.
-//
-//   "__pgirreps:<group>:<name>:<payload>"
-//
-// where <group> is the frozen registry name of the point group ("C4", "D4"),
-// <name> is the nominative alias name ("" for anonymous PgIrrepsIdx<G, spec>)
-// and <payload> is "LABEL,mult|LABEL,mult|..." in spec order. The LABEL NAMES
-// ride in the tag on purpose: they are frozen table data and the tag IS the
-// diagnostic identity (§3.6's settled surface encoding). Pure string ops only
-// — core stays ML-free; Blade.ML owns StaticValue->spec decoding, including
-// the unknown-label diagnostic.
-//
-// The two prefixes are disjoint as strings ("__pgirreps:" does not start with
-// "__irreps:" and vice versa), which is what makes tag equality decide
-// CROSS-MEMBER identity for free: an irreps tag and a pgirreps tag never
-// compare equal, so an `IrrepsIdx<s>` and a `PgIrrepsIdx<G, s'>` of the same
-// extent are distinct types by the same mechanism that separates two specs.
-// ----------------------------------------------------------------------------
+// PgIrrepsIdx tag encoding -- the SECOND block-spec member, same discipline
+// as the irreps tag but a DELIBERATELY SEPARATE format (O(3) `__irreps:` is
+// BYTE-FROZEN): "__pgirreps:<group>:<name>:<payload>". <group> = point
+// group's frozen registry name ("C4", "D4"); <name> = alias ("" if
+// anonymous); <payload> = "LABEL,mult|..." in spec order. LABEL NAMES ride
+// in the tag on purpose (frozen table data; the tag IS the diagnostic
+// identity). Pure string ops; Blade.ML owns decoding incl. the
+// unknown-label diagnostic. The two prefixes are disjoint, so tag equality
+// decides CROSS-MEMBER identity for free: `IrrepsIdx<s>` and
+// `PgIrrepsIdx<G, s'>` of the same extent are always distinct types.
 
 let pgIrrepsTagPrefix = "__pgirreps:"
 
@@ -296,17 +262,12 @@ let (|PgIrrepsTag|_|) (tag: string) : (string * string option * (string * int) l
                     Some (group, (if name = "" then None else Some name), List.map Option.get entries)
                 else None
 
-// ----------------------------------------------------------------------------
-// Halo window tag encoding. Like IrrepsIdx above, the halo slot's payload
-// rides IN the Tag string: "__halowin|<k>:<innerName>|<o1,o2,..>" where
-// <k> is 'd' (dense inner) or 'c' (compound inner: ordinals walk PRESENT
-// cells), <innerName> is the wrapped index's alias name ("" for anonymous /
-// compound) and the csv is the static signed offset set (center = 0, sign =
-// direction). Loop building re-derives the center's start offset from it
-// (per-slot — the single shared IRRange offset cannot express multi-slot
-// ranges), window reads re-derive the offset set and inner kind. Pure string
-// ops; no new IRIndexTypeG field.
-// ----------------------------------------------------------------------------
+// Halo window tag encoding. Like IrrepsIdx, the payload rides IN the Tag:
+// "__halowin|<k>:<innerName>|<o1,o2,..>", <k> = 'd' (dense inner) or 'c'
+// (compound inner: ordinals walk PRESENT cells), <innerName> = wrapped
+// index's alias, csv = static signed offset set (center = 0). Loop building
+// re-derives the center's start offset per-slot (shared IRRange offset
+// can't express multi-slot ranges); window reads re-derive offset set/kind.
 
 let haloWinTagPrefix = "__halowin|"
 
@@ -325,7 +286,7 @@ let (|HaloWinTag|_|) (tag: string) : (bool * string * int list) option =
             else None
         | _ -> None
 
-/// The center's first valid ordinal for a halo slot: max(0, -min(offsets ∪ {0})).
+/// The center's first valid ordinal for a halo slot: max(0, -min(offsets union {0})).
 /// The loop over the SHRUNK slot starts at 0; adding this to the loop index
 /// yields the true center ordinal in the inner index's space.
 let haloStartOffsetOfTag (tag: string) : int64 option =
@@ -333,7 +294,7 @@ let haloStartOffsetOfTag (tag: string) : int64 option =
     | HaloWinTag (_, _, offs) -> Some (int64 (max 0 (- (min 0 (List.min offs)))))
     | _ -> None
 
-/// Interior loss of a halo slot: (-min(offsets ∪ {0})) + max(offsets ∪ {0}).
+/// Interior loss of a halo slot: (-min(offsets union {0})) + max(offsets union {0}).
 /// Dense slots fold this into the extent at typecheck; compound slots (whose
 /// extent is the runtime mask cardinality) subtract it at the loop bound.
 let haloShrinkOfTag (tag: string) : int64 option =
@@ -342,14 +303,15 @@ let haloShrinkOfTag (tag: string) : int64 option =
         Some (int64 ((- (min 0 (List.min offs))) + (max 0 (List.max offs))))
     | _ -> None
 
-/// Derive the kind from a (possibly user-supplied) Tag value: sentinel
-/// strings map to their kind, anything else — user names, "__anon"
-/// placeholders, None — is IxKPlain. For construction sites whose tag is
-/// dynamic; sites with a literal sentinel should state the IxKind directly.
+/// Derive the kind from a (possibly user-supplied) Tag value: sentinel strings
+/// map to their kind, anything else (user names, "__anon", None) is IxKPlain.
+/// For dynamic-tag sites; a literal sentinel should state IxKind directly.
 let ixKindOfTag (tag: string option) : IxKind =
     match tag with
     | Some "__compoundidx" -> IxKCompound
     | Some "__compoundidx_dynamic" -> IxKCompoundDynamic
+    | Some "__sparseidx" -> IxKSparse
+    | Some "__orbidx" -> IxKOrbit
     | Some "__depidx" -> IxKDep
     | Some "__depidx_inner" -> IxKDepInner
     | Some "__depidx_outer" -> IxKDepOuter
@@ -376,79 +338,283 @@ let isRaggedFamilyKind (k: IxKind) : bool =
     | IxKRagged | IxKRaggedInline | IxKRaggedOpaque -> true
     | _ -> false
 
-/// Ragged-ROW family: inner dimensions whose rank-1 rows carry their length
-/// inline (`.len` on a RaggedRow<T>) rather than via `.extents` — peeled
-/// ragged rows, DepIdx-allocated inners, and group_by members all share
-/// this runtime shape.
+/// Ragged-ROW family: inner dims whose rank-1 rows carry their length inline
+/// (`.len` on a RaggedRow<T>) rather than via `.extents` -- peeled ragged
+/// rows, DepIdx-allocated inners, and group_by members all share this shape.
 let isRaggedRowKind (k: IxKind) : bool =
     match k with
     | IxKRagged | IxKRaggedInline | IxKRaggedOpaque
     | IxKDepInner | IxKGroupMember -> true
     | _ -> false
 
-/// Unit of measure signature: product of base units with integer exponents
-/// e.g. velocity = {meters: 1, seconds: -1}
-/// Dimensionless = empty map
-type UnitSig = Map<string, int>
+/// The MAGNITUDE of a unit relative to the base-unit product named by its
+/// `Dims` -- what makes `day` differ from `second` when both are {second: 1}.
+/// Kept EXACT and SYMBOLIC: a rational Num/Den times a product of named
+/// irrational constants with integer exponents. `86400 * second` is
+/// {86400/1, {}}; `2 * pi * radian` is {2/1, {pi: 1}}.
+///
+/// Nothing rounds during unit ALGEBRA -- mul/div/pow compose the rationals
+/// exactly and ADD the constant exponents -- so `turn / turn` cancels to
+/// exactly 1 rather than to 6.28.../6.28.... A float appears only when a
+/// conversion factor is materialized at a seam (scaleToCppFactor), and `pi`
+/// materializes as the BACKEND's constant rather than a decimal we wrote
+/// down, so the C++ value is correctly rounded.
+type UnitScale = {
+    Num: bigint
+    /// Strictly positive; the sign of the rational lives on Num.
+    Den: bigint
+    /// Irrational factors by integer exponent, e.g. pi^1. Zero exponents are
+    /// normalized away, so `Map.isEmpty` means "purely rational".
+    Consts: Map<string, int>
+}
 
-/// Unit arithmetic: dimensionless (empty map)
-let unitDimensionless : UnitSig = Map.empty
+/// Reduce to lowest terms, force Den > 0, and drop zero constant exponents.
+/// Every UnitScale in circulation is normalized, so structural equality is
+/// exact scale equality -- which is what the seam checks compare.
+let private normScale (num: bigint) (den: bigint) (consts: Map<string, int>) : UnitScale =
+    if den.IsZero then
+        // Only reachable from `x / 0` in a unit RHS; the parser rejects a
+        // zero literal before this, so this is a belt-and-braces invariant.
+        failwith "unit scale: zero denominator"
+    let signFix = if den.Sign < 0 then bigint -1 else bigint 1
+    let num = num * signFix
+    let den = abs den
+    let g =
+        let g0 = System.Numerics.BigInteger.GreatestCommonDivisor (abs num, den)
+        if g0.IsZero then bigint 1 else g0
+    { Num = num / g
+      Den = den / g
+      Consts = consts |> Map.filter (fun _ e -> e <> 0) }
 
-/// Normalize: remove zero-exponent entries
+/// The unity scale: every unit declared without an explicit factor has it.
+let scaleOne : UnitScale = { Num = bigint 1; Den = bigint 1; Consts = Map.empty }
+
+let scaleOfRational (num: bigint) (den: bigint) : UnitScale = normScale num den Map.empty
+
+/// A named irrational factor (`pi`), carried symbolically to emission.
+let scaleOfConst (name: string) : UnitScale = normScale (bigint 1) (bigint 1) (Map.ofList [(name, 1)])
+
+let scaleIsOne (s: UnitScale) : bool =
+    s.Num.IsOne && s.Den.IsOne && Map.isEmpty s.Consts
+
+let private mergeConsts f (a: Map<string, int>) (b: Map<string, int>) =
+    Map.fold (fun acc k v ->
+        let existing = Map.tryFind k acc |> Option.defaultValue 0
+        Map.add k (f existing v) acc) a b
+
+let scaleMul (a: UnitScale) (b: UnitScale) : UnitScale =
+    normScale (a.Num * b.Num) (a.Den * b.Den) (mergeConsts (+) a.Consts b.Consts)
+
+let scaleDiv (a: UnitScale) (b: UnitScale) : UnitScale =
+    // b.Num moves to the denominator, so a zero numerator on the divisor is
+    // the one way normScale's zero-denominator guard can fire.
+    normScale (a.Num * b.Den) (a.Den * b.Num) (mergeConsts (-) a.Consts b.Consts)
+
+let scalePow (s: UnitScale) (n: int) : UnitScale =
+    if n = 0 then scaleOne
+    elif n > 0 then
+        normScale (System.Numerics.BigInteger.Pow (s.Num, n))
+                  (System.Numerics.BigInteger.Pow (s.Den, n))
+                  (s.Consts |> Map.map (fun _ e -> e * n))
+    else
+        let k = -n
+        normScale (System.Numerics.BigInteger.Pow (s.Den, k))
+                  (System.Numerics.BigInteger.Pow (s.Num, k))
+                  (s.Consts |> Map.map (fun _ e -> e * n))
+
+/// Render a scale for diagnostics: `86400`, `1/60`, `2 * pi`, `pi^2 / 4`.
+/// The rational numerator is elided when it is 1 and a constant carries the
+/// numerator instead, so `2 * pi` does not print as `2 * pi` with a stray 1.
+let ppUnitScale (s: UnitScale) : string =
+    let ppConst (n, e) = if abs e = 1 then n else sprintf "%s^%d" n (abs e)
+    let numConsts = s.Consts |> Map.toList |> List.filter (fun (_, e) -> e > 0) |> List.map ppConst
+    let denConsts = s.Consts |> Map.toList |> List.filter (fun (_, e) -> e < 0) |> List.map ppConst
+    let numParts =
+        (if s.Num.IsOne && not (List.isEmpty numConsts) then [] else [string s.Num]) @ numConsts
+    let denParts = (if s.Den.IsOne then [] else [string s.Den]) @ denConsts
+    let numStr = if List.isEmpty numParts then "1" else String.concat " * " numParts
+    if List.isEmpty denParts then numStr
+    else sprintf "%s / %s" numStr (String.concat " * " denParts)
+
+/// Irrational constants usable as unit scale factors, by double value.
+/// `System.Math.PI` is the correctly-rounded double for pi, bit-identical to
+/// C++'s `M_PI` on every platform Blade targets -- and codegen renders a
+/// double through `floatToCppLiteral`, which is shortest-ROUND-TRIP, so the
+/// constant reaches the compiler as the exact same bits rather than as a
+/// decimal either side truncated. That is what lets a conversion factor be
+/// an ordinary float literal without a symbolic-constant IR node.
+///
+/// `pi` resolves only AFTER `env.Units`, so a user's own `Unit pi` still wins
+/// and no existing program changes meaning.
+let unitScaleConstants : Map<string, float> =
+    Map.ofList [ ("pi", System.Math.PI) ]
+
+/// The double a conversion by this scale multiplies by: the numerator
+/// product, then each denominator factor divided out in turn. Integers go in
+/// as exact doubles and the division happens once, in IEEE, so `1/60` is the
+/// correctly-rounded quotient rather than a decimal truncated on the way out.
+///
+/// An unknown constant yields nan; resolveUnitExpr rejects those names before
+/// a signature carrying one can be built, so it is unreachable in practice.
+let scaleToFloat (s: UnitScale) : float =
+    let constTerms sign =
+        s.Consts
+        |> Map.toList
+        |> List.filter (fun (_, e) -> sign * e > 0)
+        |> List.collect (fun (n, e) ->
+            List.replicate (abs e) (Map.tryFind n unitScaleConstants |> Option.defaultValue nan))
+    let num = (float s.Num) :: constTerms 1 |> List.fold (*) 1.0
+    (float s.Den) :: constTerms -1 |> List.fold (/) num
+
+/// Unit of measure signature. `Dims` is the STRUCTURAL layer: a product of
+/// base units with integer exponents (e.g. velocity = {meters: 1, seconds:
+/// -1}); dimensionless = empty map. `Nominal` is the QUANTITY layer: a
+/// nominal identity declared via `Unit speed: mps`, entailing exactly the
+/// dims it was declared with. Structural units and plain aliases carry
+/// Nominal = None; the nominal layer is exactly one level deep (quantity
+/// names are TERMINAL in unit algebra). `Scale` is the MAGNITUDE layer: how
+/// many of the Dims product one of this unit is (`day` = 86400 `second`).
+///
+/// Dims and Scale are deliberately independent: two signatures with equal
+/// Dims and different Scale are the SAME physical quantity in different
+/// magnitudes, so they are CONVERTIBLE (unitCompatible) but not
+/// interchangeable (unitSameScale). Values are never canonicalized into base
+/// units -- a `Float64<day>` holds a day-magnitude number -- so a conversion
+/// factor is materialized only where two magnitudes actually meet.
+type UnitSig = { Nominal: string option; Dims: Map<string, int>; Scale: UnitScale }
+
+/// Unit arithmetic: dimensionless (no nominal, empty dims, unity scale)
+let unitDimensionless : UnitSig = { Nominal = None; Dims = Map.empty; Scale = scaleOne }
+
+/// A structural (non-nominal) signature over the given dims, unity scale.
+let unitOfDims (dims: Map<string, int>) : UnitSig = { Nominal = None; Dims = dims; Scale = scaleOne }
+
+/// A structural signature over the given dims at an explicit magnitude.
+let unitOfDimsScaled (dims: Map<string, int>) (scale: UnitScale) : UnitSig =
+    { Nominal = None; Dims = dims; Scale = scale }
+
+/// Normalize: remove zero-exponent entries (nominal and scale untouched)
 let unitNormalize (u: UnitSig) : UnitSig =
-    u |> Map.filter (fun _ exp -> exp <> 0)
+    { u with Dims = u.Dims |> Map.filter (fun _ exp -> exp <> 0) }
 
-/// Unit multiplication: add exponents
+/// Unit multiplication: add exponents, MULTIPLY scales. Multiplicative
+/// composition DROPS the nominal layer: a quantity is an identity, not a
+/// factor, so `speed * s` yields the structural product of the dims.
+///
+/// The scale riding along is what makes `*` and `/` conversion-FREE:
+/// `Float64<day> * Float64<meter/second>` needs no runtime work, because the
+/// 86400 lands in the result TYPE rather than in the emitted expression.
 let unitMul (a: UnitSig) (b: UnitSig) : UnitSig =
     let merged =
         Map.fold (fun acc k v ->
             let existing = Map.tryFind k acc |> Option.defaultValue 0
-            Map.add k (existing + v) acc) a b
-    unitNormalize merged
+            Map.add k (existing + v) acc) a.Dims b.Dims
+    unitNormalize { Nominal = None; Dims = merged; Scale = scaleMul a.Scale b.Scale }
 
-/// Unit division: subtract exponents
+/// Unit division: subtract exponents, DIVIDE scales (drops nominal, like unitMul)
 let unitDiv (a: UnitSig) (b: UnitSig) : UnitSig =
     let merged =
         Map.fold (fun acc k v ->
             let existing = Map.tryFind k acc |> Option.defaultValue 0
-            Map.add k (existing - v) acc) a b
-    unitNormalize merged
+            Map.add k (existing - v) acc) a.Dims b.Dims
+    unitNormalize { Nominal = None; Dims = merged; Scale = scaleDiv a.Scale b.Scale }
 
-/// Unit power: scale all exponents
+/// Unit power: scale all exponents and raise the magnitude (drops nominal).
+/// `(1000 * meter)^2` is 1e6 meter^2 -- the scale must be raised to the same
+/// power as the dims or `km^2` would silently read as `1000 m^2`.
 let unitPow (u: UnitSig) (n: int) : UnitSig =
     if n = 0 then unitDimensionless
-    else u |> Map.map (fun _ exp -> exp * n) |> unitNormalize
-
-/// Check if two unit signatures are compatible (equal)
-let unitCompatible (a: UnitSig) (b: UnitSig) : bool =
-    unitNormalize a = unitNormalize b
-
-/// Pretty-print a unit signature
-let ppUnitSig (u: UnitSig) : string =
-    if Map.isEmpty u then "dimensionless"
     else
-        let pos = u |> Map.filter (fun _ e -> e > 0) |> Map.toList
-        let neg = u |> Map.filter (fun _ e -> e < 0) |> Map.toList
-        let ppTerm (name, exp) =
-            if exp = 1 then name
-            elif exp = -1 then name
-            else sprintf "%s^%d" name exp
-        let posStr = pos |> List.map ppTerm |> String.concat " * "
-        let negStr = neg |> List.map (fun (n, e) -> ppTerm (n, -e)) |> String.concat " * "
-        match pos, neg with
-        | [], [] -> "dimensionless"
-        | _, [] -> posStr
-        | [], _ -> sprintf "1 / (%s)" negStr
-        | _, _ -> sprintf "%s / %s" posStr (if neg.Length > 1 then sprintf "(%s)" negStr else negStr)
+        unitNormalize { Nominal = None
+                        Dims = u.Dims |> Map.map (fun _ exp -> exp * n)
+                        Scale = scalePow u.Scale n }
 
-/// Value carried by an EnumIdx alias declaration. The values list can be
-/// either all-int or all-string (mixed lists are rejected at typecheck time).
-/// The chosen kind determines the underlying runtime representation: an
-/// all-int EnumIdx lowers to int64_t in C++; an all-string EnumIdx lowers to
-/// std::string. Both kinds support the same SQL-like operations (group_keys,
-/// group_by); only the comparison op in the Case 2 reverse-lookup dispatch
-/// differs. Defined before the mutual block because IRType.IRTGroupKeys
-/// carries an EnumValue list option.
+/// Check if two unit signatures are CONVERTIBLE: dims must be equal, and the
+/// nominal layers must AGREE -- both the same quantity, or at least one side
+/// structural (None). Two DIFFERENT quantities are incompatible even over
+/// identical dims (that is what the nominal layer is for).
+///
+/// Deliberately scale-BLIND: `day` and `second` are compatible, since a
+/// factor relates them. Whether a seam may bridge that factor silently is a
+/// separate question each seam answers with unitSameScale.
+let unitCompatible (a: UnitSig) (b: UnitSig) : bool =
+    (unitNormalize a).Dims = (unitNormalize b).Dims
+    && (match a.Nominal, b.Nominal with
+        | Some na, Some nb -> na = nb
+        | _ -> true)
+
+/// Do two signatures share a MAGNITUDE, so that values of one can stand in
+/// for the other with no conversion factor? Every UnitScale is normalized,
+/// so this is exact rational-and-symbolic equality, never a float compare.
+let unitSameScale (a: UnitSig) (b: UnitSig) : bool = a.Scale = b.Scale
+
+/// The factor that converts a value FROM signature `src` INTO signature
+/// `dst` (multiply by it). Meaningful only for unitCompatible signatures.
+/// Computed as one exact ratio -- `day -> second` is 86400/1, not a
+/// round-trip through a canonical base -- so a value crosses at most one
+/// multiply and never visits an intermediate magnitude that could overflow.
+let unitConversionFactor (src: UnitSig) (dst: UnitSig) : UnitScale =
+    scaleDiv src.Scale dst.Scale
+
+/// Merge two CONVERTIBLE signatures (post-unitCompatible), keeping whichever
+/// nominal is present: additive ops over `speed + m/s` stay `speed`. The
+/// LEFT operand's magnitude wins, matching the nominal preference: `day +
+/// second` is a number of days.
+let unitJoin (a: UnitSig) (b: UnitSig) : UnitSig =
+    match a.Nominal with
+    | Some _ -> a
+    | None -> { a with Nominal = b.Nominal }
+
+/// Pretty-print a unit signature (error-message form). A quantity prints as
+/// its nominal name; a structural signature prints its dims product; the
+/// empty structural signature prints "dimensionless".
+let ppUnitSig (u: UnitSig) : string =
+    match u.Nominal with
+    | Some n -> n
+    | None ->
+        let dims = u.Dims
+        let dimsStr =
+            let pos = dims |> Map.filter (fun _ e -> e > 0) |> Map.toList
+            let neg = dims |> Map.filter (fun _ e -> e < 0) |> Map.toList
+            let ppTerm (name, exp) =
+                if exp = 1 then name
+                elif exp = -1 then name
+                else sprintf "%s^%d" name exp
+            let posStr = pos |> List.map ppTerm |> String.concat " * "
+            let negStr = neg |> List.map (fun (n, e) -> ppTerm (n, -e)) |> String.concat " * "
+            match pos, neg with
+            | [], [] -> None
+            | _, [] -> Some posStr
+            | [], _ -> Some (sprintf "1 / (%s)" negStr)
+            | _, _ -> Some (sprintf "%s / %s" posStr (if neg.Length > 1 then sprintf "(%s)" negStr else negStr))
+        // A magnitude is part of the identity, so it prints: without it a
+        // `day` vs `second` mismatch would render "second vs second".
+        match dimsStr, scaleIsOne u.Scale with
+        | None, true -> "dimensionless"
+        | None, false -> ppUnitScale u.Scale
+        | Some d, true -> d
+        | Some d, false -> sprintf "%s * %s" (ppUnitScale u.Scale) d
+
+/// Pretty-print a unit signature in TYPE-ARGUMENT position (`Float64<...>`).
+/// A quantity renders as its nominal name; a structural signature as its dims;
+/// an empty structural signature -- dims cancelled via division, e.g.
+/// `speed/speed` or `m/m` -- renders as `Unitless`, distinct from a bare type
+/// that never had units. Display provenance only: Unitless does not affect
+/// unification (a dims-empty sig unifies freely either way).
+let ppUnitSigType (u: UnitSig) : string =
+    match u.Nominal with
+    | Some n -> n
+    | None ->
+        // A SCALED dimensionless (`2 * pi`, from `Unit turn = 2 * pi`) is not
+        // Unitless: the magnitude survives cancellation of the dims and still
+        // drives conversions, so it has to render.
+        if Map.isEmpty ((unitNormalize u).Dims) && scaleIsOne u.Scale then "Unitless"
+        else ppUnitSig u
+
+/// Value carried by an EnumIdx alias declaration: all-int or all-string
+/// (mixed rejected at typecheck). All-int lowers to int64_t, all-string to
+/// std::string; both share the same SQL-like ops, differing only in the
+/// Case-2 comparison. Predeclared: IRTGroupKeys below needs the type.
 type EnumValue =
     | EVInt of int64
     | EVString of string
@@ -464,27 +630,16 @@ type ElemType =
     | ETBool
     | ETUnit
     | ETString
-    // Note: ETIndexRef (the legacy element-position foreign-key tag) was
-    // retired in the Option C migration. Named index references — in both
-    // value and element position — are now represented at the IRType level
-    // as `IRTIdxTagged (inner, IRefNamed name)`, unifying with the value-
-    // position encoding. Element-position lowering produces this directly.
+    // Named index references (value and element position) are represented
+    // at the IRType level as `IRTIdxTagged (inner, IRefNamed name)` below.
 
 
-// ============================================================================
-// The IRType family, generic over the extent representation (audit §4's
-// "highest-leverage split", via the genericize-as-a-wedge route).
-// ============================================================================
-// IRIndexType's Extent is the ONE coupling that fused types to expressions:
-// index types can be parameterized by runtime values (ragged lengths,
-// compound masks — formalism §4.5), which the prototype models by embedding
-// IRExpr in the extent slot. Making the family generic over 'Ext lets this
-// file own the full type structure with no expression dependency; IR.fs
-// instantiates the abbreviations `type IRType = IRTypeG<IRExpr>` (et al.),
-// so every consumer keeps compiling unchanged. The rewrite's planned move
-// — a dedicated Extent DU holding identity REFERENCES to runtime values
-// instead of embedded expressions — then becomes a type-argument swap here
-// rather than a restructuring of every file.
+// The IRType family, generic over the extent representation 'Ext. In IR.fs,
+// IRIndexType.Extent is an IRExpr -- the coupling that fused types to
+// expressions (index types depend on runtime values: ragged lengths,
+// compound masks, formalism 4.5). Generic here lets this file own the full
+// type structure with no expression dependency; IR.fs instantiates
+// `type IRType = IRTypeG<IRExpr>` (et al.) unchanged.
 
 /// Kind of loop object (leaf; referenced by LoopTypeG).
 type LoopKind =
@@ -496,19 +651,17 @@ type IRIndexTypeG<'Ext> = {
     Rank: int               // Number of index components (1 for Idx, 2 for SymIdx<2>, etc.)
     Extent: 'Ext           // Size expression (may depend on outer indices)
     Symmetry: SymmetryClass
-    Tag: string option       // Name (for index space matching). Legacy: still
-                             // mirrors IxKind's sentinel during migration —
-                             // the validator enforces agreement (audit §3.3).
+    Tag: string option       // Name (index space matching); mirrors IxKind's
+                             // sentinel -- validator enforces agreement (3.3)
     Kind: DimensionKind      // S-dimension or T-dimension
     IxKind: IxKind           // Reserved kind discriminator (never a user name)
     Dependencies: IRId list  // Dependencies on outer loop indices (for triangular iteration)
 }
 
-/// Array type in IR with identity tracking.
-/// ElemType is a full IRTypeG<'Ext> (post-Phase B2): primitives are wrapped as
-/// IRTScalar, structs/sums appear as IRTNamed, inference variables as
-/// IRTInfer, etc. Active patterns (PrimElem, AnyPrimElem, NamedElem, etc.)
-/// project the IRTypeG<'Ext> into role-specific shapes for consumers.
+/// Array type in IR with identity tracking. ElemType is a full IRTypeG<'Ext>
+/// (IRTScalar/IRTNamed/IRTInfer for primitives/structs-sums/inference vars);
+/// active patterns (PrimElem, AnyPrimElem, NamedElem, etc.) project it into
+/// role-specific shapes for consumers.
 and IRArrayTypeG<'Ext> = {
     ElemType: IRTypeG<'Ext>
     IndexTypes: IRIndexTypeG<'Ext> list
@@ -516,47 +669,30 @@ and IRArrayTypeG<'Ext> = {
     Identity: ArrayIdentity option  // For tracking array identity
 }
 
-/// Reference to an index type from the value side.
-/// Used by IRTIdxTagged as the nominal tag (parallel to UnitSig for
-/// IRTUnitAnnotated). Carries identity only — not the source index type's
-/// structure (arity, symmetry, bijection, etc.), which lives in
-/// IRIndexTypeG<'Ext> records attached to arrays.
-///
-/// Two index tags are compatible iff their IdxRefs are structurally
-/// equal: same name for named, same nominalId for anonymous.
+/// Reference to an index type from the value side; the nominal tag used by
+/// IRTIdxTagged (parallel to UnitSig for IRTUnitAnnotated). Carries identity
+/// only, not structure (arity, symmetry, bijection), which lives on
+/// IRIndexTypeG<'Ext> array records. Two tags are compatible iff IdxRefs
+/// are structurally equal (name for named, nominalId for anonymous).
 and IdxRefG<'Ext> =
-    /// User-defined named index type: Nat<LatIdx>.
-    /// Identity is the name.
+    /// User-defined named index type: Nat<LatIdx>. Identity is the name.
     | IRefNamed of string
-    /// Anonymous Idx<n> occurrence: Nat<Idx<n>>.
-    /// Identity is the nominalId — fresh per source TyIdx node, must
-    /// match the corresponding IRIndexTypeG<'Ext>.Id of the index type that
-    /// emits this value. Extent preserved for diagnostics / pretty-
-    /// printing only; NOT part of identity for unification.
+    /// Anonymous Idx<n> occurrence: Nat<Idx<n>>. Identity is the nominalId
+    /// -- fresh per source TyIdx node, matching the IRIndexTypeG<'Ext>.Id.
+    /// Extent is kept for diagnostics only, NOT part of unification identity.
     | IRefAnon of nominalId: int * extent: 'Ext
-    /// The tag WILDCARD `Nat<_>` / `Int64<_>` / `Float64<_>`: matches a value
-    /// carrying any nominal index tag, any unit signature, or none at all.
-    ///
-    /// Unlike the other two cases this carries NO identity — it is not a tag a
-    /// value can have, it is a tag a PARAMETER declines to constrain. It only
-    /// ever originates from a declared parameter type; no producer (iteration
-    /// tagging, literal coercion, provider lowering) ever emits one.
-    ///
-    /// Consequences that keep it sound:
-    ///   - Legal in parameter position only. A return type, let annotation,
-    ///     struct field or array index slot has no incoming value to source a
-    ///     tag from, so a wildcard there would be a silent hole; those sites
-    ///     reject it via irTypeHasTagWildcard (BL4003).
-    ///   - Unification is permissive in BOTH directions (Unify's wildcard arm
-    ///     runs ahead of the strict named-vs-named arm), but the wildcard does
-    ///     NOT absorb the tag it matched — the parameter's type stays
-    ///     `Base<_>`. A wildcard-typed value therefore carries no more tag
-    ///     guarantee than an untagged int, and checkArrayIndexTags treats the
-    ///     two identically (warn, allow). Making the tag flow onward is the
-    ///     tag-VARIABLE feature, which this is not.
-    ///   - Arithmetic-transparent: inferBinOp strips it, so `1.0 * m` works on
-    ///     a wildcard param even though it is refused for a concrete `Nat<Y>`.
-    ///   - Erases to the inner type at codegen; there is no `using` alias.
+    /// The tag WILDCARD `Nat<_>` / `Int64<_>` / `Float64<_>`: matches any
+    /// nominal index tag, unit signature, or none. Carries NO identity (a
+    /// declining PARAMETER, not a value's tag); only originates from a
+    /// declared parameter type. Soundness:
+    ///   - Legal in parameter position only -- return types, let/field/
+    ///     index slots reject it as a silent hole (irTypeHasTagWildcard,
+    ///     BL4003).
+    ///   - Unification is permissive both ways but does NOT absorb the
+    ///     matched tag (checkArrayIndexTags: warn, allow) -- that would be
+    ///     the tag-VARIABLE feature, which this is not.
+    ///   - Arithmetic-transparent (`1.0 * m` works on a wildcard param,
+    ///     refused for concrete `Nat<Y>`); erases to inner type at codegen.
     | IRefAny
 
 /// IR Types
@@ -568,113 +704,60 @@ and IRTypeG<'Ext> =
     | IRTUnit
     | IRTPoly of baseType: IRTypeG<'Ext> * arityVar: string  // Arity-polymorphic type
     | IRTNat of int option  // Type-level natural number (None = variable)
-    // IRTIdxTagged: a base type wrapped with a nominal index-type tag.
-    // The shape parallels IRTUnitAnnotated (base * UnitSig) but uses an
-    // IdxRefG<'Ext> tag with NO multiplicative algebra — index tags are nominal
-    // labels, not exponent vectors. Formalism §4.18.5 puts Nat<LatIdx>
-    // alongside Float<meters>, so the wrapper shape matches; the
-    // composition semantics deliberately don't.
-    //
-    // Typical inner type is IRTScalar ETInt64 (giving "Nat<I>"), but the
-    // constructor accepts any IRTypeG<'Ext> — same flexibility as IRTUnitAnnotated.
-    //
-    // Identity: structural equality on (inner, idxRef). Two IRTIdxTagged
-    // values unify iff their inner types unify AND their IdxRefs match
-    // (name=name for IRefNamed, nominalId=nominalId for IRefAnon).
-    //
-    // Renders the inner type at codegen — the tag is a typecheck-time
-    // invariant, not a runtime carrier. For IRefNamed, the C++ typedef
-    // alias is used as a documentation hook.
-    //
-    // Distinct from `IRTNat of int option` (type-level naturals for
-    // ranks and known extent values): IRTIdxTagged is a runtime value's
-    // type; IRTNat is a type-parameter.
-    //
-    // Replaces the ElemType-level encoding (ETAnonIdx, ETIndexRef) for
-    // value positions. The legacy encodings remain in place during
-    // transition; IRTIdxTagged is structurally equivalent and treated
-    // identically at every match site.
+    // IRTIdxTagged: a base type wrapped with a nominal index-type tag,
+    // shaped like IRTUnitAnnotated (base * UnitSig) but with an
+    // IdxRefG<'Ext> tag and NO multiplicative algebra -- tags are nominal
+    // labels, not exponent vectors (formalism 4.18.5: Nat<LatIdx> alongside
+    // Float<meters> matches shape only). Typical inner is IRTScalar
+    // ETInt64 ("Nat<I>"), any IRTypeG<'Ext> accepted. Identity: structural
+    // equality on (inner, idxRef) -- unify iff inner types unify AND
+    // IdxRefs match (name=name for IRefNamed, nominalId=nominalId for
+    // IRefAnon). Renders as inner type at codegen (tag is typecheck-only);
+    // IRefNamed uses the C++ typedef as a doc hook. Distinct from
+    // `IRTNat of int option`: this is a runtime value's type, IRTNat a
+    // type-parameter for ranks.
     | IRTIdxTagged of inner: IRTypeG<'Ext> * tag: IdxRefG<'Ext>
-    // IRTDist: a distribution carried to stochastic order `order` — the
-    // typed form of the PPL dist tower (ppl/NOTES.md). Nominal and
-    // parameterized: `order` is a STATIC int (resolved before this type is
-    // constructed — deliberately a plain int, not IRTNat, whose unification
-    // ignores the value); `elem` is the cumulant element type (typically
-    // IRTScalar ETFloat64); `axes` are the variable-axis index types of the
-    // underlying random vector, needed to type component projection —
-    // cumulant k of a Dist over axes D is Array<elem like SymIdx<k, D>>.
-    //
-    // Like IRTIdxTagged, this is a typecheck-time invariant with strict
-    // unification (a bare tuple never implicitly becomes a Dist; only the
-    // dist construction intrinsic and dist-typed operators produce one) and
-    // it is ERASED before codegen: a Dist value lowers to the tuple of its
-    // packed cumulant component arrays (κ_1 .. κ_order).
+    // IRTDist: a distribution at stochastic order `order` -- typed form of
+    // the PPL dist tower (ppl/NOTES.md). `order` is a STATIC plain int (not
+    // IRTNat; unification ignores its value); `elem` is the cumulant type
+    // (typically ETFloat64); `axes` types the random vector so component
+    // projection can be typed: cumulant k over axes D is Array<elem like
+    // SymIdx<k, D>>. Strict-unification typecheck-time invariant (only the
+    // dist-construction intrinsic and dist-typed ops produce one), ERASED
+    // before codegen to the tuple of packed cumulants (kappa_1..kappa_order).
     | IRTDist of order: int * elem: IRTypeG<'Ext> * axes: IRIndexTypeG<'Ext> list
     | IRTNamed of string    // Named type (struct, sum type, etc.)
     | IRTInfer of int       // Unresolved type variable (id for unification)
     | IRTUnitAnnotated of IRTypeG<'Ext> * UnitSig  // Type with unit-of-measure annotation
     | IRTGroupKeys of outerIdx: IRIndexTypeG<'Ext> * sourceIdx: IRIndexTypeG<'Ext> * enumValues: EnumValue list option
-      // GroupKeys: CSR structure mapping sourceIdx → groups indexed by outerIdx.
-      // enumValues: if keys are EnumIdx, carries the actual key values for reverse lookup.
-    // IRTArrow: unified arrow type. Subsumes function types (all-SVal slots)
-    // and is the production form for array types after Segment 3 producer
-    // migration. The slot list represents the consumption order — applying
-    // values consumes slots left-to-right; once all slots are consumed, the
-    // result type emerges.
-    //
-    // Slot kinds:
-    //   - SIdx (storage-backed): takes an index value. Array dim with real
-    //     allocated storage. The IRIndexTypeG<'Ext> carries Tag, Symmetry, and
-    //     Extent for the slot's domain.
-    //   - SIdxVirt (virtual index): takes an index value but the values
-    //     are computed on-the-fly (no allocated storage). Models virtual
-    //     arrays like `range<I>`, `reverse<I>`, etc.
-    //   - SVal (value/closure): takes a value of the given type. A pure
-    //     function param.
-    //
-    // The `identity` field tracks array-handle identity for stored-array
-    // shapes (was IRArrayTypeG<'Ext>.Identity). Pure functions and virtual arrays
-    // carry `None`. Mixed-shape arrows may carry `Some` when the outermost
-    // dimension is stored.
-    //
-    // Shape constraints (enforced at `mkVirtualArrayArrow` entry via
-    // `validateArrowShape`; other constructors are constraint-safe by
-    // construction):
-    //   1. If any slot is SIdxVirt, all slots from that point onward must
-    //      also be SIdxVirt (no SIdx or SVal after the first SIdxVirt).
-    //      Reason: virtual generation can't contain stored sub-arrays or
-    //      function closures — once we go virtual, we stay virtual.
-    //   2. If any slot is SIdxVirt, the result type must not be IRTArrow.
-    //      Reason: a virtual array's elements must be simple values, not
-    //      nested arrays/functions.
-    //
-    // Internal transformations (normalize, substTypeInIRType, Subst.Resolve)
-    // preserve these invariants on validly-constructed input — they
-    // restructure or substitute without introducing new slot-kind patterns.
-    //
-    // Empty-slot policy:
-    //   `IRTArrow ([], ret, None)` is reserved for nullary functions
-    //   produced by `mkFuncArrow []`. `ArrayElem` rejects this shape so
-    //   nullary function calls don't get misclassified as rank-0 array
-    //   indexing. Rank-0 arrays collapse to their element type at the
-    //   `mkArrayLike` producer site, matching Subst.Resolve.
-    //
+      // GroupKeys: CSR mapping sourceIdx -> groups by outerIdx; enumValues carries key values for reverse lookup when keys are EnumIdx.
+    // IRTArrow: the sole arrow-shaped type, subsuming function types (all-SVal
+    // slots) and stored/virtual arrays (distinguished only by slot kind);
+    // slots consumed left-to-right, result emerges once all are consumed.
+    // SIdx = storage-backed index slot (Tag/Symmetry/Extent on the
+    // IRIndexTypeG<'Ext>); SIdxVirt = virtual index slot, computed on-the-fly,
+    // no storage (`range<I>`, `reverse<I>`); SVal = value/closure slot.
+    // `identity`: None for pure functions/virtual arrays, Some when the
+    // outermost dimension is stored.
+    // Shape constraints (`mkVirtualArrayArrow`/`validateArrowShape`): (1) once
+    // a slot is SIdxVirt every slot after it must be too -- no stored
+    // sub-arrays/closures after virtual; (2) if any slot is SIdxVirt the
+    // result must not be IRTArrow -- virtual elements must be simple values.
+    // `IRTArrow ([], ret, None)` is reserved for nullary functions;
+    // `ArrayElem` rejects it so a nullary call isn't misread as rank-0
+    // indexing (rank-0 arrays collapse to element type at `mkArrayLike`).
     // Examples:
     //   [SVal; SVal] -> ret           : pure binary function
     //   [SIdx; SIdx] -> elem          : stored 2D array
     //   [SIdxVirt; SIdxVirt] -> elem  : virtual 2D generator
     //   [SIdx; SIdxVirt] -> elem      : stored array of virtual sub-arrays
     //   [SVal; SIdx] -> elem          : function returning a stored array
-    //   [SIdxVirt; SIdx] -> elem      : INVALID — stored after virtual
-    //
-    // Retirement state: Segments 2 and 4 retired IRTFunc; Segments 3 and 5
-    // retired IRTArray. IRTArrow is now the sole arrow-shaped type; functions,
-    // stored arrays, and virtual arrays are distinguished by slot kind only.
+    //   [SIdxVirt; SIdx] -> elem      : INVALID -- stored after virtual
     | IRTArrow of slots: IRArrowSlotG<'Ext> list * result: IRTypeG<'Ext> * identity: ArrayIdentity option
 
 and IRArrowSlotG<'Ext> =
     | SIdx of IRIndexTypeG<'Ext>       // Storage-backed slot, consumed by an index value
-    | SIdxVirt of IRIndexTypeG<'Ext>   // Virtual slot — values computed on-the-fly, no storage
+    | SIdxVirt of IRIndexTypeG<'Ext>   // Virtual slot -- values computed on-the-fly, no storage
     | SVal of IRTypeG<'Ext>            // Value/closure slot, consumed by any value of that type
 
 /// Kind of loop object with arity tracking
@@ -685,11 +768,9 @@ and LoopTypeG<'Ext> = {
     KernelType: IRTypeG<'Ext> option  // Type of bound kernel (for ObjectLoop)
 }
 
-/// Render an IxKIrreps index record's identity for diagnostics: the
-/// round-trippable long form IrrepsIdx<[(l, p, m), ...]> — error messages
-/// must show WHICH spec mismatched — prefixed with the nominative alias
-/// name when the tag carries one. None for non-irreps records, so printers
-/// use it as a pre-match arm ahead of their Symmetry dispatch.
+/// Render an IxKIrreps record's identity for diagnostics: the round-trippable
+/// `IrrepsIdx<[(l, p, m), ...]>`, prefixed with the alias if present. None
+/// for non-irreps records (a pre-match arm ahead of Symmetry dispatch).
 let (|IrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
     if ix.IxKind <> IxKIrreps then None
     else
@@ -704,19 +785,14 @@ let (|IrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
                   | Some n -> sprintf "%s (= %s)" n core
                   | None -> core)
         | _ ->
-            // Kind says irreps but the tag is missing/unparseable — a state
+            // Kind says irreps but the tag is missing/unparseable -- a state
             // validateIR rejects; render a placeholder rather than crash.
             Some "IrrepsIdx<?>"
 
-/// The pg sibling of `IrrepsIdxLike`: render an IxKPgIrreps index record's
-/// identity as the round-trippable long form
-/// `PgIrrepsIdx<C4, [("A", 1), ("E", 2)]>`, prefixed with the nominative alias
-/// name when the tag carries one. Same pre-match discipline (None for
-/// non-pg records, so printers use it ahead of their Symmetry dispatch) and
-/// deliberately NOT merged with IrrepsIdxLike: the two members render
-/// differently (the group is part of a pg identity, and the labels are names
-/// rather than (l, parity) integers), and a cross-member diagnostic has to
-/// show BOTH forms side by side for the mismatch to be readable.
+/// The pg sibling of `IrrepsIdxLike`: renders `PgIrrepsIdx<C4, [("A", 1),
+/// ("E", 2)]>`, prefixed with the alias if present. NOT merged with
+/// IrrepsIdxLike -- they render differently (group is part of pg identity;
+/// labels are names, not (l, parity) integers) and diagnostics show both.
 let (|PgIrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
     if ix.IxKind <> IxKPgIrreps then None
     else
@@ -731,5 +807,3 @@ let (|PgIrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
                   | Some n -> sprintf "%s (= %s)" n core
                   | None -> core)
         | _ -> Some "PgIrrepsIdx<?>"
-
-/// Literal values

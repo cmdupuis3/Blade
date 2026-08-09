@@ -1,0 +1,15 @@
+// TEST: Cross-module unit export
+// MODULE: Units
+/// A units-only module: every declaration is a `Unit`, nothing runtime. This
+/// is the shape stdlib/units/SI.blade has, so it pins the thing that shape
+/// depends on -- that TypeModuleExport.Units survives the module boundary and
+/// an importer can annotate with a unit it never declared.
+module Units
+
+Unit meter
+Unit kilogram
+Unit second
+
+Unit newton = kilogram * meter / second^2
+Unit joule = newton * meter
+Unit hertz = second^-1

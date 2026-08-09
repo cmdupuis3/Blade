@@ -1,37 +1,34 @@
-// Blade tree-walking interpreter — scalar numerics (Milestone 1 foundation).
+// Blade tree-walking interpreter: scalar numerics (Milestone 1 foundation).
 //
-// Bit-exact reimplementation of the scalar arithmetic that CodeGen EMITS, so the
+// Bit-exact reimplementation of the scalar arithmetic that CodeGen emits, so the
 // interpreter's printed output byte-matches the g++ -std=c++17 -O2 binaries (the
 // differential gate). Every rule here was pinned empirically against the actual
-// toolchain (MSYS2 ucrt64 g++ 15.2 + .NET 7 on Windows); see the arc report for
-// the probe methodology. The mechanisms:
+// toolchain (MSYS2 ucrt64 g++ 15.2 + .NET 7 on Windows). The mechanisms:
 //
 //   * Real binops mirror C++ usual-arithmetic-conversion promotion and integer
-//     wraparound/truncation. The ONE non-obvious case: `int64 op float32` is
-//     computed in `float` (C++ converts the int64 to float, not double) and only
-//     then widened to the Float64 result type — computing it directly in double
-//     diverges. cppArithElem encodes the C++ conversion; the Blade node type
-//     (IR.promoteElemType) is applied afterward.
+//     wraparound/truncation. The one non-obvious case: `int64 op float32` is
+//     computed in `float` (C++ converts the int64 to float, not double), then
+//     widened to the Float64 result type. cppArithElem encodes the C++
+//     conversion; the Blade node type (IR.promoteElemType) applies afterward.
 //   * Complex128 +,-,*,/ replicate libgcc __muldc3 (naive product + Annex-G NaN
 //     recovery) and __divdc3 (Smith scaled division + recovery), verified
 //     bit-for-bit incl. the NaN/inf recovery paths and NaN sign bits.
-//   * complex-mixed-with-real uses std::complex's SCALAR overloads (component
-//     scale / real-part-only add), NOT full complex arithmetic — CodeGen leaves
+//   * complex-mixed-with-real uses std::complex's scalar overloads (component
+//     scale / real-part-only add), not full complex arithmetic -- CodeGen leaves
 //     a real operand un-promoted (coerceComplexOperand), so C++ resolves the
 //     mixed overload. Diverges from full complex on signed-zero / non-finite.
-//   * Scalar libm intrinsics: on THIS platform g++'s std::<fn> and .NET Math.*
-//     BOTH bottom out in ucrtbase, so they are bit-identical. The lone exception
-//     is hypot (no .NET managed equivalent; naive sqrt(x*x+y*y) diverges) — it
-//     routes through ucrtbase.dll. Backend choice is a data table (mathBackend),
-//     not scattered code, so any function can be re-pinned to the ucrt shim if a
-//     future battery reveals a managed divergence.
+//   * Scalar libm intrinsics: on this platform g++'s std::<fn> and .NET Math.*
+//     both bottom out in ucrtbase, so they are bit-identical. The lone exception
+//     is hypot (no .NET managed equivalent; naive sqrt(x*x+y*y) diverges) --
+//     routed through ucrtbase.dll. Backend choice is a data table (mathBackend),
+//     so any function can be re-pinned to the ucrt shim if a future battery
+//     reveals a managed divergence.
 //
-// Compiled inside Blade.fsproj AFTER IR.fs/CodeGen.fs. Depends on Value.fs, the
+// Compiled inside Blade.fsproj after IR.fs/CodeGen.fs. Depends on Value.fs, the
 // IR op discriminators (IRBinOp/IRUnaryOp, IR.fs:25/36), ElemType (Types.fs:285),
-// and IR.promoteElemType (IR.fs:417, the compiler's own node-typing rule — reused
-// so the interpreter cannot drift from it). The bit-critical core (complex ops,
-// math dispatch, cppArithElem) is written over plain float/int so it is testable
-// standalone via dotnet fsi with stubbed types.
+// and IR.promoteElemType (IR.fs:417, reused so the interpreter cannot drift from
+// it). The bit-critical core (complex ops, math dispatch, cppArithElem) is
+// written over plain float/int so it is testable standalone via dotnet fsi.
 module Blade.Interp.Numerics
 
 open System
@@ -40,15 +37,14 @@ open Blade.Types
 open Blade.IR
 open Blade.Interp.Value
 
-// ============================================================================
-// ucrtbase.dll shims (the exact library the g++ binaries call)
-// ============================================================================
+// ucrtbase.dll shims (the exact library the g++ binaries call).
 // MinGW ucrt64's libstdc++ forwards <cmath> to ucrtbase; calling ucrtbase
 // directly is therefore provably identical to the compiled binary. Verified
 // bit-for-bit over a 284-value battery for every function below.
 module private Ucrt =
     [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double exp(double x)
     [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double log(double x)
+    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double log10(double x)
     [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double sqrt(double x)
     [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double sin(double x)
     [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double cos(double x)
@@ -68,7 +64,7 @@ module private Ucrt =
 
 /// Per-intrinsic backend. `Managed` = .NET Math.* (exact/correctly-rounded and
 /// identical to ucrt for these; cheaper, no marshalling). `Ucrt` = ucrtbase.dll
-/// P/Invoke (provably what g++ calls). The choice is DATA — flip an entry to
+/// P/Invoke (provably what g++ calls). The choice is data -- flip an entry to
 /// Ucrt to eliminate any residual managed-divergence risk for that function.
 type MathBackend =
     | Managed
@@ -81,7 +77,8 @@ type MathBackend =
 /// Ucrt unconditionally.
 let mathBackend : Map<string, MathBackend> =
     Map.ofList [
-        "exp", Ucrt;  "log", Ucrt;   "sin", Ucrt;  "cos", Ucrt;  "tan", Ucrt
+        "exp", Ucrt;  "log", Ucrt;   "log10", Ucrt
+        "sin", Ucrt;  "cos", Ucrt;  "tan", Ucrt
         "sinh", Ucrt; "cosh", Ucrt;  "tanh", Ucrt
         "asin", Ucrt; "acos", Ucrt;  "atan", Ucrt
         "sqrt", Managed; "floor", Managed; "ceil", Managed
@@ -89,7 +86,8 @@ let mathBackend : Map<string, MathBackend> =
 
 let private managed1 (name: string) (x: float) : float =
     match name with
-    | "exp" -> Math.Exp x | "log" -> Math.Log x | "sqrt" -> Math.Sqrt x
+    | "exp" -> Math.Exp x | "log" -> Math.Log x | "log10" -> Math.Log10 x
+    | "sqrt" -> Math.Sqrt x
     | "sin" -> Math.Sin x | "cos" -> Math.Cos x | "tan" -> Math.Tan x
     | "sinh" -> Math.Sinh x | "cosh" -> Math.Cosh x | "tanh" -> Math.Tanh x
     | "asin" -> Math.Asin x | "acos" -> Math.Acos x | "atan" -> Math.Atan x
@@ -99,7 +97,8 @@ let private managed1 (name: string) (x: float) : float =
 
 let private ucrt1 (name: string) (x: float) : float =
     match name with
-    | "exp" -> Ucrt.exp x | "log" -> Ucrt.log x | "sqrt" -> Ucrt.sqrt x
+    | "exp" -> Ucrt.exp x | "log" -> Ucrt.log x | "log10" -> Ucrt.log10 x
+    | "sqrt" -> Ucrt.sqrt x
     | "sin" -> Ucrt.sin x | "cos" -> Ucrt.cos x | "tan" -> Ucrt.tan x
     | "sinh" -> Ucrt.sinh x | "cosh" -> Ucrt.cosh x | "tanh" -> Ucrt.tanh x
     | "asin" -> Ucrt.asin x | "acos" -> Ucrt.acos x | "atan" -> Ucrt.atan x
@@ -125,13 +124,11 @@ let mathAtan2 (y: float) (x: float) : float =
     | Some Ucrt -> Ucrt.atan2(y, x)
     | _ -> Math.Atan2(y, x)
 
-/// hypot(x, y) — the std::abs(complex) backend. No managed equivalent that
+/// hypot(x, y): the std::abs(complex) backend. No managed equivalent that
 /// matches; always ucrtbase.
 let mathHypot (x: float) (y: float) : float = Ucrt.hypot(x, y)
 
-// ============================================================================
-// Complex128 arithmetic (bit-exact: libgcc __muldc3 / __divdc3)
-// ============================================================================
+// Complex128 arithmetic (bit-exact: libgcc __muldc3 / __divdc3).
 
 let inline private isInf (x: float) = Double.IsInfinity x
 let inline private isNan (x: float) = Double.IsNaN x
@@ -139,7 +136,7 @@ let inline private isFin (x: float) = not (Double.IsInfinity x) && not (Double.I
 let inline private csign (m: float) (s: float) = Math.CopySign(m, s)
 let private INF = Double.PositiveInfinity
 
-/// (a+bi)*(c+di) — naive product with C99 Annex-G NaN/inf recovery, exactly as
+/// (a+bi)*(c+di): naive product with C99 Annex-G NaN/inf recovery, exactly as
 /// libgcc __muldc3 (which libstdc++'s complex<double> operator* lowers to).
 let complexMul (a: float) (b: float) (c: float) (d: float) : float * float =
     let ac = a * c
@@ -177,7 +174,7 @@ let complexMul (a: float) (b: float) (c: float) (d: float) : float * float =
             y <- INF * (a * d + b * c)
     (x, y)
 
-/// (a+bi)/(c+di) — Smith's scaled division with libgcc __divdc3 recovery.
+/// (a+bi)/(c+di): Smith's scaled division with libgcc __divdc3 recovery.
 let complexDiv (a: float) (b: float) (c: float) (d: float) : float * float =
     let mutable x = 0.0
     let mutable y = 0.0
@@ -213,20 +210,18 @@ let complexAbs (re: float) (im: float) : float = mathHypot re im
 /// arg(a+bi) = atan2(b, a) (std::arg(complex<double>) backend).
 let complexArg (re: float) (im: float) : float = mathAtan2 im re
 
-// --- complex ⊕ real: std::complex's mixed SCALAR overloads (verified) ---
+// complex + real: std::complex's mixed SCALAR overloads (verified).
 // Applied when exactly one operand renders as complex in the emitted C++.
 let private addCR a b s = (a + s, b)          // (a+bi) + s
 let private subCR a b s = (a - s, b)          // (a+bi) - s
 let private mulCR a b s = (a * s, b * s)      // (a+bi) * s
 let private divCR a b s = (a / s, b / s)      // (a+bi) / s
 let private addRC s a b = (s + a, b)          // s + (a+bi)
-let private subRC s a b = (s - a, 0.0 - b)    // s - (a+bi)  (imag = +0 − b)
+let private subRC s a b = (s - a, 0.0 - b)    // s - (a+bi)  (imag = +0 - b)
 let private mulRC s a b = (s * a, s * b)      // s * (a+bi)
 let private divRC s a b = complexDiv s 0.0 a b // s / (a+bi) : full __divdc3 of (s,0)/(a,b)
 
-// ============================================================================
-// Value <-> primitive coercions
-// ============================================================================
+// Value <-> primitive coercions.
 
 /// The scalar ElemType a Value represents (None for non-scalar values).
 let scalarElem (v: Value) : ElemType option =
@@ -285,7 +280,7 @@ let private asI32 (v: Value) : int32 =
     | VChar c -> int32 c
     | _ -> 0
 
-/// Coerce a value to complex components. A real operand becomes (v, 0.0) — the
+/// Coerce a value to complex components. A real operand becomes (v, 0.0), the
 /// same widening CodeGen applies (coerceComplexOperand casts to the component
 /// real type; the imaginary part is an implicit +0).
 let private asComplex (v: Value) : float * float =
@@ -293,13 +288,10 @@ let private asComplex (v: Value) : float * float =
     | VComplex (r, i) -> (r, i)
     | other -> (asF64 other, 0.0)
 
-// ============================================================================
-// C++ usual-arithmetic-conversion type
-// ============================================================================
-// The type C++ EVALUATES a real binop in (distinct from the Blade node type
-// which is IR.promoteElemType). Ranks: Float64 > Float32 > Int64 > Int32. The
-// higher-ranked operand wins. This is where `int64 + float32` becomes `float`
-// (Float32 outranks Int64) — the value is then converted to the Float64 result.
+// C++ usual-arithmetic-conversion type: the type C++ evaluates a real binop
+// in (distinct from the Blade node type, IR.promoteElemType). Ranks: Float64
+// > Float32 > Int64 > Int32, higher-ranked operand wins -- where `int64 +
+// float32` becomes `float`, then converts to the Float64 result.
 let private numRank (et: ElemType) =
     match et with
     | ETFloat64 -> 5 | ETFloat32 -> 4 | ETInt64 -> 3 | ETInt32 -> 2 | _ -> 1
@@ -307,12 +299,9 @@ let private numRank (et: ElemType) =
 let cppArithElem (le: ElemType) (re: ElemType) : ElemType =
     if numRank le >= numRank re then le else re
 
-// ============================================================================
-// Runtime faults for arithmetic
-// ============================================================================
-// Integer division/modulo by zero is UB in C++ (a SIGFPE trap, no output). The
-// interpreter fails loudly instead — there is no matching printed output to
-// reproduce. Code is advisory (not a registered blade_rt panic site).
+// Runtime faults for arithmetic. Integer division/modulo by zero is UB in
+// C++ (a SIGFPE trap, no output); the interpreter fails loudly instead, since
+// there is no matching printed output to reproduce.
 let private divByZero () : 'a =
     raise (InterpPanic("BL8007", "integer division or modulo by zero", None, 0))
 
@@ -374,15 +363,11 @@ let private computeReal (op: IRBinOp) (comp: ElemType) (l: Value) (r: Value) : V
         | IRMod -> VFloat (a % b)     // unreachable for well-typed IR
         | _ -> VFloat 0.0
 
-// ============================================================================
-// Complex transcendental intrinsics (BEST-EFFORT — NOT bit-verified)
-// ============================================================================
+// Complex transcendental intrinsics: best-effort, NOT bit-verified.
 // libstdc++ implements complex exp/log/sqrt/trig with its own algorithms; these
 // standard formulas are close but NOT guaranteed to match its exact operation
-// order. The realistic complex corpus (spectra/FFT) uses only +,-,*,/ and abs,
-// which ARE bit-exact above. A later milestone should probe libstdc++'s complex
-// transcendentals and pin these. Until then, unsupported names fail loudly
-// rather than silently miscompute.
+// order. The realistic complex corpus (spectra/FFT) uses only +,-,*,/ and abs
+// (bit-exact above). Unsupported names fail loudly rather than miscompute.
 let complexMath (name: string) (re: float) (im: float) : float * float =
     match name with
     | "exp" ->
@@ -392,12 +377,11 @@ let complexMath (name: string) (re: float) (im: float) : float * float =
         (math1 "log" (complexAbs re im), complexArg re im)
     | "sqrt" ->
         // libstdc++ std::sqrt(complex<double>) is Kahan's branch algorithm (NOT
-        // the polar m*(cos(t/2),sin(t/2)) formula, which loses the exact-zero real
-        // part: sqrt(-1+0i) came out (6.12e-17, 1) instead of (0, 1)). Ported
-        // arm-for-arm from libstdc++ <complex>, bit-verified against g++ -O2 over
-        // 11 operands (incl. neg1, 3+4i, -3-4i, 2i, subnormal 1e-300): every hex
-        // pair identical. std::abs(z)=hypot (complexAbs), abs(x)=fabs, sqrt=Managed
-        // (correctly-rounded ≡ ucrtbase).
+        // the polar m*(cos(t/2),sin(t/2)) formula, which loses the exact-zero
+        // real part: sqrt(-1+0i) came out (6.12e-17, 1) instead of (0, 1)).
+        // Ported arm-for-arm from libstdc++ <complex>, bit-verified against
+        // g++ -O2 over 11 operands (incl. neg1, 3+4i, -3-4i, 2i, subnormal
+        // 1e-300): every hex pair identical.
         let x = re
         let y = im
         if x = 0.0 then
@@ -413,7 +397,7 @@ let complexMath (name: string) (re: float) (im: float) : float * float =
             sprintf "complex intrinsic '%s' is not yet bit-verified in the interpreter" name,
             None, 0))
 
-/// z ^ w for complex — best-effort exp(w * log z); NOT bit-verified (see above).
+/// z ^ w for complex: best-effort exp(w * log z); NOT bit-verified (see above).
 let private complexCaret (l: Value) (r: Value) : Value =
     let (zr, zi) = asComplex l
     let (wr, wi) = asComplex r
@@ -422,9 +406,7 @@ let private complexCaret (l: Value) (r: Value) : Value =
     let (er, ei) = complexMath "exp" pr pi
     VComplex (er, ei)
 
-// ============================================================================
-// Scalar binop / unaryop dispatch (mirrors CodeGen's IRBinOp / IRUnaryOp)
-// ============================================================================
+// Scalar binop / unaryop dispatch (mirrors CodeGen's IRBinOp / IRUnaryOp).
 
 let private evalArith (op: IRBinOp) (l: Value) (r: Value) : Value =
     match scalarElem l, scalarElem r with
@@ -485,7 +467,7 @@ let private evalArith (op: IRBinOp) (l: Value) (r: Value) : Value =
 
 // IEEE-exact per-type comparisons. Direct-typed float operators compile to the
 // IEEE ordered/unordered comparisons (NaN => false for </<=/>/>=/=, true for <>),
-// matching C++. (F#'s generic `compare` does NOT — it total-orders NaN — so it is
+// matching C++. (F#'s generic `compare` does NOT -- it total-orders NaN -- so it is
 // deliberately avoided here.)
 let private cmpF64 op (a: float) (b: float) =
     match op with
@@ -512,7 +494,7 @@ let private evalCompare (op: IRBinOp) (l: Value) (r: Value) : Value =
         | _ -> VBool false
     | VString a, VString b ->
         // std::string byte-lexicographic order. NOTE: Blade strings are UTF-8
-        // bytes in std::string; .NET strings are UTF-16 — ordinal comparison
+        // bytes in std::string; .NET strings are UTF-16 -- ordinal comparison
         // agrees for ASCII, may differ for multibyte (documented edge).
         let c = String.CompareOrdinal(a, b)
         VBool (match op with IREq -> c = 0 | IRNeq -> c <> 0 | IRLt -> c < 0 | IRLe -> c <= 0 | IRGt -> c > 0 | IRGe -> c >= 0 | _ -> false)
@@ -543,9 +525,25 @@ let private evalLogical (op: IRBinOp) (l: Value) (r: Value) : Value =
 /// the C++ CodeGen emits (promotion, wraparound, complex coercion).
 let evalBinOp (op: IRBinOp) (l: Value) (r: Value) : Value =
     match op with
+    // String concatenation: `+` on two Strings is std::string operator+ in
+    // the compiled lane -- byte-identical by construction (no formatting).
+    // Ahead of the numeric arms so a VString operand never reaches asF64.
+    | IRAdd ->
+        (match l, r with
+         | VString a, VString b -> VString (a + b)
+         | _ -> evalArith op l r)
     | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe -> evalCompare op l r
     | IRAnd | IROr -> evalLogical op l r
-    | IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret -> evalArith op l r
+    // Binary math intrinsics. Real-only by construction (TypeCheck rejects
+    // complex operands), always Float64, so they bypass evalArith's promotion
+    // and complex machinery entirely and mirror CodeGen.renderMath2 directly:
+    // `std::atan2(l, r)` and `(std::log(l) / std::log(r))`. The quotient is a
+    // plain IEEE double division in both lanes.
+    | IRMath2 "atan2" -> VFloat (mathAtan2 (asF64 l) (asF64 r))
+    | IRMath2 "log_base" -> VFloat (math1 "log" (asF64 l) / math1 "log" (asF64 r))
+    | IRMath2 name ->
+        raise (InterpPanic("BL8010", sprintf "unknown binary math intrinsic '%s'" name, None, 0))
+    | IRSub | IRMul | IRDiv | IRMod | IRCaret -> evalArith op l r
 
 /// abs(x): std::abs, whose C++ overload preserves the operand's numeric type
 /// (llabs->int64, fabs->double, fabsf->float, hypot->double magnitude for
@@ -567,8 +565,7 @@ let evalMath (name: string) (v: Value) : Value =
         match v with
         | VComplex (r, i) -> let (xr, xi) = complexMath name r i in VComplex (xr, xi)
         // NOTE: a Float32 operand would use C++'s float overload (expf, ...);
-        // that rare path is computed through double here and is a documented
-        // minor divergence (MathF/…f pinning deferred).
+        // that rare path is computed through double here, a documented minor divergence.
         | other -> VFloat (math1 name (asF64 other))
 
 /// Evaluate a scalar unary operator, matching CodeGen's IRUnaryOp emission.

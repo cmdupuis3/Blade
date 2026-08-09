@@ -1,0 +1,40 @@
+// TEST: Matrix-vector through the blade_linalg dispatch layer
+// Phase 5b of docs/plan-cpp-perf-exploitation.md. Blade has no `matvec`
+// keyword; matrix-vector is written as a per-row apply whose kernel body is
+// `prodsum(row, x)` — a rank-2 operand fully peeled one level, a shared rank-1
+// vector, a rank-1 output. That nest is emitted as ONE
+// `blade_linalg::blade_gemv` call. (The same shape appears in the wild at
+// ml-equiv/018 and /019, where the vector carries an IrrepsIdx tag.)
+//
+// Integer-valued f64 throughout, so the compiled binary, the interpreter and
+// the shim's native fallback agree BIT for BIT (`interp math`). The shim's
+// native arm is the emitted nest verbatim: rows ascending, one accumulator per
+// row seeded at +0.0, the contracted axis ascending through the ROW POINTER —
+// so a staged or sliced operand feeds it the same values the loop read.
+//
+//   y = A·xv, A 3x4:
+//     row0 = 1+4+9+16   = 30
+//     row1 = 5+12+21+32 = 70
+//     row2 = 9+20+33+48 = 110
+//
+// The second case routes a SYMMETRIC matrix through the same call. Blade cannot
+// peel a rank-2 compact group into rows (BL4004), so a sym matvec must
+// `decompact` first — after which the operand is an ordinary dense pool and
+// this is simply gemv. That is the whole reason `blade_symv` (the packed
+// dspmv route, whose layout is proven) has no emission site yet.
+//   S = outer product of [1,2,3] with itself, symmetric:
+//     [[1,2,3],[2,4,6],[3,6,9]] · [1,2,3] = [14, 28, 42]
+type M = Idx<3>
+type N = Idx<4>
+let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]
+let xv: Array<Float64 like N> = [1.0, 2.0, 3.0, 4.0]
+let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) -> prodsum(row, xv) |> compute
+
+let a3 = [1.0, 2.0, 3.0]
+let outerProd = lambda(u, v) where comm(u, v) -> u * v
+let S = method_for(a3, a3) <@> outerProd |> compute
+let D = decompact(S, 0)
+let sv = method_for(D) <@> lambda(row: Array<Float64 like M>) -> prodsum(row, a3) |> compute
+
+// EXPECT: yv = [30, 70, 110]
+// EXPECT: sv = [14, 28, 42]

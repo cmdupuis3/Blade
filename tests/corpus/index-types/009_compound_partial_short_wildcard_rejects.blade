@@ -1,11 +1,8 @@
 // TEST: Compound Partial Short Wildcard (rejects)
 // ERROR: BL4003
-// A wildcard tuple must be FULL arity: on a rank-3 compound, a 2-tuple with a
-// wildcard is ambiguous (which axes?) and rejected; short tuples pin a
-// leading prefix only in their wildcard-free form.
-// A wildcard tuple must be FULL arity: on a rank-3 compound, a 2-tuple with a
-// wildcard is ambiguous (which axes?) and rejected; short tuples pin a
-// leading prefix only in their wildcard-free form.
+// A short wildcard tuple B((0, _)) on a rank-3 compound rejects - as does
+// every other wildcard/tuple form on a compound axis since the flat-subscript
+// conversion (partial reads are a SparseIdx feature).
 type X = Idx<2>
 type Y = Idx<2>
 type Z = Idx<2>
@@ -13,4 +10,4 @@ let dense: Array<Float64 like X, Y, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0],
 let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
 let B = compound(dense, m)
 let r = B((0, _))
-// EXPECT: typecheck failure — wildcard tuple must have full arity 3.
+// EXPECT: typecheck failure - wildcard reads on a compound axis moved to SparseIdx.

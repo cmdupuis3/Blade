@@ -1,0 +1,23 @@
+// TEST: Intrinsics Abs Over Complex Array
+// ============================================================================
+// `abs <@> complexArray` is REAL-valued, exactly as scalar `abs(z)` is.
+// The intrinsic in kernel position eta-expands to lambda(__k) -> abs(__k),
+// and the scalar arm types a still-deferred operand's application AT the
+// operand's own type var -- which is the wrapper lambda's return-type var. So
+// unifying the param with Complex128 dragged the RESULT complex too, and
+// `abs` came back as (magnitude, 0) pairs that propagated into every
+// downstream binding. real/imag/arg pin the neighbours in the same class.
+// ============================================================================
+let C2: Array<Float like Idx<3>> = [3.0, 0.0, -1.0]
+let S2: Array<Float like Idx<3>> = [4.0, 2.0, 0.0]
+let z2 = (zip(C2, S2) <@> lambda(a, b) -> complex(a, b)) |> compute
+let mags = (abs <@> z2) |> compute
+let res = (real <@> z2) |> compute
+let ims = (imag <@> z2) |> compute
+// A real magnitude still multiplies with a plain Float array.
+let scaled = (mags * C2) |> compute
+// EXPECT: z2 = [(3,4), (0,2), (-1,0)]
+// EXPECT: mags = [5, 2, 1]
+// EXPECT: res = [3, 0, -1]
+// EXPECT: ims = [4, 2, 0]
+// EXPECT: scaled = [15, 0, -1]

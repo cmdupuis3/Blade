@@ -1,56 +1,48 @@
-// ============================================================================
-// Blade interpreter <-> C++ output PARITY layer: top-level binding printer.
+// Blade interpreter <-> C++ output parity layer: top-level binding printer.
 //
 // The compiled C++ binary's main() prints the module's top-level bindings, in
 // declaration order, each as `cout << "<name> = " << value << endl;` (see
 // CodeGen.genPrintScalar / genPrintStatements). This module reproduces that
-// stdout for the tree-walking interpreter so interpreter output and compiled-
-// binary output are indistinguishable to the differential gate.
+// stdout for the tree-walking interpreter so interpreter and compiled-binary
+// output are indistinguishable to the differential gate.
 //
-// SCOPE — Milestone M0 (scalars) + M2 (dense array binding print). Supported:
+// SCOPE: Milestone M0 (scalars) + M2 (dense array binding print). Supported:
 //   Float64 / Float32 / Int64 / Int32 / Bool / String / Complex128 (Complex64)
 //   scalars, and index-tagged scalars (Nat<I> etc., which print as their int).
-// TUPLE, STRUCT (named), and UNIT bindings emit NOTHING — genPrintStatements
-// returns [] for IRTTuple / IRTNamed / IRTUnit (verified empirically: a
-// top-level `let pair = (1,2)` produces no output). FUNCTION-valued bindings
-// also print nothing (their IRTArrow type is not an array and falls through).
+// TUPLE, STRUCT (named), and UNIT bindings emit nothing -- genPrintStatements
+// returns [] for IRTTuple / IRTNamed / IRTUnit. FUNCTION-valued bindings also
+// print nothing (their IRTArrow type is not an array and falls through).
 //
 // ARRAY bindings (M2) dispatch exactly as CodeGen.genPrintStatements' ArrayElem
-// arms do — this module owns the KIND dispatch, Interp/ArrayOps owns the cell/
-// row traversal and the low-level array-LINE emitters (see ArrayOps header for
-// the assumed division of labor). This wave renders:
-//   * DENSE flat rank 1-3   -> ArrayOps.emitFlatArray  (genPrintArrayFlat 1..3)
-//   * DENSE rank 4 grid     -> ArrayOps.emitGrid4Array (genPrintArrayFlat 4)
+// arms do -- this module owns the kind dispatch, Interp/ArrayOps owns the cell/
+// row traversal and the low-level array-line emitters. This wave renders:
+//   * dense flat rank 1-3   -> ArrayOps.emitFlatArray  (genPrintArrayFlat 1..3)
+//   * dense rank 4 grid     -> ArrayOps.emitGrid4Array (genPrintArrayFlat 4)
 //   * rank 0 / rank >= 5    -> ArrayOps.emitRankNPlaceholder (`<rank-N array>`)
-//   * rank-1 struct arrays, all-scalar fields -> per-field print loop (M2.6)
+//   * rank-1 struct arrays, all-scalar fields -> per-field print loop
 //       `name = [{f1: V1, f2: V2}, ...]` (mirrors genPrintStatements)
-// and mirrors CodeGen's NO-STDOUT (C++ comment only) arms as zero output:
-//   * compound arrays, function-valued arrays, struct arrays (rank>1/no fields),
-//     ragged SUB-VIEWS.
-// The still-unrendered stdout-producing kinds are GATED with PrintUnsupported so
+// and mirrors CodeGen's no-stdout (C++ comment only) arms as zero output:
+//   compound arrays, function-valued arrays, struct arrays (rank>1/no fields),
+//   ragged sub-views.
+// The still-unrendered stdout-producing kinds are gated with PrintUnsupported so
 // the caller classifies the whole program SKIP-UNSUPPORTED (never wrong bytes):
-//   * symmetric-aware arrays (rank 2-8)            -> M2.5
-//   * ragged / dep-idx LITERALS / peel / row       -> M2.7
-//   * rank-1 struct arrays with a NON-scalar field -> M2.6 (address-valued;
-//       no faithful interpreter image — CodeGen streams it as a raw pointer)
+//   symmetric-aware arrays (rank 2-8); ragged/dep-idx literals/peel/row;
+//   rank-1 struct arrays with a non-scalar field (address-valued; no faithful
+//   interpreter image -- CodeGen streams it as a raw pointer).
 //
-// TIMING LINE. genMainWrapper prints `<testName> completed in <elapsed>s` FIRST,
-// then the binding prints. `testName` is the SOURCE FILE STEM (Cli.compileFile:
-// Path.GetFileNameWithoutExtension), not IRModule.Name, so it is taken here as
-// the `progName` parameter. `elapsed` is nondeterministic and the differential
-// gate strips every line containing "completed in" (DiffOracle.normalize), so
-// we emit a constant 0. Emitting the line keeps standalone interp output shaped
-// like a real run; the gate discards it either way.
+// TIMING LINE. genMainWrapper prints `<testName> completed in <elapsed>s` first,
+// then the binding prints. `testName` is the source file stem, not IRModule.Name,
+// so it is taken here as the `progName` parameter. `elapsed` is nondeterministic
+// and the differential gate strips every line containing "completed in"
+// (DiffOracle.normalize), so we emit a constant 0.
 //
 // LINE ENDINGS. C++ `endl` writes '\n' (the CRT may expand it to '\r\n' on a
-// Windows text-mode stdout). The differential gate normalizes '\r\n' -> '\n'
-// before comparing (DiffOracle.normalize), so this printer emits '\n' — the
-// canonical logical newline — for every line.
+// Windows text-mode stdout). The gate normalizes '\r\n' -> '\n' before
+// comparing, so this printer emits '\n' for every line.
 //
 // Every scalar is rendered through Interp.CppFormat, the byte-pinned iostream
 // mirror; this module contributes only the per-binding dispatch and the
 // "<name> = " / newline framing.
-// ============================================================================
 module Blade.Interp.Print
 
 open System.Text
@@ -84,7 +76,7 @@ let rec private elemThrough (ty: IRType) : ElemType option =
     | _ -> None
 
 /// Render one scalar Value exactly as the compiled binary's `cout << value`
-/// would, driven by the binding's declared ElemType — the ElemType fixes the
+/// would, driven by the binding's declared ElemType -- the ElemType fixes the
 /// C++ variable's static type and therefore which operator<< overload runs. The
 /// value's numeric content is coerced to that width (mirroring an implicit
 /// promotion the evaluator may not have widened), so an int stored in a Float64
@@ -148,26 +140,24 @@ let private formatScalar (name: string) (et: ElemType) (v: Value) : string =
     // ETUnit is never a printable scalar (skipped before reaching here).
     | ETUnit -> bad ()
 
-/// Append to `sb` EXACTLY what the compiled binary's main() prints — the timing
+/// Append to `sb` exactly what the compiled binary's main() prints -- the timing
 /// line followed by the module's top-level binding prints, in declaration order.
 ///
-///   progName  — the compiled binary's testName (SOURCE FILE STEM, e.g.
-///               "001_basic_expression" for 001_basic_expression.blade); used
-///               only for the (gate-stripped) `<progName> completed in 0s` line.
-///   lookup    — fetches a binding's evaluated Value by its IRId.
-///   forcedIds — module-level DEFERRED bindings that were actually FORCED
-///               during evaluation (InterpState.ForcedDeferred): a deferred
-///               binding that ended up materialized auto-prints, mirroring
-///               CodeGen's forcedDeferredIdsCell in genPrintStatements; one
-///               that stayed deferred prints nothing.
-///   irModule  — the lowered module whose Bindings drive the print order and the
+///   progName  - the compiled binary's testName (source file stem); used only
+///               for the (gate-stripped) `<progName> completed in 0s` line.
+///   lookup    - fetches a binding's evaluated Value by its IRId.
+///   forcedIds - module-level deferred bindings actually forced during
+///               evaluation (InterpState.ForcedDeferred): one that ended up
+///               materialized auto-prints (mirrors genPrintStatements'
+///               forcedDeferredIdsCell); one that stayed deferred prints nothing.
+///   irModule  - the lowered module whose Bindings drive print order and the
 ///               same skip/kind decisions CodeGen.genPrintStatements makes.
-///   sb        — output sink; lines are '\n'-terminated (see module header).
+///   sb        - output sink; lines are '\n'-terminated (see module header).
 ///
 /// Raises PrintUnsupported for binding kinds not handled in M0 (arrays, or a
 /// scalar binding with a missing / mistyped value) so the caller can classify.
 let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: System.Collections.Generic.HashSet<IRId>) (irModule: IRModule) (sb: StringBuilder) : unit =
-    // Timing line first — mirrors genMainWrapper, where `timing` precedes
+    // Timing line first, mirroring genMainWrapper, where `timing` precedes
     // `printCode`. Constant elapsed (gate-stripped); see module header.
     sb.Append(progName).Append(" completed in 0s").Append('\n') |> ignore
 
@@ -203,14 +193,14 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
     // for the dense cases and mirroring CodeGen's no-stdout / unsupported arms.
     // Print owns this dispatch; ArrayOps owns the traversal + line formatting.
     // A FULL compound read bound to a dense trailing-row type is a raw T* view
-    // in C++ — CodeGen does not auto-print it (comment only). Partial reads
+    // in C++ -- CodeGen does not auto-print it (comment only). Partial reads
     // materialize real dense arrays and print normally.
     let isCompoundRowSubview (b: IRBinding) : bool =
         match b.Value with
         | IRIndex (a, (IRTuple coords) :: _, _) ->
             (match Blade.IR.typeOf a with
-             | ArrayElem at when Blade.CodeGen.isCompoundArrayType at ->
-                 let k = at.IndexTypes |> List.tryFind (fun ix -> ix.IxKind = IxKCompound)
+             | ArrayElem at when Blade.CodeGen.isCompoundArrayType at || Blade.CodeGen.isSparseArrayType at ->
+                 let k = at.IndexTypes |> List.tryFind (fun ix -> ix.IxKind = IxKCompound || ix.IxKind = IxKSparse)
                          |> Option.map (fun ix -> ix.Rank) |> Option.defaultValue coords.Length
                  (match Blade.IR.classifyCompoundIndexTuple k coords with
                   | Blade.IR.CompoundFull -> true | Blade.IR.CompoundPartial _ -> false)
@@ -219,7 +209,7 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
 
     let printArrayBinding (b: IRBinding) (arrType: IRArrayType) : unit =
         let rank = Blade.CodeGen.arrayRank arrType
-        if Blade.CodeGen.isCompoundArrayType arrType then
+        if Blade.CodeGen.isCompoundArrayType arrType || Blade.CodeGen.isSparseArrayType arrType then
             ()   // CodeGen emits a diagnostic C++ comment only -> zero stdout.
         elif isCompoundRowSubview b then
             ()   // raw trailing-row T* view: not auto-printed.
@@ -229,24 +219,18 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
             ()   // arrays of function values: comment only (std::function unstreamable).
         | IRTNamed structName ->
             // Rank-1 struct arrays with known, all-scalar fields print a
-            // per-field loop (stdout) — mirror genPrintStatements
+            // per-field loop (stdout), mirroring genPrintStatements
             // (CodeGen.fs ~10430-10457):
             //   name = [{f1: V1, f2: V2}, {f1: V1, f2: V2}, ...]
-            // Each field value is streamed by the compiled binary via
-            // `cout << name[i].field`, so the field's DECLARED ElemType fixes
-            // the C++ operator<< overload and therefore its formatting (reuse
-            // formatScalar, the same CppFormat mirror the scalar path uses).
-            // Rows are ", "-separated inside `[...]`; fields ", "-separated
-            // inside `{...}`; field ORDER follows the declared IRTDStruct list.
-            // Everything else is deferred / comment-only:
-            //   * rank>1, unknown or empty field list -> CodeGen comment (no
-            //     stdout), so emit nothing;
-            //   * ANY non-scalar field (an array / tuple / nested-struct member
-            //     that C++ would stream as a raw address) -> CodeGen still emits
-            //     the loop, but the interpreter has no faithful image of that
-            //     address, so GATE (PrintUnsupported -> SKIP-UNSUPPORTED) rather
-            //     than risk wrong bytes. (structs/013 'Trace.samples' is such a
-            //     field and must keep skipping.)
+            // Each field's DECLARED ElemType fixes the C++ operator<< overload
+            // and its formatting (reuse formatScalar). Rows ", "-separated
+            // inside `[...]`; fields ", "-separated inside `{...}`; field
+            // ORDER follows the declared IRTDStruct list. Everything else is
+            // deferred / comment-only: rank>1 or unknown/empty field list ->
+            // CodeGen comment (no stdout, emit nothing); ANY non-scalar field
+            // (address-valued in C++) -> CodeGen still emits the loop, but the
+            // interpreter has no faithful image, so GATE rather than risk
+            // wrong bytes (structs/013 'Trace.samples' must keep skipping).
             let structFields =
                 irModule.Types |> List.tryPick (fun td ->
                     match td with
@@ -317,28 +301,21 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
             if isRaggedPeelOutput || isRaggedRowBinding || isRaggedLiteralBinding then
                 // Ragged literals, rank-1 ragged ROWS, and apply-produced ragged
                 // PEEL OUTPUTS all render as the flat backing-pool value sequence,
-                // which the single ArrayOps.printArrayBinding emitter (byte-verified
-                // on the literal path) reproduces:
-                //   * a ragged LITERAL / rank>=2 elementwise-map peel output shares
-                //     lens+prefix-offsets metadata; CodeGen iterates rows via .lens
-                //     (genPrintStatements case (a) / (b)-rank>=2) and ArrayOps
-                //     flattens the SRagged pool identically;
-                //   * a rank-1 PEEL OUTPUT is rank-1 RECTANGULAR at runtime — one
-                //     scalar per outer iteration — which CodeGen prints via
-                //     genPrintArrayFlat 1 and ArrayOps.emitFlatArray on the rank-1
-                //     dense value matches byte-for-byte.
-                // GATED on a materialized VArray: if the ragged-apply layer has not
-                // produced one (the M2.7 ragged-apply path is gated UPSTREAM in the
-                // Loops layer today — "apply over ragged/grouped/compound input"),
-                // the whole program SKIP-classifies before Print runs; this arm
-                // activates as that layer materializes ragged apply outputs.
+                // which ArrayOps.printArrayBinding (byte-verified on the literal
+                // path) reproduces: a ragged LITERAL / rank>=2 elementwise-map
+                // peel output shares lens+prefix-offsets metadata (CodeGen
+                // iterates via .lens, ArrayOps flattens SRagged identically); a
+                // rank-1 PEEL OUTPUT is rank-1 RECTANGULAR at runtime, matching
+                // genPrintArrayFlat 1 byte-for-byte. GATED on a materialized
+                // VArray: if the ragged-apply layer has not produced one, the
+                // whole program SKIP-classifies before Print runs.
                 match lookup b.Id with
                 | Some (VArray ba) -> ArrayOps.printArrayBinding b ba sb
                 | _ -> raise (PrintUnsupported (sprintf "ragged/dep-idx array '%s' print: no materialized value yet (M2.7 ragged apply gated upstream)" b.Name))
             elif Blade.CodeGen.isRaggedArrayType arrType then
                 ()   // ragged sub-view: CodeGen comment only.
             else
-                // DENSE flat / grid / placeholder OR symmetric-aware (rank 2-8) —
+                // DENSE flat / grid / placeholder OR symmetric-aware (rank 2-8):
                 // delegate the array-LINE emission to ArrayOps.printArrayBinding
                 // (byte-verified against the compiled binary; owns the flat/grid/
                 // placeholder + genPrintArraySymAware formats, and its own
@@ -354,32 +331,27 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
                     raise (PrintUnsupported (sprintf "array binding '%s': no evaluated value" b.Name))
 
     for b in irModule.Bindings do
-        // isPrintable — a faithful mirror of CodeGen.genPrintStatements'
+        // isPrintable: a faithful mirror of CodeGen.genPrintStatements'
         // per-binding gate. A binding does not print if it is deferred, is a
-        // streamed provider read, or is an unmaterialized loop/compute value
-        // (IRMethodFor / IRObjectFor / a bare IRCompute of a non-combinator).
-        // IRCompute of a combinator IS materialized and prints (an array — M2).
+        // streamed provider read, or is an unmaterialized loop value
+        // (IRMethodFor / IRObjectFor, computed or not).
+        // |> compute of a DEFERRED combinator is a forced materialization and
+        // always prints; |> compute of anything ELSE prints exactly when the
+        // wrapped value itself would (mirrors genPrintStatements'
+        // printableValue byte-for-byte -- an eager reduce/scalar is unchanged
+        // by compute). Unmaterialized loop values never print.
+        let rec printableValue (v: IRExpr) =
+            match v with
+            | IRCompute (IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRVar _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeMeth _ | IRBind _ | IRGuard _ | IRSequence _) -> true
+            | IRCompute inner -> printableValue inner
+            | IRMethodFor _ | IRObjectFor _ -> false
+            | _ -> true
         let isPrintable =
             if Set.contains b.Id deferredIds && not (forcedIds.Contains b.Id) then false
             elif (match Map.tryFind b.Id irModule.ProviderReads with
                   | Some spec -> spec.Streamed
                   | None -> false) then false
-            else
-                match b.Value with
-                | IRCompute (IRApplyCombinator _) -> true
-                | IRCompute (IRComposeApply _) -> true
-                | IRCompute (IRParallel _) -> true
-                | IRCompute (IRFusion _) -> true
-                | IRCompute (IRVar _) -> true
-                | IRCompute (IRFunctorMap _) -> true
-                | IRCompute (IRChoice _) -> true
-                | IRCompute (IRFallback _) -> true
-                | IRCompute (IRComposeMeth _) -> true
-                | IRCompute (IRBind _) -> true
-                | IRCompute (IRGuard _) -> true
-                | IRCompute (IRSequence _) -> true
-                | IRCompute _ | IRMethodFor _ | IRObjectFor _ -> false
-                | _ -> true
+            else printableValue b.Value
 
         if isPrintable then
             // Type dispatch mirrors genPrintStatements after IR.stripUnits.
@@ -387,7 +359,7 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
             | IRTScalar et when isPrintableScalarEt et ->
                 emitScalar b et
             | IRTScalar _ ->
-                // ETUnit (and any future non-printable scalar) — genPrintStatements
+                // ETUnit (and any future non-printable scalar): genPrintStatements
                 // falls through to [] (no output).
                 ()
             | IRTIdxTagged (inner, _) ->
@@ -396,10 +368,15 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
                 match elemThrough inner with
                 | Some et -> emitScalar b et
                 | None -> ()
+            | IRTNat _ ->
+                // Type-level natural in value position (a Nat tuple component
+                // from destructuring, a `Nat<unit>` scalar after stripUnits):
+                // genPrintStatements renders it as size_t and prints; mirror
+                // with the int scalar path.
+                emitScalar b ETInt64
             | ArrayElem arrType ->
-                // M2: dense-array print (dispatch mirrors genPrintStatements).
                 printArrayBinding b arrType
-            | IRTTuple _ -> ()   // genPrintStatements: [] — top-level tuples print nothing
-            | IRTNamed _ -> ()   // genPrintStatements: [] — structs/sum types print nothing
-            | IRTUnit -> ()      // genPrintStatements: [] — unit prints nothing
+            | IRTTuple _ -> ()   // genPrintStatements: [] -- top-level tuples print nothing
+            | IRTNamed _ -> ()   // genPrintStatements: [] -- structs/sum types print nothing
+            | IRTUnit -> ()      // genPrintStatements: [] -- unit prints nothing
             | _ -> ()            // function values (IRTArrow non-array), inference vars, etc.

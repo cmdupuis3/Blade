@@ -16,7 +16,7 @@ let offd = {
     // exactly zero.
     let Gsq = method_for(range<Idx<3>, Idx<3>, Idx<3>>) <@> lambda(a, b, c) -> G(a, b, c) * G(a, b, c) |> compute
     let keep: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = [[[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]]
-    reduce(Gsq * keep, (+))
+    reduce(Gsq * keep, (+), axes = 3)
 }
 // EXPECT: dev = 0.0
 // EXPECT: pos = 1

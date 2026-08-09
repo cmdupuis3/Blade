@@ -1,6 +1,6 @@
 (* ===================================================================== *)
 (* BladeDeduce.v -- soundness kernel of the stage-3 signature deduction  *)
-(* (docs/plan-implicit-formers-and-deduction.md par. 8; implementation   *)
+(* (retired implicit-formers-and-deduction plan, par. 8; implementation  *)
 (* src/Deduce.fs).  The compiler deduces kernel symmetry syntactically   *)
 (* -- a {PInv, PNeg, PBottom} parity per adjacent parameter pair, from   *)
 (* two per-primitive tables -- and every rule that ever ANSWERS (PInv /  *)

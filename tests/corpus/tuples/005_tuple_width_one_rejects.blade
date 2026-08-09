@@ -1,0 +1,16 @@
+// TEST: Tuple Width One (rejects)
+// ERROR: BL1004
+// There is no 1-tuple in Blade: `(e)` is grouping, not a 1-tuple
+// (formalism.md 1275, and Parser.parseParenExpr collapses the single-element
+// case). `Tuple<1>` would therefore have to mean something the value language
+// cannot write, so the parser refuses it rather than lowering a degenerate
+// one-element IRTTuple that nothing could ever fill.
+//
+// The diagnostic must survive the LET-ANNOTATION slot specifically: all three
+// let-parse sites historically swallowed a type-parse failure and re-reported
+// at the `=`, which turned this into a misleading "Expected '=' but got ':'"
+// pointing at the colon. Parser.parseLetAnnotation propagates BL1004 instead.
+
+let b = 1.0
+let t: Tuple<1> = b
+// EXPECT: parse failure -- Tuple<N> requires N >= 2

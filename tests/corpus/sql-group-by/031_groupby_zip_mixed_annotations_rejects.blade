@@ -1,0 +1,23 @@
+// TEST: GroupBy Zip Mixed Annotations (rejects)
+// ERROR: BL3999
+// Over an ALL-grouped operand pack the peel binds every parameter off ONE
+// offsets table at one group index, so the parameters must agree on what a
+// step IS: all rows, or all elements. A rank-1 annotation on one parameter
+// beside a rank-0 (or absent) annotation on another asks for both at once and
+// has no single step to take.
+//
+// Refused at TYPECHECK, where the annotations are, rather than left to become
+// a half-bound kernel in codegen.
+//
+// Note this is NOT the ragged-beside-DENSE refusal (loops "Ragged Multi Array
+// (rejects)"), which is a different shape and keeps its own codegen-stage
+// message -- this rule only fires when every operand is grouped/ragged.
+let region = [0, 1, 0, 1]
+let a = [1.0, 2.0, 3.0, 4.0]
+let b = [10.0, 20.0, 30.0, 40.0]
+let gk = group_keys(region)
+let ga = group_by(a, gk)
+let gb = group_by(b, gk)
+let bad = method_for(zip(ga, gb)) <@> lambda(ra: T^1, rb) -> prodsum(ra, ra) + rb |> compute
+// EXPECT: BL3999 -- every kernel parameter must bind the same way over a
+// grouped co-iteration: annotate every parameter rank-1, or none.

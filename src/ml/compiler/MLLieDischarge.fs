@@ -1,157 +1,134 @@
-/// THE RADICAL-VECTOR LIE DISCHARGER — the generator-based certification
-/// engine's back half (plan-transforms-as-types §3.5's uniform rule and THE
-/// LINEARITY RESOLUTION, §7 stage 6c). MLPolyExtract normalizes a body to an
-/// exact polynomial and discharges the FINITE half (a word set of integer
-/// matrices, pure ℚ); this module is the SECOND CONSUMER of that same normal
-/// form — not a second engine — and discharges the CONNECTED half: one
-/// polynomial identity per Lie-algebra generator of 𝔰𝔬(3), plus one per
-/// generator of π₀ (the single element −I, for O(3) but not SO(3)).
+/// THE RADICAL-VECTOR LIE DISCHARGER -- the generator-based certification
+/// engine's back half. MLPolyExtract normalizes a body to an exact
+/// polynomial and discharges the FINITE half (a word set of integer
+/// matrices, pure Q); this module is the SECOND CONSUMER of that same normal
+/// form -- not a second engine -- and discharges the CONNECTED half: one
+/// polynomial identity per Lie-algebra generator of so(3), plus one for the
+/// generator of pi_0 (the single element -I, for O(3) but not SO(3)).
 ///
-/// ---------------------------------------------------------------------------
 /// WHY RADICAL VECTORS, AND WHY `mul` IS NOT PART OF THE DISCHARGE
-/// ---------------------------------------------------------------------------
-/// The defect whose vanishing is the certificate,
 ///
-///     Df(x)·(A·x) − A·f(x),
-///
-/// is LINEAR in the generator A. Every entry of A in Blade's real basis has
-/// the form q·√n with q ∈ ℚ (L_z outright integer — see the derivation
-/// below), and the body's own coefficients are exact rationals. So every
-/// coefficient of the defect is a finite ℚ-linear combination of square roots
-/// of squarefree integers: a RADICAL VECTOR, `Map<squarefree, Rat>`, key 1
-/// being the rational part. NO PRODUCT OF TWO IRRATIONAL ENTRIES EVER OCCURS
-/// in the discharge — the only multiplications are scalar·radical (a body
+/// The certificate's defect, Df(x).(A.x) - A.f(x), is LINEAR in the
+/// generator A. Every entry of A in Blade's real basis has the form
+/// q*sqrt(n) with q in Q (L_z outright integer -- see the derivation below),
+/// and the body's own coefficients are exact rationals, so every defect
+/// coefficient is a finite Q-linear combination of square roots of
+/// squarefree integers: a RADICAL VECTOR, `Map<squarefree, Rat>`, key 1 the
+/// rational part. NO PRODUCT OF TWO IRRATIONAL ENTRIES EVER OCCURS in the
+/// discharge -- the only multiplications are scalar*radical (a body
 /// coefficient times a generator entry).
 ///
-/// Acceptance is COMPONENTWISE ZERO, and it needs no independence lemma: a
-/// sum of zeros is zero, whatever the √n happen to satisfy. ℚ-independence of
-/// {√n : n squarefree} is TRUE and is cited in §3.5, but it is
-/// NON-LOAD-BEARING here — it would only be needed for COMPLETENESS (that a
-/// vanishing defect forces vanishing components), and its failure mode is a
-/// sound false-reject.
+/// Acceptance is COMPONENTWISE ZERO, needing no independence lemma: a sum of
+/// zeros is zero, whatever the sqrt(n) happen to satisfy. Q-independence of
+/// {sqrt(n) : n squarefree} is true but NON-LOAD-BEARING here -- it would
+/// only matter for COMPLETENESS (a vanishing defect forcing vanishing
+/// components), and its failure mode is a sound false-reject.
 ///
-/// `Radical.mul` therefore exists ONLY for the PIN LAYER — the exact bracket
-/// [L_a, L_b] = L_c and Casimir Σ L² = −l(l+1)·I checks in
-/// tests/Test_LieTables.fs, which multiply generator entries by generator
-/// entries and so genuinely need it. Nothing on the discharge path below
-/// calls it. (Stated at the definition, and again here, because a future
-/// reader who sees `mul` and concludes "so the ring is closed under products"
-/// has misread the resolution: it is closed, but the DISCHARGE never uses
-/// that fact, which is exactly why no field extension is required at any l.)
+/// `Radical.mul` exists ONLY for the PIN LAYER -- the exact bracket
+/// [L_a, L_b] = L_c and Casimir Sum L^2 = -l(l+1)*I checks in
+/// tests/Test_LieTables.fs, which multiply generator entries together and
+/// need it. Nothing on the discharge path below calls it: the ring IS closed
+/// under products, but the discharge never uses that fact, which is why no
+/// field extension is required at any l.
 ///
-/// ---------------------------------------------------------------------------
 /// THE GENERATOR TABLES, DERIVED AGAINST THE CODED CONVENTIONS
-/// ---------------------------------------------------------------------------
-/// The tables below are NOT quoted from a textbook. They are derived here
-/// against the conventions AS CODED — `WignerTables.uMatrix` (the real ↔
-/// complex change of basis) and `SphericalHarmonics.evalUpTo` (the real solid
-/// harmonics the shipped numeric rotation action is FIT from). A convention
-/// drift in either would make this file certify a different group action than
-/// the one the compiled program performs, which is the single unsound failure
-/// mode of the stage; tests/Test_LieTables.fs's EXP-PIN closes that loop
-/// numerically (exponentiate the tables, compare against the harmonics'
-/// own rotation action) and is the keystone of the block.
 ///
-/// STEP 1 — the action being differentiated. `Rotations.applyRep` uses the
-/// Wigner matrix D_l(R) DEFINED by Y_l(R·v) = D_l(R)·Y_l(v), which is a
-/// genuine homomorphism (D(R₁R₂) = D(R₁)D(R₂), by associativity of the
-/// substitution). The generators are A_a = d/dθ D_l(R_a(θ))|₀, and they
-/// satisfy the so(3) bracket of the 3×3 rotation generators themselves:
-/// [A_x, A_y] = A_z and cyclic (pinned exactly in the test block).
+/// Derived against the conventions AS CODED -- `WignerTables.uMatrix` (the
+/// real <-> complex change of basis) and `SphericalHarmonics.evalUpTo` (the
+/// real solid harmonics the shipped rotation action is FIT from); a
+/// convention drift in either would certify a different group action than
+/// the compiled program performs, the single unsound failure mode of the
+/// stage. tests/Test_LieTables.fs's EXP-PIN closes that loop numerically
+/// (exponentiate the tables, compare against the harmonics' own action).
 ///
-/// STEP 2 — the complex basis. In the Condon–Shortley complex basis,
-/// R_z(θ) sends (x + iy) ↦ e^{iθ}(x + iy), hence Y^μ_l(R_z(θ)v) = e^{iμθ}
-/// Y^μ_l(v) and 𝒜_z = diag(i·μ). Differentiating the R_y / R_x actions of
-/// the l = 1 harmonics and matching the standard ladder normalization gives
-/// the raising/lowering form
+/// `Rotations.applyRep` differentiates the Wigner matrix D_l(R) (DEFINED by
+/// Y_l(R.v) = D_l(R).Y_l(v)); the generators A_a = d/dtheta D_l(R_a(theta))|0
+/// satisfy the so(3) bracket of the 3x3 rotation generators themselves,
+/// [A_x, A_y] = A_z and cyclic (pinned in the test block). In the
+/// Condon-Shortley complex basis, R_z(theta) sends (x + iy) -> e^{i theta}
+/// (x + iy), so A_z = diag(i*mu); differentiating R_y / R_x on the l = 1
+/// harmonics and matching the standard ladder normalization gives
 ///
-///     𝒜₊[μ][μ+1] = i·a(μ),   𝒜₋[μ][μ−1] = i·b(μ),
-///     a(μ) = √((l−μ)(l+μ+1)),  b(μ) = √((l+μ)(l−μ+1)) = a(μ−1),
-///     𝒜_x = (𝒜₊ + 𝒜₋)/2,     𝒜_y = (𝒜₊ − 𝒜₋)/(2i).
+///     A+[mu][mu+1] = i*a(mu),   A-[mu][mu-1] = i*b(mu),
+///     a(mu) = sqrt((l-mu)(l+mu+1)),  b(mu) = sqrt((l+mu)(l-mu+1)) = a(mu-1),
+///     A_x = (A+ + A-)/2,     A_y = (A+ - A-)/(2i).
 ///
-/// (Note b(μ) = a(μ−1): the two radicands are the SAME family read from the
-/// two ends, which is what makes the realified table antisymmetric entry by
-/// entry rather than only in aggregate.)
+/// (b(mu) = a(mu-1): the same radicand family read from both ends, which is
+/// why the realified table is antisymmetric entry by entry, not just in
+/// aggregate.)
 ///
-/// STEP 3 — realification, A = U·𝒜·U†, with U the CODED `uMatrix`:
+/// STEP 3: realification, A = U.A_complex.U-dagger, with U the CODED
+/// `uMatrix`:
 ///
 ///     Y^r_0    = Y^c_0                              (row c = l, entry 1)
-///     Y^r_{+m} = (Y^c_{−m} + ε_m Y^c_{+m})/√2       (ε_m = (−1)^m)
-///     Y^r_{−m} = i(Y^c_{−m} − ε_m Y^c_{+m})/√2
+///     Y^r_{+m} = (Y^c_{-m} + eps_m Y^c_{+m})/sqrt(2)       (eps_m = (-1)^m)
+///     Y^r_{-m} = i(Y^c_{-m} - eps_m Y^c_{+m})/sqrt(2)
 ///
-/// Write R_m := Y^r_{+m} (stored at index c = l+m) and I_m := Y^r_{−m}
-/// (stored at c = l−m). Substituting the ladder action and collecting, with
-/// I₀ := 0 (there is no such component — the m = 0 row is R₀ alone):
+/// Write R_m := Y^r_{+m} (stored at index c = l+m) and I_m := Y^r_{-m}
+/// (stored at c = l-m). Substituting the ladder action, with I0 := 0 (there
+/// is no such component -- the m = 0 row is R0 alone):
 ///
-///     L_z:  δR_m = −m·I_m,          δI_m = +m·R_m          (m ≥ 1)
-///     L_y:  δR₀  = −(a(0)/√2)·R₁
-///           δR_m = (b(m)/2)·R_{m−1} − (a(m)/2)·R_{m+1}     (m ≥ 2)
-///           δR₁  = (b(1)/√2)·R₀     − (a(1)/2)·R₂
-///           δI_m = (b(m)/2)·I_{m−1} − (a(m)/2)·I_{m+1}     (m ≥ 1, I₀ = 0)
-///     L_x:  δR₀  = +(a(0)/√2)·I₁
-///           δR_m = (b(m)/2)·I_{m−1} + (a(m)/2)·I_{m+1}     (m ≥ 1, I₀ = 0)
-///           δI₁  = −(b(1)/√2)·R₀    − (a(1)/2)·R₂
-///           δI_m = −(b(m)/2)·R_{m−1} − (a(m)/2)·R_{m+1}    (m ≥ 2)
+///     L_z:  dR_m = -m*I_m,          dI_m = +m*R_m          (m >= 1)
+///     L_y:  dR0  = -(a(0)/sqrt(2))*R1
+///           dR_m = (b(m)/2)*R_{m-1} - (a(m)/2)*R_{m+1}     (m >= 2)
+///           dR1  = (b(1)/sqrt(2))*R0    - (a(1)/2)*R2
+///           dI_m = (b(m)/2)*I_{m-1} - (a(m)/2)*I_{m+1}     (m >= 1, I0 = 0)
+///     L_x:  dR0  = +(a(0)/sqrt(2))*I1
+///           dR_m = (b(m)/2)*I_{m-1} + (a(m)/2)*I_{m+1}     (m >= 1, I0 = 0)
+///           dI1  = -(b(1)/sqrt(2))*R0    - (a(1)/2)*R2
+///           dI_m = -(b(m)/2)*R_{m-1} - (a(m)/2)*R_{m+1}    (m >= 2)
 ///
-/// THREE THINGS THE CODED CONVENTIONS FORCE, each of which a textbook table
-/// would get wrong here:
+/// THREE THINGS THE CODED CONVENTIONS FORCE that a textbook table would get
+/// wrong here:
 ///
-///  (i) THE √2 AT THE m = 0 SEAM. `uMatrix` puts a bare 1 (not 1/√2) in the
-///      m = 0 row, because Y^r_0 IS Y^c_0. Every entry that touches the m = 0
-///      component therefore carries an extra √2 relative to the rest: the
-///      R₀↔R₁ and R₀↔I₁ couplings are (1/2)√(2·l(l+1)), while every other
-///      entry is (1/2)√(integer). This is why the tables are built with an
-///      explicit m = 1 special case rather than one uniform loop, and why the
-///      radicands can reach 2·l(l+1) (≈ 4l²) rather than l(l+1).
-/// (ii) THE CONDON–SHORTLEY ε_m = (−1)^m IN `uMatrix` IS WHAT MAKES THE
-///      TABLE BLOCK-STRUCTURED. Because ε_m ε_{m±1} = −1, the cross terms
-///      cancel in exactly one of the two combinations at every step: L_y
-///      couples R↔R and I↔I only, L_x couples R↔I only, L_z pairs (R_m, I_m).
+///  (i) THE sqrt(2) AT THE m = 0 SEAM. `uMatrix` puts a bare 1 (not
+///      1/sqrt(2)) in the m = 0 row, since Y^r_0 IS Y^c_0. Every entry
+///      touching m = 0 carries an extra sqrt(2): R0<->R1 and R0<->I1 couple
+///      via (1/2)*sqrt(2*l(l+1)) where every other entry is
+///      (1/2)*sqrt(integer). This is why the tables special-case m = 1
+///      instead of a uniform loop, and why radicands can reach 2*l(l+1)
+///      (~4l^2) rather than l(l+1).
+/// (ii) THE CONDON-SHORTLEY eps_m = (-1)^m IN `uMatrix` MAKES THE TABLE
+///      BLOCK-STRUCTURED. Because eps_m*eps_{m+/-1} = -1, cross terms cancel
+///      in exactly one of the two combinations at every step: L_y couples
+///      R<->R and I<->I only, L_x couples R<->I only, L_z pairs (R_m, I_m).
 ///      Drop the phase and every generator becomes dense with the wrong
-///      signs. (The same fixed-vector property of `uMatrix` is what
-///      SymPowerTables' phase rule rests on — same rows, same reason.)
+///      signs. (SymPowerTables' phase rule rests on the same fixed-vector
+///      property of `uMatrix`.)
 /// (iii) THE SIGN OF L_z IS FIXED BY THE ROW ORDER, NOT BY TASTE. With
-///      c = m + l ascending, the L_z 2×2 block on (R_m, I_m) = (c = l+m,
-///      c = l−m) reads [[0, −m], [m, 0]]. At l = 1 the real basis is
-///      (y, z, x) — the ml-spec's own order — and the table reproduces
-///      d/dθ R_z(θ) conjugated by that permutation, entry for entry. Any
-///      sign convention that "looks nicer" here certifies the INVERSE
-///      rotation and would silently accept the mirror image of every
-///      pseudovector body.
+///      c = m + l ascending, the L_z 2x2 block on (R_m, I_m) = (c = l+m,
+///      c = l-m) reads [[0, -m], [m, 0]]. At l = 1 the real basis is
+///      (y, z, x) -- the ml-spec's own order -- and the table reproduces
+///      d/dtheta R_z(theta) conjugated by that permutation, entry for entry.
+///      A "nicer-looking" sign convention would certify the INVERSE rotation
+///      and silently accept the mirror image of every pseudovector body.
 ///
-/// Assembly is block-diagonal per spec, one copy of the (2l+1)×(2l+1) table
-/// per multiplicity copy, exactly matching `Rotations.applyRep`'s layout.
-/// PARITY PLAYS NO ROLE IN THE 𝔰𝔬(3) ACTION — it is a separate, purely
-/// integer bookkeeping (the −I identity below), which is precisely why O(3)
-/// costs 3 + 1 checks and SO(3) costs 3 + 0.
+/// Assembly is block-diagonal per spec, one copy of the (2l+1)x(2l+1) table
+/// per multiplicity copy, matching `Rotations.applyRep`'s layout. PARITY
+/// PLAYS NO ROLE IN THE so(3) ACTION -- separate integer bookkeeping (the -I
+/// identity below), which is why O(3) costs 3 + 1 checks and SO(3) costs
+/// 3 + 0.
 ///
-/// ---------------------------------------------------------------------------
-/// THE −I IDENTITY (O(3) only)
-/// ---------------------------------------------------------------------------
-/// O(3) ≅ SO(3) × {±I}: the connected part is discharged by the three
-/// generators above, and π₀ by the single element −I, which acts on an
-/// IrrepsIdx block of parity p by the SCALAR (−1)^p (this is
-/// `Rotations.applyRepImproper`'s parity factor at R = identity). So each rep
-/// variable carries its block's parity bit, a monomial's sign under −I is
-/// (−1)^{Σ parities}, and the identity f(−I·x) = ρ(−I)·f(x) is the purely
-/// INTEGER statement that every monomial of output component c has parity
-/// equal to c's own. No radical, no rational, no tolerance: a parity mismatch
-/// on a nonzero coefficient is a rejection, and it is the check that
-/// separates u·(v×w) declared (0, odd) — true — from the same body declared
-/// (0, even) — false, and true again the moment the certificate weakens to
-/// SO(3).
+/// THE -I IDENTITY (O(3) only). O(3) = SO(3) x {+-I}: the connected part is
+/// discharged by the three generators above, and pi_0 by the single element
+/// -I, which acts on an IrrepsIdx block of parity p by the SCALAR (-1)^p
+/// (`Rotations.applyRepImproper`'s parity factor at R = identity). Each rep
+/// variable carries its block's parity bit, a monomial's sign under -I is
+/// (-1)^{Sum parities}, and f(-I.x) = rho(-I).f(x) is a purely INTEGER
+/// statement that every monomial of output component c has parity equal to
+/// c's own. No radical, no rational, no tolerance: a parity mismatch on a
+/// nonzero coefficient is a rejection -- the check that separates
+/// u.(v x w) declared (0, odd) -- true -- from the same body declared
+/// (0, even) -- false, and true again once the certificate weakens to SO(3).
 ///
-/// ---------------------------------------------------------------------------
-/// THE POST-ACCEPT FLOAT GUARD
-/// ---------------------------------------------------------------------------
-/// After an EXACT accept, the identity is re-evaluated in plain floating
-/// point at three deterministic sample points per generator, by a different
-/// route (term-by-term numeric differentiation of the extracted polynomial,
-/// never touching the symbolic substitution or the radical arithmetic). A
-/// violation is a COMPILER BUG, not a data condition, and raises
-/// `LieGuardFailure` rather than returning a verdict — the SymPowerTables
-/// gapped-assert discipline. MLEquiv's totality wrapper re-raises this one
-/// exception on purpose.
+/// THE POST-ACCEPT FLOAT GUARD. After an EXACT accept, the identity is
+/// re-evaluated in plain floats at three deterministic sample points per
+/// generator, by a different route (term-by-term numeric differentiation of
+/// the extracted polynomial, never touching the symbolic substitution or the
+/// radical arithmetic). A violation is a COMPILER BUG, not a data condition,
+/// and raises `LieGuardFailure` rather than a verdict -- the SymPowerTables
+/// gapped-assert discipline; MLEquiv's totality wrapper re-raises it on
+/// purpose.
 module Blade.ML.LieDischarge
 
 open System.Collections.Generic
@@ -159,18 +136,16 @@ open System.Collections.Generic
 module PX = Blade.ML.PolyExtract
 module MLS = Blade.ML.Spec
 
-// ---------------------------------------------------------------------------
 // Radical vectors
-// ---------------------------------------------------------------------------
 
-/// A ℚ-linear combination of square roots of SQUAREFREE positive integers,
+/// A Q-linear combination of square roots of SQUAREFREE positive integers,
 /// sparse. Key 1 is the rational part. INVARIANT: no zero coefficients, so
 /// `Map.isEmpty` is "is zero" and structural equality is value equality.
 type Radical = Map<int, PX.Rat>
 
-/// n = s²·k with k squarefree; returns (s, k). Trial division is ample: the
-/// radicands that arise are at most 2·l(l+1) ≈ 4l², which at the l ≤ 8 end of
-/// any shipped spec is a two-digit number.
+/// n = s^2*k with k squarefree; returns (s, k). Trial division is ample:
+/// radicands are at most 2*l(l+1) ~ 4l^2, a two-digit number at the l <= 8
+/// end of any shipped spec.
 let squarefree (n: int) : int * int =
     if n <= 0 then failwithf "internal: MLLieDischarge.squarefree of %d" n
     let mutable rest = n
@@ -194,8 +169,8 @@ module Radical =
 
     let ofInt (n: int) : Radical = ofRat (PX.Rat.ofInt n)
 
-    /// q·√n as a radical vector (n ≥ 0; n = 0 is the zero vector). The ONLY
-    /// place a square root enters the module.
+    /// q*sqrt(n) as a radical vector (n >= 0; n = 0 is the zero vector). The
+    /// ONLY place a square root enters the module.
     let ofSqrt (q: PX.Rat) (n: int) : Radical =
         if PX.Rat.isZero q || n = 0 then Map.empty
         else
@@ -216,16 +191,16 @@ module Radical =
     let neg (a: Radical) : Radical = a |> Map.map (fun _ c -> PX.Rat.neg c)
     let sub (a: Radical) (b: Radical) : Radical = b |> Map.fold (fun acc k c -> addKey k (PX.Rat.neg c) acc) a
 
-    /// SCALAR·RADICAL — the only multiplication the discharge performs (a body
-    /// coefficient scaling a generator entry). See the module header.
+    /// SCALAR*RADICAL -- the only multiplication the discharge performs (a
+    /// body coefficient scaling a generator entry). See the module header.
     let scale (q: PX.Rat) (a: Radical) : Radical =
         if PX.Rat.isZero q then Map.empty else a |> Map.map (fun _ c -> PX.Rat.mul q c)
 
-    /// RADICAL·RADICAL — THE PIN LAYER ONLY. The bracket and Casimir checks in
-    /// tests/Test_LieTables.fs multiply generator entries together and need
-    /// this; NOTHING on the discharge path calls it, and nothing should. The
-    /// linearity of the defect in A is what makes that possible, and it is the
-    /// whole reason no field extension is needed at any l (§3.5).
+    /// RADICAL*RADICAL -- THE PIN LAYER ONLY. The bracket and Casimir checks
+    /// in tests/Test_LieTables.fs multiply generator entries together and
+    /// need this; NOTHING on the discharge path calls it. The defect's
+    /// linearity in A is what makes that possible -- why no field extension
+    /// is needed at any l.
     let mul (a: Radical) (b: Radical) : Radical =
         let mutable out = zero
         for KeyValue (ka, ca) in a do
@@ -234,7 +209,7 @@ module Radical =
                 out <- addKey k (PX.Rat.mul (PX.Rat.mul ca cb) (PX.Rat.ofInt s)) out
         out
 
-    /// The float image — used ONLY by the near-miss diagnostic and by the
+    /// The float image -- used ONLY by the near-miss diagnostic and by the
     /// post-accept guard. Never by a verdict.
     let toFloat (r: Radical) : float =
         r |> Map.fold (fun acc k c -> acc + PX.Rat.toFloat c * sqrt (float k)) 0.0
@@ -251,9 +226,7 @@ module Radical =
                 if k = 1 then PX.Rat.render q else sprintf "%s*sqrt(%d)" (PX.Rat.render q) k)
             |> String.concat " + "
 
-// ---------------------------------------------------------------------------
 // The exact generator tables
-// ---------------------------------------------------------------------------
 
 type Axis =
     | Lx
@@ -271,10 +244,9 @@ let axes : Axis list = [ Lx; Ly; Lz ]
 
 let private blockCache = Dictionary<Axis * int, Radical [][]>()
 
-/// dπ_l(L_a) in the CODED real basis (index c = m + l), exactly. See the
-/// module header for the derivation; the shapes are
-///   L_z — integers ±m;
-///   L_x, L_y — (1/2)√(integer), with the m = 0 seam carrying the extra √2.
+/// dpi_l(L_a) in the CODED real basis (index c = m + l), exactly. See the
+/// module header for the derivation; shapes are L_z: integers +/-m; L_x,
+/// L_y: (1/2)*sqrt(integer), with the m = 0 seam carrying an extra sqrt(2).
 let blockGenerator (axis: Axis) (l: int) : Radical [][] =
     if l < 0 then failwithf "internal: MLLieDischarge.blockGenerator negative l (%d)" l
     match blockCache.TryGetValue((axis, l)) with
@@ -282,7 +254,7 @@ let blockGenerator (axis: Axis) (l: int) : Radical [][] =
     | _ ->
         let d = 2 * l + 1
         let m = Array.init d (fun _ -> Array.create d Radical.zero)
-        // a(k) = (l−k)(l+k+1), b(k) = (l+k)(l−k+1) = a(k−1) — INTEGER
+        // a(k) = (l-k)(l+k+1), b(k) = (l+k)(l-k+1) = a(k-1) -- INTEGER
         // radicands; the square root is taken once, in `Radical.ofSqrt`.
         let a (k: int) = (l - k) * (l + k + 1)
         let b (k: int) = (l + k) * (l - k + 1)
@@ -295,7 +267,7 @@ let blockGenerator (axis: Axis) (l: int) : Radical [][] =
                 m.[l - k].[l + k] <- Radical.ofInt k
         | Ly ->
             if l >= 1 then
-                // The m = 0 seam: δR₀ = −(a(0)/√2)·R₁, δR₁ = +(b(1)/√2)·R₀.
+                // The m = 0 seam: dR0 = -(a(0)/sqrt(2))*R1, dR1 = +(b(1)/sqrt(2))*R0.
                 m.[l].[l + 1] <- Radical.ofSqrt negHalf (2 * a 0)
                 m.[l + 1].[l] <- Radical.ofSqrt half (2 * b 1)
             for k in 2 .. l do
@@ -306,7 +278,7 @@ let blockGenerator (axis: Axis) (l: int) : Radical [][] =
                 m.[l - k].[l - k - 1] <- Radical.ofSqrt negHalf (a k)
         | Lx ->
             if l >= 1 then
-                // The m = 0 seam: δR₀ = +(a(0)/√2)·I₁, δI₁ = −(b(1)/√2)·R₀.
+                // The m = 0 seam: dR0 = +(a(0)/sqrt(2))*I1, dI1 = -(b(1)/sqrt(2))*R0.
                 m.[l].[l - 1] <- Radical.ofSqrt half (2 * a 0)
                 m.[l - 1].[l] <- Radical.ofSqrt negHalf (2 * b 1)
             for k in 2 .. l do
@@ -320,10 +292,10 @@ let blockGenerator (axis: Axis) (l: int) : Radical [][] =
 
 let private specCache = Dictionary<Axis * MLS.Spec, Radical [][]>()
 
-/// dπ_spec(L_a) — block-diagonal over the spec's blocks, one copy of the
+/// dpi_spec(L_a) -- block-diagonal over the spec's blocks, one copy of the
 /// block table per multiplicity copy, in `Rotations.applyRep`'s exact layout
-/// (block start + copy·(2l+1) + m). Cached per (axis, spec), like
-/// `realCGDense` is cached per (l1, l2, l3).
+/// (block start + copy*(2l+1) + m). Cached per (axis, spec), like
+/// `realCGDense` per (l1, l2, l3).
 let specGenerator (axis: Axis) (s: MLS.Spec) : Radical [][] =
     match specCache.TryGetValue((axis, s)) with
     | true, v -> v
@@ -344,7 +316,7 @@ let specGenerator (axis: Axis) (s: MLS.Spec) : Radical [][] =
         out
 
 /// The parity bit (0 even, 1 odd) of every component of an IrrepsIdx<spec>
-/// buffer — the −I bookkeeping's whole input.
+/// buffer -- the -I bookkeeping's whole input.
 let specParity (s: MLS.Spec) : int [] =
     let n = MLS.totalDim s
     let out = Array.zeroCreate n
@@ -355,23 +327,21 @@ let specParity (s: MLS.Spec) : int [] =
             out.[i] <- e.Parity % 2)
     out
 
-// ---------------------------------------------------------------------------
 // What the discharge is handed
-// ---------------------------------------------------------------------------
 
 /// One Lie-algebra generator as it acts on THIS function's data: a printable
 /// name, the input matrix for every rep parameter, and the output matrix.
-/// Assembling these from specs is the caller's job — the same separation that
-/// makes MLPolyExtract's `ElementAction` group-agnostic.
+/// Assembling these from specs is the caller's job -- the same separation
+/// that makes MLPolyExtract's `ElementAction` group-agnostic.
 type LieGenerator = {
     Name: string
     InMats: Map<string, Radical [][]>
     OutMat: Radical [][]
 }
 
-/// The π₀ obligation: one parity bit per component, per rep parameter and for
-/// the output. `None` at the call site means SO(3) — no component group, no
-/// check.
+/// The pi_0 obligation: one parity bit per component, per rep parameter and
+/// for the output. `None` at the call site means SO(3) -- no component
+/// group, no check.
 type InversionCheck = {
     InPar: Map<string, int []>
     OutPar: int []
@@ -385,22 +355,22 @@ type LieFailure = {
     Monomial: string
     /// Total degree in the rep components; 0 is the constant obligation.
     RepDegree: int
-    /// Df(x)·(A·x) coefficient vs (A·f(x)) coefficient, as radical vectors.
+    /// Df(x).(A.x) coefficient vs (A.f(x)) coefficient, as radical vectors.
     Lhs: Radical
     Rhs: Radical
-    /// §3.5's mandatory near-miss net, on the residual's FLOAT image (the
+    /// The mandatory near-miss net, on the residual's FLOAT image (the
     /// truncated-decimal trap). Same rule as MLPolyExtract's finite half.
     NearMiss: bool
 }
 
-/// The first monomial at which the −I identity fails. Purely integer.
+/// The first monomial at which the -I identity fails. Purely integer.
 type InversionFailure = {
     Component: int
     Monomial: string
-    /// Σ (exponent · block parity) over the monomial's rep factors, UNREDUCED
-    /// — the count a reader can check against the body by eye.
+    /// Sum (exponent * block parity) over the monomial's rep factors,
+    /// UNREDUCED -- a reader can check the count against the body by eye.
     ParitySum: int
-    /// That sum mod 2: (−1)^{MonoParity} is the monomial's sign under −I.
+    /// That sum mod 2: (-1)^{MonoParity} is the monomial's sign under -I.
     MonoParity: int
     /// The declared parity of the output component it sits in.
     OutParity: int
@@ -412,17 +382,15 @@ type LieError =
     | DischargeCap of string
 
 /// The post-accept float guard's verdict. A COMPILER BUG, never a data
-/// condition — see the module header.
+/// condition -- see the module header.
 exception LieGuardFailure of string
 
-// ---------------------------------------------------------------------------
 // The discharge
-// ---------------------------------------------------------------------------
 
-/// The near-miss rule, stated once and identical to MLPolyExtract's: the
-/// residual is nonzero but its float image is negligible against the scale of
-/// the two sides. Exactly the signature of `0.5773502` written where 1/√3 was
-/// meant, and never that of a wrong sign or a factor of two.
+/// The near-miss rule, identical to MLPolyExtract's: the residual is nonzero
+/// but its float image is negligible against the scale of the two sides --
+/// the signature of `0.5773502` written where 1/sqrt(3) was meant, never of
+/// a wrong sign or a factor of two.
 let private nearMissThreshold = 1e-6
 
 let private isNearMiss (lhs: Radical) (rhs: Radical) : bool =
@@ -443,18 +411,18 @@ let private radAdd (m: PX.Mono) (r: Radical) (p: RPoly) : RPoly =
             let s = Radical.add old r
             if Radical.isZero s then Map.remove m p else Map.add m s p
 
-/// Deterministic monomial order, the same rule MLPolyExtract's
-/// `Poly.unionMonos` uses: rep degree ascending, then rendered form. A
-/// diagnostic naming "the first offending coefficient" must name a property
-/// of the polynomials and not of a hash walk.
+/// Deterministic monomial order, same rule as MLPolyExtract's
+/// `Poly.unionMonos`: rep degree ascending, then rendered form -- so "the
+/// first offending coefficient" names a property of the polynomials, not a
+/// hash walk.
 let private unionMonos (a: RPoly) (b: RPoly) : PX.Mono list =
     Set.union (a |> Map.toSeq |> Seq.map fst |> Set.ofSeq) (b |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
     |> Set.toList
     |> List.sortBy (fun m -> (PX.Mono.repDegree m, PX.Mono.render m))
 
-/// Df(x)·(A·x) for ONE output component, as a radical-coefficient polynomial.
-/// The substitution is A-LINEAR: each rep variable contributes
-/// Σ_j A[i][j]·x_j, and the body's rational coefficient multiplies the
+/// Df(x).(A.x) for ONE output component, as a radical-coefficient
+/// polynomial. The substitution is A-LINEAR: each rep variable contributes
+/// Sum_j A[i][j]*x_j, and the body's rational coefficient multiplies the
 /// generator entry as a SCALAR. No radical ever meets another radical.
 let private defectLhs (budget: int ref) (gen: LieGenerator) (comp: PX.Poly)
     : Result<RPoly, LieError> =
@@ -467,10 +435,9 @@ let private defectLhs (budget: int ref) (gen: LieGenerator) (comp: PX.Poly)
                     let (pname, i) = key
                     match Map.tryFind pname gen.InMats with
                     | None ->
-                        // Cannot arise: the caller builds the matrices from the
-                        // same Rep parameters the extractor made variables of.
-                        // An internal error rather than a silent widening (a
-                        // missing image would verify a WEAKER identity).
+                        // Cannot arise: the caller builds matrices from the same Rep
+                        // parameters the extractor made variables of -- an internal
+                        // error, not a silent widening (a missing image would verify a WEAKER identity).
                         failed <- Some (DischargeCap (sprintf "internal: no Lie action supplied for '%s'" pname))
                     | Some mat when i < 0 || i >= mat.Length ->
                         failed <- Some (DischargeCap (sprintf "internal: component %d of '%s' is outside its %d-dimensional action" i pname mat.Length))
@@ -491,8 +458,8 @@ let private defectLhs (budget: int ref) (gen: LieGenerator) (comp: PX.Poly)
     | Some e -> Error e
     | None -> Ok out
 
-/// A·f(x) for ONE output component — a radical-scaled sum of the OTHER
-/// components, which is where the linearity in A is most visible.
+/// A.f(x) for ONE output component -- a radical-scaled sum of the OTHER
+/// components, where the linearity in A is most visible.
 let private defectRhs (gen: LieGenerator) (form: PX.PolyForm) (c: int) : RPoly =
     let mutable out : RPoly = Map.empty
     let row = gen.OutMat.[c]
@@ -503,7 +470,7 @@ let private defectRhs (gen: LieGenerator) (form: PX.PolyForm) (c: int) : RPoly =
                 out <- radAdd m (Radical.scale coef entry) out
     out
 
-// ---- the post-accept float guard ------------------------------------------
+// The post-accept float guard
 
 /// A deterministic, nonzero, sign-varying sample value. Not random: a
 /// compiler must give the same verdict on the same input every time.
@@ -530,10 +497,10 @@ let private polyValue (repVals: Map<string * int, float>) (invVals: Map<PX.InvAt
         acc <- acc + PX.Rat.toFloat c * monoValue repVals invVals None m
     acc
 
-/// Re-check every identity in plain floats, by a DIFFERENT route: term-by-term
-/// numeric differentiation of the extracted polynomial against a float image
-/// of the generator, with no symbolic substitution and no radical arithmetic
-/// anywhere. Disagreement with the exact accept is a compiler bug.
+/// Re-check every identity in plain floats by a DIFFERENT route:
+/// term-by-term numeric differentiation against a float image of the
+/// generator, with no symbolic substitution or radical arithmetic anywhere.
+/// Disagreement with the exact accept is a compiler bug.
 let private floatGuard (form: PX.PolyForm) (gens: LieGenerator list) (inv: InversionCheck option) : unit =
     // Every rep key and invariant atom the form mentions, in a deterministic
     // order, so the sample point is a function of the polynomial alone.
@@ -551,7 +518,7 @@ let private floatGuard (form: PX.PolyForm) (gens: LieGenerator list) (inv: Inver
         let repVals = repKeys |> Array.mapi (fun i k -> (k, sampleValue (7 + sample) i)) |> Map.ofArray
         let invVals = invKeys |> Array.mapi (fun i k -> (k, sampleValue (91 + sample) i)) |> Map.ofArray
         for gen in gens do
-            // (A·x)_{p,i} in floats.
+            // (A.x)_{p,i} in floats.
             let ax =
                 gen.InMats
                 |> Map.toList
@@ -579,7 +546,7 @@ let private floatGuard (form: PX.PolyForm) (gens: LieGenerator list) (inv: Inver
                 let scale = max 1.0 (max (abs lhs) (abs rhs))
                 if abs (lhs - rhs) > 1e-8 * scale then
                     raise (LieGuardFailure
-                        (sprintf "internal: the exact %s discharge accepted but the float shadow disagrees at output component %d (lhs %.17g, rhs %.17g, sample %d) — this is a compiler bug in the radical-vector Lie discharger, not a property of the checked program"
+                        (sprintf "internal: the exact %s discharge accepted but the float shadow disagrees at output component %d (lhs %.17g, rhs %.17g, sample %d) -- this is a compiler bug in the radical-vector Lie discharger, not a property of the checked program"
                             gen.Name c lhs rhs sample))
         match inv with
         | None -> ()
@@ -596,17 +563,17 @@ let private floatGuard (form: PX.PolyForm) (gens: LieGenerator list) (inv: Inver
                 let scale = max 1.0 (max (abs lhs) (abs rhs))
                 if abs (lhs - rhs) > 1e-8 * scale then
                     raise (LieGuardFailure
-                        (sprintf "internal: the exact -I discharge accepted but the float shadow disagrees at output component %d (lhs %.17g, rhs %.17g, sample %d) — this is a compiler bug in the radical-vector Lie discharger, not a property of the checked program"
+                        (sprintf "internal: the exact -I discharge accepted but the float shadow disagrees at output component %d (lhs %.17g, rhs %.17g, sample %d) -- this is a compiler bug in the radical-vector Lie discharger, not a property of the checked program"
                             c lhs rhs sample))
 
-/// THE LIE DISCHARGE. For every generator A of 𝔰𝔬(3), compare Df(x)·(A·x)
-/// with A·f(x) COEFFICIENTWISE, each coefficient a RADICAL VECTOR checked
-/// componentwise-zero; then, under O(3), the integer −I identity. `Ok ()` =
-/// the certificate holds — after which the float guard has also agreed.
+/// THE LIE DISCHARGE. For every generator A of so(3), compare Df(x).(A.x)
+/// with A.f(x) COEFFICIENTWISE, each coefficient a RADICAL VECTOR checked
+/// componentwise-zero; then, under O(3), the integer -I identity. `Ok ()` =
+/// the certificate holds -- after which the float guard has also agreed.
 ///
-/// Three generators SPAN 𝔰𝔬(3) and the defect is linear in A, so three checks
-/// are the whole connected obligation (§3.5: span-linearity replaces any
-/// Lie-closure argument; BladeGenerator.v's proved column).
+/// Three generators SPAN so(3) and the defect is linear in A, so three
+/// checks are the whole connected obligation -- span-linearity replaces any
+/// Lie-closure argument (BladeGenerator.v's proved column).
 let discharge (form: PX.PolyForm) (gens: LieGenerator list) (inv: InversionCheck option)
     : Result<unit, LieError> =
     let n = form.Components.Length

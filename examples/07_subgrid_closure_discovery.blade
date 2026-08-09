@@ -57,7 +57,7 @@ let dvsq = {
         let d = G(0, 0, i, j, k) + G(1, 1, i, j, k) + G(2, 2, i, j, k)
         d * d
     }) |> compute
-    reduce(div2, (+))
+    reduce(div2, (+), axes = 3)
 }
 let field_is_divergence_free = if dvsq < 0.00000000000000000000000001 then 1.0 else 0.0
 // EXPECT: field_is_divergence_free = 1.0

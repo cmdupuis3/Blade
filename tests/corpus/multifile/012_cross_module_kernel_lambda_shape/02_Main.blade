@@ -1,0 +1,31 @@
+// TEST: Cross-module kernel-lambda co-specialization
+// MODULE: Main
+// Two literal-shaped call sites of different fiber length, plus one that pins
+// nothing and must keep the generic copy. All three answers are the same
+// numbers either way -- that invisibility IS the pin.
+module Main
+import Fibers
+
+let W3: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let M43: Array<Float64 like Idx<4>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [1.0, 1.0, 1.0]]
+
+let W2: Array<Float64 like Idx<2>> = [10.0, 20.0]
+let M32: Array<Float64 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+
+// Specializes: p = 4, n = 3. The kernel clone bakes the fiber bound 3.
+let a = Fibers.rowdot(M43, W3)
+// Specializes to a DIFFERENT shape off the same origin: p = 3, n = 2.
+let b = Fibers.rowdot(M32, W2)
+// A second function over the same shape, so its own kernel is cloned too.
+let c = Fibers.rowdot2(M43, W3)
+
+// Declines: the wrapper forwards symbolic extents, so nothing is pinned and
+// the generic copy (with its runtime `.extents[]` bounds) still serves.
+function via(X: Array<Float64 like Idx<s>, Idx<t>>, y: Array<Float64 like Idx<t>>) -> Array<Float64 like Idx<s>> =
+    Fibers.rowdot(X, y)
+let d = via(M32, W2)
+
+// EXPECT: a = [14.0, 32.0, 50.0, 6.0]
+// EXPECT: b = [50.0, 110.0, 170.0]
+// EXPECT: c = [14.0, 32.0, 50.0, 6.0]
+// EXPECT: d = [50.0, 110.0, 170.0]

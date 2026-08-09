@@ -1,0 +1,11 @@
+// TEST: Display emit dynamic mime (rejects)
+// ERROR: BL5700
+// ============================================================================
+// Negative test: everything in a frame except the payload is fixed at
+// elaboration time (that is what lets both back ends just concatenate), so the
+// mime must be a STRING LITERAL -- the same discipline `rand` puts on its
+// shapes. A runtime-computed mime is a display-elaboration error.
+// ============================================================================
+import display as d
+let m = "text/plain"
+let bad = d.emit(m, "hello")

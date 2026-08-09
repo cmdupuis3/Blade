@@ -1,0 +1,18 @@
+// TEST: Antisym Even Functor Map (rejects)
+// ERROR: BL4015
+// The SECOND seam, reached by a different spelling. `<$>` copies the mapped-
+// over computation's array record wholesale (Symmetry included) for any f, so
+// the same unsound inheritance 164 probes at the `<@>` seam is available here
+// with no kernel in sight — and the check has to key off the COMPUTATION, not
+// the deduced output type: with f's return type still an inference variable
+// the functor arm falls through to `retTy` and the output carries no records
+// at all at that point. Codegen then folds f into the inner kernel
+// (applyFunctorWrappers / mapKernelInner) and allocates from the INNER apply's
+// type, which was deduced when the kernel was still the identity — odd, and so
+// certified. The strict pool it allocates then holds v*v values.
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> x - y
+let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let out = (lambda(v) -> v * v) <$> (method_for(C) <@> lambda(w) -> w) |> compute
+// EXPECT: typecheck failure — <$> may not hand its result the mapped-over
+// array's antisymmetric class unless the mapped function is sign-odd.

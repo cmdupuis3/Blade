@@ -1,0 +1,9 @@
+// TEST: Log Base Dimensioned Operand (rejects)
+// ERROR: BL3006
+// log_base(x, b) is log x / log b -- two transcendentals -- so BOTH operands
+// must be dimensionless, unlike atan2 where a shared signature cancels
+// (units/066). Rejecting on the FIRST operand here; the base is checked by the
+// same arm.
+Unit meters
+let d: Float<meters> = 100.0
+let bad = log_base(d, 10.0)

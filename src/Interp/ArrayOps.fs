@@ -1,53 +1,28 @@
-// Blade tree-walking interpreter — dense array storage, access, virtual arrays,
+// Blade tree-walking interpreter: dense array storage, access, virtual arrays,
 // eager array ops, and byte-parity array printing (Milestone M2-alpha).
 //
-// This file owns the VALUE-SPACE array machinery the M2 nest interpreter
-// (Interp/Loops.fs) and the new Core.fs / Print.fs arms build on: it allocates
-// and reshapes stores, reads/writes/peels cells, produces virtual-array element
-// values, folds reductions, runs the eager set/reshape ops, and — critically —
-// emits the SAME stdout the compiled C++ produces for a top-level array binding
-// (CodeGen.genPrintArrayFlat / genPrintArraySymAware), byte-for-byte.
+// Owns the value-space array machinery Interp/Loops.fs and the Core.fs /
+// Print.fs arms build on: allocate/reshape stores, read/write/peel cells,
+// produce virtual-array element values, fold reductions, run the eager
+// set/reshape ops, and emit the same stdout the compiled C++ produces for a
+// top-level array binding (CodeGen.genPrintArrayFlat / genPrintArraySymAware),
+// byte-for-byte.
 //
-// SCOPE: M2-alpha = DENSE arrays (rank-1 flat / rank>=2 nested rows). The
-// symmetric-compact, ragged, and compound storage classes are LATER milestones;
-// their entry points raise `ArrayOpUnsupported` (see the CONTRACT NOTES header
-// below for how the driver must classify that). canonFold IS fully implemented
-// (pure, needed by the M2.5 symmetry read/write it precedes).
+// SCOPE: M2-alpha = dense arrays (rank-1 flat / rank>=2 nested rows).
+// Symmetric-compact, ragged, and compound storage are later milestones;
+// unimplemented entry points raise `ArrayOpUnsupported`. canonFold is fully
+// implemented (needed by the M2.5 symmetry read/write it precedes).
 //
-// ============================================================================
-// CONTRACT NOTES (deviations from m2-design.md §1 — read before wiring)
-// ============================================================================
+// Deviations from m2-design.md 1: (1) no InterpState parameter -- Core.fs
+// (which defines it) compiles AFTER this file, so state-dependent work comes
+// in as a closure (`fold`/`pred`/`key`) the caller builds; only InterpPanic
+// (Value.fs) is needed directly. (2) own `ArrayOpUnsupported` exception,
+// since Core.InterpUnsupported/Print.PrintUnsupported compile later; Run.fs
+// catches it and maps it to ExitUnsupported (125) like the other SKIP
+// categories. (3) VirtualKind lives here, not in the IR.
 //
-//  (1) NO InterpState PARAMETER.  m2-design §1 threads `InterpState` through
-//      indexArray / reduceArray / prodSum / maskArray / sortArray. InterpState
-//      is defined in Interp/Core.fs, which compiles AFTER this file (ArrayOps.fs
-//      sits after RandMirror.fs, before Core.fs). Referencing it here is
-//      impossible without a forward dependency. It is also UNNECESSARY: every
-//      one of those functions receives the interpreter-state-dependent work as a
-//      CLOSURE (`fold`, `pred`, `key`) that the caller builds from its own
-//      InterpState. The reduce/prodSum bodies need no state (they only iterate +
-//      panic; the panic exn `InterpPanic` lives in Value.fs and IS available).
-//      ⇒ ArrayOps is InterpState-free. Loops.fs / Core.fs adapt their call sites
-//        (they already hold the state to build the closures).
-//
-//  (2) OWN "unsupported" EXCEPTION.  Core.InterpUnsupported and
-//      Print.PrintUnsupported both live in files that compile AFTER this one, so
-//      they cannot be raised here. This file raises `ArrayOpUnsupported msg` for
-//      any not-yet-implemented storage class (symmetric-compact / ragged /
-//      compound / rank-5+ nest, etc.).  ⇒ Run.fs MUST gain a catch arm:
-//          | ArrayOps.ArrayOpUnsupported feature ->
-//                { ExitCode = ExitUnsupported; Stdout = "";
-//                  Stderr = sprintf "interp-unsupported: %s" feature }
-//        placed alongside the existing Core.InterpUnsupported / Print.PrintUnsupported
-//        arms (Run.fs:141-144), so the differential gate SKIP-classifies these
-//        exactly as it does the other unsupported categories (ExitUnsupported=125).
-//
-//  (3) VirtualKind is defined HERE (not in the IR). It is the value-space
-//      descriptor the nest reads for a range/reverse/blocked source.
-//
-// Compiled inside Blade.fsproj AFTER Interp/RandMirror.fs and BEFORE Interp/Core.fs.
-// References Value.fs (value universe), CppFormat.fs (iostream-parity scalar
-// formatters), Numerics.fs (bit-exact arithmetic), and the concrete IR/Types.
+// Compiled after Interp/RandMirror.fs, before Interp/Core.fs. References
+// Value.fs, CppFormat.fs, Numerics.fs, and the concrete IR/Types.
 module Blade.Interp.ArrayOps
 
 open System.Text
@@ -59,9 +34,7 @@ open Blade.Interp.CppFormat
 
 module N = Blade.Interp.Numerics
 
-// ============================================================================
 // Faults
-// ============================================================================
 
 /// Raised for an array storage class / print form not yet interpreted
 /// (symmetric-compact, ragged, compound, rank-5+ nests, ...). The driver maps
@@ -69,13 +42,10 @@ module N = Blade.Interp.Numerics
 /// analog of Core.InterpUnsupported for the array layer.
 exception ArrayOpUnsupported of string
 
-// ============================================================================
-// Value <-> store-cell coercions
-// ============================================================================
-// Writing a kernel result / literal element into a typed unboxed store may need
-// a widening (an Int64 kernel result stored into a Float64 output, etc.), just
-// as C++ performs the implicit conversion at the assignment. These follow the
-// same rules as Core.fs's private toI64/toF64 and Numerics' asF64/asI64.
+// Value <-> store-cell coercions: writing a kernel result / literal element
+// into a typed unboxed store may need widening (Int64 into a Float64 output,
+// etc.), as C++ does at the assignment. Same rules as Core.fs's private
+// toI64/toF64 and Numerics' asF64/asI64.
 
 let private toF64v (v: Value) : float =
     match v with
@@ -110,9 +80,7 @@ let private toBoolv (v: Value) : bool =
     | VInt32 n -> n <> 0
     | _ -> false
 
-// ============================================================================
 // Element-type projection
-// ============================================================================
 
 /// Project the primitive ElemType out of an element IRType, seeing through unit
 /// annotations and nominal index-tag wrappers (Nat<I> = IRTIdxTagged(IRTScalar
@@ -125,16 +93,14 @@ let rec elemThrough (ty: IRType) : ElemType option =
     | IRTIdxTagged (inner, _) -> elemThrough inner
     | _ -> None
 
-// ============================================================================
-// §1 Storage: allocate / reshape flat backing stores
-// ============================================================================
+// 1 Storage: allocate / reshape flat backing stores.
 //
-// STORAGE MODEL (m2-design §7): a dense BladeArray is a rank-1 FLAT unboxed
+// STORAGE MODEL (m2-design 7): a dense BladeArray is a rank-1 flat unboxed
 // store, or a rank>=2 SNested tree whose leaves are flat rows (row-major). A
-// peel (peelDim) shares — does not copy — the parent's SNested row, so mutation
-// through the peel is visible in the parent (the C++ `{data[i], extents+1}`
-// view). Narrow element types WIDEN per Value.fs's documented gap: Float32→
-// SFloat, Int32→SInt, Complex64→SComplex; String/struct/tuple/func → SObj.
+// peel (peelDim) shares -- does not copy -- the parent's SNested row, so
+// mutation through the peel is visible in the parent (the C++
+// `{data[i], extents+1}` view). Narrow types widen per Value.fs: Float32->
+// SFloat, Int32->SInt, Complex64->SComplex; String/struct/tuple/func -> SObj.
 
 let private storeLen (s: Store) : int =
     match s with
@@ -204,21 +170,19 @@ let rec private reshapeFlat (extents: int64[]) (dim: int) (flat: Store) : Store 
         SNested (Array.init outer (fun r -> reshapeFlat extents (dim + 1) (sliceStore flat (r * innerLen) innerLen)))
 
 /// Wrap a FLAT row-major store as a rank-N dense BladeArray: rank<=1 keeps the
-/// flat store; rank>=2 reshapes into SNested rows (m2-design §1).
+/// flat store; rank>=2 reshapes into SNested rows (m2-design 1).
 let mkDenseArray (elemTy: IRType) (indexTypes: IRIndexType list) (extents: int64[]) (flat: Store) : BladeArray =
     let data = if extents.Length <= 1 then flat else reshapeFlat extents 0 flat
     { ElemType = elemTy; IndexTypes = indexTypes; Extents = extents; Data = data }
 
 /// Convenience allocator: a zeroed dense BladeArray of the given shape (the nest
-/// output-allocation path fills it via writeCell). Not in the §1 contract; added
-/// so Loops.fs can allocate without hand-building the flat store.
+/// output-allocation path fills it via writeCell). Not in the (1) contract;
+/// added so Loops.fs can allocate without hand-building the flat store.
 let allocDense (elemTy: IRType) (indexTypes: IRIndexType list) (extents: int64[]) : BladeArray =
     let total = extents |> Array.fold (fun acc e -> acc * int e) 1
     mkDenseArray elemTy indexTypes extents (storeOfElemType elemTy total)
 
-// ============================================================================
-// §2 Access: read / write / peel + shape accessors
-// ============================================================================
+// 2 Access: read / write / peel + shape accessors.
 
 /// Rank (number of dense loop levels) of an array.
 let rank (arr: BladeArray) : int = arr.Extents.Length
@@ -243,7 +207,7 @@ let readCell (arr: BladeArray) (coords: int64 list) : Value =
     go arr.Data coords
 
 /// Write `v` (coerced to the store's cell type) at a FULL coordinate path.
-/// Materialization only — grows nothing; the cell must already exist.
+/// Materialization only -- grows nothing; the cell must already exist.
 let writeCell (arr: BladeArray) (coords: int64 list) (v: Value) : unit =
     let rec go (store: Store) (cs: int64 list) : unit =
         match cs, store with
@@ -259,8 +223,8 @@ let writeCell (arr: BladeArray) (coords: int64 list) (v: Value) : unit =
 
 /// Peel ONE (outermost) dimension at index i. rank-1 (or rank-0) yields the
 /// scalar leaf; rank>=2 yields a sub-array VIEW whose Store ALIASES the parent's
-/// SNested row (mutation through the peel is visible in the parent — the C++
-/// `{ data[i], extents+1 }` view, m2-design §7).
+/// SNested row (mutation through the peel is visible in the parent -- the C++
+/// `{ data[i], extents+1 }` view, m2-design 7).
 let peelDim (arr: BladeArray) (i: int64) : Value =
     if arr.Extents.Length <= 1 then
         readCell arr [ i ]
@@ -271,10 +235,10 @@ let peelDim (arr: BladeArray) (i: int64) : Value =
         | SNested rows ->
             VArray { ElemType = arr.ElemType; IndexTypes = childIdx; Extents = childExt; Data = rows.[int i] }
         | SRagged (rows, lens, _) ->
-            // A peeled ragged row: its length is per-row (lens[i]), NOT the
-            // parent's placeholder inner extent. The row becomes an ordinary FLAT
-            // rank-1 array (its own leaf store) so every downstream dense op —
-            // index, extents(row), reduce, print — works unchanged and in-bounds.
+            // A peeled ragged row: its length is per-row (lens[i]), not the
+            // parent's placeholder inner extent. The row becomes an ordinary
+            // flat rank-1 array (its own leaf store) so every downstream
+            // dense op (index, extents(row), reduce, print) works unchanged.
             let rlen = if int i < lens.Length then lens.[int i] else int64 (storeLen rows.[int i])
             VArray { ElemType = arr.ElemType; IndexTypes = childIdx; Extents = [| rlen |]; Data = rows.[int i] }
         | _ ->
@@ -283,17 +247,15 @@ let peelDim (arr: BladeArray) (i: int64) : Value =
             // arrays built through mkDenseArray).
             readCell arr [ i ]
 
-/// Dimensional curry: `arr[idx]` — peel the first dim, yielding a sub-array
-/// (rank>=2) or scalar (rank-1). Identical to peelDim (IRCurry, m2-design §6).
+/// Dimensional curry: `arr[idx]` -- peel the first dim, yielding a sub-array
+/// (rank>=2) or scalar (rank-1). Identical to peelDim (IRCurry, m2-design 6).
 let curryArray (arr: BladeArray) (i: int64) : Value = peelDim arr i
 
-// ============================================================================
-// §1 Symmetry-aware canonicalization (canonFold) — PURE, complete
-// ============================================================================
-// Used by the M2.5 compact-symmetric read/write it precedes. Returns the sorted
-// (left-justified) storage coordinates, the swap PARITY (0 even / 1 odd — the
-// read transform applies negate/conjugate on odd parity), and whether the tuple
-// hits a STRICT diagonal (antisymmetric repeated index ⇒ the element is zero).
+// 1 Symmetry-aware canonicalization (canonFold), used by the M2.5
+// compact-symmetric read/write it precedes. Returns the sorted (left-
+// justified) storage coordinates, the swap parity (0 even / 1 odd; drives
+// negate/conjugate on odd), and whether the tuple hits a strict diagonal
+// (antisymmetric repeated index: element is zero).
 
 let private sortWithParity (coords: int64[]) : int64[] * int =
     let a = Array.copy coords
@@ -308,13 +270,21 @@ let private sortWithParity (coords: int64[]) : int64[] * int =
     (a, swaps % 2)
 
 /// Canonicalize an index tuple over a compact symmetry group.
-///   SymNone       → (coords, 0, false)  (no canonicalization)
-///   SymSymmetric  → (sorted, parity, false)
-///   SymHermitian  → (sorted, parity, false)  (parity drives conjugate-on-swap)
-///   SymAntisym    → (sorted, parity, isZero) (isZero when any index repeats)
+///   SymNone      -> (coords, 0, false)  (no canonicalization)
+///   SymSymmetric -> (sorted, parity, false)
+///   SymHermitian -> (sorted, parity, false)  (parity drives conjugate-on-swap)
+///   SymAntisym   -> (sorted, parity, isZero) (isZero when any index repeats)
+///   SymWreath    -> REFUSED: canonicalization is a fold of per-level sorts,
+///                  not one flat sort (that would map distinct orbits onto
+///                  the same tuple with a meaningless parity), and the
+///                  reference (OrbRank.canonOrb) needs the level list this
+///                  signature lacks -- refuse loudly rather than read a
+///                  plausible tuple from the wrong cell.
 let canonFold (sym: SymmetryClass) (coords: int64[]) : int64[] * int * bool =
     match sym with
     | SymNone -> (Array.copy coords, 0, false)
+    | SymWreath ->
+        failwith (Blade.IR.orbitStorageUnsupported "compact read (canonFold)" [])
     | SymSymmetric
     | SymHermitian ->
         let sorted, parity = sortWithParity coords
@@ -324,10 +294,10 @@ let canonFold (sym: SymmetryClass) (coords: int64[]) : int64[] * int * bool =
         let sorted, parity = sortWithParity coords
         (sorted, parity, hasRepeat)
 
-/// Left-justify a sorted index tuple to compact STORAGE coords (mirrors
+/// Left-justify a sorted index tuple to compact storage coords (mirrors
 /// nested_array_utilities::canon_left_justify, cpp:564): c[0]=p[0];
 /// c[k] = p[k] - p[k-1] - (strict ? 1 : 0). `strict` is true for an
-/// antisymmetric group (each successive row one shorter — the dropped diagonal).
+/// antisymmetric group (each successive row one shorter: the dropped diagonal).
 let canonLeftJustify (sorted: int64[]) (strict: bool) : int64[] =
     let r = sorted.Length
     let c = Array.zeroCreate r
@@ -336,18 +306,16 @@ let canonLeftJustify (sorted: int64[]) (strict: bool) : int64[] =
         c.[k] <- sorted.[k] - sorted.[k - 1] - (if strict then 1L else 0L)
     c
 
-// ============================================================================
-// §1b Compact (symmetric / antisymmetric / Hermitian) OUTPUT allocation
-// ============================================================================
-// A compact BladeArray keeps the LOGICAL Extents (so reads/prints know the true
-// shape) + the output IndexTypes (so the symmetric-aware printer and canonical
-// reader see the compact structure); only Data is a left-justified nested
-// SKELETON whose rows shrink within each symmetry group. This mirrors
-// nested_array_utilities::allocate/build_skeleton (cpp:185-244) row-length for
-// row-length: at flattened depth d inside a group (symmVec[d-1]=symmVec[d]) a row
-// holds extents[d]-lastIndex cells, where lastIndex threads the parent index
-// (+strict seed for antisym). The nest writes at the raw left-justified loop
-// coords (interpretNest's storage coords), so writeCell navigates it directly;
+// 1b Compact (symmetric / antisymmetric / Hermitian) output allocation.
+//
+// A compact BladeArray keeps the logical Extents (so reads/prints know the
+// true shape) plus the output IndexTypes; only Data is a left-justified
+// nested skeleton whose rows shrink within each symmetry group, mirroring
+// nested_array_utilities::allocate/build_skeleton (cpp:185-244): at flattened
+// depth d inside a group (symmVec[d-1]=symmVec[d]) a row holds
+// extents[d]-lastIndex cells, lastIndex threading the parent index (+strict
+// seed for antisym). The nest writes at the raw left-justified loop coords
+// (interpretNest's storage coords), so writeCell navigates it directly, and
 // the sym printer reads the same raw coords (canonical by construction).
 
 /// symmVec/strictVec come from IR.buildSymmVecWithStrict on the OUTPUT type:
@@ -379,9 +347,114 @@ let allocCompact (elemTy: IRType) (idxTys: IRIndexType list) (extents: int64[])
         else build 0 0L
     { ElemType = elemTy; IndexTypes = idxTys; Extents = extents; Data = data }
 
-// ============================================================================
-// §2 General indexing (IRIndex, plain dense) + poly-index
-// ============================================================================
+// OrbIdx (iterated-wreath) pools (docs/plan-orbit-index-types.md 4, 9 step 4).
+//
+// INVARIANT: a wreath array is a flat pool of exactly
+// `OrbRank.cellCountChecked levels n` cells in `visitStream` order (== the
+// C++ `orb_visit` order == ascending-lex canonical). Deliberately not the
+// shrinking-row SNested skeleton `allocCompact` builds: a wreath's rows
+// shrink per level, so no single simplex describes them, and a skeleton
+// shaped like one would put every cell at a plausible-but-wrong offset.
+//
+// The record keeps its honest raw-axis Extents (prod(ri) copies of n) so the
+// logical shape reads true; only Data is flat. Any path that would navigate
+// `Extents` as a nested store is refused (forEachStorageCell / emitSymAware);
+// indexArray/readCompact go through the flat read (2) instead.
+
+/// Zero value for a scalar element type (implicit-zero of a strict-diagonal
+/// antisymmetric access, and of a wreath zero-set tuple; mirrors `return T()`
+/// in the lazy compact reader). Defined here rather than beside the other
+/// compact-read helpers below because the wreath read needs it first.
+let zeroOfElemTy (elemTy: IRType) : Value =
+    match elemThrough elemTy with
+    | Some (ETFloat64 | ETFloat32) -> VFloat 0.0
+    | Some (ETInt64 | ETInt32) -> VInt 0L
+    | Some (ETComplex64 | ETComplex128) -> VComplex (0.0, 0.0)
+    | Some ETBool -> VBool false
+    | _ -> VFloat 0.0
+
+/// True iff any slot of this record list is a depth >= 2 OrbIdx class.
+let hasWreath (idxTys: IRIndexType list) : bool =
+    idxTys |> List.exists (fun ix -> ix.Symmetry = SymWreath)
+
+/// Allocate a zeroed wreath pool: `cellCountChecked` cells, flat, in stream
+/// order. The count comes from the same checked fold `IR.classifyOutputStorage`
+/// sized the compiled pool with, so the two backends cannot allocate
+/// differently (7.2: the failure to guard is a silent wraparound).
+let allocWreath (elemTy: IRType) (idxTys: IRIndexType list)
+                (levels: (int * bool) list) (n: int64) : BladeArray =
+    let cells =
+        match Blade.OrbRank.cellCountChecked (Blade.IR.orbRankLevels levels) n with
+        | Ok c -> c
+        | Error detail ->
+            raise (ArrayOpUnsupported
+                     (sprintf "OrbIdx%s at extent %d: cell count -- %s"
+                              (Blade.IR.ppOrbitLevels levels) n detail))
+    let axes = levels |> List.fold (fun a (r, _) -> a * r) 1
+    { ElemType = elemTy
+      IndexTypes = idxTys
+      Extents = Array.create axes n
+      Data = storeOfElemType elemTy (int cells) }
+
+/// Number of stored cells of a wreath pool (its flat store length).
+let wreathCellCount (arr: BladeArray) : int = storeLen arr.Data
+
+/// Read the pool cell at a canonical tuple, by its `orbRank` position -- the
+/// read the traversal nest performs on a wreath input, where the tuple comes
+/// straight out of `visitStream` so it is canonical by construction (character
+/// +1). Deliberately does not fold: a canonical tuple is a fixed point, so
+/// folding would be dead work and would hide a stream/rank disagreement. The
+/// mirrored read is `wreathReadAny` below.
+let wreathReadCanonical (arr: BladeArray) (levels: (int * bool) list) (n: int64)
+                        (tuple: int list) : Value =
+    match Blade.OrbRank.orbRank (Blade.IR.orbRankLevels levels) (int n) tuple with
+    | Error detail ->
+        raise (ArrayOpUnsupported
+                 (sprintf "OrbIdx%s canonical read at (%s): %s"
+                          (Blade.IR.ppOrbitLevels levels)
+                          (tuple |> List.map string |> String.concat ",") detail))
+    | Ok r -> readCell arr [ r ]
+
+/// docs/plan-orbidx-decompaction.md 2's read at an arbitrary raw tuple:
+///
+///     dense[t] = 0                                if canon(t) is zero-set
+///              = chi(t) * pool[orbRank(canon(t))]  otherwise
+///
+/// The interpreter twin of the emitted `orb_read<T, Levels...>`. Does not
+/// re-derive the semantics: `OrbRank.orbReadPlan` (built on the same core
+/// `OrbRank.orbRead`, pinned by `blade test orbrank`) answers which cell and
+/// which character; the only thing added here is the cell type (`Value`
+/// negate instead of int64).
+///
+/// Two failure modes stay apart: zero-set -> the element type's zero (a `-`
+/// level genuinely stores nothing there); out-of-domain (bad digit/rank/pool
+/// size/class) -> BL8003, so an off-by-one never aliases onto a structural
+/// zero. Out-of-domain is unreachable for a typechecker-admitted tuple except
+/// an out-of-range coordinate (the same unchecked hazard readCell has), and
+/// this path diagnoses it instead of reading a neighbouring cell.
+let wreathReadAny (arr: BladeArray) (levels: (int * bool) list) (n: int64)
+                  (tuple: int list) : Value =
+    match Blade.OrbRank.orbReadPlan "OrbIdx read" (Blade.IR.orbRankLevels levels)
+                                    (int n) (storeLen arr.Data) tuple with
+    | Error detail ->
+        raise (InterpPanic ("BL8003",
+                            sprintf "OrbIdx%s read at (%s): %s"
+                                    (Blade.IR.ppOrbitLevels levels)
+                                    (tuple |> List.map string |> String.concat ",") detail,
+                            None, 0))
+    | Ok Blade.OrbRank.OrbZeroCell -> zeroOfElemTy arr.ElemType
+    | Ok (Blade.OrbRank.OrbPoolCell (i, chi)) ->
+        let v = readCell arr [ int64 i ]
+        if chi < 0 then N.evalUnaryOp IRNeg v else v
+
+/// Write the pool cell at stream position `k` (the traversal nest's own
+/// counter). Position-addressed rather than tuple-addressed precisely because
+/// the nest already knows the position: `visitStream` yields cells in order, so
+/// the writer bumps a counter exactly as the C++ visitor's `linear_index` does.
+let wreathWriteAt (arr: BladeArray) (k: int64) (v: Value) : unit =
+    writeCell arr [ k ] v
+
+// 2 General indexing (IRIndex, plain dense) + poly-index.
 
 let private hasSymmetry (idxTys: IRIndexType list) : bool =
     idxTys
@@ -390,20 +463,10 @@ let private hasSymmetry (idxTys: IRIndexType list) : bool =
         || idx.Symmetry = SymAntisymmetric
         || idx.Symmetry = SymHermitian)
 
-/// Zero value for a scalar element type (implicit-zero of a strict-diagonal
-/// antisymmetric access; mirrors `return T()` in the lazy compact reader).
-let private zeroOfElemTy (elemTy: IRType) : Value =
-    match elemThrough elemTy with
-    | Some (ETFloat64 | ETFloat32) -> VFloat 0.0
-    | Some (ETInt64 | ETInt32) -> VInt 0L
-    | Some (ETComplex64 | ETComplex128) -> VComplex (0.0, 0.0)
-    | Some ETBool -> VBool false
-    | _ -> VFloat 0.0
-
 /// Apply a compact read transform at the given swap parity (mirrors
 /// nested_array_utilities::canon_transform + ReadTransform, cpp:573):
 ///   Symmetric  -> Identity;   Antisymmetric -> NegateOnSwap;
-///   Hermitian  -> ConjugateOnSwap (identity on reals — conj_scalar).
+///   Hermitian  -> ConjugateOnSwap (identity on reals -- conj_scalar).
 let private applyReadTransform (sym: SymmetryClass) (parity: int) (v: Value) : Value =
     if parity = 0 then v
     else
@@ -419,6 +482,33 @@ let private applyReadTransform (sym: SymmetryClass) (parity: int) (v: Value) : V
 /// CodeGen.renderIndexExpr's lazyCompactRead (CodeGen.fs:1463-1538) +
 /// nested_array_utilities. Plain (SymNone) slots pass their index through.
 let readCompact (arr: BladeArray) (logicalCoords: int64 list) : Value =
+    // A sole wreath slot is the (2) read, delegated whole -- the per-slot fold
+    // below cannot express it (a wreath pool is flat, not a nest of
+    // left-justified rows). Routing it here is what makes `decompactArray`
+    // work over a wreath source unchanged. A wreath COMBINED with other
+    // slots still refuses: the mixed case has no pool layout at all.
+    match arr.IndexTypes with
+    | [ ix ] when ix.Symmetry = SymWreath ->
+        let n = if arr.Extents.Length >= 1 then arr.Extents.[0] else 0L
+        // int64 -> int is the one narrowing here. Range-check BEFORE
+        // truncating: 2^32 + 1 truncates to 1, which the storage gate would
+        // then accept as a valid coordinate -- the silent aliased read this
+        // check prevents.
+        (match logicalCoords |> List.tryFind (fun c -> c < 0L || c >= n) with
+         | Some bad ->
+             raise (InterpPanic ("BL8003",
+                                 sprintf "OrbIdx%s read: coordinate %d outside [0,%d)"
+                                         (Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix)) bad n,
+                                 None, 0))
+         | None ->
+             wreathReadAny arr (Blade.IR.orbitLevelsOf ix) n
+                           (logicalCoords |> List.map int))
+    | _ ->
+    arr.IndexTypes |> List.iter (fun ix ->
+        if ix.Symmetry = SymWreath then
+            failwith (Blade.IR.orbitStorageUnsupported "compact read of a wreath group combined with \
+other index slots (readCompact)"
+                                                       (Blade.IR.orbitLevelsOf ix)))
     let coords = Array.ofList logicalCoords
     let storage = ResizeArray<int64>()
     let mutable transforms = []          // (parity, sym) per compact group, slot order
@@ -448,7 +538,24 @@ let readCompact (arr: BladeArray) (logicalCoords: int64 list) : Value =
 /// to the canonical reader (readCompact); a partial (sub-array) compact read is
 /// still gated (M3+).
 let indexArray (arr: BladeArray) (indices: Value list) : Value =
-    if hasSymmetry arr.IndexTypes then
+    // A wreath pool's store is flat and `hasSymmetry` is false for it, so
+    // without this arm the dense peel below would walk `Extents` as if
+    // nested and read a plausible cell from the wrong place. Route the
+    // full-arity form to (2) (canonOrb fold + character + rank), the twin of
+    // the emitted `orb_read`; a partial list has no answer (rows shrink per
+    // level, so no residual class describes a fibre) -- the typechecker
+    // refuses it before here, this is the backstop.
+    if hasWreath arr.IndexTypes then
+        let ix = arr.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
+        let totalRank = arr.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+        if indices.Length = totalRank then
+            readCompact arr (indices |> List.map toI64v)
+        else
+            raise (ArrayOpUnsupported
+                     (sprintf "index: OrbIdx%s spans %d raw axes and takes exactly that many flat \
+subscripts; a partial (sub-array) read of a wreath pool has no residual class"
+                              (Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix)) totalRank))
+    elif hasSymmetry arr.IndexTypes then
         let totalRank = arr.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
         if indices.Length = totalRank then
             readCompact arr (indices |> List.map toI64v)
@@ -468,50 +575,43 @@ let indexArray (arr: BladeArray) (indices: Value list) : Value =
             | _ -> raise (InterpPanic ("BL8003", "indexing a non-array value", None, 0))
     go (VArray arr) indices
 
-/// Poly-pack indexing (IRPolyIndex): a tuple pack → get<i>; an array pack → peel.
+/// Poly-pack indexing (IRPolyIndex): a tuple pack -> get<i>; an array pack -> peel.
 let polyIndex (pack: Value) (i: int64) : Value =
     match pack with
     | VTuple els when i >= 0L && int i < els.Length -> els.[int i]
     | VArray a -> peelDim a i
     | _ -> raise (ArrayOpUnsupported "IRPolyIndex: pack is neither a tuple nor an array")
 
-// ============================================================================
-// §3 Virtual arrays
-// ============================================================================
+// 3 Virtual arrays.
 
-/// Value-space descriptor for a no-store virtual source (m2-design §0.10, §3).
+/// Value-space descriptor for a no-store virtual source (m2-design 0.10, 3).
 type VirtualKind =
-    /// range<I> (+offset): element at loop index i is `i + offset`. offset 0 for
-    /// a plain `0..N`. int64 throughout so `i - 1` at i=0 is -1, not an unsigned
-    /// wrap (the signedness fix, CodeGen.fs:2958-2964).
+    /// range<I> (+offset): element at loop index i is `i + offset` (offset 0
+    /// for plain `0..N`). int64 throughout so `i - 1` at i=0 is -1, not an
+    /// unsigned wrap (CodeGen.fs:2958-2964).
     | VRange of offset: int64
     /// reverse<I>: element at loop index i is `extent - 1 - i`.
     | VReverse
-    /// blocked<I>: blocked single-index iteration; the produced element VALUE is
-    /// still the flat index i (blocking reorders iteration, not the value).
-    /// NOTE: best-effort — no compiled-binary pin yet (blocked lands in the mpi
-    /// domain-decomposition slice, outside the dense M2 corpus). FLAG.
+    /// blocked<I>: iteration is blocked but the element value is still the
+    /// flat index i. Best-effort: no compiled-binary pin yet (blocked is in
+    /// the mpi domain-decomposition slice, outside the dense M2 corpus).
     | VBlocked of blockSize: int64
 
-/// The element value a virtual source produces at loop index i (given the level
-/// extent for the reverse arm). Always Int64-typed, matching the C++ int64_t
-/// kernel-param binding.
+/// The element value a virtual source produces at loop index i. Always
+/// Int64-typed, matching the C++ int64_t kernel-param binding.
 let virtualElem (vk: VirtualKind) (extent: int64) (i: int64) : Value =
     match vk with
     | VRange off -> VInt (i + off)
     | VReverse -> VInt (extent - 1L - i)
     | VBlocked _ -> VInt i
 
-// ============================================================================
-// §4 Array-literal construction (IRArrayLit, incl. nested rank>=2)
-// ============================================================================
+// 4 Array-literal construction (IRArrayLit, incl. nested rank>=2).
 //
-// The Core.fs IRArrayLit arm evaluates the literal's TOP-LEVEL element exprs to
-// Values, then calls here. For a rank-1 literal those Values are scalar leaves
-// (packed into a flat store); for rank>=2 each element is itself a VArray row
-// (also covers "rows of computed arrays": elements that are array-VALUED exprs,
-// CodeGen.fs:4254). The outer extent is the element count; inner extents come
-// from the first row's shape (rectangular). Ragged / DepIdx literals are M2.7.
+// Core.fs's IRArrayLit arm evaluates the literal's top-level element exprs to
+// Values, then calls here. Rank-1: scalar leaves packed into a flat store.
+// Rank>=2: each element is a VArray row (covers "rows of computed arrays"
+// too, CodeGen.fs:4254); outer extent = element count, inner extents from the
+// first row's shape (rectangular). Ragged / DepIdx literals are M2.7.
 
 let arrayLitFromValues (arrType: IRArrayType) (elems: Value list) : BladeArray =
     let elemTy = arrType.ElemType
@@ -522,13 +622,12 @@ let arrayLitFromValues (arrType: IRArrayType) (elems: Value list) : BladeArray =
     | (VArray _) :: _ when isRagged ->
         // Ragged / DepIdx literal (heterogeneous per-row lengths). CSR layout
         // mirroring CodeGen.genArrayLiteral's Ragged<T> emission (CodeGen.fs:
-        // 4485-4522): each row kept as its OWN leaf store; `lens` = the actual
-        // per-row lengths (NOT a uniform inner extent taken from the first row —
-        // that rectangular assumption is exactly the bug that made r(2,3) read
-        // past a short row, BL8003); `offsets` = exclusive prefix-sum, length
-        // nRows+1. rank = 2 (outer Idx + the ONE ragged inner record); the
-        // logical Extents' inner slot is the max row length (rank/`extents(r)`
-        // fidelity only — every per-row bound is served from `lens` by peelDim).
+        // 4485-4522): each row kept as its own leaf store; `lens` is the
+        // actual per-row length (the rectangular assumption -- inner extent
+        // from the first row -- caused r(2,3) to read past a short row,
+        // BL8003); `offsets` is the exclusive prefix-sum, length nRows+1.
+        // rank = 2; logical Extents' inner slot is the max row length only
+        // (every per-row bound is actually served from `lens` by peelDim).
         let rows =
             elems
             |> List.map (function
@@ -548,8 +647,35 @@ let arrayLitFromValues (arrType: IRArrayType) (elems: Value list) : BladeArray =
           IndexTypes = idxTys
           Extents = [| int64 rows.Length; innerExtent |]
           Data = SRagged (rows, lens, offsets) }
+    | (VArray _) :: _ when
+            idxTys |> List.exists (fun ix ->
+                ix.Rank >= 2 &&
+                (match ix.Symmetry with
+                 | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                 | SymNone | SymWreath -> false)) ->
+        // Compact literal (TypeCheck.checkCompactArrayLit; CodeGen's compact
+        // genArrayLiteral branch): rows are the left-justified simplex, so
+        // they shrink and the first is not the axis shape -- extents come
+        // from the index records instead (the rectangular arm's first-row
+        // approach is off by one for a strict/antisym group).
+        let rows =
+            elems
+            |> List.map (function
+                | VArray a -> a.Data
+                | v -> raise (ArrayOpUnsupported (sprintf "compact literal: non-array row (%A)" v)))
+            |> Array.ofList
+        let extents =
+            idxTys
+            |> List.collect (fun ix ->
+                let e =
+                    match ix.Extent with
+                    | IRLit (IRLitInt n) -> n
+                    | _ -> raise (ArrayOpUnsupported "compact literal: non-static extent")
+                List.replicate (max 1 ix.Rank) e)
+            |> Array.ofList
+        { ElemType = elemTy; IndexTypes = idxTys; Extents = extents; Data = SNested rows }
     | (VArray first) :: _ ->
-        // rank>=2: each element is a row; nest the rows' stores (shared — the
+        // rank>=2: each element is a row; nest the rows' stores (shared -- the
         // rows are freshly-evaluated and owned by this literal).
         let rows =
             elems
@@ -591,19 +717,15 @@ let replicateArray (count: int64) (body: Value) : Value =
         | None -> raise (ArrayOpUnsupported "replicate: body is neither a scalar nor an array")
 
 /// `A <|:> B` dense-left allocated-fallback (fallback_copy<T,N>, nested_array_
-/// utilities.hpp:106; genFallbackMaterialize dense arm, CodeGen.fs:9410). The
-/// per-curry-level rule is `dst[i..] = a ? a[i..] : b[i..]`, keyed on A's
-/// ALLOCATION (non-null pointer chain). Every in-language Blade array is FULLY
-/// allocated, and the interpreter's value space has no partial-depth null-pointer
-/// notion, so the mask is all-present ⇒ the result is a copy of A with its
-/// allocated zeros preserved (`A <|:> B ≡ A` — the distinguisher from value-keyed
-/// `<|>`, which would replace those zeros with B). B is unused. copyBladeArray
-/// gives a fresh backing pool (fallback always yields a freshly-allocated array).
+/// utilities.hpp:106; genFallbackMaterialize dense arm, CodeGen.fs:9410): the
+/// per-curry-level rule `dst[i..] = a ? a[i..] : b[i..]` keyed on A's
+/// allocation. Every Blade array is fully allocated and the interpreter has
+/// no partial-depth null notion, so the mask is all-present: result is a
+/// fresh copy of A (`A <|:> B = A`, the distinguisher from value-keyed `<|>`,
+/// which replaces zeros with B). B is unused.
 let fallbackDense (a: BladeArray) : BladeArray = copyBladeArray a
 
-// ============================================================================
-// §5 Reductions
-// ============================================================================
+// 5 Reductions.
 
 /// Row-major flat leaves of an array (rank-1: its elements).
 let private flatLeaves (arr: BladeArray) : Value[] =
@@ -619,10 +741,10 @@ let private flatLeaves (arr: BladeArray) : Value[] =
     loop 0 []
     out.ToArray()
 
-/// reduce(arr, fold[, init]) over a MATERIALIZED array (genReduceBinding parity,
-/// m2-design §5). Without init: seed = arr[0], fold i=1..n-1; EMPTY ⇒ panic
-/// BL8003 "reduce: empty array, no reduction possible" (matches blade_rt). With
-/// init: seed = init, fold ALL i from 0; empty result IS init (never panics).
+/// reduce(arr, fold[, init]) over a materialized array (genReduceBinding
+/// parity, m2-design 5). Without init: seed = arr[0], fold i=1..n-1; empty
+/// panics BL8003 "reduce: empty array, no reduction possible" (matches
+/// blade_rt). With init: seed = init, fold all i from 0; empty result is init.
 let reduceArray (arr: BladeArray) (fold: Value -> Value -> Value) (init: Value option) : Value =
     let leaves = flatLeaves arr
     match init with
@@ -639,9 +761,9 @@ let reduceArray (arr: BladeArray) (fold: Value -> Value -> Value) (init: Value o
             acc <- fold acc leaves.[k]
         acc
 
-/// prodsum(x1..xk) = Σ_t Π_ℓ xℓ[t] over rank-1 equal-extent arrays; seed 0;
-/// empty extent ⇒ 0 (IRProdSum, m2-design §0.8). Uses Numerics for bit-exact
-/// promotion; the seed's type follows the first arg's element type.
+/// prodsum(x1..xk) = sum_t prod_l xl[t] over rank-1 equal-extent arrays; seed
+/// 0; empty extent = 0 (IRProdSum, m2-design 0.8). Uses Numerics for
+/// bit-exact promotion; the seed's type follows the first arg's element type.
 let prodSum (args: BladeArray list) : Value =
     match args with
     | [] -> VInt 0L
@@ -666,12 +788,10 @@ let prodSum (args: BladeArray list) : Value =
             | None -> ()
         sum
 
-// ============================================================================
-// §6 Eager set / reshape ops (dense rank-1 unless noted)
-// ============================================================================
-// These mostly serve the SQL-ish categories outside the M2 loop-object corpus;
-// first-occurrence order (unique/intersect/union) and a STABLE sort are pinned
-// to CodeGen's semantics. Higher-rank forms beyond transpose are LATER.
+// 6 Eager set / reshape ops (dense rank-1 unless noted). These mostly serve
+// the SQL-ish categories outside the M2 loop-object corpus; first-occurrence
+// order (unique/intersect/union) and a stable sort are pinned to CodeGen's
+// semantics. Higher-rank forms beyond transpose are later.
 
 let private cmpValues (a: Value) (b: Value) : int =
     match a, b with
@@ -696,26 +816,22 @@ let private mkRank1 (elemTy: IRType) (idxTys: IRIndexType list) (vs: Value list)
       Data = storeOfValues elemTy a }
 
 /// mask(arr, pred): keep elements where pred(v) is truthy (first-occurrence
-/// order preserved). pred is the caller's kernel closure (Value -> VBool).
-///
-/// DEPRECATED SEMANTICS — the OLD filtering `mask`. The current language `mask`
-/// is a Bool PRESENCE array (see `maskPresence` below); this filtering form is
-/// no longer what CodeGen emits. Kept only so nothing that still references it
-/// breaks; the IR arm routes to `maskPresence`, NOT here.
+/// order preserved). This is the OLD filtering `mask`, not what CodeGen emits
+/// anymore (that's the Bool presence array below, `maskPresence`); kept only
+/// so nothing that still references it breaks. The IR arm routes to
+/// `maskPresence`, not here.
 let maskArray (arr: BladeArray) (pred: Value -> Value) : BladeArray =
     let kept = elems1 arr |> List.filter (fun v -> toBoolv (pred v))
     mkRank1 arr.ElemType arr.IndexTypes kept
 
-/// mask(arr, pred): the CURRENT semantics — a rank-1 Bool PRESENCE array over
-/// arr's OWN index space, `m[i] = pred(arr[i])`. ONE pass, NO compaction, NO
-/// reorder, NO value copy: compaction belongs to `compound(A, m)` and iteration
-/// to `range<CompoundIdx<m>>`. Byte-verified against the compiled binary
-/// (`materializeMaskForm`, CodeGen.fs:2245): the emitted C++ allocates
-/// `Array<bool,1>` of length `A.extents[0]` and writes `m[i] = pred(A[i])`, so
-/// `extents(m)` is the SOURCE extent, not a filtered cardinality. rank-1 only
-/// (CodeGen emits `#error` for rank>1). The result carries the source's
-/// IndexTypes so a downstream `compound(A, m)` sees the shared index space; the
-/// element type is Bool. `pred` is the caller's kernel closure (Value -> Value).
+/// mask(arr, pred): current semantics -- a rank-1 Bool presence array over
+/// arr's own index space, `m[i] = pred(arr[i])`. One pass, no compaction, no
+/// reorder, no value copy: compaction belongs to `compound(A, m)`, iteration
+/// to `range<CompoundIdx<m>>`. Byte-verified against `materializeMaskForm`
+/// (CodeGen.fs:2245): `extents(m)` is the SOURCE extent, not a filtered
+/// cardinality; rank-1 only (CodeGen emits `#error` for rank>1). Carries the
+/// source's IndexTypes (so `compound(A, m)` sees the shared index space);
+/// element type Bool. `pred` is the caller's kernel closure.
 let maskPresence (arr: BladeArray) (pred: Value -> Value) : BladeArray =
     if arr.Extents.Length <> 1 then
         raise (ArrayOpUnsupported "mask over a rank>1 array (rank-1 only; mirrors CodeGen's #error)")
@@ -781,12 +897,9 @@ let transposeArray (arr: BladeArray) (d1: int) (d2: int) : BladeArray =
 
 /// stack(A1..An): fresh LEADING axis of extent n over n same-shaped arrays,
 /// so `stack(A,B,C)(k)` selects array k (formalism 2.6). Rank r -> r+1.
-///
 /// Mirrors CodeGen.materializeStackForm: a fresh dense pool plus a per-source
-/// element COPY — never an aliasing assembly, so writing through a source after
-/// the stack cannot reach it. The output IndexTypes reuse the child's (the
-/// extra leading Idx<n> is not reflected there, exactly as forceSequence does;
-/// printing keys off the binding type).
+/// element copy (never aliasing). Output IndexTypes reuse the child's (the
+/// extra leading Idx<n> is not reflected there, matching forceSequence).
 let stackArrays (arrs: BladeArray list) : BladeArray =
     match arrs with
     | [] -> raise (ArrayOpUnsupported "stack: no operands")
@@ -807,7 +920,7 @@ let stackArrays (arrs: BladeArray list) : BladeArray =
             loop 0 [])
         out
 
-/// join(A1..An, d): concatenate along dimension d (formalism 2.6) — rank is
+/// join(A1..An, d): concatenate along dimension d (formalism 2.6) -- rank is
 /// preserved, extents[d] is the sum of the operands' extents[d], every other
 /// axis agrees. Mirrors CodeGen.materializeJoinForm's running-offset copy.
 let joinArrays (arrs: BladeArray list) (dim: int) : BladeArray =
@@ -836,10 +949,8 @@ let joinArrays (arrs: BladeArray list) (dim: int) : BladeArray =
             offset <- offset + src.Extents.[dim]
         out
 
-// ============================================================================
-// §6.5 Symmetry producers — decompact / gram / negate / conjugate (M7-β)
-// ============================================================================
-// Eager producers over compact/dense storage. Each mirrors a CodeGen
+// 6.5 Symmetry producers: decompact / gram / negate / conjugate. Eager
+// producers over compact/dense storage. Each mirrors a CodeGen
 // materialize*Form emitter (CodeGen.fs: 2477 decompact, 2806 negate/conjugate,
 // 2924 gram), byte-verified against the compiled binary.
 
@@ -861,22 +972,20 @@ let rec private mapStoreLeaves (f: Value -> Value) (s: Store) : Store =
 /// Whole-array elementwise negate/conjugate (IRArrayNegate / IRArrayConjugate,
 /// CodeGen.fs:2806). Type- AND storage-shape-PRESERVING: negate_pool /
 /// conjugate_pool run a flat transform over the contiguous pool, so the result
-/// carries the source's exact IndexTypes/Extents/skeleton with every stored cell
-/// transformed. Antisym intra-group transpose reaches negate; Hermitian adjoint
-/// reaches conjugate (over the already-transposed dense image). conj on a real
-/// element is the identity (N.evalUnaryOp IRConj).
+/// carries the source's exact IndexTypes/Extents/skeleton with every stored
+/// cell transformed. Antisym intra-group transpose reaches negate; Hermitian
+/// adjoint reaches conjugate; conj on a real element is the identity.
 let negateConjugateArray (conj: bool) (src: BladeArray) : BladeArray =
     let f = if conj then N.evalUnaryOp IRConj else N.evalUnaryOp IRNeg
     { src with Data = mapStoreLeaves f src.Data }
 
 /// Enumerate every STORED cell of a compact/dense storage shape (`idxTys` +
 /// `extents`), invoking `visit storageCoords logicalCoords`. Mirrors
-/// emitSymAware's left-justified storage walk EXACTLY — the per-dim bound is
-/// `extents[d] - Σ(prior group storage coords) - (#prior)*strictConst` — and
-/// reconstructs the LOGICAL tuple via canon_left_justify's inverse
-/// (p_k = p_{k-1} + s_k + strict). Plain (SymNone / arity-1) dims: storage ==
-/// logical. Used by decompact to walk its (partially compact) output and read
-/// the value-equivalent source cell at each logical coordinate.
+/// emitSymAware's left-justified storage walk exactly -- per-dim bound
+/// `extents[d] - sum(prior group storage coords) - (#prior)*strictConst` --
+/// reconstructing the logical tuple via canon_left_justify's inverse
+/// (p_k = p_{k-1} + s_k + strict; plain dims: storage == logical). Used by
+/// decompact to walk its output and read the source at each logical coordinate.
 let private forEachStorageCell (idxTys: IRIndexType list) (extents: int64[])
                                (visit: int64 list -> int64 list -> unit) : unit =
     // Per-flattened-dim descriptor: (dimIdx, priorGroupDims, strictConst).
@@ -884,6 +993,12 @@ let private forEachStorageCell (idxTys: IRIndexType list) (extents: int64[])
     let mutable dimIdx = 0
     for ix in idxTys do
         let a = max 1 ix.Rank
+        // A wreath group's stored cells are NOT a shrinking-row simplex (rows
+        // shrink per LEVEL, not per the triangle this bound describes) --
+        // walking it that way would visit the wrong cell set, silently.
+        if ix.Symmetry = SymWreath then
+            failwith (Blade.IR.orbitStorageUnsupported "storage-cell walk (forEachStorageCell)"
+                                                       (Blade.IR.orbitLevelsOf ix))
         let isSym =
             ix.Symmetry = SymSymmetric || ix.Symmetry = SymAntisymmetric || ix.Symmetry = SymHermitian
         let strictConst = if ix.Symmetry = SymAntisymmetric then 1 else 0
@@ -912,18 +1027,17 @@ let private forEachStorageCell (idxTys: IRIndexType list) (extents: int64[])
                 i <- i + 1L
     if rank > 0 then loop 0
 
-/// decompact(src, d): binary group FISSION (materializeDecompactForm,
-/// CodeGen.fs:2477). Fission is VALUE-EQUIVALENT — it only re-groups storage; the
-/// logical tensor is unchanged — so every OUTPUT canonical cell equals the SOURCE
-/// read at that SAME logical coordinate. Allocate the fission-shaped output (from
-/// its carried type `outType`), enumerate its stored cells, and fill each from
-/// `readCompact src logicalCoords`. The source read applies the source group's
-/// canon_fold (sort + antisym sign + strict-diagonal zero + Hermitian conj),
-/// exactly reproducing the C++ scatter's baked full-tuple sign. This single
-/// uniform algorithm covers all four C++ shapes (symmetric gather, antisym r2
-/// dense, Hermitian r2 dense, antisym r>=3 per-group-strict residual) AND chained
-/// decompaction (the intermediate is itself a mixed-compact source readCompact
-/// folds correctly).
+/// decompact(src, d): binary group fission (materializeDecompactForm,
+/// CodeGen.fs:2477). Fission only re-groups storage -- the logical tensor is
+/// unchanged -- so every output canonical cell equals the source read at that
+/// same logical coordinate. Allocates the fission-shaped output (from its
+/// carried type `outType`), enumerates its stored cells, and fills each from
+/// `readCompact src logicalCoords`, whose canon_fold (sort + antisym sign +
+/// strict-diagonal zero + Hermitian conj) reproduces the C++ scatter's baked
+/// full-tuple sign. One algorithm covers all four C++ shapes (symmetric
+/// gather, antisym/Hermitian r2 dense, antisym r>=3 per-group-strict
+/// residual) and chained decompaction (readCompact folds a mixed-compact
+/// intermediate correctly).
 let decompactArray (src: BladeArray) (outType: IRType) : BladeArray =
     match outType with
     | ArrayElem outArr ->
@@ -943,15 +1057,12 @@ let decompactArray (src: BladeArray) (outType: IRType) : BladeArray =
         out
     | _ -> raise (ArrayOpUnsupported "decompact: output type is not an array")
 
-/// gram(left, right) = left * right^H:  R[i][j] = Σ_k left[i][k]*conj(right[j][k])
+/// gram(left, right) = left * right^H:  R[i][j] = sum_k left[i][k]*conj(right[j][k])
 /// (materializeGramForm, CodeGen.fs:2924). Two modes, driven by the carried
-/// output type: same-array → square m×m stored as the upper-triangle
-/// Sym/Hermitian compact (jr = j - i; the lower triangle is recovered lazily on
-/// read, so a downstream decompact/print sees the full matrix); distinct → dense
-/// m×p full scatter. conj is std::conj on complex / identity on real. Inputs are
-/// forced to real arrays by the caller; for same-array the caller passes the same
-/// array as both operands. The k-fold accumulates ascending (matching the C++
-/// `acc += ...` order) for byte-parity.
+/// output type: same-array -> square m x m upper-triangle Sym/Hermitian
+/// compact (jr = j - i; lower triangle recovered lazily on read); distinct ->
+/// dense m x p full scatter. conj is std::conj on complex / identity on real.
+/// The k-fold accumulates ascending (matching C++ `acc += ...`) for byte-parity.
 let gramArray (left: BladeArray) (right: BladeArray) (outType: IRType) : BladeArray =
     match outType with
     | ArrayElem outArr ->
@@ -969,7 +1080,7 @@ let gramArray (left: BladeArray) (right: BladeArray) (outType: IRType) : BladeAr
             acc
         let (osym, ostrict) = buildSymmVecWithStrict outType
         if hasRealSymmetry osym then
-            // same-array: compact Sym/Hermitian m×m, upper triangle (j = i + jr).
+            // same-array: compact Sym/Hermitian m x m, upper triangle (j = i + jr).
             let extents = [| m; m |]
             let out = allocCompact outElem outArr.IndexTypes extents (Array.ofList osym) (Array.ofList ostrict)
             for i in 0L .. m - 1L do
@@ -977,7 +1088,7 @@ let gramArray (left: BladeArray) (right: BladeArray) (outType: IRType) : BladeAr
                     writeCell out [ i; jr ] (dot i (i + jr))
             out
         else
-            // distinct: dense m×p, full scatter.
+            // distinct: dense m x p, full scatter.
             let extents = [| m; p |]
             let out = allocDense outElem outArr.IndexTypes extents
             for i in 0L .. m - 1L do
@@ -986,26 +1097,232 @@ let gramArray (left: BladeArray) (right: BladeArray) (outType: IRType) : BladeAr
             out
     | _ -> raise (ArrayOpUnsupported "gram: output type is not an array")
 
-// ============================================================================
-// §7 Compound (masked product space, formalism 4.5) — construction + reads
-// ============================================================================
-// The value-space twin of runtime `Compound<T,RANK>` + `compound_index_t`
-// (cpp/nested_array_types.hpp:133, index_types.h:235). A compound bundles the
-// rank<->tuple bijection over a masked product space with a compact backing
-// buffer holding only the present cells (each followed by its trailing block).
-// Every read/reduce mirrors a specific C++ helper byte-for-byte (§4.7 pin-points):
-//   full scalar   C((i,j))       -> data[linearize(coords)*trail + t]
-//   trailing row  C((i,j), _)    -> the trailing block (Array<T,1|2>)
-//   partial       C((i,_)) etc.  -> residual dense window / gather OR residual
-//                                   Compound (make_partial_* family)
-//   reduce/sort/…                -> walk the compact buffer (.data)
+/// matmul(left, right) = left * right:  R[i][j] = sum_t left[i][t]*right[t][j]
+/// (materializeMatmulForm; C++ side is one `blade_linalg::blade_matmul` call).
+/// Always dense m x n -- A*A is not symmetric, so no same-array claim like
+/// gram's. The t-fold accumulates ascending from the element zero, matching
+/// both the shim's native fallback and the synthesized triple loop it
+/// replaced -- the agreement tests/InterpDiff.fs checks.
+let matmulArray (left: BladeArray) (right: BladeArray) (outType: IRType) : BladeArray =
+    match outType with
+    | ArrayElem outArr ->
+        let outElem = outArr.ElemType
+        let m = if left.Extents.Length >= 1 then left.Extents.[0] else 0L
+        let kk = if left.Extents.Length >= 2 then left.Extents.[1] else 0L
+        let n = if right.Extents.Length >= 2 then right.Extents.[1] else 0L
+        let zero = zeroOfElemTy outElem
+        let extents = [| m; n |]
+        let out = allocDense outElem outArr.IndexTypes extents
+        for i in 0L .. m - 1L do
+            for j in 0L .. n - 1L do
+                let mutable acc = zero
+                for t in 0L .. kk - 1L do
+                    let lv = readCell left [ i; t ]
+                    let rv = readCell right [ t; j ]
+                    acc <- N.evalBinOp IRAdd acc (N.evalBinOp IRMul lv rv)
+                writeCell out [ i; j ] acc
+        out
+    | _ -> raise (ArrayOpUnsupported "matmul: output type is not an array")
 
-/// Flatten a rank-N Bool mask array to row-major bits — the presence vector a
+/// solve(A, b) -> x with A.x = b: the general dense linear solve by
+/// partial-pivoted LU (`materializeSolveForm`; the C++ side is the same loop
+/// nest, or one `blade_lapack::blade_solve` call under the LAPACK gate).
+///
+/// THE OPERATION-FOR-OPERATION TWIN of the emitted native arm, and unlike
+/// `eighArrays` this one IS a byte-identity claim: `blade test interp math`
+/// compares this function's printed output against the compiled program's,
+/// digit for digit. The two texts are written to be diffable by eye --
+///
+///   * one row-major working copy `lu` of A, so A itself is never factorized
+///     in place and `solve(A, b)` twice over one A answers twice the same;
+///   * x starts as a copy of b, and the forward substitution is FUSED INTO the
+///     elimination (each multiplier is applied to the right-hand side the
+///     moment it is formed), so no permutation vector is replayed later;
+///   * every update spelled `a - f * b`, never a compound assignment, so the
+///     two implementations' arithmetic reads as the same sequence of
+///     roundings. .NET never fuses a multiply-add on its own, and the C++ side
+///     is compiled with `-ffp-contract=off` by the differential harnesses, so
+///     the two agree exactly rather than nearly.
+///
+/// THE PIVOT RULE: scan column k downward from row k and keep the FIRST row
+/// attaining the maximum |value| -- a STRICT `>`, so a later equal magnitude
+/// never displaces an earlier one. That single character is the whole tie-break
+/// and it matches both the emitted C++ and LAPACK's own `idamax`.
+///
+/// SINGULARITY is an EXACT `= 0.0` test on the chosen pivot, never an epsilon:
+/// an epsilon would be a tunable this function and the C++ arm would have to
+/// agree on across a difference of two roundings, which is precisely the class
+/// of disagreement the design removes. The panic is BL8007 with
+/// `CodeGen.solveSingularMessage`, spelled here as a literal because the
+/// compiler's CodeGen module is not referenced from the interpreter -- the two
+/// copies are kept in step by the corpus abort pin that reads both.
+let solveArray (matrix: BladeArray) (rhs: BladeArray) (outType: IRType) : BladeArray =
+    match outType with
+    | ArrayElem outArr ->
+        let n = if matrix.Extents.Length >= 1 then int matrix.Extents.[0] else 0
+        // Working copy + right-hand side, in the compiled arm's own order: the
+        // whole row of `lu`, then that row's `x` cell.
+        let lu = Array.zeroCreate<float> (n * n)
+        let x = Array.zeroCreate<float> n
+        for i in 0 .. n - 1 do
+            for j in 0 .. n - 1 do
+                lu.[i * n + j] <- toF64v (indexArray matrix [VInt (int64 i); VInt (int64 j)])
+            x.[i] <- toF64v (indexArray rhs [VInt (int64 i)])
+        for k in 0 .. n - 1 do
+            // Partial pivot: first maximal |value|, strict >.
+            let mutable p = k
+            let mutable big = abs lu.[k * n + k]
+            for i in k + 1 .. n - 1 do
+                let m = abs lu.[i * n + k]
+                if m > big then
+                    big <- m
+                    p <- i
+            if lu.[p * n + k] = 0.0 then
+                raise (InterpPanic ("BL8007",
+                                    "solve(A, b): the matrix is SINGULAR -- LU factorization found an exactly-zero pivot",
+                                    None, 0))
+            if p <> k then
+                for j in 0 .. n - 1 do
+                    let t = lu.[k * n + j]
+                    lu.[k * n + j] <- lu.[p * n + j]
+                    lu.[p * n + j] <- t
+                let xt = x.[k] in x.[k] <- x.[p]; x.[p] <- xt
+            for i in k + 1 .. n - 1 do
+                let f = lu.[i * n + k] / lu.[k * n + k]
+                lu.[i * n + k] <- f
+                for j in k + 1 .. n - 1 do
+                    lu.[i * n + j] <- lu.[i * n + j] - f * lu.[k * n + j]
+                x.[i] <- x.[i] - f * x.[k]
+        // Back substitution, k descending.
+        for kk in n .. -1 .. 1 do
+            let k = kk - 1
+            let mutable s = x.[k]
+            for j in k + 1 .. n - 1 do
+                s <- s - lu.[k * n + j] * x.[j]
+            x.[k] <- s / lu.[k * n + k]
+        let out = allocDense outArr.ElemType outArr.IndexTypes [| int64 n |]
+        for i in 0 .. n - 1 do writeCell out [ int64 i ] (VFloat x.[i])
+        out
+    | _ -> raise (ArrayOpUnsupported "solve: output type is not an array")
+
+/// eigh(S) -> (Q, LAM): symmetric eigendecomposition by cyclic two-sided
+/// Jacobi. Q's columns are the eigenvectors, LAM is descending, each Q column
+/// sign-fixed so the first row attaining the maximum |entry| is positive --
+/// the conventions `MathDecls.eighDecl` / `blade_lapack`'s `emit_values_desc`
+/// / `emit_vectors_desc` document and reproduce.
+///
+/// A DELIBERATE COPY of `BladeMath.Jacobi.eigh` (src/math/Jacobi.fs), not a
+/// call into it: BladeMath is a separate fsproj the compiler never
+/// references, so it can serve as the value oracle for the generated code.
+/// Kept in step by `blade test diff-oracle math`.
+///
+/// `IREigh` only exists when LAPACK was available at elaboration time; gate
+/// off, `math.eigh` expands to synthesized Jacobi source the interpreter
+/// walks as ordinary code, so this function runs only in a gate-ON run --
+/// NEVER use it for byte-identity (`interp`/`diff-oracle` run gate-off,
+/// since an eigensolver's output is not unique). It is not a differential
+/// twin of the LAPACK route: the two agree on eigenvalues and the two
+/// normalised freedoms, not bit for bit, and not on the degenerate-subspace basis.
+///
+/// The operand is read through `indexArray`, routing a compact rank-2 group
+/// to the canonical reader. Complex is declined by name (no oracle behind
+/// it); the compiled `?heev` / `?hpev` route covers that case.
+let eighArrays (operand: BladeArray) (outType: IRType) : BladeArray * BladeArray =
+    let (qTy, lamTy) =
+        match outType with
+        | IRTTuple [ qT; lamT ] ->
+            (match qT, lamT with
+             | ArrayElem qa, ArrayElem la -> (qa, la)
+             | _ -> raise (ArrayOpUnsupported "eigh: result type is not a pair of arrays"))
+        | _ -> raise (ArrayOpUnsupported "eigh: result type is not a 2-tuple")
+    (match elemThrough operand.ElemType with
+     | Some (ETComplex64 | ETComplex128) ->
+         raise (ArrayOpUnsupported "eigh: the interpreter implements the REAL symmetric case only; a Hermitian (complex) eigendecomposition is available from the compiled LAPACK route (?heev / ?hpev) and is deliberately not re-implemented here without an oracle behind it")
+     | _ -> ())
+    let n = if operand.Extents.Length >= 1 then int operand.Extents.[0] else 0
+    // Working copy of the symmetric input + the eigenvector accumulator,
+    // identical to the oracle's `aw` / `q` (and to eighDecl's `aw` / `qm`).
+    let aw = Array2D.init n n (fun i j -> toF64v (indexArray operand [VInt (int64 i); VInt (int64 j)]))
+    let qm = Array2D.init n n (fun i j -> if i = j then 1.0 else 0.0)
+    // `MathDecls.defaultSweeps` (10), duplicated here for the same
+    // oracle-independence reason the algorithm is. The intrinsic only ever
+    // means the DEFAULT schedule: the planned elaborator rule keeps the
+    // synthesized Jacobi path whenever an explicit SWEEPS argument is given,
+    // because a stated sweep budget is a request for that algorithm and LAPACK
+    // has no analogue of it. If that rule ever changes, this constant is the
+    // other half of the change.
+    let sweeps = 10
+    for _sweep in 1 .. sweeps do
+        for p in 0 .. n - 2 do
+            for r in p + 1 .. n - 1 do
+                let apq = aw.[p, r]
+                let app = aw.[p, p]
+                let aqq = aw.[r, r]
+                let conv = abs apq <= 1.0e-15 * sqrt (abs app * abs aqq + 1.0e-300)
+                let theta = (aqq - app) / (if conv then 1.0 else 2.0 * apq)
+                let tt = (if theta >= 0.0 then 1.0 else -1.0) / (abs theta + sqrt (1.0 + theta * theta))
+                let cs = if conv then 1.0 else 1.0 / sqrt (1.0 + tt * tt)
+                let sn = if conv then 0.0 else cs * tt
+                // AW <- AW.R (columns p, r), then AW <- R^T.AW (rows p, r).
+                for i in 0 .. n - 1 do
+                    let tp = aw.[i, p]
+                    let tq = aw.[i, r]
+                    aw.[i, p] <- cs * tp - sn * tq
+                    aw.[i, r] <- sn * tp + cs * tq
+                for i in 0 .. n - 1 do
+                    let tp = aw.[p, i]
+                    let tq = aw.[r, i]
+                    aw.[p, i] <- cs * tp - sn * tq
+                    aw.[r, i] <- sn * tp + cs * tq
+                // Accumulate the column rotation into Q.
+                for i in 0 .. n - 1 do
+                    let tp = qm.[i, p]
+                    let tq = qm.[i, r]
+                    qm.[i, p] <- cs * tp - sn * tq
+                    qm.[i, r] <- sn * tp + cs * tq
+    let lam = Array.init n (fun j -> aw.[j, j])
+    // Selection sort descending (ties keep original order) + Q column swaps.
+    for kk in 0 .. n - 1 do
+        let mutable best = kk
+        for j in kk + 1 .. n - 1 do
+            if lam.[j] > lam.[best] then best <- j
+        let tl = lam.[kk] in lam.[kk] <- lam.[best]; lam.[best] <- tl
+        for i in 0 .. n - 1 do
+            let tq = qm.[i, kk] in qm.[i, kk] <- qm.[i, best]; qm.[i, best] <- tq
+    // Sign fix: first row attaining max |entry| per column made positive.
+    for j in 0 .. n - 1 do
+        let mutable bigv = 0.0
+        let mutable best = 0
+        for i in 0 .. n - 1 do
+            let mag = abs qm.[i, j]
+            if mag > bigv then
+                best <- i
+                bigv <- mag
+        let flip = if qm.[best, j] < 0.0 then -1.0 else 1.0
+        for i in 0 .. n - 1 do qm.[i, j] <- qm.[i, j] * flip
+    let qOut = allocDense qTy.ElemType qTy.IndexTypes [| int64 n; int64 n |]
+    let lamOut = allocDense lamTy.ElemType lamTy.IndexTypes [| int64 n |]
+    for i in 0 .. n - 1 do
+        for j in 0 .. n - 1 do writeCell qOut [ int64 i; int64 j ] (VFloat qm.[i, j])
+    for j in 0 .. n - 1 do writeCell lamOut [ int64 j ] (VFloat lam.[j])
+    (qOut, lamOut)
+
+// 7 Compound (masked product space, formalism 4.5): construction + reads.
+// The value-space twin of runtime `Compound<T,RANK>` + `compound_index_t`
+// (cpp/nested_array_types.hpp:133, index_types.h:235): the rank<->tuple
+// bijection over a masked product space plus a compact backing buffer
+// holding only the present cells (each followed by its trailing block).
+// Every read/reduce mirrors a C++ helper byte-for-byte (4.7): full scalar
+// C(i,j) -> data[linearize(coords)*trail + t]; trailing row -> the trailing
+// block; reduce/sort/... -> walk .data. (Partial/wildcard reads are
+// SparseIdx's job: 7b's sparsePartial.)
+
+/// Flatten a rank-N Bool mask array to row-major bits -- the presence vector a
 /// compound_index_t enumerates (pool_base flatten, genCompoundIndexFromMask).
 let maskToBits (arr: BladeArray) : bool[] = flatLeaves arr |> Array.map toBoolv
 
-/// Row-major (lex) flat offset of a tuple over the masked grid — mirrors
-/// compound_index_t::mask_offset (index_types.h:283): off = Σ off*extents[d]+t[d].
+/// Row-major (lex) flat offset of a tuple over the masked grid -- mirrors
+/// compound_index_t::mask_offset (index_types.h:283): off = off*extents[d]+t[d].
 let compoundMaskOffset (leadExtents: int64[]) (tuple: int64[]) : int64 =
     let mutable off = 0L
     for d in 0 .. leadExtents.Length - 1 do off <- off * leadExtents.[d] + tuple.[d]
@@ -1114,96 +1431,15 @@ let compoundRow (cv: CompoundValue) (coords: int64[]) : Value =
           Extents = [| cv.TrailingStride |]
           Data = storeOfValues cv.ElemType vs }
 
-/// Row-major unflatten of `flat` over `extents` (into `out`).
-let private unflatten (extents: int64[]) (flat: int64) (out: int64[]) : unit =
-    let mutable rem = flat
-    for d = extents.Length - 1 downto 0 do
-        out.[d] <- rem % extents.[d]
-        rem <- rem / extents.[d]
-
-/// Partial (residual) compound indexing (formalism 4.5): pinning some axes and
-/// leaving `freePos` free. Unifies the four C++ reconstitution helpers
-/// (make_partial_window / _compound / _gather*) — the residual's lex enumeration
-/// over the free axes, gathered from the parent via linearize, agrees cell-for-
-/// cell with the shared-window slice, so ONE gather covers prefix + scattered.
-///   residual rank 1  -> dense Array<T,1> (trail 1) or Array<T,2> (trail>1)
-///   residual rank>=2 -> residual Compound<T,RR> (its own materialized index)
-let compoundPartial (cv: CompoundValue) (pinned: (int * int64) list) (freePos: int list) : Value =
-    let rr = List.length freePos
-    let itrail = int cv.TrailingStride
-    let freeArr = Array.ofList freePos
-    let freeExtents = freeArr |> Array.map (fun p -> cv.LeadExtents.[p])
-    // Recombine a free-axis coordinate tuple with the pinned axes into a full
-    // parent tuple.
-    let recombine (freeCoords: int64[]) : int64[] =
-        let full = Array.zeroCreate cv.LeadRank
-        pinned |> List.iter (fun (pos, v) -> full.[pos] <- v)
-        Array.iteri (fun d p -> full.[p] <- freeCoords.[d]) freeArr
-        full
-    if rr = 1 then
-        // Dense residual over the ONE free axis: gather present cells in
-        // free-axis order (make_partial_window / _gather_dense[_trail]).
-        let freeAxis = freeArr.[0]
-        let ranks = ResizeArray<int>()
-        let mutable v = 0L
-        while v < cv.LeadExtents.[freeAxis] do
-            let full = recombine [| v |]
-            let off = compoundMaskOffset cv.LeadExtents full
-            if cv.Mask.[int off] then ranks.Add(compoundLinearize cv full)
-            v <- v + 1L
-        if itrail = 1 then
-            let vs = ranks.ToArray() |> Array.map (fun r -> compactCell cv.Data r)
-            VArray
-                { ElemType = cv.ElemType
-                  IndexTypes = trailingIndexTypes cv
-                  Extents = [| int64 vs.Length |]
-                  Data = storeOfValues cv.ElemType vs }
-        else
-            // rank-2 dense {present cells, trailing extent}: each present cell's
-            // whole trailing block (make_partial_window_trail / _gather_dense_trail).
-            let rows =
-                ranks.ToArray()
-                |> Array.map (fun r ->
-                    let vs = Array.init itrail (fun t -> compactCell cv.Data (r * itrail + t))
-                    storeOfValues cv.ElemType vs)
-            VArray
-                { ElemType = cv.ElemType
-                  IndexTypes = []
-                  Extents = [| int64 rows.Length; cv.TrailingStride |]
-                  Data = SNested rows }
-    else
-        // Residual COMPOUND: build a fresh sub-index over the free axes, gather
-        // each present residual cell's trailing block from the parent.
-        let subtotal = freeExtents |> Array.fold (*) 1L
-        let submask = Array.zeroCreate (int subtotal)
-        let fc = Array.zeroCreate rr
-        for flat in 0 .. int subtotal - 1 do
-            unflatten freeExtents (int64 flat) fc
-            let full = recombine fc
-            submask.[flat] <- cv.Mask.[int (compoundMaskOffset cv.LeadExtents full)]
-        let (subTable, subRankOf, subCard) = buildCompoundIndex freeExtents submask
-        let compact = Array.create (int subCard * itrail) VUnit
-        for r in 0 .. int subCard - 1 do
-            let full = recombine subTable.[r]
-            let prank = compoundLinearize cv full
-            for t in 0 .. itrail - 1 do
-                compact.[r * itrail + t] <- compactCell cv.Data (prank * itrail + t)
-        VCompound
-            { ElemType = cv.ElemType
-              IndexTypes = cv.IndexTypes
-              LeadRank = rr
-              LeadExtents = freeExtents
-              Mask = submask
-              Table = subTable
-              RankOf = subRankOf
-              Cardinality = subCard
-              TrailingStride = cv.TrailingStride
-              Data = storeOfValues cv.ElemType compact }
+// There is no compoundPartial: partial/wildcard reads are a SparseIdx
+// feature (sparsePartial in 7b below). A CompoundPartial classification on a
+// compound head is an internal invariant break, backstopped at the read
+// sites in Loops.fs / CodeGen's compoundRead.
 
 /// The compact present values of a compound as a plain rank-1 dense array
-/// (cardinality*trailing_stride cells, buffer order) — the operand form the
+/// (cardinality*trailing_stride cells, buffer order) -- the operand form the
 /// eager ops (sort/reduce/set-op) consume, matching CodeGen's compound-operand
-/// path which walks `.data` (§4.1, genReduceBinding reduceBound §1936).
+/// path which walks `.data` (4.1, genReduceBinding reduceBound 1936).
 let compoundToDense (cv: CompoundValue) : BladeArray =
     let n = int cv.Cardinality * int cv.TrailingStride
     let vs = Array.init n (fun i -> compactCell cv.Data i)
@@ -1213,15 +1449,15 @@ let compoundToDense (cv: CompoundValue) : BladeArray =
       Data = storeOfValues cv.ElemType vs }
 
 /// reduce over a compound's present cells (init required for the always-emitted
-/// empty guard; without init, empty panics — matching genReduceBinding).
+/// empty guard; without init, empty panics -- matching genReduceBinding).
 let compoundReduce (cv: CompoundValue) (fold: Value -> Value -> Value) (init: Value option) : Value =
     reduceArray (compoundToDense cv) fold init
 
-/// `S <|:> D` compound-left allocated fallback: a DENSE array shaped like D, in
-/// which each of S's PRESENT leading cells overwrites its trailing block onto a
-/// copy of D (absent leading cells keep D — the SQL sparse-overlay regime,
-/// genFallbackMaterialize compound-left arm, CodeGen.fs:9398-9449). Single
-/// trailing dim only (the compiler-wide compound gate).
+/// `S <|:> D` compound-left allocated fallback: a dense array shaped like D,
+/// in which each of S's present leading cells overwrites its trailing block
+/// onto a copy of D (absent leading cells keep D: the SQL sparse-overlay
+/// regime, genFallbackMaterialize compound-left arm, CodeGen.fs:9398-9449).
+/// Single trailing dim only (the compiler-wide compound gate).
 let fallbackCompoundLeft (cvS: CompoundValue) (d: BladeArray) : BladeArray =
     let result = copyBladeArray d
     let itrail = int cvS.TrailingStride
@@ -1232,20 +1468,157 @@ let fallbackCompoundLeft (cvS: CompoundValue) (d: BladeArray) : BladeArray =
             writeCell result coords (compactCell cvS.Data (r * itrail + tr))
     result
 
-// ============================================================================
-// §8 group_keys / group_by (CSR grouping) — build + read
-// ============================================================================
-// group_keys builds a CSR structure (offsets + group-contiguous member perm);
-// group_by gathers each group's values into a ragged array. Bucket ORDER is the
-// subtle part (§4.2/4.8): first-appearance (dynamic / multi-key), numeric-value
-// (positional Idx<N>), or enum-list-position (EnumIdx). CodeGen stores NO keys
-// array — the perm recovers everything (genGroupKeysBinding, CodeGen.fs:7511).
+// 7b Sparse (explicit key enumeration, formalism 3.5): construction + reads.
+// The value-space twin of runtime `Sparse<T,RANK>` + `sparse_index_t`
+// (cpp/nested_array_types.hpp, index_types.h): compound (7) minus the grid.
+// Keys stay in given order (iteration order == key order), the reverse map
+// keys structurally on the tuple (TupleKeyComparer -- no grid offset
+// exists), and every partial read is a gather over the entry list.
+
+/// Build the rank<->tuple bijection from an explicit key list in GIVEN order.
+/// Duplicate keys panic (sparse_index_t's ctor throws -- the bijection would
+/// be ill-defined); InterpDiff parity requires the same failure here.
+let buildSparseIndex (keys: int64[][]) : Dictionary<int64[], int> * int64 =
+    let rankOf = Dictionary<int64[], int>(TupleKeyComparer())
+    keys |> Array.iteri (fun r key ->
+        if rankOf.ContainsKey key then
+            raise (InterpPanic ("BL8005", "SparseIdx: duplicate key tuple", None, 0))
+        rankOf.[key] <- r)
+    (rankOf, int64 keys.Length)
+
+/// Build a Sparse VALUE from a values array + an explicit key list (the
+/// sparse() constructor). `arrType`'s IxKSparse slot carries the key tuple
+/// arity. The values' LEADING dimension is the key axis (one cell per key, in
+/// key order); remaining dims fold into the trailing stride, mirroring
+/// buildCompound's split. No scatter: the flattened values pool IS the
+/// compact buffer's key-major layout, so this is a straight copy.
+let buildSparse (arrType: IRArrayType) (values: BladeArray) (keys: int64[][])
+                (rankOf: Dictionary<int64[], int>) (card: int64) : SparseValue =
+    let leadRank =
+        arrType.IndexTypes
+        |> List.tryFind (fun ix -> ix.IxKind = IxKSparse)
+        |> Option.map (fun ix -> ix.Rank)
+        |> Option.defaultValue (if keys.Length > 0 then keys.[0].Length else 1)
+    if values.Extents.Length < 1 || values.Extents.[0] <> card then
+        raise (InterpPanic ("BL8001", "sparse(values, keys): values length does not match key count", None, 0))
+    let trail =
+        [ 1 .. values.Extents.Length - 1 ]
+        |> List.fold (fun acc d -> acc * values.Extents.[d]) 1L
+    let valueCells = flatLeaves values
+    { ElemType = arrType.ElemType
+      IndexTypes = arrType.IndexTypes
+      LeadRank = leadRank
+      Keys = keys
+      RankOf = rankOf
+      Cardinality = card
+      TrailingStride = trail
+      Data = storeOfValues arrType.ElemType (Array.sub valueCells 0 (int card * int trail)) }
+
+/// linearize(tuple) -> rank via the structural hash (sparse_index_t::linearize
+/// = tuple_to_rank.at). A missing key is a program error (C++ .at() throws).
+let sparseLinearize (sv: SparseValue) (coords: int64[]) : int =
+    match sv.RankOf.TryGetValue coords with
+    | true, r -> r
+    | _ -> raise (InterpPanic ("BL8003", "sparse read: key tuple not present in key set", None, 0))
+
+let private sparseTrailingIndexTypes (sv: SparseValue) : IRIndexType list =
+    match sv.IndexTypes with _ :: t -> t | [] -> []
+
+/// Full-key SCALAR read (Sparse::operator()).
+let sparseFullScalar (sv: SparseValue) (coords: int64[]) (trailOffset: int64) : Value =
+    let r = sparseLinearize sv coords
+    compactCell sv.Data (r * int sv.TrailingStride + int trailOffset)
+
+/// Trailing-ROW sub-view for a resolved key (Sparse::row).
+let sparseRow (sv: SparseValue) (coords: int64[]) : Value =
+    let r = sparseLinearize sv coords
+    let itrail = int sv.TrailingStride
+    let vs = Array.init itrail (fun t -> compactCell sv.Data (r * itrail + t))
+    VArray
+        { ElemType = sv.ElemType
+          IndexTypes = sparseTrailingIndexTypes sv
+          Extents = [| sv.TrailingStride |]
+          Data = storeOfValues sv.ElemType vs }
+
+/// Partial (residual) sparse indexing: always a gather -- one pass over Keys in
+/// key order keeping the entries whose pinned axes match. Residual keys are the
+/// matches' free-axis coordinates (automatically distinct, parent key order).
+///   residual rank 1  -> dense Array<T,1> (trail 1) or Array<T,2> (trail>1)
+///   residual rank>=2 -> residual Sparse (its own key table, key order)
+let sparsePartial (sv: SparseValue) (pinned: (int * int64) list) (freePos: int list) : Value =
+    let rr = List.length freePos
+    let itrail = int sv.TrailingStride
+    let freeArr = Array.ofList freePos
+    let matches =
+        [| for r in 0 .. int sv.Cardinality - 1 do
+             let key = sv.Keys.[r]
+             if pinned |> List.forall (fun (pos, v) -> key.[pos] = v) then
+                 yield (r, freeArr |> Array.map (fun p -> key.[p])) |]
+    if rr = 1 then
+        if itrail = 1 then
+            let vs = matches |> Array.map (fun (r, _) -> compactCell sv.Data r)
+            VArray
+                { ElemType = sv.ElemType
+                  IndexTypes = sparseTrailingIndexTypes sv
+                  Extents = [| int64 vs.Length |]
+                  Data = storeOfValues sv.ElemType vs }
+        else
+            // rank-2 dense {matches, trailing extent}: each match's whole
+            // trailing block (make_sparse_gather_dense_trail).
+            let rows =
+                matches
+                |> Array.map (fun (r, _) ->
+                    let vs = Array.init itrail (fun t -> compactCell sv.Data (r * itrail + t))
+                    storeOfValues sv.ElemType vs)
+            VArray
+                { ElemType = sv.ElemType
+                  IndexTypes = []
+                  Extents = [| int64 rows.Length; sv.TrailingStride |]
+                  Data = SNested rows }
+    else
+        // Residual SPARSE: sub-key table in parent key order, gathered blocks.
+        let subKeys = matches |> Array.map snd
+        let (subRankOf, subCard) = buildSparseIndex subKeys
+        let compact = Array.create (int subCard * itrail) VUnit
+        matches |> Array.iteri (fun i (r, _) ->
+            for t in 0 .. itrail - 1 do
+                compact.[i * itrail + t] <- compactCell sv.Data (r * itrail + t))
+        VSparse
+            { ElemType = sv.ElemType
+              IndexTypes = sv.IndexTypes
+              LeadRank = rr
+              Keys = subKeys
+              RankOf = subRankOf
+              Cardinality = subCard
+              TrailingStride = sv.TrailingStride
+              Data = storeOfValues sv.ElemType compact }
+
+/// The compact values of a sparse as a plain rank-1 dense array (buffer/key
+/// order) -- the operand form the eager ops consume, mirroring compoundToDense.
+let sparseToDense (sv: SparseValue) : BladeArray =
+    let n = int sv.Cardinality * int sv.TrailingStride
+    let vs = Array.init n (fun i -> compactCell sv.Data i)
+    { ElemType = sv.ElemType
+      IndexTypes = []
+      Extents = [| int64 n |]
+      Data = storeOfValues sv.ElemType vs }
+
+/// reduce over a sparse's cells (key order; init drives the empty guard).
+let sparseReduce (sv: SparseValue) (fold: Value -> Value -> Value) (init: Value option) : Value =
+    reduceArray (sparseToDense sv) fold init
+
+// 8 group_keys / group_by (CSR grouping): build + read. group_keys builds a
+// CSR structure (offsets + group-contiguous member perm); group_by gathers
+// each group's values into a ragged array. Bucket order is the subtle part
+// (4.2/4.8): first-appearance (dynamic / multi-key), numeric-value
+// (positional Idx<N>), or enum-list-position (EnumIdx). CodeGen stores no
+// keys array -- the perm recovers everything (genGroupKeysBinding, CodeGen.fs:7511).
 
 /// The three group-key bucketing regimes, dispatched on the group_keys binding's
-/// IRTGroupKeys type (single key) or key arity (>1 ⇒ dynamic tuple-hash).
-///   GKDynamic      — Case 3 / multi-key: bucket = first-appearance ordinal.
-///   GKPositional n — Case 1 (Idx<N> keys): bucket = the integer key value.
-///   GKEnum values  — Case 2 (EnumIdx): bucket = the key's position in `values`.
+/// IRTGroupKeys type (single key) or key arity (>1 = dynamic tuple-hash).
+///   GKDynamic      -- Case 3 / multi-key: bucket = first-appearance ordinal.
+///   GKPositional n -- Case 1 (Idx<N> keys): bucket = the integer key value.
+///   GKEnum values  -- Case 2 (EnumIdx): bucket = the key's position in `values`.
 type GroupKeyCase =
     | GKDynamic
     | GKPositional of ngroups: int
@@ -1304,7 +1677,7 @@ let buildGroupKeys (keyArrays: BladeArray list) (gkCase: GroupKeyCase) : GroupKe
 
 /// group_by(vals, gk): gather each group's values (`vals[perm[offsets[g]+k]]`,
 /// input order) into a ragged rank-2 array (genGroupByBinding, CodeGen.fs:8767).
-/// Extents = [ngroups; 0] — the inner is ragged, print-bound 0 (auto-print → []).
+/// Extents = [ngroups; 0] -- the inner is ragged, print-bound 0 (auto-print -> []).
 let buildGroupBy (idxTys: IRIndexType list) (gk: GroupKeysValue) (vals: BladeArray) : BladeArray =
     let ngroups = gk.Offsets.Length - 1
     let rows =
@@ -1319,27 +1692,21 @@ let buildGroupBy (idxTys: IRIndexType list) (gk: GroupKeysValue) (vals: BladeArr
       Extents = [| int64 ngroups; 0L |]
       Data = SRagged (rows, lens, gk.Offsets) }
 
-// ============================================================================
-// §PRINT: byte-parity array binding printer (mirrors CodeGen genPrintStatements)
-// ============================================================================
+// PRINT: byte-parity array binding printer (mirrors CodeGen genPrintStatements,
+// CodeGen.fs:9889): genPrintArrayFlat (ranks 1-4, else a rank-N placeholder)
+// or genPrintArraySymAware (symmetric ranks 2-8). Sym-aware, ragged, and
+// non-scalar-element paths raise ArrayOpUnsupported (gate SKIPs). Called by
+// Print.printBindings in place of its PrintUnsupported raise, appending to
+// the same StringBuilder (no timing line -- printBindings emits that once).
 //
-// A top-level array binding prints via genPrintArrayFlat (ranks 1-4, else a
-// rank-N placeholder) or genPrintArraySymAware (symmetric ranks 2-8), per the
-// genPrintStatements dispatch (CodeGen.fs:9889). This mirrors the FLAT path
-// byte-for-byte; the sym-aware, ragged, and non-scalar-element paths are LATER
-// (raise ArrayOpUnsupported ⇒ the gate SKIP-classifies, exactly as codegen's
-// comment-only / M2.5 cases are handled). Print.printBindings calls this in
-// place of its current PrintUnsupported raise for array bindings, appending to
-// the SAME StringBuilder (no timing line here — printBindings emits that once).
-//
-// FLAT FORMAT (genPrintArrayFlat, verified against the compiled binary):
+// Flat format (genPrintArrayFlat, verified against the compiled binary):
 //   rank 1-3 :  name = [c0, c1, c2, ...]\n     (row-major, ", " between cells)
 //   rank 4   :  name (E0xE1xE2xE3):\n
-//               ␠␠name[i][j] = [ ... ]\n        (one line per (i,j); 2-space lead)
+//               ..name[i][j] = [ ... ]\n        (one line per (i,j); 2-space lead)
 //   rank 5+  :  name = <rank-N array>\n
 //   rank 0   :  name = <rank-0>\n
 // Each cell renders as `cout << name[...]` would for the element's C++ static
-// type — i.e. formatFloat15 for Float64, etc.
+// type (formatFloat15 for Float64, etc).
 
 let private isPrintableScalarEt (et: ElemType) : bool =
     match et with
@@ -1410,8 +1777,35 @@ let private forEachCoordRowMajor (extents: int64[]) (f: int64 list -> unit) : un
                 i <- i + 1L
     loop 0 []
 
-/// Flat ranks 1-3: `name = [c0, c1, ...]` row-major, ", "-separated, `]`, newline.
+/// Rank 2: `name = [[a, b], [c, d]]` -- the twin of CodeGen.genPrintNested2, and
+/// byte-identical to it. `innerBound` takes the outer coordinate because a
+/// compact group's row shrinks with it (`extents[1] - i`, minus one more when
+/// the group is strict); a dense pair ignores its argument.
+let private emitNested2 (sb: StringBuilder) (name: string) (arr: BladeArray) (et: ElemType)
+                        (outerBound: int64) (innerBound: int64 -> int64) : unit =
+    sb.Append(name).Append(" = [") |> ignore
+    let mutable i = 0L
+    while i < outerBound do
+        if i > 0L then sb.Append(", ") |> ignore
+        sb.Append("[") |> ignore
+        let mutable first = true
+        let mutable j = 0L
+        while j < innerBound i do
+            if not first then sb.Append(", ") |> ignore
+            first <- false
+            sb.Append(formatCell et (readCell arr [ i; j ])) |> ignore
+            j <- j + 1L
+        sb.Append("]") |> ignore
+        i <- i + 1L
+    sb.Append("]").Append('\n') |> ignore
+
+/// Ranks 1 and 3: `name = [c0, c1, ...]` row-major, ", "-separated, `]`, newline.
+/// (Rank 2 goes through emitNested2 -- see its twin's note on why only that
+/// rank nests.)
 let private emitFlat123 (sb: StringBuilder) (name: string) (arr: BladeArray) (et: ElemType) : unit =
+    if arr.Extents.Length = 2 then
+        emitNested2 sb name arr et arr.Extents.[0] (fun _ -> arr.Extents.[1])
+    else
     sb.Append(name).Append(" = [") |> ignore
     let mutable first = true
     forEachCoordRowMajor arr.Extents (fun coords ->
@@ -1420,7 +1814,7 @@ let private emitFlat123 (sb: StringBuilder) (name: string) (arr: BladeArray) (et
         sb.Append(formatCell et (readCell arr coords)) |> ignore)
     sb.Append("]").Append('\n') |> ignore
 
-/// Rank 4: a header line then one `␠␠name[i][j] = [ ... ]` line per outer pair.
+/// Rank 4: a header line then one `  name[i][j] = [ ... ]` line per outer pair.
 let private emitRank4 (sb: StringBuilder) (name: string) (arr: BladeArray) (et: ElemType) : unit =
     let e = arr.Extents
     sb.Append(name).Append(" (")
@@ -1448,19 +1842,24 @@ let private emitRank4 (sb: StringBuilder) (name: string) (arr: BladeArray) (et: 
             j <- j + 1L
         i <- i + 1L
 
-/// Symmetric-aware print: mirror CodeGen.genPrintArraySymAware (CodeGen.fs:9791)
-/// EXACTLY. Iterate the compact (triangular / strict-triangular) index space in
-/// left-justified STORAGE coordinates — the bound at group component a is
-/// `extents[d] - Σ(prior group vars) - a*strictConst` (strictConst = 1 for
-/// antisymmetric, 0 for symmetric/Hermitian) — and read each RAW stored cell
-/// (`name[i][j]...`, canonical by construction so no fold on the print path).
-/// Framing is identical to the flat printer: `name = [c0, c1, ...]\n`.
+/// Symmetric-aware print: mirrors CodeGen.genPrintArraySymAware (CodeGen.fs:9791)
+/// exactly. Iterates the compact (triangular/strict-triangular) index space in
+/// left-justified storage coordinates -- bound at group component a is
+/// `extents[d] - sum(prior group vars) - a*strictConst` (strictConst 1 for
+/// antisym, 0 for sym/Hermitian) -- reading each raw stored cell (canonical by
+/// construction, no fold needed). Framing matches the flat printer.
 let private emitSymAware (sb: StringBuilder) (name: string) (arr: BladeArray) (et: ElemType) : unit =
     // Per-dimension descriptor in flattened order: (dimIdx, priorGroupDims, strictConst).
     let dims = ResizeArray<int * int list * int>()
     let mutable dimIdx = 0
     for ix in arr.IndexTypes do
         let a = max 1 ix.Rank
+        // The interpreter print path must byte-match the compiled one; neither
+        // has a wreath walk, and a triangular walk here would print a cell set
+        // that no other path agrees with.
+        if ix.Symmetry = SymWreath then
+            failwith (Blade.IR.orbitStorageUnsupported "compact print (interp emitSymAware)"
+                                                       (Blade.IR.orbitLevelsOf ix))
         let isSym =
             ix.Symmetry = SymSymmetric || ix.Symmetry = SymAntisymmetric || ix.Symmetry = SymHermitian
         let strictConst = if ix.Symmetry = SymAntisymmetric then 1 else 0
@@ -1470,8 +1869,16 @@ let private emitSymAware (sb: StringBuilder) (name: string) (arr: BladeArray) (e
             dims.Add(dimIdx, priorDims, strictConst)
             dimIdx <- dimIdx + 1
     let rank = dims.Count
+    // Bound at one dimension: extent minus the prior group coords minus the
+    // strict constant -- the twin of genPrintArraySymAware's `boundAt`.
+    let boundAt (d: int) (coords: int64[]) =
+        let (dIdx, priorDims, strictConst) = dims.[d]
+        let sub = (priorDims |> List.sumBy (fun pd -> coords.[pd])) + int64 (List.length priorDims * strictConst)
+        arr.Extents.[dIdx] - sub
     if rank < 1 || rank > 8 then
         sb.Append(name).Append(" = <rank-").Append(string rank).Append(" array>").Append('\n') |> ignore
+    elif rank = 2 then
+        emitNested2 sb name arr et (boundAt 0 [| 0L; 0L |]) (fun i -> boundAt 1 [| i; 0L |])
     else
         sb.Append(name).Append(" = [") |> ignore
         let coords : int64[] = Array.zeroCreate rank
@@ -1516,24 +1923,43 @@ let printArrayBinding (b: IRBinding) (arr: BladeArray) (sb: StringBuilder) : uni
         match elemThrough arrType.ElemType with
         | Some et when isPrintableScalarEt et ->
             match arr.Data with
-            // A group_by result is SRagged too, but its auto-print is the DENSE
-            // flat print over Extents=[ngroups; 0] → the empty `name = []`
-            // (genPrintArrayFlat; inner extent 0 emits no cells). Route it to the
-            // flat emitter below rather than streaming the backing pool.
-            | SRagged _ when (match b.Value with IRGroupBy _ -> false | _ -> true) ->
-                // A ragged / DepIdx literal prints as its FLAT backing buffer
-                // (CodeGen's ragged auto-print streams the flat pool, row after
-                // row): `name = [v0, v1, ..., v_total]`. Byte-verified vs the
-                // compiled binary (index-types 018/023/077: r = [1, 2, ..., 9]).
+            // A group_by result is SRagged too, but its auto-print is the dense
+            // flat print over Extents=[ngroups; 0] (inner extent 0 emits no
+            // cells) -- route it to the flat emitter, not the backing pool.
+            | SRagged (rows, lens, _) when (match b.Value with IRGroupBy _ -> false | _ -> true) ->
+                // A ragged / DepIdx literal prints its rows nested, like every
+                // other rank-2 array (`lens[i]` bounds each row): the row
+                // boundary is the one thing the flat pool cannot show.
                 sb.Append(b.Name).Append(" = [") |> ignore
-                raggedFlatValues arr.Data
-                |> List.iteri (fun i v ->
+                rows
+                |> Array.iteri (fun i row ->
                     if i > 0 then sb.Append(", ") |> ignore
-                    sb.Append(formatCell et v) |> ignore)
+                    sb.Append("[") |> ignore
+                    // `lens` is the row bound the compiled printer walks; a row
+                    // store can hold more than its length (a peel or a provider
+                    // read backs rows with a shared buffer).
+                    raggedFlatValues row
+                    |> List.truncate (int lens.[i])
+                    |> List.iteri (fun j v ->
+                        if j > 0 then sb.Append(", ") |> ignore
+                        sb.Append(formatCell et v) |> ignore)
+                    sb.Append("]") |> ignore)
                 sb.Append("]").Append('\n') |> ignore
             | _ ->
                 let rank = arr.Extents.Length
-                if hasSymmetry arrType.IndexTypes && rank >= 2 && rank <= 8 then
+                // An OrbIdx (iterated-wreath) binding prints its POOL CELLS in
+                // storage (visitStream/orb_cell_count) order, with the framing
+                // every other array printer uses. Checked FIRST: a wreath
+                // record reads as "compact" below, but its store is flat and
+                // neither emitSymAware nor the dense emitters describe it.
+                if hasWreath arrType.IndexTypes then
+                    sb.Append(b.Name).Append(" = [") |> ignore
+                    let cells = wreathCellCount arr
+                    for k in 0 .. cells - 1 do
+                        if k > 0 then sb.Append(", ") |> ignore
+                        sb.Append(formatCell et (readCell arr [ int64 k ])) |> ignore
+                    sb.Append("]").Append('\n') |> ignore
+                elif hasSymmetry arrType.IndexTypes && rank >= 2 && rank <= 8 then
                     emitSymAware sb b.Name arr et
                 elif rank < 1 then
                     sb.Append(b.Name).Append(" = <rank-0>").Append('\n') |> ignore

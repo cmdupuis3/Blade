@@ -1,0 +1,39 @@
+// TEST: Nested Map Capture Unit Cancels (rejects)
+// REJECT-AT: codegen
+// ============================================================================
+// The ARRAY sibling of units/052. There the cancelling product sat directly in
+// a scalar transcendental call; here it feeds a NESTED elementwise map
+// (`exp <@> (i * w * ts)`) inside the kernel body -- so the rejection came
+// from the nested apply's OWN second pass, which runs while the ENCLOSING
+// param `w` is still an unresolved infer var contributing no units. The
+// element signature it judged was therefore provisional: exactly the
+// dimensioned capture's own (`day`), even though 1/day * day cancels.
+//
+// This is a codegen-stage reject-probe ON PURPOSE, and the stage is the whole
+// assertion: the units check must NOT refuse these two lines, so the only
+// thing left to refuse them is the KNOWN issue #3 ceiling (a nested loop
+// object in a kernel body -- REDUCE_OVER_A_DEFERRED_COMPUTATION /
+// LOOP_OBJECT_USED_AS_VALUE). If the unit walk ever regresses to rejecting
+// the cancellation, the probe is refused at LOWER instead and this pin fails.
+// Turn it into a value test when #3 lands. The residue twins that must still
+// reject are unit-errors/004 (real) and unit-errors/005 (complex).
+// ============================================================================
+Unit second
+Unit day = 86400 * second
+let i = complex(0.0, 1.0)
+let ts: Array<Float<day> like Idx<3>> = [1.0, 2.0, 3.0]
+let ws: Array<Float<1/day> like Idx<2>> = [1.0, 2.0]
+
+// complex: the lsdft.blade shape (e^{i w t}) -- this used to hard-reject BL3006
+let outC = ws <@> lambda(w) -> {
+    let e = exp <@> (i * w * ts)
+    reduce(e, (+))
+} |> compute
+
+// real: accepted before too, but only VACUOUSLY (the real broadcast never
+// stamped a unit at all, so nothing was checked); now the units are actually
+// computed and actually cancel.
+let outR = ws <@> lambda(w) -> {
+    let e = exp <@> (w * ts)
+    reduce(e, (+))
+} |> compute

@@ -1,0 +1,13 @@
+// TEST: Quantity Defaulted Slot Rejects Bare Supplied Arg (rejects)
+// ERROR: BL3010
+// The introduction-position privilege belongs to the DEFAULT only: a
+// caller explicitly supplying a value for a quantity-typed defaulted slot
+// must still ascribe it -- a bare argument is rejected exactly as for a
+// required quantity slot (units/033).
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit speed: mps
+function boost(v: Float<speed>, dv: Float<speed> = 1.0) -> Float<speed> = v + dv
+let v0 = 4.0: speed
+let bad = boost(v0, 2.5)

@@ -1,0 +1,14 @@
+// TEST: Lambda Defaults Through Kernel Seam
+// A lambda with a defaulted trailing param, applied through the <@> seam
+// with fewer rows than params: the omitted param becomes a body-entry let
+// over its default (evaluated per kernel invocation, with the row params
+// bound). The same lambda also direct-calls at full and reduced arity.
+type SIdx = Idx<3>
+let A: Array<Float like SIdx> = [1.0, 2.0, 3.0]
+let scaled = method_for(A) <@> lambda(x, s = 2.0) -> x * s |> compute
+let f = lambda(x, s = 3.0) -> x * s
+let g = f(5.0)
+let h = f(5.0, 10.0)
+// EXPECT: scaled = [2, 4, 6]
+// EXPECT: g = 15
+// EXPECT: h = 50

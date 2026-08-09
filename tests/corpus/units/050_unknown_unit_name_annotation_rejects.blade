@@ -1,0 +1,12 @@
+// TEST: Unknown Unit Name In Compound Annotation (rejects)
+// ERROR: BL3015
+// The annotation twin of 048: a name inside a COMPOUND unit annotation must
+// resolve. Only a numeric literal may appear undeclared (`Float<1/second>`);
+// an identifier has to name something already in scope. Previously this
+// degraded to the BARE type, which is worse than the declaration-site
+// fallback -- `v` carried no unit at all, so the `Float64<meter>` binding
+// below accepted it and every later check on `v` passed too.
+Unit meter
+Unit second
+let v: Float64<meter / secnd> = 3.0
+let m: Float64<meter> = v

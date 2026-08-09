@@ -180,24 +180,27 @@ let private parseComplexPair (s: string) : (float * float) option =
     else None
 
 /// Parse a complex array literal `[(r1,i1), (r2,i2), ...]`.
-/// Splits on `), (` pattern so element commas don't confuse the parser.
-let private parseComplexArray (s: string) : (float * float) list option =
+///
+/// Bracket-aware (splitTopLevelCommas already treats `(` and `[` as depth, so a
+/// pair's own comma never splits) and NESTED-TOLERANT: a rank-2 complex array
+/// prints its rows bracketed, `[[(1,0), (2,3)], [(4,0)]]`, and rows flatten
+/// row-major here. Same rule, and same reason, as tryParse1DBoolArray's
+/// flattening and the ExpectedArray2D matcher's flat fallback — whether a
+/// printer emits row brackets is not the pin author's choice.
+let rec private parseComplexArray (s: string) : (float * float) list option =
     let t = s.Trim()
     if t.StartsWith("[") && t.EndsWith("]") then
         let inner = t.Substring(1, t.Length - 2).Trim()
         if String.IsNullOrWhiteSpace(inner) then Some []
         else
-            // Split into element strings. Each element is `(re, im)`.
-            // A simple approach: rebuild parens after splitting.
-            let parts = inner.Split([|"), ("; "),("|], StringSplitOptions.None)
-            let normalized =
-                parts |> Array.mapi (fun i p ->
-                    let withOpen = if i = 0 then p else "(" + p
-                    let withClose = if i = parts.Length - 1 then withOpen else withOpen + ")"
-                    withClose)
-            let parsed = normalized |> Array.map parseComplexPair
-            if parsed |> Array.forall Option.isSome then
-                Some (parsed |> Array.map Option.get |> Array.toList)
+            let parsed =
+                splitTopLevelCommas inner
+                |> List.map (fun x ->
+                    let e = x.Trim()
+                    if e.StartsWith("[") then parseComplexArray e
+                    else parseComplexPair e |> Option.map List.singleton)
+            if parsed |> List.forall Option.isSome then
+                Some (parsed |> List.collect Option.get)
             else None
     else None
 
@@ -341,7 +344,11 @@ let private tryParseExpectPin (payload: string) : ExpectedValue option =
         elif value.StartsWith("[[") then
             match tryParse2DList value with
             | Some rows -> Some (ExpectedArray2D (name, rows))
-            | None -> None
+            // A nested COMPLEX pin — `[[(1,0), (2,3)], [(4,0)]]`, the shape a
+            // rank-2 complex array prints. tryParse2DList reads floats only, so
+            // route its miss to the complex parser (which flattens rows) rather
+            // than reporting a malformed pin for a line that is fine.
+            | None -> parseComplexArray value |> Option.map (fun pairs -> ExpectedArray1DComplex (name, pairs))
         elif value.StartsWith("[(") then
             // Complex array: [(r1,i1), (r2,i2), ...]
             match parseComplexArray value with
@@ -471,6 +478,40 @@ let parseDiagPins (source: string) : DiagPin list * string list =
                 else pin
             pins.Add pin
     (List.ofSeq pins, List.ofSeq contains)
+
+/// Warning pins — the WARNING-side twin of `parseDiagPins`. Formats:
+///   // WARN: BL4003                      a checker-warning CODE (repeatable)
+///   // WARN-CODEGEN: <substring>         a codegen-warning message substring
+///
+/// Deliberately weaker than `// ERROR:`: a code token only, no `@ line:col`
+/// span. A warning's span is not what a test is asserting — that this file
+/// still earns THIS diagnosis is — and pinning spans would make every warning
+/// pin a line-number dependency that any edit above it breaks.
+///
+/// Matching is count-insensitive in both directions: one `// WARN: BL4003`
+/// licenses every BL4003 the file emits. Warning multiplicity is a function of
+/// how many sites in the file trip the same rule, which is not the property the
+/// pin is there to fix; requiring a pin per occurrence would turn "added
+/// another symmetric kernel" into a corpus edit.
+///
+/// Text after the code token is ignored as prose, so
+/// `// WARN: BL4010   (pack comm suggestion)` pins BL4010. This cannot create a
+/// false pass: an unrecognised second code on the same line is not pinned, and
+/// the runner's unpinned-warning check then fails the test.
+let parseWarnPins (source: string) : string list * string list =
+    let codes = ResizeArray<string>()
+    let codegen = ResizeArray<string>()
+    for raw in source.Split('\n') do
+        let t = raw.TrimEnd('\r').Trim()
+        if t.StartsWith "// WARN-CODEGEN:" then
+            let sub = t.Substring(16).Trim()
+            if sub <> "" then codegen.Add sub
+        elif t.StartsWith "// WARN:" then
+            let spec = t.Substring(8).Trim()
+            match spec.Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries) with
+            | [||] -> ()
+            | parts -> codes.Add (parts.[0].Trim())
+    (List.ofSeq codes, List.ofSeq codegen)
 
 /// Every `name = value` pair of a program's output, IN ORDER and WITH
 /// REPETITIONS. `parseActualValues` folds this into a Map (last wins), which is
@@ -652,9 +693,25 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                     | None -> Some (sprintf "%s: not found in output" name)
                     
                 | ExpectedArray1D (name, expectedVals) ->
+                    // A NESTED actual (`[[1, 2], [3, 4]]`) is compared against
+                    // its own row-major flattening — the mirror of the rule
+                    // ExpectedArray2D already applies to a FLAT actual, and of
+                    // the flattening tryParse1DBoolArray does. It exists for the
+                    // same reason both of those do: whether a rank-2 printer
+                    // emits row brackets is a codegen detail the pin author does
+                    // not choose (rank 2 nests, ranks 1 and 3 do not). Every
+                    // element and the total count are still compared; only the
+                    // row split goes unchecked — a pin that wants it checked is
+                    // written nested, which routes to the 2D matcher.
+                    //
+                    // tryParse1DArray itself stays strict: it is what catches a
+                    // rank-1 array that collapsed to a scalar, and the fallback
+                    // below only fires for text that parses as a full 2D nest.
                     match actual.TryFind name with
                     | Some actualStr ->
-                        match tryParse1DArray actualStr with
+                        match (match tryParse1DArray actualStr with
+                               | Some vs -> Some vs
+                               | None -> tryParse2DList actualStr |> Option.map List.concat) with
                         | Some actualVals when actualVals.Length = expectedVals.Length &&
                                                List.forall2 (fun e a -> floatEquals e a tolerance) expectedVals actualVals -> None
                         | Some actualVals -> Some (sprintf "%s: expected %A, got %A" name expectedVals actualVals)
@@ -764,33 +821,19 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                 | ExpectedArray1DComplex (name, expectedPairs) ->
                     match actual.TryFind name with
                     | Some actualStr ->
-                        // Output looks like: [(r1,i1), (r2,i2), ...]
+                        // `[(r1,i1), (r2,i2), ...]`, or the rows-bracketed form a
+                        // rank-2 array prints. ONE parser for both the pin and
+                        // the actual (parseComplexArray, which is depth-aware
+                        // and flattens rows): the actual side used to carry its
+                        // own `), (` split, which had to learn every shape twice
+                        // and did not survive row brackets.
                         let t = actualStr.Trim()
                         if t.StartsWith("[") && t.EndsWith("]") then
                             let inner = t.Substring(1, t.Length - 2).Trim()
                             if String.IsNullOrWhiteSpace(inner) && expectedPairs.IsEmpty then None
                             else
-                                // Split on `), (` to isolate elements; rebuild parens
-                                let parts = inner.Split([|"), ("; "),("|], StringSplitOptions.None)
-                                let normalized =
-                                    parts |> Array.mapi (fun i p ->
-                                        let withOpen = if i = 0 then p else "(" + p
-                                        let withClose = if i = parts.Length - 1 then withOpen else withOpen + ")"
-                                        withClose)
-                                let parsedOpts =
-                                    normalized |> Array.map (fun pstr ->
-                                        let pt = pstr.Trim()
-                                        if pt.StartsWith("(") && pt.EndsWith(")") then
-                                            let pinner = pt.Substring(1, pt.Length - 2)
-                                            match pinner.Split([|','|], 2) with
-                                            | [| reStr; imStr |] ->
-                                                match tryParseInvariant reStr, tryParseInvariant imStr with
-                                                | Some re, Some im -> Some (re, im)
-                                                | _ -> None
-                                            | _ -> None
-                                        else None)
-                                if parsedOpts |> Array.forall Option.isSome then
-                                    let actualPairs = parsedOpts |> Array.map Option.get |> Array.toList
+                                match parseComplexArray t with
+                                | Some actualPairs ->
                                     if actualPairs.Length <> expectedPairs.Length then
                                         Some (sprintf "%s: expected %d complex elements, got %d" name expectedPairs.Length actualPairs.Length)
                                     else
@@ -802,7 +845,7 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                                         | None -> None
                                         | Some ((eRe, eIm), (aRe, aIm)) ->
                                             Some (sprintf "%s: expected element (%g, %g), got (%g, %g)" name eRe eIm aRe aIm)
-                                else
+                                | None ->
                                     Some (sprintf "%s: could not parse complex array from '%s'" name actualStr)
                         else Some (sprintf "%s: expected complex array but output '%s' isn't in [(re,im),...] form" name actualStr)
                     | None -> Some (sprintf "%s: not found in output" name)

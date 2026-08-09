@@ -26,6 +26,9 @@ import sgs as sgs
 // zero, so it annihilates a constant boost. `U_BOOST` is `U` with every
 // component shifted by the same U0 = 5, and the gradient is the same number.
 // All arithmetic is exact (integer field, dx = 0.5 so the 2*dx divisor is 1).
+//
+// The suggestion channel IS this test, so the warning it emits is an assertion.
+// WARN: BL4014
 // ============================================================================
 
 // u(c, i, j, k) = base(c) + p(i) with base = (0, 10, 20), p = (1, 2, 4):

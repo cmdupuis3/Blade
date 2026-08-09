@@ -1,0 +1,13 @@
+// TEST: Sparse Runtime Keys Range Map
+// range<SparseIdx<keys>> over a RUNTIME rank-1 tuple-array (SkRuntime branch):
+// the sparse_index_t is built from the keys array at runtime, mirroring the
+// compound mask's deferred build. Same read semantics as the static branch.
+type N = Idx<3>
+let keys: Array<(Nat, Nat) like N> = [(2, 1), (0, 3), (1, 0)]
+let R = method_for(range<SparseIdx<keys>>) <@> lambda(i, j) -> i * 10 + j |> compute
+let y0 = R((2, 1))
+let y1 = R((0, 3))
+let y2 = R((1, 0))
+// EXPECT: y0 = 21
+// EXPECT: y1 = 3
+// EXPECT: y2 = 10

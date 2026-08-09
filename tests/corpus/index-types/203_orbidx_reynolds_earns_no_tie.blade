@@ -1,0 +1,24 @@
+// TEST: OrbIdx Reynolds Earns No Tie
+// docs/plan-orbit-index-types.md §8.1's ONE closed case: a reynolds-wrapped
+// kernel earns NO storage tie, at any level. Under `reynolds` the wrapper owns
+// the output symmetry and a declared `comm` clause degrades to an ITERATION
+// LICENSE over the signed permutation sum -- "a license to iterate is not a
+// claim about the bare kernel, and building a wreath storage class out of one
+// reads a permission as a proof."
+//
+// Same program as 200 except for the wrapper. Every hypothesis a tie needs is
+// present -- one repeated identity S, a declared comm clause over both
+// positions, a compact input class -- and the answer is still NOT a wreath:
+// the output is the untied juxtaposition SymIdx<2,3> x SymIdx<2,3>, 6 x 6 = 36
+// cells rather than the 21 of 200. That cell COUNT is the assertion; a wreath
+// answer would be visible in the length of the line alone.
+//
+// The values are the reynolds sum h(p,q) + h(q,p) = 2(p + q) over every ordered
+// pair of S's cells, dense in both blocks.
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let Y = method_for(S, S) <@> reynolds(h) |> compute
+// EXPECT: S = [1, 2, 3, 4, 6, 9]
+// EXPECT: Y = [4, 6, 8, 10, 14, 20, 6, 8, 10, 12, 16, 22, 8, 10, 12, 14, 18, 24, 10, 12, 14, 16, 20, 26, 14, 16, 18, 20, 24, 30, 20, 22, 24, 26, 30, 36]

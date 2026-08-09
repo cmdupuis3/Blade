@@ -1,0 +1,11 @@
+// TEST: Flat Elementwise Crossindex Fallback
+// The negative control for Phase 3's flat-pool mode: the kernel body reads A
+// at TRANSPOSED coordinates (A(j, i)), so the nest is not index-free
+// elementwise and the detector must decline — the generated C++ keeps the
+// two-level nest with its `A[__i1][__i0]` read. Nothing here is a fast path;
+// this pins that the fallback still produces the right transpose.
+let A = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+let L = method_for(range<Idx<3>>, range<Idx<3>>)
+let T = L <@> lambda(i, j) -> A(j, i) |> compute
+// EXPECT is FLAT: rank-2 results print flattened row-major.
+// EXPECT: T = [1, 4, 7, 2, 5, 8, 3, 6, 9]

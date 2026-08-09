@@ -90,6 +90,13 @@ let m3Slice = [ "symmetry"; "reynolds" ]
 /// SKIP-UNSUPPORTED by design.
 let randSlice = [ "rand" ]
 
+/// display: the frame lines themselves. THE point of running this category
+/// down both lanes is that Blade.Display.Frame.emit and its generated C++
+/// mirror (Frame.cppRuntime) are two hand-written copies of one byte format --
+/// the escape table, the ordinal counter, the field order. A divergence in
+/// either is invisible in one lane alone and shows up here as a stdout diff.
+let displaySlice = [ "display" ]
+
 /// M4a differential slice: the SQL-ish relational surface. CORPUS directory
 /// names (Corpus.category loads them), each VERIFIED against tests/corpus/ and
 /// Corpus.fs and — critically — RUN through the gate in isolation, each showing
@@ -189,7 +196,7 @@ let stackJoinSlice = [ "stack-join" ]
 /// ceiling and, per the runInterpTimed caveat, contaminate later timings.
 let memfreeSlice = [ "memfree" ]
 
-let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice @ deferredConcreteSlice @ stackJoinSlice @ memfreeSlice
+let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ displaySlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice @ deferredConcreteSlice @ stackJoinSlice @ memfreeSlice
 
 /// Output-line normalizer, shared in spirit with DiffOracle.normalize
 /// (DiffOracle.fs:79-85), widened for the split-timing wrapper:
@@ -309,9 +316,22 @@ let private rejectOnlyCategories = Set.ofList [ "mutability-errors"; "unit-error
 ///     passes. An unmarked reject is either a test that regressed or a negative
 ///     test missing its name marker; both are for a human to resolve, and
 ///     neither is something a differential gate can verify.
+/// This gate requires the interpreter's stdout to be BYTE-IDENTICAL to the
+/// compiled binary's, and src/Interp/Numerics.fs is bit-pinned to non-FMA
+/// scalar semantics — so the compiled side must be built with contraction
+/// off even though the user-facing default is `fast` (Build.fs). The pin is
+/// scoped to this block and restored on exit.
+let private pinFpContractOff () =
+    let prior = System.Environment.GetEnvironmentVariable("BLADE_FP_CONTRACT")
+    System.Environment.SetEnvironmentVariable("BLADE_FP_CONTRACT", "off")
+    { new System.IDisposable with
+        member _.Dispose() =
+            System.Environment.SetEnvironmentVariable("BLADE_FP_CONTRACT", prior) }
+
 let runInterpDiffTests (categories: string list) : BlockResult =
     printHeader "Interpreter Differential (M0)"
     let blockName = "Interp Diff"
+    use _fpPin = pinFpContractOff ()
     if not capabilities.Value.HasGpp then
         printfn "Skipped: requires g++ (the compiled binary is the differential reference)."
         { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }

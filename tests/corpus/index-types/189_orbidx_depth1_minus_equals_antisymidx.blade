@@ -1,0 +1,20 @@
+// TEST: OrbIdx Depth-1 Minus Equals AntisymIdx
+// The '-' half of 188: `OrbIdx<[(r,-)],n>` lowers to the AntisymIdx<r,n>
+// record, so it gets the strict simplex (no stored diagonal), the same C(n,r)
+// pool, and negate-on-swap reads. The mirrored read is the load-bearing pin --
+// it is what distinguishes the antisymmetric record from a symmetric one of
+// equal rank, and a lowering that dropped the sign would still print the same
+// pool.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where anticomm(x, y) -> x - y
+let a1: Array<Float64 like AntisymIdx<2, 3>> = L <@> g |> compute
+let a2: Array<Float64 like OrbIdx<[(2,-)], 3>> = L <@> g |> compute
+let canonical = a2(0, 1)
+let mirrored = a2(1, 0)
+let diagonal = a2(2, 2)
+// EXPECT: a1 = [-1, -2, -1]
+// EXPECT: a2 = [-1, -2, -1]
+// EXPECT: canonical = -1
+// EXPECT: mirrored = 1
+// EXPECT: diagonal = 0

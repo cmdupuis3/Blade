@@ -1,0 +1,19 @@
+// TEST: Caret-Free T<unit> Argument Unit Mismatch (rejects)
+// ERROR: BL3006
+// The other half of the equivalence pinned in 070: `T<u>` must REFUSE what
+// `T<u>^0` refuses, not only accept what it accepts. An equivalence that
+// holds for programs that type and breaks for programs that do not is the
+// harder half to notice, so it gets its own pin. This is 061's program with
+// the caret deleted.
+//
+// Before the ruling this was BL3001 "the parameter is declared T but the
+// argument is Float64<meter>" -- a NOMINAL mismatch against an opaque type
+// named T, which would have reported the same thing for a `second` argument.
+// Now the unit is real and the diagnostic is about units.
+Unit second
+Unit meter
+function scaled(x: T<second>^1, k: T<second>) = reduce(x, (+)) * k
+let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let k: Float<meter> = 2.0
+let bad = scaled(ts, k)
+// EXPECT: typecheck failure -- a meter scalar cannot fill a T<second> slot

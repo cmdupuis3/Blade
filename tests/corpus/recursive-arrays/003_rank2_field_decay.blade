@@ -18,7 +18,7 @@ let rec traj: Array<Float like T, X> =
 // EXPECT: traj = [8, 4, 2, 1, 16, 4, 2, 1, 0.5, 8, 2, 1, 0.5, 0.25, 4]
 // Final-segment read: bind the row first (row reads flow through bindings —
 // the dense row-view path), then reduce it.
-let final_field = traj(2)
+let final_field = traj((2 : T))
 // EXPECT: final_field = [2, 1, 0.5, 0.25, 4]
 let final_mass = reduce(final_field, (+))
 // EXPECT: final_mass = 7.75

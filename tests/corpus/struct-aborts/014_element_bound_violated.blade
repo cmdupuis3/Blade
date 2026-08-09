@@ -1,0 +1,18 @@
+// TEST: Element Bound Violated (aborts)
+// The runtime half of an ELEMENT-position bound, and the violating twin of
+// basic/036. Filed here with the other constraint-guard abort probes for the
+// same reason struct-aborts/012 is: it is the same TExprConstraintCheck node
+// reaching the same generated-C++ guard, just reached once per cell.
+//
+// The guard is a synthesized loop nest, so the FIRST offending cell aborts —
+// `m(1, 0)` here, with `m(0, *)` all in range ahead of it. That is the whole
+// claim being locked: the bound is checked per CELL, not merely present.
+//
+// The message names an ELEMENT of the binding rather than the binding itself,
+// because "x is out of range" would be false — the array is fine, one of its
+// cells is not.
+// ABORT: Bound violation in an element of 'm' (max)
+type Y = Idx<2>
+type Z = Idx<3>
+let m: Array<Float64<min=0.0, max=1.0> like Y, Z> = [[0.1, 0.2, 0.3], [9.0, 0.5, 0.6]]
+let s = m((0 : Y), (0 : Z))

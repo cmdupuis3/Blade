@@ -1,0 +1,25 @@
+// TEST: Diag Greedy Schema Leaves An Argument Over (diag)
+// ERROR: BL3002
+// ============================================================================
+// The GREEDY half of 6c rule 4 (docs/plan-tuples-vs-arg-packs.md), stated as a
+// failure so the determinism is pinned rather than assumed.
+//
+// `f(t1, a, b)` against `[y: Tuple<2>, z: Float64]`: matching runs left to
+// right and never backtracks, so y takes the tuple node `t1` (it PREFERS a
+// node of its own width over regrouping), z takes `a`, and `b` has no
+// parameter. There is a reading in which y regroups `a` and `b` -- greedy
+// refuses to go looking for it, because a rule that searched would make which
+// grouping you got depend on the whole list rather than on what you wrote.
+//
+// The deterministic escape is parentheses, which mean something now: tuples/013
+// pins `g((t1, a), b)` giving the other grouping, and `f(1.0, 2.0, a)` giving
+// the regrouped one. No `ERROR-CONTAINS`: the surplus argument is reported by
+// the ordinary call-arity accounting, and which of the two BL3002 messages
+// wins at this seam is not the property under test -- that it is REFUSED, and
+// refused deterministically, is.
+// ============================================================================
+function f(y: Tuple<2>, z: Float64) -> Float64 = y[0] + y[1] * 10.0 + z * 100.0
+let t1 = 1.0, 2.0
+let a = 3.0
+let b = 4.0
+let v = f(t1, a, b)

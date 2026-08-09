@@ -1,0 +1,22 @@
+// TEST: Rank-3 Symmetric Literal
+// The shape generalizes past rank 2: a rank-r group takes r levels of
+// brackets, and the seed threads down one level at a time (p' = p + i), so
+// SymIdx<3,3>'s outer rows hold 3, 2 and 1 sub-rows whose own lengths shrink
+// from where their parent left off. The cell count is the multiset coefficient
+// C(3+3-1, 3) = 10, which is the flat pool printed below.
+let T: Array<Int64 like SymIdx<3, 3>> = [
+    [[1, 2, 3], [4, 5], [6]],
+    [[7, 8], [9]],
+    [[10]]
+]
+let t000 = T(0, 0, 0)
+let t012 = T(0, 1, 2)
+let t210 = T(2, 1, 0)
+let t111 = T(1, 1, 1)
+let t222 = T(2, 2, 2)
+// EXPECT: T = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+// EXPECT: t000 = 1
+// EXPECT: t012 = 5
+// EXPECT: t210 = 5
+// EXPECT: t111 = 7
+// EXPECT: t222 = 10

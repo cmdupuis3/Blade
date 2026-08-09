@@ -1,0 +1,72 @@
+// TEST: Bare Comma Destructuring
+// The BINDER half of plan issue #10 (docs/plan-array-expression-fixes.md #10;
+// the construction half `let t = b, c` is `001`). `let a, b = t` desugars to
+// exactly what the parenthesized `let (a, b) = t` produces -- one `PatTuple`
+// over the same leaves, via the shared `Parser.parseLetPattern` -- so there is
+// no second destructuring mechanism.
+//
+// AMBIGUITY: none. The LHS list is bounded by the `:` or `=` that must follow
+// a let pattern; the RHS list only begins after that `=`. So the two halves
+// compose without a rule to arbitrate them, which is what `let a, b = c, d`
+// below pins. No existing spelling changed meaning: a comma could not
+// previously follow a let pattern at all (`BL1001: Expected '=' but got ','`).
+let t = 1.0, 2.0
+let a, b = t
+let s = a + b
+// EXPECT: s = 3
+
+// CONSTRUCTION ON THE RIGHT, DESTRUCTURING ON THE LEFT, in one statement.
+let c = 10.0
+let d = 20.0
+let e, f = c, d
+let s2 = e * 100.0 + f
+// EXPECT: s2 = 1020
+
+// Components at full expression precedence on both sides of the `=`: two
+// CALLS, not one call of arity two.
+function dbl(v: Float64) -> Float64 = v * 2.0
+let p, q = dbl(3.0), dbl(4.0)
+let s3 = p * 100.0 + q
+// EXPECT: s3 = 608
+
+// Width 3, and the parenthesized form for comparison -- same program.
+let g1, g2, g3 = 1.0, 2.0, 3.0
+let (h1, h2, h3) = (1.0, 2.0, 3.0)
+let s4 = g1 * 100.0 + g2 * 10.0 + g3 + h1 * 100.0 + h2 * 10.0 + h3
+// EXPECT: s4 = 246
+
+// BLOCK statement position (Parser.parseLetStmt), the second of the three
+// shared let sites.
+function inBlock(x: Float64) -> Float64 = {
+    let u, v = x, x * 2.0
+    u + v
+}
+let blockSum = inBlock(3.0)
+// EXPECT: blockSum = 9
+
+// A bare comma still parses inside a block when it is CONSTRUCTION only --
+// the LHS change cannot have eaten it, because a single pattern followed by
+// `=` never reaches the comma loop.
+function inBlock2(x: Float64) -> Float64 = {
+    let w = x, x * 3.0
+    w[0] + w[1]
+}
+let blockSum2 = inBlock2(2.0)
+// EXPECT: blockSum2 = 8
+
+// A tuple-typed PARAMETER destructured with the bare comma -- the shape the
+// component-typed annotation was added for (`015`).
+function pairSum(p: Tuple<Float64, Float64>) -> Float64 = {
+    let l, r = p
+    l * 10.0 + r
+}
+let ps = pairSum((7.0, 8.0))
+// EXPECT: ps = 78
+
+// FLAT destructuring is unchanged by the new spelling: a tuple pattern binds
+// one name per component, or one per FLATTENED leaf, and the parenthesized
+// form already did the latter (basic/024).
+let nested = (1.0, 2.0), 3.0
+let n1, n2, n3 = nested
+let s5 = n1 * 100.0 + n2 * 10.0 + n3
+// EXPECT: s5 = 123

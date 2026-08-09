@@ -1,0 +1,21 @@
+// TEST: Tuple Component Shape Mismatch (rejects)
+// ERROR: BL3999
+// ERROR-CONTAINS: argument 1, component 2
+// ============================================================================
+// The RANK half of `017`'s check. A scalar where an array component is
+// declared used to reach g++ as `std::get<1>(p)` typed `double` and then
+// indexed; now it is refused at the call with both shapes named.
+//
+// Guarded on CONCRETENESS on both sides, which is what keeps the width-only
+// spelling untouched: under `p: Tuple<2>` the declared components are fresh
+// inference variables and this check stands down (that program is `002`'s
+// recorded known limit, unchanged).
+// ============================================================================
+type I3 = Idx<3>
+function f(p: Tuple<Array<Float64 like I3>, Array<Float64 like I3>>) -> Float64 = {
+  let x, y = p
+  x((0 : I3)) + y((0 : I3))
+}
+let A: Array<Float64 like I3> = [1.0, 2.0, 3.0]
+let s = f((A, 2.0))
+// EXPECT: typecheck failure -- a scalar cannot fill an Array component

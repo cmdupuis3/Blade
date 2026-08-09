@@ -7,6 +7,13 @@
 
   <ItemGroup>
     <Compile Include="src/Runtime.fs" />
+    <!-- Display frames: the {mime, data} rich-output wire format
+         (Blade-REPL/docs/display-frames.md). Dependency-free string work, so
+         it sits at the very front and is shared by everything that has to
+         agree on the bytes: the display elaborator, TypeCheck's intrinsic,
+         Interp (emission), CodeGen (its C++ mirror), and the REPL/serve
+         session layer (extraction). -->
+    <Compile Include="src/display/DisplayFrame.fs" />
     <Compile Include="src/Ast.fs" />
     <!-- Unified diagnostics: the Diagnostic record + BLxxxx registry +
          renderers. Needs only Ast.Span; every later phase constructs
@@ -16,6 +23,15 @@
     <Compile Include="src/Lexer.fs" />
     <Compile Include="src/Parser.fs" />
     <Compile Include="src/Grad.fs" />
+    <!-- OrbIdx storage/indexing bijections (docs/plan-orbidx-bijections.md
+         Phase 2, pure-function layer): the §4 checked cardinality fold, the §5
+         canonicalizer, the §2 segment-peeled traversal stream, and the §3
+         arithmetic rank/unrank pair. Deliberately dependency-free — FSharp.Core
+         only, no Blade module is opened — so proofs/ scripts and external
+         checkers can `#load` the file standalone. Sits here because IR.fs is
+         its eventual consumer (the checked sibling of `binomI64`, IR.fs:2438),
+         and nothing it needs compiles later. -->
+    <Compile Include="src/OrbRank.fs" />
     <Compile Include="src/IR.fs" />
     <!-- Provider registry: the core<->provider seam (ProviderSpec records
          keyed by surface module name). Compiles after IR.fs and before the
@@ -27,7 +43,7 @@
     <Compile Include="src/TypedAst.fs" />
     <Compile Include="src/Deduce.fs" />
     <!-- The generic half of an equivariance-family judgment (C3 stage 0,
-         docs/design-discipline-as-data.md): the structural walker arms whose
+         retired discipline-as-data design note): the structural walker arms whose
          soundness arguments quantify over ANY action. Must PRECEDE DeduceRep,
          which is its first instance. Same dependency set (Ast/Types/IR/
          TypedAst), nothing upward. -->
@@ -46,7 +62,7 @@
          Must follow both NetcdfProvider.fs and StaticEval.fs. -->
     <Compile Include="src/ProviderStatics.fs" />
     <!-- Constrained records as index types, stage C1 — the COUNTING half
-         (docs/plan-constrained-index-types.md §7). Box enumeration over the
+         (retired constrained-index-types plan, §7). Box enumeration over the
          per-field inclusive bounds, the flat-filter vs arrow-heads
          certificate, and the `idx_card(R)` static builtin. A CORE feature,
          not an ml/ one: idx_card folds without `import ml`, so it registers
@@ -125,7 +141,7 @@
          those, which is MLPolyExtractTyped. Depends on nothing else; it is
          string formatting and cap constants. NOT part of BladeML.fsproj. -->
     <Compile Include="src/ml/compiler/MLEquivMessages.fs" />
-    <!-- Stage C2 of docs/plan-equivariance-in-types.md: the TYPED front half of
+    <!-- Stage C2 of the retired equivariance-in-types plan: the TYPED front half of
          the same engine. Needs TypedAst + DeduceRep (both far earlier) and both
          dischargers (immediately above), so this is the earliest point it can
          sit; TypeCheck, which consumes it through DeduceRep's hook, is later
@@ -146,6 +162,20 @@
          (a SEPARATE fsproj); core touchpoint is the PplElaborate.expand
          pipeline stage in TypeCheck.typeCheck. -->
     <Compile Include="src/ppl/compiler/PplElaborate.fs" />
+    <!-- Linear-algebra dispatch classification (Phase 5 of
+         docs/plan-cpp-perf-exploitation.md): IR node / loop-nest shape ->
+         typed LinAlgCall descriptor, plus the BLAS/LAPACK availability gates
+         and the routing policy table. Depends on IR.fs and Types.fs ONLY (it
+         matches IRExpr and the loop-nest records, all defined there), so it
+         can sit this early — and it must, because THREE stages consult it and
+         two of them precede codegen: MathElaborate reads `lapackAvailable ()`
+         to decide whether `eigh` elaborates to the `__math_eigh` intrinsic or
+         to synthesized Jacobi source (Phase 6 / Round B2); TypeCheck's
+         `inferEigh` reads `classifyEigh` as the intrinsic's admissibility
+         rule; and CodeGen consults the whole module instead of pattern-
+         matching BLAS shapes itself. Moved here from just above CodeGen for
+         exactly that reason — one definition of each gate, not three. -->
+    <Compile Include="src/LinAlgPatterns.fs" />
     <!-- Math compiler layer (Blade.Math.*): tensor decompositions
          (Jacobi SVD/eigh, mode-n unfolding, HOSVD) elaborated to plain
          Blade source. Lives under math/compiler/ beside the BladeMath
@@ -154,6 +184,11 @@
     <Compile Include="src/math/compiler/MathDecls.fs" />
     <Compile Include="src/math/compiler/MathElaborate.fs" />
     <Compile Include="src/rand/compiler/RandElaborate.fs" />
+    <!-- display compiler layer (Blade.Display.Elaborate): `display.emit(mime,
+         data)` -> the `__display_emit` intrinsic. Needs Ast + DisplayFrame
+         only; core touchpoint is the DisplayElaborate.expand pipeline stage in
+         TypeCheck.typeCheck. -->
+    <Compile Include="src/display/compiler/DisplayElaborate.fs" />
     <!-- Spectra compiler layer (Blade.Spectra.*): FFT + arity-polymorphic
          polyspectra elaborated to plain Blade source. Lives under
          spectra/compiler/ beside the BladeSpectra oracle (a SEPARATE
@@ -176,6 +211,14 @@
     <Compile Include="src/TypeEnv.fs" />
     <Compile Include="src/Zonk.fs" />
     <Compile Include="src/TypeCheck.fs" />
+    <!-- File-based module resolution: dotted import name -> .blade path, plus
+         the transitive closure of an entry file's imports in dependency order.
+         Needs Parser (import discovery) and ProviderRegistry/ProviderStatics
+         (which names are provider pseudo-modules and must NOT be looked for on
+         disk); must precede its three consumers — Ide.fs (`ide check` /
+         `ide serve` resolve too), Lowering.fs (the multi-file diagnostics
+         entry) and Cli.fs (compile / run / check / emit). -->
+    <Compile Include="src/ModuleResolve.fs" />
     <Compile Include="src/Ide.fs" />
     <Compile Include="src/Lowering.fs" />
     <Compile Include="src/EmitCpp.fs" />
@@ -200,6 +243,18 @@
     <!-- Interpreter-backed REPL seam: lowerSession (one shared front-end pass)
          wraps Interp/Run.fs; consumed by Cli.replLoop. -->
     <Compile Include="src/Interp/Repl.fs" />
+    <!-- The REPL's eval-once ENGINE (accumulating snippet list, rebind-in-place
+         splicing, interp-first evaluation, ReplTypes annotation). Extracted
+         from Cli.replLoop so `ide serve`'s notebook `eval` command drives the
+         identical semantics; must follow Interp/Repl.fs (its lowering seam) and
+         precede IdeServe.fs (its second front end). The g++ fallback lane is
+         INJECTED by Cli.fs, which owns compileToExe. -->
+    <Compile Include="src/ReplSession.fs" />
+    <!-- `blade ide serve`: the NDJSON daemon wrapping Ide.fs's payload. Must
+         follow Lowering.fs (the full tier monomorphizes) as well as Ide.fs,
+         which is why it cannot live inside Ide.fs; must precede Cli.fs, which
+         dispatches the verb and owns the serve regression block. -->
+    <Compile Include="src/IdeServe.fs" />
     <Compile Include="src/Build.fs" />
     <Compile Include="tests/TestHarness.fs" />
     <Compile Include="tests/Expect.fs" />
@@ -216,9 +271,21 @@
     <Compile Include="tests/Test_SumTypes.fs" />
     <Compile Include="tests/Test_Interfaces.fs" />
     <Compile Include="tests/Test_Modules.fs" />
+    <!-- File-based module resolution (src/ModuleResolve.fs) and stdlib/units/SI.blade.
+         Cannot be a corpus category: every case starts from a FILE ON DISK,
+         which is the only way to reach the search path, the transitive walk and
+         the cycle/duplicate checks. (Also `blade test module-resolve`.) -->
+    <Compile Include="tests/Test_ModuleResolve.fs" />
     <Compile Include="tests/Test_Guards.fs" />
     <Compile Include="tests/Test_Bracketed.fs" />
     <Compile Include="tests/Test_IndexTypes.fs" />
+    <!-- The OrbIdx bijection layer (src/OrbRank.fs): the traversal stream and
+         the rank/unrank pair pinned against a BRUTE-FORCE canonicalization of
+         every raw tuple — content and order — plus the hand-unrolled depth-2
+         E/B/A nest and the depth-1 triangular-offset anchors. Pure integer,
+         in-process, no Blade source pipeline. (Also `blade test orbrank`.) -->
+    <Compile Include="tests/Test_OrbRank.fs" />
+    <Compile Include="tests/OrbWreathTests.fs" />
     <Compile Include="tests/Test_Mutability.fs" />
     <Compile Include="tests/Test_Static.fs" />
     <Compile Include="tests/Test_Units.fs" />
@@ -238,12 +305,12 @@
     <Compile Include="tests/Test_RepDifferential.fs" />
     <Compile Include="tests/Test_RepCheckAgreement.fs" />
     <Compile Include="tests/Test_RepRejectCensus.fs" />
-    <!-- MEASUREMENT SCAFFOLDING for docs/census-galilean-layer.md: the
+    <!-- MEASUREMENT SCAFFOLDING for the retired galilean-layer census: the
          experimental typed GALILEAN judgment and its two censuses. Lives in the
          test assembly deliberately — nothing in src/ may reference it, and it is
          not part of the full suite (verb `blade test gal-layer`). -->
     <Compile Include="tests/Test_GalLayerCensus.fs" />
-    <!-- MEASUREMENT SCAFFOLDING for docs/census-perm-layer.md: the experimental
+    <!-- MEASUREMENT SCAFFOLDING for the retired perm-layer census: the experimental
          typed PERM judgment, its three censuses and the first-ever perm
          inference experiment. Test assembly only - nothing in src/ may
          reference it, and it is not part of the full suite
@@ -269,6 +336,12 @@
     <Compile Include="tests/Test_Ppl.fs" />
     <Compile Include="tests/Test_Math.fs" />
     <Compile Include="tests/Test_Rand.fs" />
+    <!-- Display frames: the two corpus categories plus the in-process block
+         that pins the frame BYTES and both channels (the REPL sentinel line on
+         raw interpreter stdout, and `ide serve`'s display array on the real
+         response encoder). Must follow IdeServe.fs, which is compiled with the
+         src/ files far above. -->
+    <Compile Include="tests/Test_Display.fs" />
     <Compile Include="tests/Test_Spectra.fs" />
     <Compile Include="tests/Test_Fallback.fs" />
     <Compile Include="tests/Test_Sgs.fs" />
@@ -276,6 +349,17 @@
     <Compile Include="tests/Benchmarks.fs" />
     <Compile Include="tests/CudaTests.fs" />
     <Compile Include="tests/OmpTests.fs" />
+    <Compile Include="tests/LinAlgTests.fs" />
+    <!-- Shape-monomorphization reach: which call sites earn a specialized copy
+         (cross-module, self-recursive) and which must still decline. Emission
+         text only — the decision is invisible in the values. -->
+    <Compile Include="tests/ShapeSpecTests.fs" />
+    <!-- Eigensolver dispatch emission + the inferEigh rejections (Phase 6 /
+         Round B2). Separate block from LinAlgTests because the two gates,
+         headers and defines are separate by design — and because this one must
+         pin its gate across LOWERING, not just codegen: the eigh decision is
+         made in MathElaborate, which runs inside typecheck. -->
+    <Compile Include="tests/LapackTests.fs" />
     <Compile Include="tests/AllocTests.fs" />
     <Compile Include="tests/NetcdfTests.fs" />
     <Compile Include="tests/ZarrTests.fs" />
@@ -301,7 +385,28 @@
     </None>
   </ItemGroup>
 
+  <!-- The Blade standard library, in Blade source. ModuleResolve.fs looks for
+       a `stdlib/` directory next to the running binary first (then walks up,
+       so a dev tree finds <repo>/stdlib from bin/<config>/net7.0 too), which
+       is why this copy exists: it makes `Blade.exe run` on a file that says
+       `import units.SI` work from any working directory, with no environment
+       variable set. The glob has no Link metadata, so each file keeps its
+       relative path and lands at bin/config/net7.0/stdlib/units/SI.blade, the
+       same arrangement tests/corpus/** already uses. BLADE_STDLIB overrides. -->
   <ItemGroup>
+    <None Include="stdlib/**/*.blade">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- BLADE_RESTRICT / BLADE_IVDEP: the portable spellings codegen emits.
+         Included by nested_array_utilities.hpp and blade_linalg_views.hpp, so
+         it must ship wherever they do. -->
+    <None Include="src/cpp/blade_portability.hpp">
+      <Link>cpp/blade_portability.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="src/cpp/nested_array_utilities.hpp">
       <Link>cpp/nested_array_utilities.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -318,6 +423,14 @@
       <Link>cpp/alloc_layout_tests.cpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="src/cpp/orbit_wreath_utilities.hpp">
+      <Link>cpp/orbit_wreath_utilities.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/orb_wreath_tests.cpp">
+      <Link>cpp/orb_wreath_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="src/cpp/linearized_storage.hpp">
       <Link>cpp/linearized_storage.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -328,6 +441,45 @@
     </None>
     <None Include="src/cpp/blade_runtime.hpp">
       <Link>cpp/blade_runtime.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/blade_linalg.hpp">
+      <Link>cpp/blade_linalg.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- The BLAS-free half of the linalg layer (contiguity probe + staging
+         views). Included by blade_linalg.hpp, and separately includable by
+         cpp/linalg_probe_tests.cpp so the probe's regression suite runs on
+         machines with no BLAS. -->
+    <None Include="src/cpp/blade_linalg_views.hpp">
+      <Link>cpp/blade_linalg_views.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- DEVICE (cuBLAS) dispatch, Round D. Two halves selected by __CUDACC__:
+         extern "C" prototypes for the host .cpp (g++ cannot include the CUDA
+         headers) and definitions for the companion .cu that Build.fs writes
+         and nvcc compiles. -->
+    <None Include="src/cpp/blade_linalg_cuda.hpp">
+      <Link>cpp/blade_linalg_cuda.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Eigensolver dispatch (Phase 6 / Round B). LAPACK-only; included only
+         by programs that emit a blade_lapack:: call. -->
+    <None Include="src/cpp/blade_lapack.hpp">
+      <Link>cpp/blade_lapack.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Round D's cuBLAS swap-table verification, compiled with nvcc and run
+         by Blade.Tests.CudaTests.runCublasSwapTests (`blade test cuda`).
+         Needs a real GPU, so it rides the opt-in CUDA phase. -->
+    <None Include="src/cpp/cublas_swap_tests.cu">
+      <Link>cpp/cublas_swap_tests.cu</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Runtime tests for the contiguity probe, compiled and run by
+         Blade.Tests.LinAlgTests.runLinAlgProbeTests (`blade test linalg`). -->
+    <None Include="src/cpp/linalg_probe_tests.cpp">
+      <Link>cpp/linalg_probe_tests.cpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

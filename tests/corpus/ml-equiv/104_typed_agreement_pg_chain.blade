@@ -1,6 +1,6 @@
 // TEST: ML Equiv Typed Agreement Pg Chain
 // TYPED-NOTE: this file was scoped as the STAMPED-GENERATED-CALLEE win and is
-// deliberately not one. A1 of plan-equivariance-in-types.md — the elaborator
+// deliberately not one. A1 of the retired equivariance-in-types plan — the elaborator
 // attaching `where ml.equiv(G)` to the functions it synthesizes — has not
 // landed, so a user function calling a `derive_*` output is exactly corpus
 // 053's situation: the seam already proposes it, and there is no typed-only
@@ -38,6 +38,8 @@ import ml as ml
 // conjuncts written, a certified caller calling a certified callee (corpus
 // 003's shape, at a point group), and they return the same numbers.
 // ============================================================================
+// Both proposals are seam proposals, so their warnings are assertions.
+// WARN: BL4011
 let static EC = [("E", 1)]
 let static WE = ml.pg_hom_dim("C4", EC, EC)
 // EXPECT: WE = 2

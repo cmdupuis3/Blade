@@ -1,0 +1,17 @@
+// TEST: Flat Elementwise Dense
+// Phase 3 of docs/plan-cpp-perf-exploitation.md. A rank-2 co-iteration whose
+// body reads both operands as scalar full-depth peels at exactly the loop
+// indices — the INDEX-FREE ELEMENTWISE shape — is emitted as ONE flat loop
+// over the contiguous pools instead of a two-level nest (`// flat elementwise:
+// 6 cells [2 x 3]` in the generated C++). Iteration order is unchanged: the
+// nest already walks each pool in DFS order, one leaf per innermost step, so
+// the flat index IS that leaf's pool offset for the output and every operand.
+// Values are integer-valued f64 so byte-identity with the interpreter is
+// unambiguous.
+type Row = Idx<2>
+type Col = Idx<3>
+let A: Array<Float64 like Row, Col> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Row, Col> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let F = for (A, B) in range<Row, Col> <@> lambda(a, b) -> a * b + 1.0 |> compute
+// EXPECT is FLAT: rank-2 results print flattened row-major.
+// EXPECT: F = [11, 41, 91, 161, 251, 361]

@@ -1,0 +1,21 @@
+// TEST: OrbIdx No Clause No Tie
+// The tie needs BOTH hypotheses, and this is the half 204 does not test: the
+// same OBJECT in both positions, but no declared clause. BladeWreath.v's r = 3
+// sweep isolates exactly this (`noncomm_r3_loses_the_swap`): with the argument
+// still repeated but the kernel noncommutative, the stabilizer drops from 72
+// back to the 36-element block group, so the S_2 factor of the wreath product
+// is the commutativity license and nothing else.
+//
+// So: untied juxtaposition, SymIdx<2,3> x SymIdx<2,3> = 36 cells, not 21.
+//
+// The kernel is 2p + q rather than p + q or p - q deliberately: it is provably
+// neither invariant nor anti-invariant under the swap, so the confirm-and-pin
+// suggestion (BL4010) does not fire and the test measures the tie rule alone
+// rather than the suggestion machinery.
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) -> 2.0 * p + q
+let N = method_for(S, S) <@> h |> compute
+// EXPECT: S = [1, 2, 3, 4, 6, 9]
+// EXPECT: N = [3, 4, 5, 6, 8, 11, 5, 6, 7, 8, 10, 13, 7, 8, 9, 10, 12, 15, 9, 10, 11, 12, 14, 17, 13, 14, 15, 16, 18, 21, 19, 20, 21, 22, 24, 27]

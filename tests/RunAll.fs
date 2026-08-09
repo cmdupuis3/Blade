@@ -28,6 +28,7 @@ open Blade.Tests.Static
 open Blade.Tests.Ppl
 open Blade.Tests.Math
 open Blade.Tests.Rand
+open Blade.Tests.Display
 open Blade.Tests.Spectra
 open Blade.Tests.Fallback
 open Blade.Tests.Sgs
@@ -80,8 +81,8 @@ let deferredConcreteTests = Blade.Tests.Corpus.category "deferred-concrete"
 /// All tests combined
 let allTests =
     basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
-    @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ recursiveArrayTests @ bracketedTests
-    @ indexTypeTests @ mutabilityTests @ mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ unitErrorTests
+    @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ tupleTests @ replicateTests @ anonRangeTests @ recursiveArrayTests @ bracketedTests
+    @ indexTypeTests @ mutabilityTests @ mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ displayTests @ displayErrorTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ unitErrorTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
     @ funcArrayTests
@@ -144,6 +145,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // so it belongs with the other in-process unit blocks and always runs.
     // (Also reachable standalone as `blade test normalize`.)
     let normalize = runNormalizeTests ()
+    // Display frames (Blade-REPL/docs/display-frames.md): the frame BYTES, the
+    // escape table, and the two channels -- the REPL sentinel line on raw
+    // interpreter stdout and `ide serve`'s display array on the real response
+    // encoder. Drives the interpreter and the session engine directly, no g++,
+    // so it runs unconditionally beside the other in-process blocks.
+    // (Also reachable standalone as `blade test display-frames`.)
+    let displayFrames = runDisplayTests ()
     // TypeCheck-level F# unit tests for the unify §5.3 fast path: flat-vs-split
     // arrows, inference-var binding, dist-type ordering/axis-tag rejection.
     // Same shape as the normalize block — pure IRType construction plus a call
@@ -160,6 +168,14 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let shape = Blade.Tests.Shape.runShapeTests ()
     // Oracle review: differential-harness oracles vs hand-computed truth (Phase 0.2).
     let oracles = Blade.Tests.OracleReview.runOracleTests ()
+    // The OrbIdx bijection layer (OrbRank.fs, plan-orbidx-bijections Phase 2):
+    // the segment-peeled traversal stream and the arithmetic rank/unrank pair,
+    // pinned against a brute-force canonicalization of every raw tuple — as a
+    // SET and as an ORDER, since §3's hard constraint is that rank order = the
+    // nest's visit order and a read->write roundtrip cannot catch an order
+    // mismatch. Plus the hand-unrolled depth-2 E/B/A nest, the depth-1
+    // triangular-offset anchors, and the int64 wall at depth 3 / n = 1000.
+    let orbRank = Blade.Tests.OrbRankReview.runOrbRankTests ()
     // Compiler-native CG tables (WignerTables.fs) vs closed forms (ML arc).
     let wigner = Blade.Tests.WignerTablesReview.runWignerTablesTests ()
     // Sym^j(V_l) occurrence tables (SymPowerTables.fs, stage 2b-i): exact
@@ -196,7 +212,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // rather than proves (completeness of the orbit basis).
     let permOracle = Blade.Tests.PermOracleReview.runPermOracleTests ()
     // The constrained-record COUNTING layer (StructIdxSpec.fs, stage C1 of
-    // plan-constrained-index-types §7): box enumeration over the per-field
+    // the retired constrained-index-types plan §7): box enumeration over the per-field
     // inclusive bounds with the flat-filter vs arrow-heads certificate (set
     // AND order — order agreement is what catches an offset bug), the CGm112
     // anchor and its 3/7/9 lo-sweep against an independent triple-loop dense
@@ -240,7 +256,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // `// SUGGEST:` pins, strict in both directions so SILENCE is assertable
     // (a warning changes no value, so the value corpus cannot pin it).
     let certSuggest = Blade.Tests.DiagCorpus.runCertSuggestTests ()
-    // B3 of plan-equivariance-in-types.md: the DIFFERENTIAL between the typed
+    // B3 of the retired equivariance-in-types plan: the DIFFERENTIAL between the typed
     // rep-status deduction (DeduceRep/TypedCertProposals) and the same
     // stage-6a seam inference the block above pins, run over the same corpus.
     // Recall in one direction, zero false proposals in the other; engine-only
@@ -267,18 +283,77 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Verifies layout invariants the value-checking source tests cannot catch.
     // Skips cleanly if g++ absent.
     let alloc = runAllocLayoutTests ()
+    // C++ wreath-class storage invariants (segment-peeled traversal order,
+    // rank/unrank bijection): same category as alloc, skips cleanly sans g++.
+    let orbWreath = Blade.Tests.OrbWreathTests.runOrbWreathTests ()
     // OpenMP pragma emission: verifies a `where omp(...)` clause reaches codegen
     // as a pragma for EVERY kernel spelling (named function via either eta site,
     // let-bound lambda, inline lambda) and for no unannotated one. Pure codegen
     // string checks — no toolchain, no threads — so unlike the coverage block
     // below this runs unconditionally. (Also `blade test omp-pragma`.)
     let ompPragma = runOmpPragmaTests ()
+    // LinAlg dispatch emission (Phase 5 of docs/plan-cpp-perf-exploitation.md):
+    // verifies gram/matmul reach `blade_linalg::` rather than an inline loop or
+    // an inline cblas call, that the shim header is included exactly when a
+    // route fires (and NOT otherwise), and that the routing policy table still
+    // says what it documents. Pure codegen string checks — no toolchain, no
+    // BLAS — so it runs unconditionally. (Also `blade test linalg`.)
+    let linalgEmit = Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()
+    // The runtime half of the same layer (Phase 5d): the shim's contiguity
+    // probe must REFUSE the n = 2 packed-symmetric skeleton, whose row starts
+    // are indistinguishable from a dense 2x2's over a pool one cell shorter.
+    // Compiles and runs cpp/linalg_probe_tests.cpp, so it needs g++ and reports
+    // Skipped without it — but needs no BLAS (it includes the BLAS-free
+    // blade_linalg_views.hpp). (Also `blade test linalg`.)
+    let linalgProbe = Blade.Tests.LinAlgTests.runLinAlgProbeTests ()
+    // Factory flat emission: the chained factory sugar and by-nominal
+    // argument routing elaborate BEFORE typing, so a chain must emit
+    // byte-identical C++ to its flat spelling, with exactly one call and no
+    // std::function/partial-application residue. Pure codegen string checks
+    // — no toolchain — so it runs unconditionally.
+    let factoryFlat = Blade.Tests.Functions.runFactoryFlattenTests ()
+    // Eigensolver dispatch (Phase 6 / Round B2): verifies `math.eigh` reaches
+    // `blade_lapack::blade_eigh_*` gate-on (right precision AND right symmetry
+    // family), that a complex operand's tuple is Q-complex/LAM-REAL, that the
+    // gate-off and explicit-sweeps paths are still the synthesized Jacobi with
+    // no LAPACK dependency named anywhere, and that `inferEigh` rejects the rows
+    // LAPACK has no routine for. The gate-off pin is the load-bearing one: the
+    // corpus, `interp math` and `diff-oracle math` all run that arm, and an
+    // eigensolver's output is not unique, so leaked dispatch would not merely
+    // fail those suites but strip them of meaning. Pure codegen string checks —
+    // no toolchain, no LAPACK — so it runs unconditionally. (Also `blade test
+    // lapack`.)
+    let lapackEmit = Blade.Tests.LapackTests.runLapackEmissionTests ()
+    // Shape-monomorphization REACH (Phase 4, second increment): which call
+    // sites earn a specialized copy — cross-module, self-recursive — and which
+    // must still decline (extent-changing recursion, a foreign extent NAME).
+    // The decision is invisible in the values, and it fails silently in both
+    // directions: a lost spec is only a lost 1.77x, a wrongly-taken one is an
+    // out-of-bounds loop bound. Pure codegen string checks, no toolchain.
+    // (Also `blade test shapespec`.)
+    let shapeSpec = Blade.Tests.ShapeSpecTests.runShapeSpecTests ()
+    // File-based module resolution (src/ModuleResolve.fs) + stdlib/units/SI.blade:
+    // the search path, the transitive walk, cycle/duplicate/missing refusals,
+    // and the two claims the corpus cannot make — that a file with NO imports
+    // still emits byte-identical C++, and that a unit which crossed a module
+    // boundary still rejects a dimension mismatch. Front-end only apart from one
+    // value case, which skips cleanly without g++. (Also `blade test module-resolve`.)
+    let moduleResolve = Blade.Tests.ModuleResolveTests.runModuleResolveTests ()
     // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
     // regions when cores are available. Opt-in (see FullSuiteOptions).
     let omp =
         if opts.IncludeOmp then Some (runOmpCoverageTests ())
         else
             printfn "\nOpenMP coverage: not run (opt-in; enable with 'blade test --omp' or run 'blade test omp-coverage')."
+            None
+    // Comm-licensed parallel reductions (Phase 2): compiles the omp and serial
+    // spellings of each fold and diffs the VALUES, which no string check can do.
+    // Same opt-in gate as the coverage block — it compiles and runs real
+    // programs — and skips cleanly when g++ is absent.
+    let ompReduce =
+        if opts.IncludeOmp then Some (runOmpReduceTests ())
+        else
+            printfn "OpenMP reductions: not run (opt-in; enable with 'blade test --omp' or run 'blade test omp-reduce')."
             None
     // Device buffer dimensional-type tests (CUDA streaming foundation). Pure F#.
     let bufType = runBufferTypeTests ()
@@ -289,6 +364,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         else
             printfn "CUDA kernel tests: not run (opt-in; enable with 'blade test --cuda' from the x64 Native Tools prompt)."
             None
+    // Round D's cuBLAS swap-table verification. Same opt-in phase and the same
+    // capability gate as the kernel tests above (nvcc + GPU + cl.exe), because
+    // it needs exactly the same things; separate block so a swap-table failure
+    // is not reported as a `where cuda` codegen failure.
+    let cublasSwap =
+        if opts.IncludeCuda then Some (runCublasSwapTests ())
+        else None
     // `where mpi` decomposition tests (differential vs serial oracle under
     // mpiexec). Opt-in; even when requested they skip cleanly if g++ /
     // -lmsmpi / mpiexec are absent.
@@ -342,12 +424,14 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Grand-total roll-up (#4): one line per block, a total, and failed names.
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
-          yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc
-          yield ompPragma
+          yield normalize; yield unify; yield validateArrow; yield displayFrames
+          yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield factoryFlat; yield lapackEmit; yield shapeSpec; yield moduleResolve
           match omp with Some b -> yield b | None -> ()
+          match ompReduce with Some b -> yield b | None -> ()
           yield bufType
           match cuda with Some b -> yield b | None -> ()
+          match cublasSwap with Some b -> yield b | None -> ()
           match mpi with Some b -> yield b | None -> ()
           yield diff; yield typeStruct
           match timing with Some b -> yield b | None -> ()

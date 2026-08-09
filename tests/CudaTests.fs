@@ -145,6 +145,11 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
             if onWindows then
                 let cppFull = Path.GetFullPath(cppFile)
                 let exeFull = Path.ChangeExtension(cppFull, ".exe")
+                // Stays at -O2, NOT Build.optFlags: this is an nvcc invocation
+                // (cl.exe host), and nvcc's host-flag translation does not take
+                // -march cleanly on Windows. Same rule as Build.fs's CUDA paths.
+                // The Linux branch below goes through compileCpp, so it DOES
+                // pick up the shared -O3 -march flags.
                 let args = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\"" exeFull cppFull
                 runProc "nvcc" args 120000 |> Result.map (fun () -> exeFull)
             else compileCpp cppFile outputDir
@@ -758,3 +763,118 @@ let R = method_for(Z) <@> lambda(z) where cuda(block: 32) -> exp(z) * conj(z) |>
         else (failures <- failures + 1; failedNames <- failedNames @ ["complex_exp_device"])
         printFooter "CUDA Kernel" [sprintf "%d passed" passed; sprintf "%d failure(s)" failures]
         { Block = "CUDA Kernel"; Passed = passed; Failed = failures; Skipped = 0; FailedNames = failedNames }
+
+
+/// Run `cpp/cublas_swap_tests.cu` — the runtime verification of Round D's
+/// COLUMN-MAJOR SWAP TABLE (docs/plan-cpp-perf-exploitation.md).
+///
+/// WHY IT LIVES HERE AND NOT IN `blade test linalg`. Its sibling
+/// `runLinAlgProbeTests` needs only g++ and runs in the default suite; this one
+/// needs nvcc, an MSVC host compiler on Windows, and a real GPU — the exact
+/// capability set this file already gates on. Putting it under the opt-in
+/// `--cuda` phase keeps the default suite free of a ~30 s nvcc compile and of a
+/// hardware dependency, and puts it beside the other tests that would skip for
+/// the same reasons.
+///
+/// WHAT IT PROVES THAT EMISSION TESTS CANNOT. `blade test linalg` shows that a
+/// gram/matmul REACHES `blade_cuda_*`. Whether the column-major swap inside
+/// those entry points computes the right matrix is invisible in emitted text
+/// and nearly invisible in values — a wrong transpose flag, a missing
+/// conjugation or an unflipped fill mode all return a plausible matrix rather
+/// than an error. The probe therefore computes each (route x precision) twice,
+/// once on the device and once through a host loop transcribing Blade's own
+/// arithmetic, and compares. Tolerance, not byte-identity: cuBLAS accumulates
+/// in a different order, while a swap error is thousands of ULPs out.
+///
+/// Skips cleanly (Skipped = 1) when the toolchain or the GPU is absent; never
+/// fails for environment reasons.
+let runCublasSwapTests () : Blade.Tests.TestHarness.BlockResult =
+    let blockName = "cuBLAS Swap"
+    printHeader "cuBLAS Swap-Table Verification"
+    let skipResult = { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    let caps = capabilities.Value
+    let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "cublas_swap_tests.cu")
+    if not caps.HasNvcc || not caps.HasGpu then
+        printfn "Skipped: requires nvcc + CUDA GPU (nvcc=%b, gpu=%b)." caps.HasNvcc caps.HasGpu
+        skipResult
+    elif onWindows && not caps.HasCl then
+        printfn "Skipped: nvcc needs cl.exe (MSVC) as host compiler, not found on PATH."
+        printfn "         Run from the 'x64 Native Tools Command Prompt for VS' (or after vcvars64.bat)."
+        skipResult
+    elif not (File.Exists testSrc) then
+        eprintfn "cublas_swap_tests.cu not found at: %s" testSrc
+        eprintfn "Check that Blade.fsproj copies cpp/cublas_swap_tests.cu to the output dir."
+        { Block = blockName; Passed = 0; Failed = 1; Skipped = 0
+          FailedNames = ["cublas_swap_tests.cu missing"] }
+    else
+        let exeExt = if onWindows then ".exe" else ".out"
+        let exePath = Path.ChangeExtension(testSrc, exeExt)
+        // Compiled IN cppDir so `#include "blade_linalg_cuda.hpp"` (and the
+        // views header it pulls in) resolve to the SHIPPED headers the codegen
+        // path deploys — testing a stale copy would defeat the point. nvcc stays
+        // at -O2, the rule for every nvcc path in this repo.
+        let args =
+            if onWindows then
+                sprintf "-std=c++17 -O2 -Xcompiler /Zc:preprocessor -o \"%s\" \"%s\" -lcublas" exePath testSrc
+            else
+                sprintf "-std=c++17 -O2 -o \"%s\" \"%s\" -lcublas" exePath testSrc
+        let runIn (exe: string) (a: string) (timeoutMs: int) =
+            let psi = ProcessStartInfo(exe, a)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            psi.WorkingDirectory <- cppDir
+            use p = Process.Start(psi)
+            let o = p.StandardOutput.ReadToEndAsync()
+            let e = p.StandardError.ReadToEndAsync()
+            let exited = p.WaitForExit(timeoutMs)
+            if not exited then (try p.Kill(true) with _ -> ())
+            (exited, (if exited then p.ExitCode else -1), o.Result, e.Result)
+        let (cExited, cCode, cOut, cErr) = runIn "nvcc" args 300000
+        if not cExited then
+            printfn "nvcc compilation TIMED OUT (300s)"
+            printFooter blockName ["FAILED"]
+            { Block = blockName; Passed = 0; Failed = 1; Skipped = 0; FailedNames = ["<compile timeout>"] }
+        elif cCode <> 0 then
+            printfn "nvcc compilation FAILED:"
+            printfn "%s" (cOut + "\n" + cErr)
+            printFooter blockName ["FAILED"]
+            { Block = blockName; Passed = 0; Failed = 1; Skipped = 0; FailedNames = ["<compile failed>"] }
+        else
+            let (rExited, rCode, rOut, rErr) = runIn exePath "" 120000
+            printf "%s" rOut
+            if not (String.IsNullOrWhiteSpace rErr) then eprintf "%s" rErr
+            let outText = rOut.Replace("\r\n", "\n")
+            let m =
+                System.Text.RegularExpressions.Regex.Match(
+                    outText, @"CUBLAS SWAP TESTS:\s*(\d+)/(\d+)\s*passed")
+            let pPassed = if m.Success then int m.Groups.[1].Value else 0
+            let pTotal = if m.Success then int m.Groups.[2].Value else 0
+            let failNames =
+                outText.Split('\n')
+                |> Array.choose (fun l ->
+                    let fm = System.Text.RegularExpressions.Regex.Match(l, @"\[FAIL\]:\s*(.+)$")
+                    if fm.Success then Some (fm.Groups.[1].Value.Trim()) else None)
+                |> Array.toList
+            // Same doctrine as the linalg probe: the summary line must be
+            // present before an exit 0 counts as a pass, so a binary that
+            // aborted inside the shim's own error path (which calls abort())
+            // cannot score a vacuous 0/0.
+            if not rExited then
+                printFooter blockName ["FAILED"]
+                { Block = blockName; Passed = 0; Failed = 1; Skipped = 0; FailedNames = ["<run timeout>"] }
+            elif not m.Success then
+                printFooter blockName ["FAILED"]
+                printfn "  no 'CUBLAS SWAP TESTS: p/n passed' summary in output -- cannot confirm any check ran"
+                { Block = blockName; Passed = 0; Failed = 1; Skipped = 0
+                  FailedNames = ["<no CUBLAS SWAP TESTS summary line>"] }
+            elif rCode = 0 then
+                printFooter blockName ["all passed"]
+                { Block = blockName; Passed = pPassed; Failed = 0; Skipped = 0; FailedNames = [] }
+            else
+                printFooter blockName ["FAILED"]
+                { Block = blockName; Passed = pPassed; Failed = max 1 (pTotal - pPassed); Skipped = 0
+                  FailedNames = (if failNames.IsEmpty then [sprintf "<exit %d>" rCode] else failNames) }

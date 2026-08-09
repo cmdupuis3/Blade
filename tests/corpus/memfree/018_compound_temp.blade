@@ -30,7 +30,7 @@ let rec acc: Array<Float like Steps> =
     | zero -> zero
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: prefix(n - 1) + cstep(n)
-let sfinal = acc(4)
+let sfinal = acc((4 : Steps))
 let posread = POS(4)
 let posn = extents(POS)
 // EXPECT: SRC = [3, -1, 4, -2, 5, -3]

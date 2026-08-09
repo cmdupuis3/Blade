@@ -19,6 +19,7 @@ BladeFusionDuality.v
 BladeCompute.v
 BladeDeduce.v
 BladeCauchy.v
+BladeDichotomy.v
 BladeMonad.v
 BladeSafety.v
 BladeJacobian.v
@@ -27,3 +28,5 @@ BladePartition.v
 BladePointGroup.v
 BladeWordClosure.v
 BladeRepStatus.v
+BladeWreath.v
+BladeLayout.v

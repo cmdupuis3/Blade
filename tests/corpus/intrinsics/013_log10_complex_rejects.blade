@@ -1,0 +1,9 @@
+// TEST: Intrinsics Log10 Complex (rejects)
+// ERROR: BL3007
+// <complex> overloads exp/log/sqrt and the trig and hyperbolic families, but
+// NOT log10 -- so log10 is deliberately absent from Grad.complexMathIntrinsics
+// and a complex operand is refused here exactly the way floor/ceil refuse one,
+// rather than emitting a std::log10(std::complex<double>) that only g++ would
+// reject. `log` in the same position is accepted (intrinsics/003).
+let z = complex(1.0, 2.0)
+let bad = log10(z)

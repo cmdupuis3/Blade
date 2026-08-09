@@ -1,0 +1,13 @@
+// TEST: Compound Unit Annotation Mismatch (rejects)
+// ERROR: BL3006
+// A compound annotation is not decoration: Float<meter/second> carries the
+// real m/s signature, so adding a seconds value is the ordinary unit
+// mismatch. (Local Unit decls, not `import units.SI`: the corpus lane's
+// lowerCaptured does not resolve stdlib imports, and unresolved unit names
+// degrade to bare floats -- which would make this probe lower instead of
+// reject.)
+Unit meter
+Unit second
+let v: Float<meter/second> = 3.0
+let t: Float<second> = 5.0
+let bad = v + t

@@ -1,0 +1,30 @@
+// TEST: Symmetric Literal In Triangular Shape
+// A compact group is ONE axis whose stored cells are the left-justified
+// simplex allocate<> builds, so its literal is written in that same shape:
+// row i0 holds the cells (i0, i0..n-1), i.e. lengths 3, 2, 1 for SymIdx<2,3>.
+// The literal's index path IS the storage coordinate (canon_left_justify:
+// p1 = p0 + c1), so no reshuffling happens between source and pool — and the
+// mirrored reads below are the assertion that the pool was filled in the
+// order the checker promised.
+let A: Array<Int64 like SymIdx<2, 3>> = [
+    [1, 2, 3],
+    [4, 5],
+    [6]
+]
+let a00 = A(0, 0)
+let a02 = A(0, 2)
+let a20 = A(2, 0)
+let a11 = A(1, 1)
+let a12 = A(1, 2)
+let a22 = A(2, 2)
+// The pin is NESTED, which checks the row split as well as the cells: a rank-2
+// array prints in the shape its literal takes, so this line is the source line
+// above (a flat pin would still pass — it is compared against the row-major
+// flattening — but would not notice a row boundary moving).
+// EXPECT: A = [[1, 2, 3], [4, 5], [6]]
+// EXPECT: a00 = 1
+// EXPECT: a02 = 3
+// EXPECT: a20 = 3
+// EXPECT: a11 = 4
+// EXPECT: a12 = 5
+// EXPECT: a22 = 6

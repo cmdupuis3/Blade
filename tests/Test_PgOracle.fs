@@ -1,5 +1,5 @@
 // The point-group Hom-basis COMPLETENESS oracle — stage 5b-0 of
-// plan-transforms-as-types §3.6, held to the Test_PermOracle standard:
+// the retired transforms-as-types plan §3.6, held to the Test_PermOracle standard:
 //
 //   THERE IS NO `float` IN THIS FILE. Every matrix entry is a normalized
 //   BigInteger fraction (the local `Rat` below, the PermOracle/PolyOracle

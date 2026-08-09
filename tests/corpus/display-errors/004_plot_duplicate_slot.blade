@@ -1,0 +1,7 @@
+// TEST: Plot Duplicate Slot Through Module (rejects)
+// ERROR: BL3014
+// The factory slot rules hold through the real stdlib module: supplying the
+// levels slot twice on plot.contourf is the same duplicate-fill routing
+// error a local factory raises (functions/051).
+import plot
+let bad = plot.contourf([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]], 5: levels, 9: levels)

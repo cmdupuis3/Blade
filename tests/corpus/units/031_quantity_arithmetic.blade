@@ -1,0 +1,23 @@
+// TEST: Quantity Arithmetic Nominal Flow
+// +/- keep the nominal (speed + speed = speed); * and / compose dims and
+// DROP it (speed * seconds is structurally meters, so it adds with a
+// Float<meters> value; speed / speed cancels to a dims-empty Unitless
+// signature that mixes freely with bare numbers).
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit speed: mps
+let v: Float<speed> = 4.0
+let w: Float<speed> = 6.0
+let sum = v + w
+let t: Float<seconds> = 2.0
+let d = v * t
+let m: Float<meters> = 1.0
+let probe = d + m
+let r = v / v
+let bare = r + 1.0
+// EXPECT: sum = 10
+// EXPECT: d = 8
+// EXPECT: probe = 9
+// EXPECT: r = 1
+// EXPECT: bare = 2

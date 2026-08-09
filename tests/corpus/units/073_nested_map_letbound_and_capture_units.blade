@@ -1,0 +1,47 @@
+// TEST: Nested Map Let-Bound And Capture Units Cancel (rejects)
+// REJECT-AT: codegen
+// ============================================================================
+// The two routes by which a PROVISIONAL unit reaches a nested map WITHOUT
+// being visible in the map's operand types. units/065 pinned the third
+// (an operand that is itself provisional, `sin <@> (w * ts)`), and the
+// operand-based deferral test that fixed it missed both of these:
+//
+//   A. LET-BOUND operand. `let wt = w * ts` then `sin <@> wt`. The operand is
+//      a bare TExprVar with no children, so walking it never reaches the
+//      unresolved `w` inside its defining expression. Two bugs stacked here:
+//      the deferral did not fire, AND the second pass got the answer wrong --
+//      an array-typed var contributed None to the walk (`getUnits` reads only
+//      a TOP-level annotation), so `w * ts` computed 1/day rather than
+//      1/day * day, and the rejection quoted the PARAM's own unit.
+//
+//   B. CAPTURE read by the inner kernel. `let w = 2.0 * f` then
+//      `ts <@> lambda(t) -> sin(w * t)`. Every operand is fully resolved; only
+//      `w`'s first-pass type is stale (`f` was unresolved when `2.0 * f` was
+//      typed), so nothing in the operands could ever have signalled it.
+//
+// Codegen-stage probe on purpose, same as units/065: the units check must NOT
+// refuse these, so only the known issue #3 ceiling (nested loop object in a
+// kernel body) is left to. A units regression is refused at LOWER and fails
+// this pin. Numerics are pinned separately at top level in units/074, which
+// does lower; once #3 lands, outA/outB here are
+// [1.89188841969345, -0.126920566681172].
+// Residue twins that must still reject: unit-errors/010 and unit-errors/011.
+// ============================================================================
+Unit second
+Unit day = 86400 * second
+let ts: Array<Float<day> like Idx<3>> = [1.0, 2.0, 3.0]
+let ws: Array<Float<1/day> like Idx<2>> = [1.0, 2.0]
+
+// A -- let-bound provisional operand
+let outA = ws <@> lambda(w) -> {
+    let wt = w * ts
+    let sn = sin <@> wt
+    reduce(sn, (+))
+} |> compute
+
+// B -- provisional capture read by the inner kernel
+let outB = ws <@> lambda(f) -> {
+    let w = 2.0 * f
+    let sn = (ts <@> lambda(t) -> sin(w * t)) |> compute
+    reduce(sn, (+))
+} |> compute

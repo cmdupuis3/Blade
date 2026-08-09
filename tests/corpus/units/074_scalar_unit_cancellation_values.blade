@@ -1,0 +1,32 @@
+// TEST: Scalar Unit Cancellation Values
+// ============================================================================
+// The NUMERIC half of units/073. Every nested-map-in-a-kernel-body shape is
+// blocked from running by the issue #3 codegen ceiling, so the accept pins
+// there can only assert "typechecks". This pins the arithmetic the unit
+// cancellation is claiming, in the one spelling that does lower: a CONCRETE
+// `Float<1/day>` scalar against a `Float<day>` array, top level, no kernel
+// param and so no deferral -- the strict path.
+//
+// Two things are asserted at once. `1/day * day` cancels to dimensionless, so
+// `sin` accepts it; and the magnitudes are exact reciprocals (1/86400 and
+// 86400), so the VALUES pass through unscaled -- wt1 is [1, 2, 3], not
+// [86400, ...]. Those are the numbers units/073's outA/outB must produce when
+// #3 lands: s1 and s2 are its two output cells.
+// ============================================================================
+Unit second
+Unit day = 86400 * second
+let ts: Array<Float<day> like Idx<3>> = [1.0, 2.0, 3.0]
+let w1: Float<1/day> = 1.0
+let w2: Float<1/day> = 2.0
+let wt1 = (w1 * ts) |> compute
+let wt2 = (w2 * ts) |> compute
+let sn1 = (sin <@> wt1) |> compute
+let sn2 = (sin <@> wt2) |> compute
+let s1 = reduce(sn1, (+))
+let s2 = reduce(sn2, (+))
+// EXPECT: wt1 = [1, 2, 3]
+// EXPECT: wt2 = [2, 4, 6]
+// EXPECT: sn1 = [0.841470984807897, 0.909297426825682, 0.141120008059867]
+// EXPECT: sn2 = [0.909297426825682, -0.756802495307928, -0.279415498198926]
+// EXPECT: s1 = 1.89188841969345
+// EXPECT: s2 = -0.126920566681172

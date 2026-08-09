@@ -35,7 +35,7 @@ let div_done = {
     let s_dv0 = reduce(method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j, k) -> {
         let d = G(0, 0, i, j, k) + G(1, 1, i, j, k) + G(2, 2, i, j, k)
         d * d
-    }, (+), 0.0)
+    }, (+), 0.0, axes = 3)
     dv(0) = s_dv0
     0.0
 }

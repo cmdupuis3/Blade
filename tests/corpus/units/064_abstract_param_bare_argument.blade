@@ -1,0 +1,32 @@
+// TEST: Bare Arguments Lift Into A Unit-Carrying Abstract Parameter
+// A unit-carrying parameter accepts a BARE argument -- an array literal, an
+// unannotated array binding, a bare scalar -- and the value adopts the
+// declared unit. That is not a concession made for the abstract spelling:
+// `Array<Float<second> like Idx<n>>` and `Float<second>` have always done
+// it (the permissive asymmetric unit arm is how units get INTRODUCED), and
+// `T<second>^1` / `T<second>^0` must behave identically or the abstract
+// signature would be strictly less usable than the concrete one it
+// replaces.
+//
+// The pin is on the whole path, not just acceptance: with the parameter
+// abstract, its element is a unit-annotated type VARIABLE, and the bare
+// argument is what tells HM monomorphization the variable is Float64.
+// Before, that binding was only learned when the argument carried a unit
+// wrapper too, so a bare one left the variable unresolved -- the program
+// passed `blade check` and then died at IR validation (BL6001). The unit
+// still lands on the RESULT: `total([1.0, 2.0])` is in seconds and adds
+// against a `Float<second>` (a mismatched addition is pinned in
+// unit-errors; the mismatched ARGUMENT is pinned in 061).
+Unit second
+function total(x: T<second>^1) = reduce(x, (+))
+function twice(k: T<second>^0) = k * 2.0
+let fromLiteral = total([1.0, 2.0])
+let bare = [3.0, 4.0]
+let fromBinding = total(bare)
+let bias: Float<second> = 10.0
+let summed = fromLiteral + bias
+let scaled = twice(5.0)
+// EXPECT: fromLiteral = 3
+// EXPECT: fromBinding = 7
+// EXPECT: summed = 13
+// EXPECT: scaled = 10

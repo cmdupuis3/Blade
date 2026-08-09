@@ -7,13 +7,13 @@ open BladeML
 /// bridged targets, and the certified model
 ///   p = derive_linear(HSPEC, TAUSPEC, w2, gated(HSPEC, derive_tp(GSPEC, GSPEC, g, g, w1)))
 /// trained by full-batch SGD on loss = sum_s |p_s - t_s|^2 (via ml.norms of
-/// the same-spec difference — the certified invariant exit). The Blade twin
+/// the same-spec difference -- the certified invariant exit). The Blade twin
 /// trains the SAME model through ad.grad over the compiler-synthesized
 /// layers; this replica pins the trajectory via the BladeML VJPs.
 ///
 /// Data: the 8 W=2 tiles of the N=4 divergence-free field (Oracle.fs
 /// config). Input g_s = bridge9(mean of central-difference gradients over
-/// the tile) — the box filter and the FD gradient commute on a periodic
+/// the tile) -- the box filter and the FD gradient commute on a periodic
 /// uniform grid, so the tile mean IS the filtered gradient. Target
 /// t_s = sym_to_irr(packSym(tau_s)).
 module TrainingOracle =
@@ -198,8 +198,8 @@ module TrainingOracle =
         arr "w2_final" w2
 
         // ---- 007: equivariance certificate of the TRAINED closure ----
-        // Both routes at the house rotation R = Rz(0.7)·Ry(1.1), final
-        // weights: model(D_g·g0) vs D_tau·model(g0); plus loss invariance
+        // Both routes at the house rotation R = Rz(0.7)*Ry(1.1), final
+        // weights: model(D_g*g0) vs D_tau*model(g0); plus loss invariance
         // (rotated sample AND rotated target -> identical loss). The
         // rotated inputs are printed for baking; the Blade twin reuses the
         // d_gspec/d_tauspec matrices from dump-cartesian.

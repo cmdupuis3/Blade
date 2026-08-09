@@ -1,4 +1,7 @@
 // TEST: Apply Combinator
+// BL4010: f deduces comm and both slots get A; storage stays DENSE, which is
+// exactly what the 3x3 EXPECT below pins.
+// WARN: BL4010
 let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A)
 let f = lambda(x, y) -> x * y

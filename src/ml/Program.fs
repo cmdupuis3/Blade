@@ -19,7 +19,7 @@ let main argv =
         OracleDump.dumpCartesian ()
         0
     | _ ->
-        printfn "BladeML reference implementation — equivariant ML module tests"
+        printfn "BladeML reference implementation -- equivariant ML module tests"
         printfn ""
         Tests_Core.run ()
         Tests_Wigner.run ()

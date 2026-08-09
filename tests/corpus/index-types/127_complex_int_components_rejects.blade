@@ -1,7 +1,7 @@
 // TEST: Complex Int Components (rejects)
 // ERROR: BL3001
-// complex(re, im) components must be float-typed — no implicit
-// int -> float promotion at literal construction time (same design rule
-// as the retired tuple form). complex(0, 0) is rejected; write
-// complex(0.0, 0.0).
-let x = complex(0, 0)
+// complex(re, im) components must be float-typed. Int LITERALS widen
+// F#-style at construction (complex(0, 0) == complex(0.0, 0.0)), but an
+// int-typed VALUE never flows to a float position implicitly -- cast it.
+let n = 1
+let x = complex(n, 0.0)

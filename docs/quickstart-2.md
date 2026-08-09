@@ -48,15 +48,24 @@ True
 
 The second pipeline recreates how for-loops work in most languages — not the
 efficient way here, but it shows the mechanism: virtual arrays map positions
-in the index space to indices emitted into the kernel. Swap in a different
-virtual array and the same kernel serves stencils or custom traversals:
+in the index space to indices emitted into the kernel. Swapping in a different
+virtual array changes the traversal. `halo<I, [offsets]>` is the stencil
+transformer: it walks the *interior* of `I`, and instead of a bare index the
+kernel receives a window `w`, where `w(o)` is the index at signed offset `o`
+from the center — so neighbor reads are spelled through the window:
 
 ```F#
-let result2 = loop2 <@> (stencil<Idx<M>, Idx<N>>, A, B)
+let A: Array<Float64 like Idx<5>> = [1.0, 2.0, 4.0, 7.0, 11.0]
+let d = method_for(halo<Idx<5>, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute
+```
+```
+d = [3, 5, 7]
 ```
 
-Other built-in virtual arrays: `reverse<I>` (reverse order) and
-`blocked<I, K>` (K-sized cache blocks). Because index values carry their
+Three central differences from five cells: the `[-1, 0, 1]` window shrinks the
+traversal to the interior, so no edge clamping ever reaches the kernel.
+
+Other built-in virtual arrays: `reverse<I>` (reverse order). Because index values carry their
 source index type as a unit (`i : Nat<LatIdx>`), a kernel can only index a
 captured array with indices from the *right* index space — using a `LatIdx`
 value on a `LonIdx` array is a compile error, even at equal extents.
@@ -93,9 +102,12 @@ for args in SymIdx<arity(args), N> where comm(args)
 
 Blade's combinator algebra has two "zeros", and both are useful.
 
-**The zero array tuple `()`** is the empty argument pack — a loop over no
-arrays. It is the identity for joining loops, and the natural base case of
-arity-polymorphic recursion:
+**The zero array tuple `()`** is the empty argument *pack* — a loop over no
+arrays. (It is not a `Tuple<N>` value: `Tuple<N>` annotations require a
+literal `N >= 2`, and `()` is unit, not a tuple — see
+[formalism.md](formalism.md) §2.8, "Tuples and argument packs".) It is the
+identity for joining loops, and the natural base case of arity-polymorphic
+recursion:
 
 ```F#
 method_for() <@> moment        // ≡ pure 1     (identity element)
@@ -151,6 +163,45 @@ where comm(a, b), omp(a: 1)
 argument `a` may carry OpenMP threads. Arrays are bound in order, so their
 S-dimension loops nest in order — the first argument's loops are outermost and
 are the natural parallelization target.
+
+### The clause licenses EXTERNAL loops
+
+An `omp` clause on a signature is about the S-dims that argument **contributes
+to a loop built around the function** — the caller's co-iteration when the
+function is used in kernel position:
+
+```F#
+function cov(a: Float64, b: Float64) where omp(a: 1) = a * b
+let m = object_for(cov) <@> (A, B) |> compute   // <- the licensed nest
+```
+
+It says nothing about a loop the **body itself** generates. Those loops belong
+to the kernel of the apply that builds them, and are licensed by a clause on
+*that* kernel:
+
+```F#
+function lsdft(s: T^1, t: T<time>^1, omegas: T<angular_frequency>^1)
+where omp(s: 1) = {                    // licenses a CALLER co-iterating series
+    ...
+    omegas <@> lambda(w) where omp(w: 1) -> {   // licenses THIS loop
+        ...scalar work over the captured arrays...
+    } |> compute
+}
+```
+
+Writing `where omp(omegas: 1)` on `lsdft` instead would license nothing:
+`omegas` is iterated by a loop `lsdft` builds internally, and that loop reads
+its licence from its own kernel. The compiler warns (BL4001) when a licensed
+parameter is an operand of an apply inside the body whose kernel carries no
+clause of its own, because the emitted C++ for "asked and got serial" is
+byte-identical to "never asked".
+
+A `Tuple<N>` parameter may carry a parallel clause: under one-level structural
+matching the tuple is **one schema node**, so `omp(p: n)` licenses the first
+`n` of the levels that node contributes (`omp(p: 1)` on a `Tuple<2>` threads
+one level, not two). `comm`/`anticomm` on a tuple parameter stay refused — they
+address parameters by position, and the expansion into row parameters
+renumbers those.
 
 The depth is a **licence, not a demand**. It caps the compiler's choice rather
 than replacing it: the emitted strategy is still picked from the loop structure
@@ -243,9 +294,12 @@ arrays.
 Array-level combinators operate on (lazy) array expressions; `|> compute`
 materializes with cache-optimal layout:
 
-* `zip(A, B, ...)` — pair up arrays over their shared leading dimensions; the
-  kernel receives ONE tuple argument. This is what elementwise `+` desugars
-  through.
+* `zip(A, B, ...)` — pair up arrays over their shared leading dimensions. By
+  default the kernel still takes one flat parameter per array
+  (`lambda(a, b) -> ...`); write a `Tuple<2>` (or written-tuple) parameter to
+  take the co-iterated pair as one value instead (`lambda(p: Tuple<2>) ->
+  p[0] + p[1]`) — see [formalism.md](formalism.md) §2.8. This is what
+  elementwise `+` desugars through, in the flat form.
 * `stack(A, B, ...)` — new leftmost dimension selecting among the arrays.
 * `transpose(A, perm)` — hard transpose (real data movement on materialize);
   the price of re-ordering a curried index chain.
@@ -362,7 +416,7 @@ message passing) is the subject of
 appear in *type positions* — types are computed, not just written:
 
 ```F#
-let const n = 100
+let static n = 100
 static function triangle(k) = k * (k + 1) / 2
 
 type PackedSym = Array<Float like Idx<triangle(n)>>   // Idx<5050>
@@ -370,7 +424,7 @@ type PackedSym = Array<Float like Idx<triangle(n)>>   // Idx<5050>
 
 Rules of the game:
 
-- `static function` may capture only `const`/static values; it runs at
+- `static function` may capture only `static` values; it runs at
   compile time when its arguments are static.
 - No totality proofs, no proof assistant — just the restriction that static
   computation depends only on static inputs (that keeps type checking

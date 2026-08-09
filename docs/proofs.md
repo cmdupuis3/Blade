@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**524 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**798 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -12,8 +12,8 @@ Rules of this document:
   names its Coq artifact. Nothing is `Admitted`; there are no axioms.
 - Scope caveats are stated where the files state them (rank-2 only,
   materialized fragment, do-not-cite, etc.).
-- Remaining open items live in [future.md](future.md) §4 (from the tower's
-  ROADMAP).
+- Remaining open items are collected under "What remains unproved" at the end
+  of this document.
 - The count above is mechanical, on the convention documented in
   [../proofs/README.md](../proofs/README.md): line-initial `Lemma` /
   `Theorem` / `Corollary` / `Example` in the `_CoqProject` files. Run
@@ -31,7 +31,8 @@ Rules of this document:
 | 3: symmetry | BladeCore, BladeLowering, BladeCompleteness, BladeFusionDuality | group law both halves, H-and-Stab soundness AND exactness, sign-tracked variant, fusion ⇒ duality |
 | Trinity | BladeTrinity, BladeTrinityAsym | `<*>` = shape concatenation; generators + forced closure |
 | Computation | BladeCompute, BladeMonad, BladeSafety | materialized semantics, V∘P = id, 12.x laws, MonadPlus, verified offsets + bounds safety + buffer-elimination fusion |
-| Storage split | BladeCauchy | the r = 2 Cauchy split |
+| Storage split | BladeCauchy, BladeDichotomy | the r = 2 Cauchy split; the r ≥ 3 dichotomy — witness, width-2 refutation over any ring, the r! isotypic repair |
+| Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage, exactness enumerated at r = 2 and r = 3; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
 
@@ -435,10 +436,67 @@ copy. Checked:
 Consequence (v11 §12.4): single-identity-group r = 2 (covariance class)
 regains exact per-dimension product-STRUCTURED storage via SymIdx⊗SymIdx plus
 sign-tracked AntisymIdx⊗AntisymIdx; the "flattening is forced" conclusion is
-amended at r = 2. Honest scope: r = 2 only (r ≥ 3 has mixed Schur components
-— genuinely open); totals equal the joint count (the win is structure, not
-cells); each read costs two lookups plus a halving; the bridge to concrete
-lj/alj layouts is mechanical and not done.
+amended at r = 2. Honest scope: r = 2 only — and that boundary is now a
+theorem, not an assumption: BladeDichotomy.v closes r ≥ 3 negatively and
+shows this split optimal, not merely correct. Totals equal the joint count
+(the win is structure, not cells); each read costs two lookups plus a
+halving; the bridge to concrete lj/alj layouts is mechanical and not done.
+
+## BladeDichotomy.v (26 theorems) — the r ≥ 3 storage dichotomy
+
+Closes BladeCauchy's boundary in both directions at r = 3, following the
+rank-dichotomy development (2026-08-02). The general theorem: the minimal
+width of a scalar-access per-dimension-canonical scheme is **r!** — the fiber
+over a free canonical cell carries the REGULAR representation of S_r, scalar
+weights invert only 1×1 blocks, and S_r has exactly two linear characters;
+2 = r! iff r ≤ 2. Self-contained, division-free (the factors 2 and 6
+exhibited, never divided).
+
+- **The witness** (`witness_symmetric`, `witness_nonzero`,
+  `witness_components_vanish`, packaged as
+  `naive_split_confuses_witness_with_zero`): an explicit integer tensor at
+  extent 2 — value −2 on the diagonal orbit {(0,0),(0,0),(1,1)}, +1 on
+  {(0,0),(0,1),(1,0)} — slot-pair symmetric, nonzero, and its sym AND alt
+  components vanish at every index. Any access rule reading only those two
+  components confuses it with the zero tensor: the natural r = 3
+  generalization of `cauchy_split_access` is refuted by computed pin, in the
+  register of BladeCounting's `witness_not_in_image`. (This is the
+  S^{(2,1)} ⊗ S^{(2,1)} obstruction made concrete: 20 = 16 + 4 at extent 2.)
+- **The width-2 refutation** (`width2_scalar_access_refuted`; ℤ instance
+  `width2_refuted_over_Z`): over ANY commutative ring with 1 ≠ 0, no two
+  weight functions ε₁, ε₂ : S₃ × S₃ → R reconstruct every symmetric tensor
+  from two scalars per canonical cell. Three indicator tensors evaluate to
+  the identity matrix at three fiber points of the free cell; soundness
+  forces those rows into the span of two fixed vectors; the 3×3 determinant
+  (`det3_span2`, a ring identity) vanishes on any such span but equals 1 on
+  the identity. Storage is an arbitrary per-tensor function — not even
+  linearity is assumed; the entire constraint lives in the weight span.
+  Section-local `Add Ring` over an abstract `ring_theory`, so ℚ/ℝ instances
+  are immediate.
+- **The positive half** (`six_component_access`): the m = 3! = 6 scheme —
+  store T(a, μ·b) for the six μ — reconstructs any slot-pair-symmetric
+  tensor at EVERY index, tied or free, values in an arbitrary type; pure
+  index algebra generated by the transposition and 3-cycle relations.
+- **The isotypic access rule** (`isotypic_access_r3`, with `stdmat_is_rep`
+  and the division-free column orthogonality `fourier_orthogonality_S3`):
+  INTEGER matrices for the standard representation on the root-lattice
+  basis; 6·g_μ = p_triv + sgn(μ)·p_sgn + 2·tr(ρ(μ⁻¹)·P_std) — 1 + 1 + 4 =
+  6 = 3! numbers per cell (Wedderburn), the 6 exhibited exactly as
+  BladeCauchy's 2. BladeCauchy's sort-parity product is the ρ^{(1,1)}
+  instance of the same rule — the r = 2 and r ≥ 3 stories are one statement.
+- **Cell accounting** (`cell_accounting_2_2`, `cell_accounting_3_3`): the
+  repaired store is exactly lossless in count — the double-coset sum
+  Σ_{(a,b)} |Stab(a) \ S₃ / Stab(b)| equals the diagonal-orbit count equals
+  C(LM+2, 3): 20 at extent (2,2), 165 at (3,3) — the generalization of
+  `cauchy_cell_count`, pinned from the live enumerations.
+
+Honest scope: r = 3 — the load-bearing rank, where mixed Schur components
+first exist. The general-r statement (minimal width r!, and a genuine
+tie-breaking exception at (r,L,M) = (3,2,2), where exactly 4 of 4096
+tie-breaking rules admit width 2 — so the general theorem must quantify over
+tie-breaks) is the prose development; a general-r mechanization needs a
+ℚ[S_r] development, exactly as BladeWreath's general-r exactness. Schemes
+with wider stores or multi-cell reads are a different class, not refuted.
 
 ## BladeMonad.v — monad and combinator laws
 
@@ -490,17 +548,17 @@ address = the compiler's triangular offset `roff`.
   buffer; results agree. Loop-fusion soundness with a real store, not a
   map_map restatement.
 
-Scope: rank 2 (general-r offset = nested hockey-stick sums — future.md §4);
-surface progress/preservation is the remaining open species (future.md §4.1).
+Scope: rank 2 (the general-r offset is nested hockey-stick sums, still
+unproved); surface progress/preservation is the remaining open species.
 
 ## BladeJacobian.v — the Jacobian symmetry transfer and symmetric accumulation
 
 The AD-seam file: the theorems the AD plan leans on
-([plan-forward-mode-ad-and-nn-module.md](plan-forward-mode-ad-and-nn-module.md)
-§3.3 consequence 2, §6.4/§6.5's symmetric bullets, stage C5), closing
-future.md §2.1's "Jacobian symmetry theorem" and "symmetric gradient
-accumulation" items at rank 2. Formalized at the level the compiler
-actually differentiates (Grad.fs is a syntactic transform): SYMBOLIC
+(the retired AD-module plan's §3.3 consequence 2, §6.4/§6.5's symmetric
+bullets, stage C5), closing the
+"Jacobian symmetry theorem" and "symmetric gradient accumulation" open items
+at rank 2. Formalized at the level the compiler actually differentiates
+(Grad.fs is a syntactic transform): SYMBOLIC
 differentiation on a minimal expression language — variables, constants,
 +, ×, and opaque unary intrinsics with a FORMAL derivative slot (the
 derivRule model; no real analysis anywhere) — with nat-semiring
@@ -566,8 +624,8 @@ model.
 
 ## BladeSymPower.v — the S₂ partition and the copy-splitting counts
 
-The counting obligations of
-[plan-transforms-as-types.md](plan-transforms-as-types.md) §3.2/§3.3b (listed
+The counting obligations of the retired transforms-as-types plan
+§3.2/§3.3b (listed
 in its §8 as the σ-symmetric weight count and the cardinality half of the
 Sym^k monomial-basis bijection), checked so the elaborator's internal asserts
 have a proof behind them. Division-free throughout; no Clebsch–Gordan
@@ -630,8 +688,8 @@ a compiler-side sweep (stage 2a, 15 specs to multiplicity 4).
 
 ## BladePartition.v — set partitions, RGS order, and the witness certificate
 
-The stage 5a-i obligations of
-[plan-transforms-as-types.md](plan-transforms-as-types.md) §3.6 (the Sₙ
+The stage 5a-i obligations of the retired transforms-as-types plan
+§3.6 (the Sₙ
 index-action member; staging item 5). `derive_perm_linear(K, L, N, …)` emits
 one loop nest per **partition of the K + L index positions**, with the basis
 element of a partition γ being its **coarsening indicator** B_γ — 1 on an
@@ -723,8 +781,8 @@ permutation-module tier is character-free.
 
 ## BladePointGroup.v — the point-group registry, checked by computation
 
-The stage 5b-0 obligations of
-[plan-transforms-as-types.md](plan-transforms-as-types.md) §3.6 (point groups
+The stage 5b-0 obligations of the retired transforms-as-types plan
+§3.6 (point groups
 as the second block-spec member) and §7's 5b-0 bullet, whose mandate for this
 file is *all computational over the witnesses: table closure, FS indicators, J
 identities, the e-weighted sum; End-completeness cited, oracle-discharged*.
@@ -838,14 +896,241 @@ functions, orthogonality, Clebsch–Gordan/fusion multiplicity (the CG-copy inde
 is §3.6's 5b-iii deferral) and any group off the roster are likewise absent:
 nothing here is quantified over "all point groups".
 
+## BladeWreath.v (85 theorems) — the wreath group for input-side product symmetry
+
+The input-side companion to BladeCore's output-side refutations (formalism
+3.4/12.5): two rank-r symmetric tensors combined by a pointwise kernel
+`T[I,J] = f(A[I], B[J])`. Where BladeCore refutes per-dimension product
+symmetry for one array's own indices, this file asks what symmetry the
+*declared* symmetry of the inputs licenses on the combined object.
+
+**Block-wise soundness, general r, unconstrained kernel.**
+`block_product_symmetry_soundness`: for ANY `f` — no commutativity,
+associativity, or any other hypothesis — permuting the r indices inside
+block A and independently inside block B (any `s, t` with `permutes r s`,
+`permutes r t`) leaves the output unchanged; the symmetry comes entirely
+from the declared input symmetry of A and B. `left_block_symmetry` /
+`right_block_symmetry` isolate the two generators, and
+`block_product_symmetry_nonvacuous` instantiates the hypotheses at a
+concrete symmetric tensor (`symsum`) to show they are satisfiable at every
+r. `block_canonical_access_general`: reading the output at any per-block
+canonicalization (any map returning a permuted copy of its tuple) recovers
+the true value — the product-simplex store SymIdx<r,n> ⊗ SymIdx<r,n>,
+C(n+r−1,r)² cells (BladeBinomial's closed form, squared), is lossless for
+distinct symmetric inputs. No contradiction with BladeCore's
+`counting_lemma_r2`: that theorem refutes product storage for the
+JOINT-symmetric object of one identity group; this is a different object
+(two identity groups), a different group.
+
+**The wreath upgrade (repeated argument, general r).** With the second
+input equal to the first (one identity group) and `f` commutative, the
+block swap joins the licensed set for free (`wreath_block_swap`:
+`f (A J) (A I) = f (A I) (A J)`), and composing it with the block-wise
+S_r × S_r gives invariance under the full wreath product S_r wr S_2, order
+2·(r!)² — `wreath_full_invariance`, stated for an arbitrary
+`(b : bool, s, t)`, i.e. an arbitrary wreath-group element. The division of
+labour is the doctrinal point: block-internal symmetry comes from the
+input declaration alone; the block swap needs BOTH commutativity of `f`
+AND identity of the two arguments — dropping identity loses it even with
+commutativity retained (`block_swap_not_licensed`, Theorem 9.17 /
+BladeLowering's `shared_units_insufficient` raised from r = 1 to r = 2,
+distinct arguments, comm kernel).
+
+**The wreath group is strictly inside S_{2r}.** `s4_orbit_not_licensed`:
+two index tuples in the same S_4 orbit (`same_s4_orbit`, via
+`s4_orbit_witness`) carry different values — so the sound joint form for a
+comm-repeated symmetric argument is the wreath product, not the full
+symmetric group on all 2r positions
+([plan-orbit-index-types.md](plan-orbit-index-types.md)).
+
+**Exactness at r = 2, by finite enumeration.** Over 24 slot permutations
+and 16 index tuples at extent n = 2: `distinct_stabilizer_is_block_group`
+(the distinct-input stabilizer is EXACTLY the 4-element block group,
+`distinct_stabilizer_count`) and `repeated_stabilizer_is_wreath` (the
+repeated-input stabilizer is EXACTLY the 8-element wreath group,
+`repeated_stabilizer_count`) — both checked to be composition-closed
+permutation groups (`block_group_is_group`, `wreath_group_is_group`,
+`block_subgroup_of_wreath`). `degeneracy_criterion` sweeps every symmetric
+2×2 table with entries < 5: the stabilizer jumps to all of S_4 exactly on
+the rank-one locus a·c = b² (`degenerate_witness_is_full_s4`, where the
+output is a 4-fold tensor power), and is the wreath group everywhere else —
+the exactness result is not witness luck.
+
+**Extent-6 re-enumeration.** The same result at 6×6 (24 permutations ×
+1296 tuples, kernel a parameter): `distinct6_stabilizer_is_block_group`,
+`repeated6_stabilizer_is_wreath` (multiplication),
+`repeated6_add_stabilizer_is_wreath` (addition) reproduce the r = 2 groups
+exactly at a different extent. `rank1_6_degenerates_to_s4` /
+`additive_rank1_6_degenerates_to_s4` scale the degeneracy, and
+`additive_locus_is_kernel_relative` shows the degeneracy locus is
+KERNEL-RELATIVE — the additive analogue collapses to full S_4 under
+`f = +` while staying exactly wreath under `f = *` — so a compiler cannot
+detect the collapse from the input alone; licensing must be by identity and
+declaration, not by value inspection.
+
+**Exactness at r = 3 — one rank past the seed.** r = 2 is a thin margin:
+the wreath group has order 8 inside S_4's 24, and there every generator is
+a transposition, so a reader may reasonably suspect the exactness is an
+artifact of how little room S_4 leaves. Section 10 removes that doubt by
+re-running the whole enumeration at r = 3, where 648 of the 720
+permutations of S_6 must fail — including 6-cycles and every way of
+interleaving the two index blocks — against all 3⁶ = 729 index tuples
+(`perms720_card`, `cells_r3_card`). Nothing is assumed about which
+permutations could work: the permutation list is GENERATED rather than
+written out as data (720 six-lists is past the point where a literal table
+is auditable) and then certified to be all of S_6 — 720 entries, pairwise
+distinct, each a bijection of the 6 slots (`perms720_are_bijections`,
+`perms720_distinct`). The two candidate groups are likewise DEFINED by the
+block-preserving predicate and then shown to have the right orders and to
+be composition-closed (`block36_card`, `wreath72_card`, `block36_is_group`,
+`wreath72_is_group`, `block36_subgroup_of_wreath72`), rather than asserted
+as tables. The rank-3 symmetric accessor reaches its table through
+(min, median, max), so full S_3 input symmetry is definitional rather than
+a property of the particular witness (`symtab3_perm`, `symtab3_S3`); table
+entries are kept in 1..4 deliberately, since coincidences are cheapest at
+small values, making exactness there the stronger result, not the weaker.
+
+The four regimes come out exactly as sections 2, 3, 5 and 7 predict:
+
+```
+repeated + commutative      72 = 2·(3!)²   exactly the wreath group
+distinct inputs             36 = (3!)²     exactly the block group
+repeated + NONcommutative   36 = (3!)²     the swap dies
+rank-one (degenerate)      720 = |S_6|     total collapse
+```
+
+`repeated_r3_stabilizer_is_wreath` is the headline — the stabilizer of a
+repeated symmetric argument under a commutative kernel is EXACTLY the
+72-element S_3 wr S_2, not a lower bound and not a sample — and
+`repeated_r3_add_stabilizer_is_wreath` reproves it under `Nat.add`, so the
+wreath answer is a property of the regime rather than of multiplication.
+`distinct_r3_stabilizer_is_block_group` is section 5's refutation at r = 3
+(exactly 36 = (3!)²). The sharpest of the four is
+`noncomm_r3_loses_the_swap`: same repeated symmetric input, same
+enumeration, and the only change is that the kernel (x²y) stops
+commuting — whereupon exactly the 36 swap-containing permutations drop
+out. That isolates the Z₂ factor of the wreath product as precisely the
+commutativity license of section 3, and nothing else. The strict chain
+`block36_lt_wreath72_lt_s6` (36 < 72 < 720) is derived from those
+theorems rather than re-enumerated.
+
+Three named permutations that S_6 allows and the wreath group forbids are
+pinned with the exact tuple where the output disagrees
+(`r3_pinned_are_not_wreath` plus `r3_cross_one_violates`,
+`r3_interleave_violates`, `r3_sixcycle_violates`): a 6-cycle, a full
+interleaving of the two blocks, and a single cross-block exchange — the
+last being the MINIMAL departure from the wreath group, moving just one
+slot across. `rank1_r3_admits_the_pinned_refutations` is the degenerate
+control: at rank one (U3 = u_i·u_j·u_k, whose repeated product is a 6-fold
+product of u-values) all three turn back into symmetries, so exactness at
+72 genuinely depends on the witness being off the degenerate locus, exactly
+as at r = 2 — and, as there, a compiler cannot license the extra symmetry
+from the DECLARATION, since U3 and A3 satisfy the identical rank-3
+symmetric declaration.
+
+Honest scope (in-file generalization notes, BladeWreath.v §§2–3 and the
+closing remarks): the invariance halves
+(`block_product_symmetry_soundness`, `wreath_full_invariance`) are proved
+at GENERAL r; the exact group orders (r!)² and 2·(r!)² are computed by
+COMPLETE ENUMERATION at r = 2 (extents 2 and 6) and r = 3 (extent 3), and
+beyond that are the classical orders of S_r × S_r and S_r wr S_2, cited
+rather than proved. Past r = 3 the enumeration leaves Coq's reach — r = 4
+is 40320 permutations × 3⁸ tuples — and the orders 2·(r!)² have been
+confirmed at r = 4 and r = 5 only EXTERNALLY, by exhaustive exact-integer
+witness enumeration outside this development (every non-wreath permutation
+refuted by a concrete counterexample). That is evidence, not a Coq proof,
+and the file records it as such. **General-r exactness remains open**: it
+needs a BladeCompleteness-style detection argument (a maximally symmetric
+probe kernel plus free data witnessing every violation) with the degeneracy
+locus excluded by hypothesis rather than by computation, and a general-r
+order proof needs a factorial-counting development over `permutes`.
+k-block and antisymmetric-input generalizations are noted in-file but not
+mechanized. Reproducible enumeration outside Coq: `proofs/OrbitEnum.fsx`
+(dotnet fsi).
+
+## BladeLayout.v (163 theorems) — striding parity and the layout group
+
+The physical-layout companion to the H/Stab framework: a layout assigns
+each of d axes to a memory level and a direction, so layouts are the
+hyperoctahedral group B_d = Z₂^d ⋊ S_d, order 2^d·d! (orders 8, 48, 384
+computed; closure, inverses, associativity, and normality of the flip
+subgroup all checked as theorems over the enumerated tables).
+
+**The headline: the licensing vocabulary has exactly 4 elements.**
+BladeLowering's framework has exactly two grant forms (invariant,
+anti-invariant), so the grade of a licensed move composes by XOR
+(`graded_invariant_compose`, `licensed_compose`) — anti composed with anti
+is invariant (`licensed_anti_anti`) — the grade is unique off the
+degenerate locus where `neg` has no non-fixed point (`sign_determined`),
+and there is no third form (`grant_forms_exhausted`). All of that holds at
+arbitrary rank, arbitrary kernel, arbitrary index type. So the licensing
+vocabulary is Hom(B_d, Z₂), and that group has EXACTLY 4 elements: trivial,
+permutation sign, flip parity, and their xor — exhibited, checked pairwise
+distinct, and shown complete by a generator argument. B_d is generated by
+the Coxeter set (all d−1 adjacent transpositions plus one flip;
+`b2_generated_by_coxeter`, `b3_generated_by_coxeter`, with a word carried
+for every element); one transposition plus one flip is NOT enough past
+d = 2 (`tau_phi_does_not_generate_b3`, 8 of 48); conjugacy forces one value
+on all transpositions and one on all flips while keeping the two classes
+apart (`transposition_not_conjugate_to_flip_3`), hence
+`b2_character_classified` / `b3_character_classified`: every character
+equals `chi_of` on its two generator values.
+
+**Forward canonicalization is a quotient, not a restriction.** Direction is
+free gauge exactly when the reduce monoid is commutative AND associative
+(`direction_is_free_gauge`, with both hypotheses separately refuted); Z₂^d
+is normal, and B_d/Z₂^d has d! cosets (`quotient_coset_count` at
+d = 2, 3, 4); the rule-out factor is MULTIPLICATIVE — 2^d from direction
+with no declaration at all, times |G_S| from the declaration
+(`ruleout_no_declaration`, `ruleout_full_symmetry`, with orbit
+representatives proved stable). Exactly the 2 characters trivial on the
+flips descend (`exactly_two_characters_descend`) — they are SymIdx (+1) and
+AntisymIdx (−1), so the whole representation theory needed for forward
+layout selection is already in the type system; the other 2 are the sign a
+backward layout picks up on the way to its forward representative.
+CONTRAST: 2 (resp. 4) characters, constant in d, against #irreps = the
+partition count 1, 2, 3, 5, 7, 11, 15, 22, 30, 42 (resp. the bipartition
+count 2, 5, 10, 20, 36, 65, 110, 185, 300, 481) — both computed here and
+both growing without bound; the irrep classifications themselves are
+classical and cited.
+
+**The guarantee (canonical form).** Reference cost is the Kendall-tau
+inversion count between a reference's memory-axis order and the loop
+order; cost 0 is formalism §9's outermost-slowest ideal and is attained
+(`kendall_self_is_zero`). The licensed search space — every combination of
+licensed moves crossed with every loop order — is enumerated EXHAUSTIVELY,
+and canonical form (minimum cost, lex tie-break) is proved to lie in that
+space and to be a cost minimizer of it, at ANY d, ANY licensed group, ANY
+reference set (`canonical_is_in_space`, `canonical_is_cost_minimal`), with
+uniqueness decided per instance and `is_canonical` the decision
+procedure — the layout analogue of asking whether an index tuple is
+sorted.
+
+**Worked cases.** `C[i,j] = A[i,j]·A[j,i]`: no loop order reaches cost 0
+without the declaration
+(`tpair_zero_unreachable_without_declaration`), and the symmetry rewrite
+does (`tpair_symmetry_reaches_zero`), value-preserving up to the character
+(`canonicalization_preserves_value_up_to_character`) — the declaration is
+load-bearing here. Matrix square is the honest CONTRAST: loop reordering
+alone already reaches 0 (`msq_loop_reordering_suffices`), so it is NOT
+evidence for the declaration. Propagation closes it: characters compose by
+xor along a pipeline (`character_composes`), instantiated on the transpose
+bridge (AB)ᵀ = ε_A·ε_B·(BA)ᵀ in all four sign cases at general n and pinned
+at 3×3 over ℤ.
+
+Honest scope (stated in-file): total cost 0 is NECESSARY but not
+SUFFICIENT for fastest — the metric ranks stride coherence, not reuse or
+vectorization — and no claim about cache hardware is made anywhere.
+
 ## What remains unproved
 
-See [future.md](future.md) §4: surface-calculus progress/preservation (the
-one missing species — deliberately sequenced after the rewrite settles
-surface syntax), general-r verified offsets, r ≥ 3 storage splits, k-slot
-structure, typed-path combinator laws, the adjunction proper, and the
-general-r Jacobian transfer / accumulation multiplicities (rank-2 forms:
-BladeJacobian).
+Still open: surface-calculus progress/preservation (the one missing species —
+deliberately sequenced after the rewrite settles surface syntax), general-r
+verified offsets, the storage dichotomy at general r (r = 3 closed in both
+directions by BladeDichotomy; the general minimal-width-r! statement and its
+(3,2,2) tie-breaking exception are prose), k-slot structure, typed-path
+combinator laws, the adjunction proper, and the general-r Jacobian transfer /
+accumulation multiplicities (rank-2 forms: BladeJacobian).
 
 ---
 

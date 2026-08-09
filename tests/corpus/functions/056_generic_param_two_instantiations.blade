@@ -1,0 +1,31 @@
+// TEST: Generic Param At Two Concrete Types In One Program
+// The NON-regression half of the direct-call argument-type check
+// (diagnostics/052-054). A `T^k` parameter must still take a different
+// concrete type at every call site, and the check must not be the thing that
+// pins it: a `function`'s arrow is built ONCE with type variables shared
+// across all call sites (checkFunctionDecl -> bindVarSimple, no scheme), so a
+// check that UNIFIED argument against parameter here would bind T at the
+// first call and reject the second. The class comparison binds nothing -- an
+// unresolved parameter declines to be classified at all.
+function idf(x: T^0) -> T^0 = x
+let a = idf(1.5)
+let b = idf(7)
+// EXPECT: a = 1.5
+// EXPECT: b = 7
+
+// A rank-1 generic parameter taking two arrays of different extent. (Two
+// different ELEMENT types through one `T^1` is a separate, pre-existing hole
+// -- an Int64 array reaches g++ against a double-shaped monomorph -- and is
+// not what this pin is about; nor is `-> T^0`, which reaches IR validation
+// with the variable unresolved. Both predate this check.)
+function sumOf(v: T^1) = reduce(v, (+))
+let c = sumOf([2.5, 3.5])
+let e = sumOf([1.0, 2.0, 3.0])
+// EXPECT: c = 6
+// EXPECT: e = 6
+
+// The numeric tower is ONE class: an Int64 literal in a Float64 slot stays
+// legal, which is the coarseness the check depends on.
+function addOne(x: Float64) -> Float64 = x + 1.0
+let d = addOne(4)
+// EXPECT: d = 5

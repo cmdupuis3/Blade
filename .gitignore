@@ -28,6 +28,13 @@ CoqMakefile*
 # The C++ the compiler emits, plus the compile+run scratch the test harness
 # creates beside the binary.
 generated_cpp_tests/
+# Same shape, written by the OpenMP coverage/reduction benchmark harnesses.
+generated_omp_coverage/
+generated_omp_reduce/
+
+# The pinned diff-oracle build (a full copy of bin/Release output; re-pinned
+# per-machine from a fully-gated build — never committed).
+oracle/
 
 # The compiler deploys its C++ runtime headers next to every generated .cpp,
 # and `blade build` with no -o writes them into the current directory -- which
@@ -43,6 +50,18 @@ generated_cpp_tests/
 /examples/**/*.cpp
 /examples/**/*.exe
 /examples/**/*.out
+# The cuBLAS device half (Round D of docs/plan-cpp-perf-exploitation.md).
+# `Build.buildCublasDevice` writes a two-line `<stem>_cublas.cu` beside the
+# generated .cpp and compiles it into a shared library that the host program
+# links AND LOADS AT RUN TIME -- so unlike the deployed runtime headers these
+# two cannot be cleaned up after the link, and a gate-on `blade run` on a
+# corpus program leaves them in the source tree.
+/tests/corpus/**/*_cublas.cu
+/tests/corpus/**/*_cublas.dll
+/tests/corpus/**/*_cublas.so
+/examples/**/*_cublas.cu
+/examples/**/*_cublas.dll
+/examples/**/*_cublas.so
 *.obj
 *.ilk
 *.pdb
@@ -53,3 +72,6 @@ generated_cpp_tests/
 Thumbs.db
 .DS_Store
 *.exe
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+graft/

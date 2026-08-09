@@ -1,0 +1,35 @@
+// TEST: Tuple Component Unit Mismatch (rejects)
+// ERROR: BL3006
+// ERROR-CONTAINS: argument 1, component 2
+// ============================================================================
+// The TYPE-SAFETY WIN of the component-typed spelling, and the thing the
+// width-only `Tuple<N>` can never do: with the component types WRITTEN, a
+// wrong unit inside a component is caught AT THE CALL, by name.
+//
+// It needed a check. The direct-call argument checks (plan 3.9,
+// diagnostics/052-055) read `IR.getUnits` / `ArrayElem` off the argument AS A
+// WHOLE, and both answer "nothing here" for an `IRTTuple` -- so before this
+// pin the program below type-checked clean and failed in g++. The check
+// descends ONE level (6c's one-level structural rule) and only when both the
+// declared component and the argument component are CONCRETE, so a `Tuple<N>`
+// parameter -- whose element slots are fresh inference variables -- keeps
+// exactly its previous permissiveness (`002` still passes).
+//
+// Note which component is blamed. `U^1` lowers to an arity-constrained
+// inference VARIABLE, not a concrete type, so the concreteness guard skips it
+// entirely -- it makes no demand this check could catch, which is exactly what
+// an unconstrained abstract component should do. `T<second>^1` lowers to a
+// real rank-1 array whose element carries the unit, and that is the demand
+// being violated.
+// ============================================================================
+Unit second
+Unit meter
+function lsdft(st_raw: Tuple<U^1, T<second>^1>, omegas: T<second>^1) = {
+    let s_raw, t_raw = st_raw
+    reduce(s_raw, (+)) * (reduce(t_raw, (+)) + reduce(omegas, (+)))
+}
+let s: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let t: Array<Float<meter> like Idx<3>> = [1.0, 2.0, 3.0]
+let w: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let r = lsdft((s, t), w)
+// EXPECT: typecheck failure -- a meter array cannot fill a T<second>^1 component

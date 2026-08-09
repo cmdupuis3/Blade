@@ -1,6 +1,5 @@
-// Type-checking environment: schemes, instantiate/generalize, the TypeEnv
-// record and its variable/type-definition registries (audit §4:
-// Check/TypeEnv.fs). Extracted verbatim from TypeCheck.fs (Phase 3).
+// Type-checking environment: schemes, instantiate/generalize, TypeEnv's
+// variable/type-def registries (audit sec 4: Check/TypeEnv.fs).
 module Blade.TypeEnv
 
 open Blade.Ast
@@ -19,13 +18,10 @@ let instantiate (subst: Subst) (scheme: TypeScheme) : IRType =
             scheme.QuantifiedVars
             |> List.map (fun v ->
                 let fresh = subst.Fresh()
-                // Propagate arity constraints AND stage-2 rank lower bounds to
-                // the fresh variable. Without the rank copy a generalized
-                // (`static` / `let static`) value loses its deduced bound at
-                // every use site — the fresh var starts unbounded, so nothing
-                // closes it and it defaults to a scalar. Plain `let` lambdas
-                // share one var and never instantiate, so this only reaches the
-                // ReadOnly/generalized case.
+                // Copy arity constraints and rank lower bounds too: without the
+                // rank copy, a generalized (static) value's deduced bound
+                // resets to unbounded/scalar at each use site. Only the
+                // ReadOnly/generalized case reaches here (plain `let` shares one var, never instantiates).
                 match fresh with
                 | IRTInfer freshId ->
                     subst.CopyArityConstraint(v, freshId)
@@ -54,12 +50,10 @@ let instantiate (subst: Subst) (scheme: TypeScheme) : IRType =
             | _ -> ty  // IRTScalar, IRTUnit, IRTNamed, IRTNat (no inference vars to replace)
         replace scheme.Body
 
-// ============================================================================
 // 2. Type Environment
-// ============================================================================
 
 /// Variable assignability levels tracked during type checking.
-/// Maps to binding forms: static → ReadOnly, let → Assignable, let mut → MutPassable
+/// Maps to binding forms: static -> ReadOnly, let -> Assignable, let mut -> MutPassable
 type Assignability =
     | ReadOnly      // static: not assignable, generalizable
     | Assignable    // let: assignable in scope, not passable to mut params
@@ -95,7 +89,7 @@ type MutualMemberKind =
 /// A `type P1 = T1 and P2 = T2 where ...` group. Members stay transparent
 /// aliases; this record carries the joint constraint for binding-site checks.
 type MutualGroupInfo = {
-    /// First member's name — doubles as the group's display id.
+    /// First member's name -- doubles as the group's display id.
     GroupId: string
     /// Members in declaration order.
     Members: (string * MutualMemberKind) list
@@ -109,19 +103,14 @@ type TypeModuleExport = {
     TypeDefs: Map<string, TypeDefInfo>
     VariantTags: Map<string, string * IRType option>
     Units: Map<string, UnitSig>
-    /// Static function ASTs from this module. Imported alongside Variables
-    /// so eta-reduced DepIdx in an importing module can inline a static
-    /// function defined in this one. The body is needed for the inlining;
-    /// the TypeEnv-side StaticFunctions map is the consumer.
+    /// Static function ASTs from this module, imported alongside Variables so
+    /// an importing module's eta-reduced DepIdx can inline a static function
+    /// defined here (needs the body; TypeEnv-side StaticFunctions is the consumer).
     StaticFunctions: Map<string, FunctionDecl>
-    /// Folded `let static` VALUES from this module (the TypeEnv-side
-    /// StaticValues map, filtered to bare names — see checkProgram's export
-    /// builder). Mirrors StaticFunctions: an importing module's checkModule
-    /// pre-pass seeds these under "alias.name" (qualified import) or "name"
-    /// (selective import) so cross-module references like `M.k` or a
-    /// selectively-imported `k` are visible to that module's OWN static
-    /// resolution -- see checkModule's importedStaticSeed / the
-    /// rewriteImportedStaticRefs substitution ahead of StaticEval.resolveStatics.
+    /// Folded `let static` values, bare names only (see checkProgram's export
+    /// builder). Mirrors StaticFunctions: importedStaticSeed /
+    /// rewriteImportedStaticRefs seed these under "alias.name" (qualified) or
+    /// "name" (selective) ahead of StaticEval.resolveStatics.
     StaticValues: Map<string, StaticEval.StaticValue>
 }
 
@@ -135,6 +124,14 @@ type TypeEnv = {
     Builder: IRBuilder
     OuterScope: Map<string, VarInfo>
     InPolyContext: bool
+    /// True while a LAMBDA body is being type-inferred. Unit checks that fire
+    /// at scalar position read it to DEFER premature rejections: an unresolved
+    /// kernel param contributes "no units" to the first-pass walk, so an
+    /// annotation computed against it is provisional until buildApplyInfo
+    /// unifies the params and reruns kernelBodyUnits (the authoritative pass).
+    /// NOT set for named-function declaration bodies: their unannotated params
+    /// are dimensionless by contract, so decl-time strictness is correct there.
+    InLambdaBody: bool
     CurrentCommGroups: int list list
     /// Interface name -> InterfaceDecl
     Interfaces: Map<string, InterfaceDecl>
@@ -142,144 +139,134 @@ type TypeEnv = {
     ImplMethods: Map<string * string, IRId * IRType>
     /// Unit name -> canonical UnitSig
     Units: Map<string, UnitSig>
+    /// The MAGNITUDE an enclosing annotation says the value being checked is
+    /// supposed to have, threaded down from the annotated-let seam. Read by
+    /// the scalar +/- conversion seam so each operand converts straight into
+    /// the unit that was asked for -- ONE factor per operand -- instead of
+    /// joining at the left operand and correcting the sum afterwards, which
+    /// rounds twice and computes in a magnitude nobody chose. Applied only
+    /// when it agrees dimensionally with what the operands actually produce,
+    /// so it can never turn a real unit error into a conversion.
+    UnitTarget: UnitSig option
     /// Context stack for error reporting, e.g. ["in function 'foo'"]
     Context: string list
-    /// Exports from previously type-checked modules
+    /// Exports from modules type-checked earlier in this compilation
     ModuleExports: Map<string, TypeModuleExport>
-    /// Static function ASTs, populated during checkModule's pre-pass.
-    /// Used by lowerIndexTypeList to inline eta-reduced DepIdx bodies —
-    /// `DepIdx<O, f>` desugars to `lambda(i) -> Idx<f(i)>`, and the
-    /// substitution into the inner extent requires access to f's body.
+    /// Static function ASTs, populated in checkModule's pre-pass. Lets
+    /// lowerIndexTypeList inline eta-reduced DepIdx bodies (`DepIdx<O, f>`
+    /// desugars to `lambda(i) -> Idx<f(i)>`; substitution needs f's body).
     StaticFunctions: Map<string, FunctionDecl>
-    /// Static VALUE bindings (`let static x = ...`), resolved once in
-    /// checkModule's pre-pass via StaticEval. Mirrors StaticFunctions and
-    /// exists so compile-time-known scalars (e.g. a `replicate` count) can be
-    /// resolved during type-checking, before the lowering phase's own
-    /// resolveStatics runs. Best-effort: entries that don't statically
-    /// evaluate are simply absent.
+    /// `let static x = ...` bindings, resolved once via StaticEval in
+    /// checkModule's pre-pass, so compile-time-known scalars (e.g. a
+    /// `replicate` count) resolve ahead of lowering's own resolveStatics.
+    /// Best-effort: non-evaluable entries are simply absent.
     StaticValues: Map<string, StaticEval.StaticValue>
-    /// Names declared with `static struct` — the DECLARED static-eligibility
-    /// fence. Registration checks every field type against the StaticValue
-    /// shapes and records the name here on success, so a later static struct
-    /// may use an earlier one as a field type. Ordinary structs never appear.
-    /// Deliberately a name set rather than a flag on TDIStruct: nothing in
-    /// the value world consults it, only declaration-time checks and the
-    /// constrained-index layers.
+    /// Type aliases' SURFACE bodies, by name. `TypeDefs` stores an alias as a
+    /// LOWERED `TDIAlias`, which loses `min=`/`max=`; the element-bound guard
+    /// synthesis needs the bound EXPRESSIONS, so it resolves alias chains
+    /// through this map instead. Populated by registerTypeDecl per `type X = ...`.
+    SurfaceAliases: Map<string, TypeExpr>
+    /// Names declared `static struct` (the static-eligibility fence).
+    /// Registration validates fields against StaticValue shapes and records
+    /// the name on success, so later static structs can nest earlier ones.
+    /// A name set, not a TDIStruct flag: only decl-time checks and the
+    /// constrained-index layers consult it.
     StaticStructs: Set<string>
-    /// Non-fatal diagnostics accumulated during type-checking. The field
-    /// is a mutable ResizeArray so functional updates (`{ env with ... }`)
-    /// share the same collector — warnings emitted from any scope land
-    /// in one place. Surfaced through `typeCheck`'s Ok return; runs even
-    /// when the program also has hard errors (warnings + errors aren't
-    /// mutually exclusive, but the current Ok-only plumbing skips them
-    /// on the error path — extending to both paths is a future tweak).
+    /// Non-fatal diagnostics accumulated during type-checking. A mutable
+    /// ResizeArray so `{ env with ... }` updates share one collector across
+    /// scopes. Surfaced only via `typeCheck`'s Ok return; skipped on the error path.
     Warnings: ResizeArray<string>
-    /// Dist value provenance: varId → the value's source set (underlying
-    /// array names for module-level dists, `func.param` license tokens for
-    /// Dist-typed parameters). Consumed by Dist ± dispatch and where-clause
-    /// call-site discharge. Mutable dictionary shared by reference across
-    /// functional env updates, like Warnings.
+    /// Dist value provenance: varId -> source set (underlying array names for
+    /// module-level dists, `func.param` tokens for Dist params). Consumed by
+    /// Dist +/- dispatch and where-clause discharge. Shared by reference, like Warnings.
     Provenance: System.Collections.Generic.Dictionary<IRId, Set<string>>
-    /// Functions carrying registered custom where-clause conjuncts:
-    /// funcName → (paramNames, conjuncts). Populated by checkFunctionDecl;
-    /// consulted at call sites for constraint discharge.
+    /// Custom where-clause conjuncts per function: funcName -> (paramNames,
+    /// conjuncts). Populated by checkFunctionDecl; consulted at call sites for discharge.
     FuncConstraints: System.Collections.Generic.Dictionary<string, string list * (string * string list) list>
-    /// Mutually constrained alias groups: groupId → group info.
+    /// Parameter metadata for callables with DEFAULT parameter values:
+    /// callee name -> (paramName, surface type annotation, surface default)
+    /// per param, in declaration order. Populated by checkFunctionDecl and by
+    /// let bindings whose value is a defaults-carrying lambda; consulted by
+    /// the surface call-site desugar (omitted trailing args re-type the
+    /// default at the call site). Name-keyed like FuncConstraints, and shares
+    /// its known shadowing weakness. Shared by reference.
+    FuncDefaults: System.Collections.Generic.Dictionary<string, (string * TypeExpr option * Expr option) list>
+    /// Mutually constrained alias groups: groupId -> group info.
     MutualGroups: Map<string, MutualGroupInfo>
-    /// Member alias name → owning groupId, for annotation scanning.
+    /// Member alias name -> owning groupId, for annotation scanning.
     MutualMembers: Map<string, string>
-    /// Functions whose declared return type introduces a mutual group
-    /// (e.g. `-> (P1, P2)`): funcName → groupId. The joint check is emitted
-    /// at the return site, so annotated callers don't re-check. Mutable
-    /// dictionary shared by reference, like FuncConstraints.
+    /// Functions whose return type introduces a mutual group (`-> (P1, P2)`):
+    /// funcName -> groupId. Joint check emitted at return; callers don't re-check. Shared by reference.
     MutualReturnFuncs: System.Collections.Generic.Dictionary<string, string>
-    /// Named functions' commutativity groups (by parameter index), from their
-    /// `where comm(...)` clause: funcName → int list list. Populated by
-    /// checkFunctionDecl; consulted when a named function is used as a loop
-    /// kernel (etaExpandFunctionKernel / the deferred-former eta-expansion) so
-    /// the comm survives onto the synthesized wrapper lambda and reaches the
-    /// symmetry deduction. Without this, `object_for(f)`/`method_for(..) <@> f`
-    /// for a `where comm` function produced DENSE output — only inline-lambda
-    /// comm was read. Mutable dictionary shared by reference, like FuncConstraints.
+    /// Named functions' `where comm(...)` groups (by param index): funcName ->
+    /// int list list. Populated by checkFunctionDecl; must survive
+    /// eta-expansion (etaExpandFunctionKernel) onto the loop-kernel wrapper, or
+    /// `object_for(f)` on a `where comm` function silently produces DENSE output. Shared by reference.
     FuncCommGroups: System.Collections.Generic.Dictionary<string, int list list>
-    /// Named functions' ANTISYMMETRY groups (by parameter index), from their
-    /// `where anticomm(...)` clause: funcName → int list list. The signed twin
-    /// of FuncCommGroups, and surfaced onto the eta wrapper at the same seams
-    /// for the same reason: a where-clause attribute that is not explicitly
-    /// re-attached to the synthesized kernel lambda is silently dropped, and
-    /// `object_for(f) <@> (A, A)` would fall back to dense storage with no
-    /// diagnostic. Shared by reference, like FuncCommGroups.
+    /// Named functions' `where anticomm(...)` groups (by param index):
+    /// funcName -> int list list. Signed twin of FuncCommGroups, same seam: if
+    /// not re-attached to the synthesized kernel, `object_for(f) <@> (A, A)`
+    /// silently falls back to dense. Shared by reference.
     FuncAntisymGroups: System.Collections.Generic.Dictionary<string, int list list>
-    /// Stage-3 symmetry deduction, early tier: per-function parameter NAMES
-    /// plus ADJACENT-pair swap parities (n params -> n-1 entries), recorded
-    /// at checkFunctionDecl for fixed-arity functions. Consulted by
-    /// buildApplyInfo when the kernel is an eta-expanded wrapper around a
-    /// named function, so `object_for(f)` gets f's deduced symmetry — and
-    /// f's REAL parameter names for the pin suggestion — without
-    /// reanalyzing through the call. Shared by reference, like FuncCommGroups.
+    /// Stage-3 deduction, early tier: per-function parameter NAMES plus
+    /// ADJACENT-pair swap parities (n params -> n-1 entries), from
+    /// checkFunctionDecl for fixed-arity functions. buildApplyInfo consults it
+    /// so an eta-expanded `object_for(f)` gets f's deduced symmetry and real
+    /// param names, without reanalyzing. Shared by reference.
     FuncDeducedPairs: System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>
-    /// Stage-3 symmetry deduction, INTERPROCEDURAL SIGN-LINEARITY: per-function
-    /// per-parameter sign parities in declaration order (one SignParity per
-    /// param), recorded at checkFunctionDecl for fixed-arity (non-Poly)
-    /// functions. SOdd means `f(.., −x, ..) ≡ −f(..)`. The pair deduction's
-    /// call rule consults this so a call can PROPAGATE PNeg — `mymean(x − y)`
-    /// with `mymean` linear is antisymmetric, where the
-    /// callee-and-args-all-invariant rule alone could only ever say PBottom.
-    /// Keyed by the function's BINDER ID (`FuncId`, the varId every other
-    /// body's reference to it resolves to), NOT its name like the tables
-    /// above: a parameter or local shadowing a top-level function's name would
-    /// otherwise borrow that function's sign law, and a wrong sign law is a
-    /// wrong parity — a wrong pin suggestion. Resolved in DECL ORDER (a self-
-    /// or forward-call misses and lands on SUnknown), so no fixpoint is needed
-    /// and no summary proves itself. Shared by reference, like FuncCommGroups.
+    /// Stage-3 interprocedural sign-linearity: per-function, per-param sign
+    /// parities in decl order (checkFunctionDecl, fixed-arity only). SOdd
+    /// means `f(.., -x, ..) = -f(..)`; the call rule uses it to propagate
+    /// PNeg on e.g. `mymean(x - y)`, where callee-and-args-invariant alone
+    /// gives only PBottom. Keyed by BINDER ID (`FuncId`), not name (a
+    /// shadowing local can't borrow the law); DECL ORDER resolution (self/forward -> SUnknown) needs no fixpoint. Shared by reference.
     FuncSignParities: System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>
-    /// Phase B of docs/plan-equivariance-in-types.md, the CERTIFIED half of the
-    /// typed equivariance lattice: per-function representation signatures for
-    /// the functions that carry an `__ml_equiv` conjunct — a source-written
-    /// `where ml.equiv(G)` pin, or an elaborator stamp on a synthesized
-    /// function (stage A1), which reach here as the same conjunct and so are
-    /// read uniformly. Recorded at checkFunctionDecl from the ZONKED parameter
-    /// and return types.
-    ///
-    /// Keyed by the function's BINDER ID for exactly the FuncSignParities
-    /// reason: a parameter or local shadowing a top-level function's name must
-    /// not borrow that function's transformation law. DeduceRep's call rule
-    /// consults this as an AXIOM (trust, as the seam does today — validating
-    /// pins at typecheck is stage C1, not this one). Shared by reference, like
-    /// FuncCommGroups.
+    /// CERTIFIED half of the typed equivariance lattice (FuncRepSpec below is
+    /// the speculative half): per-function rep signatures for functions
+    /// carrying an `__ml_equiv` conjunct (a source `where ml.equiv(G)` pin, or
+    /// an elaborator stamp -- read uniformly). Recorded at checkFunctionDecl
+    /// from ZONKED types; keyed by BINDER ID (shadowing reason, as
+    /// FuncSignParities). DeduceRep trusts this as an AXIOM -- pins aren't validated at typecheck. Shared by reference.
     FuncRepSigs: System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>
-    /// The SPECULATIVE half: summaries DEDUCED this pass, their dependency
-    /// closures, and the decl order they were deduced in, per candidate group.
-    /// Analysis only — deduced facts flow to callers inside this compilation
-    /// unit and are never exported; only source-written pins license checking
-    /// (plan §4, unchanged). Single-pass in decl order, no fixpoint: a forward
-    /// or self call resolves to nothing and the walk declines, which is
-    /// silence, which is correct. Shared by reference.
+    /// SPECULATIVE half: summaries DEDUCED this pass, their dependency
+    /// closures, and decl order, per candidate group. Analysis only -- never
+    /// exported; only source-written pins license checking. Single-pass,
+    /// no fixpoint: a forward/self call resolves to nothing (declines silently, correctly). Shared by reference.
     FuncRepSpec: Blade.DeduceRep.RepSpecTable
-    /// Stage-3 late tier: per-function PACK symmetry for arity-polymorphic
-    /// (Poly) kernels — funcName → (packParamName, parity). PInv means
-    /// "invariant under every permutation of the pack, at every arity",
-    /// established either by the ∀-arity AC-fold template
-    /// (Deduce.deducePackFold) or compositionally for wrapper bodies
-    /// (Deduce.packParityOf, resolving callees through this same table in
-    /// decl order). Packs never claim PNeg (no signed exchange law exists),
-    /// so this table can only ever fuel suggestions, not errors.
-    /// Shared by reference, like FuncCommGroups.
+    /// Stage-3 late tier: PACK symmetry for arity-polymorphic (Poly) kernels
+    /// -- funcName -> (packParamName, parity). PInv means invariant under
+    /// every permutation at every arity, established by the AC-fold template
+    /// (Deduce.deducePackFold) or compositionally (Deduce.packParityOf,
+    /// resolving callees via this table in decl order). Packs never claim
+    /// PNeg (no signed exchange law) -- fuels suggestions only, never errors. Shared by reference.
     PackDeducedComm: System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>
-    /// Named functions' parallel strategies (`omp`/`cuda`/`mpi`) from their
-    /// `where` clause, paired with the function's parameter NAMES:
-    /// funcName → (paramNames, strategies). Populated by checkFunctionDecl;
-    /// consulted when a named function is used as a loop kernel
-    /// (etaExpandFunctionKernel / the deferred-former eta-expansion) so the
-    /// clause survives onto the synthesized wrapper lambda. Without this,
-    /// `object_for(f)` / `method_for(..) <@> f` for a `where omp(...)`
-    /// function emitted a SERIAL nest with no diagnostic — the eta wrapper is
-    /// built with no where-clause, so `Parallel = []` reached lowering and
-    /// `IsOmpParallel` was false. The param names are needed because
-    /// `extractParallelism` resolves an `omp(a: n)` var by NAME, and the
-    /// wrapper's params are renamed (`__k<uid>_<i>`); the surfacing site
-    /// remaps by position. Shared by reference, like FuncCommGroups.
+    /// Named functions' `where` parallel strategies (`omp`/`cuda`/`mpi`) with
+    /// param NAMES: funcName -> (paramNames, strategies). Consulted so the
+    /// clause survives onto a synthesized loop-kernel wrapper -- without it,
+    /// `object_for(f)` on a `where omp(...)` function silently emitted a
+    /// SERIAL nest (`Parallel = []` reached lowering). Names matter because
+    /// `extractParallelism` resolves `omp(a: n)` by NAME, but wrapper params are renamed (`__k<uid>_<i>`); surfacing remaps by position. Shared by reference.
     FuncParallel: System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>
+    /// Named 2-param functions whose BODY is a bare builtin commutative +
+    /// associative op over the two params (`a + b`, `a * b`, `a && b`,
+    /// `a || b`, either order): funcName -> true. Populated by
+    /// checkFunctionDecl; consulted only by the fold-kernel omp licence check
+    /// (`reduce(xs, f)` where `f` carries `where omp`) -- a side channel since
+    /// BODY lives nowhere else in TypeEnv. Codegen re-derives the same predicate from IRCallable (CodeGen.foldKernelBuiltinOp); the two must agree.
+    FuncFoldBuiltin: System.Collections.Generic.Dictionary<string, bool>
+    /// WIDTH SCHEMA side channel (docs/plan-tuples-vs-arg-packs.md 6c, Design
+    /// C): parameters DECLARED `Tuple<N>`, keyed by the parameter's binder
+    /// VarId -> N. A parameter list is a width schema over the pack's flat leaf
+    /// sequence -- unannotated = 1, `Tuple<k>` = k -- and the matcher must read
+    /// the WRITTEN annotation, never the inferred type (ruling 1: tuple-ness is
+    /// always written). The lowered type `IRTTuple [v1..vk]` cannot be trusted
+    /// for this: an unannotated param unifies INTO a tuple as soon as the pack
+    /// binds it, so reading widths off the resolved type would make pack widths
+    /// inference-dependent -- the exact cliff 5.1 rules out. Populated at
+    /// inferLambda / checkFunctionDecl from `TyTupleWidth`; read by
+    /// buildApplyInfo's schema matcher and by the direct-call arg pairing.
+    /// Shared by reference.
+    DeclaredTupleWidths: System.Collections.Generic.Dictionary<IRId, int>
 }
 
 let emptyEnv () = {
@@ -290,18 +277,22 @@ let emptyEnv () = {
     Builder = IRBuilder()
     OuterScope = Map.empty
     InPolyContext = false
+    InLambdaBody = false
     CurrentCommGroups = []
     Interfaces = Map.empty
     ImplMethods = Map.empty
     Units = Map.empty
+    UnitTarget = None
     Context = []
     ModuleExports = Map.empty
     StaticFunctions = Map.empty
     StaticValues = Map.empty
+    SurfaceAliases = Map.empty
     StaticStructs = Set.empty
     Warnings = ResizeArray<string>()
     Provenance = System.Collections.Generic.Dictionary<IRId, Set<string>>()
     FuncConstraints = System.Collections.Generic.Dictionary<string, string list * (string * string list) list>()
+    FuncDefaults = System.Collections.Generic.Dictionary<string, (string * TypeExpr option * Expr option) list>()
     MutualGroups = Map.empty
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
@@ -313,23 +304,18 @@ let emptyEnv () = {
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
     FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
+    FuncFoldBuiltin = System.Collections.Generic.Dictionary<string, bool>()
+    DeclaredTupleWidths = System.Collections.Generic.Dictionary<IRId, int>()
 }
 
-/// Structured twin of `TypeEnv.Warnings`: every checker warning as a coded,
-/// spanned `Diagnostic`. Fourth member of the AsyncLocal side-channel family
-/// (TypeCheck.PinSuggestions / TypeCheck.IdePartial / ML.Equiv.CertSuggestions)
-/// — this branch's chosen idiom for getting a fact out of the checker without
-/// widening `typeCheck`'s return type, which Repl.fs and three test files
-/// consume by shape.
-///
-/// The point of the channel: `typeCheck`'s `string list` is Ok-ONLY, so a file
-/// with a hard error dropped every warning it had already earned. This survives
-/// the error path — callers drain it on BOTH arms.
-///
-/// It lives HERE rather than in TypeCheck because its only writer is
-/// `emitWarning`, which TypeEnv owns, and TypeEnv (compile index 156) cannot
-/// reference TypeCheck (158). TypeCheck re-exports it as `TypeCheck.WarningLog`
-/// so every drain site reads one namespace.
+/// Structured twin of `TypeEnv.Warnings`: every warning as a coded, spanned
+/// `Diagnostic`. One of an AsyncLocal side-channel family (also
+/// TypeCheck.PinSuggestions / IdePartial / ML.Equiv.CertSuggestions) that
+/// surfaces a fact without widening `typeCheck`'s Ok-only `string list`
+/// return (Repl.fs and three test files consume it by shape); this channel
+/// drains on both the Ok and error arms, unlike that return type. Lives here
+/// (not TypeCheck) because its writer `emitWarning` is TypeEnv-owned and
+/// TypeEnv (compile index 156) cannot reference TypeCheck (158); re-exported as `TypeCheck.WarningLog`.
 module WarningLog =
     let private slot = new System.Threading.AsyncLocal<Blade.Diagnostics.Diagnostic list>()
     let reset () = slot.Value <- []
@@ -339,21 +325,13 @@ module WarningLog =
         | null -> []
         | _ -> List.rev slot.Value
 
-/// What the checker DEDUCED, as opposed to what the source ANNOTATED. Fifth
-/// member of the AsyncLocal side-channel family, and the answer to a real
-/// tooling gap: today an editor cannot tell a rank the user WROTE from a rank
-/// the checker PROVED, or a `where comm` from a symmetry the deduction
-/// established and is merely proposing. Both render as the same type.
-///
-/// Recorded at the deduction sites (RECORDING ONLY — nothing here changes a
-/// judgment), drained by `ide check --json` on BOTH arms into a top-level
-/// `deduced[]` array.
-///
-/// Hosted in TypeEnv, like WarningLog and for a sharper reason: Zonk (compile
-/// index 157) also closes deduced ranks, and Zonk cannot reference TypeCheck
-/// (158). From here every producer can write to one channel. IDE-only by
-/// design: ppType/abstractRenderer is type-variable printing with no hook for
-/// provenance, so nothing is threaded into the REPL's renderer.
+/// What the checker DEDUCED vs. what the source ANNOTATED -- an editor
+/// otherwise can't tell a rank the user WROTE from one the checker PROVED
+/// (both render as the same type). Recording only, at deduction sites;
+/// drained by `ide check --json` on both arms into a top-level `deduced[]`
+/// array. Hosted in TypeEnv because Zonk (compile index 157) also closes
+/// deduced ranks and cannot reference TypeCheck (158). IDE-only:
+/// ppType/abstractRenderer has no provenance hook into the REPL renderer.
 type DeducedFact =
     /// A parameter whose array RANK came from the body-only rank lower bound
     /// rather than an annotation. `index` is the parameter position.
@@ -374,37 +352,25 @@ module DeducedFacts =
         | null -> []
         | _ -> List.rev slot.Value |> List.distinct
 
-    /// THE ZONK STITCH — the one-line hook for the zonk rank auto-close in
-    /// `Zonk.zonkType`'s `IRTInfer n` arm. Call it right where that arm decides
-    /// to build a rank-k array from a lower bound instead of defaulting to
-    /// Float64:
+    /// THE ZONK STITCH: hook for the zonk rank auto-close in
+    /// `Zonk.zonkType`'s `IRTInfer n` arm (where it builds a rank-k array
+    /// from a lower bound instead of defaulting to Float64):
     ///
     ///     Blade.TypeEnv.DeducedFacts.recordZonkClosedRank n k
     ///
-    /// It exists as its own named function precisely because `zonkType` has
-    /// NEITHER an owner name, a parameter name, a parameter index, nor a span —
-    /// it has a type variable and nothing else. Without this the close site
-    /// would have to invent placeholder strings at the call, which is how two
-    /// callers end up inventing two different ones. The placeholders live here,
-    /// once: owner `"<zonk>"` marks a fact with no enclosing declaration (the
-    /// let-bound-lambda case zonk exists to close), the param renders as the
-    /// variable it actually is, and the index is -1 because there is no
-    /// parameter list to be the nth member of. `deduced[]` consumers key on
-    /// `kind` and may show `owner`/`name` verbatim; a "<zonk>" fact is still a
-    /// true statement about a rank the checker proved.
+    /// Own function because `zonkType` has no owner/param name, index, or
+    /// span -- only a type variable. Sentinel placeholders live here once:
+    /// owner `"<zonk>"`, param renders as the variable itself, index -1.
+    /// Safe because `deduced[]` consumers key on `kind`, not owner/name.
     let recordZonkClosedRank (varId: IRId) (rank: int) =
         add (DeducedRank ("<zonk>", sprintf "?%d" varId, -1, rank)) noSpan
 
-/// Append a non-fatal diagnostic to BOTH warning channels: the legacy plain
-/// string list (`typeCheck`'s Ok payload — Repl.fs and the provider tests
-/// consume it by shape, so it keeps its exact type) and the structured
-/// WarningLog, which carries a BLxxxx code and a span and survives the
-/// checker's ERROR path.
-///
-/// The collector is shared by reference across all functional updates of the
-/// env, so callsites don't need to thread anything through. Callers pass the
-/// code plus the tightest span in scope; `noSpan` is honest and renders as a
-/// header-only warning, exactly what these printed before they had codes.
+/// Append a non-fatal diagnostic to BOTH warning channels: the plain
+/// string list (`typeCheck`'s Ok payload, kept exact for Repl.fs and the
+/// provider tests) and the structured WarningLog (BLxxxx code + span,
+/// survives the ERROR path). The collector is shared by reference across all
+/// functional env updates, so call sites thread nothing through. Pass the
+/// tightest span in scope; `noSpan` renders header-only.
 let emitWarning (env: TypeEnv) (code: string) (span: Span) (msg: string) : unit =
     env.Warnings.Add(msg)
     WarningLog.add
@@ -414,25 +380,19 @@ let emitWarning (env: TypeEnv) (code: string) (span: Span) (msg: string) : unit 
 let pushContext (ctx: string) (env: TypeEnv) : TypeEnv =
     { env with Context = ctx :: env.Context }
 
-/// Span of the statement currently being type-checked, per async flow
-/// (audit §3.4, statement-granularity slice; expression granularity is
-/// rewrite work). inferBlock stamps it as it unwraps each StmtSpanned;
-/// locateError below prefers it over the caller-supplied (declaration)
-/// span, so an error inside a multi-statement body points at the failing
-/// STATEMENT rather than the declaration header. inferBlock skips the
-/// remaining statements after the first error, so at error-location time
-/// the last-stamped span belongs to the statement that failed. Reset at
-/// every checkDecl entry so a span cannot leak across declarations, and at
-/// typeCheck / checkModule entry so it cannot leak across compilations or
-/// modules — these storages are AsyncLocal and outlive a single compilation
-/// in a long-lived process (`blade ide check`, the test host).
+/// Span of the statement currently being type-checked, per async flow (audit
+/// sec 3.4; expression granularity is rewrite work). inferBlock stamps it per
+/// StmtSpanned; locateError prefers it over the caller's declaration span, so
+/// an error points at the failing STATEMENT (inferBlock stops at the first
+/// error, so the last stamp is always the failing one). Reset at every
+/// checkDecl/typeCheck/checkModule entry: AsyncLocal storage outlives one
+/// compilation in a long-lived process (`blade ide check`), so a stale span would leak.
 let private currentStmtSpanStorage = System.Threading.AsyncLocal<Span>()
 
-/// Expression-level span, stamped by inferExpr on entry to every node
-/// (full-span AST). Finer than the statement span; because inference
-/// short-circuits on the first error, the last stamp lies on the path to
-/// the failing expression. Cleared whenever a new statement is entered so
-/// a leaf from a PREVIOUS statement can never win.
+/// Expression-level span, stamped by inferExpr on entry to every node.
+/// Finer than the statement span; since inference short-circuits on first
+/// error, the last stamp lies on the path to the failing expression. Cleared
+/// on each new statement so a previous leaf can't win.
 let private currentExprSpanStorage = System.Threading.AsyncLocal<Span>()
 
 let setCurrentExprSpan (s: Span) = currentExprSpanStorage.Value <- s
@@ -455,8 +415,7 @@ let currentStmtSpan () : Span =
     | _ -> currentStmtSpanStorage.Value
 
 /// Wrap a TypeError with span and context into a CompileError. Precision
-/// order: active expression span > active statement span > the caller's
-/// span (typically the enclosing declaration's).
+/// order: active expression span > active statement span > the caller's span.
 let locateError (span: Span) (env: TypeEnv) (err: TypeError) : CompileError =
     let exprSpan = currentExprSpan ()
     let stmtSpan = currentStmtSpan ()
@@ -466,31 +425,87 @@ let locateError (span: Span) (env: TypeEnv) (err: TypeError) : CompileError =
         else span
     { Error = err; Span = span; Context = env.Context; Code = None }
 
+/// Stands in for a declaration name when a unit-expression error comes from a
+/// TYPE ANNOTATION rather than a `Unit` declaration. The annotation consumers
+/// in TypeCheck.fs pass this; formatTypeError words the message around it.
+let unitAnnoContext = "<type annotation>"
+
 /// Format a TypeError as a human-readable string
 let formatTypeError (err: TypeError) : string =
     match err with
     | UnboundVariable name -> sprintf "Unbound variable: %s" name
     | TypeMismatch (exp, act) -> sprintf "Type mismatch: expected %s, got %s" (ppIRType exp) (ppIRType act)
     | ArityMismatch (exp, act) -> sprintf "Arity mismatch: expected %d args, got %d" exp act
+    | KernelPackArity msg -> msg
     | ArgRankMismatch (pos, expRank, actRank, expTy, actTy) ->
         let describe rank ty =
             if rank = 0 then sprintf "a scalar (%s)" ty
             else sprintf "a rank-%d array (%s)" rank ty
         sprintf "argument %d: rank mismatch: the parameter expects %s but the argument is %s. A call site neither broadcasts nor reduces rank -- pass a value of the declared rank, or change the parameter's declared type."
                 pos (describe expRank expTy) (describe actRank actTy)
+    | ArgTypeMismatch (pos, func, expTy, actTy) ->
+        sprintf "argument %d of %s: type mismatch: the parameter is declared %s but the argument is %s. A call site performs no conversion between these -- pass a value of the declared type, or change the parameter's declared type."
+                pos func expTy actTy
     | InvalidArrayCapture name -> sprintf "Lambda cannot capture array '%s'" name
     | InvalidApplication funcTy -> sprintf "Cannot apply non-function type: %A" funcTy
     | PatternTypeMismatch (pat, ty) -> sprintf "Pattern '%s' incompatible with type %A" pat ty
-    // ---- Promoted variants (Stage 5). Text reproduced verbatim. ----
+    // Promoted variants (Stage 5): text reproduced verbatim.
     | IndexTagMismatchNamed (expected, actual) -> sprintf "Array index tag mismatch: slot expects '%s' but argument has type '%s'." expected actual
     | IndexTagMismatchAnon expected -> sprintf "Array index tag mismatch: slot expects named tag '%s' but argument is an anonymous index value." expected
     | CrossNominalIndexArith (left, right) -> sprintf "Cross-nominal index-type arithmetic: cannot combine values of distinct index domains '%s' and '%s'." left right
     | CrossAnonIndexArith (left, right) -> sprintf "Cross-nominal index-type arithmetic: cannot combine values of distinct anonymous index domains (#%d vs #%d)." left right
-    | CompoundBareWildcard rank -> sprintf "A bare wildcard `_` cannot index a compound axis: it pins no coordinate (the result would just be the array itself). Index with a full %d-tuple, pinning at least one coordinate." rank
-    | CompoundWildcardArity (rank, tupleLen) -> sprintf "Wildcard compound indexing must use a FULL-arity tuple: this compound axis has rank %d, so write all %d coordinates with `_` marking each free axis (got a %d-tuple). Short tuples (without wildcards) pin a leading prefix instead: B((c0, ..., cj))." rank rank tupleLen
-    | CompoundAllFree rank -> sprintf "Compound index with all %d coordinates free (`_`) pins nothing -- the result is the array itself. Drop the index, or pin at least one coordinate." rank
-    | CompoundOverSupplied (rank, got) -> sprintf "Compound index over-supplied: this array's compound axis has rank %d (mask is %d-dimensional), so it takes at most a %d-tuple like B((c0, ..., c%d)); got a %d-tuple." rank rank rank (rank - 1) got
-    | CompoundNeedsTuple rank -> sprintf "Compound index must be a single tuple: write B((c0, ..., cj)) with inner parentheses, not the flat form B(c0, ..., cj). A CompoundIdx<mask> axis of rank %d is indexed as one joint tuple, full or partial (formalism 4.5 / poly-indexing 5.4)." rank
+    | CompoundTupleForm rank -> sprintf "Compound arrays take FLAT positional subscripts like SymIdx: write B(c0, ..., c%d), not the tuple form B((c0, ..., c%d)) -- and wildcards (`_`) are not accepted on a compound axis. Partial/wildcard reads (pinning some coordinates, gathering the matches) are a SparseIdx feature: build the valid tuples as a SparseIdx<keys> and index S((c0, _, ...)) there (formalism 3.5)." (rank - 1) (rank - 1)
+    | CompoundUnderSupplied (rank, got) -> sprintf "Compound index under-supplied: this array's compound axis has rank %d (mask is %d-dimensional), so it needs %d flat subscripts B(c0, ..., c%d); got %d. Partial reads are a SparseIdx feature (formalism 3.5)." rank rank rank (rank - 1) got
+    | CompoundOverSupplied (rank, got) -> sprintf "Compound index over-supplied: this array's compound axis has rank %d (mask is %d-dimensional) and consumes %d flat subscripts (plus one per trailing dim); got %d total." rank rank rank got
+    | SparseBareWildcard rank -> sprintf "A bare wildcard `_` cannot index a sparse axis: it pins no coordinate (the result would just be the array itself). Index with a full %d-tuple, pinning at least one coordinate." rank
+    | SparseWildcardArity (rank, tupleLen) -> sprintf "Wildcard sparse indexing must use a FULL-arity tuple: this sparse axis has rank %d, so write all %d coordinates with `_` marking each free axis (got a %d-tuple). Short tuples (without wildcards) pin a leading prefix instead: S((c0, ..., cj))." rank rank tupleLen
+    | SparseAllFree rank -> sprintf "Sparse index with all %d coordinates free (`_`) pins nothing -- the result is the array itself. Drop the index, or pin at least one coordinate." rank
+    | SparseOverSupplied (rank, got) -> sprintf "Sparse index over-supplied: this array's sparse axis has rank %d (keys are %d-tuples), so it takes at most a %d-tuple like S((c0, ..., c%d)); got a %d-tuple." rank rank rank (rank - 1) got
+    | SparseNeedsTuple rank -> sprintf "Sparse index must be a single tuple: write S((c0, ..., cj)) with inner parentheses, not the flat form S(c0, ..., cj). A SparseIdx<keys> axis of rank %d is indexed as one joint tuple, full or partial (formalism 3.5)." rank
+    // OrbIdx storage-refusal text, front-end half. Not routed through
+    // IR.orbitStorageUnsupported: a TypeError carries strings, not IR
+    // structures, so this renderer can't recover depth as a number -- the
+    // ONLY difference between the two spellings ("depth >= 2" here, "depth d"
+    // there); everything else is identical and corpus-pinned. KEEP THEM IN
+    // STEP or a half-updated pair tells the user two different stories.
+    | OrbitStorageUnsupported (levels, where_) ->
+        sprintf "%s: OrbIdx<%s, n> is a declarable index class of depth >= 2, and a DEDUCED one can now be \
+allocated, written, printed, READ at an arbitrary tuple (the per-level canon fold, the accumulated \
+character, the zero set), FULLY DECOMPACTED to its dense tensor, and round-tripped through a Zarr \
+store (the spec_version 2 'orbit' head -- providers/ZarrTriangularSpec.md). What is still missing is every \
+path that would put a wreath pool anywhere but under its own traversal nest: an OrbIdx ANNOTATION \
+(a store is now a producer, but the annotation also admits classes nothing produces), reduce/prodsum \
+over the pool, transpose, PARTIAL (per-level) decompaction, a WINDOWED or distributed store read, and \
+provider I/O outside Zarr (CSV and NetCDF have no pool axis to carry the class on). So the \
+compiler refuses here rather than compute an address it cannot compute. \
+The depth-1 spellings work through the existing compact machinery instead: OrbIdx<[(r,+)], n> is \
+exactly SymIdx<r, n>, OrbIdx<[(r,-)], n> is exactly AntisymIdx<r, n>, and OrbIdx<[], n> is exactly \
+Idx<n>." where_ levels
+    | OrbitSubscriptArity (levels, axes, got) ->
+        sprintf "OrbIdx<%s, n> acts on %d raw axes, so a subscript of it takes exactly %d flat \
+coordinates (W(i0, ..., i%d)) -- the same flat spelling a rank-k SymIdx group takes; got %d. \
+%sA wreath record is ONE index slot spanning all %d axes, not %d slots." levels axes axes (axes - 1) got
+                (if got < axes then
+                    "A PARTIAL subscript has no answer for a wreath class: its rows shrink per LEVEL, \
+so no residual index type describes a fibre of the pool -- decompact(W, 0) first and slice the \
+dense result. "
+                 else "")
+                axes axes
+    | OrbitDecompactPartial (levels, dim) ->
+        sprintf "decompact(W, %d): only FULL decompaction of an OrbIdx<%s, n> class is implemented -- \
+write decompact(W, 0), which produces the complete dense tensor (one plain Idx<n> axis per raw axis, \
+each cell the class's own read: the per-level canon fold, the accumulated character, and 0 on the \
+zero set). For a wreath class the second argument is the number of LEVELS TO KEEP \
+(docs/plan-orbidx-decompaction.md section 4.3), not a dimension to free, and the partial/peel lattice of \
+that plan's section 3 is not built: peeling level d unties its r_d sub-blocks into a juxtaposition of \
+depth-(d-1) classes, which needs a typed residual nothing produces yet." dim levels
+    | OrbitFoldUnsupported (levels, op) ->
+        sprintf "%s() over OrbIdx<%s, n> compact storage is not supported: folding the canonical POOL \
+cells and folding the logical (mirrored) cells differ. The pool holds one cell per ORBIT, so a fold \
+over it answers for an array of that many elements instead of the n^rank tensor it stands for -- and \
+each cell would need its orbit multiplicity (a Burnside count), with a '-' level's character \
+cancelling terms outright. decompact(W, 0) first for the logical fold: full decompaction of a wreath \
+class IS implemented, and the dense result folds like any other array." op levels
     | RaggedIdxNeedsPrior func -> sprintf "function '%s': RaggedIdx requires at least one prior index in the array's index list -- the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>." func
     | TagWildcardNotParam where_ -> sprintf "%s: the tag wildcard `_` is legal in PARAMETER position only. A parameter may decline to constrain its argument's index tag or unit, but this position has to PRODUCE one -- a wildcard here would erase the tag rather than relax it. Write the concrete index type (e.g. Nat<LatIdx>) or the bare base type." where_
     | IndexRankMismatch (where_, left, leftRank, right, rightRank) ->
@@ -509,6 +524,28 @@ let formatTypeError (err: TypeError) : string =
     | JoinShapeMismatch (pos, detail) -> sprintf "join: argument %d does not match argument 1 (%s). join(A, B, d) requires equal rank, equal element type, and equal extents on EVERY axis except the joined dimension d." pos detail
     | StackJoinCompactSlot (op, slot) -> sprintf "%s: index slot %d is a compact, ragged, or compound group. %s materializes a dense rectangular result, so its operands must be dense (plain Idx) on every axis -- decompact the axis first." op slot op
     | UnitMismatch (context, left, right) -> sprintf "Unit mismatch in %s: %s vs %s" context left right
+    | QuantityArgMismatch (pos, quantity, got) ->
+        sprintf "argument %d: the parameter's declared type carries the quantity '%s', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is %s. Ascribe it at the call site (e.g. `x : %s`); matching dimensions alone do not imply the quantity." pos quantity got quantity
+    | QuantityTerminal (quantity, declName) ->
+        sprintf "unit '%s': the quantity '%s' cannot be used inside a unit expression. Quantities are TERMINAL -- the nominal layer is exactly one level deep -- so a quantity name can neither be composed (`Unit x = %s * m`) nor re-derived from (`Unit q: %s`). Compose from the structural units the quantity was declared over instead." declName quantity quantity quantity
+    | UnknownUnitName (name, declName, candidates) ->
+        let where =
+            if declName = unitAnnoContext then "unit annotation"
+            else sprintf "unit '%s'" declName
+        sprintf "%s: '%s' is not a declared unit or a known scale constant. A unit expression composes names already in scope -- only a numeric LITERAL may appear without being declared -- so declare '%s' first (`Unit %s`), import the module that exports it, or fix the spelling.%s" where name name name
+            (if List.isEmpty candidates then "" else sprintf " Did you mean: %s?" (String.concat ", " candidates))
+    | DefaultParamOrder (func, requiredParam, defaultedParam) ->
+        sprintf "%s: parameter '%s' has no default but follows the defaulted parameter '%s'. Defaults are TRAILING: once a parameter has a default, every later parameter needs one too (otherwise an omitted-argument call is ambiguous). Reorder the parameters or give '%s' a default." func requiredParam defaultedParam requiredParam
+    | DefaultParamScope (func, param, referenced) ->
+        sprintf "%s: the default for parameter '%s' references '%s', which is itself a defaulted parameter. A default may reference the REQUIRED parameters only -- defaults evaluate left-to-right at call entry with just the required arguments bound, so another default's value is not available." func param referenced
+    | FactoryDupQuantityDecl (func, quantity, param1, param2) ->
+        sprintf "%s: defaulted parameters '%s' and '%s' both carry the quantity '%s'. By-nominal argument routing (`f(x, 3 : %s)`) needs each quantity to name exactly ONE defaulted slot -- give the second slot a distinct quantity, or make it a plain (non-quantity) parameter." func param1 param2 quantity quantity
+    | FactoryDupFill (callee, quantity, slot) ->
+        sprintf "call to '%s': the quantity slot '%s' (quantity '%s') is supplied twice -- a second argument tagged '%s' (or a positional argument already claiming that slot) conflicts with an earlier one. Each slot takes at most one argument." callee slot quantity quantity
+    | FactoryUnknownTag (callee, quantity, candidates) ->
+        sprintf "call to '%s': an argument is tagged with the quantity '%s', but '%s' has no defaulted slot of that quantity. Its quantity slots are: %s." callee quantity callee (if List.isEmpty candidates then "none" else String.concat ", " candidates)
+    | FactoryAmbiguousMix (callee, pos) ->
+        sprintf "call to '%s': argument %d has no quantity tag but appears AFTER a quantity-tagged argument, so its slot would be a guess. Positional (untagged) arguments must come first, in declared order; tag the stragglers (`v : quantity`) or reorder the call." callee pos
     | IntrinsicBindArrayFailed op -> sprintf "%s(): failed to bind array type after unification" op
     | IntrinsicNeedsArray op -> sprintf "%s() requires an array as argument" op
     | IntrinsicScalarOnly name -> sprintf "%s applies to scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(x) -> %s(x) |> compute)." name name
@@ -523,12 +560,26 @@ let formatTypeError (err: TypeError) : string =
     | ArrayLitLength (got, expected, axisTag) ->
         let axis = match axisTag with Some t -> sprintf " for axis '%s'" t | None -> ""
         sprintf "Array literal%s has %d elements, but the annotation's extent is %d" axis got expected
+    | CompactLitShape (idx, shape, where_, detail) ->
+        sprintf "Array literal over the compact group %s: %s %s. A compact group is ONE axis storing \
+one cell per canonical tuple, laid out as a left-justified simplex, so its literal is written in that \
+same shape -- %s. (A flat list or a rectangular nest names cells the storage does not have.)"
+            idx where_ detail shape
+    | HermitianLitDiagComplex where_ ->
+        sprintf "Hermitian literal: %s is a DIAGONAL cell with a non-zero imaginary part. \
+A(i, i) = conj(A(i, i)) forces the diagonal real, and the stored diagonal cell is read unconjugated, \
+so this value is not one the class can hold. Write a real diagonal (the off-diagonal cells carry the \
+complex half)." where_
     | ObjectForKernel got -> sprintf "object_for kernel must be a lambda, reynolds, or zero, but got %A" got
     | ChainOpNeedsMethodFor leftDesc -> sprintf "<@> requires method_for or object_for on the left side, but got %s" leftDesc
     | ChainOpBadKernel rightDesc -> sprintf "<@> kernel must be a lambda, operator section, named function, reynolds(...), or zero, but got %s" rightDesc
     | ChainOpUndecidable (leftDesc, rightDesc) -> sprintf "cannot infer the roles of the <@> operands: the left side is %s and the right side is %s, so the arrays/kernel roles are ambiguous. A former is implicit only when one side is decisive: a kernel (lambda, operator section, named function, reynolds(...), zero) or a former. Write it explicitly: method_for(arrays) <@> kernel, or object_for(kernel) <@> (arrays)." leftDesc rightDesc
     | CommContradictsBody (p1, p2) -> sprintf "`where comm(%s, %s)` contradicts the kernel body, which is provably ANTIcommutative under that swap (f(%s, %s) = -f(%s, %s)): triangular storage would silently corrupt half the output. Remove the comm clause, or wrap the kernel in reynolds(...) if a signed iteration license over the permutation sum is what you intend." p1 p2 p2 p1 p1 p2
     | AntisymmContradictsBody (p1, p2) -> sprintf "`where anticomm(%s, %s)` contradicts the kernel body, which is provably COMMUTATIVE under that swap (f(%s, %s) = f(%s, %s)): strict-triangular anticommutative storage would drop the diagonal and negate half the output. Remove the anticomm clause (use `where comm(%s, %s)` for the symmetric triangle), or wrap the kernel in reynolds(..., Antisymmetric) if a signed antisymmetrization is what you intend." p1 p2 p2 p1 p1 p2 p1 p2
+    | AntisymMapNotOdd (param, proved) -> sprintf "mapping this kernel over an ANTISYMMETRIC (AntisymIdx) array would keep the input's strict-triangular storage, and that is only correct for a SIGN-ODD kernel (f(-x) = -f(x)); the deduction says this one is %s in '%s'. An even or unknown-parity map of an antisymmetric array is SYMMETRIC -- it has a diagonal, and the strict iteration the input forces cannot produce one -- so the compact result would negate every mirrored read. Map over a dense copy instead (`decompact(A, 0)` materializes the full tensor, and the kernel over THAT is symmetric with the right diagonal), or use a sign-odd kernel." proved param
+    | WreathTieKernelNotOdd (param, proved, levels) -> sprintf "the declared clause ties every argument over a compact class with a '-' inner level (%s), and that tie is only sound for a kernel SIGN-ODD in each argument separately (h(-p, q) = -h(p, q)): a '-' level claims that mirroring ONE argument's sub-block negates the value, so an even or unknown-parity kernel would store a class whose mirrored reads and decompaction answer with signs the values do not satisfy. The deduction says this kernel is %s in '%s'. Use a per-argument sign-odd kernel (e.g. p * q; note p + q is NOT odd in each argument), or map over dense copies instead: decompact(_, 0) materializes the full tensor, and the kernel over THAT carries no wreath claim." levels proved param
+    | HermitianMapNotReal param -> sprintf "mapping this kernel over a HERMITIAN (HermitianIdx) array would keep the input's Hermitian storage, whose mirrored reads recover H(j,i) as conj(H(i,j)); that is only correct when the kernel commutes with conjugation (f(conj z) = conj(f z)), which is not deducible for '%s'. A kernel built from the parameter, real constants, + - * /, and neg/conj/real qualifies; a complex constant, imag(z), arg(z), `^` and the math intrinsics (exp/log/sqrt/...) do not. Map over a dense copy instead: `decompact(A, 0)` materializes the full conjugate-mirrored matrix, and the kernel over THAT carries no storage claim." param
+    | FoldOmpNeedsLicense kernelDesc -> sprintf "parallel reduction needs comm(...) or a builtin op: %s carries `omp` but nothing licenses the reorder. A parallel fold splits the axis into per-thread chunks and combines the partials, so the kernel must be COMMUTATIVE and ASSOCIATIVE -- write `where comm(a, b), omp` to declare it (the same word `<@>` uses for symmetric storage, cross-checked against the body's parity), or use a builtin fold body (a + b, a * b, a && b, a || b), which carries both properties outright. Drop `omp` to keep the serial fold." kernelDesc
     | PlaceholderNeedsAllBound (got, total) -> sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." got total
     | GroupKeysRank1 -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
     | FallbackNeedsArrays (leftDesc, rightDesc) -> sprintf "<|:> (allocated-fallback) reads the LEFT array where its storage holds a cell and the right array elsewhere, so both operands must be arrays; got %s and %s. For value-level choice (first nonzero wins) over scalars or computations, use <|>." leftDesc rightDesc
@@ -544,9 +595,9 @@ let formatTypeError (err: TypeError) : string =
     | ImplMissingMethods (iface, typeName, methods) -> sprintf "impl %s for %s is missing required methods: %s" iface typeName methods
     | StructFieldDuplicate (structName, field) -> sprintf "struct %s: field '%s' assigned more than once" structName field
     | StructNoField (structName, field) -> sprintf "struct %s has no field '%s'" structName field
-    | StructSpreadBase structName -> sprintf "struct %s: a spread base must be a variable or field path — bind it with let first" structName
+    | StructSpreadBase structName -> sprintf "struct %s: a spread base must be a variable or field path -- bind it with let first" structName
     | StructSpreadNotStruct (structName, got) -> sprintf "struct %s: spread base must be a %s value, got %s" structName structName got
-    | StructSpreadRedundant structName -> sprintf "struct %s: every field is provided explicitly — the '..' spread is redundant" structName
+    | StructSpreadRedundant structName -> sprintf "struct %s: every field is provided explicitly -- the '..' spread is redundant" structName
     | StructMissingField (structName, field) -> sprintf "struct %s: missing field '%s' in constructor" structName field
     | StructFieldType (structName, field, expected, actual) -> sprintf "struct %s, field '%s': expected %s, got %s" structName field expected actual
     | UnknownStructType name -> sprintf "unknown struct type '%s' in constructor" name
@@ -586,27 +637,27 @@ let formatTypeError (err: TypeError) : string =
     | ProviderWriteNeedsArray alias -> sprintf "%s.write expects an array as its second argument (the variable to store)" alias
     | ProviderWriteNamedBinding alias -> sprintf "%s.write stores a NAMED array binding (its name becomes the store variable's name): bind the value first (let A = ...; %s.write(\"path\", A))" alias alias
     | ProviderWriteArgs alias -> sprintf "%s.write expects (\"path\", array): a string-literal store path and the array to write" alias
-    | IrrepsIdxArgMismatch (pos, expected, actual) -> sprintf "argument %d: IrrepsIdx mismatch: the parameter expects %s but the argument carries %s. IrrepsIdx identity is the spec (plus nominative alias name) — equal total_dim does not make two irreps spaces interchangeable." pos expected actual
-    | BlockSpecArgMismatch (pos, expected, actual) -> sprintf "argument %d: block-spec index mismatch: the parameter expects %s but the argument carries %s. A block-structured index's identity is its GROUP FAMILY plus its spec (plus nominative alias name) — equal total_dim does not make two block spaces interchangeable, and an O(3) irreps space is never a point-group one." pos expected actual
-    | IrrepsIdxSpec detail -> sprintf "IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples — a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." detail
-    | IrrepsIdxSpecFn (func, detail) -> sprintf "function '%s': IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples — a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." func detail
-    | PgIrrepsIdxSpec detail -> sprintf "PgIrrepsIdx: %s. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples — a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>." detail
-    | PgIrrepsIdxSpecFn (func, detail) -> sprintf "function '%s': PgIrrepsIdx: %s. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples — a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>." func detail
-    | ComplexArity got -> sprintf "complex expects exactly two float components — complex(re, im) — got %d argument(s)" got
-    | CumulantOrderExceeds (order, carried) -> sprintf "cumulant: order %d exceeds the dist's carried order %d — insufficient stochastic order. Construct with a higher order (dist(A, %d)) or project a carried component." order carried order
-    | DistOrderDisagree (op, leftOrder, rightOrder) -> sprintf "dist %s: orders disagree (%d vs %d) — carry the same stochastic order on both sides" op leftOrder rightOrder
-    | DistNotIndependent (op, source1, source2, steering) -> sprintf "dist %s: cumulants combine only for independent distributions — sources '%s' and '%s' are not declared independent; %s" op source1 source2 steering
-    | PplConstraintNeedsImport (func, bare) -> sprintf "function '%s': constraint '%s' belongs to the ppl module — add `import ppl as <alias>` and write `where <alias>.%s(...)`" func bare bare
-    | StructBoundScope (structName, field, bad) -> sprintf "struct %s, field '%s': bound references '%s' — bounds may reference only earlier fields and statics" structName field bad
-    | StaticStructField (structName, field, why) -> sprintf "static struct %s, field '%s': %s — every field of a `static struct` must have a statically evaluable type (Int, Float, Bool, String, Char, a tuple of those, or another static struct)" structName field why
-    | BoundsInverted (where_, lo, hi) -> sprintf "%s: bounds cross — min=%s is greater than max=%s (bounds are inclusive on both ends, so this type has no values)" where_ lo hi
-    // Text reproduced VERBATIM from the two `Other` strings this case
-    // replaced (Unify.fs rank-bound block) — `got` carries the whole
-    // "a scalar" / "a rank-N array" tail, so the sentence is unchanged.
+    | IrrepsIdxArgMismatch (pos, expected, actual) -> sprintf "argument %d: IrrepsIdx mismatch: the parameter expects %s but the argument carries %s. IrrepsIdx identity is the spec (plus nominative alias name) -- equal total_dim does not make two irreps spaces interchangeable." pos expected actual
+    | BlockSpecArgMismatch (pos, expected, actual) -> sprintf "argument %d: block-spec index mismatch: the parameter expects %s but the argument carries %s. A block-structured index's identity is its GROUP FAMILY plus its spec (plus nominative alias name) -- equal total_dim does not make two block spaces interchangeable, and an O(3) irreps space is never a point-group one." pos expected actual
+    | IrrepsIdxSpec detail -> sprintf "IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples -- a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." detail
+    | IrrepsIdxSpecFn (func, detail) -> sprintf "function '%s': IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples -- a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." func detail
+    | PgIrrepsIdxSpec detail -> sprintf "PgIrrepsIdx: %s. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples -- a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>." detail
+    | PgIrrepsIdxSpecFn (func, detail) -> sprintf "function '%s': PgIrrepsIdx: %s. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples -- a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>." func detail
+    | ComplexArity got -> sprintf "complex expects exactly two float components -- complex(re, im) -- got %d argument(s)" got
+    | CumulantOrderExceeds (order, carried) -> sprintf "cumulant: order %d exceeds the dist's carried order %d -- insufficient stochastic order. Construct with a higher order (dist(A, %d)) or project a carried component." order carried order
+    | DistOrderDisagree (op, leftOrder, rightOrder) -> sprintf "dist %s: orders disagree (%d vs %d) -- carry the same stochastic order on both sides" op leftOrder rightOrder
+    | DistNotIndependent (op, source1, source2, steering) -> sprintf "dist %s: cumulants combine only for independent distributions -- sources '%s' and '%s' are not declared independent; %s" op source1 source2 steering
+    | PplConstraintNeedsImport (func, bare) -> sprintf "function '%s': constraint '%s' belongs to the ppl module -- add `import ppl as <alias>` and write `where <alias>.%s(...)`" func bare bare
+    | StructBoundScope (structName, field, bad) -> sprintf "struct %s, field '%s': bound references '%s' -- bounds may reference only earlier fields and statics" structName field bad
+    | StaticStructField (structName, field, why) -> sprintf "static struct %s, field '%s': %s -- every field of a `static struct` must have a statically evaluable type (Int, Float, Bool, String, Char, a tuple of those, or another static struct)" structName field why
+    | BoundsInverted (where_, lo, hi) -> sprintf "%s: bounds cross -- min=%s is greater than max=%s (bounds are inclusive on both ends, so this type has no values)" where_ lo hi
+    | BoundsOnAggregate (where_, noun, subject) -> sprintf "%s: bounds apply to primitive types, not aggregates -- the bound is applied to %s. A bound is a runtime comparison against %s itself (formalism 2.4: bounded PRIMITIVES carry runtime-checked bounds), and an aggregate has no such comparison. Write the bound on the ELEMENT type instead -- `Array<Float64<min=.., max=..> like I, J>` is checked cell by cell." where_ noun subject
+    // Wording must match Unify.fs's rank-bound block: `got` carries the
+    // whole "a scalar" / "a rank-N array" tail, so the sentence stays exact.
     | RankBoundViolation (needed, got) -> sprintf "this value flows into a position that requires a rank-%d (or higher) array, but it resolved to %s" needed got
-    | ProviderImportByModule (suggestion, providers) -> sprintf "provider modules are imported by module name — write `import %s as <alias>` (the Providers.* spelling was removed; registered providers: %s)" suggestion providers
-    | ProviderNoSelectiveImport pname -> sprintf "provider module '%s' does not support selective import — use `import %s as <alias>` and call <alias>.load/read/write" pname pname
-    | IndexTypeArithForbidden name -> sprintf "Arithmetic on index type '%s' is not permitted. Index types are nominal labels — for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented." name
+    | ProviderImportByModule (suggestion, providers) -> sprintf "provider modules are imported by module name -- write `import %s as <alias>` (the Providers.* spelling was removed; registered providers: %s)" suggestion providers
+    | ProviderNoSelectiveImport pname -> sprintf "provider module '%s' does not support selective import -- use `import %s as <alias>` and call <alias>.load/read/write" pname pname
+    | IndexTypeArithForbidden name -> sprintf "Arithmetic on index type '%s' is not permitted. Index types are nominal labels -- for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented." name
     | Other msg -> msg
 
 /// Format a CompileError with location and context
@@ -636,18 +687,25 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
         | None ->
             match e.Error with
             | UnboundVariable _ -> "BL2001"
-            | TypeMismatch _ | ArgRankMismatch _ -> "BL3001"
-            | ArityMismatch _ -> "BL3002"
+            | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ -> "BL3001"
+            | ArityMismatch _ | KernelPackArity _ -> "BL3002"
             | InvalidApplication _ -> "BL3003"
             | PatternTypeMismatch _ -> "BL3004"
             | InvalidArrayCapture _ -> "BL3005"
-            // ---- Promoted variants (Stage 5) ----
+            // Promoted variants (Stage 5)
             | UnitMismatch _ -> "BL3006"
+            | QuantityArgMismatch _ -> "BL3010"
+            | QuantityTerminal _ -> "BL3011"
+            | DefaultParamOrder _ | DefaultParamScope _ -> "BL3012"
+            | FactoryDupQuantityDecl _ -> "BL3013"
+            | FactoryDupFill _ | FactoryUnknownTag _ | FactoryAmbiguousMix _ -> "BL3014"
+            | UnknownUnitName _ -> "BL3015"
             | IntrinsicBindArrayFailed _ | IntrinsicNeedsArray _ | IntrinsicScalarOnly _
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
             | ReduceEmptyArray _ | ProdsumExtentMismatch _ | GramNeedsRank2 _
-            | ArrayLitLength _ | ObjectForKernel _ | ChainOpNeedsMethodFor _ | ChainOpBadKernel _
+            | ArrayLitLength _ | CompactLitShape _ | HermitianLitDiagComplex _
+            | ObjectForKernel _ | ChainOpNeedsMethodFor _ | ChainOpBadKernel _
             | ChainOpUndecidable _
             | PlaceholderNeedsAllBound _ | GroupKeysRank1 | CumulantOrderPositive _
             | CumulantOrderExceeds _ | CumulantNeedsDist _ | DistOrderDisagree _
@@ -661,11 +719,24 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | StaticStructField _
             | StructSpreadBase _ | StructSpreadNotStruct _ | StructSpreadRedundant _ -> "BL3008"
             | RankBoundViolation _ -> "BL3009"
-            // A declared `comm`/`antisymm` the deduction PROVED wrong is not an
-            // "invalid builtin argument" (BL3007's ~24-way bucket): it is an
-            // annotation contradicting its own body, with its own fix — drop the
-            // clause, or wrap in `reynolds` for the signed iteration license.
+            // A `comm`/`antisymm` clause the deduction PROVED wrong is not
+            // BL3007's generic "invalid builtin argument" bucket: it's an
+            // annotation contradicting its own body -- drop the clause, or
+            // wrap in `reynolds` for the signed iteration license.
             | CommContradictsBody _ | AntisymmContradictsBody _ -> "BL4013"
+            // Same family, other direction: nothing is DECLARED here -- the
+            // output would inherit the input's compact class, and the
+            // deduction can't certify the kernel commutes with its mirror
+            // involution. WreathTieKernelNotOdd joins deliberately: it DOES
+            // declare a clause (the SWAP h(p,q) = h(q,p)), but the failing
+            // certificate -- per-argument oddness against the inner class's
+            // mirror -- is exactly this family's undeclared gap.
+            | AntisymMapNotOdd _ | HermitianMapNotReal _
+            | WreathTieKernelNotOdd _ -> "BL4015"
+            // Own code, not BL4013's: nothing is CONTRADICTED here -- `omp`
+            // asks for a reorder the checker has no licence for. Fix is to
+            // add `comm(...)` (or use a builtin body), not remove a disproved annotation.
+            | FoldOmpNeedsLicense _ -> "BL4016"
             | StructWhereNotBool _ | StructWhereError _ | WherePredicateUnannotated _
             | PplConstraintNeedsImport _
             | UnknownWhereConstraint _ -> "BL4001"
@@ -673,11 +744,17 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | IndexTagMismatchNamed _ | IndexTagMismatchAnon _ | CrossNominalIndexArith _
             | CrossAnonIndexArith _ | IndexTypeArithForbidden _ | IrrepsIdxArgMismatch _
             | BlockSpecArgMismatch _
-            | CompoundBareWildcard _ | CompoundWildcardArity _ | CompoundAllFree _
-            | CompoundOverSupplied _ | CompoundNeedsTuple _ | RaggedIdxNeedsPrior _
+            | CompoundTupleForm _ | CompoundUnderSupplied _ | CompoundOverSupplied _
+            | SparseBareWildcard _ | SparseWildcardArity _ | SparseAllFree _
+            | SparseOverSupplied _ | SparseNeedsTuple _ | RaggedIdxNeedsPrior _
+            // BL4003: the index TYPE is well formed but this USE can't be
+            // served. Not BL7001 ("not yet supported by THIS BACKEND") --
+            // both backends refuse, in the front end.
+            | OrbitStorageUnsupported _ | OrbitSubscriptArity _
+            | OrbitDecompactPartial _ | OrbitFoldUnsupported _
             | IrrepsIdxSpec _ | IrrepsIdxSpecFn _
             | PgIrrepsIdxSpec _ | PgIrrepsIdxSpecFn _ | TagWildcardNotParam _
-            | BoundsInverted _ -> "BL4003"
+            | BoundsInverted _ | BoundsOnAggregate _ -> "BL4003"
             | IndexRankMismatch _
             | DecompactDimRange _ | DecompactPlainAxis _ | DecompactLastSlotOnly _
             | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _
@@ -699,9 +776,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
     Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) e.Span (formatTypeError e.Error)
     |> Blade.Diagnostics.withContext e.Context
 
-/// Unified Diagnostic -> CompileError, for pipeline stages (elaborators)
-/// that produce Diagnostics inside typeCheck's CompileError channel. The
-/// code and span survive; extra context is appended outermost.
+/// Unified Diagnostic -> CompileError, for pipeline stages (elaborators) that
+/// produce Diagnostics inside typeCheck's CompileError channel. Code and span survive; extra context appends outermost.
 let compileErrorOfDiagnostic (extraContext: string list) (d: Blade.Diagnostics.Diagnostic) : CompileError =
     { Error = Other d.Message
       Span = d.Span
@@ -731,9 +807,9 @@ let lookupTypeDef name env = Map.tryFind name env.TypeDefs
 
 /// Convert AST BindingMut to Assignability.
 let assignOfBindingMut = function
-    | BindConst -> ReadOnly    // static / let const → immutable
-    | BindLet -> Assignable    // let → assignable in scope
-    | BindMut -> MutPassable   // let mut → assignable + mut-passable
+    | BindConst -> ReadOnly    // static / let const -> immutable
+    | BindLet -> Assignable    // let -> assignable in scope
+    | BindMut -> MutPassable   // let mut -> assignable + mut-passable
 
 let enterScope env =
     { env with OuterScope = Map.foldBack Map.add env.Variables env.OuterScope }
@@ -741,24 +817,21 @@ let enterScope env =
 let registerTypeDef name info (env: TypeEnv) =
     { env with TypeDefs = Map.add name info env.TypeDefs }
 
-/// Register a loaded provider module's struct types into the type-check env and
-/// return the binding's module-struct type. The provider's emitted dims/vars
-/// structs are registered as-is; a synthetic top-level struct named `name` is
-/// added so the loaded binding carries `.dims` / `.vars` fields, letting field
-/// access (e.g. `sample.vars.temp`) resolve to a variable's real Array type.
-/// Pure (no file IO) so it can be unit-tested with a mock module; reading the
-/// file metadata that produces `pm` is the caller's concern.
+/// Register a loaded provider module's struct types and return the binding's
+/// module-struct type. The provider's dims/vars structs register as-is; a
+/// synthetic top-level struct `name` is added so the binding carries
+/// `.dims`/`.vars` fields (e.g. `sample.vars.temp` resolves to the real Array
+/// type). Pure (no file IO) -- unit-testable with a mock module; reading `pm`'s file metadata is the caller's concern.
 let registerProviderModule (env: TypeEnv) (name: string) (pm: IRModule) : TypeEnv * IRType =
     let envS =
         pm.Types |> List.fold (fun e td ->
             match td with
             | IRTDStruct (n, fields) -> registerTypeDef n (TDIStruct (n, [], fields, [])) e
             | IRTDEnumIdx (n, idx, values) ->
-                // Provider-synthesized column enums (CSV headered mode): the
-                // registration makes string-literal column subscripts fold to
-                // ordinals at the indexing site (dispatchAppOrIndex). The
-                // TDIEnumIdx body is a synthesized surface TypeExpr — no
-                // source declaration exists for a provider enum.
+                // Provider-synthesized column enums (CSV headered mode):
+                // registration folds string-literal column subscripts to
+                // ordinals at dispatchAppOrIndex. Body is a synthesized
+                // surface TypeExpr -- no source declaration exists.
                 let bodyExpr =
                     mkExpr noSpan (ExprKind.ExprArrayLit (
                         values |> List.map (fun v ->
@@ -767,24 +840,15 @@ let registerProviderModule (env: TypeEnv) (name: string) (pm: IRModule) : TypeEn
                             | EVInt n -> mkExpr noSpan (ExprKind.ExprLit (LitInt n)))))
                 registerTypeDef n (TDIEnumIdx (n, idx, values, TyEnumIdx bodyExpr)) e
             | IRTDIndexType (n, idx) ->
-                // The axis types the provider derived from the file, exposed
-                // to annotations as `<binding>.index.<dim>` so a program can
-                // say `Array<Float64 like store.index.y>` instead of
-                // hand-copying the extent (`type Y = Idx<64>`) and silently
-                // going stale when the store is regenerated.
-                //
-                // QUALIFIED ONLY, deliberately: dimension names like `time`
-                // or `lat` recur across stores, and a bare registration would
-                // clobber last-write-wins in the shared TypeDefs map. A short
-                // local name stays a one-liner the program opts into:
-                // `type Y = store.index.y`.
-                //
-                // The record is registered EXACTLY as the provider built it
-                // (notably Tag = None, which NetcdfTests asserts): a fresh Id
-                // is stamped at each use by lowerIndexType, and slots match on
-                // extent, so an annotation written this way unifies with the
-                // store's own arrays precisely as the hand-written Idx<64>
-                // does today.
+                // Axis types the provider derived from the file, exposed as
+                // `<binding>.index.<dim>` (e.g. `Array<Float64 like
+                // store.index.y>`) instead of hand-copying an extent that goes
+                // stale on regeneration. QUALIFIED ONLY, deliberately: bare
+                // names like `time` recur across stores and would clobber
+                // last-write-wins in the shared TypeDefs map (alias down with
+                // `type Y = store.index.y` if needed). Registered EXACTLY as
+                // the provider built it (Tag = None, asserted by
+                // NetcdfTests); lowerIndexType stamps a fresh Id per use, unifying on extent match like a hand-written Idx<64>.
                 let extentExpr =
                     match idx.Extent with
                     | IRLit (IRLitInt v) -> mkExpr noSpan (ExprKind.ExprLit (LitInt v))
@@ -792,13 +856,10 @@ let registerProviderModule (env: TypeEnv) (name: string) (pm: IRModule) : TypeEn
                 let qualified = sprintf "%s.index.%s" name n
                 registerTypeDef qualified (TDIIndexType (qualified, idx, TyIdx extentExpr)) e
             | _ -> e) env
-    // Module-struct fields point at the actual dims/vars struct decls the
-    // provider emitted. Every provider namespaces them as
-    // "<binding>__dims"/"<binding>__vars" so several loads in one program
-    // don't clobber each other in this flat TypeDefs map (field access
-    // re-resolves the struct name at each use site, so a clobbered entry
-    // silently retypes earlier uses). The bare `n = label` arm is retained
-    // for any provider that emits unsuffixed structs.
+    // Module-struct fields point at the dims/vars struct decls the provider
+    // emitted, namespaced "<binding>__dims"/"<binding>__vars" so multiple
+    // loads don't clobber each other in this flat TypeDefs map (a clobbered
+    // entry silently retypes earlier uses). Bare `n = label` covers providers that emit unsuffixed structs.
     let structNames = pm.Types |> List.choose (function IRTDStruct (n, _) -> Some n | _ -> None)
     let fieldFor (label: string) =
         structNames
@@ -818,13 +879,43 @@ let isEnumType (env: TypeEnv) (parentName: string) : bool =
 let registerVariantTag tag parentName payload (env: TypeEnv) =
     { env with VariantTags = Map.add tag (parentName, payload) env.VariantTags }
 
-/// Resolve a UnitExpr AST node to a canonical UnitSig
-let rec resolveUnitExpr (units: Map<string, UnitSig>) (expr: UnitExpr) : Result<UnitSig, string> =
+/// Why a UnitExpr failed to resolve. Both cases are hard declaration-site
+/// errors at a `Unit` RHS -- an unknown name is BL3015, a terminal-quantity
+/// misuse BL3011. The split survives because the ANNOTATION consumers
+/// (compound unit annotations) still degrade rather than reject, and they
+/// distinguish the two: see unitAnnoTerminalError in TypeCheck.fs.
+type UnitResolveErr =
+    | UResolveUnknown of name: string
+    /// A quantity (nominal) name referenced inside unit algebra. Quantities
+    /// are terminal: the nominal layer is exactly one level deep.
+    | UResolveTerminal of quantity: string
+
+/// Render a UnitResolveErr for the channels that still degrade rather than
+/// reject (the defensive lowering fallback; annotation resolution).
+let ppUnitResolveErr (e: UnitResolveErr) : string =
+    match e with
+    | UResolveUnknown name -> sprintf "Unknown unit '%s'" name
+    | UResolveTerminal q -> sprintf "Quantity '%s' cannot appear in a unit expression (quantities are terminal)" q
+
+/// Resolve a UnitExpr AST node to a canonical UnitSig. Quantity names
+/// (Nominal = Some) are REJECTED in every position — a quantity is an
+/// identity, not a factor, so it can neither be composed (`speed * m`) nor
+/// re-derived from (`Unit q: speed`).
+let rec resolveUnitExpr (units: Map<string, UnitSig>) (expr: UnitExpr) : Result<UnitSig, UnitResolveErr> =
     match expr with
     | UnitNamed name ->
         match Map.tryFind name units with
+        | Some sig' when sig'.Nominal.IsSome -> Error (UResolveTerminal name)
         | Some sig' -> Ok sig'
-        | None -> Error (sprintf "Unknown unit '%s'" name)
+        // Irrational scale constants (`pi`) resolve only AFTER the unit
+        // table, so a user's own `Unit pi` still shadows the built-in and no
+        // existing program changes meaning. Dimensionless: a constant
+        // contributes a magnitude, never a dim.
+        | None when unitScaleConstants.ContainsKey name ->
+            Ok (unitOfDimsScaled Map.empty (scaleOfConst name))
+        | None -> Error (UResolveUnknown name)
+    | UnitOne -> Ok unitDimensionless
+    | UnitScaleLit (num, den) -> Ok (unitOfDimsScaled Map.empty (scaleOfRational num den))
     | UnitMul (a, b) ->
         resolveUnitExpr units a |> Result.bind (fun sa ->
         resolveUnitExpr units b |> Result.map (fun sb ->
@@ -837,24 +928,65 @@ let rec resolveUnitExpr (units: Map<string, UnitSig>) (expr: UnitExpr) : Result<
         resolveUnitExpr units a |> Result.map (fun sa ->
             unitPow sa n)
 
-/// Register a unit declaration in the environment
-let registerUnit (env: TypeEnv) (decl: UnitDecl) : TypeEnv =
-    let sig' =
-        match decl.Definition with
-        | None | Some UnitBase ->
-            // Base unit: canonical form is {name: 1}
-            Map.ofList [(decl.Name, 1)]
-        | Some (UnitDerived expr) ->
-            match resolveUnitExpr env.Units expr with
-            | Ok resolved -> resolved
-            | Error msg ->
-                eprintfn "Unit error: %s" msg
-                Map.ofList [(decl.Name, 1)]  // fallback to base unit
-    { env with Units = Map.add decl.Name sig' env.Units }
+/// Names already in scope that a misspelling plausibly meant. Quantities are
+/// excluded: suggesting one would only trade BL3015 for BL3011. Shared with
+/// the ANNOTATION check in TypeCheck.fs, which raises the same BL3015.
+let unitSpellingCandidates (units: Map<string, UnitSig>) (name: string) : string list =
+    let close (a: string) (b: string) =
+        // One transposition, or a one-character insert/delete/substitute --
+        // enough for `pii`/`pi` and `metre`/`meter`, tight enough that an
+        // unrelated unit never shows up as a suggestion.
+        if abs (a.Length - b.Length) > 1 then false
+        elif a.Length = b.Length then
+            let diffs = Seq.zip a b |> Seq.filter (fun (x, y) -> x <> y) |> Seq.toList
+            match diffs with
+            | [] | [_] -> true
+            | [(x1, y1); (x2, y2)] -> x1 = y2 && x2 = y1  // transposition
+            | _ -> false
+        else
+            let short, long = if a.Length < b.Length then a, b else b, a
+            // One deletion turns `long` into `short`.
+            [0 .. long.Length - 1]
+            |> List.exists (fun i -> long.Remove(i, 1) = short)
+    let lowered = name.ToLowerInvariant()
+    Map.toList units
+    |> List.filter (fun (n, s) -> s.Nominal.IsNone)
+    |> List.map fst
+    |> List.append (Map.toList unitScaleConstants |> List.map fst)
+    |> List.filter (fun n -> n <> name && (n.ToLowerInvariant() = lowered || close n name))
+    |> List.distinct
+    |> List.sort
 
-// ============================================================================
+/// Register a unit declaration in the environment. A `Unit` right-hand side
+/// composes names already in scope, so a name that is neither a declared unit
+/// nor a scale constant is a hard error (BL3015) -- the old warn-and-fallback
+/// minted the declared name as a fresh BASE unit, which typechecks a
+/// misspelling into a silently wrong dimension. A terminal-quantity misuse
+/// stays BL3011.
+let registerUnit (env: TypeEnv) (decl: UnitDecl) : Result<TypeEnv, TypeError> =
+    // Base-unit signature: canonical form is {name: 1}
+    let baseSig () = unitOfDims (Map.ofList [(decl.Name, 1)])
+    let resolveErr (err: UnitResolveErr) =
+        match err with
+        | UResolveTerminal q -> QuantityTerminal (q, decl.Name)
+        | UResolveUnknown n -> UnknownUnitName (n, decl.Name, unitSpellingCandidates env.Units n)
+    let sigResult =
+        match decl.Definition with
+        | None | Some UnitBase -> Ok (baseSig ())
+        | Some (UnitDerived expr) ->
+            resolveUnitExpr env.Units expr
+            |> Result.mapError resolveErr
+        | Some (UnitQuantity expr) ->
+            // Quantity: nominal identity entailing the RHS dims. The RHS is
+            // resolved through the same terminal-checking path, so a quantity
+            // on the RHS of another quantity rejects here too.
+            resolveUnitExpr env.Units expr
+            |> Result.map (fun resolved -> { resolved with Nominal = Some decl.Name })
+            |> Result.mapError resolveErr
+    sigResult |> Result.map (fun sig' ->
+        { env with Units = Map.add decl.Name sig' env.Units })
+
 // 2b. Generalization (needs VarInfo defined above)
-// ============================================================================
 
 /// Collect free inference vars across all variable types in scope.
 let freeInferVarsInEnv (subst: Subst) (vars: Map<string, VarInfo>) : Set<int> =
@@ -869,8 +1001,6 @@ let generalize (subst: Subst) (envVars: Map<string, VarInfo>) (ty: IRType) : Typ
     let quantified = Set.difference tyFree envFree |> Set.toList
     { QuantifiedVars = quantified; Body = subst.Resolve ty }
 
-// ============================================================================
 // 3. Constant Expression Evaluation (for index extents)
-// ============================================================================
 
 /// Try to evaluate an AST expression to a compile-time int64.

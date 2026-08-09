@@ -25,6 +25,9 @@ import ml as ml
 //
 // Boost-variance is per-component and index-stable, so `u(i) - u(j)` is a
 // BVar - BVar difference and the +10 shadow below returns the same numbers.
+//
+// The suggestion channel IS this test, so the warnings it emits are assertions.
+// WARN: BL4014
 // ============================================================================
 
 // SUGGEST: function 'cell_diff' judges boost-invariant with velocity parameter(s) u: add 'where ml.galilean(u)'

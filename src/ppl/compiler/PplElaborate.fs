@@ -1,6 +1,6 @@
 /// PPL moment formers: moment/comoment tensors and declared independence,
-/// elaborated to ordinary Blade source before type checking (pipeline stage
-/// between ML-op elaboration and grad expansion — see TypeCheck.typeCheck).
+/// elaborated to ordinary Blade source before type checking (between ML-op
+/// elaboration and grad expansion; see TypeCheck.typeCheck).
 ///
 /// Surface (call-shaped, recognized when the name is not user-bound; each
 /// former must be the ENTIRE right-hand side of a top-level let):
@@ -13,33 +13,27 @@
 ///                       axes; the LAST declared index of A is the sample
 ///                       (fiber) axis, its static extent is N.
 ///   comoments(A, 2)     central pair comoment (covariance), same shape with
-///                       E[ab] - ma*mb as the kernel. Orders > 2 are
-///                       deferred (subset-lattice expansion over prodsums).
-///   comoments(X, Y)     central CROSS-covariance block between two arrays —
+///                       E[ab] - ma*mb as the kernel. Orders > 2 deferred
+///                       (subset-lattice expansion over prodsums).
+///   comoments(X, Y)     central cross-covariance block between two arrays --
 ///                       rectangular (method_for(X, Y), no comm clause).
-///   independent(X, Y)   declaration, written `let _ = independent(X, Y)`,
-///                       consumed by this stage: a declared-independent pair's
-///                       comoments(X, Y) elaborates to a literal zero block —
-///                       the cross computation is never emitted. (Exact for
-///                       central pair comoments; the cumulant tower will
-///                       extend this to higher orders.)
+///   independent(X, Y)   declaration `let _ = independent(X, Y)`: a declared-
+///                       independent pair's comoments(X, Y) elaborates to a
+///                       literal zero block, never the cross computation
+///                       (exact for central pair comoments).
 ///
-/// A moment-formed array must be a module-level `let`/`let static` whose
-/// shape is compile-time: either an Array annotation
-/// (`Array<Elem like I1, ..., Ik, SampleIdx>`) whose index extents resolve
-/// statically (directly or through type aliases), or — for COMPUTED arrays —
-/// an un-annotated `method_for(range<...>) <@> kernel [|> compute]` RHS,
-/// whose iteration space is the shape (one axis per dense range slot, halo
-/// slots shrunk to their interior; see computedShapeOf). The binding-time
-/// contract stands: shape is compile-time, data rides through.
+/// A moment-formed array must be a module-level `let`/`let static` with a
+/// compile-time shape: either an Array annotation (`Array<Elem like I1, ...,
+/// Ik, SampleIdx>`) with statically resolving index extents, or -- for
+/// COMPUTED arrays -- an un-annotated `method_for(range<...>) <@> kernel
+/// [|> compute]` RHS whose iteration space is the shape (one axis per dense
+/// range slot, halo slots shrunk to their interior; see computedShapeOf).
 module Blade.Ppl.Elaborate
 
 open Blade.Ast
 open Blade.StaticEval
 
-// ============================================================================
 // AST construction helpers (mirroring MLElaborate.fs / Grad.fs style)
-// ============================================================================
 
 let private v (n: string) = syn (ExprVar n)
 let private fLit (x: float) = syn (ExprLit (LitFloat x))
@@ -49,46 +43,37 @@ let private mulE a b = syn (ExprBinOp (Elementwise, OpMul, a, b))
 let private subE a b = syn (ExprBinOp (Elementwise, OpSub, a, b))
 let private powE a b = syn (ExprBinOp (Elementwise, OpCaret, a, b))
 let private sLet n value = StmtLet { Pattern = synPat (PatVar n); Type = None; Value = value; Mutability = BindLet }
-let private meanE arr n = divE (syn (ExprReduce (arr, syn (ExprSection OpAdd), None))) (fLit n)
+let private meanE arr n = divE (syn (ExprReduce (arr, syn (ExprSection OpAdd), None, None))) (fLit n)
 let private prodsumE args = syn (ExprApp (v "prodsum", args))
 let private commWhere (names: string list) =
     Some { Commutativity = [names]; Antisymmetry = []; Parallel = []; TDims = []; Custom = [] }
-// Full-span construction wrappers (stamp the ambient synthSpan the module
-// expansion sets per user decl). Structural combinators only — the scalar
-// helpers above already wrap.
+// Full-span construction wrappers (stamp the ambient synthSpan); structural combinators only, scalar helpers above already wrap.
 let private appE f args = syn (ExprApp (f, args))
 let private arrLitE (cells: Expr list) = syn (ExprArrayLit cells)
 let private methodForE (arrs: Expr list) = syn (ExprMethodFor arrs)
 let private lambdaE ps w body = syn (ExprLambda (ps, w, body))
 let private applyE l k = syn (ExprBinOp (Elementwise, OpApply, l, k))
 let private computeE e = syn (ExprCompute e)
-let private reduceAddE e = syn (ExprReduce (e, syn (ExprSection OpAdd), None))
+let private reduceAddE e = syn (ExprReduce (e, syn (ExprSection OpAdd), None, None))
 let private pvar n = synPat (PatVar n)
 let private ptuple (ps: Pattern list) = synPat (PatTuple ps)
 /// Inline co-iteration pipeline over same-shape (packed included) arrays:
-/// method_for(zip(a, b)) <@> lambda(u, w) -> body |> compute — the corpus-
-/// blessed one-binding form (sql-set-ops/004).
+/// method_for(zip(a, b)) <@> lambda(u, w) -> body |> compute -- the corpus-blessed one-binding form (sql-set-ops/004).
 let private zipMap2 (a: Expr) (b: Expr) (body: Expr) =
     computeE (applyE
         (methodForE [syn (ExprZip [a; b])])
-        (lambdaE [{ Name = "__u"; Type = None }; { Name = "__w"; Type = None }] None body))
+        (lambdaE [{ Name = "__u"; Type = None; Default = None; NameSpan = noSpan }; { Name = "__w"; Type = None; Default = None; NameSpan = noSpan }] None body))
 let private map1 (a: Expr) (body: Expr) =
     computeE (applyE
         (methodForE [a])
-        (lambdaE [{ Name = "__u"; Type = None }] None body))
+        (lambdaE [{ Name = "__u"; Type = None; Default = None; NameSpan = noSpan }] None body))
 
-// NOTE: "cumulant" is deliberately NOT a former name anymore — cumulant(d, k)
-// is a checker-level projection on Dist-typed values (TypeCheck's
-// inferCumulantProj, order guard as a type error), valid in any expression
-// position, so elaboration must let it flow through untouched.
+// "cumulant" is NOT a former name: it is a checker-level projection on
+// Dist-typed values (TypeCheck.inferCumulantProj), so elaboration lets it flow through untouched.
 let private formerNames = set [ "moments"; "comoments"; "cumulants"; "independent"; "dist"; "dist_add"; "dist_scale"; "comoments_merge"; "mstate"; "mstate_merge"; "mstate_cumulants"; "mixed_cumulants"; "dist_affine"; "dist_jet"; "dist_jet_closed"; "dist_map"; "dist_map_closed"; "free_cumulants"; "dist_expect"; "dist_reweight"; "dist_mix"; "dist_atoms"; "dist_negativity" ]
 
-// ============================================================================
-// Partition lattice (the load-bearing combinatorics: cumulants are Möbius-
-// weighted sums over set partitions; Bell(r) partitions, 2^r - 1 distinct
-// blocks — each block's raw moment is bound once and shared)
-// ============================================================================
-
+// Partition lattice: cumulants are Moebius-weighted sums over set partitions;
+// Bell(r) partitions, 2^r - 1 distinct blocks, each block's moment bound once and shared.
 let rec private factorial (n: int) : float =
     if n <= 1 then 1.0 else float n * factorial (n - 1)
 
@@ -110,20 +95,9 @@ let private nonemptySubsets (k: int) : int list list =
     [ 1 .. (1 <<< k) - 1 ]
     |> List.map (fun mask -> [ for i in 0 .. k - 1 do if mask &&& (1 <<< i) <> 0 then yield i ])
 
-// ============================================================================
-// The sufficient-statistic pool (the TRUE single-pass tower): every block
-// moment at every cell of every order is the raw prodsum of a row-multiset,
-// so ONE sweep over the sample axis filling P_S = Σ_t Π_{ℓ∈S} row_ℓ(t) for
-// the needed multisets S replaces the per-cell-per-order prodsum loops
-// (dist(A,4) at d=2 ran 114 sample-axis traversals for 14 distinct values).
-// Emitted as pure combinator algebra — rows → zip → ONE shared method_for →
-// one product kernel per multiset → <&!> chain → reduce((+)) — and each
-// former's cells become straight-line arithmetic over the pool scalars (the
-// proven mstate_merge cell-wise pattern). Applies to single-leading-axis
-// sources with static extents; multiaxis moments/cumulants keep the
-// per-cell pipeline path.
-// ============================================================================
-
+// The sufficient-statistic pool: every block moment is the raw prodsum of a row-multiset, so one sweep filling
+// P_S = Sum_t Prod_{l in S} row_l(t) replaces per-cell-per-order prodsum loops. Combinator algebra: rows -> zip -> shared
+// method_for -> one product kernel per multiset -> chain -> reduce((+)); single-leading-axis sources with static extents only.
 let private iLit (n: int) = syn (ExprLit (LitInt (int64 n)))
 
 /// Canonical (non-decreasing) label tuples of rank p over dim d, lex order.
@@ -144,15 +118,12 @@ type private PoolInfo = {
 let private poolRead (pool: PoolInfo) (s: int list) : Expr =
     v pool.Names.[List.sort s]
 
-/// The raw moment E[Π_{ℓ∈S} x_ℓ] = P_S / N.
+/// The raw moment E[Prod_{l in S} x_l] = P_S / N.
 let private poolMoment (pool: PoolInfo) (s: int list) : Expr =
     divE (poolRead pool s) (fLit pool.N)
 
-/// Emit the single-pass pool over a shared row list. `uniq` seeds binding
-/// names (the former's output name keeps them unique per former); `rows` =
-/// one slice expression per row position; `needed` = the multisets the
-/// caller's cells will read (deduped/canonicalized here, deterministic
-/// size-then-lex order). Returns the decls and the read handle.
+/// Emit the single-pass pool over a shared row list. `uniq` seeds binding names; `rows` = one slice expr per row position; `needed` =
+/// the multisets the caller's cells read (deduped/canonicalized). Returns decls + reader.
 let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
     (needed: int list list) (n: float) : Located<Decl> list * PoolInfo =
     let mkDecl name value =
@@ -169,7 +140,7 @@ let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
     let pName s = sprintf "__ppl_P_%s_%s" uniq (tag s)
     let kName s = sprintf "__ppl_poolk_%s_%s" uniq (tag s)
     let xName i = sprintf "__x%d" i
-    let ps = [ for i in 0 .. rows.Length - 1 -> { Name = xName i; Type = None } ]
+    let ps = [ for i in 0 .. rows.Length - 1 -> { Name = xName i; Type = None; Default = None; NameSpan = noSpan } ]
     let kDecls =
         sets |> List.map (fun s ->
             let body = s |> List.map (fun i -> v (xName i)) |> List.reduce mulE
@@ -193,8 +164,7 @@ let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
 let private rowSlices (aName: string) (d: int) : Expr list =
     [ for i in 0 .. d - 1 -> appE (v aName) [iLit i] ]
 
-/// The order-r cumulant cell at `labels`, straight-line over the pool:
-/// Σ over set partitions π of [r]: (-1)^(|π|-1)(|π|-1)! · Π_B E[Π x_B].
+/// The order-r cumulant cell at `labels`: Sum over set partitions pi of [r]: (-1)^(|pi|-1)(|pi|-1)! * Prod_B E[Prod x_B].
 let private cumulantCellExpr (pool: PoolInfo) (labels: int[]) (r: int) : Expr =
     let terms =
         setPartitions r |> List.map (fun p ->
@@ -204,13 +174,9 @@ let private cumulantCellExpr (pool: PoolInfo) (labels: int[]) (r: int) : Expr =
                 mulE acc (poolMoment pool (blk |> List.map (fun pos -> labels.[pos])))) (fLit w))
     terms |> List.reduce addE
 
-// ============================================================================
 // Module context: array annotations, alias resolution, static extents
-// ============================================================================
 
-/// Array annotations in scope: name -> (element TypeExpr, index TypeExprs).
-/// Only annotated module-level bindings participate — the formers read the
-/// declared shape, they never infer one.
+/// Array annotations in scope: name -> (element TypeExpr, index TypeExprs); only annotated bindings participate, formers never infer a shape.
 let private collectArrays (decls: Located<Decl> list) : Map<string, TypeExpr * TypeExpr list> =
     decls |> List.fold (fun acc d ->
         match d.Value with
@@ -236,24 +202,15 @@ let rec private resolveExtent (aliases: Map<string, TypeExpr>) (statics: StaticE
     | TyNamed (name, []) ->
         match Map.tryFind name aliases with
         | Some body -> resolveExtent aliases statics body
-        // Not a source alias: a provider axis path (`type Y = store.index.y`),
-        // registered by TypeEnv during type CHECKING — after this pass — so the
-        // extent comes from the store's metadata instead.
+        // Not a source alias: a provider axis path, registered by TypeEnv during checking, so the extent comes from store metadata.
         | None -> providerIndexExtent statics name
     | _ -> None
 
-/// Shape inference for COMPUTED source arrays: an UN-annotated module-level
-/// `let A = method_for(range<...>) <@> kernel [|> compute]` carries no
-/// declared TyArray, but its iteration space IS its shape — one axis per
-/// range slot, halo slots shrunk to their interior (the same dense arithmetic
-/// as TypeCheck.haloSlotsOf: reach includes the implicit center 0, interior =
-/// n - (hi - lo)). Only statically-resolvable dense slots qualify; compound /
-/// unresolvable slots return None and keep the annotation-required contract.
-/// The element type is Float64 — the formers' sample algebra is Float64
-/// throughout, and an annotated binding always takes precedence.
+/// Shape inference for COMPUTED source arrays: an un-annotated module-level `let A = method_for(range<...>) <@> kernel
+/// [|> compute]` has no declared TyArray, but its iteration space IS its shape -- one axis per range slot, halo slots shrunk
+/// to their interior (interior = n - (hi - lo)). Unresolvable slots return None; element type Float64.
 let private computedShapeOf (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (value: Expr) : (TypeExpr * TypeExpr list) option =
-    // Interior extents of one halo slot: flat offsets -> [n - reach]; nested
-    // per-axis form [[..],[..]] -> one shrunk extent per axis (same inner).
+    // Interior extents of one halo slot: flat offsets -> [n - reach]; nested per-axis form -> one shrunk extent per axis.
     let haloExtents (innerTy: TypeExpr) (offsetsExpr: Expr) : int list option =
         resolveExtent aliases statics innerTy |> Option.bind (fun n ->
             let asInt = function SVInt v -> Some (int v) | _ -> None
@@ -307,10 +264,7 @@ let private computedShapeOf (aliases: Map<string, TypeExpr>) (statics: StaticEnv
                 Some (TyNamed ("Float64", []), idxs)
             else None))
 
-// ============================================================================
-// Misplaced-use detection (v1 contract: formers are decl-RHS only)
-// ============================================================================
-
+// Misplaced-use detection: formers are decl-RHS only.
 let rec private anyExpr (p: Expr -> bool) (e: Expr) : bool =
     if p e then true else
     let any = anyExpr p
@@ -346,10 +300,10 @@ let rec private anyExpr (p: Expr -> bool) (e: Expr) : bool =
     | ExprKind.ExprPure x | ExprKind.ExprCompute x | ExprKind.ExprRead x | ExprKind.ExprUnique x | ExprKind.ExprRank x | ExprKind.ExprExtents x -> any x
     | ExprKind.ExprGuard (c, b) -> any c || any b
     | ExprKind.ExprReplicate (c, b) -> any c || any b
-    | ExprKind.ExprMask (a, pr) | ExprKind.ExprCompound (a, pr) | ExprKind.ExprGroupBy (a, pr)
+    | ExprKind.ExprMask (a, pr) | ExprKind.ExprCompound (a, pr) | ExprKind.ExprSparse (a, pr) | ExprKind.ExprGroupBy (a, pr)
     | ExprKind.ExprIntersect (a, pr) | ExprKind.ExprUnion (a, pr) | ExprKind.ExprContains (a, pr)
     | ExprKind.ExprSort (a, pr) | ExprKind.ExprGram (a, pr) -> any a || any pr
-    | ExprKind.ExprReduce (a, k, i) -> any a || any k || (i |> Option.map any |> Option.defaultValue false)
+    | ExprKind.ExprReduce (a, k, i, _) -> any a || any k || (i |> Option.map any |> Option.defaultValue false)
     | ExprKind.ExprAssign (l, r) -> any l || any r
     | _ -> false
 
@@ -358,16 +312,11 @@ let private isFormerCallOf (activeNames: Set<string>) (e: Expr) =
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, _) -> Set.contains n activeNames
     | _ -> false
 
-// ============================================================================
-// Struct-declared independence (constrained records, formalism §17.13.2):
-// `struct S { X: Array<...>, Y: Array<...> } where indep(X, Y)` — indep is a
-// STATIC license, comm's sibling, not a runtime proposition. Its conjuncts
-// are stripped from the construction-time validate() and consumed into the
-// independence relation; any residual invariant stays runtime-checked.
-// ============================================================================
+// Struct-declared independence (formalism Sec 17.13.2): `struct S { X: Array<...>, Y: Array<...> } where indep(X, Y)` --
+// indep is a static license, comm's sibling, not a runtime proposition. Conjuncts are stripped from construction-time
+// validate() into the independence relation; residual invariants stay runtime-checked.
 
-/// Split a struct where-invariant into indep(...) conjuncts and the
-/// residual runtime expression (None when indep was the whole invariant).
+/// Split a struct where-invariant into indep(...) conjuncts and the residual expression (None when indep was the whole invariant).
 let rec private splitInvariant (e: Expr) : (string * string) list * Expr option =
     match e.Kind with
     | ExprKind.ExprBinOp (m, OpAnd, l, r) ->
@@ -379,42 +328,32 @@ let rec private splitInvariant (e: Expr) : (string * string) list * Expr option 
             | Some a, None | None, Some a -> Some a
             | None, None -> None
         (il @ ir, residual)
-    // Normalized from `where <alias>.indep(X, Y)` by stripQualified before
-    // the core passes run.
+    // Normalized from `where <alias>.indep(X, Y)` by stripQualified.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__ppl_indep" }, [{ Kind = ExprKind.ExprVar x }; { Kind = ExprKind.ExprVar y }]) -> ([(x, y)], None)
     | _ -> ([], Some e)
 
-/// Deterministic alias binding name for a struct-field array path m.f —
-/// formers iterate named bindings (method_for over a raw field access
-/// doesn't reach codegen's binding-keyed loop machinery), so field paths
-/// normalize to `let __ppl_arr_m_f = m.f` at first use.
+/// Deterministic alias binding name for a struct-field array path m.f -- formers iterate named bindings (method_for over a raw
+/// field access doesn't reach codegen's binding-keyed loop machinery), so field paths normalize to `let __ppl_arr_m_f = m.f`.
 let private aliasOf (m: string) (f: string) = sprintf "__ppl_arr_%s_%s" m f
 
-// ============================================================================
 // Former elaboration
-// ============================================================================
-
 type private Ctx = {
     Arrays: Map<string, TypeExpr * TypeExpr list>
     Aliases: Map<string, TypeExpr>
     Statics: StaticEnv
     /// Unordered independence relation over array names.
     Indep: Set<string * string>
-    /// Single-array pools already emitted this module (source array name →
-    /// handle) — later formers over the same array REUSE the sweep.
+    /// Single-array pools already emitted this module (source array name -> handle); later formers over the same array reuse the sweep.
     Pools: Map<string, PoolInfo> ref
-    /// Pre-scanned maximal multiset size each source array needs across
-    /// ALL its formers, so the first former emits one maximal pool.
+    /// Pre-scanned maximal multiset size each source array needs across all its formers, so the first former emits one maximal pool.
     PoolMax: Map<string, int>
-    /// Pool-path former outputs that are FLAT lex SymIdx<2, d>-shaped
-    /// tensors (binding name → variable-axis extent d) — consumers like
-    /// comoments_merge switch to cell-wise flat reads for these.
+    /// Pool-path former outputs that are FLAT lex SymIdx<2, d>-shaped tensors (binding name -> variable-axis extent d); consumers
+    /// like comoments_merge switch to cell-wise flat reads for these.
     FlatDims: Map<string, int> ref
 }
 
-/// The module's pool for a single-axis source array: reuse if already
-/// emitted, else emit ONE maximal sweep (sizes 1..max over every former
-/// that reads this array) at the first former's position and cache it.
+/// The module's pool for a single-axis source array: reuse if already emitted, else emit ONE maximal sweep (sizes 1..max over
+/// every former that reads this array) at the first former's position and cache it.
 let private acquirePool (ctx: Ctx) (span: Span) (aName: string) (d: int) (n: float) (selfMax: int)
     : Located<Decl> list * PoolInfo =
     match Map.tryFind aName ctx.Pools.Value with
@@ -456,8 +395,7 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
         arrayShape ctx "moments" aName |> Result.map (fun (elem, leading, fiber, n) ->
             match leading with
             | [ix] when (resolveExtent ctx.Aliases ctx.Statics ix).IsSome ->
-                // SINGLE-PASS PATH: μ_S = P_S / N straight from the
-                // module's shared pool sweep.
+                // Single-pass path: mu_S = P_S / N from the shared pool sweep.
                 let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
                 let (pd, pool) = acquirePool ctx span aName d (float n) k
                 let cells = [ for labels in canonicalTuples d k -> poolMoment pool labels ]
@@ -465,7 +403,7 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
             | _ ->
                 // Multiaxis / unresolvable leading extent: per-cell pipeline.
                 let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
-                let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
+                let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); Default = None; NameSpan = noSpan })
                 let whereC = if k >= 2 then commWhere paramNames else None
                 let body = divE (prodsumE (paramNames |> List.map v)) (fLit (float n))
                 let lName = sprintf "__ppl_L_%s" outName
@@ -477,8 +415,7 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
     | _ ->
         Error "moments expects moments(A, k): an annotated module-level array and a static order"
 
-/// Central pair kernel body: E[ab] - ma*mb, spelled over reduce/prodsum
-/// (both proven kernel-position primitives; no elementwise fiber algebra).
+/// Central pair kernel body: E[ab] - ma*mb, spelled over reduce/prodsum (both proven kernel-position primitives).
 let private centralPairBody (n: float) =
     syn (ExprBlock (
         [ sLet "__ma" (meanE (v "__x1") n)
@@ -499,8 +436,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
             arrayShape ctx "comoments" aName |> Result.map (fun (elem, leading, fiber, n) ->
                 match leading with
                 | [ix] when (resolveExtent ctx.Aliases ctx.Statics ix).IsSome ->
-                    // SINGLE-PASS PATH: C_ij = P_ij/N − (P_i/N)(P_j/N)
-                    // straight off the module's shared pool.
+                    // Single-pass path: C_ij = P_ij/N - (P_i/N)(P_j/N) off the shared pool.
                     let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
                     let (pd, pool) = acquirePool ctx span aName d (float n) 2
                     ctx.FlatDims.Value <- Map.add outName d ctx.FlatDims.Value
@@ -511,7 +447,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                             | _ -> fLit 0.0 ]
                     pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
                 | _ ->
-                    let ps = ["__x1"; "__x2"] |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
+                    let ps = ["__x1"; "__x2"] |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); Default = None; NameSpan = noSpan })
                     [ mkDecl lName (methodForE [v aName; v aName])
                       mkDecl kName (lambdaE ps (commWhere ["__x1"; "__x2"]) (centralPairBody (float n)))
                       { Value = DeclLet { binding with Value = computeE (applyE (v lName) (v kName)) }; Span = span } ])
@@ -527,9 +463,8 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
             if nX <> nY then
                 Error (sprintf "comoments: '%s' and '%s' sample axes disagree (%d vs %d)" xName yName nX nY)
             elif Set.contains (indepKey xName yName) ctx.Indep then
-                // Declared independent: the central cross block is structurally
-                // zero — emit the literal, never the loops. Needs both leading
-                // extents statically (single leading axis each, v1).
+                // Declared independent: the central cross block is structurally zero -- emit the literal (needs both leading
+                // extents statically, single leading axis each).
                 match leadX, leadY with
                 | [ix], [iy] ->
                     match resolveExtent ctx.Aliases ctx.Statics ix, resolveExtent ctx.Aliases ctx.Statics iy with
@@ -542,11 +477,8 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                 match leadX, leadY with
                 | [ixx], [ixy] when (resolveExtent ctx.Aliases ctx.Statics ixx).IsSome
                                      && (resolveExtent ctx.Aliases ctx.Statics ixy).IsSome ->
-                    // SINGLE-PASS PATH: a JOINT pool over both arrays' rows
-                    // (X rows at positions 0..dx-1, Y rows at dx..dx+dy-1;
-                    // one sweep of the shared sample axis). Rectangular
-                    // rank-2 output preserved via nested cells. Joint pools
-                    // are per-former (keyed by the output name), not cached.
+                    // Single-pass path: a joint pool over both arrays' rows (X at 0..dx-1, Y at dx..dx+dy-1; one sweep of the
+                    // sample axis). Rank-2 output via nested cells. Joint pools are per-former (keyed by output name), not cached.
                     let dx = (resolveExtent ctx.Aliases ctx.Statics ixx).Value
                     let dy = (resolveExtent ctx.Aliases ctx.Statics ixy).Value
                     let rows = rowSlices xName dx @ rowSlices yName dy
@@ -564,23 +496,19 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                                              (mulE (poolMoment pool [i]) (poolMoment pool [dx + j])) ] ]
                     Ok (pd @ [ { Value = DeclLet { binding with Value = cells }; Span = span } ])
                 | _ ->
-                    let px = { Name = "__x1"; Type = Some (TyArray (elemX, [fibX])) }
-                    let py = { Name = "__x2"; Type = Some (TyArray (elemY, [fibY])) }
+                    let px = { Name = "__x1"; Type = Some (TyArray (elemX, [fibX])); Default = None; NameSpan = noSpan }
+                    let py = { Name = "__x2"; Type = Some (TyArray (elemY, [fibY])); Default = None; NameSpan = noSpan }
                     Ok [ mkDecl lName (methodForE [v xName; v yName])
                          mkDecl kName (lambdaE [px; py] None (centralPairBody (float nX)))
                          { Value = DeclLet { binding with Value = computeE (applyE (v lName) (v kName)) }; Span = span } ]))
     | _ ->
         Error "comoments expects comoments(A, 2) (same-array covariance) or comoments(X, Y) (cross block)"
 
-// ============================================================================
-// Cumulants: the partition-lattice expander
-// ============================================================================
+// Cumulants: the partition-lattice expander.
 
 /// Order-r cumulant kernel over fiber params __x1..__xr:
-///   κ_r = Σ over set partitions π of [r]:
-///           (-1)^(|π|-1) (|π|-1)! · Π over blocks B: E[Π_{i∈B} x_i]
-/// Each distinct block's raw moment E[Π x_B] = prodsum(x_B)/N is bound once
-/// (2^r - 1 lets) and shared across the Bell(r) partition terms.
+///   kappa_r = Sum over set partitions pi of [r]: (-1)^(|pi|-1) (|pi|-1)! * Prod over blocks B: E[Prod_{i in B} x_i]
+/// Each distinct block's raw moment E[Prod x_B] = prodsum(x_B)/N is bound once (2^r - 1 lets), shared across Bell(r) terms.
 let private cumulantKernelBody (r: int) (n: float) : Expr =
     let blockName (s: int list) = "__m" + (s |> List.map (fun i -> string (i + 1)) |> String.concat "")
     let lets =
@@ -593,15 +521,14 @@ let private cumulantKernelBody (r: int) (n: float) : Expr =
             p |> List.fold (fun acc blk -> mulE acc (v (blockName (List.sort blk)))) (fLit w))
     syn (ExprBlock (lets, Some (terms |> List.reduce addE)))
 
-/// The proven three-decl former pipeline over ONE array:
-/// L = method_for(A ×k); kernel = lambda over annotated fiber params
+/// The proven three-decl former pipeline over ONE array: L = method_for(A xk); kernel = lambda over annotated fiber params
 /// (comm for k >= 2); out = L <@> kernel |> compute.
 let private formerPipeline (span: Span) (outName: string) (outBinding: Binding option)
     (aName: string) (elem: TypeExpr) (fiber: TypeExpr) (k: int) (body: Expr) : Located<Decl> list =
     let lName = sprintf "__ppl_L_%s" outName
     let kName = sprintf "__ppl_k_%s" outName
     let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
-    let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
+    let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); Default = None; NameSpan = noSpan })
     let whereC = if k >= 2 then commWhere paramNames else None
     let outValue = computeE (applyE (v lName) (v kName))
     let outDecl =
@@ -620,17 +547,14 @@ let private elabCumulants (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
         let r =
             match evalExpr ctx.Statics maxSteps rExpr with
             | Ok (SVInt n) when n >= 1L && n <= 6L -> Ok (int n)
-            | Ok (SVInt n) -> Error (sprintf "cumulants: order must be in 1..6 (got %d) — Bell-number kernel growth beyond that needs the shared-subexpression pass" n)
+            | Ok (SVInt n) -> Error (sprintf "cumulants: order must be in 1..6 (got %d) -- Bell-number kernel growth beyond that needs the shared-subexpression pass" n)
             | _ -> Error "cumulants: the order must be a compile-time integer (a literal, `let static`, or static-function call)"
         r |> Result.bind (fun r ->
         arrayShape ctx "cumulants" aName |> Result.map (fun (elem, leading, fiber, n) ->
             match leading with
             | [ix] when (resolveExtent ctx.Aliases ctx.Statics ix).IsSome ->
-                // SINGLE-PASS PATH: the module's pool sweep (shared across
-                // formers over this array), κ_r cells as straight-line
-                // partition sums over pool reads. ONE traversal of the
-                // sample axis instead of one prodsum loop per block per
-                // cell.
+                // Single-pass path: the shared pool sweep (one sample-axis traversal instead of one prodsum loop per block per cell);
+                // kappa_r cells as straight-line partition sums over pool reads.
                 let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
                 let (pd, pool) = acquirePool ctx span aName d (float n) r
                 let cells =
@@ -638,45 +562,36 @@ let private elabCumulants (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                         cumulantCellExpr pool (List.toArray labels) r ]
                 pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
             | _ ->
-                // Multiaxis / unresolvable leading extent: the per-cell
-                // pipeline path (fused leading axes, kernel prodsum lets).
+                // Multiaxis / unresolvable leading extent: per-cell pipeline (fused leading axes, kernel prodsum lets).
                 formerPipeline span outName (Some binding) aName elem fiber r (cumulantKernelBody r (float n))))
     | _ ->
         Error "cumulants expects cumulants(A, r): an annotated module-level array and a static order"
 
-// ============================================================================
-// The Dist tower (v1): a dist is a COMPILE-TIME object — the binding is
-// consumed and its cumulant components materialize as packed arrays. The
-// exact laws of the tower are the elaboration rules:
-//   dist(A, r)        κ_1..κ_r pipelines from data
-//   dist_add(d1, d2)  per-order tensor addition — REQUIRES declared
-//                     independence between every pair of source arrays
-//                     (cumulants of a sum add exactly iff independent)
-//   dist_scale(c, d)  κ_k scaled by c^k (multilinearity)
+// The Dist tower: a dist is a compile-time object -- the binding is consumed and its cumulant components materialize as
+// packed arrays.
+//   dist(A, r)        kappa_1..kappa_r pipelines from data
+//   dist_add(d1, d2)  per-order tensor addition -- requires declared independence of every source-array pair (cumulants of a
+//                     sum add exactly iff independent)
+//   dist_scale(c, d)  kappa_k scaled by c^k (multilinearity)
 //   cumulant(d, k)    the order-k component, bound as an ordinary array
-// ============================================================================
 
 type private DistInfo = {
     Order: int
-    /// Component binding name per order (index k-1 → κ_k array).
+    /// Component binding name per order (index k-1 -> kappa_k array).
     Components: string list
     /// Underlying data arrays, for the independence requirement.
     Sources: Set<string>
-    /// Variable-space dimension override: pushforward results carry their
-    /// output dimension here (scalar jet results = Some 1); None = derive
-    /// it from the single source array's annotation (distDim).
+    /// Variable-space dimension override: pushforward results carry their output dimension here (scalar jet results = Some 1);
+    /// None = derive it from the single source array's annotation (distDim).
     Dim: int option
-    /// Components stored FLAT (lex-canonical ArrayLits read by offset)
-    /// instead of method_for-packed (logical multi-index reads).
+    /// Components stored FLAT (lex-canonical ArrayLits read by offset) instead of method_for-packed (logical multi-index reads).
     Flat: bool
 }
 
 let private distComponentName (dName: string) (k: int) = sprintf "__dist_%s_k%d" dName k
 
-/// The binding that makes a dist a VALUE: `let d = __dist_pack(κ1, ..., κr)`.
-/// The checker types the intrinsic as Dist<r, τ like axes> (nominal; erased
-/// back to this same component tuple at zonk), so `d` is first-class — it
-/// crosses function boundaries and cumulant(d, k) projects it anywhere.
+/// The binding that makes a dist a VALUE: `let d = __dist_pack(k1, ..., kr)`. The checker types the intrinsic as
+/// Dist<r, tau like axes> (nominal), so `d` is first-class: it crosses function boundaries and cumulant(d, k) projects anywhere.
 let private distPackDecl (span: Span) (dName: string) (info: DistInfo) : Located<Decl> =
     { Value = DeclLet { Pattern = pvar dName; Type = None
                         Value = appE (v "__dist_pack") (info.Components |> List.map v)
@@ -693,18 +608,15 @@ let private elabDist (ctx: Ctx) (span: Span) (dName: string) (args: Expr list)
             | _ -> Error "dist: the order must be a compile-time integer in 1..6"
         r |> Result.bind (fun r ->
         arrayShape ctx "dist" aName |> Result.map (fun (elem, _leading, fiber, n) ->
-            // THE TOWER, fused: per order a loop object and a cumulant
-            // kernel, then ONE compute over the <&>-chain, destructured
-            // into the per-order components — a single deferred computation
-            // owns the whole tower (the user-facing staged construction of
-            // this same shape is the planned follow-up).
+            // The tower, fused: per order a loop object and a cumulant kernel, then ONE compute over the <&>-chain, destructured
+            // into the per-order components -- a single deferred computation owns the whole tower.
             let comps = [ for k in 1 .. r -> distComponentName dName k ]
             let lName k = sprintf "__ppl_L_%s_k%d" dName k
             let kName k = sprintf "__ppl_k_%s_k%d" dName k
             let stageDecls =
                 [ for k in 1 .. r do
                     let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
-                    let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
+                    let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); Default = None; NameSpan = noSpan })
                     let whereC = if k >= 2 then commWhere paramNames else None
                     yield { Value = DeclLet { Pattern = pvar (lName k); Type = None; Value = methodForE (List.replicate k (v aName)); Mutability = BindLet }; Span = span }
                     yield { Value = DeclLet { Pattern = pvar (kName k); Type = None; Value = lambdaE ps whereC (cumulantKernelBody k (float n)); Mutability = BindLet }; Span = span } ]
@@ -723,10 +635,8 @@ let private elabDist (ctx: Ctx) (span: Span) (dName: string) (args: Expr list)
     | _ ->
         Error "dist expects dist(A, r): an annotated module-level array and a static order"
 
-/// Shared body of dist addition and subtraction: per-order combination
-/// c_k = a_k + weight(k)·b_k. Addition is weight ≡ 1; subtraction is
-/// weight k = (−1)^k (κ_k(−Y) = (−1)^k κ_k(Y)). Both are exact ONLY for
-/// independent operands — demanded for every source-array pair.
+/// Shared body of dist addition/subtraction: c_k = a_k + weight(k)*b_k. Addition is weight = 1; subtraction is weight k = (-1)^k
+/// (kappa_k(-Y) = (-1)^k kappa_k(Y)). Exact only for independent operands.
 let private elabDistCombine (opName: string) (weight: int -> float) (ctx: Ctx) (span: Span) (dName: string)
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
@@ -740,7 +650,7 @@ let private elabDistCombine (opName: string) (weight: int -> float) (ctx: Ctx) (
                       if not (Set.contains (indepKey s1 s2) ctx.Indep) then yield (s1, s2) ]
             match missing with
             | (s1, s2) :: _ ->
-                Error (sprintf "dist %s: cumulants combine only for independent distributions — declare independence of %s and %s (loose `let _ = ppl.independent(...)` or a struct `where ppl.indep(...)`)" opName s1 s2)
+                Error (sprintf "dist %s: cumulants combine only for independent distributions -- declare independence of %s and %s (loose `let _ = ppl.independent(...)` or a struct `where ppl.indep(...)`)" opName s1 s2)
             | [] ->
                 let decls =
                     [ for k in 1 .. d1.Order ->
@@ -759,7 +669,7 @@ let private elabDistCombine (opName: string) (weight: int -> float) (ctx: Ctx) (
                              Flat = d1.Flat || d2.Flat }
                 Ok (decls, info)
         | Some d1, Some d2 ->
-            Error (sprintf "dist %s: orders disagree (%d vs %d) — carry the same stochastic order on both sides" opName d1.Order d2.Order)
+            Error (sprintf "dist %s: orders disagree (%d vs %d) -- carry the same stochastic order on both sides" opName d1.Order d2.Order)
         | _ ->
             Error (sprintf "dist %s expects two previously declared dist(...) bindings" opName)
     | _ ->
@@ -772,8 +682,7 @@ let private elabDistScale (ctx: Ctx) (span: Span) (dName: string)
     | [cExpr; { Kind = ExprKind.ExprVar dn }] ->
         match Map.tryFind dn dists with
         | Some d ->
-            // κ_k(c·X) = c^k κ_k(X): multilinearity, spelled as k repeated
-            // multiplications so c may be any (pure) scalar expression.
+            // kappa_k(c*X) = c^k kappa_k(X): multilinearity, spelled as k repeated multiplications so c may be any pure scalar expr.
             let decls =
                 [ for k in 1 .. d.Order ->
                     let outN = distComponentName dName k
@@ -789,18 +698,11 @@ let private elabDistScale (ctx: Ctx) (span: Span) (dName: string)
     | _ ->
         Error "dist_scale expects dist_scale(c, d)"
 
-// ============================================================================
-// Streaming merge (clause 2 of the staging contract: a growing input is a
-// stream, and the merge monoid IS the semantics of "the file got longer")
-// ============================================================================
+// Streaming merge: a growing input is a stream, and the merge monoid IS the semantics of "the file got longer".
 
-/// comoments_merge(cA, mA, nA, cB, mB, nB): combine two chunks' pair
-/// comoments (population 1/n normalization) and means into the whole's —
-/// the exact pooled-covariance identity (the k = 2 Pébay/Chan merge):
-///   C = (nA·CA + nB·CB)/n + (nA·nB/n²)·δδᵀ,  δ = mB − mA,  n = nA + nB
-/// Chunk sizes are static; the correction δδᵀ is a packed symmetric outer
-/// square (the 012-corpus scalar product former), so the merged tensor has
-/// the same SymIdx<2, D> storage as its inputs. Associative by the algebra.
+/// comoments_merge(cA, mA, nA, cB, mB, nB): combine two chunks' pair comoments and means into the whole's -- pooled-covariance
+/// identity (k=2 Pebay/Chan): C = (nA*CA + nB*CB)/n + (nA*nB/n^2)*delta*delta^T, delta = mB-mA, n = nA+nB. Chunk sizes are
+/// static; the correction is a packed symmetric outer square, giving the same SymIdx<2, D> storage as inputs.
 let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
@@ -817,13 +719,11 @@ let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (bindin
             let ddKN = sprintf "__ppl_ddk_%s" outName
             let ddN = sprintf "__ppl_dd_%s" outName
             let mkDecl pat value = { Value = DeclLet { Pattern = pvar pat; Type = None; Value = value; Mutability = BindLet }; Span = span }
-            // δ = mB − mA (lockstep over the mean vectors)
+            // delta = mB - mA (lockstep over the mean vectors)
             let deltaDecl = mkDecl deltaN (zipMap2 (v mA) (v mB) (subE (v "__w") (v "__u")))
             match Map.tryFind cA ctx.FlatDims.Value, Map.tryFind cB ctx.FlatDims.Value with
             | Some dA, Some dB when dA = dB ->
-                // FLAT INPUTS (pool-path comoments / earlier flat merges):
-                // fully cell-wise merge — δδᵀ inlined per cell, flat lex
-                // reads on both chunks (the mstate_merge house style).
+                // Flat inputs (pool-path comoments / earlier flat merges): fully cell-wise merge, delta*delta^T inlined per cell.
                 let d = dA
                 let dRead i = appE (v deltaN) [iLit i]
                 let cells = canonicalTuples d 2
@@ -839,13 +739,13 @@ let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (bindin
                 [ deltaDecl
                   { Value = DeclLet { binding with Value = merged }; Span = span } ]
             | _ ->
-                // δδᵀ as a packed symmetric outer square (scalar comm kernel)
+                // delta*delta^T as a packed symmetric outer square (scalar comm kernel)
                 let ddL = mkDecl ddLN (methodForE [v deltaN; v deltaN])
-                let ddK = mkDecl ddKN (lambdaE [{ Name = "__a"; Type = None }; { Name = "__b"; Type = None }]
+                let ddK = mkDecl ddKN (lambdaE [{ Name = "__a"; Type = None; Default = None; NameSpan = noSpan }; { Name = "__b"; Type = None; Default = None; NameSpan = noSpan }]
                                                (commWhere ["__a"; "__b"])
                                                (mulE (v "__a") (v "__b")))
                 let dd = mkDecl ddN (computeE (applyE (v ddLN) (v ddKN)))
-                // merged = (nA·CA + nB·CB)/n + (nA·nB/n²)·δδᵀ, three-way lockstep
+                // merged = (nA*CA + nB*CB)/n + (nA*nB/n^2)*delta*delta^T, three-way lockstep
                 let body =
                     addE
                         (divE (addE (mulE (fLit nA) (v "__ca")) (mulE (fLit nB) (v "__cb"))) (fLit n))
@@ -853,32 +753,18 @@ let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (bindin
                 let merged =
                     computeE (applyE
                         (methodForE [syn (ExprZip [v cA; v cB; v ddN])])
-                        (lambdaE [{ Name = "__ca"; Type = None }; { Name = "__cb"; Type = None }; { Name = "__dd"; Type = None }] None body))
+                        (lambdaE [{ Name = "__ca"; Type = None; Default = None; NameSpan = noSpan }; { Name = "__cb"; Type = None; Default = None; NameSpan = noSpan }; { Name = "__dd"; Type = None; Default = None; NameSpan = noSpan }] None body))
                 [ deltaDecl; ddL; ddK; dd
                   { Value = DeclLet { binding with Value = merged }; Span = span } ]))
     | _ ->
         Error "comoments_merge expects comoments_merge(cA, mA, nA, cB, mB, nB): two chunks' pair comoments, means, and static sizes"
 
-// (elabCumulantAccess was removed with the typed-Dist arc: cumulant(d, k)
-// is now TypeCheck.inferCumulantProj — a checker-level projection on the
-// Dist value bound by distPackDecl, with the order guard as a type error.)
-
-// ============================================================================
-// Arbitrary-order streaming state: the Pébay generalization of the k = 2
-// merge (prototype 2's DERIVED kernels as a compile-time pass; see
-// ppl/Streaming.fs — the oracle). State = (n static, mean vector, central
-// comoment SUMS M_2..M_r). Merge, for every canonical entry S with
-// δ = meanB − meanA, cA = −nB/n, cB = nA/n:
-//   M'_S = Σ_{K⊆S, |S\K|≠1} M_{S\K}(A)·Π_{k∈K}(cA·δ_k)
-//                          + M_{S\K}(B)·Π_{k∈K}(cB·δ_k)
-// with M_∅ = n_side and M_single = 0 (pruned). Everything is static
-// (d, r, chunk sizes), so merge and finalize generate CELL-WISE
-// straight-line code: packed method_for tensors read logically
-// (M(i, j, ...) — the CNS placement canonicalizes), merge-emitted flat
-// arrays read at the lex offset of the sorted label tuple.
-// ============================================================================
-
-// (iLit and canonicalTuples moved up beside the pool machinery.)
+// Arbitrary-order streaming state: the Pebay generalization of the k = 2 merge. State = (n static, mean vector, central
+// comoment SUMS M_2..M_r). Merge, for every canonical entry S with delta = meanB - meanA, cA = -nB/n, cB = nA/n:
+//   M'_S = Sum_{K subset S, |S\K|<>1} M_{S\K}(A)*Prod_{k in K}(cA*delta_k)
+//                                    + M_{S\K}(B)*Prod_{k in K}(cB*delta_k)
+// with M_empty = n_side and M_single = 0 (pruned). Everything is static, so merge and finalize generate cell-wise
+// straight-line code: packed method_for tensors read logically, merge-emitted flat arrays read at the lex offset.
 let private lexOffsetOf (d: int) (p: int) (labels: int list) : int =
     canonicalTuples d p |> List.findIndex (fun t -> t = List.sort labels)
 
@@ -890,8 +776,7 @@ type private MStateInfo = {
     Mean: string
     /// M tensor binding name per rank p (index p-2), p = 2..Order.
     Ms: string list
-    /// True: method_for-packed tensors (logical multi-index reads).
-    /// False: merge-emitted flat arrays in lex cell order (offset reads).
+    /// True: method_for-packed tensors (logical reads). False: merge-emitted flat arrays in lex cell order (offset reads).
     Packed: bool
 }
 
@@ -903,10 +788,6 @@ let private mReadExpr (info: MStateInfo) (labels: int list) : Expr =
     let name = info.Ms.[p - 2]
     if info.Packed then appE (v name) (labels |> List.map iLit)
     else appE (v name) [iLit (lexOffsetOf info.Dim p labels)]
-
-// (centralSumKernelBody — the per-cell kernel expansion of the central
-// comoment sum — was deleted with the single-pass pool: elabMState now
-// generates the same inclusion–exclusion cell-wise over pool reads.)
 
 let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
     : Result<Located<Decl> list * MStateInfo, string> =
@@ -922,14 +803,9 @@ let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
             | [ix] ->
                 match resolveExtent ctx.Aliases ctx.Statics ix with
                 | Some d ->
-                    // SINGLE-PASS PATH: the module's shared pool sweep, then
-                    // mean and every central comoment SUM as straight-line
-                    // cells — M_S = Σ_{K⊆S} (−1)^{|K|} Π_{i∈K} μ_i · P_{S\K}
-                    // with P_∅ = n (the same inclusion–exclusion the per-cell
-                    // kernels expanded, minus their re-run prodsum loops and
-                    // per-kernel mean recomputation). State components are
-                    // FLAT lex ArrayLits (Packed = false), the same
-                    // representation merge outputs already carry.
+                    // Single-pass path: the shared pool sweep, then mean and every central comoment SUM as straight-line cells:
+                    // M_S = Sum_{K subset S} (-1)^|K| Prod_{i in K} mu_i * P_{S\K}, P_empty = n. State components are FLAT lex
+                    // ArrayLits (Packed = false), same representation merge outputs carry.
                     let (pd, pool) = acquirePool ctx span aName d (float n) r
                     let meanN = mstateComponent sName "mean"
                     let mN p = mstateComponent sName (sprintf "m%d" p)
@@ -1000,10 +876,8 @@ let private elabMStateMerge (ctx: Ctx) (span: Span) (outName: string)
     | _ ->
         Error "mstate_merge expects mstate_merge(sA, sB)"
 
-/// Freeze a state into cumulant tensors: central μ_p = M_p / n (μ_1 = 0),
-/// then the partition formula restricted to partitions with NO singleton
-/// blocks (a singleton block carries μ_1 = 0 and kills its term); κ_1 is
-/// the mean. Destructuring surface: `let (k1, ..., kr) = mstate_cumulants(s)`.
+/// Freeze a state into cumulant tensors: central mu_p = M_p / n (mu_1 = 0), then the partition formula restricted to
+/// partitions with no singleton blocks; kappa_1 is the mean. Destructuring surface: `let (k1, ..., kr) = mstate_cumulants(s)`.
 let private elabMStateCumulants (ctx: Ctx) (span: Span) (binding: Binding)
     (mstates: Map<string, MStateInfo>) (args: Expr list)
     : Result<Located<Decl> list, string> =
@@ -1018,7 +892,7 @@ let private elabMStateCumulants (ctx: Ctx) (span: Span) (binding: Binding)
                     if names |> List.forall Option.isSome then Ok (names |> List.map Option.get)
                     else Error "mstate_cumulants: destructure into plain names"
                 | _ ->
-                    Error (sprintf "mstate_cumulants: destructure the result — `let (k1, ..., k%d) = mstate_cumulants(%s)`" s.Order sn)
+                    Error (sprintf "mstate_cumulants: destructure the result -- `let (k1, ..., k%d) = mstate_cumulants(%s)`" s.Order sn)
             compNames |> Result.map (fun names ->
                 let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
                 let muE (labels: int list) = divE (mReadExpr s labels) (fLit s.N)
@@ -1045,18 +919,12 @@ let private elabMStateCumulants (ctx: Ctx) (span: Span) (binding: Binding)
     | _ ->
         Error "mstate_cumulants expects mstate_cumulants(s)"
 
-// ============================================================================
-// The closing formers: moment reconstruction (Wick under closure), mixed
-// cumulant blocks, affine pushforward, and the non-crossing (free) lattice.
-// All cell-wise straight-line generation over static shapes, reading dist
-// components with logical multi-index subscripts (packed, order >= 2) or
-// plain subscripts (order 1 / flat outputs).
-// ============================================================================
+// The closing formers: moment reconstruction (Wick under closure), mixed cumulant blocks, affine pushforward, and the
+// non-crossing (free) lattice. All cell-wise straight-line generation over static shapes, reading dist components with
+// logical multi-index subscripts (packed, order >= 2) or plain subscripts (order 1 / flat outputs).
 
-/// Read the order-q cumulant of an elaboration-registry dist at labels:
-/// κ1 is a plain rank-1 array; κ_{q>=2} are method_for-packed (logical
-/// reads) — unless the dist carries FLAT components (pushforward results),
-/// which are lex-canonical ArrayLits read by offset.
+/// Read the order-q cumulant of a registry dist at labels: kappa_1 is a plain rank-1 array; kappa_{q>=2} are method_for-packed
+/// (logical reads) unless the dist carries FLAT components (pushforward results), lex-canonical ArrayLits read by offset.
 let private distKappaRead (info: DistInfo) (labels: int list) : Expr =
     let q = labels.Length
     if info.Flat && q >= 2 then
@@ -1065,12 +933,9 @@ let private distKappaRead (info: DistInfo) (labels: int list) : Expr =
     else
         appE (v info.Components.[q - 1]) (labels |> List.map iLit)
 
-/// moments(d, k) on a dist binding: reconstruct the order-k RAW moment
-/// tensor from carried cumulants — μ_S = Σ over set partitions of S:
-/// Π_blocks κ_{|B|}(labels at B), with κ beyond the carried order treated
-/// as ZERO (the dist's implied closure: order-2 ⇒ Gaussian ⇒ this IS
-/// Wick's theorem, the sum over pairings-and-singletons). Exact when
-/// k <= carried order; a documented truncation beyond it.
+/// moments(d, k) on a dist binding: reconstruct the order-k raw moment tensor from carried cumulants -- mu_S = Sum over set
+/// partitions of S: Prod_blocks kappa_|B|(labels at B), kappa beyond the carried order = 0 (order-2 closure = Gaussian =
+/// Wick's theorem). Exact when k <= carried order; a documented truncation beyond.
 let private elabMomentsOfDist (ctx: Ctx) (span: Span) (binding: Binding)
     (info: DistInfo) (dim: int) (kExpr: Expr)
     : Result<Located<Decl> list, string> =
@@ -1093,10 +958,8 @@ let private elabMomentsOfDist (ctx: Ctx) (span: Span) (binding: Binding)
         Ok [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
     | _ -> Error "moments: on a dist, the order must be a compile-time integer in 1..8"
 
-/// The dist's variable dimension: an explicit override (pushforward
-/// results) wins; otherwise derived off the order-1 component's source
-/// array. Registry-level v1: derivation needs a dist(A, r) over a
-/// single-leading-axis array (the same constraint the streaming state has).
+/// The dist's variable dimension: an explicit override (pushforward results) wins; otherwise derived off the order-1
+/// component's source array, which needs a dist(A, r) over a single-leading-axis array (same constraint the streaming state has).
 let private distDim (ctx: Ctx) (info: DistInfo) : Result<int, string> =
     match info.Dim with
     | Some d -> Ok d
@@ -1111,12 +974,9 @@ let private distDim (ctx: Ctx) (info: DistInfo) : Result<int, string> =
         | _ -> Error "dist reconstruction: the source array needs one variable axis plus the sample axis"
     | _ -> Error "dist reconstruction: supported for single-source dists so far (sums/scales of dists carry derived components; project with cumulant(d, k) instead)"
 
-/// mixed_cumulants(X, Y, p, q): the (p, q) mixed joint-cumulant block —
-/// method_for(X ×p, Y ×q) with per-array comm groups; the kernel is the
-/// same partition sum over ALL p+q positions. Output is slot-major:
-/// packed SymIdx<p, dX> outer, packed SymIdx<q, dY> inner. A declared
-/// independent(X, Y) makes every mixed cumulant (p, q >= 1) EXACTLY zero
-/// at every order — the block elaborates to a literal zero array.
+/// mixed_cumulants(X, Y, p, q): the (p, q) mixed joint-cumulant block -- method_for(X *p, Y *q) with per-array comm groups;
+/// the kernel is the same partition sum over all p+q positions. Output is slot-major: packed SymIdx<p, dX> outer, packed
+/// SymIdx<q, dY> inner. A declared independent(X, Y) makes every mixed cumulant exactly zero -- a literal zero array.
 let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
@@ -1132,8 +992,7 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
             if nX <> nY then
                 Error (sprintf "mixed_cumulants: '%s' and '%s' sample axes disagree (%d vs %d)" xName yName nX nY)
             elif Set.contains (indepKey xName yName) ctx.Indep then
-                // Structural sparsity at ALL orders: cumulants factor over
-                // independent subalgebras, so any block touching both is 0.
+                // Structural sparsity at all orders: cumulants factor over independent subalgebras, so any block touching both is 0.
                 match leadX, leadY with
                 | [ix], [iy] ->
                     match resolveExtent ctx.Aliases ctx.Statics ix, resolveExtent ctx.Aliases ctx.Statics iy with
@@ -1149,12 +1008,9 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                 match leadX, leadY with
                 | [ixx], [ixy] when (resolveExtent ctx.Aliases ctx.Statics ixx).IsSome
                                      && (resolveExtent ctx.Aliases ctx.Statics ixy).IsSome ->
-                    // SINGLE-PASS PATH: one JOINT pool over both arrays'
-                    // rows (X at positions 0..dx-1, Y at dx..dx+dy-1); the
-                    // needed multisets are collected from the cells' actual
-                    // partition blocks. Output stays slot-major flat (X
-                    // canonical outer, Y canonical inner — lex, matching
-                    // the packed emission's print order).
+                    // Single-pass path: one joint pool over both arrays' rows (X at 0..dx-1, Y at dx..dx+dy-1); needed multisets
+                    // collected from the cells' actual partition blocks. Output stays slot-major flat (X canonical outer, Y
+                    // canonical inner, lex -- matching packed emission order).
                     let dx = (resolveExtent ctx.Aliases ctx.Statics ixx).Value
                     let dy = (resolveExtent ctx.Aliases ctx.Statics ixy).Value
                     let rows = rowSlices xName dx @ rowSlices yName dy
@@ -1175,8 +1031,8 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                     let xParams = [ for i in 1 .. p -> sprintf "__x%d" i ]
                     let yParams = [ for i in p + 1 .. r -> sprintf "__x%d" i ]
                     let ps =
-                        (xParams |> List.map (fun nm -> { Name = nm; Type = Some (TyArray (elemX, [fibX])) }))
-                        @ (yParams |> List.map (fun nm -> { Name = nm; Type = Some (TyArray (elemX, [fibY])) }))
+                        (xParams |> List.map (fun nm -> { Name = nm; Type = Some (TyArray (elemX, [fibX])); Default = None; NameSpan = noSpan }))
+                        @ (yParams |> List.map (fun nm -> { Name = nm; Type = Some (TyArray (elemX, [fibY])); Default = None; NameSpan = noSpan }))
                     let commGroups = [ xParams; yParams ] |> List.filter (fun g -> g.Length >= 2)
                     let whereC =
                         if commGroups.IsEmpty then None
@@ -1188,11 +1044,9 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
     | _ ->
         Error "mixed_cumulants expects mixed_cumulants(X, Y, p, q): two annotated arrays and static per-array orders"
 
-/// dist_affine(W, d): multilinearity under a linear map — κ'_k = W^⊗k κ_k,
-/// the exact-linear case of the Faà di Bruno pushforward. W is an annotated
-/// m×n module array read at runtime (W(i, j)); the contraction unrolls
-/// cell-wise over the static shape. Destructuring surface:
-/// `let (p1, ..., pr) = dist_affine(W, d)`.
+/// dist_affine(W, d): multilinearity under a linear map -- kappa'_k = W^{ox k} kappa_k, the exact-linear case of the Faa di
+/// Bruno pushforward. W is an annotated m x n module array read at runtime (W(i, j)); the contraction unrolls cell-wise over
+/// the static shape. Destructuring surface: `let (p1, ..., pr) = dist_affine(W, d)`.
 let private elabDistAffine (ctx: Ctx) (span: Span) (binding: Binding)
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list, string> =
@@ -1212,11 +1066,10 @@ let private elabDistAffine (ctx: Ctx) (span: Span) (binding: Binding)
                             let names = pats |> List.map (fun p -> match p.Kind with PatternKind.PatVar nm -> Some nm | _ -> None)
                             if names |> List.forall Option.isSome then Ok (names |> List.map Option.get)
                             else Error "dist_affine: destructure into plain names"
-                        | _ -> Error (sprintf "dist_affine: destructure the result — `let (p1, ..., p%d) = dist_affine(%s, %s)`" info.Order wName dn)
+                        | _ -> Error (sprintf "dist_affine: destructure the result -- `let (p1, ..., p%d) = dist_affine(%s, %s)`" info.Order wName dn)
                     compNames |> Result.map (fun names ->
                         let wRead i j = appE (v wName) [iLit i; iLit j]
-                        // all index tuples over [0, n)^k (order matters for the
-                        // W factors; κ reads canonicalize the j-tuple)
+                        // All index tuples over [0, n)^k (order matters for the W factors; kappa reads canonicalize the j-tuple).
                         let rec jTuples k = if k = 0 then [ [] ] else [ for j in 0 .. n - 1 do for rest in jTuples (k - 1) -> j :: rest ]
                         names |> List.mapi (fun ki nm ->
                             let k = ki + 1
@@ -1235,46 +1088,38 @@ let private elabDistAffine (ctx: Ctx) (span: Span) (binding: Binding)
                 | Some _, Some nCols ->
                     Error (sprintf "dist_affine: W's column count (%d) must match the dist's dimension (%d)" nCols n)
                 | _ -> Error "dist_affine: W's extents must be statically known"
-            | _ -> Error "dist_affine: W must be an annotated module-level m×n array (Array<Elem like Idx<m>, Idx<n>>)")
+            | _ -> Error "dist_affine: W must be an annotated module-level mxn array (Array<Elem like Idx<m>, Idx<n>>)")
     | _ ->
         Error "dist_affine expects dist_affine(W, d)"
 
-/// dist_jet(d, q, g0, D1, ..., Ds): the FULL Faà di Bruno pushforward,
-/// scalar output — Y = g(X) for a smooth g supplied as its degree-s jet AT
-/// THE DIST'S MEAN: g0 = g(μ) (scalar expr) and D_k = g^(k)(μ), the rank-k
-/// symmetric derivative tensor (a scalar expr when the dist is univariate;
-/// otherwise a named C(d+k−1,k)-cell rank-1 array or an inline array
-/// literal, cells in canonical lex order — the flat order packed tensors
-/// print in). Y − g0 is the Taylor polynomial in Z = X − μ, so:
-///   central moments of X  = partition sums over κ, every block size ≥ 2
-///   raw moments of Y − g0 = multinomial over jet-degree compositions,
-///                           derivative reads × central-moment reads
-///   κ(Y)                  = univariate Möbius inversion; κ_1 shifts by g0
-/// all emitted as straight-line scalar lets over the input dist's component
-/// reads — derivative VALUES are runtime expressions, the contraction
-/// structure is static (the dist_affine split, one degree higher). Exact
-/// for polynomial g of degree ≤ s when q·s ≤ the carried order; the strict
-/// form demands that budget, dist_jet_closed zero-fills cumulants beyond
-/// it (the moments(d,k) closure convention: overlarge partition blocks are
-/// dropped). Result: a univariate order-q dist, registered with inherited
-/// sources and FLAT 1-cell components.
-/// VECTOR OUTPUT (the mixed-block Faà di Bruno): g : R^dim → R^m supplied
-/// as g0 = the m-cell vector of g_a(μ) and per-order COORDINATE-MAJOR flat
-/// derivative slots — cell (a, tuple) of D_k at offset a·C(dim+k−1,k) +
-/// lexOffsetOf. Joint raw moments of Y′ = Y − g0, E[∏_j Y′_{a_j}], expand
-/// over ORDERED per-factor degree assignments (k_1..k_p) ∈ [1..s]^p with
-/// weight ∏_j 1/k_j! (the univariate composition-multinomial is exactly
-/// this sum with identical factors collected); factor j reads D_{k_j} of
-/// coordinate a_j against the CENTRAL moments of all t = Σ k_j input
-/// labels; the multivariate Möbius inversion over output positions returns
-/// the JOINT output cumulant tensors, flat in canonical lex order over m
-/// (κ_1 shifts back by g0). Registered Dim = m, Flat — distKappaRead's
-/// flat multivariate reads and the cumulant flat-projection arm compose
-/// unchanged. Differentially pinned against the prototype's
-/// jetPushforwardVec (dump-jet J5/J6). Generated-code size: the κ pool /
-/// central-moment discipline is shared with the scalar path; m multiplies
-/// only the my/component decls by C(m+k−1,k) — the q·s ≤ 8 cap fences the
-/// partition blowup exactly as before.
+/// dist_jet(d, q, g0, D1, ..., Ds): the Faa di Bruno pushforward, scalar
+/// output -- Y = g(X) for g supplied as its degree-s jet at the dist's
+/// mean: g0 = g(mu) (scalar expr), D_k = g^(k)(mu), the rank-k symmetric
+/// derivative tensor (scalar when the dist is univariate; else a named
+/// C(d+k-1,k)-cell rank-1 array or inline literal, canonical lex order).
+/// Y - g0 is the Taylor polynomial in Z = X - mu:
+///   central moments of X  = partition sums over kappa, block size >= 2
+///   raw moments of Y - g0 = multinomial over jet-degree compositions,
+///                           derivative reads * central-moment reads
+///   kappa(Y)               = univariate Moebius inversion; kappa_1 shifts by g0
+/// Emitted as straight-line scalar lets over the input dist's component
+/// reads (derivative values are runtime, the contraction structure is
+/// static -- the dist_affine split, one degree higher). Exact for
+/// polynomial g of degree <= s when q*s <= the carried order;
+/// dist_jet_closed zero-fills cumulants beyond it instead (the moments(d,k)
+/// closure convention). Result: a univariate order-q dist, registered with
+/// inherited sources and FLAT 1-cell components.
+/// VECTOR OUTPUT (mixed-block Faa di Bruno): g : R^dim -> R^m, supplied as
+/// g0 = the m-cell vector of g_a(mu) and per-order coordinate-major flat
+/// derivative slots (cell (a, tuple) of D_k at offset a*C(dim+k-1,k) +
+/// lexOffsetOf). Joint raw moments of Y' = Y - g0 expand over ordered
+/// per-factor degree assignments (k_1..k_p) in [1..s]^p with weight
+/// Prod_j 1/k_j!; factor j reads D_{k_j} of coordinate a_j against the
+/// central moments of all t = Sum k_j input labels; the multivariate
+/// Moebius inversion over output positions returns the joint output
+/// cumulant tensors, flat in canonical lex order over m (kappa_1 shifts
+/// back by g0). Registered Dim = m, Flat = true; m multiplies only the
+/// my/component decls by C(m+k-1,k), same q*s <= 8 generation bound.
 let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Span) (dName: string)
     (info: DistInfo) (dim: int) (m: int) (qExpr: Expr) (g0Expr: Expr) (dArgs: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
@@ -1286,9 +1131,9 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
             let s = dArgs.Length
             let tMax = q * s
             if not closed && tMax > info.Order then
-                Error (sprintf "%s: computing %d output cumulants through a degree-%d jet needs input order %d but the dist carries %d — insufficient stochastic order. Carry more or accept the truncation explicitly with %s_closed(...)" former q s tMax info.Order former)
+                Error (sprintf "%s: computing %d output cumulants through a degree-%d jet needs input order %d but the dist carries %d -- insufficient stochastic order. Carry more or accept the truncation explicitly with %s_closed(...)" former q s tMax info.Order former)
             elif closed && tMax > 8 then
-                Error (sprintf "%s: q·s = %d exceeds the generation bound (8) — lower the output order or the jet degree" former tMax)
+                Error (sprintf "%s: q*s = %d exceeds the generation bound (8) -- lower the output order or the jet degree" former tMax)
             else
                 let cellsOf k = canonicalTuples dim k |> List.length
                 let g0Read (a: int) : Expr =
@@ -1306,7 +1151,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                             | ExprKind.ExprLit (LitFloat 0.0) -> None
                             | _ -> Some cell)
                     | ExprKind.ExprArrayLit cells ->
-                        Error (sprintf "%s: vector D%d needs %d cells (coordinate-major: m = %d outer × %d canonical cells over dim %d), got %d" former k want m (cellsOf k) dim cells.Length)
+                        Error (sprintf "%s: vector D%d needs %d cells (coordinate-major: m = %d outer x %d canonical cells over dim %d), got %d" former k want m (cellsOf k) dim cells.Length)
                     | ExprKind.ExprVar w ->
                         (match Map.tryFind w ctx.Arrays with
                          | Some (_, [ix]) when resolveExtent ctx.Aliases ctx.Statics ix = Some want ->
@@ -1333,8 +1178,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                         setPartitions t
                         |> List.filter (fun pt ->
                             pt |> List.forall (fun blk -> blk.Length >= 2 && blk.Length <= info.Order))
-                    // κ pool + central moments: IDENTICAL to the scalar path
-                    // (input-side, output-agnostic; every κ cell bound ONCE).
+                    // kappa pool + central moments: identical to the scalar path (input-side, output-agnostic; every cell bound once).
                     let neededKappa =
                         [ for t in 2 .. tMax do
                             for labels in canonicalTuples dim t do
@@ -1363,11 +1207,11 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                     let rec tuples (k: int) : int list list =
                         if k = 0 then [ [] ]
                         else [ for lab in 0 .. dim - 1 do for rest in tuples (k - 1) -> lab :: rest ]
-                    // ordered per-factor degree assignments (k_1..k_p) ∈ [1..s]^p
+                    // Ordered per-factor degree assignments (k_1..k_p) in [1..s]^p.
                     let rec degAssigns (p: int) : int list list =
                         if p = 0 then [ [] ]
                         else [ for kj in 1 .. s do for rest in degAssigns (p - 1) -> kj :: rest ]
-                    // joint raw moments of Y′ over canonical OUTPUT tuples
+                    // Joint raw moments of Y' over canonical output tuples.
                     let myDecls =
                         [ for k in 1 .. q do
                             yield! canonicalTuples m k |> List.mapi (fun ci oLabels ->
@@ -1375,10 +1219,9 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                                 let terms =
                                     [ for degs in degAssigns k do
                                         let t = List.sum degs
-                                        if t >= 2 then   // t = 1 ⇒ D_1·E[Z] = 0
+                                        if t >= 2 then   // t = 1 => D_1*E[Z] = 0
                                             let w = degs |> List.fold (fun acc kj -> acc / factorial kj) 1.0
-                                            // factor fi reads D_{k_fi} of coordinate oArr.[fi];
-                                            // literal-zero derivative cells prune
+                                            // factor fi reads D_{k_fi} of coordinate oArr.[fi]; literal-zero cells prune
                                             let rec go (fi: int) (ds: int list) : (Expr list * int list) list =
                                                 match ds with
                                                 | [] -> [ ([], []) ]
@@ -1400,8 +1243,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                                 mkDecl (myName k ci) (match terms with [] -> fLit 0.0 | _ -> terms |> List.reduce addE)) ]
                     let myRead (sub: int list) =
                         v (myName sub.Length (lexOffsetOf m sub.Length sub))
-                    // joint κ(Y) by multivariate Möbius over output positions;
-                    // order-1 cells shift by g0
+                    // Joint kappa(Y) by multivariate Moebius over output positions; order-1 cells shift by g0.
                     let compDecls =
                         [ for k in 1 .. q ->
                             let cells =
@@ -1433,10 +1275,8 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
         | None -> Error (sprintf "%s expects %s(d, q, g0, D1, ..., Ds) with a previously declared dist binding d" former former)
         | Some info ->
             distDim ctx info |> Result.bind (fun dim ->
-            // VECTOR MODE is keyed off g0's shape: an m-cell (m ≥ 2) array
-            // literal or a named annotated rank-1 array of static extent m
-            // means g : R^dim → R^m with joint output cumulants; a scalar
-            // g0 expression keeps the univariate path byte-identical.
+            // Vector mode is keyed off g0's shape: an m-cell (m >= 2) array literal or named rank-1 array of static extent m
+            // means g : R^dim -> R^m; a scalar g0 keeps the univariate path.
             let vecM =
                 match g0Expr.Kind with
                 | ExprKind.ExprArrayLit cells -> Some cells.Length
@@ -1457,14 +1297,12 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
             let s = dArgs.Length
             let tMax = q * s
             if not closed && tMax > info.Order then
-                Error (sprintf "%s: computing %d output cumulants through a degree-%d jet needs input order %d but '%s' carries %d — insufficient stochastic order. Carry more (dist(A, %d)) or accept the truncation explicitly with %s_closed(...)" former q s tMax dn info.Order (min tMax 6) former)
+                Error (sprintf "%s: computing %d output cumulants through a degree-%d jet needs input order %d but '%s' carries %d -- insufficient stochastic order. Carry more (dist(A, %d)) or accept the truncation explicitly with %s_closed(...)" former q s tMax dn info.Order (min tMax 6) former)
             elif closed && tMax > 8 then
-                Error (sprintf "%s: q·s = %d exceeds the generation bound (8) — lower the output order or the jet degree" former tMax)
+                Error (sprintf "%s: q*s = %d exceeds the generation bound (8) -- lower the output order or the jet degree" former tMax)
             else
-                // Per-degree derivative read at a label tuple. Inline
-                // literals and univariate scalar exprs SPLICE (literal-zero
-                // cells prune their terms); named arrays read at the flat
-                // canonical offset, values at runtime.
+                // Per-degree derivative read at a label tuple: inline literals/scalar exprs splice (zero cells prune terms);
+                // named arrays read at the flat canonical offset.
                 let cellsOf k = canonicalTuples dim k |> List.length
                 let dReadOf (k: int) (dArg: Expr) : Result<(int list -> Expr option), string> =
                     if dim = 1 then
@@ -1508,10 +1346,8 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                         setPartitions t
                         |> List.filter (fun pt ->
                             pt |> List.forall (fun blk -> blk.Length >= 2 && blk.Length <= info.Order))
-                    // Every κ cell the partition sums touch, bound ONCE as a
-                    // scalar let (packed logical reads carry heavy canonical-
-                    // placement codegen — repeating them per partition term
-                    // blows the generated C++ up; ppl's pool discipline).
+                    // Every kappa cell the partition sums touch, bound ONCE as a scalar let (packed logical reads carry heavy
+                    // codegen -- repeating per partition term blows up the generated C++; ppl's pool discipline).
                     let neededKappa =
                         [ for t in 2 .. tMax do
                             for labels in canonicalTuples dim t do
@@ -1525,10 +1361,8 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                             mkDecl (kappaName kk (lexOffsetOf dim kk sub)) (distKappaRead info sub) ]
                     let kappaRead (sub: int list) =
                         v (kappaName sub.Length (lexOffsetOf dim sub.Length sub))
-                    // central moments of X, orders 2..q·s: partition sums
-                    // over the bound κ cells, singleton blocks excluded
-                    // (κ_1(Z) = 0), overlarge blocks dropped only under the
-                    // explicit closure
+                    // Central moments of X, orders 2..q*s: partition sums over the bound kappa cells, singleton blocks excluded
+                    // (kappa_1(Z) = 0), overlarge blocks dropped only under explicit closure.
                     let cmDecls =
                         [ for t in 2 .. tMax do
                             yield! canonicalTuples dim t |> List.mapi (fun ci labels ->
@@ -1541,8 +1375,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                                 mkDecl (cmName t ci) value) ]
                     let cmRead (labels: int list) =
                         v (cmName labels.Length (lexOffsetOf dim labels.Length labels))
-                    // raw moments of Y' = Y − g0: multinomial over the
-                    // ordered ways m factors distribute over jet degrees
+                    // Raw moments of Y' = Y - g0: multinomial over the ordered ways m factors distribute over jet degrees.
                     let rec compositions (m: int) (t: int) : int list list =
                         if t = 1 then [ [ m ] ]
                         else [ for first in 0 .. m do for rest in compositions (m - first) (t - 1) -> first :: rest ]
@@ -1554,14 +1387,13 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                             let terms =
                                 [ for comp in compositions m s do
                                     let t = comp |> List.mapi (fun i c -> (i + 1) * c) |> List.sum
-                                    if t >= 2 then   // t = 1 ⇒ D_1·E[Z] = 0
+                                    if t >= 2 then   // t = 1 => D_1*E[Z] = 0
                                         let w =
                                             (factorial m, List.indexed comp)
                                             ||> List.fold (fun acc (i, c) ->
                                                 acc / factorial c / (factorial (i + 1) ** float c))
                                         let degs = [ for (i, c) in List.indexed comp do for _ in 1 .. c -> i + 1 ]
-                                        // all label assignments, factor by factor;
-                                        // literal-zero derivative cells prune
+                                        // All label assignments, factor by factor; literal-zero cells prune.
                                         let rec go (ds: int list) : (Expr list * int list) list =
                                             match ds with
                                             | [] -> [ ([], []) ]
@@ -1581,7 +1413,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                                                 |> List.reduce addE
                                             yield mulE (fLit w) sum ]
                             mkDecl (myName m) (match terms with [] -> fLit 0.0 | _ -> terms |> List.reduce addE) ]
-                    // κ_m(Y') by univariate Möbius inversion; κ_1 shifts by g0
+                    // kappa_m(Y') by univariate Moebius inversion; kappa_1 shifts by g0.
                     let compDecls =
                         [ for m in 1 .. q ->
                             let mobius =
@@ -1600,50 +1432,36 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                                     Flat = true }
                     (kappaDecls @ cmDecls @ myDecls @ compDecls, outInfo))))
     | _ ->
-        Error (sprintf "%s expects %s(d, q, g0, D1, ..., Ds): a dist binding, a static output order, g(μ), and the derivative tensors at the mean" former former)
+        Error (sprintf "%s expects %s(d, q, g0, D1, ..., Ds): a dist binding, a static output order, g(mu), and the derivative tensors at the mean" former former)
 
-// ============================================================================
-// Tower Bayes: three LOW-LEVEL conditioning primitives, univariate v1.
-// Everything is straight-line scalar generation over the dist's component
-// reads, mirroring the jet pushforward's conventions (flat 1-cell output
+// Tower Bayes: three low-level conditioning primitives, univariate.
+// Straight-line scalar generation over the dist's component reads,
+// mirroring the jet pushforward's conventions (flat 1-cell output
 // components, registry-level composition, cumulant(d, k) projection).
 //
 //   dist_expect(d, c0, ..., cq)    E[c0 + c1 X + ... + cq X^q]: a scalar.
-//                                  Coefficients are arbitrary (pure) scalar
-//                                  expressions — runtime observations
-//                                  included. Exact for q <= carried order;
-//                                  beyond it, the moments(d, k) closure
-//                                  convention (overlarge partition blocks
-//                                  drop). This is the model-evidence /
-//                                  normalizer primitive.
+//                                  Exact for q <= carried order; beyond it,
+//                                  the moments(d, k) closure convention
+//                                  (overlarge blocks drop). Model-evidence
+//                                  / normalizer primitive.
 //   dist_reweight(d, c0, ..., cq)  the tower of X under the reweighted law
-//                                  dm' = (c0 + ... + cq x^q) dm / Z —
-//                                  BAYES with a polynomial likelihood
-//                                  (posterior = reweighted prior). EXACT
-//                                  and order-accounted: each posterior
-//                                  moment consumes q extra input moments,
-//                                  so an order-r prior yields an order-
-//                                  (r - q) posterior. Conditioning is not
-//                                  free: evidence spends stochastic order.
+//                                  dm' = (c0 + ... + cq x^q) dm / Z --
+//                                  Bayes with a polynomial likelihood.
+//                                  Exact and order-accounted: each
+//                                  posterior moment consumes q extra input
+//                                  moments (order-r prior -> order-(r-q)
+//                                  posterior).
 //   dist_mix(w1, d1, w2, d2)       the normalized mixture (w1 m1 + w2 m2)
 //                                  / (w1 + w2): raw moments mix linearly;
-//                                  cumulants do NOT (the between-branch
-//                                  variance appears in k2) — which is the
-//                                  point of having it. No independence
+//                                  cumulants do not. No independence
 //                                  demanded: mixing is always lawful.
 //
-// The compositions ARE the calculus: conditioning on a finite-support
-// variable = dist_reweight by its Lagrange indicator polynomial;
-// disintegrate-then-dist_mix (weights = dist_expect evidences) is the law
-// of total probability, an exact round trip; sequential Bayes = chained
-// dist_reweight, the order budget falling with each observation.
-// ============================================================================
+// Conditioning on a finite-support variable = dist_reweight by its Lagrange
+// indicator polynomial; disintegrate-then-dist_mix is the law of total
+// probability; sequential Bayes = chained dist_reweight.
 
-/// Bind the raw moments m_1..m_top of a univariate registered dist as
-/// scalar lets (partition sums over the carried cumulants, the
-/// moments(d, k) reconstruction at dim 1). Exact for j <= carried order;
-/// the shared closure convention beyond. Returns decls and a reader
-/// (m_0 reads as the literal 1).
+/// Bind the raw moments m_1..m_top of a univariate registered dist as scalar lets (partition sums over the carried cumulants,
+/// the moments(d,k) reconstruction at dim 1). Exact for j <= carried order. Returns decls and a reader (m_0 = literal 1).
 let private rawMomentDecls (span: Span) (tag: string) (info: DistInfo) (top: int)
     : Located<Decl> list * (int -> Expr) =
     let mName j = sprintf "__ppl_tb_%s_m%d" tag j
@@ -1662,8 +1480,7 @@ let private rawMomentDecls (span: Span) (tag: string) (info: DistInfo) (top: int
     let read j = if j = 0 then fLit 1.0 else v (mName j)
     (decls, read)
 
-/// kappa_1..kappa_r FLAT 1-cell component decls for dName from a raw-moment
-/// reader, by univariate Moebius inversion over set partitions.
+/// kappa_1..kappa_r FLAT 1-cell component decls for dName from a raw-moment reader, by univariate Moebius inversion over set partitions.
 let private mobiusComponentDecls (span: Span) (dName: string) (r: int) (mRead: int -> Expr)
     : Located<Decl> list =
     [ for m in 1 .. r ->
@@ -1681,7 +1498,7 @@ let private mobiusComponentDecls (span: Span) (dName: string) (r: int) (mRead: i
 let private univariateOnly (former: string) (ctx: Ctx) (info: DistInfo) : Result<unit, string> =
     distDim ctx info |> Result.bind (fun dim ->
         if dim = 1 then Ok ()
-        else Error (sprintf "%s: univariate dists only so far — marginalize or push forward (dist_map/dist_affine) first, then condition" former))
+        else Error (sprintf "%s: univariate dists only so far -- marginalize or push forward (dist_map/dist_affine) first, then condition" former))
 
 let private elabDistExpect (ctx: Ctx) (span: Span) (binding: Binding)
     (dists: Map<string, DistInfo>) (args: Expr list)
@@ -1716,7 +1533,7 @@ let private elabDistReweight (ctx: Ctx) (span: Span) (dName: string)
             let q = coeffs.Length - 1
             let rOut = info.Order - q
             if rOut < 1 then
-                Error (sprintf "dist_reweight: a degree-%d weight consumes %d orders of the tower and '%s' carries only %d — insufficient stochastic order. Carry more (dist(A, %d)) or lower the weight degree." q q dn info.Order (min (q + 1) 6))
+                Error (sprintf "dist_reweight: a degree-%d weight consumes %d orders of the tower and '%s' carries only %d -- insufficient stochastic order. Carry more (dist(A, %d)) or lower the weight degree." q q dn info.Order (min (q + 1) 6))
             else
                 let mDecls, mRead = rawMomentDecls span ("rw_" + dName) info info.Order
                 let zName = sprintf "__ppl_tb_rw_%s_Z" dName
@@ -1782,27 +1599,22 @@ let private elabDistMix (ctx: Ctx) (span: Span) (dName: string)
     | _ ->
         Error "dist_mix expects dist_mix(w1, d1, w2, d2): two weights (any pure scalar expressions) and two dist bindings"
 
-// ============================================================================
 // Signed atomic towers: quasi-distributions as first-class values.
 //   dist_atoms(r, x1, w1, ..., xk, wk)  the order-r tower of the atomic
 //                                       measure sum_i w_i delta(x_i),
-//                                       normalized by sum w_i. Weights MAY
-//                                       BE NEGATIVE: the constructor is
-//                                       deliberately sign-agnostic, so
-//                                       non-classical towers (negative
-//                                       variance included) are carryable
-//                                       values. Subsumes the point-tower
-//                                       renewal (all-positive weights).
-//   dist_negativity(d, x1, ..., xs)     the L1 negativity of d READ AS a
+//                                       normalized by sum w_i. Weights may
+//                                       be negative (non-classical towers,
+//                                       negative variance included, are
+//                                       carryable values). Subsumes the
+//                                       point-tower renewal (all-positive).
+//   dist_negativity(d, x1, ..., xs)     the L1 negativity of d read as a
 //                                       quasi-distribution on the claimed
 //                                       support {x_1..x_s}: cells by
 //                                       Lagrange indicators (exact when
-//                                       s - 1 <= carried order; demanded),
-//                                       N = sum max(0, -cell). Zero iff
-//                                       the tower is a genuine probability
-//                                       on that support — the classical
-//                                       wall as a meter reading.
-// ============================================================================
+//                                       s - 1 <= carried order), N = sum
+//                                       max(0, -cell). Zero iff the tower
+//                                       is a genuine probability on that
+//                                       support.
 
 let private elabDistAtoms (ctx: Ctx) (span: Span) (dName: string) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
@@ -1839,7 +1651,7 @@ let private elabDistAtoms (ctx: Ctx) (span: Span) (dName: string) (args: Expr li
                          Flat = true }
             (bindDecls @ (wsDecl :: mDecls) @ compDecls, info))
     | _ ->
-        Error "dist_atoms expects dist_atoms(r, x1, w1, ..., xk, wk): a static order and support/weight pairs (weights may be negative — quasi-distributions are values here)"
+        Error "dist_atoms expects dist_atoms(r, x1, w1, ..., xk, wk): a static order and support/weight pairs (weights may be negative -- quasi-distributions are values here)"
 
 let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
     (dists: Map<string, DistInfo>) (args: Expr list)
@@ -1852,7 +1664,7 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
             univariateOnly "dist_negativity" ctx info |> Result.bind (fun () ->
             let sPts = xs.Length
             if sPts - 1 > info.Order then
-                Error (sprintf "dist_negativity: reading %d cells needs the degree-%d Lagrange indicators but '%s' carries order %d — insufficient stochastic order. Carry more, or claim fewer support points." sPts (sPts - 1) dn info.Order)
+                Error (sprintf "dist_negativity: reading %d cells needs the degree-%d Lagrange indicators but '%s' carries order %d -- insufficient stochastic order. Carry more, or claim fewer support points." sPts (sPts - 1) dn info.Order)
             else
                 let xName i = sprintf "__ppl_tb_ng_%s_x%d" outName i
                 let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
@@ -1886,17 +1698,11 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
     | _ ->
         Error "dist_negativity expects dist_negativity(d, x1, ..., xs): a dist binding and at least two support points"
 
-// ============================================================================
-// dist_map: the symbolic front-end over dist_jet — differentiate a lambda
-// at elaboration time, evaluate the derivatives at the runtime mean, and
-// delegate to the jet pushforward. A polynomial's derivative chain
-// terminates in structural zeros (finite jet = EXACT pushforward); any
-// other map needs an explicit truncation degree — the approximation is a
-// modeling choice the program must own.
-// ============================================================================
+// dist_map: the symbolic front-end over dist_jet -- differentiate a lambda at elaboration time, evaluate the derivatives at
+// the runtime mean, and delegate to the jet pushforward. A polynomial's derivative chain terminates in structural zeros
+// (finite jet = exact pushforward); any other map needs an explicit truncation degree the program must own.
 
-/// Structural constant folding — enough for polynomial derivative chains
-/// to terminate in literal zeros (0·e, e·0, 0±e drop; literals fold).
+/// Structural constant folding -- enough for polynomial derivative chains to terminate in literal zeros (0*e, e*0, 0+-e drop; literals fold).
 let rec private simplifyExpr (e: Expr) : Expr =
     match e.Kind with
     | ExprKind.ExprBinOp (m, op, a0, b0) ->
@@ -1932,14 +1738,13 @@ let rec private containsVar (n: string) (e: Expr) : bool =
     | ExprKind.ExprApp (f, args) -> containsVar n f || args |> List.exists (containsVar n)
     | _ -> false
 
-/// ∂e/∂param over the supported grammar: arithmetic and exp/log/sqrt/
-/// sin/cos of the coordinates. Any subtree not mentioning the parameter is
-/// a constant (array reads and other opaque calls included).
+/// de/dparam over the supported grammar: arithmetic and exp/log/sqrt/sin/cos of the coordinates. Any subtree not mentioning the
+/// parameter is a constant (array reads and other opaque calls included).
 let rec private diffExpr (param: string) (e: Expr) : Result<Expr, string> =
     if not (containsVar param e) then Ok (fLit 0.0)
     else
         match e.Kind with
-        | ExprKind.ExprVar _ -> Ok (fLit 1.0)   // containsVar ⇒ it IS the param
+        | ExprKind.ExprVar _ -> Ok (fLit 1.0)   // containsVar => it IS the param
         | ExprKind.ExprBinOp (_, OpAdd, a, b) ->
             diffExpr param a |> Result.bind (fun da ->
             diffExpr param b |> Result.map (fun db -> addE da db))
@@ -1964,19 +1769,15 @@ let rec private diffExpr (param: string) (e: Expr) : Result<Expr, string> =
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "cos" }, [a]) ->
             diffExpr param a |> Result.map (fun da -> subE (fLit 0.0) (mulE da (appE (v "sin") [a])))
         | ExprKind.ExprBinOp (_, OpCaret, b, e) ->
-            // d(b^e) = e*b^(e-1)*b' + b^e*log(b)*e'. The base term keeps the
-            // power form (not e*b^e/b) so b=0 stays finite; the log term is
-            // pruned by simplifyExpr whenever e is constant (e'=0), which is
-            // also what keeps a negative base differentiable. The output is
-            // itself +/-/*/^ over the coordinates, so higher-order jet levels
-            // re-differentiate it in-grammar.
+            // d(b^e) = e*b^(e-1)*b' + b^e*log(b)*e'. The base term keeps the power form (not e*b^e/b) so b=0 stays finite; the
+            // log term is pruned by simplifyExpr whenever e is constant (e'=0), keeping a negative base differentiable.
             diffExpr param b |> Result.bind (fun db ->
             diffExpr param e |> Result.map (fun de ->
                 let baseTerm = mulE (mulE e (powE b (subE e (fLit 1.0)))) db
                 let expTerm  = mulE (mulE (powE b e) (appE (v "log") [b])) de
                 addE baseTerm expTerm))
         | _ ->
-            Error "dist_map: cannot differentiate the map — supported: +, -, *, /, ^ and exp/log/sqrt/sin/cos of the coordinates (opaque subterms are fine when they don't mention a coordinate)"
+            Error "dist_map: cannot differentiate the map -- supported: +, -, *, /, ^ and exp/log/sqrt/sin/cos of the coordinates (opaque subterms are fine when they don't mention a coordinate)"
 
 let rec private substVars (map: Map<string, Expr>) (e: Expr) : Expr =
     match e.Kind with
@@ -1985,16 +1786,10 @@ let rec private substVars (map: Map<string, Expr>) (e: Expr) : Expr =
     | ExprKind.ExprApp (f, args) -> inheritSpan e (ExprApp (substVars map f, args |> List.map (substVars map)))
     | _ -> e
 
-/// dist_map body normalization, applied before differentiation: unwrap
-/// trivial `{ expr }` function bodies and inline full-arity calls to
-/// same-module top-level functions — transitively, so helper reuse like
-/// `function v(m) = ...` / `function ptot(m) = v(m) + ...` presents
-/// diffExpr with one closed expression in the coordinates. The budget
-/// counts function EXPANSIONS (not expression nodes) and breaks recursive
-/// helper cycles. Like the partial-application path, substitution is the
-/// binder-free substVars: helper bodies are expected to be closed over
-/// their own parameters (a module-level free variable in a helper that
-/// collides with a map coordinate would be captured).
+/// dist_map body normalization, applied before differentiation: unwrap trivial `{ expr }` function bodies and inline
+/// full-arity calls to same-module top-level functions -- transitively, so helper reuse presents diffExpr with one closed
+/// expression in the coordinates. The budget counts function expansions and breaks recursive helper cycles; helper bodies are
+/// expected closed over their own parameters (a free variable colliding with a map coordinate would be captured).
 let private normalizeMapBody (former: string) (funcs: Map<string, FunctionDecl>) (body: Expr) : Result<Expr, string> =
     let rec unwrap (e: Expr) : Expr =
         match e.Kind with
@@ -2012,7 +1807,7 @@ let private normalizeMapBody (former: string) (funcs: Map<string, FunctionDecl>)
             if args.Length <> fd.Params.Length then
                 Error (sprintf "%s: helper '%s' is called with %d argument(s) but takes %d" former f args.Length fd.Params.Length)
             elif n <= 0 then
-                Error (sprintf "%s: the map's helper-call chain is too deep — is a helper function recursive?" former)
+                Error (sprintf "%s: the map's helper-call chain is too deep -- is a helper function recursive?" former)
             else
                 goList (n - 1) [] args |> Result.bind (fun (n2, args') ->
                     let bindMap = List.zip (fd.Params |> List.map (fun p -> p.Name)) args' |> Map.ofList
@@ -2027,42 +1822,33 @@ let private normalizeMapBody (former: string) (funcs: Map<string, FunctionDecl>)
         | _ -> Ok (n, e)
     go 256 body |> Result.map snd
 
-/// dist_map(d, q, lambda(x...) -> e) / dist_map(d, q, s, lambda(x...) -> e):
-/// derive the jet symbolically — the lambda takes one coordinate per dist
-/// dimension; derivative tensors come from repeated symbolic
-/// differentiation, evaluated at the runtime mean (reads of κ_1, bound
-/// once); the pushforward itself is dist_jet's. Without s the derivative
-/// tower must terminate (polynomial, exact); with s it truncates there.
+/// dist_map(d, q, lambda(x...) -> e) / dist_map(d, q, s, lambda(x...) -> e): derive the jet symbolically -- the lambda takes
+/// one coordinate per dist dimension; derivative tensors come from repeated symbolic differentiation, evaluated at the
+/// runtime mean (kappa_1, bound once); pushforward is dist_jet's. Without s the tower must terminate (polynomial, exact).
 let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
     (funcs: Map<string, FunctionDecl>) (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
     let former = if closed then "dist_map_closed" else "dist_map"
-    // The map slot: an inline lambda, a same-module top-level function
-    // name, or a prefix partial application of one. Named/partial forms
-    // inline the function body here at elaboration time (this pass runs
-    // BEFORE typechecking, so the checker's eta-expansion never sees this
-    // call) — the residual params become the jet coordinates, and the
-    // bound prefix args are constants w.r.t. diffExpr since differentiation
-    // is by coordinate name only.
+    // The map slot: an inline lambda, a same-module top-level function name, or a prefix partial application of one.
+    // Named/partial forms inline the function body here at elaboration time (before typechecking); residual params become
+    // the jet coordinates, and bound prefix args are constants w.r.t. diffExpr since differentiation is by name only.
     let asCoordLambda (e: Expr) : Result<(LambdaParam list * Expr) option, string> =
         match e.Kind with
         | ExprKind.ExprLambda (ps, None, body) -> Ok (Some (ps, body))
         | ExprKind.ExprVar f ->
             match Map.tryFind f funcs with
             | Some fd ->
-                let ps = fd.Params |> List.map (fun p -> { Name = p.Name; Type = None } : LambdaParam)
+                let ps = fd.Params |> List.map (fun p -> { Name = p.Name; Type = None; Default = None; NameSpan = noSpan } : LambdaParam)
                 Ok (Some (ps, fd.Body))
             | None -> Ok None
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, prefixArgs) when Map.containsKey f funcs ->
             let fd = funcs.[f]
             if prefixArgs.Length >= fd.Params.Length then
-                Error (sprintf "%s: partial application of '%s' supplies %d of its %d parameter(s) — leave at least one free to map over"
+                Error (sprintf "%s: partial application of '%s' supplies %d of its %d parameter(s) -- leave at least one free to map over"
                         former f prefixArgs.Length fd.Params.Length)
             else
-                // Capture avoidance with the binder-free substVars, in two
-                // steps: rename the residual params to reserved coordinate
-                // names FIRST, so no variable inside the bound-arg
-                // expressions can collide with a coordinate afterwards.
+                // Capture avoidance in two steps: rename residual params to reserved coordinate names FIRST, so no variable inside
+                // the bound-arg expressions can collide with a coordinate after.
                 let k = prefixArgs.Length
                 let bound = fd.Params |> List.truncate k
                 let residual = fd.Params |> List.skip k
@@ -2074,7 +1860,7 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
                     List.zip (bound |> List.map (fun p -> p.Name)) prefixArgs
                     |> Map.ofList
                 let body = fd.Body |> substVars renameMap |> substVars bindMap
-                let ps = freshNames |> List.map (fun n -> { Name = n; Type = None } : LambdaParam)
+                let ps = freshNames |> List.map (fun n -> { Name = n; Type = None; Default = None; NameSpan = noSpan } : LambdaParam)
                 Ok (Some (ps, body))
         | _ -> Ok None
     let parseErr =
@@ -2112,18 +1898,18 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
                 | _ -> Error (sprintf "%s: the truncation degree s must be a compile-time integer in 1..8" former)
         sRes |> Result.bind (fun sOpt ->
         let paramNames = ps |> List.map (fun (p: LambdaParam) -> p.Name)
-        // VECTOR MODE: a tuple-valued body lambda(x, y) -> (e1, ..., em)
-        // (m ≥ 2) means g : R^dim → R^m — one symbolic jet per output
-        // component, delegated to the vector dist_jet (joint output
-        // cumulants). A single-expression body keeps the scalar path.
+        // Vector mode: a tuple-valued body lambda(x, y) -> (e1, ..., em)
+        // (m >= 2) means g : R^dim -> R^m, one symbolic jet per output
+        // component, delegated to the vector dist_jet. A single-expression
+        // body keeps the scalar path.
         let comps =
             match body.Kind with
             | ExprKind.ExprTuple es when es.Length >= 2 -> es
             | _ -> [body]
-        // level k for one component: canonical tuple (i1 ≤ ... ≤ ik) → ∂^k f,
-        // symbolic in the coordinates; each cell differentiates the
-        // (k−1)-level cell of its tail by x_{i1} (Schwarz symmetry makes
-        // canonical tuples enough)
+        // Level k for one component: canonical tuple (i1 <= ... <= ik) ->
+        // d^k f, symbolic in the coordinates; each cell differentiates the
+        // (k-1)-level cell of its tail by x_{i1} (Schwarz symmetry makes
+        // canonical tuples enough).
         let levelFrom (fbody: Expr) (prev: Map<int list, Expr>) (k: int) : Result<Map<int list, Expr>, string> =
             canonicalTuples dim k
             |> List.fold (fun acc t ->
@@ -2139,8 +1925,8 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
                 match sOpt with
                 | Some s -> if k >= s then Ok (List.rev (lv :: acc)) else grow fbody (lv :: acc) (k + 1)
                 | None ->
-                    if allZero lv then Ok (List.rev acc)   // the polynomial terminated at degree k−1
-                    elif k >= 8 then Error (sprintf "%s: the map is not polynomial (its derivatives never vanish) — own the truncation with an explicit degree: %s(d, q, s, lambda(x...) -> expr)" former former)
+                    if allZero lv then Ok (List.rev acc)   // the polynomial terminated at degree k-1
+                    elif k >= 8 then Error (sprintf "%s: the map is not polynomial (its derivatives never vanish) -- own the truncation with an explicit degree: %s(d, q, s, lambda(x...) -> expr)" former former)
                     else grow fbody (lv :: acc) (k + 1))
         let towersRes =
             comps |> List.fold (fun acc cb ->
@@ -2149,7 +1935,7 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
         let sPer = towers |> List.map List.length
         let s = List.max sPer
         if s = 0 then
-            Error (sprintf "%s: the map is constant in the coordinates — there is no jet to push" former)
+            Error (sprintf "%s: the map is constant in the coordinates -- there is no jet to push" former)
         else
         // the mean components, bound once; coordinates substitute to them
         let muName i = sprintf "__ppl_jetmu_%s_%d" dName i
@@ -2172,9 +1958,8 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
                         else arrLitE [ for t in canonicalTuples dim k -> atMean lv.[t] ] ]
                 (atMean single, dArgs)
             | _ ->
-                // vector: g0 = the m atMean cells; D_k = coordinate-major
-                // flat cells, zero-filled where a shorter component tower
-                // has no level k (its polynomial terminated earlier)
+                // vector: g0 = the m atMean cells; D_k = coordinate-major flat cells, zero-filled where a shorter component
+                // tower has no level k (its polynomial terminated earlier)
                 let g0 = arrLitE (comps |> List.map atMean)
                 let dArgs =
                     [ for k in 1 .. s ->
@@ -2186,16 +1971,10 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
         elabDistJet closed former ctx span dName dists (v dn :: qExpr :: g0 :: dArgs)
         |> Result.map (fun (nds, outInfo) -> (muDecls @ nds, outInfo))))))
 
-// ============================================================================
-// Free cumulants: the SAME moment↔cumulant machinery summed over the
-// NON-CROSSING partition lattice (Catalan combinatorics) instead of all set
-// partitions — the transform underlying free probability. Computed by the
-// triangular recursion fk_p = μ_p − Σ over non-crossing π ≠ full-block of
-// Π fk_{|B|}: each rank's cells read raw-moment tensors (packed pipelines)
-// and LOWER-rank fk tensors (flat, emitted earlier). fk_1..fk_3 coincide
-// with classical cumulants (all partitions of ≤3 elements are non-crossing);
-// rank 4 is where the lattices first diverge.
-// ============================================================================
+// Free cumulants: the same moment<->cumulant machinery summed over the non-crossing partition lattice (Catalan combinatorics)
+// instead of all set partitions -- the transform underlying free probability. Triangular recursion
+// fk_p = mu_p - Sum over non-crossing pi <> full-block of Prod fk_|B|, reading raw-moment tensors and lower-rank fk tensors
+// (flat, emitted earlier). fk_1..fk_3 coincide with classical cumulants; rank 4 is where the lattices first diverge.
 
 let private isNonCrossing (partition: int list list) : bool =
     let blockOf = partition |> List.mapi (fun i blk -> blk |> List.map (fun x -> (x, i))) |> List.concat |> Map.ofList
@@ -2230,16 +2009,13 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
                             let names = pats |> List.map (fun p -> match p.Kind with PatternKind.PatVar nm -> Some nm | _ -> None)
                             if names |> List.forall Option.isSome then Ok (names |> List.map Option.get)
                             else Error "free_cumulants: destructure into plain names"
-                        | _ -> Error (sprintf "free_cumulants: destructure the result — `let (f1, ..., f%d) = free_cumulants(%s, %d)`" r aName r)
+                        | _ -> Error (sprintf "free_cumulants: destructure the result -- `let (f1, ..., f%d) = free_cumulants(%s, %d)`" r aName r)
                     compNames |> Result.map (fun fkNames ->
-                        // raw moments μ_S = P_S / N straight from the
-                        // module's shared pool sweep (was one packed
-                        // pipeline per rank — r separate traversals).
+                        // Raw moments mu_S = P_S / N from the shared pool sweep.
                         let (pd, pool) = acquirePool ctx span aName d (float n) r
                         let muDecls = pd
                         let muRead (labels: int list) = poolMoment pool labels
-                        // fk tensors ascending; fk_1 = μ_1; flat lex reads on
-                        // earlier fk outputs
+                        // fk tensors ascending; fk_1 = mu_1; flat lex reads on earlier fk outputs.
                         let fkRead (kIdx: int) (labels: int list) =
                             if labels.Length = 1 then appE (v fkNames.[0]) (labels |> List.map iLit)
                             else appE (v fkNames.[labels.Length - 1]) [iLit (lexOffsetOf d labels.Length labels)]
@@ -2268,18 +2044,12 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
     | _ ->
         Error "free_cumulants expects free_cumulants(A, r)"
 
-// ============================================================================
-// Independence: per-compilation state + the `indep` constraint handler
-// ============================================================================
+// Independence: per-compilation state + the `indep` constraint handler.
 
-/// PPL-owned independence state, consumed by the checker's Dist machinery:
-/// the DECLARED relation (loose `let _ = independent(X, Y)` + struct
-/// `where indep` licenses, exported by expandModule), the LICENSE stack
-/// (pairs opened around function-body checking by the registered `indep`
-/// where-clause handler), and module-dist SOURCE sets (dist binding name →
-/// underlying arrays, for checker-side provenance seeding). All state is
-/// AsyncLocal — the test suite checks programs in parallel and each
-/// compilation flows through one async context (expand → check).
+/// PPL-owned independence state, consumed by the checker's Dist machinery: the declared relation (loose
+/// `let _ = independent(X, Y)` + struct `where indep` licenses), the license stack (pairs opened around function-body
+/// checking by the registered `indep` where-clause handler), and module-dist source sets (dist binding name -> underlying
+/// arrays). All state is AsyncLocal -- the test suite checks programs in parallel, each compilation in one async context.
 module Independence =
     open System.Threading
 
@@ -2308,7 +2078,7 @@ module Independence =
     /// Checker-facing: source arrays of a module-level dist binding.
     let distSources (name: string) : Set<string> option = Map.tryFind name (sources ())
 
-    /// Checker-facing: is the pair independent under declared ∪ licenses?
+    /// Checker-facing: is the pair independent under declared or licenses?
     let isRelated (a: string) (b: string) : bool =
         let k = key a b
         Set.contains k (declared ()) || List.contains k (licenses ())
@@ -2324,21 +2094,21 @@ module Independence =
         licenseStore.Value <- removeFirst (licenses ())
 
     /// The `indep(a, b)` where-clause handler: declaring it on a function
-    /// PROMOTES the function to a PPL function — the body checks under the
-    /// license (a, b treated as independent), and every CALL SITE must
-    /// prove independence of the actual arguments' sources.
+    /// promotes it to a PPL function -- the body checks under the license
+    /// (a, b treated as independent), and every call site must prove
+    /// independence of the actual arguments' sources.
     let private indepHandler : Blade.Constraints.ConstraintHandler = {
-        Describe = "indep(a, b) — declares two Dist-valued parameters independent for the function body; call sites must prove independence of the actuals' sources"
+        Describe = "indep(a, b) -- declares two Dist-valued parameters independent for the function body; call sites must prove independence of the actuals' sources"
         Validate = fun funcName paramNames args ->
             match args with
             | [a; b] when a = b ->
-                Error (sprintf "function '%s': indep(%s, %s) — a value is not independent of itself" funcName a b)
+                Error (sprintf "function '%s': indep(%s, %s) -- a value is not independent of itself" funcName a b)
             | [a; b] ->
                 let missing = [a; b] |> List.filter (fun n -> not (List.contains n paramNames))
                 if missing.IsEmpty then Ok ()
                 else Error (sprintf "function '%s': where indep(%s, %s) must name function parameters (unknown: %s)" funcName a b (String.concat ", " missing))
             | _ ->
-                Error (sprintf "function '%s': indep expects exactly two parameter names — indep(a, b)" funcName)
+                Error (sprintf "function '%s': indep expects exactly two parameter names -- indep(a, b)" funcName)
         EnterBody = fun funcName args ->
             match args with
             | [a; b] -> pushLicense (Blade.Constraints.paramProvenanceToken funcName a)
@@ -2355,7 +2125,7 @@ module Independence =
                 let pa = provOf a
                 let pb = provOf b
                 if Set.isEmpty pa || Set.isEmpty pb then
-                    Error (sprintf "call to '%s': cannot establish provenance for the dist argument bound to '%s' — pass a dist binding (or an expression built from dists) so independence of its sources can be verified" funcName (if Set.isEmpty pa then a else b))
+                    Error (sprintf "call to '%s': cannot establish provenance for the dist argument bound to '%s' -- pass a dist binding (or an expression built from dists) so independence of its sources can be verified" funcName (if Set.isEmpty pa then a else b))
                 else
                     let missing =
                         [ for s1 in pa do
@@ -2364,28 +2134,27 @@ module Independence =
                     match missing with
                     | [] -> Ok ()
                     | (s1, s2) :: _ when s1 = s2 ->
-                        Error (sprintf "call to '%s' requires indep(%s, %s): both arguments carry source '%s' — a value is not independent of itself; pass dists built from disjoint sources" funcName a b s1)
+                        Error (sprintf "call to '%s' requires indep(%s, %s): both arguments carry source '%s' -- a value is not independent of itself; pass dists built from disjoint sources" funcName a b s1)
                     | (s1, s2) :: _ ->
-                        Error (sprintf "call to '%s' requires indep(%s, %s): sources '%s' and '%s' are not declared independent — add `let _ = ppl.independent(%s, %s)` (or a struct/function `where ppl.indep(...)` license)" funcName a b s1 s2 s1 s2)
+                        Error (sprintf "call to '%s' requires indep(%s, %s): sources '%s' and '%s' are not declared independent -- add `let _ = ppl.independent(%s, %s)` (or a struct/function `where ppl.indep(...)` license)" funcName a b s1 s2 s1 s2)
             | _ -> Error "indep expects exactly two arguments"
     }
 
     // Registered under the internal (normalized) name: the surface spelling
-    // is the qualified `where <alias>.indep(...)` with `import ppl`, which
-    // the ppl elaborator normalizes to "__ppl_indep" before checking. A bare
-    // `where indep(...)` therefore no longer resolves (the checker's
-    // unknown-constraint diagnostic points at the module spelling).
+    // `where <alias>.indep(...)` (with `import ppl`) is normalized to
+    // "__ppl_indep" before checking; a bare `where indep(...)` no longer
+    // resolves.
     let register () = Blade.Constraints.registerConstraint "__ppl_indep" indepHandler
 
 /// IDE-facing dist registry: every dist binding this module elaborates,
 /// mapped to its carried order and component bindings. The packed formers
-/// (dist/dist_add/dist_scale) leave a `__dist_pack` decl under the user's
-/// name, but the flat ones (dist_jet/dist_map/dist_reweight/dist_mix/
-/// dist_atoms) are register-only — the name is ERASED from the program, so
-/// `ide check` sees no binding for it and can offer no hover. The components
-/// always survive, so recording (order, components) is enough for the IDE to
-/// rebuild `Dist<order, elem like axes>` from κ_1's inferred type. Consumed
-/// by Ide.fs; AsyncLocal for the same reason as Independence.
+/// leave a `__dist_pack` decl under the user's name, but the flat ones
+/// (dist_jet/dist_map/dist_reweight/dist_mix/dist_atoms) are register-only
+/// -- the name is erased from the program, so `ide check` sees no binding
+/// for it. The components always survive, so recording (order, components)
+/// is enough for the IDE to rebuild `Dist<order, elem like axes>` from
+/// kappa_1's inferred type. Consumed by Ide.fs; AsyncLocal for the same
+/// reason as Independence.
 module IdeDists =
     open System.Threading
 
@@ -2405,34 +2174,27 @@ module IdeDists =
     let entries () : (string * int * string list) list =
         dists () |> Map.toList |> List.map (fun (n, (o, cs)) -> (n, o, cs))
 
-// ============================================================================
-// Checker-facing synthesis (typed-Dist operator dispatch)
-// ============================================================================
-
-/// Surface expansions for TypeCheck's Dist operator dispatch
-/// (inferDistBinOp): the checker SYNTHESIZES these block expressions and
-/// re-infers them (synthesize-and-infer), so dist operators work in any
-/// expression position — notably on Dist-typed function parameters, which
-/// the elaboration-level registry rewrites above can never see. The
-/// expansion rules live here so they stay next to the elaboration rules
-/// they mirror. NOTE: the synthesized code calls `cumulant` and
-/// `__dist_pack`, both checker intrinsics; a user shadowing `cumulant`
-/// disables dist operators in checker positions (documented edge).
+/// Checker-facing synthesis (typed-Dist operator dispatch): surface
+/// expansions for TypeCheck's Dist operator dispatch (inferDistBinOp) --
+/// the checker synthesizes these block expressions and re-infers them, so
+/// dist operators work in any expression position, notably on Dist-typed
+/// function parameters, which the elaboration-level registry rewrites above
+/// can never see. The synthesized code calls `cumulant` and `__dist_pack`,
+/// both checker intrinsics; a user shadowing `cumulant` disables dist
+/// operators in checker positions (documented edge).
 module DistSynth =
-    /// c * d (either side): κ_k(c·X) = c^k κ_k(X) — multilinearity, exact
-    /// with NO independence requirement, hence dispatchable anywhere.
+    /// c * d (either side): kappa_k(c*X) = c^k kappa_k(X) -- multilinearity,
+    /// exact with no independence requirement, dispatchable anywhere.
     ///   { let __dsd = d
     ///     let __dsk<k> = cumulant(__dsd, k)          per order
-    ///     let __dss<k> = map1(__dsk<k>, c^k · __u)   per order
+    ///     let __dss<k> = map1(__dsk<k>, c^k * __u)   per order
     ///     __dist_pack(__dss1, ..., __dssr) }
-    /// `uniq` disambiguates nested synthesized expansions.
-    ///
-    /// The scalar expr `c` is spliced INTO each kernel body verbatim (k
-    /// copies), NOT bound to a synthesized block-local: inlined kernels
-    /// render captured block-locals by NAME while the block emission names
-    /// them by id (`__v<id>`), so a `let __dsc = c` capture dangles in the
-    /// generated C++. Splicing keeps c's own variable references, which
-    /// render under the same rules as user-written kernel captures.
+    /// `uniq` disambiguates nested synthesized expansions. The scalar expr
+    /// `c` is spliced into each kernel body verbatim (k copies), not bound
+    /// to a synthesized block-local: inlined kernels render captured
+    /// block-locals by name while block emission names them by id
+    /// (`__v<id>`), so a `let __dsc = c` capture would dangle in the
+    /// generated C++.
     let scaleExpr (uniq: int) (c: Expr) (d: Expr) (order: int) : Expr =
         let dN = sprintf "__dsd_%d" uniq
         let kN k = sprintf "__dsk_%d_%d" uniq k
@@ -2446,15 +2208,14 @@ module DistSynth =
                   sLet (sN k) (map1 (v (kN k)) scaled) ]
         syn (ExprBlock (stmts, Some (appE (v "__dist_pack") [ for k in 1 .. order -> v (sN k) ])))
 
-    /// l ± r for independent dists: per-order c_k = a_k + weight(k)·b_k —
-    /// addition is weight ≡ 1; subtraction is weight k = (−1)^k
-    /// (κ_k(−Y) = (−1)^k κ_k(Y), so odd orders subtract, even orders add).
-    /// The caller (TypeCheck.inferDistBinOp) verifies the independence
-    /// condition BEFORE synthesizing; weights are literals, so the kernels
-    /// capture nothing (no block-local-capture hazard).
+    /// l +- r for independent dists: per-order c_k = a_k + weight(k)*b_k --
+    /// addition is weight = 1; subtraction is weight k = (-1)^k (kappa_k(-Y)
+    /// = (-1)^k kappa_k(Y), odd orders subtract, even orders add). The
+    /// caller verifies independence before synthesizing; weights are
+    /// literals, so the kernels capture nothing.
     ///   { let __dcl = l; let __dcr = r
     ///     let __dka<k> = cumulant(__dcl, k); __dkb<k> = cumulant(__dcr, k)
-    ///     let __dks<k> = zipMap2(__dka<k>, __dkb<k>, __u + w_k·__w)
+    ///     let __dks<k> = zipMap2(__dka<k>, __dkb<k>, __u + w_k*__w)
     ///     __dist_pack(__dks1, ..., __dksr) }
     let combineExpr (uniq: int) (weight: int -> float) (l: Expr) (r: Expr) (order: int) : Expr =
         let lN = sprintf "__dcl_%d" uniq
@@ -2474,19 +2235,16 @@ module DistSynth =
                   sLet (sN k) (zipMap2 (v (aN k)) (v (bN k)) (addE (v "__u") contrib)) ]
         syn (ExprBlock (stmts, Some (appE (v "__dist_pack") [ for k in 1 .. order -> v (sN k) ])))
 
-// ============================================================================
 // Module expansion
-// ============================================================================
 
-/// `import ppl [as _]` — the module this layer owns.
+/// `import ppl [as _]` -- the module this layer owns.
 let private isPplImport (d: Located<Decl>) =
     match d.Value with
     | DeclImport (["ppl"], _) -> true
     | _ -> false
 
-/// Aliases bound to `ppl` in this decl list. Errors on a selective
-/// `from ppl import ...`, which would reintroduce the global names the module
-/// system is meant to remove.
+/// Aliases bound to `ppl` in this decl list. Errors on a selective `from ppl import ...`, which would reintroduce the global
+/// names the module system is meant to remove.
 let private pplAliasesOf (decls: Located<Decl> list) : Result<Set<string>, string> =
     decls |> List.fold (fun acc d ->
         acc |> Result.bind (fun set ->
@@ -2498,11 +2256,9 @@ let private pplAliasesOf (decls: Located<Decl> list) : Result<Set<string>, strin
             | _ -> Ok set))
         (Ok Set.empty)
 
-/// Normalize the qualified ppl surface to the internal forms the passes below
-/// (and the type-checker) recognize: `alias.<former>(...)` -> bare
-/// `<former>(...)`, and `alias.cumulant(...)` -> `__ppl_cumulant(...)` (the
-/// projection marker TypeCheck matches). A missed position leaves an
-/// `ExprField` that fails to type-check, so this need not be exhaustive.
+/// Normalize the qualified ppl surface to the internal forms the passes below (and the checker) recognize: `alias.<former>(...)`
+/// -> bare `<former>(...)`, and `alias.cumulant(...)` -> `__ppl_cumulant(...)`. A missed position leaves an `ExprField` that
+/// fails to type-check, so this need not be exhaustive.
 let rec private stripQualified (aliases: Set<string>) (e: Expr) : Expr =
     let r = stripQualified aliases
     let rStmt s =
@@ -2520,8 +2276,7 @@ let rec private stripQualified (aliases: Set<string>) (e: Expr) : Expr =
              && (name = "cumulant" || name = "indep" || Set.contains name formerNames) ->
         match name with
         | "cumulant" -> inheritSpan e (ExprVar "__ppl_cumulant")
-        // `indep` appears qualified in struct where-invariants
-        // (`where p.indep(X, Y)`); normalize to the registered internal
+        // `indep` appears qualified in struct where-invariants (`where p.indep(X, Y)`); normalize to the registered internal
         // constraint name (splitInvariant and the checker match it).
         | "indep" -> inheritSpan e (ExprVar "__ppl_indep")
         | _ -> inheritSpan e (ExprVar name)
@@ -2539,15 +2294,13 @@ let rec private stripQualified (aliases: Set<string>) (e: Expr) : Expr =
     | ExprKind.ExprMatch (s, cases) ->
         inheritSpan e (ExprMatch (r s, cases |> List.map (fun c -> { c with Guard = Option.map r c.Guard; Body = r c.Body })))
     | ExprKind.ExprBlock (stmts, fin) -> inheritSpan e (ExprBlock (List.map rStmt stmts, Option.map r fin))
-    // Recursive array (`let rec q: T = match q with ...`): the seed and
-    // inductive slices are ordinary expressions and may carry qualified names.
+    // Recursive array (`let rec q: T = match q with ...`): seed and inductive slices are ordinary expressions and may carry qualified names.
     | ExprKind.ExprRecArray def ->
         inheritSpan e (ExprRecArray { def with
                                         SeedArm = def.SeedArm |> Option.map (fun (sv, se) -> (sv, r se))
                                         SliceExpr = r def.SliceExpr })
-    // The rest of the expression algebra. The wildcard is deliberately gone so
-    // FS0025 flags AST growth here rather than leaving a qualified name to fail
-    // downstream as an unbound variable.
+    // The rest of the expression algebra. The wildcard is deliberately gone so FS0025 flags AST growth here rather than leaving
+    // a qualified name to fail downstream as an unbound variable.
     | ExprKind.ExprCompute a -> inheritSpan e (ExprCompute (r a))
     | ExprKind.ExprRead a -> inheritSpan e (ExprRead (r a))
     | ExprKind.ExprPure a -> inheritSpan e (ExprPure (r a))
@@ -2575,13 +2328,14 @@ let rec private stripQualified (aliases: Set<string>) (e: Expr) : Expr =
     | ExprKind.ExprReplicate (c, b) -> inheritSpan e (ExprReplicate (r c, r b))
     | ExprKind.ExprMask (a, p) -> inheritSpan e (ExprMask (r a, r p))
     | ExprKind.ExprCompound (d, m) -> inheritSpan e (ExprCompound (r d, r m))
+    | ExprKind.ExprSparse (v, k) -> inheritSpan e (ExprSparse (r v, r k))
     | ExprKind.ExprIntersect (a, b) -> inheritSpan e (ExprIntersect (r a, r b))
     | ExprKind.ExprUnion (a, b) -> inheritSpan e (ExprUnion (r a, r b))
     | ExprKind.ExprContains (a, v) -> inheritSpan e (ExprContains (r a, r v))
     | ExprKind.ExprGroupBy (v, g) -> inheritSpan e (ExprGroupBy (r v, r g))
     | ExprKind.ExprSort (a, k) -> inheritSpan e (ExprSort (r a, r k))
     | ExprKind.ExprGram (l, rr) -> inheritSpan e (ExprGram (r l, r rr))
-    | ExprKind.ExprReduce (a, k, init) -> inheritSpan e (ExprReduce (r a, r k, Option.map r init))
+    | ExprKind.ExprReduce (a, k, init, ax) -> inheritSpan e (ExprReduce (r a, r k, Option.map r init, ax))
     | ExprKind.ExprStruct (nm, fields, spread) ->
         inheritSpan e (ExprStruct (nm, fields |> List.map (fun (fn, fe) -> (fn, r fe)), Option.map r spread))
     | ExprKind.ExprFor (src, cs, kern) ->
@@ -2590,22 +2344,19 @@ let rec private stripQualified (aliases: Set<string>) (e: Expr) : Expr =
             | ForArrays (arrs, inClause) -> ForArrays (List.map r arrs, Option.map r inClause)
             | ForKernel k -> ForKernel (r k)
         inheritSpan e (ExprFor (src', cs, Option.map r kern))
-    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>)
-    // carry TypeExprs, not Exprs, and are never rewritten.
+    // Leaves: no sub-expressions. Index/type args (range<I>, reverse<I>) carry TypeExprs, not Exprs, and are never rewritten.
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ | ExprKind.ExprWildcard
     | ExprKind.ExprQualified _ | ExprKind.ExprRange _ | ExprKind.ExprReverse _
     | ExprKind.ExprArity _ | ExprKind.ExprNth | ExprKind.ExprZero
     | ExprKind.ExprSection _ -> e
 
-/// Normalize a qualified constraint-conjunct name (`"<alias>.indep"` from the
-/// parser's dotted where-clause arm) to the registered internal name.
+/// Normalize a qualified constraint-conjunct name (`"<alias>.indep"` from the parser's dotted where-clause arm) to the internal name.
 let private stripConjunctName (aliases: Set<string>) (cname: string) : string =
     match cname.Split('.') with
     | [| a; "indep" |] when Set.contains a aliases -> "__ppl_indep"
     | _ -> cname
 
-/// Apply stripQualified to every expression-bearing decl (function
-/// where-clause conjunct names and struct where-invariants included).
+/// Apply stripQualified to every expression-bearing decl (function where-clause conjunct names and struct where-invariants included).
 let private stripDecl (aliases: Set<string>) (d: Located<Decl>) : Located<Decl> =
     let s = stripQualified aliases
     let value =
@@ -2624,8 +2375,7 @@ let private stripDecl (aliases: Set<string>) (d: Located<Decl>) : Located<Decl> 
     { d with Value = value }
 
 let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
-    // User definitions shadow the formers entirely (same rule as ML ops
-    // and the math intrinsics).
+    // User definitions shadow the formers entirely (same rule as ML ops and the math intrinsics).
     let declNames =
         decls |> List.choose (fun d ->
             match d.Value with
@@ -2633,9 +2383,8 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
             | _ -> None)
         |> Set.ofList
     let active n = not (Set.contains n declNames)
-    // Same-module top-level functions by name (grad's declNames precedent):
-    // dist_map accepts a named function or a prefix partial application of
-    // one in its map slot and inlines the body at elaboration time.
+    // Same-module top-level functions by name: dist_map accepts a named function or a prefix partial application of one in
+    // its map slot and inlines the body at elaboration time.
     let funcDecls : Map<string, FunctionDecl> =
         decls |> List.choose (fun d ->
             match d.Value with
@@ -2646,18 +2395,15 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
     | Error e -> Error (sprintf "PPL elaboration: static resolution failed: %s" e)
     // Fold failures are the type-checker's to report (assertion semantics).
     | Ok (statics, _) ->
-        // Pass 0.5: strip indep(...) conjuncts out of struct where-invariants
-        // (static licenses, not runtime propositions); residual invariants
-        // keep their construction-time validate().
+        // Pass 0.5: strip indep(...) conjuncts out of struct where-invariants (static licenses, not runtime propositions);
+        // residual invariants keep their construction-time validate().
         let mutable structIndep : Map<string, (string * string) list> = Map.empty
         let decls =
             decls |> List.map (fun d ->
                 match d.Value with
                 | DeclType (TyDeclStruct (sname, tps, fields, conjuncts, isStatic)) when not conjuncts.IsEmpty ->
-                    // Per-conjunct split: an indep(...) conjunct is consumed
-                    // as a static license; `&&`-joined forms inside a single
-                    // conjunct still split recursively. Residual conjuncts
-                    // stay runtime-checked.
+                    // Per-conjunct split: an indep(...) conjunct is consumed as a static license (`&&`-joined forms split
+                    // recursively); residual conjuncts stay runtime-checked.
                     let (pairs, residuals) =
                         conjuncts |> List.fold (fun (ps, rs) c ->
                             let (cp, cr) = splitInvariant c
@@ -2667,9 +2413,8 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                         structIndep <- Map.add sname pairs structIndep
                         { d with Value = DeclType (TyDeclStruct (sname, tps, fields, residuals, isStatic)) }
                 | _ -> d)
-        // Array-typed struct fields and struct-typed instances: each
-        // instance contributes alias-named array shapes and, per the
-        // struct's declared indep pairs, instance-scoped independence.
+        // Array-typed struct fields and struct-typed instances: each instance contributes alias-named array shapes and, per
+        // the struct's declared indep pairs, instance-scoped independence.
         let structFields =
             decls |> List.fold (fun acc d ->
                 match d.Value with
@@ -2698,10 +2443,8 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                 match Map.tryFind sname structIndep with
                 | Some pairs -> pairs |> List.fold (fun s (fa, fb) -> Set.add (indepKey (aliasOf iname fa) (aliasOf iname fb)) s) acc
                 | None -> acc) Set.empty
-        // Pass 0.8: normalize struct-field arguments of former calls to
-        // alias bindings (`let __ppl_arr_m_f = m.f`), inserted before first
-        // use — codegen's loop machinery iterates named bindings, not raw
-        // field accesses.
+        // Pass 0.8: normalize struct-field arguments of former calls to alias bindings (`let __ppl_arr_m_f = m.f`), inserted
+        // before first use -- codegen's loop machinery iterates named bindings, not raw field accesses.
         let mutable emittedAliases = Set.empty
         let decls =
             decls |> List.collect (fun d ->
@@ -2741,9 +2484,8 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
         | Some e -> Error e
         | None ->
         let aliases = collectAliases rest
-        // Inferred shapes for UN-annotated computed arrays (method_for over
-        // range/halo slots) seed the map; explicit annotations and struct-
-        // field aliases override them.
+        // Inferred shapes for UN-annotated computed arrays (method_for over range/halo slots) seed the map; explicit
+        // annotations and struct-field aliases override them.
         let inferredArrays =
             rest |> List.fold (fun acc d ->
                 match d.Value with
@@ -2760,10 +2502,9 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
             |> Map.fold (fun acc k s -> Map.add k s acc) inferredArrays
             |> fun annotated -> aliasArrays |> Map.fold (fun acc k s -> Map.add k s acc) annotated
         // Pre-scan: the maximal multiset size each source array needs across
-        // ALL its single-array formers in this module, so the first former
-        // emits ONE maximal pool the rest reuse (cross-former single-pass).
-        // Names that turn out to be dist bindings or ineligible arrays are
-        // harmless here — the entry is only consulted on the pool path.
+        // all its single-array formers in this module, so the first former
+        // emits ONE maximal pool the rest reuse. Names that turn out to be
+        // dist bindings or ineligible arrays are harmless here.
         let poolMax =
             rest |> List.choose (fun d ->
                 match d.Value with
@@ -2776,19 +2517,16 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
             |> List.fold (fun m (a, k) -> Map.add a (max k (defaultArg (Map.tryFind a m) 0)) m) Map.empty
         let ctx = { Arrays = arrays; Aliases = aliases; Statics = statics; Indep = indep
                     Pools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty }
-        // Pass 2: rewrite decl-RHS former calls, threading the dist registry
-        // (dist bindings are compile-time objects: consumed here, their
-        // cumulant components materialize as ordinary array decls).
+        // Pass 2: rewrite decl-RHS former calls, threading the dist registry (dist bindings are compile-time objects: consumed
+        // here, their cumulant components materialize as ordinary array decls).
         let expanded =
             rest |> List.fold (fun acc d ->
                 acc |> Result.bind (fun (ds, dists, mstates) ->
-                    // Stamp the user decl's span so every syn-built node
-                    // (former-generated decls) attributes to this decl's line.
+                    // Stamp the user decl's span so every syn-built (former-generated) node attributes to this decl's line.
                     Blade.Ast.synthSpan <- d.Span
                     match d.Value with
-                    // moments(d, k) on a DIST binding: reconstruction (κ→μ,
-                    // Wick under the carried-order closure) — dispatched by
-                    // registry membership, ahead of the data-array form.
+                    // moments(d, k) on a DIST binding: reconstruction (kappa->mu, Wick under closure), dispatched by registry
+                    // membership, ahead of the data-array form.
                     | DeclLet ({ Pattern = { Kind = PatternKind.PatVar _ }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "moments" }, [{ Kind = ExprKind.ExprVar dn }; kExpr]) } } as b) when active "moments" && Map.containsKey dn dists ->
                         let info = dists.[dn]
                         distDim ctx info
@@ -2812,58 +2550,40 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                         elabDist ctx d.Span dName args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_add" }, args) } } when active "dist_add" ->
                         elabDistCombine "+" (fun _ -> 1.0) ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
-                    // Dist OPERATORS (+ / − / scalar *) flow through
-                    // untouched: dists are VALUES (distPackDecl), and the
-                    // checker's inferDistBinOp dispatches operators in any
-                    // expression position — module decl-RHS included —
-                    // gated on the independence state this module exports
-                    // (Independence.addDeclared/addSources below). The
-                    // elaboration-level operator rewrites this replaced
-                    // lived here until the typed-Dist arc's phase 5.
+                    // Dist operators (+ / - / scalar *) flow through untouched: dists are values (distPackDecl), and the
+                    // checker's inferDistBinOp dispatches operators in any expression position, gated on the independence
+                    // state this module exports (Independence.addDeclared/addSources below).
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_scale" }, args) } } when active "dist_scale" ->
                         elabDistScale ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
-                    // The Faà di Bruno pushforward: a univariate order-q
-                    // dist with FLAT 1-cell components. Registered (it
-                    // composes with moments-on-dist/dist_affine/further
-                    // jets) but NOT packed: __dist_pack's erasure type
-                    // declares SymIdx-packed components, and flat ArrayLits
-                    // aren't — the same wart dist_affine documents. The
-                    // packed-literal arc upgrades this to a first-class
-                    // typed Dist; until then cumulant(d, k) on flat dists
-                    // projects at elaboration (arm below).
+                    // The Faa di Bruno pushforward: a univariate order-q dist with FLAT 1-cell components. Registered but NOT
+                    // packed: __dist_pack's erasure type declares SymIdx-packed components, and flat ArrayLits aren't.
+                    // cumulant(d, k) on flat dists projects at elaboration (arm below).
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_jet" }, args) } } when active "dist_jet" ->
                         elabDistJet false "dist_jet" ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_jet_closed" }, args) } } when active "dist_jet_closed" ->
                         elabDistJet true "dist_jet_closed" ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
-                    // dist_map: the symbolic front-end — same registration
-                    // and flat-component representation as dist_jet.
+                    // dist_map: the symbolic front-end, same registration and flat-component representation as dist_jet.
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_map" }, args) } } when active "dist_map" ->
                         elabDistMap false ctx d.Span dName funcDecls dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_map_closed" }, args) } } when active "dist_map_closed" ->
                         elabDistMap true ctx d.Span dName funcDecls dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
-                    // Tower Bayes: dist_expect is a scalar projection;
-                    // dist_reweight / dist_mix register flat univariate
-                    // dists exactly like the jet results above (composable
-                    // with moments-on-dist, further reweights, and
-                    // cumulant(d, k) via the flat-projection arm below).
+                    // Tower Bayes: dist_expect is a scalar projection; dist_reweight / dist_mix register flat univariate
+                    // dists exactly like the jet results above.
                     | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_expect" }, args) } } as b) when active "dist_expect" ->
                         elabDistExpect ctx d.Span b dists args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_reweight" }, args) } } when active "dist_reweight" ->
                         elabDistReweight ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_mix" }, args) } } when active "dist_mix" ->
                         elabDistMix ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
-                    // Signed atomic towers: quasi-dists as registered
-                    // values; negativity as a scalar meter.
+                    // Signed atomic towers: quasi-dists as registered values; negativity as a scalar meter.
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_atoms" }, args) } } when active "dist_atoms" ->
                         elabDistAtoms ctx d.Span dName args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_negativity" }, args) } } as b) when active "dist_negativity" ->
                         elabDistNegativity ctx d.Span b dists args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     // cumulant(d, k) on a FLAT registry dist (a pushforward
                     // result): no packed value exists for the checker's
-                    // Dist-typed projection to see, so project here — the
-                    // order guard is an elaboration error with the checker
-                    // arm's steering. DELETE when packed literals land and
-                    // jet results __dist_pack like everything else.
+                    // Dist-typed projection to see, so project here; the
+                    // order guard is an elaboration error instead.
                     | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__ppl_cumulant" }, [{ Kind = ExprKind.ExprVar dn }; kExpr]) } } as b)
                         when Map.containsKey dn dists && dists.[dn].Flat ->
                         let info = dists.[dn]
@@ -2871,12 +2591,10 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                          | Ok (SVInt k) when k >= 1L && int k <= info.Order ->
                              Ok (ds @ [ { d with Value = DeclLet { b with Value = mkExpr d.Span (ExprVar info.Components.[int k - 1]) } } ], dists, mstates)
                          | Ok (SVInt k) ->
-                             Error (sprintf "cumulant: order %d exceeds the dist's carried order %d — insufficient stochastic order. Construct with a higher order or project a carried component." k info.Order)
+                             Error (sprintf "cumulant: order %d exceeds the dist's carried order %d -- insufficient stochastic order. Construct with a higher order or project a carried component." k info.Order)
                          | _ ->
                              Error "cumulant: the order must be a compile-time integer (a literal, `let static`, or static-function call)")
-                    // Streaming state formers (clause 2 of the staging
-                    // contract, arbitrary order): mstate/mstate_merge bind
-                    // compile-time state objects; mstate_cumulants freezes
+                    // Streaming state formers: mstate/mstate_merge bind compile-time state objects; mstate_cumulants freezes
                     // one into destructured cumulant tensors.
                     | DeclLet { Pattern = { Kind = PatternKind.PatVar sName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "mstate" }, args) } } when active "mstate" ->
                         elabMState ctx d.Span sName args |> Result.map (fun (nds, info) -> (ds @ nds, dists, Map.add sName info mstates))
@@ -2884,16 +2602,11 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                         elabMStateMerge ctx d.Span outName mstates args |> Result.map (fun (nds, info) -> (ds @ nds, dists, Map.add outName info mstates))
                     | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "mstate_cumulants" }, args) } } as b) when active "mstate_cumulants" ->
                         elabMStateCumulants ctx d.Span b mstates args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
-                    // cumulant(d, k) flows through untouched: it is a
-                    // checker-level projection on the Dist-typed value that
-                    // distPackDecl binds (TypeCheck.inferCumulantProj — the
-                    // order guard is a type error there).
+                    // cumulant(d, k) flows through untouched: it is a checker-level projection on the Dist-typed value that
+                    // distPackDecl binds (TypeCheck.inferCumulantProj).
                     | _ -> Ok (ds @ [d], dists, mstates)))
                 (Ok ([], Map.empty, Map.empty))
-        // Pass 3: any surviving former reference is misplaced — the v1
-        // contract is decl-RHS only, and `independent` only as a consumed
-        // declaration. Fail with guidance rather than letting typecheck
-        // report an unbound name.
+        // Pass 3: any surviving former reference is misplaced -- formers are decl-RHS only, `independent` only as a consumed declaration.
         expanded |> Result.bind (fun (ds, dists, _mstates) ->
             let activeFormers = formerNames |> Set.filter active
             let misplaced =
@@ -2906,23 +2619,17 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
             if misplaced then
                 Error "moments/comoments must be the entire right-hand side of a top-level let (moments(A, k) as a nested expression is deferred); independent(X, Y) must be a top-level `let _ = ppl.independent(X, Y)` declaration"
             else
-                // Export this module's independence state for the checker:
-                // the declared relation gates Dist ± dispatch and call-site
+                // Export independence state for the checker: the declared relation gates Dist +- dispatch and call-site
                 // discharge; dist sources seed value provenance.
                 Independence.addDeclared indep
                 Independence.addSources (dists |> Map.map (fun _ info -> info.Sources))
-                // Every dist, packed or not — Ide.fs only consults this for
-                // names the typed program has no binding under, so the
-                // packed ones' real types keep winning.
+                // Every dist, packed or not -- Ide.fs only consults this for names with no binding, so packed ones' real types win.
                 IdeDists.add (dists |> Map.map (fun _ info -> (info.Order, info.Components)))
                 Ok ds)
 
-/// Import-gated wrapper. With no `import ppl` in the module, PPL elaboration
-/// is a no-op — bare former names are left unbound (a normal type error),
-/// never rewritten. With an alias in scope, the qualified surface
-/// (`ppl.moments(...)`, `ppl.cumulant(...)`) is normalized to the internal
-/// forms the core passes and the checker recognize, then the core runs
-/// unchanged. The `import ppl` decl itself is consumed here.
+/// Import-gated wrapper. With no `import ppl` in the module, PPL elaboration is a no-op -- bare former names are left unbound.
+/// With an alias in scope, the qualified surface (`ppl.moments(...)`, `ppl.cumulant(...)`) is normalized to the internal
+/// forms the core passes and the checker recognize. The `import ppl` decl itself is consumed here.
 let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
     pplAliasesOf decls |> Result.bind (fun aliases ->
         if Set.isEmpty aliases then Ok decls
@@ -2932,12 +2639,11 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             |> List.map (stripDecl aliases)
             |> expandModuleCore)
 
-/// Entry point: elaborate PPL formers across a program. Runs after ML-op
-/// elaboration and before grad expansion, so grad() differentiates the
-/// generated pipelines as plain Blade source.
+/// Entry point: elaborate PPL formers across a program. Runs after ML-op elaboration and before grad expansion, so grad()
+/// differentiates the generated pipelines as plain Blade source.
 let private expandStr (program: Program) : Result<Program, string> =
     // Register the `indep` where-clause handler (idempotent) and start a
-    // fresh independence state for this compilation — expand always runs
+    // fresh independence state for this compilation -- expand always runs
     // before checkProgram in the same async flow, so the checker sees this
     // program's declared relation and dist sources.
     Independence.register ()
@@ -2950,9 +2656,8 @@ let private expandStr (program: Program) : Result<Program, string> =
         (Ok [])
     |> Result.map (fun ms -> { program with Modules = ms })
 
-/// Boundary: string-errored internals -> coded diagnostics. The span is the
-/// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
-/// failure points at the offending declaration.
+/// Boundary: string-errored internals -> coded diagnostics. The span is the ambient synthSpan -- stamped per-decl by expandStr,
+/// so a mid-elaboration failure points at the offending declaration.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
     Blade.Ast.synthSpan <- Blade.Ast.noSpan
     expandStr program

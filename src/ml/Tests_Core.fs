@@ -80,28 +80,28 @@ module Tests_Core =
 
         section "core: tensor-product spec algebra (tp_spec / hom_dim)"
 
-        // Completeness of the CG decomposition: dim(V1 ⊗ V2) is preserved.
+        // Completeness of the CG decomposition: dim(V1 (x) V2) is preserved.
         let sh1 = shSpec 1
         let sh2 = shSpec 2
-        check "tpSpec completeness (sh1 ⊗ sh1)"
+        check "tpSpec completeness (sh1 (x) sh1)"
             (totalDim (tpSpec sh1 sh1) = totalDim sh1 * totalDim sh1)
-        check "tpSpec completeness (spec60 ⊗ sh2)"
+        check "tpSpec completeness (spec60 (x) sh2)"
             (totalDim (tpSpec spec60 sh2) = totalDim spec60 * totalDim sh2)
         check "tpSpec completeness (asymmetric mults)"
             (let a = mkSpec [ (1, Odd, 2) ]
              let b = mkSpec [ (2, Even, 3) ]
              totalDim (tpSpec a b) = totalDim a * totalDim b)
 
-        // Hand-computed canonical decomposition of sh_spec(1) ⊗ sh_spec(1):
-        // (0e+1o) ⊗ (0e+1o) = 0e·0e + 2·(0e·1o) + 1o·1o
-        //                   = 0e + 2×1o + (0e+1e+2e) → 2×0e, 1×1e, 2×1o, 1×2e.
-        check "tpSpec (sh1 ⊗ sh1) canonical value"
+        // Hand-computed canonical decomposition of sh_spec(1) (x) sh_spec(1):
+        // (0e+1o) (x) (0e+1o) = 0e*0e + 2*(0e*1o) + 1o*1o
+        //                   = 0e + 2x1o + (0e+1e+2e) -> 2x0e, 1x1e, 2x1o, 1x2e.
+        check "tpSpec (sh1 (x) sh1) canonical value"
             (tpSpec sh1 sh1 = mkSpec [ (0, Even, 2); (1, Even, 1); (1, Odd, 2); (2, Even, 1) ])
 
-        // 1o ⊗ 1o = 0e + 1e + 2e: the cross product lands in l=1 EVEN
-        // (axial vector) — the physics smoke test of the parity rule.
+        // 1o (x) 1o = 0e + 1e + 2e: the cross product lands in l=1 EVEN
+        // (axial vector) -- the physics smoke test of the parity rule.
         let cross = tpSpec (mkSpec [ (1, Odd, 1) ]) (mkSpec [ (1, Odd, 1) ])
-        check "tpSpec (1o ⊗ 1o) = 0e + 1e + 2e"
+        check "tpSpec (1o (x) 1o) = 0e + 1e + 2e"
             (cross = mkSpec [ (0, Even, 1); (1, Even, 1); (2, Even, 1) ])
 
         // Schur dimension of Hom_G.

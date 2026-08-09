@@ -1,76 +1,57 @@
-/// The `where ml.equiv(G)` discipline: a function carrying the (normalized)
-/// `__ml_equiv` conjunct is PROVED equivariant by construction — its body
+/// The `where ml.equiv(G)` discipline: a function carrying the normalized
+/// `__ml_equiv` conjunct is PROVED equivariant by construction -- its body
 /// may compose only equivariance-preserving operations. The judgment is an
 /// abstract interpretation over the surface AST, run by MLElaborate at the
 /// seam between pass 1 (sizing normalization + resolveStatics) and pass 2
 /// (op rewriting), where `ml.*` op calls are still surface-visible and
-/// specs resolve through the SAME static machinery elaboration uses.
+/// resolve through the same static machinery elaboration uses.
 ///
 /// The certificate is a conditional theorem: IF every representation-typed
-/// argument actually transforms as its declared IrrepsIdx spec (and, for
-/// y_to, the coordinate scalars are the components of the standard vector),
-/// and invariant arguments (weights included) are held fixed, THEN the
-/// result transforms as its declared spec. Violations are BL4008 at the
-/// offending expression's span.
+/// argument transforms as its declared IrrepsIdx spec (and, for y_to, the
+/// coordinate scalars are components of the standard vector), and invariant
+/// arguments (weights included) are held fixed, THEN the result transforms
+/// as its declared spec. Violations are BL4008.
 ///
-/// Abstract value domain:
-///   Rep spec — transforms as the block-diagonal rep described by spec;
-///   Inv shape — invariant (scalars, plain arrays, weights, norms). The
-///              shape refinement is load-bearing in exactly one place: an
-///              invariant may SCALE a rep only when it is provably a
-///              scalar, since an elementwise product with an array is a
-///              diagonal matrix and does not commute with the action;
-///   Opaque   — unclassifiable; rejected wherever it meets a rep-relevant
-///              position (op argument, return value).
+/// Abstract value domain: Rep spec (transforms as the block-diagonal rep
+/// described by spec); Inv shape (invariant -- scalars, arrays, weights,
+/// norms; may SCALE a rep only when provably a scalar, since an elementwise
+/// product with an array is a diagonal matrix that does not commute with the
+/// action); Opaque (unclassifiable, rejected at every rep-relevant position).
 ///
-/// ---------------------------------------------------------------------------
-/// TWO BLOCK-SPEC MEMBERS, ONE LATTICE (stage 5b-ii)
-/// ---------------------------------------------------------------------------
-/// `Group` is O3 | SO3 | Point of <registry name>, and a `Rep`'s payload says
-/// which block-spec family describes the transformation law: an O(3) irreps
-/// spec (l, parity, mult) or a point-group spec (LABEL_NAME, mult) against a
-/// frozen character table. §3.6's "no fourth walker" decision: the polarity
-/// table of the point-group discipline MATCHES this one at every arm (unlike
-/// Sₙ, which is a sibling registry member precisely because it diverges), so
-/// the second member is arms in this file rather than a walker beside it.
+/// TWO BLOCK-SPEC MEMBERS, ONE LATTICE. `Group` is O3 | SO3 | Point of
+/// <registry name>; a `Rep`'s payload says which block-spec family describes
+/// the law -- an O(3) irreps spec (l, parity, mult) or a point-group spec
+/// (LABEL_NAME, mult) against a frozen character table. The point-group
+/// polarity table matches this one at every arm (unlike S_n, which diverges
+/// and is a sibling registry member instead), so the second member is arms
+/// here, not a walker beside it.
 ///
-/// THE ASYMMETRY THAT DECIDES THE SIGNATURE RULES. Modules restrict along
-/// subgroup INCLUSIONS, and only in that direction:
-///
-///   * every registered point group IS a subgroup of O(3) (its generators are
-///     orthogonal matrices), so an `IrrepsIdx<spec>` space carries a genuine,
-///     generally NONTRIVIAL action of C4/D4 by restriction. Classifying such a
-///     parameter `Inv` under `equiv(C4)` would assert that a vector is
-///     C4-invariant — a false claim about the only action in the room. The
-///     restriction has to be DECOMPOSED into the group's own labels before the
-///     value can be named here, and that decomposition is `ml.restrict`
-///     (§3.6, named-not-shipped). So: REJECTED at the certified signature.
-///   * a `PgIrrepsIdx<C4, spec>` space carries no O(3) action at all — there is
-///     no functor the other way (induction changes the space; nothing extends a
-///     C4-module to an O(3)-module on the same coordinates). "Held fixed" is
-///     therefore the only available reading, and it is a hypothesis the caller
-///     can genuinely discharge, exactly like a weight buffer. So: `Inv` under
-///     equiv(O3)/equiv(SO3), which is 5b-i's behavior, unchanged here.
-///   * between two point groups the same criterion would need subgroup-
-///     inclusion data (C4 ⊂ D4 is real), and the registry carries none: it
-///     knows each group's table and no map between tables. A pg parameter whose
-///     group differs from the certificate's is therefore REJECTED — the
-///     conservative arm of the criterion, and the same "certificates do not
-///     transfer" family as a cross-group certified call.
+/// THE ASYMMETRY THAT DECIDES THE SIGNATURE RULES. Every registered point
+/// group IS a subgroup of O(3), so an `IrrepsIdx<spec>` space carries a
+/// genuine, generally NONTRIVIAL action of C4/D4 by restriction, and
+/// classifying such a parameter `Inv` under `equiv(C4)` would falsely assert
+/// C4-invariance -- it must first be DECOMPOSED into the group's own labels
+/// (`ml.restrict`, named-not-shipped), so it is REJECTED at the signature. A
+/// `PgIrrepsIdx<C4, spec>` space carries no O(3) action at all, so "held
+/// fixed" is the only reading, a hypothesis the caller can discharge like a
+/// weight buffer: `Inv` under equiv(O3)/equiv(SO3). Between two point groups
+/// the registry has no subgroup-inclusion data, so a pg parameter whose
+/// group differs from the certificate's is REJECTED -- the same
+/// "certificates do not transfer" family as a cross-group call.
 module Blade.ML.Equiv
 
 open Blade.Ast
 open Blade.StaticEval
 open Blade.ML.Spec
-// The walker shell (stage 5c): freeVars / patternVars / bindPatternVars /
-// judgeEach / conjunctsOf — the syntactic walk shared verbatim with
-// MLGalilean and MLPerm. Every RULE below is this discipline's own.
+// The walker shell: freeVars / patternVars / bindPatternVars / judgeEach /
+// conjunctsOf -- the syntactic walk shared verbatim with MLGalilean and
+// MLPerm. Every RULE below is this discipline's own.
 open Blade.ML.CertShell
 
-/// The engine's failure text, which this file no longer owns alone: the same
-/// four constructors are called by `MLPolyExtractTyped`, which reaches the same
+/// The engine's failure text, shared (not owned) by this file: the same four
+/// constructors are called by `MLPolyExtractTyped`, reaching the same
 /// `DischargeFailure` / `LieFailure` / `InversionFailure` records from the
-/// typed front half. See that module's header for why one copy and not two.
+/// typed front half -- hence one copy, not two.
 module EM = Blade.ML.EquivMessages
 
 type Group =
@@ -79,32 +60,29 @@ type Group =
     /// A registered point group, by MLPointSpec registry name (C4, D4).
     | Point of string
 
-/// The payload of a `Rep` status — WHICH block-spec family describes the
-/// value's transformation law. The two cases never meet: a certificate names
-/// one group, and `statusOfType` admits only that group's index family, so a
-/// judgment is entirely within one member. (Keeping them in one union rather
-/// than parameterizing `RepStatus` is what lets every arm below — add, scale,
-/// if-join, escape — stay one rule instead of two.)
+/// The payload of a `Rep` status -- WHICH block-spec family describes the
+/// value's transformation law. The two cases never meet (a certificate names
+/// one group, and `statusOfType` admits only that group's index family), so
+/// one union rather than a parameterized `RepStatus` lets every arm below --
+/// add, scale, if-join, escape -- stay one rule instead of two.
 type RepSpec =
     | O3Spec of Spec
     | PgSpec of string * (string * int) list
 
 /// Shape refinement carried by `Inv`. The rep lattice alone cannot decide the
-/// scaling rule: `rep * c` is equivariant when `c` is a SCALAR, because a
-/// scalar commutes with every block of the action; `rep * w` for an invariant
-/// ARRAY of the same extent scales each component independently, and a
-/// diagonal matrix with unequal entries does not commute with D^l. So an
-/// invariant records whether it is provably 0-dimensional. This is the same
-/// distinction MLPolyExtract gets structurally from VScalar-vs-VVec (its
-/// "scaling an array is admitted only by an INVARIANT scalar" arm); the
-/// abstract-interpretation walker has to carry it explicitly.
+/// scaling rule: `rep * c` is equivariant when `c` is a SCALAR (it commutes
+/// with every block); `rep * w` for an invariant ARRAY of the same extent
+/// scales each component independently, and a diagonal matrix with unequal
+/// entries does not commute with D^l. So an invariant records whether it is
+/// provably 0-dimensional, the same distinction MLPolyExtract gets
+/// structurally from VScalar-vs-VVec.
 type InvShape =
     /// Provably a scalar (scalar annotation, literal, full-rank element read).
     | InvScalar
     /// Provably an aggregate; `Some r` when the rank is known from a type
     /// annotation, `None` for aggregates whose rank was not established.
     | InvAgg of rank: int option
-    /// Shape not established — treated as non-scalar wherever scalarity is
+    /// Shape not established -- treated as non-scalar wherever scalarity is
     /// load-bearing.
     | InvShapeUnknown
 
@@ -142,8 +120,8 @@ let private joinStatus (a: RepStatus) (b: RepStatus) : RepStatus option =
     | _ -> None
 
 /// Statuses agree for certification purposes. Invariant SHAPE is deliberately
-/// not part of the comparison — it exists only to decide the scaling rule;
-/// disagreeing shapes are the type checker's to report.
+/// excluded -- it exists only to decide the scaling rule; disagreeing shapes
+/// are the type checker's to report.
 let private statusAgrees (a: RepStatus) (b: RepStatus) : bool =
     joinStatus a b |> Option.isSome
 
@@ -154,9 +132,7 @@ type CertSig = {
     Return: RepStatus
 }
 
-// ============================================================================
 // Helpers
-// ============================================================================
 
 let private fuel = 100_000
 
@@ -176,10 +152,9 @@ let private pgSpecStr (s: (string * int) list) : string =
     |> String.concat ", "
     |> sprintf "[%s]"
 
-/// How a rep payload names itself in a diagnostic — the INDEX TYPE the user
-/// would have to write. The O(3) rendering is byte-frozen: every message below
-/// that used to interpolate `IrrepsIdx<%s>` around `specStr` now interpolates
-/// this, and must come out identical.
+/// How a rep payload names itself in a diagnostic -- the INDEX TYPE the user
+/// would have to write. The O(3) rendering is byte-frozen: every message
+/// below interpolates this, and must come out identical.
 let private repStr (r: RepSpec) : string =
     match r with
     | O3Spec s -> sprintf "IrrepsIdx<%s>" (specStr s)
@@ -200,9 +175,8 @@ let private shapeStr (sh: InvShape) : string =
     | InvAgg _ -> "an array"
     | InvShapeUnknown -> "of unknown shape"
 
-/// Names TypeCheck treats as builtin scalars (mirror of its isBuiltinScalar,
-/// minus the aggregate constructors). Used only to establish that an
-/// annotation is 0-dimensional.
+/// Names TypeCheck treats as builtin scalars (mirrors isBuiltinScalar minus
+/// the aggregate constructors). Used only to establish 0-dimensionality.
 let private isBuiltinScalarName (n: string) =
     List.contains n
         [ "Int"; "Int32"; "Int64"
@@ -229,26 +203,24 @@ let private specOfArg (statics: StaticEnv) (what: string) (e: Expr) : Result<Spe
     staticArgValue statics e
     |> Result.bind (Blade.ML.Statics.specOfStatic what)
 
-/// Mirror of MLElaborate.pgGroupArg (keep in sync): the GROUP argument of a
-/// point-group op is a bare registered name, a string literal, or a `let
-/// static` string binding. Resolution against the registry is the CALLER's —
-/// here the only question is which name was written.
+/// Mirror of MLElaborate.pgGroupArg: the GROUP argument of a point-group op
+/// is a bare registered name, a string literal, or a `let static` string
+/// binding. Resolution against the registry is the CALLER's.
 let private pgGroupArgName (statics: StaticEnv) (e: Expr) : Result<string, string> =
     match e.Kind with
     | ExprKind.ExprLit (LitString s) -> Ok s
     | ExprKind.ExprVar name ->
         match Map.tryFind name statics.Values with
         | Some (SVString s) -> Ok s
-        | Some _ -> Error (sprintf "'%s' is a `let static` binding but not a STRING — GROUP names a registered point group, e.g. \"C4\"" name)
+        | Some _ -> Error (sprintf "'%s' is a `let static` binding but not a STRING -- GROUP names a registered point group, e.g. \"C4\"" name)
         | None -> Ok name
     | _ -> Error "GROUP must be a point-group name (a bare C4 / D4, a string literal, or a `let static` string binding)"
 
 /// THE TRIVIAL LABEL, identified from the frozen table and never by name: the
-/// one whose every GENERATOR matrix is the identity (generators suffice —
-/// a product of identities is an identity). Reading the name would get D4
-/// exactly wrong: A2, B1 and B2 are 1-DIMENSIONAL but not invariant, since each
-/// flips under some generator, and a cell of one of them is a pseudoscalar in
-/// every sense that matters here.
+/// one whose every GENERATOR matrix is the identity (a product of identities
+/// is an identity, so generators suffice). Reading the name would get D4
+/// wrong: A2, B1 and B2 are 1-DIMENSIONAL but not invariant -- each flips
+/// under some generator, so a cell of one is a pseudoscalar.
 let private isTrivialLabel (grp: Blade.ML.PointSpec.PointGroup) (label: string) : bool =
     let ir = Blade.ML.PointSpec.pgIrrep grp label
     ir.DimR = 1
@@ -256,14 +228,12 @@ let private isTrivialLabel (grp: Blade.ML.PointSpec.PointGroup) (label: string) 
 
 /// Static-offset read admissibility: under O3 only (l=0, even) blocks hold
 /// full invariants; under SO3 any l=0 block does (pseudoscalars are
-/// SO(3)-invariant). l=0 blocks have dim 1, so block b spans
-/// [start_b .. start_b + mult_b).
-///
-/// The point-group reading is the SAME conditional theorem one member over: the
-/// invariant cells are those of a TRIVIAL label (dim 1 with every generator the
-/// identity), and the O3/SO3 parity split replays as the trivial/non-trivial
-/// character split — at D4 the A2, B1, B2 cells are 1-dimensional and still
-/// basis-dependent, which is the pseudoscalar asymmetry as table data.
+/// SO(3)-invariant); l=0 blocks have dim 1, so block b spans [start_b ..
+/// start_b + mult_b). The point-group reading replays the same theorem:
+/// invariant cells are those of a TRIVIAL label, and the O3/SO3 parity split
+/// becomes the trivial/non-trivial character split -- at D4 the A2, B1, B2
+/// cells are 1-dimensional and still basis-dependent, the pseudoscalar
+/// asymmetry as table data.
 let private invariantOffsets (g: Group) (r: RepSpec) : Set<int> =
     match g, r with
     | (O3 | SO3), O3Spec s ->
@@ -282,13 +252,10 @@ let private invariantOffsets (g: Group) (r: RepSpec) : Set<int> =
                 yield! [ starts.[b] .. starts.[b] + mult - 1 ] ]
         |> Set.ofList
     // A payload from the other member cannot arise (statusOfType admits only
-    // the certificate group's index family), and if it ever did, NO offset is
-    // readable.
+    // the certificate group's index family); if it ever did, NO offset reads.
     | _ -> Set.empty
 
-// ============================================================================
 // Certified-signature table
-// ============================================================================
 
 /// Type aliases of this module (one-level chase for `type X = IrrepsIdx<..>`
 /// inside Array annotations, mirroring registerTypeDecl's transparency).
@@ -307,14 +274,13 @@ let private parseGroup (funcName: string) (args: string list) : Result<Group, st
     | [ "O3" ] -> Ok O3
     | [ "SO3" ] -> Ok SO3
     | [ g ] when List.contains g Blade.ML.PointSpec.pointGroupNames -> Ok (Point g)
-    | [ g ] -> Error (sprintf "function '%s': equiv(%s) — unknown group '%s'; supported: O3, SO3, %s" funcName g g pgRoster)
-    | _ -> Error (sprintf "function '%s': equiv expects exactly one group argument — equiv(O3), equiv(SO3), or a registered point group (%s)" funcName pgRoster)
+    | [ g ] -> Error (sprintf "function '%s': equiv(%s) -- unknown group '%s'; supported: O3, SO3, %s" funcName g g pgRoster)
+    | _ -> Error (sprintf "function '%s': equiv expects exactly one group argument -- equiv(O3), equiv(SO3), or a registered point group (%s)" funcName pgRoster)
 
 /// The restricted spec as it would READ in an annotation, or "" when the spec
-/// argument does not resolve. A diagnostic ENRICHMENT and nothing else — it is
-/// wrapped in a try/with because a speculative inference run may never crash on
-/// a malformed static, and its absence costs the message one sentence and no
-/// verdict.
+/// argument does not resolve. A diagnostic ENRICHMENT only -- wrapped in a
+/// try/with since a speculative inference run may never crash on a malformed
+/// static, and its absence costs the message one sentence and no verdict.
 let private restrictHint (pg: string) (statics: StaticEnv) (specExpr: Expr) : string =
     try
         match evalExpr statics fuel specExpr
@@ -327,40 +293,33 @@ let private restrictHint (pg: string) (statics: StaticEnv) (specExpr: Expr) : st
         | Error _ -> ""
     with _ -> ""
 
-/// The two signature-level refusals of the point-group arm, both instances of
-/// the header's restriction argument. Stated once so the annotation position
-/// and the alias-body position cannot drift apart.
-///
-/// STAGE A3 CHANGED WHAT IS MISSING, NOT THE VERDICT. The branching rule is
-/// shipped (MLPointSpec.restrictSpec, surfaced as `ml.pg_restrict`), so the
-/// message can now NAME the point-group module this parameter's space becomes.
-/// What it still may not do is classify the parameter `Rep (PgSpec ...)` on the
-/// strength of that name, because the two block-spec members lay the SAME
-/// module out differently: O(3) orders a block by m = −l..l, so its
-/// G-invariant m = 0 component sits in the MIDDLE with the m-pairs straddling
-/// it, while a point-group block is contiguous (`pgBlockStarts`). The
-/// disagreement is not asymptotic — it is already total at l = 1 under C4
-/// (invariant at index 1 vs index 0) and no ORDERING of the restricted spec
-/// repairs it, since the E pair is split by the A component. So the view is a
-/// genuine change of basis, a permutation with signs, and until a value-level
-/// op emits it the refusal stands.
+/// The two signature-level refusals of the point-group arm (annotation
+/// position and alias-body position), stated once so they cannot drift
+/// apart. The message can NAME the point-group module a parameter's space
+/// becomes (MLPointSpec.restrictSpec / `ml.pg_restrict`), but may not
+/// classify it `Rep (PgSpec ...)` on that strength: O(3) orders a block by m
+/// = -l..l, so its G-invariant m = 0 component sits in the MIDDLE with the
+/// m-pairs straddling it, while a point-group block is contiguous
+/// (`pgBlockStarts`) -- already disagreeing at l = 1 under C4 (invariant at
+/// index 1 vs index 0), and no ORDERING of the restricted spec repairs it,
+/// since the E pair is split by the A component. Reading the buffer at the
+/// restricted type needs a genuine change of basis, a value-level op this
+/// checker does not ship, so the refusal stands.
 let private restrictDeferral (pg: string) (hint: string) : string =
-    sprintf "an IrrepsIdx parameter under equiv(%s) names an O(3) representation space, and %s ACTS on it — by restriction along the inclusion %s -> O(3), nontrivially on every l > 0 block. Classifying it invariant would claim a vector is %s-invariant, so the judgment refuses instead.%s A decomposition is NOT a reinterpretation, though: the O(3) layout orders every block by m = -l..l, so the invariant m = 0 component sits in the MIDDLE of the block while a point-group block is contiguous, and the two layouts already disagree at l = 1. Reading this buffer at the restricted type needs a genuine change of basis — a permutation with signs — which is a value-level op this round does not ship. Declare the parameter as Array<_ like PgIrrepsIdx<%s, SPEC>> over data that is already in %s's layout"
+    sprintf "an IrrepsIdx parameter under equiv(%s) names an O(3) representation space, and %s ACTS on it -- by restriction along the inclusion %s -> O(3), nontrivially on every l > 0 block. Classifying it invariant would claim a vector is %s-invariant, so the judgment refuses instead.%s A decomposition is NOT a reinterpretation, though: the O(3) layout orders every block by m = -l..l, so the invariant m = 0 component sits in the MIDDLE of the block while a point-group block is contiguous, and the two layouts already disagree at l = 1. Reading this buffer at the restricted type needs a genuine change of basis -- a permutation with signs -- which is a value-level op this round does not ship. Declare the parameter as Array<_ like PgIrrepsIdx<%s, SPEC>> over data that is already in %s's layout"
         pg pg pg pg hint pg pg
 
 let private pgGroupMismatch (declared: string) (pg: string) : string =
-    sprintf "parameter type PgIrrepsIdx<%s, ...> names point group %s, but this function is certified for %s — certificates do not transfer between groups. This checker knows each registered group's frozen table and NO map between two of them, so neither a restriction nor an induction of a %s-module to %s is available; declare the parameter over %s"
+    sprintf "parameter type PgIrrepsIdx<%s, ...> names point group %s, but this function is certified for %s -- certificates do not transfer between groups. This checker knows each registered group's frozen table and NO map between two of them, so neither a restriction nor an induction of a %s-module to %s is available; declare the parameter over %s"
         declared declared pg declared pg pg
 
 /// Classify a signature annotation. Certified functions must be fully
 /// annotated; Rep needs `Array<T like IrrepsIdx<spec>>` (directly or via a
-/// one-level type alias), scalars and plain arrays are Inv.
-///
-/// The group SELECTS the live index family: under O3/SO3 that is `IrrepsIdx`
-/// and a `PgIrrepsIdx` annotation is an ordinary invariant buffer (the header's
-/// asymmetry, and 5b-i's behavior verbatim); under `Point g` it is
-/// `PgIrrepsIdx<g, _>` and both an `IrrepsIdx` annotation and another group's
-/// `PgIrrepsIdx` are refusals.
+/// one-level type alias), scalars and plain arrays are Inv. The group
+/// SELECTS the live index family: under O3/SO3 that is `IrrepsIdx` and a
+/// `PgIrrepsIdx` annotation is an ordinary invariant buffer (the header's
+/// asymmetry); under `Point g` it is `PgIrrepsIdx<g, _>` and both an
+/// `IrrepsIdx` annotation and another group's `PgIrrepsIdx` are refusals.
 let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (t: TypeExpr)
     : Result<RepStatus, string> =
     match t with
@@ -392,11 +351,29 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
         match Map.tryFind n aliases with
         | Some body -> statusOfType g aliases statics (TyArray (TyNamed ("Float", []), [ body ]))
         // A builtin scalar name is provably 0-dimensional; any other named
-        // type is invariant but of unestablished shape (it may well be an
+        // type is invariant but of unestablished shape (may be an
         // aggregate), so it may not scale a rep.
         | None when isBuiltinScalarName n -> Ok (Inv InvScalar)
         | None -> Ok (Inv InvShapeUnknown)
+    // A builtin scalar name carrying ARGUMENTS is still that scalar: a unit
+    // (`Float<meters>`) or index tag (`Nat<LatIdx>`) refines a 0-dimensional
+    // type, not a shape change, and all readings lower to a scalar. The
+    // argument-FREE form alone would let a unit annotation decide an
+    // equivariance verdict (`rep * s` wrongly refused for a scalar `s`) --
+    // the typed twin cannot hit this, since DeduceRep.classifyTypeR sees
+    // through `IRTUnitAnnotated`/`IRTIdxTagged` on the LOWERED type.
+    | TyNamed (n, _) when isBuiltinScalarName n -> Ok (Inv InvScalar)
     | TyNamed (_, _) -> Ok (Inv InvShapeUnknown)
+    // A bounded primitive is its base type: `min=`/`max=` (TyBounded) refine
+    // the base -- a VALUE predicate, not a coordinate -- and erase before
+    // codegen (`Float<min=0, max=1>` lowers exactly as `Float`), so two
+    // annotations lowering to the same runtime type need the same verdict.
+    // Without this arm a bounded parameter hit the catch-all and its Error
+    // skipped the whole function, the same cross-lattice leak the unit
+    // annotation had. Chasing the base composes with the unit reading:
+    // `Float<meters, min=0, max=1>` keeps the unit as a positional argument
+    // on the inner `TyNamed` node.
+    | TyBounded (baseTy, _, _) -> statusOfType g aliases statics baseTy
     | TyIrrepsIdx specExpr ->
         // alias body position (`type X = IrrepsIdx<s>` chased above)
         match g with
@@ -407,7 +384,7 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
             |> Result.map (O3Spec >> Rep)
     | TyPgIrrepsIdx (gn, specExpr) when isPointGroup g ->
         // the pg twin of the arm above; under O3/SO3 this annotation falls
-        // through to the default arm exactly as it did before 5b-ii.
+        // through to the default arm.
         let pg = groupStr g
         if gn <> pg then Error (pgGroupMismatch gn pg)
         else
@@ -417,14 +394,12 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
     | TyInt32 | TyInt64 | TyFloat32 | TyFloat64 | TyBool | TyComplex128 -> Ok (Inv InvScalar)
     | _ -> Error "cannot classify this annotation in an equiv-certified signature (supported: scalars, plain arrays, Array<_ like IrrepsIdx<spec>>)"
 
-/// Classify ONE function's signature under a group. This is the shared core
-/// of the two modes the signature rules serve: CHECKING (buildCertTable, where
-/// the group comes from the written conjunct) and DEDUCTION (stage 6a's
-/// inference channel, where the group is a hypothesis). Both must agree
-/// EXACTLY on what "fully annotated" and "classifies Rep" mean — a proposal
-/// the checker would then refuse at the signature would break Propose ⊆
-/// Check-accept before the body is ever judged — so there is one copy.
-/// Errors are the human-readable strings buildCertTable wraps in BL4008;
+/// Classify ONE function's signature under a group -- shared by CHECKING
+/// (buildCertTable, group from the written conjunct) and DEDUCTION (the
+/// inference channel, group as a hypothesis). Both must agree EXACTLY on
+/// what "fully annotated" and "classifies Rep" mean, or a proposal the
+/// checker would refuse at the signature breaks Propose subset-of
+/// Check-accept. Errors are the strings buildCertTable wraps in BL4008;
 /// inference discards them and stays silent.
 let private certSigOf (g: Group) (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (fd: FunctionDecl)
     : Result<CertSig, string> =
@@ -468,7 +443,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
         acc |> Result.bind (fun table ->
             let fail msg = Error (bl4008 span msg)
             match conjs with
-            | _ :: _ :: _ -> fail (sprintf "function '%s': duplicate equiv constraints — declare exactly one group" fd.Name)
+            | _ :: _ :: _ -> fail (sprintf "function '%s': duplicate equiv constraints -- declare exactly one group" fd.Name)
             | [ (_, gArgs) ] ->
                 match parseGroup fd.Name gArgs with
                 | Error m -> fail m
@@ -479,9 +454,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
             | [] -> Ok table))
         (Ok Map.empty)
 
-// ============================================================================
 // The judgment
-// ============================================================================
 
 /// Shape of a module-level binding read syntactically from its value. Only
 /// forms whose shape is manifest answer anything but `InvShapeUnknown`.
@@ -494,9 +467,9 @@ let rec private syntacticShape (e: Expr) : InvShape =
     | _ -> InvShapeUnknown
 
 /// Shapes of module-level `let`/`static` bindings. Globals stay invariant by
-/// the conditional-theorem reading (they are held fixed), but their SHAPE
-/// decides whether they may scale a rep, so a global array is no longer waved
-/// through as if it were a scalar.
+/// the conditional-theorem reading (held fixed), but their SHAPE decides
+/// whether they may scale a rep, so a global array is not waved through as
+/// if it were a scalar.
 let buildGlobalShapes (g: Group) (statics: StaticEnv) (decls: Located<Decl> list) : Map<string, InvShape> =
     let aliases = aliasMapOf decls
     let shapeOf (b: Binding) =
@@ -530,12 +503,11 @@ type private Ctx = {
     Globals: Map<string, InvShape>
 }
 
-/// Every `ml.*` operation whose arms below are stated in O(3) irreps specs —
+/// Every `ml.*` operation whose arms below are stated in O(3) irreps specs --
 /// the ops that MAKE, CONSUME or RESHAPE an `IrrepsIdx` value. Under a
 /// point-group certificate they are refused BY NAME (a targeted message beats
-/// the generic default arm's "not an equivariance-preserving operation", which
-/// would fire only when an argument happened to be rep-typed). Under
-/// equiv(O3)/equiv(SO3) this list is never consulted.
+/// the generic default arm, which would fire only when an argument happened
+/// to be rep-typed). Under equiv(O3)/equiv(SO3) this list is never consulted.
 let private o3OpNames =
     [ "y_to"; "tensor_product"; "linear"; "gated"; "scalars"; "norms"
       "derive_linear"; "derive_tp"; "derive_sym_tp"; "derive_alt_tp"; "derive_poly"
@@ -543,8 +515,8 @@ let private o3OpNames =
       "tensor_to_irreps"; "sym_to_irreps"; "irreps_to_sym" ]
 
 /// Shape of a folded static value. The `__ml_stat_*` sizing builtins are in
-/// the scalar-builtin list but do NOT all return scalars — sh_spec and tp_spec
-/// fold to spec TUPLES — so their shape is read from the fold, not assumed.
+/// the scalar-builtin list but do NOT all return scalars -- sh_spec and
+/// tp_spec fold to spec TUPLES -- so shape is read from the fold, not assumed.
 let private shapeOfStatic (sv: StaticValue) : InvShape =
     match sv with
     | SVInt _ | SVFloat _ | SVBool _ -> InvScalar
@@ -571,7 +543,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
                 j x |> Result.bind (fun sx ->
                     match sx with
                     | Inv _ -> Ok st
-                    | Rep _ -> reject "a representation-typed value may not be packed into a literal aggregate — the aggregate does not transform as a rep"
+                    | Rep _ -> reject "a representation-typed value may not be packed into a literal aggregate -- the aggregate does not transform as a rep"
                     | Opaque -> Ok Opaque)))
             (Ok (Inv (InvAgg None)))
     | ExprKind.ExprVar n ->
@@ -589,42 +561,39 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
     | ExprKind.ExprDotDot _ -> Ok (Inv (InvAgg None))
     | ExprKind.ExprTyped (inner, _) -> j inner
     | ExprKind.ExprUnaryOp (_, inner) -> j inner
-    // Former application must dispatch BEFORE the general binop arithmetic arm
-    // (OpApply is a BinOp constructor) — the MLGalilean/MLPerm precedent, and
-    // stage 5c catalog finding 4. Its absence was not merely the false REJECT
-    // the catalog recorded: see judgeFormerApply for the false accept it also
-    // left open.
+    // Former application must dispatch BEFORE the general binop arithmetic
+    // arm (OpApply is a BinOp constructor): see judgeFormerApply for the
+    // false accept its absence also left open, not just a false REJECT.
     | ExprKind.ExprBinOp (_, OpApply, loop, _) -> judgeFormerApply ctx env e loop
     | ExprKind.ExprBinOp (mode, op, l, r) ->
         j l |> Result.bind (fun sl ->
         j r |> Result.bind (fun sr ->
             // Outer mode ([+], [*]) cross-iterates, so the result has a
             // higher rank than either operand and cannot be the rep it was
-            // built from, whatever the operator.
+            // built from.
             let outerRep () =
-                reject "the outer-product form of this operator raises the rank of its result, so the result is not the representation its operand transforms as — use the elementwise form"
+                reject "the outer-product form of this operator raises the rank of its result, so the result is not the representation its operand transforms as -- use the elementwise form"
             let nonScalarScale sh =
-                reject (sprintf "only an invariant SCALAR may scale a representation-typed value, and this invariant is %s — an elementwise product with an array scales each component of an irrep block independently, which does not commute with the group action (scale whole blocks with the learned block-diagonal map — ml.linear under O3/SO3, ml.derive_pg_linear under a point group — or gate them with ml.gated)" (shapeStr sh))
+                reject (sprintf "only an invariant SCALAR may scale a representation-typed value, and this invariant is %s -- an elementwise product with an array scales each component of an irrep block independently, which does not commute with the group action (scale whole blocks with the learned block-diagonal map -- ml.linear under O3/SO3, ml.derive_pg_linear under a point group -- or gate them with ml.gated)" (shapeStr sh))
             match sl, sr, op with
             | (Rep _, _, _ | _, Rep _, _) when mode <> Elementwise -> outerRep ()
             | Rep s1, Rep s2, (OpAdd | OpSub) ->
                 if s1 = s2 then Ok (Rep s1)
-                else reject (sprintf "cannot add values of different representations — left transforms as %s, right as %s" (repStr s1) (repStr s2))
+                else reject (sprintf "cannot add values of different representations -- left transforms as %s, right as %s" (repStr s1) (repStr s2))
             | Rep _, Rep _, OpMul ->
-                reject "elementwise product of representation-typed values is not equivariant — use ml.tensor_product, the Clebsch-Gordan-typed contraction"
+                reject "elementwise product of representation-typed values is not equivariant -- use ml.tensor_product, the Clebsch-Gordan-typed contraction"
             | Rep _, Rep _, _ ->
                 reject "this operator is not equivariant on representation-typed values"
             // Scaling by an invariant SCALAR is the only admissible mixed
-            // form: a scalar commutes with every block of the action. An
-            // invariant ARRAY of the same extent scales each component
-            // independently, which does not — that is a false certificate,
-            // not a scaling. Shape must be PROVEN, so an unestablished shape
-            // is rejected too.
+            // form: a scalar commutes with every block. An invariant ARRAY
+            // of the same extent scales each component independently, which
+            // does not -- a false certificate, not a scaling. Shape must be
+            // PROVEN, so an unestablished shape is rejected too.
             | Rep s, Inv InvScalar, (OpMul | OpDiv) | Inv InvScalar, Rep s, OpMul -> Ok (Rep s)
             | Rep _, Inv sh, (OpMul | OpDiv) when sh <> InvScalar -> nonScalarScale sh
             | Inv sh, Rep _, OpMul when sh <> InvScalar -> nonScalarScale sh
             | (Rep _, Inv _, _) | (Inv _, Rep _, _) ->
-                reject "mixing a representation-typed value with an invariant under this operator breaks equivariance (only scaling — * and / by an invariant scalar — preserves the rep)"
+                reject "mixing a representation-typed value with an invariant under this operator breaks equivariance (only scaling -- * and / by an invariant scalar -- preserves the rep)"
             | Inv shl, Inv shr, _ ->
                 Ok (Inv (if mode = Elementwise then binShape shl shr else InvShapeUnknown))
             | Opaque, _, _ | _, Opaque, _ -> Ok Opaque))
@@ -657,16 +626,16 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
             match binding.Pattern.Kind, sv with
             | PatternKind.PatVar n, _ -> judge ctx (Map.add n sv env) body
             | _, Inv _ -> judge ctx (bindPatternVars (Inv InvShapeUnknown) env binding.Pattern) body
-            | _, _ -> reject "cannot destructure a representation-typed value — its components are basis-dependent")
+            | _, _ -> reject "cannot destructure a representation-typed value -- its components are basis-dependent")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
-        // v1: a lambda is admissible only when it never touches a rep —
-        // free vars must all be non-Rep; it is then an invariant helper.
+        // A lambda is admissible only when it never touches a rep -- free
+        // vars must all be non-Rep; it is then an invariant helper.
         let captured = freeVars (Set.ofList (ps |> List.map (fun p -> p.Name))) lamBody
         let repCapture =
             captured |> Set.toList |> List.tryFind (fun n ->
                 match Map.tryFind n env with Some (Rep _) -> true | _ -> false)
         match repCapture with
-        | Some n -> reject (sprintf "lambda captures representation-typed '%s' — factor rep work into equiv-certified functions instead" n)
+        | Some n -> reject (sprintf "lambda captures representation-typed '%s' -- factor rep work into equiv-certified functions instead" n)
         | None -> Ok (Inv InvShapeUnknown)
     | ExprKind.ExprAssign (l, r) ->
         judgeAssign ctx env e.Span l r |> Result.map (fun () -> Inv InvShapeUnknown)
@@ -677,57 +646,41 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
             | Some fe -> judge ctx env' fe
             | None -> Ok (Inv InvShapeUnknown))
     | ExprKind.ExprApp (f, args) -> judgeApp ctx env e f args
-    // --- component reads out of an INVARIANT aggregate (stage 6a, E3) --------
-    // SOUNDNESS. `Inv` in this lattice means the value is HELD FIXED by the
-    // group action — that is the conditional theorem's hypothesis, and it is
-    // what every `Inv` producer above establishes. A value that does not move
-    // has no part that moves: if the aggregate `t` is fixed and the selector is
-    // fixed, then `t[k]` / `t.f` is fixed too, i.e. invariant. So this arm
-    // never manufactures a claim the base did not already carry.
-    //
-    // The result is `InvShapeUnknown`, deliberately NOT `InvScalar`: a
-    // component of an invariant array may itself be an array, and an
-    // unestablished shape is refused by the only arm where shape is
-    // load-bearing (`nonScalarScale` — scaling a rep). So the recall this arm
-    // buys can never become a false SCALING certificate.
-    //
-    // WHAT STAYS `Opaque`, exactly as before this arm existed:
-    //   * a `Rep` base — its components are the basis-dependent numbers this
-    //     whole discipline refuses (the `x(2)` rejection, one syntax over).
-    //     Opaque rejects at every rep-relevant position and at the return
-    //     agreement check; a hard REJECT here is a behavioral tightening the
-    //     plan defers to its own round;
-    //   * an `Opaque` base — nothing is known, so nothing is claimed;
-    //   * a base whose judgment ERRORS — the error is SWALLOWED into `Opaque`,
-    //     which is precisely today's behavior (the old arm never walked the
-    //     base at all). This arm may only add accepts, never new rejects;
-    //   * a selector that is not invariant — the cell it picks would move with
-    //     the frame, the same rule array indexing is held to in `judgeAssign`.
+    // Component reads out of an INVARIANT aggregate. SOUNDNESS: `Inv` means
+    // the value is HELD FIXED by the group action, so if the aggregate `t`
+    // and the selector are both fixed, `t[k]`/`t.f` is fixed too. The result
+    // is `InvShapeUnknown`, NOT `InvScalar`, since a component of an
+    // invariant array may itself be an array, and an unestablished shape is
+    // refused by the only arm where shape is load-bearing (`nonScalarScale`),
+    // so this can never become a false SCALING certificate. Stays `Opaque`
+    // for: a `Rep` base (basis-dependent components, the `x(2)` rejection
+    // one syntax over); an `Opaque` base (nothing known, nothing claimed); a
+    // base whose judgment ERRORS (swallowed into `Opaque`, so this arm only
+    // adds accepts, never new rejects); or a non-invariant selector (the
+    // cell picked would move with the frame, as in `judgeAssign`).
     | ExprKind.ExprTupleIndex (baseE, idxE) ->
         (match j baseE, j idxE with
          | Ok (Inv _), Ok (Inv _) -> Ok (Inv InvShapeUnknown)
          | _ -> Ok Opaque)
-    // A field name is a STATIC selector (an Ident, not an expression), so there
-    // is no index to judge — the base alone decides.
+    // A field name is a STATIC selector (an Ident, not an expression), so
+    // there is no index to judge -- the base alone decides.
     | ExprKind.ExprField (baseE, _) ->
         (match j baseE with
          | Ok (Inv _) -> Ok (Inv InvShapeUnknown)
          | _ -> Ok Opaque)
-    // --- functional iteration (the post-imperative surface) ------------------
-    // The arms MLGalilean and MLPerm have carried since they were written, and
-    // this copy did not (stage 5c catalog, finding 4). Virtual arrays
-    // enumerate INDICES, and an index carries no rep structure: invariant.
+    // Functional iteration: MLGalilean and MLPerm already carry these arms.
+    // Virtual arrays enumerate INDICES, and an index carries no rep
+    // structure: invariant.
     | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprHalo _ -> Ok (Inv (InvAgg None))
     // compute is a scheduling boundary, not a value transform.
     | ExprKind.ExprCompute x -> judge ctx env x
-    // A fold over a rep sums BASIS-DEPENDENT COMPONENTS: the sum of the
-    // components of an l > 0 vector is not a rotational invariant (the norm
-    // is), so this is refused rather than mis-certified — the same verdict, on
-    // the same grounds, as raw component access. NOTE THE POLARITY against
-    // MLPerm, where a reduce over a node power IS invariant whenever the
-    // combiner is commutative, and is deferred only because v1 does not
-    // analyse the combiner.
-    | ExprKind.ExprReduce (src, _, init) ->
+    // A fold over a rep sums BASIS-DEPENDENT COMPONENTS: the sum of an l > 0
+    // vector's components is not a rotational invariant (the norm is), so
+    // this is refused on the same grounds as raw component access. NOTE THE
+    // POLARITY against MLPerm, where a reduce over a node power IS invariant
+    // whenever the combiner is commutative, deferred only because the
+    // combiner is not analysed here.
+    | ExprKind.ExprReduce (src, _, init, _) ->
         judge ctx env src |> Result.bind (fun ss ->
             (match init with
              | Some i -> judge ctx env i
@@ -736,32 +689,30 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
                 // a reduce collapses its source to one value
                 | Inv _, Inv _ -> Ok (Inv InvScalar)
                 | Rep _, _ | _, Rep _ ->
-                    Error (bl4008 e.Span (sprintf "function '%s': reduce over a representation-typed value folds basis-dependent components into a number that is not rotation-invariant — extract invariants with ml.scalars/ml.norms, or contract with ml.tensor_product" ctx.FuncName))
+                    Error (bl4008 e.Span (sprintf "function '%s': reduce over a representation-typed value folds basis-dependent components into a number that is not rotation-invariant -- extract invariants with ml.scalars/ml.norms, or contract with ml.tensor_product" ctx.FuncName))
                 | _ -> Ok Opaque))
     | _ -> Ok Opaque
 
 /// `loop <@> kernel` under the equiv judgment. A former hands its kernel the
-/// ELEMENTS of its sources, and an element of a rep is a COMPONENT — the
-/// basis-dependent number this whole discipline exists to refuse. It is the
-/// same rejection as `x(2)`, one syntax over.
+/// ELEMENTS of its sources, and an element of a rep is a COMPONENT -- the
+/// basis-dependent number this discipline exists to refuse, the same
+/// rejection as `x(2)`, one syntax over.
 ///
-/// THIS ARM CLOSED A FALSE ACCEPT, not just the false reject stage 5c
-/// catalogued. Without it `method_for(f) <@> k` fell through to the
-/// arithmetic binop arm, which judged the former source through the
-/// `| _ -> Ok Opaque` catch-all and returned Opaque for the whole
-/// application. Opaque is not a rejection — it only becomes one where it
-/// meets a status-relevant position — and a READ out of an Opaque binding
-/// takes judgeApp's uncertified-callee path, which answers Inv for invariant
-/// arguments. So `let g = method_for(f) <@> lambda(v) -> v * 2.0` followed by
-/// `g(2)` handed back a component of a rep CERTIFIED ROTATION-INVARIANT.
-/// corpus ml-equiv/049 is that program.
+/// THIS ARM CLOSES A FALSE ACCEPT, not just a false reject. Without it,
+/// `method_for(f) <@> k` fell through to the arithmetic binop arm, judging
+/// the former source through the `| _ -> Ok Opaque` catch-all and returning
+/// Opaque for the whole application; a READ out of that Opaque binding then
+/// takes judgeApp's uncertified-callee path, which answers Inv for
+/// invariant arguments -- so a binding built this way and read back later
+/// handed back a component of a rep CERTIFIED ROTATION-INVARIANT. corpus
+/// ml-equiv/049 is that program.
 ///
-/// NOTE THE POLARITY against MLGalilean's judgeFormerApply, which BINDS its
-/// source statuses to the kernel's leading parameters and lets a BVar flow in:
-/// an element of a boost-variant field is itself boost-variant, because every
-/// component shifts by the same u0, so an element of a BVar IS a BVar. An
-/// element of a rep is NOT a rep — it is one basis-dependent coordinate of one
-/// — so the same move here would be exactly the unsoundness above.
+/// NOTE THE POLARITY against MLGalilean's judgeFormerApply, which BINDS
+/// source statuses to the kernel's leading parameters and lets a BVar flow
+/// in: an element of a boost-variant field is boost-variant too, since every
+/// component shifts by the same u0. An element of a rep is NOT a rep, one
+/// basis-dependent coordinate of one -- the same move here would be exactly
+/// the unsoundness above.
 and private judgeFormerApply (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (loop: Expr)
     : Result<RepStatus, Blade.Diagnostics.Diagnostic> =
     let sources =
@@ -775,7 +726,7 @@ and private judgeFormerApply (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) 
         match srcSts |> List.tryFindIndex (function Rep _ -> true | _ -> false) with
         | Some i ->
             Error (bl4008 sources.[i].Span
-                       (sprintf "function '%s': the kernel of this former would receive COMPONENTS of a representation-typed source, which are basis-dependent numbers — extract invariants with ml.scalars/ml.norms, or contract with ml.tensor_product"
+                       (sprintf "function '%s': the kernel of this former would receive COMPONENTS of a representation-typed source, which are basis-dependent numbers -- extract invariants with ml.scalars/ml.norms, or contract with ml.tensor_product"
                             ctx.FuncName))
         | None ->
             // What the KERNEL captures, which judging the sources says nothing
@@ -786,7 +737,7 @@ and private judgeFormerApply (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) 
             match captured with
             | Some n ->
                 Error (bl4008 e.Span
-                           (sprintf "function '%s': the kernel of this former captures representation-typed '%s' — factor rep work into equiv-certified functions instead"
+                           (sprintf "function '%s': the kernel of this former captures representation-typed '%s' -- factor rep work into equiv-certified functions instead"
                                 ctx.FuncName n))
             | None ->
                 // a former builds an aggregate, whatever its sources were
@@ -804,23 +755,22 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, RepStatus>) (stmts: Stmt lis
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
                     | _, Inv _ -> Ok (bindPatternVars (Inv InvShapeUnknown) env binding.Pattern)
                     | _, _ ->
-                        Error (bl4008 binding.Value.Span (sprintf "function '%s': cannot destructure a representation-typed value — its components are basis-dependent" ctx.FuncName)))
+                        Error (bl4008 binding.Value.Span (sprintf "function '%s': cannot destructure a representation-typed value -- its components are basis-dependent" ctx.FuncName)))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
             | StmtAssign (l, _, r) -> judgeAssign ctx env l.Span l r |> Result.map (fun () -> env)
             | StmtForIn (v, range, body) ->
                 judge ctx env range |> Result.bind (fun sr ->
                     match sr with
                     | Rep _ ->
-                        Error (bl4008 range.Span (sprintf "function '%s': cannot iterate over a representation-typed value's components — they are basis-dependent" ctx.FuncName))
+                        Error (bl4008 range.Span (sprintf "function '%s': cannot iterate over a representation-typed value's components -- they are basis-dependent" ctx.FuncName))
                     | _ ->
                         judgeStmts ctx (Map.add v (Inv InvShapeUnknown) env) body |> Result.map (fun _ -> env))
             | _ -> Ok env))
         (Ok env)
 
 /// Assignments: whole-variable writes must preserve the target's status;
-/// element writes into a rep are rejected (that is exactly the raw access
-/// the discipline forbids); element writes into invariants need invariant
-/// values.
+/// element writes into a rep are rejected (the raw access this discipline
+/// forbids); element writes into invariants need invariant values.
 and private judgeAssign (ctx: Ctx) (env: Map<string, RepStatus>) (span: Span) (l: Expr) (r: Expr)
     : Result<unit, Blade.Diagnostics.Diagnostic> =
     let fail msg = Error (bl4008 span (sprintf "function '%s': %s" ctx.FuncName msg))
@@ -829,18 +779,16 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, RepStatus>) (span: Span) (l
         | ExprKind.ExprVar n ->
             match Map.tryFind n env with
             | Some st when st = sr -> Ok ()
-            | Some st -> fail (sprintf "assignment changes '%s' from %s to %s — a mut binding must keep one representation status" n (statusStr st) (statusStr sr))
+            | Some st -> fail (sprintf "assignment changes '%s' from %s to %s -- a mut binding must keep one representation status" n (statusStr st) (statusStr sr))
             | None -> Ok ()
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, idxArgs) ->
             // element write: the INDICES are judged first, then the container
-            // and the value. Judging the indices is stage 5c catalog finding
-            // 2 — MLGalilean's judgeAssign already did it, this copy and
-            // MLPerm's matched the target and walked past the index
+            // and the value. MLGalilean's judgeAssign already did this; this
+            // copy and MLPerm's matched the target and walked past the index
             // expressions, so `a(f(0)) = v` went unchecked on the WRITE path
             // while the identical read `let z = f(0)` was rejected as a raw
-            // component read. A write whose LOCATION is chosen by a
-            // basis-dependent number is not equivariant: rotate the frame and
-            // the value lands in a different cell.
+            // component read: a write whose LOCATION is basis-dependent is
+            // not equivariant.
             idxArgs
             |> List.fold (fun acc a ->
                 acc |> Result.bind (fun () ->
@@ -849,16 +797,16 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, RepStatus>) (span: Span) (l
                         | Inv _ -> Ok ()
                         | Rep _ ->
                             Error (bl4008 a.Span
-                                       (sprintf "function '%s': an array index must be invariant inside an equiv-certified body, but this one is %s — the cell it selects moves with the frame"
+                                       (sprintf "function '%s': an array index must be invariant inside an equiv-certified body, but this one is %s -- the cell it selects moves with the frame"
                                             ctx.FuncName (statusStr si)))
                         | Opaque ->
                             Error (bl4008 a.Span
-                                       (sprintf "function '%s': an array index must be invariant inside an equiv-certified body, and this one is unclassifiable — v1 cannot rule out that the cell it selects moves with the frame. Index with a static offset or a value the judgment can see"
+                                       (sprintf "function '%s': an array index must be invariant inside an equiv-certified body, and this one is unclassifiable -- the judgment cannot rule out that the cell it selects moves with the frame. Index with a static offset or a value the judgment can see"
                                             ctx.FuncName)))))
                 (Ok ())
             |> Result.bind (fun () ->
                 match Map.tryFind n env with
-                | Some (Rep _) -> fail (sprintf "element-assignment into representation-typed '%s' writes a basis-dependent component — build reps only through equivariant ops" n)
+                | Some (Rep _) -> fail (sprintf "element-assignment into representation-typed '%s' writes a basis-dependent component -- build reps only through equivariant ops" n)
                 | _ ->
                     match sr with
                     | Rep _ -> fail "cannot store a representation-typed value into an array element"
@@ -879,7 +827,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             | Rep sp ->
                 Error (bl4008 argE.Span (sprintf "function '%s': %s expects a value transforming as %s, got %s" ctx.FuncName what (repStr expected) (repStr sp)))
             | Inv _ ->
-                Error (bl4008 argE.Span (sprintf "function '%s': %s expects a representation-typed value (transforming as %s) — an invariant here would not co-rotate with the inputs" ctx.FuncName what (repStr expected)))
+                Error (bl4008 argE.Span (sprintf "function '%s': %s expects a representation-typed value (transforming as %s) -- an invariant here would not co-rotate with the inputs" ctx.FuncName what (repStr expected)))
             | Opaque ->
                 Error (bl4008 argE.Span (sprintf "function '%s': cannot classify the argument to %s" ctx.FuncName what)))
     let requireInv (what: string) (argE: Expr) =
@@ -887,11 +835,11 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             match s with
             | Inv _ -> Ok ()
             | Rep _ ->
-                Error (bl4008 argE.Span (sprintf "function '%s': %s must be invariant, but the argument is representation-typed — extract invariants with ml.scalars/ml.norms or contract with ml.tensor_product" ctx.FuncName what))
+                Error (bl4008 argE.Span (sprintf "function '%s': %s must be invariant, but the argument is representation-typed -- extract invariants with ml.scalars/ml.norms or contract with ml.tensor_product" ctx.FuncName what))
             | Opaque ->
                 Error (bl4008 argE.Span (sprintf "function '%s': cannot classify the argument to %s" ctx.FuncName what)))
     match f.Kind with
-    // --- qualified ML ops (surface-visible pre-rewrite) -------------------
+    // qualified ML ops (surface-visible pre-rewrite)
     | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) when Set.contains alias ctx.Aliases ->
         let specArg what e =
             specOfArg ctx.Statics what e
@@ -905,29 +853,28 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 Blade.ML.Statics.pgSpecOfStatic what grp sv
                 |> Result.mapError (fun m -> bl4008 e.Span (sprintf "function '%s': %s" ctx.FuncName m))
         match op, args with
-        // --- the point-group arm (5b-ii) -------------------------------------
-        // Both arms below are GUARDED on a `Point` certificate, so under
-        // equiv(O3)/equiv(SO3) every op falls through to the arms it always
-        // did — including `derive_pg_linear`, which is (and stays) an
-        // all-invariant computation to an O(3) certificate: nothing there
-        // transforms under O(3), so the generic default arm's `Ok Inv` is the
-        // header's asymmetry showing up at the op level.
+        // The point-group arm: both arms below are GUARDED on a `Point`
+        // certificate, so under equiv(O3)/equiv(SO3) every op falls through
+        // to the arms it always did -- including `derive_pg_linear`, an
+        // all-invariant computation to an O(3) certificate (nothing there
+        // transforms under O(3)), so the default arm's `Ok Inv` is the
+        // header's asymmetry at the op level.
         | _, _ when isPointGroup ctx.Group && List.contains op o3OpNames ->
             let gn = groupStr ctx.Group
-            reject (sprintf "ml.%s is an O(3) operation — it is stated in (l, parity, mult) irreps specs and its rep-typed arguments and results live in O(3) representation spaces, so it carries no %s-equivariance theorem this checker can use. Inside a `where ml.equiv(%s)` body build with the point-group ops (ml.derive_pg_linear) over PgIrrepsIdx<%s, SPEC> values"
+            reject (sprintf "ml.%s is an O(3) operation -- it is stated in (l, parity, mult) irreps specs and its rep-typed arguments and results live in O(3) representation spaces, so it carries no %s-equivariance theorem this checker can use. Inside a `where ml.equiv(%s)` body build with the point-group ops (ml.derive_pg_linear) over PgIrrepsIdx<%s, SPEC> values"
                        op gn gn gn)
-        // ml.derive_pg_linear(GROUP, SIN, SOUT, x, w) — the complete
-        // ℝ-Schur-basis layer, judged exactly as derive_linear is one member
-        // over: SIN on the input, an invariant weight buffer, SOUT out. The
-        // extra premise is the GROUP argument, which must be the certificate's
-        // own — a C4 layer proves nothing about D4-equivariance.
+        // ml.derive_pg_linear(GROUP, SIN, SOUT, x, w), judged like
+        // derive_linear: SIN on the input, an invariant weight buffer, SOUT
+        // out. The extra premise is the GROUP argument, which must be the
+        // certificate's own -- a C4 layer proves nothing about
+        // D4-equivariance.
         | "derive_pg_linear", [ gE; sInE; sOutE; xE; wE ] when isPointGroup ctx.Group ->
             let gn = groupStr ctx.Group
             match pgGroupArgName ctx.Statics gE with
             | Error m ->
                 Error (bl4008 gE.Span (sprintf "function '%s': derive_pg_linear GROUP: %s" ctx.FuncName m))
             | Ok argGroup when argGroup <> gn ->
-                Error (bl4008 gE.Span (sprintf "function '%s': derive_pg_linear names point group %s, but this function is certified for %s — the layer is %s-equivariant and says nothing about %s. Certificates do not transfer between groups"
+                Error (bl4008 gE.Span (sprintf "function '%s': derive_pg_linear names point group %s, but this function is certified for %s -- the layer is %s-equivariant and says nothing about %s. Certificates do not transfer between groups"
                                            ctx.FuncName argGroup gn argGroup gn))
             | Ok _ ->
                 let grp = Blade.ML.PointSpec.pointGroup gn
@@ -962,25 +909,23 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
         | "gated", [ specE; xE ] ->
             specArg "gated spec" specE |> Result.bind (fun spec ->
                 if spec.IsEmpty || spec.Head.L <> 0 then
-                    reject "gated: the first block must be scalars (L=0) — the gates are read from it"
+                    reject "gated: the first block must be scalars (L=0) -- the gates are read from it"
                 // EVERY l=0 block, not just the head: gatedDecl silus every
-                // (l=0) block in place, and silu is not sign-equivariant
-                // (silu(-s) <> -silu(s)), so ANY pseudoscalar l=0 block —
-                // gate block or not — flips under improper rotations while
-                // its gated value does not. The head-only check this
-                // replaces was a live false accept for specs with an even
-                // gate block and an odd l=0 block elsewhere; the whole-spec
-                // sweep matches the emitter's own stamp predicate
-                // (MLElaborate.o3UnlessPseudoscalar) and the sibling
-                // `scalars` arm.
+                // (l=0) block in place, and silu is not sign-equivariant, so
+                // ANY pseudoscalar l=0 block flips under improper rotations
+                // while its gated value does not. The head-only check this
+                // replaces was a live false accept (even gate block, odd
+                // l=0 block elsewhere); the whole-spec sweep matches the
+                // emitter's stamp predicate (MLElaborate.o3UnlessPseudoscalar)
+                // and the sibling `scalars` arm.
                 elif ctx.Group = O3 && spec |> List.exists (fun en -> en.L = 0 && en.Parity <> 0) then
-                    reject "gated under equiv(O3): every (l=0) block is gated in place, and this spec has an (l=0, odd) block — pseudoscalar cells flip under improper rotations while silu does not, breaking O(3) equivariance (SO3 admits them)"
+                    reject "gated under equiv(O3): every (l=0) block is gated in place, and this spec has an (l=0, odd) block -- pseudoscalar cells flip under improper rotations while silu does not, breaking O(3) equivariance (SO3 admits them)"
                 else
                     requireRep "gated input" (O3Spec spec) xE |> Result.map (fun () -> Rep (O3Spec spec)))
         | "scalars", [ specE; xE ] ->
             specArg "scalars spec" specE |> Result.bind (fun spec ->
                 if ctx.Group = O3 && spec |> List.exists (fun en -> en.L = 0 && en.Parity = 1) then
-                    reject "scalars under equiv(O3): the spec has (l=0, odd) blocks — pseudoscalars flip under improper rotations and are not O(3) invariants (SO3 admits them)"
+                    reject "scalars under equiv(O3): the spec has (l=0, odd) blocks -- pseudoscalars flip under improper rotations and are not O(3) invariants (SO3 admits them)"
                 else
                     requireRep "scalars input" (O3Spec spec) xE |> Result.map (fun () -> Inv (InvAgg (Some 1))))
         | "norms", [ specE; xE ] ->
@@ -998,11 +943,11 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 requireRep "derive_tp input 2" (O3Spec s2) yE |> Result.bind (fun () ->
                 requireInv "derive_tp weight buffer" wE |> Result.map (fun () ->
                     Rep (O3Spec (tpSpec s1 s2)))))))
-        // The S₂-compacted self-TPs: one spec (both inputs), same derived
-        // output spec as derive_tp(S, S, ...). The compaction is a
-        // reparameterization of a SUBSPACE of the same hom-space, so the
-        // judgment is derive_tp's — group-agnostic, and the exchange symmetry
-        // is a property of the weights, not of the equivariance claim.
+        // The S2-compacted self-TPs: one spec (both inputs), same derived
+        // output spec as derive_tp(S, S, ...) -- a reparameterization of a
+        // SUBSPACE of the same hom-space, so the judgment is derive_tp's
+        // (group-agnostic); exchange symmetry is a property of the weights,
+        // not of the equivariance claim.
         | "derive_sym_tp", [ specE; xE; yE; wE ] ->
             specArg "derive_sym_tp spec" specE |> Result.bind (fun s ->
                 requireRep "derive_sym_tp input 1" (O3Spec s) xE |> Result.bind (fun () ->
@@ -1015,16 +960,13 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 requireRep "derive_alt_tp input 2" (O3Spec s) yE |> Result.bind (fun () ->
                 requireInv "derive_alt_tp weight buffer" wE |> Result.map (fun () ->
                     Rep (O3Spec (tpSpec s s))))))
-        // derive_poly: the degree-K equivariant polynomial layer. Judged like
-        // derive_linear one degree up — the input must transform as
-        // IrrepsIdx<SPEC>, the weight buffer must be invariant, and the result
-        // transforms as the DECLARED output spec (the map is linear on
-        // Sym^K(V), and the Sym^K coordinates never appear at the surface:
-        // ml.sym_lift's rep-exit problem does not arise because derive_poly
-        // consumes x and emits an irreps space in one op). Group-agnostic:
+        // derive_poly: the degree-K equivariant polynomial layer, judged like
+        // derive_linear one degree up (input transforms as IrrepsIdx<SPEC>,
+        // weight buffer invariant, result as the DECLARED output spec --
+        // linear on Sym^K(V), whose coordinates never appear at the surface,
+        // so ml.sym_lift's rep-exit problem does not arise). Group-agnostic:
         // parity rides at spec level (O(3) acts on Sym^j(V_{l,p}) by
-        // (−1)^{j·p}), which `sym_spec` already accounts for, so a label whose
-        // parity does not match an output block simply carries no weight.
+        // (-1)^(j*p)), already accounted for by `sym_spec`.
         | "derive_poly", [ specE; kE; sOutE; xE; wE ] ->
             specArg "derive_poly SPEC" specE |> Result.bind (fun s ->
             specArg "derive_poly SOUT" sOutE |> Result.bind (fun sOut ->
@@ -1033,31 +975,29 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                     requireRep "derive_poly input" (O3Spec s) xE |> Result.bind (fun () ->
                     requireInv "derive_poly weight buffer" wE |> Result.map (fun () -> Rep (O3Spec sOut)))
                 | _ -> reject "derive_poly: K must be a static int in 1..4"))
-        // The monomial lift is a REP EXIT the lattice cannot name. Its output
-        // components are the degree-K monomials of the input's components, so
-        // they co-rotate POLYNOMIALLY — as Sym^K(V) = ml.sym_spec(SPEC, K),
-        // whose action is not the block-diagonal one an `IrrepsIdx<spec>`
-        // value carries in this checker (the monomial basis is not the irreps
-        // basis; the change of basis is exactly what stage 2's derive_poly
-        // will bake). So a rep-typed input is rejected with that reason, while
-        // an all-invariant call is fine: the monomials of an invariant are
-        // invariant.
+        // The monomial lift is a REP EXIT the lattice cannot name: its output
+        // components are the degree-K monomials of the input's components,
+        // co-rotating POLYNOMIALLY as Sym^K(V) = ml.sym_spec(SPEC, K), whose
+        // action is not the block-diagonal one an `IrrepsIdx<spec>` value
+        // carries here (the monomial basis is not the irreps basis). A
+        // rep-typed input is rejected on that reason; an all-invariant call
+        // is fine, since the monomials of an invariant are invariant.
         | "sym_lift", [ _; _; xE ] ->
             judge ctx env xE |> Result.bind (fun sx ->
                 match sx with
                 | Inv _ -> Ok (Inv (InvAgg (Some 1)))
                 | Rep sp ->
-                    Error (bl4008 xE.Span (sprintf "function '%s': ml.sym_lift's monomial coordinates are not representation-classified in the current checker — the C(n+K-1, K) products of %s components co-rotate POLYNOMIALLY (as ml.sym_spec of that spec), not through a block-diagonal irreps action, so no {Rep spec, Inv, Opaque} status describes the result. Keep ml.sym_lift in uncertified assembly code for now; inside a certified body contract with ml.derive_sym_tp / ml.derive_tp / ml.tensor_product instead" ctx.FuncName (repStr sp)))
+                    Error (bl4008 xE.Span (sprintf "function '%s': ml.sym_lift's monomial coordinates are not representation-classified in the current checker -- the C(n+K-1, K) products of %s components co-rotate POLYNOMIALLY (as ml.sym_spec of that spec), not through a block-diagonal irreps action, so no {Rep spec, Inv, Opaque} status describes the result. Keep ml.sym_lift in uncertified assembly code for now; inside a certified body contract with ml.derive_sym_tp / ml.derive_tp / ml.tensor_product instead" ctx.FuncName (repStr sp)))
                 | Opaque ->
                     Error (bl4008 xE.Span (sprintf "function '%s': cannot classify the argument to sym_lift" ctx.FuncName)))
         | ("derive_linear" | "derive_tp"), _ ->
-            reject (sprintf "%s: inside an equiv-certified body use the full call form — the 2-argument binding form is for uncertified assembly code" op)
+            reject (sprintf "%s: inside an equiv-certified body use the full call form -- the 2-argument binding form is for uncertified assembly code" op)
         | ("linear_rows" | "gated_rows"), _ ->
             reject (sprintf "%s is not admitted in equiv-certified bodies (row-stacked buffers are not representation spaces); apply the single-vector op per row" op)
-        // --- Cartesian bridges: rep-INTRODUCTION forms (the y_to shape).
+        // Cartesian bridges: rep-INTRODUCTION forms (the y_to shape).
         // Conditional premise: the invariant input really is the flat
         // row-major 3x3 (resp. packed symmetric) Cartesian tensor of a
-        // physical rank-2 quantity; then the result transforms as declared.
+        // physical rank-2 quantity.
         | "tensor_to_irreps", [ gE ] ->
             requireInv "tensor_to_irreps input (flat row-major 3x3 Cartesian tensor)" gE
             |> Result.map (fun () -> Rep (O3Spec Blade.ML.CartesianBridge.gradSpec))
@@ -1065,23 +1005,23 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             requireInv "sym_to_irreps input (packed symmetric Cartesian tensor)" sE
             |> Result.map (fun () -> Rep (O3Spec Blade.ML.CartesianBridge.tauSpec))
         | "irreps_to_sym", _ ->
-            reject "irreps_to_sym reads basis-dependent Cartesian components out of a representation — a rep escape, for uncertified assembly code only (e.g. feeding a solver); inside a certified body stay in irreps space"
+            reject "irreps_to_sym reads basis-dependent Cartesian components out of a representation -- a rep escape, for uncertified assembly code only (e.g. feeding a solver); inside a certified body stay in irreps space"
         | ("tensor_to_irreps" | "sym_to_irreps"), _ ->
             reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
         | ("tensor_product" | "linear" | "gated" | "scalars" | "norms" | "y_to" | "derive_sym_tp" | "derive_alt_tp" | "sym_lift" | "derive_poly"), _ ->
             reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
         | _ ->
-            // other alias members (sizing etc. — normalized already, so an
+            // other alias members (sizing etc. -- normalized already, so an
             // unnormalized leftover is unknown): invariant if args are.
             judgeAll args |> Result.bind (fun sts ->
                 if sts |> List.forall isInv then Ok (Inv InvShapeUnknown)
                 else reject (sprintf "ml.%s is not an equivariance-preserving operation on representation-typed values" op))
-    // --- named callees ----------------------------------------------------
+    // named callees
     | ExprKind.ExprVar fn ->
         match Map.tryFind fn ctx.Certs with
         | Some cert ->
             if cert.Group <> ctx.Group then
-                reject (sprintf "call to '%s': it is certified for %s, this function for %s — certificates do not transfer between groups" fn (groupStr cert.Group) (groupStr ctx.Group))
+                reject (sprintf "call to '%s': it is certified for %s, this function for %s -- certificates do not transfer between groups" fn (groupStr cert.Group) (groupStr ctx.Group))
             elif List.length args <> List.length cert.Params then
                 reject (sprintf "call to '%s': expected %d arguments" fn (List.length cert.Params))
             else
@@ -1107,14 +1047,13 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                       | Ok (SVInt _) ->
                           (match ctx.Group with
                            | Point gn ->
-                               // The pseudoscalar asymmetry as table data: at D4
-                               // the A2/B1/B2 cells are 1-DIMENSIONAL and still
-                               // basis-dependent, because each flips under some
-                               // generator. Dimension is not the test; the
-                               // trivial character is.
-                               Error (bl4008 e.Span (sprintf "function '%s': raw indexing into a cell of '%s' outside a TRIVIAL-label block reads a basis-dependent number — under equiv(%s) only the labels whose every generator matrix is the identity carry invariant cells, and a 1-dimensional label is not enough (%s's non-trivial characters flip under some generator, exactly as an O(3) pseudoscalar does under an improper rotation)" ctx.FuncName fn gn gn))
+                               // Pseudoscalar asymmetry as table data: at D4
+                               // the A2/B1/B2 cells are 1-DIMENSIONAL and
+                               // still basis-dependent -- dimension is not
+                               // the test, the trivial character is.
+                               Error (bl4008 e.Span (sprintf "function '%s': raw indexing into a cell of '%s' outside a TRIVIAL-label block reads a basis-dependent number -- under equiv(%s) only the labels whose every generator matrix is the identity carry invariant cells, and a 1-dimensional label is not enough (%s's non-trivial characters flip under some generator, exactly as an O(3) pseudoscalar does under an improper rotation)" ctx.FuncName fn gn gn))
                            | _ ->
-                               Error (bl4008 e.Span (sprintf "function '%s': raw indexing into an l>0 (or, under O3, parity-odd) component of '%s' reads a basis-dependent number — extract invariants with ml.scalars/ml.norms or contract with ml.tensor_product" ctx.FuncName fn)))
+                               Error (bl4008 e.Span (sprintf "function '%s': raw indexing into an l>0 (or, under O3, parity-odd) component of '%s' reads a basis-dependent number -- extract invariants with ml.scalars/ml.norms or contract with ml.tensor_product" ctx.FuncName fn)))
                       | _ ->
                           (match ctx.Group with
                            | Point _ ->
@@ -1124,7 +1063,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                  | _ -> reject (sprintf "unsupported access into representation-typed '%s'" fn))
             | _ ->
                 // uncertified callee (builtin, helper, plain array, lambda):
-                // a function of invariants is invariant — every argument
+                // a function of invariants is invariant -- every argument
                 // must be Inv, and reps must not escape.
                 judgeAll args |> Result.bind (fun sts ->
                     match sts |> List.tryFindIndex (isInv >> not) with
@@ -1149,70 +1088,41 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                         Ok (Inv sh)
                     | Some i ->
                         let argE = args.[i]
-                        // `isInv >> not` catches BOTH failing statuses, and they
-                        // are different facts. `Rep` is an established one — the
-                        // value provably transforms — and keeps the two escape
-                        // messages verbatim. `Opaque` establishes NOTHING, so
-                        // calling it "a representation-typed value" names a fact
-                        // the judgment never proved; it gets the vocabulary
-                        // requireRep/requireInv already use for the same status.
+                        // `isInv >> not` catches BOTH failing statuses:
+                        // `Rep` is established, so it keeps the escape
+                        // messages verbatim; `Opaque` establishes NOTHING,
+                        // so it gets requireRep/requireInv's vocabulary
+                        // instead of naming a fact never proved.
                         match sts.[i] with
                         | Opaque when isKnownScalarBuiltin fn ->
-                            Error (bl4008 argE.Span (sprintf "function '%s': cannot classify the argument to '%s' inside an equiv-certified body — v1 cannot rule out that it carries representation structure, and a nonlinearity may be applied only to invariants (ml.gated gates reps; ml.scalars/ml.norms extract invariants)" ctx.FuncName fn))
+                            Error (bl4008 argE.Span (sprintf "function '%s': cannot classify the argument to '%s' inside an equiv-certified body -- the judgment cannot rule out that it carries representation structure, and a nonlinearity may be applied only to invariants (ml.gated gates reps; ml.scalars/ml.norms extract invariants)" ctx.FuncName fn))
                         | Opaque ->
-                            Error (bl4008 argE.Span (sprintf "function '%s': cannot classify the argument to '%s' inside an equiv-certified body — v1 cannot rule out that it carries representation structure, and '%s' carries no equiv certificate that would say what happens to it. Pass a value the judgment can classify, or certify '%s' with `where ml.equiv(%s)`" ctx.FuncName fn fn fn (groupStr ctx.Group)))
+                            Error (bl4008 argE.Span (sprintf "function '%s': cannot classify the argument to '%s' inside an equiv-certified body -- the judgment cannot rule out that it carries representation structure, and '%s' carries no equiv certificate that would say what happens to it. Pass a value the judgment can classify, or certify '%s' with `where ml.equiv(%s)`" ctx.FuncName fn fn fn (groupStr ctx.Group)))
                         | _ when isKnownScalarBuiltin fn ->
-                            Error (bl4008 argE.Span (sprintf "function '%s': applying '%s' to a representation-typed value is not equivariant — nonlinearities act only on invariants (ml.gated gates reps; ml.scalars/ml.norms extract invariants)" ctx.FuncName fn))
+                            Error (bl4008 argE.Span (sprintf "function '%s': applying '%s' to a representation-typed value is not equivariant -- nonlinearities act only on invariants (ml.gated gates reps; ml.scalars/ml.norms extract invariants)" ctx.FuncName fn))
                         | _ ->
-                            Error (bl4008 argE.Span (sprintf "function '%s': representation-typed value escapes to '%s', which carries no equiv certificate — certify it with `where ml.equiv(%s)` or pass only invariants" ctx.FuncName fn (groupStr ctx.Group))))
+                            Error (bl4008 argE.Span (sprintf "function '%s': representation-typed value escapes to '%s', which carries no equiv certificate -- certify it with `where ml.equiv(%s)` or pass only invariants" ctx.FuncName fn (groupStr ctx.Group))))
     | _ ->
-        // computed callee over reps: not admissible in v1
+        // computed callee over reps: not admissible
         judgeAll args |> Result.bind (fun sts ->
             judge ctx env f |> Result.bind (fun sf ->
                 if isInv sf && sts |> List.forall isInv then Ok (Inv InvShapeUnknown)
                 else reject "cannot classify this call inside an equiv-certified body"))
 
-// ============================================================================
-// The generator-based ENGINE, hooked on the rejection path (stage 6b)
-// ============================================================================
-//
-// §7's flow, exactly: COMPOSITION RUNS FIRST — it is cheaper and its
-// diagnostics are better, and the engine never sees a body composition
-// accepts. On composition's Error verdict for a POINT-certified function the
-// engine attempts the polynomial route:
-//
-//   extraction FAILS            -> the ORIGINAL composition diagnostic
-//                                  surfaces untouched (silence from here);
-//   extraction hits a CAP       -> the original diagnostic, with a note naming
-//                                  the cap (a body that fell off the engine
-//                                  must not look like one it never saw);
-//   extraction + discharge PASS -> the certificate HOLDS, silently. The pin is
-//                                  discharged; there is nothing to say;
-//   discharge FAILS             -> the engine's own BL4008, naming the group
-//                                  element and the first offending
-//                                  coefficient. It REPLACES the composition
-//                                  diagnostic, because at that point we know
-//                                  something strictly better: the body is a
-//                                  polynomial and it is not equivariant.
-//
-// `Propose ⊆ Check-accept` is untouched: the 6a inference channel calls this
-// same `judgeFunction`, so a body the engine discharges becomes a BL4011
-// proposal automatically and by construction.
-//
-// TWO DISCHARGERS, ONE EXTRACTOR (stage 6c). The normal form is built once and
-// handed to whichever discharger the certificate's group calls for:
-//
-//   Point g   -> MLPolyExtract's FINITE discharge, the whole word set, pure ℚ
-//                ({0, ±1} matrices, no radicals, no connectedness step);
-//   O3 / SO3  -> MLLieDischarge's RADICAL-VECTOR discharge, three 𝔰𝔬(3)
-//                generators (the defect is linear in A, so a spanning set is
-//                the whole connected obligation) plus, under O3 only, the
-//                integer −I identity of π₀.
-//
-// The flow above is identical in both arms, down to which exit appends and
-// which replaces. The only group-specific code here is `pointActions` /
-// `o3Actions`, which turn a registry word set or a spec's block structure into
-// the shape the corresponding discharger consumes.
+// The generator-based ENGINE, hooked on the rejection path. COMPOSITION RUNS
+// FIRST -- cheaper, better diagnostics -- and never sees a body composition
+// accepts. On a POINT-certified function's Error verdict, the engine tries
+// the polynomial route: extraction FAILS, the original diagnostic surfaces
+// untouched; extraction hits a CAP, it gets a note naming the cap; extraction
+// and discharge PASS, the certificate HOLDS silently; discharge FAILS, the
+// engine's own BL4008 REPLACES composition's diagnostic, naming the group
+// element and first offending coefficient. `Propose subset-of Check-accept`
+// is untouched, since the inference channel calls this same `judgeFunction`.
+// TWO DISCHARGERS, ONE EXTRACTOR: `Point g` uses MLPolyExtract's FINITE
+// discharge (the whole word set, pure rationals, no radicals); `O3`/`SO3`
+// uses MLLieDischarge's RADICAL-VECTOR discharge (three so(3) generators,
+// plus, under O3 only, the integer -I identity of pi_0). The only
+// group-specific code is `pointActions`/`o3Actions`.
 
 module private Engine =
     module PX = Blade.ML.PolyExtract
@@ -1220,9 +1130,8 @@ module private Engine =
     module LD = Blade.ML.LieDischarge
 
     /// The scalar annotations whose SHAPE is decidable without a type-alias
-    /// map. Anything else classified `Inv` becomes `PInvOpaque`, which the
-    /// extractor refuses to touch — modelling an aliased array as one scalar
-    /// atom would be unfaithful, and the whole engine rests on faithfulness.
+    /// map. Anything else classified `Inv` becomes `PInvOpaque`: modelling an
+    /// aliased array as one scalar atom would be unfaithful.
     let private scalarNames =
         [ "Float"; "Float32"; "Float64"; "Double"; "Int"; "Int32"; "Int64" ]
 
@@ -1233,7 +1142,7 @@ module private Engine =
         | Some (TyNamed (n, [])) when List.contains n scalarNames -> PX.PInvScalar
         | _ -> PX.PInvOpaque
 
-    /// The ℝ-dimension of a rep payload, per block-spec member.
+    /// The real dimension of a rep payload, per block-spec member.
     let private repDim (r: RepSpec) : int option =
         match r with
         | PgSpec (g, s) -> Some (PS.pgTotalDim (PS.pointGroup g) s)
@@ -1257,9 +1166,9 @@ module private Engine =
             | Inv _ -> Some (PX.mkSig ps None)
             | Opaque -> None)
 
-    /// The word set as `ElementAction`s: ALL |G| ≤ 8 elements (word closure
-    /// says the generators would suffice — proofs/BladeWordClosure.v — and at
-    /// this size the redundancy is free).
+    /// The word set as `ElementAction`s: ALL |G| <= 8 elements (word closure
+    /// says the generators would suffice -- proofs/BladeWordClosure.v -- and
+    /// at this size the redundancy is free).
     let pointActions (gn: string) (cert: CertSig) : PX.ElementAction list option =
         let grp = PS.pointGroup gn
         let pgOf (r: RepSpec) = match r with PgSpec (_, s) -> Some s | O3Spec _ -> None
@@ -1268,8 +1177,8 @@ module private Engine =
                 match st with Rep r -> Some (n, pgOf r) | _ -> None)
         if repParams |> List.exists (snd >> Option.isNone) then None
         else
-            // A scalar (Inv) return is an INVARIANCE claim: the output action
-            // is the 1×1 identity, i.e. the trivial rep.
+            // A scalar (Inv) return is an INVARIANCE claim: the output
+            // action is the 1x1 identity, i.e. the trivial rep.
             let outSpec = match cert.Return with Rep r -> pgOf r | Inv _ -> Some [] | Opaque -> None
             match outSpec with
             | None -> None
@@ -1287,14 +1196,11 @@ module private Engine =
                     PX.mkAction (PS.wordName grp el.Word) inMats outMat)
                 |> Some
 
-    /// The 𝔰𝔬(3) generators (and, under O3, the −I parity bookkeeping) as the
-    /// radical-vector discharger consumes them. Same shape as `pointActions`
-    /// one member over: the ONLY group-specific step is turning each rep
-    /// payload's spec into a block-diagonal generator.
-    ///
-    /// A scalar (Inv) return is an INVARIANCE claim, so the output action is
-    /// the trivial rep: a 1×1 ZERO generator (the Lie algebra acts by 0) and
-    /// parity EVEN. That is what makes `-> Float` under equiv(O3) reject a
+    /// The so(3) generators (and, under O3, the -I parity bookkeeping) as
+    /// the radical-vector discharger consumes them. Same shape as
+    /// `pointActions`. A scalar (Inv) return is an INVARIANCE claim, so the
+    /// output action is the trivial rep: a 1x1 ZERO generator and parity
+    /// EVEN -- which is what makes `-> Float` under equiv(O3) reject a
     /// pseudoscalar body while the same body certifies under equiv(SO3).
     let o3Actions (grp: Group) (cert: CertSig) : (LD.LieGenerator list * LD.InversionCheck option) option =
         let specOf (r: RepSpec) = match r with O3Spec s -> Some s | PgSpec _ -> None
@@ -1304,7 +1210,7 @@ module private Engine =
         if repParams |> List.exists (snd >> Option.isNone) then None
         else
             let reps = repParams |> List.map (fun (n, s) -> (n, Option.get s))
-            // `Some spec` — a rep-typed return; `None` — the trivial rep.
+            // `Some spec` -- a rep-typed return; `None` -- the trivial rep.
             let outSpec =
                 match cert.Return with
                 | Rep r -> specOf r |> Option.map Some
@@ -1331,14 +1237,10 @@ module private Engine =
                 Some (gens, inv)
 
 
-/// Judge one certified function. Empty list = certificate holds.
-///
-/// Two routes, in this order: COMPOSITION (the abstract interpretation above),
-/// then — only on its rejection — the polynomial ENGINE, discharged by the
-/// finite word set under a point-group certificate (6b) or by the
-/// radical-vector 𝔰𝔬(3) generators plus −I under O3/SO3 (6c). See the
-/// `Engine` module's header for the exact flow and for why the engine's
-/// verdict may replace composition's.
+/// Judge one certified function. Empty list = certificate holds. Two routes:
+/// COMPOSITION (the abstract interpretation above), then -- only on its
+/// rejection -- the polynomial ENGINE (see the `Engine` module's header for
+/// the exact flow and why its verdict may replace composition's).
 let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticEnv)
                   (globals: Map<string, InvShape>) (aliases: Set<string>) (fd: FunctionDecl)
     : Blade.Diagnostics.Diagnostic list =
@@ -1354,14 +1256,13 @@ let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticE
                 if statusAgrees st cert.Return then []
                 else
                     [ bl4008 fd.Body.Span
-                          (sprintf "function '%s': the body is %s but the declared return type is %s — the certificate requires them to agree" fd.Name (statusStr st) (statusStr cert.Return)) ]
+                          (sprintf "function '%s': the body is %s but the declared return type is %s -- the certificate requires them to agree" fd.Name (statusStr st) (statusStr cert.Return)) ]
         match composition, cert.Group with
         | [], _ -> []
         | (d :: _), Point gn ->
-            // Total by construction, in the 6a discipline: a speculative
-            // second opinion may never turn a compiling program into a crash,
-            // so any escape from the registry or the decoders reads as "the
-            // engine has nothing to say" and composition's verdict stands.
+            // Total by construction: any escape from the registry or the
+            // decoders reads as "the engine has nothing to say" and
+            // composition's verdict stands.
             try
                 match Engine.polySig cert fd, Engine.pointActions gn cert with
                 | Some psig, Some actions ->
@@ -1379,12 +1280,10 @@ let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticE
                 | _ -> [ d ]
             with _ -> [ d ]
         | (d :: _), (O3 | SO3) ->
-            // Stage 6c, the SAME flow one discharger over. Totality is kept
-            // for the same reason (a speculative second opinion may never
-            // crash a compiling program) with ONE deliberate hole: the
-            // post-accept float guard's `LieGuardFailure` is a compiler-bug
-            // assert, not an escape from a decoder, so it is re-raised rather
-            // than swallowed into "composition's verdict stands".
+            // The SAME flow one discharger over, with ONE deliberate hole:
+            // the post-accept float guard's `LieGuardFailure` is a
+            // compiler-bug assert, not a decoder escape, so it is re-raised
+            // rather than swallowed into "composition's verdict stands".
             try
                 match Engine.polySig cert fd, Engine.o3Actions cert.Group cert with
                 | Some psig, Some (gens, inv) ->
@@ -1406,18 +1305,14 @@ let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticE
             | Blade.ML.LieDischarge.LieGuardFailure _ -> reraise ()
             | _ -> [ d ]
 
-/// TEST HOOK — stage 6c's DIFFERENTIAL obligation (§7 stage 6c, oracle layer
-/// 5). Production runs the engine only on composition's rejection path, so a
-/// body composition ACCEPTS is never seen by it; the differential asks whether
-/// the two would agree if it were, and the only way to ask is to run the
-/// engine alone. `None` = the engine has nothing to say (no certificate, an
-/// unclassifiable signature, an extraction refusal or a cap breach); `Some (Ok
-/// ())` = the polynomial discharges; `Some (Error msg)` = it does not, with
-/// the message the user would have seen.
-///
-/// Nothing in the compiler calls this. It is here rather than in the test file
-/// because `Engine` is private and must stay so — the engine has exactly one
-/// production entry point, and that is the point.
+/// TEST HOOK for the DIFFERENTIAL obligation. Production runs the engine
+/// only on composition's rejection path, so a body composition ACCEPTS is
+/// never seen by it; this asks whether the two would agree if it were, by
+/// running the engine alone. `None` = the engine has nothing to say (no
+/// certificate, an unclassifiable signature, an extraction refusal or a cap
+/// breach); `Some (Ok ())` = the polynomial discharges; `Some (Error msg)` =
+/// it does not. Nothing in the compiler calls this -- it lives here rather
+/// than in the test file because `Engine` is private and must stay so.
 let engineVerdict (certs: Map<string, CertSig>) (statics: StaticEnv) (fd: FunctionDecl)
     : Result<unit, string> option =
     match Map.tryFind fd.Name certs with
@@ -1451,46 +1346,30 @@ let engineVerdict (certs: Map<string, CertSig>) (statics: StaticEnv) (fd: Functi
                         | Error (Blade.ML.LieDischarge.ParityCheck f) ->
                             Some (Error (EM.inversionFailureMessage fd.Name f))
 
-// ============================================================================
-// The inference channel (stage 6a) — BL4011
-// ============================================================================
+// The inference channel -- BL4011. Deduction mode is the CHECKING judgment
+// run speculatively: hypothesize `where ml.equiv(G)` on a function that
+// lacks it, run `certSigOf` + `judgeFunction` verbatim, and if the
+// certificate holds, PROPOSE the pin as a warning. Nothing here is a new
+// rule, so `Propose subset-of Check-accept` holds BY CONSTRUCTION.
 //
-// Deduction mode is the CHECKING judgment run speculatively: hypothesize
-// `where ml.equiv(G)` on a function that does not carry it, run `certSigOf` +
-// `judgeFunction` verbatim, and if the certificate holds, PROPOSE the pin as a
-// warning. Nothing here is a new rule — there is no arm, no lattice and no
-// message below that the checker does not already own — so `Propose ⊆
-// Check-accept` holds BY CONSTRUCTION: what is proposed is exactly what
-// passed, under exactly the table the checker would see once the pin is
-// written (§4b: deduction proposes; only source-written `where` clauses
-// export).
+// DEPENDENCY THREADING is Deduce.fs's resolver discipline transplanted:
+// declarations fold in DECL ORDER against a speculative table holding every
+// real certificate plus every speculative certificate already inferred THIS
+// pass for an EARLIER declaration under the SAME group. No summary proves
+// itself (a self-recursive body is skipped outright), and there is no
+// fixpoint iteration: a forward call to a later uncertified function
+// resolves to nothing, silently and correctly. Every BL4011 names its
+// dependency closure, since a proposal may REST on other unwritten pins.
 //
-// The one real design decision is DEPENDENCY THREADING, and it is Deduce.fs's
-// resolver discipline transplanted: declarations fold in DECL ORDER against a
-// speculative table that holds (a) every real certificate and (b) every
-// speculative certificate already inferred THIS pass for an EARLIER
-// declaration under the SAME group. No summary proves itself (a self-recursive
-// body is skipped outright), and there is no fixpoint iteration — a forward
-// call to a later uncertified function simply resolves to nothing and the
-// speculative judgment fails, which is silence, which is correct. Because a
-// proposal may then REST on other unwritten pins, every BL4011 names its
-// dependency closure ("also requires pinning: layer1"); without that the
-// channel would be actively misleading on the multi-layer models it exists for.
-//
-// The group is recorded under the STRONGEST passer only. O(3) ⊃ SO(3), but the
-// shipped `judgeApp` refuses a cross-group call in BOTH directions, so a
-// function proposed for O3 must NOT appear in the SO3 speculative table:
-// pinning it O3 is what the user would actually write, and an SO3 caller of an
-// O3-pinned callee is a body the checker rejects. Recording only the proposal
-// keeps the closure honest.
+// The group is recorded under the STRONGEST passer only: O(3) is a superset
+// of SO(3), but `judgeApp` refuses a cross-group call in BOTH directions, so
+// a function proposed for O3 must NOT appear in the SO3 speculative table.
 
-/// The stage-6a suggestion side-channel: the structured twin of the
-/// plain-string warning the CLI prints, mirroring `TypeCheck.PinSuggestions`
-/// (the BL4010 precedent) field for field. Each entry is (message, decl span)
-/// so editor tooling can ghost-render the pin at the function it belongs to.
-/// Reset by `MLElaborate.expand`, filled at its judgment seam, read by
-/// `TypeCheck.typeCheck` (string twins into the warning list) and `Ide.ideCheck`
-/// (structured, as `warning[BL4011]`). AsyncLocal, like PinSuggestions.
+/// The inference suggestion side-channel, mirroring `TypeCheck.PinSuggestions`.
+/// Each entry is (message, decl span) so editor tooling can ghost-render the
+/// pin at its function. Reset by `MLElaborate.expand`, read by
+/// `TypeCheck.typeCheck` (string twins into the warning list) and
+/// `Ide.ideCheck` (structured, `warning[BL4011]`).
 module CertSuggestions =
     let private slot = new System.Threading.AsyncLocal<(string * Span) list>()
     let reset () = slot.Value <- []
@@ -1498,14 +1377,11 @@ module CertSuggestions =
     let get () : (string * Span) list =
         match box slot.Value with null -> [] | _ -> List.rev slot.Value
 
-/// The STRUCTURED twin of the suggestion strings — what the deduction proved,
-/// as data (the `DeducedFacts` precedent, one phase earlier). `Discipline` is
+/// The STRUCTURED twin of the suggestion strings, as data. `Discipline` is
 /// "equiv" | "galilean"; `Group` is the group name for equiv and the
 /// comma-joined velocity parameters for galilean; `Deps` is the dependency
-/// closure the proposal RESTS on ("also requires pinning"), in decl order.
-/// Hosted here (compile index 114) so MLGalilean (115) can write to it and
-/// Ide (159) can read it. Reset by `MLElaborate.expand` beside
-/// CertSuggestions; surfaced by `ide check --json` as `deduced[]` entries.
+/// closure the proposal RESTS on, in decl order. Surfaced by `ide check
+/// --json` as `deduced[]` entries.
 type CertFact = {
     Owner: string
     Discipline: string
@@ -1520,11 +1396,10 @@ module CertFacts =
     let get () : (CertFact * Span) list =
         match box slot.Value with null -> [] | _ -> List.rev slot.Value
 
-/// Which index families a signature annotation MENTIONS — the syntactic gate
-/// that picks the candidate groups. Deliberately a mirror of `statusOfType`'s
-/// REACH (the same `TyArray` index list, the same one-level alias chase) and
-/// nothing else: a family this scan cannot see is a family the classifier
-/// would not have classified `Rep` either.
+/// Which index families a signature annotation MENTIONS -- the syntactic
+/// gate that picks the candidate groups. Deliberately a mirror of
+/// `statusOfType`'s REACH: a family this scan cannot see is a family the
+/// classifier would not have classified `Rep` either.
 let rec private sigFamilies (aliases: Map<string, TypeExpr>) (t: TypeExpr) : bool * Set<string> =
     match t with
     | TyArray (_, idxs) ->
@@ -1540,21 +1415,24 @@ let rec private sigFamilies (aliases: Map<string, TypeExpr>) (t: TypeExpr) : boo
         | None -> (false, Set.empty)
     | TyIrrepsIdx _ -> (true, Set.empty)
     | TyPgIrrepsIdx (gn, _) -> (false, Set.singleton gn)
+    // NO TyBounded arm, deliberately, even though `statusOfType` grew one:
+    // the only signature where a bound hides an index family here is a bound
+    // on an INDEX-TYPE ALIAS (`v: A<min=0, max=1>`, `type A = IrrepsIdx<S>`),
+    // and that form is already broken (the bounded spelling slips past the
+    // bare-`v: A` refusal and lowers to the tagged SCALAR `Nat<A>`, so every
+    // call site dies on a rank mismatch). Chasing the bound would make the
+    // channel propose `where ml.equiv(O3)` for a program that cannot
+    // type-check at all; proposing nothing is the harmless failure mode.
     | _ -> (false, Set.empty)
 
-/// Candidate groups for a signature, STRONGEST FIRST.
-///
-///   * any `IrrepsIdx` annotation  -> O3, then SO3. Mixed signatures land here
-///     too: a `PgIrrepsIdx` buffer classifies `Inv` under an O(3) certificate
-///     (the 5b-ii asymmetry), so the O(3) candidates simply subsume it.
-///   * `PgIrrepsIdx<g, ·>` and NO `IrrepsIdx` -> `Point g`, and only when the
-///     signature names ONE registered group: two different groups cannot both
-///     be the certificate's (`statusOfType` refuses the other), and an
-///     unregistered name is not a group this checker knows.
-///
-/// Galilean and Sₙ inference are deliberately absent (§7's named deferrals):
-/// `perm_equiv`'s flat-extent keying is ambiguous at a signature, so guessing
-/// N from an `Array<_ like Idx<n>>` would propose noise.
+/// Candidate groups for a signature, STRONGEST FIRST: any `IrrepsIdx`
+/// annotation -> O3, then SO3 (mixed signatures land here too, since a
+/// `PgIrrepsIdx` buffer classifies `Inv` under an O(3) certificate, which
+/// subsumes it); `PgIrrepsIdx<g, _>` and NO `IrrepsIdx` -> `Point g`, only
+/// when the signature names ONE registered group. Galilean and S_n inference
+/// are deliberately absent: `perm_equiv`'s flat-extent keying is ambiguous
+/// at a signature, so guessing N from an `Array<_ like Idx<n>>` would
+/// propose noise.
 let private candidatesFor (aliases: Map<string, TypeExpr>) (fd: FunctionDecl) : Group list =
     let tys = (fd.Params |> List.choose (fun p -> p.Type)) @ Option.toList fd.ReturnType
     let (ir, pgs) =
@@ -1568,7 +1446,7 @@ let private candidatesFor (aliases: Map<string, TypeExpr>) (fd: FunctionDecl) : 
         | [ gn ] when List.contains gn Blade.ML.PointSpec.pointGroupNames -> [ Point gn ]
         | _ -> []
 
-/// How a proposed signature READS in the suggestion — the same vocabulary
+/// How a proposed signature READS in the suggestion -- the same vocabulary
 /// `statusStr` uses, compressed to one line.
 let private sigSummary (cs: CertSig) : string =
     let one (n, st) =
@@ -1586,12 +1464,11 @@ let private sigSummary (cs: CertSig) : string =
         | Opaque -> "unclassifiable"
     sprintf "%s -> %s" ps ret
 
-/// One candidate attempt: hypothesize the group, classify the signature with
-/// the CHECKER's own classifier, and run the CHECKER's own judgment against
-/// `table` (real certificates + this group's speculative ones). `Some cert` =
-/// the certificate holds. Total by construction — a speculative run may never
-/// turn a compiling program into a crash, so a `failwith` from the spec
-/// decoders (an unregistered label, a malformed static) reads as "no proposal".
+/// One candidate attempt: hypothesize the group, classify the signature and
+/// run the judgment against `table` (real certificates + this group's
+/// speculative ones). `Some cert` = the certificate holds. Total by
+/// construction: a `failwith` from the spec decoders reads as "no proposal"
+/// rather than crashing a compiling program.
 let private tryCandidate (g: Group) (typeAliases: Map<string, TypeExpr>) (statics: StaticEnv)
                          (globals: Map<string, InvShape>) (mlAliases: Set<string>)
                          (table: Map<string, CertSig>) (fd: FunctionDecl)
@@ -1621,7 +1498,7 @@ let inferCertificates (statics: StaticEnv) (mlAliases: Set<string>)
     : (string * Span) list =
     let typeAliases = aliasMapOf decls
     // Speculative certificates, their dependency closures, and the DECL ORDER
-    // in which they were inferred — all keyed by group name.
+    // in which they were inferred -- all keyed by group name.
     let mutable spec : Map<string, Map<string, CertSig>> = Map.empty
     let mutable deps : Map<string, Map<string, string list>> = Map.empty
     let mutable order : Map<string, string list> = Map.empty
@@ -1654,7 +1531,7 @@ let inferCertificates (statics: StaticEnv) (mlAliases: Set<string>)
                     // proposal RESTS on. Direct deps are the earlier
                     // speculatively-certified names the body reads; the
                     // closure adds each of those proposals' own deps
-                    // (already computed — decl order guarantees it).
+                    // (already computed -- decl order guarantees it).
                     let depsG = defaultArg (Map.tryFind gs deps) Map.empty
                     let orderG = defaultArg (Map.tryFind gs order) []
                     let direct = orderG |> List.filter (fun n -> Set.contains n free)
@@ -1662,9 +1539,8 @@ let inferCertificates (statics: StaticEnv) (mlAliases: Set<string>)
                         direct
                         |> List.collect (fun n -> n :: defaultArg (Map.tryFind n depsG) [])
                         |> List.distinct
-                    // Rendered in DECL order, not alphabetically (§6.6
-                    // determinism, and it reads as the order the pins would be
-                    // written in).
+                    // Rendered in DECL order, not alphabetically -- it reads
+                    // as the order the pins would be written in.
                     let ordered = orderG |> List.filter (fun n -> List.contains n closure)
                     let closureNote =
                         if ordered.IsEmpty then ""
@@ -1673,47 +1549,29 @@ let inferCertificates (statics: StaticEnv) (mlAliases: Set<string>)
                         sprintf "function '%s' judges equivariant under %s: add 'where ml.equiv(%s)' [signature: %s]%s"
                             fd.Name gs gs (sigSummary cs) closureNote
                     out <- (msg, d.Span) :: out
-                    // The STRUCTURED twin of the very same proposal (E2): same
-                    // owner, same group, same closure, same span. Emitted here
-                    // rather than rebuilt by a consumer so the string and the
-                    // fact can never disagree about what was proved.
+                    // The STRUCTURED twin of the very same proposal: same
+                    // owner, group, closure and span. Emitted here rather
+                    // than rebuilt by a consumer so the string and the fact
+                    // can never disagree about what was proved.
                     CertFacts.add { Owner = fd.Name; Discipline = "equiv"; Group = gs; Deps = ordered } d.Span
                     spec <- Map.add gs (Map.add fd.Name cs specG) spec
                     deps <- Map.add gs (Map.add fd.Name closure depsG) deps
                     order <- Map.add gs (orderG @ [ fd.Name ]) order
         | _ -> ()
-    // ========================================================================
-    // THE STRONGER-GROUP UPGRADE LINT (E4)
-    // ========================================================================
+    // THE STRONGER-GROUP UPGRADE LINT. A function pinned `ml.equiv(SO3)`
+    // whose body ALSO judges under O3 carries a weaker theorem than proved:
+    // O(3) is a superset of SO(3), so the O3 certificate is strictly
+    // stronger (it adds the improper-rotation half, the -I obligation the
+    // engine discharges). This proposes EDITING the pin, not adding one, so
+    // it emits a string only, no CertFact, hypothesized exactly as
+    // `tryCandidate` runs every other one (real certificate table, this
+    // function's entry replaced by its O3 classification).
     //
-    // A function pinned `ml.equiv(SO3)` whose body ALSO judges under O3 is
-    // carrying a weaker theorem than it proved. O(3) ⊃ SO(3), so the O3
-    // certificate is strictly stronger: it adds the improper-rotation half
-    // (the −I obligation the engine discharges), and nothing it claims is
-    // weaker than what the SO3 pin already claims.
-    //
-    // This is NOT a proposal to ADD a pin — it proposes EDITING one — so it
-    // emits a string only and NO CertFact: `deduced[]` records certificates the
-    // deduction proved about UNCERTIFIED code, and this function is certified.
-    //
-    // The hypothesis is run exactly as `tryCandidate` runs every other one: the
-    // real certificate table with THIS function's entry replaced by its O3
-    // classification, so callees keep their declared certificates and a
-    // self-call resolves against the hypothesis — precisely the table the
-    // checker would see once the pin is edited. Propose ⊆ Check-accept again by
-    // construction. The non-vacuity filter rides along: an `equiv(SO3)` pin on
-    // a signature with nothing rep-typed is vacuous under both groups, and
-    // "upgrade your tautology" is noise.
-    //
-    // THE GUARD. Certificates do not transfer between groups — `judgeApp`
-    // refuses a cross-group call in BOTH directions (see the design comment
-    // above) — so editing this pin to O3 would break every CERTIFIED caller
-    // that calls it today. A suggestion whose advice breaks the build is worse
-    // than silence, so the lint is suppressed as soon as the name occurs free
-    // in any OTHER declared-certified body. (Uncertified callers are unaffected
-    // by construction: they never consult the certificate table.) The scan is
-    // `CertShell.freeVars` with the callee's own parameters bound, i.e. the
-    // same occurrence test the inference loop uses one screen up.
+    // THE GUARD: certificates do not transfer between groups -- `judgeApp`
+    // refuses a cross-group call in BOTH directions -- so editing this pin
+    // to O3 would break every CERTIFIED caller today. The lint is therefore
+    // suppressed as soon as the name occurs free in any OTHER
+    // declared-certified body.
     let certifiedFree =
         decls
         |> List.choose (fun d ->
@@ -1745,16 +1603,14 @@ let inferCertificates (statics: StaticEnv) (mlAliases: Set<string>)
         | _ -> ()
     List.rev out
 
-// ============================================================================
 // Constraint-registry handler
-// ============================================================================
 
 /// `equiv(G)` is a callee-side theorem: Validate re-checks the conjunct
 /// shape (the elaborator has already judged the body by the time
 /// checkFunctionDecl runs), the license scope is unused, and call sites
 /// carry no obligation.
 let private equivHandler : Blade.Constraints.ConstraintHandler = {
-    Describe = "equiv(G) — certifies the function equivariant under G (O3, SO3, or a registered point group such as C4 / D4); the ML elaborator proves the body composes only equivariance-preserving operations"
+    Describe = "equiv(G) -- certifies the function equivariant under G (O3, SO3, or a registered point group such as C4 / D4); the ML elaborator proves the body composes only equivariance-preserving operations"
     Validate = fun funcName _ args ->
         parseGroup funcName args |> Result.map ignore
     EnterBody = fun _ _ -> ()

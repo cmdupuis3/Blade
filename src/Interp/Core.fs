@@ -1,33 +1,31 @@
-// Blade tree-walking interpreter — scalar-subset IR evaluator (Milestone M0).
+// Blade tree-walking interpreter: scalar-subset IR evaluator (Milestone M0).
 //
-// The differential twin of CodeGen: this walks the typed Blade IR and produces
-// the SAME runtime values the emitted C++ computes, so a later printer can make
+// The differential twin of CodeGen: walks the typed Blade IR and produces the
+// same runtime values the emitted C++ computes, so a later printer can make
 // the interpreter's output byte-match the compiled binaries. M0 covers the
-// scalar core (literals, arithmetic/comparison/logic, complex scalars, let /
-// sequence / assign / for-range / if / match with all pattern forms, tuples,
+// scalar core (literals, arithmetic/comparison/logic, complex scalars,
+// let/sequence/assign/for-range/if/match with all pattern forms, tuples,
 // structs, variant construction+dispatch, function calls, closures with
 // captures, recursion, and runtime constraint guards). Array/loop-object/
 // reduction/deferred nodes are M2+ and raise InterpUnsupported carrying the
 // offending IR case name.
 //
-// Every semantic decision here was pinned against how CodeGen EMITS the same
-// node (line refs in comments), so the interpreter cannot silently drift:
+// Every semantic decision here was pinned against how CodeGen emits the same
+// node, so the interpreter cannot silently drift:
 //   * scalar/complex arithmetic delegates wholesale to Numerics (never
-//     reimplemented) — the bit-exact promotion/wraparound/complex rules live
-//     there;
-//   * `&&`/`||` short-circuit (IRAnd/IROr render to C++ && / ||, CodeGen.fs:782);
-//   * IRIf evaluates only the taken branch (ternary, CodeGen.fs:1202);
+//     reimplemented) -- bit-exact promotion/wraparound/complex rules live there;
+//   * `&&`/`||` short-circuit (CodeGen.fs:782); IRIf evaluates only the taken
+//     branch (ternary, CodeGen.fs:1202);
 //   * IRMatch is first-match with guard fall-through, each case in a fresh
-//     scope so a partial-then-failed bind doesn't leak (mirrors the chained
-//     `cond ? body : rest` at CodeGen.fs:1749+);
-//   * IRForRange evaluates both bounds ONCE, then runs a single reused int64
-//     counter from lo to hi-1 (`for (int64_t k = lo; k < hi; k++)`,
-//     EmitCpp.forLoopFrom:26);
+//     scope so a partial-then-failed bind doesn't leak (chained
+//     `cond ? body : rest`, CodeGen.fs:1749+);
+//   * IRForRange evaluates both bounds once, then runs a single reused int64
+//     counter lo to hi-1 (EmitCpp.forLoopFrom:26);
 //   * IRConstraintCheck panics with the exact code/message/span the C++
 //     blade_rt::panic call carries (CodeGen.fs:7166, cpp/blade_runtime.hpp:29).
 //
-// Compiled inside Blade.fsproj AFTER Interp/RandMirror.fs. Depends on Value.fs
-// (the value universe + env/limits/panic scaffolding) and Numerics.fs (scalar
+// Compiled inside Blade.fsproj after Interp/RandMirror.fs. Depends on Value.fs
+// (value universe + env/limits/panic scaffolding) and Numerics.fs (scalar
 // arithmetic). Consumes the concrete IR (Blade.IR): IRExpr (IR.fs:46),
 // IRCallable (IR.fs:239), IRPattern (IR.fs:361), IRModule (IR.fs:1755).
 module Blade.Interp.Core
@@ -39,9 +37,7 @@ open Blade.Interp.Value
 
 module N = Blade.Interp.Numerics
 
-// ============================================================================
-// Interpreter state
-// ============================================================================
+// Interpreter state.
 
 /// Raised for any node/feature deferred past M0 (arrays, loop objects,
 /// reductions, deferred computations, ...). Carries the IR case name so the
@@ -50,39 +46,34 @@ exception InterpUnsupported of feature: string
 
 /// Runtime bridge from the scalar Core evaluator down to the M2 loop/array
 /// layer (Interp/Loops.fs). Core must stay free of a *compile-time* dependency
-/// on Loops, because Loops calls back into Core.evalExpr for kernel bodies — a
-/// cycle the fsproj file order forbids. So Run.fs installs these two closures at
-/// startup and Core reaches them indirectly through `InterpState.Hooks`. With
-/// `Hooks = None` (no backend installed) every routed node raises
-/// InterpUnsupported, exactly as M0 did, so a pure-scalar run is unaffected.
-///
-/// The shapes are the M2 contract other agents rely on verbatim; the real
-/// Interp/Loops.fs's `evalArrayNode` / `force` must match these signatures.
+/// on Loops, because Loops calls back into Core.evalExpr for kernel bodies --
+/// a cycle the fsproj file order forbids -- so Run.fs installs these two
+/// closures at startup and Core reaches them via `InterpState.Hooks`. With
+/// `Hooks = None` every routed node raises InterpUnsupported (M0 parity).
+/// The shapes are the M2 contract: Interp/Loops.fs's `evalArrayNode`/`force`
+/// must match these signatures.
 type InterpHooks = {
-    /// Evaluate any node Core classifies as loop/array *machinery* and delegates
-    /// wholesale to the nest interpreter: IRCompute (the force), the reduce
-    /// family (IRReduce / IRReduceCompute / IRProdSum), IRContains, and IRArrayLit
-    /// is NOT here (it materializes eagerly via ArrayOps — see evalExpr). The
-    /// IRExpr is passed verbatim; Loops owns input forcing, buildLoopNestCodeGen,
-    /// output allocation, and the fill/fold.
+    /// Evaluate any node Core classifies as loop/array *machinery*: IRCompute
+    /// (the force), the reduce family, IRContains -- NOT IRArrayLit (it
+    /// materializes eagerly via ArrayOps in evalExpr). The IRExpr is passed
+    /// verbatim; Loops owns input forcing, buildLoopNestCodeGen, output
+    /// allocation, and the fill/fold.
     EvalArrayNode: InterpState -> Env -> IRExpr -> Value
-    /// Force a VDeferred / VLoopObj to a concrete Value (array / tuple-of-arrays /
-    /// scalar), mirroring genComputeBinding.resolveComputation + dispatch, incl.
-    /// the §4 double-consumer memoization (overwrite the resolved deferred cell).
-    /// Called whenever Core needs a concrete value out of a suspended computation
-    /// (e.g. a deferred array feeding IRIndex / IRExtent / IRRank).
+    /// Force a VDeferred / VLoopObj to a concrete Value, mirroring
+    /// genComputeBinding.resolveComputation + dispatch, including the (4)
+    /// double-consumer memoization. Called whenever Core needs a concrete
+    /// value out of a suspended computation (e.g. a deferred array feeding
+    /// IRIndex / IRExtent / IRRank).
     Force: InterpState -> Env -> Value -> Value
 }
 
 /// One interpreter run's mutable accounting plus the shared read-only tables.
-/// Fields beyond the contract's core set: none — Steps/Depth/Cells are the
-/// live budgets, Callables is the id→callable table (built once by makeState,
-/// includes let-alias entries so `let f = <lambda>` references resolve), and
-/// Err accumulates panic text for the caller to flush to stderr.
-///
-/// NOTE for the Run.fs author: `Cells` is allocated but not incremented in M0
-/// (no arrays are materialized yet); it is here so the array milestone can
-/// charge allocations without changing this record's shape.
+/// Steps/Depth/Cells are the live budgets, Callables is the id->callable
+/// table (built once by makeState, includes let-alias entries so
+/// `let f = <lambda>` references resolve), and Err accumulates panic text
+/// for the caller to flush to stderr. `Cells` is allocated but not
+/// incremented in M0 (no arrays are materialized yet); it is here so the
+/// array milestone can charge allocations without changing this record's shape.
 and InterpState = {
     Limits: InterpLimits
     mutable Steps: int64
@@ -90,53 +81,48 @@ and InterpState = {
     mutable Cells: int64
     Callables: Dictionary<IRId, IRCallable>
     Err: System.Text.StringBuilder
-    // ---- Shadow call stack (M1) ------------------------------------------
-    // The differential twin of cpp/blade_runtime.hpp's `thread_local Frame
-    // stack[64]` + `int depth`. CodeGen emits `BLADE_FRAME("<blade-name>",
-    // nullptr, 0)` at every user function/lambda body entry (CodeGen.fs:9342,
-    // 9392) — file/line are always nullptr/0, so a frame prints ONLY its name.
-    // We store just the names, pushed/popped in evalCall with the SAME string
-    // CodeGen pushes (IRCallable.Name == IRFuncDef.Name). `FrameNames` holds
-    // the outermost 64 (the header caps storage at `if (depth < 64) store`);
-    // `FrameDepth` is the TRUE depth and keeps counting past 64, so the
-    // panic-time `min(depth, 64)` slice matches the header byte-for-byte.
+    // Shadow call stack (M1): the differential twin of cpp/blade_runtime.hpp's
+    // `thread_local Frame stack[64]` + `int depth`. CodeGen emits
+    // `BLADE_FRAME("<blade-name>", nullptr, 0)` at every user function/lambda
+    // body entry (CodeGen.fs:9342, 9392) -- file/line always nullptr/0, so a
+    // frame prints only its name, pushed/popped in evalCall with the same
+    // string CodeGen pushes (IRCallable.Name == IRFuncDef.Name). `FrameNames`
+    // holds the outermost 64 (header caps storage at `if (depth < 64) store`);
+    // `FrameDepth` keeps counting past 64, so the panic-time `min(depth, 64)`
+    // slice matches the header byte-for-byte.
     FrameNames: string[]
     mutable FrameDepth: int
-    // ---- Module-global scope (M1, capturing-function arc) ----------------
-    // The root env holding the module's evaluated top-level bindings. Call
-    // frames chain to it as their parent: a function body may reference
-    // module-level bindings directly (CodeGen emits such functions as
-    // main-local [&]-capturing lambdas — computeMainLocalFuncIds), and with
-    // globally-unique IRIds a root-parented lookup resolves exactly the
-    // binding the C++ capture references. Set by Run.fs after envNew, before
-    // any binding is evaluated.
+    // Module-global scope (M1, capturing-function arc): the root env holding
+    // the module's evaluated top-level bindings. Call frames chain to it as
+    // their parent -- a function body may reference module-level bindings
+    // directly (CodeGen emits such functions as main-local [&]-capturing
+    // lambdas), and with globally-unique IRIds a root-parented lookup
+    // resolves exactly the binding the C++ capture references. Set by Run.fs
+    // after envNew, before any binding is evaluated.
     mutable Global: Env option
-    // ---- M2 loop/array layer wiring --------------------------------------
-    /// Fresh-id source for the synthetic callables minted while forcing (e.g.
+    /// Fresh-id source for synthetic callables minted while forcing (e.g.
     /// applyFunctorWrappers registers inline-wrapped kernels into the AsyncLocal
-    /// AnalysisContext that buildLoopNestCodeGen resolves). Seeded past the
-    /// module's id space (EnsureAtLeast, mirroring CodeGen.genMainProgram) so a
-    /// synthetic id can never hijack a real binding/param id. One builder / run.
+    /// AnalysisContext buildLoopNestCodeGen resolves). Seeded past the module's
+    /// id space (mirroring CodeGen.genMainProgram) so a synthetic id can never
+    /// hijack a real binding/param id. One builder / run.
     Builder: IRBuilder
     /// The installed loop/array backend (Interp/Loops.fs), or None for a pure
     /// scalar run. Set once by Run.fs immediately after makeState. When None,
     /// every loop/array-machinery node raises InterpUnsupported (M0 parity).
     mutable Hooks: InterpHooks option
     /// Assignable block-level array lets (IRModule.MutableArrayLets). A let
-    /// whose id is here and whose initializer is a reference to an existing
-    /// array deep-copies the store at bind time — the differential twin of
+    /// whose id is here and whose initializer references an existing array
+    /// deep-copies the store at bind time -- the differential twin of
     /// CodeGen's fresh-alloc + pool-copy path (genVarAliasBinding), so
     /// mutations through the binding never corrupt the source array.
     MutableArrayLets: Set<IRId>
-    // ---- Forced-deferred print parity (forced-on-read auto-print) --------
-    /// REFERENCE-keyed index from a module-level binding's Value expression
-    /// object to its binding id. A root-cell VDeferred always carries the
-    /// binding's own Value node as its payload (evalBinding stores
-    /// `VDeferred (b.Value, env)`), so a reference hit in Loops.force means
-    /// "the deferred payload of module binding <id> is being forced" — the
-    /// value-space twin of forceDeferredArrayInput's IRVar arm. Sub-expression
-    /// VDeferreds (kernel bodies, scalar choice operands, ...) miss the index
-    /// and are ignored. Built once by makeState over the merged module.
+    /// Reference-keyed index from a module-level binding's Value expression
+    /// object to its binding id (forced-deferred print parity). A root-cell
+    /// VDeferred always carries the binding's own Value node as its payload,
+    /// so a reference hit in Loops.force means "the deferred payload of
+    /// module binding <id> is being forced" -- the value-space twin of
+    /// forceDeferredArrayInput's IRVar arm. Sub-expression VDeferreds miss
+    /// the index and are ignored. Built once by makeState over the merged module.
     DeferredBindingIndex: Dictionary<IRExpr, IRId>
     /// Module-level deferred bindings actually FORCED during evaluation.
     /// Print consults this: a deferred binding that ended up materialized
@@ -158,7 +144,7 @@ let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
     for kv in table do dict.[kv.Key] <- kv.Value
     let builder = IRBuilder()
     // Keep synthetic-callable ids minted during forcing disjoint from the
-    // module's own ids (same floor CodeGen uses — see CodeGen.genMainProgram's
+    // module's own ids (same floor CodeGen uses -- see CodeGen.genMainProgram's
     // `builder.EnsureAtLeast(0x40000000)`).
     builder.EnsureAtLeast(0x40000000)
     { Limits = limits
@@ -181,14 +167,12 @@ let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
         d
       ForcedDeferred = HashSet<IRId>() }
 
-// ============================================================================
-// Shadow call stack push/pop + panic-time capture — mirrors blade_runtime.hpp
-// ============================================================================
+// Shadow call stack push/pop + panic-time capture, mirroring blade_runtime.hpp.
 // Push at Blade function-body entry, pop on normal exit. On a panic the frames
-// are read (capturedFrames) BEFORE any unwinding: evalCall does NOT pop in a
-// finally, so an escaping InterpPanic leaves the live call chain intact for
-// Run.fs to render — exactly as the C++ side, where blade_rt::panic reads the
-// stack and std::exit(1)s WITHOUT running the RAII Scope destructors.
+// are read (capturedFrames) BEFORE unwinding: evalCall does NOT pop in a
+// finally, so an escaping InterpPanic leaves the live call chain intact --
+// exactly as the C++ side, where blade_rt::panic reads the stack and exits
+// without running the RAII Scope destructors.
 
 /// Push a frame (`Scope` ctor: `if (depth < 64) stack[depth] = ...; ++depth`).
 let private pushFrame (st: InterpState) (name: string) : unit =
@@ -199,19 +183,17 @@ let private pushFrame (st: InterpState) (name: string) : unit =
 let private popFrame (st: InterpState) : unit =
     st.FrameDepth <- st.FrameDepth - 1
 
-/// The live shadow-stack frames at panic time, innermost first — the order
+/// The live shadow-stack frames at panic time, innermost first -- the order
 /// blade_rt::panic walks them (`for (i = min(depth,64)-1; i >= 0; --i)`).
 let capturedFrames (st: InterpState) : string list =
     let d = min st.FrameDepth FrameCap
     [ for i in (d - 1) .. -1 .. 0 -> st.FrameNames.[i] ]
 
-// ============================================================================
-// Small value coercions (loop bounds, complex components, truthiness)
-// ============================================================================
-// Numerics owns the bit-critical arithmetic coercions (its asF64/asI64 are
-// private). These are the few extra projections the evaluator itself needs;
-// they follow the same C++ conversion rules (truncate-toward-zero on int
-// casts, nonzero-is-true) but never touch arithmetic results.
+// Small value coercions (loop bounds, complex components, truthiness).
+// Numerics owns the bit-critical arithmetic coercions (private asF64/asI64);
+// these are the few extra projections the evaluator itself needs, following
+// the same C++ rules (truncate-toward-zero, nonzero-is-true) but never
+// touching arithmetic results.
 
 let private toBoolV (v: Value) : bool =
     match v with
@@ -220,10 +202,10 @@ let private toBoolV (v: Value) : bool =
     | VInt32 n -> n <> 0
     | _ -> false
 
-/// C++ `x != 0` over any scalar — the choice `<|>` pick test (exprToCpp binds
-/// the left operand to a temporary first, CodeGen.fs:1589). Distinct from toBoolV, which is the
-/// bool-context projection (floats are never bool contexts, but ARE compared
-/// against zero by choice).
+/// C++ `x != 0` over any scalar -- the choice `<|>` pick test (exprToCpp
+/// binds the left operand to a temporary first, CodeGen.fs:1589). Distinct
+/// from toBoolV, the bool-context projection (floats are never bool contexts,
+/// but ARE compared against zero by choice).
 let private valueNonZero (v: Value) : bool =
     match v with
     | VBool b -> b
@@ -234,7 +216,7 @@ let private valueNonZero (v: Value) : bool =
     | VComplex (r, i) -> r <> 0.0 || i <> 0.0
     | _ -> false
 
-/// Integer projection for loop bounds / counters — C++ `(int64_t)x` truncates
+/// Integer projection for loop bounds / counters -- C++ `(int64_t)x` truncates
 /// toward zero on float sources.
 let private toI64 (v: Value) : int64 =
     match v with
@@ -265,13 +247,10 @@ let private nodeName (e: IRExpr) : string =
         Microsoft.FSharp.Reflection.FSharpValue.GetUnionFields(e, typeof<IRExpr>)
     case.Name
 
-// ============================================================================
-// Tuple projection (flat vs. structural) — mirrors CodeGen.fs:1219
-// ============================================================================
+// Tuple projection (flat vs. structural), mirroring CodeGen.fs:1219.
 // IRTupleProj carries isFlat: structural (`std::get<i>`) indexes the immediate
-// tuple; flat indexes leaves of the fully-flattened nested tuple. Value-level
-// leaf counting matches IR.flattenTupleLeaves exactly (only tuples recurse;
-// every other value — scalar, complex, struct, variant — is one leaf).
+// tuple; flat indexes leaves of the fully-flattened nested tuple. Leaf
+// counting matches IR.flattenTupleLeaves exactly (only tuples recurse).
 
 let rec private countLeaves (v: Value) : int =
     match v with
@@ -302,19 +281,14 @@ let rec private projectFlat (v: Value) (flatIdx: int) : Value =
         | None -> raise (InterpPanic ("BL8003", "tuple projection index out of range", None, 0))
     | leaf -> leaf   // flat index into a leaf: the value is itself the sole leaf
 
-// ============================================================================
-// Variant construction — mirrors Lowering.fs:164-176 / 654-655
-// ============================================================================
-// A payload-less variant constructor (`North`) lowers to a bare IRParam whose
+// Variant construction, mirroring Lowering.fs:164-176 / 654-655. A
+// payload-less variant constructor (`North`) lowers to a bare IRParam whose
 // type is the sum type (IRTNamed); a payload constructor (`Some x`) lowers to
 // IRApp(IRParam("Some", _, FuncElem(_, IRTNamed _)), [x]). The runtime tag is
-// `hash constructorName` — the SAME derivation IRPatVariant stores
-// (`IRPatVariant (name, hash name, ...)`), so construction and dispatch agree.
-// (F# `hash` of a string is stable within a process; lowering and evaluation
-// share one process run, so the stored pattern tag and this tag match.)
-//
-// Qualified references (TExprQualified → IRParam with a dotted name) also spell
-// as IRParam; a name containing '.' is therefore NOT treated as a constructor.
+// `hash constructorName`, the same derivation IRPatVariant stores, so
+// construction and dispatch agree (F# `hash` of a string is stable within a
+// process). Qualified references (TExprQualified -> IRParam with a dotted
+// name) also spell as IRParam, so a name containing '.' is never a constructor.
 
 let private variantResultName (ty: IRType) : string option =
     match ty with
@@ -324,9 +298,7 @@ let private variantResultName (ty: IRType) : string option =
 
 let private isCtorName (name: string) = not (name.Contains ".")
 
-// ============================================================================
-// Pattern literal comparison (IRPatLit) — value-level, IEEE/ordinal exact
-// ============================================================================
+// Pattern literal comparison (IRPatLit): value-level, IEEE/ordinal exact.
 
 let private litMatches (lit: IRLit) (v: Value) : bool =
     match lit, v with
@@ -340,21 +312,18 @@ let private litMatches (lit: IRLit) (v: Value) : bool =
     | IRLitUnit, VUnit -> true
     | _ -> false
 
-// ============================================================================
-// M2 defer/force plumbing (§4) — classification + backend routing
-// ============================================================================
-// The interpreter keeps CodeGen's DeferredComputations map IMPLICIT in the value
-// domain: a deferred binding's cell holds VDeferred(expr, env), a loop object's
-// cell holds VLoopObj. `evalBinding` (below) decides which, mirroring
+// M2 defer/force plumbing (formalism 4): classification + backend routing.
+// The interpreter keeps CodeGen's DeferredComputations map IMPLICIT in the
+// value domain: a deferred binding's cell holds VDeferred(expr, env), a loop
+// object's cell holds VLoopObj. `evalBinding` decides which, mirroring
 // CodeGen.genBinding / computeDeferredIds exactly so the interpreter's cell
-// contents stay in lock-step with Print (which reuses computeDeferredIds to pick
-// which bindings render).
+// contents stay in lock-step with Print.
 
-/// True when an OPERAND expression is (or aliases) a deferred computation — the
-/// value-space mirror of CodeGen.computeDeferredIds' inner `isDeferred ids e`
-/// (a combinator/compose/parallel/... form, or an IRVar whose bound cell already
-/// holds a VDeferred). By induction over module-ordered bindings this coincides
-/// with `Set.contains id deferredIds`, so the two twins never disagree.
+/// True when an OPERAND expression is (or aliases) a deferred computation --
+/// the value-space mirror of CodeGen.computeDeferredIds' inner
+/// `isDeferred ids e` (a combinator/compose/parallel/... form, or an IRVar
+/// whose bound cell already holds a VDeferred). By induction over
+/// module-ordered bindings this coincides with `Set.contains id deferredIds`.
 let private isDeferredOperand (env: Env) (e: IRExpr) : bool =
     match e with
     | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _
@@ -367,11 +336,10 @@ let private isDeferredOperand (env: Env) (e: IRExpr) : bool =
     | _ -> false
 
 /// Whether a top-level binding VALUE defers (its cell holds VDeferred) rather
-/// than materializes — an exact port of CodeGen.computeDeferredIds' per-binding
+/// than materializes -- an exact port of CodeGen.computeDeferredIds' per-binding
 /// `shouldDefer` (CodeGen.fs:9865-9886), so a binding is VDeferred iff Print
-/// (via computeDeferredIds) would skip it. NB: IRMethodFor/IRObjectFor are NOT
-/// deferred here (evalBinding treats them as loop objects — VLoopObj — before
-/// consulting this, matching genBinding and Print's explicit skip of them).
+/// would skip it. IRMethodFor/IRObjectFor are NOT deferred here (evalBinding
+/// treats them as loop objects -- VLoopObj -- before consulting this).
 let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
     // Mirror computeDeferredIds' resultIsArray rule: an array-typed combinator is a
     // deferred computation whatever its operands (materializes only at |> compute);
@@ -382,7 +350,7 @@ let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
     | IRZip _ -> true
     | IRComposeObj _ -> true
     // f >> g is a function VALUE (applied via applyValue, never forced through
-    // the Loops backend) — defer so the eager branch doesn't force it. The
+    // the Loops backend) -- defer so the eager branch doesn't force it. The
     // binding is function-typed, so Print skips it on both sides regardless.
     | IRCompose _ -> true
     | IRBind (comp, _) -> resultIsArray || isDeferredOperand env comp
@@ -390,7 +358,7 @@ let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
     | IRFunctorMap (_, inner) -> resultIsArray || isDeferredOperand env inner
     | IRChoice (left, right) -> resultIsArray || isDeferredOperand env left || isDeferredOperand env right
     // <|:> always defers at binding level (CodeGen.genFallbackBinding /
-    // computeDeferredIds agree) — its operands are arrays, never scalars.
+    // computeDeferredIds agree) -- its operands are arrays, never scalars.
     | IRFallback _ -> true
     | IRGuard (_, body) ->
         let rec leafIsDeferred e =
@@ -412,7 +380,7 @@ let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
 
 /// Route a node Core classifies as loop/array *machinery* (the force, reductions,
 /// nest-consuming reads) to the installed Loops backend. With no backend it is an
-/// unimplemented feature — the SAME InterpUnsupported skip M0 produced.
+/// unimplemented feature -- the same InterpUnsupported skip M0 produced.
 let private evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     match st.Hooks with
     | Some h -> h.EvalArrayNode st env expr
@@ -432,21 +400,20 @@ let private forceValue (st: InterpState) (env: Env) (v: Value) : Value =
 /// Is this array eligible for the assignable-let deep copy? Mirrors the
 /// C++ side's dense-only guard in genVarAliasBinding (plain dense or
 /// symmetric-compact Array<T,N>): ragged-family / dep-idx / compound index
-/// tags — and any ragged backing store — keep the historical alias.
+/// tags -- and any ragged backing store -- keep the historical alias.
 let private isDenseCopyableArray (ba: BladeArray) : bool =
     (match ba.Data with SRagged _ -> false | _ -> true)
     && ba.IndexTypes |> List.forall (fun ix ->
         not (isRaggedRowKind ix.IxKind)
         && ix.IxKind <> IxKCompound
-        && ix.IxKind <> IxKCompoundDynamic)
+        && ix.IxKind <> IxKCompoundDynamic
+        && ix.IxKind <> IxKSparse)
 
-// ============================================================================
-// The evaluator
-// ============================================================================
+// The evaluator.
 
 /// Evaluate an IR expression to a runtime value. One step charged per entry;
 /// exceeding the step budget raises a loud panic (there is no matching C++
-/// output — a runaway is a diagnostic, not a value).
+/// output -- a runaway is a diagnostic, not a value).
 let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     st.Steps <- st.Steps + 1L
     if st.Steps > st.Limits.MaxSteps then
@@ -462,7 +429,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
 
     | IRVar (id, _) ->
         // Locals (let / param / loop var / capture) win; otherwise the id names
-        // a callable (top-level function or lifted lambda) — reify it as a
+        // a callable (top-level function or lifted lambda) -- reify it as a
         // closure, capturing the current frame's cells for its free vars.
         match envTryFind env id with
         | Some cell -> cell.V
@@ -496,9 +463,8 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // Left-to-right operand evaluation, then Numerics' bit-exact dispatch
         // (promotion / wraparound / complex coercion / string concat). Array
         // operands never reach here: Lowering's lowerArrayBinOpsModule rewrites
-        // every array-typed binop into the same method_for co-iteration (or
-        // single-array broadcast) combinator that top-level `x + y` / `A + s`
-        // take, so this arm only ever sees scalars.
+        // every array-typed binop into a method_for co-iteration combinator,
+        // so this arm only ever sees scalars.
         let lv = evalExpr st env l
         let rv = evalExpr st env r
         N.evalBinOp op lv rv
@@ -511,12 +477,11 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // than a child scope) is safe and matches the flat env model.
         let v = evalExpr st env value
         // Copy semantics for assignable array lets initialized from an
-        // existing array (`let mut a = Z` — st.MutableArrayLets): deep-copy
+        // existing array (`let mut a = Z` -- st.MutableArrayLets): deep-copy
         // the store so mutations through `a` never corrupt `Z`, mirroring
         // CodeGen's fresh-alloc + pool-copy (genVarAliasBinding). Only an
-        // IRVar initializer aliases (other shapes materialize fresh);
-        // ragged stores keep the historical alias, matching the C++ side's
-        // dense-only guard.
+        // IRVar initializer aliases; ragged stores keep the historical alias
+        // (matching the C++ side's dense-only guard).
         let v =
             match value, v with
             | IRVar _, VArray ba when Set.contains id st.MutableArrayLets
@@ -568,7 +533,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         | _ -> raise (InterpUnsupported "IRFieldAccess on non-struct value")
 
     // Inline object_for application (`A [op] B` outer product, etc.) is an
-    // array-producing binding form, not a callable application — route it to the
+    // array-producing binding form, not a callable application -- route it to the
     // Loops backend (materializeObjectForApp) rather than evalApp, whose callee
     // would be a VLoopObj it cannot invoke.
     | IRApp (IRObjectFor _, _, _) ->
@@ -598,7 +563,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
 
     | IRConstraintCheck (cond, message, span) ->
         // `if (!(cond)) blade_rt::panic("BL8001", message, file, line)`
-        // (CodeGen.fs:7166). File is nullptr when empty, line 0 when unset —
+        // (CodeGen.fs:7166). File is nullptr when empty, line 0 when unset --
         // reproduced here so Run.fs can render the identical stderr line.
         if toBoolV (evalExpr st env cond) then VUnit
         else
@@ -615,37 +580,36 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
          | VArray ba -> VInt (int64 ba.Extents.Length)
          | _ -> raise (InterpUnsupported "IRRank"))
 
-    // ---- M2 deferred-computation forms (§4). The suspended (expr, env) pair IS
-    //      the deferral, mirroring the DeferredComputations entry genBinding
-    //      creates; a downstream IRCompute / combinator forces it via Hooks.Force.
-    //      evalBinding intercepts these at binding level too — this arm covers
-    //      sub-expression / aliased occurrences. (IRSequence keeps its scalar arm
-    //      above; it defers only at binding level, via shouldDeferBinding.)
+    // ---- M2 deferred-computation forms (formalism 4). The suspended (expr, env)
+    //      pair IS the deferral, mirroring the DeferredComputations entry
+    //      genBinding creates; a downstream IRCompute / combinator forces it via
+    //      Hooks.Force. evalBinding intercepts these at binding level too --
+    //      this arm covers sub-expression / aliased occurrences. (IRSequence
+    //      defers only at binding level, via shouldDeferBinding.)
     | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _
     | IRFunctorMap _ | IRZip _ | IRComposeObj _ | IRComposeMeth _
     | IRBind _ ->
         VDeferred (expr, env)
 
-    // ---- pure(v): the identity monadic unit — renders as just its inner value
+    // ---- pure(v): the identity monadic unit -- renders as just its inner value
     //      (exprToCppCore IRPure -> inner, CodeGen.fs:1291; typeOf sees through).
     | IRPure e -> evalExpr st env e
 
     // ---- f >> g function composition: a VALUE (C++ emits a lambda,
     //      CodeGen.fs:1384-1388). Held suspended; applyValue unwraps it at the
-    //      call site as g(f(args)). Never forced through the Loops backend —
+    //      call site as g(f(args)). Never forced through the Loops backend --
     //      shouldDeferBinding lists it so compose bindings skip the eager-branch
     //      force (function-typed bindings print nothing on both sides).
     | IRCompose _ -> VDeferred (expr, env)
 
     // ---- M2 choice / guard in EXPRESSION position. Over a computation operand
-    //      they defer exactly like the combinator forms above (the binding-level
-    //      classifiers agree). Over scalars they are the EAGER exprToCpp
-    //      ternaries (CodeGen.fs:1589/1598):
-    //        a <|> b            →  auto l = a; l != 0 ? l : b   (a evaluated once)
-    //        guard(p, body)     →  (p ? body : zero)    (type-appropriate zero;
-    //                               body NOT evaluated when p is false)
+    //      they defer exactly like the combinator forms above. Over scalars
+    //      they are the EAGER exprToCpp ternaries (CodeGen.fs:1589/1598):
+    //        a <|> b            ->  auto l = a; l != 0 ? l : b   (a evaluated once)
+    //        guard(p, body)     ->  (p ? body : zero)   (body NOT evaluated
+    //                               when p is false)
     //      Without these arms a scalar guard/choice inside arithmetic reached
-    //      Numerics as a VDeferred operand — BL8010 (guard-combinators/006).
+    //      Numerics as a VDeferred operand -- BL8010 (guard-combinators/006).
     | IRChoice (left, right) ->
         if isDeferredOperand env left || isDeferredOperand env right then
             VDeferred (expr, env)
@@ -657,7 +621,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     // Loops.forceExpr.
     | IRFallback _ -> VDeferred (expr, env)
     | IRGuard (cond, body) ->
-        // Defer iff the guard's LEAF body is a computation — genGuardBinding's
+        // Defer iff the guard's LEAF body is a computation -- genGuardBinding's
         // leafIsComputation recursion (CodeGen.fs:9019, nested guards peel).
         let rec leafIsComp e =
             match e with
@@ -674,17 +638,95 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> VInt 0L
             | _ -> VFloat 0.0
 
-    // ---- M2 loop objects: method_for / object_for — provenance the `<@>` apply
+    // ---- M2 loop objects: method_for / object_for -- provenance the `<@>` apply
     //      reads later (no code, like genBinding's IRMethodFor/IRObjectFor arms).
     | IRMethodFor _ | IRObjectFor _ ->
         VLoopObj { Provenance = expr; Captured = env }
 
-    // ---- M2 the force (IRCompute) + reduce family + membership → Loops backend
-    //      (the nest machinery). None ⇒ InterpUnsupported, i.e. M0-parity skip.
+    // ---- M2 the force (IRCompute) + reduce family + membership -> Loops backend
+    //      (the nest machinery). None = InterpUnsupported, i.e. M0-parity skip.
     | IRCompute _ | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRContains _ ->
         evalArrayNode st env expr
 
-    // ---- group_by(vals, gk) → a ragged (CSR) array. Materializes via the Loops
+    // ---- display.emit: the IR's one EFFECTFUL expression (docs/display-frames.md).
+    //      Buffered rather than written, because the interpreter assembles all
+    //      of stdout after every binding has evaluated -- Run.execProgram
+    //      flushes the buffer ahead of the binding prints, which is exactly
+    //      where the compiled binary's std::cout writes land (inside main()'s
+    //      body, before the timing line). Same bytes, same order, both lanes.
+    | IRDisplayEmit (head, quoted, dataExpr, metaTail) ->
+        (match evalExpr st env dataExpr with
+         | VString s -> VBool (Blade.Display.Frame.emit head quoted s metaTail)
+         | _ -> raise (InterpUnsupported "display.emit: payload did not evaluate to a String"))
+
+    // ---- display.json_array / display.json_num: JSON text of a numeric
+    //      array / scalar. Formatting parity is the contract:
+    //      CppFormat.formatFloat15 is the byte-exact mirror of the C++
+    //      helpers' `setprecision(15)` stream (blade_display::json1/json2 in
+    //      Blade.Display.Frame.cppRuntime), so the differential gate pins
+    //      the two lanes together exactly as it does for prints.
+    | IRDisplayJson (rank, dataExpr) ->
+        (match forceValue st env (evalExpr st env dataExpr) with
+         | VArray ba ->
+             let elemStr (store: Store) (i: int) : string =
+                 match store with
+                 | SFloat a -> Blade.Interp.CppFormat.formatFloat15 a.[i]
+                 | SInt a -> string a.[i]
+                 | SObj vs ->
+                     (match vs.[i] with
+                      | VFloat f -> Blade.Interp.CppFormat.formatFloat15 f
+                      | VFloat32 f -> Blade.Interp.CppFormat.formatFloat32 f
+                      | VInt n -> string n
+                      | VInt32 n -> string n
+                      | _ -> raise (InterpUnsupported "display.json_array: non-numeric element"))
+                 | _ -> raise (InterpUnsupported "display.json_array: unsupported element store")
+             let sb = System.Text.StringBuilder()
+             (match rank, ba.Data with
+              | 1, store ->
+                  let n = int ba.Extents.[0]
+                  sb.Append '[' |> ignore
+                  for i in 0 .. n - 1 do
+                      if i > 0 then sb.Append ',' |> ignore
+                      sb.Append(elemStr store i) |> ignore
+                  sb.Append ']' |> ignore
+              | 2, SNested rows ->
+                  let nr = int ba.Extents.[0]
+                  let nc = int ba.Extents.[1]
+                  sb.Append '[' |> ignore
+                  for i in 0 .. nr - 1 do
+                      if i > 0 then sb.Append ',' |> ignore
+                      sb.Append '[' |> ignore
+                      for j in 0 .. nc - 1 do
+                          if j > 0 then sb.Append ',' |> ignore
+                          sb.Append(elemStr rows.[i] j) |> ignore
+                      sb.Append ']' |> ignore
+                  sb.Append ']' |> ignore
+              | 2, store ->
+                  // Flat row-major backing (computed rank-2 results).
+                  let nr = int ba.Extents.[0]
+                  let nc = int ba.Extents.[1]
+                  sb.Append '[' |> ignore
+                  for i in 0 .. nr - 1 do
+                      if i > 0 then sb.Append ',' |> ignore
+                      sb.Append '[' |> ignore
+                      for j in 0 .. nc - 1 do
+                          if j > 0 then sb.Append ',' |> ignore
+                          sb.Append(elemStr store (i * nc + j)) |> ignore
+                      sb.Append ']' |> ignore
+                  sb.Append ']' |> ignore
+              | r, _ -> raise (InterpUnsupported (sprintf "display.json_array: unsupported rank %d" r)))
+             VString (sb.ToString())
+         | _ -> raise (InterpUnsupported "display.json_array: operand did not evaluate to an array"))
+
+    | IRDisplayNum dataExpr ->
+        (match forceValue st env (evalExpr st env dataExpr) with
+         | VFloat f -> VString (Blade.Interp.CppFormat.formatFloat15 f)
+         | VFloat32 f -> VString (Blade.Interp.CppFormat.formatFloat32 f)
+         | VInt n -> VString (string n)
+         | VInt32 n -> VString (string n)
+         | _ -> raise (InterpUnsupported "display.json_num: operand did not evaluate to a numeric scalar"))
+
+    // ---- group_by(vals, gk) -> a ragged (CSR) array. Materializes via the Loops
     //      backend (it reads the VGroupKeys from `gk` + gathers the values).
     //      group_keys itself is intercepted at BINDING level (evalBinding) where
     //      the IRTGroupKeys type drives the Case-1/2/3 bucketing.
@@ -698,21 +740,21 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         VArray (ArrayOps.arrayLitFromValues arrType elemVals)
 
     // ---- M2 virtual-array sources (range / reverse / blocked): no standalone
-    //      store — consumed only as nest inputs (ArraySource.SVirtual). The
+    //      store -- consumed only as nest inputs (ArraySource.SVirtual). The
     //      suspended (expr, env) lets the Loops backend read the IRRange /
     //      IRVirtualReverse / IRBlocked descriptor when it wires the nest.
     | IRRange _ | IRVirtualReverse _ | IRBlocked _ ->
         VDeferred (expr, env)
 
     // ---- M2 indexing / currying / poly-index over a concrete array. Force a
-    //      deferred array input first, then delegate to ArrayOps (state-free — it
+    //      deferred array input first, then delegate to ArrayOps (state-free -- it
     //      takes only the array + evaluated indices).
     | IRIndex (arrExpr, indices, _) ->
         (match forceValue st env (evalExpr st env arrExpr) with
          | VArray ba ->
              let idxVals = indices |> List.map (evalExpr st env)
              ArrayOps.indexArray ba idxVals
-         | _ -> evalArrayNode st env expr)   // streamed / non-array source → backend
+         | _ -> evalArrayNode st env expr)   // streamed / non-array source -> backend
     | IRCurry (arrExpr, idxExpr, _) ->
         (match forceValue st env (evalExpr st env arrExpr) with
          | VArray ba -> ArrayOps.curryArray ba (toI64 (evalExpr st env idxExpr))
@@ -726,18 +768,19 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRPolyTail _ ->
         raise (InterpUnsupported "IRPolyTail on non-monomorphized parameter pack")
 
-    // ---- M2 extent: read the concrete array's static shape (§0.9).
-    //      A rank-1 compound has no `.extents` — its sole axis's runtime extent
+    // ---- M2 extent: read the concrete array's static shape (formalism 0.9).
+    //      A rank-1 compound has no `.extents` -- its sole axis's runtime extent
     //      is the compact index's cardinality (popcount), the `extents(f)`
     //      overload for compounds (genExtentExpr, CodeGen.fs:2127).
     | IRExtent (arrExpr, dim) ->
         (match forceValue st env (evalExpr st env arrExpr) with
          | VArray ba when dim >= 0 && dim < ba.Extents.Length -> VInt ba.Extents.[dim]
          | VCompound cv -> VInt cv.Cardinality
+         | VSparse sv -> VInt sv.Cardinality
          | _ -> raise (InterpUnsupported "IRExtent"))
 
     // ---- Compound-halo window read `w(o)`: the COORDINATE of the present cell at
-    //      ordinal (center + o) — IRHaloUnhash's `w[(o)][0]` over the compound's
+    //      ordinal (center + o) -- IRHaloUnhash's `w[(o)][0]` over the compound's
     //      rank_to_tuple table (CodeGen.fs:3051). The window value is a VTuple
     //      (coordinate column, center ordinal), bound by materializeCompoundHaloMap.
     | IRHaloUnhash (winExpr, off) ->
@@ -746,9 +789,8 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
          | _ -> raise (InterpUnsupported "IRHaloUnhash: window is not a compound-halo window"))
 
     // ---- M4 wave-1 eager set/reshape ops (mask / sort / set-ops / transpose).
-    //      These MATERIALIZE a fresh array (no nest, but they need to force
-    //      deferred inputs first and, for sort/mask, call a kernel), so they
-    //      route to the Loops backend (evalArrayNode) exactly like IRReduce /
+    //      MATERIALIZE a fresh array (forcing deferred inputs first; sort/mask
+    //      also call a kernel), so route to the Loops backend like IRReduce /
     //      IRContains. Semantics pinned to CodeGen's materialize*Form emitters:
     //      mask = Bool PRESENCE array (NOT filtering), sort = stable ascending by
     //      key, set-ops = unordered_set first-occurrence, transpose = hard swap.
@@ -757,26 +799,32 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
 
     // ---- Rank-changing assembly (formalism 2.6): stack adds a fresh leading
     //      axis over same-shaped operands; join concatenates along a dimension.
-    //      Both materialize a fresh dense pool by copying (never aliasing) their
-    //      operands, mirroring CodeGen's materialize{Stack,Join}Form.
+    //      Both materialize a fresh dense pool by copying their operands,
+    //      mirroring CodeGen's materialize{Stack,Join}Form.
     | IRStack _ | IRJoin _ ->
         evalArrayNode st env expr
 
-    // ---- Symmetry producers (M7-β): decompact fission, gram A·Bᴴ, whole-array
-    //      negate/conjugate. Like the eager set/reshape ops they MATERIALIZE a
-    //      fresh array (forcing deferred inputs first), so route to the Loops
-    //      backend, which mirrors CodeGen's materialize{Decompact,Gram,Negate/
-    //      Conjugate}Form emitters.
-    | IRDecompact _ | IRGram _ | IRArrayNegate _ | IRArrayConjugate _ ->
+    // ---- Symmetry producers: decompact fission, gram A.B^H, whole-array
+    //      negate/conjugate. Like the eager set/reshape ops these MATERIALIZE a
+    //      fresh array, so route to the Loops backend (mirrors CodeGen's
+    //      materialize{Decompact,Gram,Negate/Conjugate}Form emitters).
+    | IRDecompact _ | IRGram _ | IRMatmul _ | IRSolve _ | IRArrayNegate _ | IRArrayConjugate _ ->
+        evalArrayNode st env expr
+
+    // ---- eigh: same materializing family, but its value is a TUPLE (Q, LAM)
+    //      rather than one array, so the Loops backend returns a VTuple here.
+    //      Reachable only when the LAPACK gate was on at elaboration; gate
+    //      off, `math.eigh` is synthesized Blade source and this node never exists.
+    | IREigh _ ->
         evalArrayNode st env expr
 
     | other ->
-        // Anything still uninterpreted (compound / group / provider forms, ...) —
+        // Anything still uninterpreted (compound / group / provider forms, ...):
         // later milestones.
         raise (InterpUnsupported (nodeName other))
 
 /// Reify a callable id as a closure value, snapshotting the current frame's
-/// cells for each declared capture (by CaptureInfo.Id — the free var's original
+/// cells for each declared capture (by CaptureInfo.Id -- the free var's original
 /// VarId). Top-level functions have no captures, so this yields an empty map.
 and makeClosure (env: Env) (callable: IRCallable) : Value =
     let captures =
@@ -810,7 +858,7 @@ and evalApp (st: InterpState) (env: Env) (func: IRExpr) (args: IRExpr list) : Va
         applyValue st fv argVals
 
 /// Apply an already-evaluated callee value. A composed function (`f >> g`,
-/// held as a suspended IRCompose — see the evalExpr arm) unwraps here:
+/// held as a suspended IRCompose -- see the evalExpr arm) unwraps here:
 /// CodeGen renders composition as `[&](auto... a){ return g(f(a...)); }`
 /// (CodeGen.fs:1384), so application is g-of-f with f evaluated first; chains
 /// (left-assoc IRCompose nests, Lowering.fs:335-341) recurse naturally.
@@ -824,14 +872,14 @@ and applyValue (st: InterpState) (fv: Value) (argVals: Value list) : Value =
 
 /// Invoke a callable in a FRESH frame: captured cells bound by reference (so
 /// mutation through the closure is visible to the definer), then parameters
-/// bound positionally to the evaluated arguments. The frame has no parent — a
-/// callable body reaches only its params, its captures, and other callables
-/// (via the id→callable table), never the caller's locals.
+/// bound positionally to the evaluated arguments. The frame has no parent --
+/// a callable body reaches only its params, its captures, and other callables
+/// (via the id->callable table), never the caller's locals.
 and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, ValueRef>) (args: Value list) : Value =
     st.Depth <- st.Depth + 1
     if st.Depth > st.Limits.MaxDepth then
         raise (InterpPanic ("BL8002", sprintf "interpreter call depth budget exceeded (%d)" st.Limits.MaxDepth, None, 0))
-    // Shadow-stack frame at body entry, named by the Blade function — the SAME
+    // Shadow-stack frame at body entry, named by the Blade function -- the SAME
     // string CodeGen pushes via BLADE_FRAME (CodeGen.fs:9342/9392). Pushed AFTER
     // the depth guard (an over-budget call never ran a C++ body, so it pushed no
     // frame) and NOT popped on an exception path: an escaping InterpPanic must
@@ -840,7 +888,7 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
     pushFrame st callable.Name
     // Chain the frame to the module-global scope: function bodies may read
     // module-level bindings directly (main-local capturing lambdas in C++).
-    // Globally-unique IRIds make this exact — no accidental shadowing.
+    // Globally-unique IRIds make this exact -- no accidental shadowing.
     let frame =
         match st.Global with
         | Some g -> envChild g
@@ -876,7 +924,7 @@ and evalMatch (st: InterpState) (env: Env) (sv: Value) (cases: IRMatchCase list)
 
 /// Try to match `scrut` against `pat`, binding variables into `env` as a side
 /// effect. Returns whether the pattern matched (bindings are only consumed on a
-/// full match, so partial bindings on failure are inert — the caller discards
+/// full match, so partial bindings on failure are inert -- the caller discards
 /// this scope).
 and tryMatch (env: Env) (scrut: Value) (pat: IRPattern) : bool =
     match pat with
@@ -889,14 +937,11 @@ and tryMatch (env: Env) (scrut: Value) (pat: IRPattern) : bool =
         match scrut with
         | VTuple els when els.Length = List.length pats ->
             List.forall2 (fun p v -> tryMatch env v p) pats (List.ofArray els)
-        // Struct destructuring patterns lower to IRPatTuple with the field
-        // NAMES dropped (Lowering.fs:656-657: `TPatStruct -> IRPatTuple`), so a
-        // VStruct scrutinee must be matched POSITIONALLY, field slot by pattern
-        // slot. This is the same shape the compiled side sees (names are gone
-        // at IR level on both twins), so positional matching keeps the
-        // interpreter in lock-step with CodeGen. Without this arm a VStruct
-        // silently fails every IRPatTuple, wrongly falling through to the next
-        // case / the non-exhaustive panic.
+        // Struct destructuring patterns lower to IRPatTuple with field NAMES
+        // dropped (Lowering.fs:656-657), so a VStruct scrutinee is matched
+        // POSITIONALLY -- the same shape the compiled side sees. Without this
+        // arm a VStruct silently fails every IRPatTuple, wrongly falling
+        // through to the next case / the non-exhaustive panic.
         | VStruct (_, fields) when fields.Length = List.length pats ->
             List.forall2 (fun p (_, v) -> tryMatch env v p) pats (List.ofArray fields)
         | _ -> false
@@ -932,8 +977,8 @@ and evalAssign (st: InterpState) (env: Env) (target: IRExpr) (v: Value) : unit =
         | _ -> raise (InterpUnsupported "assignment to non-struct field target")
     | LVIndex (arrExpr, indices) ->
         // Array element assignment: force the target array to concrete form, then
-        // write through the coordinate path (ArrayOps.writeCell mutates in place —
-        // the C++ `arr[i][j]… = v` store).
+        // write through the coordinate path (ArrayOps.writeCell mutates in place --
+        // the C++ `arr[i][j]... = v` store).
         (match forceValue st env (evalExpr st env arrExpr) with
          | VArray ba ->
              let coords = indices |> List.map (fun e -> toI64 (evalExpr st env e))
@@ -941,11 +986,9 @@ and evalAssign (st: InterpState) (env: Env) (target: IRExpr) (v: Value) : unit =
          | _ -> raise (InterpUnsupported "IRAssign to non-array index target"))
     | LVOther _ -> raise (InterpUnsupported "IRAssign to non-lvalue target")
 
-// ============================================================================
-// Defer-aware top-level binding driver (§4)
-// ============================================================================
+// Defer-aware top-level binding driver (formalism 4).
 
-/// Runtime guard for COMPUTED rows in an array-literal binding — the value-space
+/// Runtime guard for COMPUTED rows in an array-literal binding -- the value-space
 /// twin of genArrayLiteral's per-copied-dim extent guard (CodeGen.fs:4383-4386):
 ///
 ///   if (src.extents[j] != n) { cerr << "Blade runtime: array literal row
@@ -953,13 +996,12 @@ and evalAssign (st: InterpState) (env: Env) (target: IRExpr) (v: Value) : unit =
 ///   blade_rt::panic("BL8006", "array literal extent mismatch", nullptr, 0); }
 ///
 /// Walks the literal EXPRESSION structure exactly as codegen's walkLeaves does
-/// (row-major; recursing only through nested IRArrayLit children), so a leaf at
-/// a path SHORTER than the declared rank is a computed row whose remaining dims
-/// must equal the DECLARED extents; the first mismatch panics. Nested-literal
-/// rows are shape-checked statically by the checker and are NOT guarded (mirror).
-/// The InterpPanic message carries the cerr line's content (path/name/extent/
-/// dim/expected) so the abort gate's `// ABORT:` substring pins match; the code
-/// is the same BL8006.
+/// (row-major; recursing only through nested IRArrayLit children): a leaf at
+/// a path SHORTER than the declared rank is a computed row whose remaining
+/// dims must equal the DECLARED extents; the first mismatch panics BL8006.
+/// Nested-literal rows are shape-checked statically and NOT guarded here. The
+/// InterpPanic message carries the cerr line's content so the abort gate's
+/// `// ABORT:` substring pins match.
 let private checkArrayLitRowExtents (varName: string) (elements: IRExpr list) (arrType: IRArrayType) (arr: BladeArray) : unit =
     // Declared per-dim extents (multi-rank index types expand one entry per
     // rank component); None = non-literal extent, not guarded (codegen renders
@@ -976,8 +1018,8 @@ let private checkArrayLitRowExtents (varName: string) (elements: IRExpr list) (a
         | IRArrayLit (children, _) ->
             children |> List.iteri (fun i c -> walk (path @ [ i ]) c)
         | _ when path.Length < rank ->
-            // Computed (array-valued) leaf: check its ACTUAL extents — read from
-            // the materialized value at `path` — against the declared remainder.
+            // Computed (array-valued) leaf: check its ACTUAL extents (read from
+            // the materialized value at `path`) against the declared remainder.
             let subDims = declaredDims |> List.skip path.Length
             let mutable cur : Value = VArray arr
             for i in path do
@@ -996,7 +1038,7 @@ let private checkArrayLitRowExtents (varName: string) (elements: IRExpr list) (a
         | _ -> ()   // full-rank scalar leaf: no row to guard
     walk [] (IRArrayLit (elements, arrType))
 
-/// An EnumIdx admissible value → the interpreter Value used to compare against a
+/// An EnumIdx admissible value -> the interpreter Value used to compare against a
 /// key array's element (Case-2 EnumIdx reverse lookup).
 let private enumValueToValue (ev: EnumValue) : Value =
     match ev with
@@ -1004,9 +1046,9 @@ let private enumValueToValue (ev: EnumValue) : Value =
     | EVString s -> VString s
 
 /// Build the CSR VGroupKeys for a `let gk = group_keys(keys...)` binding. The
-/// binding's IRTGroupKeys type picks the bucketing regime — Case 1 positional
-/// (Idx<N> ⇒ bucket = key value), Case 2 EnumIdx (bucket = enum-list position),
-/// Case 3 dynamic (first-appearance); multi-key ⇒ dynamic tuple-hash. Mirrors
+/// binding's IRTGroupKeys type picks the bucketing regime -- Case 1 positional
+/// (Idx<N>: bucket = key value), Case 2 EnumIdx (bucket = enum-list position),
+/// Case 3 dynamic (first-appearance); multi-key: dynamic tuple-hash. Mirrors
 /// genGroupKeysBinding's dispatch (CodeGen.fs:7550-7692).
 let private buildGroupKeysValue (st: InterpState) (env: Env) (keys: IRExpr list) (ty: IRType) : Value =
     let keyArrs =
@@ -1030,17 +1072,15 @@ let private buildGroupKeysValue (st: InterpState) (env: Env) (keys: IRExpr list)
 
 /// Evaluate one top-level binding into a runtime value, reproducing
 /// CodeGen.genBinding's defer-vs-materialize-vs-loop-object decision so the
-/// interpreter's cell contents stay in lock-step with the C++ twin and with
-/// Print (which reuses computeDeferredIds to choose what to render):
-///   * `method_for` / `object_for`      ⇒ VLoopObj (pure provenance, no force);
-///   * a combinator/compose/parallel/…  ⇒ VDeferred(binding.Value, env) — NOT
+/// interpreter's cell contents stay in lock-step with the C++ twin and Print:
+///   * `method_for` / `object_for`        -> VLoopObj (pure provenance, no force);
+///   * a combinator/compose/parallel/...  -> VDeferred(binding.Value, env), NOT
 ///     evaluated, exactly the DeferredComputations entry genBinding records;
-///   * everything else                  ⇒ eager `evalExpr` (scalars, structs,
-///     tuples, array literals, IRCompute forces, reductions, …), as in M0.
-/// Run.execProgram calls this once per binding, in module order, into the root
-/// env; because bindings evaluate top-to-bottom the value-space defer test
-/// (shouldDeferBinding) sees every earlier binding's cell already populated,
-/// which is what makes it coincide with computeDeferredIds' fold.
+///   * everything else -> eager `evalExpr` (scalars, structs, tuples, array
+///     literals, IRCompute forces, reductions, ...), as in M0.
+/// Run.execProgram calls this once per binding, in module order, so
+/// shouldDeferBinding sees every earlier binding's cell already populated,
+/// coinciding with computeDeferredIds' fold.
 let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
     match b.Value with
     | IRMethodFor _ | IRObjectFor _ ->
@@ -1055,14 +1095,14 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
     | _ ->
         // Force after eager evaluation: evalExpr's unconditional-defer arms
         // (e.g. a scalar `<|>` choice) can hand back VDeferred even when the
-        // BINDING is classified eager — the compiled binary materializes such a
+        // BINDING is classified eager -- the compiled binary materializes such a
         // binding inline, so the interpreter must too, or a scalar cell ends up
         // holding a suspension that Print (which never forces) chokes on.
         let value = forceValue st env (evalExpr st env b.Value)
         // Computed-row extent guard (genArrayLiteral, CodeGen.fs:4383-4386):
         // an array-literal binding whose row is a COMPUTED array (not a nested
         // literal) is copied against the DECLARED extents in C++, guarded per
-        // dim at runtime — annotation-vs-actual mismatches are not (yet)
+        // dim at runtime -- annotation-vs-actual mismatches are not (yet)
         // rejected by unify, so the mismatch must be a loud BL8006 panic here
         // too, not a silently mis-shaped array (func-arrays T12 abort probe).
         (match b.Value, value with
@@ -1071,7 +1111,7 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
              checkArrayLitRowExtents cppName elements arrType arr
          | _ -> ())
         // Copy semantics for assignable top-level array bindings whose
-        // initializer references an existing array (`let U = Z`) — the
+        // initializer references an existing array (`let U = Z`) -- the
         // differential twin of genVarAliasBinding's mut-copy path (every
         // non-static let is assignable, IRBinding.IsMutable). Ragged stores
         // keep the historical alias, matching the C++ dense-only guard.
@@ -1081,11 +1121,9 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
             VArray (copyBladeArray ba)
         | _ -> value
 
-// ============================================================================
-// Public call entry
-// ============================================================================
+// Public call entry.
 
-/// Invoke a callable with no closure captures — the entry point Run.fs uses for
+/// Invoke a callable with no closure captures -- the entry point Run.fs uses for
 /// top-level functions (source-level functions never capture). Lifted lambdas
 /// that DO capture are applied through evalExpr's IRApp path, which threads the
 /// VClosure's captured cells into evalCall.

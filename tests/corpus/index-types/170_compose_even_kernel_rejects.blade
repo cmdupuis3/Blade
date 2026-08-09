@@ -1,0 +1,18 @@
+// TEST: Compose Even Kernel (rejects)
+// ERROR: BL4015
+// Composition must not bypass the compact-class inheritance gate. The
+// composed-apply arm used to skip deduction entirely (empty SymcomStates,
+// output type = first input's type), so an even kernel that a DIRECT apply
+// rejects (164) slipped through `>>@` unchecked — same silent wrong-answer
+// mode as 164, reached through the combinator suite instead. The chained
+// per-stage typing now runs the same gate per stage: stage 1 (odd, v*2.0)
+// inherits the antisymmetric class legitimately; stage 2 (even, v*v) must
+// refuse it exactly as the direct spelling does.
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> x - y
+let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let o1 = object_for(lambda(v) -> v * 2.0)
+let o2 = object_for(lambda(v) -> v * v)
+let out = (o1 >>@ o2) <@> C |> compute
+// EXPECT: typecheck failure — stage 2 is an even map of an antisymmetric
+// intermediate; the gate fires exactly as it does for the direct apply.

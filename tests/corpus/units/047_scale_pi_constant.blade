@@ -1,0 +1,24 @@
+// TEST: Unit Scale Pi Constant
+// `pi` is usable as an irrational scale factor, carried SYMBOLICALLY through
+// unit algebra (exponents add) rather than as a decimal. So a factor of 2*pi
+// introduced by one declaration and removed by another cancels EXACTLY --
+// the round trip emits no residue, which a float scale could not promise.
+// `pi` resolves only after the user's unit table, so a `Unit pi` would win.
+Unit radian
+Unit second
+Unit turn = 2 * pi * radian
+Unit hz = 1 / second
+
+// One turn per second, expressed two ways: the 2*pi enters via `turn` and
+// leaves via the annotation, so the exponents cancel to nothing.
+Unit angular = turn / second
+let w: Float<angular> = 3.0
+let w_back: Float<angular> = w
+
+// A half-turn IS pi radians: the rational part composes with the symbolic
+// part independently (1/2 * 2 * pi = pi).
+Unit half_turn = turn / 2
+let h: Float<half_turn> = 1.0
+
+// EXPECT: w_back = 3
+// EXPECT: h = 1

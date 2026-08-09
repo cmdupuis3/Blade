@@ -1,43 +1,32 @@
-// Blade-DSL Index Type Role Validator
-// Pre-typecheck pass enforcing the rules for where index types may appear.
+// Pre-typecheck pass enforcing where index types may appear. Index types are
+// type-level constructs describing array index domains and providing
+// nominative identity for foreign-key relationships; they have value-level
+// meaning only as a foreign-key array's (aliased) element type, or in a
+// static-context position. Runs before TypeCheck.lowerTypeExpr and rejects
+// index types in positions with no meaningful interpretation, so
+// lowerTypeExpr's downstream handling of standalone index types can assume
+// validation already ran.
 //
-// Index types in Blade are TYPE-LEVEL constructs. They describe array index
-// domains and provide nominative identity for foreign-key relationships.
-// They have value-level meaning only when (a) used as the element type of a
-// foreign-key array (must be aliased), or (b) appearing in a static-context
-// position where compile-time evaluation makes sense.
-//
-// This validator runs before TypeCheck.lowerTypeExpr and rejects index types
-// in positions that have no meaningful interpretation. The IR-level lowering
-// can then be safely simplified — once an AST passes validation, code paths
-// in lowerTypeExpr that produce malformed IRTArray<Float64,...> shapes for
-// index types in standalone position are unreachable.
-//
-// The position rules:
+// Position rules:
 //   Array<T like ___>  index domain  : any index type
 //   Array<___ like Y>  element type  : aliased index types only (foreign key)
 //   type X = ___                     : any index type (alias body)
-//   DepIdx<I, λ(i) -> ___> body      : statically-evaluable only
+//   DepIdx<I, lambda(i) -> ___> body : statically-evaluable only
 //   static function f(p: ___)        : aliased AND statically-evaluable
 //   static function f() -> ___       : statically-evaluable
 //   static-context tuple element     : statically-evaluable
 //   anywhere else                    : rejected
 //
-// Aliased index types are a superset of anonymous: any context that admits an
-// anonymous index type also admits an aliased one. The asymmetry runs the
-// other way (foreign-key elements and static fn params accept aliased only).
+// Aliased index types are a superset of anonymous (any context admitting an
+// anonymous index type also admits an aliased one); the asymmetry runs only
+// the other way (foreign-key elements, static fn params: aliased only).
 //
-// Round 1 scope: declaration-level type expressions. Expression-level
-// annotations (lambda params, ExprTyped, inner StmtLet, PatTyped) are NOT
-// yet validated. Those require walking all expressions and are deferred.
+// Scope: declaration-level type expressions only. Expression-level
+// annotations (lambda params, ExprTyped, StmtLet, PatTyped) are not yet validated.
 
 module Blade.IndexTypeValidator
 
 open Blade.Ast
-
-// ============================================================================
-// Validation Errors
-// ============================================================================
 
 /// Validation error. The message is user-facing; DeclName provides context.
 type ValidationError = {
@@ -46,20 +35,16 @@ type ValidationError = {
     DeclName: string
 }
 
-// ============================================================================
-// Position Context
-// ============================================================================
-
 /// Where a TypeExpr appears in the AST. Determines which rules apply.
 ///
 /// PosForbidden carries a role string used in the error message, e.g.
 /// "regular function parameter", "struct field". The validator never tries
-/// to be helpful in these positions — it just reports the role.
+/// to be helpful in these positions -- it just reports the role.
 type Position =
     | PosArrayIndexDomain        // Array<T like ___>          : any index type
     | PosArrayElemType           // Array<___ like Y>          : aliased only
     | PosAliasBody               // type X = ___               : any
-    | PosDepIdxBody              // DepIdx<I, λ(i) -> ___>     : static only
+    | PosDepIdxBody              // DepIdx<I, lambda(i) -> ___> : static only
     | PosStaticFnParam           // static function f(p: ___)  : aliased + static
     | PosStaticFnReturn          // static function f() -> ___ : static
     | PosLetStaticAnno           // let static x: ___ = ...    : forbidden (direct);
@@ -68,26 +53,18 @@ type Position =
     | PosStaticTupleElem         // tuple element in any static-context position
     | PosForbidden of role: string
 
-// ============================================================================
-// Alias Environment
-// ============================================================================
-
 /// Maps alias names to their resolved body. Built incrementally as the
 /// validator walks declarations top-down. Forward references to types not
 /// yet declared resolve to None (treated conservatively as "not an index
-/// type" and "not statically-evaluable" — Blade currently doesn't support
-/// forward type references in alias chains anyway).
+/// type" and "not statically-evaluable" -- Blade doesn't support forward
+/// type references in alias chains anyway).
 type AliasEnv = Map<string, TypeExpr>
-
-// ============================================================================
-// Index Type Detection
-// ============================================================================
 
 /// True iff `ty` is an index type, directly or via alias resolution.
 let rec isIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
     match ty with
-    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
-    | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _
+    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _
+    | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _ | TySparseIdx _
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque
     | TyIrrepsIdx _ | TyPgIrrepsIdx _
     | TyEquivIdx _ -> true
@@ -96,61 +73,70 @@ let rec isIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
         | Some body -> isIndexType env body
         | None -> false
     | TyConstrained (inner, _) -> isIndexType env inner
+    // `A<min=e1, max=e2>` (Ast.TyBounded) is the SAME type as `A` for every
+    // purpose this validator cares about -- TypeCheck.lowerTypeExpr discards
+    // the bounds and lowers the base (TypeCheck.fs:290). Without this arm a bound
+    // shields an index type from every position rule below, and the mistake
+    // resurfaces at the call site as an unrelated BL3001 rank mismatch.
+    | TyBounded (inner, _, _) -> isIndexType env inner
     | _ -> false
 
 /// True iff `ty` is an aliased index type (a TyNamed resolving to an index).
-let isAliasedIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
+/// Bounds are transparent: `A<min=.., max=..>` is as aliased as `A` is.
+let rec isAliasedIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
     match ty with
     | TyNamed (n, _) ->
         match Map.tryFind n env with
         | Some body -> isIndexType env body
         | None -> false
+    | TyBounded (inner, _, _) -> isAliasedIndexType env inner
     | _ -> false
 
 /// True iff `ty` is an anonymous (raw) index type, not aliased.
 let isAnonymousIndexType (ty: TypeExpr) : bool =
     match ty with
-    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
-    | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _
+    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _
+    | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _ | TySparseIdx _
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque
     | TyIrrepsIdx _ | TyPgIrrepsIdx _
     | TyEquivIdx _ -> true
     | _ -> false
 
-/// True iff `ty` is KNOWN to be statically-evaluable. Default false (the
-/// safer default per the design — runtime-evaluable is the default, static
-/// is the special case). Resolves through alias chains.
-///
-/// Statically-evaluable: Idx, SymIdx, AntisymIdx, HermitianIdx, BoundedIdx,
-/// EnumIdx, EquivIdx (all extent expressions trusted to reduce — the
-/// existing lowering surfaces non-static extents downstream).
-///
-/// Runtime: RaggedIdx, RaggedIdxOpaque, CompoundIdx — these structurally
-/// require runtime data.
-///
-/// DepIdx: static iff both outer and body are static.
+/// True iff `ty` is KNOWN to be statically-evaluable; defaults to false
+/// (runtime-evaluable is the default, static the special case). Resolves
+/// through alias chains. Statically-evaluable: Idx, SymIdx, AntisymIdx,
+/// HermitianIdx, BoundedIdx, EnumIdx, EquivIdx. Runtime: RaggedIdx,
+/// RaggedIdxOpaque, CompoundIdx (structurally require runtime data). DepIdx:
+/// static iff both outer and body are static.
 let rec isKnownStatic (env: AliasEnv) (ty: TypeExpr) : bool =
     match ty with
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
     | TyBoundedIdx _ | TyEnumIdx _ | TyEquivIdx _ -> true
     | TyIrrepsIdx _ | TyPgIrrepsIdx _ -> true  // spec is static by definition; extent folds to a literal
-    | TyRaggedIdx _ | TyRaggedIdxOpaque | TyCompoundIdx _ -> false
+    // OrbIdx's level list is integer literals/sign tokens parsed straight into
+    // data (Ast.TyOrbIdx), so it is compile-time-known by construction --
+    // unlike SparseIdx below, whose payload is an expression this validator
+    // cannot classify without a value env. Saying `false` here would wrongly
+    // exclude OrbIdx from every static-context position SymIdx is allowed in.
+    | TyOrbIdx _ -> true
+    // SparseIdx joins the runtime family even though a `let static` key list
+    // folds at compile time: this validator sees only the surface type (no
+    // value env), so it cannot distinguish a static key list from a runtime
+    // keys array. The split is made later, at lowering (SkStatic/SkRuntime).
+    | TyRaggedIdx _ | TyRaggedIdxOpaque | TyCompoundIdx _ | TySparseIdx _ -> false
     | TyDepIdx (outer, _, body) ->
         isKnownStatic env outer && isKnownStatic env body
     | TyNamed (n, _) ->
         match Map.tryFind n env with
         | Some body -> isKnownStatic env body
-        | None -> false  // unknown — assume runtime
+        | None -> false  // unknown -- assume runtime
     | TyConstrained (inner, _) -> isKnownStatic env inner
+    | TyBounded (inner, _, _) -> isKnownStatic env inner
     | _ -> false
-
-// ============================================================================
-// Position Rules
-// ============================================================================
 
 /// Compute the position to use for a tuple element. Static-context positions
 /// promote to PosStaticTupleElem (which permits static-eval index types,
-/// anonymous or aliased). Other positions inherit unchanged — a tuple inside
+/// anonymous or aliased). Other positions inherit unchanged -- a tuple inside
 /// a regular-fn param remains forbidden, a tuple inside an array-elem stays
 /// in PosArrayElemType, etc.
 let tuplePositionFor (parent: Position) : Position =
@@ -208,7 +194,7 @@ let checkIndexTypeRules (env: AliasEnv) (declName: string) (span: Span)
         if not isAliased then
             mkErr (
                 "Anonymous index types cannot be passed as function parameters. "
-                + "Static functions accept aliased index types only — declare "
+                + "Static functions accept aliased index types only -- declare "
                 + "`type X = ...` first and use the alias name.")
         elif not isStatic then
             mkErr (
@@ -225,7 +211,7 @@ let checkIndexTypeRules (env: AliasEnv) (declName: string) (span: Span)
             + "time and require statically-evaluable types.")
 
     | PosLetStaticAnno ->
-        // Direct annotation rejected. Tuple elements get tuplePositionFor →
+        // Direct annotation rejected. Tuple elements get tuplePositionFor ->
         // PosStaticTupleElem, which has its own rule. So this case fires only
         // when the user annotated `let static x: Idx<3> = ...` directly.
         mkErr (
@@ -249,10 +235,6 @@ let checkIndexTypeRules (env: AliasEnv) (declName: string) (span: Span)
             + "(`type X = ___`), in DepIdx bodies, or in static function "
             + "signatures.")
 
-// ============================================================================
-// Type Expression Walking
-// ============================================================================
-
 /// Validate a TypeExpr at a given position. Handles both the position-rule
 /// check (for index types at this level) and recursion into composite types.
 let rec validateTypeExpr (env: AliasEnv) (declName: string) (span: Span)
@@ -264,7 +246,7 @@ let rec validateTypeExpr (env: AliasEnv) (declName: string) (span: Span)
     positionErrs @ childErrs
 
 /// Recurse into composite types. Each child is validated at the appropriate
-/// position derived from `parentPos` — most children inherit, but some types
+/// position derived from `parentPos` -- most children inherit, but some types
 /// (TyArray, TyDepIdx) introduce specific child positions.
 and validateChildren (env: AliasEnv) (declName: string) (span: Span)
                      (parentPos: Position) (ty: TypeExpr) : ValidationError list =
@@ -295,9 +277,16 @@ and validateChildren (env: AliasEnv) (declName: string) (span: Span)
     | TyPoly inner ->
         validateTypeExpr env declName span parentPos inner
 
+    | TyBounded _ ->
+        // Deliberately not recursing: the bound is transparent to isIndexType
+        // et al, so validateTypeExpr already applied this position's rules to
+        // the TyBounded node itself -- recursing would double-report. The base
+        // is always a TyNamed (Parser.fs:818), whose own arm is `[]` too.
+        []
+
     | TyFunc _ ->
-        // Function types as type expressions (higher-order). Out of scope
-        // for round 1; deferred until we have user-level use cases.
+        // Function types as type expressions (higher-order) are not yet
+        // validated.
         []
 
     | TyAbstractArray _ ->
@@ -306,10 +295,6 @@ and validateChildren (env: AliasEnv) (declName: string) (span: Span)
         []
 
     | _ -> []
-
-// ============================================================================
-// Declaration Walking
-// ============================================================================
 
 /// Format a binding name from a pattern (best-effort, for context strings).
 let private patternName (pat: Pattern) : string =
@@ -413,15 +398,11 @@ let validateDecl (env: AliasEnv) (decl: Located<Decl>) : ValidationError list * 
 
     | DeclImpl _ ->
         // Impl blocks contain function decls; those will be validated when
-        // they're processed individually. Not yet covered for round 1.
+        // they're processed individually. Not yet covered.
         ([], env)
 
     | DeclUnit _ | DeclImport _ ->
         ([], env)
-
-// ============================================================================
-// Module / Program Entry
-// ============================================================================
 
 /// Validate a module. Walks declarations in source order, accumulating the
 /// alias environment as types are declared.

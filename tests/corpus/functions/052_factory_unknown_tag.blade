@@ -1,0 +1,10 @@
+// TEST: Factory Unknown Tag (rejects)
+// ERROR: BL3014
+// A quantity-tagged argument matching NONE of the callee's quantity slots
+// is an error naming the candidates (levels, cmap) -- not a positional
+// fallback that would silently land it in the wrong slot.
+Unit levels: 1
+Unit cmap: 1
+Unit other: 1
+function plot(x: Float, n: Float<levels> = 10.0, c: Float<cmap> = 0.0) -> Float = x + n * 100.0 + c * 7.0
+let r = plot(1.0, 2.0: other)

@@ -1,10 +1,6 @@
-// Blade-DSL Lowering Pass
-// Transforms AST to IR with proper support for:
-// - Array identity tracking (for triangular iteration)
-// - Lambda capture analysis
-// - Pattern binding
-// - Arity polymorphism
-// - Kernel irank/orank inference
+// Blade-DSL Lowering Pass: transforms AST to IR, with support for array
+// identity tracking (triangular iteration), lambda capture analysis, pattern
+// binding, arity polymorphism, and kernel irank/orank inference.
 
 module Blade.Lowering
 
@@ -38,41 +34,36 @@ type ModuleExport = {
     StaticFunctions: Map<string, StaticEval.StaticFuncDef>
 }
 
-/// Tracks how static functions are used: compile-time, runtime, or both.
-/// Useful for IDE diagnostics (e.g. "this static function is only ever called at runtime").
+/// Tracks how static functions are used (compile-time, runtime, or both),
+/// for IDE diagnostics like "this static function is only ever called at
+/// runtime".
 [<Flags>]
 type StaticUsage =
     | Unused       = 0
-    | CompileTime  = 1   // called with all-static args → evaluated at compile time
-    | RunTime      = 2   // called with runtime args → emitted as normal function call
+    | CompileTime  = 1   // called with all-static args -> evaluated at compile time
+    | RunTime      = 2   // called with runtime args -> emitted as normal function call
 
 let rec staticValueToIR (v: StaticEval.StaticValue) : IRExpr =
     match v with
     | StaticEval.SVInt n -> IRLit (IRLitInt n)
     | StaticEval.SVFloat f -> IRLit (IRLitFloat f)
     | StaticEval.SVBool b -> IRLit (IRLitBool b)
-    // A folded STRING is an ordinary IR literal (IRLitString has always
-    // existed; IR.inferExprType types it ETString and CodeGen.litToCpp emits
-    // std::string). The old IRLitUnit stub silently turned a string-carrying
-    // static into `void` — visible the moment a spec's entries became
-    // (LABEL_NAME, mult) tuples (plan-transforms-as-types §3.6's settled
-    // point-group surface, stage 5b-i), where `let static SIN = [("A", 1)]`
-    // lowered to std::tuple<void, int64_t> and would not compile.
+    // A folded STRING is an ordinary IR literal (IR.inferExprType types it
+    // ETString and CodeGen.litToCpp emits std::string). Lowering it to
+    // IRLitUnit instead would silently turn a string-carrying static into
+    // `void`, e.g. a spec entry `let static SIN = [("A", 1)]` would lower to
+    // std::tuple<void, int64_t> and fail to compile.
     | StaticEval.SVString s -> IRLit (IRLitString s)
     | StaticEval.SVUnit -> IRLit IRLitUnit
     | StaticEval.SVTuple vs -> IRTuple (vs |> List.map staticValueToIR)
     | StaticEval.SVStruct (n, fs) -> IRStructLit (n, fs |> List.map (fun (fn, v) -> (fn, staticValueToIR v)))
 
-// (The duplicated resolveUnitExpr that lived here is gone — audit Phase 0.3.
-// The one definition is TypeEnv.resolveUnitExpr; the single use below
-// calls it qualified.)
+// The one definition of resolveUnitExpr is TypeEnv.resolveUnitExpr; the
+// single use below calls it qualified.
 
-// ============================================================================
-// TypedAST-based Lowering (New Pipeline)
-// ============================================================================
-//
-// These functions translate from TypedAST to IR. Since type checking has
-// already been done, this is a straightforward translation without inference.
+// TypedAST-based Lowering: translates TypedAST to IR. Since type checking
+// has already been done, this is a straightforward translation without
+// inference.
 
 /// Environment for typed lowering (simplified - no type inference needed)
 type TypedLowerEnv = {
@@ -89,52 +80,46 @@ type TypedLowerEnv = {
     Interfaces: Map<string, InterfaceDecl>
     ModuleExports: Map<string, ModuleExport>
     ImportedModules: Map<string, string>
-    /// Provider alias -> registered provider module name
-    /// (e.g. `import netcdf as nc` records "nc" -> "netcdf").
+    /// Provider alias -> registered provider module name (e.g. `import
+    /// netcdf as nc` records "nc" -> "netcdf").
     ProviderAliases: Map<string, string>
-    /// Provider load binding name -> (provider name, store path literal)
-    /// (e.g. "sample" -> ("netcdf", "f.nc")). Recorded at tryInvokeProvider;
-    /// used at a `view |> alias.read` site to recover provider + path by
-    /// walking the var-reference to its root provider binding.
+    /// Provider load binding name -> (provider name, store path literal),
+    /// recorded at tryInvokeProvider; used at a `view |> alias.read` site to
+    /// recover provider + path by walking the var-reference to its root.
     ProviderPaths: Map<string, string * string>
-    /// Deferred provider reads accumulated during lowering, keyed by the
-    /// receiving binding's IRId. Copied into IRModule.ProviderReads at module
-    /// assembly and consumed at codegen.
+    /// Deferred provider reads, keyed by the receiving binding's IRId.
+    /// Copied into IRModule.ProviderReads at module assembly, consumed at
+    /// codegen.
     ProviderReads: Map<IRId, ProviderReadSpec>
-    /// Deferred provider writes (`alias.write("path", A)`) accumulated during
-    /// lowering, keyed by the write binding's IRId. Copied into
-    /// IRModule.ProviderWrites at module assembly and consumed at codegen.
+    /// Deferred provider writes (`alias.write("path", A)`), keyed by the
+    /// write binding's IRId. Copied into IRModule.ProviderWrites.
     ProviderWrites: Map<IRId, ProviderWriteSpec>
-    /// Deferred random-fill constructors accumulated during lowering, keyed by
-    /// the receiving binding's IRId. Value is the lowered modulus expr. Copied
-    /// into IRModule.RandomInits at module assembly and consumed at codegen.
-    /// Value is a RandomFillSpec (fill_random modulus, or a rand key).
+    /// Deferred random-fill constructors, keyed by the receiving binding's
+    /// IRId. Value is a RandomFillSpec (fill_random modulus, or a rand key).
+    /// Copied into IRModule.RandomInits at module assembly.
     RandomInits: Map<IRId, RandomFillSpec>
-    /// Deferred compound-construction constructors (compound(dense, mask))
-    /// accumulated during lowering, keyed by the receiving binding's IRId.
-    /// Value is (loweredDense, loweredMask). Copied into IRModule.CompoundInits
-    /// at module assembly and consumed at codegen (P0 index materialization +
-    /// scatter). Mirrors RandomInits.
+    /// Deferred compound-construction constructors (compound(dense, mask)),
+    /// keyed by the receiving binding's IRId, value (loweredDense,
+    /// loweredMask). Copied into IRModule.CompoundInits; mirrors RandomInits.
     CompoundInits: Map<IRId, IRExpr * IRExpr>
+    /// Deferred sparse-construction constructors (sparse(values, keys)),
+    /// keyed by the receiving binding's IRId (keys ride the binding type's
+    /// IRSparseKeys extent). Copied into IRModule.SparseInits.
+    SparseInits: Map<IRId, IRExpr>
     /// Lifted lambda callables accumulated during lowering of the current
-    /// module. Each lambda-construction site (lowerTypedLambda,
-    /// lowerTypedSection, lowerTypedPartialApp, binop-kernel synthesis)
-    /// adds its newly-built IRCallable here. At module-assembly time
-    /// (end of lowerTypedModule), these are appended to IRModule.Functions
-    /// so the lifted lambdas are available alongside source-level
-    /// functions for cross-procedural analysis and codegen.
-    ///
-    /// Mutable shared state — F# record `with` updates share the
-    /// underlying ResizeArray, so additions from any nested call
-    /// accumulate into the module's single list. Reset per-module
-    /// at the start of lowerTypedModule.
+    /// module: every lambda-construction site adds its IRCallable here, and
+    /// at module assembly these are appended to IRModule.Functions so lifted
+    /// lambdas are available alongside source-level functions. Mutable
+    /// shared state -- F# record `with` updates share the underlying
+    /// ResizeArray, so additions from any nested call accumulate into the
+    /// module's single list. Reset per-module at the start of
+    /// lowerTypedModule.
     LiftedCallables: ResizeArray<IRCallable>
-    /// Block-level `let mut` bindings of ARRAY type, accumulated during
-    /// lowering (lowerTypedBlock TStmtLet — IRLet erases the mutability
-    /// flag, so it is recorded here by IRId). Copied into
-    /// IRModule.MutableArrayLets at module assembly; consumed by codegen and
-    /// the interpreter to give such bindings copy (not alias) semantics.
-    /// Mutable shared state like LiftedCallables; reset per-module.
+    /// Block-level `let mut` bindings of ARRAY type (IRLet has no
+    /// mutability slot, so it is recorded here by IRId). Copied into
+    /// IRModule.MutableArrayLets; consumed by codegen and the interpreter to
+    /// give such bindings copy, not alias, semantics. Mutable shared state
+    /// like LiftedCallables; reset per-module.
     MutableArrayLets: ResizeArray<IRId>
 }
 
@@ -158,6 +143,7 @@ let emptyTypedEnv () : TypedLowerEnv = {
     ProviderWrites = Map.empty
     RandomInits = Map.empty
     CompoundInits = Map.empty
+    SparseInits = Map.empty
     LiftedCallables = ResizeArray<IRCallable>()
     MutableArrayLets = ResizeArray<IRId>()
 }
@@ -169,20 +155,19 @@ let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
 ///
 /// Positional destructuring reads element i of the tuple (or, for a struct
 /// scrutinee, the field carrying the sub-binding's own name). A CONS binding
-/// differs in exactly one place — its LAST leaf. `let head :: tail = (1, 2, 3)`
-/// binds `tail` to the REMAINDER (2, 3), so that leaf lowers to a re-built
-/// tuple of projections 1.. rather than to projection 1. Emitting a plain
-/// projection there is the miscompile this helper exists to prevent: `tail`
-/// used to come out as the single element 2.
+/// differs at its LAST leaf: `let head :: tail = (1, 2, 3)` binds `tail` to
+/// the REMAINDER (2, 3), so that leaf lowers to a re-built tuple of
+/// projections 1.. rather than to projection 1 -- a plain projection there
+/// would miscompile `tail` as the single element 2.
 ///
 /// A one-element remainder degrades to the bare element, because Blade has no
-/// 1-tuple — `(x)` is just `x`. TypeCheck's PatCons arm types the leaf by the
+/// 1-tuple (`(x)` is just `x`); TypeCheck's PatCons arm types the leaf by the
 /// identical rule, so the declared type and this value always agree.
 ///
 /// `isFlat` only ever applies to positional projections: a cons binding has
 /// fewer leaves than the tuple has slots, so checkDecl's flat-vs-structural
-/// test never selects flat for one, and the remainder must index the scrutinee
-/// structurally in any case.
+/// test never selects flat for one, and the remainder must index the
+/// scrutinee structurally in any case.
 let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: int) (name: string) : IRExpr =
     let baseVar = IRVar (binding.VarId, binding.Type)
     let isConsBinding = match binding.Destructure with DSConsRest -> true | DSPositional -> false
@@ -192,9 +177,8 @@ let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: 
         match binding.Type with
         | IRTPoly _ ->
             // Cons-destructuring a parameter pack (`let head :: tail = A`): head
-            // leaves are pack-element reads (IRPolyIndex — the same node `A[i]`
+            // leaves are pack-element reads (IRPolyIndex, same node `A[i]`
             // lowers to), the rest leaf is the symbolic pack tail (IRPolyTail).
-            // Arity-monomorphization expands both against the concrete pack.
             if isRestLeaf then IRPolyTail (baseVar, i)
             else IRPolyIndex (baseVar, IRLit (IRLitInt (int64 i)))
         | IRTTuple ts when isRestLeaf && ts.Length > i ->
@@ -276,14 +260,14 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         (match func.Type, args with
          | IRTIdxTagged (_, IRefNamed tag), [_] -> tag.StartsWith("__halowin|")
          | _ -> false) ->
-        // halo window read: w(o). `w` is bound to the true CENTER ordinal by the
-        // underlying range slot's VirtualRange peel (int64 w = i + startOffset),
-        // so the neighbor ordinal is (w + o); BndShrink guarantees in-bounds.
-        //  - dense inner ("__halowin|d:"): the ordinal IS the index — plain add.
-        //  - compound inner ("__halowin|c:"): the neighbor is the (w+o)-th
-        //    PRESENT cell; IRHaloUnhash renders its coordinate through the
-        //    peel-emitted cidx alias. The offset must be an integer literal
-        //    (the static-offset contract; nothing else can be proven in-reach).
+        // halo window read: w(o). `w` is bound to the true CENTER ordinal by
+        // the underlying range slot's VirtualRange peel (int64 w = i +
+        // startOffset), so the neighbor ordinal is (w + o); BndShrink
+        // guarantees in-bounds. Dense inner ("__halowin|d:"): the ordinal IS
+        // the index, plain add. Compound inner ("__halowin|c:"): the
+        // neighbor is the (w+o)-th PRESENT cell; IRHaloUnhash renders its
+        // coordinate through the peel-emitted cidx alias, and the offset
+        // must be an integer literal (nothing else can be proven in-reach).
         let tag = match func.Type with IRTIdxTagged (_, IRefNamed t) -> t | _ -> ""
         let f = lowerTypedExpr env func
         let offArg = List.head args
@@ -302,15 +286,11 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprApp (func, args) ->
         let f = lowerTypedExpr env func
         let as' = args |> List.map (lowerTypedExpr env)
-        // Path 1 fix (Stage 3c follow-on): if TypeCheck pinned the
-        // function position to an array type — e.g., after
-        // buildApplyInfo unified a kernel param to Array<T, N> — the
+        // If TypeCheck pinned the function position to an array type (e.g.
+        // after buildApplyInfo unified a kernel param to Array<T, N>), the
         // application is structurally an index, not a function call.
-        // Dispatch here so the IR's IRIndex/IRApp split matches the
-        // semantic intent at the value-renderer side. Codegen's
-        // ragged-peel pass has historically applied this rewrite at
-        // codegen time as a workaround; pushing it back to Lowering
-        // ensures the body's shape is correct regardless of whether
+        // Dispatching here (rather than leaving it to a codegen-time
+        // workaround) makes the body's shape correct regardless of whether
         // the lambda is inlined or lifted to a top-level function.
         match func.Type with
         | ArrayElem _ -> IRIndex (f, as', None)
@@ -323,11 +303,10 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprTupleIndex (tuple, index) ->
         let tup = lowerTypedExpr env tuple
-        // A LITERAL index into a real tuple is a static projection —
-        // IRTupleProj, same as destructuring emits. (The checker's
-        // cumulant(d, k) arm produces exactly this shape: by lowering
-        // time the Dist type has zonk-erased to IRTTuple.) Everything
-        // else stays on the poly-pack path (IRPolyIndex).
+        // A LITERAL index into a real tuple is a static projection
+        // (IRTupleProj, same as destructuring emits) -- the checker's
+        // cumulant(d, k) arm produces this shape once Dist has zonk-erased
+        // to IRTTuple. Everything else stays on the poly-pack path.
         match tuple.Type, index.Kind with
         | IRTTuple _, TExprLit (LitInt n) -> IRTupleProj (tup, int n, false)
         | _ ->
@@ -362,10 +341,10 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRTuple (exprs |> List.map (lowerTypedExpr env))
     
     | TExprComplexLit (re, im) ->
-        // Lower to IRComplex, NOT IRTuple. Complex is a scalar at IR
-        // level — flattening to a tuple of floats here would let
-        // downstream code (array lowering, codegen) reshape it as part
-        // of the surrounding rank, producing wrong-rank arrays.
+        // Lower to IRComplex, not IRTuple: complex is a scalar at IR level,
+        // and flattening to a tuple of floats would let downstream code
+        // reshape it as part of the surrounding rank, producing wrong-rank
+        // arrays.
         IRComplex (lowerTypedExpr env re, lowerTypedExpr env im)
     
     | TExprArrayLit (elems, arrTy) ->
@@ -391,11 +370,10 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         }
     
     | TExprApply info when info.IsComposeApply ->
-        // Slot-inverted compose application: `(o1 >>@ o2) <@> A`.
-        // TypeCheck flagged this case with IsComposeApply = true, storing
-        // the input arrays in BOTH `info.Arrays` and (redundantly)
-        // `info.Kernel`. The IR form `IRComposeApply` carries them only
-        // in `InputArrays`; the redundancy goes away.
+        // Slot-inverted compose application: `(o1 >>@ o2) <@> A`. TypeCheck
+        // flagged this with IsComposeApply = true, storing the input arrays
+        // in both `info.Arrays` and (redundantly) `info.Kernel`; the IR
+        // form `IRComposeApply` carries them only in `InputArrays`.
         IRComposeApply {
             Composition = lowerTypedExpr env info.Loop
             InputArrays = info.Arrays |> List.map (lowerTypedExpr env)
@@ -403,18 +381,18 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         }
 
     | TExprApply info ->
-        // Canonical apply. Symmetry info already computed during type checking.
-        // Lift the kernel ONCE and reuse the lifted IRVar for the loop-provenance
-        // IRObjectFor.Kernel, rather than re-lowering info.Loop's embedded kernel.
-        // TypeCheck stores the same eta-lambda in BOTH info.Kernel and (inside)
-        // info.Loop's object_for; lowering both minted two identical __lambda_N
-        // callables, and each anchored its own arity/HM specialization chain
-        // (the HM clone path bypasses spec dedup) — producing duplicate C++
+        // Canonical apply. Symmetry info already computed during type
+        // checking. Lift the kernel ONCE and reuse the lifted IRVar for the
+        // loop-provenance IRObjectFor.Kernel, rather than re-lowering
+        // info.Loop's embedded kernel: TypeCheck stores the same eta-lambda
+        // in both info.Kernel and (inside) info.Loop's object_for, and
+        // lowering both used to mint two identical __lambda_N callables,
+        // each anchoring its own arity/HM specialization chain (the HM
+        // clone path bypasses spec dedup) -- producing duplicate C++
         // definitions once multiple arities of a recursive poly kernel are
-        // specialized (`redefinition of comoment_prod_arity_2_HM_..._T`). The
-        // Loop kernel is codegen-dead for a canonical apply (genApplyCombinator
-        // reads only info.Kernel), so sharing the single lifted id is safe and
-        // lets the existing (funcId, …) dedup collapse the chains.
+        // specialized. The Loop kernel is codegen-dead for a canonical apply
+        // (genApplyCombinator reads only info.Kernel), so sharing the single
+        // lifted id is safe and lets the existing dedup collapse the chains.
         let loweredKernel = lowerTypedExpr env info.Kernel
         let loweredLoop =
             match info.Loop.Kind, loweredKernel with
@@ -513,13 +491,30 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRPure (lowerTypedExpr env e)
     
     | TExprCompute e ->
+        // ALREADY-EAGER FOLD: `|> compute` over a form that materializes on its
+        // own is the identity, and the IRCompute wrapper actively HIDES it.
+        // The bracketed outer product `A [op] B` lowers (lowerTypedBinOp's
+        // both-operands-are-arrays branch) to a completed application
+        // `IRApp(IRObjectFor kernel, [IRTuple [A; B]])`, which genBinding's
+        // IRApp(IRObjectFor) arm and genFuncBody's hoistLoopApps both expand
+        // into a real loop nest. Wrapped in IRCompute it instead reaches
+        // genComputeBinding, which dispatches only the deferred combinator
+        // shapes and otherwise falls through to genScalarBinding -- rendering
+        // the loop object as the LOOP_OBJECT_USED_AS_VALUE sentinel. Drop the
+        // no-op wrapper so the existing expansion paths see the application.
+        // Narrow on purpose: only the BARE application folds; IRLet-wrapped
+        // forms (the broadcast path's hoisted scalar) already work as-is.
+        //
         // CONSTANT-FILL FOLD: `replicate(N, pure(lit)) |> compute` with a
         // concrete count and a literal body is exactly an N-element array
-        // literal — lower it as IRArrayLit so it rides the array-literal
-        // machinery everywhere (function bodies included; the general
-        // IRSequence realization is main-body-only). The generated C++ is
-        // byte-identical to writing the literal out. Non-literal counts
-        // and non-constant bodies keep the general combinator path.
+        // literal -- lower it as IRArrayLit so it rides the array-literal
+        // machinery everywhere (the general IRSequence realization is
+        // main-body-only). Non-literal counts and non-constant bodies keep
+        // the general combinator path.
+        let computeWrap (x: IRExpr) =
+            match x with
+            | IRApp (IRObjectFor _, _, _) -> x
+            | _ -> IRCompute x
         (match e.Kind with
          | TExprReplicate (cnt, body) ->
              (match cnt.Kind, body.Kind, texpr.Type with
@@ -528,37 +523,39 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
                          && (match inner.Kind with TExprLit _ -> true | _ -> false) ->
                   let copies = List.replicate (int n) (lowerTypedExpr env inner)
                   IRArrayLit (copies, arrTy)
-              | _ -> IRCompute (lowerTypedExpr env e))
-         | _ -> IRCompute (lowerTypedExpr env e))
+              | _ -> computeWrap (lowerTypedExpr env e))
+         | _ -> computeWrap (lowerTypedExpr env e))
     
     | TExprRead e ->
-        // Slice 1: passthrough. |> read will force the deferred provider read
-        // that load_as produces (introduced in a later slice); until that
-        // exists, reading lowers to the operand itself (a no-op).
+        // |> read will force the deferred provider read that load_as
+        // produces; until that exists, reading lowers to the operand itself
+        // (a no-op).
         lowerTypedExpr env e
 
     | TExprFillRandom _ ->
-        // fill_random(mod) is only meaningful as an annotated top-level
-        // let-binding value, where the TDeclLet loop intercepts it (it needs the
-        // binding's array type for the shape and records it in RandomInits).
-        // Reaching here means it was used inline / in a nested let, which has no
-        // annotation to supply the shape.
+        // Only meaningful as an annotated top-level let-binding value, where
+        // TDeclLet intercepts it (needs the binding's array type for the
+        // shape, records it in RandomInits). Reaching here means it was used
+        // inline / in a nested let, which has no annotation to supply the shape.
         failwith "fill_random(mod) is only valid as an annotated top-level let-binding value (let A: Array<..> = fill_random(mod))"
 
     | TExprRandGen _ ->
-        // rand.uniform/normal(key, shape) is materialized only as a top-level
-        // let-binding value, where the TDeclLet loop intercepts it (it records
-        // the key/kind in RandomInits and allocates the self-typed array).
-        // Reaching here means it was used inline / in a nested let.
+        // Materialized only as a top-level let-binding value, where TDeclLet
+        // intercepts it (records the key/kind in RandomInits, allocates the
+        // self-typed array). Reaching here means it was used inline / nested.
         failwith "rand.uniform/normal(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n))"
 
     | TExprCompound _ ->
-        // compound(dense, mask) is only meaningful as a top-level let-binding
-        // value, where the TDeclLet loop intercepts it (it records the lowered
-        // dense + mask in CompoundInits and leaves a unit placeholder, mirroring
-        // fill_random). Reaching here means it was used inline / in a nested let,
-        // which the compound-construction codegen path does not handle.
+        // Only meaningful as a top-level let-binding value, where TDeclLet
+        // intercepts it (records the lowered dense + mask in CompoundInits,
+        // leaves a unit placeholder). Reaching here means it was used inline
+        // or nested, which the compound-construction codegen path does not handle.
         failwith "compound(dense, mask) is only valid as a top-level let-binding value (let B = compound(dense, mask))"
+
+    | TExprSparse _ ->
+        // Same top-level-let-only discipline as compound(dense, mask): the
+        // TDeclLet loop intercepts and records the values expr in SparseInits.
+        failwith "sparse(values, keys) is only valid as a top-level let-binding value (let S = sparse(values, keys))"
     
     | TExprGuard (cond, body) ->
         IRGuard (lowerTypedExpr env cond, lowerTypedExpr env body)
@@ -577,6 +574,15 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprContains (a, v) ->
         IRContains (lowerTypedExpr env a, lowerTypedExpr env v)
+
+    | TExprDisplayEmit (head, quoted, data, metaTail) ->
+        IRDisplayEmit (head, quoted, lowerTypedExpr env data, metaTail)
+
+    | TExprDisplayJson (rank, data) ->
+        IRDisplayJson (rank, lowerTypedExpr env data)
+
+    | TExprDisplayNum data ->
+        IRDisplayNum (lowerTypedExpr env data)
     
     | TExprGroupBy (values, grouping) ->
         IRGroupBy (lowerTypedExpr env values, lowerTypedExpr env grouping)
@@ -592,7 +598,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
          // Fused reduction terminal: the checker spliced a RESOLVED deferred
          // computation (plain apply or canonical fusion tree) as the child
          // and always filled the seed (tryInferReduceCompute). Fold without
-         // materializing — codegen emits one nest with scalar accumulators.
+         // materializing -- codegen emits one nest with scalar accumulators.
          | (TExprApply _ | TExprFusion _), Some seed ->
             IRReduceCompute (lowerTypedExpr env array, lowerTypedExpr env kernel,
                              lowerTypedExpr env seed)
@@ -604,8 +610,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             | IRArrayLit _ ->
                 // Array-LITERAL source (`reduce([a, b, c], op)`): the fold
                 // codegen NAMES its source (extents + element reads), which
-                // an inline literal cannot provide — bind it to a fresh id
-                // and fold over the binding.
+                // an inline literal cannot provide -- bind it to a fresh id.
                 let srcId = env.Builder.FreshId()
                 IRLet (srcId, srcIR, IRReduce (IRVar (srcId, array.Type), kernelIR, initIR))
             | _ -> IRReduce (srcIR, kernelIR, initIR))
@@ -619,14 +624,20 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRDecompact (lowerTypedExpr env array, dim)
     | TExprGram (left, right, isSameArray) ->
         IRGram (lowerTypedExpr env left, lowerTypedExpr env right, isSameArray)
+    | TExprMatmul (left, right) ->
+        IRMatmul (lowerTypedExpr env left, lowerTypedExpr env right)
+    | TExprEigh operand ->
+        IREigh (lowerTypedExpr env operand)
+    | TExprSolve (matrix, rhs) ->
+        IRSolve (lowerTypedExpr env matrix, lowerTypedExpr env rhs)
     | TExprArrayNegate array ->
         IRArrayNegate (lowerTypedExpr env array)
     | TExprArrayConjugate array ->
         IRArrayConjugate (lowerTypedExpr env array)
     
     | TExprExtents array ->
-        // Rank-1: emit a single IRExtent (arr, 0).
-        // Rank-N: emit a tuple of IRExtent (arr, i) for i in 0..N-1.
+        // Rank-1: a single IRExtent (arr, 0). Rank-N: a tuple of
+        // IRExtent (arr, i) for i in 0..N-1.
         let arr' = lowerTypedExpr env array
         match array.Type with
         | ArrayElem arrTy when arrTy.IndexTypes.Length = 1 ->
@@ -635,8 +646,8 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             let n = arrTy.IndexTypes.Length
             IRTuple (List.init n (fun i -> IRExtent (arr', i)))
         | _ ->
-            // Typecheck should have rejected — fall back to a degenerate form
-            // rather than crash; downstream IR validator will catch oddities.
+            // Typecheck should have rejected -- degenerate fallback rather
+            // than crash; the IR validator will catch oddities.
             IRExtent (arr', 0)
     
     | TExprZero ->
@@ -648,11 +659,10 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | IRTScalar ETFloat32 | IRTScalar ETFloat64 -> IRLit (IRLitFloat 0.0)
         | IRTInfer _ -> IRLit (IRLitFloat 0.0)  // unresolved defaults to float
         | ArrayElem _ ->
-            // An array-typed zero that reached lowering sits in a position the
-            // binding-site materialization (inferLetBindingValue's zero arm)
-            // does not cover — emitting IRZero here would render as a scalar
-            // `0` under an array type in the generated C++ (a null pointer).
-            // Fail loudly with the working spelling instead.
+            // An array-typed zero that reached lowering sits in a position
+            // the binding-site materialization (inferLetBindingValue's zero
+            // arm) does not cover -- emitting IRZero here would render as a
+            // scalar `0` under an array type (a null pointer). Fail loudly.
             failwith "zero at an array type is only materialized at an annotated let binding (`let A: Array<...> = zero`). In other positions (a function's return expression, a call argument), bind it first: `let z: Array<...> = zero` and use `z`."
         | _ -> IRZero  // fallback
     
@@ -684,7 +694,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRConstraintCheck (lowerTypedExpr env cond, message, texpr.Span)
     
     | TExprSequence exprs ->
-        // sequence(c1, c2, ..., cn) → IRSequence (flat n-ary parallel)
+        // sequence(c1, c2, ..., cn) -> IRSequence (flat n-ary parallel)
         let lowered = exprs |> List.map (lowerTypedExpr env)
         match lowered with
         | [] -> IRLit IRLitUnit
@@ -725,57 +735,55 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
     let body' = lowerTypedExpr paramEnv info.Body
 
     // If the body's top-level shape is value-position-illegal as a
-    // standalone function return, wrap it in IRCompute. Currently this
-    // applies only to bare IRApplyCombinator — `method_for { ... }` and
-    // similar combinator forms that need a destination to materialize
-    // into. genFuncBody's return-position match handles
-    // `IRCompute(IRApplyCombinator _)` by synthesizing an internal let
-    // binding, running the full combinator codegen, and returning the
-    // bound name. Use-site rendering (exprToCppCore's IRCompute arm) is
-    // identical for IRCompute(IRApplyCombinator) and bare IRApplyCombinator,
-    // so the wrap doesn't change behavior at existing use sites.
+    // standalone function return, wrap it in IRCompute. This applies only to
+    // bare IRApplyCombinator -- `method_for { ... }` and similar combinator
+    // forms that need a destination to materialize into. genFuncBody's
+    // return-position match handles `IRCompute(IRApplyCombinator _)` by
+    // synthesizing an internal let binding and running the full combinator
+    // codegen; use-site rendering is identical either way, so the wrap
+    // doesn't change behavior at existing use sites.
     let bodyWrapped =
         match body' with
         | IRApplyCombinator _ | IRComposeApply _ -> IRCompute body'
         | _ -> body'
 
-    // Build unified IRCallable. info.ReturnType comes from TypeCheck,
-    // so the lambda has a concrete return type. The body's IRExpr type
-    // matches it (modulo inference); we trust TypeCheck's annotation.
-    // Lambda-level parallelism flows TypedLambdaInfo.Parallel -> here via
-    // the shared extractor (same logic a function's where-clause uses).
+    // Build unified IRCallable. info.ReturnType comes from TypeCheck, so the
+    // lambda has a concrete return type; we trust that annotation. Lambda-level
+    // parallelism flows TypedLambdaInfo.Parallel -> here via the shared
+    // extractor (same logic a function's where-clause uses).
     let (lamParallelism, lamIsOmp, lamIsCuda, lamBlock, lamIsMpi) =
         extractParallelism info.Parallel (info.Params |> List.map (fun p -> p.Name))
-    // A named, recursive lambda (`let const name = lambda ...` whose body refers
-    // to itself) carries a self-binding: give the lifted callable the real name
-    // and the id the body's self-reference resolves to, so the emitted top-level
-    // C++ function can call itself. An anonymous lambda gets the default
-    // synthesized "__lambda_<id>" name and a fresh id.
+    // A named, recursive lambda (`let const name = lambda ...` whose body
+    // refers to itself) carries a self-binding: give the lifted callable the
+    // real name and the id the body's self-reference resolves to, so the
+    // emitted top-level C++ function can call itself. An anonymous lambda
+    // gets the default synthesized "__lambda_<id>" name and a fresh id.
     let lamOpts =
         match info.SelfBinding with
         | Some (selfName, selfId) ->
             { defaultLambdaOptions with NameOverride = Some selfName; IdOverride = Some selfId }
         | None -> defaultLambdaOptions
     // A `where anticomm(a, b)` group is an axis group exactly like a comm
-    // group — same fusion, same triangular iteration — so it rides CommGroups
-    // for every grouping consumer (buildLoopLevelStructure et al.), with the
-    // separate AntisymGroups list carrying the one extra bit: the simplex is
-    // STRICT (no diagonal, sign flip on swapped reads). IsCommutative stays
-    // the user's comm declaration: an antisym kernel is NOT commutative, and
-    // the flag feeds diagnostics that ask exactly that question.
+    // group (same fusion, same triangular iteration), so it rides CommGroups
+    // for every grouping consumer, with the separate AntisymGroups list
+    // carrying the one extra bit: the simplex is STRICT (no diagonal, sign
+    // flip on swapped reads). IsCommutative stays the user's comm
+    // declaration: an antisym kernel is NOT commutative.
     let callable =
         { mkCallable env.Builder lamOpts paramInfos bodyWrapped info.ReturnType
                      captures info.IsCommutative (info.CommGroups @ info.AntisymGroups)
                      lamParallelism lamIsOmp lamIsCuda lamBlock lamIsMpi
-            with AntisymGroups = info.AntisymGroups }
-    // Emit IRVar(callable.Id, funcType) — the callable lives in
-    // LiftedCallables → module.Functions; the IRVar carries just the
-    // function type for type-inference and consumer dispatch.
-    // Consumers use `resolveCallable` to walk back to the callable
-    // when they need params/body/captures. The function type for the
-    // IRVar annotation uses the regular params only — captures are
-    // an implementation detail of the lifted function's signature
-    // and aren't part of what consumers see.
+            with AntisymGroups = info.AntisymGroups
+                 // The apply seam's per-parameter sign summary rides along
+                 // the same way, so codegen and the interpreter can hand
+                 // IR.deduceWreathTie the values typecheck judged from.
+                 SignParities = info.SignParities }
+    // Emit IRVar(callable.Id, funcType): the callable lives in
+    // LiftedCallables -> module.Functions, and the IRVar carries just the
+    // function type for type-inference and consumer dispatch. Consumers use
+    // `resolveCallable` to walk back when they need params/body/captures.
+    // The function type uses the regular params only -- captures are an
+    // implementation detail of the lifted function's signature.
     env.LiftedCallables.Add(callable)
     let funcType =
         let paramTypes = callable.Params |> List.map (fun p -> p.Type)
@@ -801,7 +809,7 @@ and lowerLiteralToIRLit lit : IRLit =
 
 /// Lower a value-position literal, reconciling the source value with the
 /// resolved element type (mirrors `TExprZero`). A numeric literal that flexed
-/// to a wider type — e.g. an int literal pinned to Float64 — emits the matching
+/// to a wider type (e.g. an int literal pinned to Float64) emits the matching
 /// constructor so it stays consistent with `CarriedType`/CodeGen. An unpinned
 /// (`IRTInfer`) or non-scalar type falls back to the natural constructor: the
 /// literal stays a scalar value and any consuming op broadcasts it.
@@ -840,23 +848,23 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
         match stmt with
         | TStmtLet binding ->
             let value = lowerTypedExpr env binding.Value
-            // A named, recursive lambda binding (`let const f = lambda ... f ...`,
-            // incl. the nested-`function` desugar) lifts to a module-level
-            // callable whose id IS binding.VarId, so `f` resolves to that callable
-            // everywhere — its own body (recursion) and the rest of the block. The
-            // lowered value is then a bare self-reference IRVar(binding.VarId);
-            // wrapping it in an IRLet would create a degenerate self-alias and a
-            // stray main-local shadow of the top-level function. Skip the IRLet —
-            // the callable was already registered by lowerTypedExpr above.
+            // A named, recursive lambda binding (`let const f = lambda ... f
+            // ...`, incl. the nested-`function` desugar) lifts to a
+            // module-level callable whose id IS binding.VarId, so `f`
+            // resolves to that callable everywhere. The lowered value is
+            // then a bare self-reference IRVar(binding.VarId); wrapping it
+            // in an IRLet would create a degenerate self-alias and a stray
+            // main-local shadow of the top-level function, so skip the
+            // IRLet -- the callable was already registered above.
             let isSelfBoundLambda =
                 match binding.Value.Kind with
                 | TExprLambda info ->
                     (match info.SelfBinding with Some (_, id) -> id = binding.VarId | None -> false)
                 | _ -> false
             // IRLet has no mutability slot, so record mut ARRAY lets in the
-            // module side table — codegen/interp give them copy semantics
+            // module side table -- codegen/interp give them copy semantics
             // (a mut binding initialized from an existing array must not
-            // alias its storage; see IRModule.MutableArrayLets).
+            // alias its storage).
             (match binding.Type with
              | ArrayElem _ when binding.IsMutable ->
                  env.MutableArrayLets.Add binding.VarId
@@ -868,10 +876,9 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
                 let body = lowerTypedBlock env' rest finalExpr
                 IRLet (binding.VarId, value, body)
             else
-                // Destructuring let inside a block (`let (x, y) = p`): chain a
-                // projection IRLet per pattern leaf after the primary binding,
-                // mirroring the TDeclLet path — without these the leaf VarIds
-                // dangle (the body references bindings never introduced).
+                // Destructuring let inside a block (`let (x, y) = p`): chain
+                // a projection IRLet per pattern leaf after the primary
+                // binding -- without these the leaf VarIds dangle.
                 let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
                 let isFlat =
                     match binding.Type with
@@ -932,28 +939,28 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
         | OpAdd -> (IRAdd, true) | OpSub -> (IRSub, false)
         | OpMul -> (IRMul, true) | OpDiv -> (IRDiv, false)
         | OpMod -> (IRMod, false) | OpCaret -> (IRCaret, false)
+        // atan2/log_base are order-sensitive, hence not commutative. No surface
+        // SECTION syntax reaches them (they are call-shaped, not operators),
+        // but map them anyway so the `_ -> IRAdd` fallback below can never
+        // silently turn one into an addition.
+        | OpMath2 name -> (IRMath2 name, false)
         | OpEq -> (IREq, true) | OpNeq -> (IRNeq, true)
         | OpLt -> (IRLt, false) | OpLe -> (IRLe, false)
         | OpGt -> (IRGt, false) | OpGe -> (IRGe, false)
         | OpAnd -> (IRAnd, true) | OpOr -> (IROr, true)
         | _ -> (IRAdd, true)
-    // Stage 3c.2 follow-on: extract the resolved param/return types from
-    // the typed section's function type instead of hardcoding Float64.
-    // TypeCheck.inferExpr ExprSection already types sections
-    // polymorphically (`α → α → α`); subsequent unifications in
-    // consumer-position handlers (e.g., inferReduce pinning kernel
-    // params to the array element type) bind that fresh α to the actual
-    // context type. By zonk time the section's funcTy carries the
-    // resolved scalar type, and we pull it from there. Float64 only
-    // appears as a fallback for sections whose type genuinely couldn't
-    // be resolved — a case that should not occur in practice but is
-    // preserved as a defensive default rather than crashing.
+    // Extract the resolved param/return types from the typed section's
+    // function type instead of hardcoding Float64: TypeCheck.inferExpr
+    // ExprSection types sections polymorphically (`a -> a -> a`), and
+    // subsequent unifications in consumer-position handlers bind that fresh
+    // `a` to the actual context type. By zonk time the section's funcTy
+    // carries the resolved scalar type. Float64 is only a fallback for
+    // sections whose type genuinely couldn't be resolved.
     let (paramTy, retTy) =
         match funcTy with
         | IRTArrow (slots, r, _) when slots.Length = 2 ->
-            // Pull the first param's resolved scalar type. Both slots
-            // should resolve to the same scalar after typecheck's
-            // section unification, but we read the first as canonical.
+            // Both slots should resolve to the same scalar; read the first
+            // as canonical.
             let first =
                 match slots.[0] with
                 | SVal t -> t
@@ -964,11 +971,10 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
     let parms : IRParam list =
         [{ Name = "a"; Type = paramTy; Index = 0; VarId = aId }
          { Name = "b"; Type = paramTy; Index = 1; VarId = bId }]
-    // Comparison and logical ops produce bool regardless of operand
-    // type; arithmetic ops produce the operand element type. retTy
-    // from the funcTy should already encode this distinction, but
-    // we recompute defensively so a malformed funcTy doesn't put a
-    // wrong return type on the lifted callable.
+    // Comparison and logical ops produce bool regardless of operand type;
+    // arithmetic ops produce the operand element type. retTy from funcTy
+    // should already encode this, but recompute defensively so a malformed
+    // funcTy doesn't put a wrong return type on the lifted callable.
     let retType =
         match irOp with
         | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
@@ -977,7 +983,6 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
     let commGroups = if isComm then [[0; 1]] else []
     let callable = mkLambdaCallable env.Builder parms body retType [] isComm commGroups [] false false 256 false
     env.LiftedCallables.Add(callable)
-    // Stage 3c.3: emit IRVar reference to the lifted callable.
     let funcType =
         let paramTypes = callable.Params |> List.map (fun p -> p.Type)
         mkFuncArrow paramTypes callable.RetType
@@ -985,12 +990,12 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
 
 /// Lower a partial operator application to a lambda
 and lowerTypedPartialApp env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (funcTy: IRType) : IRExpr =
-    // NOTE: inlines argExpr into the lifted kernel with NO captures — only
-    // safe when argExpr is a literal or references module-level ids. The
+    // Inlines argExpr into the lifted kernel with NO captures -- only safe
+    // when argExpr is a literal or references module-level ids. The
     // array<->scalar broadcast path hoists computed scalars into a let and
     // threads them as captures instead (lowerTypedBinOp); explicit
     // partial-app sections (`(s +)`) with function-local operands still
-    // share the inline hazard (pre-existing, narrower surface).
+    // share this inline hazard.
     lowerTypedPartialAppWith env op argExpr isLeft funcTy []
 
 and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (funcTy: IRType) (captures: CaptureInfo list) : IRExpr =
@@ -1004,15 +1009,17 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
         | OpLt -> IRLt | OpLe -> IRLe
         | OpGt -> IRGt | OpGe -> IRGe
         | OpAnd -> IRAnd | OpOr -> IROr
+        // Reachable from lowerTypedBinOp's array<->scalar broadcast path:
+        // without this arm a broadcast `atan2(A, c)` that ever reached lowering
+        // directly would emit `A + c`. TypeCheck re-synthesizes the array forms
+        // as an explicit kernel today, so this is a backstop, not a live path.
+        | OpMath2 name -> IRMath2 name
         | _ -> IRAdd
-    // Same resolved-type extraction as lowerTypedSection: pull the
-    // partial application's param/return scalar types from the typed
-    // function type. For partial app the funcTy is `α → α` (or
-    // `α → Bool` for comparisons), so we read slot 0 as the param
-    // type. argExpr was already lowered and carries its own type via
-    // the IR; we don't need to consult it here because the typechecker
-    // already unified arg's type with the operator's left-or-right
-    // operand position.
+    // Same resolved-type extraction as lowerTypedSection: pull the partial
+    // application's param/return scalar types from the typed function type
+    // (`a -> a`, or `a -> Bool` for comparisons), reading slot 0 as the
+    // param type. argExpr was already lowered and carries its own type via
+    // the IR, so it doesn't need consulting here.
     let (paramTy, retTy) =
         match funcTy with
         | IRTArrow (slots, r, _) when slots.Length = 1 ->
@@ -1034,7 +1041,6 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
         | _ -> retTy
     let callable = mkLambdaCallable env.Builder parms body retType captures false [] [] false false 256 false
     env.LiftedCallables.Add(callable)
-    // Stage 3c.3: emit IRVar reference to the lifted callable.
     let funcType =
         let paramTypes = callable.Params |> List.map (fun p -> p.Type)
         mkFuncArrow paramTypes callable.RetType
@@ -1044,11 +1050,11 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
 and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
     let irMode = match mode with Elementwise -> IRElementwise | Outer -> IROuter
     
-    // Check if both operands are arrays — if so, synthesize object_for loop
+    // Check if both operands are arrays -- if so, synthesize object_for loop
     let isArithOp = match op with
                     | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
                     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
-                    | OpAnd | OpOr -> true
+                    | OpAnd | OpOr | OpMath2 _ -> true
                     | _ -> false
     let leftIsArray = match leftExpr.Type with ArrayElem _ -> true | _ -> false
     let rightIsArray = match rightExpr.Type with ArrayElem _ -> true | _ -> false
@@ -1060,13 +1066,12 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
                    | OpDiv -> IRDiv | OpMod -> IRMod | OpCaret -> IRCaret
                    | OpEq -> IREq | OpNeq -> IRNeq
                    | OpLt -> IRLt | OpLe -> IRLe | OpGt -> IRGt | OpGe -> IRGe
-                   | OpAnd -> IRAnd | OpOr -> IROr | _ -> IRAdd
-        // S3 tag: relic. Default to Float64 if elem type isn't a primitive.
+                   | OpAnd -> IRAnd | OpOr -> IROr
+                   | OpMath2 name -> IRMath2 name | _ -> IRAdd
         // Lambda params for arithmetic ops require concrete scalar types;
-        // if the array's elem type isn't a primitive (e.g., struct or
-        // unresolved infer), the codegen would fail downstream. Preserving
-        // current default behavior; a stricter error here would be a
-        // separate cleanup.
+        // default to Float64 if the array's elem type isn't a primitive
+        // (e.g. struct or unresolved infer), since codegen would otherwise
+        // fail downstream.
         let elemTypeL =
             match leftExpr.Type with
             | ArrayElem a ->
@@ -1084,9 +1089,8 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             { Name = "__a"; Type = IRTScalar elemTypeL; Index = 0; VarId = aId }
             { Name = "__b"; Type = IRTScalar elemTypeR; Index = 1; VarId = bId }
         ]
-        // Kernel return type: comparison/logical ops produce bool;
-        // arithmetic ops keep the left operand's element type (matches
-        // existing IRBinOp typing conventions for elementwise ops).
+        // Comparison/logical ops produce bool; arithmetic ops keep the left
+        // operand's element type (matches IRBinOp typing conventions).
         let kernelRetType =
             match irOp with
             | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
@@ -1097,8 +1101,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups [] false false 256 false
         env.LiftedCallables.Add(lambdaInfo)
         // Kernel slot references the lifted callable via IRVar;
-        // genObjectForApplication uses resolveCallable + wrapper to
-        // consume it.
+        // genObjectForApplication uses resolveCallable + wrapper to consume it.
         let kernelFuncType =
             let paramTypes = lambdaInfo.Params |> List.map (fun p -> p.Type)
             mkFuncArrow paramTypes lambdaInfo.RetType
@@ -1112,14 +1115,12 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
         IRApp(IRObjectFor objInfo, [IRTuple [l; r]], resultType)
     elif mode = Elementwise && isArithOp && (leftIsArray <> rightIsArray) then
         // Array<->scalar broadcast: `A > 2.0`, `A + a`, `2.0 / A`. The op is
-        // T^0 -> T^0 -> T^0; co-iteration peels the array operand down to T^0
-        // and the scalar already matches that rank, so we iterate the array
-        // with the scalar held fixed via a 1-param partial-application kernel
-        // (lambda(x) -> x op s, or lambda(x) -> s op x). The scalar operand is
-        // captured as the fixed arg; isLeft selects the side. Comparisons and
-        // logicals produce Bool elements; arithmetic keeps the result type's
-        // element type (inferArithType already promoted it against the
-        // scalar operand).
+        // T^0 -> T^0 -> T^0; co-iteration peels the array operand down to
+        // T^0 and the scalar already matches that rank, so iterate the
+        // array with the scalar held fixed via a 1-param partial-application
+        // kernel (lambda(x) -> x op s, or lambda(x) -> s op x); isLeft
+        // selects the side. Comparisons/logicals produce Bool elements;
+        // arithmetic keeps the result type's element type.
         let kernelRet =
             match op with
             | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr -> IRTScalar ETBool
@@ -1138,8 +1139,8 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
                 (r, l, leftExpr.Type, true, mkFuncArrow [elemTy] kernelRet)
         match scalarIR with
         | IRLit _ ->
-            // Literal fixed arg (`A > 2.0`): the historical inline shape — a
-            // literal cannot dangle and needs no hoisting.
+            // Literal fixed arg (`A > 2.0`): a literal cannot dangle and
+            // needs no hoisting.
             let kernelVar = lowerTypedPartialApp env op scalarIR fixedIsLeft funcTy
             let objInfo : ObjectForInfo = {
                 Kernel = kernelVar
@@ -1154,9 +1155,8 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             // function-local VarIds inside it DANGLING (BL6001) and would
             // recompute the scalar per element. Hoist it into a let so it
             // evaluates once, and thread the let-bound var into the kernel
-            // as a proper CAPTURE — the existing capture-forwarding
-            // machinery (captureForwardName / the wrapper's [&] chain)
-            // closes the scope at every consumer site.
+            // as a proper CAPTURE -- the capture-forwarding machinery closes
+            // the scope at every consumer site.
             let sVar = env.Builder.FreshId()
             let cap : CaptureInfo = {
                 Id = sVar
@@ -1189,7 +1189,8 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
     | OpGe -> IRBinOp (irMode, IRGe, l, r)
     | OpAnd -> IRBinOp (irMode, IRAnd, l, r)
     | OpOr -> IRBinOp (irMode, IROr, l, r)
-    
+    | OpMath2 name -> IRBinOp (irMode, IRMath2 name, l, r)
+
     | OpApply ->
         // For <@>, symmetry info should already be in TExprApply
         // This case handles when we still have raw binop (shouldn't happen in typed AST)
@@ -1345,7 +1346,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
     
     | TDeclStatic binding ->
         // Static values: use pre-evaluated value if available, else lower
-        // normally. The fast path is for plain `let static x` only — a
+        // normally. The fast path is for plain `let static x` only -- a
         // destructured static's primary is the synthetic "_" and its leaves
         // are emitted as constants from the sub-binding loop below.
         let (primary, env') =
@@ -1367,10 +1368,10 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
                 (irBinding, env')
 
         // Emit sub-bindings for destructured patterns. The static evaluator's
-        // bindPattern (StaticEval.fs) has already populated env.StaticValues
-        // with each sub-name → value mapping for tuple destructuring; prefer
-        // those direct constants. Fall back to tuple projection of the
-        // primary binding for shapes the static evaluator didn't reach.
+        // bindPattern has already populated env.StaticValues with each
+        // sub-name -> value mapping for tuple destructuring; prefer those
+        // direct constants, falling back to tuple projection of the primary
+        // binding for shapes the static evaluator didn't reach.
         let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
         let isFlat =
             match binding.Type with
@@ -1385,13 +1386,13 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
                 let bd =
                     match Map.tryFind name env.StaticValues with
                     | Some sv ->
-                        // Direct static constant — preferred path for statically-
-                        // evaluated tuple destructuring.
+                        // Direct static constant -- preferred path for
+                        // statically-evaluated tuple destructuring.
                         let irValue = staticValueToIR sv
                         { Id = subId; Name = name; Type = subTy; Value = irValue
                           IsConst = true; IsMutable = false }
                     | None ->
-                        // Projection fallback — same shape as TDeclLet's branch.
+                        // Projection fallback -- same shape as TDeclLet's branch.
                         let projExpr = subBindingValue binding isStruct isFlat i name
                         { Id = subId; Name = name; Type = subTy; Value = projExpr
                           IsConst = true; IsMutable = false }
@@ -1409,17 +1410,32 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         ([Choice3Of3 irTd], env)
     
     | TDeclUnit unitDecl ->
-        // Register unit in environment (same logic as untyped pipeline)
+        // Register unit in environment (same logic as the typecheck pipeline,
+        // minus the hard errors). registerUnit already rejected BOTH resolver
+        // failures -- a terminal-quantity misuse (BL3011) and an unknown name
+        // (BL3015) -- so neither Error arm is reachable for input that got
+        // this far. They stay only to keep lowering total; reaching one means
+        // env.UnitDefs here disagrees with env.Units in typecheck, which is an
+        // internal inconsistency and NOT the old warn-and-fallback (that
+        // deliberately compiled a misspelling into a fresh base unit).
+        let baseSig = unitOfDims (Map.ofList [(unitDecl.Name, 1)])
         let sig' =
             match unitDecl.Definition with
-            | None | Some UnitBase ->
-                Map.ofList [(unitDecl.Name, 1)]
+            | None | Some UnitBase -> baseSig
             | Some (UnitDerived expr) ->
                 match TypeEnv.resolveUnitExpr env.UnitDefs expr with
                 | Ok resolved -> resolved
-                | Error msg ->
-                    eprintfn "Unit error: %s" msg
-                    Map.ofList [(unitDecl.Name, 1)]
+                | Error err ->
+                    eprintfn "internal: unit '%s' resolved in typecheck but not in lowering: %s"
+                        unitDecl.Name (TypeEnv.ppUnitResolveErr err)
+                    baseSig
+            | Some (UnitQuantity expr) ->
+                match TypeEnv.resolveUnitExpr env.UnitDefs expr with
+                | Ok resolved -> { resolved with Nominal = Some unitDecl.Name }
+                | Error err ->
+                    eprintfn "internal: quantity '%s' resolved in typecheck but not in lowering: %s"
+                        unitDecl.Name (TypeEnv.ppUnitResolveErr err)
+                    { baseSig with Nominal = Some unitDecl.Name }
         let env' = { env with UnitDefs = Map.add unitDecl.Name sig' env.UnitDefs }
         ([], env')
     
@@ -1545,7 +1561,7 @@ let tryPlainRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpec
 
 /// Detect a streamed read: `let A = s.vars.A |> alias.stream`. Mirrors
 /// tryPlainRead (dense whole-variable spec) but marks the spec Streamed:
-/// codegen emits no materialization — consuming nests inline fiber reads.
+/// codegen emits no materialization -- consuming nests inline fiber reads.
 let tryStreamRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpec option =
     let rec rootName (e: TypedExpr) =
         match e.Kind with
@@ -1609,13 +1625,12 @@ let tryWindowRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpe
          | _ -> None)
     | _ -> None
 
-/// Detect a provider write: `let _ = alias.write("path", A)`. The checker
-/// guarantees the shape (string-literal path, named array source, unit
-/// result); this recovers the source binding, its array type, and dimension
-/// names — named index types when the array's index Ids match module-level
-/// IRTDIndexType defs (e.g. a provider-loaded array written back), synthesized
-/// dim<i> otherwise. The binding lowers to a unit placeholder; codegen emits
-/// a flatten prologue + the provider's writer at the ProviderWrites intercept.
+/// Detect a provider write: `let _ = alias.write("path", A)`. Recovers the
+/// source binding, its array type, and dimension names -- named index types
+/// when the array's index Ids match module-level IRTDIndexType defs,
+/// synthesized dim<i> otherwise. The binding lowers to a unit placeholder;
+/// codegen emits a flatten prologue + the provider's writer at the
+/// ProviderWrites intercept.
 let tryProviderWrite (env: TypedLowerEnv) (typeDefs: IRTypeDef list) (binding: TypedBinding) : ProviderWriteSpec option =
     match binding.Value.Kind with
     | TExprApp ({ Kind = TExprField ({ Kind = TExprVar (alias, _, _) }, "write", _) }, [tPath; tValue]) ->
@@ -1624,10 +1639,9 @@ let tryProviderWrite (env: TypedLowerEnv) (typeDefs: IRTypeDef list) (binding: T
              (match tValue.Type with
               | ArrayElem arrTy ->
                   // Dimension names, best source first: (a) the source is
-                  // itself a provider read — ask its provider for the store's
-                  // names (round-trips them through the write); (b) a
-                  // module-level named index type with a matching Id; (c)
-                  // synthesized dim<i>.
+                  // itself a provider read, ask its provider for the store's
+                  // names; (b) a module-level named index type with a
+                  // matching Id; (c) synthesized dim<i>.
                   let fromSourceStore =
                       match Map.tryFind srcId env.ProviderReads with
                       | Some rspec ->
@@ -1755,11 +1769,10 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
         // All other declarations go through lowerTypedDecl
         // But first check for provider calls (e.g. let sample = NetCDF.load("sample.nc"))
         | TDeclLet binding when (tryCompoundRead currentEnv binding).IsSome ->
-            // Deferred compound read (`load_compound(var, mask) |> read`): the
-            // binding holds the compact Compound value, but no C++ is emitted
-            // here. genBinding materializes it via genReadCompoundVar when it
-            // sees the binding's IRId in ctx.ProviderReads. Value is a unit
-            // placeholder; the type is the compound view type from typecheck.
+            // Deferred compound read (`load_compound(var, mask) |> read`): no
+            // C++ is emitted here. genBinding materializes it via
+            // genReadCompoundVar when it sees the binding's IRId in
+            // ctx.ProviderReads. Value is a unit placeholder.
             let spec = (tryCompoundRead currentEnv binding).Value
             let bd = {
                 Id = binding.VarId
@@ -1773,12 +1786,11 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with ProviderReads = Map.add binding.VarId spec currentEnv.ProviderReads }
         | TDeclLet binding when (tryPlainRead currentEnv binding).IsSome ->
-            // Deferred dense read (`sample.vars.A |> read`): the binding holds the
-            // dense array value, materialized in codegen via genReadVar (the
-            // no-mask arm of the ProviderReads intercept). Value is a unit
-            // placeholder; the type is the array type from typecheck. Mirrors the
-            // compound arm above; the matchers are mutually exclusive (compound
-            // wraps a load_compound app, this wraps a plain field access).
+            // Deferred dense read (`sample.vars.A |> read`): materialized in
+            // codegen via genReadVar (the no-mask arm of the ProviderReads
+            // intercept). Mirrors the compound arm above; the matchers are
+            // mutually exclusive (compound wraps a load_compound app, this
+            // wraps a plain field access).
             let spec = (tryPlainRead currentEnv binding).Value
             let bd = {
                 Id = binding.VarId
@@ -1793,7 +1805,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             currentEnv <- { currentEnv with ProviderReads = Map.add binding.VarId spec currentEnv.ProviderReads }
         | TDeclLet binding when (tryStreamRead currentEnv binding).IsSome ->
             // Streamed read (`alias.stream(view)`): a deferred-read binding
-            // whose spec is marked Streamed — codegen emits the stream-open
+            // whose spec is marked Streamed -- codegen emits the stream-open
             // prologue only; nests inline the fiber reads.
             let spec = (tryStreamRead currentEnv binding).Value
             let bd = {
@@ -1824,10 +1836,9 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with ProviderReads = Map.add binding.VarId spec currentEnv.ProviderReads }
         | TDeclLet binding when (tryProviderWrite currentEnv types binding).IsSome ->
-            // Deferred provider write (`alias.write("path", A)`): no value is
-            // bound (the checker typed it unit); codegen emits the flatten
-            // prologue + the provider's writer when it sees the binding's
-            // IRId in ctx.ProviderWrites. Mirrors the read intercepts above.
+            // Deferred provider write: codegen emits the flatten prologue +
+            // the provider's writer when it sees the binding's IRId in
+            // ctx.ProviderWrites. Mirrors the read intercepts above.
             let spec = (tryProviderWrite currentEnv types binding).Value
             let bd = {
                 Id = binding.VarId
@@ -1841,11 +1852,9 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with ProviderWrites = Map.add binding.VarId spec currentEnv.ProviderWrites }
         | TDeclLet binding when (match binding.Value.Kind with TExprFillRandom _ -> true | _ -> false) ->
-            // Random-fill constructor (`let A: Array<..> = fill_random(mod)`): the
-            // binding holds a random-filled array, materialized in codegen via
-            // allocate<> + the runtime fill_random (the RandomInits intercept in
-            // genBinding). Value is a unit placeholder; the type is the array type
-            // from the annotation (typecheck). The modulus is lowered and recorded.
+            // Random-fill constructor: materialized in codegen via allocate<>
+            // + the runtime fill_random (the RandomInits intercept in
+            // genBinding). The modulus is lowered and recorded.
             let modIR =
                 match binding.Value.Kind with
                 | TExprFillRandom m -> lowerTypedExpr currentEnv m
@@ -1862,12 +1871,9 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (FillModulus modIR) currentEnv.RandomInits }
         | TDeclLet binding when (match binding.Value.Kind with TExprRandGen _ -> true | _ -> false) ->
-            // rand.uniform/normal(key, shape): the binding holds a deterministic
-            // random array, materialized in codegen via allocate<> + the runtime
-            // blade_rand fill (the RandomInits/RandGen intercept in genBinding).
-            // Value is a unit placeholder; the array type/shape comes from
-            // typecheck (self-typed from the shape arg). The key is lowered and
-            // recorded. Mirrors the fill_random arm.
+            // rand.uniform/normal(key, shape): materialized via allocate<> +
+            // the runtime blade_rand fill (RandomInits/RandGen intercept).
+            // The key is lowered and recorded. Mirrors the fill_random arm.
             let kind, keyIR =
                 match binding.Value.Kind with
                 | TExprRandGen (k, key, _) -> k, lowerTypedExpr currentEnv key
@@ -1884,12 +1890,10 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (RandGen (kind, keyIR)) currentEnv.RandomInits }
         | TDeclLet binding when (match binding.Value.Kind with TExprCompound _ -> true | _ -> false) ->
-            // Compound-construction constructor (`let B = compound(dense, mask)`):
-            // the binding holds a CompoundIdx-typed compact array, materialized in
-            // codegen via P0 (genCompoundIndexFromMask) + a dense->compact scatter
-            // (the CompoundInits intercept in genBinding). Value is a unit
-            // placeholder; the type is the Compound view type from typecheck. The
-            // dense and mask are lowered and recorded. Mirrors the fill_random arm.
+            // Compound-construction constructor: materialized via P0
+            // (genCompoundIndexFromMask) + a dense->compact scatter (the
+            // CompoundInits intercept). Dense and mask are lowered and
+            // recorded. Mirrors the fill_random arm.
             let denseIR, maskIR =
                 match binding.Value.Kind with
                 | TExprCompound (d, m) -> lowerTypedExpr currentEnv d, lowerTypedExpr currentEnv m
@@ -1905,6 +1909,25 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             bindings <- bindings @ [bd]
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with CompoundInits = Map.add binding.VarId (denseIR, maskIR) currentEnv.CompoundInits }
+        | TDeclLet binding when (match binding.Value.Kind with TExprSparse _ -> true | _ -> false) ->
+            // Sparse-construction constructor: materialized via the sparse
+            // index build + a straight pool copy (values are already in key
+            // order, no scatter). Mirrors the compound arm above.
+            let valuesIR =
+                match binding.Value.Kind with
+                | TExprSparse (v, _) -> lowerTypedExpr currentEnv v
+                | _ -> IRLit IRLitUnit  // unreachable: guarded by the `when` above
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = binding.Type
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = binding.IsMutable
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with SparseInits = Map.add binding.VarId valuesIR currentEnv.SparseInits }
         | TDeclLet binding when isProviderCall currentEnv binding.Value ->
             match tryInvokeProvider currentEnv binding with
             | Some (providerTypes, bd, env') ->
@@ -1917,7 +1940,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
                 bindings <- bindings @ [bd]
                 currentEnv <- env'
             | None ->
-                // Provider invocation failed — fall through to normal lowering
+                // Provider invocation failed -- fall through to normal lowering
                 let (items, env') = lowerTypedDecl currentEnv (TDeclLet binding)
                 currentEnv <- env'
                 for item in items do
@@ -1993,7 +2016,11 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
         ProviderWrites = currentEnv.ProviderWrites
         RandomInits = currentEnv.RandomInits
         CompoundInits = currentEnv.CompoundInits
+        SparseInits = currentEnv.SparseInits
         MutableArrayLets = Set.ofSeq currentEnv.MutableArrayLets
+        // Nothing is synthesized-from-another at lowering time; the
+        // copy-producing passes (shapeMonomorphizeModule) fill this in.
+        DerivedFuncOrigins = Map.empty
     }
     (irModule, moduleExport)
 
@@ -2017,59 +2044,67 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // every function has a fixed param count matching its call sites.
         let irModule = IR.monomorphizeModule irModule env.Builder
         // HM monomorphization: substitute function-boundary type variables
-        // (e.g., `T` in `Array<T like Idx<n>>`, or `T` extracted from
+        // (e.g. `T` in `Array<T like Idx<n>>`, or `T` extracted from
         // `Poly<T^N>`'s base type) with concrete types learned from each
         // call site. Runs after Poly so per-param/per-arg unification is
-        // straightforward — each pack has already been expanded.
+        // straightforward -- each pack has already been expanded.
         let irModule = IR.monomorphizeHMFunctions irModule env.Builder
-        // Rewrite raw array-typed binops into object_for combinators now that
-        // pack-element operand types are concrete (post Poly+HM). `A[i] + A[j]`
-        // on rank>=1 pack elements couldn't be recognized as an array op at
-        // lowering time (its element type was an unresolved var); here it can,
-        // so it gets the same elementwise-loop lowering top-level `x + y` does.
+        currentExports <- Map.add moduleName exports currentExports
+        irModules <- irModules @ [irModule]
+
+    // SHAPE monomorphization: a function over a symbolic extent (`Idx<n>`)
+    // gets a specialized copy per distinct call-site extent signature, with
+    // the cosmetic `IRParam` extent placeholders rewritten to `IRLit`. Must
+    // run AFTER both monomorphizers (each creates call sites this one reads,
+    // and neither carries extents itself) and before the combinator-producing
+    // rewrites below, so the array types those build inherit the literals
+    // rather than needing a second rewrite.
+    //
+    // It is the one pass here that runs over the WHOLE PROGRAM rather than per
+    // module, which is what lets a literal-shaped call in module A specialize
+    // a function defined in module B. That needs every module's arity/HM
+    // monomorphization to have happened first -- hence the split loop -- and
+    // costs nothing else: a module's exports are fixed by `lowerTypedModule`
+    // before any of these passes run, so hoisting them out of the loop cannot
+    // change what a later module sees, and for a single-module program the
+    // builder mints exactly the same ids in exactly the same order as before.
+    let irModules = IR.shapeMonomorphizeModules irModules env.Builder
+
+    let irModules =
+        irModules |> List.map (fun irModule ->
+        // Rewrite raw array-typed binops into object_for combinators now
+        // that pack-element operand types are concrete (post Poly+HM):
+        // `A[i] + A[j]` on rank>=1 pack elements couldn't be recognized as
+        // an array op at lowering time (its element type was an unresolved
+        // var), so it gets the same elementwise-loop lowering top-level
+        // `x + y` does.
         let irModule = IR.lowerArrayBinOpsModule irModule env.Builder
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.
         let irModule = IR.liftInlineFormsModule irModule env.Builder
-        // M1.4: structural rewrite of mask+contains fusion. Recognizes
-        // The mask+contains fusion pass, the IRMaskWithSet/IRSetMember IR
-        // variants, the dead mask-emitter set-hoist, and the ContainsProbe
-        // probe machinery (type, active pattern, the exprAttrs Probes field
-        // and its collection/consumption) are all removed. NOTE: mask+contains
-        // now always runs a linear scan; the semijoin hash-set is a separate,
-        // not-yet-implemented optimization.
-        currentExports <- Map.add moduleName exports currentExports
-        irModules <- irModules @ [irModule]
-    
+        // mask+contains fusion always runs a linear scan; the semijoin
+        // hash-set is a separate, not-yet-implemented optimization.
+        irModule)
+
     { Modules = irModules }
 
-// ============================================================================
 // Typecheck warning surfacing (shared by every CLI lane)
-// ============================================================================
 
 /// Every typecheck warning channel, drained and assembled as coded, spanned
-/// Diagnostics. THREE producers feed it:
-///   - `TypeEnv.WarningLog`: the checker's own `emitWarning`s
-///     (BL4001/BL4003/BL4004/BL4010/BL9001), which now survive the checker's
-///     ERROR path — before this they rode `typeCheck`'s Ok-only string list and
-///     vanished the moment a file also had a hard error;
-///   - `ML.Equiv.CertSuggestions`: stage-6a certificate suggestions (BL4011),
-///     which never went through `emitWarning` at all — the ML elaborator fills
-///     them several phases earlier and `typeCheck` only appended their string
-///     twins to the same Ok payload;
-///   - `ML.Galilean.GalCertSuggestions`: the galilean twin of the same pass
-///     (BL4014), filled at the galilean seam of the same elaborator. Drained
-///     AFTER the equiv channel so a file earning both reads equiv-then-galilean,
-///     each channel in its own insertion order — the same ordering discipline
-///     `TypeCheck.typeCheck`'s string twins use, so the CLI's rendered warnings
-///     and the Ok payload's strings never disagree about sequence.
+/// Diagnostics. Three producers feed it: `TypeEnv.WarningLog` (the checker's
+/// own `emitWarning`s: BL4001/BL4003/BL4004/BL4010/BL9001, which survive the
+/// checker's ERROR path); `ML.Equiv.CertSuggestions` (stage-6a certificate
+/// suggestions, BL4011, filled by the ML elaborator); and
+/// `ML.Galilean.GalCertSuggestions`, the galilean twin (BL4014), drained
+/// AFTER the equiv channel so a file earning both reads equiv-then-galilean,
+/// each channel in its own insertion order.
 ///
-/// `skipPins` drops BL4010 for `--strict-pins`, which has already re-reported
-/// exactly those as errors. BL4011 and BL4014 are deliberately NOT dropped:
-/// strict-pins owns the STORAGE decision, and a certificate owns no storage
-/// decision at all — neither code grows a strict-pins arm, so neither has a
-/// promoted-to-error twin that a filter here would be de-duplicating.
+/// `skipPins` drops BL4010 for `--strict-pins`, which has already
+/// re-reported exactly those as errors. BL4011 and BL4014 are deliberately
+/// NOT dropped: strict-pins owns the STORAGE decision, and a certificate
+/// owns no storage decision at all, so neither has a promoted-to-error twin
+/// a filter here would be de-duplicating.
 let typeCheckWarningDiagnostics (skipPins: bool) : Blade.Diagnostics.Diagnostic list =
     let own =
         Blade.TypeEnv.WarningLog.get ()
@@ -2084,21 +2119,17 @@ let typeCheckWarningDiagnostics (skipPins: bool) : Blade.Diagnostics.Diagnostic 
             Blade.Diagnostics.mkWarning "BL4014" Blade.Diagnostics.PhConstraints span msg)
     (own @ certs @ galCerts) |> List.distinct
 
-/// THE surfacing helper: one format, one stream for every CLI lane. Warnings
-/// render exactly like errors (`warning[BL4010]: ...` + snippet) instead of the
-/// old bare `[TypeCheck Warning] <text>` prefix, and they go to STDERR
-/// everywhere. `check` printed its two to stdout before — a deliberate behavior
-/// change: warnings are diagnostics, and diagnostics belong on stderr so
-/// `blade check` / `blade emit` stdout stays pipeable.
+/// The surfacing helper: one format, one stream for every CLI lane. Warnings
+/// render exactly like errors (`warning[BL4010]: ...` + snippet) and go to
+/// STDERR everywhere: warnings are diagnostics, and diagnostics belong on
+/// stderr so `blade check` / `blade emit` stdout stays pipeable.
 let printTypeCheckWarnings (useColor: bool) (sm: Blade.Diagnostics.SourceMap option)
                            (skipPins: bool) : unit =
     match typeCheckWarningDiagnostics skipPins with
     | [] -> ()
     | ds -> eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor sm ds)
 
-// ============================================================================
 // Convenience functions for testing
-// ============================================================================
 
 /// Main pipeline: Parse -> TypeCheck -> Lower
 let lower (source: string) : Result<IRProgram, string> =
@@ -2107,8 +2138,8 @@ let lower (source: string) : Result<IRProgram, string> =
         match Blade.TypeCheck.typeCheck program with
         | Ok (typedProgram, builder, _) ->
             // Warnings go to stderr so the pipeline output (the IR program)
-            // stays clean. No SourceMap and no TTY at this entry point, so the
-            // render degrades to headers + `--> file:line:col` locations.
+            // stays clean; no SourceMap/TTY here, so rendering degrades to
+            // headers + `--> file:line:col` locations.
             printTypeCheckWarnings false None false
             // Lowering can THROW on a failed compile-time provider load; keep
             // this convenience entry point from surfacing an unhandled exception.
@@ -2144,6 +2175,109 @@ let lowerDiag (fileName: string option) (source: string)
                     Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
     result, sm
 
+/// Multi-FILE twin of `lowerDiag`. `sources` is (path, source) in dependency
+/// order with the ENTRY LAST -- what `ModuleResolve.resolveEntry` returns --
+/// and every span keeps its own file, so the SourceMap (keyed on the same
+/// paths) renders snippets for members as readily as for the entry.
+///
+/// Parsing goes through `ModuleResolve.parseResolved` rather than
+/// `Parser.parseMultiSource` because the latter renames a header-less module
+/// after its FILE NAME, which is right for the corpus harness and wrong for an
+/// absolute path; see the note there.
+let lowerDiagMulti (sources: (string * string) list)
+    : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    let sm = Blade.Diagnostics.SourceMap.ofSources sources
+    let result =
+        match Blade.ModuleResolve.parseResolved sources with
+        | Error d -> Error [ d ]
+        | Ok program ->
+            match Blade.TypeCheck.typeCheck program with
+            | Error errors ->
+                Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
+            | Ok (typedProgram, builder, warnings) ->
+                try Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+                with ex ->
+                    Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+    result, sm
+
+/// The CLI's front door: resolve `filePath`'s imports to files, then lower the
+/// whole set.
+///
+/// A file whose imports all resolve to builtin pseudo-modules (or that has no
+/// imports at all) takes `lowerDiag` UNCHANGED -- same call, same SourceMap
+/// key, same everything -- so the overwhelmingly common single-file case
+/// cannot have been perturbed by the module layer existing.
+let lowerFileDiag (filePath: string) (source: string)
+    : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    let r = Blade.ModuleResolve.resolveEntry filePath source
+    match r.Errors, r.Files with
+    | [], [ _single ] -> lowerDiag (Some filePath) source
+    | [], files -> lowerDiagMulti (Blade.ModuleResolve.sourcesOf files)
+    | ds, _ -> Error ds, Blade.ModuleResolve.sourceMapOf r
+
+/// Harness twin of `lower`: the same parse -> typecheck -> lower pipeline and
+/// the same `Result`, but the typecheck warnings come back as coded
+/// `Diagnostic`s instead of being rendered to stderr.
+///
+/// It exists because `lower`'s unconditional `printTypeCheckWarnings` is a
+/// LEAK when the caller is the test suite: ~4k corpus files per run sprayed
+/// their warnings into the console with no SourceMap and no file name (so each
+/// one rendered as a bare `--> line:col`), interleaved with the parallel
+/// progress lines of whichever tests happened to be running. Handing the
+/// warnings back lets the runner hold each test's warnings against that test's
+/// own `// WARN:` pins.
+///
+/// Two deliberate differences from `lower`:
+///
+///   * The drain happens on the typecheck-ERROR arm too, where `lower` prints
+///     nothing. The warning channels survive the checker's error path — that
+///     is exactly what `Cli.compileFile` relies on at its `Error ds` arm — so a
+///     program that earned warnings before being refused really did earn them,
+///     and the pin discipline can hold a reject-probe to them like any other
+///     test.
+///   * Nothing is printed, ever. Whether a warning is expected is a question
+///     only the caller can answer.
+///
+/// On the Ok arm the drain happens BEFORE `lowerTypedProgram`, exactly where
+/// `lower` prints, so the captured set is the set `lower` would have printed.
+/// On a PARSE error nothing is drained: the checker never ran, so it never
+/// reset the (AsyncLocal, reset-per-`typeCheck`) channels, and draining them
+/// would hand this file the PREVIOUS file's warnings.
+let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnostics.Diagnostic list =
+    // Resolve FILE-BACKED imports (stdlib `units.SI`, `plot`, ...) exactly
+    // like the path-bearing entry points do, so the corpus lane exercises the
+    // same program the run/serve lanes compile. The synthetic entry path
+    // anchors the stdlib probe at the working directory (the corpus runs from
+    // the repo root, where <cwd>/stdlib exists); pseudo-modules (ml, display,
+    // ...) are exempt inside the resolver, and a source with no file imports
+    // resolves to just itself -- the historical single-source pipeline.
+    // Before this, `import units.SI` in a corpus test was a silent no-op and
+    // every unit name it was supposed to bring in degraded to a bare float.
+    let entryPath =
+        System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "__corpus_entry__.blade")
+    let r = Blade.ModuleResolve.resolveEntry entryPath source
+    match r.Errors with
+    | (d: Blade.Diagnostics.Diagnostic) :: _ ->
+        Error (sprintf "%s: %s" d.Code d.Message), []
+    | [] ->
+    match Blade.ModuleResolve.parseResolved (Blade.ModuleResolve.sourcesOf r.Files) with
+    | Ok program ->
+        match Blade.TypeCheck.typeCheck program with
+        | Ok (typedProgram, builder, _) ->
+            let warnings = typeCheckWarningDiagnostics false
+            let result =
+                // Lowering can THROW on a failed compile-time provider load; keep
+                // this convenience entry point from surfacing an unhandled exception.
+                try Ok (lowerTypedProgram typedProgram (Some program) builder)
+                with ex -> Error ex.Message
+            result, warnings
+        | Error errors ->
+            let warnings = typeCheckWarningDiagnostics false
+            let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
+            Error (String.concat "\n" msgs), warnings
+    | Error d ->
+        Error (sprintf "Parse error: %s" d.Message), []
+
 /// Lower multiple source files into a single IR program with cross-module imports
 let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, string> =
     match Blade.Parser.parseMultiSource sources with
@@ -2158,3 +2292,25 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
+
+/// The multi-source twin of `lowerCaptured`, on exactly the same terms: same
+/// pipeline as `lowerMultiSource`, warnings returned rather than printed,
+/// drained on the typecheck-error arm as well as the Ok arm, and NOT drained
+/// after a parse error (where the checker never ran to reset the channels).
+let lowerMultiSourceCaptured (sources: (string * string) list)
+    : Result<IRProgram, string> * Blade.Diagnostics.Diagnostic list =
+    match Blade.Parser.parseMultiSource sources with
+    | Ok program ->
+        match Blade.TypeCheck.typeCheck program with
+        | Ok (typedProgram, builder, _) ->
+            let warnings = typeCheckWarningDiagnostics false
+            let result =
+                try Ok (lowerTypedProgram typedProgram (Some program) builder)
+                with ex -> Error ex.Message
+            result, warnings
+        | Error errors ->
+            let warnings = typeCheckWarningDiagnostics false
+            let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
+            Error (String.concat "\n" msgs), warnings
+    | Error e ->
+        Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message), []

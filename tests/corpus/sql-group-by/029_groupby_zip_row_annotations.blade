@@ -1,0 +1,50 @@
+// TEST: GroupBy Zip Row Annotations
+// ROW-vs-ELEMENT dispatch over a grouped zip is decided by the parameter's
+// WRITTEN annotation, not by how the body happens to use it.
+//
+// The `Array<T like RaggedIdx<_>>` spelling (025) is one way to write rank 1.
+// The abstract spellings -- `T^1`, `T<unit>^1`, a concrete rank-1 array type --
+// are equally a declaration of the row, but they leave the parameter an
+// ARITY-CONSTRAINED inference variable rather than a concrete `Array<..>`. The
+// dispatch used to fall back to a structural scan of the body for array-shaped
+// uses (index / apply / reduce / prodsum / extents / rank), so a body that only
+// FORWARDS the row -- into a tuple, or as one argument of a call -- read as
+// elementwise and the parameter silently bound a single element.
+//
+// Rank-0 and unannotated parameters still bind the element, which is what keeps
+// the elementwise-map form working.
+let region = [0, 1, 0, 1]
+let a = [1.0, 2.0, 3.0, 4.0]
+let b = [10.0, 20.0, 30.0, 40.0]
+let gk = group_keys(region)
+let ga = group_by(a, gk)
+let gb = group_by(b, gk)
+
+// Identical values to 025's RaggedIdx<_> spelling: group 0 = 1*10 + 3*30,
+// group 1 = 2*20 + 4*40.
+let dots = method_for(zip(ga, gb)) <@> lambda(ra: T^1, rb: U^1) -> prodsum(ra, rb) |> compute
+// EXPECT: dots = [100, 200]
+
+// The body FORWARDS both rows into a call rather than consuming them here, so
+// no structural array use is visible in the kernel at all -- the annotation is
+// the only signal, and it has to be enough.
+function rowdot(t: T^1, s: U^1) = prodsum(t, s)
+let viaCall = method_for(zip(ga, gb)) <@> lambda(ra: T^1, rb: U^1) -> rowdot(ra, rb) |> compute
+// EXPECT: viaCall = [100, 200]
+
+// Forwarded as a TYPED TUPLE component -- the shape a Welch taper call takes.
+function rowdotT(ts: Tuple<T^1, U^1>) = {
+    let t, s = ts
+    prodsum(t, s)
+}
+let viaTuple = method_for(zip(ga, gb)) <@> lambda(ra: T^1, rb: U^1) -> rowdotT((ra, rb)) |> compute
+// EXPECT: viaTuple = [100, 200]
+
+// A concrete rank-1 array annotation is a rank-1 annotation too.
+let viaConcrete = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
+// EXPECT: viaConcrete = [100, 200]
+
+// UNANNOTATED parameters still bind ELEMENTS, so a single grouped operand keeps
+// its elementwise reading -- the row rule must not swallow that form.
+let sums = method_for(ga) <@> lambda(r: T^1) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [4, 6]

@@ -1,0 +1,16 @@
+// TEST: Default Referencing Required Param
+// The auto_levels(z) pattern: a default may reference the REQUIRED params,
+// and sees the CALLER's evaluated argument value. The desugar binds each
+// referenced supplied argument exactly once (temp then param-named alias in
+// a block), so `view(z + 1.0)` evaluates the argument in caller scope even
+// though the caller's own `z` collides with the parameter name. Repeated
+// and nested calls exercise per-call-site uniqueness of the desugar block.
+function auto(z: Float) -> Float = z * 10.0
+function view(z: Float, lo: Float = auto(z), hi: Float = z + 1.0) -> Float = z + lo + hi
+let z = 7.0
+let d1 = view(z + 1.0)
+let d2 = view(z)
+let d3 = view(view(2.0))
+// EXPECT: d1 = 97
+// EXPECT: d2 = 85
+// EXPECT: d3 = 301

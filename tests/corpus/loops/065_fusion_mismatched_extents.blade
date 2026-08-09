@@ -1,4 +1,6 @@
 // TEST: Fusion Mismatched Extents (rejects)
+// Substring pin only: the full message names line-numbered `__tup_N_K` temps.
+// WARN-CODEGEN: cannot fuse these computations
 // <&!> is MANDATORY fusion: leaves whose loop extents differ (3 vs 2)
 // cannot share a nest, and the compiler must say so loudly (#error with a
 // steering diagnostic pointing at <&>) rather than emit a nest that reads

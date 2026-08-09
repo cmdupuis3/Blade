@@ -1,0 +1,20 @@
+// TEST: OrbIdx Wreath Function Return (rejects)
+// ERROR: BL4003
+// A wreath pool is a flat `T*` sized by orb_cell_count -- not an Array<T,N>,
+// because allocate<>'s recurrence builds ONE shrinking simplex and a wreath's
+// rows shrink per level. The C++ ABI hands arrays back as the Array<T,N>
+// wrapper, so returning one would hand the caller a wrapper describing a
+// skeleton that does not exist (and `.extents` reads that have no storage).
+// Produce the class at the use site instead.
+//
+// The gate here is on the RESOLVED return type, not the annotation: the
+// signature gate sees only DECLARED types, and this function declares none --
+// its return type is whatever the body's deduction produces. An
+// annotation-only check would have let exactly this case through.
+let h = lambda(p, q) where comm(p, q) -> p + q
+function tie(X: Array<Float64 like SymIdx<2, 3>>) = method_for(X, X) <@> h |> compute
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let W = tie(S)
+// EXPECT: typecheck failure — a wreath pool cannot cross a function return.

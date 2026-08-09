@@ -36,7 +36,7 @@ module Tests_SphericalHarmonics =
 
         section "spherical harmonics: closed-form identities"
 
-        // Homogeneity: Y_l(s v) = s^l Y_l(v) — these are solid harmonics.
+        // Homogeneity: Y_l(s v) = s^l Y_l(v) -- these are solid harmonics.
         let v0 = Rotations.randomUnitVector rng
         let s = 1.7
         for l in 0 .. 4 do

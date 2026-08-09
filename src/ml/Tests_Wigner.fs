@@ -79,7 +79,7 @@ module Tests_Wigner =
             check (sprintf "real CG orthogonality (%d x %d), worst dev %.2g" l1 l2 worst) (worst < 1e-10)
 
         // Exchange symmetry (ml-spec 14.2): for l1 = l2,
-        // C[m1,m2,m3] = (-1)^(l1+l2-l3) C[m2,m1,m3] — survives the real basis.
+        // C[m1,m2,m3] = (-1)^(l1+l2-l3) C[m2,m1,m3] -- survives the real basis.
         for l in [ 1; 2 ] do
             for l3 in 0 .. 2 * l do
                 let c = Wigner.realCGDense l l l3
@@ -93,8 +93,7 @@ module Tests_Wigner =
                     (worst < 1e-10)
 
         // Cross-block exchange symmetry (the l1 <> l2 case of the same
-        // identity, relied on by the compacted weight space of
-        // docs/plan-transforms-as-types.md 3.2 / 6.2(ii)): the coupling tensor
+        // identity, relied on by the compacted weight space): the coupling tensor
         // of the swapped-degree pair is the transpose of the original times
         // the exchange sign,
         //   realCG(l2,l1,l3)[m2,m1,m3] = (-1)^(l1+l2-l3) realCG(l1,l2,l3)[m1,m2,m3].
@@ -136,8 +135,8 @@ module Tests_Wigner =
 
         // THE SPEC DISCREPANCY, demonstrated: in the real basis the complex
         // rule m1 + m2 = m3 does NOT characterize the support. For
-        // (1,1,2), the entry (m1,m2,m3) = (-1,+1,-2) — the coupling of y and
-        // x into the xy harmonic — is nonzero although m1 + m2 = 0 <> -2.
+        // (1,1,2), the entry (m1,m2,m3) = (-1,+1,-2) -- the coupling of y and
+        // x into the xy harmonic -- is nonzero although m1 + m2 = 0 <> -2.
         let c112 = Wigner.realCGDense 1 1 2
         check "real (1,1,2): C[m=-1, m=+1 -> m=-2] nonzero (violates m1+m2=m3)"
             (abs c112.[0].[2].[0] > 1e-3)

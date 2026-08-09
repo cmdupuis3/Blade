@@ -9,8 +9,8 @@ let (G, U0, U1, U2, U3) = m.hosvd(X)
 let normdev = {
     // Frobenius-norm invariance: ‖G‖² = ‖X‖². Both are total energies, so a
     // single all-element reduce with a square-accumulating kernel gives each.
-    let sg = reduce(G, lambda(acc, x) -> acc + x * x, 0.0)
-    let sx = reduce(X, lambda(acc, x) -> acc + x * x, 0.0)
+    let sg = reduce(G, lambda(acc, x) -> acc + x * x, 0.0, axes = 4)
+    let sx = reduce(X, lambda(acc, x) -> acc + x * x, 0.0, axes = 4)
     let dd = sg - sx
     dd * dd
 }
@@ -29,16 +29,16 @@ let odev = {
     let S = g0 + g1 + g2 + g3
     let FourI: Array<Float64 like Idx<2>, Idx<2>> = [[4.0, 0.0], [0.0, 4.0]]
     let E = S - FourI
-    reduce(E, lambda(acc, x) -> acc + x * x, 0.0)
+    reduce(E, lambda(acc, x) -> acc + x * x, 0.0, axes = 2)
 }
 let resid = {
     // Full rank-4 reconstruction X̂ = G ×₀ U0 ×₁ U1 ×₂ U2 ×₃ U3 : the rank-8
     // term tensor with output modes (i,j,k,l) leading and core modes (a,b,c,d)
     // trailing, each core fibre collapsed by a reduce to recover X̂.
     let T = method_for(range<Idx<2>, Idx<2>, Idx<2>, Idx<2>, Idx<2>, Idx<2>, Idx<2>, Idx<2>>) <@> lambda(i, j, k, l, a, b, c, d) -> G(a, b, c, d) * U0(i, a) * U1(j, b) * U2(k, c) * U3(l, d) |> compute
-    let Xhat = method_for(T) <@> lambda(sub: Array<Float64 like Idx<2>, Idx<2>, Idx<2>, Idx<2>>) -> reduce(sub, (+)) |> compute
+    let Xhat = method_for(T) <@> lambda(sub: Array<Float64 like Idx<2>, Idx<2>, Idx<2>, Idx<2>>) -> reduce(sub, (+), axes = 4) |> compute
     let E = Xhat - X
-    reduce(E, lambda(acc, x) -> acc + x * x, 0.0)
+    reduce(E, lambda(acc, x) -> acc + x * x, 0.0, axes = 4)
 }
 // EXPECT: normdev = 0.0
 // EXPECT: odev = 0.0

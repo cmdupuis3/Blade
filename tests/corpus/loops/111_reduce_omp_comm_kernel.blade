@@ -1,0 +1,26 @@
+// TEST: Reduce Omp Comm Kernel
+// Phase 2 of docs/plan-cpp-perf-exploitation.md, Path B: a fold kernel that is
+// NOT a bare builtin op earns the parallel fold from a declared `comm(a, b)`
+// (already cross-checked against body parity — a provably antisymmetric body is
+// BL4013). Emission is manual contiguous chunks with a per-thread partial and a
+// fixed-order combine, so no identity element is needed and any licensed kernel
+// works. Both spellings of the clause are covered: a named function (the
+// eta-expansion-prone one) and an inline lambda.
+//
+// The last binding is the reduce-over-DEFERRED-COMPUTATION form: no
+// intermediate array is materialized at all, and the OUTERMOST loop level is
+// what gets chunked (each thread runs the whole inner nest serially).
+//
+// INTEGER-VALUED data on purpose — see 110 for why the interpreter differential
+// requires it.
+function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+let named = reduce(A, myAdd)
+let seeded = reduce(A, myAdd, 45.0)
+let inline_lam = reduce(A, lambda(a, b) where comm(a, b), omp -> (a + b) * 1.0)
+let B = [2.0, 3.0, 4.0, 5.0]
+let fused = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)
+// EXPECT: named = 55
+// EXPECT: seeded = 100
+// EXPECT: inline_lam = 55
+// EXPECT: fused = 770

@@ -1,0 +1,45 @@
+// TEST: OrbIdx Wreath Decompact Full
+// FULL decompaction of a wreath class -- the endpoint of
+// docs/plan-orbidx-decompaction.md §3's lattice, and the only point on it v1
+// builds. `decompact(W, 0)`: for a wreath the second argument is the number of
+// LEVELS TO KEEP (§4.3), not a dimension to free, so 0 means "keep none" =
+// fully dense. The result is the rank-prod(ri) tensor, one plain Idx<n> axis
+// per raw axis, and EVERY cell is the class's own §2 read. 218 pins that any
+// other `d` (the §3 peel) is refused by name.
+//
+// DENSE-SEQUENTIAL, in both backends: one `orb_read` per dense cell rather than
+// §4.2's pool-sequential scatter. The scatter would have to enumerate each pool
+// cell's ORBIT with its character, and no verified emitter for that exists --
+// `orb_visit` hands out canonical tuples only -- whereas `orb_read` IS the
+// verified §2 read. Correctness is the bar here; the performance claim in §4.2
+// is unmeasured either way.
+//
+// THE ORACLE IS INDEPENDENT OF THE PACK, per §6: the pinned dense values below
+// are the LOGICAL definition W(i,j,k,l) = S(i,j) + S(k,l) with S(i,j) =
+// A[i]*A[j], evaluated at every raw tuple. Nothing in the pins is read back out
+// of the pool or its order, so a rank/visit-order mismatch cannot cancel
+// between the two sides the way a read->write roundtrip lets it (the antisym
+// storage post-mortem).
+//
+// n = 3, so the 21-cell pool decompacts to 3^4 = 81 dense cells -- a 3.9x
+// expansion, which is the cost §1 calls the escape hatch and §5 says always
+// allocates (pack and dense share no layout, so there is no in-place form).
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+let D = decompact(W, 0)
+// S(i,j) = A[i]*A[j] as a full 3x3 = [[1,2,3],[2,4,6],[3,6,9]], so
+// D[i][j] is the flattened (k,l) plane S(i,j) + [1,2,3,2,4,6,3,6,9].
+// EXPECT: S = [1, 2, 3, 4, 6, 9]
+// EXPECT: W = [2, 3, 4, 5, 7, 10, 4, 5, 6, 8, 11, 6, 7, 9, 12, 8, 10, 13, 12, 15, 18]
+// EXPECT: D[0][0] = [2, 3, 4, 3, 5, 7, 4, 7, 10]
+// EXPECT: D[0][1] = [3, 4, 5, 4, 6, 8, 5, 8, 11]
+// EXPECT: D[0][2] = [4, 5, 6, 5, 7, 9, 6, 9, 12]
+// EXPECT: D[1][0] = [3, 4, 5, 4, 6, 8, 5, 8, 11]
+// EXPECT: D[1][1] = [5, 6, 7, 6, 8, 10, 7, 10, 13]
+// EXPECT: D[1][2] = [7, 8, 9, 8, 10, 12, 9, 12, 15]
+// EXPECT: D[2][0] = [4, 5, 6, 5, 7, 9, 6, 9, 12]
+// EXPECT: D[2][1] = [7, 8, 9, 8, 10, 12, 9, 12, 15]
+// EXPECT: D[2][2] = [10, 11, 12, 11, 13, 15, 12, 15, 18]

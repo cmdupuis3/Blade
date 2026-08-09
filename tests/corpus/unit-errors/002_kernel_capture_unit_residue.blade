@@ -1,0 +1,11 @@
+// TEST: Kernel Capture Unit Residue Rejects
+// ERROR: BL3006
+// Second-pass twin of units/052_capture_unit_cancellation: deferring the
+// first-pass transcendental check is NOT acceptance. When the param's unit
+// does not cancel the capture's (1/day * day * day = day), the apply-site
+// kernelBodyUnits pass still rejects the dimensioned argument.
+Unit second
+Unit day = 86400 * second
+let ws: Array<Float<1/day> like Idx<3>> = [1.0, 2.0, 3.0]
+let tz: Float<day> = 2.0
+let out = (ws <@> lambda(w) -> cos(w * tz * tz)) |> compute

@@ -13,11 +13,17 @@
 // DERIVATION of the pin: `rank` counts IndexTypes RECORDS, and one DepIdx
 // expands to exactly two (outer + inner), each of arity 1. Nothing else is in
 // the parameter's index list, so rank(A) = 1 + 1 = 2 for ANY argument -- which
-// is why a ragged [3, 2, 1] actual is a legitimate witness here even though
+// is why a ragged [3, 1, 2] actual is a legitimate witness here even though
 // the lambda spells a uniform inner Idx<3>: the value is type-level only.
+//
+// The row profile is 3, 1, 2 rather than the 3, 2, 1 it used to be for one
+// reason: a TRIANGULAR nest (n, n-1, ..., 1) now infers SymIdx<2, n>
+// (formalism §3.9), which is ONE compact record of arity 2 where a DepIdx is
+// two records of arity 1 — a component-rank mismatch (BL4004), not the ragged
+// witness this file wants. Any non-triangular profile is still inline-ragged.
 function f(A: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3>>>) -> Int64 = {
     rank(A)
 }
-let data = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let data = [[1.0, 2.0, 3.0], [4.0], [5.0, 6.0]]
 let x = f(data)
 // EXPECT: x = 2

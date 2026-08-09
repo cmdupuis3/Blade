@@ -23,7 +23,7 @@ let rec acc: Array<Float like Steps> =
     | zero -> zero
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: prefix(n - 1) + rstep(RS, n)
-let sfinal = acc(4)
+let sfinal = acc((4 : Steps))
 // EXPECT: RS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 // EXPECT: acc = [0, 1.1229, 2.3565, 3.7026, 5.163]
 // EXPECT: sfinal = 5.163

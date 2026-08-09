@@ -1,0 +1,69 @@
+// TEST: Tuple Param Parallel Licence
+// ============================================================================
+// A parallel `where` conjunct IS allowed on a kernel that declares a `Tuple<N>`
+// parameter. The accept half of diagnostics/060, which keeps refusing the
+// POSITIONAL conjuncts (`comm`/`anticomm`) for the same reason it always did.
+//
+// Why the split is sound. The tuple parameter is realized at the apply seam by
+// replacing it with its k row parameters plus a body-entry `let p = (..)`, and
+// that renumbers positions and deletes the tuple parameter's NAME. `comm` is an
+// index list, so it lands on the wrong slot. The parallel strategies resolve BY
+// NAME to the operand a parameter contributes, and under one-level structural
+// matching (docs/plan-tuples-vs-arg-packs.md 6c) a `Tuple<k>` parameter is ONE
+// schema node -- so the licence has a well-defined home after the expansion,
+// and is rewritten onto the synthesized row params rather than dropped.
+//
+// The DEPTH counts levels of that node, outermost first, exactly as it counts
+// rank components of a `T^k` array parameter: `omp(p: 1)` on a `Tuple<2>`
+// licenses ONE level (p's first row), `omp(p: 2)` licenses both. The pragma
+// shapes are pinned in tests/OmpTests.fs (`blade test omp-pragma`); what this
+// file pins is that the programs COMPILE and that the licence is observationally
+// inert -- parallelism never changes values, and a race here would corrupt them.
+//
+// The strategies with no variable payload (`cuda`, `mpi`) are unaffected by the
+// renaming and pass through; they are inert pre-flip, so their values match the
+// unclaused twin cell for cell.
+// ============================================================================
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let B: Array<Float64 like Idx<2>> = [10.0, 20.0]
+let C: Array<Float64 like Idx<2>> = [100.0, 200.0]
+
+// Baseline: the same kernel with no clause at all (tuples/010's `s7`/`s8`).
+let K0 = object_for(lambda(p: Tuple<2>, z) -> p[0] + p[1] + z)
+let s0 = K0 <@> (A, B, C) |> compute
+// EXPECT: s0 = [111, 211, 121, 221, 112, 212, 122, 222]
+
+// One level of the tuple node licensed.
+let K1 = object_for(lambda(p: Tuple<2>, z) where omp(p: 1) -> p[0] + p[1] + z)
+let s1 = K1 <@> (A, B, C) |> compute
+// EXPECT: s1 = [111, 211, 121, 221, 112, 212, 122, 222]
+
+// Both levels of the tuple node licensed.
+let K2 = object_for(lambda(p: Tuple<2>, z) where omp(p: 2) -> p[0] + p[1] + z)
+let s2 = K2 <@> (A, B, C) |> compute
+// EXPECT: s2 = [111, 211, 121, 221, 112, 212, 122, 222]
+
+// The licence on the PLAIN parameter beside a tuple one: the tuple expansion
+// must not disturb a var that already names a row param.
+let K3 = object_for(lambda(p: Tuple<2>, z) where omp(z: 1) -> p[0] + p[1] + z)
+let s3 = K3 <@> (A, B, C) |> compute
+// EXPECT: s3 = [111, 211, 121, 221, 112, 212, 122, 222]
+
+// A NAMED function carrying the clause, used in kernel position: the eta
+// wrapper re-spells the `Tuple<2>` annotation and remaps the omp var onto its
+// own params, and only then does the tuple expansion run. Both renamings have
+// to compose or the licence is lost.
+function addTriple(p: Tuple<2>, z: Float64) where omp(p: 1) = p[0] + p[1] + z
+let s4 = object_for(addTriple) <@> (A, B, C) |> compute
+// EXPECT: s4 = [111, 211, 121, 221, 112, 212, 122, 222]
+
+// `cuda` carries no variable names -- nothing to remap, and inert pre-flip
+// (symmetry/011).
+let K5 = object_for(lambda(p: Tuple<2>, z) where cuda(block: 64) -> p[0] + p[1] + z)
+let s5 = K5 <@> (A, B, C) |> compute
+// EXPECT: s5 = [111, 211, 121, 221, 112, 212, 122, 222]
+
+// `mpi` likewise: inert unless the MPI emit gate is on.
+let K6 = object_for(lambda(p: Tuple<2>, z) where mpi -> p[0] + p[1] + z)
+let s6 = K6 <@> (A, B, C) |> compute
+// EXPECT: s6 = [111, 211, 121, 221, 112, 212, 122, 222]

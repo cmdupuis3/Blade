@@ -1,0 +1,10 @@
+// TEST: Bool Quantity Roundtrip
+// Bool<flag> carries a dimensionless quantity through a declaration, a
+// strict parameter slot, and back out; the value erases to a plain bool at
+// codegen (nothing about the runtime representation changes).
+Unit flag: 1
+let f: Bool<flag> = true
+function keep(b: Bool<flag>) -> Bool<flag> = b
+let g = keep(f)
+// EXPECT: f = true
+// EXPECT: g = true

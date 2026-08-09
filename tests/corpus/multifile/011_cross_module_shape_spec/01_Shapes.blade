@@ -1,0 +1,19 @@
+// TEST: Cross-module shape specialization
+// MODULE: Shapes
+// The symbolic-extent functions live HERE; every literal-shaped call site
+// lives in Main. Shape monomorphization runs over the whole program (not once
+// per module), so these earn their specialized copies from a call site they
+// cannot see — and the copies are placed in THIS module, next to their
+// origins, which is what keeps the emission-order rule intact across the
+// module merge.
+module Shapes
+
+function vsum(v: Array<Float64 like Idx<n>>) -> Float64 = reduce(v, (+))
+
+function vscale(v: Array<Float64 like Idx<n>>) -> Array<Float64 like Idx<n>> = v * 2.0
+
+// Two occurrences of the SAME name: a call pinning them to different literals
+// must decline rather than pick one (unify never compares extents, so such a
+// call typechecks).
+function vsum2(u: Array<Float64 like Idx<n>>, v: Array<Float64 like Idx<n>>) -> Float64 =
+    reduce(u, (+)) + reduce(v, (+))

@@ -1,0 +1,7 @@
+// TEST: Default Before Required Param (rejects)
+// ERROR: BL3012
+// Defaults are TRAILING: once a parameter has a default, every later
+// parameter needs one too -- otherwise an omitted-argument call would be
+// ambiguous about which slot the supplied args fill.
+function bad(a: Float = 1.0, b: Float) -> Float = a + b
+let r = bad(2.0)

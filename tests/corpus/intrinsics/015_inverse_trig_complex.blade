@@ -1,0 +1,25 @@
+// TEST: Intrinsics Inverse Trig Complex
+// ============================================================================
+// asin/acos/atan on a COMPLEX operand. <complex> overloads all three, so they
+// sit in Grad.complexMathIntrinsics and preserve the operand's complex type
+// (the emitted call is std::atan(std::complex<double>)) -- unlike floor/ceil
+// and log10, which have no complex overload and refuse (intrinsics/013).
+// atan(0 + i/2) = i*atanh(1/2) = i*ln(3)/2 is the closed form the pin checks.
+//
+// Split out of intrinsics/010 on purpose: the INTERPRETER refuses complex
+// asin/acos/atan with BL8011 ("not yet bit-verified"), which makes any file
+// containing one a skip in the interpreter differential. Keeping the complex
+// half here leaves 010's real-valued pins under that gate.
+// ============================================================================
+let z = complex(0.0, 0.5)
+let za = atan(z)
+
+let w = complex(0.5, 0.0)
+let ws = asin(w)
+let wc = acos(w)
+
+// wc's imaginary part prints as `-0` (std::acos of a real-valued complex
+// lands on negative zero); the pin compares numerically, where -0.0 = 0.0.
+// EXPECT: za = (0, 0.549306144334055)
+// EXPECT: ws = (0.523598775598299, 0)
+// EXPECT: wc = (1.0471975511966, 0)

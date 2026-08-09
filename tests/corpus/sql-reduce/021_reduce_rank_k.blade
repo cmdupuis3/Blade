@@ -6,16 +6,19 @@
 // accumulation loops it replaces (hosvd residuals, binning sums). Seeds:
 // (+) -> 0, (*) -> 1, otherwise the explicit 3-arg init.
 // ============================================================================
+// The desugared fold walks its own `__rksrc` copy of the operand with
+// generated counters, so the untagged-index note (BL4003) does not reach the
+// author: this program has no subscript at all, and no cast could exist.
 type R = Idx<2>
 type C = Idx<3>
 let M: Array<Float like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-let s = reduce(M, (+))
+let s = reduce(M, (+), axes = 2)
 // EXPECT: s = 21.0
-let p = reduce(M, (*))
+let p = reduce(M, (*), axes = 2)
 // EXPECT: p = 720.0
-let m = reduce(M, lambda(a, x) -> if x > a then x else a, 0.0)
+let m = reduce(M, lambda(a, x) -> if x > a then x else a, 0.0, axes = 2)
 // EXPECT: m = 6.0
 type Z = Idx<2>
 let T3: Array<Float like Z, Z, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
-let s3 = reduce(T3, (+))
+let s3 = reduce(T3, (+), axes = 3)
 // EXPECT: s3 = 36.0

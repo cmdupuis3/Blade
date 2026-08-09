@@ -15,6 +15,12 @@ import ad as ad
 // with the loss it just measured. The loss trace is the loss column of the
 // trajectory; the final weights are its last row. The loss fold itself is an
 // additive `reduce` (grad differentiates it exactly).
+//
+// BL4003: the state-vector idiom reads its slots with bare integer literals
+// (`s(0)..s(3)` unpacking the weights, `wtraj(1)..` pulling the rows back out).
+// Each is a real untagged subscript with a real fix -- `(0 : State)` -- but one
+// cast per slot is pure noise at this width, so the note is pinned, not taken.
+// WARN: BL4003
 // ============================================================================
 let static SIN = [(0, 0, 2), (1, 1, 1)]
 let static SOUT = [(0, 0, 1), (1, 1, 2)]

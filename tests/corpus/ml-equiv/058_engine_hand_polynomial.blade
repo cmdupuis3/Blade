@@ -2,7 +2,7 @@
 import ml as ml
 // ============================================================================
 // THE GENERATOR-BASED ENGINE, PART I: A HAND-WRITTEN POLYNOMIAL CERTIFIED
-// (docs/plan-transforms-as-types.md §3.5's uniform rule, §7 stage 6b).
+// (retired transforms-as-types plan §3.5's uniform rule, §7 stage 6b).
 //
 // Everything below is a body the COMPOSITION judgment refuses, and refuses
 // correctly: raw indexing into a non-trivial-label cell reads a
@@ -23,6 +23,8 @@ import ml as ml
 // of the source cannot tell which discharged it. That is deliberate (the
 // BL4010 precedent) — there is no `equiv_gen` variant and there never will be.
 // ============================================================================
+// `rot_loose` below is the uncertified twin, so its suggestion is an assertion.
+// WARN: BL4011
 let static EC = [("E", 1)]
 
 // --- 1. J, WRITTEN OUT BY HAND ---------------------------------------------

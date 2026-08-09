@@ -79,9 +79,22 @@ let private normalize (s: string) : string =
     |> String.concat "\n"
     |> fun t -> t.Trim()
 
+/// Byte-exact comparison needs both sides built with contraction off, even
+/// though the user-facing default is `fast` (Build.fs): the pin covers the
+/// in-process compile directly and reaches the oracle subprocess via env
+/// inheritance (older pinned oracles default to off on their own). Restored
+/// on exit.
+let private pinFpContractOff () =
+    let prior = System.Environment.GetEnvironmentVariable("BLADE_FP_CONTRACT")
+    System.Environment.SetEnvironmentVariable("BLADE_FP_CONTRACT", "off")
+    { new System.IDisposable with
+        member _.Dispose() =
+            System.Environment.SetEnvironmentVariable("BLADE_FP_CONTRACT", prior) }
+
 let runDiffOracleTests (oracleExe: string) (categories: string list) : BlockResult =
     printHeader "Differential vs Pinned Oracle"
     let blockName = "Diff Oracle"
+    use _fpPin = pinFpContractOff ()
     if not (File.Exists oracleExe) then
         printfn "Skipped: no pinned oracle at %s" (Path.GetFullPath oracleExe)
         printfn "         Pin one from a fully-gated build:  Copy-Item bin\\Release\\net7.0 oracle -Recurse"

@@ -1,0 +1,16 @@
+// TEST: Symmetric Literal Through A Nominal Alias
+// The compact-literal shape is keyed off the RESOLVED index record, so it
+// arrives the same way through a `type` alias — the spelling users reach for
+// first, and the one that has to keep working when the alias is what the rest
+// of the program passes around.
+type MySym = SymIdx<2, 3>
+let A: Array<Int32 like MySym> = [
+    [1, 2, 3],
+    [4, 5],
+    [6]
+]
+let a01 = A((0 : MySym), (1 : MySym))
+let a10 = A((1 : MySym), (0 : MySym))
+// EXPECT: A = [[1, 2, 3], [4, 5], [6]]
+// EXPECT: a01 = 2
+// EXPECT: a10 = 2

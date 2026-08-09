@@ -1,90 +1,43 @@
-/// The DISCIPLINE KIT — a LIBRARY for equivariance-family judgments.
+/// The DISCIPLINE KIT -- a LIBRARY, NOT A FRAMEWORK, for equivariance-family
+/// judgments. Blade has THREE equivariance disciplines and THREE claim
+/// vocabularies (`ml.equiv(G)`, `ml.galilean(u, ..)`, `ml.perm_equiv(N)`);
+/// this file does not house them under one abstraction, and nothing here is
+/// mandatory. A discipline MAY call `structuralArm` for the generic walk;
+/// one whose walk genuinely differs in SHAPE, not just verdicts (perm v2's
+/// per-axis status vectors are the live example), should write its own.
 ///
-/// Stage 0 of docs/design-discipline-as-data.md. That document's finding, in
-/// one line: the WALKER abstracts across equiv / galilean / perm and the RULES
-/// do not, because the three actions are different algebraic structures (a
-/// linear rep, an affine shift, a permutation matrix) whose arithmetic rules
-/// have opposite polarity at nearly every arm.
+/// WHAT IS WORTH CALLING is the anti-drift core: the three SEAM walkers
+/// drifted in exactly these places, and every divergence the stage-5c
+/// three-way diff found was a false ACCEPT (see MLPerm.fs's catalog): the
+/// callee guard in `TExprApp` (corpus ml-equiv/049); judging a former's
+/// sources rather than scanning names (045, 046); `ParamMatches` being
+/// distinct from `Join`; `mentionsAnyId` answering TRUE for unenumerated
+/// nodes; the self-reference guard; judging element-write indices in the
+/// block fold (047, 048). Reimplementing one of those reopens a closed bug.
 ///
-/// ----------------------------------------------------------------------------
-/// THIS IS A LIBRARY, NOT A FRAMEWORK
-/// ----------------------------------------------------------------------------
-/// Blade has THREE equivariance disciplines and THREE claim vocabularies
-/// (`ml.equiv(G)`, `ml.galilean(u, ..)`, `ml.perm_equiv(N)`), and by decision
-/// of 2026-07-29 it is not trying to house them under one abstraction. Nothing
-/// here is mandatory. A discipline MAY call `structuralArm` for the generic
-/// walk; a discipline whose walk genuinely differs — perm v2's per-axis status
-/// vectors are the live example, since they change the walk's SHAPE and not
-/// just its verdicts — should write its own and call only the helpers it wants.
-/// Bending this file to accommodate such a discipline would recreate the
-/// framework that decision removed.
+/// THE CRITERION: a rule belongs IFF ITS SOUNDNESS ARGUMENT QUANTIFIES OVER
+/// ANY ACTION -- it never names what the group does to a value, only
+/// whether the value MOVES or is HELD FIXED (e.g. the call rule's all-fixed
+/// fall-through names no representation, boost, or permutation). The
+/// counter-example that must NOT move here: `Cov + Cov`, justified as "the
+/// action is LINEAR, so D(x+y) = Dx + Dy" -- true for equiv and perm, FALSE
+/// for galilean, where adding two boost-variant values doubles the U0
+/// coefficient. A rule whose argument names the action is per-discipline,
+/// and A GUARD IS A RULE.
 ///
-/// WHAT IS ACTUALLY WORTH CALLING is the anti-drift core, because the three
-/// SEAM walkers drifted in exactly these places and every divergence the
-/// stage-5c three-way diff found was a false ACCEPT (see MLPerm.fs's catalog):
-///   * the callee guard in `TExprApp` (an Opaque/Bottom callee declines) —
-///     corpus ml-equiv/049;
-///   * JUDGING a former's sources rather than scanning names — 045, 046;
-///   * `ParamMatches` being distinct from `Join` (see its comment);
-///   * `mentionsAnyId` answering TRUE for unenumerated nodes;
-///   * the self-reference guard;
-///   * judging element-write indices in the block fold — 047, 048.
-/// A discipline that reimplements one of those is re-opening a closed bug.
+/// WHY THE STATUS TYPE IS ABSTRACT rather than this file's own DU:
+/// DeduceRep's `RepStatusT` is a real F# DU, and every match over it (~200
+/// call sites) is checked for EXHAUSTIVENESS by the compiler. Re-expressing
+/// it as an abbreviation of a generic DU would force its constructors into
+/// partial active patterns, silently switching that checking OFF in exactly
+/// the 445-line walker whose whole risk is a dropped arm. Abstracting over
+/// the status instead keeps every discipline's DU intact and exhaustive, at
+/// the cost of one 12-field record -- the trade-off MLCertShell.fs declined
+/// at a 20-line seam, justified here because the shared surface is ~250
+/// lines, including the interprocedural call rule, which has already
+/// drifted between copies once.
 ///
-/// ----------------------------------------------------------------------------
-/// THE CRITERION FOR WHAT MAY LIVE HERE
-/// ----------------------------------------------------------------------------
-/// A rule belongs in this file IF AND ONLY IF ITS SOUNDNESS ARGUMENT QUANTIFIES
-/// OVER ANY ACTION — i.e. the justification never names what the group does to
-/// a value, only whether the value MOVES or is HELD FIXED. Two worked examples,
-/// both of them arms below:
-///
-///   * The call rule's all-fixed fall-through: "when every argument is provably
-///     fixed, nothing flowing in moves, and a deterministic map of fixed inputs
-///     gives the same output in every frame." No step of that mentions a
-///     representation, a boost or a permutation. It is generic.
-///   * The if rule: "if the condition is fixed, the same branch is taken in
-///     every frame, so the result's law is the branches' common law." Likewise.
-///
-/// And the counter-example that must NOT move here, however tempting its shape:
-/// `Cov + Cov`. Its justification is "the action is LINEAR, so D(x+y) = Dx +
-/// Dy" — which names the action, is true for equiv and perm, and is FALSE for
-/// galilean, where adding two boost-variant values doubles the U0 coefficient
-/// and is a reject. A rule whose argument names the action is a per-discipline
-/// rule, and A GUARD IS A RULE.
-///
-/// ----------------------------------------------------------------------------
-/// WHY THE STATUS TYPE IS ABSTRACT RATHER THAN THIS FILE'S OWN DU
-/// ----------------------------------------------------------------------------
-/// DELIBERATE DECISION (C3 stage 0). Do not "simplify" this by making the
-/// generic code operate on `Status<'Cov,'Fix>` directly and having each
-/// discipline abbreviate its own status to it. That was the first design and it
-/// was rejected for a SAFETY reason, not a taste one.
-///
-/// DeduceRep's `RepStatusT` is a real F# discriminated union, and every match
-/// over it in DeduceRep / MLPolyExtractTyped / TypeCheck is checked for
-/// EXHAUSTIVENESS by the compiler. Re-expressing it as an abbreviation of a
-/// generic DU would force its constructors to become partial active patterns at
-/// roughly two hundred call sites, which silently switches that exhaustiveness
-/// checking OFF — in exactly the 445-line walker whose whole risk is an arm
-/// being dropped without either gate noticing. The compiler's incompleteness
-/// warning is the main thing standing between this refactor and a silently lost
-/// rule, and the refactor's entire value proposition is that it provably
-/// changes nothing. Abstracting over the status instead keeps every
-/// discipline's DU intact, keeps its matches exhaustive, and costs one record.
-///
-/// That record is 12 fields. That number is the honest price of this
-/// abstraction, and it is the same objection MLCertShell.fs raised when it
-/// declined to share `judgeStmts` at the elaboration seam ("six moving parts to
-/// share twenty-odd lines, which is a worse trade than the copy"). The
-/// objection was right there and is wrong here only because the quantity
-/// changed: at the seam the shared surface was ~25 lines; here it is ~250,
-/// including the single most soundness-critical arm in the walker (the
-/// interprocedural call rule, which has already drifted between copies once —
-/// see MLPerm.fs's stage-5c drift catalog, where two of four findings were
-/// false ACCEPTS).
-///
-/// Compile order: after TypedAst, before DeduceRep — Ast/Types/IR/TypedAst
+/// Compile order: after TypedAst, before DeduceRep -- Ast/Types/IR/TypedAst
 /// only, nothing upward.
 module Blade.DisciplineKit
 
@@ -93,15 +46,12 @@ open Blade.Types
 open Blade.IR
 open Blade.TypedAst
 
-// ============================================================================
-// 1. GENERIC AST HELPERS
-// ============================================================================
-//
-// These quantify over no action at all — they are facts about the syntax tree.
+// 1. GENERIC AST HELPERS -- these quantify over no action at all, they are
+// facts about the syntax tree.
 
 /// A provably compile-time integer index, or None. `compute` is a scheduling
-/// boundary and is peeled; anything else — a variable, an arithmetic
-/// expression, a folded static this walker cannot see — is NOT a literal, and
+/// boundary and is peeled; anything else (a variable, an arithmetic
+/// expression, a folded static this walker cannot see) is NOT a literal, and
 /// the caller declines.
 let rec staticIntOf (e: TypedExpr) : int option =
     match e.Kind with
@@ -109,10 +59,10 @@ let rec staticIntOf (e: TypedExpr) : int option =
     | TExprCompute inner -> staticIntOf inner
     | _ -> None
 
-/// Does this subtree read any of `ids`? CONSERVATIVE BY DESIGN, in the
-/// `Deduce.usesVar` discipline: a node kind not enumerated here answers TRUE.
-/// The only consumer treats "mentions nothing" as a licence, so guessing FALSE
-/// would be the unsound direction; guessing TRUE merely forfeits recall.
+/// Does this subtree read any of `ids`? CONSERVATIVE BY DESIGN: a node kind
+/// not enumerated here answers TRUE. The only consumer treats "mentions
+/// nothing" as a licence, so guessing FALSE would be unsound; TRUE merely
+/// forfeits recall.
 let rec mentionsAnyId (ids: Set<IRId>) (e: TypedExpr) : bool =
     let any = List.exists (mentionsAnyId ids)
     match e.Kind with
@@ -129,23 +79,20 @@ let rec mentionsAnyId (ids: Set<IRId>) (e: TypedExpr) : bool =
     | TExprArrayLit (es, _) -> any es
     | TExprArrayNegate a | TExprArrayConjugate a -> mentionsAnyId ids a
     | TExprIf (c, t, f) -> any [ c; t; f ]
-    // Everything else — lambdas, formers, reduces, blocks, matches — is
+    // Everything else -- lambdas, formers, reduces, blocks, matches -- is
     // deliberately unenumerated: answering TRUE costs only recall.
     | _ -> true
 
-/// The COMPONENTWISE-UNIFORM LINEAR fragment, relative to a kernel's parameter
-/// ids: literals, variable reads, and arithmetic on them — PLUS any subtree
-/// that mentions no kernel parameter at all.
+/// The COMPONENTWISE-UNIFORM LINEAR fragment, relative to a kernel's
+/// parameter ids: literals, variable reads, and arithmetic on them, plus any
+/// subtree that mentions no kernel parameter (this is what admits a captured
+/// scalar read like `q(0)` beside the element being scaled).
 ///
-/// That second clause is what admits a captured scalar read like `q(0)` beside
-/// the element being scaled. SOUNDNESS: a subtree that reads no kernel
-/// parameter has the same value at every iteration position, so it is a genuine
-/// loop CONSTANT; if its type is scalar it is one number for the whole array,
-/// which is exactly the premise the scaling rule needs. A subtree that DOES
-/// read a kernel parameter — `q(a)` — varies per position, and is admitted only
-/// through the arithmetic cases, which is what stops a position-varying value
-/// from passing itself off as a scalar multiplier (the `x * w` false
-/// certificate, one level deeper).
+/// SOUNDNESS: a subtree reading no kernel parameter has the same value at
+/// every iteration position, a genuine loop CONSTANT. A subtree that DOES
+/// read one (`q(a)`) varies per position, and is admitted only through the
+/// arithmetic cases -- which stops a position-varying value from passing
+/// itself off as a scalar multiplier (the `x * w` false certificate).
 let rec isElementwiseArith (ps: Set<IRId>) (e: TypedExpr) : bool =
     if not (mentionsAnyId ps e) then true
     else
@@ -156,51 +103,43 @@ let rec isElementwiseArith (ps: Set<IRId>) (e: TypedExpr) : bool =
         | TExprCompute i -> isElementwiseArith ps i
         | _ -> false
 
-// ============================================================================
 // 2. THE OFFERED STATUS SHAPE (for future instances; equiv supplies its own)
-// ============================================================================
 //
 // The common shape of MLEquiv's `Rep|Inv|Opaque`, MLGalilean's
-// `BVar|BInv|BOpaque` and MLPerm's `Pow k|PowUnsized|POpaque`, plus the fourth
-// element the seam encodes as `Error`.
+// `BVar|BInv|BOpaque` and MLPerm's `Pow k|PowUnsized|POpaque`, plus the
+// fourth element the seam encodes as `Error`:
+//   SCov p  -- the value MOVES under the action, in the manner recorded by `p`.
+//   SFix r  -- the value is HELD FIXED; `r` refines fixedness where a rule
+//              needs more (equiv: provable 0-dimensionality; perm: provable
+//              extent; galilean: nothing, so unit).
+//   SOpaque -- nothing established; propagates, never manufactures a claim.
+//   SBottom -- the walker DECLINES.
 //
-//   SCov p  — the value MOVES under the action, in the manner recorded by `p`.
-//   SFix r  — the value is HELD FIXED; `r` refines fixedness where a rule needs
-//             more than "fixed" (equiv: provable 0-dimensionality, for the
-//             scaling rule; perm: provable extent; galilean: nothing, so unit).
-//   SOpaque — nothing established; propagates, never manufactures a claim.
-//   SBottom — the walker DECLINES.
-//
-// NOT USED BY THE EQUIV INSTANCE, which keeps its own `RepStatusT` DU for the
-// exhaustiveness reason in the header. This lives here so stages 1/2/5 have a
-// default to reach for, and as a worked demonstration that the shape the design
-// doc describes can satisfy `StatusOps` below.
+// NOT USED BY THE EQUIV INSTANCE, which keeps its own `RepStatusT` DU for
+// the exhaustiveness reason in the header; this is a default for future
+// instances and a worked demonstration that the shape satisfies `StatusOps`.
 type Status<'Cov, 'Fix> =
     | SCov of 'Cov
     | SFix of 'Fix
     | SOpaque
     | SBottom
 
-// ============================================================================
 // 3. THE OPERATIONS THE GENERIC WALKER NEEDS ON A STATUS
-// ============================================================================
 
 /// Everything the structural arms below must be able to do to a status,
-/// without knowing what it is.
-///
-/// `FixOfType` and `ClassifyTy` close over the type resolver (and, for the
-/// latter, the hypothesis), so this record is built ONCE per walk rather than
-/// once per node.
+/// without knowing what it is. `FixOfType` and `ClassifyTy` close over the
+/// type resolver (and, for the latter, the hypothesis), so this record is
+/// built ONCE per walk rather than once per node.
 type StatusOps<'St> = {
     /// The walker DECLINES. Deduction reads it as silence, checking as abstain.
     Bottom: 'St
     /// Nothing established.
     Opaque: 'St
-    /// Fixed, refinement unestablished — what every discipline binds pattern
-    /// variables at (MLCertShell.bindPatternVars takes exactly this, one
-    /// abstraction level down: `Inv` / `BInv` / `Pow 0`).
+    /// Fixed, refinement unestablished -- what every discipline binds
+    /// pattern variables at (MLCertShell.bindPatternVars takes exactly this,
+    /// one abstraction level down: `Inv` / `BInv` / `Pow 0`).
     FixTop: 'St
-    /// Fixed AND provably 0-dimensional — a loop counter is an integer.
+    /// Fixed AND provably 0-dimensional -- a loop counter is an integer.
     FixScalar: 'St
 
     IsCov: 'St -> bool
@@ -208,25 +147,23 @@ type StatusOps<'St> = {
     IsBottom: 'St -> bool
     IsOpaque: 'St -> bool
 
-    /// Merge two statuses reached on different control-flow paths. `None` = the
-    /// paths disagree, which every caller turns into Bottom.
+    /// Merge two statuses reached on different control-flow paths. `None` =
+    /// the paths disagree, which every caller turns into Bottom.
     Join: 'St -> 'St -> 'St option
 
     /// Does an ARGUMENT status satisfy a stored PARAMETER status at a call?
-    ///
-    /// DELIBERATELY NOT `Join >> Option.isSome`, and the difference is
-    /// load-bearing: equiv's `joinStatusT` accepts Opaque-against-Opaque (two
-    /// control-flow paths that both established nothing still agree that
-    /// nothing is established), but an OPAQUE ARGUMENT must never satisfy a
-    /// parameter — that is the case where the certificate would have been doing
-    /// work, and where a mismatch is a real loss of information.
+    /// DELIBERATELY NOT `Join >> Option.isSome`: equiv's `joinStatusT`
+    /// accepts Opaque-against-Opaque (two control-flow paths that both
+    /// established nothing still agree), but an OPAQUE ARGUMENT must never
+    /// satisfy a parameter -- that is the case where the certificate would
+    /// have been doing work, and a mismatch is a real loss of information.
     ParamMatches: 'St -> 'St -> bool
 
-    /// "Fixed, with the refinement read off this type." The typed win over the
-    /// seam's syntactic shape guessing.
+    /// "Fixed, with the refinement read off this type." The typed win over
+    /// the seam's syntactic shape guessing.
     FixOfType: IRType -> 'St
 
-    /// Classify a type under the current hypothesis — the former rule's
+    /// Classify a type under the current hypothesis -- the former rule's
     /// type-agreement guard needs the status of the RESULT NODE'S OWN type.
     ClassifyTy: IRType -> 'St
 }
@@ -240,24 +177,24 @@ type CallSig<'Hyp, 'St> = {
     CReturn: 'St
 }
 
-/// The two places a structural arm must ask the discipline a question. Both are
+/// The two places a structural arm must ask the discipline a question: both
 /// arms whose SHAPE is shared and whose VERDICT is not.
 type StructRules<'St> = {
-    /// A covariant binding used in APPLICATION position — `x(i)` where `x`
-    /// moves. This is a component read, and the three disciplines disagree
-    /// flatly: equiv declines (components of an l>0 block are basis-dependent),
-    /// galilean returns a covariant element (boost-variance is per-component and
-    /// index-stable), perm declines in v1 though the mathematics permits it.
+    /// A covariant binding used in APPLICATION position -- `x(i)` where `x`
+    /// moves, a component read. The three disciplines disagree flatly:
+    /// equiv declines (components of an l>0 block are basis-dependent),
+    /// galilean returns a covariant element (boost-variance is
+    /// per-component and index-stable), perm declines though the
+    /// mathematics permits it.
     CovAppliedAsCallee: 'St -> 'St
 
-    /// The conclusion guard of a former application, after the kernel body has
-    /// been walked generically. Arguments, in order:
-    ///   * the kernel body's derived status,
-    ///   * the status classified from the RESULT NODE'S OWN type,
-    ///   * whether the kernel body is inside the componentwise-uniform-linear
-    ///     fragment (`isElementwiseArith`),
-    ///   * whether any source array was covariant.
-    /// equiv needs all four; galilean and perm need only the first.
+    /// The conclusion guard of a former application, after the kernel body
+    /// has been walked generically. Arguments, in order: the kernel body's
+    /// derived status; the status classified from the RESULT NODE'S OWN
+    /// type; whether the kernel body is inside the
+    /// componentwise-uniform-linear fragment (`isElementwiseArith`);
+    /// whether any source array was covariant. equiv needs all four;
+    /// galilean and perm need only the first.
     FormerConclusion: 'St -> 'St -> bool -> bool -> 'St
 }
 
@@ -278,32 +215,28 @@ type WalkCtx<'Hyp, 'St> = {
     /// Binder ids whose SPECULATIVE summaries this walk actually consumed.
     DepHits: System.Collections.Generic.HashSet<IRId>
     /// CHECKING MODE. False for deduction, true for validating a declared
-    /// certificate. The walk is otherwise IDENTICAL — this flag exists only to
-    /// make the walker refuse to produce a DEFINITE status at the one rule
-    /// where it is knowingly more permissive than the seam checker, so that a
-    /// documented divergence can never be reported as a compiler bug.
+    /// certificate. The walk is otherwise IDENTICAL -- this flag exists only
+    /// to make the walker refuse to produce a DEFINITE status at the one
+    /// rule where it is knowingly more permissive than the seam checker, so
+    /// a documented divergence can never be reported as a compiler bug.
     Checking: bool
 }
 
-// ============================================================================
 // 4. THE STRUCTURAL FRAGMENT
-// ============================================================================
 
-/// Does the stored signature `sg` apply to a call with these argument statuses?
-/// Hypothesis equality, then arity, then positional agreement.
+/// Does the stored signature `sg` apply to a call with these argument
+/// statuses? Hypothesis equality, then arity, then positional agreement.
 let sigApplies (ctx: WalkCtx<'Hyp, 'St>) (sg: CallSig<'Hyp, 'St>) (argSts: 'St list) : bool =
     ctx.HypEq sg.CHyp ctx.Hyp
     && List.length sg.CParams = List.length argSts
     && (List.zip sg.CParams argSts |> List.forall (fun (p, a) -> ctx.Ops.ParamMatches p a))
 
 /// The structural arms of the walker, written once for every discipline.
-///
 /// `judge` is the caller's full recursive walk, tied back by the discipline;
-/// `None` means "this node kind belongs to the RULES", and that `None` IS the
-/// abstraction boundary — stated in one place, checkable by reading one
-/// function. The node kinds it declines are exactly: literals, arithmetic
-/// (binary and unary), whole-array negate/conjugate, indexing, reduction,
-/// aggregate construction, and virtual arrays.
+/// `None` means "this node kind belongs to the RULES", and that `None` IS
+/// the abstraction boundary. The node kinds it declines are exactly:
+/// literals, arithmetic (binary and unary), whole-array negate/conjugate,
+/// indexing, reduction, aggregate construction, and virtual arrays.
 let structuralArm
         (ctx: WalkCtx<'Hyp, 'St>)
         (judge: Map<IRId, 'St> -> TypedExpr -> 'St)
@@ -316,13 +249,12 @@ let structuralArm
 
     match expr.Kind with
 
-    // --- variables --------------------------------------------------------
     // A parameter carries its classified status. A FREE variable (module
-    // global, builtin, constant) is fixed by the conditional-theorem reading —
-    // the theorem quantifies over the action on the PARAMETERS, and a
-    // module-level constant is the same value in every frame — with its
-    // refinement read off its type. NOTE this is deliberately fixed even when
-    // the global's own TYPE would classify as moving: a fixed buffer does not
+    // global, builtin, constant) is fixed by the conditional-theorem reading
+    // -- the theorem quantifies over the action on the PARAMETERS, and a
+    // module-level constant is the same value in every frame -- with its
+    // refinement read off its type. Deliberately fixed even when the
+    // global's own TYPE would classify as moving: a fixed buffer does not
     // transform, and calling it covariant would be the unsound direction.
     | TExprVar (_, vid, _) when vid = ctx.Self -> Some ops.Bottom
     | TExprVar (_, vid, _) ->
@@ -362,13 +294,11 @@ let structuralArm
                        | None -> ops.Bottom)
               else ops.Bottom)
 
-    // --- binding forms ----------------------------------------------------
-    // The binding-descent problem, solved by ENVIRONMENT THREADING rather than
-    // by Deduce.flattenBindings: this walker carries an env (the seam's
-    // design), so inlining bindings first would be a no-op preprocessing pass
-    // — and it is strictly more general, since flatten declines to inline a
-    // non-rewritable or over-budget value and leaves a residual `let` that a
-    // binding-free walker then bottoms out on.
+    // Binding forms: the binding-descent problem, solved by ENVIRONMENT
+    // THREADING rather than by Deduce.flattenBindings -- this walker carries
+    // an env, and it is strictly more general, since flatten declines to
+    // inline a non-rewritable or over-budget value and leaves a residual
+    // `let` that a binding-free walker then bottoms out on.
     | TExprLet (_, vid, value, body) ->
         Some (let sv = j value
               if ops.IsBottom sv then ops.Bottom
@@ -420,7 +350,7 @@ let structuralArm
     | TExprAssign (l, r) ->
         Some (if ops.IsFix (j l) && ops.IsFix (j r) then ops.FixTop else ops.Bottom)
 
-    // --- static selectors -------------------------------------------------
+    // Static selectors.
     | TExprTupleIndex (baseE, idxE) ->
         let sb = j baseE
         let si = j idxE
@@ -438,14 +368,13 @@ let structuralArm
     // `compute` is a scheduling boundary, not a value transform.
     | TExprCompute x -> Some (j x)
 
-    // --- lambdas ----------------------------------------------------------
-    // v1, and deliberately weaker than the seam's arm: a lambda body is not
-    // walked (its parameters have no classified status, and `Captures` is the
-    // only handle on what it closes over). With nothing moving in scope the
-    // closure is an ordinary fixed helper; with something moving in scope it is
-    // Opaque unless it demonstrably captures it, in which case it declines.
-    // Opaque here is safe because the callee guard below refuses to call an
-    // Opaque value.
+    // Lambdas: deliberately weaker than the seam's arm -- a lambda body is
+    // not walked (its parameters have no classified status, and `Captures`
+    // is the only handle on what it closes over). With nothing moving in
+    // scope the closure is an ordinary fixed helper; with something moving
+    // in scope it is Opaque unless it demonstrably captures it, in which
+    // case it declines. Opaque is safe here because the callee guard below
+    // refuses to call an Opaque value.
     | TExprLambda info ->
         let envHasCov = env |> Map.exists (fun _ st -> ops.IsCov st)
         Some (if not envHasCov then ops.FixTop
@@ -458,32 +387,28 @@ let structuralArm
                           | None -> false)
                   if capturesCov then ops.Bottom else ops.Opaque)
 
-    // --- calls ------------------------------------------------------------
-    // The interprocedural rule. A call resolves by the callee's BINDER IRId —
-    // the id every reference to a top-level function carries in its `TExprVar`
-    // payload — against, in order:
-    //   1. the CERTIFIED table (a source-written pin, or an elaborator stamp on
-    //      a synthesized function, which is provable by construction): trusted
-    //      as an axiom, exactly as the seam trusts it;
-    //   2. this pass's SPECULATIVE table under the same hypothesis: consumed at
-    //      suggestion strength, and RECORDED as a dependency so the proposal can
-    //      name the pins it rests on.
-    // When the stored signature does NOT apply — a hypothesis mismatch, an
-    // arity mismatch, or an argument whose status does not match the stored
-    // parameter status — the call FALLS THROUGH to the all-fixed rule rather
-    // than declining outright.
+    // Calls: the interprocedural rule. A call resolves by the callee's
+    // BINDER IRId against, in order: (1) the CERTIFIED table (a
+    // source-written pin, or an elaborator stamp on a synthesized function,
+    // provable by construction): trusted as an axiom, exactly as the seam
+    // trusts it; (2) this pass's SPECULATIVE table under the same
+    // hypothesis: consumed at suggestion strength, and RECORDED as a
+    // dependency. When the stored signature does NOT apply (hypothesis
+    // mismatch, arity mismatch, or an argument status that doesn't match
+    // the stored parameter status), the call FALLS THROUGH to the all-fixed
+    // rule rather than declining outright.
     //
-    // SOUNDNESS of the fall-through, AND THE REASON THIS ARM IS GENERIC: a
-    // certificate is a statement about what happens to values that MOVE. When
-    // every argument is provably fixed, nothing flowing in moves, and the
-    // callee is a deterministic map: the same inputs in every frame give the
-    // same output in every frame, so the result is fixed no matter which group
-    // (if any) the callee is certified for. That argument names no action.
+    // SOUNDNESS of the fall-through, AND WHY THIS ARM IS GENERIC: a
+    // certificate is a statement about what happens to values that MOVE.
+    // When every argument is provably fixed, the callee is a deterministic
+    // map, so the same inputs in every frame give the same output -- fixed
+    // no matter which group (if any) the callee is certified for. That
+    // argument names no action.
     //
-    // KNOWN DIVERGENCE from the seam checker, accepted and documented rather
-    // than special-cased: the seam refuses a cross-hypothesis CERTIFIED call in
-    // BOTH directions, even when every argument is fixed — a coarser rule than
-    // this one. `Checking` is what keeps that divergence from ever being
+    // KNOWN DIVERGENCE from the seam checker, accepted rather than
+    // special-cased: the seam refuses a cross-hypothesis CERTIFIED call in
+    // BOTH directions, even when every argument is fixed -- a coarser rule
+    // than this one. `Checking` keeps that divergence from ever being
     // reported as a compiler bug; see below.
     | TExprApp (f, args) ->
         let argSts = args |> List.map j
@@ -499,15 +424,14 @@ let structuralArm
                   (match Map.tryFind fid env with
                    | Some st when ops.IsCov st ->
                        // Application syntax over a moving binding is a
-                       // component read — the discipline's call.
+                       // component read -- the discipline's call.
                        ctx.Rules.CovAppliedAsCallee st
-                   // A callee whose own status is unknown or declined cannot be
-                   // taken for a fixed function. THIS GUARD IS LOAD-BEARING:
-                   // without it a value produced by a node the rules do not
-                   // model (Opaque) would take the uncertified-callee path below
-                   // and hand back a FIXED status — the shape of the false
-                   // accept MLEquiv documents at its `judgeFormerApply`
-                   // (corpus ml-equiv/049).
+                   // A callee whose own status is unknown or declined cannot
+                   // be taken for a fixed function. LOAD-BEARING: without it
+                   // a value the rules do not model (Opaque) would take the
+                   // uncertified-callee path below and hand back a FIXED
+                   // status -- the false accept MLEquiv documents at its
+                   // `judgeFormerApply` (corpus ml-equiv/049).
                    | Some st when ops.IsOpaque st || ops.IsBottom st -> ops.Bottom
                    | _ ->
                        let resolved =
@@ -519,14 +443,12 @@ let structuralArm
                            if sigApplies ctx sg argSts then
                                (if speculative then ctx.DepHits.Add fid |> ignore)
                                sg.CReturn
-                           // THE ONE MODE-SENSITIVE RULE. The fall-through below
-                           // is the documented divergence from the seam. In
-                           // DEDUCTION that extra recall is the point. In
-                           // CHECKING it must not produce a definite status: the
-                           // whole purpose of that mode is to agree with the
-                           // seam, and a status derived through a rule the seam
-                           // does not have is exactly the shape of a FALSE
-                           // compiler-bug report. Opaque here means the
+                           // THE ONE MODE-SENSITIVE RULE: in DEDUCTION the
+                           // fall-through's extra recall is the point; in
+                           // CHECKING it must not produce a definite status
+                           // (that mode agrees with the seam, and a status
+                           // derived through a rule the seam lacks is a
+                           // FALSE compiler-bug report). Opaque means the
                            // validation abstains, which is always safe.
                            elif ctx.Checking then ops.Opaque
                            else allFixedRule ()
@@ -534,31 +456,27 @@ let structuralArm
                            // Uncertified callee (builtin, plain helper, array
                            // read through application syntax). SOUNDNESS: a
                            // function of fixed values is fixed. A moving
-                           // argument would ESCAPE into a body that carries no
-                           // certificate saying what happens to it: decline. An
-                           // unclassifiable argument proves nothing either.
+                           // argument would ESCAPE into a body with no
+                           // certificate saying what happens to it: decline.
                            allFixedRule ())
               | _ ->
-                  // Computed callee: admissible only when nothing moving is in
-                  // play at all.
+                  // Computed callee: admissible only when nothing moving is
+                  // in play at all.
                   if ops.IsFix (j f) && argSts |> List.forall ops.IsFix
                   then ops.FixTop
                   else ops.Bottom)
 
-    // --- former application -----------------------------------------------
+    // Former application: THE ARM THE MOVE TO TYPECHECK MAKES NECESSARY. At
+    // the seam, `x + y` on two arrays is an `ExprBinOp` and the arithmetic
+    // rule fires directly; by typecheck it has ALREADY been desugared into a
+    // former application (`method_for(x, y) <@> lambda(a, b) -> a + b`), so
+    // without this arm the arithmetic fragment of a discipline is invisible.
     //
-    // THIS IS THE ARM THE MOVE TO TYPECHECK MAKES NECESSARY. At the seam,
-    // `x + y` on two arrays is an `ExprBinOp` and the arithmetic rule fires
-    // directly. By typecheck it has ALREADY been desugared into a former
-    // application — `method_for(x, y) <@> lambda(a, b) -> a + b` — so without
-    // this arm the entire arithmetic fragment of a discipline is invisible and
-    // the typed lattice deduces essentially nothing on arrays.
-    //
-    // THE WALK is generic: bind the kernel's parameters to the statuses of the
-    // SOURCE ARRAYS (not to "component" statuses) and walk the kernel body.
-    // THE CONCLUSION is not, so it is `Rules.FormerConclusion` — the guard that
-    // decides whether reading a per-element kernel as a whole-array operation
-    // was valid is a statement about the action.
+    // THE WALK is generic: bind the kernel's parameters to the statuses of
+    // the SOURCE ARRAYS and walk the kernel body. THE CONCLUSION is not, so
+    // it is `Rules.FormerConclusion` -- the guard deciding whether reading a
+    // per-element kernel as a whole-array operation was valid is a
+    // statement about the action.
     | TExprApply info ->
         let srcSts = info.Arrays |> List.map j
         let anyCovSrc = srcSts |> List.exists ops.IsCov
@@ -566,13 +484,12 @@ let structuralArm
         else
             Some (match info.Kernel.Kind with
                   | TExprLambda lam when List.length lam.Params = List.length srcSts ->
-                      // A kernel parameter inherits its SOURCE's status VERBATIM
-                      // — emphatically NOT the refinement of its own (element)
-                      // type. The whole point of the whole-array reading is that
-                      // a kernel parameter drawn from a fixed ARRAY is a
-                      // different number at every position, so it may not scale
-                      // a moving value even though each individual element is
-                      // 0-dimensional.
+                      // A kernel parameter inherits its SOURCE's status
+                      // VERBATIM, NOT the refinement of its own (element)
+                      // type: a kernel parameter drawn from a fixed ARRAY is
+                      // a different number at every position, so it may not
+                      // scale a moving value even though each individual
+                      // element is 0-dimensional.
                       let kEnv =
                           List.zip lam.Params srcSts
                           |> List.fold (fun m ((p: TypedParam), st) -> Map.add p.VarId st m) env
@@ -585,9 +502,8 @@ let structuralArm
                       ctx.Rules.FormerConclusion kSt outSt elementwise anyCovSrc
                   | _ -> if anyCovSrc then ops.Bottom else ops.Opaque)
 
-    // --- everything else belongs to the RULES ------------------------------
-    // Literals, arithmetic, unary ops, whole-array negate/conjugate, indexing,
-    // reduction, aggregate construction, virtual arrays — and the catch-all,
-    // which is the discipline's to own because a discipline may model a node
-    // kind this one does not.
+    // Everything else belongs to the RULES: literals, arithmetic, unary
+    // ops, whole-array negate/conjugate, indexing, reduction, aggregate
+    // construction, virtual arrays, and the catch-all, which is the
+    // discipline's to own because it may model a node kind this one does not.
     | _ -> None

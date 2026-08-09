@@ -1,0 +1,55 @@
+// TEST: Nested Tuples Are Data
+// The functionality 6c bought back (docs/plan-tuples-vs-arg-packs.md 6c): under
+// 6b's free-monoid ruling every pack deep-flattened, so a tuple could never
+// CONTAIN a tuple in argument or operand position -- `((a,b),(c,d))` and
+// `(a,b,c,d)` were the same four leaves. One-level matching keeps the nesting,
+// and this file is what that is for.
+
+// A pair of pairs, bound to a single `Tuple<2>` parameter. 6c rule 3's
+// precedence (a): a lone `Tuple<m>` parameter facing a lone m-tuple argument
+// DIRECT-BINDS -- it is not spliced into its components. So r is the pair of
+// pairs, and the inner structure is reachable.
+//
+// KNOWN LIMIT, and the reason this pin uses the fully WRITTEN nested type
+// rather than `Tuple<2>`: a `Tuple<N>` annotation lowers to N FRESH inference
+// variables in the element slots, and nothing at a direct call writes into
+// them (tuples/002's note). So under `r: Tuple<2>` the slots default to
+// `double`, `r[0]` is typed a scalar, and the CHAIN `r[0][0]` emits
+// `std::get<0>(std::get<0>(r))` on a double -- a g++ failure, not a Blade
+// error. The chain itself is fine: parse, typing and lowering all handle it,
+// as this pin shows. It is the width-only annotation that cannot carry element
+// types, which is the same gap tuples/002 records and wants per-call-site
+// instantiation of the callee's arrow to close.
+//
+// UPDATE: the fully written type is no longer the ONLY way to say this. The
+// component-typed spelling `Tuple<Tuple<Float64, Float64>, Tuple<Float64,
+// Float64>>` is the same node as the type below and carries the inner types
+// just as well -- `tuples/015` pins the identical program in that spelling.
+function outer(r: ((Float64, Float64), (Float64, Float64))) -> Float64 =
+    r[0][0] + r[0][1] * 10.0 + r[1][0] * 100.0 + r[1][1] * 1000.0
+let deep = outer(((1.0, 2.0), (3.0, 4.0)))
+// EXPECT: deep = 4321
+
+// Rule 3 precedence (a) on its own, at width-only: a single 2-tuple argument
+// against a single `Tuple<2>` parameter binds the PAIR. It is not spliced into
+// two scalars -- that reading would need two parameters, and the direct match
+// is tried first. Scalar elements, so the element slots resolve.
+function pr(p: Tuple<2>) -> Float64 = p[0] * 10.0 + p[1]
+let bound = pr((3.0, 4.0))
+// EXPECT: bound = 34
+
+// OPERAND position, pair of pairs: two `Tuple<2>` parameters each direct-bind
+// one node, so the loop iterates all four arrays and each parameter sees its
+// own pair per cell. Under 6b this pack was four leaves and the two parameters
+// regrouped them positionally -- the same answer by accident, from a spelling
+// that could not express anything else.
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let B: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let C: Array<Float64 like Idx<2>> = [5.0, 6.0]
+let D: Array<Float64 like Idx<2>> = [7.0, 8.0]
+let g = object_for(lambda(p: Tuple<2>, q: Tuple<2>) -> p[0] * p[1] + q[0] * q[1])
+          <@> ((A, B), (C, D)) |> compute
+// EXPECT: g[0][0] = [38, 43, 45, 51]
+// EXPECT: g[0][1] = [39, 44, 46, 52]
+// EXPECT: g[1][0] = [41, 46, 48, 54]
+// EXPECT: g[1][1] = [43, 48, 50, 56]

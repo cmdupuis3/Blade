@@ -1,7 +1,6 @@
-/// `rand`-module elaboration: rewrites `alias.uniform/normal(key, shape)` into
-/// the compiler-internal builtins `__rand_uniform` / `__rand_normal`, which the
-/// type-checker self-types (dense Float64 array of the static shape) and codegen
-/// materializes via the blade_rand runtime.
+/// `rand`-module elaboration: rewrites `alias.uniform/normal(key, shape)` into the compiler-internal builtins
+/// `__rand_uniform` / `__rand_normal`, which the type-checker self-types (dense Float64 array of the static shape) and
+/// codegen materializes via the blade_rand runtime.
 ///
 /// Surface (reachable only through `import rand [as <alias>]`):
 ///
@@ -9,14 +8,12 @@
 ///   rand.uniform(key, [m, n])     -- rank-2, row-major
 ///   rand.normal(key, n)           -- N(0,1) via Box-Muller
 ///
-/// `key` is an Int64 stream key (same key => same draws). `shape` is a static
-/// int or a list of static ints (`let static` names or literals). Unlike the
-/// math module this pass synthesizes no Blade source — a counter-free RNG is not
-/// expressible in Blade (no unsigned/bitwise ops), so the RNG lives in the C++
-/// runtime and this pass only rewrites the call.
+/// `key` is an Int64 stream key (same key => same draws). `shape` is a static int or a list of static ints (`let static`
+/// names or literals). Unlike the math module this pass synthesizes no Blade source -- a counter-free RNG is not
+/// expressible in Blade (no unsigned/bitwise ops), so the RNG lives in the C++ runtime and this pass only rewrites the call.
 ///
-/// Pipeline position: after Math elaboration, BEFORE Grad expansion — rand
-/// output is not differentiable, so Grad sees only the settled opaque builtin.
+/// Pipeline position: after Math elaboration, BEFORE Grad expansion -- rand output is not differentiable, so Grad sees
+/// only the settled opaque builtin.
 module Blade.Rand.Elaborate
 
 open Blade.Ast
@@ -49,8 +46,7 @@ let private resolveShape (statics: StaticEnv) (what: string) (shapeE: Expr) : Re
                 else Error (sprintf "%s: shape extents must be positive (got %d)" what n))))
         (Ok [])
 
-/// Elaborate one qualified rand op. `keyE` is passed through verbatim (already
-/// recursively rewritten); the shape becomes trailing int-literal args.
+/// Elaborate one qualified rand op. `keyE` is passed through verbatim; the shape becomes trailing int-literal args.
 let private elabOp (statics: StaticEnv) (op: string) (args: Expr list) : Result<Expr, string> =
     let build fn keyE shapeE =
         resolveShape statics (sprintf "rand.%s" op) shapeE
@@ -63,10 +59,7 @@ let private elabOp (statics: StaticEnv) (op: string) (args: Expr list) : Result<
         Error (sprintf "rand.%s: expected rand.%s(key, shape) where shape is a static int or list of static ints" op op)
     | _ -> Error (sprintf "rand: unknown op '%s' (available: uniform, normal)" op)
 
-// ============================================================================
 // Rewrite walker (same shape as MathElaborate.rewriteExpr)
-// ============================================================================
-
 let rec private rewriteExpr (statics: StaticEnv) (aliases: Set<string>) (e: Expr) : Result<Expr, string> =
     let r = rewriteExpr statics aliases
     let rList es =
@@ -130,20 +123,15 @@ let rec private rewriteExpr (statics: StaticEnv) (aliases: Set<string>) (e: Expr
                     r c.Body |> Result.map (fun b -> cs @ [{ c with Guard = g'; Body = b }]))))
                 (Ok [])
             |> Result.map (fun cs' -> inheritSpan e (ExprMatch (s', cs'))))
-    // Recursive array (`let rec q: T = match q with ...`): the seed and
-    // inductive slices are ordinary expressions and may contain qualified
-    // ops. Without this arm they fell through untouched, and since this pass
-    // DELETES the import that would bind the alias, the call reached the
-    // checker as an unbound variable.
+    // Recursive array (`let rec q: T = match q with ...`): the seed and inductive slices are ordinary expressions and may
+    // contain qualified ops; without this arm they fell through unrewritten and reached the checker as an unbound variable.
     | ExprKind.ExprRecArray def ->
         rOpt (def.SeedArm |> Option.map snd) |> Result.bind (fun seedE ->
         r def.SliceExpr |> Result.map (fun slice' ->
             let seed' = Option.map2 (fun (sv, _) se -> (sv, se)) def.SeedArm seedE
             inheritSpan e (ExprRecArray { def with SeedArm = seed'; SliceExpr = slice' })))
-    // The rest of the expression algebra. Every constructor holding a
-    // sub-expression is walked, and the catch-all wildcard is deliberately
-    // GONE: an unhandled case is an FS0025 incomplete-match warning at build
-    // time rather than a qualified call silently surviving unrewritten.
+    // The rest of the expression algebra: every constructor holding a sub-expression is walked, and the catch-all wildcard
+    // is deliberately GONE, so an unhandled case is an FS0025 build warning rather than a qualified call surviving unrewritten.
     | ExprKind.ExprCompute inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprCompute i))
     | ExprKind.ExprRead inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprRead i))
     | ExprKind.ExprPure inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprPure i))
@@ -176,6 +164,8 @@ let rec private rewriteExpr (statics: StaticEnv) (aliases: Set<string>) (e: Expr
         r a |> Result.bind (fun a' -> r p |> Result.map (fun p' -> inheritSpan e (ExprMask (a', p'))))
     | ExprKind.ExprCompound (d, m) ->
         r d |> Result.bind (fun d' -> r m |> Result.map (fun m' -> inheritSpan e (ExprCompound (d', m'))))
+    | ExprKind.ExprSparse (v, k) ->
+        r v |> Result.bind (fun v' -> r k |> Result.map (fun k' -> inheritSpan e (ExprSparse (v', k'))))
     | ExprKind.ExprIntersect (a, b) ->
         r a |> Result.bind (fun a' -> r b |> Result.map (fun b' -> inheritSpan e (ExprIntersect (a', b'))))
     | ExprKind.ExprUnion (a, b) ->
@@ -188,10 +178,10 @@ let rec private rewriteExpr (statics: StaticEnv) (aliases: Set<string>) (e: Expr
         r a |> Result.bind (fun a' -> r k |> Result.map (fun k' -> inheritSpan e (ExprSort (a', k'))))
     | ExprKind.ExprGram (l, rr) ->
         r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> inheritSpan e (ExprGram (l', r'))))
-    | ExprKind.ExprReduce (a, k, init) ->
+    | ExprKind.ExprReduce (a, k, init, ax) ->
         r a |> Result.bind (fun a' ->
         r k |> Result.bind (fun k' ->
-        rOpt init |> Result.map (fun init' -> inheritSpan e (ExprReduce (a', k', init')))))
+        rOpt init |> Result.map (fun init' -> inheritSpan e (ExprReduce (a', k', init', ax)))))
     | ExprKind.ExprStruct (nm, fields, spread) ->
         fields |> List.fold (fun acc (fn, fe) ->
             acc |> Result.bind (fun fs -> r fe |> Result.map (fun fe' -> fs @ [(fn, fe')])))
@@ -206,15 +196,12 @@ let rec private rewriteExpr (statics: StaticEnv) (aliases: Set<string>) (e: Expr
          | ForKernel k -> r k |> Result.map ForKernel)
         |> Result.bind (fun src' ->
         rOpt kern |> Result.map (fun kern' -> inheritSpan e (ExprFor (src', cs, kern'))))
-    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>)
-    // carry TypeExprs, not Exprs, and are never rewritten.
+    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>) carry TypeExprs, not Exprs, never rewritten.
     | ExprKind.ExprWildcard | ExprKind.ExprQualified _ | ExprKind.ExprRange _
     | ExprKind.ExprReverse _ | ExprKind.ExprArity _ | ExprKind.ExprNth
     | ExprKind.ExprZero | ExprKind.ExprSection _ -> Ok e
 
-// ============================================================================
 // Gating + program expansion
-// ============================================================================
 
 let private isRandImport (d: Located<Decl>) =
     match d.Value with
@@ -243,8 +230,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         | Ok (statics, _) ->
             declsNoImport |> List.fold (fun acc d ->
                 acc |> Result.bind (fun out ->
-                    // Stamp the user decl's span so every syn-built node
-                    // attributes to this declaration's source line.
+                    // Stamp the user decl's span so every syn-built node attributes to this declaration's source line.
                     Blade.Ast.synthSpan <- d.Span
                     let mapped =
                         match d.Value with

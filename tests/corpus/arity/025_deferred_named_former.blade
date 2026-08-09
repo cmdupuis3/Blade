@@ -1,4 +1,7 @@
 // TEST: Deferred former — bare object_for(named poly kernel), let-bound then applied
+// BL4010: comoment deduces comm over its pack and both slots get `data`; the
+// dense 2x2 covariance below is the proof, so the suggestion is pinned.
+// WARN: BL4010
 // A bare arity-polymorphic named kernel is a DEFERRED loop-former: its pack
 // arity and element type stay unresolved until the <@> application reveals
 // them. `let comomentLoop = object_for(comoment)` binds it without a lambda

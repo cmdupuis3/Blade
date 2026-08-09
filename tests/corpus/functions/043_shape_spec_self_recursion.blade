@@ -1,0 +1,29 @@
+// TEST: Shape Spec Through Self Recursion
+// Shape monomorphization admits a self-recursive callee when every recursive
+// call forwards the caller's OWN parameter extents through unchanged. Here
+// `rec_sum` hands `a` straight back to itself, so the extent signature is
+// closed under the recursion: the n=5 copy's recursive call re-pins n=5 and
+// rewrites to that same copy, which is what makes the baked bound legal all
+// the way down the stack.
+//
+// `shrink` is the case that must still DECLINE. Its recursive call hands over
+// a DIFFERENT array (`w3`, three cells), so the signature is not closed —
+// baking 5 into a copy whose recursion runs over three cells would loop past
+// the end. It keeps the generic copy and its runtime `.extents[]` read.
+//
+// Nothing here fails loudly if the reach regresses: both functions still
+// compute the right numbers from the generic copies. The emission-side pin
+// (which copy exists, which bound is a literal) is `blade test shapespec`.
+let w3: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let w5: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+
+function rec_sum(a: Array<Float64 like Idx<n>>, k: Int64) -> Float64 =
+    if k <= 0 then 0.0 else reduce(a, (+)) + rec_sum(a, k - 1)
+
+function shrink(a: Array<Float64 like Idx<n>>, k: Int64) -> Float64 =
+    if k <= 0 then 0.0 else reduce(a, (+)) + shrink(w3, k - 1)
+
+let s = rec_sum(w5, 3)
+let t = shrink(w5, 2)
+// EXPECT: s = 45
+// EXPECT: t = 21

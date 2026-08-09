@@ -1,19 +1,13 @@
-// Blade-DSL Zarr Store Provider
-// Compile-time metadata extraction from Zarr stores (v2 and v3).
-//
-// A Zarr store is a DIRECTORY: JSON metadata files plus one raw binary file
-// per chunk — inherently multi-file. Metadata and compile-time data reads
-// are pure .NET (System.Text.Json + File IO, no native library); runtime
-// data I/O is deferred to generated C++ that uses only std::fstream /
-// std::filesystem (no link-time dependency — contrast NetcdfProvider's
-// libnetcdf).
+// Blade-DSL Zarr Store Provider: compile-time metadata extraction from Zarr
+// stores (v2 and v3). A Zarr store is a DIRECTORY: JSON metadata files plus
+// one raw binary file per chunk. Metadata and compile-time data reads are
+// pure .NET (System.Text.Json + File IO, no native library); runtime data
+// I/O is generated C++ using only std::fstream / std::filesystem (no link-time dependency, unlike NetcdfProvider's libnetcdf).
 //
 // v1 scope (loud, specific rejections outside it):
 //   - UNCOMPRESSED chunks only: v2 `compressor: null` / v3 a single `bytes`
 //     codec. gzip/blosc/zstd/sharding/transpose are rejected BY NAME at
-//     parse; the ZarrCodec seam below is where future codecs slot in
-//     (decode on the F# fold path, emitted decompression on the C++ path,
-//     plus Build.fs link flags recorded in ProviderSpec.LinkNeeds).
+//     parse; the ZarrCodec seam below is where future codecs slot in.
 //   - Little-endian on-disk data ('<' or '|' v2 dtypes, v3 bytes codec
 //     endian "little"); big-endian is rejected.
 //   - C (row-major) order; v2 order "F" is rejected (v3 F-order arrives as
@@ -21,10 +15,9 @@
 //   - Numeric dtypes only: f4/f8 and the integer codings (collapsed to
 //     ETInt64, mirroring NetcdfProvider.ncTypeToElemType).
 //
-// Missing chunk files read as fill_value (the Zarr contract); a missing
-// chunk with a null fill_value (v2) is a loud error, never silent zeros.
-// Edge chunks are stored FULL-SIZE (padded) — readers copy only the
-// intersection with the array bounds.
+// Missing chunk files read as fill_value; a missing chunk with a null
+// fill_value (v2) is a loud error, never silent zeros. Edge chunks are stored
+// FULL-SIZE (padded) -- readers copy only the intersection with the array bounds.
 module Blade.ZarrProvider
 
 open System
@@ -33,12 +26,9 @@ open System.Text.Json
 open Blade.IR
 open Blade.Types
 
-// ============================================================================
 // Metadata model
-// ============================================================================
 
-/// Normalized dtype: Code is the v2-style suffix without the byte-order
-/// char ("f8", "i4", "u2", ...); v3 names normalize onto the same codes.
+/// Normalized dtype: Code is the v2-style suffix without the byte-order char ("f8", "i4", "u2", ...); v3 names normalize onto the same codes.
 type ZarrDtype = {
     Code: string
     Elem: ElemType
@@ -49,41 +39,40 @@ type ZarrDtype = {
 type ZarrFill =
     | FillFloat of float
     | FillInt of int64
-    /// v2 `fill_value: null` — legal until a chunk is actually missing,
-    /// then a loud error (never silent data invention).
+    /// v2 `fill_value: null` -- legal until a chunk is actually missing, then a loud error.
     | FillNone
 
-/// The codec seam. v1 supports identity only; future compressed codecs
-/// (gzip, blosc, ...) add arms here, decode in `decodeChunk` for the
-/// compile-time path, and emit decompression calls in CppZarr for the
-/// runtime path (plus link flags via ProviderSpec.LinkNeeds).
+/// The codec seam. v1 supports identity only; future compressed codecs (gzip, blosc, ...) add arms here, decoding in `decodeChunk` and emitting decompression calls in CppZarr.
 type ZarrCodec =
     | CodecIdentity
 
-/// Triangular-decomposed layout (the `blade` attribute, spec_version 1):
-/// the physical array's LEADING dimension is a packed simplex pool —
-/// C(n+r-1, r) cells for "sym", C(n, r) for "antisym" — in canonical
-/// ascending-lex order (== linearized_storage's linearize order == the
-/// allocator's DFS pool order, differentially pinned). Trailing dimensions
-/// are ordinary dense axes. Chunking the pool dimension yields contiguous
-/// flat-cell ranges — exactly the decomposition the MPI backend distributes
-/// (one decomposition block = one chunk). See providers/ZarrTriangularSpec.md.
+/// Triangular-decomposed layout (the `blade` attribute): the physical
+/// array's LEADING dimension is a packed pool in canonical ascending-lex
+/// order. Two head kinds:
+///   * spec_version 1 -- a SIMPLEX pool: C(n+r-1, r) cells for "sym", C(n,
+///     r) for "antisym" (== linearized_storage's linearize order). Trailing
+///     dims are ordinary dense axes; chunking the pool dimension yields
+///     contiguous flat-cell ranges (one decomposition block = one chunk).
+///   * spec_version 2 -- an ORBIT (iterated-wreath) pool: `Sym = SymWreath`,
+///     `Levels` non-empty. No trailing dense dims.
+/// See providers/ZarrTriangularSpec.md.
 type PackedGroup = {
     Sym: SymmetryClass
+    /// Depth-1: the group's arity r. Wreath: the RAW AXIS COUNT prod(r_i), matching `mkWreathIndexRecord`'s Rank field.
     Rank: int
+    /// The base extent n (the wreath fold's base modulus).
     Extent: int64
+    /// The iterated-wreath level list [(r1,s1), ...], OUTERMOST-LAST, `true` = '+'.
+    /// Non-empty exactly when `Sym = SymWreath`, `[]` for a simplex head -- the same carrier convention `IR.orbitLevelsOf` uses.
+    Levels: (int * bool) list
 }
 
-/// Block ordering for the simplex-blocks decomposition: ascending-lex over
-/// tile multisets (the combinadic rank), or the recursive-halving DFS
-/// ("mixed-radix path") order that keeps subtrees contiguous.
+/// Block ordering for the simplex-blocks decomposition: ascending-lex over tile multisets (the combinadic rank), or the recursive-halving DFS ("mixed-radix path") order that keeps subtrees contiguous.
 type BlockOrder =
     | OrderLex
     | OrderPath
 
-/// simplex-blocks decomposition parameters: the pool is stored as padded
-/// block rows [blockCount, tile^rank] instead of one flat pool. See
-/// providers/ZarrSimplexBlocksPlan.md.
+/// simplex-blocks decomposition parameters: the pool is stored as padded block rows [blockCount, tile^rank] instead of one flat pool. See providers/ZarrSimplexBlocksPlan.md.
 type SimplexBlocksInfo = {
     /// Tile edge B over the index interval [0, extent).
     Tile: int64
@@ -97,12 +86,11 @@ type BladeLayout = {
     Group: PackedGroup
     /// Trailing dense extents (must match the physical shape's tail).
     DenseDims: int64 list
-    /// None: layout "packed" (flat canonical pool, decomposition
-    /// "flat-ranges"). Some: layout "packed-blocks" (simplex-blocks rows).
+    /// None: layout "packed" (flat pool, decomposition "flat-ranges"); Some: layout "packed-blocks" (simplex-blocks rows).
     Blocks: SimplexBlocksInfo option
 }
 
-/// C(m, k) — cardinality arithmetic for pool validation.
+/// C(m, k) -- cardinality arithmetic for pool validation.
 let binom (m: int64) (k: int) : int64 =
     if k < 0 || m < int64 k then 0L
     else
@@ -113,29 +101,38 @@ let binom (m: int64) (k: int) : int64 =
             den <- den * int64 (i + 1)
         num / den
 
-/// Packed pool cardinality of a group: multiset (sym) or strict (antisym)
-/// combinations.
-let packedCardinality (g: PackedGroup) : int64 =
+/// Packed pool cardinality of a group, with the failure surfaced: multiset
+/// (sym) or strict (antisym) combinations at depth 1, and the iterated fold
+/// over the level list for a wreath head. The wreath arm goes through
+/// `Blade.OrbRank.cellCountChecked`, the SAME overflow-checked fold
+/// `IR.bufferGroupCardinality`/`IR.classifyOutputStorage` size the in-memory
+/// pool with, so the two never independently disagree about a pool length.
+let packedCardinalityChecked (g: PackedGroup) : Result<int64, string> =
     match g.Sym with
-    | SymSymmetric -> binom (g.Extent + int64 g.Rank - 1L) g.Rank
-    | SymAntisymmetric -> binom g.Extent g.Rank
-    | _ -> 0L
+    | SymSymmetric -> Ok (binom (g.Extent + int64 g.Rank - 1L) g.Rank)
+    | SymAntisymmetric -> Ok (binom g.Extent g.Rank)
+    | SymWreath ->
+        Blade.OrbRank.cellCountChecked (Blade.IR.orbRankLevels g.Levels) g.Extent
+    | s ->
+        Error (sprintf "packed group symmetry %A has no pool cardinality" s)
 
-// ============================================================================
-// Simplex-blocks math (decomposition scheme "simplex-blocks")
-// ============================================================================
-// The block grid of a rank-r simplex with T tiles IS SymIdx<r, T>: blocks are
-// tile MULTISETS in both the sym and antisym cases (an antisym block with a
-// repeated tile holds the strict cells inside that tile). AntisymIdx is
-// special because of the diagonal in two ways here: per-tile factors are
-// C(w, m) not C(w+m-1, m), and a tile of width w with multiplicity m > w
-// contributes an EMPTY block (its padded row is all fill) — e.g. every
-// repeated-tile block is empty when Tile = 1.
+/// Unchecked cardinality for the depth-1 (simplex) call sites (packed-blocks
+/// math and window extraction, neither reachable by a wreath head). A failure
+/// answers 0 rather than a guess: a zero-sized pool fails visibly, a wrong-sized one does not.
+let packedCardinality (g: PackedGroup) : int64 =
+    match packedCardinalityChecked g with
+    | Ok c -> c
+    | Error _ -> 0L
+
+// Simplex-blocks math (decomposition scheme "simplex-blocks"): the block
+// grid of a rank-r simplex with T tiles IS SymIdx<r, T>: blocks are tile
+// MULTISETS in both the sym and antisym cases (a repeated tile holds the
+// strict cells inside it in the antisym case). AntisymIdx per-tile factors
+// are C(w, m) not C(w+m-1, m), and a tile of width w with multiplicity
+// m > w contributes an EMPTY block -- every repeated-tile block is empty when Tile = 1.
 module SimplexBlocks =
 
-    /// Combinadic rank of a canonical coordinate tuple (ascending-lex order;
-    /// sorted, strictly increasing when strict). Mirrors
-    /// linearized_storage::{symmetric|antisymmetric}::linearize.
+    /// Combinadic rank of a canonical coordinate tuple (ascending-lex order; sorted, strictly increasing when strict). Mirrors linearized_storage::{symmetric|antisymmetric}::linearize.
     let rankOfCoords (strict: bool) (n: int64) (coords: int64[]) : int64 =
         let r = coords.Length
         // Completions with m positions remaining, next value >= v (+1 strict).
@@ -171,16 +168,13 @@ module SimplexBlocks =
             lo <- v + (if strict then 1L else 0L)
         coords
 
-    /// Number of blocks: tile multisets of size r over T tiles (both
-    /// symmetries — blocks are always multisets).
+    /// Number of blocks: tile multisets of size r over T tiles (both symmetries -- blocks are always multisets).
     let blockCount (r: int) (T: int64) : int64 = binom (T + int64 r - 1L) r
 
     /// Width of tile t over [0, n) with edge B (the last tile may be ragged).
     let tileWidth (n: int64) (B: int64) (t: int64) : int64 = min B (n - t * B)
 
-    /// Cells in a block (tile multiset, ascending): group tiles by value;
-    /// a tile of width w with multiplicity m contributes C(w+m-1, m) (sym)
-    /// or C(w, m) (antisym — ZERO when m > w: the empty diagonal blocks).
+    /// Cells in a block (tile multiset, ascending): group tiles by value; a tile of width w with multiplicity m contributes C(w+m-1, m) (sym) or C(w, m) (antisym -- ZERO when m > w: the empty diagonal blocks).
     let blockCellCount (strict: bool) (n: int64) (B: int64) (tiles: int64[]) : int64 =
         tiles
         |> Array.countBy id
@@ -189,16 +183,13 @@ module SimplexBlocks =
             let f = if strict then binom w m else binom (w + int64 m - 1L) m
             acc * f) 1L
 
-    /// The format's fixed row width: B^r bounds every block's cell count
-    /// (each per-tile factor is <= w^m <= B^m).
+    /// The format's fixed row width: B^r bounds every block's cell count (each per-tile factor is <= w^m <= B^m).
     let maxBlockCells (r: int) (B: int64) : int64 =
         let mutable acc = 1L
         for _ in 1 .. r do acc <- acc * B
         acc
 
-    /// A block's cells in absolute ascending-lex order (the within-block
-    /// canonical order both the writer and the emitted C++ use): branch-free
-    /// bounds i_k in [max(tile_k*B, i_{k-1}+strict), min((tile_k+1)*B, n)).
+    /// A block's cells in absolute ascending-lex order (the within-block canonical order both the writer and the emitted C++ use): branch-free bounds i_k in [max(tile_k*B, i_{k-1}+strict), min((tile_k+1)*B, n)).
     let enumBlockCells (strict: bool) (n: int64) (B: int64) (tiles: int64[]) : seq<int64[]> =
         let r = tiles.Length
         let rec go (k: int) (prev: int64) (acc: int64 list) : seq<int64[]> =
@@ -217,9 +208,8 @@ module SimplexBlocks =
         go 0 -1L []
 
     /// Tile multisets in recursive-halving DFS ("mixed-radix path") order:
-    /// split [a, b) at the midpoint; children ordered all-low first
-    /// (j = r down to 0 tiles in the low half), low part major within a
-    /// child. Requires a power-of-two grid so splits stay clean.
+    /// split [a, b) at the midpoint; children ordered all-low first (j = r
+    /// down to 0 tiles in the low half). Requires a power-of-two grid.
     let rec private pathMultisets (a: int64) (b: int64) (r: int) : seq<int64 list> =
         seq {
             if r = 0 then yield []
@@ -234,8 +224,7 @@ module SimplexBlocks =
 
     let isPowerOfTwo (x: int64) = x > 0L && (x &&& (x - 1L)) = 0L
 
-    /// Physical row of each block under "path" order:
-    /// pathRows.[lexBlockRank] = row index in the store.
+    /// Physical row of each block under "path" order: pathRows.[lexBlockRank] = row index in the store.
     let pathRows (r: int) (T: int64) : int64[] =
         if not (isPowerOfTwo T) then
             failwithf "simplex-blocks path order requires a power-of-two grid (got %d)" T
@@ -245,8 +234,7 @@ module SimplexBlocks =
             rows.[int (rankOfCoords false T (Array.ofList ms))] <- int64 i)
         rows
 
-    /// (physical padded cell count, canonical pool cell count) — the padding
-    /// overhead report for a configuration.
+    /// (physical padded cell count, canonical pool cell count): the padding overhead report for a configuration.
     let paddingReport (strict: bool) (n: int64) (B: int64) (r: int) : int64 * int64 =
         let T = (n + B - 1L) / B
         let phys = blockCount r T * maxBlockCells r B
@@ -255,10 +243,8 @@ module SimplexBlocks =
         (phys, pool)
 
     /// physCellIdx -> poolCellIdx map (cells only, trailing dims excluded);
-    /// -1 marks padding. physCellIdx = physicalRow * B^r + localOffset,
-    /// where localOffset counts the block's cells in absolute ascending-lex
-    /// order. Shared by the F# writer (inverted) and reader so the two sides
-    /// cannot drift.
+    /// -1 marks padding. physCellIdx = physicalRow * B^r + localOffset
+    /// (ascending-lex within the block). Shared by the F# writer (inverted) and reader so the two sides cannot drift.
     let blocksCellMap (strict: bool) (n: int64) (B: int64) (r: int) (order: BlockOrder) : int[] =
         let T = (n + B - 1L) / B
         let nBlocks = blockCount r T
@@ -295,8 +281,7 @@ type ZarrArrayMeta = {
     DimNames: string list option
     FillValue: ZarrFill
     Codec: ZarrCodec
-    /// Triangular-decomposed layout from the `blade` attribute; None for
-    /// ordinary dense arrays.
+    /// Triangular-decomposed layout from the `blade` attribute; None for ordinary dense arrays.
     Blade: BladeLayout option
     /// 2 | 3
     Version: int
@@ -312,8 +297,7 @@ type ZarrStore = {
     Arrays: ZarrArrayMeta list
 }
 
-/// A variable's payload read at compile time: dimension extents plus the
-/// row-major flat buffer. Mirrors NetcdfProvider.NcVarData.
+/// A variable's payload read at compile time: dimension extents plus the row-major flat buffer (mirrors NetcdfProvider.NcVarData).
 type ZarrVarData = {
     DimLengths: int list
     Payload: ZarrPayload
@@ -322,12 +306,9 @@ and ZarrPayload =
     | ZFloats of float[]
     | ZInts of int64[]
 
-// ============================================================================
 // Dtype tables
-// ============================================================================
 
-/// v2-style normalized code -> dtype record. The integer collapse to
-/// ETInt64 mirrors ncTypeToElemType.
+/// v2-style normalized code -> dtype record (the integer collapse to ETInt64 mirrors ncTypeToElemType).
 let private dtypeOfCode (code: string) : Result<ZarrDtype, string> =
     match code with
     | "f4" -> Ok { Code = "f4"; Elem = ETFloat32; ByteSize = 4; IsFloat = true }
@@ -340,7 +321,7 @@ let private dtypeOfCode (code: string) : Result<ZarrDtype, string> =
     | "u2" -> Ok { Code = "u2"; Elem = ETInt64; ByteSize = 2; IsFloat = false }
     | "u4" -> Ok { Code = "u4"; Elem = ETInt64; ByteSize = 4; IsFloat = false }
     | "u8" -> Ok { Code = "u8"; Elem = ETInt64; ByteSize = 8; IsFloat = false }
-    | other -> Error (sprintf "unsupported dtype '%s' (numeric f4/f8/i*/u* only in v1 — bool, complex, datetime and string dtypes are not supported)" other)
+    | other -> Error (sprintf "unsupported dtype '%s' (numeric f4/f8/i*/u* only -- bool, complex, datetime and string dtypes are not supported)" other)
 
 /// v2 dtype string ("<f8", "|i1", ">f4"): byte-order char + code.
 let zarrDtypeV2 (dtype: string) : Result<ZarrDtype, string> =
@@ -365,11 +346,9 @@ let zarrDtypeV3 (name: string) : Result<ZarrDtype, string> =
     | "uint16" -> dtypeOfCode "u2"
     | "uint32" -> dtypeOfCode "u4"
     | "uint64" -> dtypeOfCode "u8"
-    | other -> Error (sprintf "unsupported data_type '%s' (numeric float32/float64/int*/uint* only in v1)" other)
+    | other -> Error (sprintf "unsupported data_type '%s' (numeric float32/float64/int*/uint* only)" other)
 
-// ============================================================================
 // JSON parsing helpers
-// ============================================================================
 
 let private tryProp (el: JsonElement) (name: string) : JsonElement option =
     match el.TryGetProperty name with
@@ -403,10 +382,12 @@ let private parseFill (where_: string) (isFloat: bool) (el: JsonElement option) 
              | s, _ -> Error (sprintf "%s: unsupported fill_value '%s'" where_ s))
         | _ -> Error (sprintf "%s: unsupported fill_value kind %A" where_ e.ValueKind)
 
-/// Parse + validate the `blade` layout attribute (spec_version 1) against
-/// the physical shape. `attrs` is the attributes object (the v2 .zattrs
-/// root / v3 `attributes` value); an absent "blade" key is an ordinary
-/// dense array (Ok None). All violations are loud and specific.
+/// Parse + validate the `blade` layout attribute (spec_version 1 or 2)
+/// against the physical shape. `attrs` is the attributes object (v2
+/// .zattrs root / v3 `attributes`); an absent "blade" key is an ordinary
+/// dense array. spec_version 2 adds ONE thing: the `"orbit"` head, an
+/// iterated-wreath (`OrbIdx` depth >= 2) pool -- rejected BY NAME under
+/// spec_version 1, since v1's kind set is closed and an old reader must not silently reinterpret a v2 store.
 let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement option) : Result<BladeLayout option, string> =
     match attrs |> Option.bind (fun a -> tryProp a "blade") with
     | None -> Ok None
@@ -420,12 +401,12 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
             |> Option.map (fun v -> if v.ValueKind = JsonValueKind.Number then v.GetInt32() else -1)
             |> Option.defaultValue -1
         let layoutStr = strOf "layout" ""
-        if specVersion <> 1 then
-            Error (sprintf "%s: blade.spec_version %d is not supported (this reader implements spec_version 1)" where_ specVersion)
+        if specVersion <> 1 && specVersion <> 2 then
+            Error (sprintf "%s: blade.spec_version %d is not supported (this reader implements spec_version 1 and 2)" where_ specVersion)
         elif layoutStr <> "packed" && layoutStr <> "packed-blocks" then
             Error (sprintf "%s: blade.layout '%s' is not supported ('packed' or 'packed-blocks')" where_ layoutStr)
         elif strOf "order" "ascending-lex" <> "ascending-lex" then
-            Error (sprintf "%s: blade.order '%s' is not supported ('ascending-lex' only — the pinned linearized_storage order)" where_ (strOf "order" ""))
+            Error (sprintf "%s: blade.order '%s' is not supported ('ascending-lex' only -- the pinned linearized_storage order)" where_ (strOf "order" ""))
         else
         match tryProp b "index_types" with
         | Some its when its.ValueKind = JsonValueKind.Array && its.GetArrayLength() >= 1 ->
@@ -452,11 +433,61 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                     elif extent <= 0L then Error (sprintf "%s: blade.index_types[%d]: packed group needs a positive extent" where_ i)
                     else
                         let sym = if kind = "sym" then SymSymmetric else SymAntisymmetric
-                        Ok (Choice1Of2 { Sym = sym; Rank = rank; Extent = extent })
+                        Ok (Choice1Of2 { Sym = sym; Rank = rank; Extent = extent; Levels = [] })
+                | "orbit" when specVersion < 2 ->
+                    // The v1 door, shut by name: v1's kind set is closed, so an
+                    // orbit head reaching a v1 reader must be a loud refusal, never
+                    // a reinterpretation as some simplex group with matching cardinality.
+                    Error (sprintf "%s: blade.index_types[%d]: kind 'orbit' (an iterated-wreath OrbIdx class) is a spec_version 2 head, but this store declares spec_version %d -- see providers/ZarrTriangularSpec.md"
+                               where_ i specVersion)
+                | "orbit" ->
+                    // levels: [[r, "+"|"-"], ...], OUTERMOST-LAST -- a reader
+                    // must not reverse this direction.
+                    let parseLevel (j: int) (le: JsonElement) : Result<int * bool, string> =
+                        if le.ValueKind <> JsonValueKind.Array || le.GetArrayLength() <> 2 then
+                            Error (sprintf "%s: blade.index_types[%d].levels[%d]: each level is a two-element array [rank, \"+\"|\"-\"]" where_ i j)
+                        else
+                            let items = le.EnumerateArray() |> Array.ofSeq
+                            let r = if items.[0].ValueKind = JsonValueKind.Number then items.[0].GetInt32() else -1
+                            let s = if items.[1].ValueKind = JsonValueKind.String then items.[1].GetString() else ""
+                            if r < 2 then
+                                // A rank-1 level is the trivial group and normalizes
+                                // away (OrbRank.normalizeLevels), so admitting it
+                                // would put TWO spellings of one class on disk.
+                                Error (sprintf "%s: blade.index_types[%d].levels[%d]: level rank %d is not >= 2 (a rank-1 level is the trivial group and must be omitted, so that one class has one spelling on disk)" where_ i j r)
+                            elif s <> "+" && s <> "-" then
+                                Error (sprintf "%s: blade.index_types[%d].levels[%d]: sign '%s' is not \"+\" or \"-\"" where_ i j s)
+                            else Ok (r, (s = "+"))
+                    match tryProp e "levels" with
+                    | Some ls when ls.ValueKind = JsonValueKind.Array ->
+                        let rec collectLevels j (acc: (int * bool) list) =
+                            let items = ls.EnumerateArray() |> Array.ofSeq
+                            if j >= items.Length then Ok (List.rev acc)
+                            else
+                                match parseLevel j items.[j] with
+                                | Ok lv -> collectLevels (j + 1) (lv :: acc)
+                                | Error err -> Error err
+                        (match collectLevels 0 [] with
+                         | Error err -> Error err
+                         | Ok levels ->
+                             if List.length levels < 2 then
+                                 // The one-spelling rule: OrbIdx<[(r,+)],n> IS SymIdx<r,n>
+                                 // and OrbIdx<[(r,-)],n> IS AntisymIdx<r,n>, so a depth-1
+                                 // orbit head would be a second spelling of a class that already has one.
+                                 Error (sprintf "%s: blade.index_types[%d]: an 'orbit' head needs depth >= 2 (got %d level(s)). A depth-1 class is written as kind 'sym' / 'antisym' -- OrbIdx<[(r,+)],n> IS SymIdx<r,n> and OrbIdx<[(r,-)],n> IS AntisymIdx<r,n>, and one class gets one spelling on disk"
+                                            where_ i (List.length levels))
+                             elif extent <= 0L then
+                                 Error (sprintf "%s: blade.index_types[%d]: orbit head needs a positive extent (the class's base extent n)" where_ i)
+                             else
+                                 let axes = levels |> List.fold (fun a (r, _) -> a * r) 1
+                                 Ok (Choice1Of2 { Sym = SymWreath; Rank = axes; Extent = extent; Levels = levels }))
+                    | _ ->
+                        Error (sprintf "%s: blade.index_types[%d]: orbit head is missing its 'levels' array" where_ i)
                 | "herm" ->
-                    Error (sprintf "%s: blade.index_types[%d]: kind 'herm' is reserved (constraint-coupled cells) and not supported in spec_version 1" where_ i)
+                    Error (sprintf "%s: blade.index_types[%d]: kind 'herm' is reserved (constraint-coupled cells) and not supported" where_ i)
                 | other ->
-                    Error (sprintf "%s: blade.index_types[%d]: unknown kind '%s' (sym | antisym | dense)" where_ i other)
+                    Error (sprintf "%s: blade.index_types[%d]: unknown kind '%s' (sym | antisym | dense%s)"
+                               where_ i other (if specVersion >= 2 then " | orbit" else ""))
             let rec collect i acc =
                 if i >= entries.Length then Ok (List.rev acc)
                 else
@@ -468,18 +499,36 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
             | Ok parsed ->
                 match parsed with
                 | Choice1Of2 group :: rest ->
+                    let isOrbit = (group.Sym = SymWreath)
+                    let headDesc =
+                        if isOrbit then sprintf "orbit %s" (Blade.IR.ppOrbitLevels group.Levels)
+                        elif group.Sym = SymSymmetric then "sym"
+                        else "antisym"
                     if rest |> List.exists (function Choice1Of2 _ -> true | _ -> false) then
-                        Error (sprintf "%s: blade layout supports exactly ONE packed group in spec_version 1 (and it must be leading)" where_)
+                        Error (sprintf "%s: blade layout supports exactly ONE packed group (and it must be leading)" where_)
+                    elif isOrbit && layoutStr <> "packed" then
+                        // 'packed-blocks' decomposes a SIMPLEX by tile multisets (the
+                        // block grid of a rank-r simplex is itself SymIdx<r,T>); a
+                        // wreath pool's rows shrink per LEVEL, with no tile multiset to decompose by.
+                        Error (sprintf "%s: blade.layout 'packed-blocks' is not defined for an orbit (iterated-wreath) head -- spec_version 2 is the flat single-pool layout only" where_)
+                    elif isOrbit && not (List.isEmpty rest) then
+                        // The in-memory side has no trailing dims for a wreath array at all, so this is a refusal, not a mis-shape.
+                        Error (sprintf "%s: blade orbit head with %d trailing dense dim(s) is not yet supported -- a wreath array's in-memory representation is a SOLE flat pool (no index group composes with it), so writers never emit trailing dims beside an orbit head"
+                                   where_ (List.length rest))
                     else
+                    match packedCardinalityChecked group with
+                    | Error detail ->
+                        Error (sprintf "%s: blade packed group (%s, extent %d): cardinality cannot be computed -- %s"
+                                   where_ headDesc group.Extent detail)
+                    | Ok card ->
                         let denseDims = rest |> List.map (function Choice2Of2 d -> d | _ -> 0L)
-                        let card = packedCardinality group
                         if layoutStr = "packed" then
                             match shape with
                             | pool :: tail when pool = card && tail = denseDims ->
                                 Ok (Some { Group = group; DenseDims = denseDims; Blocks = None })
                             | pool :: _ when pool <> card ->
-                                Error (sprintf "%s: blade packed group (%s, rank %d, extent %d) has cardinality %d but the pool dimension is %d — a corrupt or mislabeled store"
-                                           where_ (if group.Sym = SymSymmetric then "sym" else "antisym") group.Rank group.Extent card (List.head shape))
+                                Error (sprintf "%s: blade packed group (%s, rank %d, extent %d) has cardinality %d but the pool dimension is %d -- a corrupt or mislabeled store"
+                                           where_ headDesc group.Rank group.Extent card (List.head shape))
                             | _ ->
                                 Error (sprintf "%s: blade dense dims %A do not match the physical trailing shape %A" where_ denseDims (List.tail shape))
                         else
@@ -534,12 +583,11 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                                 | _ ->
                                     Error (sprintf "%s: blade decomposition needs positive integer tile and grid" where_)
                 | _ ->
-                    Error (sprintf "%s: blade layout's FIRST index_types entry must be the packed group (sym/antisym) in spec_version 1" where_)
+                    Error (sprintf "%s: blade layout's FIRST index_types entry must be the packed group (sym/antisym%s)"
+                               where_ (if specVersion >= 2 then "/orbit" else ""))
         | _ -> Error (sprintf "%s: blade layout is missing index_types" where_)
 
-// ============================================================================
-// Array metadata parsers (pure: JSON text in, Result out — unit-testable)
-// ============================================================================
+// Array metadata parsers (pure: JSON text in, Result out -- unit-testable)
 
 /// Parse a v2 array's `.zarray` (+ optional `.zattrs` for _ARRAY_DIMENSIONS).
 let parseArrayMetaV2 (name: string) (arrayDir: string) (zarrayJson: string) (zattrsJson: string option) : Result<ZarrArrayMeta, string> =
@@ -567,7 +615,7 @@ let parseArrayMetaV2 (name: string) (arrayDir: string) (zarrayJson: string) (zat
                         match tryProp c "id" with
                         | Some idEl when idEl.ValueKind = JsonValueKind.String -> idEl.GetString()
                         | _ -> "<unknown>"
-                    Some (sprintf "%s uses compressor '%s' — compressed Zarr stores are not supported in v1 (uncompressed only); see the ZarrCodec extension point" where_ cid)
+                    Some (sprintf "%s uses compressor '%s' -- compressed Zarr stores are not supported (uncompressed only); see the ZarrCodec extension point" where_ cid)
                 | None -> None
             match compressorErr with
             | Some e -> Error e
@@ -577,14 +625,14 @@ let parseArrayMetaV2 (name: string) (arrayDir: string) (zarrayJson: string) (zat
                 | None -> None
                 | Some f when f.ValueKind = JsonValueKind.Null -> None
                 | Some f when f.ValueKind = JsonValueKind.Array && f.GetArrayLength() = 0 -> None
-                | Some _ -> Some (sprintf "%s uses filters — not supported in v1 (uncompressed, unfiltered only)" where_)
+                | Some _ -> Some (sprintf "%s uses filters -- not supported (uncompressed, unfiltered only)" where_)
             match filtersErr with
             | Some e -> Error e
             | None ->
             let orderErr =
                 match tryProp root "order" with
                 | Some o when o.ValueKind = JsonValueKind.String && o.GetString() = "C" -> None
-                | Some o when o.ValueKind = JsonValueKind.String -> Some (sprintf "%s has order '%s' — only C (row-major) order is supported" where_ (o.GetString()))
+                | Some o when o.ValueKind = JsonValueKind.String -> Some (sprintf "%s has order '%s' -- only C (row-major) order is supported" where_ (o.GetString()))
                 | _ -> None  // missing order: tolerate, C assumed
             match orderErr with
             | Some e -> Error e
@@ -682,7 +730,7 @@ let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Resu
                         else Some (sprintf "%s: big-endian bytes codec is not supported (little-endian stores only)" where_)
                     | _ ->
                         let bad = names |> List.filter (fun n -> n <> "bytes")
-                        Some (sprintf "%s uses codec(s) %s — compressed/transformed Zarr stores are not supported in v1 (a single little-endian 'bytes' codec only); see the ZarrCodec extension point"
+                        Some (sprintf "%s uses codec(s) %s -- compressed/transformed Zarr stores are not supported (a single little-endian 'bytes' codec only); see the ZarrCodec extension point"
                                   where_ (bad @ (if List.isEmpty bad then names else []) |> List.map (sprintf "'%s'") |> String.concat ", "))
                 | Some _ -> Some (sprintf "%s: malformed codecs" where_)
             match codecErr with
@@ -732,9 +780,7 @@ let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Resu
     with ex ->
         Error (sprintf "array '%s': malformed zarr.json: %s" name ex.Message)
 
-// ============================================================================
 // Store discovery (the multi-file walk)
-// ============================================================================
 
 let private isValidIdent (s: string) =
     s.Length > 0
@@ -757,11 +803,9 @@ let private loadArrayV3 (name: string) (arrayDir: string) : ZarrArrayMeta =
     | Ok m -> m
     | Error e -> failwithf "Zarr store: %s" e
 
-/// Load all metadata from a Zarr store directory. Recognizes, in order:
-/// v3 (`zarr.json` group or single array), v2 group (`.zgroup` + array
-/// subdirectories), v2 single array (`.zarray`). Array names must be valid
-/// Blade identifiers (they become struct field names). One level of
-/// nesting only in v1 (arrays directly under the store root).
+/// Load all metadata from a Zarr store directory. Recognizes, in order: v3
+/// (`zarr.json` group or single array), v2 group (`.zgroup` + array
+/// subdirectories), v2 single array (`.zarray`). Array names must be valid Blade identifiers; one level of nesting only.
 let load (path: string) : ZarrStore =
     let full = Path.GetFullPath path
     let checkName (n: string) =
@@ -818,12 +862,9 @@ let load (path: string) : ZarrStore =
 let tryFindArray (store: ZarrStore) (varName: string) : ZarrArrayMeta option =
     store.Arrays |> List.tryFind (fun a -> a.Name = varName)
 
-// ============================================================================
 // Chunk-grid math
-// ============================================================================
 
-/// Chunk key for a grid coordinate: v2 "i.j" (rank-0: "0"); v3 default
-/// "c/i/j" (rank-0: "c"); v3 "v2"-encoding like v2.
+/// Chunk key for a grid coordinate: v2 "i.j" (rank-0: "0"); v3 default "c/i/j" (rank-0: "c"); v3 "v2"-encoding like v2.
 let chunkKey (meta: ZarrArrayMeta) (coords: int64 list) : string =
     let joined = coords |> List.map string |> String.concat meta.ChunkKeySep
     match meta.ChunkKeyPrefix, coords with
@@ -856,9 +897,7 @@ let rowMajorStrides (lens: int list) : int list =
             (List.head tail * List.head rest) :: tail
     go lens
 
-// ============================================================================
 // Compile-time data read (chunk assembly for the static fold + tests)
-// ============================================================================
 
 let private decodeFloatCell (code: string) (b: byte[]) (off: int) : float =
     match code with
@@ -878,9 +917,7 @@ let private decodeIntCell (code: string) (b: byte[]) (off: int) : int64 =
     | "u8" -> int64 (BitConverter.ToUInt64(b, off))
     | c -> failwithf "decodeIntCell: not an integer code '%s'" c
 
-/// Read an array's full payload by assembling its chunks. Missing chunk
-/// files fill with fill_value (loud error when fill_value is null); chunk
-/// files must be exactly full-chunk-sized (edge chunks are stored padded).
+/// Read an array's full payload by assembling its chunks. Missing chunk files fill with fill_value (loud error when null); chunk files must be exactly full-chunk-sized (edge chunks are stored padded).
 let readArrayData (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
     try
         let shape = meta.Shape |> List.map int
@@ -905,13 +942,13 @@ let readArrayData (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
                 if File.Exists file then
                     let raw = decodeChunk meta.Codec (File.ReadAllBytes file)
                     if raw.Length <> chunkCount * bs then
-                        failwithf "chunk '%s' of array '%s' is %d bytes, expected %d — a compressed or corrupt store?"
+                        failwithf "chunk '%s' of array '%s' is %d bytes, expected %d -- a compressed or corrupt store?"
                             key meta.Name raw.Length (chunkCount * bs)
                     Some raw
                 else
                     match meta.FillValue with
                     | FillNone ->
-                        failwithf "chunk '%s' of array '%s' is missing and fill_value is null — refusing to invent data" key meta.Name
+                        failwithf "chunk '%s' of array '%s' is missing and fill_value is null -- refusing to invent data" key meta.Name
                     | _ -> None
             // Copy the chunk's intersection with the array bounds (edge
             // chunks are stored full-size; the overhang is ignored).
@@ -952,10 +989,8 @@ let readVarData (path: string) (varName: string) : Result<ZarrVarData, string> =
         Error ex.Message
 
 /// Canonical pool of a packed variable regardless of physical layout:
-/// "packed" reads the pool directly; "packed-blocks" reassembles it from
-/// the padded block rows via the shared cell map. Logical DimLengths =
-/// [cardinality] @ dense dims. Ground truth for tests and the differential
-/// gate between the two layouts.
+/// "packed" reads the pool directly; "packed-blocks" reassembles it from the
+/// padded block rows via the shared cell map. Ground truth for tests and the differential gate between the two layouts.
 let readPackedPool (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
     match meta.Blade with
     | None -> Error (sprintf "variable '%s' has no blade packed layout" meta.Name)
@@ -984,9 +1019,7 @@ let readPackedPool (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
                 | ZFloats xs -> Ok { DimLengths = dims; Payload = ZFloats (remap xs 0.0) }
                 | ZInts xs -> Ok { DimLengths = dims; Payload = ZInts (remap xs 0L) }
 
-// ============================================================================
 // Mapping to Blade IR types (mirrors NetcdfProvider.ncFileToModule)
-// ============================================================================
 
 /// Build a named IRIndexType for a dimension (name, extent).
 let zarrDimToNamedIndexType (builder: IRBuilder) (name: string, length: int64) : string * IRIndexType =
@@ -1001,8 +1034,7 @@ let zarrDimToNamedIndexType (builder: IRBuilder) (name: string, length: int64) :
     }
     (name, idx)
 
-/// Resolved dimension names for an array: its DimNames when present (count
-/// must match rank), synthesized "<var>_dim<i>" otherwise.
+/// Resolved dimension names for an array: DimNames when present (count must match rank), synthesized "<var>_dim<i>" otherwise.
 let private resolvedDimNames (a: ZarrArrayMeta) : string list =
     match a.DimNames with
     | Some ns when ns.Length = a.Shape.Length -> ns
@@ -1010,27 +1042,23 @@ let private resolvedDimNames (a: ZarrArrayMeta) : string list =
         failwithf "Zarr array '%s': %d dimension names for rank %d" a.Name ns.Length a.Shape.Length
     | None -> a.Shape |> List.mapi (fun i _ -> sprintf "%s_dim%d" a.Name i)
 
-/// Convert a ZarrStore into an IRModule using structs for dims/vars —
-/// the same shape ncFileToModule produces:
+/// Converts a ZarrStore into an IRModule using structs for dims/vars, the
+/// same shape ncFileToModule produces:
 ///
 ///   type x = Idx<20>          (named index types, one per dimension)
 ///   struct sample__dims = { x: Array<Float64, Idx<x>> }   (coordinate arrays)
 ///   struct sample__vars = { A: Array<Float32, Idx<x>, ...> }
 ///
-/// The structs are namespaced by `moduleName` (the receiving binding) rather
-/// than named the bare "dims"/"vars", because registerProviderModule adds them
-/// to a single flat TypeDefs map: with literal names a second load in the same
-/// program silently overwrote the first, and since field access re-resolves the
-/// struct name at every use site, `a.vars.X` after `let b = z.load(..)` then
-/// type-checked against b's fields with no diagnostic. CsvProvider established
-/// the convention; registerProviderModule's `fieldFor` resolves the suffix.
+/// The structs are namespaced by `moduleName` rather than the bare
+/// "dims"/"vars": registerProviderModule keeps one flat TypeDefs map, so
+/// literal names would let a second load silently overwrite the first;
+/// `fieldFor` resolves the suffix.
 ///
 /// Coordinate arrays (1-D, named after their dimension) go in dims; unlike
-/// NetCDF (whose dims struct hardcodes Int64 coordinates), a Zarr
-/// coordinate array's ACTUAL element type is used when the array exists.
-/// Dimension names come from xarray's _ARRAY_DIMENSIONS (v2) /
-/// dimension_names (v3); arrays without names get per-array synthesized
-/// dimensions. Same-named dimensions must agree on extent across arrays.
+/// NetCDF (which hardcodes Int64 coordinates), a Zarr coordinate array's
+/// ACTUAL element type is used when it exists. Dimension names come from
+/// xarray's _ARRAY_DIMENSIONS (v2) / dimension_names (v3); unnamed arrays
+/// get synthesized dimensions. Same-named dimensions must agree on extent.
 let zarrStoreToModule
     (builder: IRBuilder)
     (moduleName: string)
@@ -1038,11 +1066,9 @@ let zarrStoreToModule
     (externalDimMap: Map<string, IRIndexType> option)
     : IRModule =
 
-    // Step 0: dimension universe (first-seen order), extent-consistent.
-    // A blade-packed array's POOL dimension is not a shareable dimension —
-    // its physical extent is a derived cardinality and its index space is
-    // the packed group itself (typed per-var below) — so only the trailing
-    // dense dims join the universe.
+    // Dimension universe (first-seen order), extent-consistent. A blade-packed
+    // array's POOL dimension is not shareable (its extent is a derived
+    // cardinality, typed per-var below), so only trailing dense dims join it.
     let sharedDims (a: ZarrArrayMeta) : (string * int64) list =
         let all = List.zip (resolvedDimNames a) a.Shape
         match a.Blade with
@@ -1063,7 +1089,7 @@ let zarrStoreToModule
                 dimExtents.[dn] <- ext
                 dimOrder.Add dn
 
-    // Step 1: named index types.
+    // Named index types.
     let (indexTypeDefs, dimMap) =
         match externalDimMap with
         | Some dm -> ([], dm)
@@ -1083,7 +1109,7 @@ let zarrStoreToModule
         |> Option.map (fun a -> a.Dtype.Elem)
         |> Option.defaultValue ETInt64
 
-    // Step 2: dims struct — one coordinate array per dimension.
+    // dims struct: one coordinate array per dimension.
     let dimsFields =
         dimOrder |> List.ofSeq |> List.map (fun dn ->
             let idx = dimMap.[dn]
@@ -1091,11 +1117,9 @@ let zarrStoreToModule
             (dn, arrType))
     let dimsStruct = IRTDStruct(sprintf "%s__dims" moduleName, dimsFields)
 
-    // Step 3: vars struct — data arrays (coordinate arrays excluded).
-    // A blade-packed array types with its packed group as the LEADING index
-    // type — the exact record shape source-level SymIdx/AntisymIdx lowering
-    // produces (TypeCheck.lowerIndexType), so downstream compact codegen
-    // engages identically.
+    // vars struct: data arrays (coordinate arrays excluded). A blade-packed
+    // array types with its packed group as the LEADING index type, the exact
+    // record shape source-level SymIdx/AntisymIdx lowering produces.
     let varsFields =
         store.Arrays
         |> List.filter (not << isCoordinateArr)
@@ -1110,15 +1134,27 @@ let zarrStoreToModule
                 match a.Blade with
                 | Some layout ->
                     let g = layout.Group
-                    let packedIdx = {
-                        Id = builder.FreshId()
-                        Rank = g.Rank
-                        Extent = IRLit (IRLitInt g.Extent)
-                        Symmetry = g.Sym
-                        Tag = None; IxKind = IxKPlain
-                        Kind = SDimension
-                        Dependencies = []
-                    }
+                    let packedIdx =
+                        if g.Sym = SymWreath then
+                            // Routed through the SAME normalization + constructor
+                            // (IR.orbitNormalForm -> IR.mkWreathIndexRecord) the
+                            // surface type and deduction use, so a loaded and a
+                            // deduced class are the SAME record. The other normal
+                            // forms below are backstops (depth <= 1 was refused at parse).
+                            match orbitNormalForm g.Levels with
+                            | OrbNfWreath ls ->
+                                mkWreathIndexRecord (builder.FreshId()) ls (IRLit (IRLitInt g.Extent))
+                            | _ ->
+                                failwithf "Zarr array '%s': orbit head %s normalizes to depth <= 1, which parseBladeLayout rejects -- a depth-1 class is stored as kind 'sym'/'antisym'"
+                                          a.Name (ppOrbitLevels g.Levels)
+                        else
+                            { Id = builder.FreshId()
+                              Rank = g.Rank
+                              Extent = IRLit (IRLitInt g.Extent)
+                              Symmetry = g.Sym
+                              Tag = None; IxKind = IxKPlain
+                              Kind = SDimension
+                              Dependencies = [] }
                     packedIdx :: trailingIdx
                 | None -> trailingIdx
             let arrType = {
@@ -1140,7 +1176,9 @@ let zarrStoreToModule
         ProviderWrites = Map.empty
         RandomInits = Map.empty
         CompoundInits = Map.empty
+        SparseInits = Map.empty
         MutableArrayLets = Set.empty
+        DerivedFuncOrigins = Map.empty
     }
 
 /// Convenience: load a store and produce a module in one step (contract).
@@ -1148,9 +1186,7 @@ let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRMo
     let store = load path
     zarrStoreToModule builder moduleName store None
 
-// ============================================================================
 // Store fingerprint / version stamp (multi-file provenance)
-// ============================================================================
 
 /// Every file under the store, sorted by relative path (deterministic).
 let private storeFiles (root: string) : (string * string) list =
@@ -1161,8 +1197,7 @@ let private storeFiles (root: string) : (string * string) list =
         |> List.ofArray
     else []
 
-/// SHA256 over (relative path, contents) of every file in the store —
-/// metadata AND chunks, so provenance pins the actual payload.
+/// SHA256 over (relative path, contents) of every file in the store -- metadata AND chunks, so provenance pins the actual payload.
 let storeFingerprint (root: string) : string =
     use sha = System.Security.Cryptography.SHA256.Create()
     for (rel, file) in storeFiles root do
@@ -1181,9 +1216,7 @@ let storeVersionStamp (root: string) : int64 =
         |> function [] -> 0L | ts -> List.max ts
     with _ -> 0L
 
-// ============================================================================
 // C++ code generation (pure std C++17: <fstream>, <filesystem>)
-// ============================================================================
 
 module CppZarr =
 
@@ -1227,20 +1260,15 @@ module CppZarr =
         elif Double.IsNegativeInfinity f then "(-std::numeric_limits<double>::infinity())"
         else f.ToString("R", Globalization.CultureInfo.InvariantCulture)
 
-    /// A loud runtime failure (the ncChecked discipline: never exit 0 with
-    /// an uninitialized buffer).
+    /// A loud runtime failure (the ncChecked discipline: never exit 0 with an uninitialized buffer).
     let private zExit (message: string) : string =
         sprintf "{ std::cerr << \"Zarr error: %s\" << std::endl; std::exit(1); }" message
 
-    /// The chunk-assembly core shared by the dense and packed readers:
-    /// emits C++ that assembles the (physical, dense) on-disk array into a
-    /// flat row-major buffer `<cppVarName>_flat` of C++ type `elemCpp`.
-    /// All metadata (shape, chunk grid, dtype, fill, key encoding) is baked
-    /// at compile time from the store's actual metadata — the generated
-    /// program parses no JSON. Missing chunks fill with fill_value (or fail
-    /// loudly when fill_value is null); a missing/renamed store fails
-    /// loudly at the metadata existence check. The caller owns (and must
-    /// delete[]) `<cppVarName>_flat`.
+    /// The chunk-assembly core shared by the dense and packed readers: emits
+    /// C++ assembling the (physical, dense) on-disk array into a flat
+    /// row-major buffer `<cppVarName>_flat` of type `elemCpp`. All metadata is
+    /// baked at compile time -- the generated program parses no JSON. Missing
+    /// chunks fill with fill_value (or fail loudly when null). Caller owns (and must delete[]) `<cppVarName>_flat`.
     let private genAssembleFlat (storePath: string) (store: ZarrStore) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string) : string list =
         let v = cppVarName
         let varName = meta.Name
@@ -1320,7 +1348,7 @@ module CppZarr =
         let presentBranch =
             [ gInd + sprintf "if (%s_cf) {" v
               gInd + sprintf "    %s_cf.read((char*)%s_cbuf, %d);" v v chunkBytes
-              gInd + sprintf "    if (%s_cf.gcount() != (std::streamsize)%d) { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is short (expected %d bytes) — a compressed or corrupt store?\" << std::endl; std::exit(1); }"
+              gInd + sprintf "    if (%s_cf.gcount() != (std::streamsize)%d) { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is short (expected %d bytes) -- a compressed or corrupt store?\" << std::endl; std::exit(1); }"
                   v chunkBytes v varName chunkBytes ]
             @ (copyLoops (sprintf "%s_flat[%s] = (%s)%s_cbuf[%s];" v gIdx elemCpp v cIdx))
         let missingBranch =
@@ -1349,10 +1377,9 @@ module CppZarr =
         @ gridClose
         @ [ sprintf "delete[] %s_cbuf;" v ]
 
-    /// Generate C++ to read a DENSE variable from an uncompressed Zarr
-    /// store: chunk assembly into `<v>_flat`, then the same materialization
-    /// form as CppNetcdf.genReadVar — nested Array via allocate<>,
-    /// flat->nested copy, buffers released.
+    /// Generates C++ to read a DENSE variable: chunk assembly into
+    /// `<v>_flat`, then the same materialization as CppNetcdf.genReadVar
+    /// (nested Array via allocate<>, flat->nested copy, buffers released).
     let genReadVar (storePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
         let store = load storePath
         let meta =
@@ -1395,21 +1422,13 @@ module CppZarr =
         assemble @ materialize
 
     /// Blocks-layout pool assembly with PER-BLOCK chunk I/O: for each block
-    /// (tile multiset — symmetric::unlinearize over tiles for BOTH
-    /// symmetries), optionally skip it (window / MPI cell-range ownership),
-    /// read ITS chunk file only, and scatter its cells into the canonical
-    /// pool — branch-free intra-block bounds, pool index via linearize.
-    /// Antisym blocks with a repeated narrow tile iterate zero cells (the
-    /// empty-diagonal-block case).
-    ///
-    /// distribute: rank-scoped I/O — each rank handles only blocks whose
-    /// pool range [first-cell, last-cell] intersects its balanced flat-cell
-    /// range, then MPI_Allgatherv restores the full pool buffer on all
-    /// ranks. Requires the program's MPI scaffolding (rank/size globals,
-    /// MPI_Init) — the codegen intercept only sets it when present.
-    /// windowSkip: [wlo, whi) coordinate window — blocks with any tile
-    /// interval disjoint from the window are not read at all (the cells
-    /// themselves are filtered by the caller's extraction pass).
+    /// (tile multiset), optionally skip it (window / MPI ownership), read ITS
+    /// chunk file only, and scatter its cells into the canonical pool
+    /// (branch-free intra-block bounds, pool index via linearize). Antisym
+    /// blocks with a repeated narrow tile iterate zero cells (empty-diagonal-block).
+    /// distribute: rank-scoped I/O, each rank handling only blocks whose pool
+    /// range intersects its balanced flat-cell range, then MPI_Allgatherv
+    /// restores the full pool on all ranks. windowSkip: blocks with any tile interval disjoint from [wlo, whi) are skipped entirely.
     let private genAssemblePackedBlocks
             (storePath: string) (store: ZarrStore) (meta: ZarrArrayMeta)
             (layout: BladeLayout) (info: SimplexBlocksInfo)
@@ -1440,7 +1459,7 @@ module CppZarr =
             | OrderLex -> []
             | OrderPath ->
                 if nBlocks > 1_000_000L then
-                    failwithf "Zarr codegen: variable '%s': path-order block table would need %d entries — beyond the emission cap" meta.Name nBlocks
+                    failwithf "Zarr codegen: variable '%s': path-order block table would need %d entries -- beyond the emission cap" meta.Name nBlocks
                 let rows = SimplexBlocks.pathRows r T
                 [ sprintf "static const size_t %s_sbrow[%d] = { %s };" v rows.Length (rows |> Array.map string |> String.concat ", ") ]
         let rowExpr =
@@ -1517,7 +1536,7 @@ module CppZarr =
                | _ -> [])
             @ [ sprintf "    if (%s_have) {" v
                 sprintf "        %s_cf.read((char*)%s_cbuf, %d);" v v chunkBytes
-                sprintf "        if (%s_cf.gcount() != (std::streamsize)%d) { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is short (expected %d bytes) — a compressed or corrupt store?\" << std::endl; std::exit(1); }" v chunkBytes v meta.Name chunkBytes
+                sprintf "        if (%s_cf.gcount() != (std::streamsize)%d) { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is short (expected %d bytes) -- a compressed or corrupt store?\" << std::endl; std::exit(1); }" v chunkBytes v meta.Name chunkBytes
                 "    }" ]
 
         // Branch-free intra-block bounds per level.
@@ -1611,18 +1630,12 @@ module CppZarr =
             sprintf "delete[] %s_cbuf;" v ]
         @ gather
 
-    /// Generate C++ assembling a blade-packed variable's canonical flat
-    /// pool into `<cppVarName>_flat` (provider contract GenReadPacked: the
-    /// codegen intercept performs the packed allocation and pool copy, and
-    /// releases the buffer). Validates the declared Blade index types
-    /// against the store's blade layout — group symmetry/rank and trailing
-    /// dense extents must agree; the leading extent is the group extent for
-    /// whole reads, hi-lo for windowed reads. Dispatches on the store's
-    /// physical layout: flat pool ("packed") or simplex-blocks rows
-    /// ("packed-blocks"). opts.Distribute emits the MPI rank-scoped read
-    /// (blocks layout only — flat stores read fully on every rank);
-    /// opts.Window emits the sub-simplex extraction (blocks stores skip
-    /// non-intersecting chunks entirely).
+    /// Generates C++ assembling a blade-packed variable's canonical flat pool
+    /// into `<cppVarName>_flat` (the codegen intercept performs allocation,
+    /// copy, and release). Validates the declared Blade index types against
+    /// the store's layout, then dispatches on physical layout: flat pool
+    /// ("packed") or simplex-blocks rows ("packed-blocks"). opts.Distribute
+    /// emits the MPI rank-scoped read (blocks only); opts.Window emits the sub-simplex extraction.
     let genReadPacked (storePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) (opts: Blade.ProviderRegistry.PackedReadOpts) : string list =
         let store = load storePath
         let meta =
@@ -1632,6 +1645,32 @@ module CppZarr =
         match meta.Blade with
         | None ->
             failwithf "Zarr codegen: variable '%s' has no blade packed layout but was typed packed (this indicates a typing inconsistency)" varName
+        | Some layout when layout.Group.Sym = SymWreath ->
+            // The store's pool IS the in-memory representation, so assembly is
+            // the ordinary flat chunk walk and downstream "materialization" is
+            // a straight copy. Everything that could go wrong is a MISMATCH
+            // between the declared class and the stored one, checked here rather than trusted.
+            let g = layout.Group
+            (match arrType.IndexTypes with
+             | [ lead ] when lead.Symmetry = SymWreath ->
+                 let declLevels = Blade.IR.orbitLevelsOf lead
+                 let declExtent =
+                     match Blade.IR.orbitBaseExtent lead with
+                     | IRLit (IRLitInt n) -> n
+                     | _ -> -1L
+                 if declLevels <> g.Levels || declExtent <> g.Extent then
+                     failwithf "Zarr codegen: variable '%s': declared OrbIdx<%s, %d> does not match the store's orbit head OrbIdx<%s, %d>"
+                               varName (Blade.IR.ppOrbitLevels declLevels) declExtent
+                               (Blade.IR.ppOrbitLevels g.Levels) g.Extent
+             | _ ->
+                 failwithf "Zarr codegen: variable '%s': the store declares an orbit (iterated-wreath) head, so the variable must type as a SOLE OrbIdx group" varName)
+            if opts.Window.IsSome then
+                failwithf "Zarr codegen: variable '%s': z.read_window over an OrbIdx (iterated-wreath) pool is not supported -- a wreath class has no translated sub-class to window into" varName
+            if opts.Distribute then
+                failwithf "Zarr codegen: variable '%s': the MPI-distributed read is not defined for an OrbIdx (iterated-wreath) pool (spec_version 2 is the flat single-pool layout only)" varName
+            if layout.Blocks.IsSome then
+                failwithf "Zarr codegen: variable '%s': 'packed-blocks' is not defined for an orbit head" varName
+            genAssembleFlat storePath store meta cppVarName (elemCppOf arrType.ElemType)
         | Some layout ->
             let g = layout.Group
             let expectedLead =
@@ -1663,10 +1702,9 @@ module CppZarr =
                  | None -> genAssembleFlat storePath store meta cppVarName elemCpp
                  | Some info -> genAssemblePackedBlocks storePath store meta layout info cppVarName elemCpp opts.Distribute None)
             | Some (wlo, whi) ->
-                // Assemble the SOURCE pool (blocks stores skip chunks whose
-                // tiles miss the window), then extract the translated
-                // sub-simplex: window cells enumerate in ascending-lex, so
-                // the destination index is a running counter.
+                // Assemble the SOURCE pool (blocks stores skip chunks whose tiles
+                // miss the window), then extract the translated sub-simplex:
+                // window cells enumerate ascending-lex, so the destination index is a running counter.
                 let v = cppVarName
                 let srcV = v + "_ws"
                 let assemble =
@@ -1718,10 +1756,7 @@ module CppZarr =
                 @ wClose
                 @ [ sprintf "delete[] %s_flat;" srcV ]
 
-    /// STREAMED fiber reads, hoisted prologue: metadata existence check,
-    /// the fiber buffer (trailing-axis length), a per-t-chunk segment
-    /// buffer, and the fill value for missing chunks. Dense variables
-    /// only in v1 (site dims dense, fiber = the LAST axis).
+    /// STREAMED fiber reads, hoisted prologue: metadata existence check, the fiber buffer, a per-t-chunk segment buffer, and the fill value. Dense variables only (site dims dense, fiber = the LAST axis).
     let genStreamOpen (storePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
         let store = load storePath
         let meta =
@@ -1729,7 +1764,7 @@ module CppZarr =
             | Some m -> m
             | None -> failwithf "Zarr codegen: variable '%s' not found in store '%s'" varName storePath
         if meta.Blade.IsSome then
-            failwithf "Zarr stream of '%s': packed variables are not streamable in v1 (bind with .read)" varName
+            failwithf "Zarr stream of '%s': packed variables are not streamable (bind with .read)" varName
         if arrType.IndexTypes |> List.exists (fun ix -> ix.Symmetry <> SymNone || ix.Rank <> 1) then
             failwithf "Zarr stream of '%s': dense variables only" varName
         if meta.Shape.Length < 2 then
@@ -1755,11 +1790,9 @@ module CppZarr =
           sprintf "%s* %s_fseg = new %s[%d];" diskCpp v diskCpp ctT ]
         @ fillDecl
 
-    /// STREAMED fiber reads, in-nest: assemble one trailing-axis fiber at
-    /// the given site coordinates from the chunk file(s) covering it —
-    /// one seek+read per t-chunk (the fiber is contiguous WITHIN a chunk
-    /// because the fiber axis is the innermost). Missing chunks fill (or
-    /// fail loudly under a null fill_value).
+    /// STREAMED fiber reads, in-nest: assemble one trailing-axis fiber at the
+    /// given site coordinates, one seek+read per t-chunk (contiguous WITHIN a
+    /// chunk since the fiber axis is innermost). Missing chunks fill (or fail loudly under a null fill_value).
     let genStreamFiber (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (siteExprs: string list) (arrType: IRArrayType) : string list =
         let store = load storePath
         let meta =
@@ -1811,25 +1844,20 @@ module CppZarr =
           sprintf "    if (%s_cf) {" v
           sprintf "        %s_cf.seekg((std::streamoff)((%s) * %d));" v offExpr bs
           sprintf "        %s_cf.read((char*)%s_fseg, %s_len * %d);" v v v bs
-          sprintf "        if (%s_cf.gcount() != (std::streamsize)(%s_len * %d)) { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is short — a compressed or corrupt store?\" << std::endl; std::exit(1); }" v v bs v varName
+          sprintf "        if (%s_cf.gcount() != (std::streamsize)(%s_len * %d)) { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is short -- a compressed or corrupt store?\" << std::endl; std::exit(1); }" v v bs v varName
           sprintf "        for (size_t %s_q = 0; %s_q < %s_len; %s_q++) %s[%s_tc * %d + %s_q] = (%s)%s_fseg[%s_q];" v v v v destBuf v ctT v elemCpp v v ]
         @ missingBranch
         @ [ "}" ]
 
-    /// Generate C++ to write a variable as an uncompressed Zarr v2 array
-    /// (one chunk = the whole array). v2 is the write format: flat
-    /// "."-separated chunk keys (no per-chunk directories) and readable by
-    /// every zarr-python/xarray in the field; our own reader handles both
-    /// versions, so roundtrips are format-agnostic. Multiple writes into
-    /// one store root accumulate arrays (the .zgroup is idempotent);
-    /// re-writing the same variable overwrites it. The caller provides
-    /// `<cppVarName>_flat` (row-major) — see the codegen write intercept.
+    /// Generates C++ to write a variable as an uncompressed Zarr v2 array
+    /// (one chunk = the whole array): flat "."-separated chunk keys, readable
+    /// by every zarr-python/xarray. Multiple writes into one store root
+    /// accumulate arrays (.zgroup is idempotent); re-writing overwrites. The caller provides `<cppVarName>_flat` (row-major).
     let genWriteVar (storePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) (dimNames: string list) : string list =
         let v = cppVarName
         // A packed (SymIdx/AntisymIdx) leading group writes as its POOL:
-        // on-disk shape = [cardinality] @ trailing dense extents, with the
-        // blade layout attribute recording the group. The flat buffer the
-        // intercept hands over is already in canonical pool order.
+        // on-disk shape = [cardinality] @ trailing dense extents. The flat
+        // buffer the intercept hands over is already in canonical pool order.
         let packedLead =
             match arrType.IndexTypes with
             | lead :: _ when lead.Symmetry <> SymNone && lead.Rank >= 2 -> Some lead
@@ -1840,6 +1868,31 @@ module CppZarr =
             | _ -> failwithf "Zarr write of '%s' requires literal extents (%s)" varName context
         let (shape, bladeAttrJson) =
             match packedLead with
+            | Some lead when lead.Symmetry = SymWreath ->
+                // The array IS the flat pool, so the on-disk shape is [cardinality]
+                // and the caller's buffer is copied verbatim (no trailing dims: a wreath group never composes with another index group).
+                if arrType.IndexTypes.Length <> 1 then
+                    failwithf "Zarr write of '%s': an OrbIdx (iterated-wreath) group is stored as a SOLE flat pool; %d index groups were declared"
+                              varName arrType.IndexTypes.Length
+                let levels = Blade.IR.orbitLevelsOf lead
+                if List.isEmpty levels then
+                    failwithf "Zarr write of '%s': the wreath record carries no level list (its Extent must be the IROrbitClass marker)" varName
+                let n = litExtent "orbit base extent" (Blade.IR.orbitBaseExtent lead)
+                let group = { Sym = SymWreath; Rank = lead.Rank; Extent = n; Levels = levels }
+                let card =
+                    match packedCardinalityChecked group with
+                    | Ok c -> c
+                    | Error detail ->
+                        failwithf "Zarr write of '%s': OrbIdx%s at extent %d -- %s"
+                                  varName (Blade.IR.ppOrbitLevels levels) n detail
+                let levelsJson =
+                    levels
+                    |> List.map (fun (r, plus) -> sprintf "[%d, \\\"%s\\\"]" r (if plus then "+" else "-"))
+                    |> String.concat ", "
+                let attr =
+                    sprintf ", \\\"blade\\\": {\\\"spec_version\\\": 2, \\\"layout\\\": \\\"packed\\\", \\\"order\\\": \\\"ascending-lex\\\", \\\"index_types\\\": [{\\\"kind\\\": \\\"orbit\\\", \\\"levels\\\": [%s], \\\"extent\\\": %d}], \\\"decomposition\\\": {\\\"scheme\\\": \\\"flat-ranges\\\"}}"
+                        levelsJson n
+                ([card], attr)
             | Some lead ->
                 (match lead.Symmetry with
                  | SymSymmetric | SymAntisymmetric -> ()
@@ -1849,12 +1902,15 @@ module CppZarr =
                         if ix.Symmetry <> SymNone || ix.Rank <> 1 then
                             failwithf "Zarr write of '%s': only one leading packed group plus dense trailing dims is supported" varName
                         litExtent "trailing dim" ix.Extent)
-                let group = { Sym = lead.Symmetry; Rank = lead.Rank; Extent = litExtent "packed extent" lead.Extent }
+                let group = { Sym = lead.Symmetry; Rank = lead.Rank; Extent = litExtent "packed extent" lead.Extent; Levels = [] }
                 let card = packedCardinality group
                 let kindStr = if group.Sym = SymSymmetric then "sym" else "antisym"
                 let idxEntries =
                     (sprintf "{\\\"kind\\\": \\\"%s\\\", \\\"rank\\\": %d, \\\"extent\\\": %d}" kindStr group.Rank group.Extent)
                     :: (trailing |> List.map (sprintf "{\\\"kind\\\": \\\"dense\\\", \\\"extent\\\": %d}"))
+                // spec_version stays 1 for a depth-1 head: version 2 admits
+                // sym/antisym unchanged, so stamping 2 here would only make
+                // today's stores unreadable by a v1 reader for no gain.
                 let attr =
                     sprintf ", \\\"blade\\\": {\\\"spec_version\\\": 1, \\\"layout\\\": \\\"packed\\\", \\\"order\\\": \\\"ascending-lex\\\", \\\"index_types\\\": [%s], \\\"decomposition\\\": {\\\"scheme\\\": \\\"flat-ranges\\\"}}"
                         (String.concat ", " idxEntries)
@@ -1900,7 +1956,7 @@ module CppZarr =
                 (wCheck (sprintf "%s_ch" v) (sprintf "cannot write chunk '%s/%s'" arrayDir chunkKey0))
         ]
 
-    /// Required C++ includes for Zarr I/O (std only — no link flags).
+    /// Required C++ includes for Zarr I/O (std only -- no link flags).
     let genIncludes () : string list =
         [ "#include <fstream>"
           "#include <filesystem>"
@@ -1908,9 +1964,7 @@ module CppZarr =
           "#include <string>"
           "#include <limits>" ]
 
-// ============================================================================
 // F#-side store writer (fixtures and programmatic store creation)
-// ============================================================================
 
 module ZarrWrite =
 
@@ -1931,9 +1985,7 @@ module ZarrWrite =
         Data: WritePayload
         /// Chunk grid coordinates to leave UNWRITTEN (fill_value tests).
         OmitChunks: int64 list list
-        /// Triangular-decomposed layout: Shape must be [cardinality] @
-        /// DenseDims and Data must already be in canonical ascending-lex
-        /// pool order. Writes the `blade` attribute.
+        /// Triangular-decomposed layout: Shape must be [cardinality] @ DenseDims and Data already in canonical ascending-lex pool order. Writes the `blade` attribute.
         Blade: BladeLayout option
     }
 
@@ -1974,13 +2026,23 @@ module ZarrWrite =
         | FillInt n -> string n
         | FillNone -> "null"
 
-    /// The `blade` attribute value for a packed layout (plain JSON — the
-    /// F# writer emits real files, no C++ string escaping).
+    /// The `blade` attribute value for a packed layout (plain JSON -- the F#
+    /// writer emits real files, no C++ escaping). spec_version 2 is stamped
+    /// ONLY for an orbit head, so a depth-1 store stays byte-identical to what a v1 reader wrote/reads.
     let private bladeAttrValue (layout: BladeLayout) : string =
-        let kindStr = if layout.Group.Sym = SymSymmetric then "sym" else "antisym"
+        let isOrbit = (layout.Group.Sym = SymWreath)
+        let headEntry =
+            if isOrbit then
+                let levelsJson =
+                    layout.Group.Levels
+                    |> List.map (fun (r, plus) -> sprintf "[%d, \"%s\"]" r (if plus then "+" else "-"))
+                    |> String.concat ", "
+                sprintf "{\"kind\": \"orbit\", \"levels\": [%s], \"extent\": %d}" levelsJson layout.Group.Extent
+            else
+                let kindStr = if layout.Group.Sym = SymSymmetric then "sym" else "antisym"
+                sprintf "{\"kind\": \"%s\", \"rank\": %d, \"extent\": %d}" kindStr layout.Group.Rank layout.Group.Extent
         let idxEntries =
-            (sprintf "{\"kind\": \"%s\", \"rank\": %d, \"extent\": %d}" kindStr layout.Group.Rank layout.Group.Extent)
-            :: (layout.DenseDims |> List.map (sprintf "{\"kind\": \"dense\", \"extent\": %d}"))
+            headEntry :: (layout.DenseDims |> List.map (sprintf "{\"kind\": \"dense\", \"extent\": %d}"))
         let (layoutStr, decompJson) =
             match layout.Blocks with
             | None -> ("packed", "{\"scheme\": \"flat-ranges\"}")
@@ -1988,14 +2050,12 @@ module ZarrWrite =
                 let orderStr = match i.Order with OrderLex -> "ascending-lex" | OrderPath -> "path"
                 ("packed-blocks",
                  sprintf "{\"scheme\": \"simplex-blocks\", \"tile\": %d, \"grid\": %d, \"block_order\": \"%s\"}" i.Tile i.Grid orderStr)
-        sprintf "{\"spec_version\": 1, \"layout\": \"%s\", \"order\": \"ascending-lex\", \"index_types\": [%s], \"decomposition\": %s}"
-            layoutStr (String.concat ", " idxEntries) decompJson
+        sprintf "{\"spec_version\": %d, \"layout\": \"%s\", \"order\": \"ascending-lex\", \"index_types\": [%s], \"decomposition\": %s}"
+            (if isOrbit then 2 else 1) layoutStr (String.concat ", " idxEntries) decompJson
 
     /// Normalize a blocks-layout WriteVar to its physical form: the caller
     /// supplies the LOGICAL view (Shape = [cardinality] @ dense, Data = the
-    /// canonical pool); this permutes/pads into block rows and sets the
-    /// mandated physical shape/chunks ([blockCount, tile^rank] @ dense,
-    /// one block = one chunk). Ordinary vars pass through unchanged.
+    /// canonical pool); this permutes/pads into block rows ([blockCount, tile^rank] @ dense). Ordinary vars pass through unchanged.
     let private toPhysical (var: WriteVar) : WriteVar =
         match var.Blade with
         | Some layout when layout.Blocks.IsSome ->
@@ -2042,8 +2102,7 @@ module ZarrWrite =
                 OmitChunks = [] }
         | _ -> var
 
-    /// Build one chunk's bytes: the in-bounds region from Data, edge
-    /// overhang padded with the fill value (zeros under FillNone).
+    /// Build one chunk's bytes: the in-bounds region from Data, edge overhang padded with the fill value (zeros under FillNone).
     let private chunkBytesFor (var: WriteVar) (coords: int64 list) : byte[] =
         let shape = var.Shape |> List.map int
         let chunks = var.Chunks |> List.map int
@@ -2146,9 +2205,7 @@ module ZarrWrite =
                     shapeJson dataType chunksJson fillJson dimsJson attrsJson)
             writeChunks arrayDir var "/" "c"
 
-// ============================================================================
 // Provider registration record
-// ============================================================================
 
 let private adaptVarData (d: ZarrVarData) : Blade.ProviderRegistry.ProviderVarData =
     { DimLengths = d.DimLengths
@@ -2157,8 +2214,7 @@ let private adaptVarData (d: ZarrVarData) : Blade.ProviderRegistry.ProviderVarDa
         | ZFloats xs -> Blade.ProviderRegistry.PFloats xs
         | ZInts xs -> Blade.ProviderRegistry.PInts xs }
 
-/// The zarr ProviderSpec (surface module name: "zarr"). Registered by
-/// ProviderStatics.install ().
+/// The zarr ProviderSpec (surface module name "zarr").
 let spec : Blade.ProviderRegistry.ProviderSpec = {
     Name = "zarr"
     LoadAsModule = loadAsModule
@@ -2170,11 +2226,28 @@ let spec : Blade.ProviderRegistry.ProviderSpec = {
             let store = load path
             match tryFindArray store varName with
             | Some m when m.Blade.IsSome ->
-                Error (sprintf "variable '%s' has a packed (blade: layout=packed) pool layout — triangular variables do not fold at compile time in v1; bind with a plain `let ... |> <alias>.read`" varName)
+                Error (sprintf "variable '%s' has a packed (blade: layout=packed) pool layout -- triangular and orbit (iterated-wreath) variables do not fold at compile time; bind with a plain `let ... |> <alias>.read`" varName)
             | _ -> readVarData path varName |> Result.map adaptVarData
         with ex -> Error ex.Message
     GenReadVar = CppZarr.genReadVar
     GenReadPacked = Some CppZarr.genReadPacked
+    // Presence is the wreath capability flag at every seam; the function
+    // itself is the F#-side pool reader the interpreter materializes from.
+    // Refuses anything that is not an orbit head, so a depth-1 packed variable gets a named error, not a pool typed as the wrong class.
+    ReadWreathPool = Some (fun path varName ->
+        try
+            let store = load path
+            match tryFindArray store varName with
+            | None ->
+                Error (sprintf "variable '%s' not found in Zarr store '%s'" varName path)
+            | Some m ->
+                match m.Blade with
+                | Some l when l.Group.Sym = SymWreath -> readPackedPool m |> Result.map adaptVarData
+                | Some _ ->
+                    Error (sprintf "variable '%s' has a depth-1 packed (sym/antisym) layout, not an orbit head" varName)
+                | None ->
+                    Error (sprintf "variable '%s' is an ordinary dense array, not an orbit (iterated-wreath) pool" varName)
+        with ex -> Error ex.Message)
     GenReadCompoundVar = None  // load_compound: rejected loudly in v1
     GenWriteVar = CppZarr.genWriteVar
     GenStreamOpen = Some CppZarr.genStreamOpen

@@ -1,0 +1,12 @@
+// TEST: Quantity Slot Rejects Bare Argument (rejects)
+// ERROR: BL3010
+// A parameter declared with a QUANTITY only accepts values ASSERTED to be
+// that quantity: a bare literal must be ascribed at the call site
+// (`twice((4.0 : speed))`). Structural-unit parameters keep the permissive
+// behavior (units/002-008); the strictness is scoped to Nominal slots.
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit speed: mps
+function twice(x: Float<speed>) -> Float<speed> = x + x
+let r = twice(4.0)

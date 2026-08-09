@@ -1,40 +1,38 @@
-/// Unfold — the staged-former elaboration pass (staged tower Phase 1).
+/// Unfold -- the staged-former elaboration pass.
 ///
 /// `static method_for(...)` / `static object_for(...)` / `static for (...)`
-/// mark a loop-object former whose ARGUMENT LIST elaborates at compile time.
-/// This pass runs FIRST in the expansion pipeline (before ML/PPL/math/grad
-/// elaboration and typechecking) and ELIMINATES every ExprStatic node:
-///
+/// mark a loop-object former whose ARGUMENT LIST elaborates at compile
+/// time. This pass runs FIRST in the expansion pipeline (before
+/// ML/PPL/math/grad elaboration and typechecking) and ELIMINATES every
+/// ExprStatic node:
 ///   * Ground subexpressions fold through StaticEval (the existing
-///     `let static` / static-function evaluator — recursion, fuel, builtins).
-///   * Staged values — array refs, lambdas, loop objects, any runtime
-///     expression StaticEval's ground domain can't hold — are carried as
+///     `let static` / static-function evaluator: recursion, fuel, builtins).
+///   * Staged values -- array refs, lambdas, loop objects, any runtime
+///     expression StaticEval's ground domain can't hold -- are carried as
 ///     opaque expression leaves (UOpaque). Tuples may mix both.
 ///   * A static FUNCTION applied to staged arguments is INLINED: binders in
 ///     the body are alpha-renamed with fresh `__unf_<fn>_<n>_` names per
 ///     unfold instance (capture safety), parameters substitute as
 ///     expressions, and unfolding recurses fuel-bounded.
-///   * In static-former argument position — and ONLY there — tuple results
+///   * In static-former argument position, and ONLY there, tuple results
 ///     flatten recursively into the positional argument list (the
-///     uncurrying rule: ((A,B),C) ≡ (A,(B,C)) ≡ (A,B,C)). Everywhere else
+///     uncurrying rule: ((A,B),C) = (A,(B,C)) = (A,B,C)). Everywhere else
 ///     the pack convention stands (f((A,B)) = one tuple argument).
 ///   * `qs[k]` on a staged tuple with a compile-time k selects the element
 ///     (kernel selection); an index is always required.
 ///
 /// `let static` ownership is shared with StaticEval.resolveStatics: a
-/// DeclStatic whose RHS folds fully ground is LEFT ALONE (StaticEval owns
-/// it exactly as today); in a module that USES static formers, one whose
-/// RHS unfolds to a STAGED value (a tuple with opaque leaves, or a bare
-/// loop-object former) is consumed here — its uses inside static formers
-/// substitute, the decl is DELETED before resolveStatics could report it as
-/// a fold failure, and any surviving reference outside a static former is
-/// an error. Modules with no static former are untouched (current fold-or-
-/// fail behavior stands). Single-lambda statics keep their existing
+/// DeclStatic whose RHS folds fully ground is LEFT ALONE; in a module that
+/// USES static formers, one whose RHS unfolds to a STAGED value (a tuple
+/// with opaque leaves, or a bare loop-object former) is consumed here --
+/// its uses inside static formers substitute, the decl is DELETED before
+/// resolveStatics could report it as a fold failure, and any surviving
+/// reference outside a static former is an error. Modules with no static
+/// former are untouched. Single-lambda statics keep their existing
 /// function-declaration exemption. Staged statics resolve in DECLARATION
-/// ORDER (forward references among staged statics are not supported in
-/// Phase 1); imported (cross-module) staged statics are likewise out of
-/// scope — ground qualified statics keep working via the existing
-/// checkModule seed.
+/// ORDER (no forward references among staged statics); imported
+/// (cross-module) staged statics are out of scope -- ground qualified
+/// statics keep working via the existing checkModule seed.
 ///
 /// Poly interplay: none. Unfolding completes before typechecking, so
 /// computePolyArity and the partial-application eta-expansion see ordinary
@@ -46,17 +44,15 @@ open Blade.StaticEval
 
 exception private UnfoldError of string
 
-/// Fuel for one unfolding chain (static-function inlining depth × nodes).
+/// Fuel for one unfolding chain (static-function inlining depth x nodes).
 let private unfoldFuel = 10_000
 
-// ============================================================================
 // Generic expression walk
-// ============================================================================
 
-/// Pre-order transform: `f` sees each node first; `Some r` replaces the node
-/// (no further descent — the callback recurses itself if it needs to);
-/// `None` rebuilds the node with transformed children. Exhaustive over Expr
-/// so FS0025 audits future AST growth.
+/// Pre-order transform: `f` sees each node first; `Some r` replaces the
+/// node (no further descent, the callback recurses itself if it needs to);
+/// `None` rebuilds the node with transformed children. Exhaustive over
+/// Expr so FS0025 audits future AST growth.
 let rec mapExprPre (f: Expr -> Expr option) (e: Expr) : Expr =
     match f e with
     | Some r -> r
@@ -100,6 +96,7 @@ let rec mapExprPre (f: Expr -> Expr option) (e: Expr) : Expr =
         | ExprKind.ExprRank x -> re (ExprRank (g x))
         | ExprKind.ExprMask (a, p) -> re (ExprMask (g a, g p))
         | ExprKind.ExprCompound (d, m) -> re (ExprCompound (g d, g m))
+        | ExprKind.ExprSparse (v, k) -> re (ExprSparse (g v, g k))
         | ExprKind.ExprIntersect (a, b) -> re (ExprIntersect (g a, g b))
         | ExprKind.ExprUnion (a, b) -> re (ExprUnion (g a, g b))
         | ExprKind.ExprUnique a -> re (ExprUnique (g a))
@@ -107,7 +104,7 @@ let rec mapExprPre (f: Expr -> Expr option) (e: Expr) : Expr =
         | ExprKind.ExprGroupBy (v, gk) -> re (ExprGroupBy (g v, g gk))
         | ExprKind.ExprGroupKeys ks -> re (ExprGroupKeys (List.map g ks))
         | ExprKind.ExprSort (a, k) -> re (ExprSort (g a, g k))
-        | ExprKind.ExprReduce (a, k, init) -> re (ExprReduce (g a, g k, Option.map g init))
+        | ExprKind.ExprReduce (a, k, init, ax) -> re (ExprReduce (g a, g k, Option.map g init, ax))
         | ExprKind.ExprTranspose (a, d1, d2) -> re (ExprTranspose (g a, d1, d2))
         | ExprKind.ExprDecompact (a, d) -> re (ExprDecompact (g a, d))
         | ExprKind.ExprGram (l, r) -> re (ExprGram (g l, g r))
@@ -138,7 +135,7 @@ and mapStmtPre (f: Expr -> Expr option) (s: Stmt) : Stmt =
     | StmtSpanned (inner, sp) -> StmtSpanned (mapStmtPre f inner, sp)
 
 /// Every ExprVar name in the tree (FULL coverage, unlike the conservative
-/// StaticEval.collectFreeNames — shadowing is ignored, which for the
+/// StaticEval.collectFreeNames -- shadowing is ignored, which for the
 /// staged-escape check only risks a false positive on a shadowed name).
 let private collectAllVars (e: Expr) : Set<string> =
     let mutable seen = Set.empty
@@ -155,9 +152,7 @@ let private containsStatic (e: Expr) : bool =
         None) e |> ignore
     found
 
-// ============================================================================
 // Capture-avoiding substitution and per-instance binder freshening
-// ============================================================================
 
 /// Substitute free variables by expressions, stopping at shadowing binders.
 // (public: also reused by TypeCheck.inferRecArray to substitute the prefix /
@@ -181,7 +176,7 @@ let rec substFree (m: Map<string, Expr>) (e: Expr) : Expr =
                 let m' = without (collectPatternBindings c.Pattern) m
                 { c with Guard = Option.map (substFree m') c.Guard; Body = substFree m' c.Body }))))
         | ExprKind.ExprBlock (stmts, fin) ->
-            // statements bind sequentially — thread the shrinking map
+            // statements bind sequentially -- thread the shrinking map
             let rec goStmt mm s =
                 match s with
                 | StmtSpanned (inner, sp) ->
@@ -235,9 +230,7 @@ let rec private freshenBinders (prefix: string) (counter: int ref) (e: Expr) : E
             Some (inheritSpan x (ExprLet (b', freshenBinders prefix counter (substFree m body))))
         | _ -> None) e
 
-// ============================================================================
 // The staged value domain
-// ============================================================================
 
 /// A value during unfolding: ground (StaticEval's domain), an opaque runtime
 /// expression leaf, or a staged tuple that may mix both.
@@ -265,7 +258,7 @@ let rec private uvalueToExpr (v: UValue) : Expr =
     | UOpaque e -> e
     | UTuple vs -> syn (ExprTuple (vs |> List.map uvalueToExpr))
 
-/// Recursive tuple flatten — the uncurrying rule, applied ONLY in
+/// Recursive tuple flatten -- the uncurrying rule, applied ONLY in
 /// static-former argument position.
 let rec private flattenU (v: UValue) : Expr list =
     match v with
@@ -273,7 +266,7 @@ let rec private flattenU (v: UValue) : Expr list =
     | UGround (SVTuple vs) -> vs |> List.collect (fun sv -> flattenU (UGround sv))
     | other -> [uvalueToExpr other]
 
-/// Is this U-value STAGED — i.e. must it be consumed at compile time
+/// Is this U-value STAGED -- i.e. must it be consumed at compile time
 /// (a tuple with opaque leaves, or a bare loop-object former)?
 let rec private isStagedValue (v: UValue) : bool =
     match v with
@@ -286,7 +279,7 @@ let rec private isStagedValue (v: UValue) : bool =
     | UOpaque { Kind = ExprKind.ExprMethodFor _ } | UOpaque { Kind = ExprKind.ExprObjectFor _ } | UOpaque { Kind = ExprKind.ExprFor _ } -> true
     | _ -> false
 
-/// A lambda-valued `let static` declares a function — same exemption as
+/// A lambda-valued `let static` declares a function -- same exemption as
 /// StaticEval's fold assertion (its helper is private there).
 let rec private isLambdaValued (e: Expr) : bool =
     match e.Kind with
@@ -294,13 +287,11 @@ let rec private isLambdaValued (e: Expr) : bool =
     | ExprKind.ExprTyped (inner, _) -> isLambdaValued inner
     | _ -> false
 
-// ============================================================================
 // U-evaluation
-// ============================================================================
 
 /// Shared context for one module's unfolding: the ground static environment,
 /// the fresh-name counter, and the set of static functions this pass
-/// actually inlined (candidates for deletion — a staged-only body like
+/// actually inlined (candidates for deletion -- a staged-only body like
 /// rep's tuple recursion cannot lower as a runtime function).
 type private UCtx = {
     Env: StaticEnv
@@ -332,10 +323,10 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
                       raise (UnfoldError (sprintf "static unfolding: staged tuple index %d out of bounds (0..%d)" i (vs.Length - 1)))
                   | _ ->
                       raise (UnfoldError "static unfolding: an index into a staged tuple must be a compile-time integer"))
-             | _ -> UOpaque expr)  // Poly-tuple indexing on a runtime value — not ours
+             | _ -> UOpaque expr)  // Poly-tuple indexing on a runtime value -- not ours
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fname }, args) when Map.containsKey fname ctx.Env.Functions ->
             // A static function whose ground evaluation failed: at least one
-            // argument (or an intermediate) is staged — inline the body.
+            // argument (or an intermediate) is staged -- inline the body.
             let fd = ctx.Env.Functions.[fname]
             if args.Length <> fd.Params.Length then
                 raise (UnfoldError (sprintf "static unfolding: '%s' expects %d argument(s), got %d" fname fd.Params.Length args.Length))
@@ -359,16 +350,14 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
             ueval ctx (Map.add n v staged) true (fuel - 1) body
         | _ -> UOpaque expr
 
-// ============================================================================
 // Static-former unfolding
-// ============================================================================
 
 let private unfoldFormer (ctx: UCtx) (staged: Map<string, UValue>) (inner: Expr) : Expr =
     let uevalArg = ueval ctx staged false unfoldFuel
     let single (what: string) (e: Expr) =
         match flattenU (uevalArg e) with
         | [k] -> k
-        | many -> raise (UnfoldError (sprintf "static %s: the kernel elaborated to %d expressions — exactly one is required (select from a staged tuple with an index: qs[k])" what many.Length))
+        | many -> raise (UnfoldError (sprintf "static %s: the kernel elaborated to %d expressions -- exactly one is required (select from a staged tuple with an index: qs[k])" what many.Length))
     match inner.Kind with
     | ExprKind.ExprMethodFor args ->
         inheritSpan inner (ExprMethodFor (args |> List.collect (uevalArg >> flattenU)))
@@ -381,13 +370,11 @@ let private unfoldFormer (ctx: UCtx) (staged: Map<string, UValue>) (inner: Expr)
     | _ ->
         raise (UnfoldError "internal: `static` wraps a non-former expression (parser invariant violated)")
 
-// ============================================================================
 // Module pass
-// ============================================================================
 
 let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     // Phase 1: ground statics + static functions via the existing resolver.
-    // Fold failures are NOT reported here — checkModule owns the fold-or-fail
+    // Fold failures are NOT reported here -- checkModule owns the fold-or-fail
     // assertion; we only need the ground environment.
     let senv =
         match resolveStatics m.Decls with
@@ -396,9 +383,9 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     let ctx = { Env = senv; Counter = ref 0; Inlined = System.Collections.Generic.HashSet<string>() }
 
     // Phase 2: classify staged statics in declaration order. A `let static
-    // qs = (lambda..., ...)` (tuple with opaque leaves, or a bare loop-object
-    // former) is consumed by this pass; ground and single-lambda statics
-    // keep their existing paths untouched.
+    // qs = (lambda..., ...)` (tuple with opaque leaves, or a bare
+    // loop-object former) is consumed here; ground and single-lambda
+    // statics keep their existing paths untouched.
     let mutable staged : Map<string, UValue> = Map.empty
     for d in m.Decls do
         // Ground literals folded during staged-static classification take this
@@ -423,7 +410,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
             match x.Kind with
             // Kernel selection `qs[k]` on a staged tuple resolves ANYWHERE in
             // the module (the kernel slot of `static method_for(A) <@> qs[1]`
-            // sits outside the former's argument list) — k must be a
+            // sits outside the former's argument list) -- k must be a
             // compile-time integer; the selected element splices in place.
             | ExprKind.ExprTupleIndex ({ Kind = ExprKind.ExprVar n }, _) when Map.containsKey n staged ->
                 Some (uvalueToExpr (ueval ctx staged false unfoldFuel x))
@@ -455,7 +442,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
                 | other -> other
             { d with Value = value' })
 
-    // Phase 4: staged statics must not escape — after substitution inside
+    // Phase 4: staged statics must not escape -- after substitution inside
     // static formers, no reference to a consumed name may survive.
     if not (Map.isEmpty staged) then
         for d in rewritten do
@@ -476,7 +463,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     // Phase 5: delete consumed staged decls, then delete static FUNCTIONS
     // this pass inlined that have no surviving reference (a staged-only body
     // like rep's tuple recursion cannot lower as a runtime C++ function;
-    // ones still referenced — e.g. from a ground `let static` RHS — stay).
+    // ones still referenced -- e.g. from a ground `let static` RHS -- stay).
     let declsAfterStaged =
         rewritten |> List.filter (fun d ->
             match d.Value with
@@ -511,7 +498,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     Blade.Ast.synthSpan <- noSpan
     { m with Decls = decls' }
 
-/// The pass entry point — same shape as the other elaborators. Modules
+/// The pass entry point -- same shape as the other elaborators. Modules
 /// without any static former pass through untouched (so existing `let
 /// static` semantics, including fold-or-fail rejects, are byte-identical).
 let private expandStr (program: Program) : Result<Program, string> =

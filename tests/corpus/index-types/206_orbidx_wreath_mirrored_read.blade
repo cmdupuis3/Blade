@@ -1,0 +1,51 @@
+// TEST: OrbIdx Wreath Mirrored Read
+// The read half of docs/plan-orbidx-decompaction.md §2, at an ARBITRARY raw
+// tuple:
+//
+//     dense[t] = 0                                if canon(t) is zero-set
+//              = chi(t) * pool[orbRank(canon(t))]  otherwise
+//
+// A wreath record is ONE index slot spanning prod(ri) = 4 raw axes, so the
+// subscript is the FLAT four-coordinate form W(i,j,k,l) -- the same spelling a
+// rank-k SymIdx group takes. This is the case WRITES did not need: the
+// traversal nest only ever visits canonical cells, so filling the pool needs no
+// fold, while a read at an arbitrary tuple needs §5's per-level sort fold and
+// the accumulated character. Both backends serve it from the SAME verified
+// artifact -- codegen instantiates `orb_read<double, orb_level<...>...>`
+// (src/cpp/orbit_wreath_utilities.hpp), the interpreter drives
+// `OrbRank.orbReadPlan` -- rather than either one re-deriving canon+rank.
+//
+// This test also pins a DISPATCH hole. A depth-2 record presents 4 args against
+// 1 slot: the arity guard in dispatchAppOrIndex is false, and if no arm matched
+// the catch-all would mint a fresh inference variable and return Ok. The
+// explicit arm is what makes a WRONG arity an error (216, 217) and a right one
+// a typed element read, rather than leaving both to a vacuous catch-all.
+//
+// The class here is all-'+', so every character is +1: a mirrored tuple reads
+// the SAME value as its canonical representative and there is no zero set.
+// 213 is the mixed-character twin, where both of those change.
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+// S is the symmetric outer square of A: S(i,j) = A[i]*A[j], 6 cells.
+// W is its comm tie with itself: W(i,j,k,l) = S(i,j) + S(k,l), 21 cells.
+// Hand-derived from that definition, NOT from the pool order:
+//   canon   W(0,1,0,1) = S(0,1) + S(0,1) = 2 + 2 = 4
+//   mirror  W(1,0,0,1) -- inner block 1 mirrored -- same orbit, chi = +1  -> 4
+//   swapped W(2,2,0,0) = S(2,2) + S(0,0) = 9 + 1 = 10, and the block swap
+//           W(0,0,2,2) is the same orbit, so it must read 10 too
+//   both    W(2,1,1,0) = S(1,2) + S(0,1) = 6 + 2 = 8 (both blocks mirrored)
+let canonical = W(0, 1, 0, 1)
+let mirrored = W(1, 0, 0, 1)
+let outer = W(2, 2, 0, 0)
+let outerSwapped = W(0, 0, 2, 2)
+let bothMirrored = W(2, 1, 1, 0)
+// EXPECT: S = [1, 2, 3, 4, 6, 9]
+// EXPECT: W = [2, 3, 4, 5, 7, 10, 4, 5, 6, 8, 11, 6, 7, 9, 12, 8, 10, 13, 12, 15, 18]
+// EXPECT: canonical = 4
+// EXPECT: mirrored = 4
+// EXPECT: outer = 10
+// EXPECT: outerSwapped = 10
+// EXPECT: bothMirrored = 8

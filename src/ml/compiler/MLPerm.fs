@@ -1,183 +1,118 @@
 /// The `where ml.perm_equiv(N)` discipline: a function carrying the
 /// (normalized) `__ml_perm_equiv` conjunct is PROVED equivariant under the
-/// symmetric group Sₙ acting by RELABELLING THE NODE AXIS of extent N — its
+/// symmetric group S_n acting by RELABELLING THE NODE AXIS of extent N -- its
 /// body may compose only relabelling-equivariant operations. The judgment is
 /// an abstract interpretation over the surface AST, run by MLElaborate at the
-/// same pass-1/pass-2 seam as the equiv and galilean judgments, where `ml.*`
-/// op calls are still surface-visible and static extents resolve through the
-/// SAME machinery elaboration uses (plan-transforms-as-types §3.6, §7 stage
-/// 5a-iii).
+/// same pass-1/pass-2 seam as the equiv and galilean judgments.
 ///
-/// THIS WAS THE THIRD COPY of the abstract-interpretation WALKER SHELL
-/// (freeVars / patternVars / the let-block-if-match-assign-for folds /
-/// judgeApp's callee dispatch), after MLEquiv.fs and MLGalilean.fs — written
-/// out rather than guessed at so that §7's stage 5c could extract the shell
-/// against THREE witnesses. That extraction has happened: the SYNTACTIC walk
-/// (freeVars, patternVars, the left-to-right judge fold, the where-conjunct
-/// pre-scan) now lives in MLCertShell.fs. What stayed here is what the three
-/// disciplines DISAGREE about — the lattice, the signature classifier, the
-/// judgment arms, the op table — including `judgeStmts` / `judgeAssign`,
-/// whose shapes agree but whose every message and guard does not.
+/// This is the third of three abstract-interpretation walkers, after
+/// MLEquiv.fs and MLGalilean.fs. The syntactic walk shared by all three lives
+/// in MLCertShell.fs; what stays here -- the lattice, the signature
+/// classifier, the judgment arms, the op table -- is what the three
+/// disciplines DISAGREE about.
 ///
-/// THE DRIFT CATALOG THAT DIFF PRODUCED IS NOW CLOSED. Writing the third copy
-/// out longhand was worth more than the shell it justified: comparing three
-/// witnesses found four places where the copies had silently diverged, and
-/// the fix pass after 5c settled all four. Two were false ACCEPTS, i.e.
-/// certificates issued for functions that do not have the property:
-///
-///   1. THIS FILE's former arm cleared a node-covariant array that appeared
-///      only in a former's source list, because it scanned names and the
-///      shared `freeVars` had no arm for `method_for`. It now JUDGES the
-///      sources (MLGalilean's judgeFormerApply shape) and scans for captures
-///      besides — neither check subsumes the other. corpus ml-equiv/045, 046.
+/// Comparing the three walkers found four silent divergences, all now fixed.
+/// Two were false ACCEPTS:
+///   1. THIS FILE's former arm cleared a node-covariant array in a former's
+///      source list, because it scanned names and `freeVars` had no arm for
+///      `method_for`. It now JUDGES the sources (MLGalilean's
+///      judgeFormerApply shape) and scans captures besides -- neither check
+///      subsumes the other. corpus ml-equiv/045, 046.
 ///   2. MLEquiv had the same hole one lattice over, and worse: with no
 ///      OpApply arm at all, a former over a rep answered Opaque, and a READ
-///      out of an Opaque binding answered Inv. The catalog had filed that
-///      absence as a capability gap; it was also unsound. corpus ml-equiv/049.
+///      out of an Opaque binding answered Inv -- unsound. corpus ml-equiv/049.
+/// The other two: element-write INDICES went unjudged here and in MLEquiv
+/// while MLGalilean folded over them (corpus ml-equiv/047, 048), and the
+/// shared `freeVars` descended only one level into `for` bodies.
 ///
-/// The other two were a missing check and a missing walk: element-write
-/// INDICES went unjudged here and in MLEquiv while MLGalilean folded over
-/// them (corpus ml-equiv/047, 048), and the shared `freeVars` descended only
-/// one level into `for` bodies. Both are fixed at the site that owned them.
+/// THE MORAL: the copies drift in the GUARDS, not the rules -- every
+/// divergence was a place one walker checked something the others did not,
+/// never a disagreement about the same check. A guard only one copy has is a
+/// bug in the other two until argued otherwise.
 ///
-/// THE MORAL, for the next discipline: the copies drift in the GUARDS, not in
-/// the rules. Every divergence the diff found was a place where one walker
-/// checked something the others did not — never a place where two walkers
-/// checked the same thing and disagreed about the answer. The polarity table
-/// below is the intended disagreement; a guard only one copy has is a bug in
-/// the other two until argued otherwise.
+/// THE LATTICE -- graded by k, OPPOSITE POLARITY to MLEquiv's at almost every
+/// arm:
+///   Pow k    -- a flat N^k buffer transforming as sigma^(x)k: relabelling the
+///              nodes permutes its cells along each of the k axes. Pow 0 is
+///              the INVARIANT status.
+///   POpaque  -- unclassifiable; rejected wherever it meets a status-relevant
+///              position.
 ///
-/// ---------------------------------------------------------------------------
-/// THE LATTICE — ℕ-graded, and of OPPOSITE POLARITY to MLEquiv's at almost
-/// every arm
-/// ---------------------------------------------------------------------------
-///   Pow k    — a flat N^k buffer that transforms as σ^{⊗k}: relabelling the
-///              nodes by σ permutes its cells by σ acting on each of the k
-///              axes. Pow 0 is the INVARIANT status (N^0 = 1 cell, or a
-///              scalar, or anything the action fixes).
-///   POpaque  — unclassifiable; rejected wherever it meets a status-relevant
-///              position (op argument, return value).
+/// The polarity table is the whole argument for a SIBLING lattice rather than
+/// a `Rep of GroupSpec` payload on MLEquiv's:
+///   pointwise nonlinearity on a rep    O(3): BL4008     S_n: LEGAL (Pow k)
+///   elementwise product of two reps    O(3): BL4008     S_n: LEGAL (Pow k)
+///   sum of two like reps               O(3): legal      S_n: legal
+///   raw component read                 O(3): BL4008     S_n: legal in the
+///                                                        MATH, deferred here
+/// A permutation moves cells without mixing them, so EVERY POINTWISE MAP
+/// COMMUTES WITH IT, while the Wigner action of O(3) mixes cells within a
+/// block -- exactly what MLEquiv forbids. One judgment cannot wear both.
 ///
-/// The polarity table, which is the whole argument for a SIBLING lattice
-/// rather than a `Rep of GroupSpec` payload on MLEquiv's:
+/// FLAT-BUFFER KEYING: the ops here consume FLAT ROW-MAJOR N^k buffers
+/// (`derive_perm_linear`'s x is one `Idx<N^K>` axis), so the classifier keys
+/// on the flat extent: `Array<Float like Idx<M>>` is Pow k iff M = N^k for
+/// some 0 <= k <= MLPermSpec.maxPositions. k is unique because N >= 2 makes
+/// the powers strictly increasing (N < 2 is refused: at N = 1 every extent is
+/// 1 = N^k for every k). M = 1 and scalars are Pow 0. RANK >= 2 ARRAYS AND
+/// NON-`Idx` INDEX TYPES ARE A HARD REJECT: v1 has one status per VALUE, and
+/// a `batch x node` array needs one per AXIS -- per-axis status vectors are
+/// the named v2 shape, unlocking O(3) x S_n dual certificates too.
 ///
-///   pointwise nonlinearity on a rep    O(3): BL4008     Sₙ: LEGAL (Pow k)
-///   elementwise product of two reps    O(3): BL4008     Sₙ: LEGAL (Pow k)
-///   sum of two like reps               O(3): legal      Sₙ: legal
-///   raw component read                 O(3): BL4008     Sₙ: legal in the
-///                                                       MATH, deferred here
-///                                                       (see below)
+/// EXTENT-KEYING CAVEAT: an `Idx<M>` whose M is not a power of N is Pow 0; a
+/// COINCIDENTALLY N^k extent classifies covariant -- the conditional-theorem
+/// reading ("IF this parameter transforms as sigma^(x)k THEN the result
+/// transforms as declared"), so a coincidence falsifies the hypothesis for
+/// that caller rather than the theorem. Nominal keying (`Nat<Node>`) is the
+/// named upgrade.
 ///
-/// The first two lines are the headline: PERMUTATIONS COMMUTE WITH EVERY
-/// POINTWISE MAP, because a permutation moves cells around without mixing
-/// them, so anything applied cell-by-cell commutes with it. The Wigner action
-/// of O(3) mixes cells within a block, so the same two lines are exactly what
-/// MLEquiv forbids. One judgment cannot wear both.
-///
-/// ---------------------------------------------------------------------------
-/// v1 KEYS ON FLAT BUFFERS (a deliberate delta from §3.6's "rank-k" prose)
-/// ---------------------------------------------------------------------------
-/// §3.6 describes Pow k as "rank-k, all axes node-covariant". The ops that
-/// landed at 5a-ii consume FLAT ROW-MAJOR N^k buffers (the `_rows` house
-/// precedent — `derive_perm_linear`'s x is one `Idx<N^K>` axis, its result one
-/// `Idx<N^L>` axis), so the classifier keys on the FLAT EXTENT instead:
-///
-///     a signature parameter `Array<Float like Idx<M>>` is Pow k
-///     iff M = N^k for some 0 ≤ k ≤ MLPermSpec.maxPositions
-///
-/// k is unique because N ≥ 2 makes the powers strictly increasing — which is
-/// why N < 2 is REFUSED at the conjunct (at N = 1 every extent is 1 = N^k for
-/// every k, so no rank is determined; the group is trivial and the certificate
-/// would be vacuous anyway). M = 1 is Pow 0: N^0 = 1, the one-cell invariant
-/// readout `derive_perm_linear(K, 0, N, ·, ·)` returns. Scalars are Pow 0.
-///
-/// RANK ≥ 2 ARRAYS AND NON-`Idx` INDEX TYPES ARE A HARD REJECT in a certified
-/// signature (the MLEquiv.fs multi-index precedent) — v1 has one status per
-/// VALUE, and a `batch × node` or `node × channel` array needs one per AXIS.
-/// Per-axis status vectors are the named v2 shape, and the same upgrade is
-/// what unlocks O(3)×Sₙ dual certificates (§3.6's two cross-referencing
-/// deferrals).
-///
-/// THE EXTENT-KEYING CAVEAT. An `Idx<M>` whose M is NOT a power of N is
-/// classified Pow 0 — invariant. Conversely an extent that is COINCIDENTALLY
-/// N^k (a weight buffer of Bell(2) = 2 slots read at N = 2) classifies
-/// COVARIANT, which is the conditional-theorem reading exactly as §3.6 states
-/// it: the certificate says "IF this parameter transforms as σ^{⊗k} THEN the
-/// result transforms as declared", so a coincidence makes the hypothesis false
-/// for that caller rather than making the theorem wrong. Nominal keying
-/// (`Nat<Node>`) is the named upgrade.
-///
-/// ---------------------------------------------------------------------------
-/// COMPONENT ACCESS — the one place v1 is STRICTER than the mathematics
-/// ---------------------------------------------------------------------------
-/// §3.6 records that component access by a bound index is LEGAL for Sₙ (the
-/// node basis is real, unlike the irreps basis). v1 has no loop-variable
-/// tracking, so it cannot tell `x(i)` inside a `for i in 0..N` (which
-/// reassembles equivariantly) from `x(0)` (which does not). It therefore
-/// REJECTS every read out of a Pow k, k ≥ 1, with a message naming per-axis
-/// tracking as the v2 lift. Reads out of a Pow 0 are fine — a value the action
-/// fixes has components the action fixes. Nothing is lost in practice at 5a:
-/// the WHOLE-ARRAY elementwise operators cover pointwise work, and
+/// COMPONENT ACCESS is the one place v1 is STRICTER than the math: a bound
+/// index read is LEGAL for S_n (the node basis is real), but v1 has no
+/// loop-variable tracking, so it cannot tell `x(i)` inside `for i in 0..N`
+/// (equivariant) from `x(0)` (not), and REJECTS every read out of a Pow k,
+/// k >= 1. Nothing is lost in practice: whole-array elementwise operators and
 /// derive_perm_linear / derive_perm_bias / perm_matmul cover the rest.
 ///
-/// ---------------------------------------------------------------------------
-/// THE RULES
-/// ---------------------------------------------------------------------------
+/// THE RULES:
 ///   +, -, *, / of two Pow k (same k)          -> Pow k   (pointwise)
-///   Pow k with a Pow 0 (scalar broadcast)     -> Pow k   (the only Sₙ-fixed
-///                                                        vectors ARE the
-///                                                        constants, so a
-///                                                        broadcast add is
-///                                                        equivariant)
+///   Pow k with a Pow 0 (scalar broadcast)     -> Pow k   (only constants are S_n-fixed)
 ///   unary minus / a pointwise scalar builtin  -> status preserved
 ///   ml.derive_perm_linear(K, L, N, x, w)      -> Pow L   (x : Pow K, w : Pow 0)
 ///   ml.derive_perm_bias(L, N, b)              -> Pow L   (b : Pow 0)
 ///   ml.perm_matmul(N, a, b)                   -> Pow 2   (a, b : Pow 2)
 ///   every other ml.* op                       : all-Pow-0 args -> Pow 0
 ///   a certified callee                        : signature match, N must agree
-///   an uncertified callee                     : all-Pow-0 args -> Pow 0;
-///                                               a Pow k (k ≥ 1) escaping is a
-///                                               reject (the MLEquiv precedent)
+///   an uncertified callee                     : all-Pow-0 args -> Pow 0; a
+///                                               Pow k (k >= 1) escaping rejects
 /// Violations are BL4012 at the offending expression's span.
 module Blade.ML.Perm
 
 open Blade.Ast
 open Blade.StaticEval
-// The walker shell (stage 5c): freeVars / patternVars / bindPatternVars /
-// judgeEach / conjunctsOf — the syntactic walk shared verbatim with MLEquiv
-// and MLGalilean. Every RULE below is this discipline's own.
+// The walker shell (freeVars / patternVars / bindPatternVars / judgeEach /
+// conjunctsOf) is shared verbatim with MLEquiv and MLGalilean.
 open Blade.ML.CertShell
 
 type PowStatus =
-    /// Pow k = a flat N^k buffer transforming as σ^{⊗k}. Pow 0 = invariant,
-    /// and it is a claim the judgment must EARN: see PowUnsized.
+    /// Pow k = a flat N^k buffer transforming as sigma^(x)k. Pow 0 = invariant,
+    /// a claim the judgment must EARN: see PowUnsized.
     | Pow of int
     /// Invariant-SHAPED, but the walker never established the extent, so
-    /// `Pow 0` is not available. The two are different claims: Pow 0 says the
-    /// value is fixed by every relabelling, and for an aggregate that holds
-    /// only when its cell count is outside the node-power space — an
-    /// arbitrary buffer in N^k (k > 0) is NOT S_n-fixed, only the
-    /// all-cells-equal ones are, which is exactly what the literal arm
-    /// already refuses. A former result, a module binding with no annotation,
-    /// or an uncertified call whose return type is unannotated could have any
-    /// extent, so it lands here and is refused wherever fixedness is
-    /// load-bearing (weight slots, the return, and combination with a node
-    /// power) rather than being waved through as an invariant.
+    /// `Pow 0` is not available (only all-cells-equal N^k buffers, k > 0, are
+    /// S_n-fixed). Refused wherever fixedness is load-bearing.
     | PowUnsized
     | POpaque
 
 type PermSig = {
-    /// The node-axis extent this certificate is about. Certificates do not
-    /// transfer between extents (the MLEquiv group-mismatch precedent).
+    /// The node-axis extent this certificate is about; certificates do not
+    /// transfer between extents.
     N: int
     /// Parameter name -> status, in declaration order.
     Params: (string * PowStatus) list
     Return: PowStatus
 }
 
-// ============================================================================
 // Helpers
-// ============================================================================
 
 let private fuel = 100_000
 
@@ -186,18 +121,16 @@ let private bl4012 (span: Span) (msg: string) : Blade.Diagnostics.Diagnostic =
 
 let private statusStr (st: PowStatus) : string =
     match st with
-    | Pow 0 -> "invariant (Pow 0 — fixed by every node relabelling)"
-    | Pow k -> sprintf "node-covariant of rank %d (Pow %d — a flat N^%d buffer transforming as sigma^(x%d))" k k k k
+    | Pow 0 -> "invariant (Pow 0 -- fixed by every node relabelling)"
+    | Pow k -> sprintf "node-covariant of rank %d (Pow %d -- a flat N^%d buffer transforming as sigma^(x%d))" k k k k
     | PowUnsized -> "invariant-shaped but of unestablished extent (it cannot be claimed fixed: if its cell count lands in a node-power space, an arbitrary buffer there is not S_n-fixed)"
     | POpaque -> "unclassifiable"
 
-/// The rank cap: the same K + L bound the ops carry, so a classified rank is
-/// always a rank some op could actually consume.
+/// The rank cap: the same K + L bound the ops carry.
 let private maxPow = Blade.ML.PermSpec.maxPositions
 
-/// k with N^k = m, or None. N >= 2 (enforced at the conjunct) makes the powers
-/// strictly increasing, so at most one k can match — that uniqueness is the
-/// whole reason for the N < 2 refusal.
+/// k with N^k = m, or None. N >= 2 makes the powers strictly increasing, so
+/// at most one k can match -- the whole reason for the N < 2 refusal.
 let private powClass (n: int64) (m: int64) : int option =
     let rec go (k: int) (acc: int64) =
         if acc = m then Some k
@@ -216,9 +149,7 @@ let private staticArgValue (statics: StaticEnv) (e: Expr) : Result<StaticValue, 
         | None -> Error (sprintf "'%s' is not a `let static` binding" name)
     | _ -> Error "expected a `let static` binding name or literal"
 
-// ============================================================================
 // Certified-signature table
-// ============================================================================
 
 /// Type aliases of this module (one-level chase, mirroring MLEquiv).
 let private aliasMapOf (decls: Located<Decl> list) : Map<string, TypeExpr> =
@@ -230,7 +161,7 @@ let private aliasMapOf (decls: Located<Decl> list) : Map<string, TypeExpr> =
 
 /// The v2 pointer, attached to every signature-shape refusal.
 let private v2Note =
-    "v1 keys node-covariance on the FLAT extent of a SINGLE `Idx<>` axis (the Sn ops consume flat row-major N^k buffers — ml.derive_perm_linear's x is one Idx<N^K> axis), so a certified signature carries one status per VALUE. A multi-axis array needs one status per AXIS: per-axis status vectors are the named v2 shape, and the same upgrade is what unlocks O(3) x Sn dual certificates (plan-transforms-as-types §3.6, the two cross-referencing deferrals). Flatten the buffer, or leave the function uncertified"
+    "node-covariance is keyed on the FLAT extent of a SINGLE `Idx<>` axis (the Sn ops consume flat row-major N^k buffers -- ml.derive_perm_linear's x is one Idx<N^K> axis), so a certified signature carries one status per VALUE. A multi-axis array would need one status per AXIS, which is not tracked. Flatten the buffer, or leave the function uncertified"
 
 /// Alias-chase budget: `type A = B` chains are followed, but never in a cycle.
 let private aliasDepth = 8
@@ -241,13 +172,12 @@ let rec private statusOfIndex (depth: int) (n: int) (aliases: Map<string, TypeEx
     match ix with
     | TyIdx extentE ->
         evalExpr statics fuel extentE
-        |> Result.mapError (fun m -> sprintf "the Idx<> extent does not resolve statically (%s) — a perm-certified signature is classified by extent" m)
+        |> Result.mapError (fun m -> sprintf "the Idx<> extent does not resolve statically (%s) -- a perm-certified signature is classified by extent" m)
         |> Result.bind (fun sv ->
             match sv with
             | SVInt m ->
-                // THE EXTENT-KEYING CAVEAT (§3.6): a non-power extent is
-                // invariant, and a COINCIDENTAL N^k extent classifies
-                // covariant — the conditional-theorem reading, not a bug.
+                // Extent-keying caveat: a non-power extent is invariant, a
+                // coincidental N^k extent classifies covariant (see header).
                 match powClass (int64 n) m with
                 | Some k -> Ok (Pow k)
                 | None -> Ok (Pow 0)
@@ -275,13 +205,15 @@ and private statusOfType (depth: int) (n: int) (aliases: Map<string, TypeExpr>) 
         statusOfType (depth - 1) n aliases statics (Map.find nm aliases)
     | TyNamed (_, _) -> Ok (Pow 0) // scalar primitives and non-index named types
     | TyIdx _ -> statusOfIndex depth n aliases statics t
+    // `min=`/`max=` refine the VALUE and erase before codegen, so they cannot
+    // move an extent. `depth` is not spent -- a bound is not an alias hop.
+    | TyBounded (baseTy, _, _) -> statusOfType depth n aliases statics baseTy
     | TyInt32 | TyInt64 | TyFloat32 | TyFloat64 | TyBool | TyComplex128 -> Ok (Pow 0)
     | _ ->
         Error (sprintf "cannot classify this annotation in a perm-certified signature (supported: scalars and `Array<_ like Idx<M>>`). %s" v2Note)
 
-/// The conjunct's single argument: an int literal (`ml.perm_equiv(4)`) or the
-/// name of a `let static` binding (`ml.perm_equiv(NODES)`). N ≥ 2 is REQUIRED —
-/// see powClass.
+/// The conjunct's single argument: an int literal or a `let static` name.
+/// N >= 2 is required -- see powClass.
 let private resolveN (statics: StaticEnv) (funcName: string) (args: string list) : Result<int, string> =
     match args with
     | [ a ] ->
@@ -291,14 +223,14 @@ let private resolveN (statics: StaticEnv) (funcName: string) (args: string list)
             | _ ->
                 match Map.tryFind a statics.Values with
                 | Some (SVInt n) -> Ok (int n)
-                | Some _ -> Error (sprintf "function '%s': perm_equiv(%s) — '%s' is a `let static` binding but not an int; N is the node-axis extent" funcName a a)
-                | None -> Error (sprintf "function '%s': perm_equiv(%s) — N must be an int literal or the name of a `let static` int binding (the node-axis extent)" funcName a)
+                | Some _ -> Error (sprintf "function '%s': perm_equiv(%s) -- '%s' is a `let static` binding but not an int; N is the node-axis extent" funcName a a)
+                | None -> Error (sprintf "function '%s': perm_equiv(%s) -- N must be an int literal or the name of a `let static` int binding (the node-axis extent)" funcName a)
         raw |> Result.bind (fun n ->
             if n < 2 then
-                Error (sprintf "function '%s': perm_equiv(%d) — N must be >= 2. v1 classifies node-covariance by the FLAT extent of a parameter (Idx<M> is Pow k iff M = N^k), and only N >= 2 makes the powers N^0 < N^1 < ... strictly increasing, hence the rank unique; at N = 1 every extent is 1 = N^k for every k. S_1 is the trivial group, so the certificate would be vacuous in any case" funcName n)
+                Error (sprintf "function '%s': perm_equiv(%d) -- N must be >= 2. Node-covariance is classified by the FLAT extent of a parameter (Idx<M> is Pow k iff M = N^k), and only N >= 2 makes the powers N^0 < N^1 < ... strictly increasing, hence the rank unique; at N = 1 every extent is 1 = N^k for every k. S_1 is the trivial group, so the certificate would be vacuous in any case" funcName n)
             else Ok n)
     | _ ->
-        Error (sprintf "function '%s': perm_equiv expects exactly one argument — the node-axis extent N, as in `where ml.perm_equiv(4)`" funcName)
+        Error (sprintf "function '%s': perm_equiv expects exactly one argument -- the node-axis extent N, as in `where ml.perm_equiv(4)`" funcName)
 
 /// Pre-scan: every DeclFunction carrying a normalized ("__ml_perm_equiv", [N])
 /// conjunct gets a certified signature. Errors are BL4012 at the decl.
@@ -315,7 +247,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
                 match conjs with
                 | [] -> Ok table
                 | _ :: _ :: _ ->
-                    fail (sprintf "function '%s': duplicate perm_equiv constraints — declare exactly one node-axis extent" fd.Name)
+                    fail (sprintf "function '%s': duplicate perm_equiv constraints -- declare exactly one node-axis extent" fd.Name)
                 | [ (_, args) ] ->
                     match resolveN statics fd.Name args with
                     | Error m -> fail m
@@ -326,7 +258,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
                                 acc |> Result.bind (fun ps ->
                                     match p.Type with
                                     | None ->
-                                        Error (sprintf "function '%s': a perm-certified function must annotate every parameter and its return type ('%s' is unannotated) — the certificate is read off the extents" fd.Name p.Name)
+                                        Error (sprintf "function '%s': a perm-certified function must annotate every parameter and its return type ('%s' is unannotated) -- the certificate is read off the extents" fd.Name p.Name)
                                     | Some t ->
                                         statusOfType aliasDepth n aliases statics t
                                         |> Result.mapError (sprintf "function '%s', parameter '%s': %s" fd.Name p.Name)
@@ -345,16 +277,11 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
             | _ -> Ok table))
         (Ok Map.empty)
 
-// ============================================================================
 // The judgment
-// ============================================================================
 
-/// The invariance evidence an UNCERTIFIED value of this annotated type may
-/// claim. A rank that lands in the node-power space is NOT claimable — nothing
-/// certified that the value transforms as sigma^{⊗k}, and an arbitrary buffer
-/// there is not fixed either — so it is unsized rather than `Pow k`. An extent
-/// OUTSIDE every node power is real evidence: relabelling has no action on
-/// that space at all, so the value is genuinely fixed.
+/// The invariance evidence an UNCERTIFIED value of this type may claim. A
+/// rank landing in the node-power space is NOT claimable, so it is unsized
+/// rather than `Pow k`.
 let private invEvidenceOfType (n: int) (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (t: TypeExpr) : PowStatus =
     match statusOfType aliasDepth n aliases statics t with
     | Ok (Pow k) when k > 0 -> PowUnsized
@@ -368,11 +295,10 @@ let private invEvidenceOfCells (n: int) (cells: int64) : PowStatus =
     | Some k when k > 0 -> PowUnsized
     | _ -> Pow 0
 
-/// Module-level bindings: invariant by the conditional-theorem reading (they
-/// are held fixed), but their EXTENT decides whether that can be claimed as
-/// Pow 0. An unannotated `let c = [0.0, 1.0, 2.0, 3.0]` at N = 4 is a constant
-/// in N^1, which is not S_n-fixed — the literal arm refuses that expression
-/// inside a body, and a module binding must not launder it.
+/// Module-level bindings: invariant by the conditional-theorem reading, but
+/// their EXTENT decides whether that can be claimed as Pow 0 -- an
+/// unannotated `let c = [0.0, 1.0, 2.0, 3.0]` at N = 4 is a constant in N^1,
+/// not S_n-fixed.
 let buildGlobals (n: int) (statics: StaticEnv) (decls: Located<Decl> list) : Map<string, PowStatus> =
     let aliases = aliasMapOf decls
     let evidence (b: Binding) =
@@ -395,9 +321,8 @@ let buildGlobals (n: int) (statics: StaticEnv) (decls: Located<Decl> list) : Map
                 | _ -> Map.add nm PowUnsized m2) m
         | _ -> m) Map.empty
 
-/// Return annotations of every function in the module, so a call to an
-/// uncertified helper is classified by its declared extent instead of being
-/// assumed fixed.
+/// Return annotations of every function, so a call to an uncertified helper
+/// is classified by its declared extent instead of assumed fixed.
 let buildReturnEvidence (n: int) (statics: StaticEnv) (decls: Located<Decl> list) : Map<string, PowStatus> =
     let aliases = aliasMapOf decls
     decls
@@ -424,8 +349,7 @@ type private Ctx = {
 }
 
 /// Flat cell count of a `range<I1, ..., In>` iteration space: the product of
-/// the axis extents. `None` when any axis does not resolve to a static
-/// `Idx<>` — the caller then has no evidence and must stay unsized.
+/// the axis extents. `None` when an axis does not resolve statically.
 let private rangeCells (ctx: Ctx) (idxTypes: TypeExpr list) : int64 option =
     if idxTypes.IsEmpty then None
     else
@@ -439,20 +363,15 @@ let private rangeCells (ctx: Ctx) (idxTypes: TypeExpr list) : int64 option =
                      | _ -> None)
                 | _ -> None)) (Some 1L)
 
-/// THE POLARITY DEMO, stated once where the rule lives: a permutation moves
-/// cells without mixing them, so EVERY POINTWISE MAP COMMUTES WITH IT.
-/// `f(sigma . x) = sigma . f(x)` holds for any f applied cell-by-cell — which
-/// is precisely the arm MLEquiv rejects with BL4008 ("nonlinearities act only
-/// on invariants"), because the Wigner action mixes cells inside a block.
-///
-/// Blade's scalar intrinsics are SCALAR-ONLY (`exp(A)` on a whole array is a
-/// type error with its own steering, corpus intrinsics/006), so this arm can
-/// only be reached by a body that is going to fail type-checking for an
-/// unrelated reason. It is here anyway, and it is the RIGHT verdict: the
-/// lattice must not be the thing that rejects a pointwise map, or the polarity
-/// would silently be MLEquiv's. The WRITABLE form of the same axiom is the
-/// whole-array elementwise operators below (`h * h`, `h / (1.0 + h * h)`),
-/// which are the lines corpus ml-equiv/039 pins as accepted and which are
+/// THE POLARITY DEMO: a permutation moves cells without mixing them, so
+/// EVERY POINTWISE MAP COMMUTES WITH IT -- `f(sigma . x) = sigma . f(x)` for
+/// any cell-by-cell f -- exactly the arm MLEquiv rejects with BL4008, because
+/// the Wigner action mixes cells inside a block. Blade's scalar intrinsics
+/// are SCALAR-ONLY (`exp(A)` is a type error, corpus intrinsics/006), so this
+/// arm is reached only by an already-ill-typed body, but the lattice must not
+/// be the thing that rejects a pointwise map, or the polarity would silently
+/// be MLEquiv's. The WRITABLE form is the whole-array elementwise operators
+/// below, the lines corpus ml-equiv/039 pins as accepted and which are
 /// BL4008 verbatim under `ml.equiv(O3)`.
 let private isPointwiseBuiltin (n: string) =
     List.contains n [ "exp"; "log"; "sqrt"; "sin"; "cos"; "tan"; "tanh"; "abs"; "floor"; "ceil"; "min"; "max"; "pow" ]
@@ -468,10 +387,10 @@ let private combinePointwise (sts: PowStatus list) : Result<PowStatus, string> =
         match ranks with
         | [] -> Ok (if unsized then PowUnsized else Pow 0)
         | _ when unsized ->
-            Error "this pointwise operation combines a node power with a value whose extent the judgment never established. Broadcasting is sound only against something FIXED by relabelling, and an arbitrary buffer that lands in the node-power space is not (only the all-cells-equal ones are) — annotate the operand's extent, or build the equivariant constants with ml.derive_perm_bias"
+            Error "this pointwise operation combines a node power with a value whose extent the judgment never established. Broadcasting is sound only against something FIXED by relabelling, and an arbitrary buffer that lands in the node-power space is not (only the all-cells-equal ones are) -- annotate the operand's extent, or build the equivariant constants with ml.derive_perm_bias"
         | [ k ] -> Ok (Pow k)
         | _ ->
-            Error (sprintf "this pointwise operation mixes node-covariant values of different ranks (%s) — a pointwise map runs cell-by-cell over ONE space; contract the ranks first (ml.derive_perm_linear) or broadcast through an invariant"
+            Error (sprintf "this pointwise operation mixes node-covariant values of different ranks (%s) -- a pointwise map runs cell-by-cell over ONE space; contract the ranks first (ml.derive_perm_linear) or broadcast through an invariant"
                        (ranks |> List.map (sprintf "Pow %d") |> String.concat " and "))
 
 let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
@@ -481,17 +400,15 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
     match e.Kind with
     | ExprKind.ExprLit _ -> Ok (Pow 0)
     | ExprKind.ExprArrayLit es | ExprKind.ExprTuple es ->
-        // A literal aggregate is a CONSTANT. Constants are Sₙ-fixed — EXCEPT
-        // that the only Sₙ-fixed vectors of a node-power space are the ones
-        // with every cell equal, and v1 does not check cell equality. So a
-        // literal whose extent lands in a node-power space is refused with a
-        // pointer at the op whose whole job is equivariant constants.
+        // A literal is a CONSTANT, but the only S_n-fixed vectors of a
+        // node-power space are the all-cells-equal ones, and v1 does not
+        // check cell equality, so a literal landing there is refused.
         es
         |> judgeEach j
         |> Result.bind (fun sts ->
             match sts |> List.tryFind (fun s -> match s with Pow k -> k > 0 | _ -> false) with
             | Some st ->
-                reject (sprintf "packing a %s into a literal aggregate loses its node-axis structure — the aggregate does not transform as a node power" (statusStr st))
+                reject (sprintf "packing a %s into a literal aggregate loses its node-axis structure -- the aggregate does not transform as a node power" (statusStr st))
             | None ->
                 match powClass (int64 ctx.N) (int64 es.Length) with
                 | Some k when k > 0 ->
@@ -500,9 +417,8 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
     | ExprKind.ExprVar n ->
         match Map.tryFind n env with
         | Some st -> Ok st
-        // globals/constants/builtins: held fixed by the conditional-theorem
-        // reading, but "held fixed" is only claimable as Pow 0 when the extent
-        // says so — see buildGlobals.
+        // globals/constants/builtins: "held fixed" is only claimable as Pow 0
+        // when the extent says so -- see buildGlobals.
         | None ->
             match Map.tryFind n ctx.Globals with
             | Some st -> Ok st
@@ -510,34 +426,23 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
     | ExprKind.ExprDotDot _ -> Ok PowUnsized
     | ExprKind.ExprTyped (inner, _) -> j inner
     | ExprKind.ExprUnaryOp (_, inner) ->
-        // Pointwise, hence status-preserving — the polarity arm again.
+        // Pointwise, hence status-preserving -- the polarity arm again.
         j inner
-    // Former application must dispatch BEFORE the general binop arithmetic arm
-    // (OpApply is a BinOp constructor).
+    // Former application must dispatch before the general binop arm (OpApply
+    // is a BinOp constructor).
     | ExprKind.ExprBinOp (_, OpApply, loop, _) ->
-        // The co-iteration formers hand a kernel the ELEMENTS of their sources,
-        // and an element of a Pow k is a COMPONENT — exactly the read v1 defers
-        // (see the header). So a former application is admissible only when
-        // nothing node-covariant is in scope of it.
-        //
-        // TWO CHECKS, because neither subsumes the other (stage 5c catalog,
-        // finding 1 — the one unsound path it found). The SOURCES are JUDGED,
-        // the way MLGalilean's judgeFormerApply judges them: a source need not
-        // be a name, and `method_for(ml.derive_perm_bias(1, N, b)) <@> ...`
-        // builds a Pow 1 out of nothing but invariants, which no scan over
-        // names can see. The free-variable scan then covers what the kernel
-        // CAPTURES, which judging the sources says nothing about. Before the
-        // fix there was only the scan, and `freeVars` had no former arms at
-        // all, so `method_for(x) <@> lambda ...` over a node-covariant `x`
-        // came back Pow 0 — an INVARIANT — and satisfied a requirePow-0 weight
-        // position. corpus ml-equiv/045 is that program.
-        // A single-source former's RESULT has the extent of its source, so the
-        // source's own evidence carries over: a source proven outside the
-        // node-power space cannot produce a result inside it. A cross-product
-        // former (`method_for(a) <*> method_for(b)`) is a different matter —
-        // its result extent is the PRODUCT, and two non-power extents can
-        // multiply into one (at N = 6, 4 * 9 = 36 = 6^2) — so it does not
-        // inherit, and its `sources` list is empty here besides.
+        // A former's kernel receives the ELEMENTS of its sources -- the
+        // component read v1 defers -- so it is admissible only when nothing
+        // node-covariant is in scope. TWO CHECKS, neither subsuming the other
+        // (catalog finding 1): the SOURCES are JUDGED (a source need not be a
+        // name -- `method_for(ml.derive_perm_bias(1,N,b)) <@>` builds a Pow 1
+        // from invariants alone, invisible to a name scan), and freeVars
+        // covers what the kernel CAPTURES. Before the fix there was only the
+        // scan, no former arm, so `method_for(x) <@> lambda ...` over
+        // covariant `x` came back Pow 0 and satisfied a requirePow-0 weight
+        // position -- corpus ml-equiv/045. A single-source former's RESULT
+        // inherits its source's extent; a cross-product former (`<*>`) does
+        // not -- its extent is the PRODUCT of two possibly non-power extents.
         let sources =
             match loop.Kind with
             | ExprKind.ExprMethodFor arrays -> arrays
@@ -549,7 +454,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
             match srcSts |> List.tryFindIndex (fun s -> match s with Pow k -> k > 0 | _ -> false) with
             | Some i ->
                 Error (bl4012 sources.[i].Span
-                           (sprintf "function '%s': the kernel of this former would receive COMPONENTS of a source that is %s; component access inside perm-certified bodies lands in v2 with per-axis tracking. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear"
+                           (sprintf "function '%s': the kernel of this former would receive COMPONENTS of a source that is %s; component access inside perm-certified bodies requires per-axis tracking, which is not implemented. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear"
                                 ctx.FuncName (statusStr srcSts.[i])))
             | None ->
                 let covariant =
@@ -557,14 +462,10 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
                         match Map.tryFind n env with Some (Pow k) -> k > 0 | _ -> false)
                 match covariant with
                 | Some n ->
-                    reject (sprintf "the kernel of this former would receive COMPONENTS of node-covariant '%s'; component access inside perm-certified bodies lands in v2 with per-axis tracking. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear" n)
+                    reject (sprintf "the kernel of this former would receive COMPONENTS of node-covariant '%s'; component access inside perm-certified bodies requires per-axis tracking, which is not implemented. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear" n)
                 | None ->
-                    // THE EXTENT CLAIM, which is the one this arm used to make
-                    // for free. `Pow 0` here would assert the result is fixed
-                    // by every relabelling; that is only true when its extent
-                    // stays out of the node-power space. Exactly one source,
-                    // itself proven fixed, transfers that proof; anything else
-                    // is unsized.
+                    // Only a single source, itself proven fixed, transfers
+                    // that proof to the result; anything else is unsized.
                     match srcSts with
                     | [ Pow 0 ] -> Ok (Pow 0)
                     | _ -> Ok PowUnsized)
@@ -572,12 +473,9 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
         j l |> Result.bind (fun sl ->
         j r |> Result.bind (fun sr ->
             match op with
-            // +, -, *, / are all POINTWISE on flat buffers, so all four
-            // preserve the rank — this is the arm where MLEquiv admits only
-            // Rep +/- Rep and scaling by an invariant, and rejects Rep * Rep
-            // outright (BL4008, "use ml.tensor_product"). Division is the same
-            // pointwise argument as multiplication: a reciprocal is applied
-            // cell-by-cell, and a Pow 0 denominator is a constant.
+            // +, -, *, / are all POINTWISE, so all four preserve the rank --
+            // the arm where MLEquiv admits only Rep +/- Rep and scaling by an
+            // invariant, rejecting Rep * Rep outright (BL4008).
             | OpAdd | OpSub | OpMul | OpDiv ->
                 combinePointwise [ sl; sr ]
                 |> Result.mapError (fun m -> bl4012 e.Span (sprintf "function '%s': %s" ctx.FuncName m))
@@ -586,7 +484,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
                 | Pow 0, Pow 0 -> Ok (Pow 0)
                 | POpaque, _ | _, POpaque -> Ok POpaque
                 | _ ->
-                    reject "this operator is not classified on node-covariant values in v1 — combine node powers with +, -, *, / (pointwise), or with ml.derive_perm_linear / ml.perm_matmul"))
+                    reject "this operator is not classified on node-covariant values -- combine node powers with +, -, *, / (pointwise), or with ml.derive_perm_linear / ml.perm_matmul"))
     | ExprKind.ExprIf (c, t, f) ->
         j c |> Result.bind (fun sc ->
             match sc with
@@ -595,7 +493,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
                 j f |> Result.bind (fun sf ->
                     if st = sf then Ok st
                     else reject (sprintf "if branches disagree: then-branch is %s, else-branch is %s" (statusStr st) (statusStr sf))))
-            | _ -> reject "an if condition inside a perm-certified body must be invariant — branching on a node-covariant value makes the result depend on the node labelling")
+            | _ -> reject "an if condition inside a perm-certified body must be invariant -- branching on a node-covariant value makes the result depend on the node labelling")
     | ExprKind.ExprMatch (scrut, cases) ->
         j scrut |> Result.bind (fun ss ->
             match ss with
@@ -613,14 +511,14 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
             match binding.Pattern.Kind, sv with
             | PatternKind.PatVar n, _ -> judge ctx (Map.add n sv env) body
             | _, (Pow 0 | PowUnsized) -> judge ctx (bindPatternVars PowUnsized env binding.Pattern) body
-            | _, _ -> reject "cannot destructure a node-covariant value in v1 — bind it whole")
+            | _, _ -> reject "cannot destructure a node-covariant value -- bind it whole")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
         let captured = freeVars (Set.ofList (ps |> List.map (fun p -> p.Name))) lamBody
         let covCapture =
             captured |> Set.toList |> List.tryFind (fun n ->
                 match Map.tryFind n env with Some (Pow k) -> k > 0 | _ -> false)
         match covCapture with
-        | Some n -> reject (sprintf "lambda captures node-covariant '%s' — factor node work into perm-certified functions instead" n)
+        | Some n -> reject (sprintf "lambda captures node-covariant '%s' -- factor node work into perm-certified functions instead" n)
         | None -> Ok (Pow 0)
     | ExprKind.ExprAssign (l, r) ->
         judgeAssign ctx env e.Span l r |> Result.map (fun () -> Pow 0)
@@ -632,13 +530,9 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
             | None -> Ok (Pow 0))
     | ExprKind.ExprApp (f, args) -> judgeApp ctx env e f args
     | ExprKind.ExprField (_, _) -> Ok POpaque
-    // --- functional iteration (the post-imperative surface) ------------------
-    // Virtual arrays enumerate indices: label-independent by nature.
-    // Virtual arrays enumerate INDICES. That is label-independent only when
-    // the index set is not a node axis: `range<Idx<N>>` IS the node index set,
-    // and the identity index array is fixed by no relabelling but the identity.
-    // The extent is right there in the annotation, so it is read rather than
-    // assumed — the same powClass test the literal arm applies.
+    // Virtual arrays enumerate INDICES, label-independent only when the index
+    // set is not a node axis: `range<Idx<N>>` IS the node index set. The
+    // extent is read from the annotation, not assumed.
     | ExprKind.ExprRange idxTypes ->
         (match rangeCells ctx idxTypes with
          | Some cells -> Ok (invEvidenceOfCells ctx.N cells)
@@ -646,12 +540,9 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
     | ExprKind.ExprReverse _ | ExprKind.ExprHalo _ -> Ok PowUnsized
     // compute is a scheduling boundary, not a value transform.
     | ExprKind.ExprCompute x -> judge ctx env x
-    // A reduce over a Pow k IS invariant when the combiner is commutative (a
-    // sum over all cells does not see the labelling) — but v1 does not analyse
-    // the combiner, and the CERTIFIED spelling of that sum already exists: it
-    // is ml.derive_perm_linear(K, 0, N, x, w), the invariant readout, whose
-    // completeness is the theorem. So this arm refuses and points there.
-    | ExprKind.ExprReduce (src, _, init) ->
+    // A reduce over a Pow k IS invariant for a commutative combiner, but v1
+    // does not analyse it; the certified spelling is ml.derive_perm_linear.
+    | ExprKind.ExprReduce (src, _, init, _) ->
         judge ctx env src |> Result.bind (fun ss ->
             (match init with
              | Some i -> judge ctx env i
@@ -660,9 +551,9 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
                 | Pow 0, Pow 0 -> Ok (Pow 0)
                 | POpaque, _ | _, POpaque -> Ok POpaque
                 | (PowUnsized, _ | _, PowUnsized) ->
-                    Error (bl4012 e.Span (sprintf "function '%s': reduce over a value of unestablished extent cannot be called invariant — if the source lands in the node-power space its cells move with the labelling, and v1 does not check that the combiner is commutative. Annotate the source's extent, or use ml.derive_perm_linear(K, 0, %d, x, w), the complete invariant readout" ctx.FuncName ctx.N))
+                    Error (bl4012 e.Span (sprintf "function '%s': reduce over a value of unestablished extent cannot be called invariant -- if the source lands in the node-power space its cells move with the labelling, and the combiner is not checked for commutativity. Annotate the source's extent, or use ml.derive_perm_linear(K, 0, %d, x, w), the complete invariant readout" ctx.FuncName ctx.N))
                 | _ ->
-                    Error (bl4012 e.Span (sprintf "function '%s': reduce over a node-covariant value is invariant only for a commutative combiner, which v1 does not check — the certified invariant readout is ml.derive_perm_linear(K, 0, %d, x, w), whose basis is COMPLETE (every S_n-invariant linear form on the node power is one weight setting)" ctx.FuncName ctx.N))))
+                    Error (bl4012 e.Span (sprintf "function '%s': reduce over a node-covariant value is invariant only for a commutative combiner, which is not checked -- the certified invariant readout is ml.derive_perm_linear(K, 0, %d, x, w), whose basis is COMPLETE (every S_n-invariant linear form on the node power is one weight setting)" ctx.FuncName ctx.N))))
     | _ -> Ok POpaque
 
 and private judgeStmts (ctx: Ctx) (env: Map<string, PowStatus>) (stmts: Stmt list)
@@ -677,7 +568,7 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, PowStatus>) (stmts: Stmt lis
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
                     | _, (Pow 0 | PowUnsized) -> Ok (bindPatternVars PowUnsized env binding.Pattern)
                     | _, _ ->
-                        Error (bl4012 binding.Value.Span (sprintf "function '%s': cannot destructure a node-covariant value in v1 — bind it whole" ctx.FuncName)))
+                        Error (bl4012 binding.Value.Span (sprintf "function '%s': cannot destructure a node-covariant value -- bind it whole" ctx.FuncName)))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
             | StmtAssign (l, _, r) -> judgeAssign ctx env l.Span l r |> Result.map (fun () -> env)
             | StmtForIn (v, range, body) ->
@@ -700,17 +591,12 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, PowStatus>) (span: Span) (l
         | ExprKind.ExprVar n ->
             match Map.tryFind n env with
             | Some st when st = sr -> Ok ()
-            | Some st -> fail (sprintf "assignment changes '%s' from %s to %s — a mut binding must keep one status" n (statusStr st) (statusStr sr))
+            | Some st -> fail (sprintf "assignment changes '%s' from %s to %s -- a mut binding must keep one status" n (statusStr st) (statusStr sr))
             | None -> Ok ()
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, idxArgs) ->
-            // element write: the INDICES are judged first, then the container
-            // and the value. Judging the indices is catalog finding 2 —
-            // MLGalilean's judgeAssign already did it, MLEquiv and this copy
-            // matched the target and walked past the index expressions, so
-            // `a(x(0)) = v` went unchecked on the WRITE path while the
-            // identical read `let z = x(0)` was rejected. A write whose
-            // LOCATION is chosen by node-covariant data is not equivariant:
-            // relabel the nodes and the value lands in a different cell.
+            // element write: INDICES are judged first (catalog finding 2 --
+            // this copy used to walk past them, so `a(x(0)) = v` went
+            // unchecked on WRITE while `let z = x(0)` was rejected on READ).
             idxArgs
             |> List.fold (fun acc a ->
                 acc |> Result.bind (fun () ->
@@ -719,21 +605,21 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, PowStatus>) (span: Span) (l
                         | Pow 0 -> Ok ()
                         | PowUnsized ->
                             Error (bl4012 a.Span
-                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, and this one is invariant-shaped but of unestablished extent — v1 cannot rule out that the cell it selects moves with the node labelling"
+                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, and this one is invariant-shaped but of unestablished extent -- the judgment cannot rule out that the cell it selects moves with the node labelling"
                                             ctx.FuncName))
                         | Pow _ ->
                             Error (bl4012 a.Span
-                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, but this one is %s — the cell it selects moves with the node labelling"
+                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, but this one is %s -- the cell it selects moves with the node labelling"
                                             ctx.FuncName (statusStr si)))
                         | POpaque ->
                             Error (bl4012 a.Span
-                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, and this one is unclassifiable — v1 cannot rule out that the cell it selects moves with the node labelling. Index with a static offset or a value the judgment can see"
+                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, and this one is unclassifiable -- the judgment cannot rule out that the cell it selects moves with the node labelling. Index with a static offset or a value the judgment can see"
                                             ctx.FuncName)))))
                 (Ok ())
             |> Result.bind (fun () ->
                 match Map.tryFind n env with
                 | Some (Pow k) when k > 0 ->
-                    fail (sprintf "element-assignment into node-covariant '%s' writes ONE cell of a node power, which v1 cannot tell from an equivariant reassembly; per-axis tracking lands in v2. Build node powers with ml.derive_perm_linear / ml.derive_perm_bias / ml.perm_matmul, or with whole-array elementwise arithmetic" n)
+                    fail (sprintf "element-assignment into node-covariant '%s' writes ONE cell of a node power, which cannot be told from an equivariant reassembly without per-axis tracking. Build node powers with ml.derive_perm_linear / ml.derive_perm_bias / ml.perm_matmul, or with whole-array elementwise arithmetic" n)
                 | _ ->
                     match sr with
                     | Pow k when k > 0 -> fail "cannot store a node-covariant value into an array element"
@@ -752,7 +638,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
             if s = Pow k then Ok ()
             elif s = PowUnsized && k = 0 then
                 Error (bl4012 argE.Span
-                           (sprintf "function '%s': %s must be invariant, and this argument is invariant-SHAPED but of unestablished extent — the op's theorem holds only if those cells do not move when the nodes are relabelled, and a buffer that lands in the node-power space does move. Annotate the extent, or build the equivariant constants with ml.derive_perm_bias"
+                           (sprintf "function '%s': %s must be invariant, and this argument is invariant-SHAPED but of unestablished extent -- the op's theorem holds only if those cells do not move when the nodes are relabelled, and a buffer that lands in the node-power space does move. Annotate the extent, or build the equivariant constants with ml.derive_perm_bias"
                                 ctx.FuncName what))
             else
                 Error (bl4012 argE.Span
@@ -762,16 +648,15 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
         staticArgValue ctx.Statics argE
         |> Result.bind (fun sv -> match sv with SVInt n -> Ok (int n) | _ -> Error "must be a static int")
         |> Result.mapError (fun m -> bl4012 argE.Span (sprintf "function '%s': %s: %s" ctx.FuncName what m))
-    /// The op's N must be THE certificate's N: one function body, one node
-    /// axis. (The MLEquiv group-mismatch precedent, one lattice down.)
+    /// The op's N must be THE certificate's N: one function body, one node axis.
     let requireN (op: string) (n': int) (argE: Expr) =
         if n' = ctx.N then Ok ()
         else
             Error (bl4012 argE.Span
-                       (sprintf "function '%s': ml.%s is called with N = %d, but this function is certified `ml.perm_equiv(%d)`. A certificate names ONE node axis — an S_%d-equivariant op proves nothing about S_%d relabellings. Match the extents, or split the body into two certified functions"
+                       (sprintf "function '%s': ml.%s is called with N = %d, but this function is certified `ml.perm_equiv(%d)`. A certificate names ONE node axis -- an S_%d-equivariant op proves nothing about S_%d relabellings. Match the extents, or split the body into two certified functions"
                             ctx.FuncName op n' ctx.N n' ctx.N))
     match f.Kind with
-    // --- ml ops (surface-visible pre-rewrite) -------------------------------
+    // ml ops (surface-visible pre-rewrite)
     | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) when Set.contains alias ctx.MlAliases ->
         (match op, args with
          | "derive_perm_linear", [ kE; lE; nE; xE; wE ] ->
@@ -781,41 +666,37 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
                  requireN "derive_perm_linear" n' nE |> Result.bind (fun () ->
                  requirePow "derive_perm_linear input" k xE |> Result.bind (fun () ->
                  requirePow "derive_perm_linear weight buffer" 0 wE |> Result.map (fun () ->
-                     // The complete Hom_{Sn}(R^{N^K}, R^{N^L}) basis: the
-                     // result IS a node power of rank L, by construction.
+                     // The complete Hom_{Sn}(R^{N^K}, R^{N^L}) basis.
                      Pow l))))))
          | "derive_perm_bias", [ lE; nE; bE ] ->
              staticInt "derive_perm_bias L" lE |> Result.bind (fun l ->
              staticInt "derive_perm_bias N" nE |> Result.bind (fun n' ->
                  requireN "derive_perm_bias" n' nE |> Result.bind (fun () ->
                  requirePow "derive_perm_bias coefficient buffer" 0 bE |> Result.map (fun () ->
-                     // The rep-INTRODUCTION form: the complete space of
-                     // S_n-invariant constants in R^{N^L}.
+                     // The rep-INTRODUCTION form: S_n-invariant constants in R^{N^L}.
                      Pow l))))
          | "perm_matmul", [ nE; aE; bE ] ->
              staticInt "perm_matmul N" nE |> Result.bind (fun n' ->
                  requireN "perm_matmul" n' nE |> Result.bind (fun () ->
                  requirePow "perm_matmul left factor" 2 aE |> Result.bind (fun () ->
                  requirePow "perm_matmul right factor" 2 bE |> Result.map (fun () ->
-                     // (P A P^T)(P B P^T) = P (A B) P^T — the PPGN engine, the
-                     // one bilinear shipped BY NAME rather than by synthesis.
+                     // (P A P^T)(P B P^T) = P (A B) P^T -- shipped BY NAME.
                      Pow 2))))
          | ("derive_perm_linear" | "derive_perm_bias" | "perm_matmul"), _ ->
              reject (sprintf "%s: unrecognized call shape inside a perm-certified body" op)
          | _ ->
-             // every other ml.* op (the O(3) surface included): its arguments
-             // live in irreps space or in sizing space, neither of which
-             // carries a node axis, so invariants in / invariant out.
+             // every other ml.* op: its arguments live in irreps or sizing
+             // space, neither carrying a node axis, so invariants in/out.
              judgeAll args |> Result.bind (fun sts ->
                  if sts |> List.forall ((=) (Pow 0)) then Ok (Pow 0)
                  elif sts |> List.forall (fun st -> st = Pow 0 || st = PowUnsized) then Ok PowUnsized
-                 else reject (sprintf "ml.%s carries no S_n rule for node-covariant arguments — the node-axis ops are ml.derive_perm_linear, ml.derive_perm_bias and ml.perm_matmul" op)))
-    // --- named callees ------------------------------------------------------
+                 else reject (sprintf "ml.%s carries no S_n rule for node-covariant arguments -- the node-axis ops are ml.derive_perm_linear, ml.derive_perm_bias and ml.perm_matmul" op)))
+    // named callees
     | ExprKind.ExprVar fn ->
         match Map.tryFind fn ctx.Certs with
         | Some cert ->
             if cert.N <> ctx.N then
-                reject (sprintf "call to '%s': it is certified for N = %d, this function for N = %d — certificates do not transfer between node-axis extents" fn cert.N ctx.N)
+                reject (sprintf "call to '%s': it is certified for N = %d, this function for N = %d -- certificates do not transfer between node-axis extents" fn cert.N ctx.N)
             elif List.length args <> List.length cert.Params then
                 reject (sprintf "call to '%s': expected %d arguments" fn (List.length cert.Params))
             else
@@ -824,9 +705,8 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
                     acc |> Result.bind (fun () ->
                         match pSt with
                         | POpaque -> reject (sprintf "call to '%s': parameter '%s' is unclassifiable" fn pName)
-                        // Unreachable from a signature (statusOfType answers
-                        // Pow or Error), but stated rather than wildcarded so
-                        // a future classifier cannot slip past this arm.
+                        // Unreachable from a signature (statusOfType answers Pow
+                        // or Error); stated so a future classifier can't slip past.
                         | PowUnsized -> reject (sprintf "call to '%s': parameter '%s' has no established extent" fn pName)
                         | Pow k -> requirePow (sprintf "'%s' parameter '%s'" fn pName) k argE))
                     (Ok ())
@@ -834,33 +714,23 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
         | None ->
             match Map.tryFind fn env with
             | Some (Pow k) when k > 0 ->
-                // A read out of a node power. LEGAL in the mathematics when the
-                // index is a bound loop variable (§3.6 — the node basis is
-                // real, unlike the irreps basis MLEquiv guards); v1 has no
-                // loop-variable tracking, so it refuses uniformly.
-                reject (sprintf "component access into node-covariant '%s' inside a perm-certified body lands in v2 with per-axis tracking — v1 cannot tell a bound-index read (which reassembles equivariantly) from a fixed-offset one (which does not). Whole-array elementwise operators are pointwise, hence equivariant, and ml.derive_perm_linear(K, 0, %d, x, w) is the complete invariant readout" fn ctx.N)
+                // A read out of a node power, LEGAL for a bound loop-variable
+                // index; v1 has no such tracking, so it refuses uniformly.
+                reject (sprintf "component access into node-covariant '%s' inside a perm-certified body requires per-axis tracking, which is not implemented: a bound-index read (which reassembles equivariantly) cannot be told from a fixed-offset one (which does not). Whole-array elementwise operators are pointwise, hence equivariant, and ml.derive_perm_linear(K, 0, %d, x, w) is the complete invariant readout" fn ctx.N)
             | _ ->
                 judgeAll args |> Result.bind (fun sts ->
                     match sts |> List.tryFindIndex (fun s -> s <> Pow 0 && s <> PowUnsized) with
                     | None ->
-                        // A read out of an invariant array, or a call to a
-                        // helper: invariant by the conditional-theorem reading,
-                        // but fixedness is claimable only with an extent behind
-                        // it. An indexed read of a bound array is one cell, so
-                        // it is a scalar; a helper call is classified by its
-                        // declared return type (buildReturnEvidence).
+                        // Fixedness is claimable only with an extent behind it:
+                        // an indexed read of a bound array is one cell (a
+                        // scalar); a helper call uses its declared return type.
                         let unsizedArg = sts |> List.exists ((=) PowUnsized)
                         (match Map.tryFind fn env with
-                         // An element read is ONE cell, but a cell of a buffer
-                         // that is not itself fixed is not fixed either: if the
-                         // buffer lands in the node-power space its cells move
-                         // with the labelling, so `a(0)` moves with it too.
+                         // A cell of a buffer not itself fixed isn't either.
                          | Some (Pow 0) -> Ok (Pow 0)
                          | Some _ -> Ok PowUnsized
                          | None ->
-                             // Not a local: either a module-level array being
-                             // indexed (its evidence is in Globals) or a call
-                             // to a helper (classified by its declared return).
+                             // Not a local: a module array (Globals) or a helper.
                              match Map.tryFind fn ctx.Globals with
                              | Some (Pow 0) -> Ok (Pow 0)
                              | Some _ -> Ok PowUnsized
@@ -870,16 +740,14 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
                                  | Some _ -> Ok PowUnsized
                                  | None -> Ok PowUnsized)
                     | Some i ->
-                        // THE POLARITY ARM. A pointwise scalar builtin applied
-                        // to a node power is EQUIVARIANT (see
-                        // isPointwiseBuiltin's comment) — the exact opposite of
-                        // MLEquiv's verdict on the same shape.
+                        // THE POLARITY ARM: a pointwise builtin on a node power
+                        // is EQUIVARIANT -- opposite of MLEquiv's verdict.
                         if isPointwiseBuiltin fn then
                             combinePointwise sts
                             |> Result.mapError (fun m -> bl4012 e.Span (sprintf "function '%s': %s" ctx.FuncName m))
                         else
                             Error (bl4012 args.[i].Span
-                                       (sprintf "function '%s': a node-covariant value escapes to '%s', which carries no perm certificate — certify it with `where ml.perm_equiv(%d)` or pass only invariants"
+                                       (sprintf "function '%s': a node-covariant value escapes to '%s', which carries no perm certificate -- certify it with `where ml.perm_equiv(%d)` or pass only invariants"
                                             ctx.FuncName fn ctx.N)))
     | _ ->
         judgeAll args |> Result.bind (fun sts ->
@@ -905,28 +773,24 @@ let judgeFunction (certs: Map<string, PermSig>) (statics: StaticEnv) (mlAliases:
             if st = cert.Return then []
             else
                 [ bl4012 fd.Body.Span
-                      (sprintf "function '%s': the body is %s but the declared return type says %s — the certificate requires them to agree" fd.Name (statusStr st) (statusStr cert.Return)) ]
+                      (sprintf "function '%s': the body is %s but the declared return type says %s -- the certificate requires them to agree" fd.Name (statusStr st) (statusStr cert.Return)) ]
 
-// ============================================================================
 // Constraint-registry handler
-// ============================================================================
 
 /// `perm_equiv(N)` is a callee-side theorem: Validate re-checks the conjunct
-/// shape (the elaborator has already judged the body by the time
-/// checkFunctionDecl runs, and it is the elaborator that resolves a `let
-/// static` N against the static environment), the license scope is unused, and
-/// call sites carry no obligation.
+/// shape (the elaborator has already judged the body, and resolves `let
+/// static` N against the static environment); call sites carry no obligation.
 let private permHandler : Blade.Constraints.ConstraintHandler = {
-    Describe = "perm_equiv(N) — certifies the function equivariant under the symmetric group S_N relabelling a node axis of extent N; the ML elaborator proves the body composes only relabelling-equivariant operations"
+    Describe = "perm_equiv(N) -- certifies the function equivariant under the symmetric group S_N relabelling a node axis of extent N; the ML elaborator proves the body composes only relabelling-equivariant operations"
     Validate = fun funcName _ args ->
         match args with
         | [ a ] ->
             match System.Int32.TryParse a with
             | true, n when n < 2 ->
-                Error (sprintf "function '%s': perm_equiv(%d) — N must be >= 2 (the node-axis extent; S_1 is trivial and the flat extent keying needs strictly increasing powers)" funcName n)
+                Error (sprintf "function '%s': perm_equiv(%d) -- N must be >= 2 (the node-axis extent; S_1 is trivial and the flat extent keying needs strictly increasing powers)" funcName n)
             | _ -> Ok () // an int >= 2, or a `let static` name the elaborator resolves
         | _ ->
-            Error (sprintf "function '%s': perm_equiv expects exactly one argument — the node-axis extent N, as in `where ml.perm_equiv(4)`" funcName)
+            Error (sprintf "function '%s': perm_equiv expects exactly one argument -- the node-axis extent N, as in `where ml.perm_equiv(4)`" funcName)
     EnterBody = fun _ _ -> ()
     ExitBody = fun _ _ -> ()
     Discharge = fun _ _ _ -> Ok ()

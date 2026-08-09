@@ -1,0 +1,17 @@
+// TEST: Default Params Multi Arity
+// Trailing parameter defaults: a call may omit trailing defaulted params.
+// Absence resolves STATICALLY -- the call-site desugar appends the (type-
+// ascribed) default expressions, so codegen and the interpreter only ever
+// see ordinary full-arity calls. Also: a fully-defaulted function is
+// callable with zero args.
+function k0() -> Float = 0.5
+function scale(x: Float, k: Float = 2.0, b: Float = k0()) -> Float = x * k + b
+let a = scale(3.0, 4.0, 1.0)
+let b = scale(3.0, 4.0)
+let c = scale(3.0)
+function c0(k: Float = 3.0) -> Float = k * 2.0
+let z = c0()
+// EXPECT: a = 13
+// EXPECT: b = 12.5
+// EXPECT: c = 6.5
+// EXPECT: z = 6

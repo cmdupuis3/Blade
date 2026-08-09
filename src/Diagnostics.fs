@@ -14,9 +14,7 @@ module Blade.Diagnostics
 
 open Blade.Ast
 
-// ============================================================================
-// Core types
-// ============================================================================
+// Core types.
 
 type Severity =
     | SevError
@@ -49,9 +47,7 @@ type Diagnostic = {
 /// (codegen feature limits, internal invariants). Caught at the CLI boundary.
 exception BladeDiagnosticException of Diagnostic
 
-// ============================================================================
-// SourceMap: original source retained to error-report time for snippets
-// ============================================================================
+// SourceMap: original source retained to error-report time for snippets.
 
 type SourceMap = { Files: Map<string, string[]> }
 
@@ -70,8 +66,8 @@ module SourceMap =
     let tryLines (sm: SourceMap) (file: string) : string[] option =
         Map.tryFind file sm.Files
 
-    /// Lines for a span's file. A span with File = None (the common legacy
-    /// case) resolves against a single-file map — the usual CLI situation.
+    /// Lines for a span's file. A span with File = None (the common case)
+    /// resolves against a single-file map -- the usual CLI situation.
     let tryLinesFor (sm: SourceMap) (file: string option) : string[] option =
         match file with
         | Some f -> tryLines sm f
@@ -80,9 +76,7 @@ module SourceMap =
             | [ (_, lines) ] -> Some lines
             | _ -> None
 
-// ============================================================================
-// Constructors
-// ============================================================================
+// Constructors.
 
 let mkDiagnostic code severity phase span message : Diagnostic =
     { Code = code; Severity = severity; Phase = phase; Span = span
@@ -92,7 +86,7 @@ let mkError code phase span message : Diagnostic =
     mkDiagnostic code SevError phase span message
 
 /// Warning mirror of `mkError`. Non-fatal, but coded and spanned like every
-/// other diagnostic, so `Render.render` treats it identically — the checker's
+/// other diagnostic, so `Render.render` treats it identically -- the checker's
 /// `emitWarning` channel builds these.
 let mkWarning code phase span message : Diagnostic =
     mkDiagnostic code SevWarning phase span message
@@ -106,33 +100,37 @@ let withNoteAt (span: Span) (note: string) (d: Diagnostic) : Diagnostic =
 let withContext (context: string list) (d: Diagnostic) : Diagnostic =
     { d with Context = context }
 
-// ============================================================================
 // Code registry: every code the compiler can emit, with a short title.
 // Test_Diagnostics asserts shape and uniqueness; emitting an unregistered
 // code is a bug the corpus tests catch.
-// ============================================================================
 
 module Codes =
-    /// Source of truth, as a LIST so duplicate codes stay visible — building
+    /// Source of truth, as a LIST so duplicate codes stay visible -- building
     /// the Map directly would silently drop all but the last entry for a
-    /// repeated code (that is exactly how BL4007 was double-booked once).
-    /// Test_Diagnostics asserts this list has no duplicate codes.
+    /// repeated code. Test_Diagnostics asserts this list has no duplicate codes.
     let registryEntries : (string * string) list =
         [
-            // BL0xxx — lexer
+            // BL0xxx: lexer
             "BL0001", "unknown character"
             "BL0002", "unterminated string"
             "BL0003", "invalid numeric literal"
             "BL0999", "lexical error"
-            // BL1xxx — parser
+            // BL1xxx: parser
             "BL1001", "expected token"
             "BL1002", "unexpected end of file"
             "BL1999", "parse error"
-            // BL2xxx — name resolution
+            // BL2xxx: name resolution
             "BL2001", "unbound variable"
             "BL2002", "unknown qualified name"
             "BL2003", "invalid import"
-            // BL3xxx — types
+            // BL2004..BL2006: FILE-based module resolution (ModuleResolve.fs),
+            // the layer that turns `import units.SI` into units/SI.blade before
+            // the checker ever sees the program. Separate from BL2003, which is
+            // the checker's verdict on an import it CAN see.
+            "BL2004", "module not found"
+            "BL2005", "import cycle"
+            "BL2006", "duplicate module"
+            // BL3xxx: types
             "BL3001", "type mismatch"
             "BL3002", "arity mismatch"
             "BL3003", "invalid application"
@@ -142,8 +140,39 @@ module Codes =
             "BL3007", "invalid builtin argument"
             "BL3008", "struct construction error"
             "BL3009", "rank deduction violation"
+            // BL3010: strict quantity slots. A parameter whose declared type
+            // carries a QUANTITY (nominal unit, `Unit speed: mps`) rejects
+            // any argument not ascribed with that quantity — bare values and
+            // structurally-dimensioned values alike. Split from BL3006: the
+            // dims may agree perfectly; what is missing is the caller's
+            // ASSERTION, and the fix is an ascription, not a conversion.
+            "BL3010", "quantity argument needs ascription"
+            // BL3011: quantity names are TERMINAL in unit algebra — the
+            // nominal layer is exactly one level deep, so `Unit x = speed*m`
+            // and `Unit q: speed` are declaration-site errors.
+            "BL3011", "quantity name is terminal"
+            // BL3012: parameter-default declaration rules. Defaults are
+            // TRAILING (a required param may not follow a defaulted one) and
+            // may reference the REQUIRED params only — they evaluate at call
+            // entry, left-to-right, with just the required arguments bound.
+            "BL3012", "invalid parameter default"
+            // BL3013: factory declarations. Within one function's defaulted
+            // trailing group, quantity-typed slots must carry DISTINCT
+            // quantities — by-nominal routing needs each nominal to name
+            // exactly one slot. Declaration-site, fires even if never called.
+            "BL3013", "factory quantity slots must be distinct"
+            // BL3014: by-nominal argument routing at a call site — a slot
+            // filled twice, a tag matching no slot, or an untagged positional
+            // argument after a tagged one (ambiguous mix).
+            "BL3014", "invalid quantity-tagged argument routing"
+            // BL3015: a name on the RHS of a `Unit` declaration that is
+            // neither a declared unit nor a built-in scale constant. A unit
+            // RHS composes what is already in scope; the alternative (mint
+            // the declared name as a fresh base unit) types a misspelling
+            // into a silently wrong dimension.
+            "BL3015", "unknown unit name"
             "BL3999", "type error"
-            // BL4xxx — constraints / static
+            // BL4xxx: constraints / static
             "BL4001", "constraint violation"
             "BL4002", "static evaluation failure"
             "BL4003", "index type violation"
@@ -154,32 +183,37 @@ module Codes =
             "BL4008", "equivariance discipline violation"
             "BL4009", "galilean discipline violation"
             "BL4010", "confirm-and-pin storage suggestion"
-            // BL4011 was RESERVED and deliberately unregistered through five
-            // stages, held for the certificate-SUGGESTION channel of
-            // plan-transforms-as-types §4b (deduced-rep "propose, don't
-            // export"); stage 5a's Sₙ lattice took BL4012 rather than
-            // double-booking it — the BL4007 lesson. Stage 6a is that channel:
-            // MLEquiv runs the shipped checking judgment speculatively on
-            // uncertified functions and proposes the pin. A WARNING, always —
-            // an uncertified function is correct, just not proved equivariant,
-            // so nothing here can fail a build (and `--strict-pins`, which owns
-            // BL4010's storage decision, deliberately grows no BL4011 arm).
+            // BL4011: certificate-SUGGESTION channel for deduced equivariance
+            // ("propose, don't export"). MLEquiv runs the shipped checking
+            // judgment speculatively on uncertified functions and proposes
+            // the pin. Always a warning -- an uncertified function is
+            // correct, just not proved equivariant, so nothing here can fail
+            // a build (and `--strict-pins`, which owns BL4010's storage
+            // decision, deliberately grows no BL4011 arm).
             "BL4011", "equivariance certificate suggestion"
             "BL4012", "permutation-equivariance discipline violation"
-            // BL4013 — the stage-3 CONTRADICTION errors, split out of BL3007's
+            // BL4013: the CONTRADICTION errors, split out of BL3007's
             // ~24-way "invalid builtin argument" bucket (TypeEnv.fs). A declared
             // `comm` over a provably antisymmetric pair (or `antisymm` over a
             // provably invariant one) is not a bad builtin argument: it is an
             // annotation the deduction can prove wrong, and the one error whose
             // fix is "remove the clause / wrap in reynolds".
             "BL4013", "symmetry annotation contradicts body"
-            // BL4014 — BL4011's galilean twin: the inference pass runs the
+            // BL4014: BL4011's galilean twin. The inference pass runs the
             // shipped galilean judgment speculatively (try-each-velocity-
-            // parameter) and proposes `where ml.galilean(u)`. A WARNING,
-            // always, for BL4011's reason — and like BL4011 it grows no
+            // parameter) and proposes `where ml.galilean(u)`. Always a
+            // warning, for BL4011's reason, and like BL4011 grows no
             // `--strict-pins` arm: certificates own no storage decision.
             "BL4014", "galilean certificate suggestion"
-            // BL5xxx — elaborators
+            // BL4015: the compact-class INHERITANCE gate (AntisymMapNotOdd /
+            // HermitianMapNotReal / WreathTieKernelNotOdd).
+            "BL4015", "compact-class inheritance not certified"
+            // BL4016: `where ... omp` on a fold kernel with no reorder licence.
+            // Distinct from BL4013 (annotation contradicts body): nothing is
+            // disproved, there is simply no commutativity/associativity claim
+            // to stand on. See docs/plan-cpp-perf-exploitation.md.
+            "BL4016", "parallel fold needs a reorder licence"
+            // BL5xxx: elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"
             "BL5200", "math elaboration error"
@@ -187,28 +221,32 @@ module Codes =
             "BL5400", "spectra elaboration error"
             "BL5500", "grad elaboration error"
             "BL5600", "sgs elaboration error"
-            // BL6xxx — IR validation
+            "BL5700", "display elaboration error"
+            // BL6xxx: IR validation
             "BL6001", "IR validation error"
-            // BL7xxx — backend limits
+            // BL7xxx: backend limits
             "BL7001", "feature not yet supported by this backend"
             "BL7002", "CUDA backend limit"
             "BL7003", "MPI backend limit"
-            // BL8xxx — runtime (generated C++)
+            // BL8xxx: runtime (generated C++)
             "BL8001", "constraint violation"
             "BL8002", "non-exhaustive match"
             "BL8003", "empty reduction"
             "BL8004", "MPI runtime error"
             "BL8005", "unhandled runtime exception"
             "BL8006", "index out of bounds"
-            // BL9xxx — internal compiler errors
+            // solve(A, b) hit an exactly-zero pivot. Raised identically by the
+            // emitted LU loop nest, by the LAPACK ?gesv arm's non-zero `info`,
+            // and by the interpreter's twin -- see CodeGen.solveSingularMessage.
+            "BL8007", "singular matrix"
+            // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"
             "BL9003", "internal lowering invariant violated"
-            // Two independent judgments of the same equivariance theorem — the
-            // elaboration-seam checker and the typecheck-resident walker —
-            // reached contradictory verdicts (plan-equivariance-in-types.md C1).
-            // The seam has already ACCEPTED the program, so this can never be
-            // the user's fault.
+            // Two independent judgments of the same equivariance theorem, the
+            // elaboration-seam checker and the typecheck-resident walker,
+            // reached contradictory verdicts. The seam has already accepted
+            // the program, so this can never be the user's fault.
             "BL9004", "internal deduction disagreement"
         ]
 
@@ -236,6 +274,7 @@ module Codes =
                 | "BL5400" -> PhElaborate "spectra"
                 | "BL5500" -> PhElaborate "grad"
                 | "BL5600" -> PhElaborate "sgs"
+                | "BL5700" -> PhElaborate "display"
                 | _ -> PhElaborate "ml"
             | '6' -> PhIRValidate
             | '7' -> PhBackend
@@ -252,12 +291,13 @@ module Codes =
         | "spectra" -> "BL5400"
         | "grad" -> "BL5500"
         | "sgs" -> "BL5600"
+        | "display" -> "BL5700"
         | _ -> "BL5000"
 
     let ice (message: string) : Diagnostic =
         mkError "BL9001" PhInternal noSpan
             (sprintf "internal compiler error: %s" message)
-        |> withNote "this is a bug in the Blade compiler, not in your program — please report it"
+        |> withNote "this is a bug in the Blade compiler, not in your program -- please report it"
 
     let iceCodegen (message: string) : Diagnostic =
         { ice message with Code = "BL9002" }
@@ -265,9 +305,7 @@ module Codes =
     let backendLimit (span: Span) (message: string) : Diagnostic =
         mkError "BL7001" PhBackend span message
 
-// ============================================================================
-// Rendering
-// ============================================================================
+// Rendering.
 
 module Render =
 
@@ -312,11 +350,11 @@ module Render =
 
     /// Snippet block for one located span: gutter, source line, underline.
     /// Renders the span's first line only; a multi-line span underlines to
-    /// the end of that line. Returns [] when no source is available.
-    /// `sev` is threaded in so the carets match the header's severity color:
-    /// this was hardcoded to SevError, which painted a warning's underline
-    /// bold-RED under a bold-YELLOW `warning[...]` label. Invisible to the
-    /// renderer goldens (all useColor = false), visible to every human.
+    /// the end of that line. Returns [] when no source is available. `sev`
+    /// is threaded in so the carets match the header's severity color --
+    /// a mismatch would paint a warning's underline bold-red under a
+    /// bold-yellow `warning[...]` label, invisible to the renderer goldens
+    /// (all useColor = false) but visible to every human.
     let private snippet useColor (sev: Severity) (sm: SourceMap option) (span: Span) : string list =
         match sm |> Option.bind (fun m -> SourceMap.tryLinesFor m span.File) with
         | None -> []

@@ -117,9 +117,9 @@ let e6_freepoisson = 5.0 + 9.0 * 0.5 + 0.5 * 0.5
 let e6_qgaussian = 5.0 + 6.0 * a_qspec + 3.0 * a_qspec * a_qspec + a_qspec * a_qspec * a_qspec
 
 // --- block A entries (the basis-aware reading of the SAME matrix) ---
-let EA1 = reduce(method_for(XA, XA) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y), (+))
-let EA2 = reduce(method_for(XA, XA) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y) * prodsum(x, y), (+))
-let EA4 = reduce(method_for(XA, XA) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y) * prodsum(x, y) * prodsum(x, y) * prodsum(x, y), (+))
+let EA1 = reduce(method_for(XA, XA) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y), (+), axes = 2)
+let EA2 = reduce(method_for(XA, XA) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y) * prodsum(x, y), (+), axes = 2)
+let EA4 = reduce(method_for(XA, XA) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y) * prodsum(x, y) * prodsum(x, y) * prodsum(x, y), (+), axes = 2)
 let DA2 = reduce(method_for(XA) <@> lambda(x: Array<Float64 like Idx<96>>) -> prodsum(x, x) * prodsum(x, x), (+))
 let DA4 = reduce(method_for(XA) <@> lambda(x: Array<Float64 like Idx<96>>) -> prodsum(x, x) * prodsum(x, x) * prodsum(x, x) * prodsum(x, x), (+))
 let noA = 48.0 * 48.0 - 48.0

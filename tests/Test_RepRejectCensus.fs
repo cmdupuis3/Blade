@@ -1,4 +1,4 @@
-/// Stage C3 of docs/plan-equivariance-in-types.md: the REJECTION-PARITY CENSUS.
+/// Stage C3 of the retired equivariance-in-types plan: the REJECTION-PARITY CENSUS.
 ///
 /// WHAT THIS BLOCK IS, AND WHY IT IS NOT ONE OF THE OTHER TWO.
 ///

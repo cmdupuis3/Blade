@@ -11,10 +11,10 @@ type Steps = Idx<5>
 let mut STG = method_for(range<C>) <@> lambda(i) -> 0.0 * i |> compute
 function stepf(n: Int64) -> Float = {
     let t = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 2.0 * n |> compute
-    STG(0) = t(0)
-    STG(1) = t(1)
-    STG(2) = t(2)
-    STG(3) = t(3)
+    STG((0 : C)) = t((0 : C))
+    STG((1 : C)) = t((1 : C))
+    STG((2 : C)) = t((2 : C))
+    STG((3 : C)) = t((3 : C))
     reduce(t, (+)) * 0.5
 }
 let rec acc: Array<Float like Steps> =
@@ -22,7 +22,7 @@ let rec acc: Array<Float like Steps> =
     | zero -> zero
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: prefix(n - 1) + stepf(n)
-let sfinal = acc(4)
+let sfinal = acc((4 : Steps))
 // EXPECT: STG = [8, 9, 10, 11]
 // EXPECT: acc = [0, 7, 18, 33, 52]
 // EXPECT: sfinal = 52

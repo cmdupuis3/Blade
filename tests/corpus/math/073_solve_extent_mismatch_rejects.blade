@@ -1,0 +1,12 @@
+// TEST: Math solve: b extent disagrees with A rejects (rejects)
+// ERROR: BL5200
+// ERROR-CONTAINS: b's extent must match A's dimension
+// A is 3x3 and b is length 4: there is no system here at all. Worth its own
+// probe rather than folding into the non-square one, because the two failures
+// are found by DIFFERENT comparisons -- squareness compares A's two extents to
+// each other, agreement compares A's to b's -- and a rule that checked only the
+// first would let this program through to emit loops that read b out of bounds.
+import math as m
+let A: Array<Float64 like Idx<3>, Idx<3>> = [[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]
+let b: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let x = m.solve(A, b)

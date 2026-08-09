@@ -4,19 +4,19 @@ open System
 
 /// Verification of the hand-written adjoints (Autodiff.fs) and the training
 /// oracle (TrainingOracle.fs). The differential-oracle stance, applied to
-/// gradients — independent routes must agree:
+/// gradients -- independent routes must agree:
 ///
 ///   1. Finite differences: for random perturbation dx and cotangent u,
-///      ⟨u, (f(x+εdx) - f(x-εdx)) / 2ε⟩  ≈  ⟨vjp_x(u), dx⟩.
+///      <u, (f(x+epsilondx) - f(x-epsilondx)) / 2epsilon>  ~=  <vjp_x(u), dx>.
 ///      Checked per op AND for the full 26-parameter model loss.
-///   2. Adjoint duality: ⟨scatter_add(v), u⟩ = ⟨v, gather(u)⟩ exactly
-///      (they are each other's transpose — the structural fact the compiler
+///   2. Adjoint duality: <scatter_add(v), u> = <v, gather(u)> exactly
+///      (they are each other's transpose -- the structural fact the compiler
 ///      transform will rely on).
 ///   3. The w=0 trap: the forward's `w <> 0.0` skip must not leak into dW
 ///      (zero weights have nonzero gradients).
 ///   4. Gradient equivariance: rotating a graph's positions leaves the loss
-///      AND every weight gradient unchanged (invariant readout ⇒ invariant
-///      loss surface ⇒ invariant gradients).
+///      AND every weight gradient unchanged (invariant readout => invariant
+///      loss surface => invariant gradients).
 ///   5. Training sanity: the fixed-seed run's loss decreases substantially.
 module Tests_Autodiff =
 
@@ -29,7 +29,7 @@ module Tests_Autodiff =
         Array.fold2 (fun acc x y -> acc + x * y) 0.0 a b
 
     /// Central-difference directional derivative of f at x along dx,
-    /// contracted with u: ⟨u, Df(x)[dx]⟩.
+    /// contracted with u: <u, Df(x)[dx]>.
     let private fdDirectional (f: float[] -> float[]) (x: float[]) (dx: float[]) (u: float[]) : float =
         let eps = 1e-5
         let xp = Array.mapi (fun i v -> v + eps * dx.[i]) x
@@ -127,10 +127,10 @@ module Tests_Autodiff =
         let srcIdx = [| 0; 2; 2; 5; 1; 4; 0 |]
         let feats = randArray (nRows * featDim)
         let vals = randArray (srcIdx.Length * featDim)
-        // ⟨gather(feats), vals⟩ = ⟨feats, scatter_add(vals)⟩
+        // <gather(feats), vals> = <feats, scatter_add(vals)>
         let lhs = dot (MessagePassing.gather feats featDim nRows srcIdx) vals
         let rhs = dot feats (MessagePassing.scatterAdd vals featDim srcIdx nRows)
-        TestHarness.checkClose "⟨gather(f), v⟩ = ⟨f, scatter_add(v)⟩" 1e-12 lhs rhs
+        TestHarness.checkClose "<gather(f), v> = <f, scatter_add(v)>" 1e-12 lhs rhs
         // and the vjp wrappers are exactly those transposes
         TestHarness.checkArrayClose "vjpGather = scatter_add" 0.0
             (MessagePassing.scatterAdd vals featDim srcIdx nRows)

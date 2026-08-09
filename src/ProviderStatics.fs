@@ -1,21 +1,19 @@
-/// Provider-backed statics: the bridge that lets
-/// `let static A = alias.read(sample.vars.A)` FOLD the store's payload at
-/// compile time — staging contract clause 1 ("inputs are immutable values
-/// within a program's scope; fold freely"). Layering: the providers compile
-/// before StaticEval and neither may reference the other, so the reader is
-/// REGISTERED into StaticEval's provider hook from here (installed by
-/// TypeCheck.typeCheck, ahead of every resolveStatics pass — the PPL
-/// elaboration's own statics inherit the fold for free).
+/// Bridges `let static A = alias.read(sample.vars.A)` to FOLD the store's
+/// payload at compile time (staging contract clause 1: inputs are
+/// immutable, so fold freely). Providers compile before StaticEval and
+/// neither may reference the other, so the reader is registered into
+/// StaticEval's provider hook here by TypeCheck.typeCheck, ahead of every
+/// resolveStatics pass -- the PPL elaboration's own statics inherit the
+/// fold for free.
 ///
-/// This module is also the registry install point: each provider's
-/// ProviderSpec (Blade.ProviderRegistry) is assembled/registered here, and
-/// the registered name set is bridged into StaticEval so resolveStatics can
-/// recognize `import netcdf as nc`-style provider imports.
+/// Also the registry install point: each provider's ProviderSpec is
+/// assembled/registered here, and the registered name set is bridged into
+/// StaticEval so resolveStatics recognizes `import netcdf as nc`-style
+/// imports.
 ///
-/// Operational honesty is PROVENANCE, not freshness: each fold records
-/// (path, variable, sha256) — "this executable = program · store@hash" —
-/// and prints a provenance note at compile time. The hash log is also the
-/// future memoization key for incremental compile-time folds.
+/// Provenance not freshness: each fold records (path, variable, sha256) and
+/// prints a provenance note at compile time; the hash log doubles as a
+/// future incremental-fold memoization key.
 module Blade.ProviderStatics
 
 open Blade.StaticEval
@@ -33,10 +31,9 @@ let private fileHash (path: string) : string =
         |> Array.map (sprintf "%02x")
         |> String.concat "")
 
-/// Fold ceiling in elements. Beyond it the fold refuses with steering:
-/// "large and closed" inputs belong to the runtime/streaming schedule
-/// (a multi-million-element C++ literal would sink the C++ compiler),
-/// per the fold/residualize/stream table in ppl/NOTES.md.
+/// Fold ceiling in elements. Beyond it the fold refuses: "large and closed"
+/// inputs belong to the runtime/streaming schedule instead (see the
+/// fold/residualize/stream table in ppl/NOTES.md).
 let foldCeiling = 65536
 
 /// Shape a flat row-major buffer into nested SVTuples by dim extents
@@ -55,11 +52,8 @@ let shapeValue (lens: int list) (leaf: int -> StaticValue) : StaticValue =
             (SVTuple items, off)
     fst (go lens 0)
 
-// ============================================================================
-// NetCDF ProviderSpec (surface module name: "netcdf")
-// ============================================================================
-// Assembled here from NetcdfProvider's public functions so the provider
-// implementation file needs no registry knowledge of its own.
+// NetCDF ProviderSpec (surface module name "netcdf"); assembled here so
+// the provider implementation file needs no registry knowledge of its own.
 
 let private netcdfAdapt (d: Blade.NetcdfProvider.NcVarData) : Blade.ProviderRegistry.ProviderVarData =
     { DimLengths = d.DimLengths
@@ -75,6 +69,7 @@ let netcdfSpec : Blade.ProviderRegistry.ProviderSpec = {
         Blade.NetcdfProvider.readVarData path varName |> Result.map netcdfAdapt
     GenReadVar = Blade.NetcdfProvider.CppNetcdf.genReadVar
     GenReadPacked = None  // packed (SymIdx/AntisymIdx) NetCDF I/O: future arc
+    ReadWreathPool = None // OrbIdx (iterated-wreath) NetCDF I/O: same arc, refused
     GenReadCompoundVar = Some Blade.NetcdfProvider.CppNetcdf.genReadCompoundVar
     GenWriteVar = Blade.NetcdfProvider.CppNetcdf.genWriteVar
     GenStreamOpen = Some Blade.NetcdfProvider.CppNetcdf.genStreamOpen
@@ -94,22 +89,17 @@ let netcdfSpec : Blade.ProviderRegistry.ProviderSpec = {
     LinkNeeds = "libnetcdf (NETCDF_DIR)"
 }
 
-// ============================================================================
-// Provider-neutral fold bridge
-// ============================================================================
-
-/// Fold memoization: the pipeline runs several resolveStatics passes per
-/// compilation (checkModule, the ML and PPL elaborations, lowering's
-/// Phase 0) — the payload is read and provenance recorded ONCE. Keyed on
-/// (provider, path, var, versionStamp) so a long-lived compiler process
-/// re-reads when the store actually changed between compilations.
+/// Fold memoization: several resolveStatics passes run per compilation, so
+/// the payload is read and provenance recorded ONCE, keyed on (provider,
+/// path, var, versionStamp) -- a long-lived process re-reads only when the
+/// store actually changed.
 let private foldCache =
     System.Collections.Concurrent.ConcurrentDictionary<string * string * string * int64, Result<StaticValue, string>>()
 
 let private readAndFoldUncached (provider: string) (path: string) (varName: string) : Result<StaticValue, string> =
     match Blade.ProviderRegistry.tryFind provider with
     | None ->
-        Error (sprintf "provider '%s' is not registered — was ProviderStatics.install () run?" provider)
+        Error (sprintf "provider '%s' is not registered -- was ProviderStatics.install () run?" provider)
     | Some spec ->
         match spec.ReadVarData path varName with
         | Error e ->
@@ -117,7 +107,7 @@ let private readAndFoldUncached (provider: string) (path: string) (varName: stri
         | Ok data ->
             let count = data.DimLengths |> List.fold (*) 1
             if count > foldCeiling then
-                Error (sprintf "'%s' has %d elements — beyond the %d-element fold ceiling; large closed inputs take the runtime schedule (bind with a plain `let ... |> %s.read`)" varName count foldCeiling provider)
+                Error (sprintf "'%s' has %d elements -- beyond the %d-element fold ceiling; large closed inputs take the runtime schedule (bind with a plain `let ... |> %s.read`)" varName count foldCeiling provider)
             else
                 let h = spec.Fingerprint path
                 provenance.Add((path, varName, h))
@@ -133,16 +123,12 @@ let private readAndFold (provider: string) (path: string) (varName: string) : Re
         | None -> 0L
     foldCache.GetOrAdd((provider, path, varName, stamp), fun _ -> readAndFoldUncached provider path varName)
 
-/// Axis extents of a store: dim name → extent, read from the provider's own
-/// metadata module (the index types it derives from the file). This is the
-/// SAME read TypeCheck performs at the `let store = alias.load(...)` site,
-/// pulled earlier because the module elaborations resolve `store.index.<dim>`
-/// before type checking runs — memoized on the same (…, versionStamp) key as
-/// the payload fold, so the metadata is opened once per compilation and
-/// re-read when the store actually changes. An unreadable store or
-/// unregistered provider yields no axes, and the asking elaborator reports
-/// its own "extent not statically known" steer: type checking re-opens the
-/// store right after and diagnoses the real fault there.
+/// Axis extents of a store: dim name -> extent, read from the provider's
+/// own metadata module -- the same read TypeCheck performs at `let store =
+/// alias.load(...)`, pulled earlier since module elaborations resolve
+/// `store.index.<dim>` before type checking runs. Memoized on the same key
+/// as the payload fold; an unreadable store or unregistered provider yields
+/// no axes, and type checking re-opens the store to diagnose the real fault.
 let private axisCache =
     System.Collections.Concurrent.ConcurrentDictionary<string * string * string * int64, Map<string, int>>()
 

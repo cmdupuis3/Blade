@@ -74,20 +74,59 @@ present cells return their dense value; cardinality is the pass count.
 - The **static** type-annotation form `CompoundIdx<mask>` exists (v10 §4.4–4.5)
   and is the reserved compile-time path; the runtime `compound()` builder is the
   exercised route in v7. Both denote the same index semantics.
-- **Partial indexing / residual compounds**: fixing some coordinates of a
-  compound (including interior and trailing wildcards) yields either a plain
-  index (1 free dim) or a **residual compound** (≥ 2 free dims) — the residual of
-  a mask is itself a mask. This is pinned by `corpus/index-types` 001–017
-  including the reject cases (all-free, short wildcard, interior hole in trailing
-  form). The executable semantics of the residual is the proofs-layer
-  `has_completion` (BladeCompound); the arrow enumerates exactly the in-bounds
-  mask-true tuples, each once, in lexicographic order (BladeLex).
+- **No partial indexing**: fixing SOME coordinates while freeing others
+  (wildcards, short prefixes, residual reads) is a **SparseIdx** feature —
+  build the valid tuples as a `SparseIdx<keys>` and index `S((lat, _))` there.
+  A compound axis is full-arity only; the reject cases are pinned by
+  `corpus/index-types` 002–014. The arrow still enumerates exactly the
+  in-bounds mask-true tuples, each once, in lexicographic order (BladeLex).
 
-Canonical application form: ONE tuple per compound axis — `B((lat, lon))`, wildcards inside the tuple `B((lat, _))`; rank-1 compounds take a bare scalar. The flat form `B(lat, lon)` is rejected with a steering diagnostic (a compound is one slot filled by one joint tuple; formalism §3.2).
+Canonical application form: FLAT positional subscripts like SymIdx — `B(lat, lon)`,
+with trailing regular dims appended (`B(lat, lon, t)`; omitting the trailing
+index yields the contiguous trailing-row sub-view). The historical tuple
+spelling `B((lat, lon))` and every wildcard form are rejected with a steering
+diagnostic pointing at SparseIdx.
 
-v7: `TypeCheck.fs compoundViewType`, IR `IRCompoundMask`/`IRCompoundProject`,
-index kinds `IxKCompound`/`IxKCompoundDynamic`. Tests: `sql-masks/001`,
-`index-types/001–017`.
+v7: `TypeCheck.fs compoundViewType`, IR `IRCompoundMask`, index kinds
+`IxKCompound`/`IxKCompoundDynamic`. (`IRCompoundProject` is the residual
+carrier, now reached only from a SparseIdx head.) Tests: `sql-masks/001`,
+`index-types/001–017`; the sparse counterparts are `index-types/171–184`.
+
+## 2b. `sparse(values, keys)` — bundle values with an explicit key set
+
+```blade
+sparse : Array<T like Idx<n>, Rest...> × keys -> Sparse<T>
+```
+
+The `SparseIdx` sibling of `compound`. Where a compound derives validity from
+a **mask over a grid**, a sparse takes the valid tuples **explicitly**: `keys`
+is a rank-1 array of Nat tuples — a `let static` list (baked at compile time)
+or a runtime tuple-array — and `values` supplies one cell per key, already
+**in key order**, so construction is a straight copy with no scatter.
+
+- The **leading** `values` dimension is the key axis; any remaining dimensions
+  become regular trailing slots whose product is the trailing stride — the
+  direct analogue of the mask's leading-prefix rule in `compound`. So
+  `sparse(vals, keys)` with `vals : Array<T like E, T2>` gives
+  `Array<T like SparseIdx<keys>, T2>`: each key owns a contiguous block, read
+  as a row sub-view (`S((i, j))`) or a scalar (`S((i, j), t)`).
+
+- Keys keep their **given order**: iteration and the compact buffer follow it,
+  never a sorted order. Duplicate keys are a construction error;
+  `|values| ≠ |keys|` panics (BL8001). Rank is implicit from the tuple arity.
+- Indexing is tuple-form with wildcards: `S((i, j))` is an O(1) hash lookup
+  (a missing key is a runtime error), and `S((i, _))` / short prefixes gather
+  the matching entries in key order — with no sorted table there is no
+  window/prefix family, so every partial costs one pass.
+- `range<SparseIdx<keys>>` is the iteration-side builder (visit the key set,
+  compute a value per key).
+
+Choose `CompoundIdx` when validity comes from data over a rectilinear grid
+(its lex-sorted table buys contiguous layout); choose `SparseIdx` for an
+arbitrary enumerated key set (edge lists, CG triples) or when you need
+partial reads.
+
+Tests: `index-types/171–184`.
 
 ## 3. `intersect(A, B)` / `union(A, B)` — set operations
 
@@ -138,7 +177,7 @@ let anti = compound(A, mask(A, lambda(x) -> !contains(B, x)))
 Multiplicity-preserving (unlike `intersect`). **Performance status**: the
 O(|A|+|B|) hash-set fusion (pre-building a set from B) was attempted, found to be
 a no-op as wired, and removed; every `contains` is currently a linear scan, so the
-idiom is O(|A|·|B|). Re-landing the set-hoist is planned ([future.md](../future.md)).
+idiom is O(|A|·|B|). Re-landing the set-hoist is planned (open item 1 below).
 The `sql-semijoins` tests (7) guard correctness only, including "Pattern Does Not
 Fire On Conjunction" (the fusion must not misfire when the predicate is a
 conjunction).
@@ -160,8 +199,29 @@ array's annotation:
 Multi-key form requires rank-1 key arrays over the same outer extent; the
 compound key is always dynamic (tuple-keyed hash).
 
+### Negative keys select rows out
+
+A **negative key means the row belongs to no group**: it is dropped from the
+grouping entirely rather than forming a group of its own. This is `WHERE` fused
+into `GROUP BY`, and it is what lets the key *function* do the selection:
+
+```blade
+let seg  = (t <@> lambda(x) -> floor(x / width)) |> compute  // out-of-range rows key < 0
+let gk   = group_keys(seg)
+let gt   = group_by(t, gk)                                   // dropped rows never gathered
+```
+
+The drop happens in the offsets construction, so a dropped row contributes to no
+group's offsets and `group_by` never reads it. It applies to every numeric key
+case — integer positional buckets, unannotated dynamic discovery, and float keys
+(the `floor` idiom above) — and, for the multi-key form, a row drops when **any**
+component is negative. `EnumIdx` keys are exempt: there the admissible values are
+declared up front, so a negative entry in that list is a value you asked for, not
+a sentinel. String keys have no negative.
+
 Tests: `sql-group-by` cases "Idx Annotated", "Enum First/String",
-"Sparse Keys Dynamic", "Compound Two Keys First/Reduce".
+"Sparse Keys Dynamic", "Compound Two Keys First/Reduce",
+"Negative Key Excluded".
 
 ## 8. `group_by(values, gk)` — ragged grouped view
 
@@ -182,12 +242,55 @@ method_for(grouped) <@> lambda(g) -> reduce(g, (+)) |> compute   // SUM ... GROU
 - Direct rank-2 indexing works (`grouped(i)(j)`, `grouped(i, j)`); a let-bound row
   carries its length from the offsets table.
 - Kernel parameters that treat `g` as an array value (not just index it) need a
-  `Array<T like RaggedIdx<_>>` annotation.
+  rank-1 annotation — `Array<T like RaggedIdx<_>>`, or the abstract `T^1` /
+  `T<unit>^1` spelling (see "Co-iterating several grouped arrays" below).
 - Grand totals = per-group reduce, then dense reduce over the results.
 - **Elementwise map over a grouped result is rejected by design** ("map before
   grouping") — pinned by `sql-group-by/020`.
+- A grouped source may itself be a **compound** (masked) view: the
+  `mask → compound → group_keys → group_by` chain partitions what survives the
+  filter — pinned by `sql-group-by/027`.
 
-Tests: `sql-group-by` (21).
+### Co-iterating several grouped arrays
+
+Grouped arrays partitioned by the **same `group_keys` binding** co-iterate: the
+rows correspond one-to-one, and the kernel receives one row per operand.
+
+```blade
+let gk = group_keys(region)
+let ga = group_by(a, gk)
+let gb = group_by(b, gk)
+method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>,
+                                   rb: Array<Float64 like RaggedIdx<_>>)
+    -> prodsum(ra, rb) |> compute        // per-group dot product
+```
+
+One offsets table drives the whole walk, so this is the ordinary ragged peel with
+k row params bound at the same group — the ragged axis is *not* a product axis
+and no outer product is formed.
+
+- **A parameter binds the ROW when its written annotation is rank-1**, and the
+  element otherwise. Any rank-1 spelling counts — `Array<T like RaggedIdx<_>>`,
+  the abstract `T^1` / `T<unit>^1`, or a concrete rank-1 array type — and a
+  `T<unit>^1` row carries its unit onto the row's element type, so a mismatched
+  unit rejects. The annotation decides, not the body: a kernel that only
+  *forwards* its rows (into a call, or a typed tuple) has no array-shaped use
+  for a body scan to find, and used to bind one element instead. Pinned by
+  `sql-group-by/029` and `/030`, with the unit mismatch in `unit-errors/014`.
+- **Mixed row/element annotations are refused.** One offsets table drives the
+  shared walk, so a rank-1 parameter beside a rank-0 one has no single step to
+  take — annotate every parameter, or none (`sql-group-by/031`).
+- **Same keys is required, and is checked on the expressions, not the types.**
+  Two `group_keys` calls over identical key values are two independent
+  partitions with structurally identical index records; each operand is chased
+  to its `group_by` and the `group_keys` operands must resolve to the same
+  binding. Mismatched keys are `BL3999` — pinned by `sql-group-by/026`.
+- The kernel must **consume** its rows to a scalar (`prodsum`, `reduce`, …). A
+  row-shaped result would need a grouped output type, which has no downstream
+  consumers — the same reason the elementwise map above is gated.
+- Ragged-beside-dense operands remain refused.
+
+Tests: `sql-group-by` (25).
 
 ## 9. `sort(A, keyFn)` — ORDER BY
 
@@ -204,16 +307,46 @@ joins — are a documented future direction).
 
 Tests: `sql-sort` (2) + type-recovery probe.
 
-## 10. `reduce(A[, kernel])` — aggregation
+## 10. `reduce(A[, kernel[, init]][, axes = n])` — aggregation
 
 ```blade
-reduce : Array<T like I..., J> × (T × T -> T) -> <result over I...>
+reduce : Array<T like I₁..I_k> × (T × T -> T) -> Array<T like I₁..I_{k−n}>
 reduce(A) ≡ reduce(A, (+))
 ```
 
-Folds the innermost dimension. Composes inline in arithmetic
-(`100.0 + reduce(A)`) and inside kernels (per-group aggregation, captured-array
-reduction).
+Folds **right-to-left**: the **innermost axis, one axis by default**. A rank-k
+operand yields a rank-(k−n) result, so
+
+```blade
+reduce([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], (+))   // [6.0, 60.0]  (rank 1)
+```
+
+The axis count is the optional **named final argument** `axes = n`, with
+1 ≤ n ≤ rank(A). `n = rank(A)` is the full fold to a scalar:
+
+```blade
+reduce(M, (+))                    // 1 axis  (default)
+reduce(M, (+), init)              // 1 axis, seeded
+reduce(M, (+), axes = 2)          // 2 axes
+reduce(M, (+), init, axes = 2)    // 2 axes, seeded
+reduce([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], (+), axes = 2)   // 66.0
+```
+
+It is a NAMED slot, not a fourth positional one, because the third positional
+argument is already the seed — a bare `reduce(A, op, 2)` would be ambiguous
+between "seed 2" and "fold 2 axes". `n` must be an integer literal: the result
+rank is `rank(A) − n`, part of the type, so a symbolic count has no static
+result type (deferred, and refused explicitly).
+
+The row-wise `<@>` spelling remains exactly equivalent to the default, and is
+still the form to reach for when the row kernel does more than fold:
+
+```blade
+reduce(A, (+))  ≡  method_for(A) <@> lambda(r) -> reduce(r, (+)) |> compute
+```
+
+Composes inline in arithmetic (`100.0 + reduce(A, (+), axes = 2)`) and inside
+kernels (per-group aggregation, captured-array reduction).
 
 **Empty-input rule** (3-arg form landed, arc 4): `reduce(A, op, init)` seeds
 the fold with `init` (`init ⊕ a₀ ⊕ a₁ ⊕ ...`), `init` unifies with the element
@@ -221,10 +354,59 @@ type, and the empty fold is defined as `init` — statically-empty arrays are
 legal and dynamically-empty operands return `init` with no guard. WITHOUT an
 init, statically-empty arrays remain a compile-time rejection and
 dynamic-extent operands keep the runtime non-emptiness guard (no identity, no
-defined empty fold).
+defined empty fold). In the PARTIAL form the seed applies **per folded group**,
+not once globally: `reduce(grid, (+), 100.0)` adds 100 to every row, while
+`reduce(grid, (+), 100.0, axes = 2)` adds it once to the grand total.
 
-Tests: `sql-reduce` (10, incl. init basic / static-empty / dynamic-empty),
-`sql-regressions/003–004`.
+**Restrictions**, inherited unchanged by both forms: the folded axes must be
+plain (non-compact) storage — folding the canonical cells and the logical
+(mirrored) cells of a symmetric/antisymmetric/Hermitian record differ, so those
+are rejected with a `decompact(A, d)` steer — and the kernel must be
+**unit-endomorphic** (`T × T -> T` above is literal: `+`/`-` preserve an
+element's unit, `*`/`/` do not, since folding n of them yields a grade that
+depends on the extent). A multi-axis partial fold (1 < n < rank) additionally
+needs the folded slice to be dense, statically sized, untagged and unitless;
+outside that envelope, write the row-wise form with the slice type spelled out.
+
+A fused `<&!>` tree terminal (`reduce((L₁ <@> k₁) <&!> (L₂ <@> k₂), (+))`) has
+no partial form and stays the full fold it has always been: its leaves may have
+different ranks and its result is a tuple of scalars, so "the innermost axis"
+names nothing there.
+
+> **History.** This section originally documented the innermost-axis fold; on
+> 2026-08-08 it was rewritten to a full fold (plan-array-expression-fixes D1),
+> which described the interim compiler rather than the intended design. The
+> language owner ruled on 2026-08-09 that the original claim was the design —
+> the compiler was the drift — and this section is back to it, now with the
+> explicit `axes = n` count the full fold needs.
+
+Tests: `sql-reduce` (12, incl. init basic / static-empty / dynamic-empty, the
+rank-k full fold `021`, the partial default `023`, and the seed/axes ladder
+`024`), `diagnostics/066–068`, `unit-errors/013`, `sql-regressions/003–004`.
+
+## 10a. `prodsum(A, B)` — fused dot-product reduction
+
+```blade
+prodsum : Array<T like I...> × Array<T like I...> -> T
+```
+
+Elementwise-multiplies two same-shape arrays and folds the products to a
+single scalar in one pass — the standard dot product for real element types.
+Used both at top level and as the row-reducing kernel inside a
+`method_for(zip(A, B))` apply, the standard idiom for a batch of dot products
+/ Gram matrices (`tests/corpus/loops/085_zip_rank2_row_prodsum.blade`).
+
+**Complex operands are NOT conjugated** (ruled 2026-08-08, not an oversight).
+`prodsum(e, e)` on a `Complex128` array means `Σ eₜ²`, not the Hermitian
+inner product `Σ|eₜ|²` — neither argument is implicitly `conj`-ed. A caller
+that wants the Hermitian form must conjugate explicitly with `conj` before
+reducing. A generalized Lomb–Scargle DFT kernel relies on the unconjugated
+reading to recover `Σ e^{2iωt}` from a single complex multiply; the Hermitian
+reading would silently collapse that to `n`.
+
+Semantics pin: `tests/corpus/index-types/235_prodsum_complex_unconjugated.blade`
+(validated 2026-08-08 against the compiler: `prodsum(z, z)` over
+`[1, i, -1+i]` returns `(0,-2)` = Σz², not the Hermitian `4`).
 
 ## 11. `extents(A)` — COUNT / dimensions
 
@@ -276,7 +458,7 @@ Tests: `sql-foreign-keys` (10).
   compounds live on the index level (and the compound arrow inherits
   lex-sortedness, BladeLex).
 
-## Open items (also listed in [future.md](../future.md))
+## Open items
 
 1. Semijoin/antijoin hash fusion (set-hoist) — removed no-op; redesign.
 2. ~~`reduce(A, op, init)` — empty-input identity.~~ **Landed (arc 4)**; see §10.

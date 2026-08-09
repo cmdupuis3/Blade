@@ -1,0 +1,27 @@
+// TEST: OrbIdx Wreath Reduce (rejects)
+// ERROR: BL4003
+// reduce over a compact array is not a walk of its POOL: the logical tensor has
+// prod(ri) dense axes and every mirrored tuple contributes, so a correct reduce
+// needs the orbit SIZE of each stored cell (and the character, which can cancel
+// terms outright at a '-' level). Walking the 21 pool cells of
+// OrbIdx<[(2,+),(2,+)],3> would silently answer for a 21-element array instead
+// of the 81-element tensor it stands for -- a plausible number, wrong.
+//
+// The multiplicities are computable (a Burnside count per orbit), but they are
+// not computed, so this fails closed. prodsum refuses through the same door.
+// This is exact PARITY with depth-1 compact storage, which refuses a fold for
+// the identical canonical-vs-logical reason.
+//
+// WHAT CHANGED with the read path: the message's remedy is now real. It names
+// `decompact(W, 0)`, full decompaction of a wreath class IS implemented (207),
+// and 215 runs the whole steer end to end -- decompact, slice a fibre, fold it.
+// So this refusal is a missing OPTIMIZATION (fold the pool with multiplicities)
+// rather than a dead end. That is why it carries its own diagnostic instead of
+// the generic storage refusal: the two differ in what the user should do next.
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+let total = reduce(W, lambda(a, b) -> a + b)
+// EXPECT: typecheck failure — reduce over a wreath pool has no orbit multiplicities.

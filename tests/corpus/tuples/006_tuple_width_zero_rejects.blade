@@ -1,0 +1,11 @@
+// TEST: Tuple Width Zero (rejects)
+// ERROR: BL1004
+// `Tuple<0>` has no annotation spelling to denote: the empty tuple `()` is
+// the identity operand of `<*>` (formalism.md 1336), not a value a parameter
+// takes. Refused at the same place as `Tuple<1>`, in PARAMETER position here
+// so the diagnostic is pinned on a slot whose parse error was never swallowed
+// -- 005 pins the let-ascription slot, which needed parseLetAnnotation.
+
+function f(t: Tuple<0>) -> Float64 = 1.0
+let x = f((1.0, 2.0))
+// EXPECT: parse failure -- Tuple<N> requires N >= 2

@@ -1,12 +1,12 @@
-// Structured C++ emission layer (audit §2.1) — THIN, deliberately not a
+// Structured C++ emission layer (audit section 2.1) -- THIN, deliberately not a
 // C++ AST. Typed builders for the recurring emission shapes: named fields
 // make argument transposition a compile error instead of a
 // compiles-clean-but-wrong bug (the sprintf scatter loop this replaces
 // threaded the same name through TWENTY positional %s slots).
 //
-// Policy (audit §2.1): any emission with more than two interpolated slots
+// Policy (audit section 2.1): any emission with more than two interpolated slots
 // should go through a builder here. The pre-existing sprintf sites are
-// being migrated shape-by-shape — recurring shapes first (loop headers,
+// being migrated shape-by-shape -- recurring shapes first (loop headers,
 // allocation, scatter); one-off low-slot sprintfs may stay put.
 module Blade.EmitCpp
 
@@ -14,12 +14,12 @@ module Blade.EmitCpp
 // Loop headers
 // ----------------------------------------------------------------------------
 
-/// `for (size_t VAR = 0; VAR < BOUND; VAR++) {` — the canonical counting
-/// loop. VAR is stated once; the old sprintf form needed it three times.
+/// `for (size_t VAR = 0; VAR < BOUND; VAR++) {` -- the canonical counting
+/// loop. VAR is stated once rather than repeated at each use.
 let forLoop (ind: string) (var: string) (bound: string) : string =
     sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind var var bound var
 
-/// `for (int64_t VAR = START; VAR < BOUND; VAR++) {` — the for-in loop.
+/// `for (int64_t VAR = START; VAR < BOUND; VAR++) {` -- the for-in loop.
 /// int64_t, not size_t (unlike forLoop's internal counters): VAR is the
 /// user's Int64 for-in variable, and an unsigned binding wraps negative
 /// intermediates in body arithmetic (e.g. 0.5 * (k - 1) at k=0).
@@ -31,9 +31,9 @@ let forLoopFrom (ind: string) (var: string) (start: string) (bound: string) : st
 // ----------------------------------------------------------------------------
 
 /// `Array<ELEM, RANK> NAME = { allocate<typename promote<ELEM, RANK>::type,
-///  SYMM>(EXTENTS), EXTENTS };` — the wrapper-allocation declaration.
+///  SYMM>(EXTENTS), EXTENTS };` -- the wrapper-allocation declaration.
 /// `Strict = Some arg` selects allocate_strict with its extra template arg.
-/// Elem and Rank each appear twice in the output, Extents twice — stating
+/// Elem and Rank each appear twice in the output, Extents twice -- stating
 /// them once here is the point.
 type ArrayAlloc = {
     Ind: string            // leading indentation ("" when the caller indents)
@@ -70,7 +70,7 @@ type CompactScatter = {
 
 let compactScatter (s: CompactScatter) : string =
     let n = s.Name
-    // Assembled from small pieces rather than one 21-slot format string —
+    // Assembled from small pieces rather than one 21-slot format string --
     // miscounting THAT argument list is precisely the bug class this layer
     // exists to kill.
     s.Ind

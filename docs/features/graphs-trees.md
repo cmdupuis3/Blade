@@ -9,8 +9,8 @@ currying is partial application of the address, and symmetry is canonical
 ordering.
 
 The speculative far end (symmetric-tree storage theory, dynamic trees,
-distributed trees) is tracked in [future.md](../future.md); this document records
-the parts whose design direction is settled.
+distributed trees) is collected under §3 below; this document records the
+parts whose design direction is settled.
 
 ---
 
@@ -81,7 +81,7 @@ A symmetric tree has commutative children: `T[(0,1)] == T[(1,0)]` where children
 are interchangeable — the tree analog of `A(i,j) = A(j,i)`. Canonical form =
 sorted path; storage reduces to canonical orderings; the bijection
 canonicalizes. The storage theory (the tree analog of triangular/left-justified
-layout) is open — see [future.md](../future.md).
+layout) is open (§3).
 
 ## 2. Graphs via trace index types
 
@@ -159,7 +159,7 @@ for i in Trace<G> { f(i) }         // Stream<T> or compile error (unbounded)
 ```
 
 Random walks, Monte Carlo sampling, and message-passing-until-convergence fit
-this pattern. Full semantics deferred — see [future.md](../future.md).
+this pattern. Full semantics deferred (§3).
 
 ### 2.7 Applications
 
@@ -172,8 +172,6 @@ this pattern. Full semantics deferred — see [future.md](../future.md).
 - **Web crawling**: `Page^Trace<*>`; collapse = already visited.
 
 ## 3. Open questions
-
-Tracked in [future.md](../future.md):
 
 1. Dynamic trees (insertion/deletion vs flat storage; buffer/rebuild strategies)
 2. Symmetric-tree storage theory (triangular analog for commutative children)

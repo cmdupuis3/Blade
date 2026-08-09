@@ -1,77 +1,74 @@
-/// T_{j,l} tables — the universal occurrence bases of V_L inside Sym^j(V_l)
-/// behind `derive_poly<k>` (plan-transforms-as-types §3.3b, stage 2b-i).
-/// Per (j, l), an exact pipeline with floats appearing only at the very end
-/// (the same status as realCGDense): degree-j monomials over the
-/// divided-power weight basis (lex `symMultisets` order) → integer raising
-/// matrix E → per-weight kernels over ℚ, RREF in lex monomial order (pivot
-/// monomials are the labeling artifact) → exact rational Gram–Schmidt within
-/// each multiplicity space → integer lowering → diagonal unitarization →
-/// realization through WignerTables.uMatrix with the phase rule derived
-/// below. Cached per (j, l), like realCGDense.
+/// T_{j,l} tables -- the universal occurrence bases of V_L inside Sym^j(V_l)
+/// behind `derive_poly<k>`. Per (j, l): degree-j monomials over the
+/// divided-power weight basis (lex `symMultisets` order) -> integer raising
+/// matrix E -> per-weight kernels over Q, RREF in lex monomial order (pivot
+/// monomials are the labeling artifact) -> exact rational Gram-Schmidt per
+/// multiplicity space -> integer lowering -> diagonal unitarization ->
+/// realization via WignerTables.uMatrix with the phase rule derived below.
+/// Floats appear only at the end (same status as realCGDense); cached per
+/// (j, l) like realCGDense.
 ///
 /// CONVENTIONS (stated once; the code follows them):
-/// - Weight basis w_m, m = −l..l, 0-based index i = m + l. Divided-power sl₂
-///   action: E·w_m = (l−m)·w_{m+1}, F·w_m = (l+m)·w_{m−1}, extended to
-///   degree-j monomials as derivations — E on the cell A = ∏ w_i^{α_i} is
-///   Σ_i α_i·(2l−i)·(A with one w_i → w_{i+1}), an INTEGER matrix. w_m is
-///   the Condon–Shortley unit basis rescaled by c_m = √((l+m)!(l−m)!/(2l)!)
-///   (positive, c_m = c_{−m}), so E and F are exactly the CS ladder
-///   operators J± written in w coordinates, and lowering-then-normalizing
+/// - Weight basis w_m, m = -l..l, 0-based index i = m + l. Divided-power sl2
+///   action: E.w_m = (l-m).w_{m+1}, F.w_m = (l+m).w_{m-1}, extended to
+///   degree-j monomials as derivations -- E on the cell A = prod w_i^{a_i} is
+///   Sum_i a_i*(2l-i)*(A with one w_i -> w_{i+1}), an INTEGER matrix. w_m is
+///   the Condon-Shortley unit basis rescaled by c_m = sqrt((l+m)!(l-m)!/(2l)!)
+///   (positive, c_m = c_{-m}), so E and F are exactly the CS ladder
+///   operators J+/- written in w coordinates, and lowering-then-normalizing
 ///   yields the CS-phased unit basis of each occurrence copy.
-/// - Inner product: the one induced on Sym^j ⊂ V^{⊗j} by orthonormal {e_i};
-///   for arrangement sums, ⟨s_A, s_B⟩ = δ_AB·N_A with N_A = j!/∏α_i!. The
-///   equivariant identification of the commutative monomial with a tensor is
-///   mono_A ↦ (∏α_i!)·s_A — the unique scaling (up to one global constant)
-///   under which the derivation action of E equals Σ_a 1⊗..E..⊗1 on tensors
-///   (matching coefficients forces α_m·c_{A'} = (α_{m+1}+1)·c_A, i.e.
-///   c_A = ∏α_i!). Hence the exact Gram in stored coordinates is diagonal:
-///     ⟨mono_A, mono_B⟩ = δ_AB · j! · ∏_i α_i! · ∏_a c²_{m_a}   — rational.
-///   This is where §3.3b identity (3)'s /N_I bookkeeping lives: the emitted
-///   float rows satisfy Σ_I T[r,I]·T[r',I]/N_I = δ with no further factors.
+/// - Inner product: the one induced on Sym^j (subset of V^{tensor j}) by
+///   orthonormal {e_i}; for arrangement sums, <s_A, s_B> = delta_AB*N_A with
+///   N_A = j!/prod a_i!. The equivariant identification mono_A ->
+///   (prod a_i!)*s_A is the unique scaling (up to a global constant)
+///   matching E's derivation action to Sum_a 1(x)..E..(x)1 on tensors, so
+///   the exact Gram in stored coordinates is diagonal:
+///     <mono_A, mono_B> = delta_AB * j! * prod_i a_i! * prod_a c^2_{m_a}   -- rational.
+///   This is where identity (3)'s /N_I bookkeeping lives: the emitted float
+///   rows satisfy Sum_I T[r,I]*T[r',I]/N_I = delta with no further factors.
 ///
-/// THE REALIZATION PHASE RULE — §3.3b's conjecture, derived here against the
-/// conventions AS CODED (WignerTables.uMatrix, the CS basis of `clebsch`),
-/// and CONFIRMED: the complex table of a V_L occurrence in Sym^j(V_l) is
-/// purely real iff j·l + L is even and purely imaginary iff odd; the
-/// canonical realization multiplies by −i exactly in the odd case.
+/// THE REALIZATION PHASE RULE, derived against the conventions as coded
+/// (WignerTables.uMatrix, the CS basis of `clebsch`): the complex table of a
+/// V_L occurrence in Sym^j(V_l) is purely real iff j*l + L is even and
+/// purely imaginary iff odd; the canonical realization multiplies by -i
+/// exactly in the odd case.
 ///
-///  1. The coded uMatrix rows all satisfy u[c, m] = (−1)^m·conj(u[c, −m])
-///     (check the three row shapes at WignerTables.fs): they are the fixed
-///     vectors of the antiunitary J with J|l,m⟩ = (−1)^m|l,−m⟩. In the CS
-///     convention conj(D^l_{mm'}) = (−1)^{m−m'}·D^l_{−m,−m'}, so J commutes
-///     with the whole real rotation action; and J w_m = (−1)^m w_{−m}
-///     because the c_m rescaling is positive and mirror-symmetric.
-///  2. Let K be plain coefficient conjugation in the w basis — the map every
-///     vector this file builds is trivially fixed under (kernel, RREF,
-///     Gram–Schmidt and lowering are rational arithmetic; the final
-///     normalization is positive). Since R_y(π)|l,m⟩ = (−1)^{l−m}|l,−m⟩,
-///     K = (−1)^l·J∘R_y(π) on V_l; inducing to Sym^j multiplies the scalar
-///     once per factor: K_S = (−1)^{j·l}·J_S∘R_S, where R_S is the honest
-///     GROUP action of R_y(π) on Sym^j(V_l) and J_S the induced conjugation.
-///  3. R_S preserves each occurrence copy — it is a group element and the
-///     copy (the sl₂ span of a highest-weight vector) is invariant — acting
-///     by the standard d^L(π): v_{r,M} ↦ (−1)^{L−M}·v_{r,−M}. So the a
-///     priori worry that conjugation mixes the copies of a multiplicity
-///     space dissolves: J_S v_{r,M} = (−1)^{jl}·K_S(R_S⁻¹ v_{r,M})
-///     = (−1)^{jl+L−M}·v_{r,−M}, copy by copy. Reading J_S in w-monomial
-///     coordinates (real coefficients, weight M: J_S negates weights and
-///     contributes (−1)^{Σm_a} = (−1)^M), the complex table t[M, A] has the
-///     mirror symmetry  t[−M, mirror(A)] = (−1)^{jl+L}·t[M, A].
-///  4. Realize exactly like realCGDense — conj(u_l) on every Sym-side
+///  1. The coded uMatrix rows satisfy u[c, m] = (-1)^m*conj(u[c, -m])
+///     (check the three row shapes at WignerTables.fs) -- fixed vectors of
+///     the antiunitary J with J|l,m> = (-1)^m|l,-m>. In the CS convention
+///     conj(D^l_{mm'}) = (-1)^{m-m'}*D^l_{-m,-m'}, so J commutes with the
+///     whole real rotation action; J w_m = (-1)^m w_{-m} since c_m is
+///     positive and mirror-symmetric.
+///  2. Let K be plain coefficient conjugation in the w basis, which
+///     trivially fixes every vector this file builds (kernel, RREF,
+///     Gram-Schmidt and lowering are rational; the final normalization is
+///     positive). Since R_y(pi)|l,m> = (-1)^{l-m}|l,-m>, K = (-1)^l*J.R_y(pi)
+///     on V_l; inducing to Sym^j multiplies the scalar once per factor:
+///     K_S = (-1)^{j*l}*J_S.R_S, where R_S is the honest GROUP action of
+///     R_y(pi) on Sym^j(V_l) and J_S the induced conjugation.
+///  3. R_S preserves each occurrence copy (a group element fixing the sl2
+///     span of a highest-weight vector), acting by the standard d^L(pi):
+///     v_{r,M} -> (-1)^{L-M}*v_{r,-M}. Hence J_S v_{r,M} =
+///     (-1)^{jl}*K_S(R_S^-1 v_{r,M}) = (-1)^{jl+L-M}*v_{r,-M}, copy by
+///     copy -- conjugation cannot mix copies of a multiplicity space. In
+///     w-monomial coordinates (weight M: J_S negates weights, contributing
+///     (-1)^{Sum m_a} = (-1)^M), the complex table t[M, A] has the mirror
+///     symmetry t[-M, mirror(A)] = (-1)^{jl+L}*t[M, A].
+///  4. Realize exactly like realCGDense -- conj(u_l) on every Sym-side
 ///     factor, u_L plain on the row side. Taking conj of the realized table:
 ///     each U entry flips by its m-sign (step 1), the weight selection
-///     Σ m_a = M cancels the accumulated (−1)^{Σm_a + M}, and the m → −m
-///     relabeling leaves  conj(T_real) = (−1)^{jl+L}·T_real.  Real iff
-///     j·l + L is even; purely imaginary, realized by −i, iff odd.  ∎
+///     Sum m_a = M cancels the accumulated (-1)^{Sum m_a + M}, and the
+///     m -> -m relabeling leaves conj(T_real) = (-1)^{jl+L}*T_real. Real iff
+///     j*l + L is even; purely imaginary, realized by -i, iff odd.
 ///
-/// At j = 2 (Sym² carries even L only, Λ² odd) this reduces to realCGDense's
-/// l1+l2+l3 parity rule at l1 = l2 = l; j = 1 gives the always-real identity
-/// table; the first genuinely new case is V₃ ⊂ Sym³(V₂) — imaginary,
-/// realized by −i. The generator still asserts the residual gap (≥ 5 orders
-/// below the table max on the realized branch, the other branch at table
-/// scale) — a violation is a compiler bug and fails loudly, not a data
-/// condition. Parity never enters: O(3) parity acts on Sym^j(V_{l,p}) by the
-/// scalar (−1)^{j·p} and rides at spec level.
+/// At j = 2 (Sym^2 carries even L only, Lambda^2 odd) this reduces to
+/// realCGDense's l1+l2+l3 parity rule at l1 = l2 = l; j = 1 gives the
+/// always-real identity table; the first genuinely new case is V_3 in
+/// Sym^3(V_2) -- imaginary, realized by -i. The generator asserts the
+/// residual gap (>= 5 orders below table max on the realized branch, the
+/// other branch at table scale); a violation is a compiler bug, not a data
+/// condition. Parity never enters: O(3) parity acts on Sym^j(V_{l,p}) by
+/// the scalar (-1)^{j*p} and rides at spec level.
 module Blade.ML.SymPowerTables
 
 open System.Collections.Generic
@@ -80,14 +77,11 @@ open System.Numerics
 module Spec = Blade.ML.Spec
 module WT = Blade.ML.WignerTables
 
-// ---------------------------------------------------------------------------
 // Minimal exact rationals over System.Numerics.BigInteger. Local by design:
-// MLSpec stays dependency-free (it is shared with the BladeML project) and
-// nothing else compiler-side needs exact fractions. Always normalized
-// (Den > 0, gcd = 1), so structural equality is value equality. Exactness
-// comes from BigInteger arithmetic — functionally the same result as the
-// fraction-free/Bareiss route, chosen for clarity at these tiny sizes.
-// ---------------------------------------------------------------------------
+// MLSpec stays dependency-free (shared with the BladeML project) and nothing
+// else compiler-side needs exact fractions. Always normalized (Den > 0,
+// gcd = 1), so structural equality is value equality; exactness matches the
+// fraction-free/Bareiss route, chosen here for clarity at these tiny sizes.
 
 type Rat = { Num: bigint; Den: bigint }
 
@@ -113,11 +107,9 @@ module Rat =
     let scaleInt (k: int) (a: Rat) = make (a.Num * bigint k) a.Den
     let toFloat (a: Rat) = float a.Num / float a.Den
 
-// ---------------------------------------------------------------------------
 // The monomial cell space of Sym^j(V_l): lex `symMultisets` cells over the
-// 2l+1 weight indices, with the integer E/F actions and the exact Gram
-// weights precomputed once per (j, l).
-// ---------------------------------------------------------------------------
+// 2l+1 weight indices, with the integer E/F actions and exact Gram weights
+// precomputed once per (j, l).
 
 let private fact (n: int) : bigint =
     let mutable acc = BigInteger.One
@@ -129,7 +121,7 @@ let rec private removeFirst (x: int) (xs: int list) =
     | [] -> []
     | h :: t -> if h = x then t else h :: removeFirst x t
 
-/// Distinct arrangements (ordered tuples) of a sorted multiset. j ≤ 4, so
+/// Distinct arrangements (ordered tuples) of a sorted multiset. j <= 4, so
 /// brute recursion over distinct heads is plenty.
 let rec private arrangements (xs: int list) : int list list =
     match xs with
@@ -145,15 +137,15 @@ type private CellSpace = {
     /// lex `symMultisets` cells (0-based weight indices i = m + l)
     Cells: int list []
     Index: Map<int list, int>
-    /// Σ i_a − j·l
+    /// sum i_a - j*l
     Weight: int []
-    /// ∏_i α_i! per cell, as float (≤ 24 at j ≤ 4)
+    /// prod_i a_i! per cell, as float (<= 24 at j <= 4)
     AlphaFact: float []
-    /// N_A = j!/∏α_i! per cell
+    /// N_A = j!/prod a_i! per cell
     NMult: int []
-    /// exact Gram weight q_A = j!·∏α_i!·∏_a c²_{m_a} per cell (module doc)
+    /// exact Gram weight q_A = j! * prod a_i! * prod_a c^2_{m_a} per cell (module doc)
     Q: Rat []
-    /// ∏_a c_{m_a} per cell (float; c_m = √((l+m)!(l−m)!/(2l)!))
+    /// prod_a c_{m_a} per cell (float; c_m = sqrt((l+m)!(l-m)!/(2l)!))
     CProd: float []
     /// integer E action per cell: (target cell index, coefficient)
     EAct: (int * int) [] []
@@ -167,7 +159,7 @@ let private spaceCache = Dictionary<int * int, CellSpace>()
 
 let private cellSpace (j: int) (l: int) : CellSpace =
     if j < 1 || j > 4 then
-        failwithf "internal: SymPowerTables j = %d out of scope (1..4, plan §6.5)" j
+        failwithf "internal: SymPowerTables j = %d out of scope (1..4, plan section 6.5)" j
     if l < 0 then failwithf "internal: SymPowerTables negative l (%d)" l
     match spaceCache.TryGetValue((j, l)) with
     | true, v -> v
@@ -176,7 +168,7 @@ let private cellSpace (j: int) (l: int) : CellSpace =
         let cells = Spec.symMultisets d j |> List.toArray
         let index = cells |> Array.mapi (fun i c -> (c, i)) |> Map.ofArray
         let alphas (cell: int list) = cell |> List.countBy id
-        // c²_i = i!·(2l−i)!/(2l)! as an exact rational, per weight index i
+        // c^2_i = i! * (2l-i)! / (2l)! as an exact rational, per weight index i
         let c2 = Array.init d (fun i -> Rat.make (fact i * fact (2 * l - i)) (fact (2 * l)))
         let space = {
             J = j
@@ -235,8 +227,8 @@ let private gramDotSp (sp: CellSpace) (a: Rat[]) (b: Rat[]) : Rat =
             acc <- Rat.add acc (Rat.mul sp.Q.[i] (Rat.mul a.[i] b.[i]))
     acc
 
-// ---- public exact re-verification hooks (the tests use these, so the pins
-// re-derive E·v = 0 and the Gram identities rather than trusting the builder) --
+// Public exact re-verification hooks: the tests re-derive E.v = 0 and the
+// Gram identities from these rather than trusting the builder.
 
 /// The lex monomial cells of Sym^j over the 2l+1 weight indices i = m + l.
 let symCells (j: int) (l: int) : int list list = cellSpace j l |> fun sp -> List.ofArray sp.Cells
@@ -249,34 +241,32 @@ let applyE (j: int) (l: int) (v: Rat[]) : Rat[] = applyAct (cellSpace j l).EAct 
 let applyF (j: int) (l: int) (v: Rat[]) : Rat[] = applyAct (cellSpace j l).FAct v
 
 /// The exact Sym^j inner product in stored (monomial-cell) coordinates:
-/// Σ_A q_A·a_A·b_A with q_A = j!·∏α_i!·∏ c²_{m_a} (module doc).
+/// sum_A q_A*a_A*b_A with q_A = j! * prod a_i! * prod c^2_{m_a} (module doc).
 let gramDot (j: int) (l: int) (a: Rat[]) (b: Rat[]) : Rat = gramDotSp (cellSpace j l) a b
 
-// ---------------------------------------------------------------------------
-// Exact layer: per weight L, the kernel of E over ℚ in canonical RREF form,
-// Gram–Schmidt'd in RREF row order.
-// ---------------------------------------------------------------------------
+// Exact layer: per weight L, the kernel of E over Q in canonical RREF form,
+// Gram-Schmidt'd in RREF row order.
 
 /// One weight space's worth of occurrences of V_L in Sym^j(V_l), exact.
 type ExactWeightSpace = {
     L: int
     /// cell indices of the weight-L monomials (ascending = lex order)
     WeightCells: int []
-    /// pivot monomial (cell) of each RREF kernel row, in RREF row order —
-    /// the documented labeling artifact of §3.3b
+    /// pivot monomial (cell) of each RREF kernel row, in RREF row order --
+    /// the documented labeling artifact
     Pivots: int list []
     /// canonical RREF kernel rows over the FULL cell space (support =
     /// weight-L cells); copy r of the occurrence = row r
     RrefRows: Rat[][]
-    /// exact Gram–Schmidt of RrefRows in row order (unnormalized)
+    /// exact Gram-Schmidt of RrefRows in row order (unnormalized)
     GsRows: Rat[][]
-    /// ⟨GsRows r, GsRows r⟩ — the rational norm² factored out at float time
+    /// <GsRows r, GsRows r> -- the rational norm^2 factored out at float time
     Norm2: Rat []
 }
 
-/// Reduced row echelon form over ℚ. Returns (row, pivot column) pairs with
+/// Reduced row echelon form over Q. Returns (row, pivot column) pairs with
 /// pivots ascending; zero rows dropped. Canonical for the row space given
-/// the (lex) column order — this IS the §3.3b occurrence labeling.
+/// the (lex) column order -- this IS the occurrence labeling.
 let private rref (rows: Rat[][]) : (Rat[] * int) list =
     let rows = rows |> Array.map Array.copy
     let nRows = rows.Length
@@ -320,15 +310,15 @@ let private kernelBasis (m: Rat[][]) (nCols: int) : Rat[][] =
 let private exactCache = Dictionary<int * int, ExactWeightSpace list>()
 
 /// The exact occurrence data of Sym^j(V_l), L descending, mult > 0 only.
-/// Cross-checked against the §3.3 weight-peel (`powerSpec`) on every build.
+/// Cross-checked against the weight-peel (`powerSpec`) on every build.
 let symPowerExact (j: int) (l: int) : ExactWeightSpace list =
     match exactCache.TryGetValue((j, l)) with
     | true, v -> v
     | _ ->
         let sp = cellSpace j l
         let nCells = sp.Cells.Length
-        // Occurrence multiplicities from the integer weight-peel — the
-        // stage-2a counting half; the kernel dims must reproduce it.
+        // Occurrence multiplicities from the integer weight-peel; the kernel
+        // dims must reproduce them.
         let expected =
             Spec.powerSpec Spec.PowSym [ ({ L = l; Parity = 0; Mult = 1 } : Spec.SpecEntry) ] j
             |> List.map (fun e -> e.L, e.Mult)
@@ -355,7 +345,7 @@ let symPowerExact (j: int) (l: int) : ExactWeightSpace list =
                     full
                 let rrefFull = canon |> List.map (fst >> toFull) |> List.toArray
                 let pivots = canon |> List.map (fun (_, p) -> sp.Cells.[cols.[p]]) |> List.toArray
-                // Exact Gram–Schmidt in RREF row order (dims ≤ 3 at j ≤ 4;
+                // Exact Gram-Schmidt in RREF row order (dims <= 3 at j <= 4;
                 // independence is already proved by the pivots).
                 let gs = ResizeArray<Rat[]>()
                 let norm2 = ResizeArray<Rat>()
@@ -369,10 +359,10 @@ let symPowerExact (j: int) (l: int) : ExactWeightSpace list =
                                 v.[i] <- Rat.sub v.[i] (Rat.mul coef prev.[i])
                     let n2 = gramDotSp sp v v
                     if Rat.isZero n2 then
-                        failwithf "internal: SymPowerTables(%d,%d) L=%d: Gram–Schmidt hit a zero norm" j l L
+                        failwithf "internal: SymPowerTables(%d,%d) L=%d: Gram-Schmidt hit a zero norm" j l L
                     gs.Add v
                     norm2.Add n2
-                // Re-verify E·v = 0 exactly for every RREF and GS row.
+                // Re-verify E.v = 0 exactly for every RREF and GS row.
                 for v in Seq.append (Seq.ofArray rrefFull) gs do
                     if applyAct sp.EAct v |> Array.exists (fun x -> not (Rat.isZero x)) then
                         failwithf "internal: SymPowerTables(%d,%d) L=%d: kernel vector not annihilated by E" j l L
@@ -385,10 +375,8 @@ let symPowerExact (j: int) (l: int) : ExactWeightSpace list =
         exactCache.[(j, l)] <- res
         res
 
-// ---------------------------------------------------------------------------
-// Float layer: integer lowering, diagonal unitarization, uMatrix realization
-// with the derived phase rule.
-// ---------------------------------------------------------------------------
+// Float layer: integer lowering, diagonal unitarization, uMatrix
+// realization with the derived phase rule.
 
 /// One realized occurrence copy of V_L in Sym^j(V_l).
 type SymOccurrence = {
@@ -397,15 +385,15 @@ type SymOccurrence = {
     Copy: int
     /// this copy's RREF pivot monomial (the labeling artifact)
     Pivot: int list
-    /// true iff the realization multiplied by −i (the derived rule:
-    /// j·l + L odd); asserted against the empirical residuals at build time
+    /// true iff the realization multiplied by -i (the derived rule:
+    /// j*l + L odd); asserted against the empirical residuals at build time
     Flipped: bool
     /// max |Re| / max |Im| over the complex block BEFORE the phase fix
     MaxRe: float
     MaxIm: float
-    /// Rows.[c].[I], c = m_real + L: T[row, I] = ⟨v_row, s_I⟩ over the lex
-    /// real-basis cells — §3.3b identity (2); evaluation carries no N_I,
-    /// orthonormality is Σ_I T[r,I]·T[r',I]/N_I = δ (identity (3)).
+    /// Rows.[c].[I], c = m_real + L: T[row, I] = <v_row, s_I> over the lex
+    /// real-basis cells (identity (2)); evaluation carries no N_I,
+    /// orthonormality is Sum_I T[r,I]*T[r',I]/N_I = delta (identity (3)).
     Rows: float[][]
 }
 
@@ -416,7 +404,7 @@ type SymPowerTable = {
     /// lex monomial cells over the 2l+1 REAL components (same enumeration
     /// as the complex side: `symMultisets (2l+1) j`)
     Cells: int list []
-    /// N_I per cell, as float — the /N_I weight of identity (3)
+    /// N_I per cell, as float -- the /N_I weight of identity (3)
     CellMult: float []
     /// occurrences: L descending, copies in RREF order
     Occurrences: SymOccurrence list
@@ -433,7 +421,7 @@ let symPowerTable (j: int) (l: int) : SymPowerTable =
         let nCells = sp.Cells.Length
         let exact = symPowerExact j l
         let ul = WT.uMatrix l
-        // v_mu = Σ_c conj(U[c, mu])·e_c — the nonzero (c, conj u) options per
+        // v_mu = Sum_c conj(U[c, mu])*e_c -- the nonzero (c, conj u) options per
         // weight index, exactly realCGDense's conj-on-the-input-side placement.
         let colOpts =
             [| for i in 0 .. 2 * l ->
@@ -455,13 +443,12 @@ let symPowerTable (j: int) (l: int) : SymPowerTable =
                     if Rat.isZero n2 then
                         failwithf "internal: SymPowerTables(%d,%d) L=%d copy %d: lowering lost the vector at M=%d" j l L r M
                     let invNorm = 1.0 / sqrt (Rat.toFloat n2)   // diagonal unitarization
-                    // Per-M realization: expand each monomial's distinct
-                    // arrangements factor-by-factor through conj(U).
+                    // Per-M realization: expand each monomial's arrangements through conj(U).
                     let dM = Array.zeroCreate<Complex> nCells
                     for iA in 0 .. nCells - 1 do
                         if not (Rat.isZero vec.[iA]) then
                             // tensor coefficient per ordered arrangement:
-                            // a_A·∏α_i! (module doc), w→v rescale ∏c_m, unit norm
+                            // a_A * prod a_i! (module doc), w->v rescale prod c_m, unit norm
                             let beta = Rat.toFloat vec.[iA] * sp.AlphaFact.[iA] * sp.CProd.[iA] * invNorm
                             for arr in sp.Arrs.[iA] do
                                 let rec go (rest: int list) (acc: Complex) (chosen: int list) =
@@ -480,9 +467,8 @@ let symPowerTable (j: int) (l: int) : SymPowerTable =
                             for idx in 0 .. nCells - 1 do
                                 if dM.[idx] <> Complex.Zero then
                                     cplx.[cL].[idx] <- cplx.[cL].[idx] + uu * dM.[idx]
-                // Phase: apply the DERIVED rule, then assert the residual gap —
-                // the realized branch ≥ 5 orders below max, the other at table
-                // scale (unit rows bound max|T| ≥ 1/√nCells from below).
+                // Phase: apply the DERIVED rule, then assert the residual gap: the
+                // realized branch >= 5 orders below max, else at table scale (unit rows bound max|T| >= 1/sqrt(nCells)).
                 let mutable maxRe = 0.0
                 let mutable maxIm = 0.0
                 for row in cplx do
@@ -503,7 +489,7 @@ let symPowerTable (j: int) (l: int) : SymPowerTable =
                     for i in 0 .. nCells - 1 do
                         s <- s + row.[i] * row.[i] / float sp.NMult.[i]
                     if abs (s - 1.0) > 1e-10 then
-                        failwithf "internal: SymPowerTables(%d,%d) L=%d copy %d: realized row norm² = %.17g" j l L r s
+                        failwithf "internal: SymPowerTables(%d,%d) L=%d copy %d: realized row norm^2 = %.17g" j l L r s
                 occs.Add { L = L; Copy = r; Pivot = ws.Pivots.[r]
                            Flipped = flipped; MaxRe = maxRe; MaxIm = maxIm; Rows = rows }
         let res = {

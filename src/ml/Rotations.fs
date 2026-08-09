@@ -8,7 +8,7 @@ open System.Collections.Generic
 /// The real Wigner D matrix for degree l is *fit from the spherical
 /// harmonics themselves*: sample 2l+1 generic unit vectors v_i and solve
 /// Y_l(R v_i) = D_l(R) Y_l(v_i). This makes D an independent oracle for the
-/// CG machinery — tensor-product equivariance tests cross-validate the CG
+/// CG machinery -- tensor-product equivariance tests cross-validate the CG
 /// tensors against the harmonics with no shared code path.
 ///
 /// Parity note: everything here is proper rotations (SO(3)), where parity is
@@ -107,9 +107,9 @@ module Rotations =
                     out.[s + i] <- acc
         out
 
-    /// Apply an IMPROPER O(3) element (inversion ∘ R, R proper) to an
+    /// Apply an IMPROPER O(3) element (inversion . R, R proper) to an
     /// IrrepsIdx<spec> feature vector: each (l, p) block transforms by
-    /// paritySign(p) · D_l(R) — the parity extension promised in the header
+    /// paritySign(p) * D_l(R) -- the parity extension promised in the header
     /// (added 2026-07-18 for the equiv(O3) certificate tests).
     let applyRepImproper (spec: SpecEntry[]) (r: float[][]) (feat: float[]) : float[] =
         let starts = IrrepsIdx.blockStarts spec
@@ -122,7 +122,7 @@ module Rotations =
         out
 
     /// Dense (totalDim x totalDim) block-diagonal matrix of the PROPER
-    /// action of R on IrrepsIdx<spec> — for baking into Blade certificate
+    /// action of R on IrrepsIdx<spec> -- for baking into Blade certificate
     /// tests as a flat row-major literal. A full matvec over it reproduces
     /// applyRep to the ulp (the off-block zeros contribute exact +0.0).
     let repMatrix (spec: SpecEntry[]) (r: float[][]) : float[] =

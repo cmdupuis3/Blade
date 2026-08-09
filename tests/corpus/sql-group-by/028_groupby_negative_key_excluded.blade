@@ -1,0 +1,57 @@
+// TEST: GroupBy Negative Key Excluded
+// A NEGATIVE key means "this row belongs to no group": the row is dropped from
+// the grouping entirely rather than forming a group of its own. That is SQL's
+// WHERE fused into GROUP BY, and it is what lets a key FUNCTION do selection --
+// the row that no family claims just keys negative.
+//
+// The drop happens in group_keys' offsets construction (every pass that walks
+// the key array skips it), so a dropped row contributes to no group's offsets
+// and group_by never gathers it.
+let keys = [-1, 0, 1, 0]
+let vals = [0.5, 1.5, 2.5, 3.5]
+let gk = group_keys(keys)
+let g = group_by(vals, gk)
+// Row 0 is dropped. Two groups remain, in first-occurrence order:
+//   key 0 -> rows 1,3 -> 1.5 + 3.5 = 5;  key 1 -> row 2 -> 2.5
+let sums = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [5, 2.5]
+let sizes = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
+// EXPECT: sizes = [2, 1]
+
+// POSITIONAL buckets (Idx<N> keys) take the same rule. This spelling used to
+// be a memory-safety bug rather than a semantics question: the negative key
+// indexed the stack counts/offsets arrays at -1, and the emitted program
+// SEGFAULTED. The drop is what makes it well-defined.
+type RegionIdx = Idx<2>
+type StationIdx = Idx<4>
+let pregion: Array<RegionIdx like StationIdx> = [-1, 0, 1, 0]
+let pvals: Array<Float64 like StationIdx> = [0.5, 1.5, 2.5, 3.5]
+let pgk = group_keys(pregion)
+let pg = group_by(pvals, pgk)
+let psums = method_for(pg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: psums = [5, 2.5]
+let psizes = method_for(pg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
+// EXPECT: psizes = [2, 1]
+
+// STRING keys are unaffected: there is no negative string, so no guard is
+// emitted and grouping is exactly as before.
+let names = ["a", "b", "a"]
+let nvals = [1.0, 2.0, 3.0]
+let ngk = group_keys(names)
+let ng = group_by(nvals, ngk)
+let nsums = method_for(ng) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: nsums = [4, 2]
+
+// SELECTION BY KEY FUNCTION, the motivating idiom: a float key computed by
+// floor, with the out-of-range prefix keyed negative. Segment width 2.0, so
+// t < 0 selects itself out and the rest partition by floor(t / 2).
+let t = [-3.0, 0.5, 1.5, 2.5, 4.5, -1.0]
+let seg = (t <@> lambda(x) -> floor(x / 2.0)) |> compute
+// seg = [-2, 0, 0, 1, 2, -1]: rows 0 and 5 drop out
+let sgk = group_keys(seg)
+let gt = group_by(t, sgk)
+// groups in first-occurrence order: 0 -> [0.5, 1.5]; 1 -> [2.5]; 2 -> [4.5]
+let segSums = method_for(gt) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: segSums = [2, 2.5, 4.5]
+let segSizes = method_for(gt) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
+// EXPECT: segSizes = [2, 1, 1]

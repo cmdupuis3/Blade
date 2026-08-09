@@ -1,0 +1,25 @@
+// TEST: OrbIdx Deduced Anticomm Level
+// The appended level's SIGN comes from the clause: `where anticomm(p, q)` over
+// the repeated argument appends (k,-) rather than (k,+), so the deduced class
+// is OrbIdx<[(2,+),(2,-)], 3> -- symmetric within a block, ANTIsymmetric
+// between blocks. The mirror image of 213's Riemann shape, and the other half
+// of §6's claim that the group is fixed by the ranks while the sign list
+// selects among the 2^d characters it admits.
+//
+// The '-' outer level drops the diagonal: §4's fold is C(6,2) = 15, not the
+// C(7,2) = 21 of 200, and the 6 cells where the two sub-keys are EQUAL have no
+// storage at all (the zero set, §5). The traversal nest reflects that
+// structurally -- `orb_visit`'s equality segment is `if constexpr (GE)` on the
+// level's sign, so a '-' instantiation contains no trace of it, not even a
+// skipped test. Counting the printed cells is what pins it: 21 would mean the
+// sign was dropped and the diagonal stored.
+//
+// `anticomm` is the PIN spelling: the kernel is used AS-IS (no permutation
+// sum), storing f(a,b) for a < b only, so the cells are S[a] - S[b].
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where anticomm(p, q) -> p - q
+let W = method_for(S, S) <@> h |> compute
+// EXPECT: S = [1, 2, 3, 4, 6, 9]
+// EXPECT: W = [-1, -2, -3, -5, -8, -1, -2, -4, -7, -1, -3, -6, -2, -5, -3]

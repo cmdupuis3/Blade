@@ -768,16 +768,19 @@ let data = z.load_compound(sample.vars.A, sample.vars.M) |> z.read
     check "blade parse: dense-first rejected (packed group must lead)"
         (isError (parseArrayMetaV2 "C" "d" """{"shape":[3,10],"chunks":[3,10],"dtype":"<f8","compressor":null,"fill_value":0,"order":"C","filters":null}"""
                       (Some (bladeZattrs """{"kind": "dense", "extent": 3}, {"kind": "sym", "rank": 2, "extent": 4}"""))) "FIRST") ""
+    // The version gate is closed UPWARD, not at 1: spec_version 2 (the orbit
+    // head, section 18b) is implemented and a sym head under it is valid, so
+    // the "future version" probe moved to 3.
     check "blade parse: future spec_version rejected"
-        (isError (parseArrayMetaV2 "C" "d" (v2packed "10") (Some """{"blade": {"spec_version": 2, "layout": "packed", "index_types": [{"kind": "sym", "rank": 2, "extent": 4}]}}""")) "spec_version") ""
+        (isError (parseArrayMetaV2 "C" "d" (v2packed "10") (Some """{"blade": {"spec_version": 3, "layout": "packed", "index_types": [{"kind": "sym", "rank": 2, "extent": 4}]}}""")) "spec_version") ""
     check "blade parse: v3 attributes carry the layout too"
         (match parseArrayMetaV3 "C" "d" """{"zarr_format":3,"node_type":"array","shape":[10],"data_type":"float64","chunk_grid":{"name":"regular","configuration":{"chunk_shape":[5]}},"fill_value":0,"codecs":[{"name":"bytes"}],"attributes":{"blade":{"spec_version":1,"layout":"packed","order":"ascending-lex","index_types":[{"kind":"sym","rank":2,"extent":4}]}}}""" with
          | Ok m -> (match m.Blade with Some l -> l.Group.Rank = 2 && l.Group.Extent = 4L | None -> false)
          | Error e -> false) ""
     check "binom/packedCardinality: sym(2,4)=10, antisym(2,4)=6, sym(3,3)=10"
-        (packedCardinality { Sym = SymSymmetric; Rank = 2; Extent = 4L } = 10L
-         && packedCardinality { Sym = SymAntisymmetric; Rank = 2; Extent = 4L } = 6L
-         && packedCardinality { Sym = SymSymmetric; Rank = 3; Extent = 3L } = 10L) ""
+        (packedCardinality { Sym = SymSymmetric; Rank = 2; Extent = 4L; Levels = [] } = 10L
+         && packedCardinality { Sym = SymAntisymmetric; Rank = 2; Extent = 4L; Levels = [] } = 6L
+         && packedCardinality { Sym = SymSymmetric; Rank = 3; Extent = 3L; Levels = [] } = 10L) ""
 
     // ---------------------------------------------------------------
     // 14. Packed module typing (mirrors source-level SymIdx lowering)
@@ -789,7 +792,7 @@ let data = z.load_compound(sample.vars.A, sample.vars.M) |> z.read
             { Name = "C"; ArrayDir = "/mock/tri/C"; Shape = [10L]; Chunks = [10L]
               Dtype = mockDt "f8" ETFloat64 8 true; DimNames = None
               FillValue = FillFloat 0.0; Codec = CodecIdentity
-              Blade = Some { Group = { Sym = SymSymmetric; Rank = 2; Extent = 4L }; DenseDims = []; Blocks = None }
+              Blade = Some { Group = { Sym = SymSymmetric; Rank = 2; Extent = 4L; Levels = [] }; DenseDims = []; Blocks = None }
               Version = 2; ChunkKeySep = "."; ChunkKeyPrefix = "" }
         ] }
      let m = zarrStoreToModule (IRBuilder()) "tri" packedStore None
@@ -825,7 +828,7 @@ let data = z.load_compound(sample.vars.A, sample.vars.M) |> z.read
      ZarrWrite.writeStoreV2 foldTri [
         { Name = "C"; DimNames = None; Shape = [10L]; Chunks = [10L]
           FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 (triOracle false 4); OmitChunks = []
-          Blade = Some { Group = { Sym = SymSymmetric; Rank = 2; Extent = 4L }; DenseDims = []; Blocks = None } } ]
+          Blade = Some { Group = { Sym = SymSymmetric; Rank = 2; Extent = 4L; Levels = [] }; DenseDims = []; Blocks = None } } ]
      match Blade.ProviderRegistry.tryFind "zarr" with
      | Some s ->
          check "packed fold: refused with steering"
@@ -839,7 +842,7 @@ let data = z.load_compound(sample.vars.A, sample.vars.M) |> z.read
         let card = int64 pool.Length
         let inStore = fixStore (sprintf "zarr_tri_%s" kind)
         let outStore = fixStore (sprintf "zarr_tri_%s_out" kind)
-        let layout : BladeLayout = { Group = { Sym = sym; Rank = 2; Extent = int64 n }; DenseDims = []; Blocks = None }
+        let layout : BladeLayout = { Group = { Sym = sym; Rank = 2; Extent = int64 n; Levels = [] }; DenseDims = []; Blocks = None }
         let triVars : ZarrWrite.WriteVar list = [
             { Name = "C"; DimNames = None; Shape = [card]; Chunks = [card]
               FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 pool; OmitChunks = []
@@ -1080,7 +1083,7 @@ let w = z.write("%s", C)
               for t in 0 .. trail - 1 ->
                 float (100 * (i + 1) + 10 * (j + 1) + t) |]
      let card = int64 symCells.Length
-     let layout : BladeLayout = { Group = { Sym = SymSymmetric; Rank = 2; Extent = int64 n }; DenseDims = [int64 trail]; Blocks = None }
+     let layout : BladeLayout = { Group = { Sym = SymSymmetric; Rank = 2; Extent = int64 n; Levels = [] }; DenseDims = [int64 trail]; Blocks = None }
      let mixVars : ZarrWrite.WriteVar list = [
         { Name = "D"; DimNames = Some ["cells"; "t"]; Shape = [card; int64 trail]; Chunks = [card; int64 trail]
           FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 pool; OmitChunks = []
@@ -1125,6 +1128,481 @@ let w = z.write("%s", D)
                  else check "packed mixed: compiles" false e)
         | Error e -> check "packed mixed: lowers" false e
      with ex -> check "packed mixed e2e" false ex.Message)
+
+    // ---------------------------------------------------------------
+    // 18b. spec_version 2: the `orbit` (iterated-wreath) head — metadata
+    // ---------------------------------------------------------------
+    // Pure JSON/typing probes, hermetic (no g++). The e2e half is 18c.
+    printfn "\n--- blade orbit head (spec_version 2): attribute parse ---"
+    let orbAttr (spec: int) (levels: string) (extent: int) (extraEntries: string) (layoutAndDecomp: string) =
+        sprintf """{"blade": {"spec_version": %d, "layout": %s, "order": "ascending-lex", "index_types": [{"kind": "orbit", "levels": [%s], "extent": %d}%s]}}"""
+            spec layoutAndDecomp levels extent extraEntries
+    let v2arr (shape: string) =
+        sprintf """{"shape":[%s],"chunks":[%s],"dtype":"<f8","compressor":null,"fill_value":0,"order":"C","filters":null}""" shape shape
+    // [(2,+),(2,+)] at n = 3 folds 3 -> C(4,2) = 6 -> C(7,2) = 21.
+    (match parseArrayMetaV2 "W" "d" (v2arr "21") (Some (orbAttr 2 """[2, "+"], [2, "+"]""" 3 "" "\"packed\"")) with
+     | Ok m ->
+         check "orbit parse: [(2,+),(2,+)] n=3 -> SymWreath group, 21-cell pool"
+             (match m.Blade with
+              | Some l ->
+                  l.Group.Sym = SymWreath && l.Group.Levels = [(2, true); (2, true)]
+                  && l.Group.Extent = 3L && l.Group.Rank = 4 && l.DenseDims = [] && l.Blocks = None
+              | None -> false)
+             (sprintf "%A" m.Blade)
+     | Error e -> check "orbit parse: [(2,+),(2,+)] n=3" false e)
+    // The Riemann twin: mixed character, 4 -> C(4,2) = 6 -> C(7,2) = 21.
+    (match parseArrayMetaV2 "R" "d" (v2arr "21") (Some (orbAttr 2 """[2, "-"], [2, "+"]""" 4 "" "\"packed\"")) with
+     | Ok m ->
+         check "orbit parse: [(2,-),(2,+)] n=4 -> 21-cell pool (mixed character)"
+             (match m.Blade with
+              | Some l -> l.Group.Levels = [(2, false); (2, true)] && l.Group.Extent = 4L
+              | None -> false)
+             (sprintf "%A" m.Blade)
+     | Error e -> check "orbit parse: [(2,-),(2,+)] n=4" false e)
+    check "orbit parse: cardinality is the ITERATED fold (packedCardinalityChecked)"
+        (packedCardinalityChecked { Sym = SymWreath; Rank = 4; Extent = 3L; Levels = [(2, true); (2, true)] } = Ok 21L
+         && packedCardinalityChecked { Sym = SymWreath; Rank = 4; Extent = 4L; Levels = [(2, false); (2, true)] } = Ok 21L
+         && packedCardinalityChecked { Sym = SymWreath; Rank = 4; Extent = 4L; Levels = [(2, true); (2, true)] } = Ok 55L) ""
+    // THE version gate: a v1 reader must refuse an orbit head loudly. Our own
+    // v1 path is that reader, so this pins it rather than assuming it.
+    check "orbit parse: kind 'orbit' under spec_version 1 is refused BY NAME"
+        (isError (parseArrayMetaV2 "W" "d" (v2arr "21") (Some (orbAttr 1 """[2, "+"], [2, "+"]""" 3 "" "\"packed\""))) "spec_version 2 head") ""
+    // One spelling per class on disk.
+    check "orbit parse: a DEPTH-1 orbit head is illegal (sym/antisym is the spelling)"
+        (isError (parseArrayMetaV2 "W" "d" (v2arr "6") (Some (orbAttr 2 """[2, "+"]""" 3 "" "\"packed\""))) "depth >= 2") ""
+    check "orbit parse: an EMPTY level list is illegal"
+        (isError (parseArrayMetaV2 "W" "d" (v2arr "3") (Some (orbAttr 2 "" 3 "" "\"packed\""))) "depth >= 2") ""
+    check "orbit parse: a rank-1 level is illegal (it normalizes away -> two spellings)"
+        (isError (parseArrayMetaV2 "W" "d" (v2arr "21") (Some (orbAttr 2 """[1, "+"], [2, "+"], [2, "+"]""" 3 "" "\"packed\""))) "rank 1 is not >= 2") ""
+    check "orbit parse: a malformed sign is refused"
+        (isError (parseArrayMetaV2 "W" "d" (v2arr "21") (Some (orbAttr 2 """[2, "+"], [2, "*"]""" 3 "" "\"packed\""))) "is not \"+\" or \"-\"") ""
+    check "orbit parse: a missing levels array is refused"
+        (isError (parseArrayMetaV2 "W" "d" (v2arr "21")
+                     (Some """{"blade": {"spec_version": 2, "layout": "packed", "index_types": [{"kind": "orbit", "extent": 3}]}}""")) "missing its 'levels'") ""
+    // Pool-length mismatch: a LOAD ERROR, never a reinterpretation. 20 != 21.
+    check "orbit parse: pool length != cardinality is a loud load error"
+        (isError (parseArrayMetaV2 "W" "d" (v2arr "20") (Some (orbAttr 2 """[2, "+"], [2, "+"]""" 3 "" "\"packed\""))) "cardinality 21 but the pool dimension is 20") ""
+    check "orbit parse: trailing dense dims are refused (not yet supported)"
+        (isError (parseArrayMetaV2 "W" "d" (v2arr "21, 2")
+                     (Some (orbAttr 2 """[2, "+"], [2, "+"]""" 3 """, {"kind": "dense", "extent": 2}""" "\"packed\""))) "not yet supported") ""
+    check "orbit parse: 'packed-blocks' is not defined for an orbit head"
+        (isError (parseArrayMetaV2 "W" "d" (v2arr "21") (Some (orbAttr 2 """[2, "+"], [2, "+"]""" 3 "" "\"packed-blocks\""))) "not defined for an orbit") ""
+    check "orbit parse: spec_version 3 is still refused (the version gate is closed upward)"
+        (isError (parseArrayMetaV2 "W" "d" (v2arr "21") (Some (orbAttr 3 """[2, "+"], [2, "+"]""" 3 "" "\"packed\""))) "spec_version 3 is not supported") ""
+    check "orbit parse: sym heads still work under spec_version 2 (superset, not replacement)"
+        (match parseArrayMetaV2 "C" "d" (v2arr "10")
+                   (Some """{"blade": {"spec_version": 2, "layout": "packed", "index_types": [{"kind": "sym", "rank": 2, "extent": 4}]}}""") with
+         | Ok m -> (match m.Blade with Some l -> l.Group.Sym = SymSymmetric && l.Group.Levels = [] | None -> false)
+         | Error _ -> false) ""
+    check "orbit parse: v3 (zarr.json) carries the same head"
+        (match parseArrayMetaV3 "W" "d" """{"zarr_format":3,"node_type":"array","shape":[21],"data_type":"float64","chunk_grid":{"name":"regular","configuration":{"chunk_shape":[21]}},"fill_value":0,"codecs":[{"name":"bytes"}],"attributes":{"blade":{"spec_version":2,"layout":"packed","order":"ascending-lex","index_types":[{"kind":"orbit","levels":[[2,"-"],[2,"+"]],"extent":4}]}}}""" with
+         | Ok m -> (match m.Blade with Some l -> l.Group.Sym = SymWreath && l.Group.Levels = [(2, false); (2, true)] | None -> false)
+         | Error _ -> false) ""
+
+    printfn "\n--- blade orbit head: module typing + attribute round trip ---"
+    (let orbLayout : BladeLayout =
+        { Group = { Sym = SymWreath; Rank = 4; Extent = 3L; Levels = [(2, true); (2, true)] }
+          DenseDims = []; Blocks = None }
+     let orbStore = {
+        Path = "/tmp/orb"; Version = 2
+        Arrays = [ { Name = "W"; ArrayDir = "/tmp/orb/W"; Shape = [21L]; Chunks = [21L]
+                     Dtype = { Code = "f8"; Elem = ETFloat64; ByteSize = 8; IsFloat = true }
+                     DimNames = None; FillValue = FillFloat 0.0; Codec = CodecIdentity
+                     Blade = Some orbLayout; Version = 2; ChunkKeySep = "."; ChunkKeyPrefix = "" } ] }
+     let m = zarrStoreToModule (IRBuilder()) "orb" orbStore None
+     let wType =
+        m.Types |> List.tryPick (function
+            | IRTDStruct ("orb__vars", fields) -> fields |> List.tryPick (fun (n, t) -> if n = "W" then Some t else None)
+            | _ -> None)
+     // The record must be THE one mkWreathIndexRecord builds — same Rank (raw
+     // axes), same IROrbitClass carrier, same "__orbidx" sentinel — because a
+     // loaded class and a deduced one have to be the same type, not two records
+     // that merely print alike.
+     check "orbit typing: W types as the SymWreath record (levels, extent, raw-axis rank, sentinel tag)"
+         (match wType with
+          | Some (ArrayElem at) ->
+              (match at.IndexTypes with
+               | [ ix ] ->
+                   ix.Symmetry = SymWreath && ix.Rank = 4 && ix.Tag = Some "__orbidx"
+                   && ix.IxKind = IxKOrbit
+                   && Blade.IR.orbitLevelsOf ix = [(2, true); (2, true)]
+                   && Blade.IR.orbitBaseExtent ix = IRLit (IRLitInt 3L)
+               | _ -> false)
+          | _ -> false)
+         (sprintf "%A" wType)
+     check "orbit typing: the pool dim does NOT join the module's shareable dimensions"
+         (m.Types |> List.forall (function IRTDIndexType _ -> false | _ -> true)) ""
+     // F#-writer round trip: the attribute we emit is the attribute we parse.
+     let orbFix = fixStore "zarr_orb_attr"
+     (try Directory.Delete(orbFix, true) with _ -> ())
+     let orbVars : ZarrWrite.WriteVar list = [
+        { Name = "W"; DimNames = None; Shape = [21L]; Chunks = [21L]
+          FillValue = FillFloat 0.0
+          Data = ZarrWrite.WF64 [| for i in 1 .. 21 -> float i |]; OmitChunks = []
+          Blade = Some orbLayout } ]
+     ZarrWrite.writeStoreV2 orbFix orbVars
+     let attrText = File.ReadAllText (Path.Combine(orbFix, "W", ".zattrs"))
+     check "orbit write (F#): the attribute says spec_version 2 + kind orbit + outermost-last levels"
+         (attrText.Contains "\"spec_version\": 2"
+          && attrText.Contains "\"kind\": \"orbit\""
+          && attrText.Contains "\"levels\": [[2, \"+\"], [2, \"+\"]]"
+          && attrText.Contains "\"extent\": 3") attrText
+     check "orbit write (F#): the store reloads to the SAME layout record"
+         (match load orbFix |> fun s -> tryFindArray s "W" with
+          | Some m2 -> m2.Blade = Some orbLayout
+          | None -> false) ""
+     check "orbit write (F#): readPackedPool returns the 21 cells in order"
+         (match load orbFix |> fun s -> tryFindArray s "W" |> Option.get |> readPackedPool with
+          | Ok { DimLengths = [21]; Payload = ZFloats xs } -> xs = [| for i in 1 .. 21 -> float i |]
+          | other -> printfn "    (got %A)" other; false) ""
+     // v3 too — the head is version-agnostic.
+     let orbFix3 = fixStore "zarr_orb_attr_v3"
+     (try Directory.Delete(orbFix3, true) with _ -> ())
+     ZarrWrite.writeStoreV3 orbFix3 orbVars
+     check "orbit write (F#): v3 store carries and reloads the same head"
+         (match load orbFix3 |> fun s -> tryFindArray s "W" with
+          | Some m3 -> m3.Blade = Some orbLayout && m3.Version = 3
+          | None -> false) "")
+
+    // ---------------------------------------------------------------
+    // 18c. spec_version 2 e2e: deduced wreath -> write -> read -> use
+    // ---------------------------------------------------------------
+    // Both directions of the store boundary, on BOTH backends. Values are
+    // hand-derived (corpus 200 / 213 derive them from the kernel definition,
+    // not from a pool dump), never a read->write roundtrip: both sides of a
+    // roundtrip shift together, so a roundtrip cannot see an order mismatch
+    // (plan-orbidx-bijections §3, the antisym storage post-mortem).
+    printfn "\n--- blade orbit e2e: deduced wreath -> z.write -> z.read ---"
+    /// Compiled stdout for a source, or a skip/failure reason.
+    let compiledStdout (label: string) (src: string) : Result<string, string> =
+        match lower src with
+        | Error e -> Error (sprintf "lower: %s" e)
+        | Ok ir ->
+            let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir label
+            CodeGen.deployRuntimeHeaders e2eDir
+            let cppFile = Path.Combine(e2eDir, label + ".cpp")
+            File.WriteAllText(cppFile, cpp)
+            match compileCpp cppFile e2eDir with
+            | Error e -> Error e
+            | Ok exePath ->
+                match runExecutable exePath with
+                | Ok (0, out) -> Ok out
+                | Ok (code, out) -> Error (sprintf "exit %d: %s" code out)
+                | Error e -> Error e
+    /// Normalized stdout comparison, mirroring InterpDiff.normalize (timing
+    /// lines out, CRLF -> LF, trimmed).
+    let normOut (s: string) =
+        s.Replace("\r\n", "\n").Split('\n')
+        |> Array.filter (fun l -> not (l.Contains "completed in") && not (l.Contains "input allocation took"))
+        |> Array.map (fun l -> l.TrimEnd())
+        |> String.concat "\n" |> fun t -> t.Trim()
+    /// The interpreter walk of the same program (the second backend).
+    let interpStdout (label: string) (src: string) : Result<string, string> =
+        match lower src with
+        | Error e -> Error (sprintf "lower: %s" e)
+        | Ok ir ->
+            let r = Blade.Interp.Run.runProgram ir label Blade.Interp.Value.defaultLimits
+            if r.ExitCode = 0 then Ok r.Stdout
+            else Error (sprintf "interp exit %d: %s" r.ExitCode (r.Stderr.Trim()))
+    let orbCases =
+        [ // (label, extent, inner reynolds keyword or "", inner kernel, outer
+          //  kernel, LEVELS, hand-derived pool, probe (name, subscript, value))
+          // 1. The all-'+' tie: S = A(x)A symmetric, W = S + S over the pair-of-pairs
+          //    class OrbIdx<[(2,+),(2,+)], 3>. 21 cells; corpus 200's hand-derived list.
+          ("orb_tied", 3, "", "x * y", "p + q", [(2, true); (2, true)],
+           [| 2.0; 3.0; 4.0; 5.0; 7.0; 10.0; 4.0; 5.0; 6.0; 8.0; 11.0; 6.0; 7.0; 9.0; 12.0; 8.0; 10.0; 13.0; 12.0; 15.0; 18.0 |],
+           [ "canonical", "W(0, 1, 0, 1)", 4.0
+             "mirrored",  "W(1, 0, 0, 1)", 4.0
+             "outer",     "W(2, 2, 0, 0)", 10.0
+             "outerSwapped", "W(0, 0, 2, 2)", 10.0
+             "bothMirrored", "W(2, 1, 1, 0)", 8.0 ])
+          // 2. The Riemann twin: OrbIdx<[(2,-),(2,+)], 4>. Mixed character —
+          //    a signed mirror AND a zero set, neither of which the all-'+'
+          //    class can exercise. Corpus 213's hand-derived values.
+          ("orb_riemann", 4, "Antisymmetric", "2.0 * x + y", "p * q", [(2, false); (2, true)],
+           [| 1.0; 2.0; 3.0; 1.0; 2.0; 1.0; 4.0; 6.0; 2.0; 4.0; 2.0; 9.0; 3.0; 6.0; 3.0; 1.0; 2.0; 1.0; 4.0; 2.0; 1.0 |],
+           [ "canonical",  "W(0, 1, 2, 3)", 1.0
+             "oneMirror",  "W(1, 0, 2, 3)", -1.0
+             "bothMirror", "W(1, 0, 3, 2)", 1.0
+             "blockSwap",  "W(2, 3, 0, 1)", 1.0
+             "crossed",    "W(0, 2, 1, 3)", 4.0
+             "zeroFirst",  "W(0, 0, 1, 2)", 0.0
+             "zeroSecond", "W(1, 2, 3, 3)", 0.0 ]) ]
+    for (label, n, innerSym, innerBody, outerBody, levels, pool, probes) in orbCases do
+        // Two independent renderings of the SAME level list: the surface
+        // spelling (unused by the write program, which DEDUCES the class — it is
+        // here so the case row states what is expected) and the on-disk JSON the
+        // attribute must carry, outermost-last in both.
+        let levelsJson =
+            "[" + (levels |> List.map (fun (r, plus) -> sprintf "[%d, \"%s\"]" r (if plus then "+" else "-")) |> String.concat ", ") + "]"
+        let outStore = fixStore (sprintf "zarr_%s_out" label)
+        (try Directory.Delete(outStore, true) with _ -> ())
+        (try Directory.Delete(Path.Combine(e2eDir, outStore), true) with _ -> ())
+        let avals = [ for i in 1 .. n -> sprintf "%.1f" (float i) ] |> String.concat ", "
+        let innerKernel = if innerSym = "" then "g" else sprintf "reynolds(g, %s)" innerSym
+        let writeSrc =
+            sprintf """
+import zarr as z
+
+let A = [%s]
+let g = lambda(x, y) where comm(x, y) -> %s
+let S = method_for(A, A) <@> %s |> compute
+let h = lambda(p, q) where comm(p, q) -> %s
+let W = method_for(S, S) <@> h |> compute
+let w = z.write("%s", W)
+"""
+                    avals innerBody innerKernel outerBody outStore
+        try
+            match lower writeSrc with
+            | Error e -> check (sprintf "%s: write program lowers" label) false e
+            | Ok ir ->
+                // The write must go through the ORBIT arm, not the depth-1
+                // packed one: no pool_base (there is no skeleton to reach into).
+                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "%s_write" label)
+                check (sprintf "%s: write emits a flat pool copy + the orb_cell_count pin (no pool_base)" label)
+                    (cppCode.Contains "orb_cell_count" && cppCode.Contains "_flat[__ow_i]"
+                     && not (cppCode.Contains "pool_base")) ""
+                CodeGen.deployRuntimeHeaders e2eDir
+                let cppFile = Path.Combine(e2eDir, sprintf "%s_write.cpp" label)
+                File.WriteAllText(cppFile, cppCode)
+                (match compileCpp cppFile e2eDir with
+                 | Error e ->
+                     if isSkipError e then printfn "  SKIP %s e2e (compile skipped): %s" label e
+                     else check (sprintf "%s: write compiles" label) false e
+                 | Ok exePath ->
+                 match runExecutable exePath with
+                 | Ok (code, out) when code <> 0 ->
+                     check (sprintf "%s: write runs (exit 0)" label) false (sprintf "exit %d: %s" code out)
+                 | Error e -> check (sprintf "%s: write runs (exit 0)" label) false e
+                 | Ok (_, writeOut) ->
+                     check (sprintf "%s: write runs (exit 0)" label) true ""
+                     let written = Path.Combine(e2eDir, outStore)
+                     // (a) The pool on disk equals the hand-derived cells, in
+                     // order — the independent-oracle comparison, not a roundtrip.
+                     (match readVarData written "W" with
+                      | Ok { DimLengths = dl; Payload = ZFloats got } ->
+                          check (sprintf "%s: written pool = hand-derived cells (exact, in canonical order)" label)
+                              (dl = [pool.Length] && got = pool)
+                              (sprintf "shape %A got %A expected %A" dl got pool)
+                      | Ok _ -> check (sprintf "%s: written pool" label) false "not floats"
+                      | Error e -> check (sprintf "%s: written pool" label) false e)
+                     // ... and the in-process print agrees, so a shift cannot
+                     // hide by moving between the two.
+                     (match writeOut.Split('\n') |> Array.tryPick (fun l ->
+                                let l = l.Trim()
+                                if l.StartsWith "W = [" && l.EndsWith "]" then Some l else None) with
+                      | Some line ->
+                          let inner = line.Substring("W = [".Length, line.Length - "W = [".Length - 1)
+                          let got = inner.Split(',') |> Array.map (fun s -> Double.Parse(s.Trim(), Globalization.CultureInfo.InvariantCulture))
+                          check (sprintf "%s: printed pool = written pool" label) (got = pool) (sprintf "got %A" got)
+                      | None -> check (sprintf "%s: printed pool" label) false "no W = [...] line")
+                     // (b) The attribute: spec_version 2, orbit head, exact
+                     // level list and extent.
+                     let attrText = File.ReadAllText (Path.Combine(written, "W", ".zattrs"))
+                     check (sprintf "%s: written attribute is spec_version 2 + kind orbit + the exact levels" label)
+                         (attrText.Contains "\"spec_version\": 2"
+                          && attrText.Contains "\"kind\": \"orbit\""
+                          && attrText.Contains (sprintf "\"extent\": %d" n)
+                          && attrText.Contains (sprintf "\"levels\": %s" levelsJson))
+                         (sprintf "attr %s (wanted levels %s)" attrText levelsJson)
+                     // (c) Reload: the store types back as the same class, and
+                     // the RELOADED array serves mirrored / zero-set reads.
+                     (try Directory.Delete(outStore, true) with _ -> ())
+                     let copyDir (src: string) (dst: string) =
+                         for f in Directory.GetFiles(src, "*", SearchOption.AllDirectories) do
+                             let rel = Path.GetRelativePath(src, f)
+                             let target = Path.Combine(dst, rel)
+                             Directory.CreateDirectory (Path.GetDirectoryName target) |> ignore
+                             File.Copy(f, target, true)
+                     // Compiler cwd copy (metadata + the interpreter's read)
+                     // beside the exe-dir copy the binary reads: the same
+                     // two-copy scheme every other e2e block uses.
+                     copyDir written outStore
+                     let probeLines =
+                         probes |> List.map (fun (nm, expr, _) -> sprintf "let %s = %s" nm expr) |> String.concat "\n"
+                     let readSrc =
+                         sprintf """
+import zarr as z
+
+let s = z.load("%s")
+let W = s.vars.W |> z.read
+%s
+"""
+                                 outStore probeLines
+                     match compiledStdout (sprintf "%s_read" label) readSrc with
+                     | Error e ->
+                         if isSkipError e then printfn "  SKIP %s read e2e: %s" label e
+                         else check (sprintf "%s: read compiles and runs" label) false e
+                     | Ok readOut ->
+                         check (sprintf "%s: read compiles and runs" label) true ""
+                         let scalarOf (nm: string) : float option =
+                             readOut.Split('\n')
+                             |> Array.tryPick (fun l ->
+                                 let l = l.Trim()
+                                 if l.StartsWith (nm + " = ") then
+                                     match Double.TryParse(l.Substring((nm + " = ").Length).Trim(),
+                                                           Globalization.NumberStyles.Float,
+                                                           Globalization.CultureInfo.InvariantCulture) with
+                                     | true, v -> Some v
+                                     | _ -> None
+                                 else None)
+                         let missing =
+                             probes |> List.choose (fun (nm, _, v) ->
+                                 match scalarOf nm with
+                                 | Some got when abs (got - v) < 1e-9 -> None
+                                 | other -> Some (nm, v, other))
+                         check (sprintf "%s: RELOADED array serves every mirrored / zero-set read" label)
+                             (List.isEmpty missing)
+                             (sprintf "wrong/missing %A in:\n%s" missing readOut)
+                         let reloadedPool =
+                             readOut.Split('\n')
+                             |> Array.tryPick (fun l ->
+                                 let l = l.Trim()
+                                 if l.StartsWith "W = [" && l.EndsWith "]" then
+                                     let inner = l.Substring("W = [".Length, l.Length - "W = [".Length - 1)
+                                     Some (inner.Split(',') |> Array.map (fun s -> Double.Parse(s.Trim(), Globalization.CultureInfo.InvariantCulture)))
+                                 else None)
+                         check (sprintf "%s: RELOADED array prints the pool in canonical order (%d cells)" label pool.Length)
+                             (reloadedPool = Some pool)
+                             (sprintf "got %A expected %A" reloadedPool pool)
+                         // (d) BOTH BACKENDS. The interpreter walks the same
+                         // store from the compiler cwd copy; its stdout must be
+                         // byte-identical to the compiled binary's.
+                         (match interpStdout (sprintf "%s_read" label) readSrc with
+                          | Error e -> check (sprintf "%s: interpreter reads the orbit store" label) false e
+                          | Ok interpOut ->
+                              check (sprintf "%s: interp stdout == compiled stdout (both backends agree)" label)
+                                  (normOut interpOut = normOut readOut)
+                                  (sprintf "interp:\n%s\ncompiled:\n%s" (normOut interpOut) (normOut readOut))))
+            with ex -> check (sprintf "%s e2e" label) false ex.Message
+
+    // A DEPTH-1 class spelled `OrbIdx<[(2,+)], n>` must write as "sym", not
+    // "orbit": it normalizes to the SymIdx record at lowering, so the orbit
+    // head never sees it, and the store keeps ONE spelling per class.
+    printfn "\n--- blade orbit head: depth-1 OrbIdx writes as sym/antisym ---"
+    for (kw, kindStr, cells) in [ ("+", "sym", 6); ("-", "antisym", 3) ] do
+        let outStore = fixStore (sprintf "zarr_orb_d1_%s_out" kindStr)
+        (try Directory.Delete(Path.Combine(e2eDir, outStore), true) with _ -> ())
+        let symKw = if kw = "+" then "Symmetric" else "Antisymmetric"
+        let src =
+            sprintf """
+import zarr as z
+
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let C: Array<Float64 like OrbIdx<[(2,%s)], 3>> = method_for(A, A) <@> reynolds(g, %s) |> compute
+let w = z.write("%s", C)
+"""
+                    kw symKw outStore
+        try
+            match lower src with
+            | Error e -> check (sprintf "orbit depth-1 %s: lowers" kindStr) false e
+            | Ok ir ->
+                let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "zarr_orb_d1_%s" kindStr)
+                // Pinned on the EMITTED attribute, no run required: the writer
+                // bakes the JSON as a literal.
+                check (sprintf "orbit depth-1 %s: emitted attribute says kind '%s', spec_version 1, NOT orbit" kindStr kindStr)
+                    (cpp.Contains (sprintf "kind\\\": \\\"%s" kindStr)
+                     && cpp.Contains "spec_version\\\": 1"
+                     && not (cpp.Contains "\\\"orbit\\\"")) ""
+                CodeGen.deployRuntimeHeaders e2eDir
+                let cppFile = Path.Combine(e2eDir, sprintf "zarr_orb_d1_%s.cpp" kindStr)
+                File.WriteAllText(cppFile, cpp)
+                (match compileCpp cppFile e2eDir with
+                 | Error e ->
+                     if isSkipError e then printfn "  SKIP orbit depth-1 %s e2e: %s" kindStr e
+                     else check (sprintf "orbit depth-1 %s: compiles" kindStr) false e
+                 | Ok exePath ->
+                     match runExecutable exePath with
+                     | Ok (0, _) ->
+                         check (sprintf "orbit depth-1 %s: written store is a depth-1 packed head (reload pins it)" kindStr)
+                             (match load (Path.Combine(e2eDir, outStore)) |> fun s -> tryFindArray s "C" with
+                              | Some m ->
+                                  (match m.Blade with
+                                   | Some l ->
+                                       l.Group.Levels = []
+                                       && l.Group.Sym = (if kw = "+" then SymSymmetric else SymAntisymmetric)
+                                       && l.Group.Rank = 2 && m.Shape = [int64 cells]
+                                   | None -> false)
+                              | None -> false) ""
+                     | Ok (code, out) -> check (sprintf "orbit depth-1 %s: runs" kindStr) false (sprintf "exit %d: %s" code out)
+                     | Error e -> check (sprintf "orbit depth-1 %s: runs" kindStr) false e)
+        with ex -> check (sprintf "orbit depth-1 %s" kindStr) false ex.Message
+
+    // ---------------------------------------------------------------
+    // 18d. Corrupted orbit stores + the providers that still refuse
+    // ---------------------------------------------------------------
+    printfn "\n--- blade orbit head: corrupt stores and non-zarr providers refuse ---"
+    (let badPool = fixStore "zarr_orb_badpool"
+     (try Directory.Delete(badPool, true) with _ -> ())
+     // A hand-built store whose pool is one cell short of the class's fold.
+     // ZarrWrite would refuse to build the inconsistency, so it is written by
+     // hand — which is exactly the shape an external writer's bug takes.
+     Directory.CreateDirectory (Path.Combine(badPool, "W")) |> ignore
+     File.WriteAllText(Path.Combine(badPool, ".zgroup"), "{\"zarr_format\": 2}")
+     File.WriteAllText(Path.Combine(badPool, "W", ".zarray"),
+        "{\"zarr_format\": 2, \"shape\": [20], \"chunks\": [20], \"dtype\": \"<f8\", \"compressor\": null, \"fill_value\": 0, \"order\": \"C\", \"filters\": null}")
+     File.WriteAllText(Path.Combine(badPool, "W", ".zattrs"),
+        "{\"blade\": {\"spec_version\": 2, \"layout\": \"packed\", \"order\": \"ascending-lex\", \"index_types\": [{\"kind\": \"orbit\", \"levels\": [[2, \"+\"], [2, \"+\"]], \"extent\": 3}]}}")
+     File.WriteAllBytes(Path.Combine(badPool, "W", "0"), Array.zeroCreate (20 * 8))
+     let src = sprintf """
+import zarr as z
+
+let s = z.load("%s")
+let W = s.vars.W |> z.read
+"""
+                     badPool
+     check "orbit corrupt: a short pool fails the LOAD, loudly, with both numbers"
+         (match (try lower src with ex -> Error ex.Message) with
+          | Error e -> e.Contains "cardinality 21" && e.Contains "pool dimension is 20"
+          | Ok _ -> false)
+         (match (try lower src with ex -> Error ex.Message) with Error e -> e | Ok _ -> "lowered"))
+    // Depth-1 orbit head on disk: refused at load, not silently read as a
+    // SymIdx whose cardinality happens to agree.
+    (let d1Store = fixStore "zarr_orb_depth1"
+     (try Directory.Delete(d1Store, true) with _ -> ())
+     Directory.CreateDirectory (Path.Combine(d1Store, "W")) |> ignore
+     File.WriteAllText(Path.Combine(d1Store, ".zgroup"), "{\"zarr_format\": 2}")
+     File.WriteAllText(Path.Combine(d1Store, "W", ".zarray"),
+        "{\"zarr_format\": 2, \"shape\": [6], \"chunks\": [6], \"dtype\": \"<f8\", \"compressor\": null, \"fill_value\": 0, \"order\": \"C\", \"filters\": null}")
+     File.WriteAllText(Path.Combine(d1Store, "W", ".zattrs"),
+        "{\"blade\": {\"spec_version\": 2, \"layout\": \"packed\", \"order\": \"ascending-lex\", \"index_types\": [{\"kind\": \"orbit\", \"levels\": [[2, \"+\"]], \"extent\": 3}]}}")
+     File.WriteAllBytes(Path.Combine(d1Store, "W", "0"), Array.zeroCreate (6 * 8))
+     let src = sprintf """
+import zarr as z
+
+let s = z.load("%s")
+let W = s.vars.W |> z.read
+"""
+                     d1Store
+     check "orbit corrupt: a depth-1 orbit head on disk is refused (its cardinality WOULD have matched)"
+         (match (try lower src with ex -> Error ex.Message) with
+          | Error e -> e.Contains "depth >= 2"
+          | Ok _ -> false) "")
+    // CSV and NetCDF have no wreath pools: both still refuse, by name.
+    for (alias, importLine) in [ ("c", "import csv as c"); ("nc", "import netcdf as nc") ] do
+        let src =
+            sprintf """
+%s
+
+let A = [1.0, 2.0, 3.0]
+let g = lambda(x, y) where comm(x, y) -> x * y
+let S = method_for(A, A) <@> g |> compute
+let h = lambda(p, q) where comm(p, q) -> p + q
+let W = method_for(S, S) <@> h |> compute
+let w = %s.write("generated_cpp_tests/orb_refuse_out", W)
+"""
+                    importLine alias
+        let outcome =
+            try
+                match lower src with
+                | Error e -> e
+                | Ok ir ->
+                    let (_, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "orb_refuse_%s" alias)
+                    "emitted (no refusal)"
+            with ex -> ex.Message
+        check (sprintf "orbit refusal: provider '%s' still refuses a wreath write" alias)
+            (outcome.Contains "stores no OrbIdx pools") outcome
 
     // ---------------------------------------------------------------
     // 19. Simplex-blocks: math identities (Phase 0, pure)
@@ -1194,7 +1672,7 @@ let w = z.write("%s", D)
     printfn "\n--- simplex-blocks: store write -> load -> pool roundtrip ---"
     let sbLayout sym strict rank n tile order : BladeLayout =
         let T = (n + tile - 1L) / tile
-        { Group = { Sym = sym; Rank = rank; Extent = n }
+        { Group = { Sym = sym; Rank = rank; Extent = n; Levels = [] }
           DenseDims = []
           Blocks = Some { Tile = tile; Grid = T; Order = order } }
     let sbPool strict n =
@@ -1234,7 +1712,7 @@ let w = z.write("%s", D)
      ZarrWrite.writeStoreV2 flatRoot [
         { Name = "C"; DimNames = None; Shape = [int64 pool.Length]; Chunks = [int64 pool.Length]
           FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 pool; OmitChunks = []
-          Blade = Some { Group = { Sym = SymSymmetric; Rank = 2; Extent = 5L }; DenseDims = []; Blocks = None } } ]
+          Blade = Some { Group = { Sym = SymSymmetric; Rank = 2; Extent = 5L; Levels = [] }; DenseDims = []; Blocks = None } } ]
      let flatPool =
          match load flatRoot |> fun s -> tryFindArray s "C" |> Option.get |> readPackedPool with
          | Ok { Payload = ZFloats xs } -> xs
@@ -1250,7 +1728,7 @@ let w = z.write("%s", D)
      let trail = 2
      let symCells = [ for i in 0 .. int n - 1 do for j in i .. int n - 1 -> (i, j) ]
      let pool = [| for (i, j) in symCells do for t in 0 .. trail - 1 -> float (100 * (i + 1) + 10 * (j + 1) + t) |]
-     let layout = { Group = { Sym = SymSymmetric; Rank = 2; Extent = n }
+     let layout = { Group = { Sym = SymSymmetric; Rank = 2; Extent = n; Levels = [] }
                     DenseDims = [int64 trail]
                     Blocks = Some { Tile = 2L; Grid = 2L; Order = OrderLex } }
      let root = Path.Combine(scratch, "sb_mixed")
@@ -1351,7 +1829,7 @@ let w = z.write("%s", C)
               for j in i .. 5 ->
                 float ((i + 1) * 10 + (j + 1)) |]
      for (label, blocks) in [ ("blocks", Some { Tile = 2L; Grid = 3L; Order = OrderLex }); ("flat", None) ] do
-        let layout : BladeLayout = { Group = { Sym = SymSymmetric; Rank = 2; Extent = n }; DenseDims = []; Blocks = blocks }
+        let layout : BladeLayout = { Group = { Sym = SymSymmetric; Rank = 2; Extent = n; Levels = [] }; DenseDims = []; Blocks = blocks }
         let pool = sbPool false n
         let inStore = fixStore (sprintf "zarr_win_%s" label)
         let outStore = fixStore (sprintf "zarr_win_%s_out" label)
@@ -1429,7 +1907,7 @@ let w = z.write("%s", W)
     printfn "\n--- zarr mpi: distributed simplex-blocks read (differential) ---"
     (let mpiPool = sbPool false 5L
      let mpiLayout : BladeLayout =
-         { Group = { Sym = SymSymmetric; Rank = 2; Extent = 5L }; DenseDims = []
+         { Group = { Sym = SymSymmetric; Rank = 2; Extent = 5L; Levels = [] }; DenseDims = []
            Blocks = Some { Tile = 2L; Grid = 3L; Order = OrderLex } }
      let aData = [| for i in 0 .. 11 -> float i * 0.5 |]
      let mpiVars : ZarrWrite.WriteVar list = [

@@ -1,40 +1,31 @@
-// Blade-DSL CSV Provider
-// Comma-separated text tables as compile-time-shaped array I/O.
+// Blade-DSL CSV Provider: comma-separated text tables as compile-time-shaped array
+// I/O. A CSV file is a single text file; metadata (shape, dtype) comes from parsing
+// it at compile time, which also serves the static fold and the interpreter
+// (ReadVarData). Runtime I/O is generated C++ using only <fstream>/<sstream> (no
+// link-time dependency, unlike NetcdfProvider's libnetcdf).
 //
-// A CSV file is a single text file; metadata (shape, dtype) comes from
-// parsing it at compile time — the same parse also serves the static fold
-// and the interpreter (ReadVarData). Runtime data I/O is deferred to
-// generated C++ using only <fstream>/<sstream> (no link-time dependency,
-// like ZarrProvider; contrast NetcdfProvider's libnetcdf).
+// File model (sniffed off the first non-empty record, the same rule the C++ reader
+// bakes in):
+//   - Every first-row cell numeric -> MATRIX mode: R x C numbers, one 2-D var `data`
+//     with plain (anonymous) Idx axes.
+//   - Otherwise -> HEADERED mode: first row = column labels; `data`'s COLUMN axis is
+//     a synthesized EnumIdx over the labels (`<binding>_cols`), selected by label:
+//     `obs.vars.data[i, "temp"]`. Labels must be non-empty unique strings; an
+//     all-numeric header is indistinguishable from a matrix and unsupported (rename
+//     the column).
 //
-// File model (sniffed off the first non-empty record, deterministically —
-// the SAME rule the C++ reader bakes in):
-//   - Every first-row cell numeric  -> MATRIX mode: R x C numbers, one 2-D
-//     var named `data` with plain (anonymous) Idx axes.
-//   - Otherwise                     -> HEADERED mode: first row = column
-//     labels; one 2-D var named `data` whose COLUMN axis is a synthesized
-//     EnumIdx over the labels (`<binding>_cols`), so columns are selected
-//     by label: `obs.vars.data[i, "temp"]`. Labels are arbitrary non-empty
-//     unique strings (EnumIdx values, not identifiers). A header whose
-//     labels ALL look numeric is indistinguishable from a matrix and is
-//     documented as unsupported (rename a column).
+// Format rules, enforced identically here and in the emitted C++: delimiter is comma
+// only, no quoting/escaping (any '"' is an error); LF and CRLF both accepted (one
+// trailing '\r' stripped per line), a UTF-8 BOM on line 1 is stripped, one trailing
+// newline tolerated; ragged rows, empty cells, and interior blank lines are errors
+// named with a line number; data cells are numeric only (strings deferred --
+// ProviderPayload is closed over floats/ints). Whole-table dtype: every cell an
+// integer literal -> Int64, else Float64 (locale-independent; "nan"/"inf"/"-inf"
+// accepted as float specials to round-trip C++ output).
 //
-// Format rules (v1, enforced identically here and in the emitted C++):
-//   - Delimiter is comma only. No quoting/escaping — any '"' is an error.
-//   - LF and CRLF both accepted (one trailing '\r' stripped per line);
-//     a UTF-8 BOM on line 1 is stripped; one trailing newline tolerated.
-//   - Ragged rows, empty cells, and interior blank lines are errors with
-//     line numbers.
-//   - Data cells are numeric only (strings are deferred — ProviderPayload
-//     is closed over floats/ints). Whole-table dtype: every cell an
-//     integer literal -> Int64, else Float64 (locale-independent parsing;
-//     "nan"/"inf"/"-inf" accepted as float specials to round-trip C++
-//     output).
-//
-// Writes (`c.write("out.csv", A)`, rank <= 2): no header row; rank-1
-// writes one value per line (re-loads as R x 1), rank-2 writes comma rows.
-// Floats print with 17 significant digits AND a forced decimal point so
-// `2.0` never re-loads as Int64.
+// Writes (`c.write("out.csv", A)`, rank <= 2): no header row; rank-1 writes one value
+// per line (reloads as R x 1), rank-2 writes comma rows. Floats print with 17
+// significant digits and a forced decimal point so `2.0` never reloads as Int64.
 module Blade.CsvProvider
 
 open System
@@ -42,9 +33,7 @@ open System.IO
 open Blade.IR
 open Blade.Types
 
-// ============================================================================
 // Metadata model
-// ============================================================================
 
 type CsvShape =
     /// First row = column labels; Rows = data-row count (header excluded).
@@ -55,8 +44,7 @@ type CsvShape =
 type CsvFile = {
     Path: string
     Shape: CsvShape
-    /// Whole-table element type: ETInt64 iff EVERY data cell is an integer
-    /// literal, ETFloat64 otherwise.
+    /// ETInt64 iff every data cell is an integer literal, else ETFloat64.
     Elem: ElemType
 }
 
@@ -71,12 +59,10 @@ let rowCount (f: CsvFile) =
     | CsvTable (_, r) -> r
     | CsvMatrix (r, _) -> r
 
-// ============================================================================
 // The one parser (metadata, fold payload, and interp reads all derive)
-// ============================================================================
 
 /// Integer-literal cell: optional sign, digits only. This decides Int64 vs
-/// Float64 — "1e5" and "1.0" are floats even though integral in value.
+/// Float64 -- "1e5" and "1.0" are floats even though integral in value.
 let private isIntCell (s: string) =
     let s = s.Trim()
     if s.Length = 0 then false
@@ -85,8 +71,7 @@ let private isIntCell (s: string) =
         body.Length > 0 && body |> Seq.forall Char.IsDigit
 
 /// Locale-independent float parse; accepts the C-locale specials the C++
-/// writer can produce ("nan", "inf", "-inf") which .NET's parser spells
-/// differently ("NaN", "Infinity").
+/// writer produces ("nan"/"inf"/"-inf"), spelled differently by .NET.
 let private tryParseFloat (s: string) : float option =
     let t = s.Trim()
     match t.ToLowerInvariant() with
@@ -100,14 +85,11 @@ let private tryParseFloat (s: string) : float option =
 
 let private isNumericCell (s: string) = (tryParseFloat s).IsSome
 
-/// Raw rectangular cells. Validates the v1 format rules; every error names
-/// the 1-based line. Lines arrive newline-split with '\r' stripped and BOM
-/// removed; a single trailing empty line (the trailing-newline artifact) is
-/// dropped before validation.
+/// Raw rectangular cells, validated against the format rules above; every
+/// error names its 1-based line (BOM stripped, lone trailing blank dropped).
 let parseCells (path: string) (text: string) : Result<string[][], string> =
-    // NB: the char literal below is U+FEFF (the BOM itself) — invisible in
-    // most editors.
-    let text = if text.Length > 0 && text.[0] = '﻿' then text.Substring 1 else text
+    // NB: the char literal below is U+FEFF (the BOM) -- invisible in most editors.
+    let text = if text.Length > 0 && text.[0] = '\uFEFF' then text.Substring 1 else text
     let rawLines = text.Split '\n' |> Array.map (fun l -> if l.EndsWith "\r" then l.Substring(0, l.Length - 1) else l)
     // One trailing newline => one trailing "" entry; tolerate exactly that.
     let lines =
@@ -124,7 +106,7 @@ let parseCells (path: string) (text: string) : Result<string[][], string> =
                 elif line = "" then
                     err <- Some (sprintf "blank line in '%s' at line %d" path lineNo); [||]
                 elif line.Contains "\"" then
-                    err <- Some (sprintf "quote character in '%s' at line %d — quoting/escaping is not supported (v1)" path lineNo); [||]
+                    err <- Some (sprintf "quote character in '%s' at line %d -- quoting/escaping is not supported (v1)" path lineNo); [||]
                 else
                     let row = line.Split ','
                     match row |> Array.tryFindIndex (fun c -> c.Trim() = "") with
@@ -140,9 +122,8 @@ let parseCells (path: string) (text: string) : Result<string[][], string> =
                 Error (sprintf "ragged row in '%s' at line %d: %d cells where line 1 has %d" path (i + 1) cells.[i].Length width)
             | None -> Ok cells
 
-/// Parse + classify: the sniffing rule, label validation, dtype inference.
-/// Returns the metadata and the full cell grid (data rows only start at
-/// row 1 for tables).
+/// Parse + classify: sniffing rule, label validation, dtype inference.
+/// Returns the metadata plus the full cell grid.
 let parseFile (path: string) : Result<CsvFile * string[][], string> =
     if not (File.Exists path) then
         Error (sprintf "CSV file not found: '%s' (resolved against cwd '%s')" path (Directory.GetCurrentDirectory()))
@@ -160,7 +141,7 @@ let parseFile (path: string) : Result<CsvFile * string[][], string> =
                     match dataRows.[i] |> Array.tryFindIndex (not << isNumericCell) with
                     | Some ci ->
                         let lineNo = (if headered then i + 2 else i + 1)
-                        bad <- Some (sprintf "non-numeric cell '%s' (column %d) in '%s' at line %d — string columns are not supported (v1)" dataRows.[i].[ci] (ci + 1) path lineNo)
+                        bad <- Some (sprintf "non-numeric cell '%s' (column %d) in '%s' at line %d -- string columns are not supported (v1)" dataRows.[i].[ci] (ci + 1) path lineNo)
                     | None -> ()
             match bad with
             | Some e -> Error e
@@ -181,17 +162,15 @@ let parseFile (path: string) : Result<CsvFile * string[][], string> =
                     ({ Path = path; Shape = shape; Elem = elem }, cells))
     )
 
-/// Metadata-only load; throws with path + cwd detail on any failure (the
-/// TypeCheck call site swallows exceptions silently — Lowering's uncaught
-/// call is the loud surface, so the message must carry everything).
+/// Metadata-only load; throws with path + cwd detail -- the message must
+/// carry everything since the TypeCheck call site swallows exceptions
+/// silently, leaving Lowering's uncaught call as the loud surface.
 let loadMeta (path: string) : CsvFile =
     match parseFile path with
     | Ok (f, _) -> f
     | Error e -> failwithf "CSV load failed: %s" e
 
-// ============================================================================
 // Compile-time payload (static fold + interpreter dense reads)
-// ============================================================================
 
 /// The single 2-D var every CSV module exposes.
 [<Literal>]
@@ -225,9 +204,7 @@ let readVarData (path: string) (varName: string) : Result<Blade.ProviderRegistry
                     Blade.ProviderRegistry.PFloats xs
             Ok { DimLengths = [rows; cols]; Payload = payload })
 
-// ============================================================================
 // Mapping to Blade IR types
-// ============================================================================
 
 /// Anonymous plain index (matrix axes and the table's row axis).
 let private anonIdx (builder: IRBuilder) (extent: int64) : IRIndexType =
@@ -243,11 +220,10 @@ let private anonIdx (builder: IRBuilder) (extent: int64) : IRIndexType =
 let colsTagName (moduleName: string) = sprintf "%s_cols" moduleName
 
 /// Compile-time metadata -> IRModule. One var `data` in a `<name>__vars`
-/// struct (uniquely named so several CSV loads in one program don't clobber
-/// each other in the TypeDefs map — registerProviderModule resolves the
-/// suffixed names). Headered mode additionally emits an IRTDEnumIdx for the
-/// column axis; registerProviderModule registers it so string-literal
-/// column subscripts fold to ordinals at the indexing site.
+/// struct (suffixed so several CSV loads in one program don't clobber each
+/// other in TypeDefs -- registerProviderModule resolves the suffix).
+/// Headered mode also emits an IRTDEnumIdx for the column axis so
+/// string-literal column subscripts fold to ordinals at the indexing site.
 let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRModule =
     let f = loadMeta path
     let rows = int64 (match f.Shape with CsvTable (_, r) -> r | CsvMatrix (r, _) -> r)
@@ -285,12 +261,12 @@ let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRMo
         ProviderWrites = Map.empty
         RandomInits = Map.empty
         CompoundInits = Map.empty
+        SparseInits = Map.empty
         MutableArrayLets = Set.empty
+        DerivedFuncOrigins = Map.empty
     }
 
-// ============================================================================
 // Fingerprint / version stamp (single-file provenance)
-// ============================================================================
 
 let fileFingerprint (path: string) : string =
     use sha = Security.Cryptography.SHA256.Create()
@@ -301,9 +277,7 @@ let fileFingerprint (path: string) : string =
 let fileVersionStamp (path: string) : int64 =
     try File.GetLastWriteTimeUtc(path).Ticks with _ -> 0L
 
-// ============================================================================
 // C++ code generation (pure std C++17: <fstream>, <sstream>)
-// ============================================================================
 
 module CppCsv =
 
@@ -314,19 +288,16 @@ module CppCsv =
         | IRTScalar ETFloat32 -> "float"
         | _ -> "double"
 
-    /// C++ string literal for a path (forward slashes; no escaping beyond
-    /// backslash normalization — paths come from Blade string literals).
+    /// C++ string literal for a path (forward slashes; backslashes normalized).
     let private cppPath (p: string) = p.Replace("\\", "/")
 
     let private csvExit (v: string) (msg: string) =
         sprintf "{ std::cerr << \"CSV error: %s\" << std::endl; std::exit(1); }" msg
 
-    /// Emit the parse-and-fill block: opens the file, re-applies the v1
-    /// format rules (BOM/CRLF/quotes/ragged/blank), validates the baked
-    /// shape, and fills `<v>_flat` (row-major R x C). Locale note: strtod/
-    /// strtoll are locale-sensitive in principle, but generated programs
-    /// never call setlocale, so the "C" locale is guaranteed — keep it that
-    /// way.
+    /// Emits the parse-and-fill block: opens the file, re-applies the format
+    /// rules (BOM/CRLF/quotes/ragged/blank), validates the baked shape, and
+    /// fills `<v>_flat` (row-major R x C). strtod/strtoll are locale-
+    /// sensitive, but generated programs never call setlocale, so "C" is guaranteed.
     let private genParseFill (path: string) (v: string) (elemCpp: string) (isInt: bool)
                              (headered: bool) (rows: int64) (cols: int64) : string list =
         let p = cppPath path
@@ -346,18 +317,18 @@ module CppCsv =
           sprintf "        %s_lineno++;" v
           sprintf "        if (!%s_line.empty() && %s_line.back() == '\\r') %s_line.pop_back();" v v v
           sprintf "        if (%s_lineno == 1 && %s_line.size() >= 3 && (unsigned char)%s_line[0] == 0xEF && (unsigned char)%s_line[1] == 0xBB && (unsigned char)%s_line[2] == 0xBF) %s_line.erase(0, 3);" v v v v v v
-          // A blank line is legal only as the very last line (trailing-
-          // newline artifact); getline itself absorbs ONE trailing newline,
-          // so a blank here means "\n\n" at EOF or an interior blank.
+          // A blank line is legal only as the last line (trailing-newline
+          // artifact); getline absorbs one trailing newline, so a blank
+          // here means "\n\n" at EOF or an interior blank.
           sprintf "        if (%s_line.empty()) { if (%s_in.peek() == EOF) break; %s }" v v
               (csvExit v (sprintf "blank line in '%s' at line \" << %s_lineno << \"" p v))
           sprintf "        if (%s_line.find('\"') != std::string::npos) %s" v
-              (csvExit v (sprintf "quote character in '%s' at line \" << %s_lineno << \" — quoting is not supported (v1)" p v)) ]
+              (csvExit v (sprintf "quote character in '%s' at line \" << %s_lineno << \" -- quoting is not supported (v1)" p v)) ]
         @ (if headered then
             [ sprintf "        if (%s_lineno == 1) continue;  // header row (labels baked at compile time)" v ]
            else [])
         @ [ sprintf "        if (%s_row >= %d) %s" v rows
-                (csvExit v (sprintf "'%s' has more data rows than the %d baked at compile time — file changed since compilation?" p rows))
+                (csvExit v (sprintf "'%s' has more data rows than the %d baked at compile time -- file changed since compilation?" p rows))
             sprintf "        size_t %s_col = 0, %s_pos = 0;" v v
             "        while (true) {"
             sprintf "            size_t %s_comma = %s_line.find(',', %s_pos);" v v v
@@ -379,11 +350,11 @@ module CppCsv =
             sprintf "        %s_row++;" v
             "    }"
             sprintf "    if (%s_row != %d) %s" v rows
-                (csvExit v (sprintf "'%s' has \" << %s_row << \" data rows where %d were baked at compile time — file changed since compilation?" p v rows))
+                (csvExit v (sprintf "'%s' has \" << %s_row << \" data rows where %d were baked at compile time -- file changed since compilation?" p v rows))
             "}" ]
 
     /// Dense reader: parse-and-fill into `<v>_flat`, then the standard
-    /// materialization (extents, allocate<>, flat->nested copy, release) —
+    /// materialization (extents, allocate<>, flat->nested copy, release),
     /// the same closing form as CppZarr.genReadVar.
     let genReadVar (path: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
         if varName <> DataVarName then
@@ -409,18 +380,16 @@ module CppCsv =
               sprintf "delete[] %s_flat;" v ]
         assemble @ materialize
 
-    /// Dense writer: `<v>_flat` (populated by the codegen write intercept)
-    /// streamed out as comma rows. Rank-1 writes one value per line (a
-    /// column; re-loads as R x 1). Floats print at max_digits10 (17) with a
-    /// FORCED decimal point so a whole-valued float column re-loads as
-    /// Float64, not Int64; "nan"/"inf" renderings are left untouched (the
-    /// reader accepts them).
+    /// Dense writer: `<v>_flat` (populated by the write intercept) streamed
+    /// out as comma rows. Rank-1 writes one value per line (re-loads as
+    /// R x 1). Floats print at max_digits10 (17) with a forced decimal
+    /// point so a whole-valued float column re-loads as Float64, not Int64.
     let genWriteVar (path: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) (_dimNames: string list) : string list =
         let v = cppVarName
         let p = cppPath path
         arrType.IndexTypes |> List.iter (fun ix ->
             if ix.Symmetry <> SymNone || ix.Rank <> 1 then
-                failwithf "CSV write of '%s': packed/compound index groups are not supported — densify first" varName)
+                failwithf "CSV write of '%s': packed/compound index groups are not supported -- densify first" varName)
         let litExtent (e: IRExpr) =
             match e with
             | IRLit (IRLitInt n) -> n
@@ -457,7 +426,7 @@ module CppCsv =
             sprintf "    if (!%s_out.good()) %s" v (csvExit v (sprintf "write failed for '%s'" p))
             "}" ]
 
-    /// Required C++ includes for CSV I/O (std only — no link flags).
+    /// Required C++ includes for CSV I/O (std only -- no link flags).
     let genIncludes () : string list =
         [ "#include <fstream>"
           "#include <sstream>"
@@ -466,14 +435,11 @@ module CppCsv =
           "#include <iomanip>"
           "#include <cstdlib>" ]
 
-// ============================================================================
 // F#-side fixture writer (tests and programmatic file creation)
-// ============================================================================
 
 module CsvWrite =
 
-    /// Exact-text control: caller supplies finished lines (no newlines
-    /// inside); written LF-terminated.
+    /// Exact-text control: caller supplies finished lines, written LF-terminated.
     let writeRaw (path: string) (lines: string list) : unit =
         File.WriteAllText(path, (lines |> String.concat "\n") + "\n")
 
@@ -481,9 +447,7 @@ module CsvWrite =
     let writeTable (path: string) (header: string list) (rows: string list list) : unit =
         writeRaw path ((String.concat "," header) :: (rows |> List.map (String.concat ",")))
 
-    /// Headerless float matrix; round-trip formatting ("R" gives shortest
-    /// exact rendering) with a forced decimal point, mirroring the C++
-    /// writer's dtype-stability rule.
+    /// Headerless float matrix; round-trip ("R") formatting with a forced decimal point.
     let writeMatrix (path: string) (data: float[][]) : unit =
         let cell (x: float) =
             let s = x.ToString("R", Globalization.CultureInfo.InvariantCulture)
@@ -491,18 +455,14 @@ module CsvWrite =
             else s + ".0"
         writeRaw path (data |> Array.toList |> List.map (fun row -> row |> Array.map cell |> String.concat ","))
 
-// ============================================================================
-// Provider registration record
-// ============================================================================
-
-/// The csv ProviderSpec (surface module name: "csv"). Registered by
-/// ProviderStatics.install ().
+/// The csv ProviderSpec (surface module name "csv").
 let spec : Blade.ProviderRegistry.ProviderSpec = {
     Name = "csv"
     LoadAsModule = loadAsModule
     ReadVarData = readVarData
     GenReadVar = CppCsv.genReadVar
     GenReadPacked = None       // packed groups: not representable in CSV
+    ReadWreathPool = None      // OrbIdx pools: likewise (CSV has no pool axis)
     GenReadCompoundVar = None  // load_compound: rejected loudly
     GenWriteVar = CppCsv.genWriteVar
     GenStreamOpen = None       // streaming: future arc (rejected loudly)

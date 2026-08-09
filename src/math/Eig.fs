@@ -1,8 +1,8 @@
 /// Reference implementation for the math-module general (non-symmetric)
-/// eigensolver — the VALUE ORACLE for the generated `m.eig` kernel.
+/// eigensolver -- the VALUE ORACLE for the generated `m.eig` kernel.
 /// Classic real-Schur route: Householder Hessenberg reduction + Francis
 /// double-shift QR, eigenvalues extracted from the final quasi-triangular
-/// form (1×1 blocks = real, 2×2 blocks = complex pairs via the quadratic).
+/// form (1x1 blocks = real, 2x2 blocks = complex pairs via the quadratic).
 ///
 /// Deliberately structured the way the GENERATED code must be (no
 /// break/early-exit; a fixed iteration budget with a shrinking window
@@ -54,7 +54,7 @@ let private subdiagSmall (h: float[,]) (k: int) : bool =
 /// Fixed-budget windowed Francis double-shift QR on a Hessenberg matrix.
 /// The active window is [0, hi); each iteration finds the window start l
 /// (largest small subdiagonal below hi), freezes windows of size <= 2
-/// (extraction solves 2×2 blocks exactly), else runs one double-shift
+/// (extraction solves 2x2 blocks exactly), else runs one double-shift
 /// bulge chase over [l, hi).
 let francis (n: int) (maxIter: int) (h: float[,]) : unit =
     let mutable hi = n
@@ -118,9 +118,9 @@ let francis (n: int) (maxIter: int) (h: float[,]) : unit =
                         h.[i, e] <- -sn * tp + cs * tq
                     h.[e, e - 2] <- 0.0
 
-/// Eigenvalues from the quasi-triangular form: 1×1 blocks are real, 2×2
+/// Eigenvalues from the quasi-triangular form: 1x1 blocks are real, 2x2
 /// blocks solve the quadratic (complex pair emitted +im first). Sorted by
-/// DESCENDING modulus (selection, ties keep original order — conjugate
+/// DESCENDING modulus (selection, ties keep original order -- conjugate
 /// pairs stay adjacent).
 let extract (n: int) (h: float[,]) : float[] * float[] =
     let lre = Array.zeroCreate n
@@ -166,7 +166,7 @@ let extract (n: int) (h: float[,]) : float[] * float[] =
 
 /// General real eigenvalues: (LRE, LIM), descending modulus, conjugate
 /// pairs adjacent with +im first. maxIter is the total Francis budget
-/// (the generated default is 30·n).
+/// (the generated default is 30*n).
 let eig (maxIter: int) (a: float[,]) : float[] * float[] =
     let n = Array2D.length1 a
     if Array2D.length2 a <> n then failwith "eig oracle: square input required"

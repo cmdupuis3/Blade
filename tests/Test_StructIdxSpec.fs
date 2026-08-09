@@ -1,5 +1,5 @@
 // Pins for the constrained-record COUNTING layer (src/StructIdxSpec.fs) —
-// stage C1 of docs/plan-constrained-index-types.md §7. No types, no lowering,
+// stage C1 of the retired constrained-index-types plan §7. No types, no lowering,
 // no emission: everything here is a solution-set enumeration or a count, and
 // every number is an integer.
 //
@@ -131,8 +131,8 @@ let private staticLet (name: string) (value: Expr) =
 let private staticFn (name: string) (ps: string list) (body: Expr) =
     at noSpan (DeclFunction {
         Name = name; TypeParams = []
-        Params = ps |> List.map (fun p -> { Name = p; Type = None; Mutability = Immutable })
-        WhereClause = None; ReturnType = None; Body = body; IsStatic = true })
+        Params = ps |> List.map (fun p -> { Name = p; Type = None; Mutability = Immutable; Default = None; NameSpan = noSpan })
+        WhereClause = None; ReturnType = None; Body = body; IsStatic = true; NameSpan = noSpan })
 
 /// Run the real static resolver over a decl list and hand back the env — the
 /// environment `idx_card` sees at compile time.

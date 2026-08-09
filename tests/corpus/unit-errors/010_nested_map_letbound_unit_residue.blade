@@ -1,0 +1,24 @@
+// TEST: Nested Map Let-Bound Unit Residue Rejects
+// ERROR: BL3006
+// ============================================================================
+// Residue twin of units/073 case A. The deferral for a LET-BOUND nested-map
+// operand is a deferral, not a surrender: `1/day * day * day = day` survives,
+// and the enclosing kernel's second pass rejects once `w` is bound.
+//
+// This is also the pin for the walk fix that case A needed. The second pass
+// models kernel-local lets through its `bound` map, and it only reaches `day`
+// here because an array-typed var now contributes its ELEMENT signature to
+// that walk; while it contributed None, this expression computed 1/day and
+// would have rejected for the WRONG reason (quoting the param's unit) -- a
+// pin that passes on a wrong answer. Check the reported unit, not just the code.
+// ============================================================================
+Unit second
+Unit day = 86400 * second
+let ts: Array<Float<day> like Idx<3>> = [1.0, 2.0, 3.0]
+let ws: Array<Float<1/day> like Idx<2>> = [1.0, 2.0]
+let out = ws <@> lambda(w) -> {
+    let wt = w * ts * ts
+    let sn = sin <@> wt
+    reduce(sn, (+))
+} |> compute
+// ERROR-CONTAINS: dimensionless vs 86400 * second

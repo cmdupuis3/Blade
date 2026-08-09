@@ -1,0 +1,9 @@
+// TEST: Reduce Axes Exceeds Rank Rejects
+// ERROR: BL3999
+// ERROR-CONTAINS: exceeds the operand's rank 2
+// ============================================================================
+// n = rank(A) is already the full fold to a scalar; there is nothing beyond
+// it to collapse, so n > rank is a hard error rather than a saturating clamp.
+// ============================================================================
+let grid: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let bad = reduce(grid, (+), axes = 3)

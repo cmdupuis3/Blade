@@ -1,0 +1,12 @@
+// TEST: Atan2 Magnitude Mismatch (rejects)
+// ERROR: BL3999
+// Same DIMENSION, different MAGNITUDE. atan2(1 day, 86400 second) is either 1
+// or 1/86400 depending on a conversion factor, and an intrinsic call is not one
+// of the seams (scalar +, -, comparisons) where Blade materializes one -- so it
+// has to reject rather than pick. BL3999 is the same-dimensions-different-scale
+// band, distinct from the BL3006 dimension mismatch in unit-errors/006.
+Unit second
+Unit day = 86400 * second
+let t1: Float<day> = 1.0
+let t2: Float<second> = 86400.0
+let bad = atan2(t1, t2)

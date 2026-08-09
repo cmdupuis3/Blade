@@ -1,0 +1,22 @@
+// TEST: Fold Omp Needs License
+// ============================================================================
+// `where ... omp` on a FOLD kernel opts the reduction into a parallel fold:
+// codegen splits the reduced axis into per-thread chunks, folds each serially,
+// and combines the partials. That is the serial answer only if the kernel is
+// commutative AND associative, and this one is neither — `a - b` is provably
+// ANTIcommutative, so no chunking is sound.
+//
+// The point of this file is that the answer is a REFUSAL, not a silent serial
+// fallback. "Asked for omp and got serial" and "never asked" emit byte-identical
+// C++, so a dropped clause is invisible to the user — the same reasoning behind
+// the BL9001 dropped-clause guard on the map side.
+//
+// The two accepted licences are `where comm(a, b), omp` (declared, and already
+// cross-checked against the body's parity) and a builtin fold body
+// (a + b, a * b, a && b, a || b), which carries both properties outright.
+// ============================================================================
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let s = reduce(A, lambda(a, b) where omp -> a - b)
+// ERROR: BL4016
+// ERROR-CONTAINS: parallel reduction needs comm(...) or a builtin op
+// ERROR-CONTAINS: COMMUTATIVE and ASSOCIATIVE

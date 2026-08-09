@@ -1,0 +1,12 @@
+// TEST: Unknown Unit Name On An Abstract Parameter (rejects)
+// ERROR: BL3015
+// The abstract twin of 048/050. Under a caret the head is a type VARIABLE,
+// so its argument slot admits nothing but a unit -- the same situation as
+// `Float<secnd>`, with the variable standing in for the base. A name there
+// has to resolve; only a numeric literal may appear undeclared. Degrading
+// to the bare type instead would be the worst outcome, since the parameter
+// would silently carry no unit and every later check on it would pass.
+Unit second
+function total(x: T<secnd>^1) = reduce(x, (+))
+let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let bad = total(ts)

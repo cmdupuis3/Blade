@@ -1,0 +1,9 @@
+// TEST: Tuple With One Component Type (rejects)
+// ERROR: BL1004
+// ERROR-CONTAINS: needs at least TWO component types
+// `Tuple<T>` is the component-typed spelling's version of `Tuple<1>` (`005`),
+// and it is refused for the same reason: there is no 1-tuple in Blade, `(e)`
+// is grouping (formalism.md 1275). The two spellings must agree about this or
+// one of them becomes a back door to a degenerate one-element IRTTuple.
+function g(p: Tuple<Float64>) -> Float64 = p[0]
+// EXPECT: parse failure -- a component-typed Tuple needs at least two components

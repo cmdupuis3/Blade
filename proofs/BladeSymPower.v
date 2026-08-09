@@ -4,7 +4,7 @@
 (*                                                                       *)
 (* Three counting claims the ML elaborator makes about self-tensor and    *)
 (* symmetric powers, checked here so its internal asserts have a proof    *)
-(* behind them (docs/plan-transforms-as-types.md 3.2, 3.3, 3.3b):         *)
+(* behind them (retired transforms-as-types plan, 3.2, 3.3, 3.3b):        *)
 (*                                                                       *)
 (*  T1  THE S2 PARTITION.  A self-tensor-product weight space splits into *)
 (*      an exchange-symmetric and an exchange-antisymmetric half with no  *)
@@ -307,7 +307,7 @@ Proof.
   assert (H := s2_path_partition p). lia.
 Qed.
 
-(* The two worked counts of plan-transforms-as-types 3.2, as path lists.  *)
+(* Two worked counts of the retired transforms-as-types plan 3.2, as lists*)
 (* Count 1, s = [(0,e,1); (1,o,1)]: five kept paths -- the diagonal       *)
 (* (0,0,0), the mirror pair (0,1,2) || (1,0,2), and the three diagonals   *)
 (* (1,1,0), (1,1,1), (1,1,3) -- 10 dense parameters splitting 7 + 3, the  *)

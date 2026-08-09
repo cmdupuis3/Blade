@@ -1,0 +1,46 @@
+// TEST: Complex gram is a HERMITIAN rank-k update (zherk), not a symmetric one
+// Round A of docs/plan-cpp-perf-exploitation.md's typed-dispatch widening.
+//
+// Blade's complex `gram(A, A)` accumulates `A[i][k] * conj(A[j][k])` — it
+// conjugates the SECOND factor — so it computes A·A^H, which is exactly what
+// `zherk` computes and NOT what `zsyrk` would. This program pins the values
+// that distinguish the two: with a genuinely complex A, A·A^H has a REAL
+// diagonal (each entry is Σ|A(i,k)|²) while A·Aᵀ does not.
+//
+// Every real and imaginary part here is a small integer, exact in binary, so
+// the compiled binary and the interpreter agree BIT for BIT (`interp math`).
+// The corpus runs with the BLAS gate OFF, so what it exercises is Blade's own
+// scalar loop — the verification truth. The zherk arm is checked by hand
+// against OpenBLAS and is allowed to differ in the last ULP.
+//
+//   A = [[1+1i, 2+0i],
+//        [0+1i, 1-1i]]
+//
+//   G(0,0) = (1+1i)(1-1i) + (2)(2)      = 2 + 4      = 6
+//   G(0,1) = (1+1i)(0-1i) + (2)(1+1i)   = (1-1i)+(2+2i) = 3 + 1i
+//   G(1,1) = (0+1i)(0-1i) + (1-1i)(1+1i)= 1 + 2      = 3
+//
+// Packed upper storage holds exactly those three cells, in that order.
+// The diagonal entries are real — the Hermitian signature.
+let A: Array<Complex128 like Idx<2>, Idx<2>> = [[complex(1.0, 1.0), complex(2.0, 0.0)], [complex(0.0, 1.0), complex(1.0, -1.0)]]
+
+let G = gram(A, A)
+
+// A DISTINCT-operand complex gram is A·B^H by the same conjugation, and reaches
+// a different route (zgemm with CblasConjTrans rather than zherk). Dense result.
+//   B = [[1+0i, 0+1i],
+//        [2+0i, 0-1i],
+//        [1+1i, 1+0i]]
+//   H(i,j) = Σ_k A(i,k)·conj(B(j,k))
+//   H(0,0) = (1+1i)(1) + (2)(0-1i)      = 1+1i - 2i   = 1 - 1i
+//   H(0,1) = (1+1i)(2) + (2)(0+1i)      = 2+2i + 2i   = 2 + 4i
+//   H(0,2) = (1+1i)(1-1i) + (2)(1)      = 2 + 2       = 4
+//   H(1,0) = (0+1i)(1) + (1-1i)(0-1i)   = 1i + (-1-1i) = -1
+//   H(1,1) = (0+1i)(2) + (1-1i)(0+1i)   = 2i + (1+1i)  = 1 + 3i
+//   H(1,2) = (0+1i)(1-1i) + (1-1i)(1)   = (1+1i)+(1-1i) = 2
+let B: Array<Complex128 like Idx<3>, Idx<2>> = [[complex(1.0, 0.0), complex(0.0, 1.0)], [complex(2.0, 0.0), complex(0.0, -1.0)], [complex(1.0, 1.0), complex(1.0, 0.0)]]
+
+let H = gram(A, B)
+
+// EXPECT: G = [(6,0), (3,1), (3,0)]
+// EXPECT: H = [(1,-1), (2,4), (4,0), (-1,0), (1,3), (2,0)]
