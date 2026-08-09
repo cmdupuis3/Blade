@@ -1938,9 +1938,36 @@ let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
 /// -- and codegen has no C++ spelling for one (it emits a
 /// BLADE_UNRESOLVED_ELEM_TYPE placeholder). Defaulting matches what the
 /// getArrayType fallback already supplied on this path.
+/// AN INDEX RECORD'S `Kind` IS A STATEMENT ABOUT ONE APPLY, NOT ABOUT THE VALUE.
+/// `SDimension` means "this apply's grid iterates it"; `TDimension` means "this
+/// apply's KERNEL contributed it" -- `kernelTDims` stamps the kernel's return
+/// axes that way, and `deduceOutputType` bakes them into the result TYPE. The
+/// resulting VALUE has no T-shaped axes: it is an array with n axes, and the
+/// NEXT apply must iterate all of them.
+///
+/// `computeSDimsPerArray` counts only `SDimension`, so an operand carrying an
+/// inherited `TDimension` record silently lost that axis at the next `<@>`.
+/// Measured on `examples/lswosa.blade`: `ls_e` is the (freq x segment) grid a
+/// grouped kernel returned, `transpose(ls_e, [0,1])` accepts it as rank 2, and
+/// `ls_e <@> mag2` came back RANK 1 -- so `reduce(mod_avg, (+))` refused a value
+/// that is an array (line 187). The same shape with a lambda kernel came back a
+/// SCALAR, because the ragged-inner accounting in `kernelInputRanks` subtracts
+/// the (undercounted) S-dims and re-attributes the difference to the kernel.
+///
+/// Unreachable before S3 -- an array-valued kernel return had no way to exist,
+/// so no value ever carried a `TDimension` record into an operand slot. This
+/// normalization runs BEFORE `buildApplyInfo` re-tags the fibers THIS apply
+/// consumes, so the two compose: inherited kinds reset to S, then this apply
+/// stamps its own T-dims.
+let private reSDimOperand (at: IRArrayType) : IRArrayType =
+    if at.IndexTypes |> List.exists (fun ix -> ix.Kind <> SDimension) then
+        { at with IndexTypes = at.IndexTypes |> List.map (fun ix -> { ix with Kind = SDimension }) }
+    else at
+
 let loopOperandArrayType (env: TypeEnv) (fallback: unit -> IRArrayType) (ty: IRType) : IRArrayType =
     match env.Subst.Resolve ty with
-    | ArrayElem at ->
+    | ArrayElem at0 ->
+        let at = reSDimOperand at0
         match env.Subst.Resolve at.ElemType with
         | IRTInfer _ -> { at with ElemType = IRTScalar ETFloat64 }
         | _ -> at
@@ -2932,6 +2959,19 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                     |> List.tryPick (fun (slot, (pi, ai)) ->
                         if indexRankDiffers pi ai then Some (i, slot, pi, ai) else None)
                 | _ -> None)
+        // POINT THE CARET AT THE ARGUMENT THE MESSAGE NAMES. `currentExprSpan`
+        // is stamped by `inferExpr` on entry to EVERY node and the last stamp
+        // wins (TypeEnv.locateError), so by the time these checks run it holds
+        // the LAST argument inferred -- the text said "argument 4" while the
+        // caret underlined argument 8 (`examples/lswosa.blade`'s BL3010, and
+        // every other argument-indexed refusal below shares the defect). Each
+        // check already knows the offending index; re-stamp before building the
+        // error so the two agree. No-op when the argument carries no span
+        // (synthesized nodes), which leaves the previous behaviour intact.
+        let atArg (i: int) =
+            if i >= 0 && i < tArgs.Length then
+                let s = (List.item i tArgs).Span
+                if s.StartLine > 0 then setCurrentExprSpan s
         let unitClash =
             let n = min paramTys.Length tArgs.Length
             // (sig, concrete): `concrete` is false while the (element) type is
@@ -2957,12 +2997,14 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             |> List.tryPick (fun (i, (pu, _), (au, aConcrete)) ->
                 match pu, au with
                 | Some pu, Some au when not (unitCompatible pu au) ->
+                    atArg i
                     Some (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
                 // Convertible but at a different MAGNITUDE. Argument passing
                 // is a seam that does not (yet) insert a factor, so name the
                 // difference instead of handing the callee a raw number in
                 // the wrong magnitude.
                 | Some pu, Some au when not (unitSameScale pu au) ->
+                    atArg i
                     Some (Other (sprintf
                             "argument %d expects %s but got %s: same dimensions, magnitudes differing by the factor %s"
                             (i + 1) (ppUnitSig pu) (ppUnitSig au)
@@ -2977,6 +3019,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                                   && (match au with
                                       | Some a -> a.Nominal <> pu.Nominal
                                       | None -> true) ->
+                    atArg i
                     Some (QuantityArgMismatch (i + 1, pu.Nominal.Value, describeArg au))
                 | _ -> None)
         // ONE LEVEL INTO A TUPLE ARGUMENT. Every check above reads
@@ -3033,8 +3076,10 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                             else
                             match IR.getUnits pe, IR.getUnits ae with
                             | Some pu, Some au when not (unitCompatible pu au) ->
+                                atArg i
                                 Some (UnitMismatch (where, ppUnitSig pu, ppUnitSig au))
                             | _ when isConcrete ae && pr <> ar ->
+                                atArg i
                                 Some (Other (sprintf
                                         "%s: the parameter component is declared %s (rank %d) but the argument component is %s (rank %d). A call site performs no conversion between these -- pass a value of the declared type, or change the declared component type."
                                         where (ppIRType (env.Subst.Resolve pc)) pr
@@ -3050,6 +3095,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         let argRankClash = firstArgRankClash env.Subst paramTys (tArgs |> List.map (fun a -> a.Type))
         match irrepsClash, rankClash, unitClash, argRankClash with
         | Some (i, pi, ai), _, _, _ ->
+            atArg i
             // O(3) member gets a named message; pg-vs-pg or a cross-member
             // pair gets the family-level twin naming the discipline instead.
             (match pi.Tag, ai.Tag with
@@ -3058,12 +3104,14 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
              | _ ->
                  Error (BlockSpecArgMismatch (i + 1, ppIndexType pi, ppIndexType ai)))
         | None, Some (i, slot, pi, ai), _, _ ->
+            atArg i
             Error (IndexRankMismatch (sprintf "argument %d, index slot %d" (i + 1) slot,
                                       ppIndexType pi, max 1 pi.Rank,
                                       ppIndexType ai, max 1 ai.Rank))
         | None, None, Some unitErr, _ ->
             Error unitErr
         | None, None, None, Some (i, pr, ar, pTy, aTy) ->
+            atArg i
             Error (ArgRankMismatch (i + 1, pr, ar,
                                     ppIRType (env.Subst.Resolve pTy),
                                     ppIRType (env.Subst.Resolve aTy)))
@@ -3072,6 +3120,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             // defect more precisely: element CLASS. See firstArgTypeClash.
             match firstArgTypeClash env.Subst paramTys (tArgs |> List.map (fun a -> a.Type)) with
             | Some (i, pTy, aTy) ->
+                atArg i
                 let callee =
                     match tFunc.Kind with
                     | TExprVar (name, _, _) -> sprintf "'%s'" name
@@ -3725,7 +3774,33 @@ let private tryFillDefaultArgs (env: TypeEnv) (callSpan: Span) (func: Expr) (arg
             then trailingArgs |> List.map (argQuantityTag env)
             else trailingArgs |> List.map (fun _ -> None)
         let anyTagged = argTags |> List.exists Option.isSome
-        if not anyTagged && k >= total then None      // full-arity positional call: untouched
+        // TAGS THAT ONLY CONFIRM THE POSITIONAL READING ARE A NO-OP, and saying
+        // so is what makes THIS FUNCTION IDEMPOTENT. A partial call is rewritten
+        // to full arity and re-inferred, which lands back here -- and the
+        // rewrite appends the missing defaults UNTAGGED, because a slot with no
+        // quantity (`n_segments: Float64 = 10.0`) has no tag to carry. On the
+        // second pass those appended arguments read as untagged stragglers
+        // after the user's tagged one and the straggler check below refused a
+        // call it had itself just built: `lswosa((s, t), freqs, (0.0 : time))`
+        // -- three arguments -- was reported as "argument 4 has no quantity tag"
+        // (examples/lswosa.blade could not be called at all).
+        //
+        // The test is exact rather than a re-entry flag: routing has nothing to
+        // do when every TAGGED trailing argument already sits in the slot
+        // carrying its quantity and the call is complete. Reordering calls
+        // (`plot(1.0, 3.0: cmap, 2.0: levels)`, functions/049) disagree with
+        // their positions and still route; the genuine ambiguity
+        // (`plot(1.0, 3.0: cmap, 2.0)`, functions/053) still refuses. Full
+        // arity is required because a SHORT call still needs this function to
+        // fill its defaults.
+        let tagsConfirmPositions =
+            argTags
+            |> List.indexed
+            |> List.forall (fun (j, t) ->
+                match t with
+                | Some q -> j < slotQs.Length && slotQs.[j] = Some q
+                | None -> true)
+        if k >= total && (not anyTagged || tagsConfirmPositions) then None
         else
         // Per trailing slot, in DECLARED order: Some suppliedArg | None (use default).
         let assembled : TypeResult<Expr option list> =
@@ -9101,7 +9176,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                         isCoIterGroup <- isCoIterGroup @ [false]
                 let arrTypes = arrays |> List.map (fun a ->
                     match a.Type with
-                    | ArrayElem at -> at
+                    | ArrayElem at -> reSDimOperand at
                     | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
                 let allCoIter = isCoIterGroup |> List.forall id
                 let recs =
@@ -9143,7 +9218,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             flatArrays |> List.iter (fun arr -> materializeArityVar env arr "map")
         let arrayTypes = flatArrays |> List.map (fun arr ->
             match env.Subst.Resolve arr.Type with
-            | ArrayElem at -> at
+            | ArrayElem at -> reSDimOperand at
             | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
         // Real per-array S-dim counts in BOTH modes: the co-iteration case needs
         // them so buildApplyInfo's IRTInfer fallback computes the kernel slice

@@ -135,21 +135,33 @@ function lswosa(st: Tuple<U^1, T<time>^1>,
 where omp(st: 1) = {
     let s_raw, t_raw = st
     let ts = t_raw - t_zero
-    let t_min = mymin(ts)
-    let t_max = mymax(ts)
+    // `mymin`/`mymax` are generic over `T^1`, so the fold hands back a bare
+    // number -- the `time` quantity does not survive a unit-agnostic callee.
+    // Re-assert it here, at the one place the value is known to be a time.
+    let t_min: Float64<time> = mymin(ts)
+    let t_max: Float64<time> = mymax(ts)
     let span_total = t_max - t_min
 
     let s_var = variance(s_raw)
     let n_samples = extents(s_raw)
 
-    let h = span_total / (n_segments + 1.0)
-    let seg_span = 2.0 * h
-    let zero_t = h - h   // typed zero of T<time>
+    // QUANTITIES ARE TERMINAL, so every derived value here is STRUCTURALLY
+    // dimensioned (`86400 * second`) rather than carrying the nominal `time`,
+    // and `family_spectra`'s slots are declared `T<time>` -- a quantity slot,
+    // which accepts only values ASSERTED to be that quantity (BL3010). Assert
+    // it once per binding, where the value is named, instead of at each of the
+    // eight call-site arguments.
+    let h: Float64<time> = span_total / (n_segments + 1.0)
+    let seg_span: Float64<time> = 2.0 * h
+    let zero_t: Float64<time> = h - h   // typed zero of T<time>
 
     // Even family: segments 0,2,..,N-2 cover [0, N*h]; odd: 1,3,..,N-1
     // cover [h, (N+1)*h]. Each is a partition of its masked range.
-    let ls_e = family_spectra(ts, s_raw, freqs, zero_t, n_segments * h, zero_t, seg_span, t_zero)
-    let ls_o = family_spectra(ts, s_raw, freqs, h, (n_segments + 1.0) * h, h, seg_span, t_zero)
+    // The two family UPPER bounds are products formed here, so they are
+    // structural again and carry their own assertion (same rule as the
+    // bindings above -- a quantity is asserted, never inferred).
+    let ls_e = family_spectra(ts, s_raw, freqs, zero_t, ((n_segments * h) : time), zero_t, seg_span, t_zero)
+    let ls_o = family_spectra(ts, s_raw, freqs, h, (((n_segments + 1.0) * h) : time), h, seg_span, t_zero)
 
     // Segment accumulations, per frequency, across BOTH families:
     // |ls|^2, cos(arg), sin(arg). atan2(imag, real) is the reference's arg.
