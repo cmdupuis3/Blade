@@ -1,0 +1,52 @@
+// TEST: Scalar Intrinsic Let-Bound Capture Cancels
+// ============================================================================
+// The SCALAR-intrinsic face of the let-hiding gap that units/073 pins for
+// nested maps -- the fourth report of one underlying shape, and the reason
+// both deferral sites now share a single predicate
+// (`typedExprHasProvisionalUnits`).
+//
+// `let w = 2pi * fq` inside a kernel body types BARE Float64: `fq` is an
+// unresolved inference variable at first-pass, so it contributes no units.
+// `cos(w * t_zero)` was then judged 1 * day = day and rejected on the spot.
+// Nothing in the argument's own node types said "provisional" -- `w` is
+// resolved and a TExprVar has no children -- so the old walk stopped there.
+// Chasing `w` into its defining expression finds `fq`, defers, and the
+// apply-site second pass (which models kernel-local lets in its `bound` map)
+// gets 2pi/day * day = dimensionless and accepts.
+//
+// The INLINE spelling `cos((2pi * fq) * t_zero)` always worked, which is what
+// made this a let-hiding bug rather than a unit-algebra one. Both are pinned
+// here and must agree -- VALUE agreement is the point, since a deferral that
+// silently changed the arithmetic would still "accept".
+//
+// 2pi is written as a literal rather than a module-level `let` on purpose: a
+// module-level let captured inside a FUNCTION-BODY kernel is not forwarded to
+// the emitted C++ ("'two_pi' was not declared in this scope"), which is an
+// unrelated codegen gap that would block this pin from running.
+// Residue twin: unit-errors/012.
+// ============================================================================
+Unit second
+Unit day = 86400 * second
+Unit time: day
+Unit frequency: 1 / day
+
+// let-bound intermediate -- the shape that regressed
+function viaLet(freqs: T<frequency>^1, t_zero: T<time> = 0.0) = {
+    freqs <@> lambda(fq) -> {
+        let w = 6.283185307179586 * fq
+        cos(w * t_zero)
+    } |> compute
+}
+
+// inline -- the shape that always worked; same units, same answer
+function inline_(freqs: T<frequency>^1, t_zero: T<time> = 0.0) = {
+    freqs <@> lambda(fq) -> cos((6.283185307179586 * fq) * t_zero) |> compute
+}
+
+let fs: Array<Float<frequency> like Idx<2>> = [0.0, 0.25]
+let tz: Float<time> = 1.0
+let a = viaLet(fs, tz)
+let b = inline_(fs, tz)
+// cos(0) = 1; cos(2pi * 0.25 * 1) = cos(pi/2) = 0 to rounding
+// EXPECT: a = [1, 6.12323399573677e-17]
+// EXPECT: b = [1, 6.12323399573677e-17]

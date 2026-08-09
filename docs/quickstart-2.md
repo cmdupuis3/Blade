@@ -164,6 +164,45 @@ argument `a` may carry OpenMP threads. Arrays are bound in order, so their
 S-dimension loops nest in order — the first argument's loops are outermost and
 are the natural parallelization target.
 
+### The clause licenses EXTERNAL loops
+
+An `omp` clause on a signature is about the S-dims that argument **contributes
+to a loop built around the function** — the caller's co-iteration when the
+function is used in kernel position:
+
+```F#
+function cov(a: Float64, b: Float64) where omp(a: 1) = a * b
+let m = object_for(cov) <@> (A, B) |> compute   // <- the licensed nest
+```
+
+It says nothing about a loop the **body itself** generates. Those loops belong
+to the kernel of the apply that builds them, and are licensed by a clause on
+*that* kernel:
+
+```F#
+function lsdft(s: T^1, t: T<time>^1, omegas: T<angular_frequency>^1)
+where omp(s: 1) = {                    // licenses a CALLER co-iterating series
+    ...
+    omegas <@> lambda(w) where omp(w: 1) -> {   // licenses THIS loop
+        ...scalar work over the captured arrays...
+    } |> compute
+}
+```
+
+Writing `where omp(omegas: 1)` on `lsdft` instead would license nothing:
+`omegas` is iterated by a loop `lsdft` builds internally, and that loop reads
+its licence from its own kernel. The compiler warns (BL4001) when a licensed
+parameter is an operand of an apply inside the body whose kernel carries no
+clause of its own, because the emitted C++ for "asked and got serial" is
+byte-identical to "never asked".
+
+A `Tuple<N>` parameter may carry a parallel clause: under one-level structural
+matching the tuple is **one schema node**, so `omp(p: n)` licenses the first
+`n` of the levels that node contributes (`omp(p: 1)` on a `Tuple<2>` threads
+one level, not two). `comm`/`anticomm` on a tuple parameter stay refused — they
+address parameters by position, and the expansion into row parameters
+renumbers those.
+
 The depth is a **licence, not a demand**. It caps the compiler's choice rather
 than replacing it: the emitted strategy is still picked from the loop structure
 (collapse for rectangular levels, `schedule(dynamic)` when triangular work sits

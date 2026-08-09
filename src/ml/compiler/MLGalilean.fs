@@ -223,7 +223,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
     // compute is a scheduling boundary, not a value transform.
     | ExprKind.ExprCompute x -> judge ctx env x
     // A fold over boost-variant values SCALES the frame shift, so it rejects.
-    | ExprKind.ExprReduce (src, _, init) ->
+    | ExprKind.ExprReduce (src, _, init, _) ->
         judge ctx env src |> Result.bind (fun ss ->
             (match init with
              | Some i -> judge ctx env i

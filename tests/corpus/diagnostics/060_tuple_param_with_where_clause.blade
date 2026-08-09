@@ -1,25 +1,29 @@
 // TEST: Diag Tuple Param With Where Clause (diag)
 // ERROR: BL3999
-// ERROR-CONTAINS: `Tuple<N>` parameter is not supported
+// ERROR-CONTAINS: `comm`/`anticomm` clause on a kernel that also declares a `Tuple<N>` parameter is not supported
 // ============================================================================
 // A `Tuple<N>` kernel parameter is realized at the apply seam by replacing it
 // with its k row parameters plus a body-entry `let p = (..)` -- the same
 // mechanism the defaults fill uses (docs/plan-tuples-vs-arg-packs.md 6b). That
 // renumbers parameter POSITIONS and removes the tuple parameter's NAME from
-// the list, and every `where` conjunct addresses parameters by one or the
-// other: `comm`/`anticomm` are index lists, the parallel strategies are
-// resolved by name in Lowering.
+// the list, and the two classes of `where` conjunct address parameters by one
+// or the other. The refusal splits along exactly that line:
 //
-// Both failure modes would be SILENT. A comm group landing on the wrong index
-// degrades to dense storage with no diagnostic; a dropped `omp` clause emits a
-// serial nest whose C++ is indistinguishable from a program that never asked
-// (the BL9001 dropped-parallel guard at the apply seam exists because that was
-// a real, long-lived bug). So the combination is refused rather than remapped
-// on a guess -- `comm` between two PAIRS has no settled meaning to remap TO.
+//   * `comm` / `anticomm` are POSITIONAL index lists. After the expansion a
+//     surviving group lands on the wrong slot, and the failure is SILENT (a
+//     misplaced comm group degrades to dense storage with no diagnostic).
+//     Worse, there is nothing settled to remap TO -- "comm(p, q)" between two
+//     PAIRS has no agreed meaning. Still REFUSED, and that is this file.
 //
-// The escape is in the message and is always available: write the parameters
-// flat, one per operand, which is what every `where`-carrying kernel in the
-// corpus already does.
+//   * The PARALLEL STRATEGIES (`omp`/`cuda`/`mpi`) resolve BY NAME to the
+//     operand a parameter contributes, and under one-level structural matching
+//     (6c) a `Tuple<k>` parameter is ONE schema node -- so the name still
+//     designates a well-defined unit of the nest. ALLOWED since the omp-licence
+//     ruling; the licence is rewritten onto the synthesized row params, and
+//     `tuples/014` is the accept pin (values + emitted pragma).
+//
+// The escape for comm is in the message and is always available: write the
+// parameters flat, one per operand.
 // ============================================================================
 let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
 let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]

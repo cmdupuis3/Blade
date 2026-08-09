@@ -1,0 +1,39 @@
+// TEST: Tuple<T1, T2> Is The Written (T1, T2)
+// The equivalence the component-typed spelling is BUILT on: `Tuple<A, B>` and
+// `(A, B)` are not two types that agree, they are ONE type -- the parser emits
+// the same `TyTuple` node for both (Parser.parseTypeExpr's `Tuple<` arm), so
+// there is no second lowering, no second unify rule and no second printing
+// path that could drift.
+//
+// Pinned three ways: a value crosses between the two spellings, each spelling
+// accepts what the other produces, and a mismatch is refused identically.
+function viaTuple(p: Tuple<Float64, Float64>) -> Float64 = p[0] * 10.0 + p[1]
+function viaParen(p: (Float64, Float64)) -> Float64 = p[0] * 10.0 + p[1]
+
+// ONE bound value into BOTH parameter spellings.
+let t = 3.0, 4.0
+let x = viaTuple(t)
+let y = viaParen(t)
+// EXPECT: x = 34
+// EXPECT: y = 34
+
+// A literal argument, both ways.
+let z = viaTuple((3.0, 4.0)) + viaParen((3.0, 4.0))
+// EXPECT: z = 68
+
+// The RESULT of a `(T1, T2)`-returning function feeds a `Tuple<T1, T2>`
+// parameter and back again -- the round trip that a distinct-node
+// implementation would have needed a coercion for.
+function mkPair(u: Float64) -> (Float64, Float64) = (u, u * 2.0)
+let round = viaTuple(mkPair(5.0))
+// EXPECT: round = 60
+function mkPair2(u: Float64) -> Tuple<Float64, Float64> = (u, u * 2.0)
+let round2 = viaParen(mkPair2(5.0))
+// EXPECT: round2 = 60
+
+// Nesting agrees too: the outer spelling and the inner spelling are
+// independent, because both are the same node.
+function deep(r: Tuple<(Float64, Float64), Tuple<Float64, Float64>>) -> Float64 =
+    r[0][0] + r[0][1] * 10.0 + r[1][0] * 100.0 + r[1][1] * 1000.0
+let d = deep(((1.0, 2.0), (3.0, 4.0)))
+// EXPECT: d = 4321

@@ -43,7 +43,7 @@ let private mulE a b = syn (ExprBinOp (Elementwise, OpMul, a, b))
 let private subE a b = syn (ExprBinOp (Elementwise, OpSub, a, b))
 let private powE a b = syn (ExprBinOp (Elementwise, OpCaret, a, b))
 let private sLet n value = StmtLet { Pattern = synPat (PatVar n); Type = None; Value = value; Mutability = BindLet }
-let private meanE arr n = divE (syn (ExprReduce (arr, syn (ExprSection OpAdd), None))) (fLit n)
+let private meanE arr n = divE (syn (ExprReduce (arr, syn (ExprSection OpAdd), None, None))) (fLit n)
 let private prodsumE args = syn (ExprApp (v "prodsum", args))
 let private commWhere (names: string list) =
     Some { Commutativity = [names]; Antisymmetry = []; Parallel = []; TDims = []; Custom = [] }
@@ -54,7 +54,7 @@ let private methodForE (arrs: Expr list) = syn (ExprMethodFor arrs)
 let private lambdaE ps w body = syn (ExprLambda (ps, w, body))
 let private applyE l k = syn (ExprBinOp (Elementwise, OpApply, l, k))
 let private computeE e = syn (ExprCompute e)
-let private reduceAddE e = syn (ExprReduce (e, syn (ExprSection OpAdd), None))
+let private reduceAddE e = syn (ExprReduce (e, syn (ExprSection OpAdd), None, None))
 let private pvar n = synPat (PatVar n)
 let private ptuple (ps: Pattern list) = synPat (PatTuple ps)
 /// Inline co-iteration pipeline over same-shape (packed included) arrays:
@@ -303,7 +303,7 @@ let rec private anyExpr (p: Expr -> bool) (e: Expr) : bool =
     | ExprKind.ExprMask (a, pr) | ExprKind.ExprCompound (a, pr) | ExprKind.ExprSparse (a, pr) | ExprKind.ExprGroupBy (a, pr)
     | ExprKind.ExprIntersect (a, pr) | ExprKind.ExprUnion (a, pr) | ExprKind.ExprContains (a, pr)
     | ExprKind.ExprSort (a, pr) | ExprKind.ExprGram (a, pr) -> any a || any pr
-    | ExprKind.ExprReduce (a, k, i) -> any a || any k || (i |> Option.map any |> Option.defaultValue false)
+    | ExprKind.ExprReduce (a, k, i, _) -> any a || any k || (i |> Option.map any |> Option.defaultValue false)
     | ExprKind.ExprAssign (l, r) -> any l || any r
     | _ -> false
 
@@ -2335,7 +2335,7 @@ let rec private stripQualified (aliases: Set<string>) (e: Expr) : Expr =
     | ExprKind.ExprGroupBy (v, g) -> inheritSpan e (ExprGroupBy (r v, r g))
     | ExprKind.ExprSort (a, k) -> inheritSpan e (ExprSort (r a, r k))
     | ExprKind.ExprGram (l, rr) -> inheritSpan e (ExprGram (r l, r rr))
-    | ExprKind.ExprReduce (a, k, init) -> inheritSpan e (ExprReduce (r a, r k, Option.map r init))
+    | ExprKind.ExprReduce (a, k, init, ax) -> inheritSpan e (ExprReduce (r a, r k, Option.map r init, ax))
     | ExprKind.ExprStruct (nm, fields, spread) ->
         inheritSpan e (ExprStruct (nm, fields |> List.map (fun (fn, fe) -> (fn, r fe)), Option.map r spread))
     | ExprKind.ExprFor (src, cs, kern) ->

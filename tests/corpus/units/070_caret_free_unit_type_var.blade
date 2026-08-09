@@ -1,0 +1,78 @@
+// TEST: Caret-Free T<unit> Is T<unit>^0
+// OWNER RULING, 2026-08-09: "`^0` should be optional, they're semantically
+// equivalent." A caret-free `T<u>` denotes the rank-0 type variable annotated
+// `u` -- the SAME type as `T<u>^0` (units/062), not a look-alike.
+//
+// WHAT IT REPLACES, measured before the change: `T<second>` parsed as an
+// ordinary named-type application and fell through to the named-type
+// fallback, lowering to the opaque nominal `IRTNamed "T"` with the unit
+// SILENTLY DROPPED. Every argument was then BL3001 "the parameter is declared
+// T but the argument is Float64<second>" -- an annotation that was neither an
+// error nor meaningful, which is the worst of the three outcomes.
+//
+// Implemented as a DESUGAR onto the caret node (lowerTypeExpr's TyNamed arm
+// rewrites to `TyAbstractArray (head, 0)`), not as a parallel construction,
+// so unification, the unit checks, HM monomorphization, printing and every
+// diagnostic see one representation and the two spellings cannot drift. That
+// is what the pairs below pin.
+//
+// The head is a type VARIABLE under exactly the caret arm's three conditions:
+// not a built-in base, not a declared type, and an argument list that
+// resolves to a unit. A real named type keeps its ordinary reading.
+Unit second
+
+// PARAMETER position, the same program twice.
+function scaledFree(x: T<second>^1, k: T<second>) = reduce(x, (+)) * k
+function scaledCaret(x: T<second>^1, k: T<second>^0) = reduce(x, (+)) * k
+let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let k: Float<second> = 2.0
+let areaFree: Float<second^2> = scaledFree(ts, k)
+let areaCaret: Float<second^2> = scaledCaret(ts, k)
+// EXPECT: areaFree = 12
+// EXPECT: areaCaret = 12
+
+// DEFAULTED parameter -- the shape the motivating program writes
+// (`t_zero: T<time> = 0.0`) and the one that forced the implementation's key
+// choice. A defaulted annotation is re-lowered AT THE CALL SITE by
+// tryFillDefaultArgs' ascription, where the callee's prescanned type-var
+// scope is gone, so the caret-free rule must NOT be gated on
+// `Subst.IsTypeVar`. (It is not. Bare `T` vs `T^0` is gated that way and is
+// therefore NOT equivalent -- see 071's note.)
+function shiftedFree(x: T<second>^1, t_zero: T<second> = 0.0) = reduce(x, (+)) + t_zero
+function shiftedCaret(x: T<second>^1, t_zero: T<second>^0 = 0.0) = reduce(x, (+)) + t_zero
+let baseFree = shiftedFree(ts)
+let baseCaret = shiftedCaret(ts)
+let offFree = shiftedFree(ts, k)
+let offCaret = shiftedCaret(ts, k)
+// EXPECT: baseFree = 6
+// EXPECT: baseCaret = 6
+// EXPECT: offFree = 8
+// EXPECT: offCaret = 8
+
+// RETURN-type position.
+function idFree(v: T<second>) -> T<second> = v
+function idCaret(v: T<second>^0) -> T<second>^0 = v
+let rFree: Float<second> = idFree(k)
+let rCaret: Float<second> = idCaret(k)
+// EXPECT: rFree = 2
+// EXPECT: rCaret = 2
+
+// A head that names a REAL type keeps its ordinary meaning -- the rule reads
+// the head, not the shape of the application.
+type Alias = Float64
+let plain: Alias = 5.0
+// EXPECT: plain = 5
+
+// The motivating program's own signature shape: a component-typed tuple whose
+// components use the caret spelling, plus a caret-FREE defaulted scalar.
+function lsdft(st_raw: Tuple<U^1, T<second>^1>,
+               omegas: T<second>^1,
+               t_zero: T<second> = 0.0) = {
+    let s_raw, t_raw = st_raw
+    reduce(s_raw, (+)) * (reduce(t_raw, (+)) + reduce(omegas, (+)) + t_zero)
+}
+let sig: Array<Float64 like Idx<3>> = [1.0, 1.0, 1.0]
+let tim: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let om: Array<Float<second> like Idx<3>> = [1.0, 1.0, 1.0]
+let lv = lsdft((sig, tim), om)
+// EXPECT: lv = 27

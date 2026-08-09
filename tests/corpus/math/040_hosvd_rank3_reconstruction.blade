@@ -11,8 +11,8 @@ let resid = {
     // (i,j,k) leading and the contracted core modes (a,b,c) trailing, then
     // collapse each (a,b,c) fibre with a reduce to recover X̂(i,j,k).
     let T = method_for(range<Idx<3>, Idx<3>, Idx<3>, Idx<3>, Idx<3>, Idx<3>>) <@> lambda(i, j, k, a, b, c) -> G(a, b, c) * U0(i, a) * U1(j, b) * U2(k, c) |> compute
-    let Xhat = method_for(T) <@> lambda(sub: Array<Float64 like Idx<3>, Idx<3>, Idx<3>>) -> reduce(sub, (+)) |> compute
+    let Xhat = method_for(T) <@> lambda(sub: Array<Float64 like Idx<3>, Idx<3>, Idx<3>>) -> reduce(sub, (+), axes = 3) |> compute
     let E = Xhat - X
-    reduce(E, lambda(acc, x) -> acc + x * x, 0.0)
+    reduce(E, lambda(acc, x) -> acc + x * x, 0.0, axes = 3)
 }
 // EXPECT: resid = 0.0

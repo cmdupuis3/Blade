@@ -477,7 +477,13 @@ and ExprKind =
     | ExprGroupBy of values: Expr * grouping: Expr  // group_by(vals, gk) - apply grouping to values
     | ExprGroupKeys of keys: Expr list             // group_keys(keys1, keys2, ...) - build CSR grouping structure (compound if >1 key)
     | ExprSort of array: Expr * key: Expr          // sort(A, key) - sort array by key function (stable)
-    | ExprReduce of array: Expr * kernel: Expr * init: Expr option  // reduce(A, op[, init]) - fold innermost dim; init seeds the fold and defines the empty-array result
+    // reduce(A, op[, init][, axes = n]) - folds the innermost n axes RIGHT-TO-LEFT,
+    // n = 1 by default: a rank-k operand yields a rank-(k-n) result, and n = rank
+    // is the full fold to a scalar. `init` seeds each folded group's accumulator
+    // and defines the empty-group result. `axes` is the NAMED final argument (the
+    // third POSITIONAL slot is already the seed, so a bare int there would be
+    // ambiguous); it must be an integer literal with 1 <= n <= rank(A).
+    | ExprReduce of array: Expr * kernel: Expr * init: Expr option * axes: Expr option
     | ExprTranspose of array: Expr * dim1: int * dim2: int  // transpose(A, [d1, d2]) - swap two arity-1 SymNone axes (hard; allocates)
     | ExprDecompact of array: Expr * dim: int  // decompact(A, d) - pull the compact component at dim d out as a free Idx (hard; allocates dense)
     | ExprGram of left: Expr * right: Expr  // gram(A, B) = A * B^H: result[i][j] = sum_k A[i][k]*conj(B[j][k]). Square+Hermitian/symmetric when A,B same array; dense otherwise.

@@ -11,15 +11,15 @@ let (G, U0, U1, U2) = m.hosvd(X)
 // with a reduce and take the root.
 let norms0 = {
     let Gsq = method_for(range<Idx<3>, Idx<3>, Idx<3>>) <@> lambda(a, b, c) -> G(a, b, c) * G(a, b, c) |> compute
-    method_for(Gsq) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> sqrt(reduce(face, (+))) |> compute
+    method_for(Gsq) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> sqrt(reduce(face, (+), axes = 2)) |> compute
 }
 let norms1 = {
     let Gsq = method_for(range<Idx<3>, Idx<3>, Idx<3>>) <@> lambda(b, a, c) -> G(a, b, c) * G(a, b, c) |> compute
-    method_for(Gsq) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> sqrt(reduce(face, (+))) |> compute
+    method_for(Gsq) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> sqrt(reduce(face, (+), axes = 2)) |> compute
 }
 let norms2 = {
     let Gsq = method_for(range<Idx<3>, Idx<3>, Idx<3>>) <@> lambda(c, a, b) -> G(a, b, c) * G(a, b, c) |> compute
-    method_for(Gsq) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> sqrt(reduce(face, (+))) |> compute
+    method_for(Gsq) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> sqrt(reduce(face, (+), axes = 2)) |> compute
 }
 // All-orthogonality: for each mode, the Gram matrix of the flattened mode-n
 // slices must be diagonal. Build each Gram via a rank-4 cross-slice term
@@ -29,15 +29,15 @@ let norms2 = {
 let ortho = {
     let up: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, 1.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]]
     let M0 = method_for(range<Idx<3>, Idx<3>, Idx<3>, Idx<3>>) <@> lambda(a, a2, b, c) -> G(a, b, c) * G(a2, b, c) |> compute
-    let Gram0 = method_for(M0) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> reduce(face, (+)) |> compute
+    let Gram0 = method_for(M0) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> reduce(face, (+), axes = 2) |> compute
     let up0 = Gram0 * up
     let M1 = method_for(range<Idx<3>, Idx<3>, Idx<3>, Idx<3>>) <@> lambda(a, a2, b, c) -> G(b, a, c) * G(b, a2, c) |> compute
-    let Gram1 = method_for(M1) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> reduce(face, (+)) |> compute
+    let Gram1 = method_for(M1) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> reduce(face, (+), axes = 2) |> compute
     let up1 = Gram1 * up
     let M2 = method_for(range<Idx<3>, Idx<3>, Idx<3>, Idx<3>>) <@> lambda(a, a2, b, c) -> G(b, c, a) * G(b, c, a2) |> compute
-    let Gram2 = method_for(M2) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> reduce(face, (+)) |> compute
+    let Gram2 = method_for(M2) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> reduce(face, (+), axes = 2) |> compute
     let up2 = Gram2 * up
-    reduce(up0, lambda(acc, x) -> acc + x * x, 0.0) + reduce(up1, lambda(acc, x) -> acc + x * x, 0.0) + reduce(up2, lambda(acc, x) -> acc + x * x, 0.0)
+    reduce(up0, lambda(acc, x) -> acc + x * x, 0.0, axes = 2) + reduce(up1, lambda(acc, x) -> acc + x * x, 0.0, axes = 2) + reduce(up2, lambda(acc, x) -> acc + x * x, 0.0, axes = 2)
 }
 // EXPECT: norms0 = [41.041458598976831, 1.382452917271221, 0.0]
 // EXPECT: norms1 = [41.051944010145107, 1.0248868171229528, 0.0]

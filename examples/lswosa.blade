@@ -1,0 +1,178 @@
+import units.SI
+
+// Welch's overlapped segment averaging (WOSA) over the generalized
+// Lomb-Scargle DFT, for unevenly sampled series. Translated from the dask
+// reference implementation; same decomposition (hanning / wosa_lsdft /
+// lswosa), same estimator, spelled in Blade's typed-tuple + group_by idiom.
+//
+// The LS kernel here is the REAL-VALUED tau formulation -- similar to
+// examples/lsdft.blade but not the same: tau is formed explicitly as
+// atan2(sum sin 2wt, sum cos 2wt) / 2w, the a/b components are normalized by
+// their own sum-of-squares, and the t_zero phase rotation is applied
+// COMPONENT-wise (cos(w t0) * a, sin(w t0) * b), exactly as the reference
+// does -- not as a complex multiply.
+//
+// SEGMENTATION. The reference builds ragged per-segment subsets with
+// np.where inside a sequential loop. Blade's reading: segmentation is a
+// GROUP_BY. One wrinkle: 50%-overlapped segments are not a partition (each
+// sample lands in up to two segments), but they are exactly the union of two
+// interleaved NON-overlapping families -- even segments 0,2,..,N-2 partition
+// [0, N*h] by floor(t / 2h), odd segments 1,3,..,N-1 partition [h, (N+1)*h]
+// by floor((t - h) / 2h), h = span/(N+1). So: mask each family's covered
+// range, partition what remains, map hanning . wosa_lsdft over the group
+// rows, and parallelize on the resulting group axis (`where omp` on the
+// row param licenses it). Boundary semantics: floor gives half-open cells;
+// the reference's inclusive `t <= upper` double-counts exact boundary
+// samples within a family -- a measure-zero disagreement, flagged here.
+
+Unit day = 86400 * second
+Unit time: day
+Unit frequency: 1 / day
+
+let i = complex(0.0, 1.0)
+let two_pi = 6.283185307179586
+
+function mymean(x: T^1) = reduce(x, (+)) / extents(x)
+
+function variance(x: T^1) = {
+    let d = x - mymean(x)
+    prodsum(d, d) / extents(d)
+}
+
+function mymin(x: T^1) = reduce(x, lambda(a, b) -> if a < b then a else b)
+function mymax(x: T^1) = reduce(x, lambda(a, b) -> if a > b then a else b)
+
+/// Hamming-family taper (alpha = 0.53836) over one SEGMENT's samples.
+/// Faithful to the reference, including its quirk: the cosine's argument is
+/// the ABSOLUTE (epoch-shifted) time over the segment span, not t - lower --
+/// segments whose lower bound is nonzero are tapered off-center. Kept so the
+/// numerics match the reference; flagged so nobody "fixes" one side. Note
+/// only span = upper - lower is ever used.
+function hanning(ts_sub: Tuple<T<time>^1, U^1>, lower: T<time>, upper: T<time>) = {
+    let t_sub, s_sub = ts_sub
+    let alpha = 0.53836
+    let beta = 1.0 - alpha
+    let span = upper - lower
+    let w = (t_sub <@> lambda(t) -> alpha - beta * cos(two_pi * t / span)) |> compute
+    let scale = prodsum(w, w) / extents(w)
+    (s_sub * w / sqrt(scale)) |> compute
+}
+
+/// Generalized LS DFT of ONE (sub)series: complex, phase-preserving.
+/// Length-agnostic over the abstract tuple param, so the same function
+/// serves the full series and a WOSA segment row. omp(st: 1) licenses a
+/// caller's co-iteration over series; the internal frequency loop carries
+/// its own licence on the lambda.
+function wosa_lsdft(st: Tuple<U^1, T<time>^1>,
+                    freqs: T<frequency>^1, t_zero: T<time> = 0.0)
+where omp(st: 1) = {
+    let s_raw, t_raw = st
+    let n = extents(t_raw)
+    let s = s_raw - reduce(s_raw, (+)) / n
+    let ts = t_raw - t_zero
+
+    freqs <@> lambda(f) where omp(f: 1) -> {
+        let w = two_pi * f
+
+        // tau nulls the cross term: atan2(sum sin 2wt, sum cos 2wt) / 2w.
+        let wtx2 = (2.0 * w) * ts
+        let s2 = sin <@> wtx2
+        let c2 = cos <@> wtx2
+        let tau = atan2(reduce(s2, (+)), reduce(c2, (+))) / (2.0 * w)
+
+        let ph = w * (ts - tau)
+        let cwt = cos <@> ph
+        let swt = sin <@> ph
+
+        let a = prodsum(s, cwt) / sqrt(prodsum(cwt, cwt))
+        let b = prodsum(s, swt) / sqrt(prodsum(swt, swt))
+
+        // Component-wise epoch rotation, per the reference.
+        complex(cos(w * t_zero) * a, sin(w * t_zero) * b)
+    }
+}
+
+/// One segment FAMILY's spectra: partition the family's covered time range
+/// into segments with a single key function (selection included -- see the
+/// sentinel rule below), taper each group row, and LS-transform it. Rows
+/// co-iterate as zip(grouped t, grouped s) -- both grouped from the SAME
+/// group_keys, so the offsets tables agree. The group axis is the parallel
+/// axis: omp on the row param licenses it (the licence names the operand
+/// node the param binds). Returns FREQ-major (freq x segment).
+function family_spectra(ts: T<time>^1, s: U^1, freqs: T<frequency>^1,
+                        lo: T<time>, hi: T<time>, shift: T<time>,
+                        seg_span: T<time>, t_zero: T<time>) = {
+    // Selection lives in the KEY function: a negative key excludes the row
+    // from every group (the sentinel rule), so out-of-family samples drop
+    // here without a mask/compound pass. The odd family's t < shift prefix
+    // is negative naturally; the range guard handles each family's tail.
+    let keys = (ts <@> lambda(t) ->
+        if t >= lo && t <= hi then floor((t - shift) / seg_span) else 0.0 - 1.0) |> compute
+    let gk = group_keys(keys)
+    let gt = group_by(ts, gk)
+    let gs = group_by(s, gk)
+    let grid = method_for(zip(gt, gs)) <@> lambda(trow: T<time>^1, srow: U^1) where omp(trow: 1) -> {
+        let sw = hanning((trow, srow), shift, shift + seg_span)
+        wosa_lsdft((sw, trow), freqs, t_zero)
+    } |> compute
+    // Freq-major so the caller's per-frequency segment folds are plain
+    // row-mode. The transpose is this function's implementation detail; the
+    // language-level fix is a fold-over-leading-axis spelling
+    // (reduce(grid, lambda(a: T^1, b: T^1) -> a + b)), tracked as a feature.
+    transpose(grid, [0, 1])
+}
+
+/// WOSA: 50%-overlapped segments as two interleaved group_by families,
+/// Hamming-tapered, per-segment LS spectra, modulus averaged and phase
+/// circular-averaged, Welch normalization verbatim from the reference.
+///
+/// Second reference quirk kept: segment bounds live on [0, t_max - t_min]
+/// but are compared against ts = t_raw - t_zero (NOT shifted by t_min), so a
+/// series whose ts does not start near zero selects off-window segments.
+function lswosa(st: Tuple<U^1, T<time>^1>,
+                freqs: T<frequency>^1, t_zero: T<time> = 0.0,
+                n_segments: Float64 = 10.0)
+where omp(st: 1) = {
+    let s_raw, t_raw = st
+    let ts = t_raw - t_zero
+    let t_min = mymin(ts)
+    let t_max = mymax(ts)
+    let span_total = t_max - t_min
+
+    let s_var = variance(s_raw)
+    let n_samples = extents(s_raw)
+
+    let h = span_total / (n_segments + 1.0)
+    let seg_span = 2.0 * h
+    let zero_t = h - h   // typed zero of T<time>
+
+    // Even family: segments 0,2,..,N-2 cover [0, N*h]; odd: 1,3,..,N-1
+    // cover [h, (N+1)*h]. Each is a partition of its masked range.
+    let ls_e = family_spectra(ts, s_raw, freqs, zero_t, n_segments * h, zero_t, seg_span, t_zero)
+    let ls_o = family_spectra(ts, s_raw, freqs, h, (n_segments + 1.0) * h, h, seg_span, t_zero)
+
+    // Segment accumulations, per frequency, across BOTH families:
+    // |ls|^2, cos(arg), sin(arg). atan2(imag, real) is the reference's arg.
+    // Family grids come back FREQ-major, and `reduce` folds RIGHT-TO-LEFT
+    // (innermost axis, one by default; `axes = n` folds n), so a bare
+    // reduce over each mapped grid is the per-frequency segment fold.
+    function cosatan2(z: Complex128) = cos(atan2(imag(z), real(z)))
+    function sinatan2(z: Complex128) = sin(atan2(imag(z), real(z)))
+    function mag2(z: Complex128) = real(z)^2 + imag(z)^2
+    let mod2 = (reduce(ls_e <@> mag2, (+)) |> compute)
+             + (reduce(ls_o <@> mag2, (+)) |> compute)
+    let cos_sum = (reduce(ls_e <@> cosatan2, (+)) |> compute)
+                + (reduce(ls_o <@> cosatan2, (+)) |> compute)
+    let sin_sum = (reduce(ls_e <@> sinatan2, (+)) |> compute)
+                + (reduce(ls_o <@> sinatan2, (+)) |> compute)
+
+    let mod_avg = mod2 / n_segments
+    let arg_avg = atan2(sin_sum / n_segments, cos_sum / n_segments)
+
+    // Welch normalization, verbatim from the reference.
+    let nsegs = 2.0 * n_samples / (n_segments + 1.0)
+    let df = reduce(freqs, (+)) / nsegs
+    let factors = 2.0 / (n_segments * nsegs * df) * (s_var / (df * reduce(mod_avg, (+))))
+
+    complex(cos <@> arg_avg |> compute, sin <@> arg_avg |> compute) * mod_avg * factors
+}

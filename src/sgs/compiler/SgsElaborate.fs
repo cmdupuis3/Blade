@@ -382,10 +382,10 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (s
         r a |> Result.bind (fun a' -> r k |> Result.map (fun k' -> inheritSpan e (ExprSort (a', k'))))
     | ExprKind.ExprGram (l, rr) ->
         r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> inheritSpan e (ExprGram (l', r'))))
-    | ExprKind.ExprReduce (a, k, init) ->
+    | ExprKind.ExprReduce (a, k, init, ax) ->
         r a |> Result.bind (fun a' ->
         r k |> Result.bind (fun k' ->
-        rOpt init |> Result.map (fun init' -> inheritSpan e (ExprReduce (a', k', init')))))
+        rOpt init |> Result.map (fun init' -> inheritSpan e (ExprReduce (a', k', init', ax)))))
     | ExprKind.ExprStruct (nm, fields, spread) ->
         fields |> List.fold (fun acc (fn, fe) ->
             acc |> Result.bind (fun fs -> r fe |> Result.map (fun fe' -> fs @ [(fn, fe')])))

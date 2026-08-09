@@ -19,7 +19,7 @@ let named = reduce(A, myAdd)
 let seeded = reduce(A, myAdd, 45.0)
 let inline_lam = reduce(A, lambda(a, b) where comm(a, b), omp -> (a + b) * 1.0)
 let B = [2.0, 3.0, 4.0, 5.0]
-let fused = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)
+let fused = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)
 // EXPECT: named = 55
 // EXPECT: seeded = 100
 // EXPECT: inline_lam = 55

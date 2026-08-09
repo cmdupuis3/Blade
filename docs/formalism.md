@@ -167,13 +167,26 @@ annotation. It fixes only how many *top-level* slots a value or parameter
 occupies — nesting inside the annotated value is not counted, so a
 `Tuple<4>` cannot re-count across two nested `Tuple<2>`s (`((a,b),(c,d))` is
 two nodes, not four; write the flat spelling `(a,b,c,d)` instead — the one
-thing this ruling gives up). Element types stay inferred. A bare comma
-**constructs** a tuple at any binding site — `let t = b, c` has type
-`Tuple<2>` — matching the parenthesized literal `(b, c)` byte-for-byte from
-the checker down; only the *pattern* side still requires parens (`let (a, b)
-= t` destructures, `let a, b = t` does not). A literal `(a, b)` written
-directly as an argument is a tuple value the same way — it needn't be
-let-bound first.
+thing this ruling gives up). Element types stay inferred.
+**`Tuple<T1, ..., Tk>`** is the same annotation with the component types
+*written*: the argument list disambiguates (a lone integer literal is a
+width, anything else is a component list of width `k >= 2`; the two may not
+be mixed), and it denotes exactly the type the parenthesized
+`(T1, ..., Tk)` denotes — one node, not two that agree. Prefer it whenever a
+component is anything but a plain scalar, because written components are the
+only ones that are actually *checked* (a wrong unit or rank inside a
+component is reported at the call as `argument i, component j`) and the only
+ones that survive to codegen.
+A bare comma **constructs** a tuple at any binding site — `let t = b, c` has
+type `Tuple<2>` — matching the parenthesized literal `(b, c)` byte-for-byte
+from the checker down, and it **destructures** on the pattern side the same
+way: `let a, b = t` binds what `let (a, b) = t` binds. The two halves compose
+without a disambiguating rule — `let a, b = c, d` destructures the pair built
+from `c` and `d` — because the pattern list is bounded by the `:` or `=` that
+must follow it and the value list only begins after that `=`. A pattern whose
+name count matches neither the value's top-level width nor its flattened leaf
+count is an error, not a partial binding. A literal `(a, b)` written directly
+as an argument is a tuple value the same way — it needn't be let-bound first.
 
 **Kernel and function parameter lists are width schemas**, matched
 **greedily, left to right**, against the pack's top-level spine, with no
@@ -206,11 +219,15 @@ Nested tuples are real data under direct binding — a `Tuple<2>` parameter
 facing one 2-wide tuple node receives the whole node, not its splice, so a
 fully written nested type such as `((Float64,Float64),(Float64,Float64))`
 carries a pair of pairs through to the body and `r[0][1]` chains correctly.
-(The width-only `Tuple<2>` spelling does *not* yet carry this: its element
+(The width-only `Tuple<2>` spelling does *not* carry this: its element
 slots are fresh inference variables nothing at a direct call writes into, so
 a nested value passed through one defaults its slot to a scalar and the
 projection chain fails in codegen, not in `check` — a known, separate gap in
-the direct-call argument seam, not of one-level matching itself.) Symmetrically, **a direct call never splices**: at
+the direct-call argument seam, not of one-level matching itself. Writing the
+components — `Tuple<Tuple<Float64,Float64>,Tuple<Float64,Float64>>`, the same
+type as the parenthesized spelling above — fills the slots and is the
+supported way to say it; the same applies to a tuple of *arrays*, which the
+width-only form cannot express at all.) Symmetrically, **a direct call never splices**: at
 `two(x: Float64, y: Float64)`, one tuple argument (`two(pair)`) is read as
 the whole first parameter under currying's existing partial-application
 rule, never as two scalars for `x` and `y` — so it lands as an ordinary type
@@ -561,7 +578,12 @@ non-listed arguments are singletons), parallelism spec (`omp(x: depth)` —
 licenses UP TO `depth` S-dim levels of argument x, outermost first, to carry
 threads; a cap on the structural strategy, not a demand, so the emitted pragma
 is the structural choice restricted to licensed levels, and the pragma sits on
-the outermost licensed level even when that is not level 0; `cuda` and
+the outermost licensed level even when that is not level 0; the licensed levels
+are the EXTERNAL ones — those x contributes to a nest built AROUND f, i.e. a
+caller's co-iteration when f is used in kernel position — never a loop f's own
+body generates over x, which is licensed by a clause on that loop's kernel;
+a `Tuple<k>` parameter is one schema node whose levels are its k rows in order,
+so `omp(p: n)` licenses its first n rows; `cuda` and
 other backends substitute), and T-dimension spec (`tdim({extent, symm, name})`
 records) when output dims don't derive from inputs.
 
@@ -668,9 +690,11 @@ the annotation hook only.
   structure (value-checked against independent oracles).
 - `hermitian(A)` — adjoint.
 - `conj(x)` — componentwise conjugation (identity on reals).
-- `reduce(A[, kernel[, init]])` — innermost-dimension fold; default kernel
-  `(+)`; see [features/sql.md](features/sql.md) §10 for typing details and the
-  empty-input rule.
+- `reduce(A[, kernel[, init]][, axes = n])` — right-to-left fold of the
+  innermost `n` dimensions, `n = 1` by default (rank k in, rank k−n out;
+  `n = rank(A)` is the full fold to a scalar); default kernel `(+)`; see
+  [features/sql.md](features/sql.md) §10 for typing details, the axis-count
+  rules and the empty-input rule.
 - `extents(A)` — rank-1: scalar; dense rank-k: tuple, outermost first;
   compound: cardinality. Rejected where a per-dimension scalar doesn't exist
   (ragged/grouped) — use `extents(row)`.

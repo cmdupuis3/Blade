@@ -84,7 +84,7 @@ let div_done = {
               + (u1(i * 16 + jp * 4 + k) - u1(i * 16 + jm * 4 + k)) / (2.0 * h)
               + (u2(i * 16 + j * 4 + kp) - u2(i * 16 + j * 4 + km)) / (2.0 * h)
         d * d
-    }, (+), 0.0)
+    }, (+), 0.0, axes = 3)
     dv(0) = s_dv0
     0.0
 }
@@ -99,7 +99,7 @@ let ctrl_done = {
         let im = (i + 3) % 4
         let d = (cos(ip * h + 0.15) - cos(im * h + 0.15)) / (2.0 * h)
         d * d
-    }, (+), 0.0)
+    }, (+), 0.0, axes = 3)
     dv(1) = s_dv1
     0.0
 }

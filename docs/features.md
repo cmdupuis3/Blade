@@ -13,6 +13,7 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | Type variables | `A -> B -> ...` | Core | Same letter = same type in a signature |
 | Complex conjugates | `conj(x)` | Core |  |
 | Units of measure | `Unit meters`, `Float<velocity>`,<br> unit arithmetic | Core | Annotations on primitive types only |
+| Unit-carrying type variables | `T<time>^r`, `T<time>` | Core | The caret marks the head as a VARIABLE rather than a named type; `^0` is optional, so `T<time>` and `T<time>^0` are the same type (one lowering, so units, unification, monomorphization and diagnostics cannot drift between them). A misspelled unit is BL3015 in either spelling. A head naming a real type keeps its ordinary meaning |
 | Bounded primitives | `Float<min=0, max=1>` | Planned | Runtime-checked bounds |
 | Mutually constrained types | `type V1 ... and V2 ...`<br>`where <constraint>` | Core | Joint assignment required |
 | Boolean Operators |  `&&`/`\|\|`/`!` | Core | |
@@ -187,7 +188,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | `group_keys(k₁, k₂, ...)` | GROUP BY keys | CSR grouping structure; static (Idx / EnumIdx) and dynamic dispatch |
 | `group_by(values, gk)` | GROUP BY | Rank-2 ragged result; per-group kernels/reduces; elementwise map rejected by design |
 | `sort(A, keyFn)` | ORDER BY | Stable, key-extractor (not comparator); dense result |
-| `reduce(A[, kernel[, init]])` | Aggregates | Default `(+)`; folds innermost dim; 3-arg init form seeds the fold and defines the empty result (landed, arc 4) — without init, statically-empty rejected and dynamic extents guarded |
+| `reduce(A[, kernel[, init]][, axes = n])` | Aggregates | Default `(+)`; folds RIGHT-TO-LEFT, the innermost `n` axes with `n = 1` by default (rank k in, rank k−n out; `axes = rank(A)` is the full fold to a scalar — named slot, since the 3rd positional argument is the seed; `n` must be an integer literal, 1 ≤ n ≤ rank). 3-arg init form seeds EACH folded group and defines the empty result (landed, arc 4) — without init, statically-empty rejected and dynamic extents guarded |
 | `extents(A)` | COUNT(*) | Cardinality on compound = post-WHERE count |
 | Foreign keys | FK joins | Integer / EnumIdx arrays as references; capture-and-index idiom |
 
@@ -201,7 +202,8 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
-| Tuples: literals, exact + wildcard destructuring, `head :: tail`, unit `()`; no positional access | Core | singleton collapse `(a) = a` |
+| Tuples: literals, exact + wildcard destructuring, `head :: tail`, unit `()`; no positional access | Core | singleton collapse `(a) = a`; bare commas on BOTH sides of a `let` (`let a, b = c, d`), parens optional; a pattern whose name count matches neither the top-level width nor the flattened leaf count is an error |
+| Tuple annotations: `Tuple<N>` (width only, elements inferred) and `Tuple<T1, ..., Tk>` (components written) | Core | a lone integer literal is the width, any other list is a component list of width k >= 2; the two may not be mixed. `Tuple<A, B>` is the SAME type as the written `(A, B)`. Only written components are checked at the call (`argument i, component j`) and only they survive to codegen — the width-only form's element slots are inference variables nothing instantiates, so it cannot carry arrays or nested tuples |
 | Structs (named fields, no methods); functional update `{ x = 3.0, ..p }` | Core |  |
 | Dependent records (later fields' bounds depend on earlier fields) | Core | CGPath example |
 | Constrained records (`where` clause on struct) | Core | checked at construction |
@@ -237,7 +239,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
 | C++ codegen (via g++) | Core |  |
-| OpenMP parallelism via `omp(arg: depth)` clause | Core | depth counts S-dim levels per argument, outermost first |
+| OpenMP parallelism via `omp(arg: depth)` clause | Core | depth counts S-dim levels per argument, outermost first, and the levels are the EXTERNAL ones the argument contributes to a nest built around the function (a caller's co-iteration) — a loop the body itself generates is licensed on that loop's own kernel; BL4001 warns on the confusion. A `Tuple<k>` parameter is one node: `omp(p: n)` licenses its first n rows (`comm`/`anticomm` on a tuple parameter stay refused) |
 | CUDA backend via `cuda` clause | Core | requires x64 Native Tools environment |
 | Lazy computation | Core | `compute` and `read` |
 | OpenBLAS lowering for `gram()` (`cblas_dsyrk` same-array / `cblas_dgemm` distinct) | Experimental | Real `Float64` only; opt-in via `BLADE_BLAS=1` (or `OPENBLAS_DIR` set; `BLADE_BLAS=0` forces off). Output layout unchanged (packed symmetric / dense) — BLAS fills a staging buffer, repack lands Blade storage. Emitted `#include <cblas.h>` keys Build.fs's `-I`/link resolution (`OPENBLAS_DIR`, netcdf-style). Measured: gram p=1024×n=16384, 8.6 s loops → 0.55 s 1-thread / 0.15 s 16-thread; values agree to ~1e-14 rel |

@@ -1,0 +1,27 @@
+// TEST: GroupBy Compound Source
+// The mask -> compound -> (map) -> group_keys -> group_by chain: partition
+// what survives a filter. A rank-1 Compound is a COMPACT view, not an Array --
+// its length is the compact index's runtime cardinality and its cells live in
+// `.data`, with no `.extents` and no operator[]. group_keys' key scan and
+// group_by's gather both read their source by name, so both need that
+// accessor; using the dense spelling produced C++ that would not compile.
+//
+// Note the key array `keys` is ALSO compound-shaped: mapping over a compact
+// view preserves the view's shape, which is the honest result (a value per
+// present cell). gk__perm indexes that same compact order, so the gather
+// lines up.
+let t = [0.2, 0.8, 1.4, 2.1, 2.7]
+let m = mask(t, lambda(x) -> x >= 0.5)
+// tk = the surviving cells: [0.8, 1.4, 2.1, 2.7]
+let tk = compound(t, m)
+// keys = floor of each survivor: [0, 1, 2, 2]
+let keys = (tk <@> lambda(x) -> floor(x)) |> compute
+let gk = group_keys(keys)
+let g = group_by(tk, gk)
+// groups in first-occurrence order: [0.8], [1.4], [2.1, 2.7]
+let firsts = method_for(g) <@> lambda(r) -> r(0) |> compute
+// EXPECT: firsts = [0.8, 1.4, 2.1]
+let sizes = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
+// EXPECT: sizes = [1, 1, 2]
+let sums = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [0.8, 1.4, 4.8]

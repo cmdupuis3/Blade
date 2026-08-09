@@ -4,9 +4,11 @@
 // width >= 2. Design C makes this load-bearing -- `Tuple<N>` annotations are
 // only useful if there is an unparenthesized way to write the value.
 //
-// The binder side (`let a, b = t`) stays DEFERRED; only the RHS changed.
-// Parser.parseLetRhs is shared by all three let sites, so the top-level form
-// here and the block form below cannot drift.
+// The binder side (`let a, b = t`) has since landed too -- `021` is its pin,
+// and the two halves compose without a rule to arbitrate them (the LHS list
+// is bounded by the `=`, the RHS list starts after it). Parser.parseLetRhs
+// and Parser.parseLetPattern are each shared by all three let sites, so the
+// top-level form here and the block form below cannot drift.
 
 let b = 1.0
 let c = 2.0

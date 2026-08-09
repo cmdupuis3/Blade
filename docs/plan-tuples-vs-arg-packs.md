@@ -720,7 +720,8 @@ meaningful parens. Lost: only the cross-level recount (`Tuple<4>` over
 `((a,b),(c,d))` errors — write the flat spelling). Everything else in §9
 survives: width schemas, the VarId surface rewrite, alias fixpoint, hard
 arity errors, explicitness, element-level zip tuple kernels, the where+Tuple
-refusal, the direct-call checks.
+refusal (since narrowed to `comm`/`anticomm` only — see §9), the direct-call
+checks.
 
 Implementation delta if adopted: spine expansion instead of leaf expansion at
 the pack sites; a direct tuple-node binding arm beside the regroup arm (both
@@ -946,11 +947,20 @@ recorded** — all measured, not predicted:
 - **Step 4 / #11, `lambda((a, b))` patterns.** The `Tuple<N>` annotation
   reaches the same programs via projection, which is why §6b called #11 wanted
   but not blocking.
-- **A `where` clause together with a `Tuple<N>` param** is REFUSED
-  (`diagnostics/060`) rather than remapped: `comm`/`anticomm` address params by
-  position and the parallel strategies by name, and the expansion moves both.
-  Both failure modes are silent, and `comm` between two pairs has no settled
-  meaning to remap to.
+- **A `where` clause together with a `Tuple<N>` param** SPLITS by conjunct
+  class (owner ruling, 2026-08-09; the refusal was blanket when this section
+  was first written). `comm`/`anticomm` address params by POSITION and the
+  expansion renumbers them, silently, with nothing settled to remap to — still
+  REFUSED (`diagnostics/060`). The PARALLEL STRATEGIES resolve by NAME, and
+  under §6c a `Tuple<k>` param is ONE schema node, so the name still names a
+  well-defined unit: ALLOWED, with the licence rewritten onto the k row params
+  at the same seam that creates them. The depth counts levels of the node,
+  outermost first — `omp(p: n)` gives row j the residual budget `n - j` and
+  drops the rest, so `omp(p: 1)` on a `Tuple<2>` threads ONE level. The split
+  is on the class, not a per-strategy allowlist, so a future `ParallelStrategy`
+  inherits it; `cuda`/`mpi` carry no var names and pass through. Pinned
+  `tuples/014` (values, all five strategy spellings + the named-function eta
+  path) and `tests/OmpTests.fs` (the exact pragma, depth 1 vs 2).
 - **A `Tuple<N>` whose element types are not scalars** still fails to
   monomorphize (`tuples/002`'s note, now corrected there). The earlier
   prediction that the §3.9 fix would close this is MEASURED FALSE: neither the
@@ -975,3 +985,100 @@ recorded** — all measured, not predicted:
   The splice is implemented and live at the OPERAND seam, which is where
   `f((a,b)) == f(a,b)` and `K <@> P` are actually needed, and the splice code
   at the call seam stays as the fallback for lists that have no other reading.
+
+## 10. Component-typed tuples, bare-comma binders, caret-free `T<u>` (2026-08-09)
+
+Three items, all measured with a private build and a before/after `blade
+check` sweep over the whole corpus.
+
+### 10.1 `Tuple<T1, ..., Tk>` — the component-typed spelling
+
+Disambiguation is on the ARGUMENT LIST, at the parser
+(`Parser.parseTypeExpr`'s `Tuple<` arm): a **single integer literal** is the
+width-only form (`TyTupleWidth`), **any other list** is a component-type list
+of width k ≥ 2 and produces **`TyTuple`** — the very node the written
+`(T1, ..., Tk)` produces. So `Tuple<A, B>` and `(A, B)` are one type, not two
+that agree, and nothing downstream changed: `declaredTupleWidth` already
+counted a written `TyTuple`, unify's equal-length rule already handled it,
+`etaExpandFunctionKernel` already re-spells an `IRTTuple` param as `Tuple<k>`
+for the named-function kernel path. The width schema therefore accepted the
+new spelling with **no matcher change at all** (verified both orientations,
+lambda and named function, in `tuples/015`).
+
+A width and a type list cannot be mixed in either order (`Tuple<3, Float64>`,
+`Tuple<Float64, 3>` — both BL1004), `Tuple<T>` is refused for `Tuple<1>`'s
+reason, and `Tuple<0>` / `Tuple<1>` / `Tuple<>` keep their messages.
+
+**§9's element-slot limit is gone for this spelling, and only for it.**
+Measured, same program both ways: `Tuple<Array<Float64 like I3>, Array<Float64
+like I3>>` compiles and **runs** (`tuples/015`), while the identical program
+with `Tuple<2>` still dies in g++ (`cannot convert std::tuple<Array<double,1>,
+Array<double,1>>`). Nested `Tuple<Tuple<Float64,Float64>,
+Tuple<Float64,Float64>>` supports the projection chain `r[0][1]`, which
+`tuples/012` previously had to write out in full. The per-call-site
+instantiation item is still open — it is what would fix the *width-only* form.
+
+**The type-safety win needed a check.** The direct-call argument checks (§3.9,
+`diagnostics/052`–`055`) read `IR.getUnits` / `ArrayElem` off the argument AS A
+WHOLE, and both answer "nothing here" for an `IRTTuple`, so a wrong unit or
+rank inside a component was invisible and reached g++. `unitClash` now
+descends **one level** into a tuple parameter meeting a tuple argument of the
+same width, reporting `argument i, component j` (`tuples/017` units,
+`tuples/018` rank). Both sides must be CONCRETE, so a `Tuple<N>` parameter —
+whose element slots are fresh inference variables — keeps exactly its previous
+permissiveness.
+
+### 10.2 `let a, b = t` — the bare-comma binder (#10's deferred half)
+
+`Parser.parseLetPattern`, shared by all three let sites, collects a bare comma
+list into the same `PatTuple` the parenthesized form produces. No second
+mechanism, and no ambiguity to arbitrate: the LHS list is bounded by the `:` or
+`=` that must follow a let pattern, the RHS list begins after that `=`. So
+`let a, b = c, d` is construction on the right and destructuring on the left,
+pinned in `tuples/021` along with `let a, b = f(x), g(y)`, the block-statement
+position, and a bare comma still parsing as pure construction inside a block.
+Nothing regressed: a comma could not previously follow a let pattern at all.
+
+Width mismatch was a **pre-existing silent hole** found while pinning this:
+`let (a, b, c) = <2-tuple>` passed `check` at every declaration site and died
+in g++ on `std::get<2>` (the four sites all said "Fall back to structural, let
+fresh vars handle overflow"), and in expression position it bound nothing and
+reported each name as UnboundVariable. `tupleDestructureArityError` is now
+shared by all four sites and stands down for every non-tuple scrutinee
+(`tuples/022`).
+
+### 10.3 Caret-free `T<u>` = `T<u>^0`
+
+Owner ruling: "`^0` should be optional, they're semantically equivalent."
+Measured prior behaviour: `T<second>` fell to the named-type fallback and
+lowered to the opaque `IRTNamed "T"` with the unit **silently dropped**, so
+every argument was BL3001 "the parameter is declared T but the argument is
+Float64<second>" — an annotation that was neither an error nor meaningful.
+
+Implemented as a **desugar** in `lowerTypeExpr`'s `TyNamed` arm onto the caret
+node, under exactly the caret arm's three head conditions (not a built-in
+base, not a declared type, argument list resolves to a unit — the shared
+`unitOfTypeVarArgs` / `isUnitCarryingTypeVarHead`). One lowered representation,
+so unification, unit checks, monomorphization, printing and diagnostics cannot
+drift; the prescan and `unitAnnoError` got the matching arms, so a misspelled
+unit is BL3015 in all three spellings (`Float<secnd>`, `T<secnd>`,
+`T<secnd>^0`). Pins: `units/070` (accept + spelling-pair equivalence at
+parameter, defaulted-parameter and return positions), `071` (unit mismatch),
+`072` (undeclared unit).
+
+**Deliberately not gated on `Subst.IsTypeVar`**, and this is the load-bearing
+detail: a defaulted parameter's annotation is re-lowered AT THE CALL SITE by
+`tryFillDefaultArgs`' `mkFill` ascription, where the callee's prescanned
+type-var scope is gone. The motivating program writes `t_zero: T<time> = 0.0`,
+so a scope-gated rule would have failed on its first use.
+
+**Found in passing, NOT fixed: bare `T` and `T^0` are not equivalent**, for
+that exact reason. `TyVar` mints a variable unconditionally; `TyNamed`'s
+type-variable reading consults `Subst.IsTypeVar`, which is empty at the
+call-site re-lowering. Measured: `function f(t_zero: T = 0.0)` called as `f()`
+is BL3001 "expected T, got Float64"; `t_zero: T^0 = 0.0` is accepted; without
+a default both spellings work and monomorphize identically. The fix is not the
+same move — a bare `T` has no unit argument to key on, so it cannot be
+distinguished from a forward-referenced named type without either carrying the
+callee's type-var scope to the fill site or making `mkFill` re-lower under it.
+Its own item.

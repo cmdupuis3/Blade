@@ -122,7 +122,7 @@ let rec freeVars (bound: Set<string>) (e: Expr) : Set<string> =
     | ExprKind.ExprJoin (es, _) -> fvs es
     | ExprKind.ExprApp (f, args) -> Set.union (fv f) (fvs args)
     | ExprKind.ExprIf (c, t, f) -> Set.unionMany [ fv c; fv t; fv f ]
-    | ExprKind.ExprReduce (src, kern, init) -> Set.unionMany [ fv src; fv kern; fvOpt init ]
+    | ExprKind.ExprReduce (src, kern, init, _) -> Set.unionMany [ fv src; fv kern; fvOpt init ]
     | ExprKind.ExprAlign (es, spec) ->
         let pad =
             match spec with

@@ -1,0 +1,34 @@
+// TEST: GroupBy Zip Row Units
+// A unit-carrying row annotation `T<u>^1` puts its unit on the ROW's element
+// type, exactly as the dense parameter path does -- so the row is checked as
+// `Array<Float64<u> like ...>`, not as a bare shape. The mismatched-unit twin
+// in unit-errors/004 is the other half of this pin.
+//
+// This is also the regression pin for a units-transparency defect the row rule
+// uncovered: `T<day>^1` resolves to an inference variable WEARING a unit
+// (`IRTUnitAnnotated(IRTInfer _, day)`), and two shape tests matched the bare
+// `IRTInfer` only, so the unit-carrying program took a different path from its
+// unit-free twin. Units say what a value MEASURES, never whether its shape is
+// known -- which is why the two results below must agree cell for cell.
+Unit day
+
+let region = [0, 1, 0, 1]
+let t: Array<Float64<day> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let s = [10.0, 20.0, 30.0, 40.0]
+let gk = group_keys(region)
+let gt = group_by(t, gk)
+let gs = group_by(s, gk)
+// group 0 = rows 0,2 -> 1*10 + 3*30 = 100;  group 1 = rows 1,3 -> 2*20 + 4*40 = 200
+let dots = method_for(zip(gt, gs)) <@> lambda(tr: T<day>^1, sr: U^1) -> prodsum(tr, sr) |> compute
+// EXPECT: dots = [100, 200]
+
+// The UNIT-FREE twin of the identical program, cell for cell.
+let u: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let gu = group_by(u, gk)
+let dotsPlain = method_for(zip(gu, gs)) <@> lambda(tr: T^1, sr: U^1) -> prodsum(tr, sr) |> compute
+// EXPECT: dotsPlain = [100, 200]
+
+// The unit rides through a call that consumes the rows, too.
+function tdot(tr: T<day>^1, sr: U^1) = prodsum(tr, sr)
+let viaCall = method_for(zip(gt, gs)) <@> lambda(tr: T<day>^1, sr: U^1) -> tdot(tr, sr) |> compute
+// EXPECT: viaCall = [100, 200]

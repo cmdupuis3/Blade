@@ -16,7 +16,7 @@ let add = A [+] B |> compute
 let sub = A [-] B |> compute
 // EXPECT: sub = [-2, -3, -1, -2]
 // The computed outer product feeds a downstream combinator: 3+4+6+8.
-let total = reduce(A [*] B |> compute, (+))
+let total = reduce(A [*] B |> compute, (+), axes = 2)
 // EXPECT: total = 21
 // Duality pin: the documented desugar `A [op] B = method_for(A, B) <@> (op)`
 // gives the same cells through the explicit spelling.

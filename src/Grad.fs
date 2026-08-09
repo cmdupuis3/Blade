@@ -502,7 +502,15 @@ let rec private hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, in
     let re k = inheritSpan e k
     let recurse = hoistReduces fname ctx extents
     match e.Kind with
-    | ExprKind.ExprReduce (src, kernel, initOpt) ->
+    | ExprKind.ExprReduce (src, kernel, initOpt, axesOpt) ->
+        // A PARTIAL fold (`axes = n` with n < rank) produces an ARRAY, not a
+        // scalar, so the accumulator-loop rewrite below does not model it.
+        // Grad v1 differentiates the rank-1 fold only; an explicit axis count
+        // is refused rather than silently rewritten as if it were one.
+        (match axesOpt with
+         | Some _ -> err fname "reduce with an explicit `axes = n` is not differentiable (v1): grad supports the rank-1 additive fold `reduce(A, (+)[, init])`"
+         | None -> Ok ())
+        |> Result.bind (fun () ->
         (match kernel.Kind with
          | ExprKind.ExprSection OpAdd -> Ok ()
          | ExprKind.ExprSection _ -> err fname "reduce in differentiated code supports only the additive kernel `(+)` (v1)"
@@ -534,7 +542,7 @@ let rec private hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, in
                                 [ StmtExpr (syn (ExprAssign (v accName, add (v accName) readK))) ])
                  Ok (srcPre @ [accLet; loop], v accName)
              | None -> err fname (sprintf "reduce source '%s' has no statically-known extent in differentiated code; reduce over a param/let array with an `Idx<n>` extent or over an inline array literal (v1)" nm))
-        | _ -> err fname "reduce in differentiated code requires an array-variable or inline-array-literal source; deferred/former reductions are not differentiable (v1)"))
+        | _ -> err fname "reduce in differentiated code requires an array-variable or inline-array-literal source; deferred/former reductions are not differentiable (v1)")))
     | ExprKind.ExprBinOp (m, op, l, r) ->
         recurse l |> Result.bind (fun (pl, l') ->
         recurse r |> Result.map (fun (pr, r') -> (pl @ pr, re (ExprBinOp (m, op, l', r')))))

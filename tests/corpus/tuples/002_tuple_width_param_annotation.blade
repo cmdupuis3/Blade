@@ -72,3 +72,10 @@ let lv2 = addPair(p)
 // annotation's fresh element slots, so they still default to `double`. Closing
 // this needs per-call-site instantiation of the callee's arrow (a type SCHEME),
 // which is its own item.
+//
+// UPDATE 2: still true OF THIS SPELLING, and now optional. The COMPONENT-TYPED
+// spelling `Tuple<T1, ..., Tk>` (`015`) writes the element types instead of
+// inferring them, so the slots are concrete and the array case above RUNS.
+// The type SCHEME item is what would close the width-only form; until then
+// `Tuple<N>` means "N scalars I have not named" and the component-typed form
+// is what a tuple of arrays is written with.

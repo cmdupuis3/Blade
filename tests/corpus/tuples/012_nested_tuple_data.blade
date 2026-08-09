@@ -20,6 +20,11 @@
 // as this pin shows. It is the width-only annotation that cannot carry element
 // types, which is the same gap tuples/002 records and wants per-call-site
 // instantiation of the callee's arrow to close.
+//
+// UPDATE: the fully written type is no longer the ONLY way to say this. The
+// component-typed spelling `Tuple<Tuple<Float64, Float64>, Tuple<Float64,
+// Float64>>` is the same node as the type below and carries the inner types
+// just as well -- `tuples/015` pins the identical program in that spelling.
 function outer(r: ((Float64, Float64), (Float64, Float64))) -> Float64 =
     r[0][0] + r[0][1] * 10.0 + r[1][0] * 100.0 + r[1][1] * 1000.0
 let deep = outer(((1.0, 2.0), (3.0, 4.0)))

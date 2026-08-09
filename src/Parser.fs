@@ -817,9 +817,28 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         errorC "BL1004" "A tuple width cannot be negative: `Tuple<N>` requires an integer literal N >= 2" line col
 
     | Some (TokIdent "Tuple") when (match peek (advance tokens) with Some (TokOp "<") -> true | _ -> false) ->
-        // `Tuple<N>`: the width-only tuple annotation (Design C,
-        // docs/plan-tuples-vs-arg-packs.md 6b). Element types are inferred;
-        // only the width is written.
+        // `Tuple<...>` has TWO spellings, disambiguated by the ARGUMENT LIST:
+        //
+        //   * a SINGLE INTEGER LITERAL -- `Tuple<2>` -- is the WIDTH-ONLY
+        //     annotation (Design C, docs/plan-tuples-vs-arg-packs.md 6b): the
+        //     width is written, the element types are inferred.
+        //   * ANY other argument list is a COMPONENT-TYPE LIST of width
+        //     k >= 2 -- `Tuple<U^1, T<time>^1>` -- and produces exactly the
+        //     node a written `(T1, ..., Tk)` produces. `Tuple<A, B>` and
+        //     `(A, B)` are therefore THE SAME TYPE, not two types that agree:
+        //     unify's equal-length rule, printing, projection, the width
+        //     schema (`declaredTupleWidth` already counts a written `TyTuple`)
+        //     and codegen are all untouched by this spelling existing.
+        //
+        // Why both: `TyTupleWidth` lowers its element slots to FRESH
+        // inference variables and nothing at a direct call instantiates them
+        // (plan 9, `tuples/002`'s note), so a width-only tuple of ARRAYS
+        // defaults to `double` and dies in g++. With the components WRITTEN
+        // the slots are concrete, which is the whole point of this spelling.
+        //
+        // The two cannot be MIXED (`Tuple<3, Float64>`): a width is not a type
+        // and a type is not a width, so a list containing both is refused
+        // outright rather than silently given one of the two readings.
         //
         // Reserved-name story: this follows `Dist`'s SOFT-keyword precedent
         // (the arm just above) rather than `Array`'s hard lexer keyword. The
@@ -830,8 +849,14 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         // Making it a lexer keyword would have broken those.
         let (ltLine, ltCol) = currentPos (advance tokens)
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        // The width reading needs the integer to be the WHOLE list, so the
+        // closing `>` (or the `>>` expectGt splits) has to follow immediately.
+        let isWidthForm =
+            match peek afterLt, peek (advance afterLt) with
+            | Some (TokInt _), Some (TokOp ">") | Some (TokInt _), Some (TokOp ">>") -> true
+            | _ -> false
         (match peek afterLt with
-         | Some (TokInt n) ->
+         | Some (TokInt n) when isWidthForm ->
              // Width must be a positive integer LITERAL >= 2. A 1-tuple does
              // not exist in Blade (`(e)` is grouping, formalism.md:1275) and
              // the 0-tuple has no annotation spelling, so both are refused
@@ -844,8 +869,33 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
              else
                  expectGt (advance afterLt) >>= fun _ remaining ->
                  success (TyTupleWidth (int n)) remaining
+         | Some (TokOp ">") | Some (TokOp ">>") ->
+             errorC "BL1004" "`Tuple<>` is empty: write an integer literal width (`Tuple<2>`, element types inferred) or a list of at least two component types (`Tuple<Float64, Float64>`)" ltLine ltCol
          | _ ->
-             errorC "BL1004" "`Tuple<N>` requires an integer literal width N >= 2 (element types are inferred; write `(T1, T2)` to spell them out)" ltLine ltCol)
+             // COMPONENT-TYPE LIST. Hand-rolled instead of `sepBy` so that an
+             // integer in ANY position -- `Tuple<3, Float64>` and
+             // `Tuple<Float64, 3>` alike -- gets the mixture diagnostic rather
+             // than `parseTypeExpr`'s generic "unexpected token in type".
+             let rec parseComponents (acc: TypeExpr list) (toks: Token list) : ParseResult<TypeExpr list> =
+                 match peek toks with
+                 | Some (TokInt _) ->
+                     let (line, col) = currentPos toks
+                     errorC "BL1004" "`Tuple<...>` is either a single integer WIDTH (`Tuple<2>`, element types inferred) or a list of component TYPES (`Tuple<Float64, Float64>`) -- the two spellings cannot be mixed" line col
+                 | _ ->
+                     parseTypeExpr toks >>= fun ty afterTy ->
+                     match peek afterTy with
+                     | Some TokComma -> parseComponents (ty :: acc) (advance afterTy)
+                     | _ -> success (List.rev (ty :: acc)) afterTy
+             parseComponents [] afterLt >>= fun comps afterComps ->
+             expectGt afterComps >>= fun _ remaining ->
+             match comps with
+             | [_] ->
+                 // Same rule as `Tuple<1>`, one spelling up: there is no
+                 // 1-tuple, and `Tuple<T>` reads like one.
+                 errorC "BL1004" "`Tuple<T>` is not a tuple type: a component-typed `Tuple<...>` needs at least TWO component types (there is no 1-tuple -- `(e)` is grouping). For the width-only spelling write an integer literal, e.g. `Tuple<2>`." ltLine ltCol
+             | _ ->
+                 // The SAME node the written `(T1, ..., Tk)` type produces.
+                 success (TyTuple comps) remaining)
 
     | Some (TokIdent "Dist") when (match peek (advance tokens) with Some (TokOp "<") -> true | _ -> false) ->
         // Dist<order, Elem like I1, ..., Ik>: the typed dist tower
@@ -2208,11 +2258,31 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
             let line, col = currentPos afterComma
             error "decompact expects a single integer dimension index: decompact(A, d)" line col)
     
-    // reduce(array, op[, init]): folds the innermost dim by a binary kernel
-    // (default (+) if omitted; accepts operator sections like (+)). The
-    // optional init is the fold's initial accumulator (init (+) a0 (+) a1 ...);
-    // an empty array reduces to init, and without init empty inputs are rejected.
+    // reduce(array, op[, init][, axes = n]): folds the innermost `n` axes by a
+    // binary kernel, n = 1 by default (default kernel (+) if omitted; accepts
+    // operator sections like (+)). The optional init is each folded group's
+    // initial accumulator (init (+) a0 (+) a1 ...); an empty group reduces to
+    // init, and without init empty inputs are rejected.
+    //
+    // `axes` is a NAMED final argument, not a fourth positional one: the third
+    // POSITIONAL slot is already the seed, so a bare `reduce(A, op, 2)` would be
+    // ambiguous between "seed 2" and "fold 2 axes". Recognized by the same
+    // two-token lookahead `isNamedTypeArg` uses for `min=`/`max=` in type
+    // arguments -- an identifier immediately followed by `=`, a shape that is a
+    // hard parse error in an expression argument today, so this is a strict
+    // widening. Special-cased to `reduce`; ordinary calls have no named slots.
     | Some (TokKeyword KwReduce) ->
+        let isAxesArg (toks: Token list) =
+            match toks with
+            | t1 :: t2 :: _ ->
+                (match t1.Kind with TokIdent "axes" -> true | _ -> false) && t2.Kind = TokOp "="
+            | _ -> false
+        // `axes = n` then the closing paren. Only ever called with `isAxesArg`
+        // true, so the two leading tokens are the name and the `=`.
+        let parseAxesTail (array: Expr) (op: Expr) (initE: Expr option) (toks: Token list) =
+            parseExprImpl (advance (advance toks)) >>= fun axesE afterAxes ->
+            expect TokRParen afterAxes >>= fun _ remaining ->
+            success (mkE tokens remaining (ExprReduce (array, op, initE, Some axesE))) remaining
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         parseExprImpl afterLParen >>= fun array afterArr ->
         match peek afterArr with
@@ -2220,19 +2290,37 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
             // 1-arg form: reduce(arr) = reduce(arr, (+))
             expect TokRParen afterArr >>= fun _ remaining ->
             let sp = rangeSpan tokens remaining
-            success (mkExpr sp (ExprReduce (array, mkExpr sp (ExprSection OpAdd), None))) remaining
+            success (mkExpr sp (ExprReduce (array, mkExpr sp (ExprSection OpAdd), None, None))) remaining
         | _ ->
             expect TokComma afterArr >>= fun _ afterComma ->
+            // `reduce(A, axes = n)`: the kernel-omitted sugar, carrying an axis
+            // count. Same defaulted (+) the 1-arg form supplies.
+            if isAxesArg afterComma then
+                parseAxesTail array (mkExpr (rangeSpan tokens afterComma) (ExprSection OpAdd)) None afterComma
+            else
             parseExprImpl afterComma >>= fun op afterOp ->
             match peek afterOp with
             | Some TokRParen ->
                 expect TokRParen afterOp >>= fun _ remaining ->
-                success (mkE tokens remaining (ExprReduce (array, op, None))) remaining
+                success (mkE tokens remaining (ExprReduce (array, op, None, None))) remaining
             | _ ->
                 expect TokComma afterOp >>= fun _ afterComma2 ->
+                if isAxesArg afterComma2 then
+                    parseAxesTail array op None afterComma2
+                else
                 parseExprImpl afterComma2 >>= fun initE afterInit ->
-                expect TokRParen afterInit >>= fun _ remaining ->
-                success (mkE tokens remaining (ExprReduce (array, op, Some initE))) remaining
+                match peek afterInit with
+                | Some TokRParen ->
+                    expect TokRParen afterInit >>= fun _ remaining ->
+                    success (mkE tokens remaining (ExprReduce (array, op, Some initE, None))) remaining
+                | _ ->
+                    expect TokComma afterInit >>= fun _ afterComma3 ->
+                    if isAxesArg afterComma3 then
+                        parseAxesTail array op (Some initE) afterComma3
+                    else
+                        let line, col = currentPos afterComma3
+                        error "reduce takes at most three positional arguments (array, kernel, init); \
+the axis count is the named final argument `axes = n`" line col
 
     // conj(x): complex conjugate (identity on real). Lowers to ExprUnaryOp(OpConj, _).
     | Some (TokKeyword KwConj) ->
@@ -2405,6 +2493,37 @@ and parseLetAnnotation (afterPat: Token list) : ParseResult<TypeExpr option> =
         | Error _ -> success None afterPat
     | _ -> success None afterPat
 
+/// The LHS of a `let`, in BOTH spellings: a single pattern, or a BARE COMMA
+/// LIST (`let a, b = t`). The list desugars to exactly what the parenthesized
+/// `let (a, b) = t` produces -- one `PatTuple` over the same leaves -- so
+/// there is no second destructuring mechanism to keep in step
+/// (docs/plan-array-expression-fixes.md #10, the deferred half; construction
+/// `let t = b, c` is `parseLetRhs`'s mirror image, landed the same day).
+///
+/// UNAMBIGUOUS against RHS construction, which is the reason the two halves
+/// can coexist: the LHS list is bounded by the `:` or `=` that must follow a
+/// let pattern, and the RHS list only begins after that `=`. So
+/// `let a, b = c, d` is "destructure the pair built from c and d", and no
+/// existing program changes meaning -- a comma could not previously follow a
+/// let pattern at all (it was `BL1001: Expected '=' but got ','`). The only
+/// behavioural difference on ill-formed input is which token the missing-`=`
+/// error points at.
+///
+/// Shared by all three let-parse sites (`parseLet`, `parseLetStmt`,
+/// `parseTopLevelLet`) so they cannot drift.
+and parseLetPattern (tokens: Token list) : ParseResult<Pattern> =
+    parsePattern tokens >>= fun first afterFirst ->
+    match peek afterFirst with
+    | Some TokComma ->
+        let rec rest (acc: Pattern list) (toks: Token list) : ParseResult<Pattern list> =
+            parsePattern toks >>= fun p afterP ->
+            match peek afterP with
+            | Some TokComma -> rest (p :: acc) (advance afterP)
+            | _ -> success (List.rev (p :: acc)) afterP
+        rest [] (advance afterFirst) >>= fun tail afterTail ->
+        success (mkP tokens afterTail (PatTuple (first :: tail))) afterTail
+    | _ -> success first afterFirst
+
 and parseLetRhs (tokens: Token list) : ParseResult<Expr> =
     parseExprImpl tokens >>= fun first afterFirst ->
     match peek afterFirst with
@@ -2424,7 +2543,7 @@ and parseLet (tokens: Token list) : ParseResult<Expr> =
         | Some (TokKeyword KwMut) -> BindMut, advance tokens
         | _ -> BindLet, tokens
     
-    parsePattern afterMut >>= fun pat afterPat ->
+    parseLetPattern afterMut >>= fun pat afterPat ->
     parseLetAnnotation afterPat >>= fun ty afterTy ->
 
     expect (TokOp "=") afterTy >>= fun _ afterEq ->
@@ -2940,7 +3059,7 @@ and parseLetStmt (tokens: Token list) : ParseResult<Stmt> =
         | Some (TokKeyword KwMut) -> BindMut, advance tokens
         | _ -> BindLet, tokens
 
-    parsePattern afterMut >>= fun pat afterPat ->
+    parseLetPattern afterMut >>= fun pat afterPat ->
     parseLetAnnotation afterPat >>= fun ty afterTy ->
 
     expect (TokOp "=") afterTy >>= fun _ afterEq ->
@@ -3043,7 +3162,7 @@ let parseTopLevelLet (tokens: Token list) : ParseResult<Decl> =
         | Some (TokKeyword KwMut) -> BindMut, advance tokens
         | _ -> BindLet, tokens
 
-    parsePattern afterMut >>= fun pat afterPat ->
+    parseLetPattern afterMut >>= fun pat afterPat ->
     parseLetAnnotation afterPat >>= fun ty afterTy ->
 
     expect (TokOp "=") afterTy >>= fun _ afterEq ->

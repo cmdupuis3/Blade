@@ -103,7 +103,7 @@ let a = 1
 let b = 2
 let c = 3
 let myTuple = a, b, c          // construction
-let (e, d, f) = myTuple        // destructuring — needs the parens
+let e, d, f = myTuple          // destructuring — the same spelling, mirrored
 let head :: tail = myTuple     // partial destructuring
 tail == (b, c)
 ```
@@ -111,9 +111,11 @@ tail == (b, c)
 True
 ```
 
-The unparenthesized destructuring form does *not* exist — `let e, d, f =
-myTuple` is a parse error (`BL1001`), even though the construction on the line
-above it is spelled the same way. Only the pattern side requires parens.
+Parentheses on the pattern side are optional: `let (e, d, f) = myTuple` binds
+exactly the same thing. Both halves of one statement may use the bare form at
+once — `let a, b = c, d` destructures the pair built from `c` and `d`, with no
+rule needed to arbitrate the two, because the left list is bounded by the `=`
+and the right list starts after it.
 
 A tuple doesn't need to be destructured at all; `t[k]` projects one component:
 

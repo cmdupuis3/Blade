@@ -73,7 +73,7 @@ let DIG: Array<Int64 like Idx<192>, Idx<97>> = DIG_h.vars.data |> csvd.read
 // computed in-language, no matrix needed.
 let MVAL = [0.92, 1.0, 1.08]
 let DVAL = [0.0, 1.0, 2.0]
-let digmean = reduce(method_for(range<Idx<192>>) <*> method_for(range<Idx<97>>) <@> lambda(s: Int64, k: Int64) -> DVAL(DIG(s, k)), (+)) / 18624.0
+let digmean = reduce(method_for(range<Idx<192>>) <*> method_for(range<Idx<97>>) <@> lambda(s: Int64, k: Int64) -> DVAL(DIG(s, k)), (+), axes = 2) / 18624.0
 let e0 = reduce(method_for(range<Idx<9>>) <@> lambda(g: Int64) -> 2.0 * MVAL(g % 3) / (MVAL(g % 3) + MVAL(g / 3)), (+)) / 9.0
 let r20 = reduce(method_for(range<Idx<9>>) <@> lambda(g: Int64) -> 2.0 * MVAL(g % 3) / (MVAL(g % 3) + MVAL(g / 3)) * (2.0 * MVAL(g % 3) / (MVAL(g % 3) + MVAL(g / 3))), (+)) / 9.0
 let r11 = reduce(method_for(range<Idx<27>>) <@> lambda(g: Int64) -> 2.0 * MVAL(g % 3) / (MVAL(g % 3) + MVAL((g / 3) % 3)) * (2.0 * MVAL((g / 3) % 3) / (MVAL((g / 3) % 3) + MVAL(g / 9))), (+)) / 27.0
