@@ -4092,9 +4092,28 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
 /// pre-substitution type variables, so only node-carried types are safe.
 /// Anything else returns None; the call site falls back to the function's
 /// declared type-var positions.
-let exprTypeIfKnown (expr: IRExpr) : IRType option =
+let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
     match expr with
     | CarriedType ty -> Some ty
+    // A TUPLE LITERAL carries no type of its own -- `IRTuple` is a bare
+    // component list -- so an HM call site whose argument is written
+    // `f((a, b))` learned NOTHING about the parameter's component type vars.
+    // With `f(st: Tuple<T^1, U^1>)` that leaves T and U unbound, `paramVarsCovered`
+    // false, no specialization generated, and the (dropped) HM original's call
+    // site left dangling: `blade check` passes and IR validation then reports
+    // BL6001 "unresolved type variable" plus a dangling VarId. Measured on
+    // `functions/059`'s fully-abstract spelling, `sql-group-by/029`'s
+    // `rowdotT`, and `examples/lswosa.blade`'s `hanning`/`wosa_lsdft`.
+    //
+    // Recursing COMPONENTWISE keeps the node-carried discipline this function
+    // exists to enforce: every leaf type still comes from `CarriedType`, and a
+    // tuple with even one unknown component still answers None rather than
+    // inventing a partial type.
+    | IRTuple es ->
+        let comps = es |> List.map exprTypeIfKnown
+        if comps |> List.forall Option.isSome then
+            Some (IRTTuple (comps |> List.map Option.get))
+        else None
     | _ -> None
 
 /// Unify a parameter type against an argument type, accumulating
@@ -4304,19 +4323,20 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
     // The original lambda stays in module.Functions unchanged.
     let origParamIds = func.Params |> List.map (fun p -> p.VarId) |> Set.ofList
     let lambdaClones = System.Collections.Generic.Dictionary<IRId, IRCallable>()
-    // Ids applied directly in the body (heads of IRApp). These go through the
+    // Ids applied directly in a body (heads of IRApp). These go through the
     // module-level call-site rewrite + memoized spec path, so we must NOT
     // clone them into this parent -- doing so would bypass spec dedup and
-    // leave any inner HM calls in the clone unrewritten.
-    let appliedIds =
+    // leave any inner HM calls in the clone unrewritten. Computed per body,
+    // since the discovery walk below visits clone bodies too.
+    let appliedIdsOf (body: IRExpr) =
         let acc = System.Collections.Generic.HashSet<IRId>()
         mapIRExpr (fun e ->
             (match e with
              | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
              | _ -> ())
-            e) bodyWithTypes |> ignore
+            e) body |> ignore
         acc
-    let needsClone (c: IRCallable) : bool =
+    let needsClone (appliedIds: System.Collections.Generic.HashSet<IRId>) (c: IRCallable) : bool =
         // (a) closures capturing one of this function's params, or (b)
         // HM-polymorphic callables referenced as first-class values (e.g. an
         // operator-section lambda passed as a `reduce` kernel): the
@@ -4325,13 +4345,25 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
         // callees are excluded -- they specialize via the normal spec path.
         (c.Captures |> List.exists (fun cap -> Set.contains cap.Id origParamIds))
         || (hasTypeVarsInSignature c && not (appliedIds.Contains c.Id))
-    // Walk bodyWithTypes to identify referenced lambdas needing clones.
-    let _ =
+    // Walk bodyWithTypes to identify referenced lambdas needing clones --
+    // TRANSITIVELY. A lifted kernel can reference a SECOND callable as a value
+    // (`__lambda_49`'s broadcast body holding `__lambda_48`), and that second
+    // one is visible only from inside the first one's body. Scanning the
+    // parent's body alone left it uncloned while the module-level filter
+    // dropped it for having type vars in its params, so the clone referenced a
+    // deleted id -- BL6001 "dangling VarId reference: v48" on `functions/055`.
+    // Worklist over clone bodies, terminating because `lambdaClones` is keyed
+    // by ORIGINAL id and each id is cloned at most once.
+    let pendingBodies = System.Collections.Generic.Queue<IRExpr>()
+    pendingBodies.Enqueue bodyWithTypes
+    while pendingBodies.Count > 0 do
+        let scanBody = pendingBodies.Dequeue()
+        let appliedIds = appliedIdsOf scanBody
         mapIRExpr (fun e ->
             (match e with
              | IRVar (id, _) when callables.ContainsKey id && not (lambdaClones.ContainsKey id) ->
                  let lam = callables.[id]
-                 if needsClone lam then
+                 if needsClone appliedIds lam then
                      let cloneId = builder.FreshId()
                      let newCaps =
                          lam.Captures |> List.map (fun cap ->
@@ -4371,18 +4403,29 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
                              Body = newBody
                              RetType = newRet }
                      lambdaClones.[id] <- clone
+                     pendingBodies.Enqueue newBody
              | _ -> ())
-            e) bodyWithTypes
+            e) scanBody |> ignore
 
+    // Point every reference at the CLONE. The parent's body needs its param
+    // remap as well; clone bodies already had theirs applied at construction,
+    // and only need the callable-id redirect -- but they DO need it, or a
+    // clone keeps calling the about-to-be-deleted original (the other half of
+    // the `functions/055` dangle).
+    let redirectToClones (e: IRExpr) =
+        match e with
+        | IRVar (id, _) when lambdaClones.ContainsKey id ->
+            let clone = lambdaClones.[id]
+            let funcTy = mkFuncArrow (clone.Params |> List.map (fun p -> p.Type)) clone.RetType
+            IRVar (clone.Id, funcTy)
+        | _ -> e
     let bodyRewritten =
         mapIRExpr (fun e ->
             match e with
             | IRVar (id, ty) when varIdRemap.ContainsKey id -> IRVar (varIdRemap.[id], ty)
-            | IRVar (id, _) when lambdaClones.ContainsKey id ->
-                let clone = lambdaClones.[id]
-                let funcTy = mkFuncArrow (clone.Params |> List.map (fun p -> p.Type)) clone.RetType
-                IRVar (clone.Id, funcTy)
-            | _ -> e) bodyWithTypes
+            | _ -> redirectToClones e) bodyWithTypes
+    for kv in lambdaClones |> Seq.toList do
+        lambdaClones.[kv.Key] <- { kv.Value with Body = mapIRExpr redirectToClones kv.Value.Body }
     // Name-mangle by binding signature, using the occurrence-id-independent
     // canonTypeKey so the emitted name matches the HM dedup key exactly (arrays
     // don't collapse to a colliding "T"; see canonTypeKey).
@@ -4455,8 +4498,21 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         let sitesFromSpecs =
             specMap |> Map.toList
                     |> List.collect (fun (_, spec) -> collectHMCallSites hmFuncMap spec.Body)
+        // AND CLONE BODIES, for the same reason spec bodies are scanned. A
+        // lifted kernel that calls an HM helper (`lambda(trow, srow) ->
+        // hanning((trow, srow), ..)`) is cloned-and-substituted alongside its
+        // enclosing spec, and only in the CLONE do that inner call's argument
+        // types become concrete -- in the original the helper's own signature
+        // vars are still bound to the enclosing function's vars. Without this
+        // source the helper's concrete specialization was never requested, the
+        // clone kept calling the (about-to-be-dropped) abstract original, and
+        // its still-open var reached the validator as BL6001. Measured on
+        // `examples/lswosa.blade`: `family_spectra`'s grid kernel, calling
+        // `hanning` and `wosa_lsdft`.
+        let sitesFromClones =
+            lambdaClones |> Seq.collect (fun c -> collectHMCallSites hmFuncMap c.Body) |> List.ofSeq
         let uniqueSites =
-            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs) |> List.distinct
+            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs @ sitesFromClones) |> List.distinct
 
         for (funcId, sortedBindings) in uniqueSites do
             let key = (funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
@@ -4538,7 +4594,9 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         let fromSpecs =
             specMap |> Map.toList
                     |> List.collect (fun (_, s) -> collectAllBindingsFromExpr s.Body)
-        fromFns @ fromBindings @ fromSpecs
+        let fromClones =
+            lambdaClones |> Seq.collect (fun c -> collectAllBindingsFromExpr c.Body) |> List.ofSeq
+        fromFns @ fromBindings @ fromSpecs @ fromClones
     // Group by ID; keep only IDs whose observations all agree.
     let globalBindings : Map<int, IRType> =
         allObservedBindings
@@ -4608,8 +4666,29 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                         Captures = spec.Captures |> List.map (fun c ->
                                    { c with Type = substTypeInIRType bindings c.Type }) })
 
+    // Clone bodies get the SAME treatment as ordinary and spec function
+    // bodies, and for the same two reasons: their inner HM calls must be
+    // rewritten to the specs the fixpoint generated for them (the abstract
+    // originals are dropped from `newFunctions` just below), and any residual
+    // IRTInfer -- in the body, the return type, the params, or a CAPTURE's
+    // type -- substituted out. Appending them raw left an lswosa kernel clone
+    // still calling the deleted `hanning` and carrying `T?10014` in both its
+    // body and its captured function-value type.
+    let cloneFuncs =
+        lambdaClones
+        |> List.ofSeq
+        |> List.map (fun c ->
+            let bindings = mergeBindings (unionBindingsFromExpr c.Body)
+            let bodyWithRewrittenCalls = mapIRExpr rewriteCallSite c.Body
+            let bodyWithSubstitutedTypes = substTypeInIRExpr bindings bodyWithRewrittenCalls
+            { c with Body = bodyWithSubstitutedTypes
+                     RetType = substTypeInIRType bindings c.RetType
+                     Params = c.Params |> List.map (fun p ->
+                                { p with Type = substTypeInIRType bindings p.Type })
+                     Captures = c.Captures |> List.map (fun cap ->
+                                { cap with Type = substTypeInIRType bindings cap.Type }) })
     { modul with
-        Functions = newFunctions @ specFuncs @ (lambdaClones |> List.ofSeq)
+        Functions = newFunctions @ specFuncs @ cloneFuncs
         Bindings = newBindings }
 
 /// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose

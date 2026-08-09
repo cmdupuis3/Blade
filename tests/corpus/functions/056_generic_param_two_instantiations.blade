@@ -13,16 +13,60 @@ let b = idf(7)
 // EXPECT: a = 1.5
 // EXPECT: b = 7
 
-// A rank-1 generic parameter taking two arrays of different extent. (Two
-// different ELEMENT types through one `T^1` is a separate, pre-existing hole
-// -- an Int64 array reaches g++ against a double-shaped monomorph -- and is
-// not what this pin is about; nor is `-> T^0`, which reaches IR validation
-// with the variable unresolved. Both predate this check.)
+// A rank-1 generic parameter taking two arrays of different extent. (`-> T^0`
+// still reaches IR validation with the variable unresolved; that predates this
+// check and is not what this pin is about.)
 function sumOf(v: T^1) = reduce(v, (+))
 let c = sumOf([2.5, 3.5])
 let e = sumOf([1.0, 2.0, 3.0])
 // EXPECT: c = 6
 // EXPECT: e = 6
+
+// ============================================================================
+// TWO ELEMENT TYPES THROUGH ONE `T^1`, at a body that MATERIALIZES the param.
+//
+// This used to be a hole with two distinct halves, and this block has teeth
+// against both:
+//
+//   * Give a `T^1` param its array SHAPE (any array demand in the body does --
+//     `extents`, `reduce`, a `<@>` over it) and the synthesized element used to
+//     be a plain fresh var, which zonk defaulted to Float64. The function then
+//     existed at exactly ONE element type and the second call site failed in
+//     g++ ("could not convert Array<std::complex<double>> to Array<double>").
+//     The element is now minted in the substitution's id space carrying the
+//     polymorphic mark, so IR-phase HM monomorphization specializes per call
+//     site as it did before the shape was known.
+//   * The loop's ArrayTypes snapshot hard-defaulted an unresolved element to
+//     Float64, so even WITH the parameter polymorphic the emitted body read
+//     `double x = xs[i]` out of a complex array and declared an
+//     `Array<double,1>` return.
+//
+// COMPLEX IS THE INSTANTIATION ON PURPOSE. Int64-vs-Float64 would pass for the
+// wrong reason: int64 -> double is lossless, so a body wrongly monomorphized at
+// double still compiles and still prints the right numbers. complex -> double
+// is not convertible at all, so a regression in either half is a hard g++
+// error, and a regression in the VALUES shows up in the imaginary parts below.
+function centre(xs: T^1) = {
+    let n = extents(xs)
+    let m = reduce(xs, (+)) / n
+    (xs <@> lambda(x) -> x - m) |> compute
+}
+let cre: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let ccx: Array<Complex128 like Idx<4>> = [complex(1.0, 1.0), complex(2.0, 0.0), complex(3.0, 0.0-1.0), complex(4.0, 0.0)]
+let dre = centre(cre)
+let dcx = centre(ccx)
+// EXPECT: dre = [-1.5, -0.5, 0.5, 1.5]
+// EXPECT: dcx = [(-1.5,1), (-0.5,0), (0.5,-1), (1.5,0)]
+
+// The same two instantiations through a body with NO array demand at all: the
+// map is the only thing that gives `T` its shape, and it now supplies it in a
+// named function's body (it used to be gated to lambda bodies, where the shape
+// costs nothing because the var is monomorphic anyway).
+function dbl(xs: T^1) = (xs <@> lambda(x) -> x + x) |> compute
+let ddr = dbl(cre)
+let ddc = dbl(ccx)
+// EXPECT: ddr = [2, 4, 6, 8]
+// EXPECT: ddc = [(2,2), (4,0), (6,-2), (8,0)]
 
 // The numeric tower is ONE class: an Int64 literal in a Float64 slot stays
 // legal, which is the coarseness the check depends on.

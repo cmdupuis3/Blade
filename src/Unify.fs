@@ -338,6 +338,17 @@ type Subst() =
         IRTInfer id
 
     member _.Bind(id, ty) =
+        // POLYMORPHIC MARK PROPAGATION (var-to-var only). The mark says "zonk
+        // must keep this var open; IR-phase HM monomorphization substitutes
+        // it per call site". When a marked var defers to ANOTHER var the mark
+        // has to travel with it, or the survivor gets defaulted to Float64 by
+        // zonk and the function collapses to one element type. Exactly the
+        // `CopyLiteralDefault` situation, one bind arm up. Concrete binds are
+        // untouched -- a mark on a resolved var means nothing.
+        (match ty with
+         | IRTInfer id2 when Set.contains id polymorphicIds ->
+             polymorphicIds <- Set.add id2 polymorphicIds
+         | _ -> ())
         map <- Map.add id ty map
 
     member _.TryFind(id) =
@@ -376,6 +387,15 @@ type Subst() =
 
     member _.IsPolymorphicId(id: int) : bool =
         Set.contains id polymorphicIds
+
+    /// Mint the mark on a var that was NOT created from a signature type-var
+    /// NAME. The only client is the array-shape synthesis in
+    /// `requireArrayArgMinRank`: giving a `T^k` signature var its array shape
+    /// replaces one polymorphic var with `Array<E, ..>`, and unless `E`
+    /// inherits the mark the function stops being polymorphic in its element
+    /// type at exactly the moment its shape becomes known.
+    member _.MarkPolymorphic(id: int) =
+        polymorphicIds <- Set.add id polymorphicIds
 
     member _.AddRankLowerBound(id: int, k: int) =
         if k > 0 then

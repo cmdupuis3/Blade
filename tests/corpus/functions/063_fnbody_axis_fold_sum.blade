@@ -1,0 +1,23 @@
+// TEST: Function-Body Axis Fold Over Mapped Grids
+// lswosa's `mod2` tail reduced to a pin: inside a NAMED function,
+// `reduce(a <@> sq, (+)) |> compute` is an ARRAY-VALUED axis fold (rank-2 ->
+// rank-1), and the sum of two of them is an array binop over the folds.
+// Two seams have teeth here:
+//   * the fold arrives at the function-body let dispatch DOUBLE-wrapped --
+//     the user's `|> compute` stacked on the fold's own IRCompute -- and
+//     every dispatch arm matches exactly one wrapper, so the nested form
+//     used to fall to the default arm's inline rendering and its sentinel
+//     ("array-valued elementwise kernel body ... inline combinator");
+//   * an array-valued IRReduce as a body let routes through genReduceBinding
+//     (statement form), not the scalar fold's inline IIFE.
+// Hand-checked: sq(a) = [[1,4,9],[16,25,36]] with row sums [14, 77];
+// sq(b) = [[1,1,1],[4,4,4]] with row sums [3, 12]; x = [17, 89]; total 106.
+let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let m2: Array<Float like Idx<2>, Idx<3>> = [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]
+function sq(z: Float64) = z * z
+function tailf(a: Array<Float like Idx<2>, Idx<3>>, b: Array<Float like Idx<2>, Idx<3>>) = {
+    let x = (reduce(a <@> sq, (+)) |> compute) + (reduce(b <@> sq, (+)) |> compute)
+    reduce(x, (+))
+}
+let out = tailf(m, m2)
+// EXPECT: out = 106

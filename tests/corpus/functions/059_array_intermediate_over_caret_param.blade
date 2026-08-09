@@ -18,18 +18,24 @@
 // Array<Float64 like Idx<__inferred_n>> (rank 1) but the argument component is
 // Float64 (rank 0)".
 //
-// The repair is shape-only and binds nothing: the binop stamps its own result
-// with the concrete operand's shape and leaves `U` free, because in a NAMED
-// function's body that var is the declaration's HM-polymorphic signature var
-// and binding it collapses every call site to the first one's element type
-// (see materializeArityVar's note, and arity/019's recursive fold).
+// The repair is shape-only where it can be: the binop stamps its own result
+// with the concrete operand's shape, and the ELEMENT stays a polymorphic
+// signature var, so binding a call site cannot collapse the declaration to one
+// element type (see materializeArityVar's note, and arity/019's recursive
+// fold). functions/056 pins the two-element-types half of that directly.
 //
 // SPELLING IS THE lswosa ONE ON PURPOSE -- `T<time>^1` with `T<time>` scalar
-// bounds, i.e. `hanning`'s signature verbatim. The fully abstract spelling
-// (`Tuple<T^1, U^1>`, `lower: T`) typechecks but leaves `T` unresolved at the
-// call site and is refused by IR validation (BL6001); that is a separate,
-// pre-existing hole in how a generic `T^1` param gets pinned through a tuple
-// component, not something this seam decides.
+// bounds, i.e. `hanning`'s signature verbatim.
+//
+// THE FULLY ABSTRACT SPELLING IS PINNED TOO, at the bottom of this file, and
+// used to be the interesting refusal: `Tuple<T^1, U^1>` with `lower: T`
+// typechecked and then died at IR validation with BL6001 "unresolved type
+// variable", because an HM call site whose argument is a TUPLE LITERAL learned
+// nothing about the parameter's component type vars -- `IRTuple` carries no
+// type of its own, so `exprTypeIfKnown` answered None, `paramVarsCovered` was
+// false, and no specialization was ever generated for a function the module
+// pass had already dropped. `exprTypeIfKnown` now recurses componentwise. Both
+// spellings must produce the same numbers.
 //
 // Values are the taper itself, so a regression in the ELEMENT type (rather than
 // the rank) shows up too: w_i = alpha - beta*cos(2*pi*t_i/span) with
@@ -61,3 +67,25 @@ let sw = taper((ts, ss), 0.0, 8.0)
 // return of a function whose body materialized it from a caret-shorthand param.
 let tot = reduce(sw, (+))
 // EXPECT: tot = 1.13962293049185
+
+// THE FULLY ABSTRACT SPELLING: no units, no quantity, both tuple components
+// and both scalar bounds carried by bare type variables. Same body, same
+// arguments, so it must produce the same numbers -- the only thing that
+// changes is that every type var now has to be learned from the call site, and
+// two of them are only reachable THROUGH the tuple literal.
+function taperAbs(ts_sub: Tuple<T^1, U^1>, lower: T, upper: T) = {
+    let t_sub, s_sub = ts_sub
+    let alpha = 0.53836
+    let beta = 1.0 - alpha
+    let span = upper - lower
+    let w = (t_sub <@> lambda(t) -> alpha - beta * cos(two_pi * t / span)) |> compute
+    let scale = prodsum(w, w) / extents(w)
+    (s_sub * w / sqrt(scale)) |> compute
+}
+
+let tsp: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let swAbs = taperAbs((tsp, ss), 0.0, 8.0)
+// EXPECT: swAbs = [0.293711798006901, 0.373051878450875, 0.29962392894915, 0.173235325084922]
+
+let totAbs = reduce(swAbs, (+))
+// EXPECT: totAbs = 1.13962293049185

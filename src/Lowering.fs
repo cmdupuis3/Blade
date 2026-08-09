@@ -2167,6 +2167,29 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.
         let irModule = IR.liftInlineFormsModule irModule env.Builder
+        // S2/S4, SECOND APPLICATION -- and it has to be here, not only at
+        // `lowerTypedExpr` time. `lowerArrayBinOpsModule` SYNTHESIZES fresh
+        // `IRApplyCombinator` nodes (an array-vs-array binop becomes
+        // `method_for(zip ..) <@> kernel`), and it runs long after
+        // `forceCallableBody` walked each callable's body. A synthesized
+        // combinator landing in a FUNCTION-BODY let RHS therefore arrives at
+        // codegen unforced, which is the shape genFuncBodyScoped refuses
+        // outright (BL9001, "'__vN' as a name with no declaration behind it").
+        // Measured on `examples/lswosa.blade`: `mod2`/`cos_sum`/`sin_sum` are
+        // each a sum of two rank-1 per-frequency folds, six such lets in one
+        // body.
+        //
+        // FUNCTIONS ONLY. At module level the deferred protocol is real --
+        // `genBinding`/`genComputeBinding` materialize a bare combinator under
+        // the binding's own name -- so `Bindings` is deliberately untouched.
+        // Both passes are idempotent (an already-`IRCompute`-wrapped node
+        // matches neither), so re-running over bodies that were forced at
+        // lowering changes nothing.
+        let irModule =
+            { irModule with
+                Functions =
+                    irModule.Functions
+                    |> List.map (fun f -> { f with Body = forceCallableBody f.Body }) }
         // mask+contains fusion always runs a linear scan; the semijoin
         // hash-set is a separate, not-yet-implemented optimization.
         irModule)

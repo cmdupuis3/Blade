@@ -1933,11 +1933,29 @@ let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
 /// ExprVar arm recovers a rank-1 record from env.
 ///
 /// The ELEMENT type keeps getArrayType's Float64 default whenever it is still
-/// unresolved. Inside a rank-polymorphic body a `T^1` parameter's element is
-/// only pinned at the call site, so the honest answer here is an inference var
-/// -- and codegen has no C++ spelling for one (it emits a
-/// BLADE_UNRESOLVED_ELEM_TYPE placeholder). Defaulting matches what the
-/// getArrayType fallback already supplied on this path.
+/// unresolved AND NOT HM-POLYMORPHIC. Codegen has no C++ spelling for a bare
+/// inference var (it emits a BLADE_UNRESOLVED_ELEM_TYPE placeholder), so an
+/// element nothing will ever pin has to default, and defaulting matches what
+/// the getArrayType fallback already supplied on this path.
+///
+/// A DECLARATION's signature var is the one case that does get pinned:
+/// `function f(xs: T^1)` -- once `requireArrayArgMinRank` gives `T` its shape,
+/// the element is a polymorphic-marked var that IR-phase HM monomorphization
+/// substitutes PER CALL SITE. Defaulting it here silently collapsed the
+/// function to Float64 while its PARAMETER type stayed polymorphic, so a
+/// specialization at Complex128 emitted `Array<complex<double>>` parameters
+/// around a `double` loop body and `Array<double,1>` returns ("cannot convert
+/// std::complex<double> to double in initialization").
+///
+/// NOT INSIDE A LAMBDA BODY, though, and the two guards are not the same
+/// question. A LAMBDA param may also be written `T^1` (`lambda(r: T^1) -> ...`)
+/// and its var carries the same mark, but nothing monomorphizes a lambda: it
+/// is unified with the iterated ROW type moments later, in `buildApplyInfo`.
+/// This snapshot is taken while the body is being typed, i.e. BEFORE that
+/// unification, and is never revisited -- so keeping the var here just carries
+/// an unresolvable `IRTInfer` into codegen (measured: loops/117 and sql's
+/// two-compound-operand reduce emitted "unresolved type variable T?N in element
+/// position"). Inside a lambda the Float64 default is still the right answer.
 /// AN INDEX RECORD'S `Kind` IS A STATEMENT ABOUT ONE APPLY, NOT ABOUT THE VALUE.
 /// `SDimension` means "this apply's grid iterates it"; `TDimension` means "this
 /// apply's KERNEL contributed it" -- `kernelTDims` stamps the kernel's return
@@ -1969,7 +1987,8 @@ let loopOperandArrayType (env: TypeEnv) (fallback: unit -> IRArrayType) (ty: IRT
     | ArrayElem at0 ->
         let at = reSDimOperand at0
         match env.Subst.Resolve at.ElemType with
-        | IRTInfer _ -> { at with ElemType = IRTScalar ETFloat64 }
+        | IRTInfer id when env.InLambdaBody || not (env.Subst.IsPolymorphicId id) ->
+            { at with ElemType = IRTScalar ETFloat64 }
         | _ -> at
     | _ -> fallback ()
 
@@ -2141,39 +2160,60 @@ let requireArrayArgMinRank (env: TypeEnv) (tArr: TypedExpr) (opName: string) (mi
     let resolved = env.Subst.Resolve(tArr.Type)
     match resolved with
     | ArrayElem arrTy -> Ok arrTy
-    | IRTInfer _ ->
+    | IRTInfer vid ->
         let k = max 1 minRank
-        let freshIdx i = {
-            Id = env.Builder.FreshId()
-            Rank = 1
-            Extent =
-                IRParam ((if k = 1 then sprintf "__%s_inferred_n" opName
-                          else sprintf "__%s_inferred_n%d" opName i),
+        let freshIdx i =
+            // The minted extent name carries the index record's own fresh id.
+            // These names are IDENTITY, not just display: shape
+            // monomorphization (IR.shapeMonomorphizeModules) bakes call-site
+            // extents into a spec BY NAME, so two distinct inference vars
+            // sharing a display name (`__method_for_inferred_n` minted once
+            // for a caller's param and once inside its callee) would be baked
+            // to ONE value -- measured: a grouped pipeline whose spec baked
+            // the callee's freqs-length T-dim (4) to the caller's input
+            // length (6), overflowing every row copy at runtime.
+            let idxId = env.Builder.FreshId()
+            { Id = idxId
+              Rank = 1
+              Extent =
+                IRParam ((if k = 1 then sprintf "__%s_inferred_n_%d" opName idxId
+                          else sprintf "__%s_inferred_n%d_%d" opName i idxId),
                          0, IRTNat None)
-            Symmetry = SymNone
-            Tag = None; IxKind = IxKPlain
-            Kind = SDimension
-            Dependencies = []
-        }
-        // NOTE (measured, 2026-08-09) -- this synthesis is where a `T^k`
-        // DECLARATION parameter loses its HM element polymorphism: giving `T`
-        // its shape rewrites it to `Array<E, ..>` where `E` is a plain fresh
-        // var, so zonk defaults `E` to whatever the first call site wanted and
-        // the function exists at exactly one element type. `function
-        // variance(x: T^1) = { let n = extents(x); ... }` called on a real and
-        // then a complex series fails in g++; `function dbl(xs: T^1) = xs <@>
-        // ... ` (no array demand in the body) does not, because nothing gives
-        // `T` a shape and the IR monomorphizer sees it whole. PRE-EXISTING --
-        // identical under master @3500258. The obvious repair (mint `E` in the
-        // substitution's id space and carry the polymorphic mark, propagating
-        // it on var-to-var binds) was implemented and measured: it fixes the
-        // direct case (`variance` at two element types) and then fails one
-        // level down in IR validation, because lifted lambdas and module
-        // bindings holding the still-open var are not cloned per specialization
-        // (`functions/055`, `functions/059`, and `lsdft`'s own frequency kernel
-        // all go BL6001). It needs the IR-side clone-and-specialize pass to
-        // cover those shapes first; see the report accompanying this comment.
-        let freshElem = env.Builder.FreshInferType()
+              Symmetry = SymNone
+              Tag = None; IxKind = IxKPlain
+              Kind = SDimension
+              Dependencies = []
+            }
+        // ELEMENT POLYMORPHISM SURVIVES THE SHAPE. This synthesis is where a
+        // `T^k` DECLARATION parameter used to lose its HM element
+        // polymorphism: giving `T` its shape rewrites it to `Array<E, ..>`,
+        // and with `E` a plain fresh var zonk defaulted `E` to whatever the
+        // first call site wanted, so the function existed at exactly one
+        // element type (`function variance(x: T^1) = { let n = extents(x);
+        // ... }` over a real and then a complex series failed in g++ with
+        // "could not convert Array<complex<double>> to Array<double>").
+        //
+        // Fix: when the var being given its shape is itself a signature var
+        // (IsPolymorphicId -- i.e. it came from a declared type-var NAME),
+        // mint `E` in the SUBSTITUTION's id space and carry the mark onto it.
+        // Zonk then leaves `E` open, `hasTypeVarsInParams` still sees the
+        // function as HM, and IR-phase monomorphization specializes it per
+        // call site exactly as it did before the shape was known. Subst.Bind
+        // propagates the mark on var-to-var binds so a deferral inside the
+        // body cannot drop it.
+        //
+        // Non-signature vars (an unannotated kernel parameter, a synthesized
+        // intermediate) keep the plain builder-minted var: they are
+        // monomorphic by construction and marking them would keep genuinely
+        // dead vars alive through zonk.
+        let freshElem =
+            if env.Subst.IsPolymorphicId vid then
+                let e = env.Subst.Fresh()
+                (match e with
+                 | IRTInfer eid -> env.Subst.MarkPolymorphic eid
+                 | _ -> ())
+                e
+            else env.Builder.FreshInferType()
         let freshArrType = {
             ElemType = freshElem
             IndexTypes = List.init k freshIdx
@@ -9209,13 +9249,15 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // the nested map's result was typed a scalar. Supply the shape the
         // arity constraint already forces -- see materializeArityVar.
         //
-        // LAMBDA BODIES ONLY. In a named function's body the same demand spends
-        // the declaration's HM-polymorphic signature var: `function dbl(xs: T^1)
-        // = xs <@> lambda(x) -> x + x |> compute` reaches this seam, and binding
-        // `T` here collapsed dbl to its first call site's element type and
-        // dropped the `_HM_` specializations from loops/115 and loops/116.
-        if env.InLambdaBody then
-            flatArrays |> List.iter (fun arr -> materializeArityVar env arr "map")
+        // NAMED FUNCTION BODIES TOO, since requireArrayArgMinRank now carries
+        // the polymorphic mark onto the synthesized element type. Binding `T`
+        // here used to SPEND the declaration's HM-polymorphic signature var
+        // (`function dbl(xs: T^1) = xs <@> lambda(x) -> x + x |> compute`
+        // collapsed to its first call site's element type and dropped the
+        // `_HM_` specializations from loops/115 and loops/116); with the mark,
+        // the shape is supplied and the ELEMENT stays open, so the IR
+        // monomorphizer still specializes per call site.
+        flatArrays |> List.iter (fun arr -> materializeArityVar env arr "map")
         let arrayTypes = flatArrays |> List.map (fun arr ->
             match env.Subst.Resolve arr.Type with
             | ArrayElem at -> reSDimOperand at
@@ -13106,13 +13148,11 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
         else
         let identities = arrays |> List.map (fun arr ->
             match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
-        // S1 SEAM 3, method_for orientation (see the object_for site for the
-        // lambda-bodies-only rule and the regression that bought it): a
+        // S1 SEAM 3, method_for orientation (see the object_for site): a
         // caret-shorthand `T^k` operand is an arity-constrained var, so
         // loopOperandArrayType takes its `fallback ()` branch and the loop
         // iterates a shape nobody declared. Supply the forced shape first.
-        if env.InLambdaBody then
-            tArrays |> List.iter (fun ta -> materializeArityVar env ta "method_for")
+        tArrays |> List.iter (fun ta -> materializeArityVar env ta "method_for")
         // Same stale-IRTInfer hazard as the zip arms above.
         let arrayTypes = tArrays |> List.mapi (fun i ta ->
             loopOperandArrayType env (fun () -> getArrayType env arrays.[i]) ta.Type)

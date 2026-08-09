@@ -10244,6 +10244,22 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     | _ -> 1
                 let code =
                     if outRank >= 2 then
+                        // A trailing extent the static evaluator can settle is
+                        // emitted as a literal. Everything else -- a
+                        // compiler-minted `__<op>_inferred_n` param (the length
+                        // a LENGTH-AGNOSTIC generic callee keeps abstract:
+                        // `f: V^1` -> the returned row is as long as the
+                        // argument, and the static type never learns the
+                        // number; extents are deliberately outside type
+                        // identity), or a function-scope symbolic extent whose
+                        // rendered spelling names no declared C++ identifier --
+                        // takes the size-on-first-row form below: the returned
+                        // row is self-describing at runtime (`__rowv.extents`),
+                        // so the trailing extents are read off the FIRST row
+                        // and the pool is allocated then. Runtime sizing is
+                        // correct for every one of these shapes; the static
+                        // table is kept for literals so the common pinned
+                        // shapes emit exactly as before.
                         let innerDims =
                             match info.OutputType with
                             | ArrayElem a ->
@@ -10251,8 +10267,8 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                                 |> List.skip 1
                                 |> List.map (fun ix ->
                                     match tryEvalIntIR ix.Extent with
-                                    | Some n -> sprintf "%d" n
-                                    | None -> exprToCppCtx ctx ix.Extent)
+                                    | Some n -> Some (sprintf "%d" n)
+                                    | None -> None)
                             | _ -> []
                         let innerCells =
                             [ 1 .. outRank - 1 ] |> List.map (sprintf "%s_extents[%d]" name) |> String.concat " * "
@@ -10262,22 +10278,48 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                                 [ sprintf "%s        deallocate<typename promote<%s, %d>::type, nullptr>(__rowv.data, __rowv.extents);"
                                       ind outElemStr (outRank - 1) ]
                             | _ -> []
-                        [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows" ind opNames gkName
-                          sprintf "%ssize_t %s_extents[%d] = {%s};" ind name outRank
-                              ((ngroupsExpr :: innerDims) |> String.concat ", ")
-                          sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
-                              ind outElemStr outRank name outElemStr outRank name name
-                          sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
-                        @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
-                        @ [ sprintf "%s    {" ind
-                            sprintf "%s        auto __rowv = %s;" ind bodyStr
-                            sprintf "%s        const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" ind outElemStr
-                            sprintf "%s        const size_t __rowc = (size_t)(%s);" ind innerCells
-                            sprintf "%s        %s* __rowd = nested_array_utilities::pool_base(%s.data) + (__g * __rowc);" ind outElemStr name
-                            sprintf "%s        for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];" ind ]
-                        @ freeLine
-                        @ [ sprintf "%s    }" ind
-                            sprintf "%s}" ind ]
+                        if innerDims |> List.forall Option.isSome then
+                            [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows" ind opNames gkName
+                              sprintf "%ssize_t %s_extents[%d] = {%s};" ind name outRank
+                                  ((ngroupsExpr :: (innerDims |> List.map Option.get)) |> String.concat ", ")
+                              sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
+                                  ind outElemStr outRank name outElemStr outRank name name
+                              sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+                            @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
+                            @ [ sprintf "%s    {" ind
+                                sprintf "%s        auto __rowv = %s;" ind bodyStr
+                                sprintf "%s        const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" ind outElemStr
+                                sprintf "%s        const size_t __rowc = (size_t)(%s);" ind innerCells
+                                sprintf "%s        %s* __rowd = nested_array_utilities::pool_base(%s.data) + (__g * __rowc);" ind outElemStr name
+                                sprintf "%s        for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];" ind ]
+                            @ freeLine
+                            @ [ sprintf "%s    }" ind
+                                sprintf "%s}" ind ]
+                        else
+                            // Size-on-first-row form: extents start {ngroups, 0..},
+                            // iteration 0 fills the trailing slots from the row's
+                            // own runtime extents and allocates the pool. With
+                            // zero groups nothing allocates and every consumer
+                            // iterates an honest empty shape.
+                            [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows, inner extents from the first row (length-agnostic callee)" ind opNames gkName
+                              sprintf "%ssize_t %s_extents[%d] = {%s};" ind name outRank
+                                  ((ngroupsExpr :: (innerDims |> List.map (fun d -> defaultArg d "0"))) |> String.concat ", ")
+                              sprintf "%sArray<%s, %d> %s = { nullptr, %s_extents };" ind outElemStr outRank name name
+                              sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+                            @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
+                            @ [ sprintf "%s    {" ind
+                                sprintf "%s        auto __rowv = %s;" ind bodyStr
+                                sprintf "%s        if (__g == 0) {" ind
+                                sprintf "%s            for (size_t __rx = 1; __rx < %d; __rx++) %s_extents[__rx] = __rowv.extents[__rx - 1];" ind outRank name
+                                sprintf "%s            %s.data = allocate<typename promote<%s, %d>::type, nullptr>(%s_extents);" ind name outElemStr outRank name
+                                sprintf "%s        }" ind
+                                sprintf "%s        const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" ind outElemStr
+                                sprintf "%s        const size_t __rowc = (size_t)(%s);" ind innerCells
+                                sprintf "%s        %s* __rowd = nested_array_utilities::pool_base(%s.data) + (__g * __rowc);" ind outElemStr name
+                                sprintf "%s        for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];" ind ]
+                            @ freeLine
+                            @ [ sprintf "%s    }" ind
+                                sprintf "%s}" ind ]
                     else
                         [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s" ind opNames gkName
                           sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
@@ -15537,6 +15579,15 @@ let private genFuncBodyScoped
         (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string)
         (lets: (IRId * IRExpr) list) (retExpr: IRExpr) : string list =
     let mutable currentNames = names
+    // Grouped-array registrations made by THIS body's lets (group_by ->
+    // group_keys name map). genGroupByBinding records them in its returned
+    // ctx; at module level the binding fold threads that ctx forward, and the
+    // grouped-zip peel reads it to recognize co-iterable operands. The
+    // function-body fold below constructs a fresh bodyCtx per let, so the
+    // registrations must be accumulated here and spliced into every bodyCtx --
+    // dropping them makes `method_for(zip(gt, gs))` inside a function body
+    // fall past the peel into the multi-array refusal.
+    let mutable currentGrouped = ctx.GroupedArrays
     // Indentation for genApplyCombinator emissions: the function body lives one
     // level deeper than the function declaration's ctx.Indent.
     let bodyIndent = ctx.Indent + 1
@@ -15545,6 +15596,19 @@ let private genFuncBodyScoped
         // setAllocOwner); the fold overwrites the stamp each iteration.
         setAllocOwner (Some id)
         let varName = sprintf "__v%d" id
+        // Collapse stacked IRCompute wrappers before dispatching. `compute` is
+        // idempotent at inference, but IR construction can stack the user's
+        // `|> compute` on a node that already carries its own wrap (measured:
+        // `reduce(g <@> k, (+)) |> compute` in a function body arrives as
+        // IRCompute(IRCompute(..))), and every arm below matches exactly ONE
+        // wrapper -- the nested form fell to the default arm's inline
+        // rendering and its sentinel.
+        let value =
+            let rec collapse e =
+                match e with
+                | IRCompute (IRCompute _ as inner) -> collapse inner
+                | e -> e
+            collapse value
         match value with
         | IRForRange (vid, lo, hi, forBody) ->
             // Route through genForRangeBinding -- the recursive binding-level
@@ -15553,7 +15617,7 @@ let private genFuncBodyScoped
             // exactly as they do at module level. The old inline renderer
             // here was flat: a nested IRForRange fell through exprToCpp and
             // emitted an unsupported-expression marker.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
             let tempBinding = {
                 Id = id; Name = varName; Type = IRTUnit
                 Value = value; IsConst = true; IsMutable = false
@@ -15622,7 +15686,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // not visible in the enclosing scope) and only handles the 2-array
             // accumulation form anyway. Routing through genApplyCombinator here
             // mirrors what genBinding does at the module level.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
@@ -15633,7 +15697,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // peels the IRCompute and routes to genComposeApply -- the same
             // statement form module level uses. exprToCpp has no expression
             // rendering for it.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
@@ -15647,7 +15711,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // accumulators and a loop nest -- so it routes through genBinding's
             // genReduceComputeBinding exactly as at module level. exprToCpp has
             // no expression form for it and would emit its sentinel.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
@@ -15662,7 +15726,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // at module level. Capture forwarding for the kernel resolves
             // through currentNames (the hoisted scalar lets precede this
             // entry in dependency order).
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
@@ -15676,7 +15740,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // IRArrayLit arm emits the statement form (extents + allocate +
             // per-element init). The default arm's exprToCpp has no inline
             // rendering for array literals.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
@@ -15689,12 +15753,76 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // genBinding so genVarAliasBinding's mut-copy path runs (fresh
             // alloc + pool copy). The default arm's `auto` alias would share
             // Z's storage and let mutations through `a` corrupt it.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
             }
             let (code, _) = genBinding bodyCtx tempBinding builder
+            currentNames <- Map.add id varName currentNames
+            code
+        | (IRReduce _ | IRCompute (IRReduce _)) when
+            (let inner = (match value with IRCompute e -> e | e -> e)
+             match inferExprType inner with ArrayElem _ -> true | _ -> false) ->
+            // An ARRAY-VALUED reduce (axis fold: rank-2 -> rank-1, lswosa's
+            // per-frequency segment fold `reduce(ls_e <@> mag2, (+)) |> compute`)
+            // as a function-body let, with or without the user's IRCompute
+            // wrapper. Statement-shaped -- it allocates the folded output and
+            // runs a nest -- so route through genBinding (genComputeBinding
+            // peels the wrapper, genReduceBinding emits) as at module level.
+            // The default arm's inline exprToCpp rendering only serves the
+            // SCALAR fold (a self-contained IIFE), which is why scalar reduces
+            // deliberately stay below.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let tempBinding = {
+                Id = id; Name = varName
+                Type = inferExprType (match value with IRCompute e -> e | e -> e)
+                Value = value; IsConst = false; IsMutable = true
+            }
+            let (code, _) = genBinding bodyCtx tempBinding builder
+            currentNames <- Map.add id varName currentNames
+            code
+        | IRGroupKeys _ | IRGroupBy _ ->
+            // group_keys/group_by as FUNCTION-BODY lets (lswosa's
+            // `family_spectra` shape: the whole segmentation pipeline lives
+            // inside a named function). Statement-shaped with a name-suffix
+            // ABI (`<name>__ngroups`/`__offsets`/`__perm`, read by name
+            // downstream), so route through genBinding's
+            // genGroupKeysBinding/genGroupByBinding exactly as at module
+            // level; the suffixes derive from the mapped `__v<id>` name, so
+            // downstream consumers (the grouped peel, IRGroupBy itself)
+            // resolve them through currentNames unchanged.
+            //
+            // Two module-level facts have no function-body counterpart and are
+            // reconstructed here:
+            //  - genGroupKeysBinding dispatches its three cases on the
+            //    BINDING's IRTGroupKeys type, which only a typechecked module
+            //    binding record carries (a body let is a bare (id, value)
+            //    pair, and inferExprType says IRTUnit for the opaque node).
+            //    Synthesize the DYNAMIC-DISCOVERY form: semantically valid
+            //    for every key array, merely forgoing the positional-bucket
+            //    (`Idx<N>`) optimization inside function bodies.
+            //  - genGroupByBinding registers name -> gk in GroupedArrays via
+            //    its returned ctx; capture it into currentGrouped so the
+            //    grouped-zip peel sees it.
+            let tempType =
+                match value with
+                | IRGroupKeys _ ->
+                    let dynIdx = {
+                        Id = 0; Rank = 1
+                        Extent = IRParam ("__fnbody_group_n", 0, IRTNat None)
+                        Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                        Kind = SDimension; Dependencies = []
+                    }
+                    IRTGroupKeys (dynIdx, dynIdx, None)
+                | _ -> inferExprType value
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let tempBinding = {
+                Id = id; Name = varName; Type = tempType
+                Value = value; IsConst = false; IsMutable = true
+            }
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentGrouped <- ctxAfter.GroupedArrays
             currentNames <- Map.add id varName currentNames
             code
         | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ | IRMatmul _ | IREigh _ | IRSolve _
@@ -15740,7 +15868,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         match retExpr with
         | IRCompute (IRApplyCombinator info) ->
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1 }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
             let combCode = genApplyCombinator bodyCtx retVarName info builder
             // The returned pool leaves with the value; free everything else.
             suppressAllocName retVarName
@@ -15776,7 +15904,7 @@ or return a scalar and materialize at the call site"
             // genComposeApply -- the same statement form module level uses.
             // exprToCpp has no expression rendering for it.
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1 }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
             let tempBinding = {
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
                 Value = retExpr; IsConst = false; IsMutable = true
@@ -15792,7 +15920,7 @@ or return a scalar and materialize at the call site"
             // arm is a sentinel. Reached by every kernel body whose tail is a
             // reduce over a body-local computation (plan section 1, M-A).
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1 }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
             let tempBinding = {
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
                 Value = retExpr; IsConst = false; IsMutable = true
@@ -15801,6 +15929,40 @@ or return a scalar and materialize at the call site"
             // A reduce yields a SCALAR: nothing to spare from the frees, and the
             // value is already in a local, so the frees may close before return.
             stmts @ redCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
+        | IRTranspose _ ->
+            // Transpose in RETURN position (lswosa's `family_spectra` tail:
+            // `transpose(grid, [0, 1])`). Statement-shaped -- swapped-extent
+            // alloc + axis-swapped copy -- so bind it to a __retN through
+            // genBinding's genTransposeBinding and return the name; exprToCpp
+            // has no expression form and would emit the unsupported-IR-node
+            // sentinel. The transposed pool leaves with the value, so it is
+            // spared from the scope frees by name.
+            let retVarName = sprintf "__ret%d" (builder.FreshId())
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let tempBinding = {
+                Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
+                Value = retExpr; IsConst = false; IsMutable = true
+            }
+            let (trCode, _) = genBinding bodyCtx tempBinding builder
+            suppressAllocName retVarName
+            // Return-extent ABI: genTransposeBinding declares its extents
+            // table as a frame-local `size_t[R]`, which is fine for a binding
+            // consumed in the same frame and DANGLING the moment the wrapper
+            // crosses the call boundary (the caller then reads garbage shape
+            // -- measured as an empty print and a bad_array_new_length in the
+            // next consumer). Re-wrap on a heap table before returning, the
+            // same self-describing form genObjectForApplication adopted.
+            let heapWrap =
+                match inferExprType retExpr with
+                | ArrayElem a ->
+                    let rank = arrayRank a
+                    let elemStr = elemTypeToCpp a.ElemType
+                    [ sprintf "%ssize_t* %s_hx = new size_t[%d];" indent retVarName rank
+                      sprintf "%sfor (size_t __hx = 0; __hx < %d; __hx++) %s_hx[__hx] = %s.extents[__hx];" indent rank retVarName retVarName
+                      sprintf "%sArray<%s, %d> %s_hw = { %s.data, %s_hx };" indent elemStr rank retVarName retVarName retVarName ]
+                | _ -> []
+            let retName = if heapWrap.IsEmpty then retVarName else retVarName + "_hw"
+            stmts @ trCode @ heapWrap @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retName]
         | IRArrayLit (elements, arrType) ->
             // Array literal as return value: lift to a local binding, then
             // return. `genArrayLiteral` is the statement-form generator for
@@ -15814,7 +15976,7 @@ or return a scalar and materialize at the call site"
             // via allocate<>) lives on the heap so the caller receives a
             // valid array.
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1 }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
             let arrayCode = genArrayLiteral bodyCtx retVarName elements arrType
             suppressAllocName retVarName
             stmts @ arrayCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
