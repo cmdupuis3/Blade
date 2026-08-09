@@ -19,10 +19,13 @@
 // here and must agree -- VALUE agreement is the point, since a deferral that
 // silently changed the arithmetic would still "accept".
 //
-// 2pi is written as a literal rather than a module-level `let` on purpose: a
-// module-level let captured inside a FUNCTION-BODY kernel is not forwarded to
-// the emitted C++ ("'two_pi' was not declared in this scope"), which is an
-// unrelated codegen gap that would block this pin from running.
+// 2pi rides as a module-level `let`, which also makes this the units-surface
+// witness for the capture fix pinned by functions/058: a module binding read
+// from a FUNCTION-BODY kernel used to reach the emitted C++ undeclared
+// ("'two_pi' was not declared in this scope"). It was a literal here while
+// that gap was open. Note the interaction the pair covers -- `two_pi` is a
+// dimensionless VARIABLE, not a literal, so it cannot be unit-lifted; the
+// cancellation below has to come from the deferral, not from lifting.
 // Residue twin: unit-errors/012.
 // ============================================================================
 Unit second
@@ -30,17 +33,19 @@ Unit day = 86400 * second
 Unit time: day
 Unit frequency: 1 / day
 
+let two_pi = 6.283185307179586
+
 // let-bound intermediate -- the shape that regressed
 function viaLet(freqs: T<frequency>^1, t_zero: T<time> = 0.0) = {
     freqs <@> lambda(fq) -> {
-        let w = 6.283185307179586 * fq
+        let w = two_pi * fq
         cos(w * t_zero)
     } |> compute
 }
 
 // inline -- the shape that always worked; same units, same answer
 function inline_(freqs: T<frequency>^1, t_zero: T<time> = 0.0) = {
-    freqs <@> lambda(fq) -> cos((6.283185307179586 * fq) * t_zero) |> compute
+    freqs <@> lambda(fq) -> cos((two_pi * fq) * t_zero) |> compute
 }
 
 let fs: Array<Float<frequency> like Idx<2>> = [0.0, 0.25]

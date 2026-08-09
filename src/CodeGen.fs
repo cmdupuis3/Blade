@@ -15651,6 +15651,11 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
         | t -> irTypeToCpp t
 
     let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
+    // Parity with genFuncDef (which folds captures in alongside params): a
+    // source-level `function` always has Captures = [], but the main-locality
+    // fixpoint can route a lifted callable with non-empty Captures here, and
+    // its body's IRVar references must resolve to the same names.
+    let bodyNames = funcDef.Captures |> List.fold (fun m c -> Map.add c.Id c.Name m) bodyNames
     let safeName = sanitizeCppName funcDef.Name
     // std::function type with one param type per Blade param (no companion args).
     let paramTypeList =
@@ -15743,20 +15748,50 @@ let private isComputeBinding (b: IRBinding) : bool =
 /// parameters (lifted lambdas with function-typed captures) do NOT
 /// propagate -- the call-site wrapper closes over those inside main, so the
 /// callee's main-locality never leaks into the lifted function's body.
+///
+/// A body's free variables are not just the ones it SPELLS. By the time this
+/// runs, a kernel lambda has been lifted into its own IRCallable and the body
+/// retains only `IRVar(lambdaId)` -- so a module binding the kernel reads
+/// survives only in that callable's `Captures`, and `collectVarRefsIR` (a
+/// syntactic id walk) cannot see it. Whoever NAMES the callable is the one
+/// that has to supply those captures, whether the callee is inlined into this
+/// body's loop nest or called through a genCallableWrapper that forwards them
+/// as arguments. So a body also inherits the capture obligations of every
+/// callable it names. That is the opposite direction from the paragraph above
+/// -- there, a callee's main-locality must not leak outward into a lifted
+/// body; here, a caller inherits its callee's UNMET obligations.
 let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : Set<IRId> =
     let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
-    let capturesModuleBinding (funcDef: IRFuncDef) =
-        let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-        let captureIds = funcDef.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList
-        let bound = Set.unionMany [paramIds; captureIds; funcIds]
-        let freeVars = Set.difference (collectVarRefsIR funcDef.Body) bound
-        freeVars |> Set.exists (fun id -> Map.containsKey id ctx0.VarNames)
+    let capturesById =
+        modul.Functions
+        |> List.map (fun f -> (f.Id, f.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList))
+        |> Map.ofList
+    // The callables a body NAMES, as opposed to receives: intersecting with
+    // funcIds drops params (a param's VarId is never a function id) and
+    // subtracting the body's own captures drops function-typed captures.
     let uncapturedFuncRefs =
         modul.Functions
         |> List.map (fun f ->
             let captureIds = f.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList
             (f.Id, Set.difference (Set.intersect (collectVarRefsIR f.Body) funcIds) captureIds))
         |> Map.ofList
+    let inheritedCaptures (funcDef: IRFuncDef) =
+        uncapturedFuncRefs.[funcDef.Id]
+        |> Set.fold (fun acc g ->
+            Set.union acc (Map.tryFind g capturesById |> Option.defaultValue Set.empty)) Set.empty
+    let capturesModuleBinding (funcDef: IRFuncDef) =
+        let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        let captureIds = funcDef.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList
+        let bound = Set.unionMany [paramIds; captureIds; funcIds]
+        let spelled = Set.difference (collectVarRefsIR funcDef.Body) bound
+        // Subtract `bound` AFTER the fold, never inside it: a self-recursive
+        // lifted callable names itself, and a callee whose captures are all
+        // params of THIS function is already satisfied here. Both would
+        // false-positive otherwise. Subtracting funcIds is load-bearing too --
+        // function ids are in ctx0.VarNames, so a function-typed capture would
+        // otherwise flag every caller; those are handled as edges instead.
+        let inherited = Set.difference (inheritedCaptures funcDef) bound
+        Set.union spelled inherited |> Set.exists (fun id -> Map.containsKey id ctx0.VarNames)
     let direct =
         modul.Functions
         |> List.filter capturesModuleBinding
