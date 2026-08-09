@@ -2171,6 +2171,29 @@ let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResu
 /// failure leaves the var exactly as it was for the pre-existing diagnostic to
 /// report. Non-arity vars are left alone -- an unannotated kernel parameter is
 /// one of those and may still resolve to a scalar.
+///
+/// THE DEMAND IS NOT FREE, and both of its call-site restrictions were paid for
+/// in regressions. Binding a `T^k` var SPENDS it: in a named function's
+/// declaration body that var is the HM-polymorphic signature var the
+/// monomorphizer specializes on, so an unguarded demand collapses the function
+/// to one specialization -- or worse, hands codegen a synthetic shape whose
+/// invented `__..._inferred_n` extent nothing ever declares. Measured:
+///
+///   * `function packsum1(A: Poly<T^1>) -> T^1` folding `head + packsum1(tail)`
+///     lost every `_HM_..._arr_double__r1s0e2` suffix across arity/019, 020,
+///     021, 022, 024, 025, 026, 028; the recursive call vanished from the
+///     emitted C++ and the surviving loop read `arr0.extents[0]` off an
+///     undeclared name. Guard: the binop seam demands only when the OTHER
+///     operand pins the shape (there, both were unresolved).
+///   * `function dbl(xs: T^1) = xs <@> lambda(x) -> x + x |> compute`, applied
+///     to a Float array and then an Int array, collapsed to ONE specialization
+///     ("could not convert Array<long long int> to Array<double>"). Guard: the
+///     loop-former seam demands only inside a LAMBDA body, where the var is
+///     monomorphic anyway -- `buildApplyInfo` unifies a kernel param with the
+///     iterated row type moments later, so pre-computing can only agree with
+///     what unification was about to do.
+///
+/// Both guards live at the call sites, since they differ per seam.
 let materializeArityVar (env: TypeEnv) (tArg: TypedExpr) (opName: string) : unit =
     match env.Subst.Resolve tArg.Type with
     | IRTInfer vid ->
@@ -7400,12 +7423,35 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // arms are chosen. See materializeArityVar: the arity constraint
             // already forces a rank-k array, so this changes when the shape
             // appears, not whether it may.
+            //
+            // ONLY WHEN THE OTHER OPERAND PINS THE SHAPE -- the second of the
+            // two restrictions this demand carries (the first, lambda bodies
+            // only, lives in materializeArityVar). When the other side is a
+            // concrete array (zip) or a concrete scalar (broadcast), the rank is
+            // already decided by this expression and unification would reach the
+            // same binding, so the demand is not speculation. When BOTH sides
+            // are unresolved -- `packsum1`'s `head + packsum1(tail)`, a plain
+            // destructure var against the function's own generic return var --
+            // nothing here knows the shape, and deferring to lowering (master's
+            // behaviour) is the correct answer.
+            let pinsShape (t: IRType) =
+                match IR.stripUnits t with
+                | ArrayElem _ -> true       // zip partner: rank decided
+                | IRTScalar _ -> true       // broadcast partner: scalar by construction
+                // `T<u>^0` lowers to a unit-annotated VAR but the caret already
+                // said rank 0, so it pins just as a scalar does. A BARE var
+                // pins nothing.
+                | IRTInfer _ -> (match t with IRTUnitAnnotated (IRTInfer _, _) -> true | _ -> false)
+                | _ -> false
             (match op with
              | (OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
                | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
                | OpAnd | OpOr) when mode = Elementwise ->
-                 materializeArityVar env tL "elementwise"
-                 materializeArityVar env tR "elementwise"
+                 // Both tested against the PRE-materialization snapshots, so
+                 // materializing one operand can never make the other look
+                 // pinned (`r1 * r2` over two `T^1` params stays deferred).
+                 if pinsShape rRes0 then materializeArityVar env tL "elementwise"
+                 if pinsShape lRes0 then materializeArityVar env tR "elementwise"
              | _ -> ())
             let lRes = env.Subst.Resolve tL.Type
             let rRes = env.Subst.Resolve tR.Type
@@ -7589,10 +7635,21 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 // already answers with the array -- `| _ -> lBare` happens to be
                 // right in that orientation -- and is left untouched, wrapper
                 // and all.
+                //
+                // A caret-shorthand `T^k` var counts as unresolved here TOO, and
+                // this is what carries M-B inside a NAMED function body, where
+                // materializeArityVar deliberately abstains so HM keeps the
+                // signature var (see its note). `examples/lswosa.blade`'s
+                // `hanning` ends `(s_sub * w / sqrt(scale)) |> compute` with
+                // `s_sub: U^1` and `w` a concrete array: repairing the SHAPE
+                // makes the function's return array-typed -- which is all the
+                // caller's `reduce(sw, (+))` ever needed -- while `U` stays free
+                // for the monomorphizer. Nothing is bound; only this node's own
+                // type is stamped.
                 let resTy =
                     let unboundVar t =
                         match IR.stripUnits t with
-                        | IRTInfer vid -> (env.Subst.GetArityConstraint vid).IsNone
+                        | IRTInfer _ -> true
                         | _ -> false
                     let reshape (arr: IRArrayType) =
                         match IR.getUnits resTy0 with
@@ -8979,7 +9036,14 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // is an arity-constrained var, not an IRTArray, so it landed there and
         // the nested map's result was typed a scalar. Supply the shape the
         // arity constraint already forces -- see materializeArityVar.
-        flatArrays |> List.iter (fun arr -> materializeArityVar env arr "map")
+        //
+        // LAMBDA BODIES ONLY. In a named function's body the same demand spends
+        // the declaration's HM-polymorphic signature var: `function dbl(xs: T^1)
+        // = xs <@> lambda(x) -> x + x |> compute` reaches this seam, and binding
+        // `T` here collapsed dbl to its first call site's element type and
+        // dropped the `_HM_` specializations from loops/115 and loops/116.
+        if env.InLambdaBody then
+            flatArrays |> List.iter (fun arr -> materializeArityVar env arr "map")
         let arrayTypes = flatArrays |> List.map (fun arr ->
             match env.Subst.Resolve arr.Type with
             | ArrayElem at -> at
@@ -12863,11 +12927,13 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
         else
         let identities = arrays |> List.map (fun arr ->
             match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
-        // S1 SEAM 3, method_for orientation (see the object_for site): a
+        // S1 SEAM 3, method_for orientation (see the object_for site for the
+        // lambda-bodies-only rule and the regression that bought it): a
         // caret-shorthand `T^k` operand is an arity-constrained var, so
         // loopOperandArrayType takes its `fallback ()` branch and the loop
         // iterates a shape nobody declared. Supply the forced shape first.
-        tArrays |> List.iter (fun ta -> materializeArityVar env ta "method_for")
+        if env.InLambdaBody then
+            tArrays |> List.iter (fun ta -> materializeArityVar env ta "method_for")
         // Same stale-IRTInfer hazard as the zip arms above.
         let arrayTypes = tArrays |> List.mapi (fun i ta ->
             loopOperandArrayType env (fun () -> getArrayType env arrays.[i]) ta.Type)

@@ -18,20 +18,30 @@
 // Array<Float64 like Idx<__inferred_n>> (rank 1) but the argument component is
 // Float64 (rank 0)".
 //
-// The demand that fixes it is the one every array INTRINSIC already issues
-// (requireArrayArgMinRank); the binop seam simply did not issue it. Note this
-// is not a guess about the shape: Unify's arity invariant already refuses to
-// bind an arity-1 var to anything but a rank-1 array, so the demand only
-// decides WHEN the shape appears.
+// The repair is shape-only and binds nothing: the binop stamps its own result
+// with the concrete operand's shape and leaves `U` free, because in a NAMED
+// function's body that var is the declaration's HM-polymorphic signature var
+// and binding it collapses every call site to the first one's element type
+// (see materializeArityVar's note, and arity/019's recursive fold).
+//
+// SPELLING IS THE lswosa ONE ON PURPOSE -- `T<time>^1` with `T<time>` scalar
+// bounds, i.e. `hanning`'s signature verbatim. The fully abstract spelling
+// (`Tuple<T^1, U^1>`, `lower: T`) typechecks but leaves `T` unresolved at the
+// call site and is refused by IR validation (BL6001); that is a separate,
+// pre-existing hole in how a generic `T^1` param gets pinned through a tuple
+// component, not something this seam decides.
 //
 // Values are the taper itself, so a regression in the ELEMENT type (rather than
 // the rank) shows up too: w_i = alpha - beta*cos(2*pi*t_i/span) with
 // alpha = 0.53836, beta = 0.46164, span = 8, then sw_i = s_i*w_i/sqrt(scale)
 // and scale = prodsum(w,w)/4.
 // ============================================================================
+Unit second
+Unit time = second
+
 let two_pi = 6.283185307179586
 
-function taper(ts_sub: Tuple<T^1, U^1>, lower: T, upper: T) = {
+function taper(ts_sub: Tuple<T<time>^1, U^1>, lower: T<time>, upper: T<time>) = {
     let t_sub, s_sub = ts_sub
     let alpha = 0.53836
     let beta = 1.0 - alpha
@@ -41,7 +51,7 @@ function taper(ts_sub: Tuple<T^1, U^1>, lower: T, upper: T) = {
     (s_sub * w / sqrt(scale)) |> compute
 }
 
-let ts: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let ts: Array<Float<time> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
 let ss: Array<Float like Idx<4>> = [1.0, 0.5, 0.25, 0.125]
 
 let sw = taper((ts, ss), 0.0, 8.0)
