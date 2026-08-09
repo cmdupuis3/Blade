@@ -422,6 +422,100 @@ let private ompPlacementCases : (string * string * string) list =
     [ ("outer_licence_pragma_on_i0", kern "omp(a: 1)" + arrays + apply, "__i0")
       ("inner_licence_pragma_on_i1", kern "omp(b: 1)" + arrays + apply, "__i1") ]
 
+/// The RAGGED / GROUPED PEEL row loop (`CodeGen.peelRowPragma`).
+///
+/// `tryRaggedPeel` and `tryGroupedZipPeel` hand-roll their `__g` row loop and
+/// bypass the generic loop-nest builder, which is the only place `genNestPragma`
+/// attaches a pragma. A `where omp(...)` clause on a kernel applied to a grouped
+/// or ragged array was therefore ACCEPTED AND SILENTLY DROPPED -- and because
+/// "asked and got serial" is byte-identical to "never asked", the drop was
+/// invisible. These cases pin both directions of the fix.
+///
+/// A SEPARATE TABLE from `ompDepthCases`, which asserts exactly one pragma
+/// PROGRAM-WIDE. That is a different claim than "one pragma for this nest" once
+/// group-by emission is in the program, and conflating them would make a future
+/// pragma elsewhere in the group-by lowering read as a failure here.
+///
+/// `None` means NO pragma anywhere and no `[omp]` marker either -- parallelism is
+/// opt-in, and the clause-deleted twins are the claim that silence stays the
+/// default so existing corpus output is unchanged.
+///
+/// KERNELS ARE LAMBDAS, NOT NAMED FUNCTIONS, deliberately: `checkOmpInternalLoop`
+/// fires only on function decls, and warns when a licensed param is an operand of
+/// an inner apply whose kernel carries no clause. A named-function spelling of
+/// the zip case could earn a stray BL4001 that has nothing to do with what these
+/// cases measure. The corpus uses the lambda spelling for these shapes anyway.
+let private peelPragmaCases : (string * string * string option) list =
+    // (name, source, the single expected pragma line -- None = no pragma at all)
+    let dynamicPragma = Some "#pragma omp parallel for schedule(dynamic)"
+    // Grouped: uneven group sizes, the shape `schedule(dynamic)` exists for.
+    let grouped body =
+        "let region = [0, 1, 0, 1, 1]\n" +
+        "let temps = [20.0, 25.0, 30.0, 22.0, 27.0]\n" +
+        "let gk = group_keys(region)\n" +
+        "let grouped = group_by(temps, gk)\n" + body
+    let groupedZip body =
+        "let region = [0, 1, 0, 1, 1]\n" +
+        "let a = [1.0, 2.0, 3.0, 4.0, 5.0]\n" +
+        "let b = [10.0, 20.0, 30.0, 40.0, 50.0]\n" +
+        "let gk = group_keys(region)\n" +
+        "let ga = group_by(a, gk)\nlet gb = group_by(b, gk)\n" + body
+    let raggedLit body =
+        "let lens: Array<Int64 like Idx<3>> = [3, 2, 1]\n" +
+        "let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]\n" + body
+    let raggedInline body =
+        "let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]\n" + body
+    let row = "Array<Float64 like RaggedIdx<_>>"
+    [ // ---- grouped, single operand: the reported case ---------------------
+      ("peel_grouped_reduce_licensed",
+       grouped (sprintf "let s = method_for(grouped) <@> lambda(g: %s) where omp(g: 1) -> reduce(g, (+)) |> compute\n" row),
+       dynamicPragma)
+      ("peel_grouped_reduce_unlicensed",
+       grouped (sprintf "let s = method_for(grouped) <@> lambda(g: %s) -> reduce(g, (+)) |> compute\n" row),
+       None)
+      // ---- grouped co-iteration (tryGroupedZipPeel) ------------------------
+      ("peel_grouped_zip_licensed",
+       groupedZip (sprintf "let d = method_for(zip(ga, gb)) <@> lambda(ra: %s, rb: %s) where omp(ra: 1) -> prodsum(ra, rb) |> compute\n" row row),
+       dynamicPragma)
+      ("peel_grouped_zip_unlicensed",
+       groupedZip (sprintf "let d = method_for(zip(ga, gb)) <@> lambda(ra: %s, rb: %s) -> prodsum(ra, rb) |> compute\n" row row),
+       None)
+      // ---- ragged LITERAL, row-consuming ----------------------------------
+      ("peel_ragged_literal_licensed",
+       raggedLit (sprintf "let s = method_for(r) <@> lambda(g: %s) where omp(g: 1) -> reduce(g, (+)) |> compute\n" row),
+       dynamicPragma)
+      ("peel_ragged_literal_unlicensed",
+       raggedLit (sprintf "let s = method_for(r) <@> lambda(g: %s) -> reduce(g, (+)) |> compute\n" row),
+       None)
+      // ---- ragged ELEMENTWISE map (the two-loop arm) ----------------------
+      // The pragma must land on `__g`; the `__k` header below it stays bare.
+      // Honouring `omp(e: 2)` would need collapse(2), and the inner bound
+      // `r.lens[__g]` is a memory load rather than affine in `__g` -- outside
+      // even OpenMP 5.0's non-rectangular collapse, so it would be ill-formed.
+      ("peel_ragged_elementwise_licensed",
+       raggedInline "let d = method_for(r) <@> lambda(e) where omp(e: 1) -> e * 2.0 |> compute\n",
+       dynamicPragma)
+      ("peel_ragged_elementwise_unlicensed",
+       raggedInline "let d = method_for(r) <@> lambda(e) -> e * 2.0 |> compute\n",
+       None) ]
+
+/// `omp(g: 0)`: REQUESTED, but licensing no level. `parseOmpArgs` accepts any
+/// `TokInt`, so this parses with `IsOmpParallel = true` and a maximum depth of 0
+/// -- which makes `peelRowPragma`'s licence-decline branch reachable, and that
+/// branch is the whole difference between declining out loud and the silent drop
+/// this change exists to fix.
+///
+/// NOT expressible in `peelPragmaCases`: its `None` arm means "no pragma AND no
+/// marker" (never asked), whereas this case must emit no pragma AND a marker.
+/// The two expectations are opposites, which is why this is its own case.
+let private peelDeclineMarkerCase : string * string =
+    ("peel_depth_zero_reports_serial",
+     "let region = [0, 1, 0, 1, 1]\n" +
+     "let temps = [20.0, 25.0, 30.0, 22.0, 27.0]\n" +
+     "let gk = group_keys(region)\n" +
+     "let grouped = group_by(temps, gk)\n" +
+     "let s = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) where omp(g: 0) -> reduce(g, (+)) |> compute\n")
+
 // ============================================================================
 // BLADE_OMP_THREADS -- the serial-emission BUILD knob
 // ============================================================================
@@ -507,6 +601,24 @@ let private ompThreadsKnobCases : (string * string * string list * string list) 
       // These emit the portable MACRO, not a `#pragma` line, because their
       // output can be space-joined into a one-line IIFE -- which is also why
       // their suppression marker is a BLOCK comment. Both facts are pinned.
+      // ---- the ragged / grouped PEEL row loop ------------------------------
+      // The peel hand-rolls its `__g` loop outside the nest builder, so it needs
+      // its own knob check; without this case the knob could silently stop
+      // covering the newest thread-emitting site. The loop below generates a
+      // knob-OFF control twin requiring `#pragma omp parallel` to be present,
+      // which is what keeps this arm from passing vacuously.
+      ("knob_ragged_peel_row_loop_suppressed",
+       "let region = [0, 1, 0, 1, 1]\n" +
+       "let temps = [20.0, 25.0, 30.0, 22.0, 27.0]\n" +
+       "let gk = group_keys(region)\n" +
+       "let grouped = group_by(temps, gk)\n" +
+       "let s = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) where omp(g: 1) -> reduce(g, (+)) |> compute\n",
+       [ marker; "for (size_t __g = 0; __g < gk__ngroups; __g++) {" ],
+       [ "#pragma omp parallel"; "schedule(dynamic)"; "omp_get_" ])
+      // ---- the intrinsic emitters (gram / matmul) --------------------------
+      // These emit the portable MACRO, not a `#pragma` line, because their
+      // output can be space-joined into a one-line IIFE -- which is also why
+      // their suppression marker is a BLOCK comment. Both facts are pinned.
       ("knob_native_matmul_gram_macros_suppressed",
        "import math as m\n" +
        "type M35 = Array<Float64 like Idx<3>, Idx<5>>\n" +
@@ -535,11 +647,27 @@ let private ompThreadsEquivalenceCases : (string * string * string) list =
     // (name, licensed source, the same program with the clause deleted)
     let arrays = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\nlet B = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]\n"
     let tri = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\nlet L = method_for(A, A, A)\n"
+    // `clause` is the ONLY textual difference between the two programs, so the
+    // comparison cannot accidentally be measuring some other edit.
+    let grouped (clause: string) =
+        "let region = [0, 1, 0, 1, 1]\n" +
+        "let temps = [20.0, 25.0, 30.0, 22.0, 27.0]\n" +
+        "let gk = group_keys(region)\n" +
+        "let grouped = group_by(temps, gk)\n" +
+        sprintf "let s = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) %s-> reduce(g, (+)) |> compute\n" clause
     [ ("knob_equals_unlicensed_map",
        "function cov(a: Float64, b: Float64) where omp(a: 1) = a * b\n" + arrays +
        "let m = object_for(cov) <@> (A, B) |> compute\n",
        "function cov(a: Float64, b: Float64) = a * b\n" + arrays +
        "let m = object_for(cov) <@> (A, B) |> compute\n")
+      // The ragged/grouped PEEL. Stronger here than for the nest cases: the peel
+      // has no `pragmaLevel`/`ompLastLevel` state to reset, so byte-identity is a
+      // direct statement that adding the licence changes NOTHING about the
+      // emitted row loop except the pragma line itself -- no reordered
+      // declarations, no altered subscripts, and in particular no reassociated
+      // per-row reduction.
+      ("knob_equals_unlicensed_grouped_peel",
+       grouped "where omp(g: 1) ", grouped "")
       ("knob_equals_unlicensed_triangular",
        tri + "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y + z\n" +
        "let R = L <@> k |> compute\n",
@@ -629,6 +757,63 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
                 resultLine Pass name (sprintf "pragma governs %s" idx)
             | Some idx -> fail name (sprintf "pragma governs %s, expected %s" idx expectedIdx)
             | None -> fail name "no pragma found"
+    // ---- the RAGGED / GROUPED PEEL row loop ----
+    // Count, exact string, AND placement in one assertion, because for this site
+    // each is separately falsifiable: the peel could emit the right pragma on the
+    // wrong loop (`group_keys` builds its own `__g` loop earlier in the program),
+    // or the right count with the wrong schedule.
+    //
+    // Placement is checked as "the next non-blank line AFTER the pragma", reusing
+    // the ompPlacementCases rule rather than searching for `for (size_t __g`
+    // directly -- a direct search would find the group_keys build loop and pass
+    // for the wrong reason.
+    for (name, src, expectedPragma) in peelPragmaCases do
+        match cppOf name src with
+        | Error e -> fail name e
+        | Ok cpp ->
+            let lines = cpp.Split('\n') |> Array.map (fun l -> l.Trim())
+            let pragmaLines = lines |> Array.filter (fun l -> l.StartsWith "#pragma omp") |> Array.toList
+            let governedIsRowLoop () =
+                lines
+                |> Array.tryFindIndex (fun l -> l.StartsWith "#pragma omp")
+                |> Option.bind (fun i -> lines |> Array.skip (i + 1) |> Array.tryFind (fun l -> l <> ""))
+                |> Option.map (fun header -> header.StartsWith "for (size_t __g = 0;")
+                |> Option.defaultValue false
+            match expectedPragma, pragmaLines with
+            | None, [] ->
+                // Parallelism is opt-in, so no pragma is only half the claim: the
+                // decline marker must be absent too, or "never asked" would be
+                // indistinguishable from "asked and was refused".
+                if cpp.Contains "[omp]" then
+                    fail name "expected no pragma and no [omp] marker, but a marker was emitted"
+                else
+                    passed <- passed + 1
+                    resultLine Pass name "serial, and silent (no clause)"
+            | None, many ->
+                fail name (sprintf "expected no pragma, got %d: %s" many.Length (String.concat " | " many))
+            | Some expected, [actual] when actual = expected ->
+                if not (governedIsRowLoop ()) then
+                    fail name "pragma emitted but does not immediately precede the peel's `__g` row loop"
+                elif cpp.Contains "[omp] requested but emitted serial" then
+                    fail name "pragma emitted AND a requested-but-serial marker -- the two are contradictory"
+                else
+                    passed <- passed + 1
+                    resultLine Pass name (sprintf "%s on __g" actual)
+            | Some expected, [actual] -> fail name (sprintf "expected `%s`, got `%s`" expected actual)
+            | Some expected, [] -> fail name (sprintf "expected `%s`, got no pragma" expected)
+            | Some expected, many ->
+                fail name (sprintf "expected one `%s`, got %d: %s" expected many.Length (String.concat " | " many))
+    // ---- the peel's licence DECLINE is audible ----
+    (let (name, src) = peelDeclineMarkerCase
+     match cppOf name src with
+     | Error e -> fail name e
+     | Ok cpp ->
+         let expected = "// [omp] requested but emitted serial: the omp(...) licence covers no level of the peeled row loop"
+         if cpp.Contains expected then
+             passed <- passed + 1
+             resultLine Pass name "decline reported in the emitted C++"
+         else
+             fail name "omp(g: 0) declined SILENTLY -- no licence-decline marker in the emitted C++")
     // ---- emission SHAPE: native gram/matmul arms, ivdep, loop direction ----
     // Compared against the source with every line's LEADING INDENT stripped:
     // these assertions are about which statements are emitted and in what

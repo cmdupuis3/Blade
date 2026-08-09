@@ -1,0 +1,57 @@
+// TEST: GroupBy Omp Licence
+// `where omp(...)` on a kernel peeled over a grouped array. The peels
+// (tryRaggedPeel / tryGroupedZipPeel) hand-roll their `__g` row loop and bypass
+// the loop-nest builder, which is the only place genNestPragma attaches a
+// pragma -- so the clause was accepted and then SILENTLY DROPPED. Because
+// "asked for omp and got serial" is byte-identical to "never asked", nothing in
+// the emitted C++ showed it.
+//
+// This file pins the VALUES; the pragma itself is pinned by the pure-codegen
+// block (`blade test omp-pragma`), since a corpus EXPECT cannot see emitted C++.
+// What the values are for: each `__g` iteration writes exactly one output cell,
+// so threading the row loop must not change a single result. Every computation
+// below is therefore written TWICE -- once licensed, once not -- against the
+// same EXPECT. A pair that disagrees is a race; a pair that agrees is the
+// property the peel's parallelization rests on.
+//
+// UNEVEN GROUPS THROUGHOUT, deliberately: the emitted pragma is
+// `schedule(dynamic)` precisely because row lengths are data-dependent, and
+// equal-sized groups would exercise none of that.
+
+// group 0 = rows 0,3,5 -> 1 + 4 + 6 = 11
+// group 1 = rows 1,4    -> 2 + 5     = 7
+// group 2 = row  2      -> 3         = 3
+let region = [0, 1, 2, 0, 1, 0]
+let vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let gk = group_keys(region)
+let grouped = group_by(vals, gk)
+
+let sums_omp = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) where omp(g: 1) -> reduce(g, (+)) |> compute
+// EXPECT: sums_omp = [11, 7, 3]
+let sums_serial = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: sums_serial = [11, 7, 3]
+
+// A bare `where omp` (no depths) is the licenseUnresolved fallback: it licenses
+// the outermost level, which at a peel IS the row loop.
+let sums_bare = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) where omp -> reduce(g, (+)) |> compute
+// EXPECT: sums_bare = [11, 7, 3]
+
+// SAME-KEYS co-iteration (tryGroupedZipPeel): k row params peeled at the same
+// __g, so one licence covers the shared row loop.
+// group 0 = rows 0,3,5 -> 1*10 + 4*40 + 6*60 = 10 + 160 + 360 = 530
+// group 1 = rows 1,4   -> 2*20 + 5*50        = 40 + 250       = 290
+// group 2 = row  2     -> 3*30               = 90
+let other = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let ga = group_by(vals, gk)
+let gb = group_by(other, gk)
+
+let dots_omp = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) where omp(ra: 1) -> prodsum(ra, rb) |> compute
+// EXPECT: dots_omp = [530, 290, 90]
+let dots_serial = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
+// EXPECT: dots_serial = [530, 290, 90]
+
+// The licence on the SECOND operand licenses the same shared row loop: there is
+// no per-argument level ownership to distinguish when every operand peels at
+// the same __g (IR.coIterLicense's "most permissive wins").
+let dots_rb = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) where omp(rb: 1) -> prodsum(ra, rb) |> compute
+// EXPECT: dots_rb = [530, 290, 90]
