@@ -1583,7 +1583,39 @@ let private runIdeCellsTests () : TH.BlockResult =
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
-        // 10. An empty notebook is a real state (a fresh .bladenb) and must
+        // 10. `Unit` is the one declaration keyword the lexer capitalises, and
+        // ReplSession.declRe used to spell it `unit` -- so a unit-declaration
+        // cell missed the declaration lane and got wrapped in `let __cellN = `,
+        // which cannot parse. It only ever showed up once `import units.SI`
+        // moved OUT of the cell, because the import matched declRe for it.
+        let unitCells =
+            [ "import units.SI"
+              "Unit day = 86400 * second"
+              "let t: T<day>^0 = 1.5" ]
+        let (code, responses, _) = drive [ cellsReq 61 "fast" nbPath unitCells; shutdownReq ]
+        let unitBody = match responses with [r] -> r | _ -> ""
+        let name = "a Unit-declaration cell is a declaration, not a wrapped expression"
+        match windowsOf unitBody with
+        | [_; (_, _, None, None); _] when code = 0 && diagCount unitBody = 0 ->
+            record name TH.Pass ""
+        | ws -> record name TH.Fail (sprintf "exit %d, %d diagnostics, windows %A: %s"
+                                             code (diagCount unitBody) ws unitBody)
+
+        // ...and a re-run of that cell has to REPLACE its earlier text, the way
+        // every other declaration does. Appending a second `Unit day` would
+        // redeclare it.
+        let (code, responses, _) =
+            drive [ cellsReq 62 "fast" nbPath
+                        [ "import units.SI"; "Unit day = 86400 * second"
+                          "Unit day = 43200 * second" ]
+                    shutdownReq ]
+        let rebindBody = match responses with [r] -> r | _ -> ""
+        let name = "a rebound Unit declaration supersedes the earlier one"
+        if code = 0 && diagCount rebindBody = 0 then record name TH.Pass ""
+        else record name TH.Fail (sprintf "exit %d, %d diagnostics: %s"
+                                          code (diagCount rebindBody) rebindBody)
+
+        // 11. An empty notebook is a real state (a fresh .bladenb) and must
         // answer like any other, not fault.
         let (code, responses, _) = drive [ cellsReq 51 "fast" nbPath []; shutdownReq ]
         let name = "an empty cell list answers with an empty windows array"

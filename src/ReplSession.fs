@@ -250,8 +250,12 @@ module ReplTypes =
 // between the REPL and the notebook would be two languages, not one.
 
 /// Top-level name a snippet (re)defines, for rebind replacement.
+///
+/// `Unit` is capitalised because the KEYWORD is (see Lexer.keywords) -- it is
+/// the one declaration keyword that is not lower-case, and both this pattern
+/// and `declRe` have to spell it the way the lexer does.
 let private bindingNameRe =
-    Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+)?|static\s+function\s+|function\s+|type\s+)([A-Za-z_][A-Za-z0-9_]*)")
+    Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+)?|static\s+function\s+|function\s+|type\s+|Unit\s+)([A-Za-z_][A-Za-z0-9_]*)")
 
 let bindingName (snippet: string) : string option =
     let m = bindingNameRe.Match snippet
@@ -305,8 +309,13 @@ let isTimingLine (l: string) =
 
 /// A snippet is a declaration iff it opens with a declaration keyword;
 /// anything else is a bare expression to evaluate and echo.
+///
+/// The alternation is CASE-SENSITIVE and must list each keyword exactly as
+/// Lexer.keywords spells it: `Unit` is capitalised, and while it was spelled
+/// `unit` here it never matched, so a `Unit d = ...` cell fell through to the
+/// bare-expression lane and was wrapped in `let __cellN = `.
 let declRe =
-    Regex(@"^\s*(let|static|function|type|struct|interface|impl|unit|import|from|module)\b")
+    Regex(@"^\s*(let|static|function|type|struct|interface|impl|Unit|import|from|module)\b")
 
 let identRe = Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
 
