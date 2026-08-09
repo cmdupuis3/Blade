@@ -377,6 +377,13 @@ type Subst() =
     member _.IsPolymorphicId(id: int) : bool =
         Set.contains id polymorphicIds
 
+    member _.MarkPolymorphic(id: int) =
+        polymorphicIds <- Set.add id polymorphicIds
+
+    member _.CopyPolymorphic(fromId: int, toId: int) =
+        if Set.contains fromId polymorphicIds then
+            polymorphicIds <- Set.add toId polymorphicIds
+
     member _.AddRankLowerBound(id: int, k: int) =
         if k > 0 then
             let cur = Map.tryFind id rankLowerBounds |> Option.defaultValue 0
@@ -614,6 +621,17 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     | IRTInfer id, ty | ty, IRTInfer id ->
         if occursIn id ty then Error (Other "Infinite type detected")
         else
+            // A var-to-var bind must carry the HM-polymorphic flag to the
+            // SURVIVING var. `polymorphicIds` is populated only at
+            // LookupOrCreateTypeVar; every arm below ends in `Bind(id, ty)`,
+            // so when `ty` is itself a var, `id`'s flag would otherwise die
+            // with the bind and Zonk would default the survivor to Float64.
+            // Seam that fires this: an UNANNOTATED return type -- unify of the
+            // body's boundary `T` against the decl's fresh retType var demoted
+            // `T` to a monomorphic Float64 function silently.
+            (match ty with
+             | IRTInfer id2 -> subst.CopyPolymorphic(id, id2)
+             | _ -> ())
             // Rank lower bound (stage-2 deduction): validate/propagate before
             // any bind. A too-low-rank array or a scalar violates the bound;
             // another inference var inherits it (max-join).
