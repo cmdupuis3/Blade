@@ -1,0 +1,39 @@
+// TEST: Tuple Width Let Ascription
+// `Tuple<N>` in a let ascription, against both the bare-comma construction
+// and the parenthesized literal. The annotation carries only the width; the
+// element types come from the value.
+//
+// Parser.parseLetAnnotation is what makes this slot report its own errors
+// (see 005/006) instead of swallowing them and failing at the `=`.
+
+let b = 1.0
+let c = 2.0
+
+let t: Tuple<2> = b, c
+let t0 = t[0]
+let t1 = t[1]
+// EXPECT: t0 = 1
+// EXPECT: t1 = 2
+
+let u: Tuple<2> = (c, b)
+let u0 = u[0]
+// EXPECT: u0 = 2
+
+let w: Tuple<3> = 1.0, 2.0, 4.0
+let ws = w[0] + w[1] + w[2]
+// EXPECT: ws = 7
+
+// Heterogeneous elements: only the width is declared, so nothing forces the
+// slots to agree.
+let h: Tuple<2> = 3, 4.5
+let h1 = h[1]
+// EXPECT: h1 = 4.5
+
+// Block position, so the ascription is exercised at parseLetStmt as well as
+// at the top level.
+function inBlock(x: Float64) -> Float64 = {
+    let q: Tuple<2> = x, x + 1.0
+    q[0] + q[1]
+}
+let blockv = inBlock(5.0)
+// EXPECT: blockv = 11

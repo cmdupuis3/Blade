@@ -1,0 +1,24 @@
+// TEST: Scale Factor In Annotation Position
+// A magnitude may LEAD a compound unit annotation, so an annotation can
+// spell exactly what a `Unit` right-hand side can. Previously a scale factor
+// parsed only when it was not the first token -- `Float<day / 2>` worked and
+// `Float<2 * pi / day>` was a parse error -- which is precisely the position
+// a conversion target gets written in.
+Unit second
+Unit radian
+Unit day = 86400 * second
+
+// The annotation names the magnitude, so the binding below converts.
+let a: Float64<86400 * second> = 1.0
+let a_day: Float64<day> = a
+
+// Symbolic and rational factors compose the same way here as on a RHS.
+let w: Float64<2 * pi / day> = 1.0
+let w_hz: Float64<second^-1> = w
+
+let h: Float64<0.5 * day> = 2.0
+let h_day: Float64<day> = h
+
+// EXPECT: a_day = 1
+// EXPECT: w_hz = 0.0000727220521664304
+// EXPECT: h_day = 1

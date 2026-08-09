@@ -1,0 +1,18 @@
+// TEST: Factory Swapped Tag Order
+// By-nominal routing: after the required positionals, a quantity-tagged
+// trailing argument routes to the slot carrying that quantity regardless of
+// its position -- swapped order computes the same values as declared order.
+// A VARIABLE already carrying the nominal routes too; an omitted slot takes
+// its default exactly as the plain defaults machinery does.
+Unit levels: 1
+Unit cmap: 1
+function plot(x: Float, n: Float<levels> = 10.0, c: Float<cmap> = 0.0) -> Float = x + n * 100.0 + c * 7.0
+let a = plot(1.0, 2.0: levels, 3.0: cmap)
+let b = plot(1.0, 3.0: cmap, 2.0: levels)
+let c = plot(1.0, 5.0: cmap)
+let n2 = (4.0: levels)
+let g = plot(1.0, n2)
+// EXPECT: a = 222
+// EXPECT: b = 222
+// EXPECT: c = 1036
+// EXPECT: g = 401

@@ -123,6 +123,13 @@ module Codes =
             "BL2001", "unbound variable"
             "BL2002", "unknown qualified name"
             "BL2003", "invalid import"
+            // BL2004..BL2006: FILE-based module resolution (ModuleResolve.fs),
+            // the layer that turns `import units.SI` into units/SI.blade before
+            // the checker ever sees the program. Separate from BL2003, which is
+            // the checker's verdict on an import it CAN see.
+            "BL2004", "module not found"
+            "BL2005", "import cycle"
+            "BL2006", "duplicate module"
             // BL3xxx: types
             "BL3001", "type mismatch"
             "BL3002", "arity mismatch"
@@ -133,6 +140,37 @@ module Codes =
             "BL3007", "invalid builtin argument"
             "BL3008", "struct construction error"
             "BL3009", "rank deduction violation"
+            // BL3010: strict quantity slots. A parameter whose declared type
+            // carries a QUANTITY (nominal unit, `Unit speed: mps`) rejects
+            // any argument not ascribed with that quantity — bare values and
+            // structurally-dimensioned values alike. Split from BL3006: the
+            // dims may agree perfectly; what is missing is the caller's
+            // ASSERTION, and the fix is an ascription, not a conversion.
+            "BL3010", "quantity argument needs ascription"
+            // BL3011: quantity names are TERMINAL in unit algebra — the
+            // nominal layer is exactly one level deep, so `Unit x = speed*m`
+            // and `Unit q: speed` are declaration-site errors.
+            "BL3011", "quantity name is terminal"
+            // BL3012: parameter-default declaration rules. Defaults are
+            // TRAILING (a required param may not follow a defaulted one) and
+            // may reference the REQUIRED params only — they evaluate at call
+            // entry, left-to-right, with just the required arguments bound.
+            "BL3012", "invalid parameter default"
+            // BL3013: factory declarations. Within one function's defaulted
+            // trailing group, quantity-typed slots must carry DISTINCT
+            // quantities — by-nominal routing needs each nominal to name
+            // exactly one slot. Declaration-site, fires even if never called.
+            "BL3013", "factory quantity slots must be distinct"
+            // BL3014: by-nominal argument routing at a call site — a slot
+            // filled twice, a tag matching no slot, or an untagged positional
+            // argument after a tagged one (ambiguous mix).
+            "BL3014", "invalid quantity-tagged argument routing"
+            // BL3015: a name on the RHS of a `Unit` declaration that is
+            // neither a declared unit nor a built-in scale constant. A unit
+            // RHS composes what is already in scope; the alternative (mint
+            // the declared name as a fresh base unit) types a misspelling
+            // into a silently wrong dimension.
+            "BL3015", "unknown unit name"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"
@@ -183,6 +221,7 @@ module Codes =
             "BL5400", "spectra elaboration error"
             "BL5500", "grad elaboration error"
             "BL5600", "sgs elaboration error"
+            "BL5700", "display elaboration error"
             // BL6xxx: IR validation
             "BL6001", "IR validation error"
             // BL7xxx: backend limits
@@ -241,6 +280,7 @@ module Codes =
                 | "BL5400" -> PhElaborate "spectra"
                 | "BL5500" -> PhElaborate "grad"
                 | "BL5600" -> PhElaborate "sgs"
+                | "BL5700" -> PhElaborate "display"
                 | _ -> PhElaborate "ml"
             | '6' -> PhIRValidate
             | '7' -> PhBackend
@@ -257,6 +297,7 @@ module Codes =
         | "spectra" -> "BL5400"
         | "grad" -> "BL5500"
         | "sgs" -> "BL5600"
+        | "display" -> "BL5700"
         | _ -> "BL5000"
 
     let ice (message: string) : Diagnostic =

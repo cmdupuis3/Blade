@@ -48,7 +48,6 @@ type TokenKind =
 and Keyword =
     | KwLet
     | KwRec
-    | KwConst
     | KwMut
     | KwStatic
     | KwFunction
@@ -151,7 +150,6 @@ type Token = {
 let keywords = 
     [ "let", KwLet
       "rec", KwRec
-      "const", KwConst
       "mut", KwMut
       "static", KwStatic
       "function", KwFunction

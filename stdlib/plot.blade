@@ -1,0 +1,113 @@
+// Blade plot module, v1 (plotly-only).
+//
+// `import plot` gives the plotting factories; each one serializes a plotly
+// figure (application/vnd.plotly.v1+json) and hands it to `display.emit`,
+// which writes ONE display frame per call (Blade-REPL/docs/display-frames.md).
+// The editor's plot panel renders the payload; nothing here knows how.
+//
+// FACTORY SHAPE. Every factory takes its REQUIRED data arrays positionally,
+// then defaulted OPTION SLOTS, each tagged with its own option-marker
+// quantity below. Slots fill by NOMINAL, in any order, flat or chained --
+//
+//     plot.contourf(x, y, z)
+//     plot.contourf(x, y, z, 20: levels, "waves": title)
+//     plot.contourf(x, y, z)("waves": title)(1: cmap)
+//
+// -- with duplicate slots, unknown tags, and ambiguous mixes rejected
+// (BL3014), and a bare value in a slot position rejected until ascribed
+// (BL3010). Omitted slots take the defaults declared here.
+//
+// STRUCTURE NOTE. The array serialization (d.json_array / d.json_num) is
+// written INLINE in each factory rather than in a shared generic helper:
+// a module-exported generic function whose body calls ANOTHER generic
+// function does not yet monomorphize across the module boundary (see the
+// plot-module report), so only String-typed helpers are shared.
+//
+// COLORMAPS, v1: an Int index into a fixed table (0 = Viridis default,
+// 1 = Plasma, 2 = Cividis, 3 = Greys, 4 = RdBu). An EnumIdx<["Viridis",...]>
+// upgrade would make the selection nominal AND checked; deferred.
+//
+// LIMITS, v1: title/label strings are inserted into the figure JSON without
+// escaping (a title containing `"` produces invalid JSON); NaN/Inf data
+// serialize as JSON-invalid tokens (plotly wants null). Deferred.
+module plot
+
+import display as d
+
+// ---- Option-marker quantities (dimensionless: the nominal IS the content) ----
+
+/// Contour count for contour/contourf (plotly `ncontours`).
+Unit levels: 1
+/// Colormap table index (see the table in `__cmap_name`).
+Unit cmap: 1
+/// Figure title (tags Strings).
+Unit title: 1
+/// X-axis label (tags Strings).
+Unit xlabel: 1
+/// Y-axis label (tags Strings).
+Unit ylabel: 1
+
+// ---- Internal helpers (exported like everything else; the __ prefix says "not API") ----
+
+/// Colormap index -> plotly colorscale name. Out-of-table indices fall back
+/// to Viridis rather than erroring: a colormap is presentation, not data.
+function __cmap_name(c: Int64<cmap>) -> String =
+    if c == 1 then "Plasma" else if c == 2 then "Cividis" else if c == 3 then "Greys" else if c == 4 then "RdBu" else "Viridis"
+
+/// The figure's layout object. Empty strings mean "no entry"; the constant
+/// `"autosize":true` tail keeps the object valid JSON whatever is omitted.
+function __layout(t: String<title>, xl: String<xlabel>, yl: String<ylabel>) -> String = {
+    let tt = if t == "" then "" else "\"title\":{\"text\":\"" + t + "\"},"
+    let xt = if xl == "" then "" else "\"xaxis\":{\"title\":{\"text\":\"" + xl + "\"}},"
+    let yt = if yl == "" then "" else "\"yaxis\":{\"title\":{\"text\":\"" + yl + "\"}},"
+    "{" + tt + xt + yt + "\"autosize\":true}"
+}
+
+/// Wrap one trace + layout into a figure and emit the frame. The meta is a
+/// string LITERAL (the display contract); everything runtime-varying --
+/// title included -- lives in the payload's layout.
+function __emit_fig(trace: String, layout: String) -> Bool =
+    d.emit("application/vnd.plotly.v1+json", "{\"data\":[" + trace + "],\"layout\":" + layout + "}", "{\"backend\":\"plotly\"}")
+
+// ---- Factories ----
+
+/// Filled contour plot of z over the x/y grid.
+function contourf(x: X^1, y: Y^1, z: Z^2,
+                  n: Int64<levels> = 10, c: Int64<cmap> = 0,
+                  t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+    let xy = "\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + ",\"z\":" + d.json_array(z)
+    let trace = "{\"type\":\"contour\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"fill\"},\"ncontours\":" + d.json_num(n) + "}"
+    __emit_fig(trace, __layout(t, xl, yl))
+}
+
+/// Line contour plot of z over the x/y grid.
+function contour(x: X^1, y: Y^1, z: Z^2,
+                 n: Int64<levels> = 10, c: Int64<cmap> = 0,
+                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+    let xy = "\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + ",\"z\":" + d.json_array(z)
+    let trace = "{\"type\":\"contour\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"lines\"},\"ncontours\":" + d.json_num(n) + "}"
+    __emit_fig(trace, __layout(t, xl, yl))
+}
+
+/// Heatmap of z over the x/y grid.
+function heatmap(x: X^1, y: Y^1, z: Z^2,
+                 c: Int64<cmap> = 0,
+                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+    let xy = "\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + ",\"z\":" + d.json_array(z)
+    let trace = "{\"type\":\"heatmap\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\"}"
+    __emit_fig(trace, __layout(t, xl, yl))
+}
+
+/// Line plot of y against x.
+function line(x: X^1, y: Y^1,
+              t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+    let trace = "{\"type\":\"scatter\",\"mode\":\"lines\",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + "}"
+    __emit_fig(trace, __layout(t, xl, yl))
+}
+
+/// Scatter plot of y against x.
+function scatter(x: X^1, y: Y^1,
+                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+    let trace = "{\"type\":\"scatter\",\"mode\":\"markers\",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + "}"
+    __emit_fig(trace, __layout(t, xl, yl))
+}

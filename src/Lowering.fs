@@ -520,12 +520,30 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRPure (lowerTypedExpr env e)
     
     | TExprCompute e ->
+        // ALREADY-EAGER FOLD: `|> compute` over a form that materializes on its
+        // own is the identity, and the IRCompute wrapper actively HIDES it.
+        // The bracketed outer product `A [op] B` lowers (lowerTypedBinOp's
+        // both-operands-are-arrays branch) to a completed application
+        // `IRApp(IRObjectFor kernel, [IRTuple [A; B]])`, which genBinding's
+        // IRApp(IRObjectFor) arm and genFuncBody's hoistLoopApps both expand
+        // into a real loop nest. Wrapped in IRCompute it instead reaches
+        // genComputeBinding, which dispatches only the deferred combinator
+        // shapes and otherwise falls through to genScalarBinding -- rendering
+        // the loop object as the LOOP_OBJECT_USED_AS_VALUE sentinel. Drop the
+        // no-op wrapper so the existing expansion paths see the application.
+        // Narrow on purpose: only the BARE application folds; IRLet-wrapped
+        // forms (the broadcast path's hoisted scalar) already work as-is.
+        //
         // CONSTANT-FILL FOLD: `replicate(N, pure(lit)) |> compute` with a
         // concrete count and a literal body is exactly an N-element array
         // literal -- lower it as IRArrayLit so it rides the array-literal
         // machinery everywhere (the general IRSequence realization is
         // main-body-only). Non-literal counts and non-constant bodies keep
         // the general combinator path.
+        let computeWrap (x: IRExpr) =
+            match x with
+            | IRApp (IRObjectFor _, _, _) -> x
+            | _ -> IRCompute x
         (match e.Kind with
          | TExprReplicate (cnt, body) ->
              (match cnt.Kind, body.Kind, texpr.Type with
@@ -534,8 +552,8 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
                          && (match inner.Kind with TExprLit _ -> true | _ -> false) ->
                   let copies = List.replicate (int n) (lowerTypedExpr env inner)
                   IRArrayLit (copies, arrTy)
-              | _ -> IRCompute (lowerTypedExpr env e))
-         | _ -> IRCompute (lowerTypedExpr env e))
+              | _ -> computeWrap (lowerTypedExpr env e))
+         | _ -> computeWrap (lowerTypedExpr env e))
     
     | TExprRead e ->
         // |> read will force the deferred provider read that load_as
@@ -585,6 +603,15 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprContains (a, v) ->
         IRContains (lowerTypedExpr env a, lowerTypedExpr env v)
+
+    | TExprDisplayEmit (head, quoted, data, metaTail) ->
+        IRDisplayEmit (head, quoted, lowerTypedExpr env data, metaTail)
+
+    | TExprDisplayJson (rank, data) ->
+        IRDisplayJson (rank, lowerTypedExpr env data)
+
+    | TExprDisplayNum data ->
+        IRDisplayNum (lowerTypedExpr env data)
     
     | TExprGroupBy (values, grouping) ->
         IRGroupBy (lowerTypedExpr env values, lowerTypedExpr env grouping)
@@ -935,6 +962,11 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
         | OpAdd -> (IRAdd, true) | OpSub -> (IRSub, false)
         | OpMul -> (IRMul, true) | OpDiv -> (IRDiv, false)
         | OpMod -> (IRMod, false) | OpCaret -> (IRCaret, false)
+        // atan2/log_base are order-sensitive, hence not commutative. No surface
+        // SECTION syntax reaches them (they are call-shaped, not operators),
+        // but map them anyway so the `_ -> IRAdd` fallback below can never
+        // silently turn one into an addition.
+        | OpMath2 name -> (IRMath2 name, false)
         | OpEq -> (IREq, true) | OpNeq -> (IRNeq, true)
         | OpLt -> (IRLt, false) | OpLe -> (IRLe, false)
         | OpGt -> (IRGt, false) | OpGe -> (IRGe, false)
@@ -1000,6 +1032,11 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
         | OpLt -> IRLt | OpLe -> IRLe
         | OpGt -> IRGt | OpGe -> IRGe
         | OpAnd -> IRAnd | OpOr -> IROr
+        // Reachable from lowerTypedBinOp's array<->scalar broadcast path:
+        // without this arm a broadcast `atan2(A, c)` that ever reached lowering
+        // directly would emit `A + c`. TypeCheck re-synthesizes the array forms
+        // as an explicit kernel today, so this is a backstop, not a live path.
+        | OpMath2 name -> IRMath2 name
         | _ -> IRAdd
     // Same resolved-type extraction as lowerTypedSection: pull the partial
     // application's param/return scalar types from the typed function type
@@ -1040,7 +1077,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
     let isArithOp = match op with
                     | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
                     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
-                    | OpAnd | OpOr -> true
+                    | OpAnd | OpOr | OpMath2 _ -> true
                     | _ -> false
     let leftIsArray = match leftExpr.Type with ArrayElem _ -> true | _ -> false
     let rightIsArray = match rightExpr.Type with ArrayElem _ -> true | _ -> false
@@ -1052,7 +1089,8 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
                    | OpDiv -> IRDiv | OpMod -> IRMod | OpCaret -> IRCaret
                    | OpEq -> IREq | OpNeq -> IRNeq
                    | OpLt -> IRLt | OpLe -> IRLe | OpGt -> IRGt | OpGe -> IRGe
-                   | OpAnd -> IRAnd | OpOr -> IROr | _ -> IRAdd
+                   | OpAnd -> IRAnd | OpOr -> IROr
+                   | OpMath2 name -> IRMath2 name | _ -> IRAdd
         // Lambda params for arithmetic ops require concrete scalar types;
         // default to Float64 if the array's elem type isn't a primitive
         // (e.g. struct or unresolved infer), since codegen would otherwise
@@ -1174,7 +1212,8 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
     | OpGe -> IRBinOp (irMode, IRGe, l, r)
     | OpAnd -> IRBinOp (irMode, IRAnd, l, r)
     | OpOr -> IRBinOp (irMode, IROr, l, r)
-    
+    | OpMath2 name -> IRBinOp (irMode, IRMath2 name, l, r)
+
     | OpApply ->
         // For <@>, symmetry info should already be in TExprApply
         // This case handles when we still have raw binop (shouldn't happen in typed AST)
@@ -1381,17 +1420,32 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         ([Choice3Of3 irTd], env)
     
     | TDeclUnit unitDecl ->
-        // Register unit in environment (same logic as untyped pipeline)
+        // Register unit in environment (same logic as the typecheck pipeline,
+        // minus the hard errors). registerUnit already rejected BOTH resolver
+        // failures -- a terminal-quantity misuse (BL3011) and an unknown name
+        // (BL3015) -- so neither Error arm is reachable for input that got
+        // this far. They stay only to keep lowering total; reaching one means
+        // env.UnitDefs here disagrees with env.Units in typecheck, which is an
+        // internal inconsistency and NOT the old warn-and-fallback (that
+        // deliberately compiled a misspelling into a fresh base unit).
+        let baseSig = unitOfDims (Map.ofList [(unitDecl.Name, 1)])
         let sig' =
             match unitDecl.Definition with
-            | None | Some UnitBase ->
-                Map.ofList [(unitDecl.Name, 1)]
+            | None | Some UnitBase -> baseSig
             | Some (UnitDerived expr) ->
                 match TypeEnv.resolveUnitExpr env.UnitDefs expr with
                 | Ok resolved -> resolved
-                | Error msg ->
-                    eprintfn "Unit error: %s" msg
-                    Map.ofList [(unitDecl.Name, 1)]
+                | Error err ->
+                    eprintfn "internal: unit '%s' resolved in typecheck but not in lowering: %s"
+                        unitDecl.Name (TypeEnv.ppUnitResolveErr err)
+                    baseSig
+            | Some (UnitQuantity expr) ->
+                match TypeEnv.resolveUnitExpr env.UnitDefs expr with
+                | Ok resolved -> { resolved with Nominal = Some unitDecl.Name }
+                | Error err ->
+                    eprintfn "internal: quantity '%s' resolved in typecheck but not in lowering: %s"
+                        unitDecl.Name (TypeEnv.ppUnitResolveErr err)
+                    { baseSig with Nominal = Some unitDecl.Name }
         let env' = { env with UnitDefs = Map.add unitDecl.Name sig' env.UnitDefs }
         ([], env')
     
@@ -2141,6 +2195,46 @@ let lowerDiag (fileName: string option) (source: string)
                     Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
     result, sm
 
+/// Multi-FILE twin of `lowerDiag`. `sources` is (path, source) in dependency
+/// order with the ENTRY LAST -- what `ModuleResolve.resolveEntry` returns --
+/// and every span keeps its own file, so the SourceMap (keyed on the same
+/// paths) renders snippets for members as readily as for the entry.
+///
+/// Parsing goes through `ModuleResolve.parseResolved` rather than
+/// `Parser.parseMultiSource` because the latter renames a header-less module
+/// after its FILE NAME, which is right for the corpus harness and wrong for an
+/// absolute path; see the note there.
+let lowerDiagMulti (sources: (string * string) list)
+    : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    let sm = Blade.Diagnostics.SourceMap.ofSources sources
+    let result =
+        match Blade.ModuleResolve.parseResolved sources with
+        | Error d -> Error [ d ]
+        | Ok program ->
+            match Blade.TypeCheck.typeCheck program with
+            | Error errors ->
+                Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
+            | Ok (typedProgram, builder, warnings) ->
+                try Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+                with ex ->
+                    Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+    result, sm
+
+/// The CLI's front door: resolve `filePath`'s imports to files, then lower the
+/// whole set.
+///
+/// A file whose imports all resolve to builtin pseudo-modules (or that has no
+/// imports at all) takes `lowerDiag` UNCHANGED -- same call, same SourceMap
+/// key, same everything -- so the overwhelmingly common single-file case
+/// cannot have been perturbed by the module layer existing.
+let lowerFileDiag (filePath: string) (source: string)
+    : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    let r = Blade.ModuleResolve.resolveEntry filePath source
+    match r.Errors, r.Files with
+    | [], [ _single ] -> lowerDiag (Some filePath) source
+    | [], files -> lowerDiagMulti (Blade.ModuleResolve.sourcesOf files)
+    | ds, _ -> Error ds, Blade.ModuleResolve.sourceMapOf r
+
 /// Harness twin of `lower`: the same parse -> typecheck -> lower pipeline and
 /// the same `Result`, but the typecheck warnings come back as coded
 /// `Diagnostic`s instead of being rendered to stderr.
@@ -2170,7 +2264,23 @@ let lowerDiag (fileName: string option) (source: string)
 /// reset the (AsyncLocal, reset-per-`typeCheck`) channels, and draining them
 /// would hand this file the PREVIOUS file's warnings.
 let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnostics.Diagnostic list =
-    match Blade.Parser.parseProgram source with
+    // Resolve FILE-BACKED imports (stdlib `units.SI`, `plot`, ...) exactly
+    // like the path-bearing entry points do, so the corpus lane exercises the
+    // same program the run/serve lanes compile. The synthetic entry path
+    // anchors the stdlib probe at the working directory (the corpus runs from
+    // the repo root, where <cwd>/stdlib exists); pseudo-modules (ml, display,
+    // ...) are exempt inside the resolver, and a source with no file imports
+    // resolves to just itself -- the historical single-source pipeline.
+    // Before this, `import units.SI` in a corpus test was a silent no-op and
+    // every unit name it was supposed to bring in degraded to a bare float.
+    let entryPath =
+        System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "__corpus_entry__.blade")
+    let r = Blade.ModuleResolve.resolveEntry entryPath source
+    match r.Errors with
+    | (d: Blade.Diagnostics.Diagnostic) :: _ ->
+        Error (sprintf "%s: %s" d.Code d.Message), []
+    | [] ->
+    match Blade.ModuleResolve.parseResolved (Blade.ModuleResolve.sourcesOf r.Files) with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
         | Ok (typedProgram, builder, _) ->
@@ -2185,8 +2295,8 @@ let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnosti
             let warnings = typeCheckWarningDiagnostics false
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs), warnings
-    | Error e ->
-        Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message), []
+    | Error d ->
+        Error (sprintf "Parse error: %s" d.Message), []
 
 /// Lower multiple source files into a single IR program with cross-module imports
 let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, string> =

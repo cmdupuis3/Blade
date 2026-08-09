@@ -1,0 +1,15 @@
+// TEST: Diag Zip In Object For Pack (diag)
+// ERROR: BL3999
+// ============================================================================
+// A `zip` BESIDE another array in one operand pack. The pack builder used to
+// splice the zip's children in as ordinary operands, so this compiled and ran
+// as a THREE-way outer product -- 2*3*3 = 18 cells instead of the 2*3 = 6 the
+// co-iteration spelling means -- with no diagnostic at all. Co-iterating a zip
+// inside an outer loop is not implemented; the shape is refused until it is.
+// Single-operand zip application (loops/106, loops/014) is unaffected.
+// ============================================================================
+let w: Array<Float like Idx<2>> = [1.0, 2.0]
+let t: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
+let s: Array<Float like Idx<3>> = [10.0, 100.0, 1000.0]
+let K = object_for(lambda(f, ti, v) -> v * f * ti)
+let grid = K <@> (w, zip(t, s)) |> compute

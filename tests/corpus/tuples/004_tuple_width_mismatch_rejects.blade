@@ -1,0 +1,17 @@
+// TEST: Tuple Width Mismatch (rejects)
+// ERROR: BL3001
+// A `Tuple<N>` annotation lowers to an IRTTuple of N fresh element variables,
+// so the width check is unify's existing equal-length IRTTuple rule
+// (Unify.fs) rather than a new diagnostic: a 2-tuple value against a
+// `Tuple<3>` slot is an ordinary type mismatch.
+//
+// This is the property Design C's substitution law rests on -- the width of a
+// tuple-typed name is STATIC, so `f(a, t)` and `f(a, (b, c))` can be made to
+// agree by the width-schema matcher (the next stage). If a width mismatch
+// were tolerated here, pack widths would be inference-dependent and the
+// matcher would have nothing to slice on.
+
+let b = 1.0
+let c = 2.0
+let t: Tuple<3> = b, c
+// EXPECT: typecheck failure -- a 2-wide value cannot fill a Tuple<3> slot

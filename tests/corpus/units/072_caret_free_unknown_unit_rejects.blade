@@ -1,0 +1,16 @@
+// TEST: Caret-Free T<unit> With An Undeclared Unit (rejects)
+// ERROR: BL3015
+// The THIRD spelling of one rule. `Float<secnd>` (the unitSlotBases arm) and
+// `T<secnd>^0` (063, the caret arm) already report an undeclared unit name;
+// under the caret-free ruling `T<secnd>` is the same type as `T<secnd>^0`, so
+// it reports it too -- routed through the same `unitSlotBases` logic with the
+// variable standing in for a base that owns a unit slot, so the three cannot
+// drift.
+//
+// Without this the misspelling would fall to the named-type fallback and
+// lower to the opaque `IRTNamed "T"`: no error, no unit, and a confusing
+// nominal mismatch at the first call.
+Unit second
+function f(t: T<secnd>) -> Float64 = 1.0
+let r = f(1.0)
+// EXPECT: typecheck failure -- 'secnd' is not a declared unit

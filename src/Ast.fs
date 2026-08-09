@@ -50,6 +50,16 @@ type BinOp =
     | OpDiv       // /
     | OpMod       // %
     | OpCaret     // ^ (power/exponentiation)
+    | OpMath2 of string  // BINARY scalar math intrinsic: atan2/log_base. No
+                         // surface OPERATOR spells this -- the surface form is
+                         // a plain call `atan2(y, x)`, which TypeCheck rewrites
+                         // to this op when the name is not user-bound (exactly
+                         // how `exp(x)` becomes the OpMath unary op). It is a
+                         // BinOp rather than a dedicated node so the whole
+                         // elementwise pipeline -- zip lifting, array/scalar
+                         // broadcast, the unit tables, loop synthesis -- applies
+                         // unchanged, and it renders as a CALL like the other
+                         // function-form binop, `^` (pow).
     // Comparison
     | OpEq        // ==
     | OpNeq       // !=
@@ -127,6 +137,26 @@ type ParallelStrategy =
     // strategy carries no payload; decomposition options can be added later.
     | Mpi
 
+/// A unit-of-measure expression: the shared grammar of Unit-declaration
+/// right-hand sides AND compound unit annotations in TYPE-ARGUMENT position
+/// (`Float<meter / second^2>`). Defined ahead of TypeExpr because
+/// TyUnitExpr embeds it (it references nothing but Ident, so hoisting it out
+/// of the UnitDecl group below is free).
+type UnitExpr =
+    | UnitNamed of Ident
+    | UnitMul of UnitExpr * UnitExpr
+    | UnitDiv of UnitExpr * UnitExpr
+    | UnitPow of UnitExpr * int
+    | UnitOne                            // the unity literal `1`: empty dims (Unit levels: 1, Unit hz = 1/seconds)
+    /// A MAGNITUDE factor: empty dims at a scale other than 1 (`Unit day =
+    /// 86400 * second`, `Unit minute = second * 60`). Held as an exact
+    /// rational -- a decimal literal is recovered from its shortest
+    /// round-trip spelling, so `0.0254 * meter` is 254/10000 and not the
+    /// binary double that literal happens to land on. `UnitOne` is the
+    /// num = den = 1 case, kept separate because it predates this node and
+    /// reads better in the reciprocal idiom `1 / seconds`.
+    | UnitScaleLit of num: bigint * den: bigint
+
 type TypeExpr =
     // Primitive types
     | TyInt32
@@ -169,6 +199,27 @@ type TypeExpr =
     | TyFunc of args: TypeExpr list * ret: TypeExpr
     // Tuple type: (T1, T2, ...)
     | TyTuple of TypeExpr list
+    /// `Tuple<N>`: the WIDTH-ONLY tuple annotation
+    /// (docs/plan-tuples-vs-arg-packs.md 6b, Design C). N is a positive
+    /// integer literal >= 2 checked by the parser -- `Tuple<0>`/`Tuple<1>`
+    /// and symbolic widths are rejected there, so every node that reaches
+    /// the checker is well-formed. Element types are INFERRED: it lowers to
+    /// `IRTTuple` of N fresh inference variables (TypeCheck.lowerTypeExpr),
+    /// exactly what `TyTuple` of N written element types would produce, so
+    /// unification, printing and codegen see one representation.
+    ///
+    /// The node is a LEAF -- it has no child TypeExpr -- which is why the
+    /// repo-wide "a new type shape silently opts out of every TypeExpr walk
+    /// lacking an arm" hazard is benign here: every such walk recurses to
+    /// find units / index types / named types INSIDE a type, and there is
+    /// nothing inside this one. Deliberately NOT a `TyNamed ("Tuple", ...)`,
+    /// so it can never be mistaken for a unit-carrying base (unitSlotBases)
+    /// or a user type.
+    ///
+    /// Kept distinct from `TyTuple` rather than desugared at parse time
+    /// because the width-schema matcher (the next stage) must dispatch on
+    /// WRITTEN syntax only -- see 5.1 of the plan.
+    | TyTupleWidth of int
     // Type variable (for parametric polymorphism)
     // Ident is a single uppercase letter (T, U, V, ...)
     // int option is the arity: None or Some 0 = scalar, Some k = rank-k array
@@ -261,6 +312,15 @@ type TypeExpr =
     | TyHalo of inner: TypeExpr * offsets: Expr
     | TyConstrained of TypeExpr * Constraint list
     | TyPoly of TypeExpr  // Poly<T^r>: arity polymorphism
+    // COMPOUND unit expression in type-argument position:
+    // `Float<meter/second>`, `Float<second^-1>`, `Float<(meter*second)^2>`,
+    // `Float<1>`. Produced only by parseTypeArg's unit-expression routing —
+    // a LONE name stays TyNamed and `name^POSITIVE-INT` stays TyVar (both
+    // unit-disambiguated at lowering), so existing grammar is untouched.
+    // Resolved through env.Units at lowering: STRUCTURAL composition only;
+    // a quantity name inside is BL3011 (terminality, same rule as Unit
+    // declaration right-hand sides — see unitAnnoTerminalError).
+    | TyUnitExpr of UnitExpr
 
 /// The second argument of `SymIdx<k, _>` / `AntisymIdx<k, _>`: the base index
 /// space the k-th symmetric (antisymmetric) power is taken over.
@@ -417,7 +477,13 @@ and ExprKind =
     | ExprGroupBy of values: Expr * grouping: Expr  // group_by(vals, gk) - apply grouping to values
     | ExprGroupKeys of keys: Expr list             // group_keys(keys1, keys2, ...) - build CSR grouping structure (compound if >1 key)
     | ExprSort of array: Expr * key: Expr          // sort(A, key) - sort array by key function (stable)
-    | ExprReduce of array: Expr * kernel: Expr * init: Expr option  // reduce(A, op[, init]) - fold innermost dim; init seeds the fold and defines the empty-array result
+    // reduce(A, op[, init][, axes = n]) - folds the innermost n axes RIGHT-TO-LEFT,
+    // n = 1 by default: a rank-k operand yields a rank-(k-n) result, and n = rank
+    // is the full fold to a scalar. `init` seeds each folded group's accumulator
+    // and defines the empty-group result. `axes` is the NAMED final argument (the
+    // third POSITIONAL slot is already the seed, so a bare int there would be
+    // ambiguous); it must be an integer literal with 1 <= n <= rank(A).
+    | ExprReduce of array: Expr * kernel: Expr * init: Expr option * axes: Expr option
     | ExprTranspose of array: Expr * dim1: int * dim2: int  // transpose(A, [d1, d2]) - swap two arity-1 SymNone axes (hard; allocates)
     | ExprDecompact of array: Expr * dim: int  // decompact(A, d) - pull the compact component at dim d out as a free Idx (hard; allocates dense)
     | ExprGram of left: Expr * right: Expr  // gram(A, B) = A * B^H: result[i][j] = sum_k A[i][k]*conj(B[j][k]). Square+Hermitian/symmetric when A,B same array; dense otherwise.
@@ -479,6 +545,12 @@ and ForSource =
 and LambdaParam = {
     Name: Ident
     Type: TypeExpr option
+    /// Default value expression (`s = 2.0` / `s: Float = 2.0`). The trailing
+    /// rule (defaults only after all required params) and the required-
+    /// params-only scope rule are enforced at declaration (BL3012); absence
+    /// resolves statically at each call/apply site, so nothing option-like
+    /// survives into codegen or the interpreter.
+    Default: Expr option
     /// Span of the parameter's NAME TOKEN alone (not the `name: Type` pair),
     /// for go-to-definition and rename. `noSpan` on the params elaborators
     /// synthesize -- they have no source text to point at.
@@ -523,7 +595,9 @@ and Binding = {
 }
 
 and BindingMut =
-    | BindConst    // let const
+    | BindConst    // INTERNAL immutable marker: minted by `let static` and the
+                   // local `function` desugar. NOT surface syntax -- there is
+                   // no `const` keyword in Blade (removed 2026-08-08).
     | BindLet      // let
     | BindMut      // let mut
 
@@ -547,6 +621,8 @@ and ParamDecl = {
     Name: Ident
     Type: TypeExpr option
     Mutability: Mutability
+    /// Default value expression -- see LambdaParam.Default.
+    Default: Expr option
     /// Span of the parameter's NAME TOKEN alone -- see LambdaParam.NameSpan.
     NameSpan: Span
 }
@@ -620,13 +696,9 @@ type UnitDecl = {
 
 and UnitDef =
     | UnitBase                           // base unit
-    | UnitDerived of UnitExpr            // derived from other units
-
-and UnitExpr =
-    | UnitNamed of Ident
-    | UnitMul of UnitExpr * UnitExpr
-    | UnitDiv of UnitExpr * UnitExpr
-    | UnitPow of UnitExpr * int
+    | UnitDerived of UnitExpr            // derived from other units (structural alias)
+    | UnitQuantity of UnitExpr           // Unit speed: mps — nominal quantity entailing the RHS dims
+    // (UnitExpr itself is defined ahead of TypeExpr — TyUnitExpr embeds it.)
 
 /// How names from an imported module are brought into scope
 type ImportStyle =

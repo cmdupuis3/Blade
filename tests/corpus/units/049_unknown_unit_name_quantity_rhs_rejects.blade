@@ -1,0 +1,8 @@
+// TEST: Unknown Unit Name In Quantity RHS (rejects)
+// ERROR: BL3015
+// The quantity arm resolves its RHS through the same path, so an unknown
+// name rejects there too. Previously this minted `speed` as a nominal over a
+// fresh base dim, so the quantity existed but entailed the wrong dimensions.
+Unit meters
+Unit seconds
+Unit speed: meters / second

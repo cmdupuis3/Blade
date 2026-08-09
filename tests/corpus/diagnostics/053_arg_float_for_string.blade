@@ -1,0 +1,8 @@
+// TEST: Diag Direct Call Float Arg For String Param (diag)
+// ERROR: BL3001 @ 7:11
+// ERROR-CONTAINS: the parameter is declared String but the argument is Float64
+// The other direction of 052. The classes are coarse on purpose -- an Int64
+// literal reaching a Float64 parameter is legal and stays legal (the numeric
+// tower is ONE class) -- but text and number never meet.
+function g(s: String) -> String = s
+let r = g(1.5)

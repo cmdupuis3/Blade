@@ -367,8 +367,18 @@ let many parser (tokens: Token list) =
         | Error _ -> Ok (List.rev acc, toks)
     loop [] tokens
 
+/// Errors that `sepBy` (and the let-annotation slot) must PROPAGATE rather
+/// than treat as "the list ends here". A code qualifies only if it can be
+/// raised exclusively after the parse has committed -- BL1004 fires only once
+/// the two-token lookahead `Tuple <` has matched in TYPE position, so there
+/// is no legitimate backtrack it could be cutting off. Without this the
+/// precise diagnostic is swallowed and the caller re-reports far away
+/// ("Expected ')' but got identifier 't'" at the parameter NAME).
+let isHardParseError (e: ParseError) : bool = e.Code = "BL1004"
+
 let sepBy parser sep (tokens: Token list) =
     match parser tokens with
+    | Error e when isHardParseError e -> Error e
     | Error _ -> Ok ([], tokens)
     | Ok (first, rest) ->
         let rec loop acc toks =
@@ -377,6 +387,7 @@ let sepBy parser sep (tokens: Token list) =
             | Ok (_, afterSep) ->
                 match parser afterSep with
                 | Ok (v, rest') -> loop (v :: acc) rest'
+                | Error e when isHardParseError e -> Error e
                 | Error _ -> Ok (List.rev acc, toks)
         loop [first] rest
 
@@ -568,6 +579,144 @@ let isNamedTypeArg (tokens: Token list) : bool =
         (match t1.Kind with TokIdent _ -> true | _ -> false) && t2.Kind = TokOp "="
     | _ -> false
 
+// Unit-expression grammar (shared by Unit-declaration right-hand sides and
+// compound type-argument annotations like `Float<meter/second^2>`). Defined
+// HERE, ahead of the parseTypeExpr group, because parseTypeArg routes into
+// it; parseUnitDecl (further down) calls it too. A unit expression never
+// contains `,` or `>`, so a sub-parse inside a type-argument list always
+// stops cleanly before the enclosing constructor's delimiters.
+
+/// Recover the EXACT rational a decimal literal denotes, from its shortest
+/// round-trip spelling rather than from the binary double it parsed to:
+/// `0.0254` is 254/10000, not the dyadic fraction that literal lands on.
+/// "R" round-trips, so the digits recovered are exactly the ones that could
+/// have been written. None for a non-finite or zero factor (caller rejects).
+let rationalOfFloatLiteral (v: float) : (bigint * bigint) option =
+    if System.Double.IsNaN v || System.Double.IsInfinity v || v = 0.0 then None
+    else
+        let s = v.ToString ("R", System.Globalization.CultureInfo.InvariantCulture)
+        // Split off an exponent suffix first ("1.5E-05"), then the point.
+        let mantissa, exp10 =
+            match s.IndexOfAny [| 'e'; 'E' |] with
+            | -1 -> s, 0
+            | i -> s.Substring (0, i), int (s.Substring (i + 1))
+        let neg = mantissa.StartsWith "-"
+        let mantissa = if neg then mantissa.Substring 1 else mantissa
+        let intPart, fracPart =
+            match mantissa.IndexOf '.' with
+            | -1 -> mantissa, ""
+            | i -> mantissa.Substring (0, i), mantissa.Substring (i + 1)
+        match System.Numerics.BigInteger.TryParse (intPart + fracPart) with
+        | false, _ -> None
+        | true, digits ->
+            let num = if neg then -digits else digits
+            // Net power of ten: fraction digits push down, the exponent
+            // suffix pushes either way.
+            let p = exp10 - fracPart.Length
+            if p >= 0 then Some (num * System.Numerics.BigInteger.Pow (bigint 10, p), bigint 1)
+            else Some (num, System.Numerics.BigInteger.Pow (bigint 10, -p))
+
+/// Parse a unit expression: meters / seconds, kg * velocity, meters^2
+let rec parseUnitExpr (tokens: Token list) : ParseResult<UnitExpr> =
+    parseUnitTerm tokens >>= fun left rest ->
+    parseUnitExprTail left rest
+
+and parseUnitExprTail (left: UnitExpr) (tokens: Token list) : ParseResult<UnitExpr> =
+    match peek tokens with
+    | Some (TokOp "*") ->
+        parseUnitTerm (advance tokens) >>= fun right rest ->
+        parseUnitExprTail (UnitMul (left, right)) rest
+    | Some (TokOp "/") ->
+        parseUnitTerm (advance tokens) >>= fun right rest ->
+        parseUnitExprTail (UnitDiv (left, right)) rest
+    | _ -> success left tokens
+
+and parseUnitTerm (tokens: Token list) : ParseResult<UnitExpr> =
+    parseUnitAtom tokens >>= fun atom rest ->
+    match peek rest with
+    | Some (TokOp "^") ->
+        let afterCaret = advance rest
+        match peek afterCaret with
+        | Some (TokInt n) -> success (UnitPow (atom, int n)) (advance afterCaret)
+        // Negative exponent (`seconds^-1`, `meters^-2`): the lexer emits the
+        // minus as its own operator token, so glue it back on here --
+        // reciprocal units (frequencies, decay coefficients) are too common
+        // to force through the a/b spelling.
+        | Some (TokOp "-") ->
+            (match peek (advance afterCaret) with
+             | Some (TokInt n) -> success (UnitPow (atom, -(int n))) (advance (advance afterCaret))
+             | _ ->
+                 let line, col = currentPos (advance afterCaret)
+                 error "Expected integer exponent after '^' in unit expression" line col)
+        | _ ->
+            let line, col = currentPos afterCaret
+            error "Expected integer exponent after '^' in unit expression" line col
+    | _ -> success atom rest
+
+and parseUnitAtom (tokens: Token list) : ParseResult<UnitExpr> =
+    match peek tokens with
+    | Some (TokIdent name) -> success (UnitNamed name) (advance tokens)
+    // The unity literal `1`: empty dims. Enables the dimensionless-quantity
+    // form (`Unit levels: 1`) and reciprocal aliases (`Unit hz = 1 / seconds`).
+    | Some (TokInt 1L) -> success UnitOne (advance tokens)
+    // A MAGNITUDE factor (`Unit day = 86400 * second`). Dimensionless, so it
+    // composes through the same mul/div/pow arms as any other atom; what it
+    // contributes is the scale, not a dim.
+    | Some (TokInt 0L) ->
+        let line, col = currentPos tokens
+        error "A unit scale factor cannot be zero (a zero-magnitude unit has no inverse)" line col
+    | Some (TokInt n) -> success (UnitScaleLit (bigint n, bigint 1)) (advance tokens)
+    | Some (TokFloat v) ->
+        (match rationalOfFloatLiteral v with
+         | Some (num, den) -> success (UnitScaleLit (num, den)) (advance tokens)
+         | None ->
+             let line, col = currentPos tokens
+             error (sprintf "'%g' is not usable as a unit scale factor (must be finite and non-zero)" v) line col)
+    | Some TokLParen ->
+        parseUnitExpr (advance tokens) >>= fun expr afterExpr ->
+        expect TokRParen afterExpr >>= fun _ remaining ->
+        success expr remaining
+    | _ ->
+        let line, col = currentPos tokens
+        error "Expected unit name, '1', or '(' in unit expression" line col
+
+/// Lookahead for a COMPOUND unit expression in type-argument position.
+/// Deliberately conservative -- it claims only shapes the type grammar
+/// cannot already mean, so every existing type-argument spelling parses
+/// exactly as before:
+///   - a LONE unit name stays TyNamed (`Float<meter>`, `Float<speed>`);
+///   - `name^INT` stays TyVar (`T^2`); a unit name there is disambiguated
+///     at LOWERING (units-first policy), not in the grammar;
+///   - claimed here: `name * ...` / `name / ...`, `name^-INT` (negative
+///     exponents never parsed before), `name^INT` followed by `*`/`/`,
+///     a leading unity `1`, a leading MAGNITUDE followed by `*`/`/`
+///     (`86400 * second`, `2 * pi / day`, `0.5 * meter`), and a
+///     parenthesized group opening with `(name *|/|^ ...` (a tuple type
+///     never continues a name that way).
+///
+/// The magnitude arms exist so an annotation can spell the same thing a
+/// `Unit` RHS can. Without them a scale factor parses only when it is not
+/// the FIRST token (`Float<day / 2>` worked, `Float<2 * pi / day>` did not),
+/// which is precisely the position a conversion target gets written in. No
+/// type argument in the language starts with a numeric literal followed by
+/// `*` or `/`, so nothing else can mean this.
+let isUnitExprArg (tokens: Token list) : bool =
+    match tokens |> List.truncate 4 |> List.map (fun t -> t.Kind) with
+    | TokInt 1L :: _ -> true
+    | TokInt _ :: TokOp "*" :: _ -> true
+    | TokInt _ :: TokOp "/" :: _ -> true
+    | TokFloat _ :: TokOp "*" :: _ -> true
+    | TokFloat _ :: TokOp "/" :: _ -> true
+    | TokIdent _ :: TokOp "*" :: _ -> true
+    | TokIdent _ :: TokOp "/" :: _ -> true
+    | TokIdent _ :: TokOp "^" :: TokOp "-" :: _ -> true
+    | TokIdent _ :: TokOp "^" :: TokInt _ :: TokOp "*" :: _ -> true
+    | TokIdent _ :: TokOp "^" :: TokInt _ :: TokOp "/" :: _ -> true
+    | TokLParen :: TokIdent _ :: TokOp "*" :: _ -> true
+    | TokLParen :: TokIdent _ :: TokOp "/" :: _ -> true
+    | TokLParen :: TokIdent _ :: TokOp "^" :: _ -> true
+    | _ -> false
+
 let rec parseTypeExpr (tokens: Token list) : ParseResult<TypeExpr> =
     parseTypeAtom tokens >>= fun first rest ->
     match peek rest with
@@ -659,6 +808,95 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         | [single] -> success single remaining
         | _ -> success (TyTuple types) remaining
 
+    // `Tuple<-2>`: the lexer glues `<-` into ONE token, so a negative width
+    // never reaches the arm below. Caught here so it gets the width
+    // diagnostic rather than falling through to `TyNamed "Tuple"` and
+    // failing at the `=` with an unrelated message.
+    | Some (TokIdent "Tuple") when (match peek (advance tokens) with Some (TokOp "<-") -> true | _ -> false) ->
+        let (line, col) = currentPos (advance tokens)
+        errorC "BL1004" "A tuple width cannot be negative: `Tuple<N>` requires an integer literal N >= 2" line col
+
+    | Some (TokIdent "Tuple") when (match peek (advance tokens) with Some (TokOp "<") -> true | _ -> false) ->
+        // `Tuple<...>` has TWO spellings, disambiguated by the ARGUMENT LIST:
+        //
+        //   * a SINGLE INTEGER LITERAL -- `Tuple<2>` -- is the WIDTH-ONLY
+        //     annotation (Design C, docs/plan-tuples-vs-arg-packs.md 6b): the
+        //     width is written, the element types are inferred.
+        //   * ANY other argument list is a COMPONENT-TYPE LIST of width
+        //     k >= 2 -- `Tuple<U^1, T<time>^1>` -- and produces exactly the
+        //     node a written `(T1, ..., Tk)` produces. `Tuple<A, B>` and
+        //     `(A, B)` are therefore THE SAME TYPE, not two types that agree:
+        //     unify's equal-length rule, printing, projection, the width
+        //     schema (`declaredTupleWidth` already counts a written `TyTuple`)
+        //     and codegen are all untouched by this spelling existing.
+        //
+        // Why both: `TyTupleWidth` lowers its element slots to FRESH
+        // inference variables and nothing at a direct call instantiates them
+        // (plan 9, `tuples/002`'s note), so a width-only tuple of ARRAYS
+        // defaults to `double` and dies in g++. With the components WRITTEN
+        // the slots are concrete, which is the whole point of this spelling.
+        //
+        // The two cannot be MIXED (`Tuple<3, Float64>`): a width is not a type
+        // and a type is not a width, so a list containing both is refused
+        // outright rather than silently given one of the two readings.
+        //
+        // Reserved-name story: this follows `Dist`'s SOFT-keyword precedent
+        // (the arm just above) rather than `Array`'s hard lexer keyword. The
+        // builtin wins in TYPE position whenever the two-token lookahead
+        // `Tuple <` matches, so a user `type Tuple<...>` can never shadow it
+        // there; a bare `Tuple` with no `<`, and every VALUE named `Tuple`,
+        // still falls through to the ordinary TyNamed / identifier paths.
+        // Making it a lexer keyword would have broken those.
+        let (ltLine, ltCol) = currentPos (advance tokens)
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        // The width reading needs the integer to be the WHOLE list, so the
+        // closing `>` (or the `>>` expectGt splits) has to follow immediately.
+        let isWidthForm =
+            match peek afterLt, peek (advance afterLt) with
+            | Some (TokInt _), Some (TokOp ">") | Some (TokInt _), Some (TokOp ">>") -> true
+            | _ -> false
+        (match peek afterLt with
+         | Some (TokInt n) when isWidthForm ->
+             // Width must be a positive integer LITERAL >= 2. A 1-tuple does
+             // not exist in Blade (`(e)` is grouping, formalism.md:1275) and
+             // the 0-tuple has no annotation spelling, so both are refused
+             // here rather than lowered into a degenerate IRTTuple. A
+             // symbolic width would make pack widths inference-dependent,
+             // which 6b rules out explicitly.
+             if n < 2L then
+                 let (line, col) = currentPos afterLt
+                 errorC "BL1004" (sprintf "Tuple<%d> is not a tuple width: `Tuple<N>` requires an integer literal N >= 2 (there is no 1-tuple -- `(e)` is grouping -- and no 0-tuple annotation)" n) line col
+             else
+                 expectGt (advance afterLt) >>= fun _ remaining ->
+                 success (TyTupleWidth (int n)) remaining
+         | Some (TokOp ">") | Some (TokOp ">>") ->
+             errorC "BL1004" "`Tuple<>` is empty: write an integer literal width (`Tuple<2>`, element types inferred) or a list of at least two component types (`Tuple<Float64, Float64>`)" ltLine ltCol
+         | _ ->
+             // COMPONENT-TYPE LIST. Hand-rolled instead of `sepBy` so that an
+             // integer in ANY position -- `Tuple<3, Float64>` and
+             // `Tuple<Float64, 3>` alike -- gets the mixture diagnostic rather
+             // than `parseTypeExpr`'s generic "unexpected token in type".
+             let rec parseComponents (acc: TypeExpr list) (toks: Token list) : ParseResult<TypeExpr list> =
+                 match peek toks with
+                 | Some (TokInt _) ->
+                     let (line, col) = currentPos toks
+                     errorC "BL1004" "`Tuple<...>` is either a single integer WIDTH (`Tuple<2>`, element types inferred) or a list of component TYPES (`Tuple<Float64, Float64>`) -- the two spellings cannot be mixed" line col
+                 | _ ->
+                     parseTypeExpr toks >>= fun ty afterTy ->
+                     match peek afterTy with
+                     | Some TokComma -> parseComponents (ty :: acc) (advance afterTy)
+                     | _ -> success (List.rev (ty :: acc)) afterTy
+             parseComponents [] afterLt >>= fun comps afterComps ->
+             expectGt afterComps >>= fun _ remaining ->
+             match comps with
+             | [_] ->
+                 // Same rule as `Tuple<1>`, one spelling up: there is no
+                 // 1-tuple, and `Tuple<T>` reads like one.
+                 errorC "BL1004" "`Tuple<T>` is not a tuple type: a component-typed `Tuple<...>` needs at least TWO component types (there is no 1-tuple -- `(e)` is grouping). For the width-only spelling write an integer literal, e.g. `Tuple<2>`." ltLine ltCol
+             | _ ->
+                 // The SAME node the written `(T1, ..., Tk)` type produces.
+                 success (TyTuple comps) remaining)
+
     | Some (TokIdent "Dist") when (match peek (advance tokens) with Some (TokOp "<") -> true | _ -> false) ->
         // Dist<order, Elem like I1, ..., Ik>: the typed dist tower
         // (ppl/NOTES.md). Order leads because it's an expression (any
@@ -706,7 +944,20 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
             afterLt |> sepBy parseTypeArg TokComma >>= fun args afterArgs ->
             expectGt afterArgs >>= fun _ remaining ->
             let line, col = currentPos afterLt
-            buildTypeApp name args line col remaining
+            buildTypeApp name args line col remaining >>= fun applied afterApplied ->
+            // A TRAILING caret after a type application is the abstract-array
+            // spelling with a unit-carrying element: `T<day>^1` is a rank-1
+            // abstract array of `T` annotated `day`, `T<day>^0` the scalar.
+            // The caret is what marks the type-VARIABLE reading of the head;
+            // without it `T<x>` keeps its ordinary named-type meaning, and a
+            // real base name under a caret (`Float<day>^1`) stays concrete.
+            // Lowering (TypeCheck.lowerTypeExpr, TyAbstractArray) decides
+            // which of the two the head is.
+            match peek afterApplied with
+            | Some (TokOp "^") ->
+                advance afterApplied |> parseRankExpr >>= fun rankExpr afterRank ->
+                success (TyAbstractArray (applied, rankExpr, None)) afterRank
+            | _ -> success applied afterApplied
         | _ ->
             success (TyNamed (name, [])) afterName
 
@@ -728,6 +979,15 @@ and parseTypeArg (tokens: Token list) : ParseResult<TypeArg> =
         let argName = match (List.head tokens).Kind with TokIdent n -> n | _ -> ""
         parseSimpleExpr (advance (advance tokens)) >>= fun value remaining ->
         success (TANamed (argName, value)) remaining
+    elif isUnitExprArg tokens then
+        // COMPOUND unit annotation (`meter/second`, `second^-1`, `1`,
+        // `(meter*second)^2`): the full Unit-declaration grammar, resolved
+        // through env.Units at lowering. The sub-parse stops at anything
+        // that is not `* / ^`, so it can never eat the `,` or closing `>`
+        // of the enclosing constructor. Lone names and `name^INT` are NOT
+        // claimed (see isUnitExprArg), so existing spellings are untouched.
+        parseUnitExpr tokens >>= fun ue remaining ->
+        success (TAPositional (TyUnitExpr ue)) remaining
     else
         parseTypeExpr tokens >>= fun ty remaining ->
         success (TAPositional ty) remaining
@@ -1998,11 +2258,31 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
             let line, col = currentPos afterComma
             error "decompact expects a single integer dimension index: decompact(A, d)" line col)
     
-    // reduce(array, op[, init]): folds the innermost dim by a binary kernel
-    // (default (+) if omitted; accepts operator sections like (+)). The
-    // optional init is the fold's initial accumulator (init (+) a0 (+) a1 ...);
-    // an empty array reduces to init, and without init empty inputs are rejected.
+    // reduce(array, op[, init][, axes = n]): folds the innermost `n` axes by a
+    // binary kernel, n = 1 by default (default kernel (+) if omitted; accepts
+    // operator sections like (+)). The optional init is each folded group's
+    // initial accumulator (init (+) a0 (+) a1 ...); an empty group reduces to
+    // init, and without init empty inputs are rejected.
+    //
+    // `axes` is a NAMED final argument, not a fourth positional one: the third
+    // POSITIONAL slot is already the seed, so a bare `reduce(A, op, 2)` would be
+    // ambiguous between "seed 2" and "fold 2 axes". Recognized by the same
+    // two-token lookahead `isNamedTypeArg` uses for `min=`/`max=` in type
+    // arguments -- an identifier immediately followed by `=`, a shape that is a
+    // hard parse error in an expression argument today, so this is a strict
+    // widening. Special-cased to `reduce`; ordinary calls have no named slots.
     | Some (TokKeyword KwReduce) ->
+        let isAxesArg (toks: Token list) =
+            match toks with
+            | t1 :: t2 :: _ ->
+                (match t1.Kind with TokIdent "axes" -> true | _ -> false) && t2.Kind = TokOp "="
+            | _ -> false
+        // `axes = n` then the closing paren. Only ever called with `isAxesArg`
+        // true, so the two leading tokens are the name and the `=`.
+        let parseAxesTail (array: Expr) (op: Expr) (initE: Expr option) (toks: Token list) =
+            parseExprImpl (advance (advance toks)) >>= fun axesE afterAxes ->
+            expect TokRParen afterAxes >>= fun _ remaining ->
+            success (mkE tokens remaining (ExprReduce (array, op, initE, Some axesE))) remaining
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         parseExprImpl afterLParen >>= fun array afterArr ->
         match peek afterArr with
@@ -2010,19 +2290,37 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
             // 1-arg form: reduce(arr) = reduce(arr, (+))
             expect TokRParen afterArr >>= fun _ remaining ->
             let sp = rangeSpan tokens remaining
-            success (mkExpr sp (ExprReduce (array, mkExpr sp (ExprSection OpAdd), None))) remaining
+            success (mkExpr sp (ExprReduce (array, mkExpr sp (ExprSection OpAdd), None, None))) remaining
         | _ ->
             expect TokComma afterArr >>= fun _ afterComma ->
+            // `reduce(A, axes = n)`: the kernel-omitted sugar, carrying an axis
+            // count. Same defaulted (+) the 1-arg form supplies.
+            if isAxesArg afterComma then
+                parseAxesTail array (mkExpr (rangeSpan tokens afterComma) (ExprSection OpAdd)) None afterComma
+            else
             parseExprImpl afterComma >>= fun op afterOp ->
             match peek afterOp with
             | Some TokRParen ->
                 expect TokRParen afterOp >>= fun _ remaining ->
-                success (mkE tokens remaining (ExprReduce (array, op, None))) remaining
+                success (mkE tokens remaining (ExprReduce (array, op, None, None))) remaining
             | _ ->
                 expect TokComma afterOp >>= fun _ afterComma2 ->
+                if isAxesArg afterComma2 then
+                    parseAxesTail array op None afterComma2
+                else
                 parseExprImpl afterComma2 >>= fun initE afterInit ->
-                expect TokRParen afterInit >>= fun _ remaining ->
-                success (mkE tokens remaining (ExprReduce (array, op, Some initE))) remaining
+                match peek afterInit with
+                | Some TokRParen ->
+                    expect TokRParen afterInit >>= fun _ remaining ->
+                    success (mkE tokens remaining (ExprReduce (array, op, Some initE, None))) remaining
+                | _ ->
+                    expect TokComma afterInit >>= fun _ afterComma3 ->
+                    if isAxesArg afterComma3 then
+                        parseAxesTail array op (Some initE) afterComma3
+                    else
+                        let line, col = currentPos afterComma3
+                        error "reduce takes at most three positional arguments (array, kernel, init); \
+the axis count is the named final argument `axes = n`" line col
 
     // conj(x): complex conjugate (identity on real). Lowers to ExprUnaryOp(OpConj, _).
     | Some (TokKeyword KwConj) ->
@@ -2144,31 +2442,110 @@ and parseLambdaParam (tokens: Token list) : ParseResult<LambdaParam> =
     // the optional annotation is consumed.
     let nameSpan = headSpan tokens
     expectIdent tokens >>= fun name afterName ->
+    // Optional default value: `name = expr` / `name: Type = expr`. The
+    // expression parser stops at `,` and `)`, so the param list's own
+    // delimiters are unaffected.
+    let withDefault ty afterTy =
+        match peek afterTy with
+        | Some (TokOp "=") ->
+            parseExprImpl (advance afterTy) >>= fun dflt remaining ->
+            success { Name = name; Type = ty; Default = Some dflt; NameSpan = nameSpan } remaining
+        | _ ->
+            success { Name = name; Type = ty; Default = None; NameSpan = nameSpan } afterTy
     match peek afterName with
     | Some TokColon ->
-        advance afterName |> parseTypeExpr >>= fun ty remaining ->
-        success { Name = name; Type = Some ty; NameSpan = nameSpan } remaining
+        advance afterName |> parseTypeExpr >>= fun ty afterTy ->
+        withDefault (Some ty) afterTy
     | _ ->
-        success { Name = name; Type = None; NameSpan = nameSpan } afterName
+        withDefault None afterName
+
+/// The right-hand side of a `let`, with the BARE-COMMA tuple construction of
+/// docs/plan-tuples-vs-arg-packs.md 6b: `let t = b, c` builds the 2-tuple
+/// `(b, c)`, `let t = a, b, c` the 3-tuple, and so on for any width >= 2.
+/// This is the CONSTRUCTION half of plan issue #10 only -- the binder side
+/// (`let a, b = t`) stays deferred, and the parenthesized `let (a, b) = t`
+/// destructure is untouched.
+///
+/// Each component parses at full expression precedence and stops at the
+/// comma (a comma is a separator, never an operator), so `let t = f(x), g(y)`
+/// is a 2-tuple of two CALLS, not `f(x, g(y))`. The node produced is exactly
+/// the `ExprTuple` a parenthesized literal produces, so the two spellings are
+/// the same program from the checker down.
+///
+/// Shared by all three let-parse sites (`parseLet`, `parseLetStmt`,
+/// `parseTopLevelLet`) so they cannot drift.
+/// The optional `: T` annotation slot of a `let`, shared by all three let
+/// sites. Historically each site inlined `match parseTypeExpr ... with Error
+/// _ -> None, afterPat` -- a type-parse failure is SWALLOWED and the site
+/// re-reports at the `=`, which turns a precise annotation diagnostic into a
+/// misleading "Expected '=' but got ':'" pointing at the colon.
+///
+/// `isHardParseError` codes are propagated instead of swallowed -- the same
+/// rule `sepBy` applies, for the same reason: a BL1004 can only be raised
+/// once the slot is unambiguously an annotation, so the fallback's tolerance
+/// for non-annotation colons is unchanged.
+and parseLetAnnotation (afterPat: Token list) : ParseResult<TypeExpr option> =
+    match peek afterPat with
+    | Some TokColon ->
+        match parseTypeExpr (advance afterPat) with
+        | Ok (t, rest) -> success (Some t) rest
+        | Error e when isHardParseError e -> Error e
+        | Error _ -> success None afterPat
+    | _ -> success None afterPat
+
+/// The LHS of a `let`, in BOTH spellings: a single pattern, or a BARE COMMA
+/// LIST (`let a, b = t`). The list desugars to exactly what the parenthesized
+/// `let (a, b) = t` produces -- one `PatTuple` over the same leaves -- so
+/// there is no second destructuring mechanism to keep in step
+/// (docs/plan-array-expression-fixes.md #10, the deferred half; construction
+/// `let t = b, c` is `parseLetRhs`'s mirror image, landed the same day).
+///
+/// UNAMBIGUOUS against RHS construction, which is the reason the two halves
+/// can coexist: the LHS list is bounded by the `:` or `=` that must follow a
+/// let pattern, and the RHS list only begins after that `=`. So
+/// `let a, b = c, d` is "destructure the pair built from c and d", and no
+/// existing program changes meaning -- a comma could not previously follow a
+/// let pattern at all (it was `BL1001: Expected '=' but got ','`). The only
+/// behavioural difference on ill-formed input is which token the missing-`=`
+/// error points at.
+///
+/// Shared by all three let-parse sites (`parseLet`, `parseLetStmt`,
+/// `parseTopLevelLet`) so they cannot drift.
+and parseLetPattern (tokens: Token list) : ParseResult<Pattern> =
+    parsePattern tokens >>= fun first afterFirst ->
+    match peek afterFirst with
+    | Some TokComma ->
+        let rec rest (acc: Pattern list) (toks: Token list) : ParseResult<Pattern list> =
+            parsePattern toks >>= fun p afterP ->
+            match peek afterP with
+            | Some TokComma -> rest (p :: acc) (advance afterP)
+            | _ -> success (List.rev (p :: acc)) afterP
+        rest [] (advance afterFirst) >>= fun tail afterTail ->
+        success (mkP tokens afterTail (PatTuple (first :: tail))) afterTail
+    | _ -> success first afterFirst
+
+and parseLetRhs (tokens: Token list) : ParseResult<Expr> =
+    parseExprImpl tokens >>= fun first afterFirst ->
+    match peek afterFirst with
+    | Some TokComma ->
+        advance afterFirst |> sepBy parseExprImpl TokComma >>= fun rest afterRest ->
+        success (mkExpr (rangeSpan tokens afterRest) (ExprTuple (first :: rest))) afterRest
+    | _ -> success first afterFirst
 
 and parseLet (tokens: Token list) : ParseResult<Expr> =
-    // let [const|mut] pattern [: type] = value. Blade has no ML-style
+    // let [mut] pattern [: type] = value. Blade has no ML-style
     // "let x = v in body" -- `in` is only used for virtual arrays in for-loops.
+    // There is NO `const` in the surface language: BindConst exists only as
+    // the internal immutability marker minted by `let static` and the local
+    // `function` desugar.
     let mutability, afterMut =
         match peek tokens with
-        | Some (TokKeyword KwConst) -> BindConst, advance tokens
         | Some (TokKeyword KwMut) -> BindMut, advance tokens
         | _ -> BindLet, tokens
     
-    parsePattern afterMut >>= fun pat afterPat ->
-    let ty, afterTy =
-        match peek afterPat with
-        | Some TokColon ->
-            match parseTypeExpr (advance afterPat) with
-            | Ok (t, rest) -> Some t, rest
-            | Error _ -> None, afterPat
-        | _ -> None, afterPat
-    
+    parseLetPattern afterMut >>= fun pat afterPat ->
+    parseLetAnnotation afterPat >>= fun ty afterTy ->
+
     expect (TokOp "=") afterTy >>= fun _ afterEq ->
 
     let afterEq = skipNL afterEq
@@ -2181,7 +2558,7 @@ and parseLet (tokens: Token list) : ParseResult<Expr> =
         let sp = rangeSpan tokens afterValue
         success (mkExpr sp (ExprLet (binding, mkExpr sp (ExprLit LitUnit)))) afterValue
     | _ ->
-        parseExprImpl afterEq >>= fun value afterValue ->
+        parseLetRhs afterEq >>= fun value afterValue ->
         let binding = { Mutability = mutability; Pattern = pat; Type = ty; Value = value }
         let sp = rangeSpan tokens afterValue
         success (mkExpr sp (ExprLet (binding, mkExpr sp (ExprLit LitUnit)))) afterValue
@@ -2540,14 +2917,16 @@ and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
         | _ -> Ok (None, afterRParen)
     whereResult >>= fun whereClause afterWhere ->
 
-    let retType, afterRet =
-        match peek afterWhere with
-        | Some (TokOp "->") ->
-            match parseTypeExpr (advance afterWhere) with
-            | Ok (t, rest) -> Some t, skipNL rest
-            | Error _ -> None, afterWhere
-        | _ -> None, afterWhere
-    
+    // A swallowed type-parse failure re-reports at the `=`; `isHardParseError`
+    // codes are precise enough that losing them would be strictly worse.
+    (match peek afterWhere with
+     | Some (TokOp "->") ->
+         (match parseTypeExpr (advance afterWhere) with
+          | Ok (t, rest) -> success (Some t) (skipNL rest)
+          | Error e when isHardParseError e -> Error e
+          | Error _ -> success None afterWhere)
+     | _ -> success None afterWhere) >>= fun retType afterRet ->
+
     expect (TokOp "=") afterRet >>= fun _ afterEq ->
     parseInlineOrBlock afterEq >>= fun body remaining ->
 
@@ -2677,21 +3056,14 @@ and parseLetStmt (tokens: Token list) : ParseResult<Stmt> =
     | _ ->
     let mutability, afterMut =
         match peek tokens with
-        | Some (TokKeyword KwConst) -> BindConst, advance tokens
         | Some (TokKeyword KwMut) -> BindMut, advance tokens
         | _ -> BindLet, tokens
 
-    parsePattern afterMut >>= fun pat afterPat ->
-    let ty, afterTy =
-        match peek afterPat with
-        | Some TokColon ->
-            match parseTypeExpr (advance afterPat) with
-            | Ok (t, rest) -> Some t, rest
-            | Error _ -> None, afterPat
-        | _ -> None, afterPat
+    parseLetPattern afterMut >>= fun pat afterPat ->
+    parseLetAnnotation afterPat >>= fun ty afterTy ->
 
     expect (TokOp "=") afterTy >>= fun _ afterEq ->
-    parseExprImpl afterEq >>= fun value remaining ->
+    parseLetRhs afterEq >>= fun value remaining ->
 
     success (StmtLet {
         Mutability = mutability
@@ -2705,6 +3077,16 @@ and parseLetStmt (tokens: Token list) : ParseResult<Stmt> =
 let parseParamDecl (tokens: Token list) : ParseResult<ParamDecl> =
     let nameSpan = headSpan tokens
     expectIdent tokens >>= fun name afterName ->
+    // Optional default value after the (optional) annotation:
+    // `x: Type = expr` or `x = expr`. Trailing/scope rules are the type
+    // checker's (BL3012); the grammar only collects the expression.
+    let withDefault ty mutability afterTy =
+        match peek afterTy with
+        | Some (TokOp "=") ->
+            parseExprImpl (advance afterTy) >>= fun dflt remaining ->
+            success { Name = name; Type = ty; Mutability = mutability; Default = Some dflt; NameSpan = nameSpan } remaining
+        | _ ->
+            success { Name = name; Type = ty; Mutability = mutability; Default = None; NameSpan = nameSpan } afterTy
     match peek afterName with
     | Some TokColon ->
         // Optional mutability marker before the type: `x: mut T` (formalism
@@ -2715,10 +3097,10 @@ let parseParamDecl (tokens: Token list) : ParseResult<ParamDecl> =
             match peek (advance afterName) with
             | Some (TokKeyword KwMut) -> Mutable, advance (advance afterName)
             | _ -> Immutable, advance afterName
-        parseTypeExpr afterAnnot >>= fun ty remaining ->
-        success { Name = name; Type = Some ty; Mutability = mutability; NameSpan = nameSpan } remaining
+        parseTypeExpr afterAnnot >>= fun ty afterTy ->
+        withDefault (Some ty) mutability afterTy
     | _ ->
-        success { Name = name; Type = None; Mutability = Immutable; NameSpan = nameSpan } afterName
+        withDefault None Immutable afterName
 
 let parseFunctionDecl (tokens: Token list) : ParseResult<Decl> =
     // `tokens` starts AT the name (the `function` keyword is consumed by the
@@ -2743,19 +3125,18 @@ let parseFunctionDecl (tokens: Token list) : ParseResult<Decl> =
         | _ -> Ok (None, afterRParen)
     whereResult >>= fun whereClause afterWhere ->
 
-    // Return type: either : Type or -> Type
-    let retType, afterRet =
-        match peek afterWhere with
-        | Some TokColon ->
-            match parseTypeExpr (advance afterWhere) with
-            | Ok (t, rest) -> Some t, skipNL rest
-            | Error _ -> None, afterWhere
-        | Some (TokOp "->") ->
-            match parseTypeExpr (advance afterWhere) with
-            | Ok (t, rest) -> Some t, skipNL rest
-            | Error _ -> None, afterWhere
-        | _ -> None, afterWhere
-    
+    // Return type: either : Type or -> Type. A swallowed type-parse failure
+    // re-reports at the `=`; `isHardParseError` codes propagate instead.
+    let parseRet (afterArrow: Token list) : ParseResult<TypeExpr option> =
+        match parseTypeExpr afterArrow with
+        | Ok (t, rest) -> success (Some t) (skipNL rest)
+        | Error e when isHardParseError e -> Error e
+        | Error _ -> success None afterWhere
+    (match peek afterWhere with
+     | Some TokColon -> parseRet (advance afterWhere)
+     | Some (TokOp "->") -> parseRet (advance afterWhere)
+     | _ -> success None afterWhere) >>= fun retType afterRet ->
+
     expect (TokOp "=") afterRet >>= fun _ afterEq ->
     parseInlineOrBlock afterEq >>= fun body remaining ->
     
@@ -2778,22 +3159,15 @@ let parseTopLevelLet (tokens: Token list) : ParseResult<Decl> =
     | _ ->
     let mutability, afterMut =
         match peek tokens with
-        | Some (TokKeyword KwConst) -> BindConst, advance tokens
         | Some (TokKeyword KwMut) -> BindMut, advance tokens
         | _ -> BindLet, tokens
-    
-    parsePattern afterMut >>= fun pat afterPat ->
-    let ty, afterTy =
-        match peek afterPat with
-        | Some TokColon ->
-            match parseTypeExpr (advance afterPat) with
-            | Ok (t, rest) -> Some t, rest
-            | Error _ -> None, afterPat
-        | _ -> None, afterPat
-    
+
+    parseLetPattern afterMut >>= fun pat afterPat ->
+    parseLetAnnotation afterPat >>= fun ty afterTy ->
+
     expect (TokOp "=") afterTy >>= fun _ afterEq ->
-    parseExprImpl afterEq >>= fun value remaining ->
-    
+    parseLetRhs afterEq >>= fun value remaining ->
+
     success (DeclLet {
         Mutability = mutability
         Pattern = pat
@@ -3125,62 +3499,24 @@ let parseQualifiedName (tokens: Token list) : ParseResult<QualifiedName> =
         error "Expected module name" line col
 
 // Unit of Measure Declarations
+//
+// (The unit-expression grammar itself -- parseUnitExpr and friends -- now
+// lives ahead of the parseTypeExpr group, because compound type arguments
+// like `Float<meter/second^2>` route into it via parseTypeArg.)
 
-/// Parse a unit expression: meters / seconds, kg * velocity, meters^2
-let rec parseUnitExpr (tokens: Token list) : ParseResult<UnitExpr> =
-    parseUnitTerm tokens >>= fun left rest ->
-    parseUnitExprTail left rest
-
-and parseUnitExprTail (left: UnitExpr) (tokens: Token list) : ParseResult<UnitExpr> =
-    match peek tokens with
-    | Some (TokOp "*") ->
-        parseUnitTerm (advance tokens) >>= fun right rest ->
-        parseUnitExprTail (UnitMul (left, right)) rest
-    | Some (TokOp "/") ->
-        parseUnitTerm (advance tokens) >>= fun right rest ->
-        parseUnitExprTail (UnitDiv (left, right)) rest
-    | _ -> success left tokens
-
-and parseUnitTerm (tokens: Token list) : ParseResult<UnitExpr> =
-    parseUnitAtom tokens >>= fun atom rest ->
-    match peek rest with
-    | Some (TokOp "^") ->
-        let afterCaret = advance rest
-        match peek afterCaret with
-        | Some (TokInt n) -> success (UnitPow (atom, int n)) (advance afterCaret)
-        // Negative exponent (`seconds^-1`, `meters^-2`): the lexer emits the
-        // minus as its own operator token, so glue it back on here --
-        // reciprocal units (frequencies, decay coefficients) are too common
-        // to force through the a/b spelling.
-        | Some (TokOp "-") ->
-            (match peek (advance afterCaret) with
-             | Some (TokInt n) -> success (UnitPow (atom, -(int n))) (advance (advance afterCaret))
-             | _ ->
-                 let line, col = currentPos (advance afterCaret)
-                 error "Expected integer exponent after '^' in unit expression" line col)
-        | _ ->
-            let line, col = currentPos afterCaret
-            error "Expected integer exponent after '^' in unit expression" line col
-    | _ -> success atom rest
-
-and parseUnitAtom (tokens: Token list) : ParseResult<UnitExpr> =
-    match peek tokens with
-    | Some (TokIdent name) -> success (UnitNamed name) (advance tokens)
-    | Some TokLParen ->
-        parseUnitExpr (advance tokens) >>= fun expr afterExpr ->
-        expect TokRParen afterExpr >>= fun _ remaining ->
-        success expr remaining
-    | _ ->
-        let line, col = currentPos tokens
-        error "Expected unit name or '(' in unit expression" line col
-
-/// Parse a unit declaration: Unit meters  or  Unit velocity = meters / seconds
+/// Parse a unit declaration:
+///   Unit meters                       — base dimension
+///   Unit velocity = meters / seconds  — structural alias (canonicalized, name discarded)
+///   Unit speed: mps                   — QUANTITY: nominal identity entailing the RHS dims
 let parseUnitDecl (tokens: Token list) : ParseResult<Decl> =
     expectIdent tokens >>= fun name afterName ->
     match peek afterName with
     | Some (TokOp "=") ->
         parseUnitExpr (advance afterName) >>= fun expr remaining ->
         success (DeclUnit { Name = name; Definition = Some (UnitDerived expr) }) remaining
+    | Some TokColon ->
+        parseUnitExpr (advance afterName) >>= fun expr remaining ->
+        success (DeclUnit { Name = name; Definition = Some (UnitQuantity expr) }) remaining
     | _ ->
         success (DeclUnit { Name = name; Definition = None }) afterName
 

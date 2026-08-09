@@ -1,0 +1,31 @@
+// TEST: Intrinsics Inverse Trig
+// ============================================================================
+// asin/acos/atan end to end: as scalar calls, as kernels in every kernel-position
+// spelling (`f <@> A`, `object_for(f)`, `method_for(A) <@> f`), and folded by the
+// static evaluator. The three sit in Grad.mathIntrinsics with derivative rules
+// (asin' = 1/sqrt(1-x^2), acos' = -1/sqrt(1-x^2), atan' = 1/(1+x^2)), in
+// StaticEval.evalBuiltin's table. They are also in Grad.complexMathIntrinsics;
+// the complex-operand half lives in intrinsics/015 rather than here, because
+// the interpreter refuses complex asin/acos/atan as not-yet-bit-verified
+// (BL8011) and that would skip this whole file out of the interp differential.
+// ============================================================================
+let a = asin(0.5)
+let b = acos(0.5)
+let c = atan(1.0)
+
+let A: Array<Float like Idx<3>> = [0.0, 0.5, 1.0]
+let asins = asin <@> A |> compute
+let acoss = object_for(acos) <@> A |> compute
+let atans = method_for(A) <@> atan |> compute
+
+let static sa = asin(0.5)
+let static sc = atan(1.0)
+let folded = sa + sc
+
+// EXPECT: a = 0.523598775598299
+// EXPECT: b = 1.0471975511966
+// EXPECT: c = 0.785398163397448
+// EXPECT: asins = [0.0, 0.523598775598299, 1.5707963267949]
+// EXPECT: acoss = [1.5707963267949, 1.0471975511966, 0.0]
+// EXPECT: atans = [0.0, 0.463647609000806, 0.785398163397448]
+// EXPECT: folded = 1.30899693899575

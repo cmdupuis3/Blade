@@ -1,0 +1,47 @@
+// TEST: Intrinsics Atan2
+// ============================================================================
+// atan2(y, x) -- the quadrant-correct angle of the point (x, y), and the first
+// BINARY math intrinsic. The whole point over atan(y/x) is the sign handling
+// the four quadrants below pin: atan(y/x) collapses quadrants II/IV onto I/III
+// and divides by zero on the vertical axis.
+//
+// It is typed as an ordinary TExprBinOp carrying Ast.OpMath2, so it inherits
+// the elementwise pipeline wholesale: two arrays co-iterate through zip, an
+// array against a scalar broadcasts in either slot, and the bare name in kernel
+// position eta-expands to a TWO-parameter wrapper. Renders std::atan2(y, x).
+//
+// Units: the operands enter only as the ratio y/x, so a SHARED signature
+// cancels and the result is dimensionless (units/066); a mismatched pair
+// rejects (unit-errors/006), as does a magnitude mismatch (unit-errors/009).
+// ============================================================================
+let q1 = atan2(1.0, 1.0)
+let q2 = atan2(1.0, 0.0 - 1.0)
+let q3 = atan2(0.0 - 1.0, 0.0 - 1.0)
+let q4 = atan2(0.0 - 1.0, 1.0)
+// The axes -- where atan(y/x) would divide by zero.
+let up = atan2(1.0, 0.0)
+let down = atan2(0.0 - 1.0, 0.0)
+
+let Y: Array<Float like Idx<4>> = [1.0, 1.0, 0.0 - 1.0, 0.0 - 1.0]
+let X: Array<Float like Idx<4>> = [1.0, 0.0 - 1.0, 0.0 - 1.0, 1.0]
+let ang = atan2(Y, X) |> compute
+let angman = (zip(Y, X) <@> lambda(y, x) -> atan2(y, x)) |> compute
+let angeta = (method_for(zip(Y, X)) <@> atan2) |> compute
+let bcastY = atan2(Y, 1.0) |> compute
+let bcastX = atan2(1.0, X) |> compute
+
+let static s = atan2(1.0, 1.0)
+let folded = s + s
+
+// EXPECT: q1 = 0.785398163397448
+// EXPECT: q2 = 2.35619449019234
+// EXPECT: q3 = -2.35619449019234
+// EXPECT: q4 = -0.785398163397448
+// EXPECT: up = 1.5707963267949
+// EXPECT: down = -1.5707963267949
+// EXPECT: ang = [0.785398163397448, 2.35619449019234, -2.35619449019234, -0.785398163397448]
+// EXPECT: angman = [0.785398163397448, 2.35619449019234, -2.35619449019234, -0.785398163397448]
+// EXPECT: angeta = [0.785398163397448, 2.35619449019234, -2.35619449019234, -0.785398163397448]
+// EXPECT: bcastY = [0.785398163397448, 0.785398163397448, -0.785398163397448, -0.785398163397448]
+// EXPECT: bcastX = [0.785398163397448, 2.35619449019234, 2.35619449019234, 0.785398163397448]
+// EXPECT: folded = 1.5707963267949

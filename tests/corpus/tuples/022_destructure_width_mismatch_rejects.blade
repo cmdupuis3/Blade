@@ -1,0 +1,24 @@
+// TEST: Tuple Destructure Width Mismatch (rejects)
+// ERROR: BL3999
+// ERROR-CONTAINS: but the value is a 2-tuple
+// ============================================================================
+// A destructuring `let` whose name count matches NEITHER the value's
+// top-level width NOR its flattened leaf count. Every one of the four
+// destructuring sites used to fall back to the structural list and let fresh
+// inference variables cover the overflow ("Fall back to structural, let fresh
+// vars handle overflow") -- MEASURED consequence: `blade check` said OK and
+// g++ then rejected `std::get<2>` applied to a `std::tuple<double, double>`.
+//
+// `tupleDestructureArityError` is shared by all four (DeclLet, `let static`,
+// block `StmtLet`, expression position) so they cannot drift, and stands down
+// for every non-tuple scrutinee -- a `Poly` pack or a still-unresolved type is
+// somebody else's judgement, and answering here would turn inference order
+// into a diagnostic.
+//
+// The bare-comma binder (`021`) inherits this for free: it produces the same
+// `PatTuple` the parenthesized form does.
+// ============================================================================
+let t = 1.0, 2.0
+let a, b, c = t
+let s = a + b + c
+// EXPECT: typecheck failure -- three names against a 2-tuple

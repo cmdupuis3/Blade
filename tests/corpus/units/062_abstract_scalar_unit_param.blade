@@ -1,0 +1,19 @@
+// TEST: Rank-0 Abstract Unit Parameter, Including A Default
+// `T<unit>^0` is the SCALAR of the same spelling: a type variable with the
+// unit stamped on it, which is the shape a bare quantity annotation already
+// produces. It works in the two positions a scalar parameter has -- an
+// ordinary slot (`k`, multiplied into a `second`-valued sum, giving
+// second^2, which the `Float<second^2>` binding below accepts) and a
+// DEFAULTED slot, where the fill's ascription introduces the unit onto the
+// bare literal so the API author's own default needs no annotation.
+Unit second
+function scaled(x: T<second>^1, k: T<second>^0) = reduce(x, (+)) * k
+function shifted(x: T<second>^1, t_zero: T<second>^0 = 0.0) = reduce(x, (+)) + t_zero
+let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let k: Float<second> = 2.0
+let area: Float<second^2> = scaled(ts, k)
+let base = shifted(ts)
+let offset = shifted(ts, k)
+// EXPECT: area = 12
+// EXPECT: base = 6
+// EXPECT: offset = 8

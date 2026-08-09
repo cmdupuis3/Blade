@@ -1,0 +1,75 @@
+// TEST: Component-Typed Tuple Annotation
+// `Tuple<T1, ..., Tk>` -- the COMPONENT-TYPED spelling of the tuple
+// annotation, alongside the width-only `Tuple<N>`
+// (docs/plan-tuples-vs-arg-packs.md 6b/6c). The argument list disambiguates:
+// a SINGLE INTEGER LITERAL is a width, anything else is a list of component
+// types of width k >= 2.
+//
+// It is not a new type. `Tuple<A, B>` parses to the SAME `TyTuple` node the
+// written `(A, B)` produces, so unification, printing, projection, the width
+// schema and codegen were untouched by adding it -- see `016` for the pin on
+// that equivalence.
+//
+// WHAT IT BUYS, and the reason it exists: `Tuple<N>` lowers its element slots
+// to N FRESH INFERENCE VARIABLES and nothing at a direct call instantiates
+// them (plan 9; `002`'s note, MEASURED again while writing this file). So a
+// width-only tuple of ARRAYS defaults to `double` and dies in g++. With the
+// components WRITTEN the slots are concrete, and this file is that case
+// RUNNING.
+type I3 = Idx<3>
+
+// A tuple of ARRAYS -- the case `Tuple<2>` cannot express. Destructured with
+// the bare-comma binder (`020`) and used as arrays.
+function sumEnds(p: Tuple<Array<Float64 like I3>, Array<Float64 like I3>>) -> Float64 = {
+  let x, y = p
+  x((0 : I3)) + y((2 : I3))
+}
+let A: Array<Float64 like I3> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like I3> = [4.0, 5.0, 6.0]
+let s = sumEnds((A, B))
+// EXPECT: s = 7
+
+// NESTED, with a projection CHAIN. `012` had to write this type out in full
+// (`((Float64, Float64), (Float64, Float64))`) precisely because the
+// width-only annotation could not carry the inner types; `Tuple<...>` now can,
+// and `r[0][1]` resolves through both levels.
+function outer(r: Tuple<Tuple<Float64, Float64>, Tuple<Float64, Float64>>) -> Float64 =
+    r[0][0] + r[0][1] * 10.0 + r[1][0] * 100.0 + r[1][1] * 1000.0
+let deep = outer(((1.0, 2.0), (3.0, 4.0)))
+// EXPECT: deep = 4321
+
+// Component types are ordinary TypeExprs: mixed scalars are as fine here as
+// under `Tuple<3>`, and the width still comes from the LIST length.
+function mixed(t: Tuple<Float64, Int64, Float64>) -> Float64 = t[0] + t[2]
+let m = mixed((1.5, 7, 2.5))
+// EXPECT: m = 4
+
+// RETURN-type position, like the width-only spelling.
+function mkPair(u: Float64) -> Tuple<Float64, Float64> = (u, u + 1.0)
+let r = mkPair(10.0)
+let rv = r[0] + r[1]
+// EXPECT: rv = 21
+
+// LAMBDA parameter position.
+let lam = lambda(q: Tuple<Float64, Float64>) -> q[0] * q[1]
+let lv = lam((3.0, 4.0))
+// EXPECT: lv = 12
+
+// WIDTH SCHEMA (6c): a component-typed parameter is a schema node of width k,
+// exactly like `Tuple<k>` -- `declaredTupleWidth` counts a written `TyTuple`
+// already, so the matcher needed no change. Both orientations:
+// a LAMBDA kernel...
+let P: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let Q: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let R: Array<Float64 like Idx<2>> = [5.0, 6.0]
+let g = object_for(lambda(x, y: Tuple<Float64, Float64>) -> x + y[0] * y[1])
+          <@> (P, (Q, R)) |> compute
+// EXPECT: g = [16, 19, 21, 25, 17, 20, 22, 26]
+
+// ...and a NAMED FUNCTION kernel, which reaches the seam through
+// etaExpandFunctionKernel's `IRTTuple -> Tuple<k>` re-spelling and then has
+// its element slots pinned by that wrapper's own unify against the callee's
+// arrow.
+function addPair(t: Tuple<Float64, Float64>) -> Float64 = t[0] + t[1]
+let h = object_for(addPair) <@> (P, Q) |> compute
+// EXPECT: h = [[4, 5], [5, 6]]

@@ -28,6 +28,7 @@ open Blade.Tests.Static
 open Blade.Tests.Ppl
 open Blade.Tests.Math
 open Blade.Tests.Rand
+open Blade.Tests.Display
 open Blade.Tests.Spectra
 open Blade.Tests.Fallback
 open Blade.Tests.Sgs
@@ -80,8 +81,8 @@ let deferredConcreteTests = Blade.Tests.Corpus.category "deferred-concrete"
 /// All tests combined
 let allTests =
     basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
-    @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ recursiveArrayTests @ bracketedTests
-    @ indexTypeTests @ mutabilityTests @ mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ unitErrorTests
+    @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ tupleTests @ replicateTests @ anonRangeTests @ recursiveArrayTests @ bracketedTests
+    @ indexTypeTests @ mutabilityTests @ mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ displayTests @ displayErrorTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ unitErrorTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
     @ funcArrayTests
@@ -144,6 +145,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // so it belongs with the other in-process unit blocks and always runs.
     // (Also reachable standalone as `blade test normalize`.)
     let normalize = runNormalizeTests ()
+    // Display frames (Blade-REPL/docs/display-frames.md): the frame BYTES, the
+    // escape table, and the two channels -- the REPL sentinel line on raw
+    // interpreter stdout and `ide serve`'s display array on the real response
+    // encoder. Drives the interpreter and the session engine directly, no g++,
+    // so it runs unconditionally beside the other in-process blocks.
+    // (Also reachable standalone as `blade test display-frames`.)
+    let displayFrames = runDisplayTests ()
     // TypeCheck-level F# unit tests for the unify §5.3 fast path: flat-vs-split
     // arrows, inference-var binding, dist-type ordering/axis-tag rejection.
     // Same shape as the normalize block — pure IRType construction plus a call
@@ -298,6 +306,12 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Skipped without it — but needs no BLAS (it includes the BLAS-free
     // blade_linalg_views.hpp). (Also `blade test linalg`.)
     let linalgProbe = Blade.Tests.LinAlgTests.runLinAlgProbeTests ()
+    // Factory flat emission: the chained factory sugar and by-nominal
+    // argument routing elaborate BEFORE typing, so a chain must emit
+    // byte-identical C++ to its flat spelling, with exactly one call and no
+    // std::function/partial-application residue. Pure codegen string checks
+    // — no toolchain — so it runs unconditionally.
+    let factoryFlat = Blade.Tests.Functions.runFactoryFlattenTests ()
     // Eigensolver dispatch (Phase 6 / Round B2): verifies `math.eigh` reaches
     // `blade_lapack::blade_eigh_*` gate-on (right precision AND right symmetry
     // family), that a complex operand's tuple is Q-complex/LAM-REAL, that the
@@ -318,6 +332,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // out-of-bounds loop bound. Pure codegen string checks, no toolchain.
     // (Also `blade test shapespec`.)
     let shapeSpec = Blade.Tests.ShapeSpecTests.runShapeSpecTests ()
+    // File-based module resolution (src/ModuleResolve.fs) + stdlib/units/SI.blade:
+    // the search path, the transitive walk, cycle/duplicate/missing refusals,
+    // and the two claims the corpus cannot make — that a file with NO imports
+    // still emits byte-identical C++, and that a unit which crossed a module
+    // boundary still rejects a dimension mismatch. Front-end only apart from one
+    // value case, which skips cleanly without g++. (Also `blade test module-resolve`.)
+    let moduleResolve = Blade.Tests.ModuleResolveTests.runModuleResolveTests ()
     // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
     // regions when cores are available. Opt-in (see FullSuiteOptions).
     let omp =
@@ -403,9 +424,9 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Grand-total roll-up (#4): one line per block, a total, and failed names.
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
-          yield normalize; yield unify; yield validateArrow
+          yield normalize; yield unify; yield validateArrow; yield displayFrames
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield lapackEmit; yield shapeSpec
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield factoryFlat; yield lapackEmit; yield shapeSpec; yield moduleResolve
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

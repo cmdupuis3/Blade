@@ -1,8 +1,13 @@
 // TEST: Unit Binding Mismatch (rejects)
-// ERROR: BL3001
+// ERROR: BL3006
 // A unit-annotated binding cannot be initialized from a value carrying a
 // DIFFERENT unit signature (unification is unit-strict when both sides
 // are annotated; bare literals still flow in freely).
+// BL3006 (unit mismatch), not BL3001 (type mismatch): scaled units moved
+// the annotated-let seam off plain unification -- the value is checked
+// against the annotation's BARE type so a magnitude can be converted, which
+// leaves the signature comparison to the conversion step. It reports the
+// specific failure, matching units/015's argument-position sibling.
 Unit meters
 Unit seconds
 let t: Float<seconds> = 5.0

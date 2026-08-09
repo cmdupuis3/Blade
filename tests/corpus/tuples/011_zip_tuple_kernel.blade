@@ -1,0 +1,50 @@
+// TEST: Element Level Zip Tuple Kernel
+// The DUALITY PIN for Design C's "element-level symmetry, for free"
+// (docs/plan-tuples-vs-arg-packs.md 6b): the same `Tuple<k>` annotation that
+// slices an operand pack also reads one level down, so
+// `method_for(zip(B, C)) <@> lambda(p: Tuple<2>)` gives `p` the PAIR per
+// iteration.
+//
+// That is quickstart-1 205's promised "kernel receives ONE tuple argument"
+// (formalism 131), recovered as an OPT-IN spelling rather than as a second,
+// competing default -- and it is what 3.5's M3 asked for. The unannotated
+// `lambda(p)` over the same zip is NOT this: it is 5.2's undecidable shape and
+// is now a hard error demanding exactly this annotation
+// (diagnostics/058). Before the matcher it silently bound `p` to A's element
+// and DROPPED B, returning a plausible-looking array.
+//
+// The two spellings must agree by VALUE over the same loop -- that equality is
+// the pin, not either value on its own.
+
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+
+let tup = method_for(zip(A, B)) <@> lambda(p: Tuple<2>) -> p[0] * p[1] |> compute
+let flat = method_for(zip(A, B)) <@> lambda(a, b) -> a * b |> compute
+// EXPECT: tup = [10, 40, 90]
+// EXPECT: flat = [10, 40, 90]
+
+// Same two readings with the OTHER orientation of the operator, so the
+// annotation is not a property of one apply arm.
+let otup = object_for(lambda(p: Tuple<2>) -> p[0] + p[1]) <@> zip(A, B) |> compute
+let oflat = object_for(lambda(a, b) -> a + b) <@> zip(A, B) |> compute
+// EXPECT: otup = [11, 22, 33]
+// EXPECT: oflat = [11, 22, 33]
+
+// A NAMED function with the tuple parameter, in both orientations. The
+// kernel-position eta wrapper re-spells the callee's tuple parameter as
+// `Tuple<k>` so the wrapper declares the same schema; without that carry-over
+// this lands on the annotation demand while the identical lambda spelling
+// works, which would make the named and anonymous forms disagree.
+function addp(p: Tuple<2>) -> Float64 = p[0] + p[1]
+let n0 = method_for(zip(A, B)) <@> addp |> compute
+let n1 = object_for(addp) <@> zip(A, B) |> compute
+// EXPECT: n0 = [11, 22, 33]
+// EXPECT: n1 = [11, 22, 33]
+
+// The FULLY WRITTEN tuple type says the same thing as the width-only spelling
+// (3.6's M6, which used to be a g++ failure: "could not convert
+// '__fp_A[__fk]' from 'const double' to 'std::tuple<double, double>'").
+function addw(p: (Float64, Float64)) -> Float64 = p[0] + p[1]
+let w0 = method_for(zip(A, B)) <@> addw |> compute
+// EXPECT: w0 = [11, 22, 33]

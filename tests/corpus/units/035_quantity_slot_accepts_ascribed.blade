@@ -1,0 +1,20 @@
+// TEST: Quantity Slot Accepts Ascribed Argument
+// The blessed shapes for a strict quantity slot: an ascribed literal, a
+// quantity-typed binding, and an ascription minting the nominal onto an
+// already-dimensioned value of the SAME dims (the dims check passes, the
+// value adopts the quantity).
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit speed: mps
+function twice(x: Float<speed>) -> Float<speed> = x + x
+let r = twice((4.0 : speed))
+let v: Float<speed> = 3.0
+let r2 = twice(v)
+let dist: Float<meters> = 8.0
+let dur: Float<seconds> = 2.0
+let vel = ((dist / dur) : speed)
+let r3 = twice(vel)
+// EXPECT: r = 8
+// EXPECT: r2 = 6
+// EXPECT: r3 = 8

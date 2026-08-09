@@ -1,0 +1,8 @@
+// TEST: Intrinsics Atan2 Complex (rejects)
+// ERROR: BL3007
+// atan2 is real-only: the quadrant it resolves is a fact about the real plane,
+// and <complex> has no two-argument overload to fall back on. Same refusal as
+// log10 on a complex operand (intrinsics/013), reached through the BINARY
+// intrinsic's own scalar arm. log_base is refused by the same arm.
+let z = complex(1.0, 2.0)
+let bad = atan2(z, 1.0)

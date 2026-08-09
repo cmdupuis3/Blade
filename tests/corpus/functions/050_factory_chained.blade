@@ -1,0 +1,14 @@
+// TEST: Factory Chained Application
+// Chained-application sugar: `f(x)(a: q1)(b: q2)` flattens into the single
+// flat call before dispatch -- comma groups and chains are equivalent, in
+// any tag order, and mixing a tagged arg into the base group works too.
+// Values must equal the flat spelling (functions/049: a = 222).
+Unit levels: 1
+Unit cmap: 1
+function plot(x: Float, n: Float<levels> = 10.0, c: Float<cmap> = 0.0) -> Float = x + n * 100.0 + c * 7.0
+let d = plot(1.0)(2.0: levels)(3.0: cmap)
+let e = plot(1.0)(3.0: cmap, 2.0: levels)
+let f = plot(1.0, 2.0: levels)(3.0: cmap)
+// EXPECT: d = 222
+// EXPECT: e = 222
+// EXPECT: f = 222

@@ -1,0 +1,13 @@
+// TEST: Abstract Parameter Unit Mismatch (rejects)
+// ERROR: BL3006
+// The teeth behind 060: `T<second>^1` is not decoration. The parameter's
+// element carries the real `second` signature, so a `Float<meter>` array
+// meets it as the ordinary argument-position unit mismatch -- exactly what
+// a concrete `Array<Float<second> like Idx<n>>` parameter would have done.
+// Without the check the call would simply bind the type variable and the
+// units would vanish.
+Unit second
+Unit meter
+function total(x: T<second>^1) = reduce(x, (+))
+let ms: Array<Float<meter> like Idx<3>> = [1.0, 2.0, 3.0]
+let bad = total(ms)

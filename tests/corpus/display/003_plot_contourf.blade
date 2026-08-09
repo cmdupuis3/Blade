@@ -1,0 +1,18 @@
+// TEST: Plot Contourf Frame
+// ============================================================================
+// `import plot`: the stdlib plotting module, built entirely on the factory
+// machinery (quantity-tagged optional slots) and display.json_array /
+// json_num / emit. One call = ONE plotly frame on stdout. The frame BYTES
+// (mime, trace JSON, z values) are pinned in-process in Test_Display.fs;
+// this file pins the surface and -- through `blade test interp` -- that the
+// interpreter and the compiled binary emit byte-identical frames, floats
+// included (the 15-significant-digit parity rule).
+// ============================================================================
+import plot
+let x = [0.0, 1.0, 2.0]
+let y = [0.0, 1.0]
+let z = [[0.0, 1.0, 2.25], [3.0, 4.0, 5.5]]
+let ok = plot.contourf(x, y, z, 20: levels, "waves": title)
+let ok2 = plot.heatmap(x, y, z)
+// EXPECT: ok = true
+// EXPECT: ok2 = true

@@ -1,0 +1,14 @@
+// TEST: Tuple Width And Component Types Cannot Mix (rejects)
+// ERROR: BL1004
+// ERROR-CONTAINS: cannot be mixed
+// `Tuple<...>` disambiguates on the WHOLE argument list: a single integer
+// literal is a width, anything else is a component-type list. A list holding
+// both is neither, so it is refused outright rather than silently given one
+// of the two readings -- there is no reading of "3" as a type and none of
+// `Float64` as a width.
+//
+// Both orders are caught (the components are parsed by a hand-rolled loop
+// rather than `sepBy`, precisely so an integer in ANY position gets this
+// message instead of the generic "unexpected token in type").
+function g(p: Tuple<3, Float64>) -> Float64 = p[0]
+// EXPECT: parse failure -- a width and a component list cannot be mixed

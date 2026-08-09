@@ -1,0 +1,13 @@
+// TEST: Quantity Declaration And Use
+// `Unit speed: mps` declares a QUANTITY: a nominal identity entailing the
+// dims of mps. Introduction positions stay permissive (a bare literal
+// initializes a Float<speed> binding), and a quantity-carrying value flows
+// freely into a STRUCTURAL (non-nominal) slot of the same dims.
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit speed: mps
+let v: Float<speed> = 4.0
+let w: Float<mps> = v + 1.0
+// EXPECT: v = 4
+// EXPECT: w = 5

@@ -1,0 +1,10 @@
+// TEST: Quantity Terminal As Quantity RHS (rejects)
+// ERROR: BL3011
+// A quantity cannot be re-derived from another quantity (`Unit q: speed`):
+// the nominal layer is exactly one level deep, so the RHS of a `:`
+// declaration must be structural (base units, aliases, or `1`).
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit speed: mps
+Unit q: speed

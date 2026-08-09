@@ -44,11 +44,36 @@ type LoweredSession =
 let lowerSessionDiag (fileName: string option) (source: string)
     : Result<LoweredSession, Blade.Diagnostics.Diagnostic list * Blade.Diagnostics.SourceMap> =
     let key = defaultArg fileName "<input>"
-    let sm = Blade.Diagnostics.SourceMap.ofSources [ key, source ]
+    // File-based imports resolve here for the same reason `blade run` resolves
+    // them: a session that says `import units.SI` should mean the same thing it
+    // means in a file. The REPL/notebook session source lives at a real path
+    // (`srcPath`), so the resolver has a directory to search from.
+    //
+    // With nothing to resolve -- no imports, or only builtin pseudo-modules,
+    // which is every session that existed before this -- `sources` is the one
+    // pair this function always used and the parse below is the same call.
+    let resolution =
+        match fileName with
+        | Some path -> Some (Blade.ModuleResolve.resolveEntry path source)
+        | None -> None
+    let sources =
+        match resolution with
+        | Some r when not (List.isEmpty r.Errors) -> Blade.ModuleResolve.sourcesOf r.Files
+        | Some r when r.Files.Length > 1 -> Blade.ModuleResolve.sourcesOf r.Files
+        | _ -> [ key, source ]
+    let sm = Blade.Diagnostics.SourceMap.ofSources sources
     let reject (ds: Blade.Diagnostics.Diagnostic list) = Error (ds, sm)
-    match Blade.Parser.parseProgramWithFile fileName source with
-    | Error e ->
-        reject [ Blade.Parser.diagnosticOfParseError fileName e ]
+    let parsed =
+        match resolution with
+        | Some r when not (List.isEmpty r.Errors) -> Error r.Errors
+        | Some r when r.Files.Length > 1 ->
+            Blade.ModuleResolve.parseResolved sources |> Result.mapError List.singleton
+        | _ ->
+            Blade.Parser.parseProgramWithFile fileName source
+            |> Result.mapError (fun e -> [ Blade.Parser.diagnosticOfParseError fileName e ])
+    match parsed with
+    | Error ds ->
+        reject ds
     | Ok prog ->
         match Blade.TypeCheck.typeCheck prog with
         | Error errors ->

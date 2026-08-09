@@ -90,6 +90,13 @@ let m3Slice = [ "symmetry"; "reynolds" ]
 /// SKIP-UNSUPPORTED by design.
 let randSlice = [ "rand" ]
 
+/// display: the frame lines themselves. THE point of running this category
+/// down both lanes is that Blade.Display.Frame.emit and its generated C++
+/// mirror (Frame.cppRuntime) are two hand-written copies of one byte format --
+/// the escape table, the ordinal counter, the field order. A divergence in
+/// either is invisible in one lane alone and shows up here as a stdout diff.
+let displaySlice = [ "display" ]
+
 /// M4a differential slice: the SQL-ish relational surface. CORPUS directory
 /// names (Corpus.category loads them), each VERIFIED against tests/corpus/ and
 /// Corpus.fs and — critically — RUN through the gate in isolation, each showing
@@ -189,7 +196,7 @@ let stackJoinSlice = [ "stack-join" ]
 /// ceiling and, per the runInterpTimed caveat, contaminate later timings.
 let memfreeSlice = [ "memfree" ]
 
-let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice @ deferredConcreteSlice @ stackJoinSlice @ memfreeSlice
+let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ displaySlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice @ deferredConcreteSlice @ stackJoinSlice @ memfreeSlice
 
 /// Output-line normalizer, shared in spirit with DiffOracle.normalize
 /// (DiffOracle.fs:79-85), widened for the split-timing wrapper:

@@ -1,0 +1,25 @@
+// TEST: Nested Map Capture Unit Residue Rejects
+// ERROR: BL3006
+// ============================================================================
+// Residue twin of units/073 case B: the provisional CAPTURE route. `w` is a
+// kernel-local let over the still-unresolved outer param, so the inner apply's
+// own unit pass defers; the enclosing second pass then recomputes `w` through
+// its `bound` map (2.0 * f = 1/day) and walks the inner kernel body with the
+// inner param bound to ts's element unit, leaving 1/day * day * day = day.
+//
+// The reported unit matters as much as the code: `day` is the RESIDUE. If the
+// recheck ever read the inner kernel's stale first-pass types instead, `w`
+// would come back bare and the message would still say `day` -- so this pin
+// alone cannot distinguish the two, which is why units/073 case B pins the
+// accepting side.
+// ============================================================================
+Unit second
+Unit day = 86400 * second
+let ts: Array<Float<day> like Idx<3>> = [1.0, 2.0, 3.0]
+let fs: Array<Float<1/day> like Idx<2>> = [1.0, 2.0]
+let out = fs <@> lambda(f) -> {
+    let w = 2.0 * f
+    let sn = (ts <@> lambda(t) -> sin(w * t * t)) |> compute
+    reduce(sn, (+))
+} |> compute
+// ERROR-CONTAINS: dimensionless vs 86400 * second

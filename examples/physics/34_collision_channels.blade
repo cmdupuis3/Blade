@@ -126,8 +126,8 @@ let relgap3 = abs(c6p3 / g6p3 - 1.0)
 let relgap4 = abs(c6p4 / g6p4 - 1.0)
 
 // ---- spectral readout: growth rates, the mean-transfer identity, naive gap ----
-let erho1 = reduce(method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i: Int64, j: Int64) -> 2.0 * MVAL(i) / (MVAL(i) + MVAL(j)), (+)) / 9.0
-let erho2 = reduce(method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i: Int64, j: Int64) -> 2.0 * MVAL(i) / (MVAL(i) + MVAL(j)) * (2.0 * MVAL(i) / (MVAL(i) + MVAL(j))), (+)) / 9.0
+let erho1 = reduce(method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i: Int64, j: Int64) -> 2.0 * MVAL(i) / (MVAL(i) + MVAL(j)), (+), axes = 2) / 9.0
+let erho2 = reduce(method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i: Int64, j: Int64) -> 2.0 * MVAL(i) / (MVAL(i) + MVAL(j)) * (2.0 * MVAL(i) / (MVAL(i) + MVAL(j))), (+), axes = 2) / 9.0
 let lam1 = c20p1 / c19p1
 let lam2 = c20p2 / c19p2
 let itm = lam2 / (lam1 * lam1)

@@ -250,12 +250,57 @@ module ReplTypes =
 // between the REPL and the notebook would be two languages, not one.
 
 /// Top-level name a snippet (re)defines, for rebind replacement.
+///
+/// `Unit` is capitalised because the KEYWORD is (see Lexer.keywords) -- it is
+/// the one declaration keyword that is not lower-case, and both this pattern
+/// and `declRe` have to spell it the way the lexer does.
 let private bindingNameRe =
-    Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+)?|static\s+function\s+|function\s+|type\s+)([A-Za-z_][A-Za-z0-9_]*)")
+    Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+)?|static\s+function\s+|function\s+|type\s+|Unit\s+)([A-Za-z_][A-Za-z0-9_]*)")
 
 let bindingName (snippet: string) : string option =
     let m = bindingNameRe.Match snippet
     if m.Success then Some m.Groups.[1].Value else None
+
+/// The names a MULTI-LINE submission declares at top level.
+///
+/// `bindingName` is anchored `^\s*`, so it happily matches an INDENTED `let` --
+/// which is right for a `:paste` block of top-level declarations and wrong for
+/// a function body. Running it over every line of
+/// `function f(x) = { let n = ...; let m = ... }` harvested `n` and `m` as if
+/// the submission had bound them: they rode out to the REPL echo and the
+/// notebook's `bindings[]` as scoped names the user never bound, each with an
+/// empty type and value (nothing top-level carries that name to read one from),
+/// and the LAST of them became the echo target instead of the function.
+///
+/// Only a line that STARTS at nesting depth 0 can declare a top-level name.
+/// Depth counts (), [] and {} outside double-quoted strings and `//` comments --
+/// the same best-effort textual stance as the rest of this block (a brace in a
+/// comment can still fool it; the cost is a missed echo, never a wrong binding).
+let topLevelBindingNames (source: string) : string list =
+    let advance (depth: int) (line: string) : int =
+        let mutable d = depth
+        let mutable inQuotes = false
+        let mutable i = 0
+        while i < line.Length do
+            let c = line.[i]
+            if inQuotes then
+                if c = '\\' then i <- i + 1
+                elif c = '"' then inQuotes <- false
+            elif c = '"' then inQuotes <- true
+            elif c = '/' && i + 1 < line.Length && line.[i + 1] = '/' then i <- line.Length
+            elif c = '(' || c = '[' || c = '{' then d <- d + 1
+            elif c = ')' || c = ']' || c = '}' then d <- d - 1
+            i <- i + 1
+        d
+    let acc = ResizeArray<string>()
+    let mutable depth = 0
+    for line in source.Replace("\r\n", "\n").Split('\n') do
+        if depth <= 0 then
+            match bindingName line with
+            | Some n -> acc.Add n
+            | None -> ()
+        depth <- advance depth line
+    List.ofSeq acc
 
 /// The generated main prints a "<name> completed in Xs" timing line whose
 /// value changes every run -- exclude it from the output diff.
@@ -264,8 +309,13 @@ let isTimingLine (l: string) =
 
 /// A snippet is a declaration iff it opens with a declaration keyword;
 /// anything else is a bare expression to evaluate and echo.
+///
+/// The alternation is CASE-SENSITIVE and must list each keyword exactly as
+/// Lexer.keywords spells it: `Unit` is capitalised, and while it was spelled
+/// `unit` here it never matched, so a `Unit d = ...` cell fell through to the
+/// bare-expression lane and was wrapped in `let __cellN = `.
 let declRe =
-    Regex(@"^\s*(let|static|function|type|struct|interface|impl|unit|import|from|module)\b")
+    Regex(@"^\s*(let|static|function|type|struct|interface|impl|Unit|import|from|module)\b")
 
 let identRe = Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -382,7 +432,19 @@ type EvalResult =
       Stdout: string
       Stderr: string
       Bindings: Binding list
-      Diagnostics: EvalDiagnostic list }
+      Diagnostics: EvalDiagnostic list
+      /// Display frames this submission produced, in emission order: the raw
+      /// JSON text of each, exactly as it travelled on stdout
+      /// (Blade.Display.Frame). `ide serve` writes them as the eval response's
+      /// `display` array (docs/display-frames.md section 2); they are LIFTED OUT of
+      /// `Stdout` above, so a client showing both never sees a frame twice.
+      ///
+      /// A session re-runs every accumulated snippet on each submission, so an
+      /// earlier cell's frames reappear here. That is deliberate and is the
+      /// contract in the spec's section 10: their generated `meta.id`s are stable
+      /// across re-runs, so the panel merges equal ids into the plot it already
+      /// has, and the notebook lane skips an already-seen id for cell outputs.
+      Display: string list }
 
 /// The compiled fallback lane: session source path -> working directory ->
 /// (exit code, stdout, stderr), or an already-composed failure message.
@@ -655,7 +717,7 @@ type ReplSession(runCwd: string) =
         let trimmed = source.Trim()
         let blank =
             { Kept = true; ExitCode = 0; Lane = LaneInterp; ElapsedMs = 0
-              Stdout = ""; Stderr = ""; Bindings = []; Diagnostics = [] }
+              Stdout = ""; Stderr = ""; Bindings = []; Diagnostics = []; Display = [] }
         if trimmed = "" then blank else
         // `Trim()` may have eaten leading blank lines; the client's cell
         // coordinates still count them.
@@ -675,10 +737,11 @@ type ReplSession(runCwd: string) =
             | CandidateRejected (ds, _) ->
                 { Kept = false; ExitCode = 1; Lane = LaneInterp; ElapsedMs = 0
                   Stdout = ""; Stderr = ""; Bindings = []
-                  Diagnostics = ds |> List.map (remapDiagnostic candidate placement) }
+                  Diagnostics = ds |> List.map (remapDiagnostic candidate placement)
+                  Display = [] }
             | CandidateFailed msg ->
                 { Kept = false; ExitCode = 1; Lane = LaneGpp; ElapsedMs = 0
-                  Stdout = ""; Stderr = msg; Bindings = []; Diagnostics = [] }
+                  Stdout = ""; Stderr = msg; Bindings = []; Diagnostics = []; Display = [] }
             | CandidateRan r ->
                 let valueOf (name: string) =
                     r.Lines
@@ -699,12 +762,25 @@ type ReplSession(runCwd: string) =
                     | None -> ""
                 let kept = (r.ExitCode = 0)
                 if kept && commit then this.Commit candidate
+                // Display frames leave the text stream here, once, for every
+                // lane: both the interpreter and the compiled binary put them
+                // on stdout (that is what makes the REPL channel work at all),
+                // so the serve channel is a pure line filter rather than a
+                // second emission path.
+                let frames = r.Lines |> Array.choose (fun l ->
+                    if l.StartsWith Blade.Display.Frame.Sentinel
+                    then Some (l.Substring Blade.Display.Frame.Sentinel.Length)
+                    else None)
                 { Kept = kept
+                  Display = List.ofArray frames
                   ExitCode = r.ExitCode
                   Lane = r.Lane
                   ElapsedMs = r.ElapsedMs
                   Stdout =
-                    let userOut = r.Lines |> Array.filter (fun l -> not (outNameRe.IsMatch l))
+                    let userOut =
+                        r.Lines
+                        |> Array.filter (fun l ->
+                            not (outNameRe.IsMatch l) && not (l.StartsWith Blade.Display.Frame.Sentinel))
                     let joined = String.concat "\n" userOut
                     if joined.Trim() = "" then "" else joined
                   Stderr = r.Stderr.Trim()
@@ -718,10 +794,9 @@ type ReplSession(runCwd: string) =
             let (candidate, idx) = this.DeclarationCandidate trimmed
             // A :paste block may declare several names; every one of them is a
             // binding this submission made, and the LAST is what the REPL echoes.
-            let names =
-                trimmed.Replace("\r\n", "\n").Split('\n')
-                |> Array.choose bindingName
-                |> Array.toList
+            // Top-level only -- a function body's locals are not this
+            // submission's bindings (see topLevelBindingNames).
+            let names = topLevelBindingNames trimmed
             let target = List.tryLast names
             evalWith candidate { Index = idx; Prefix = 0; LeadPad = leadPad }
                      target (names |> List.map (fun n -> (n, n))) true

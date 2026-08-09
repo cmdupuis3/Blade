@@ -1,0 +1,27 @@
+// TEST: Unit Atan2 Same Unit Cancels
+// ============================================================================
+// atan2(y, x) is the one intrinsic whose operands may be dimensioned: they
+// enter only as the RATIO y/x, so any SHARED signature cancels and the result
+// is dimensionless. `atan2(dy: meters, dx: meters)` is exactly the slope angle
+// of a displacement, and adding a bare number to the result must type -- which
+// is the check that proves the annotation was dropped rather than propagated.
+// A mismatched pair rejects (unit-errors/006); so does a same-dimension pair at
+// different MAGNITUDE (unit-errors/009), because an intrinsic call has no seam
+// where a conversion factor could be inserted.
+// Holds at array position too, through the elementwise lift.
+// ============================================================================
+Unit meters
+let dy: Float<meters> = 1.0
+let dx: Float<meters> = 1.0
+let ang = atan2(dy, dx)
+let plusBare = ang + 1.0
+
+let DY: Array<Float<meters> like Idx<3>> = [1.0, 2.0, 3.0]
+let DX: Array<Float<meters> like Idx<3>> = [1.0, 1.0, 1.0]
+let angs = atan2(DY, DX) |> compute
+let shifted = (angs <@> lambda(a) -> a + 1.0) |> compute
+
+// EXPECT: ang = 0.785398163397448
+// EXPECT: plusBare = 1.78539816339745
+// EXPECT: angs = [0.785398163397448, 1.10714871779409, 1.24904577239825]
+// EXPECT: shifted = [1.78539816339745, 2.10714871779409, 2.24904577239825]

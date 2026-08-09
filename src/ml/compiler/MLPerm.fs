@@ -542,7 +542,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
     | ExprKind.ExprCompute x -> judge ctx env x
     // A reduce over a Pow k IS invariant for a commutative combiner, but v1
     // does not analyse it; the certified spelling is ml.derive_perm_linear.
-    | ExprKind.ExprReduce (src, _, init) ->
+    | ExprKind.ExprReduce (src, _, init, _) ->
         judge ctx env src |> Result.bind (fun ss ->
             (match init with
              | Some i -> judge ctx env i

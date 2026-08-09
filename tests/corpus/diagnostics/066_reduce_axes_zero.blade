@@ -1,0 +1,12 @@
+// TEST: Reduce Axes Zero Rejects
+// ERROR: BL3999
+// ERROR-CONTAINS: axes = 0
+// ERROR-CONTAINS: at least 1
+// ============================================================================
+// `axes = n` is the count of INNERMOST axes the fold collapses, so it ranges
+// over 1 .. rank(A). Zero would name no fold at all (the identity on A), and
+// silently returning A is exactly the kind of plausible-but-wrong answer the
+// axis argument exists to prevent.
+// ============================================================================
+let grid: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let bad = reduce(grid, (+), axes = 0)

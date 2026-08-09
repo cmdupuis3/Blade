@@ -1,0 +1,17 @@
+// TEST: Factory Slots With SI Stdlib
+// Factories compose with the stdlib: `import units.SI` supplies structural
+// units, a local dimensionless quantity tags an optional slot, and an
+// omitted tagged slot evaluates its default -- including one referencing a
+// REQUIRED param (g = x * 2.0 sees the caller's x). Structural SI slots
+// (Float<meter>) keep the permissive positional behavior.
+import units.SI
+Unit gain: 1
+function amp(x: Float, g: Float<gain> = x * 2.0) -> Float = x + g
+let a1 = amp(3.0)
+let a2 = amp(3.0, 10.0: gain)
+function span(len: Float<meter>, pad: Float<meter> = 0.5) -> Float<meter> = len + pad
+let L: Float<meter> = 2.0
+let s = span(L)
+// EXPECT: a1 = 9
+// EXPECT: a2 = 13
+// EXPECT: s = 2.5

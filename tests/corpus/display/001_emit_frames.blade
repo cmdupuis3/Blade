@@ -1,0 +1,20 @@
+// TEST: Display Emit Frames
+// ============================================================================
+// `display.emit(mime, data[, meta])` writes ONE display frame per call to
+// stdout -- the SOH-sentinel line specified in Blade-REPL/docs/display-frames.md
+// -- and evaluates to `true`. `encoding` is inferred from the mime: a `+json`
+// mime carries `data` as an inline JSON value, anything else as a quoted
+// (escaped) string. The generated `meta.id` counts emissions within the run,
+// so re-running a REPL session reproduces the same ids and the editor's plot
+// panel updates its entries in place instead of appending duplicates.
+//
+// The frame BYTES are pinned in-process (tests/Test_Display.fs); this file
+// pins the surface, the return value, and -- through `blade test interp` --
+// that the interpreter and the compiled binary emit the same stdout.
+// ============================================================================
+import display as d
+let fig = "{\"data\":[{\"type\":\"contour\",\"z\":[[1,2],[3,4]]}],\"layout\":{}}"
+let ok = d.emit("application/vnd.plotly.v1+json", fig, "{\"title\":\"demo\"}")
+let png = d.emit("image/png", "iVBORw0KGgo=")
+// EXPECT: ok = true
+// EXPECT: png = true

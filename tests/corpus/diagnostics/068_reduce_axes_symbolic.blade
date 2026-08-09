@@ -1,0 +1,12 @@
+// TEST: Reduce Axes Symbolic Rejects
+// ERROR: BL3999
+// ERROR-CONTAINS: requires an integer literal
+// ============================================================================
+// The fold's result RANK is rank(A) - n, so `n` is part of the TYPE. A
+// symbolic count would make the result type depend on a runtime value, which
+// the array type system has no way to express -- deferred, and refused
+// explicitly rather than defaulted to 1 behind the author's back.
+// ============================================================================
+let grid: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let k = 2
+let bad = reduce(grid, (+), axes = k)

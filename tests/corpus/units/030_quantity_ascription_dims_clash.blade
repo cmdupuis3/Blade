@@ -1,0 +1,12 @@
+// TEST: Quantity Ascription Dims Clash (rejects)
+// ERROR: BL3001
+// Ascription MINTS the nominal WITH a dims check: ascribing `speed` onto a
+// value already dimensioned seconds is a compile error (the annotated-vs-
+// annotated unify rejects; the checking collapse reports the generic type
+// mismatch, matching units/014's convention for annotated bindings).
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit speed: mps
+let t: Float<seconds> = 5.0
+let bad = (t : speed)

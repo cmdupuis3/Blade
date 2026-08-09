@@ -1,0 +1,28 @@
+// TEST: Scalar Intrinsic Let-Bound Unit Residue Rejects
+// ERROR: BL3006
+// ============================================================================
+// Residue twin of units/075: chasing a let into its defining expression buys a
+// DEFERRAL, not an acquittal. `2pi/day * day * day = day` survives, and the
+// apply-site second pass rejects once `fq` is bound.
+//
+// The reported unit is the assertion, not just the code. Before the chase, the
+// premature judgement read `w` as bare (dimensionless) and quoted `day^2`
+// (7464960000 * second^2) -- the wrong residue, reached by the wrong route, on
+// a line that a code-only pin would have called correctly rejected. `day` is
+// the answer only the post-unification walk can produce.
+// ============================================================================
+Unit second
+Unit day = 86400 * second
+Unit time: day
+Unit frequency: 1 / day
+let two_pi = 6.283185307179586
+function viaLet(freqs: T<frequency>^1, t_zero: T<time> = 0.0) = {
+    freqs <@> lambda(fq) -> {
+        let w = two_pi * fq
+        cos(w * t_zero * t_zero)
+    }
+}
+let fs: Array<Float<frequency> like Idx<2>> = [0.0, 0.25]
+let tz: Float<time> = 1.0
+let a = viaLet(fs, tz) |> compute
+// ERROR-CONTAINS: dimensionless vs 86400 * second

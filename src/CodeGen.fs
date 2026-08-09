@@ -1144,6 +1144,24 @@ let binOpToCpp = function
     | IREq -> "==" | IRNeq -> "!=" 
     | IRLt -> "<" | IRLe -> "<=" | IRGt -> ">" | IRGe -> ">="
     | IRAnd -> "&&" | IROr -> "||"
+    | IRMath2 name -> name   // call-shaped, like IRCaret; see renderMath2
+
+/// Render a BINARY math intrinsic. Call-shaped rather than infix, the same
+/// exception `^` already needs (`pow(l, r)`), so every IRBinOp emission site
+/// routes IRMath2 here before reaching binOpToCpp.
+///   atan2(y, x)    -> std::atan2(y, x)
+///   log_base(x, b) -> (std::log(x) / std::log(b))
+/// There is no std::log_base; the quotient IS the definition, and emitting it
+/// inline keeps the interpreter's mirror (Numerics.evalArith) a one-liner over
+/// the same two std::log calls. Both operands are real by construction
+/// (TypeCheck rejects complex ones), so no complex coercion is needed. In the
+/// CUDA device dialect the names go UNQUALIFIED, matching renderUnaryOpTyped's
+/// real-operand rule -- CUDA's device overloads live in the global namespace.
+let renderMath2 (name: string) (lStr: string) (rStr: string) : string =
+    let q (fn: string) = if inCudaDeviceDialect () then fn else "std::" + fn
+    match name with
+    | "log_base" -> sprintf "(%s(%s) / %s(%s))" (q "log") lStr (q "log") rStr
+    | _ -> sprintf "%s(%s, %s)" (q name) lStr rStr
 
 /// Convert unary operator to C++ string
 let unaryOpToCpp = function
@@ -1297,8 +1315,10 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRBinOp (_, op, l, r) ->
         let lStr = exprToCppSimple names l
         let rStr = exprToCppSimple names r
-        if op = IRCaret then sprintf "pow(%s, %s)" lStr rStr
-        else emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
+        match op with
+        | IRCaret -> sprintf "pow(%s, %s)" lStr rStr
+        | IRMath2 name -> renderMath2 name lStr rStr
+        | _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
         let inner = exprToCppSimple names e
         if isComplexType (inferExprType e) then sprintf "%s(%s)" (complexFnName "conj") inner
@@ -2069,10 +2089,10 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRBinOp (_, op, l, r) ->
         let lStr = exprToCppCore subst names l
         let rStr = exprToCppCore subst names r
-        if op = IRCaret then
-            sprintf "pow(%s, %s)" lStr rStr
-        else
-            emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
+        match op with
+        | IRCaret -> sprintf "pow(%s, %s)" lStr rStr
+        | IRMath2 name -> renderMath2 name lStr rStr
+        | _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
         // conj is std::conj/thrust::conj on complex operands; the identity on
         // reals (mathematically conj(x)=x for real x, and std::conj(double)
@@ -2202,7 +2222,16 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             | ArrayElem at -> elemTypeToCpp at.ElemType
             | t -> elemTypeToCpp t
         let product = argStrs |> List.map (fun a -> sprintf "%s[__pt]" a) |> String.concat " * "
-        let serialBound = literalOrRuntimeExtent headTy (List.head argStrs) 0
+        // A peeled ragged/grouped ROW param is a RaggedRow<T>, which carries
+        // its length inline as `.len` and has no `.extents` at all -- the same
+        // rule mask / reduce / extents already apply. Reached by the grouped
+        // co-iteration `method_for(zip(ga, gb)) <@> lambda(ra, rb) ->
+        // prodsum(ra, rb)`, where every operand is such a row.
+        let prodSumBound (ty: IRType) (nameStr: string) =
+            match ty with
+            | ArrayElem a when isRaggedRowType a -> sprintf "%s.len" nameStr
+            | _ -> literalOrRuntimeExtent ty nameStr 0
+        let serialBound = prodSumBound headTy (List.head argStrs)
         let serialForm =
             sprintf "[&]() { %s __ps = 0; for (size_t __pt = 0; __pt < %s; __pt++) { __ps += %s; } return __ps; }()"
                 elemStr serialBound product
@@ -2237,7 +2266,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 else List.map2 (fun n s -> sprintf "auto&& %s = %s;" n s) opNames argStrs
             let prodAt (i: string) =
                 opNames |> List.map (fun a -> sprintf "%s[%s]" a i) |> String.concat " * "
-            let boundOn = literalOrRuntimeExtent headTy (List.head opNames) 0
+            let boundOn = prodSumBound headTy (List.head opNames)
             // WHICH FORM. `omp simd reduction(+:__ps)` where the element type
             // admits it (`simdReducibleElem`), the K-lane chains otherwise.
             //
@@ -2301,6 +2330,25 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 @ laneStmts
                 @ [ sprintf "return %s;" resultLane ]
             sprintf "[&]() { %s }()" (String.concat " " body)
+    | IRDisplayEmit (head, quoted, dataExpr, metaTail) ->
+        // One display-frame line on stdout (docs/display-frames.md), answering
+        // bool. The head / quoting flag / meta tail are elaboration-time
+        // constants; only the payload is computed here. The helper is
+        // Blade.Display.Frame.cppRuntime's MIRROR of Frame.emit -- keep the
+        // two in step or the differential gate says so.
+        sprintf "blade_display::emit(%s, %s, %s, %s, %s)"
+            (escapeStringLit head)
+            (if quoted then "true" else "false")
+            (exprToCppCore subst names dataExpr)
+            (escapeStringLit metaTail)
+            (escapeStringLit Blade.Display.Frame.SessionTag)
+    | IRDisplayJson (rank, dataExpr) ->
+        // JSON text of a rank-1/rank-2 numeric array. The helper streams with
+        // setprecision(15) -- the print block's own rule -- so the
+        // interpreter's CppFormat.formatFloat15 mirror gives byte parity.
+        sprintf "blade_display::json%d(%s)" rank (exprToCppCore subst names dataExpr)
+    | IRDisplayNum dataExpr ->
+        sprintf "blade_display::jsonnum(%s)" (exprToCppCore subst names dataExpr)
     | IRContains (arrExpr, valueExpr) ->
         // Linear-scan membership test as an IIFE returning bool.
         let arrStr = exprToCppCore subst names arrExpr
@@ -7009,7 +7057,13 @@ let genIncludes () : string list =
      "using namespace nested_array_utilities;"
      "using std::cout;"
      "using std::endl;"
-     ""
+     ""]
+    // Display-frame emitter (docs/display-frames.md). Header-only, static
+    // inline and free when unused, so it is emitted unconditionally rather
+    // than behind a per-program feature scan.
+    @ Blade.Display.Frame.cppRuntime ()
+    @
+    [""
      "#define TIME std::chrono::high_resolution_clock::now()"
      "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()"
      ""]
@@ -7173,7 +7227,11 @@ let genIncludesExternal () : string list =
      "#include \"blade_runtime.hpp\""        // blade_rt::panic + BLADE_FRAME shadow stack
      "using std::cout;"
      "using std::endl;"
-     ""
+     ""]
+    // Display-frame emitter -- see the sibling include block above.
+    @ Blade.Display.Frame.cppRuntime ()
+    @
+    [""
      "#define TIME std::chrono::high_resolution_clock::now()"
      "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()"
      ""]
@@ -9821,12 +9879,107 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     let mpiError (reason: string) : string list =
         [sprintf "%s#error \"mpi: kernel for '%s' is not MPI-eligible: %s\"" ind name reason]
 
-    let raggedResult = tryRaggedPeel ()
+    // SAME-KEYS GROUPED CO-ITERATION: `method_for(zip(g1, ..., gk)) <@>
+    // lambda(r1, ..., rk) -> <scalar>`, every operand a group_by result over
+    // the SAME group_keys binding. TypeCheck (inferMethodFor) has already
+    // refused operands grouped by different keys, so ONE offsets table drives
+    // the walk and group g of every operand is peeled at the same __g -- the
+    // single-operand peel with k row params instead of one.
+    //
+    // The kernel must COLLAPSE its rows to a scalar. A row-shaped result would
+    // need a grouped OUTPUT type, whose lengths downstream consumers resolve
+    // through ctx.GroupedArrays -- which this site cannot extend, exactly as
+    // in the single-operand elementwise-over-group_by case. Falls through to
+    // the standard-nest gate below when it cannot be served, so an
+    // unsupported shape still gets the honest refusal rather than a nest that
+    // knows nothing about per-row lengths.
+    let tryGroupedZipPeel () : string list option =
+        if info.Arrays.Length < 2 || info.Arrays.Length <> info.ArrayTypes.Length then None
+        else
+        // Every operand grouped, and all by the same group_keys emission.
+        let gkNames =
+            List.map2 (fun a (at: IRArrayType) ->
+                match at.IndexTypes with
+                | outer :: _ when outer.IxKind = IxKGroupOuter ->
+                    Map.tryFind (exprToCppCtx ctx a) ctx.GroupedArrays
+                | _ -> None) info.Arrays info.ArrayTypes
+        match gkNames with
+        | (Some gkName) :: _ when gkNames |> List.forall ((=) (Some gkName)) ->
+            let ngroupsExpr = sprintf "%s__ngroups" gkName
+            let perRowLenExpr = sprintf "%s__offsets[__g + 1] - %s__offsets[__g]" gkName gkName
+            let outputIsRowShaped =
+                match info.OutputType with
+                | ArrayElem a when a.IndexTypes.Length >= 2 ->
+                    a.IndexTypes |> List.skip 1 |> List.exists (fun ix ->
+                        isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKGroupMember || ix.IxKind = IxKDepInner)
+                | _ -> false
+            match resolveCallable info.Kernel with
+            | Some callable when callable.Params.Length = info.Arrays.Length && outputIsRowShaped ->
+                Some (codegenError ctx ind "co-iterating grouped arrays supports only a row-CONSUMING kernel (one that collapses its rows to a scalar, e.g. prodsum(ra, rb) or reduce); a row-shaped result would need a grouped output type, which has no downstream support -- map the values BEFORE group_by instead")
+            | Some callable when callable.Params.Length = info.Arrays.Length ->
+                let outElem =
+                    match info.OutputType with
+                    | ArrayElem a -> a.ElemType
+                    | IRTScalar _ as t -> t
+                    | _ ->
+                        match inferExprType callable.Body with
+                        | IRTScalar _ as t -> t
+                        | ArrayElem a -> a.ElemType
+                        | _ -> (List.head info.ArrayTypes).ElemType
+                let outElemStr = elemTypeToCpp outElem
+                // One peeled row per operand, all at the SAME __g and the same
+                // per-row length. Each row's C++ type follows its own param
+                // type, by the rule the single-operand peel uses: a rank-1
+                // ragged/dep-idx param is a RaggedRow<T> (inline `.len`),
+                // anything else an Array<T,1> with a materialized _extents.
+                let rowDecls =
+                    List.mapi2 (fun i (param: IRParam) (at: IRArrayType) ->
+                        let subName = sprintf "%s__sub%d" name i
+                        let arrName = exprToCppCtx ctx info.Arrays.[i]
+                        let elemStr = elemTypeToCpp at.ElemType
+                        let paramIsRaggedRow =
+                            match param.Type with
+                            | ArrayElem pt -> (isRaggedArrayType pt || isDepIdxArrayType pt) && pt.IndexTypes.Length = 1
+                            | _ -> false
+                        let lines =
+                            if paramIsRaggedRow then
+                                [ sprintf "%s    RaggedRow<%s> %s = { %s[__g], %s };" ind elemStr subName arrName perRowLenExpr ]
+                            else
+                                [ sprintf "%s    size_t %s_extents[1] = {%s};" ind subName perRowLenExpr
+                                  sprintf "%s    Array<%s, 1> %s = { %s[__g], %s_extents };" ind elemStr subName arrName subName ]
+                        (param.VarId, subName, lines)) callable.Params info.ArrayTypes
+                let nameMap =
+                    let withRows =
+                        rowDecls |> List.fold (fun m (vid, sub, _) -> Map.add vid sub m) ctx.VarNames
+                    callable.Captures |> List.fold (fun m c -> Map.add c.Id c.Name m) withRows
+                let bodyStr = exprToCpp nameMap callable.Body
+                let opNames = info.Arrays |> List.map (exprToCppCtx ctx) |> String.concat ", "
+                let code =
+                    [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s" ind opNames gkName
+                      sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
+                      sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name
+                      sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+                    @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
+                    @ [ sprintf "%s    %s[__g] = %s;" ind name bodyStr
+                        sprintf "%s}" ind ]
+                // Raw `new T[n]` backing with stack extents, as the
+                // single-operand peel registers for its scalar-output form.
+                (match outElem with
+                 | IRTScalar _ -> registerAlloc (RawArrayData (name, None))
+                 | _ -> ())
+                Some code
+            | _ -> None
+        | _ -> None
+
+    let raggedResult =
+        match tryRaggedPeel () with
+        | Some c -> Some c
+        | None -> tryGroupedZipPeel ()
     if raggedResult.IsSome then
         if mpiRequested then mpiError "ragged/grouped iteration domains are not decomposed (v1)"
         else raggedResult.Value
     else
-    
+
     // Ragged/grouped operands are handled ONLY by tryRaggedPeel (single
     // array, single-param kernel). Anything that slipped past it -- a
     // multi-array method_for mixing a ragged operand with others, or a
@@ -11552,6 +11705,55 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
     walk root
     List.ofSeq ordered
 
+/// Reading a rank-1 source array that may be a COMPOUND (or SPARSE) compact
+/// view rather than a dense Array. The two runtime shapes have different
+/// interfaces: `Compound<T,1>` / `Sparse<T,1>` carry their length as the
+/// compact index's runtime `idx->cardinality` and their cells in `.data[i]`,
+/// and expose neither `.extents` nor `operator[]`. Returns (lengthExpr,
+/// elementAt) so an emitter can be written once against both.
+///
+/// The same idiom is spelled inline at the `contains`, `sort` and `reduce`
+/// sites; this is its shared form for the emitters that consume a key or
+/// value array by name.
+let compactOrDenseSource (e: IRExpr) (nameStr: string) : string * (string -> string) =
+    let isR1Compact =
+        match inferExprType e with
+        | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
+        | _ -> false
+    let bound =
+        if isR1Compact then sprintf "%s.idx->cardinality" nameStr
+        else
+            match inferExprType e with
+            | ArrayElem at -> literalOrRuntimeExtentOfArray at nameStr 0
+            | _ -> sprintf "%s.extents[0]" nameStr
+    let elemAt (i: string) =
+        if isR1Compact then sprintf "%s.data[%s]" nameStr i else sprintf "%s[%s]" nameStr i
+    (bound, elemAt)
+
+/// NEGATIVE KEY = "this row belongs to no group".
+///
+/// A key function is allowed to do selection: a row whose key is negative is
+/// dropped from the grouping entirely (SQL's WHERE fused into GROUP BY),
+/// rather than forming a group of its own. This is what lets a Welch-style
+/// segment family be written as one `floor` expression with the out-of-range
+/// rows keyed -1, instead of a mask -> compound -> group chain.
+///
+/// Emitted as a `continue` guard inside every pass that walks the key array
+/// (discovery, counts, permutation), so a dropped row contributes to no
+/// group's offsets and `group_by` never gathers it. `<name>__perm` stays
+/// allocated at the full input length and is simply under-filled.
+///
+/// Only NUMERIC keys can be negative: `std::string` has no `< 0`, so a string
+/// key never emits the guard. EnumIdx keys are deliberately exempt too -- there
+/// the admissible values are declared up front, so a negative entry in that
+/// list is a value the user asked for, not a sentinel.
+let negativeKeyDrop (elemType: IRType) (keyVar: string) (indent: string) : string list =
+    match IR.stripUnits elemType with
+    | IRTScalar (ETInt64 | ETInt32 | ETFloat64 | ETFloat32)
+    | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) ->
+        [sprintf "%s    if (%s < 0) continue; // negative key: row belongs to no group" indent keyVar]
+    | _ -> []
+
 let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -11698,7 +11900,15 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | IRBind (comp, cont) ->
         genBindChainBinding ctx binding builder comp cont
     | IRTuple _ | IRComplex _ | IRFieldAccess _ | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIf _ | IRApp _ | IRParam _ | IRMatch _
-    | IRPure _ | IRIndex _ | IRExtent _ | IRContains _ ->
+    // display.emit is a Bool-valued scalar like the rest of this group -- the
+    // frame write is a side effect of evaluating it, and it lands in main()'s
+    // BODY, ahead of the timing line and the print block. That position is what
+    // the interpreter mirrors (Interp/Run.fs flushes its frame buffer before
+    // printBindings), which is what keeps the differential gate happy.
+    | IRPure _ | IRIndex _ | IRExtent _ | IRContains _ | IRDisplayEmit _
+    // json_array / json_num answer a String scalar; the same scalar-binding
+    // path serves them (their C++ is a single blade_display::json* call).
+    | IRDisplayJson _ | IRDisplayNum _ ->
         genScalarExprBinding ctx binding builder
     
     | IRCompose _ ->
@@ -11840,6 +12050,11 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
         let keysName = exprToCppCtx ctx singleKey
         let (elemType, keysElemErrCode) = inferElemTypeStrict ctx ind singleKey "group_keys"
         let elemStr = elemTypeToCpp elemType
+        // The key array may be a rank-1 COMPOUND compact view (the
+        // mask -> compound -> map chain), which has no .extents / operator[].
+        let (keysBound, keysAt) = compactOrDenseSource singleKey keysName
+        // Negative keys drop their row from the grouping (see negativeKeyDrop).
+        let dropNeg = negativeKeyDrop elemType "__k" ind
         match binding.Type with
         | IRTGroupKeys (outerIdx, _, enumValuesOpt) ->
             let ngroupsOpt =
@@ -11859,52 +12074,61 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                 // Users who want numeric bucket ordering instead of
                 // first-occurrence order should annotate with `Idx<N>` to opt
                 // into Case 1.
-                let code = keysElemErrCode @ [
-                    sprintf "%s// group_keys: dynamic ngroups (hash discovery, %s keys)" ind elemStr
-                    sprintf "%sstd::unordered_map<%s, size_t> %s__lookup;" ind elemStr name
-                    sprintf "%ssize_t %s__ngroups = 0;" ind name
-                    sprintf "%sfor (size_t __ki = 0; __ki < %s.extents[0]; __ki++) {" ind keysName
-                    sprintf "%s    %s __k = %s[__ki];" ind elemStr keysName
-                    sprintf "%s    if (%s__lookup.find(__k) == %s__lookup.end()) %s__lookup[__k] = %s__ngroups++;" ind name name name name
-                    sprintf "%s}" ind
-                    sprintf "%ssize_t* %s__counts = new size_t[%s__ngroups]();" ind name name
-                    sprintf "%sfor (size_t __ki = 0; __ki < %s.extents[0]; __ki++) {" ind keysName
-                    sprintf "%s    %s__counts[%s__lookup[%s[__ki]]]++;" ind name name keysName
-                    sprintf "%s}" ind
-                    sprintf "%ssize_t* %s__offsets = new size_t[%s__ngroups + 1];" ind name name
-                    sprintf "%s%s__offsets[0] = 0;" ind name
-                    sprintf "%sfor (size_t __gi = 0; __gi < %s__ngroups; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind name name name name
-                    sprintf "%ssize_t* %s__fill = new size_t[%s__ngroups]();" ind name name
-                    sprintf "%ssize_t* %s__perm = new size_t[%s.extents[0]];" ind name keysName
-                    sprintf "%sfor (size_t __ki = 0; __ki < %s.extents[0]; __ki++) {" ind keysName
-                    sprintf "%s    size_t __g = %s__lookup[%s[__ki]];" ind name keysName
-                    sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
-                    sprintf "%s}" ind
-                    sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
-                    sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm" ind name name name name
+                // Each key pass opens the same way: read the cell into __k,
+                // then (numeric keys) skip the row when the key is negative.
+                let openPass =
+                    [ sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind keysBound
+                      sprintf "%s    %s __k = %s;" ind elemStr (keysAt "__ki") ] @ dropNeg
+                let code = List.concat [
+                    keysElemErrCode
+                    [ sprintf "%s// group_keys: dynamic ngroups (hash discovery, %s keys)" ind elemStr
+                      sprintf "%sstd::unordered_map<%s, size_t> %s__lookup;" ind elemStr name
+                      sprintf "%ssize_t %s__ngroups = 0;" ind name ]
+                    openPass
+                    [ sprintf "%s    if (%s__lookup.find(__k) == %s__lookup.end()) %s__lookup[__k] = %s__ngroups++;" ind name name name name
+                      sprintf "%s}" ind
+                      sprintf "%ssize_t* %s__counts = new size_t[%s__ngroups]();" ind name name ]
+                    openPass
+                    [ sprintf "%s    %s__counts[%s__lookup[__k]]++;" ind name name
+                      sprintf "%s}" ind
+                      sprintf "%ssize_t* %s__offsets = new size_t[%s__ngroups + 1];" ind name name
+                      sprintf "%s%s__offsets[0] = 0;" ind name
+                      sprintf "%sfor (size_t __gi = 0; __gi < %s__ngroups; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind name name name name
+                      sprintf "%ssize_t* %s__fill = new size_t[%s__ngroups]();" ind name name
+                      sprintf "%ssize_t* %s__perm = new size_t[%s];" ind name keysBound ]
+                    openPass
+                    [ sprintf "%s    size_t __g = %s__lookup[__k];" ind name
+                      sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
+                      sprintf "%s}" ind
+                      sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
+                      sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm" ind name name name name ]
                 ]
                 let ctx' = addVarName binding.Id name ctx
                 (code, ctx')
             | Some ngroups, None ->
                 // Case 1: positional bucketing. keys[i] in [0, ngroups).
-                let code = keysElemErrCode @ [
-                    sprintf "%s// group_keys: %d groups, positional buckets (Idx<N> keys)" ind ngroups
-                    sprintf "%ssize_t %s__ngroups = %d;" ind name ngroups
-                    sprintf "%ssize_t %s__counts[%d] = {0};" ind name ngroups
-                    sprintf "%sfor (size_t __ki = 0; __ki < %s.extents[0]; __ki++) {" ind keysName
-                    sprintf "%s    %s__counts[%s[__ki]]++;" ind name keysName
-                    sprintf "%s}" ind
-                    sprintf "%ssize_t %s__offsets[%d];" ind name (ngroups + 1)
-                    sprintf "%s%s__offsets[0] = 0;" ind name
-                    sprintf "%sfor (size_t __gi = 0; __gi < %d; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind ngroups name name name
-                    sprintf "%ssize_t %s__fill[%d] = {0};" ind name ngroups
-                    sprintf "%ssize_t* %s__perm = new size_t[%s.extents[0]];" ind name keysName
-                    sprintf "%sfor (size_t __ki = 0; __ki < %s.extents[0]; __ki++) {" ind keysName
-                    sprintf "%s    size_t __g = (size_t)%s[__ki];" ind keysName
-                    sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
-                    sprintf "%s}" ind
-                    sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
-                    sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm" ind name name name name
+                let openPass =
+                    [ sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind keysBound
+                      sprintf "%s    %s __k = %s;" ind elemStr (keysAt "__ki") ] @ dropNeg
+                let code = List.concat [
+                    keysElemErrCode
+                    [ sprintf "%s// group_keys: %d groups, positional buckets (Idx<N> keys)" ind ngroups
+                      sprintf "%ssize_t %s__ngroups = %d;" ind name ngroups
+                      sprintf "%ssize_t %s__counts[%d] = {0};" ind name ngroups ]
+                    openPass
+                    [ sprintf "%s    %s__counts[__k]++;" ind name
+                      sprintf "%s}" ind
+                      sprintf "%ssize_t %s__offsets[%d];" ind name (ngroups + 1)
+                      sprintf "%s%s__offsets[0] = 0;" ind name
+                      sprintf "%sfor (size_t __gi = 0; __gi < %d; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind ngroups name name name
+                      sprintf "%ssize_t %s__fill[%d] = {0};" ind name ngroups
+                      sprintf "%ssize_t* %s__perm = new size_t[%s];" ind name keysBound ]
+                    openPass
+                    [ sprintf "%s    size_t __g = (size_t)__k;" ind
+                      sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
+                      sprintf "%s}" ind
+                      sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
+                      sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm" ind name name name name ]
                 ]
                 let ctx' = addVarName binding.Id name ctx
                 (code, ctx')
@@ -11944,16 +12168,16 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                     sprintf "%s%s" ind bucketMapDecl
                     sprintf "%s%s" ind bucketLambdaDecl
                     sprintf "%ssize_t %s__counts[%d] = {0};" ind name ngroups
-                    sprintf "%sfor (size_t __ki = 0; __ki < %s.extents[0]; __ki++) {" ind keysName
-                    sprintf "%s    %s__counts[%s__bucket(%s[__ki])]++;" ind name name keysName
+                    sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind keysBound
+                    sprintf "%s    %s__counts[%s__bucket(%s)]++;" ind name name (keysAt "__ki")
                     sprintf "%s}" ind
                     sprintf "%ssize_t %s__offsets[%d];" ind name (ngroups + 1)
                     sprintf "%s%s__offsets[0] = 0;" ind name
                     sprintf "%sfor (size_t __gi = 0; __gi < %d; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind ngroups name name name
                     sprintf "%ssize_t %s__fill[%d] = {0};" ind name ngroups
-                    sprintf "%ssize_t* %s__perm = new size_t[%s.extents[0]];" ind name keysName
-                    sprintf "%sfor (size_t __ki = 0; __ki < %s.extents[0]; __ki++) {" ind keysName
-                    sprintf "%s    size_t __g = %s__bucket(%s[__ki]);" ind name keysName
+                    sprintf "%ssize_t* %s__perm = new size_t[%s];" ind name keysBound
+                    sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind keysBound
+                    sprintf "%s    size_t __g = %s__bucket(%s);" ind name (keysAt "__ki")
                     sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
                     sprintf "%s}" ind
                     sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
@@ -11990,38 +12214,56 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
             |> List.map (fun (_, t, _) -> t)
             |> String.concat ", "
             |> sprintf "std::tuple<%s>"
-        // Use the FIRST key array's extents for outer iteration. Typecheck
-        // has verified all key arrays share the outer extent.
-        let outerExtent = sprintf "%s.extents[0]" (List.head keyNames)
+        // Use the FIRST key array's length for outer iteration. Typecheck has
+        // verified all key arrays share the outer extent. Each component reads
+        // through the compound-or-dense accessor, so a compact view works here
+        // too.
+        let keyAccess = List.map2 (fun k n -> compactOrDenseSource k n) multipleKeys keyNames
+        let outerExtent = fst (List.head keyAccess)
         // make_tuple(k1[__ki], k2[__ki], ...) expression.
         let makeTupleAt indexVar =
-            keyNames
-            |> List.map (fun n -> sprintf "%s[%s]" n indexVar)
+            keyAccess
+            |> List.map (fun (_, at) -> at indexVar)
             |> String.concat ", "
             |> sprintf "std::make_tuple(%s)"
-        let code = keyErrCode @ [
-            sprintf "%s// group_keys: compound dispatch (%d-key tuple), dynamic ngroups via hash discovery" ind multipleKeys.Length
-            sprintf "%sstd::unordered_map<%s, size_t, tuple_hasher> %s__lookup;" ind tupleTypeStr name
-            sprintf "%ssize_t %s__ngroups = 0;" ind name
-            sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind outerExtent
-            sprintf "%s    auto __k = %s;" ind (makeTupleAt "__ki")
-            sprintf "%s    if (%s__lookup.find(__k) == %s__lookup.end()) %s__lookup[__k] = %s__ngroups++;" ind name name name name
-            sprintf "%s}" ind
-            sprintf "%ssize_t* %s__counts = new size_t[%s__ngroups]();" ind name name
-            sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind outerExtent
-            sprintf "%s    %s__counts[%s__lookup[%s]]++;" ind name name (makeTupleAt "__ki")
-            sprintf "%s}" ind
-            sprintf "%ssize_t* %s__offsets = new size_t[%s__ngroups + 1];" ind name name
-            sprintf "%s%s__offsets[0] = 0;" ind name
-            sprintf "%sfor (size_t __gi = 0; __gi < %s__ngroups; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind name name name name
-            sprintf "%ssize_t* %s__fill = new size_t[%s__ngroups]();" ind name name
-            sprintf "%ssize_t* %s__perm = new size_t[%s];" ind name outerExtent
-            sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind outerExtent
-            sprintf "%s    size_t __g = %s__lookup[%s];" ind name (makeTupleAt "__ki")
-            sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
-            sprintf "%s}" ind
-            sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
-            sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm (compound)" ind name name name name
+        // A tuple row is dropped when ANY numeric component is negative --
+        // the componentwise reading of the negative-key sentinel (a row that
+        // no family claims on any axis belongs to no group).
+        let dropNegTuple =
+            let tests =
+                List.map2 (fun k (_, at) ->
+                    let (kElem, _) = inferElemTypeStrict ctx ind k "group_keys (compound key)"
+                    if List.isEmpty (negativeKeyDrop kElem "__x" ind) then None
+                    else Some (sprintf "%s < 0" (at "__ki"))) multipleKeys keyAccess
+                |> List.choose id
+            if List.isEmpty tests then []
+            else [sprintf "%s    if (%s) continue; // negative key component: row belongs to no group" ind (String.concat " || " tests)]
+        let openPass =
+            [ sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind outerExtent ] @ dropNegTuple
+        let code = List.concat [
+            keyErrCode
+            [ sprintf "%s// group_keys: compound dispatch (%d-key tuple), dynamic ngroups via hash discovery" ind multipleKeys.Length
+              sprintf "%sstd::unordered_map<%s, size_t, tuple_hasher> %s__lookup;" ind tupleTypeStr name
+              sprintf "%ssize_t %s__ngroups = 0;" ind name ]
+            openPass
+            [ sprintf "%s    auto __k = %s;" ind (makeTupleAt "__ki")
+              sprintf "%s    if (%s__lookup.find(__k) == %s__lookup.end()) %s__lookup[__k] = %s__ngroups++;" ind name name name name
+              sprintf "%s}" ind
+              sprintf "%ssize_t* %s__counts = new size_t[%s__ngroups]();" ind name name ]
+            openPass
+            [ sprintf "%s    %s__counts[%s__lookup[%s]]++;" ind name name (makeTupleAt "__ki")
+              sprintf "%s}" ind
+              sprintf "%ssize_t* %s__offsets = new size_t[%s__ngroups + 1];" ind name name
+              sprintf "%s%s__offsets[0] = 0;" ind name
+              sprintf "%sfor (size_t __gi = 0; __gi < %s__ngroups; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind name name name name
+              sprintf "%ssize_t* %s__fill = new size_t[%s__ngroups]();" ind name name
+              sprintf "%ssize_t* %s__perm = new size_t[%s];" ind name outerExtent ]
+            openPass
+            [ sprintf "%s    size_t __g = %s__lookup[%s];" ind name (makeTupleAt "__ki")
+              sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
+              sprintf "%s}" ind
+              sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
+              sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm (compound)" ind name name name name ]
         ]
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
@@ -13347,6 +13589,10 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     let gkName = exprToCppCtx ctx gk
     let (elemType, elemErrCode) = inferElemTypeStrict ctx ind vals "group_by"
     let elemStr = elemTypeToCpp elemType
+    // The value array may be a rank-1 COMPOUND compact view (`group_by` over
+    // the surviving cells of a mask). gk__perm indexes the same COMPACT order
+    // the key scan walked, so the gather just needs the matching accessor.
+    let (_, valsAt) = compactOrDenseSource vals valsName
     let code = elemErrCode @ [
         sprintf "%s// group_by: per-group nested allocation, group-contiguous via gk__perm" ind
         sprintf "%ssize_t %s_extents[2] = {%s__ngroups, 0}; // inner extent is ragged" ind name gkName
@@ -13355,7 +13601,7 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         sprintf "%s    size_t __sz = %s__offsets[__g + 1] - %s__offsets[__g];" ind gkName gkName
         sprintf "%s    %s[__g] = new %s[__sz];" ind name elemStr
         sprintf "%s    for (size_t __k = 0; __k < __sz; __k++) {" ind
-        sprintf "%s        %s[__g][__k] = %s[%s__perm[%s__offsets[__g] + __k]];" ind name valsName gkName gkName
+        sprintf "%s        %s[__g][__k] = %s;" ind name (valsAt (sprintf "%s__perm[%s__offsets[__g] + __k]" gkName gkName))
         sprintf "%s    }" ind
         sprintf "%s}" ind
     ]

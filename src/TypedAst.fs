@@ -25,13 +25,22 @@ type TypedParam = {
     Type: IRType
     Index: int
     VarId: IRId
+    /// Typed default value expression, checked at the lambda declaration with
+    /// the params in scope (it references required params by their VarIds).
+    /// Consumed by the kernel-apply seam, which binds an omitted trailing
+    /// param as a body-entry TExprLet over this expr; direct calls re-type
+    /// the SURFACE default at the call site instead. None on required params
+    /// and every synthesized param.
+    Default: TypedExpr option
     /// Source span of the parameter's NAME TOKEN, carried through from
     /// Ast.ParamDecl/LambdaParam so `references[]` can point go-to-definition
     /// at it. `noSpan` on synthesized params (the kernels elaborators invent).
     NameSpan: Span
 }
 
-type TypedLambdaInfo = {
+// (`and`, not `type`: TypedParam.Default references TypedExpr, so it joins
+// the TypedLambdaInfo/TypedExpr recursive group.)
+and TypedLambdaInfo = {
     Params: TypedParam list
     Body: TypedExpr
     ReturnType: IRType
@@ -249,6 +258,21 @@ and TypedExprKind =
     | TExprUnion of TypedExpr * TypedExpr
     | TExprUnique of array: TypedExpr
     | TExprContains of array: TypedExpr * value: TypedExpr
+    /// `display.emit(mime, data[, meta])`: write one display frame to stdout,
+    /// evaluate to `true`. Everything except `data` is fixed at elaboration
+    /// time (Blade.Display.Elaborate) -- `head` is the frame JSON up to and
+    /// including `"data":`, `quoted` says whether the payload goes out as a
+    /// quoted JSON string or an inline JSON value, `metaTail` is the user
+    /// `meta` object minus its braces. Byte format: Blade.Display.Frame.
+    | TExprDisplayEmit of head: string * quoted: bool * data: TypedExpr * metaTail: string
+    /// `display.json_array(A)`: render a rank-1 or rank-2 numeric array as
+    /// JSON text (String). `rank` is pinned at typecheck so both back ends
+    /// pick the 1-D/2-D serializer without re-resolving the type. Number
+    /// formatting is the byte-parity 15-significant-digit print rule.
+    | TExprDisplayJson of rank: int * data: TypedExpr
+    /// `display.json_num(x)`: render a numeric scalar as JSON text (String),
+    /// same formatting rule as TExprDisplayJson.
+    | TExprDisplayNum of data: TypedExpr
     | TExprGroupBy of values: TypedExpr * grouping: TypedExpr
     | TExprGroupKeys of keys: TypedExpr list
     | TExprSort of array: TypedExpr * key: TypedExpr

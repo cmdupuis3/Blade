@@ -1,0 +1,8 @@
+// TEST: Diag Direct Call Wrong Arg Type To Lambda Binding (diag)
+// ERROR: BL3001 @ 7:11
+// ERROR-CONTAINS: argument 1 of 'f'
+// A let-bound lambda reaches the SAME direct-application seam as a named
+// `function`, so the check has to cover it: the callee is a variable whose
+// type resolved to an arrow, not a declaration the checker looked up.
+let f = lambda(x: Float64) -> x + 1.0
+let r = f("hello")

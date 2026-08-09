@@ -94,6 +94,11 @@ type private ParamInfo = {
     /// Deduced minimum rank; Some only when DEDUCED (annotated params show
     /// their rank in the type).
     PMinRank: int option
+    /// Pretty-printed DEFAULT value expression for signature help
+    /// (`s: Float = 2.0` renders "2.0"); None on required params. The JSON
+    /// field is omitted when absent, so the payload shape is unchanged for
+    /// existing clients.
+    PDefault: string option
 }
 
 type private BindingInfo = {
@@ -344,6 +349,9 @@ let private renderJson (env: Envelope) (diags: Diag list) (bindings: BindingInfo
                 match p.PMinRank with
                 | Some k -> sb.AppendFormat(",\"minRank\":{0}", k) |> ignore
                 | None -> ()
+                match p.PDefault with
+                | Some d -> sb.AppendFormat(",\"default\":\"{0}\"", jsonEscape d) |> ignore
+                | None -> ()
                 sb.Append '}' |> ignore)
             sb.AppendFormat("],\"ret\":\"{0}\"", jsonEscape ret) |> ignore
             if not b.Where.IsEmpty then
@@ -498,10 +506,39 @@ let rec private indexNamesOf (t: IRType) : (IRId * string) list =
     | IRTTuple ts -> ts |> List.collect indexNamesOf
     | _ -> []
 
+/// Index slots whose EXTENT is an INTERNAL (`__`-prefixed) param -- a
+/// compiler-minted name like `__extents_inferred_n`, which `extents(A)` pins on
+/// an otherwise-unconstrained array parameter. Nothing user-written produces one
+/// and no source can refer to it, so leaking it into a hover or a REPL echo
+/// (`Array<Float64 like Idx<__extents_inferred_n>>`) shows an identifier that
+/// does not exist. `indexNamesOf` already suppresses `__` TAGS; this is the same
+/// rule one level down, on the extent expression a nameless slot falls back to
+/// printing. They render as the `_` wildcard `concreteNames` already uses for
+/// exactly these slots in `calls[]`, so both surfaces read the same way.
+///
+/// PLAIN slots only: `ppIndexTypeIn` treats a nominal name on a COMPACT class as
+/// the whole class's surface spelling, so naming one `_` would print a bare `_`
+/// instead of `SymIdx<2, _>`.
+let rec private internalExtentNames (t: IRType) : (IRId * string) list =
+    let isInternal (idx: IRIndexType) =
+        idx.Symmetry = SymNone
+        && (match idx.Extent with
+            | IRParam (n, _, _) -> n.StartsWith "__"
+            | _ -> false)
+    match t with
+    | ArrayElem arr ->
+        (arr.IndexTypes |> List.choose (fun idx ->
+            if isInternal idx then Some (idx.Id, "_") else None))
+        @ internalExtentNames arr.ElemType
+    | IRTTuple ts -> ts |> List.collect internalExtentNames
+    | _ -> []
+
 /// Public: also the REPL's display printer (Cli.fs) -- index-name-aware
 /// rendering beats bare ppIRType for any type embedding named index types.
 let ppType (t: IRType) : string =
-    ppIRTypeIn (indexNamesOf t |> Map.ofList) t
+    // Internal extents first so a real nominal name for the same slot wins
+    // (Map.ofList keeps the last entry for a duplicate key).
+    ppIRTypeIn (internalExtentNames t @ indexNamesOf t |> Map.ofList) t
 
 /// Multi-line function signature: each parameter and the return type on its
 /// own line (long array types stay readable).
@@ -692,6 +729,7 @@ let private builtinCallOf (te: TypedExpr) : (string * TypedExpr list) option =
     | TExprIntersect (a, b) -> Some ("intersect", [a; b])
     | TExprUnion (a, b) -> Some ("union", [a; b])
     | TExprContains (a, v) -> Some ("contains", [a; v])
+    | TExprDisplayEmit (_, _, d, _) -> Some ("display.emit", [d])
     | TExprGroupBy (v, g) -> Some ("group_by", [v; g])
     | TExprGroupKeys ks -> Some ("group_keys", ks)
     | TExprTranspose (a, _, _) -> Some ("transpose", [a])
@@ -1013,7 +1051,9 @@ let private typeDeclNames (td: TypeDecl) : string list =
 let private bindingKind (b: Binding) =
     match b.Mutability with
     | BindMut -> "let mut"
-    | BindConst -> "let const"
+    // BindConst is internal-only (let static / local function desugar);
+    // `const` is not surface syntax.
+    | BindConst -> "let static"
     | BindLet -> "let"
 
 let private collectSourceBindings (prog: Ast.Program) =
@@ -1112,11 +1152,38 @@ type private TypedEntry = {
     EName: string
     EKind: string
     ETypeStr: string
-    EParams: (string * string * int option) list   // name, type, deduced min rank
+    EParams: (string * string * int option * string option) list   // name, type, deduced min rank, default text
     ERet: string option
     EWhere: string list
     EDeducedComm: string list
 }
+
+/// Compact one-line rendering of a surface DEFAULT expression for signature
+/// help. Best-effort: the shapes defaults actually take (literals, names,
+/// small arithmetic, calls) render exactly; anything larger elides to "...".
+let rec private ppDefaultExpr (e: Expr) : string =
+    let binOpToken op =
+        match op with
+        | OpAdd -> "+" | OpSub -> "-" | OpMul -> "*" | OpDiv -> "/"
+        | OpMod -> "%" | OpCaret -> "^"
+        | OpEq -> "==" | OpNeq -> "!=" | OpLt -> "<" | OpLe -> "<="
+        | OpGt -> ">" | OpGe -> ">=" | OpAnd -> "&&" | OpOr -> "||"
+        | _ -> "?"
+    match e.Kind with
+    | ExprLit (LitInt n) -> string n
+    | ExprLit (LitFloat f) ->
+        let s = sprintf "%g" f
+        if s.Contains "." || s.Contains "e" || s.Contains "E" then s else s + ".0"
+    | ExprLit (LitBool b) -> if b then "true" else "false"
+    | ExprLit (LitString s) -> sprintf "\"%s\"" s
+    | ExprVar n -> n
+    | ExprUnaryOp (OpNeg, inner) -> "-" + ppDefaultExpr inner
+    | ExprBinOp (_, op, l, r) -> sprintf "%s %s %s" (ppDefaultExpr l) (binOpToken op) (ppDefaultExpr r)
+    | ExprApp (f, args) -> sprintf "%s(%s)" (ppDefaultExpr f) (args |> List.map ppDefaultExpr |> String.concat ", ")
+    | ExprField (b, f) -> sprintf "%s.%s" (ppDefaultExpr b) f
+    | ExprTyped (inner, _) -> ppDefaultExpr inner
+    | ExprTuple es -> sprintf "(%s)" (es |> List.map ppDefaultExpr |> String.concat ", ")
+    | _ -> "..."
 
 let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: TypedProgram) =
     let acc = ResizeArray<TypedEntry>()
@@ -1172,6 +1239,13 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
             | Some src when src.Params.Length = f.Params.Length ->
                 src.Params |> List.map (fun p -> p.Type.IsSome) |> List.toArray
             | _ -> f.Params |> List.map (fun _ -> true) |> List.toArray
+        // Surface defaults by param position (for the optional "default"
+        // field on params[] -- signature help shows what an omitted arg gets).
+        let srcDefaults =
+            match Map.tryFind f.Name srcFuncs with
+            | Some src when src.Params.Length = f.Params.Length ->
+                src.Params |> List.map (fun p -> p.Default |> Option.map ppDefaultExpr) |> List.toArray
+            | _ -> f.Params |> List.map (fun _ -> None) |> List.toArray
         let ps =
             f.Params
             |> List.mapi (fun i p ->
@@ -1182,7 +1256,7 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
                         | ArrayElem arr when not arr.IndexTypes.IsEmpty ->
                             Some arr.IndexTypes.Length
                         | _ -> None
-                (p.Name, pp p.Type, minRank))
+                (p.Name, pp p.Type, minRank, srcDefaults.[i]))
         let ret = pp f.ReturnType
         let kind = if f.IsStatic then "static function" else "function"
         let deducedComm =
@@ -1193,7 +1267,7 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
                | Some (packName, Blade.Deduce.PInv) -> [sprintf "comm(%s)" packName]
                | _ -> [])
         acc.Add { Scope = ""; EName = f.Name; EKind = kind
-                  ETypeStr = formatFunctionSig (ps |> List.map (fun (n, t, _) -> (n, t))) ret
+                  ETypeStr = formatFunctionSig (ps |> List.map (fun (n, t, _, _) -> (n, t))) ret
                   EParams = ps; ERet = Some ret
                   EWhere = whereConjuncts f.WhereClause
                   EDeducedComm = deducedComm }
@@ -1382,7 +1456,7 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
                 elif not e.EParams.IsEmpty && block <> "" then
                     let paramRes =
                         e.EParams
-                        |> List.map (fun (n, _, _) ->
+                        |> List.map (fun (n, _, _, _) ->
                             Regex(sprintf @"^[\s\-\*]*%s\s*[:\u2014-]" (Regex.Escape n)))
                     block.Split('\n')
                     |> Array.filter (fun l -> paramRes |> List.forall (fun re -> not (re.IsMatch l)))
@@ -1391,8 +1465,8 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
                 else block
             let ps =
                 e.EParams
-                |> List.map (fun (n, t, mr) ->
-                    { PName = n; PType = t; PDoc = paramDocIn block n; PMinRank = mr })
+                |> List.map (fun (n, t, mr, dflt) ->
+                    { PName = n; PType = t; PDoc = paramDocIn block n; PMinRank = mr; PDefault = dflt })
             let providerRead = if e.Scope = "" then Map.tryFind e.EName provRead else None
             yield { Name = e.EName; Kind = kind; Line = line; Col = col
                     EndLine = endLine; EndCol = endCol
@@ -1713,6 +1787,57 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
                     Message = e.Message; Code = e.Code }
         exitCode <- 1
     | Ok program ->
+        // File-based imports (`import units.SI`) are resolved here for the
+        // same reason `blade check` resolves them: without it the editor
+        // squiggles every `Float<newton>` in a file that compiles fine.
+        //
+        // Only the program handed to the CHECKER grows. Every payload
+        // collector below still receives the entry module alone, because each
+        // one joins spans against `source` -- this buffer -- and a member
+        // file's line 12 is not this file's line 12. The typed program is
+        // sliced the same way (checkProgram preserves module order, so the
+        // entry is last); the FULL-tier upgrade gets the whole thing, since
+        // monomorphization has to see the modules it lowers.
+        //
+        // With nothing to resolve, `depModules` is empty and every value below
+        // is the one this function computed before the module layer existed.
+        let resolution =
+            match program.Modules with
+            | [ m ] -> Blade.ModuleResolve.resolveParsedEntry filePath source m
+            | _ -> Blade.ModuleResolve.resolveEntry filePath source
+        let depModules =
+            match resolution.Errors, resolution.Files with
+            | [], (_ :: _ :: _ as files) ->
+                let deps = files |> List.take (files.Length - 1)
+                match Blade.ModuleResolve.parseResolved (Blade.ModuleResolve.sourcesOf deps) with
+                | Ok p -> p.Modules
+                | Error _ -> []          // reported by the member's own check
+            | _ -> []
+        for d in resolution.Errors do
+            // A resolution failure is spanned in the file that WROTE the bad
+            // import. When that is this buffer the span is usable as-is;
+            // when it is a member file it is not, so it lands at 1:1 with the
+            // file named in the message.
+            let sameFile = (d.Span.File = Some filePath) || d.Span.File.IsNone
+            let (line, col, endLine, endCol) =
+                if sameFile then clampSpan d.Span else (1, 1, 1, 1)
+            let message =
+                if sameFile then d.Message
+                else sprintf "%s (in %s)" d.Message (defaultArg d.Span.File "?")
+            diags.Add { Severity = "error"; Line = line; Col = col
+                        EndLine = endLine; EndCol = endCol
+                        Message = message; Code = d.Code }
+            exitCode <- 1
+        let checkedProgram =
+            if List.isEmpty depModules then program
+            else { program with Modules = depModules @ program.Modules }
+        /// The entry module's slice of a typed program checked over the whole
+        /// resolved set. Identity when nothing was resolved.
+        let entryOnly (tp: TypedProgram) =
+            if List.isEmpty depModules then tp
+            else match tp.Modules with
+                 | [] -> tp
+                 | ms -> { tp with Modules = [ List.last ms ] }
         // Fresh provider-module registry (the load site records into it
         // during typeCheck; collectProviderStores reads it).
         Blade.ProviderRegistry.IdeStores.reset ()
@@ -1782,16 +1907,26 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
                                 { empty with DKind = "packComm"; DOwner = owner; DName = pack })
                     checkerFacts @ certFactRecords ()
                 with _ -> []
-        match Blade.TypeCheck.typeCheck program with
+        match Blade.TypeCheck.typeCheck checkedProgram with
         | Error errors ->
             for e in errors do
-                let (line, col, endLine, endCol) = clampSpan e.Span
+                // Same member-file rule as the resolution diagnostics above: a
+                // span that belongs to another file cannot be squiggled here.
+                let foreign =
+                    not (List.isEmpty depModules)
+                    && (match e.Span.File with Some f -> f <> filePath | None -> false)
+                let (line, col, endLine, endCol) =
+                    if foreign then (1, 1, 1, 1) else clampSpan e.Span
                 let code = (Blade.TypeEnv.diagnosticOfCompileError e).Code
                 let msg =
                     let baseMsg = Blade.TypeEnv.formatTypeError e.Error
-                    match e.Context with
-                    | [] -> baseMsg
-                    | ctx -> sprintf "%s (%s)" baseMsg (String.concat "; " (List.rev ctx))
+                    let withCtx =
+                        match e.Context with
+                        | [] -> baseMsg
+                        | ctx -> sprintf "%s (%s)" baseMsg (String.concat "; " (List.rev ctx))
+                    if foreign then
+                        sprintf "%s (in %s)" withCtx (defaultArg e.Span.File "?")
+                    else withCtx
                 diags.Add { Severity = "error"; Line = line; Col = col
                             EndLine = endLine; EndCol = endCol; Message = msg; Code = code }
             exitCode <- 1
@@ -1801,7 +1936,8 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
             // and produced a PARTIAL typed program, surface bindings for
             // the parts that DID check, so errors still get tooltips.
             match Blade.TypeCheck.IdePartial.get () with
-            | Some (typedProg, _) ->
+            | Some (fullTyped, _) ->
+                let typedProg = entryOnly fullTyped
                 let sourceLines = source.Replace("\r\n", "\n").Split('\n')
                 bindings <- (try joinBindings program typedProg sourceLines with _ -> [])
                 providers <- (try collectProviderStores program with _ -> [])
@@ -1809,9 +1945,10 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
                 kernels <- (try collectKernels () with _ -> [])
                 references <- (try collectReferences program typedProg sourceLines with _ -> [])
             | None -> ()
-        | Ok (typedProg, builder, _) ->
+        | Ok (fullTyped, builder, _) ->
             drainWarningChannels ()
             drainDeducedFacts ()
+            let typedProg = entryOnly fullTyped
             let sourceLines = source.Replace("\r\n", "\n").Split('\n')
             bindings <- joinBindings program typedProg sourceLines
             // Guarded so provider structure can never break the JSON output.
@@ -1826,7 +1963,9 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
             | None -> ()
             | Some up ->
                 let outcome =
-                    try up program typedProg builder
+                    // Monomorphization lowers, so it needs the WHOLE resolved
+                    // program -- not the entry slice the payload collectors got.
+                    try up checkedProgram fullTyped builder
                     with ex -> Error [("BL9001", ex.Message)]
                 match outcome with
                 | Ok concrete -> bindings <- applyConcrete concrete bindings

@@ -1,0 +1,34 @@
+// TEST: Unit Annotation On An Abstract Array Parameter
+// `T<unit>^r` -- the type-variable spelling of a unit-carrying parameter.
+// Before this, a caret and a type argument were mutually exclusive on a
+// type variable, so a unit could only appear on a CONCRETE signature
+// (`Array<Float<day> like Idx<n>>`); every unit-carrying library function
+// had to be written against a fixed index type. The caret is what marks
+// the type-variable reading -- `T<x>` with no caret keeps its ordinary
+// named-type meaning.
+//
+// The element lowers to the SAME shape a concrete `Float<day>` element
+// produces, so the unit is not a second mechanism: it flows through the
+// ordinary arithmetic rules (the sum below is in days and adds against a
+// `Float<day>`), and two abstract parameters keep INDEPENDENT extents --
+// `ts` has 3 elements and `ws` has 5, and each `extents` call answers about
+// its own argument. (Units declared locally, not `import units.SI`: the
+// corpus lane does not resolve stdlib imports and unresolved names would
+// degrade these annotations to bare floats, asserting nothing.)
+Unit second
+Unit hertz
+function total(x: T<second>^1) = reduce(x, (+))
+function meanOf(x: T<second>^1) = reduce(x, (+)) / extents(x)
+function ratio(t: T<second>^1, w: T<hertz>^1) =
+  (reduce(t, (+)) / extents(t)) * (reduce(w, (+)) / extents(w))
+let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let ws: Array<Float<hertz> like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let sum = total(ts)
+let bias: Float<second> = 4.0
+let shifted = sum + bias
+let avg = meanOf(ts)
+let r = ratio(ts, ws)
+// EXPECT: sum = 6
+// EXPECT: shifted = 10
+// EXPECT: avg = 2
+// EXPECT: r = 6

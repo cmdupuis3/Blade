@@ -24,6 +24,10 @@ type IRBinOp =
     | IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret  // ^ for power
     | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe
     | IRAnd | IROr
+    /// Binary math intrinsic (atan2 / log_base), lowered from Ast.OpMath2.
+    /// Renders as a CALL, not an infix operator -- the same shape IRCaret
+    /// already needs (`pow(l, r)`). Always real-valued Float64.
+    | IRMath2 of string
 
 /// Mode for binary array operations
 type IRBinOpMode =
@@ -97,6 +101,20 @@ type IRExpr =
     | IRUnion of IRExpr * IRExpr              // union(A, B) - set union (deduplicated, A's elements first)
     | IRUnique of array: IRExpr               // unique(A) - dedup, first-occurrence order
     | IRContains of array: IRExpr * value: IRExpr  // contains(A, x) - membership test, returns bool
+    /// display.emit(mime, data[, meta]) -- one display-frame line on stdout,
+    /// evaluating to `true`. The only EFFECTFUL expression node in the IR:
+    /// `head`/`quoted`/`metaTail` are elaboration-time constants (see
+    /// TypedAst.TExprDisplayEmit) and `data` is the runtime String payload.
+    /// Both back ends share Blade.Display.Frame's byte format -- the
+    /// interpreter buffers, the compiled binary writes std::cout, and the
+    /// differential gate pins the two together.
+    | IRDisplayEmit of head: string * quoted: bool * data: IRExpr * metaTail: string
+    /// display.json_array(A): rank-1/rank-2 numeric array -> JSON text
+    /// (String). Pure (unlike IRDisplayEmit). `rank` pinned at typecheck;
+    /// formatting is the shared 15-significant-digit byte-parity rule.
+    | IRDisplayJson of rank: int * data: IRExpr
+    /// display.json_num(x): numeric scalar -> JSON text (String). Pure.
+    | IRDisplayNum of data: IRExpr
     | IRGroupBy of values: IRExpr * grouping: IRExpr  // group_by(vals, gk) - apply grouping
     | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key => compound dispatch
     | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
@@ -3802,6 +3820,9 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRIntersect (a, b) -> [a; b], (function [a'; b'] -> IRIntersect (a', b') | _ -> badChildren "IRIntersect")
     | IRUnion (a, b) -> [a; b], (function [a'; b'] -> IRUnion (a', b') | _ -> badChildren "IRUnion")
     | IRContains (a, v) -> [a; v], (function [a'; v'] -> IRContains (a', v') | _ -> badChildren "IRContains")
+    | IRDisplayEmit (h, q, d, m) -> [d], (function [d'] -> IRDisplayEmit (h, q, d', m) | _ -> badChildren "IRDisplayEmit")
+    | IRDisplayJson (r, d) -> [d], (function [d'] -> IRDisplayJson (r, d') | _ -> badChildren "IRDisplayJson")
+    | IRDisplayNum d -> [d], (function [d'] -> IRDisplayNum d' | _ -> badChildren "IRDisplayNum")
     | IRGroupBy (v, k) -> [v; k], (function [v'; k'] -> IRGroupBy (v', k') | _ -> badChildren "IRGroupBy")
     | IRSort (a, k) -> [a; k], (function [a'; k'] -> IRSort (a', k') | _ -> badChildren "IRSort")
     | IRReduce (a, k, None) -> [a; k], (function [a'; k'] -> IRReduce (a', k', None) | _ -> badChildren "IRReduce")
@@ -4126,6 +4147,20 @@ let rec unifyParamWithArg (paramTy: IRType) (argTy: IRType) (acc: Map<int, IRTyp
             | _ -> acc'
         let acc' = List.zip pSlots aSlots |> List.fold unifySlot acc
         unifyParamWithArg pRet aRet acc'
+    // A unit annotation on ONE side only. Last, so the both-annotated arm
+    // above still wins; these mirror `Unify.unify`'s permissive asymmetric
+    // unit arms, which is what lets a BARE value flow into an annotated
+    // position in the first place -- `f(x: Float<day>)` accepts a bare
+    // literal or a bare array. Learning bindings has to see through the
+    // wrapper for the same reason: with a unit-carrying ABSTRACT parameter
+    // (`T<day>^1`, whose element is `IRTUnitAnnotated (IRTInfer n, day)`) a
+    // bare argument left `n` unlearned, so specialization never substituted
+    // it and the var reached the IR validator as BL6001 "unresolved type
+    // variable" -- a program that passed `blade check` and then died. No
+    // unit CHECK is skipped here: compatibility is settled in TypeCheck, at
+    // the call site, long before monomorphization runs.
+    | IRTUnitAnnotated (pi, _), _ -> unifyParamWithArg pi argTy acc
+    | _, IRTUnitAnnotated (ai, _) -> unifyParamWithArg paramTy ai acc
     | _ -> acc  // Concrete types or unhandled compound -- no bindings learned
 
 /// Walk a type collecting all IRTInfer IDs found inside (recursively).
@@ -5408,6 +5443,11 @@ let rec typeOf (expr: IRExpr) : IRType =
     | IRBinOp (_, op, left, right) ->
         (match op with
          | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> IRTScalar ETBool
+         // atan2 / log_base are real-valued regardless of operand widths (the
+         // C++ overload set promotes integer operands to double), so they do
+         // NOT follow the promote-the-operands rule below -- `atan2(1, 1)` over
+         // two Int64s is a double, not an int.
+         | IRMath2 _ -> IRTScalar ETFloat64
          | _ ->
              match typeOf left, typeOf right with
              | IRTScalar e1, IRTScalar e2 ->
@@ -5554,6 +5594,8 @@ let rec typeOf (expr: IRExpr) : IRType =
          | ArrayElem a -> mkArrayLike { a with ElemType = IRTScalar ETBool }
          | t -> t)
     | IRContains _ -> IRTScalar ETBool  // Membership returns bool
+    | IRDisplayEmit _ -> IRTScalar ETBool  // display.emit always answers true
+    | IRDisplayJson _ | IRDisplayNum _ -> IRTScalar ETString  // JSON text
     | IRGroupBy (v, gk) ->
         // TypeCheck's `ExprGroupBy` rule constructs a rank-2 array type with
         // `__group_outer` + `__group_member` tagged index slots. For
@@ -5965,6 +6007,34 @@ let liftChildEvaluatedOnce (builder: IRBuilder) (child: IRExpr) : (IRId * IRType
     else
         (peeled, inner)
 
+/// Like `liftChild`, but ALSO hoists a SYNTHESIZED ELEMENTWISE LOOP
+/// APPLICATION -- `IRApp(IRObjectFor ..., [A])`, what an array/scalar
+/// broadcast `x - s` lowers to when TypeCheck's `method_for(A) <@>
+/// lambda(__bx) -> ...` re-synthesis does not fire (it is skipped when the
+/// scalar operand's type is still an unresolved inference variable, e.g.
+/// `reduce(x, (+)) / n` with an Int64 `n`). That form materializes only from a
+/// let-RHS -- genBinding's IRApp(IRObjectFor) arm and genFuncBody's
+/// hoistLoopApps are the two expansion sites -- so left inline in a consuming
+/// operand slot it reaches exprToCpp and renders as the
+/// LOOP_OBJECT_USED_AS_VALUE sentinel.
+///
+/// Deliberately NARROWER than `liftChildEvaluatedOnce`: it adds only this one
+/// shape, not the whole `isNestedLoopComputeArg` family. In particular a bare
+/// `IRCompute` operand is left alone -- a forced FUNCTOR MAP (`exp <$> (L <@>
+/// k)`) still has to reach the consumer whole, since hoisting it splits the
+/// wrapper off the loop it wraps and the consumer then reads a binding that
+/// was never emitted under that id.
+let liftChildIncludingLoopApp (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
+    let (peeled, inner) = peelLetChain child
+    match inner with
+    | IRApp (IRObjectFor _, _, _) ->
+        let id = builder.FreshId()
+        let ty = typeOf inner
+        (peeled @ [(id, ty, inner)], IRVar (id, ty))
+    | _ ->
+        let (b, e) = liftChild builder inner
+        (peeled @ b, e)
+
 /// Lift a list of children, accumulating bindings.
 let liftChildren (builder: IRBuilder) (children: IRExpr list) : (IRId * IRType * IRExpr) list * IRExpr list =
     children |> List.fold (fun (binds, acc) child ->
@@ -6039,12 +6109,32 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arrFinal) = liftChild builder arr'
         wrapLets binds (IRContains (arrFinal, v'))
 
-    // Single-child consumers where the array slot can hold an inline form
+    // display.emit's payload is a plain String scalar -- nothing to lift, but
+    // the child still recurses so an inline form INSIDE the payload
+    // expression is handled like anywhere else.
+    | IRDisplayEmit (h, q, data, m) -> IRDisplayEmit (h, q, liftExpr builder data, m)
+
+    // display.json_array consumes an ARRAY: recurse, then hoist an inline
+    // form in the data slot into a let, exactly like IRReduce's array slot.
+    | IRDisplayJson (r, data) ->
+        let data' = liftExpr builder data
+        let (binds, dataFinal) = liftChild builder data'
+        wrapLets binds (IRDisplayJson (r, dataFinal))
+    | IRDisplayNum data -> IRDisplayNum (liftExpr builder data)
+
+    // Single-child consumers where the array slot can hold an inline form.
+    //
+    // Both use liftChildIncludingLoopApp, not liftChild: neither emitter has a
+    // rendering for a synthesized elementwise loop application, so an operand
+    // holding one (`x - s`, when TypeCheck's method_for re-synthesis is skipped
+    // -- see that helper's note) reached exprToCpp and rendered as codegen's
+    // LOOP_OBJECT_USED_AS_VALUE sentinel. Hoisting it to its own let-RHS is
+    // what writing the intermediate `let` by hand already does.
     | IRReduce (arr, kernel, init) ->
         let arr' = liftExpr builder arr
         let kernel' = liftExpr builder kernel
         let init' = init |> Option.map (liftExpr builder)
-        let (binds, arrFinal) = liftChild builder arr'
+        let (binds, arrFinal) = liftChildIncludingLoopApp builder arr'
         wrapLets binds (IRReduce (arrFinal, kernel', init'))
     | IRReduceCompute (comp, kernel, seed) ->
         // The computation child is a deferred combinator (apply/fusion
@@ -6057,7 +6147,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (allBinds, finals) =
             args |> List.fold (fun (bs, fs) a ->
                 let a' = liftExpr builder a
-                let (b, aFinal) = liftChild builder a'
+                let (b, aFinal) = liftChildIncludingLoopApp builder a'
                 (bs @ b, fs @ [aFinal])) ([], [])
         wrapLets allBinds (IRProdSum finals)
     | IRExtent (arr, dim) ->
@@ -7468,7 +7558,12 @@ let rec ppIRType = function
         sprintf "Dist<%d, %s like %s>" order (ppIRType elem) axesStr
     | IRTNamed name -> name  // Named types print as themselves
     | IRTInfer id -> sprintf "T?%d" id
-    | IRTUnitAnnotated (inner, units) -> sprintf "%s<%s>" (ppIRType inner) (ppUnitSig units)
+    // Type-argument rendering (ppUnitSigType, not ppUnitSig): a quantity
+    // renders as its nominal name (`Float64<speed>`), a structural signature
+    // as its dims, and a dims-cancelled structural signature (`speed/speed`,
+    // `m/m`) as `<Unitless>` — display provenance only, distinct from a bare
+    // type that never had units.
+    | IRTUnitAnnotated (inner, units) -> sprintf "%s<%s>" (ppIRType inner) (ppUnitSigType units)
     | IRTGroupKeys (outerIdx, sourceIdx, _) -> sprintf "GroupKeys<%s, %s>" (ppIndexType outerIdx) (ppIndexType sourceIdx)
     | IRTArrow (slots, result, identity) ->
         // Renders the unified arrow form. For array-shaped arrows (all-SIdx
@@ -7617,6 +7712,8 @@ let ppBinOp = function
     | IRGe -> ">="
     | IRAnd -> "&&"
     | IROr -> "||"
+    | IRMath2 name -> name   // call-shaped; ppIRExpr renders it infix-ish, which
+                             // is only ever read by IR dumps
 
 let ppBinOpWithMode mode op =
     let opStr = ppBinOp op
@@ -7895,9 +7992,11 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
 // Design notes:
 //   - No memoization: a correctness foundation, not a hot path. Add a
 //     reference-keyed cache if profiling later shows this dominating.
-//   - IsPure is currently true for all native Blade IR (no I/O, no
-//     in-language mutation beyond codegen's deterministic allocations);
-//     exists for forward compatibility with a future impure construct.
+//   - IsPure is true for all native Blade IR EXCEPT IRDisplayEmit, the one
+//     construct with observable I/O (it writes a display frame to stdout).
+//     Nothing consumes IsPure yet; the flag is set correctly so that when a
+//     hoist/LICM/CSE pass arrives it cannot silently move, merge or drop a
+//     frame emission.
 //   - Exhaustive by construction: only semantically special variants have
 //     explicit arms (IRVar contributes a free var; IRApp follows resolvable
 //     callees; BinderShape variants scope their bound ids). Everything else
@@ -7925,6 +8024,14 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
     // -- Variable reference: the one FreeVars source --
     | IRVar (id, _) ->
         { emptyAttrs with FreeVars = Set.singleton id }
+
+    // -- The one IMPURE construct: display.emit writes a frame to stdout, so
+    //    a future hoist/CSE/dead-binding pass must not move it, merge two of
+    //    them, or drop one whose value is unused. This is the "future impure
+    //    construct" the header anticipated; the payload's own attrs still
+    //    merge in (it can reference bindings like anything else).
+    | IRDisplayEmit (_, _, data, _) ->
+        { exprAttrs data with IsPure = false }
 
     | IRApp (f, args, _) ->
         let baseAttrs = mergeMany (exprAttrs f :: List.map exprAttrs args)

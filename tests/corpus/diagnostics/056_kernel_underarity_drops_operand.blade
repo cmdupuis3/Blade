@@ -1,0 +1,22 @@
+// TEST: Diag Kernel Under Arity Drops Operand (diag)
+// ERROR: BL3002
+// ERROR-CONTAINS: supplies 3 operands to a kernel with 2 parameters
+// ============================================================================
+// THE SILENT WRONG ANSWER (docs/plan-tuples-vs-arg-packs.md 3.4, M2). The
+// kernel-parameter unification at the apply seam was guarded by
+//     if lambdaInfo.Params.Length = expandedRows.Length then ... else
+//         Ok ()  // Arity mismatch handled elsewhere; don't double-report.
+// and "elsewhere" did not exist -- the only kernel-arity check in the tree was
+// on the `for (...) in ...` co-iteration path. So this program passed every
+// stage, iterated C's axis anyway, and returned TWELVE cells
+//     [11,11,21,21,31,31,12,12,22,22,32,32]
+// with C's values never read. No diagnostic at any stage.
+//
+// The width-schema matcher makes the totals a hard requirement: the pack has 3
+// leaves and the schema has width 2. This is the most valuable of the new
+// errors, because it is the only one whose old behaviour LOOKED like an answer.
+// ============================================================================
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+let C: Array<Float64 like Idx<2>> = [5.0, 6.0]
+let g = object_for(lambda(a, b) -> a + b) <@> (A, B, C) |> compute

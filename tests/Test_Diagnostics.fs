@@ -79,6 +79,7 @@ let runDiagnosticsCoreTests () : BlockResult =
             | "BL5400" -> Some (PhElaborate "spectra")
             | "BL5500" -> Some (PhElaborate "grad")
             | "BL5600" -> Some (PhElaborate "sgs")
+            | "BL5700" -> Some (PhElaborate "display")
             | _ -> None      // an unlisted BL5xxx is a banding gap, not a pass
         | '6' -> Some PhIRValidate
         | '7' -> Some PhBackend

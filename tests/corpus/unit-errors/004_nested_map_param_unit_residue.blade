@@ -1,0 +1,24 @@
+// TEST: Nested Map Param Unit Residue Rejects
+// ERROR: BL3006
+// ============================================================================
+// Second-pass twin of units/065: deferring the nested map's own unit check is
+// NOT acceptance. `1/day * day * day = day` leaves a residue, and the
+// ENCLOSING kernel's second pass -- which now has an arm for a nested `<@>`
+// map -- rejects the dimensioned transcendental argument once the outer param
+// is bound.
+//
+// This case was a FALSE ACCEPT before the arm existed, and not by deferral:
+// with `w` unresolved the real array/scalar product never took the broadcast
+// path that stamps a unit, so the operand reached `exp` with NO signature and
+// the transcendental rule had nothing to judge. The nested-map arm recomputes
+// the element signature from the operands instead of reading the stamp, so
+// the residue is visible.
+// ============================================================================
+Unit second
+Unit day = 86400 * second
+let ts: Array<Float<day> like Idx<3>> = [1.0, 2.0, 3.0]
+let ws: Array<Float<1/day> like Idx<2>> = [1.0, 2.0]
+let out = ws <@> lambda(w) -> {
+    let e = exp <@> (w * ts * ts)
+    reduce(e, (+))
+} |> compute

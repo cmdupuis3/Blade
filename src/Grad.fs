@@ -72,7 +72,7 @@ open Blade.Ast
 /// Keep in sync with StaticEval.evalBuiltin and derivRule below.
 let mathIntrinsics : Set<string> =
     Set.ofList [
-        "exp"; "log"; "sqrt"
+        "exp"; "log"; "log10"; "sqrt"
         "sin"; "cos"; "tan"
         "sinh"; "cosh"; "tanh"
         "asin"; "acos"; "atan"
@@ -81,6 +81,21 @@ let mathIntrinsics : Set<string> =
     ]
 
 let isMathIntrinsic (name: string) : bool = Set.contains name mathIntrinsics
+
+/// BINARY math intrinsics -- plain two-argument calls (`atan2(y, x)`) that
+/// TypeCheck rewrites to `TExprBinOp (Elementwise, OpMath2 name, ...)` when the
+/// name is not user-bound. Deliberately a SEPARATE set from `mathIntrinsics`:
+/// that one is documented unary and `TypeCheck.isUnaryIntrinsic` /
+/// `etaExpandFunctionKernel` read it for an arity they cannot otherwise
+/// recover, so widening it would eta-expand `atan2` to one parameter.
+/// Real-only (neither has a std::complex overload), and their result is
+/// always dimensionless -- see TypeCheck.unitRulesForOp's OpMath2 arms.
+/// Keep in sync with StaticEval.evalBuiltin, `adjointOf`'s binary-intrinsic
+/// arm below, and CodeGen's IRMath2 rendering.
+let binaryMathIntrinsics : Set<string> =
+    Set.ofList [ "atan2"; "log_base" ]
+
+let isBinaryMathIntrinsic (name: string) : bool = Set.contains name binaryMathIntrinsics
 
 /// Subset of the intrinsics that have std::complex overloads in <complex>
 /// and so are permitted on complex operands (result is complex, same
@@ -128,6 +143,10 @@ let private derivRule (name: string) (u: Expr) : Expr option =
     match name with
     | "exp" -> Some (call "exp" [u])
     | "log" -> Some (div (fLit 1.0) u)
+    // d/du log10(u) = 1/(u ln 10). `log(10.0)` is left symbolic rather than
+    // spelled as a decimal so the emitted derivative carries the same rounding
+    // as the forward pass's std::log10 base; both back ends constant-fold it.
+    | "log10" -> Some (div (fLit 1.0) (mul u (call "log" [fLit 10.0])))
     | "sqrt" -> Some (div (fLit 1.0) (mul (fLit 2.0) (call "sqrt" [u])))
     | "sin" -> Some (call "cos" [u])
     | "cos" -> Some (neg (call "sin" [u]))
@@ -512,7 +531,15 @@ let rec private hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, in
     let re k = inheritSpan e k
     let recurse = hoistReduces fname ctx extents
     match e.Kind with
-    | ExprKind.ExprReduce (src, kernel, initOpt) ->
+    | ExprKind.ExprReduce (src, kernel, initOpt, axesOpt) ->
+        // A PARTIAL fold (`axes = n` with n < rank) produces an ARRAY, not a
+        // scalar, so the accumulator-loop rewrite below does not model it.
+        // Grad v1 differentiates the rank-1 fold only; an explicit axis count
+        // is refused rather than silently rewritten as if it were one.
+        (match axesOpt with
+         | Some _ -> err fname "reduce with an explicit `axes = n` is not differentiable (v1): grad supports the rank-1 additive fold `reduce(A, (+)[, init])`"
+         | None -> Ok ())
+        |> Result.bind (fun () ->
         (match kernel.Kind with
          | ExprKind.ExprSection OpAdd -> Ok ()
          | ExprKind.ExprSection _ -> err fname "reduce in differentiated code supports only the additive kernel `(+)` (v1)"
@@ -544,7 +571,7 @@ let rec private hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, in
                                 [ StmtExpr (syn (ExprAssign (v accName, add (v accName) readK))) ])
                  Ok (srcPre @ [accLet; loop], v accName)
              | None -> err fname (sprintf "reduce source '%s' has no statically-known extent in differentiated code; reduce over a param/let array with an `Idx<n>` extent or over an inline array literal (v1)" nm))
-        | _ -> err fname "reduce in differentiated code requires an array-variable or inline-array-literal source; deferred/former reductions are not differentiable (v1)"))
+        | _ -> err fname "reduce in differentiated code requires an array-variable or inline-array-literal source; deferred/former reductions are not differentiable (v1)")))
     | ExprKind.ExprBinOp (m, op, l, r) ->
         recurse l |> Result.bind (fun (pl, l') ->
         recurse r |> Result.map (fun (pr, r') -> (pl @ pr, re (ExprBinOp (m, op, l', r')))))
@@ -1054,6 +1081,31 @@ let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list
          | Some d ->
              let pre, c = bindCot rc cot
              adjointOf rc u (mul c d) |> Result.map (fun ss -> pre @ ss))
+    // BINARY intrinsics. Their partials are handled here rather than in
+    // `derivRule`, whose signature (name -> Expr -> Expr option) is
+    // structurally unary: it returns ONE derivative of ONE forward operand, so
+    // a two-argument rule has nowhere to live in that table without changing
+    // every caller. The chain rule is applied per operand right here, which is
+    // what the table's consumer does anyway.
+    //   atan2(y, x): d/dy =  x/(x^2+y^2),  d/dx = -y/(x^2+y^2)
+    //   log_base(x, b) = log x / log b:
+    //                    d/dx = 1/(x log b),  d/db = -log x/(b (log b)^2)
+    // Without this arm both would fall to the `Ok []` catch-all below and
+    // silently contribute a ZERO gradient.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [a; b]) when isBinaryMathIntrinsic name
+                                       && not (Map.containsKey name rc.Ctx.Decls) ->
+        let pre, c = bindCot rc cot
+        let (dA, dB) =
+            match name with
+            | "atan2" ->
+                let denom = add (mul a a) (mul b b)
+                (div b denom, neg (div a denom))
+            | _ ->  // log_base(x, b)
+                let lb = call "log" [b]
+                (div (fLit 1.0) (mul a lb),
+                 neg (div (call "log" [a]) (mul b (mul lb lb))))
+        adjointOf rc a (mul c dA) |> Result.bind (fun sa ->
+        adjointOf rc b (mul c dB) |> Result.map (fun sb -> pre @ sa @ sb))
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar _ }, _) ->
         // array read of a non-diff array, or int-typed call -- no adjoint
         Ok []
@@ -1309,7 +1361,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
         fd.Params
         @ (classes |> List.choose (fun (p, c) ->
              match c with
-             | DiffArray -> Some { Name = dName p.Name; Type = p.Type; Mutability = Mutable; NameSpan = noSpan }
+             | DiffArray -> Some { Name = dName p.Name; Type = p.Type; Mutability = Mutable; Default = None; NameSpan = noSpan }
              | _ -> None))
     { Name = fname + gradSuffix
       TypeParams = fd.TypeParams

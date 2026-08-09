@@ -161,7 +161,36 @@ let private ompDepthCases : (string * string * string) list =
        "function k(a: Float64) where omp(a: 2) = a * 2.0\n" +
        "let M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
        "let m = object_for(k) <@> (M) |> compute\n",
-       "#pragma omp parallel for simd") ]
+       "#pragma omp parallel for simd")
+      // TUPLE PARAMETER (docs/plan-tuples-vs-arg-packs.md 6c). A `Tuple<k>`
+      // parameter is ONE schema node whose levels are its k rows in order, and
+      // the apply seam realizes it by replacing it with k row params -- which
+      // deletes the name the licence resolves by. These two cases are the pin
+      // that the licence survives that expansion AND keeps its depth meaning:
+      // one level licensed of a two-row node is a plain `parallel for`, both
+      // levels licensed is `collapse(2)`. Before the split, BOTH of these were
+      // a hard BL3999 refusal (any where-clause + any tuple param).
+      ("tuple_param_depth_1_no_collapse",
+       "let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n" +
+       "let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]\n" +
+       "let f = lambda(p: Tuple<2>) where omp(p: 1) -> p[0] * p[1]\n" +
+       "let m = object_for(f) <@> (A, B) |> compute\n",
+       "#pragma omp parallel for")
+      ("tuple_param_depth_2_collapses",
+       "let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n" +
+       "let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]\n" +
+       "let f = lambda(p: Tuple<2>) where omp(p: 2) -> p[0] * p[1]\n" +
+       "let m = object_for(f) <@> (A, B) |> compute\n",
+       "#pragma omp parallel for collapse(2)")
+      // The same licence reached through the NAMED-function eta wrapper, which
+      // renames the params ONCE (to `__k<uid>_<i>`) before the tuple expansion
+      // renames them again. The two remappings have to compose.
+      ("tuple_param_named_function_depth_1",
+       "function f(p: Tuple<2>) where omp(p: 1) = p[0] * p[1]\n" +
+       "let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n" +
+       "let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]\n" +
+       "let m = object_for(f) <@> (A, B) |> compute\n",
+       "#pragma omp parallel for") ]
 
 /// Comm-licensed parallel REDUCTIONS (Phase 2 of
 /// docs/plan-cpp-perf-exploitation.md). `where ... omp` on a FOLD kernel opts

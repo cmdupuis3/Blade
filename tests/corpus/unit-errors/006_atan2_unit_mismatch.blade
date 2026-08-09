@@ -1,0 +1,12 @@
+// TEST: Atan2 Unit Mismatch (rejects)
+// ERROR: BL3006
+// atan2(y, x) accepts dimensioned operands only when they share ONE signature
+// (units/066): the intrinsic sees the ratio y/x, and meters/seconds is not a
+// number. BL3006 is the unit-algebra band, the same code the `+` mismatch
+// reports. The accepting direction, and the same-dimension-different-magnitude
+// rejection, are units/066 and unit-errors/009.
+Unit meters
+Unit seconds
+let dy: Float<meters> = 1.0
+let dt: Float<seconds> = 1.0
+let bad = atan2(dy, dt)

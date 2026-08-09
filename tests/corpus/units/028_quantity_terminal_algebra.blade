@@ -1,0 +1,11 @@
+// TEST: Quantity Terminal In Unit Algebra (rejects)
+// ERROR: BL3011
+// Quantities are TERMINAL: a quantity name cannot appear inside unit
+// algebra (`Unit x = speed * meters`). The nominal layer is exactly one
+// level deep; compose from the structural units the quantity was declared
+// over instead.
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit speed: mps
+Unit x = speed * meters

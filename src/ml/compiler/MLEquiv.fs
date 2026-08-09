@@ -680,7 +680,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
     // POLARITY against MLPerm, where a reduce over a node power IS invariant
     // whenever the combiner is commutative, deferred only because the
     // combiner is not analysed here.
-    | ExprKind.ExprReduce (src, _, init) ->
+    | ExprKind.ExprReduce (src, _, init, _) ->
         judge ctx env src |> Result.bind (fun ss ->
             (match init with
              | Some i -> judge ctx env i

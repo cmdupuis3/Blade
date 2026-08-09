@@ -1,0 +1,9 @@
+// TEST: Dimensionless Quantity Levels
+// `Unit levels: 1` declares a dimensionless QUANTITY (the option-marker
+// case): the unity literal `1` means empty dims, so the nominal tag is the
+// entire content of the type. A bare literal adopts it by ascription.
+Unit levels: 1
+let n = (20 : levels)
+let m: Float<levels> = 3.0
+// EXPECT: n = 20
+// EXPECT: m = 3

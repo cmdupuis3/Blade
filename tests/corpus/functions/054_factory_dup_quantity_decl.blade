@@ -1,0 +1,8 @@
+// TEST: Factory Duplicate Quantity Declaration (rejects)
+// ERROR: BL3013
+// Within one function's defaulted trailing group, quantity-typed slots
+// must carry DISTINCT quantities: by-nominal routing needs each nominal to
+// name exactly one slot. Fires at the declaration, even though this
+// function is never called.
+Unit levels: 1
+function bad(x: Float, a: Float<levels> = 1.0, b: Float<levels> = 2.0) -> Float = x + a + b

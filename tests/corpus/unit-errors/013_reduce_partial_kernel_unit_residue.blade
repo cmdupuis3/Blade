@@ -1,0 +1,16 @@
+// TEST: Reduce Partial Fold Kernel Unit Residue Rejects
+// ERROR: BL3006
+// ERROR-CONTAINS: reduce kernel
+// ============================================================================
+// The fold's units ENDOMORPHISM check, through the PARTIAL (one-axis) form.
+// A fold is typed at its element's unit, so the kernel must preserve it: `*`
+// over `Float64<meter>` yields meter^2, a grade that depends on the extent.
+// The rank-1 form has always rejected this; the partial form must reject
+// identically -- and it cannot do so from inside the synthesized row kernel,
+// where the row's element type is still an inference variable, so the check
+// is run at the reduce site where the operand's element type is known.
+// Without it, this program typechecks and labels meter^2 values `meter`.
+// ============================================================================
+Unit meter
+let grid: Array<Float64<meter> like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let bad = reduce(grid, (*))

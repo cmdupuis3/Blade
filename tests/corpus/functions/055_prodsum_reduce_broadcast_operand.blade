@@ -1,0 +1,48 @@
+// TEST: Prodsum Reduce Broadcast Operand
+// An array/scalar elementwise broadcast (`x - s`) sitting DIRECTLY in a
+// prodsum or reduce operand slot, inside a function body.
+//
+// TypeCheck re-synthesizes `array <op> scalar` into `method_for(A) <@>
+// lambda(__bx) -> ...` only when the scalar operand's type has already
+// resolved to a scalar; when it is still an inference variable at that
+// moment (here `reduce(x, (+)) / n` with an Int64 `n` from extents) the
+// expression keeps its direct binop lowering, which is a synthesized loop
+// APPLICATION. That form has no inline rendering, so an unlifted operand
+// used to reach codegen as the LOOP_OBJECT_USED_AS_VALUE sentinel. Both
+// consumers lift their operands evaluated-once, so either spelling of the
+// mean divisor compiles to the same numbers.
+//
+// n = 4, mean = 2.5, deviations = [-1.5, -0.5, 0.5, 1.5]
+function covariance(x: T^1, y: T^1) = {
+    let n = extents(x)          // Int64
+    prodsum(x - reduce(x, (+)) / n, y - reduce(y, (+)) / n) / n
+}
+// (2.25 + 0.25 + 0.25 + 2.25) / 4
+let v = covariance([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
+// EXPECT: v = 1.25
+
+// The Float64 divisor spelling of the same function must agree.
+function covarianceF(x: T^1, y: T^1) = {
+    let n = 1.0 * extents(x)    // Float64
+    prodsum(x - reduce(x, (+)) / n, y - reduce(y, (+)) / n) / n
+}
+let vf = covarianceF([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
+// EXPECT: vf = 1.25
+
+// Same broadcast in a let-bound scalar, feeding prodsum twice.
+function sumsq(x: T^1) = {
+    let n = extents(x)
+    let m = reduce(x, (+)) / n
+    prodsum(x - m, x - m)
+}
+let s = sumsq([1.0, 2.0, 3.0, 4.0])
+// EXPECT: s = 5
+
+// The reduce operand slot has the same shape; deviations sum to zero.
+function devsum(x: T^1) = {
+    let n = extents(x)
+    let m = reduce(x, (+)) / n
+    reduce(x - m, (+))
+}
+let d = devsum([1.0, 2.0, 3.0, 4.0])
+// EXPECT: d = 0

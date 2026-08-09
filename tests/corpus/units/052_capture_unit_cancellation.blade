@@ -1,0 +1,17 @@
+// TEST: Kernel Param Unit Cancels Dimensioned Capture
+// A kernel param is still an inference variable when its body is first typed,
+// so it contributes NO units to that pass -- the annotation on `w * tz` at
+// that point is exactly the capture's signature (day), a provisional guess.
+// The transcendental check must DEFER there and let the apply-site second
+// pass (kernelBodyUnits, after param unification) do the real check, which
+// sees 1/day * day cancel to dimensionless and accepts.
+// Regression pin for plan-array-expression-fixes #4: both operand orders
+// used to falsely reject with the capture's own unit.
+Unit second
+Unit day = 86400 * second
+let ws: Array<Float<1/day> like Idx<3>> = [0.0, 0.0, 0.0]
+let tz: Float<day> = 2.0
+let out = (ws <@> lambda(w) -> cos(w * tz)) |> compute
+let out2 = (ws <@> lambda(w) -> cos(tz * w)) |> compute
+// EXPECT: out = [1, 1, 1]
+// EXPECT: out2 = [1, 1, 1]
