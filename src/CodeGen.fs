@@ -16032,6 +16032,35 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             let (code, _) = genBinding bodyCtx tempBinding builder
             currentNames <- Map.add id varName currentNames
             code
+        | _ when (let rec chainTail e =
+                      match e with
+                      | IRCompute inner | IRLet (_, _, inner) -> chainTail inner
+                      | e -> e
+                  match chainTail value with
+                  | IRApp (IRObjectFor _, _, _) -> true
+                  | _ -> false) ->
+            // An IRLet-WRAPPED loop application (possibly under the user's
+            // `|> compute`): the direct-lowered scalar<*>array broadcast form,
+            // `IRLet(s, scalar, IRApp(IRObjectFor kernel, [A]))`. It arises in
+            // a body when the scalar side is an unresolved kernel param at
+            // typing time (the `scalarish` gate skips the compute re-synthesis
+            // -- see Lowering's broadcast arm), so none of the IRCompute(...)
+            // arms above match. The default arm's inline rendering walks into
+            // the chain and hits exprToCpp's loop-object sentinel; module
+            // level routes the identical shape through genLetChainBinding.
+            // Do the same here, stripping a leading IRCompute first (compute
+            // over an already-eager chain is the identity -- computeWrap's
+            // rule, which does not reach this form because the wrap sits
+            // OUTSIDE the let chain).
+            let bare = (match value with IRCompute inner -> inner | v -> v)
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType bare
+                Value = bare; IsConst = false; IsMutable = true
+            }
+            let (code, _) = genBinding bodyCtx tempBinding builder
+            currentNames <- Map.add id varName currentNames
+            code
         | IRArrayLit _ ->
             // Array literal as a function-body let (e.g. a locally built
             // buffer that loops then fill): route through genBinding, whose

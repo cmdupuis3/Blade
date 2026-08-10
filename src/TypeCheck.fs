@@ -2028,6 +2028,51 @@ let loopOperandArrayType (env: TypeEnv) (fallback: unit -> IRArrayType) (ty: IRT
         | _ -> at
     | _ -> fallback ()
 
+/// The `object_for(k) <@> X` orientation's operand-shape fallback, and the
+/// TypedExpr twin of `getArrayType`'s `ExprVar` arm.
+///
+/// The two orientations of the SAME apply disagreed about an operand whose type
+/// is still an unresolved inference var. `method_for` falls back through
+/// `getArrayType`, which recovers a RANK-1 record (extent `<name>_n`, Identity =
+/// the variable) for a named operand; `object_for` degraded to a RANK-0 record,
+/// which types the whole apply SCALAR. Measured on
+///
+///     function g(ws: Float64^1, t: Float64^1) = {
+///         ws <@> lambda(w) -> { let wt = (w * t) |> compute
+///                               let c = sin <@> wt
+///                               reduce(c, (+)) } }
+///
+/// `wt <@> sin` compiled and ran; the identical `sin <@> wt` emitted
+/// `double __v7 = 0; __v7 += std::sin(__v6);` -- `genApplyCombinator`'s
+/// SCALAR-output accumulation path, with no loop and a phantom element name
+/// g++ rejects ("'__v6' was not declared in this scope"). Only the abstract
+/// (`T^k`) spelling reaches it: with concrete `Array<..>` params the operand
+/// resolves to an array and neither fallback runs.
+///
+/// The rank-1 claim is NOT a guess: `<@>` has nothing to iterate unless the
+/// operand is an array, so rank >= 1 is pinned by the apply itself. It is also
+/// the CHEAP half of that claim -- a local metadata record, NOT a `Bind`. The
+/// var stays open, so this cannot spend a declaration's HM-polymorphic
+/// signature/return var (the S1 regression: `materializeArityVar`'s two call-site
+/// guards exist precisely because BINDING one collapses every specialization).
+/// Restricted to a still-unresolved `IRTInfer`: a var that already resolved to a
+/// concrete SCALAR is not an unknown, so it keeps the rank-0 degradation and its
+/// existing diagnostic.
+let objectForOperandFallback (env: TypeEnv) (t: TypedExpr) : IRArrayType =
+    let rank0 = { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None }
+    match t.Kind with
+    | TExprVar (name, _, _) ->
+        (match env.Subst.Resolve t.Type with
+         | IRTInfer _ ->
+             { ElemType = IRTScalar ETFloat64
+               IndexTypes = [ { Id = env.Builder.FreshId(); Rank = 1
+                                Extent = IRParam (name + "_n", 0, IRTNat None)
+                                Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                                Kind = SDimension; Dependencies = [] } ]
+               IsVirtual = false; Identity = Some (AIDVariable name) }
+         | _ -> rank0)
+    | _ -> rank0
+
 // 8. Helpers
 
 let sequenceResults (results: TypeResult<'a> list) : TypeResult<'a list> =
@@ -9525,10 +9570,17 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // the shape is supplied and the ELEMENT stays open, so the IR
         // monomorphizer still specializes per call site.
         flatArrays |> List.iter (fun arr -> materializeArityVar env arr "map")
+        // S1 SEAM 3, second half: `materializeArityVar` covers the operand that
+        // still WEARS the caret-shorthand var, but an array-valued INTERMEDIATE
+        // built from one (`let wt = w * t` over a `t: Float64^1` the binop seam
+        // left deferred) is a plain unresolved var, so the demand is a no-op and
+        // the old rank-0 fallback typed the apply scalar. Fall back exactly as
+        // the method_for orientation of this same apply already does -- see
+        // objectForOperandFallback.
         let arrayTypes = flatArrays |> List.map (fun arr ->
             match env.Subst.Resolve arr.Type with
             | ArrayElem at -> reSDimOperand at
-            | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+            | _ -> objectForOperandFallback env arr)
         // Real per-array S-dim counts in BOTH modes: the co-iteration case needs
         // them so buildApplyInfo's IRTInfer fallback computes the kernel slice
         // rank against the true array rank (a scalar kernel over rank-2 zips
