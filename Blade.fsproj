@@ -266,6 +266,11 @@
          dispatches the verb and owns the serve regression block. -->
     <Compile Include="src/IdeServe.fs" />
     <Compile Include="src/Build.fs" />
+    <!-- `blade doctor`: the native-toolchain health report. Real compile+run
+         probes (the only reliable catch for the Windows PATH-shadow trap)
+         over Build.fs's helpers and LinAlgPatterns' tier expansion; must
+         follow Build.fs and precede Cli.fs, which dispatches the verb. -->
+    <Compile Include="src/Doctor.fs" />
     <Compile Include="tests/TestHarness.fs" />
     <Compile Include="tests/Expect.fs" />
     <Compile Include="tests/Corpus.fs" />
@@ -360,6 +365,10 @@
     <Compile Include="tests/CudaTests.fs" />
     <Compile Include="tests/OmpTests.fs" />
     <Compile Include="tests/LinAlgTests.fs" />
+    <!-- Structural pins for `blade doctor`: row set/order, JSON shape, and
+         the pinned-surface determinism (BLADE_BLAS=0 -> blas row off).
+         Statuses of real probes are machine facts and are NOT asserted. -->
+    <Compile Include="tests/DoctorTests.fs" />
     <!-- Shape-monomorphization reach: which call sites earn a specialized copy
          (cross-module, self-recursive) and which must still decline. Emission
          text only — the decision is invisible in the values. -->

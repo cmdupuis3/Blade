@@ -56,10 +56,25 @@ let private fileValues () : Map<string, string> =
         | p -> p
     fileCache.GetOrAdd(path, parseFile)
 
-/// Env-first lookup. Empty strings count as unset on BOTH sides, matching
-/// the `null | ""` convention every existing env gate already used.
-let get (key: string) : string option =
+/// Which source supplied a configuration value -- `blade doctor` reports
+/// this so a stale toolchain.json shadowed by an env var (or vice versa) is
+/// visible instead of mysterious.
+type Origin =
+    | FromEnv
+    | FromFile
+
+/// Env-first lookup with provenance. Empty strings count as unset on BOTH
+/// sides, matching the `null | ""` convention every existing env gate
+/// already used.
+let getWithOrigin (key: string) : (string * Origin) option =
     match Environment.GetEnvironmentVariable key with
     | null | "" ->
-        fileValues () |> Map.tryFind key |> Option.filter (fun v -> v <> "")
-    | v -> Some v
+        fileValues ()
+        |> Map.tryFind key
+        |> Option.filter (fun v -> v <> "")
+        |> Option.map (fun v -> (v, FromFile))
+    | v -> Some (v, FromEnv)
+
+/// Env-first lookup (the common form; provenance dropped).
+let get (key: string) : string option =
+    getWithOrigin key |> Option.map fst

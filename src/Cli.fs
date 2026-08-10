@@ -53,6 +53,9 @@ let printUsage () =
     printfn "  run <file.edgi> --mpi <N>         ... with `where mpi` kernels decomposed across"
     printfn "                                    N ranks (compiled -lmsmpi, run under mpiexec)"
     printfn "  check <file.edgi>                 Type-check only (no code generation)"
+    printfn "  doctor [--json]                   Report native-toolchain health: g++/OpenMP core"
+    printfn "                                    (real compile+run), BLAS/LAPACK tier, NetCDF, MPI,"
+    printfn "                                    CUDA, setup tools; exit 0 iff the g++ core works"
     printfn "  ide check --json <file.edgi>      Type-check and emit JSON diagnostics + binding types"
     printfn "                                    (machine-readable, for editor tooling)"
     printfn "  ide serve                         Persistent editor daemon: NDJSON check requests on"
@@ -81,6 +84,8 @@ let printUsage () =
     printfn "  test omp-coverage                 Run the OpenMP thread-coverage block standalone"
     printfn "  test omp-reduce                   Run the comm-licensed parallel-reduction block standalone"
     printfn "  test linalg                       Run the blade_linalg dispatch-emission block standalone"
+    printfn "                                    (+ the BLAS tier-resolution unit block)"
+    printfn "  test doctor                       Run the `blade doctor` structural pins standalone"
     printfn "  test lapack                       Run the blade_lapack eigensolver-dispatch block standalone"
     printfn "  test multifile                    Run the cross-module (multi-file) corpus standalone"
     printfn "  test module-resolve               Run the file-based module resolver + units.SI block"
@@ -1886,6 +1891,11 @@ let private dispatchTest (rest: string list) : int =
         let probeFailed = (Blade.Tests.LinAlgTests.runLinAlgProbeTests ()).Failed
         let tierFailed = (Blade.Tests.LinAlgTests.runBlasTierTests ()).Failed
         if emitFailed + probeFailed + tierFailed = 0 then 0 else 1
+    | [ "doctor" ] ->
+        // Structural pins for the doctor's rows and JSON shape; the probes
+        // run for real but machine-dependent statuses are not asserted.
+        let failed = (Blade.Tests.DoctorTests.runDoctorTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "multifile" ] ->
         // The cross-module corpus (tests/corpus/multifile), standalone. Also
         // part of the full suite; broken out because it is the only slice that
@@ -2264,6 +2274,10 @@ let private dispatchInner (args: string[]) : int =
     | [| "emit"; file; "-o"; output; "--verbose" |] -> emitFile file (Some output) true strictPins
 
     | [| "check"; file |] -> checkFile file strictPins
+
+    // Native-toolchain health report (docs/plan-toolchain-packaging.md).
+    | [| "doctor" |] -> Blade.Doctor.runDoctor false
+    | [| "doctor"; "--json" |] -> Blade.Doctor.runDoctor true
 
     | [| "repl" |] -> replLoop ()
 

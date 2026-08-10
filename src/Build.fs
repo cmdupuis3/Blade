@@ -90,8 +90,10 @@ type CompilePlan =
     | UseNvcc                 // nvcc drives host compiler: cl.exe (Windows) / g++ (Linux)
     | SkipCompile of string   // human-readable reason
 
-/// Probe whether a tool responds to a version/help query on PATH.
-let private probeTool (exe: string) (args: string) : bool =
+/// Probe whether a tool responds to a version/help query on PATH. Public:
+/// `blade doctor` probes setup-adjacent tools (make, gfortran, git, coqc)
+/// through the same helper rather than growing a twin.
+let probeTool (exe: string) (args: string) : bool =
     try
         let psi = ProcessStartInfo(exe, args)
         psi.RedirectStandardOutput <- true

@@ -327,6 +327,11 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // env-over-file precedence. Pure in-process unit checks with the whole
     // env surface pinned — no toolchain needed. (Also `blade test linalg`.)
     let blasTier = Blade.Tests.LinAlgTests.runBlasTierTests ()
+    // `blade doctor` structural pins: row set/order, JSON shape, and the
+    // pinned-surface determinism (BLADE_BLAS=0 -> blas row off). Probes run
+    // for real; machine-dependent statuses are not asserted.
+    // (Also `blade test doctor`.)
+    let doctorBlock = Blade.Tests.DoctorTests.runDoctorTests ()
     // Factory flat emission: the chained factory sugar and by-nominal
     // argument routing elaborate BEFORE typing, so a chain must emit
     // byte-identical C++ to its flat spelling, with exactly one call and no
@@ -447,7 +452,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield factoryFlat; yield lapackEmit; yield shapeSpec; yield moduleResolve
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield factoryFlat; yield lapackEmit; yield shapeSpec; yield moduleResolve
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType
