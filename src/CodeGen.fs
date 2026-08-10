@@ -8105,6 +8105,16 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
         | FuncScope (Some retExpr) ->
             match retExpr with
             | IRCompute (IRApplyCombinator _) | IRArrayLit _ -> []
+            // `return f(x, y, z)` where f is a FreshPool callee: the returned
+            // wrapper is a fresh pool with its own extents, so it can alias
+            // none of the argument bindings -- and the fallthrough return arm
+            // evaluates the call into a local (`auto __rv = f(...);`) BEFORE
+            // the scope frees are emitted, so x/y/z are dead by the time they
+            // are freed. Seeding them only pinned one array per helper call
+            // (measured on 09_qg_atmosphere: three 64x64 fields leaked per
+            // H_single invocation, every timestep). NotFresh callees keep the
+            // wide seeding: their return may hand back an argument itself.
+            | IRApp (f, _, _) when freshReturnOf f = FreshPool -> []
             | _ ->
                 match inferExprType retExpr with
                 | IRTScalar _ | IRTUnit -> []
@@ -8117,6 +8127,44 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
                 else s) acc
         if acc' = acc then acc else propagate acc'
     propagate (Set.ofList (assignSeeds @ captureSeeds @ providerSeeds @ retSeeds))
+
+/// Hoist FreshPool-returning calls out of ARGUMENT position into fresh lets.
+/// `g(f(x))` evaluates f's fresh array as a C++ temporary no let ever names,
+/// so the scope tracker cannot register it and its pool leaks every call
+/// (measured on 09_qg_atmosphere: `__spectra_1(uhat(ll, ph))` and
+/// `__spectra_2(flux(u, 0.0, q))` each dropped a 64x64 field per timestep).
+/// Hoisted into `let t = f(x)`, the binding takes the ordinary site-3/3b
+/// registration and scope-exit free. Guards are exactly site 3's: FreshPool
+/// callee, dense + nullptr, no symmetry -- anything else stays inline (and
+/// keeps leaking rather than risking a wrong free). Only IRApp trees are
+/// walked: a lambda in argument position must keep its body expression-shaped.
+/// C++ argument evaluation order is unspecified, so serializing sibling
+/// arguments through lets changes nothing observable.
+let hoistFreshPoolCallArgs (builder: IRBuilder) (e: IRExpr) : (IRId * IRExpr) list * IRExpr =
+    let hoistable (arg: IRExpr) =
+        match arg with
+        | IRApp (f, _, _) when freshReturnOf f = FreshPool ->
+            (match inferExprType arg with
+             | ArrayElem at ->
+                 isFreeableDenseArrayType at
+                 && classifyOutputStorage (inferExprType arg) = AllocDense
+                 && not (hasRealSymmetry (buildSymmVec (inferExprType arg)))
+             | _ -> false)
+        | _ -> false
+    let rec go (e: IRExpr) : (IRId * IRExpr) list * IRExpr =
+        match e with
+        | IRApp (f, args, ty) ->
+            let processed = args |> List.map go
+            let innerLets = processed |> List.collect fst
+            let (extraLets, finalArgs) =
+                processed |> List.fold (fun (ls, acc) (_, a) ->
+                    if hoistable a then
+                        let tmp = builder.FreshId()
+                        (ls @ [(tmp, a)], acc @ [IRVar (tmp, inferExprType a)])
+                    else (ls, acc @ [a])) ([], [])
+            (innerLets @ extraLets, IRApp (f, finalArgs, ty))
+        | _ -> ([], e)
+    go e
 
 /// One tracked allocation, with everything needed to free it recorded at
 /// REGISTRATION time. TemplateArgs in particular is stored verbatim rather than
@@ -15771,6 +15819,13 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     let innerCtx = addVarName vid varName ctx
     // Unroll the body IRLet chain into statements
     let (bodyLets, _bodyFinal) = unrollLetChain body
+    // FreshPool calls in ARGUMENT position get their own lets here exactly as
+    // in genFuncBody, so a per-iteration `g(f(x))` temporary is registered
+    // and recycled instead of leaking once per trip.
+    let bodyLets =
+        bodyLets |> List.collect (fun (id, v) ->
+            let (hv, v') = hoistFreshPoolCallArgs builder v
+            hv @ [(id, v')])
     // Deterministic deallocation: ONE loop-body frame, pushed AFTER
     // forceDeferredPositionalReads above (whose materializations belong to the
     // OUTER scope and must not be freed per iteration). Registrations always land
@@ -16172,6 +16227,33 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 let valStr = exprToCpp currentNames value
                 currentNames <- Map.add id varName currentNames
                 [sprintf "%sauto %s = %s;" indent varName valStr]
+        // Deterministic deallocation, site 3b: the FUNCTION-BODY twin of
+        // site 3 (`let r = f(a)` where the CALLEE allocated the pool).
+        // Same guard set, for the same reasons: FreshPool callees only (a
+        // NotFresh return may hand back its own parameter, so registering
+        // the binding would double-free), dense + nullptr only (the one
+        // storage combination whose free cannot disagree with the callee's
+        // allocate). Emission is the fall-through arm's `auto` line
+        // unchanged -- only the scope registration is new. Without this arm
+        // such lets fell through unregistered and every intermediate of a
+        // chained-step helper leaked per call (measured on 08_burgers_les:
+        // dns10's nine burgers_step intermediates, 512 B each, every call).
+        | IRApp (fn, _, _) when
+            (match inferExprType value with
+             | ArrayElem at ->
+                 freshReturnOf fn = FreshPool
+                 && isFreeableDenseArrayType at
+                 && classifyOutputStorage (inferExprType value) = AllocDense
+                 && not (hasRealSymmetry (buildSymmVec (inferExprType value)))
+             | _ -> false) ->
+            let valStr = exprToCpp currentNames value
+            (match inferExprType value with
+             | ArrayElem at ->
+                 registerPoolAlloc AllocDense (elemTypeToCpp at.ElemType) (arrayRank at)
+                     "nullptr" (varName + "_extents") varName None
+             | _ -> ())
+            currentNames <- Map.add id varName currentNames
+            [sprintf "%sauto %s = %s;" indent varName valStr]
         | _ ->
             let valStr = exprToCpp currentNames value
             currentNames <- Map.add id varName currentNames
@@ -16347,6 +16429,28 @@ or return a scalar and materialize at the call site"
             // frees still sit before `return`, so anything the return names
             // must survive.
             match inferExprType retExpr with
+            // A FreshPool-call ARRAY return takes the value-first shape too:
+            // the callee's wrapper is a fresh pool (own extents) that can
+            // alias none of this scope's bindings, so the call is evaluated
+            // into a local BEFORE the frees and the bindings it consumed are
+            // genuinely freed. The suppress-by-token belt below would instead
+            // spare every binding the return text names -- a per-call leak
+            // (measured on 09_qg_atmosphere: `return tendency(.., uq, vq, ph)`
+            // sparing three 64x64 fields per H_single call, every timestep).
+            // Works with the matching retSeeds narrowing in
+            // computeScopeEscapes; NotFresh callees keep the old shape.
+            | ArrayElem _ when (match retExpr with
+                                | IRApp (f, _, _) -> freshReturnOf f = FreshPool
+                                | _ -> false) ->
+                let frees = popAllocScopeFrees indent
+                if List.isEmpty frees then
+                    stmts @ [sprintf "%sreturn %s;" indent retStr]
+                else
+                    let rv = sprintf "__retv%d" (builder.FreshId())
+                    stmts
+                    @ [sprintf "%sauto %s = %s;" indent rv retStr]
+                    @ frees
+                    @ [sprintf "%sreturn %s;" indent rv]
             | ArrayElem _ | IRTTuple _ ->
                 for n in registeredAllocNames () do
                     if containsIdentToken retStr n then suppressAllocName n
@@ -16428,6 +16532,15 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             lv @ [(id, v')]))
     let (retLets, retExpr) = hoistLoopApps retExpr0
     let lets = lets @ retLets
+    // Second hoist: FreshPool calls buried in ARGUMENT position (g(f(x))),
+    // whose temporaries the scope tracker could otherwise never register.
+    // Runs before computeScopeEscapes so the minted lets are in its domain.
+    let lets =
+        lets |> List.collect (fun (id, v) ->
+            let (hv, v') = hoistFreshPoolCallArgs builder v
+            hv @ [(id, v')])
+    let (retHoist, retExpr) = hoistFreshPoolCallArgs builder retExpr
+    let lets = lets @ retHoist
     let escapes =
         computeScopeEscapes ctx (FuncScope (if isUnitExpr retExpr then None else Some retExpr)) lets
     let allocDepth = allocScopeDepth ()
