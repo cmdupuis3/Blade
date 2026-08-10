@@ -12713,10 +12713,16 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                             let read = synAt (ExprApp (bufVar, safeIdx :: rest))
                             if isPartial then
                                 // Only the READ is hoisted (that is what the
-                                // row-view wrap keys off). The select stays
-                                // INLINE: a binding whose value is an
-                                // array-valued `if` is declared as a raw
-                                // element pointer, not an Array<T,N>.
+                                // row-view wrap keys off); the select stays
+                                // INLINE. Whichever consumer needs the select
+                                // under a name binds it itself -- IR's lift
+                                // pass hoists an array-valued select out of a
+                                // loop form's `Arrays` slot
+                                // (`isArrayValuedSelect`), and CodeGen declares
+                                // such a binding on the Array<T,N> wrapper path
+                                // (`producesWrapperOf`). Hoisting it here
+                                // instead would name it even where it is only
+                                // ever read inline.
                                 let raw = emit key (fun () -> read)
                                 Some (guardWrap needsLo needsHi idx (synAt (ExprVar raw)) (zeroSliceFor rest.Length))
                             else Some (guardWrap needsLo needsHi idx read zed)
