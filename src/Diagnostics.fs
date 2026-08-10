@@ -171,6 +171,13 @@ module Codes =
             // the declared name as a fresh base unit) types a misspelling
             // into a silently wrong dimension.
             "BL3015", "unknown unit name"
+            // BL3016: a parameter and its argument BOTH carry a literal extent
+            // on the same index slot, and they differ. Not a naming quibble:
+            // codegen treats a literal parameter extent as ground truth and
+            // bakes it into loop bounds and result allocations, so the emitted
+            // C++ indexes past the argument's allocation. A symbolic extent
+            // (`Idx<n>`) reads `.extents[d]` at runtime and stays permissive.
+            "BL3016", "argument extent mismatch"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"

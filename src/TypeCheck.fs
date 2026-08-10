@@ -3042,9 +3042,10 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         // declares a tuple parameter AND the flat pairing does not fit, so the
         // ordinary call path is untouched.
         let tArgs = regroupArgsByWidth env paramTys tArgs
-        // Four checks direct-application would otherwise skip (params are
-        // NOT unified against args here, unlike kernel application); each
-        // catches a mismatch g++ rejects that Blade would typecheck clean:
+        // Checks direct-application would otherwise skip (params are NOT
+        // unified against args here, unlike kernel application); each catches
+        // a mismatch g++ rejects that Blade would typecheck clean -- except
+        // extentClash, which g++ accepts and which faults at RUNTIME:
         //   irrepsClash  - BLOCK-SPEC (irreps/point-group) pairs must match
         //                  identity, not just extent.
         //   rankClash    - a rank-k compact slot is k emitted dims but ONE
@@ -3214,6 +3215,35 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             paramTys |> List.exists (fun t ->
                 match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)
         let argRankClash = firstArgRankClash env.Subst paramTys (tArgs |> List.map (fun a -> a.Type))
+        // extentClash (BL3016) - consumed LAST (see the arm below), and the
+        // only check here whose failure is a MEMORY error rather than a g++
+        // rejection or a discipline violation. Codegen treats
+        // a parameter's LITERAL extent as ground truth: it bakes it into the
+        // emitted subscripts, loop bounds and result allocations, and never
+        // consults the argument's runtime extent. So `Idx<2>` into an `Idx<4>`
+        // parameter emits reads two doubles past the allocation -- in the
+        // DECLARATIVE path (`method_for(w) <@> ...`) exactly as in the
+        // raw-index path, and worse there, since the over-long result array
+        // carries the garbage out as a value.
+        //
+        // Literal-vs-literal only, ranks equal. A symbolic extent (`Idx<n>`,
+        // ragged/compound/opaque) emits a runtime `.extents[d]` read and is
+        // already correct, so it keeps the historical looseness -- as does an
+        // argument still unresolved here.
+        let extentClash =
+            let n = min paramTys.Length tArgs.Length
+            List.zip (List.truncate n paramTys) (List.truncate n tArgs)
+            |> List.mapi (fun i pair -> (i, pair))
+            |> List.tryPick (fun (i, (pTy, arg)) ->
+                match env.Subst.Resolve pTy, env.Subst.Resolve arg.Type with
+                | ArrayElem pa, ArrayElem aa when pa.IndexTypes.Length = aa.IndexTypes.Length ->
+                    List.zip pa.IndexTypes aa.IndexTypes
+                    |> List.mapi (fun d pair -> (d, pair))
+                    |> List.tryPick (fun (d, (pi, ai)) ->
+                        match tryEvalIntIR pi.Extent, tryEvalIntIR ai.Extent with
+                        | Some pe, Some ae when pe <> ae -> Some (i, d, pe, ae)
+                        | _ -> None)
+                | _ -> None)
         match irrepsClash, rankClash, unitClash, argRankClash with
         | Some (i, pi, ai), _, _, _ ->
             atArg i
@@ -3249,6 +3279,15 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 Error (ArgTypeMismatch (i + 1, callee,
                                         ppIRType (env.Subst.Resolve pTy),
                                         ppIRType (env.Subst.Resolve aTy)))
+            | None ->
+            // The SIXTH check, after element class because a wrong-class
+            // argument that is also the wrong length should be reported as
+            // the class error. See `extentClash` above for why this one is a
+            // memory error rather than a typing disagreement.
+            match extentClash with
+            | Some (i, d, pe, ae) ->
+                atArg i
+                Error (ExtentArgMismatch (i + 1, d + 1, pe, ae))
             | None ->
             // Rank propagation (the INFERENCE half of argRankClash's
             // CHECKING): impose the callee param's rank as a LOWER BOUND on
@@ -6771,6 +6810,13 @@ and isDenseStackableSlot (ix: IRIndexType) : bool =
 /// runtime expressions answer None and are simply not compared (the emitted
 /// C++ reads `.extents[d]` either way; this is a compile-time courtesy check,
 /// not a soundness requirement).
+///
+/// "Reads `.extents[d]` either way" holds for the stack/join operands this
+/// serves, NOT in general: at a PARAMETER position codegen treats a literal
+/// extent as ground truth and bakes it into subscripts, loop bounds and result
+/// allocations. There the same comparison is a soundness requirement, which is
+/// what BL3016 (`extentClash` / `kernelExtentClash`) enforces -- do not
+/// generalize this docstring's permissiveness to that seam.
 and staticExtentOf (e: IRExpr) : int64 option =
     match e with
     | IRLit (IRLitInt n) -> Some n
@@ -10866,6 +10912,40 @@ and buildApplyInfo (env: TypeEnv)
                     Some (QuantityArgMismatch (i + 1, pu.Nominal.Value, got))
                 | _ -> None)
 
+    // STRICT static EXTENT agreement for KERNEL parameters (BL3016, the <@>
+    // twin of the extentClash check at the dispatch seam). The unification
+    // below is real, but it is blind here: `unify`'s ArrayElem arm compares
+    // element type, tag and symmetry and explicitly NOT extents ("extents
+    // never compared", Unify.fs) -- correct for inference, wrong as an
+    // agreement check, because codegen does not treat a literal extent as a
+    // runtime value. A parameter's LITERAL extent is baked into the emitted
+    // subscripts and loop bounds, so `lambda(row: Array<Float64 like Idx<5>>)`
+    // iterated over a 3-wide row emits `row[3]`/`row[4]` past the row -- and
+    // past the whole allocation on the last row. Observed as silent wrong
+    // data, not a reliable crash.
+    //
+    // Literal-vs-literal only, ranks equal. When either side's extent is
+    // symbolic (`Idx<n>`, ragged/compound/opaque markers) codegen emits a
+    // runtime `.extents[d]` read and is already correct; those keep the
+    // historical looseness, as does an unresolved row.
+    let kernelExtentClash =
+        match schemaRows with
+        | None -> None
+        | Some expandedRows ->
+            List.zip resolvedParamTypes expandedRows
+            |> List.mapi (fun i pair -> (i, pair))
+            |> List.tryPick (fun (i, (paramTy, row)) ->
+                match env.Subst.Resolve paramTy, env.Subst.Resolve row with
+                | ArrayElem pa, ArrayElem ra when pa.IndexTypes.Length = ra.IndexTypes.Length ->
+                    List.zip pa.IndexTypes ra.IndexTypes
+                    |> List.mapi (fun d pair -> (d, pair))
+                    |> List.tryPick (fun (d, (pi, ri)) ->
+                        match tryEvalIntIR pi.Extent, tryEvalIntIR ri.Extent with
+                        | Some pe, Some re when pe <> re ->
+                            Some (ExtentArgMismatch (i + 1, d + 1, pe, re))
+                        | _ -> None)
+                | _ -> None)
+
     // A PACK parameter (`Poly<T^k>`) absorbs the whole argument list and has no
     // fixed width, so the schema does not describe it. Every supported spelling
     // eta-expands to the pack width BEFORE reaching this seam (the deferred-
@@ -10878,9 +10958,10 @@ and buildApplyInfo (env: TypeEnv)
             match t with IRTPoly _ -> true | _ -> false)
 
     let kernelParamUnifyResult =
-        match kernelQuantityClash with
-        | Some err -> Error err
-        | None ->
+        match kernelQuantityClash, kernelExtentClash with
+        | Some err, _ -> Error err
+        | None, Some err -> Error err
+        | None, None ->
         match schemaRows with
         | Some rows ->
             // Use resolved types so the unify call sees the same shape we used

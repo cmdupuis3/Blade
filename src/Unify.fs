@@ -125,6 +125,16 @@ type TypeError =
     /// structurally-dimensioned arguments are both rejected; the caller must
     /// ascribe (`x : speed`). `got` describes the argument's signature.
     | QuantityArgMismatch of pos: int * quantity: string * got: string
+    /// BL3016: a parameter's index slot and the argument's BOTH carry a
+    /// compile-time-literal extent, and they differ. Codegen bakes a literal
+    /// parameter extent into loop bounds and result allocations (a symbolic
+    /// `Idx<n>` reads `.extents[d]` at runtime instead), so this is an
+    /// out-of-bounds read, not a naming disagreement. `dim` is 1-based over
+    /// the array's index slots. Raised at BOTH param-vs-arg seams: direct
+    /// application (dispatchAppOrIndex) and kernel application
+    /// (buildApplyInfo), which is why `pos` says "argument"/"parameter"
+    /// rather than naming a call form.
+    | ExtentArgMismatch of pos: int * dim: int * expected: int64 * actual: int64
     /// BL3011: a quantity name used inside unit algebra (`Unit x = speed * m`)
     /// or as the RHS of another quantity (`Unit q: speed`). Quantities are
     /// TERMINAL: the nominal layer is exactly one level deep.
