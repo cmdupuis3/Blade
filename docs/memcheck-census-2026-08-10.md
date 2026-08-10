@@ -45,6 +45,56 @@
 >
 > Post-everything corpus state: zero known scope-tracker escapes; every
 > remaining outstanding byte is single-copy module-binding residency.
+>
+> **Third addendum — a class the census could not see.** The sentence
+> above is scoped to what `examples/` exercises, and every `let rec`
+> trajectory in the corpus is a MODULE-level binding. A `let rec` written
+> inside a FUNCTION body is a different code path end to end, and it
+> leaked twice over on every call:
+>
+> - genFuncBody's `deepUnroll` flattens the block's chain into the body's
+>   let list, so the block value never reaches genLetChainBinding (where
+>   521bced's elision lives) — it lands on genFuncBodyScoped's mut-alias
+>   arm and took the deep copy, staging the whole trajectory twice.
+> - The tail `traj(k)` returns a row VIEW into the staging pool. Nothing
+>   could free that pool: not the frame (the view still reads it, so the
+>   escape analysis pinned it) and not the caller (it never sees the base
+>   wrapper). "Pinned" read as safe; it was the leak spelled out.
+>
+> Measured on a driver calling such a function in a loop (10000x4
+> trajectory per call), `blade run --memcheck`:
+>
+> | driver | before | after |
+> |---|---|---|
+> | 4 calls | 3,200,582 B / 21 blocks | 582 B / 5 blocks |
+> | 19 calls | 15,201,182 B / 81 blocks | 1,182 B / 5 blocks |
+>
+> 800,040 B per call (both 10000x4 pools plus their skeletons) → 0. The
+> block count is now CONSTANT in the call count, which is this document's
+> own discriminator for a tracker escape versus by-design residency; the
+> remaining 582/1182 B is the driver's own `outs` module binding, and it
+> scales with `R`, not with calls.
+>
+> The fix is a materialized return slice (the row is copied into its own
+> pool before the frees, so the trajectory is scope-freed like any other
+> temporary and the caller receives self-contained storage), NOT a
+> pinning path — pinning would have kept the whole trajectory alive.
+>
+> **Incidental, and worse than the leak:** the returned view's `.extents`
+> pointed into a frame-local `size_t[2]` table, so it DANGLED the moment
+> the wrapper crossed the call boundary. The reported repro printed
+> `out = []` on master — a use-after-return reading garbage shape, not
+> merely a leak. It survived the census because no corpus program returns
+> an interior view of a function-local array. The same hazard is why
+> genObjectForApplication and the IRTranspose return arm heap-wrap their
+> tables; the materialized slice now goes through `emitExtentsTable`,
+> which gives a static-constexpr table when every extent is literal and a
+> heap one otherwise.
+>
+> **Census-scope rule this establishes:** "zero known escapes" is a claim
+> about the corpus, not about the compiler. A code path no corpus program
+> takes is untested, not clean — and `let rec` in a function body was one
+> such path even though `let rec` itself is heavily covered.
 
 First full memory-leak census of `examples/` (11 top-level + 47 physics = 58
 programs), run under the new `blade run --memcheck` Debug+AddressSanitizer

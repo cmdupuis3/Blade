@@ -7802,6 +7802,62 @@ let rec allSubExprs (e: IRExpr) : IRExpr list =
     match e with
     | ExprShape (children, _) -> e :: (children |> List.collect allSubExprs)
 
+/// A return that hands the caller an INTERIOR VIEW of storage this scope owns.
+///
+/// `traj((9999 : T))` at the tail of a function-local `let rec` renders as
+/// `Array<T,1>{ traj.data[9999], traj.extents + 1 }` -- a wrapper POINTING INTO
+/// the trajectory's pool. Nobody can free that pool: not the scope (the
+/// returned view still reads it) and not the caller (it never sees the base
+/// wrapper, only one row of it), so the whole array leaks on every call. The
+/// escape analysis makes that explicit -- seeding the base pins it -- but
+/// pinning is not a fix, it is the leak spelled out.
+///
+/// Returns the base binding's id when the return takes that shape AND the
+/// slice can be copied out, which is the actual repair: materialize the slice
+/// into its own pool before the frees, and the base becomes an ordinary scope
+/// temporary. Three consumers share this ONE predicate so they cannot drift --
+/// computeScopeEscapes (drop the return seed), genFuncBodyScoped's return arm
+/// (emit the copy), and computeFreshReturnFacts (tell callers they now own a
+/// fresh pool). A disagreement between the first two would be a use-after-free,
+/// so a single decision point is not a stylistic preference here.
+///
+/// Guards, each load-bearing for the flat `std::copy_n` the materialization
+/// emits:
+///   * the base is one of THIS scope's lets. A parameter, capture, or module
+///     binding is someone else's storage, correctly returned as a view (and
+///     copying it would hand the caller a pool it has no reason to free);
+///   * base and slice are both plain dense -- no symmetry, compact, ragged,
+///     sparse, dep-idx, or virtual storage -- so the sub-block a leading index
+///     selects is CONTIGUOUS in the pool and `pool_base` on the sub-skeleton
+///     lands on its first cell rather than the whole pool's;
+///   * every subscript is scalar and they form a strict LEADING prefix
+///     (`idxs` exactly consumes the rank the slice drops), which is what makes
+///     the selection a sub-block rather than a strided gather.
+let returnedInteriorView (scopeLets: (IRId * IRExpr) list) (retExpr: IRExpr) : IRId option =
+    let denseUnsymmetric (t: IRType) =
+        match t with
+        | ArrayElem at ->
+            isFreeableDenseArrayType at && not at.IsVirtual
+            && classifyOutputStorage t = AllocDense
+            && not (hasRealSymmetry (buildSymmVec t))
+        | _ -> false
+    match retExpr with
+    | IRIndex ((IRVar (srcId, _)) as baseExpr, idxs, _)
+            when scopeLets |> List.exists (fun (id, _) -> id = srcId) ->
+        let baseTy = inferExprType baseExpr
+        let sliceTy = inferExprType retExpr
+        match baseTy, sliceTy with
+        | ArrayElem bat, ArrayElem sat
+                when denseUnsymmetric baseTy && denseUnsymmetric sliceTy
+                     && not (List.isEmpty idxs)
+                     && arrayRank sat > 0
+                     && List.length idxs = arrayRank bat - arrayRank sat
+                     && idxs |> List.forall (fun i ->
+                            match inferExprType i with IRTScalar _ -> true | _ -> false) ->
+            Some srcId
+        | _ -> None
+    | _ -> None
+
 /// Classify every array-returning module function as FreshPool or NotFresh.
 /// Only array-typed returns are in the domain; anything else is absent and reads
 /// as NotFresh. The iteration is a fixpoint because a function may return the
@@ -7832,6 +7888,12 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
                 let otherUses =
                     lets |> List.filter (fun (id, v) -> id <> rid && Set.contains rid (collectVarRefsIR v))
                 if boundToLifted && List.isEmpty otherUses then FreshPool else NotFresh
+            // An interior view of a scope-local array is no longer returned as
+            // a view: genFuncBodyScoped's return arm copies the slice into its
+            // own pool (see returnedInteriorView), so the caller DOES own the
+            // storage it receives. Classifying it NotFresh here would leave the
+            // caller-side free off and simply move the leak one frame out.
+            | IRIndex _ when (returnedInteriorView lets retExpr).IsSome -> FreshPool
             | IRApp (f, _, _) ->
                 match resolveCallable f with
                 | Some c -> Map.tryFind c.Id facts |> Option.defaultValue NotFresh
@@ -8166,6 +8228,16 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
             // H_single invocation, every timestep). NotFresh callees keep the
             // wide seeding: their return may hand back an argument itself.
             | IRApp (f, _, _) when freshReturnOf f = FreshPool -> []
+            // An INTERIOR VIEW of a scope-local array (`return traj(k)`). The
+            // return arm materializes the slice into its own pool before these
+            // frees are emitted, so the base is ordinary scope-owned storage
+            // from here on. Seeding it would pin the WHOLE array for the life
+            // of the program -- and since a function frame runs per CALL, that
+            // is an unbounded leak, not a one-off (measured: a 10000x4
+            // trajectory per `integrate` invocation). Paired with
+            // genFuncBodyScoped's matching arm through returnedInteriorView;
+            // narrowing here WITHOUT that arm would be a use-after-free.
+            | IRIndex _ when (returnedInteriorView scopeLets retExpr).IsSome -> []
             | _ ->
                 match inferExprType retExpr with
                 | IRTScalar _ | IRTUnit -> []
@@ -16591,6 +16663,52 @@ or return a scalar and materialize at the call site"
                     @ [sprintf "%sauto %s = %s;" indent rv retStr]
                     @ frees
                     @ [sprintf "%sreturn %s;" indent rv]
+            // An INTERIOR VIEW of a scope-local array, materialized. `return
+            // traj(9999)` hands back a wrapper into the trajectory's pool, and
+            // nothing can free that pool afterwards -- not this scope (the view
+            // still reads it) and not the caller (it never sees the base). The
+            // suppress-by-token belt below would only make that official.
+            // Copy the slice into its OWN pool first; the base then falls to
+            // the ordinary frees, and the value the caller gets is
+            // self-contained. computeScopeEscapes drops the matching return
+            // seed and computeFreshReturnFacts promotes the callee to
+            // FreshPool, both off this same predicate.
+            | ArrayElem sat when (returnedInteriorView lets retExpr).IsSome ->
+                let retVarName = sprintf "__ret%d" (builder.FreshId())
+                let viewName = retVarName + "_vw"
+                let extentsName = retVarName + "_extents"
+                let rank = arrayRank sat
+                let elemStr = elemTypeToCpp sat.ElemType
+                // Return-extent ABI (see the IRTranspose arm): a frame-local
+                // `size_t[R]` table dangles the moment the wrapper crosses the
+                // call boundary. emitExtentsTable gives a static-constexpr
+                // table where every extent is literal and a heap one otherwise
+                // -- both outlive the frame. The heap table is deliberately NOT
+                // registered: it leaves with the return value.
+                let dims =
+                    [ for d in 0 .. rank - 1 ->
+                        match literalExtentOfArray sat d with
+                        | Some n -> (sprintf "%d" n, true)
+                        | None -> (sprintf "%s.extents[%d]" viewName d, false) ]
+                let (extentsDecl, _leavesWithValue) = emitExtentsTable indent extentsName rank dims
+                let allocRhs =
+                    match emitAllocRhs AllocDense elemStr rank "nullptr" extentsName with
+                    | Ok rhs -> rhs
+                    | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+                // The slice is a CONTIGUOUS sub-block of a dense pool
+                // (returnedInteriorView proved the leading-prefix, all-scalar,
+                // unsymmetric shape), so `pool_base` on the sub-skeleton lands
+                // on its first cell and one flat copy_n moves the whole slice.
+                let matCode =
+                    [ sprintf "%sArray<%s, %d> %s = %s;" indent elemStr rank viewName retStr ]
+                    @ extentsDecl
+                    @ [ sprintf "%sArray<%s, %d> %s = %s;" indent elemStr rank retVarName allocRhs
+                        sprintf "%ssize_t %s_n = count_leaves<typename promote<%s, %d>::type, nullptr>(%s);"
+                            indent retVarName elemStr rank extentsName
+                        sprintf "%sstd::copy_n(pool_base(%s.data), %s_n, pool_base(%s.data));"
+                            indent viewName retVarName retVarName ]
+                stmts @ matCode @ popAllocScopeFrees indent
+                @ [sprintf "%sreturn %s;" indent retVarName]
             | ArrayElem _ | IRTTuple _ ->
                 for n in registeredAllocNames () do
                     if containsIdentToken retStr n then suppressAllocName n
