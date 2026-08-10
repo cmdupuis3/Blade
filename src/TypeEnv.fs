@@ -854,6 +854,24 @@ let enterCallableBody env =
 let bodyLocalBinding (name: string) (env: TypeEnv) =
     env.InCallableBody && not (Map.containsKey name env.OuterScope)
 
+/// Is `name` a CAPTURE of the lambda currently being inferred -- visible here,
+/// but bound outside the innermost enclosing body, so `buildCaptures` will put
+/// it in the lambda's `Captures` and codegen will forward it by name at every
+/// call site?
+///
+/// Gated on `InLambdaBody`, NOT `InCallableBody`, because only a lambda has a
+/// capture list: a NAMED function's `Captures` is always empty (IRCallable),
+/// and the module bindings its body spells are served by main-local emission /
+/// the S0 declaration hoist instead. Widening this to every callable body
+/// silently breaks that path -- a named function reading a deferred binding by
+/// name has nothing to materialize it (`function g(w) = w * reduce(c, (+))`
+/// over a deferred `c` emits `c[0]` with no definition of `c`).
+///
+/// False at module level, like `bodyLocalBinding` -- there is no body, so a
+/// name is neither body-local nor captured.
+let capturedOuterBinding (name: string) (env: TypeEnv) =
+    env.InLambdaBody && Map.containsKey name env.OuterScope
+
 let registerTypeDef name info (env: TypeEnv) =
     { env with TypeDefs = Map.add name info env.TypeDefs }
 

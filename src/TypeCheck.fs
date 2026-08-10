@@ -5228,11 +5228,30 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
     // Declining here drops the fold to the ordinary `IRReduce` over the array
     // the let already built.
     //
+    // A CAPTURED binding declines for the mirror-image reason. Splicing inside
+    // a kernel body puts the two halves of the same lambda into disagreement:
+    // the body fuses a copy of `c`'s producer (and so spells `c`'s OWN inputs,
+    // dragging them in as module references), while lambda-lifting still lists
+    // `c` itself in `Captures` and forwards it BY NAME at every call site. The
+    // capture is undeclared (`c` is deferred, so it has no C++ definition), and
+    // the extra module references demote the lambda to a main() local emitted
+    // in id order -- after the very binding that calls it:
+    //
+    //   let c   = method_for(A) <@> lambda(x) -> x * 2.0        // deferred
+    //   let out = ws <@> lambda(w) -> w * reduce(c, (+)) |> compute
+    //   // 'c' was not declared in this scope
+    //   // '__lambda_16' was not declared in this scope
+    //
+    // CodeGen now materializes a deferred capture at the boundary that
+    // forwards it (collectDeferredKernelCaptures), so the array IS built by
+    // the time the body runs and the ordinary `IRReduce` over it is right --
+    // the same trade the body-local clause makes, for the same reason.
+    //
     // Deliberately narrow, because every clause pays for itself:
-    //  * `bodyLocalBinding` -- module-level and CAPTURED bindings keep the
-    //    deferred protocol (`loops/095`, the deferred-concrete corpus). A
-    //    captured `let c = A <@> k` is unforced at its own definition site, so
-    //    declining would fold over an array that was never built.
+    //  * `bodyLocalBinding` / `capturedOuterBinding` -- a MODULE-LEVEL fold
+    //    (`loops/095`, the deferred-concrete corpus) is inside no callable at
+    //    all, so nothing captures or materializes `c` and fusing stays
+    //    strictly cheaper than forcing. That case is untouched.
     //  * a bare `TExprVar` root only -- a written-out `reduce(A <@> k, (+))`
     //    has no binding and nothing materialized, so it must still fuse.
     //  * a SINGLE apply, never a `<&!>` fusion tree -- a tree has no array
@@ -5261,7 +5280,8 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
         | _ -> false
     let alreadyMaterializedLet () =
         match tArr.Kind with
-        | TExprVar (name, _, _) when bodyLocalBinding name env && not (foldKernelIsParallel ()) ->
+        | TExprVar (name, _, _) when (bodyLocalBinding name env || capturedOuterBinding name env)
+                                     && not (foldKernelIsParallel ()) ->
             (match (resolveTypedExpr env tArr).Kind with
              | TExprApply info when not info.IsComposeApply ->
                 (match env.Subst.Resolve info.OutputType with
