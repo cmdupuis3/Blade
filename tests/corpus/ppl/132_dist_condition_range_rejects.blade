@@ -1,0 +1,13 @@
+// TEST: Dist Condition Coordinate Range (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: out of range
+import ppl as ppl
+// The conditioned coordinate is a static index into the tower's variable
+// space: for a 2-dimensional dist the coordinates are 0..1, so i = 2 is
+// refused at elaboration with the dimension in the message (the same
+// static-shape discipline as every subscript in Blade).
+type V2 = Idx<2>
+type T4 = Idx<4>
+let A: Array<Float64 like V2, T4> = [[1.0, 2.0, 3.0, 6.0], [2.0, 3.0, 5.0, 10.0]]
+let d = ppl.dist(A, 2)
+let c = ppl.dist_condition(d, 2, 4.0)

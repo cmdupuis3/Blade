@@ -162,7 +162,10 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprCompute e -> TExprCompute (z e)
         | TExprRead e -> TExprRead (z e)
         | TExprFillRandom e -> TExprFillRandom (z e)
-        | TExprRandGen (k, key, dims) -> TExprRandGen (k, z key, dims)
+        // The weights extent is a resolved static int, not a type -- only the
+        // paired expression is zonked.
+        | TExprRandGen (k, key, pars, weights, dims) ->
+            TExprRandGen (k, z key, List.map z pars, weights |> Option.map (fun (w, n) -> (z w, n)), dims)
         | TExprRank e -> TExprRank (z e)
         | TExprDotDot (lo, hi) -> TExprDotDot (z lo, z hi)
         | TExprReynolds (k, a) -> TExprReynolds (z k, a)

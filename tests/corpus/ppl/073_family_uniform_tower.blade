@@ -1,0 +1,22 @@
+// TEST: Family Uniform Tower
+import ppl as ppl
+// uniform(a, b) cumulants over the Bernoulli numbers: κ1 = (a+b)/2 and,
+// for even n, κ_n = B_n (b-a)^n / n (κ_n of U(0,1) is B_n/n from
+// K(t) = ln((e^t-1)/t), scaled by (b-a)^n); odd orders ≥ 3 vanish.
+// B_2, B_4, B_6 = 1/6, -1/30, 1/42 give divisors 12, -120, 252. Checked
+// independently through central moments (w = b-a): κ4 = w⁴/80 - 3(w²/12)²
+// = -w⁴/120 and κ6 = w⁶/448 - 15(w⁴/80)(w²/12) + 30(w²/12)³ = w⁶/252.
+// Here w = 2: κ = (2, 1/3, 0, -16/120, 0, 64/252).
+let u = ppl.uniform(1.0, 3.0, 6)
+let u1 = ppl.cumulant(u, 1)
+let u2 = ppl.cumulant(u, 2)
+let u3 = ppl.cumulant(u, 3)
+let u4 = ppl.cumulant(u, 4)
+let u5 = ppl.cumulant(u, 5)
+let u6 = ppl.cumulant(u, 6)
+// EXPECT: u1 = [2.0]
+// EXPECT: u2 = [0.333333333333333]
+// EXPECT: u3 = [0.0]
+// EXPECT: u4 = [-0.133333333333333]
+// EXPECT: u5 = [0.0]
+// EXPECT: u6 = [0.253968253968254]

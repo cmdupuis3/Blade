@@ -1,0 +1,19 @@
+// TEST: Split-Rhat Hand Values
+import ppl as ppl
+// rhat(c1, c2): split-Rhat -- each chain halves, J = 4 segments of m = n/2;
+// W = mean of the 4 SAMPLE variances (/(m-1)); B = m * variance of the 4
+// segment means (/(J-1) = 3); Rhat = sqrt(((m-1)W/m + B/m) / W).
+//
+// c1 = [1..8], c2 = [8..1], n = 8, m = 4. All four segments are consecutive
+// runs of 4 integers, so every sample variance is 20/12 = 5/3 and W = 5/3.
+// Segment means are 2.5, 6.5, 6.5, 2.5 -> grand mean 4.5, squared
+// deviations 4 each, B = 4 * 16/3 = 64/3. var+ = (3*(5/3) + 64/3)/4 =
+// 79/12; Rhat = sqrt((79/12)/(5/3)) = sqrt(79/20) = sqrt(3.95).
+// (cross-check: sqrt(3.95) = 1.98746069143518, and 1.98746069143518^2
+// recovers 3.95 = 79/20.) The stationary-vs-antithetic layout makes the
+// between-segment spread dominate, so Rhat is FAR from 1 -- a
+// change-detector for the between/within split, not a mixing pass.
+let up: Array<Float64 like Idx<8>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let down: Array<Float like Idx<8>> = [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+let r = ppl.rhat(up, down)
+// EXPECT: r = 1.9874606914351791

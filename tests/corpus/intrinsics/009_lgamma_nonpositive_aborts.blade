@@ -1,0 +1,18 @@
+// TEST: Intrinsics LGamma Non-Positive (aborts)
+// ABORT: error[BL8008]
+// ABORT: lgamma: argument must be positive
+// ============================================================================
+// lgamma is defined for x > 0 only. The reflection formula that would extend
+// it to negative arguments is deliberately absent: it is a second thing to
+// keep bit-identical between blade_rt::lgamma and its interpreter twin, and
+// the callers this intrinsic exists for (Gamma / Poisson / Beta log-densities)
+// never need it. A non-positive argument is therefore a caller bug and PANICS
+// -- returning a silent NaN would let it seep into a log-likelihood and come
+// out the far end as an unexplained NaN posterior.
+//
+// The guard is `!(x > 0.0)`, so NaN is refused on the same branch. Both the
+// compiled binary (blade_rt::panic) and the interpreter (InterpPanic) raise
+// BL8008 with this message, which is what the differential gate compares.
+// ============================================================================
+let x = 0.0 - 1.0
+let bad = lgamma(x)

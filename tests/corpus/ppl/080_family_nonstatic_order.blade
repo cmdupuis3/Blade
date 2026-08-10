@@ -1,0 +1,9 @@
+// TEST: Family Non-Static Order (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: the order must be a compile-time integer
+import ppl as ppl
+// The order is a type-level truncation parameter, so it must resolve
+// statically (a literal, `let static`, or static-function call) — a plain
+// runtime binding is refused with steering, same contract as dist/mstate.
+let r = 4
+let d = ppl.gaussian(0.0, 1.0, r)

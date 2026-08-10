@@ -1,0 +1,37 @@
+// TEST: Rand Categorical Determinism And Range
+// The first Int64-valued rand fill. Two properties that together say the
+// int64 pool is wired correctly end to end, and one that says the fill is
+// keyed like every other family.
+//
+// RANGE is asserted ARITHMETICALLY rather than by eyeballing the pin, in the
+// style of 010's x*(1-x) trick. Over the INTEGERS, i*(i-1)*(i-2)*(i-3) is 0
+// exactly when i is one of 0,1,2,3 and STRICTLY POSITIVE otherwise -- for
+// i >= 4 all four factors are positive, and for i <= -1 all four are negative
+// and there is an even number of them. So a zero sum over all 12 draws rules
+// out every out-of-range index at once, in BOTH directions, with no
+// cancellation possible. That the product is computed in Int64 at all is the
+// half of the test that would fail if these draws had come back as Float64.
+//
+// DETERMINISM uses the sum of SQUARED elementwise differences, not the plain
+// sum: `a - b` is elementwise here, but a signed sum would read zero for two
+// arrays that merely balance. Squares are non-negative, so a zero sum forces
+// equality slot by slot. `keyMatters` then proves the certificate is not
+// vacuous -- the same construction over a DIFFERENT key must be non-zero, so
+// `identical` is testing the key contract rather than a degenerate always-0
+// expression.
+import rand as r
+let W: Array<Float64 like Idx<4>> = [1.0, 1.0, 2.0, 4.0]
+let a = r.categorical(11, W, 12)
+let b = r.categorical(11, W, 12)
+let c = r.categorical(12, W, 12)
+let same = a - b
+let identical = reduce(same * same, (+)) == 0
+let apart = a - c
+let keyMatters = reduce(apart * apart, (+)) > 0
+let oob = method_for(a) <@> lambda(i) -> i * (i - 1) * (i - 2) * (i - 3) |> compute
+let inRange = reduce(oob, (+)) == 0
+// EXPECT: a = [0, 1, 3, 0, 3, 2, 3, 1, 3, 1, 3, 3]
+// EXPECT: b = [0, 1, 3, 0, 3, 2, 3, 1, 3, 1, 3, 3]
+// EXPECT: identical = true
+// EXPECT: keyMatters = true
+// EXPECT: inRange = true

@@ -9,12 +9,37 @@
 /// than shared to avoid a cross-project (.fsproj) file-include coupling and
 /// to keep this module self-contained under Blade.Interp.
 ///
-/// Codegen contract mirrored (CodeGen.fs genRandGenBinding, ~L8187-8213):
-///   blade_rand::<kind>(pool_base(A.data), card, key)
+/// Codegen contract mirrored (CodeGen.fs genRandGenBinding):
+///   blade_rand::<kind>(pool_base(A.data), card, key [, p1 [, p2]])
 /// where `card` = product of ALL extents (dense SymNone, row-major flat pool),
-/// `key` is the int64 stream key, one draw per pool slot, filled in flat order.
-/// `normal` consumes TWO uniform draws per element (Box-Muller, cos branch
-/// only; the sin partner is NOT cached, see `next_normal` below).
+/// `key` is the int64 stream key, `p1`/`p2` are the family's runtime Float64
+/// parameters (cast to double by codegen, evaluated by the interpreter), one
+/// draw per pool slot, filled in flat order.
+///
+/// DRAW BUDGET per element -- the property that keeps the streams in step:
+///   uniform      1 uniform
+///   normal       2 uniforms (Box-Muller, cos branch only; the sin partner is
+///                NOT cached, see `nextNormal`)
+///   exponential  1 uniform
+///   bernoulli    1 uniform
+///   poisson      lam+1 uniforms in expectation (Knuth, data-dependent)
+///   gamma        per Marsaglia-Tsang iteration: 1 normal, plus 1 uniform when
+///                the iteration is not rejected at v <= 0; plus 1 more uniform
+///                for the shape<1 boost. Data-dependent -- so every branch
+///                condition here must be evaluated in the SAME order as the
+///                header or the two streams desynchronize at the first
+///                rejection and never recover.
+///   beta         two gammas, in the order (a, then b).
+///   categorical  1 uniform, unconditionally (including the degenerate-weights
+///                branch, which draws before returning 0).
+///
+/// ELEMENT TYPE. Every family here returns `float[]` EXCEPT `categorical`, which
+/// returns `int64[]` because its fill writes an `int64_t` pool (see the element
+/// type note in rand_runtime.hpp). That is why the dispatch is split into
+/// `draws` (float families) and `drawsCategorical`, rather than one function
+/// with a widened return: the two feed different interpreter stores (SFloat vs
+/// SInt) and a common `float[]` return would reintroduce exactly the Float64
+/// index the int64 pool exists to avoid.
 module Blade.Interp.RandMirror
 
 // Core stream (copy of spectra/Rand.fs BladeSpectra.Rand).
@@ -78,27 +103,169 @@ let private nextNormal (g: Mt19937_64) : float =
     if u1 < twoPow53Inv then u1 <- twoPow53Inv
     sqrt (-2.0 * log u1) * cos (twoPi * u2)
 
-// Public draw APIs (match blade_rand::uniform / blade_rand::normal).
+/// rand_runtime.hpp `next_exponential`: ONE uniform -> Exp(rate) by inverse CDF.
+/// The prefix `-` binds tighter than `/` in F# exactly as in C++, so this is
+/// `(-log(1-u)) / rate`, not `-(log(1-u)/rate)` -- the two differ in the sign of
+/// a zero result and would print differently.
+let private nextExponential (g: Mt19937_64) (rate: float) : float =
+    let u = nextUniform g
+    -(log (1.0 - u)) / rate
+
+/// rand_runtime.hpp `next_gamma_ge1`: Marsaglia-Tsang for shape >= 1, scale 1.
+/// The `while` loop reproduces the header's `for(;;)` with `continue` on
+/// v <= 0: that rejection consumes the normal (two uniforms) and NOTHING else,
+/// which is why the uniform draw sits inside the v > 0 branch.
+let private nextGammaGe1 (g: Mt19937_64) (shape: float) : float =
+    let d = shape - (1.0 / 3.0)
+    let c = 1.0 / sqrt (9.0 * d)
+    let mutable result = 0.0
+    let mutable accepted = false
+    while not accepted do
+        let x = nextNormal g
+        let v0 = 1.0 + c * x
+        if v0 > 0.0 then
+            let v = v0 * v0 * v0
+            let u = nextUniform g
+            let x2 = x * x
+            if u < 1.0 - 0.0331 * x2 * x2 then
+                result <- d * v
+                accepted <- true
+            elif log u < 0.5 * x2 + d * (1.0 - v + log v) then
+                result <- d * v
+                accepted <- true
+    result
+
+/// rand_runtime.hpp `next_gamma`: any shape > 0. shape < 1 takes the boost
+/// branch (Gamma(shape+1) THEN one uniform, in that draw order).
+let private nextGamma (g: Mt19937_64) (shape: float) (rate: float) : float =
+    if shape < 1.0 then
+        let gg = nextGammaGe1 g (shape + 1.0)
+        let u = nextUniform g
+        gg * (u ** (1.0 / shape)) / rate
+    else
+        nextGammaGe1 g shape / rate
+
+/// rand_runtime.hpp `next_poisson`: Knuth's product-of-uniforms. Consumes
+/// lam+1 uniforms in expectation; the count is returned as a float, matching
+/// the header's `double k`.
+let private nextPoisson (g: Mt19937_64) (lam: float) : float =
+    let L = exp (-lam)
+    let mutable p = 1.0
+    let mutable k = 0.0
+    let mutable go = true
+    while go do
+        p <- p * nextUniform g
+        if p <= L then go <- false
+        else k <- k + 1.0
+    k
+
+/// rand_runtime.hpp `next_bernoulli`: ONE uniform, 1.0 iff u < p.
+let private nextBernoulli (g: Mt19937_64) (p: float) : float =
+    if nextUniform g < p then 1.0 else 0.0
+
+/// rand_runtime.hpp `next_beta`: g1/(g1+g2) from two unit-rate gammas drawn in
+/// the order (a, then b).
+let private nextBeta (g: Mt19937_64) (a: float) (b: float) : float =
+    let g1 = nextGamma g a 1.0
+    let g2 = nextGamma g b 1.0
+    let s = g1 + g2
+    if s <= 0.0 then 0.0 else g1 / s
+
+// Public draw APIs (one per blade_rand fill).
+
+/// Run one fill: seed a fresh engine from `key` and draw `n` values with
+/// `next`, exactly as every `blade_rand::<kind>` body does.
+let inline private fill (key: int64) (n: int) (next: Mt19937_64 -> float) : float[] =
+    let g = Mt19937_64(mix64 (uint64 key))
+    Array.init n (fun _ -> next g)
 
 /// blade_rand::uniform(out, n, key): `n` draws ~ U[0,1) for stream `key`.
-let uniform (key: int64) (n: int) : float[] =
-    let g = Mt19937_64(mix64 (uint64 key))
-    Array.init n (fun _ -> nextUniform g)
+let uniform (key: int64) (n: int) : float[] = fill key n nextUniform
 
 /// blade_rand::normal(out, n, key): `n` draws ~ N(0,1) via Box-Muller for
 /// stream `key`. Each element consumes two uniform draws (no caching).
-let normal (key: int64) (n: int) : float[] =
-    let g = Mt19937_64(mix64 (uint64 key))
-    Array.init n (fun _ -> nextNormal g)
+let normal (key: int64) (n: int) : float[] = fill key n nextNormal
 
-/// Dispatch on the runtime `kind` string ("uniform" | "normal") that codegen
-/// records in RandGen (CodeGen.fs). Matches the internal builtin call surface
-/// (__rand_uniform / __rand_normal): a single int64 key, `n` flat draws.
-let draws (kind: string) (key: int64) (n: int) : float[] =
+/// blade_rand::exponential(out, n, key, rate).
+let exponential (key: int64) (rate: float) (n: int) : float[] =
+    fill key n (fun g -> nextExponential g rate)
+
+/// blade_rand::gamma(out, n, key, shape, rate).
+let gamma (key: int64) (shape: float) (rate: float) (n: int) : float[] =
+    fill key n (fun g -> nextGamma g shape rate)
+
+/// blade_rand::poisson(out, n, key, lam).
+let poisson (key: int64) (lam: float) (n: int) : float[] =
+    fill key n (fun g -> nextPoisson g lam)
+
+/// blade_rand::bernoulli(out, n, key, p).
+let bernoulli (key: int64) (p: float) (n: int) : float[] =
+    fill key n (fun g -> nextBernoulli g p)
+
+/// blade_rand::beta(out, n, key, a, b).
+let beta (key: int64) (a: float) (b: float) (n: int) : float[] =
+    fill key n (fun g -> nextBeta g a b)
+
+/// blade_rand::categorical(out, n, key, w, k): `n` indices in [0, k) with
+/// P(i) proportional to w_i. Mirrors the header body statement for statement --
+/// the clamp of non-positive/NaN weights to 0, the running left-to-right scan,
+/// the in-place division by the total, the degenerate short-circuit that still
+/// consumes its uniform, and the strict `u >= cum[j]` walk with the j+1 < k
+/// clamp. Note this fill does NOT go through `fill`: it returns int64 and it
+/// hoists a per-call scan the way the C++ body does.
+let categorical (key: int64) (weights: float[]) (n: int) : int64[] =
+    let g = Mt19937_64(mix64 (uint64 key))
+    let k = weights.Length
+    let cum = Array.zeroCreate<float> k
+    let mutable acc = 0.0
+    for i in 0 .. k - 1 do
+        acc <- acc + (if weights.[i] > 0.0 then weights.[i] else 0.0)
+        cum.[i] <- acc
+    let total = acc
+    let degenerate = not (total > 0.0)
+    if not degenerate then
+        for i in 0 .. k - 1 do cum.[i] <- cum.[i] / total
+    Array.init n (fun _ ->
+        let u = nextUniform g
+        if degenerate then 0L
+        else
+            let mutable j = 0
+            while j + 1 < k && u >= cum.[j] do j <- j + 1
+            int64 j)
+
+/// Dispatch on the runtime `kind` string that codegen records in
+/// RandGen (IR.fs RandomFillSpec), with the already-evaluated runtime Float64
+/// parameters in surface order. Matches the internal builtin call surface
+/// (__rand_<fam>): one int64 key, the family's params, `n` flat draws.
+/// The parameter-count mismatch cases are unreachable -- the typechecker arm
+/// fixes each family's arity -- but they fail loudly rather than silently
+/// drawing from the wrong transform.
+let draws (kind: string) (key: int64) (pars: float list) (n: int) : float[] =
+    match kind, pars with
+    | "uniform", []             -> uniform key n
+    | "normal", []              -> normal key n
+    | "exponential", [rate]     -> exponential key rate n
+    | "gamma", [shape; rate]    -> gamma key shape rate n
+    | "poisson", [lam]          -> poisson key lam n
+    | "bernoulli", [p]          -> bernoulli key p n
+    | "beta", [a; b]            -> beta key a b n
+    | ("uniform" | "normal" | "exponential" | "gamma" | "poisson" | "bernoulli" | "beta"), _ ->
+        failwithf "RandMirror.draws: rand kind '%s' got %d parameter(s)" kind (List.length pars)
+    | "categorical", _ ->
+        // Not a widening oversight: categorical draws are int64 and belong to
+        // `drawsCategorical`. Reaching here means a caller routed the array-
+        // parameter family through the scalar-parameter dispatch.
+        failwith "RandMirror.draws: 'categorical' is an int64 fill -- use drawsCategorical"
+    | other, _ ->
+        failwithf "RandMirror.draws: unknown rand kind '%s' (expected uniform | normal | exponential | gamma | poisson | bernoulli | beta)" other
+
+/// Int64 counterpart of `draws` for the one array-parameter family. Kept
+/// separate rather than folded into `draws` because the return type differs
+/// (see the element-type note in this module's header).
+let drawsCategorical (kind: string) (key: int64) (weights: float[]) (n: int) : int64[] =
     match kind with
-    | "uniform" -> uniform key n
-    | "normal"  -> normal key n
-    | other -> failwithf "RandMirror.draws: unknown rand kind '%s' (expected 'uniform' | 'normal')" other
+    | "categorical" -> categorical key weights n
+    | other -> failwithf "RandMirror.drawsCategorical: unknown int64 rand kind '%s' (expected categorical)" other
 
 // RandomFillSpec executor.
 
@@ -107,11 +274,12 @@ let draws (kind: string) (key: int64) (n: int) : float[] =
 /// `card`-length draw sequence, where `card` = product of extents.
 type FilledRandom = { Data: float[]; Extents: int list }
 
-/// Execute a rand.uniform/normal fill exactly as CodeGen.fs genRandGenBinding
-/// emits it: card = product of extents (row-major flat pool), one blade_rand
-/// call of `card` draws keyed by `key`, filled in flat order. `kind` is the
-/// RandGen kind ("uniform" | "normal"); `key` is the already-evaluated int64
-/// stream key; `extents` are the (all positive, static) dense extents.
-let runFill (kind: string) (key: int64) (extents: int list) : FilledRandom =
+/// Execute a rand fill exactly as CodeGen.fs genRandGenBinding emits it:
+/// card = product of extents (row-major flat pool), one blade_rand call of
+/// `card` draws keyed by `key`, filled in flat order. `kind` is the RandGen
+/// kind; `key` is the already-evaluated int64 stream key; `pars` are the
+/// already-evaluated runtime Float64 parameters in surface order; `extents`
+/// are the (all positive, static) dense extents.
+let runFill (kind: string) (key: int64) (pars: float list) (extents: int list) : FilledRandom =
     let card = extents |> List.fold (fun acc e -> acc * e) 1
-    { Data = draws kind key card; Extents = extents }
+    { Data = draws kind key pars card; Extents = extents }

@@ -1,0 +1,25 @@
+// TEST: AD Digamma Has No Derivative Rule (rejects)
+// ERROR: BL5500
+// ERROR-CONTAINS: has no derivative rule
+import ad as ad
+// ============================================================================
+// This probe guards the SPLIT between "derivative is zero" and "derivative is
+// unknown", not any particular intrinsic. Both readings show up in derivRule
+// as `None`, and conflating them is the dangerous direction: an intrinsic with
+// no rule that is silently treated as zero-derivative yields a WRONG gradient
+// with that whole term missing and no diagnostic anywhere. Grad's
+// zeroDerivIntrinsics lists the genuinely-zero ones (floor, ceil); everything
+// else with no rule is refused here.
+//
+// It used to be lgamma standing at the frontier. lgamma is now differentiable
+// -- derivRule maps it to digamma, which landed as an intrinsic -- so the
+// probe MOVED UP one rung rather than being deleted: digamma's own derivative
+// is trigamma, which the language does not have. See 015 for the other half,
+// which pins the lgamma derivative that this file used to reject.
+//
+// If trigamma ever lands, do the same thing again: move this probe to
+// trigamma and pin digamma's derivative in a positive test. Deleting it would
+// silently re-merge the two readings of `None`.
+// ============================================================================
+function f(x: Float) -> Float = digamma(x) + x * x
+let (fv, dfv) = ad.grad(f)(3.0)

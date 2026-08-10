@@ -1,0 +1,68 @@
+// TEST: HMC Gamma-Poisson Payoff (lgamma gradient)
+import ppl as ppl
+import ad as ad
+// THE PAYOFF: a posterior HMC could not touch before the digamma merge. The
+// Poisson log-likelihood and the Gamma prior log-density are both "closed
+// form plus an lgamma normalizer"; with d/dx lgamma(x) = digamma(x) refused,
+// their gradients were not expressible at all (ad/014's old refusal), so no
+// gradient-based sampler could run on ANY gamma-family model. This test runs
+// fixed-leapfrog HMC through those exact lgamma paths, written with
+// ppl.logpdf/ppl.loglik in a density-form model body.
+//
+// Model, on the ORACLE_PINS.md dump-conjugate Gamma-Poisson block:
+//   prior:      rate lam ~ Gamma(a0=2, b0=1)
+//   likelihood: counts [3, 1, 4, 1, 5] ~ Poisson(lam)   (n=5, sum=14)
+// Conjugate truth, by hand: the posterior kernel is
+//   lam^(a0-1) e^(-b0 lam) * prod_i lam^(x_i) e^(-lam) / x_i!
+//     ~ lam^(a0 + sum x_i - 1) e^(-(b0 + n) lam)
+// i.e. Gamma(a0 + sum x_i, b0 + n) = Gamma(2 + 14, 1 + 5) = Gamma(16, 6)
+// with mean 16/6 = 8/3 = 2.6666..., variance 16/36 = 4/9 = 0.4444... --
+// matching the oracle pins (post_shape=16, post_rate=6,
+// post_mean=2.6666666666666665).
+//
+// The latent is sampled UNCONSTRAINED as t = log(lam) (lam = exp(t), support
+// R, no rejected negative-rate proposals), with the log-Jacobian |dlam/dt| =
+// lam contributing the bare `+ t` term:
+//   logpost(t) = logpdf(gamma(2, 1), exp(t)) + t + loglik(poisson(exp(t)), A)
+// The chain is pushed back to lam-space by an ANNOTATED elementwise map --
+// chain diagnostics accept any rank-1 array with a static declared extent,
+// so the transformed chain rides the same chain_mean/chain_var formers.
+//
+// Deterministic booleans under fixed keys: with eps = 0.1, L = 4, n = 4096,
+// burn = 512 the lam-space estimates land at mean 2.68547 / var 0.43036
+// (key 4242) and 2.66992 / 0.45540 (key 77) against 2.66667 / 0.44444
+// truth, so mean-within-0.05 / var-within-0.06 hold for both chains with
+// real margin -- and they discriminate: the PRIOR mean is 2 (off by 0.67),
+// and dropping the Jacobian term shifts the posterior to Gamma(15, 6) with
+// mean 2.5 (off by 0.17 > 0.05). t-space cross-check in passing: the chain
+// mean 0.95749 sits 0.008 from E[log lam] = digamma(16) - log 6 =
+// 0.9492538590994058. Split-Rhat over the two keys: 0.99987 < 1.01.
+let pdata: Array<Float64 like Idx<5>> = [3.0, 1.0, 4.0, 1.0, 5.0]
+function logpost(t: Float64) -> Float64 =
+    ppl.logpdf(gamma(2.0, 1.0), exp(t)) + t + ppl.loglik(poisson(exp(t)), pdata)
+
+let ct = ppl.hmc(logpost, 1.0, 4096, 0.1, 4, 4242)
+let ct2 = ppl.hmc(logpost, 1.0, 4096, 0.1, 4, 77)
+type CIdx = Idx<4096>
+let lam: Array<Float64 like CIdx> = method_for(ct) <@> lambda(u) -> exp(u) |> compute
+let lam2: Array<Float64 like CIdx> = method_for(ct2) <@> lambda(u) -> exp(u) |> compute
+
+let ml = ppl.chain_mean(lam, 512)
+let vl = ppl.chain_var(lam, 512)
+let ml2 = ppl.chain_mean(lam2, 512)
+let vl2 = ppl.chain_var(lam2, 512)
+let mean_ok_1 = abs(ml - 2.6666666666666665) < 0.05
+// EXPECT: mean_ok_1 = true
+let var_ok_1 = abs(vl - 0.4444444444444444) < 0.06
+// EXPECT: var_ok_1 = true
+let mean_ok_2 = abs(ml2 - 2.6666666666666665) < 0.05
+// EXPECT: mean_ok_2 = true
+let var_ok_2 = abs(vl2 - 0.4444444444444444) < 0.06
+// EXPECT: var_ok_2 = true
+
+let mt = ppl.chain_mean(ct, 512)
+let logspace_mean_ok = abs(mt - 0.9492538590994058) < 0.05
+// EXPECT: logspace_mean_ok = true
+let rh = ppl.rhat(ct, ct2)
+let rhat_ok = rh < 1.01
+// EXPECT: rhat_ok = true

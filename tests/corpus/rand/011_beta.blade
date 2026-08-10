@@ -1,0 +1,26 @@
+// TEST: Rand Beta
+// Beta(a, b) = g1/(g1+g2) from two unit-rate gammas. Moments of Beta(2, 3):
+//   mean = a/(a+b)                    = 0.4
+//   var  = ab/((a+b)^2 (a+b+1))       = 6/(25*6) = 0.04
+// SE(mean) = sqrt(0.04/4096) = 0.003125, so the 0.02 tolerance is ~6 SE.
+//
+// The variance check is what makes this more than a scaling test: any
+// transform with the right mean but the wrong spread (e.g. g1/(2*g1) style
+// bugs, or reusing one gamma for both) fails it. The support [0,1] is pinned
+// separately -- a ratio g1/(g1+g2) of non-negative parts is in range by
+// construction, so this catches sign or NaN escapes rather than tail behaviour.
+import rand as r
+let x = r.beta(61, 2.0, 3.0, 4096)
+let s = reduce(x, (+))
+let mean = s / 4096.0
+let sq = method_for(x) <@> lambda(q) -> q * q |> compute
+let ss = reduce(sq, (+))
+let var = ss / 4096.0 - mean * mean
+let meanOk = abs(mean - 0.4) < 0.02
+let varOk = abs(var - 0.04) < 0.01
+let inRange = method_for(x) <@> lambda(q) -> if q < 0.0 then 1.0 else if q > 1.0 then 1.0 else 0.0 |> compute
+let nOut = reduce(inRange, (+))
+let allInRange = nOut < 0.5
+// EXPECT: meanOk = true
+// EXPECT: varOk = true
+// EXPECT: allInRange = true

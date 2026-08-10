@@ -151,7 +151,34 @@ let emptyTypedEnv () : TypedLowerEnv = {
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
     { env with Variables = Map.add name id env.Variables }
 
-/// Value expression for destructured sub-binding #i of `binding`.
+/// Flat-vs-structural projection mode for a destructuring binding, plus the
+/// slot each sub-binding reads.
+///
+/// The WIDTH that decides the mode is the pattern's slot count, which is only
+/// the same as `SubBindings.Length` when every pattern position binds a name.
+/// A wildcard binds nothing yet still covers a component, so the checker
+/// states both numbers explicitly (DSTupleAt); re-deriving either one from the
+/// sub-binding list is what made `let (_, g) = f(x)` read element 0.
+/// Non-tuple shapes (struct fields, cons leaves, no destructuring) keep the
+/// identity mapping and the historical count.
+let destructureLayout (binding: TypedBinding) : bool * (int -> int) =
+    let slotOfSub, slots =
+        match binding.Destructure with
+        | DSTupleAt (components, slots) ->
+            let arr = List.toArray components
+            (fun i -> if i < arr.Length then arr.[i] else i), slots
+        | DSPositional | DSConsRest -> id, binding.SubBindings.Length
+    let isFlat =
+        match binding.Type with
+        | IRTTuple _ ->
+            let structCount = match binding.Type with IRTTuple ts -> ts.Length | _ -> 0
+            let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
+            slots = flatCount && slots <> structCount
+        | _ -> false
+    (isFlat, slotOfSub)
+
+/// Value expression for destructured sub-binding #i of `binding`, reading
+/// tuple slot `slot` (they differ only when a pattern position binds nothing).
 ///
 /// Positional destructuring reads element i of the tuple (or, for a struct
 /// scrutinee, the field carrying the sub-binding's own name). A CONS binding
@@ -168,9 +195,11 @@ let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
 /// fewer leaves than the tuple has slots, so checkDecl's flat-vs-structural
 /// test never selects flat for one, and the remainder must index the
 /// scrutinee structurally in any case.
-let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: int) (name: string) : IRExpr =
+let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: int) (slot: int) (name: string) : IRExpr =
     let baseVar = IRVar (binding.VarId, binding.Type)
-    let isConsBinding = match binding.Destructure with DSConsRest -> true | DSPositional -> false
+    // Cons/pack shapes never remap (slot = i there), so the rest-leaf test and
+    // the pack reads below stay on the sub-binding index they were written for.
+    let isConsBinding = match binding.Destructure with DSConsRest -> true | DSPositional | DSTupleAt _ -> false
     let isRestLeaf = isConsBinding && i = binding.SubBindings.Length - 1
     if isStruct then IRFieldAccess (baseVar, name)
     else
@@ -184,7 +213,7 @@ let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: 
         | IRTTuple ts when isRestLeaf && ts.Length > i ->
             let rest = [ for j in i .. ts.Length - 1 -> IRTupleProj (baseVar, j, false) ]
             if rest.Length = 1 then rest.Head else IRTuple rest
-        | _ -> IRTupleProj (baseVar, i, isFlat)
+        | _ -> IRTupleProj (baseVar, slot, isFlat)
 
 /// Map a callable's parallelization-strategy list (from a function's
 /// where-clause or a lambda's `Parallel` list) into the five IRCallable
@@ -617,9 +646,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
 
     | TExprRandGen _ ->
         // Materialized only as a top-level let-binding value, where TDeclLet
-        // intercepts it (records the key/kind in RandomInits, allocates the
-        // self-typed array). Reaching here means it was used inline / nested.
-        failwith "rand.uniform/normal(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n))"
+        // intercepts it (records the kind/key/params in RandomInits, allocates
+        // the self-typed array). Reaching here means it was used inline / nested.
+        failwith "rand.<fam>(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n))"
 
     | TExprCompound _ ->
         // Only meaningful as a top-level let-binding value, where TDeclLet
@@ -958,13 +987,7 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
                 // a projection IRLet per pattern leaf after the primary
                 // binding -- without these the leaf VarIds dangle.
                 let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
-                let isFlat =
-                    match binding.Type with
-                    | IRTTuple ts ->
-                        let structCount = ts.Length
-                        let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
-                        binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
-                    | _ -> false
+                let (isFlat, slotOf) = destructureLayout binding
                 let env'' = binding.SubBindings |> List.fold (fun e (name, subId, _) -> bindTypedVar name subId e) env'
                 let body = lowerTypedBlock env'' rest finalExpr
                 // Constraint guards run right after the destructure, before
@@ -976,7 +999,7 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
                     binding.SubBindings |> List.mapi (fun i (name, subId, _subTy) -> (i, name, subId))
                 let chained =
                     List.foldBack (fun (i, name, subId) acc ->
-                        let projExpr = subBindingValue binding isStruct isFlat i name
+                        let projExpr = subBindingValue binding isStruct isFlat i (slotOf i) name
                         IRLet (subId, projExpr, acc)) indexedSubs withChecks
                 IRLet (binding.VarId, value, chained)
         | TStmtAssign (lhs, rhs) ->
@@ -1402,16 +1425,9 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         let (irBinding, env') = lowerTypedBinding env binding
         // Emit sub-bindings for destructured patterns (tuple, cons, struct)
         let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
-        // Determine if this is a flat destructuring (pattern count = flat leaf count != structural count)
-        let isFlat =
-            match binding.Type with
-            | IRTTuple ts ->
-                let structCount = ts.Length
-                let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
-                binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
-            | _ -> false
+        let (isFlat, slotOf) = destructureLayout binding
         let subIRBindings = binding.SubBindings |> List.mapi (fun i (name, subId, subTy) ->
-            let projExpr = subBindingValue binding isStruct isFlat i name
+            let projExpr = subBindingValue binding isStruct isFlat i (slotOf i) name
             let env' = bindTypedVar name subId env'
             { Id = subId; Name = name; Type = subTy; Value = projExpr; IsConst = true; IsMutable = false })
         let env'' = binding.SubBindings |> List.fold (fun e (name, subId, _) -> bindTypedVar name subId e) env'
@@ -1457,13 +1473,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         // direct constants, falling back to tuple projection of the primary
         // binding for shapes the static evaluator didn't reach.
         let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
-        let isFlat =
-            match binding.Type with
-            | IRTTuple ts ->
-                let structCount = ts.Length
-                let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
-                binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
-            | _ -> false
+        let (isFlat, slotOf) = destructureLayout binding
         let (subIRBindings, envFinal) =
             binding.SubBindings |> List.mapi (fun i (name, subId, subTy) -> (i, name, subId, subTy))
             |> List.fold (fun (acc, e) (i, name, subId, subTy) ->
@@ -1477,7 +1487,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
                           IsConst = true; IsMutable = false }
                     | None ->
                         // Projection fallback -- same shape as TDeclLet's branch.
-                        let projExpr = subBindingValue binding isStruct isFlat i name
+                        let projExpr = subBindingValue binding isStruct isFlat i (slotOf i) name
                         { Id = subId; Name = name; Type = subTy; Value = projExpr
                           IsConst = true; IsMutable = false }
                 (acc @ [bd], bindTypedVar name subId e)
@@ -1955,13 +1965,23 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (FillModulus modIR) currentEnv.RandomInits }
         | TDeclLet binding when (match binding.Value.Kind with TExprRandGen _ -> true | _ -> false) ->
-            // rand.uniform/normal(key, shape): materialized via allocate<> +
+            // rand.<fam>(key, params.., shape): materialized via allocate<> +
             // the runtime blade_rand fill (RandomInits/RandGen intercept).
-            // The key is lowered and recorded. Mirrors the fill_random arm.
-            let kind, keyIR =
+            // The key and the family's runtime Float64 params are lowered in
+            // the CURRENT env (so they may reference earlier bindings, exactly
+            // as the key may) and recorded. Mirrors the fill_random arm.
+            //
+            // The categorical weights array lowers in the same env for the same
+            // reason -- it is always an earlier binding -- and carries the
+            // checker-pinned static extent through unchanged.
+            let kind, keyIR, parIRs, weightsIR =
                 match binding.Value.Kind with
-                | TExprRandGen (k, key, _) -> k, lowerTypedExpr currentEnv key
-                | _ -> "uniform", IRLit (IRLitInt 0L)  // unreachable: guarded by the `when` above
+                | TExprRandGen (k, key, pars, weights, _) ->
+                    k,
+                    lowerTypedExpr currentEnv key,
+                    (pars |> List.map (lowerTypedExpr currentEnv)),
+                    (weights |> Option.map (fun (w, n) -> (lowerTypedExpr currentEnv w, n)))
+                | _ -> "uniform", IRLit (IRLitInt 0L), [], None  // unreachable: guarded by the `when` above
             let bd = {
                 Id = binding.VarId
                 Name = binding.Name
@@ -1972,7 +1992,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             }
             bindings <- bindings @ [bd]
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
-            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (RandGen (kind, keyIR)) currentEnv.RandomInits }
+            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (RandGen (kind, keyIR, parIRs, weightsIR)) currentEnv.RandomInits }
         | TDeclLet binding when (match binding.Value.Kind with TExprCompound _ -> true | _ -> false) ->
             // Compound-construction constructor: materialized via P0
             // (genCompoundIndexFromMask) + a dense->compact scatter (the

@@ -1,0 +1,38 @@
+// TEST: Cornish-Fisher Normal Quantile
+import ppl as ppl
+// On a Gaussian tower Cornish-Fisher is EXACT: every correction coefficient
+// is a structural zero and dist_quantile_approx(d, p) = mu + sd·PPND16(p) --
+// so these pins are Wichura's AS241 standard-normal quantile itself, straight
+// from the oracle's dump-cf first block. Note AS241 is NOT exactly
+// antisymmetric across p = 0.5 in floating point (z(0.05) and -z(0.95)
+// differ in the last ulp, because 1 - 0.95 is not 0.05 as a double); the two
+// pins below preserve that asymmetry deliberately -- do not "fix" it.
+let g = ppl.gaussian(0.0, 1.0, 2)
+let q05 = ppl.dist_quantile_approx(g, 0.05)
+let q25 = ppl.dist_quantile_approx(g, 0.25)
+let q50 = ppl.dist_quantile_approx(g, 0.5)
+let q75 = ppl.dist_quantile_approx(g, 0.75)
+let q95 = ppl.dist_quantile_approx(g, 0.95)
+let q01 = ppl.dist_quantile_approx(g, 0.01)
+let q99 = ppl.dist_quantile_approx(g, 0.99)
+let q975 = ppl.dist_quantile_approx(g, 0.975)
+let q999 = ppl.dist_quantile_approx(g, 0.999)
+// r = 6 Gaussian tower: same values (the lambda decls exist but are zero).
+let g6 = ppl.gaussian(0.0, 1.0, 6)
+let s05 = ppl.dist_quantile_approx(g6, 0.05)
+let s975 = ppl.dist_quantile_approx(g6, 0.975)
+// Affine transport: N(1.5, 4) at 0.975 = 1.5 + 2·1.9599639845400536.
+let gn = ppl.gaussian(1.5, 4.0, 2)
+let t975 = ppl.dist_quantile_approx(gn, 0.975)
+// EXPECT: q05 = -1.6448536269514726
+// EXPECT: q25 = -0.67448975019608171
+// EXPECT: q50 = 0
+// EXPECT: q75 = 0.67448975019608171
+// EXPECT: q95 = 1.6448536269514715
+// EXPECT: q01 = -2.3263478740408408
+// EXPECT: q99 = 2.3263478740408408
+// EXPECT: q975 = 1.9599639845400536
+// EXPECT: q999 = 3.0902323061678132
+// EXPECT: s05 = -1.6448536269514726
+// EXPECT: s975 = 1.9599639845400536
+// EXPECT: t975 = 5.4199279690801072

@@ -1,0 +1,29 @@
+// TEST: Rand Gamma Small Shape Boost
+// shape < 1 takes the OTHER branch of next_gamma: the Marsaglia-Tsang boost,
+// which draws Gamma(shape+1) and scales by u^(1/shape). Without this test the
+// shape<1 branch (and the extra uniform it consumes, and its pow() call) is
+// entirely uncovered -- 006 exercises only shape >= 1.
+//
+// Gamma(0.5, 1): mean = 0.5, var = 0.5. The distribution is heavily
+// right-skewed with a density that diverges at 0, so the sample mean converges
+// more slowly than 006's; SE(mean) = sqrt(0.5/4096) ~ 0.011 and the tolerance
+// is 0.06 (~5 SE). Variance of a chi-square-like variate has heavy sampling
+// noise of its own, so its tolerance is deliberately loose at 0.15.
+//
+// Support is (0, inf) but a draw CAN legitimately underflow to 0 when u
+// underflows in u^(1/shape), so this test pins non-NEGATIVITY, not positivity.
+import rand as r
+let x = r.gamma(31, 0.5, 1.0, 4096)
+let s = reduce(x, (+))
+let mean = s / 4096.0
+let sq = method_for(x) <@> lambda(q) -> q * q |> compute
+let ss = reduce(sq, (+))
+let var = ss / 4096.0 - mean * mean
+let meanOk = abs(mean - 0.5) < 0.06
+let varOk = abs(var - 0.5) < 0.15
+let nonneg = method_for(x) <@> lambda(q) -> if q < 0.0 then 1.0 else 0.0 |> compute
+let nNeg = reduce(nonneg, (+))
+let noneNegative = nNeg < 0.5
+// EXPECT: meanOk = true
+// EXPECT: varOk = true
+// EXPECT: noneNegative = true

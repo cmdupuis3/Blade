@@ -1,0 +1,24 @@
+// TEST: Rand Bernoulli
+// Bernoulli(p) as Float64 0.0/1.0. This is the ONLY family whose transform
+// makes no libm call at all -- one uniform and a comparison -- so its draws are
+// bit-identical between the interpreter mirror and the compiled binary by
+// construction, which makes the exact pin below the strongest of the new ones.
+//
+// Values in {0,1} is asserted ARITHMETICALLY rather than by eyeballing the pin:
+// x*(1-x) is 0 exactly when x is 0 or 1, so summing it over all 4096 draws and
+// demanding 0 rules out every other value at once (a 0.5 draw would contribute
+// 0.25). The pinned 6 draws additionally fix WHICH values come out.
+//
+// Mean ~ p = 0.3; SE = sqrt(0.3*0.7/4096) ~ 0.0072, so 0.03 is ~4 SE.
+import rand as r
+let b = r.bernoulli(11, 0.3, 6)
+let x = r.bernoulli(51, 0.3, 4096)
+let s = reduce(x, (+))
+let mean = s / 4096.0
+let meanOk = abs(mean - 0.3) < 0.03
+let dev = method_for(x) <@> lambda(q) -> q * (1.0 - q) |> compute
+let devs = reduce(dev, (+))
+let binaryOnly = abs(devs) < 0.0000001
+// EXPECT: b = [1, 1, 0, 1, 0, 1]
+// EXPECT: meanOk = true
+// EXPECT: binaryOnly = true

@@ -1,0 +1,26 @@
+// TEST: Sample Gamma Dist Roundtrip
+import ppl as ppl
+// The round-trip that unifies the module (plan section 5): sample from an
+// exact family, lift the draws back into a Dist tower with the ALREADY
+// SHIPPED dist(A, r), and read moments off the tower. gamma(3, 2) has mean
+// 3/2 = 1.5 and variance 3/4 = 0.75; with 4096 keyed draws the sample mean's
+// SE is ~0.0135, so the 0.06 tolerance is ~4.4 SE -- and the key is FIXED,
+// so the booleans are deterministic (the rand-corpus idiom), with the exact
+// estimates pinned as change-detectors beside them.
+// dist's shape contract wants a leading variable axis plus the sample axis,
+// so the rank-1 fill is wrapped to Idx<1> x Idx<4096> through the
+// range-kernel form the formers already infer shapes from (corpus 068/069).
+let s = ppl.sample(gamma(3.0, 2.0), 4242, 4096)
+type OneIdx = Idx<1>
+type NIdx = Idx<4096>
+let A = method_for(range<OneIdx, NIdx>) <@> lambda(i, j) -> s(j) |> compute
+let d = ppl.dist(A, 2)
+let m1 = ppl.dist_expect(d, 0.0, 1.0)
+let m2 = ppl.dist_expect(d, 0.0, 0.0, 1.0)
+let varv = m2 - m1 * m1
+let meanOk = abs(m1 - 1.5) < 0.06
+let varOk = abs(varv - 0.75) < 0.12
+// EXPECT: m1 = 1.51462766693987
+// EXPECT: varv = 0.780892756141792
+// EXPECT: meanOk = true
+// EXPECT: varOk = true

@@ -1,0 +1,31 @@
+// TEST: Rand Poisson
+// Poisson(lam) by Knuth's product-of-uniforms. Poisson is equidispersed --
+// mean = var = lam -- so checking BOTH moments against the same 4.0 is a real
+// discrimination test, not one fact stated twice: an off-by-one in the loop's
+// accept condition would shift the mean and leave the variance, and a wrong
+// e^-lam would move them apart.
+//
+// SE(mean) = sqrt(4/4096) = 0.03125, so the 0.15 mean tolerance is ~5 SE. The
+// variance of the sample variance is larger; 0.4 is the matching looseness.
+//
+// The pinned 6 draws double as the INTEGRALITY assertion: counts are carried as
+// Float64 (see cpp/rand_runtime.hpp's element-type note) and print without a
+// decimal point precisely because they are exact whole doubles. A non-integral
+// value would print with decimals and fail the pin.
+import rand as r
+let p = r.poisson(11, 4.0, 6)
+let x = r.poisson(41, 4.0, 4096)
+let s = reduce(x, (+))
+let mean = s / 4096.0
+let sq = method_for(x) <@> lambda(q) -> q * q |> compute
+let ss = reduce(sq, (+))
+let var = ss / 4096.0 - mean * mean
+let meanOk = abs(mean - 4.0) < 0.15
+let varOk = abs(var - 4.0) < 0.4
+let neg = method_for(x) <@> lambda(q) -> if q < 0.0 then 1.0 else 0.0 |> compute
+let nNeg = reduce(neg, (+))
+let noneNegative = nNeg < 0.5
+// EXPECT: p = [3, 5, 8, 3, 2, 2]
+// EXPECT: meanOk = true
+// EXPECT: varOk = true
+// EXPECT: noneNegative = true

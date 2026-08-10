@@ -1,0 +1,28 @@
+// TEST: Logpdf Gamma
+import ppl as ppl
+// Formerly the gamma-pending reject probe: gamma's log-density needed lgamma,
+// which is now a real intrinsic (hand-rolled Lanczos in blade_runtime.hpp,
+// bit-exact interp mirror, corpus intrinsics/008). The closed form is
+//   (shape-1)·log x - rate·x + shape·log rate - lgamma(shape)
+// -- ON-SUPPORT (x > 0), no branching. NOT yet AD-able: lgamma has no Grad
+// derivative rule until digamma lands. Pins are the oracle's dump-logpdf
+// values (src/ppl/ORACLE_PINS.md), compared at the harness tolerance -- the
+// runtime lgamma and the oracle's are independent Lanczos implementations
+// that agree to ~1e-12 relative, never bitwise by construction.
+let g1 = ppl.logpdf(gamma(2.0, 1.0), 0.5)
+let g2 = ppl.logpdf(gamma(2.0, 1.0), 1.0)
+let g3 = ppl.logpdf(gamma(2.0, 1.0), 2.5)
+let g4 = ppl.logpdf(gamma(3.5, 2.0), 1.0)
+let g5 = ppl.logpdf(gamma(0.5, 1.0), 0.1)
+// Gamma(1, r) == Exp(r) holds EXACTLY: lgamma is pinned to 0 at its zeros
+// x = 1 and x = 2 (the Cephes/Boost practice), and (shape-1)·log x drops out.
+let g6 = ppl.logpdf(gamma(1.0, 2.5), 1.0)
+let e6 = ppl.logpdf(exponential(2.5), 1.0)
+let same = abs(g6 - e6) < 0.000000000001
+// EXPECT: g1 = -1.1931471805599454
+// EXPECT: g2 = -1
+// EXPECT: g3 = -1.5837092681258449
+// EXPECT: g4 = -0.77495847038726717
+// EXPECT: g5 = 0.47892760357232322
+// EXPECT: g6 = -1.5837092681258449
+// EXPECT: same = true

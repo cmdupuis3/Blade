@@ -1,0 +1,12 @@
+// TEST: HMC Non-Static Leapfrog Count (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: the leapfrog step count L must be a compile-time integer
+import ppl as ppl
+import ad as ad
+// The leapfrog sweep is a static loop (the same regime as the chain length:
+// trip counts are shapes, and shapes are static everywhere in Blade). A
+// plain runtime `let` does not resolve statically, so hmc refuses with
+// steering; x0, eps, and the key stay ordinary runtime expressions.
+function lp(x: Float64) -> Float64 = 0.0 - x * x / 2.0
+let steps = 4
+let c = ppl.hmc(lp, 0.0, 64, 0.5, steps, 7)

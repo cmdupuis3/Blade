@@ -1,0 +1,21 @@
+// TEST: Logpdf Beta
+import ppl as ppl
+// Beta log-density: (a-1)·log x + (b-1)·log(1-x) - log B(a, b), with
+// log B(a, b) = lgamma(a) + lgamma(b) - lgamma(a+b). beta(1, 1) is the
+// uniform on (0, 1), and its logpdf is EXACTLY zero everywhere on the
+// support: both (a-1) coefficients vanish and lgamma's pinned zeros make
+// log B(1, 1) = -lgamma(2) = 0 bit-for-bit. Pins from dump-logpdf.
+let t1 = ppl.logpdf(beta(2.0, 3.0), 0.05)
+let t2 = ppl.logpdf(beta(2.0, 3.0), 0.25)
+let t3 = ppl.logpdf(beta(2.0, 3.0), 0.75)
+let t4 = ppl.logpdf(beta(0.5, 0.5), 0.5)
+let t5 = ppl.logpdf(beta(0.5, 0.5), 0.95)
+let t6 = ppl.logpdf(beta(1.0, 1.0), 0.5)
+let t7 = ppl.logpdf(beta(1.0, 1.0), 0.95)
+// EXPECT: t1 = -0.61341221254109435
+// EXPECT: t2 = 0.52324814376454531
+// EXPECT: t3 = -0.57536414490356425
+// EXPECT: t4 = -0.45158270528945377
+// EXPECT: t5 = 0.37878289812137123
+// EXPECT: t6 = 0
+// EXPECT: t7 = 0

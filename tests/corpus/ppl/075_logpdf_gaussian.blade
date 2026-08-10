@@ -1,0 +1,15 @@
+// TEST: Logpdf Gaussian
+import ppl as ppl
+// ppl.logpdf(family(params), x): the scalar log-density at x, closed-form
+// arithmetic — the family argument is SYMBOLIC (a syntactic tag + param
+// exprs, the dist_map-lambda precedent), no tower materializes, and both
+// the bare and the alias-qualified family spellings work (stripQualified
+// normalizes the latter). The standard-normal pin at 0 is the plan's P1
+// acceptance value: -½·log(2π) = -0.918938533204673.
+let l0 = ppl.logpdf(gaussian(0.0, 1.0), 0.0)
+let l1 = ppl.logpdf(gaussian(0.0, 1.0), 1.0)
+// -½·log(4π) - (0.5-1.5)²/4 = -1.26551212348465 - 0.25
+let l2 = ppl.logpdf(ppl.gaussian(1.5, 2.0), 0.5)
+// EXPECT: l0 = -0.918938533204673
+// EXPECT: l1 = -1.41893853320467
+// EXPECT: l2 = -1.51551212348465

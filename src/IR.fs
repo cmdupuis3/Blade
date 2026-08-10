@@ -1790,12 +1790,26 @@ type ProviderWriteSpec = {
 
 /// Deferred array-fill constructor spec, keyed in RandomInits by the receiving
 /// binding's IRId. `fill_random(mod)` records a FillModulus (rand() % mod, C
-/// rand(), nondeterministic); `rand.uniform/normal(key)` records a RandGen
+/// rand(), nondeterministic); `rand.<fam>(key, params..)` records a RandGen
 /// (deterministic mt19937_64-based runtime, keyed by `key`). Both allocate the
 /// binding's array type and fill its pool at codegen.
+///
+/// RandGen `pars` are the family's runtime Float64 scalar parameters in surface
+/// order -- ordinary IRExprs evaluated ONCE at the binding's position (not per
+/// draw), emitted as trailing `(double)` arguments after the key. Empty for
+/// uniform/normal; one for exponential/poisson/bernoulli; two for gamma/beta.
+///
+/// `weights` is the array-valued parameter channel, `Some` only for
+/// `categorical` (which has no scalar pars). It pairs the lowered rank-1
+/// Float64 array expression with the STATIC extent the checker pinned: codegen
+/// emits `pool_base(<expr>.data), (size_t)<len>` in the parameter position, so
+/// the length travels with the pointer rather than being re-derived from the
+/// expression's type at each consumer.
 type RandomFillSpec =
     | FillModulus of IRExpr              // fill_random(mod)
-    | RandGen of kind: string * key: IRExpr   // rand.<kind>(key), kind = "uniform" | "normal"
+    // rand.<kind>(key, pars..[, weights]); kind = uniform | normal | exponential
+    // | gamma | poisson | bernoulli | beta | categorical
+    | RandGen of kind: string * key: IRExpr * pars: IRExpr list * weights: (IRExpr * int) option
 
 type IRModule = {
     Name: string

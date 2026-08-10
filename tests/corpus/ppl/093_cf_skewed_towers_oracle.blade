@@ -1,0 +1,43 @@
+// TEST: Cornish-Fisher Skewed Towers Oracle
+import ppl as ppl
+// Cornish-Fisher quantiles on skewed towers, pinned verbatim against the
+// oracle's dump-cf blocks. The p = 0.5 values are hand-checkable: at z = 0
+// only the first-order term survives, x = mu - kappa_3/(6·kappa_2):
+//   exponential(1) r=4: 1 - 2/6  = 0.66666666666666674
+//   gamma(3, 1) r=4:    3 - 6/18 = 2.6666666666666665
+//   poisson(4) r=4:     4 - 4/24 = 3.8333333333333335
+// CF is an approximation off the Gaussian tower: on exponential(1) at
+// p = 0.05 it is off the true quantile by +6.9e-2 (r=4) / +2.4e-2 (r=6) --
+// the pins are the ORACLE's values, not the exact law's.
+let e4 = ppl.exponential(1.0, 4)
+let a05 = ppl.dist_quantile_approx(e4, 0.05)
+let a25 = ppl.dist_quantile_approx(e4, 0.25)
+let a50 = ppl.dist_quantile_approx(e4, 0.5)
+let a75 = ppl.dist_quantile_approx(e4, 0.75)
+let a95 = ppl.dist_quantile_approx(e4, 0.95)
+let e6 = ppl.exponential(1.0, 6)
+let b05 = ppl.dist_quantile_approx(e6, 0.05)
+let b50 = ppl.dist_quantile_approx(e6, 0.5)
+let b95 = ppl.dist_quantile_approx(e6, 0.95)
+let g4 = ppl.gamma(3.0, 1.0, 4)
+let c05 = ppl.dist_quantile_approx(g4, 0.05)
+let c50 = ppl.dist_quantile_approx(g4, 0.5)
+let g6 = ppl.gamma(3.0, 1.0, 6)
+let c95 = ppl.dist_quantile_approx(g6, 0.95)
+let p4 = ppl.poisson(4.0, 4)
+let d50 = ppl.dist_quantile_approx(p4, 0.5)
+let p6 = ppl.poisson(4.0, 6)
+let d95 = ppl.dist_quantile_approx(p6, 0.95)
+// EXPECT: a05 = 0.11987620289468359
+// EXPECT: a25 = 0.26644956576009671
+// EXPECT: a50 = 0.66666666666666674
+// EXPECT: a75 = 1.3701747163196183
+// EXPECT: a95 = 3.0171527665022571
+// EXPECT: b05 = 0.075366544504779531
+// EXPECT: b50 = 0.68641975308642
+// EXPECT: b95 = 3.0001841524855841
+// EXPECT: c05 = 0.83282941414472811
+// EXPECT: c50 = 2.6666666666666665
+// EXPECT: c95 = 6.2966033147482232
+// EXPECT: d50 = 3.8333333333333335
+// EXPECT: d95 = 7.556834524285291

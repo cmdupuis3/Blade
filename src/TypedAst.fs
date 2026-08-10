@@ -218,11 +218,30 @@ and TypedExprKind =
     // let-binding value. Lowering records it in RandomInits; `modulus` is the
     // argument to rand() % modulus.
     | TExprFillRandom of modulus: TypedExpr
-    // rand.uniform/normal(key, shape): internal builtin, deterministic
+    // rand.<fam>(key, params..., shape): internal builtin, deterministic
     // random-array constructor, self-typed from the shape argument. Lowering
-    // records (kind, key) in RandomInits. `kind` is "uniform" | "normal";
-    // `dims` are the static extents.
-    | TExprRandGen of kind: string * key: TypedExpr * dims: int list
+    // records (kind, key, pars, weights) in RandomInits. `kind` is the family
+    // name ("uniform" | "normal" | "exponential" | "gamma" | "poisson" |
+    // "bernoulli" | "beta" | "categorical"); `pars` are the family's runtime
+    // Float64 SCALAR parameters in surface order (empty for uniform/normal, one
+    // for exponential/poisson/bernoulli, two for gamma/beta) -- ordinary typed
+    // expressions, evaluated once per fill, NOT per draw; `dims` are the
+    // static extents.
+    //
+    // `weights` is the SECOND parameter channel, and is `Some` only for
+    // `categorical` (whose `pars` is correspondingly empty). It is an
+    // ARRAY-valued parameter -- a rank-1 Float64 array -- carried separately
+    // from `pars` because it is shaped differently at every stage downstream:
+    // codegen passes a pool pointer plus a length where a scalar par passes one
+    // `(double)` cast, and the interpreter unwraps a VArray where a scalar par
+    // evaluates to a number. Folding it into `pars` would make every consumer
+    // re-discover which entries are arrays.
+    //
+    // The paired int is the weights array's STATIC extent, pinned by the
+    // checker off the argument's own type. It rides along rather than being
+    // re-read from the TypedExpr's type downstream so that the "is this extent
+    // static?" question is asked (and refused) in exactly one place.
+    | TExprRandGen of kind: string * key: TypedExpr * pars: TypedExpr list * weights: (TypedExpr * int) option * dims: int list
     | TExprGuard of cond: TypedExpr * body: TypedExpr
     | TExprZero
     | TExprReynolds of kernel: TypedExpr * isAntisymmetric: bool
@@ -363,6 +382,17 @@ and DestructureShape =
     /// Sub-binding i is element i of a tuple (or the field with its own name,
     /// for a struct scrutinee). Also the shape when there is no destructuring.
     | DSPositional
+    /// Tuple pattern with its slot assignment stated explicitly: sub-binding k
+    /// reads slot `components[k]`, and the whole pattern consumes `slots`
+    /// slots. Both numbers are needed because a pattern position that binds
+    /// NOTHING (a wildcard, a literal) still consumes its slot: deriving the
+    /// slot from the sub-binding's list position instead -- which is what
+    /// DSPositional means -- compacts every later binder onto the leading
+    /// components, so `let (_, g) = f(x)` silently bound g to element 0.
+    /// `slots` (not SubBindings.Length) is also what Lowering's flat-vs-
+    /// structural test must count, since that test compares the pattern's
+    /// width against the scrutinee's flat and structural widths.
+    | DSTupleAt of components: int list * slots: int
     /// Cons split over a tuple scrutinee. `::` is right-associative, so a chain
     /// `a :: b :: rest` flattens into leading leaves [a; b] plus one rest leaf.
     /// Every leaf but the last is positional; the last takes the whole

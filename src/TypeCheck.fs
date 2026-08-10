@@ -1574,6 +1574,42 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | _ -> Set.empty
 
 /// Extract variable names bound by a pattern.
+/// Slot assignment for a tuple pattern's leaves, shared by every `let`
+/// destructuring site (block statement, top-level decl, `let static`).
+/// Returns one entry per BOUND name, in binding order, as
+/// (name, patternPositionType, slot), plus the total slot count.
+///
+/// A pattern position that binds nothing -- `_`, a literal -- still consumes
+/// its slot. Without that, the leaves after it compact onto the leading
+/// components and read the wrong element (the `let (_, g) = f(x)` bug).
+///
+/// A compound position (a nested tuple) consumes one slot PER NAME it binds,
+/// which is what makes the flat regime work: `let ((a,b), c) = ((1,2),3)`
+/// assigns slots 0,1,2 and, being 3 slots wide against a 2-component
+/// scrutinee, is projected as flat leaves by Lowering. Nested patterns are
+/// still not destructured RECURSIVELY here (their names take fresh type
+/// vars, per the callers' long-standing rule) -- so a nested pattern that
+/// binds fewer names than its position has leaves, e.g. `((_, b), c)`,
+/// remains as unsupported as it was before this helper existed.
+and tuplePatternSlots (pats: Pattern list) : (string * int option * int) list * int =
+    let mutable slot = 0
+    let entries = ResizeArray<string * int option * int>()
+    pats |> List.iteri (fun i p ->
+        match p.Kind with
+        | PatternKind.PatVar n ->
+            entries.Add (n, Some i, slot)
+            slot <- slot + 1
+        | _ ->
+            match patternNames p with
+            | [] ->
+                // binds nothing, but still covers a component
+                slot <- slot + 1
+            | names ->
+                for n in names do
+                    entries.Add (n, None, slot)
+                    slot <- slot + 1)
+    (List.ofSeq entries, slot)
+
 and patternNames (pat: Pattern) : string list =
     match pat.Kind with
     | PatternKind.PatWildcard -> []
@@ -3260,7 +3296,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprBlocked (_, bs) -> [bs]
         | TExprPure e | TExprCompute e | TExprRead e | TExprFillRandom e | TExprRank e
         | TExprExtents e | TExprReynolds (e, _) -> [e]
-        | TExprRandGen (_, key, _) -> [key]
+        | TExprRandGen (_, key, pars, weights, _) -> (key :: pars) @ (weights |> Option.map fst |> Option.toList)
         | TExprGuard (c, b) -> [c; b]
         | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
         | TExprGroupBy (a, p) | TExprSort (a, p)
@@ -4443,15 +4479,54 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__dist_pack" }, args) when not args.IsEmpty ->
         inferDistPack env args
 
-    // ---- __rand_uniform / __rand_normal(key, d1, ..., dn): rand module ----
+    // ---- __rand_<fam>(key, p1, .., pk, d1, ..., dn): rand module ----
     // Compiler-internal (double-underscore reserved): emitted by the `rand`
-    // elaboration stage from `alias.uniform/normal(key, shape)`. `key` is an
-    // Int64 stream key; the trailing args are the (elaborator-resolved) static
-    // extents. Self-typed as a dense Float64 array of that shape -- no annotation
-    // needed. Lowering records (kind, key) in RandomInits; codegen emits
-    // allocate<> + the runtime blade_rand fill.
-    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar (("__rand_uniform" | "__rand_normal") as fn) }, (keyE :: dimArgs)) when not dimArgs.IsEmpty ->
-        let kind = if fn = "__rand_uniform" then "uniform" else "normal"
+    // elaboration stage from `alias.<fam>(key, params.., shape)`. `key` is an
+    // Int64 stream key; the next `nPars` args are the family's RUNTIME Float64
+    // scalar parameters (any Float64-typed expression -- only the shape must be
+    // static); the trailing args are the (elaborator-resolved) static extents.
+    // Self-typed as a dense array of that shape -- no annotation needed. The
+    // element type is Float64 for every scalar-parameter family, including the
+    // integer-valued poisson and bernoulli, and Int64 for `categorical` alone
+    // (see the element-type note in cpp/rand_runtime.hpp: its draws are
+    // subscripts, not measurements). Lowering records (kind, key, pars, weights)
+    // in RandomInits; codegen emits allocate<> + the runtime blade_rand fill,
+    // and picks the C++ pool type straight off this ElemType.
+    //
+    // `categorical` also carries the ARRAY parameter channel: its single
+    // non-shape argument is a rank-1 Float64 weights array, and this arm is
+    // where its extent is PINNED -- the extent has to be a static literal
+    // because codegen passes a compile-time length beside the pool pointer and
+    // the interpreter mirror needs the same length to scan. A symbolic extent
+    // is refused here rather than producing a fill whose k is unknown.
+    //
+    // The per-family parameter count is fixed HERE (not by the elaborator), so
+    // it is enforced on the intrinsic itself and any future direct emitter of
+    // __rand_* -- e.g. the ppl module -- is held to the same arity.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar (("__rand_uniform" | "__rand_normal" | "__rand_exponential"
+                                                   | "__rand_gamma" | "__rand_poisson" | "__rand_bernoulli"
+                                                   | "__rand_beta" | "__rand_categorical") as fn) }, (keyE :: rest)) when not rest.IsEmpty ->
+        // nPars = scalar Float64 parameters; hasWeights = the array channel.
+        // No family uses both today, but the two are counted independently so
+        // the argument split does not assume that.
+        let kind, nPars, hasWeights =
+            match fn with
+            | "__rand_uniform"     -> "uniform", 0, false
+            | "__rand_normal"      -> "normal", 0, false
+            | "__rand_exponential" -> "exponential", 1, false
+            | "__rand_gamma"       -> "gamma", 2, false
+            | "__rand_poisson"     -> "poisson", 1, false
+            | "__rand_bernoulli"   -> "bernoulli", 1, false
+            | "__rand_categorical" -> "categorical", 0, true
+            | _                    -> "beta", 2, false
+        // Surface order is key, [weights], scalar pars.., shape.
+        let nLead = nPars + (if hasWeights then 1 else 0)
+        if List.length rest <= nLead then
+            Error (Other (sprintf "rand.%s: expected %d distribution parameter(s) and a shape" kind nLead))
+        else
+        let leadArgs, dimArgs = List.splitAt nLead rest
+        let weightsArg = if hasWeights then Some (List.head leadArgs) else None
+        let parArgs = if hasWeights then List.tail leadArgs else leadArgs
         // Extents must be static ints (the elaborator resolves them to literals).
         let dimResults =
             dimArgs |> List.map (fun d ->
@@ -4462,13 +4537,64 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         match dimResults |> List.fold (fun acc r -> match acc, r with Ok xs, Ok x -> Ok (xs @ [x]) | Error e, _ -> Error e | _, Error e -> Error e) (Ok []) with
         | Error e -> Error (Other e)
         | Ok dims ->
+            // The weights channel: inferred (not checked against a demand --
+            // its extent is what we are trying to LEARN), then required to be a
+            // rank-1 Float64 array with a static positive extent. AnyPrimElem
+            // so a unit-annotated Float64 still passes: units erase at codegen
+            // and the pool is a `double` pool either way.
+            // Split out of the pipeline below so each refusal is one flat arm:
+            // rank, element type and extent-staticness are three separate
+            // reasons and each gets its own message.
+            let pinWeights (tW: TypedExpr) : TypeResult<TypedExpr * int> =
+                match env.Subst.Resolve(tW.Type) with
+                | ArrayElem arrTy ->
+                    let rank = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+                    if rank <> 1 then
+                        Error (Other (sprintf "rand.%s: weights must be a rank-1 array (got rank %d)" kind rank))
+                    else
+                        match env.Subst.Resolve(arrTy.ElemType) with
+                        | AnyPrimElem ETFloat64 ->
+                            match arrTy.IndexTypes with
+                            | [ix] ->
+                                match ix.Extent with
+                                | IRLit (IRLitInt k) when k > 0L -> Ok (tW, int k)
+                                | IRLit (IRLitInt k) ->
+                                    Error (Other (sprintf "rand.%s: weights extent must be positive (got %d)" kind k))
+                                | _ ->
+                                    Error (Other (sprintf "rand.%s: the weights array must have a STATIC extent -- codegen passes its length beside the pool pointer, so a symbolic or parameter extent cannot be filled" kind))
+                            | _ -> Error (Other (sprintf "rand.%s: weights must be a rank-1 Float64 array" kind))
+                        | AnyPrimElem et ->
+                            Error (Other (sprintf "rand.%s: weights must have Float64 elements (got %A)" kind et))
+                        | _ ->
+                            Error (Other (sprintf "rand.%s: weights must be a rank-1 Float64 array" kind))
+                | _ ->
+                    Error (Other (sprintf "rand.%s: weights must be a rank-1 Float64 array, not a scalar" kind))
+            let weightsResult : TypeResult<(TypedExpr * int) option> =
+                match weightsArg with
+                | None -> Ok None
+                | Some wE ->
+                    inferExpr env wE
+                    |> Result.bind pinWeights
+                    |> Result.map Some
+            weightsResult |> Result.bind (fun tWeights ->
+            // Params check against Float64 (an int literal promotes; an
+            // array-typed argument is refused by the check, not silently taken).
+            let parResults =
+                parArgs |> List.fold (fun acc p ->
+                    acc |> Result.bind (fun ps ->
+                        checkExpr env (IRTScalar ETFloat64) p |> Result.map (fun tp -> ps @ [tp])))
+                    (Ok [])
+            parResults |> Result.bind (fun tPars ->
             checkExpr env (IRTScalar ETInt64) keyE |> Result.map (fun tKey ->
                 let indices =
                     dims |> List.map (fun n ->
                         { Id = env.Builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 n))
                           Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] })
-                let arrTy = mkArrayArrow indices (IRTScalar ETFloat64) None
-                mkTyped (TExprRandGen (kind, tKey, dims)) arrTy)
+                // Element type: Int64 for categorical (its draws are indices),
+                // Float64 for every other family.
+                let elemTy = if kind = "categorical" then IRTScalar ETInt64 else IRTScalar ETFloat64
+                let arrTy = mkArrayArrow indices elemTy None
+                mkTyped (TExprRandGen (kind, tKey, tPars, tWeights, dims)) arrTy)))
 
     // ---- __display_emit(head, quoted, data, metaTail): display module ----
     // Compiler-internal (double-underscore reserved): emitted by the `display`
@@ -13015,15 +13141,14 @@ and stmtDestructureBindings (env: TypeEnv) (pat: Pattern) (valueTy: IRType)
                     let flat = IR.flattenTupleLeaves resolvedTy
                     if pats.Length = flat.Length then flat else ts
             | _ -> []
-        pats |> List.iteri (fun i p ->
-            match p.Kind with
-            | PatternKind.PatVar n ->
-                let eTy =
-                    if i < typeList.Length then e.Subst.Resolve(typeList.[i])
-                    else e.Subst.Fresh()
-                bindLeaf n eTy
-            | _ -> bindCompound p)
-        Ok (e, subs, DSPositional)
+        let (entries, slots) = tuplePatternSlots pats
+        for (n, posOpt, _) in entries do
+            let eTy =
+                match posOpt with
+                | Some i when i < typeList.Length -> e.Subst.Resolve(typeList.[i])
+                | _ -> e.Subst.Fresh()
+            bindLeaf n eTy
+        Ok (e, subs, DSTupleAt (entries |> List.map (fun (_, _, s) -> s), slots))
     | PatternKind.PatCons (h, t) ->
         // `let head :: tail = tup`. Flatten/typing/reject rules live in
         // consDestructureLeaves, shared with the top-level, `let static` and
@@ -14098,21 +14223,17 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 if pats.Length = flat.Length then flat
                                 else ts  // arity already parked above
                         | _ -> []
-                    pats |> List.mapi (fun i p -> (i, p))
-                    |> List.fold (fun e (i, p) ->
-                        match p.Kind with
-                        | PatternKind.PatVar n ->
-                            let eTy =
-                                if i < typeList.Length then env.Subst.Resolve(typeList.[i])
-                                else env.Subst.Fresh()
-                            let subId = env.Builder.FreshId()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e
-                        | _ -> patternNames p |> List.fold (fun e2 n ->
-                            let subId = env.Builder.FreshId()
-                            let eTy = env.Subst.Fresh()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e2) e) env'
+                    let (entries, slots) = tuplePatternSlots pats
+                    destructure <- DSTupleAt (entries |> List.map (fun (_, _, s) -> s), slots)
+                    entries
+                    |> List.fold (fun e (n, posOpt, _) ->
+                        let eTy =
+                            match posOpt with
+                            | Some i when i < typeList.Length -> env.Subst.Resolve(typeList.[i])
+                            | _ -> env.Subst.Fresh()
+                        let subId = env.Builder.FreshId()
+                        subBindings <- subBindings @ [(n, subId, eTy)]
+                        bindVarSimple n subId eTy e) env'
                 | PatternKind.PatCons (h, t) ->
                     // `let head :: tail = tup` splits an n-tuple into element 0
                     // and the REMAINDER (`tail` is the (n-1)-tuple, not the
@@ -14312,21 +14433,17 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 let flat = IR.flattenTupleLeaves resolvedTy
                                 if pats.Length = flat.Length then flat else ts
                         | _ -> []
-                    pats |> List.mapi (fun i p -> (i, p))
-                    |> List.fold (fun e (i, p) ->
-                        match p.Kind with
-                        | PatternKind.PatVar n ->
-                            let eTy =
-                                if i < typeList.Length then env.Subst.Resolve(typeList.[i])
-                                else env.Subst.Fresh()
-                            let subId = env.Builder.FreshId()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e
-                        | _ -> patternNames p |> List.fold (fun e2 n ->
-                            let subId = env.Builder.FreshId()
-                            let eTy = env.Subst.Fresh()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e2) e) env'
+                    let (entries, slots) = tuplePatternSlots pats
+                    destructure <- DSTupleAt (entries |> List.map (fun (_, _, s) -> s), slots)
+                    entries
+                    |> List.fold (fun e (n, posOpt, _) ->
+                        let eTy =
+                            match posOpt with
+                            | Some i when i < typeList.Length -> env.Subst.Resolve(typeList.[i])
+                            | _ -> env.Subst.Fresh()
+                        let subId = env.Builder.FreshId()
+                        subBindings <- subBindings @ [(n, subId, eTy)]
+                        bindVarSimple n subId eTy e) env'
                 | PatternKind.PatCons (h, t) ->
                     match consDestructureLeaves env tValue.Type h t with
                     | Error e ->

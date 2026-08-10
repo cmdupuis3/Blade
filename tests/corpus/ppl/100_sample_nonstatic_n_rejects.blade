@@ -1,0 +1,11 @@
+// TEST: Sample Non-Static Count (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: the sample count must be a compile-time integer
+import ppl as ppl
+// Shapes are static everywhere in Blade and a rand fill's extent is a
+// shape: a plain runtime `let` does not resolve statically, so the count is
+// refused with steering (a literal, `let static`, or static-function call).
+// The distribution parameters and the key, by contrast, are ordinary
+// runtime expressions.
+let n = 64
+let s = ppl.sample(gamma(3.0, 2.0), 1, n)

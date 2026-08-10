@@ -23,6 +23,12 @@
 //     routed through ucrtbase.dll. Backend choice is a data table (mathBackend),
 //     so any function can be re-pinned to the ucrt shim if a future battery
 //     reveals a managed divergence.
+//   * lgamma and digamma are the intrinsics with NEITHER escape hatch: .NET has
+//     no gamma function to call, ucrtbase has no digamma at all, and no library
+//     is shared with the compiled side. Codegen therefore emits neither
+//     std::lgamma nor any libm psi -- both sides run the same hand-rolled series
+//     (lgammaLanczos / digammaSeries here, blade_rt::lgamma / blade_rt::digamma
+//     in src/cpp/blade_runtime.hpp), which must be kept identical by hand.
 //
 // Compiled inside Blade.fsproj after IR.fs/CodeGen.fs. Depends on Value.fs, the
 // IR op discriminators (IRBinOp/IRUnaryOp, IR.fs:25/36), ElemType (Types.fs:285),
@@ -64,17 +70,23 @@ module private Ucrt =
 
 /// Per-intrinsic backend. `Managed` = .NET Math.* (exact/correctly-rounded and
 /// identical to ucrt for these; cheaper, no marshalling). `Ucrt` = ucrtbase.dll
-/// P/Invoke (provably what g++ calls). The choice is data -- flip an entry to
-/// Ucrt to eliminate any residual managed-divergence risk for that function.
+/// P/Invoke (provably what g++ calls). `BladeRt` = neither library, but a
+/// series hand-rolled IDENTICALLY here and in src/cpp/blade_runtime.hpp,
+/// for the intrinsics where no shared library exists to borrow. The choice
+/// is data -- flip an entry to Ucrt to eliminate any residual
+/// managed-divergence risk for that function.
 type MathBackend =
     | Managed
     | Ucrt
+    | BladeRt
 
 /// Backend selection. Transcendentals + pow/atan2/hypot default to Ucrt (the
 /// zero-risk, provably-g++-identical path); the exact algebraic/rounding ops
 /// (sqrt, floor, ceil) use Managed (IEEE-correctly-rounded => identical
 /// everywhere, and avoid marshalling). hypot has NO managed equivalent, so it is
-/// Ucrt unconditionally.
+/// Ucrt unconditionally. lgamma and digamma have neither a managed equivalent
+/// NOR a shared library with the compiled side (codegen emits blade_rt:: for
+/// them) -- both sides run the same hand-rolled series, hence BladeRt.
 let mathBackend : Map<string, MathBackend> =
     Map.ofList [
         "exp", Ucrt;  "log", Ucrt;   "log10", Ucrt
@@ -82,7 +94,8 @@ let mathBackend : Map<string, MathBackend> =
         "sinh", Ucrt; "cosh", Ucrt;  "tanh", Ucrt
         "asin", Ucrt; "acos", Ucrt;  "atan", Ucrt
         "sqrt", Managed; "floor", Managed; "ceil", Managed
-        "pow", Ucrt;  "atan2", Ucrt; "hypot", Ucrt ]
+        "pow", Ucrt;  "atan2", Ucrt; "hypot", Ucrt
+        "lgamma", BladeRt; "digamma", BladeRt ]
 
 let private managed1 (name: string) (x: float) : float =
     match name with
@@ -106,10 +119,105 @@ let private ucrt1 (name: string) (x: float) : float =
     | "fabs" | "abs" -> Ucrt.fabs x
     | _ -> nan
 
+/// log Gamma(x) for x > 0: the Lanczos approximation (g = 7, n = 9),
+/// transcribed statement for statement from `blade_rt::lgamma` in
+/// src/cpp/blade_runtime.hpp -- read that comment for WHY this is hand-rolled
+/// rather than a library call on either side (short version: .NET has no gamma
+/// function at all, so there is no shared implementation to borrow the way
+/// every other intrinsic here borrows ucrtbase). Same coefficients, same
+/// association, same order: change one side and you MUST change the other, or
+/// the interpreter stops being a byte-for-byte twin.
+///
+/// `log` is pinned to ucrtbase DIRECTLY rather than routed through `math1`,
+/// because the C++ side calls std::log unconditionally -- what has to match is
+/// the header, not the mathBackend entry for the separate `log(x)` intrinsic.
+///
+/// Domain: x > 0 (`not (x > 0.0)` also catches NaN). Non-positive PANICS, the
+/// twin of the header's blade_rt::panic; the reflection formula is deliberately
+/// absent, since log-densities never need it.
+let lgammaLanczos (x: float) : float =
+    if not (x > 0.0) then
+        raise (InterpPanic("BL8008", "lgamma: argument must be positive", None, 0))
+    // Gamma(1) = Gamma(2) = 1 exactly; the series lands a few ulp off zero.
+    elif x = 1.0 || x = 2.0 then 0.0
+    else
+        // Denominators over x, not over z = x - 1: see the header's note on
+        // the cancellation in `(x - 1) + k` for small x.
+        let mutable s = 0.99999999999980993
+        s <- s + 676.5203681218851     / x
+        s <- s + -1259.1392167224028   / (x + 1.0)
+        s <- s + 771.32342877765313    / (x + 2.0)
+        s <- s + -176.61502916214059   / (x + 3.0)
+        s <- s + 12.507343278686905    / (x + 4.0)
+        s <- s + -0.13857109526572012  / (x + 5.0)
+        s <- s + 9.9843695780195716e-6 / (x + 6.0)
+        s <- s + 1.5056327351493116e-7 / (x + 7.0)
+        let t = x + 6.5   // (x - 1) + g + 0.5, with g = 7
+        // 0.9189385332046727 = log(2*pi) / 2
+        0.9189385332046727 + (x - 0.5) * (Ucrt.log t) - t + (Ucrt.log s)
+
+/// digamma(x) = psi(x) = d/dx log Gamma(x), for x > 0: recurrence down to the
+/// asymptotic regime, then the Stirling-type asymptotic series. Transcribed
+/// statement for statement from `blade_rt::digamma` in
+/// src/cpp/blade_runtime.hpp -- read that comment for the method, for the
+/// seven Bernoulli coefficients B_2n/(2n) and where they come from, and for
+/// the measurements behind "shift to x >= 10, truncate after seven terms"
+/// (worst 1.1e-15 over 206,001 probes, which is the recurrence's own
+/// roundoff floor; the customary shift to x >= 6 leaves ~1e-13).
+///
+/// Same lockstep contract as lgammaLanczos above: same constants, same
+/// association, same order, or the interpreter stops being a byte-for-byte
+/// twin. The series is deliberately summed as `c / p` with `p <- p * x2`
+/// rather than in Horner form, so there is no multiply-add pair on either
+/// side and FMA contraction cannot come into it at all.
+///
+/// `log` is pinned to ucrtbase directly, for the same reason as in
+/// lgammaLanczos: what must match is the header's std::log call, not the
+/// mathBackend entry for the separate `log(x)` intrinsic.
+///
+/// Domain: x > 0 (`not (x > 0.0)` also catches NaN), panicking with the same
+/// BL8008 as lgamma. Nothing is pinned at special points -- psi has no
+/// rational value at any convenient argument, so unlike lgamma's exact zeros
+/// at 1 and 2 there is nothing exact to return.
+let digammaSeries (x: float) : float =
+    if not (x > 0.0) then
+        raise (InterpPanic("BL8008", "digamma: argument must be positive", None, 0))
+    else
+        // psi(x) = psi(x+1) - 1/x, applied until the asymptotic series is good.
+        let mutable x = x
+        let mutable r = 0.0
+        while x < 10.0 do
+            r <- r - 1.0 / x
+            x <- x + 1.0
+        let x2 = x * x
+        let mutable p = x2                          // x^2, then x^4, x^6, ...
+        let mutable s =    (1.0 / 12.0)     / p
+        p <- p * x2
+        s <- s +          (-1.0 / 120.0)    / p
+        p <- p * x2
+        s <- s +           (1.0 / 252.0)    / p
+        p <- p * x2
+        s <- s +          (-1.0 / 240.0)    / p
+        p <- p * x2
+        s <- s +           (1.0 / 132.0)    / p
+        p <- p * x2
+        s <- s +        (-691.0 / 32760.0)  / p
+        p <- p * x2
+        s <- s +           (1.0 / 12.0)     / p
+        r + (Ucrt.log x) - 0.5 / x - s
+
+/// The BladeRt backend's dispatch table (see lgammaLanczos / digammaSeries).
+let private bladeRt1 (name: string) (x: float) : float =
+    match name with
+    | "lgamma" -> lgammaLanczos x
+    | "digamma" -> digammaSeries x
+    | _ -> nan
+
 /// Apply a single-argument real intrinsic through its selected backend.
 let math1 (name: string) (x: float) : float =
     match Map.tryFind name mathBackend with
     | Some Ucrt -> ucrt1 name x
+    | Some BladeRt -> bladeRt1 name x
     | _ -> managed1 name x
 
 /// b ^ e, matching CodeGen's `pow(l, r)` emission (unqualified `pow`).

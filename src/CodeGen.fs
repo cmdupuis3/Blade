@@ -1440,6 +1440,13 @@ let unaryOpToCpp = function
     | IRReal -> "std::real"
     | IRImag -> "std::imag"
     | IRArg -> "std::arg"
+    // lgamma and digamma are Blade's OWN (blade_runtime.hpp), not libm's: the
+    // interpreter has to reproduce them bit for bit and can borrow neither
+    // ucrtbase's nor .NET's (there is no .NET gamma, and no libm psi at all).
+    // Both sides run the same hand-rolled series -- see the header, and
+    // Interp/Numerics.fs lgammaLanczos / digammaSeries.
+    | IRMath "lgamma" -> "blade_rt::lgamma"
+    | IRMath "digamma" -> "blade_rt::digamma"
     | IRMath name -> "std::" + name  // function-call form via the generic
                                      // `op(expr)` unary arm
 
@@ -13780,18 +13787,30 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     (guardProviderWrite ind (flatten @ writeCode @ cleanup), ctx)
 
 
-/// rand.uniform/normal(key, shape): allocate the dense Float64 array (self-typed
-/// from the shape) and fill its flat contiguous pool with `card` deterministic
-/// draws keyed by `key`, via the blade_rand runtime. All rand arrays are dense
+/// rand.<fam>(key, params.., shape): allocate the dense array (self-typed from
+/// the shape) and fill its flat contiguous pool with `card` deterministic draws
+/// keyed by `key`, via the blade_rand runtime. All rand arrays are dense
 /// SymNone, so pool_base gives the full pool and the draw count is the product
 /// of extents. Mirrors the fill_random dense path but uses a flat pool fill.
+///
+/// The pool's C++ type is whatever `elemTypeToCpp` makes of the binding's
+/// ElemType, which is how `categorical` gets an `int64_t` pool (and every other
+/// family a `double` one) without a second allocation arm here: the checker
+/// picked the element type, this code was already generic in it.
+///
+/// The family's runtime Float64 parameters follow the key as trailing
+/// `(double)`-cast arguments, in surface order; a zero-parameter family
+/// (uniform/normal) emits the original three-argument call unchanged, so this
+/// extension is byte-compatible with the pre-existing emission for those two.
+/// The array parameter channel (categorical's weights) emits in the same
+/// position as a POINTER-plus-LENGTH pair, `pool_base(W.data), (size_t)k`.
 and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
-    let kind, keyExpr =
+    let kind, keyExpr, parExprs, weightsExpr =
         match ctx.RandomInits.[binding.Id] with
-        | RandGen (k, key) -> k, key
-        | FillModulus _ -> "uniform", IRLit (IRLitInt 0L)  // unreachable: dispatch guards this
+        | RandGen (k, key, pars, weights) -> k, key, pars, weights
+        | FillModulus _ -> "uniform", IRLit (IRLitInt 0L), [], None  // unreachable: dispatch guards this
     match binding.Type with
     | ArrayElem arrTy ->
         let elemCpp = elemTypeToCpp arrTy.ElemType
@@ -13808,9 +13827,21 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             let allocLine =
                 sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s), %s };"
                     ind elemCpp rank name elemCpp rank extentsName extentsName
+            // Array parameter first (surface order puts weights before any
+            // scalar par), then the scalar pars.
+            let weightsArgs =
+                match weightsExpr with
+                | None -> ""
+                | Some (wExpr, k) ->
+                    sprintf ", nested_array_utilities::pool_base(%s.data), (size_t)%dLL"
+                        (exprToCpp ctx.VarNames wExpr) k
+            let parArgs =
+                parExprs
+                |> List.map (fun p -> sprintf ", (double)(%s)" (exprToCpp ctx.VarNames p))
+                |> String.concat ""
             let fillLine =
-                sprintf "%sblade_rand::%s(nested_array_utilities::pool_base(%s.data), (size_t)%dLL, (int64_t)(%s));"
-                    ind kind name card (exprToCpp ctx.VarNames keyExpr)
+                sprintf "%sblade_rand::%s(nested_array_utilities::pool_base(%s.data), (size_t)%dLL, (int64_t)(%s)%s%s);"
+                    ind kind name card (exprToCpp ctx.VarNames keyExpr) weightsArgs parArgs
             ([extentsArr; allocLine; fillLine], addVarName binding.Id name ctx)
     | _ ->
         ([sprintf "%s#error \"rand binding '%s' is not an array type\"" ind name], addVarName binding.Id name ctx)

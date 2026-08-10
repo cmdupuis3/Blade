@@ -1,0 +1,19 @@
+// TEST: Chain Moments Hand Values
+import ppl as ppl
+// chain_mean/chain_var over the post-burn suffix, on a LITERAL chain so the
+// pins are exact hand arithmetic (the diagnostics accept any module-level
+// rank-1 array with a static extent, not only mh chains). Normalization is
+// POPULATION (/m), matching the module's moment estimators. Two independent
+// hand computations agree: burn=2 keeps [3..8], mean = 33/6 = 5.5, var =
+// E[x^2] - mean^2 = 199/6 - 30.25 = 35/12; the variance of k consecutive
+// integers is (k^2-1)/12, and (36-1)/12 = 35/12 confirms it. With burn=0,
+// mean = 4.5 and var = (64-1)/12 = 5.25.
+let chain8: Array<Float64 like Idx<8>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let m2 = ppl.chain_mean(chain8, 2)
+// EXPECT: m2 = 5.5
+let v2 = ppl.chain_var(chain8, 2)
+// EXPECT: v2 = 2.9166666666666665
+let m0 = ppl.chain_mean(chain8, 0)
+// EXPECT: m0 = 4.5
+let v0 = ppl.chain_var(chain8, 0)
+// EXPECT: v0 = 5.25
