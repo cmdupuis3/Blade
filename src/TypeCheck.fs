@@ -5210,6 +5210,67 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
         | TExprApply _ ->
             Some (Error (Other "reduce() over a composed (>>@/@>>) application is not supported yet -- force it with `|> compute` and reduce the resulting array"))
         | _ -> None
+    // ---- Don't splice a SECOND copy of an already-materialized let --------
+    // The fusion above resolves through bindings and splices the RESOLVED
+    // apply into the typed node -- a COPY of the computation, not a reference
+    // to the binding. At module level that is exactly right: `let c = A <@> k`
+    // stays deferred, nothing materializes it, and the fold is the only
+    // consumer, so fusing is strictly cheaper than forcing.
+    //
+    // Inside a callable body the arithmetic inverts. Lowering's S2
+    // (`forceBareCombinatorLets`) wraps every body-local `let` whose RHS is a
+    // bare combinator in `IRCompute` -- there is no forcing site downstream of
+    // it, so the array gets built whether or not anyone reads it. Splicing on
+    // top of that materializes the SAME computation twice per outer cell: the
+    // now-dead let, plus the fused nest. `units/065`'s
+    // `let e = exp <@> (i*w*ts); reduce(e, (+))` emitted 3 arrays and 2 full
+    // `std::exp` passes where 2 arrays and 1 pass compute the same values.
+    // Declining here drops the fold to the ordinary `IRReduce` over the array
+    // the let already built.
+    //
+    // Deliberately narrow, because every clause pays for itself:
+    //  * `bodyLocalBinding` -- module-level and CAPTURED bindings keep the
+    //    deferred protocol (`loops/095`, the deferred-concrete corpus). A
+    //    captured `let c = A <@> k` is unforced at its own definition site, so
+    //    declining would fold over an array that was never built.
+    //  * a bare `TExprVar` root only -- a written-out `reduce(A <@> k, (+))`
+    //    has no binding and nothing materialized, so it must still fuse.
+    //  * a SINGLE apply, never a `<&!>` fusion tree -- a tree has no array
+    //    form to fall back to (staggered leaf ranks, tuple result).
+    //  * a plain array output -- compact symmetric/antisymmetric/Hermitian
+    //    output still reaches the error below rather than silently changing
+    //    which cells get folded.
+    //  * an UNANNOTATED fold kernel -- see `foldKernelIsParallel`.
+    //
+    // A fold kernel carrying `omp`/`cuda`/`mpi` keeps the fused terminal, for
+    // the same reason `rankKDesugar` declines for it (see `deferredWithOmpKernel`
+    // there): the fused nest is what chunks the outer level, and the ordinary
+    // `IRReduce` carries no clause, so declining would turn a licensed parallel
+    // fold serial with no diagnostic -- the exact silent drop that feature
+    // exists to prevent. Today's omp reduce-over-computation cases are all
+    // module-level and written inline, so none of them reach this guard anyway;
+    // it is here so the body-local spelling cannot regress into a silent
+    // serialization.
+    let foldKernelIsParallel () =
+        match (resolveTypedExpr env tKernel).Kind with
+        | TExprLambda li -> not li.Parallel.IsEmpty
+        | TExprVar (fn, _, _) ->
+            (match env.FuncParallel.TryGetValue fn with
+             | true, (_, s) -> not s.IsEmpty
+             | _ -> false)
+        | _ -> false
+    let alreadyMaterializedLet () =
+        match tArr.Kind with
+        | TExprVar (name, _, _) when bodyLocalBinding name env && not (foldKernelIsParallel ()) ->
+            (match (resolveTypedExpr env tArr).Kind with
+             | TExprApply info when not info.IsComposeApply ->
+                (match env.Subst.Resolve info.OutputType with
+                 | ArrayElem arr ->
+                    arr.IndexTypes |> List.forall (fun ix -> ix.Symmetry = SymNone)
+                 | _ -> false)
+             | _ -> false)
+        | _ -> false
+    if alreadyMaterializedLet () then None else
     match collect tArr with
     | None -> None
     | Some leavesR ->
@@ -11156,7 +11217,7 @@ and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
     types |> List.iter (Option.iter scan)
 
 and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
-    let scopeEnv = enterScope env
+    let scopeEnv = enterCallableBody env
     let commGroups = extractCommGroups parms whereClause
     let antisymGroups = extractAntisymGroups parms whereClause
 
@@ -14398,7 +14459,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 for (method, (mangledName, funcVarId, paramTypes, retType)) in List.zip implDecl.Methods methodIds do
                     if methodErr.IsNone then
                         let savedScope = env'.Subst.PushTypeVarScope()
-                        let mutable bodyEnv = enterScope env'
+                        let mutable bodyEnv = enterCallableBody env'
                         let typedParams = method.Params |> List.mapi (fun i p ->
                             let varId = env'.Builder.FreshId()
                             let ty =
@@ -14687,7 +14748,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     if not customConjuncts.IsEmpty then
         env.FuncConstraints.[funcDecl.Name] <- (paramNames, customConjuncts)
 
-    let mutable bodyEnv = enterScope envWithFunc
+    let mutable bodyEnv = enterCallableBody envWithFunc
     let typedParams = funcDecl.Params |> List.mapi (fun i p ->
         let varId = env.Builder.FreshId()
         let assign = match p.Mutability with
