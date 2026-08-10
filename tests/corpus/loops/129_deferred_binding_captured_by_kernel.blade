@@ -1,0 +1,86 @@
+// TEST: Deferred Binding Captured By Kernel
+// ============================================================================
+// loops/095 pins the rule that a MODULE-LEVEL consumer forces a deferred
+// binding wherever it reads it by name. This pins the seam 095 misses: a
+// consumer inside a KERNEL BODY, where the read becomes a CAPTURE.
+//
+// `let c = method_for(A) <@> lambda(x) -> x * 2.0` with no `|> compute` stays
+// deferred -- genBinding emits only a "<deferred computation>" comment. A
+// lambda mentioning `c` closes over it, and lambda-lifting forwards every
+// capture BY NAME at the call site (`__lambda_16(w, c)`). Nothing forced `c`,
+// so that name had no C++ definition:
+//
+//     error: 'c' was not declared in this scope
+//     error: '__lambda_16' was not declared in this scope
+//
+// TWO defects, one per error, and they were each other's mirror:
+//
+//   * The consumer forced its deferred ARRAY INPUTS but never the kernel's
+//     deferred CAPTURES (genComputeBinding's IRApplyCombinator arm, and the
+//     lambda-alias wrapper in genVarAliasBinding, both now go through
+//     collectDeferredKernelCaptures).
+//
+//   * The fused-reduce terminal spliced a COPY of `c`'s producer into the
+//     body (tryInferReduceCompute). So the body spelled `A` while the call
+//     site passed `c` -- disagreeing about the lambda's own arity -- and the
+//     extra module reference demoted the lambda to a `std::function` local of
+//     main(), emitted in id order AFTER the binding that calls it. That is
+//     the second error, and it is why forcing the capture alone was not
+//     enough: the body has to READ the capture for the two halves to agree.
+//
+// Three consumer shapes, all of which named `c` and none of which built it:
+// the fused reduce (`out`), a positional read (`picked`), and a lambda bound
+// to a name and called directly (`z`, whose wrapper forwards the capture).
+//
+// `c` is FORCED by these consumers, so it joins the auto-print list like an
+// eager binding -- 095's rule, and the EXPECT below pins it.
+//
+// Two controls pin the edges the fix must NOT move:
+//
+//   * `dsum` -- a MODULE-LEVEL fold over its own deferred binding `d`,
+//     captured by nothing. It keeps the fused terminal (no array is ever built
+//     for `d`, which is strictly cheaper than forcing), so `d` stays deferred
+//     and prints nothing.
+//
+//   * `gz` -- a NAMED FUNCTION reading a deferred binding. A named function's
+//     `Captures` is always empty, so there is no capture to force and nothing
+//     would materialize `c2` if the fold stopped fusing; it must keep splicing.
+//     This is why `capturedOuterBinding` gates on `InLambdaBody` rather than
+//     `InCallableBody` -- the wider spelling compiles clean and breaks exactly
+//     this program with `'c2' was not declared in this scope`.
+// ============================================================================
+type X = Idx<4>
+let A: Array<Float64 like X> = [1.0, 2.0, 3.0, 4.0]
+let c = method_for(A) <@> lambda(x) -> x * 2.0
+let ws: Array<Float64 like Idx<2>> = [1.0, 10.0]
+
+// (1) Fused reduce over the capture: reduce(c, (+)) = 2+4+6+8 = 20.
+let out = ws <@> lambda(w) -> w * reduce(c, (+)) |> compute
+
+// (2) Positional read of the capture: c(1) = 4.
+let picked = ws <@> lambda(w) -> w * c((1 : X)) |> compute
+
+// (3) Lambda bound to a name, called directly -- the alias wrapper forwards
+//     the same capture, so it needs the same forcing.
+let f = lambda(w) -> w * reduce(c, (+))
+let z = f(2.0)
+
+// (4) Control: module-level fold, no capture, still fuses. d = [2, 3, 4, 5].
+let d = method_for(A) <@> lambda(x) -> x + 1.0
+let dsum = reduce(d, (+))
+
+// (5) Control: named function over a deferred binding -- no capture list, so
+//     the fold must keep splicing c2's producer into the body. c2 = [3, 4, 5, 6],
+//     reduce = 18, times 2 = 36.
+let c2 = method_for(A) <@> lambda(x) -> x + 2.0
+function g(w: Float64) -> Float64 = w * reduce(c2, (+))
+let gz = g(2.0)
+
+// EXPECT: A = [1, 2, 3, 4]
+// EXPECT: c = [2, 4, 6, 8]
+// EXPECT: ws = [1, 10]
+// EXPECT: out = [20, 200]
+// EXPECT: picked = [4, 40]
+// EXPECT: z = 40
+// EXPECT: dsum = 14
+// EXPECT: gz = 36

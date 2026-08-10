@@ -12341,6 +12341,36 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
     walk root
     List.ofSeq ordered
 
+/// Deferred-computation bindings a KERNEL reads through its CAPTURE list.
+///
+/// A lambda kernel mentioning an enclosing binding closes over it, and
+/// lambda-lifting turns that into a capture PARAMETER forwarded by name at
+/// every call site (`__lambda_N(<peeled args>, c)` -- captureForwardName).
+/// A still-DEFERRED capture has no C++ definition at all, only genBinding's
+/// "<deferred computation>" comment, so the forwarded name is undeclared:
+///
+///   let c  = method_for(A) <@> lambda(x) -> x * 2.0        // deferred
+///   let out = ws <@> lambda(w) -> w * reduce(c, (+)) |> compute
+///
+/// Forcing here is half of the fix and load-bearing on the other half:
+/// `tryInferReduceCompute` must ALSO decline to splice a copy of `c`'s
+/// producer into the body, or the body still spells `c`'s own inputs while
+/// the call site passes `c` -- two halves of one lambda disagreeing about
+/// its arity. With both, `c` is an ordinary materialized array the body
+/// reads by name, exactly as `|> compute` on `c` would have given it.
+///
+/// Only the kernel's own capture list is consulted -- the array INPUTS are
+/// forced separately by the consumer, and a nested still-deferred binding
+/// the body never names is left alone.
+let collectDeferredKernelCaptures (ctx: CodeGenContext) (kernel: IRExpr) : IRId list =
+    match resolveKernel kernel with
+    | Some rk ->
+        rk.Callable.Captures
+        |> List.map (fun c -> c.Id)
+        |> List.filter (fun id -> Map.containsKey id ctx.DeferredComputations)
+        |> List.distinct
+    | None -> []
+
 /// Reading a rank-1 source array that may be a COMPOUND (or SPARSE) compact
 /// view rather than a dense Array. The two runtime shapes have different
 /// interfaces: `Compound<T,1>` / `Sparse<T,1>` carry their length as the
@@ -13073,9 +13103,17 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                     let (fcode, fctx, _) = forceDeferredArrayInput accCtx builder (sprintf "%s__in%d" name id) arr
                     (accCode @ fcode, fctx)
                 | _ -> (accCode, accCtx)) ([], ctx)
+        // Same rule one slot over: a deferred binding the KERNEL closes over
+        // is forwarded BY NAME as a capture argument at every call site, so it
+        // must be materialized before the nest renders too (see
+        // collectDeferredKernelCaptures). Runs after the input forcing so a
+        // binding that is both an input and a capture is materialized once.
+        let (capForceCode, ctx) =
+            collectDeferredKernelCaptures ctx info'.Kernel
+            |> forceDeferredBindingIds ctx builder (sprintf "%s__cap" name)
         let code = genApplyCombinator ctx name info' builder
         let ctx' = addVarName binding.Id name ctx
-        (forceCode @ code, ctx')
+        (forceCode @ capForceCode @ code, ctx')
 
     | IRComposeApply info ->
         // Slot-inverted apply: (object_for(f) >>@ object_for(g)) <@> A.
@@ -14105,8 +14143,15 @@ and forceDeferredArrayInput (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase:
 /// already forced (removed from the map) is skipped by the collector, so this
 /// composes cleanly with the per-input forcing the rearrangement combinators do.
 and forceDeferredPositionalReads (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase: string) (value: IRExpr) : string list * CodeGenContext =
-    let ids = collectDeferredPositionalReads ctx value
-    ids |> List.fold (fun (accCode, accCtx) id ->
+    forceDeferredBindingIds ctx builder tmpBase (collectDeferredPositionalReads ctx value)
+
+/// Materialize each deferred binding id in `ids`, threading the ctx so a
+/// binding forced by an earlier id (or already forced by the caller) is
+/// skipped rather than emitted twice. Shared by the positional-read pre-pass
+/// and the kernel-capture forcing in genComputeBinding.
+and forceDeferredBindingIds (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase: string) (ids: IRId list) : string list * CodeGenContext =
+    ids |> List.fold (fun (accCode, accCtx: CodeGenContext) id ->
+        if not (Map.containsKey id accCtx.DeferredComputations) then (accCode, accCtx) else
         // Recover the array type from the deferred computation so the
         // materialized binding is typed correctly (forceDeferredArrayInput's
         // IRVar arm carries the IRVar's type onto the synthesized binding).
@@ -15396,6 +15441,14 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         // the callable's signature and the user never sees the wrapper's type.
         match resolveCallable binding.Value with
         | Some callable ->
+            // The wrapper forwards every capture BY NAME, so a still-DEFERRED
+            // one has to be materialized first -- the same capture-boundary
+            // forcing genComputeBinding does for a combinator's kernel (see
+            // collectDeferredKernelCaptures). Runs before VarNames is read
+            // below, since forcing can rename nothing but must be in scope.
+            let (capForceCode, ctx) =
+                collectDeferredKernelCaptures ctx binding.Value
+                |> forceDeferredBindingIds ctx builder (sprintf "%s__cap" name)
             let safeName = sanitizeCppName callable.Name
             let paramSig =
                 callable.Params
@@ -15430,7 +15483,7 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                 sprintf "std::function<%s(%s)>" retTypeStr (String.concat ", " paramTypes)
             let code = [sprintf "%s%s %s = [&](%s) { return %s(%s); };" ind funcTypeStr name paramSig safeName allArgs]
             let ctx' = addVarName binding.Id name ctx
-            (code, ctx')
+            (capForceCode @ code, ctx')
         | None ->
             // Plain variable alias -- may be aliasing a tuple, propagate children
             let srcName = Map.tryFind srcId ctx.VarNames |> Option.defaultValue ""
