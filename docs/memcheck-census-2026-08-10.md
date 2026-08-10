@@ -1,5 +1,32 @@
 # Memcheck census of the examples corpus — 2026-08-10
 
+> **Post-fix addendum (same day, commit 874322c).** Three scope-tracker leak
+> classes were closed after this census ran — function-body `let r = f(a)`
+> registration (site 3b), return-argument pinning on FreshPool-call returns
+> (value-first return + seed narrowing), and argument-position call
+> temporaries (`g(f(x))` hoisting). Post-fix numbers:
+>
+> - 09_qg_atmosphere: 6.98 GB → **3.39 GB**, and the remainder matches its
+>   three spectral trajectory module bindings + skeleton tables exactly —
+>   per-timestep garbage is zero.
+> - 08_burgers_les: 144 KB → **67 KB** (module bindings only).
+> - The rest of Tier 2 was re-measured and is UNCHANGED — per-size
+>   histograms show those numbers are predominantly large module-level
+>   bindings (the deliberate compute-print-exit leak), e.g. physics/47's
+>   entire 7.01 MB is its two rank-3 {6001,24,2} trajectory bindings, and
+>   physics/44's 12.7 MB is 37 large stable blocks plus a 290 KB residual
+>   of 64-byte blocks (4,534 of them — the one real class left: small
+>   objects from tuple-returning helpers / heap extents tables, outside
+>   computeFreshReturnFacts' single-array-return domain).
+>
+> Census-reading rule learned: a big outstanding number is NOT itself a
+> leak verdict — match the live-block size histogram against the program's
+> module-binding shapes first. Remaining documented-but-unfixed: the
+> tuple-return / heap-extents small-object class (≤290 KB/program), and the
+> `let rec` build-buffer double-materialize (both the build array and its
+> final copy stay live — 2x the by-design footprint, e.g. ~1.5 GB of
+> 09_qg's remaining 3.39 GB).
+
 First full memory-leak census of `examples/` (11 top-level + 47 physics = 58
 programs), run under the new `blade run --memcheck` Debug+AddressSanitizer
 profile (branch `feat/debug-memcheck`). Every program compiled, ran to
