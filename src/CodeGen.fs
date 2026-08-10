@@ -975,8 +975,96 @@ let primTypeToCpp = function
     | ETString -> "std::string"
 
 /// Get rank (total dimensions) from array type
-let arrayRank (arr: IRArrayType) = 
+let arrayRank (arr: IRArrayType) =
     arr.IndexTypes |> List.sumBy (fun i -> i.Rank)
+
+// ---------------------------------------------------------------------------
+// Array-SHAPE predicates: which C++ wrapper an array type is spelled as.
+//
+// Defined HERE, above the irTypeToCpp/elemTypeToCpp recursion group, because
+// `cppArrayTypeStr` joins that group (it must call elemTypeToCpp) and every
+// signature-rendering site inside it -- notably arrowSlotTypeForFuncSig, which
+// renders std::function<> slots -- has to reach the SAME wrapper decision the
+// declaration sites use. They were previously declared below the group, which
+// forced arrowSlotTypeForFuncSig to hardcode `Array<T, N>` and silently
+// disagree with the ragged/compound/sparse declaration wrappers.
+// ---------------------------------------------------------------------------
+
+/// Detect whether an IRArrayType is RAGGED -- any index in the ragged family
+///   - __raggedidx           : a ragged literal's inner dimension
+///   - __group_member        : a group_by result's inner dimension
+///   - __raggedidx_opaque    : opaque RaggedIdx<_> (kernel param / sub-array)
+/// All share the property that the array shape carries a per-row lengths
+/// companion at codegen time.
+let isRaggedArrayType (arrTy: IRArrayType) : bool =
+    arrTy.IndexTypes |> List.exists (fun idx -> isRaggedFamilyKind idx.IxKind)
+
+/// A rank-1 value whose single axis is a RAGGED-FAMILY inner dimension: a
+/// peeled/indexed row of a ragged literal (__raggedidx*), a DepIdx-allocated
+/// array (__depidx_inner), or a group_by result (__group_member). All three
+/// share the same runtime row shape -- a pointer plus a per-row length --
+/// and are represented as `RaggedRow<T>` when bound (`.len`, operator[]).
+/// This is the ONE predicate for "does this rank-1 operand carry its length
+/// inline as .len rather than via .extents", used consistently by the
+/// sub-view binding emission, reduce (both forms), IRExtent, and print, so
+/// the accessor never disagrees with the declared type.
+let isRaggedRowType (arrTy: IRArrayType) : bool =
+    arrTy.IndexTypes.Length = 1 && isRaggedRowKind arrTy.IndexTypes.[0].IxKind
+
+
+/// Detect whether an IRArrayType represents a DepIdx array -- outer Idx plus an
+/// inner record whose Extent is a function of the outer iteration index
+/// (the `__depidx_inner` tag on a non-first index). Once allocated it has the
+/// same `_lens`/`_offsets`/row-pointer runtime layout as ragged, so iteration
+/// predicates treat both as "has row-lengths companion" via `isRaggedArrayType
+/// OR isDepIdxArrayType`; genArrayLiteral keeps a separate branch since lens
+/// come from the formula, not literal structure.
+let isDepIdxArrayType (arrTy: IRArrayType) : bool =
+    arrTy.IndexTypes |> List.exists (fun idx ->
+        idx.IxKind = IxKDepInner)
+
+/// Detect whether an IRArrayType is a CompoundIdx<mask> array -- a masked
+/// product space (formalism 4.5), tabulated at runtime, rendered as
+/// `Compound<T, RANK>`, accessed by whole-tuple gather. Matches the
+/// `__compoundidx` tag by EXACT equality, NOT a prefix test:
+/// `__compoundidx_dynamic` is the unrelated group_by compound-key index and
+/// must not be rendered as Compound<T,RANK>.
+let isCompoundArrayType (arrTy: IRArrayType) : bool =
+    arrTy.IndexTypes |> List.exists (fun idx ->
+        idx.IxKind = IxKCompound)
+
+/// Detect whether an IRArrayType is a SparseIdx<keys> array -- an explicit
+/// valid-tuple enumeration (formalism 3.5) rendered as `Sparse<T, RANK>`,
+/// accessed by whole-tuple hash lookup. Twin of isCompoundArrayType over the
+/// sparse kind.
+let isSparseArrayType (arrTy: IRArrayType) : bool =
+    arrTy.IndexTypes |> List.exists (fun idx ->
+        idx.IxKind = IxKSparse)
+
+/// Does this array type DECLARE as `RaggedRow<T>` in C++? THE single predicate
+/// for that spelling: `cppArrayTypeStr` (every declaration position, including
+/// std::function<> slots via arrowSlotTypeForFuncSig) and the grouped/ragged
+/// peel's row bindings both call it, so a peeled row's declared type can never
+/// drift from the signature it is passed to. The peel sites used to inline
+/// this test, which is exactly how they drifted.
+///
+/// KNOWN GAP -- deliberately NARROWER than `isRaggedRowType`: a rank-1
+/// `IxKGroupMember` row (a peeled `group_by` row) is a ragged ROW at every
+/// ACCESSOR site (`.len`, via isRaggedRowType in reduce/prodsum/IRExtent/print)
+/// but still DECLARES as `Array<T,1>` here. Widening this to `isRaggedRowType`
+/// is the correct end state, and it makes `method_for(grouped) <@> lambda(g)
+/// -> f(g)` (unannotated param, ragged-annotated callee) compile -- but it
+/// then breaks ABSTRACT-ARITY callees: a `function f(t: T^1)` is zonk-closed
+/// to a deduced-rank `Array<T,1>` (IxKPlain), and HM monomorphization learns
+/// only ELEMENT bindings (`unifyParamWithArg`'s ArrayElem arm, keyed by
+/// infer-var id), so it can never adopt the argument's ragged SHAPE. Widening
+/// therefore needs monomorphization to specialize on array shape -- a new
+/// binding channel plus an IxKind component in `canonTypeKey`. The pins that
+/// fail if it is widened alone: tests/corpus/sql-group-by/029 and
+/// tests/corpus/functions/068.
+let declaresAsRaggedRow (arrTy: IRArrayType) : bool =
+    (isRaggedArrayType arrTy || isDepIdxArrayType arrTy)
+    && arrTy.IndexTypes.Length = 1
 
 /// Convert an IRType in array-element position to a C++ type string.
 /// Dispatches via active patterns:
@@ -1124,21 +1212,79 @@ and irTypeToCpp = function
             cell.Value <- cell.Value @ ["IRTArrow with mixed slot kinds reached codegen (no language construct produces these yet)"]
             "BLADE_UNSUPPORTED_ARROW_TYPE"
 
+/// Render an array type as its C++ type string. Five cases:
+///   * CompoundIdx<mask> -> `Compound<T, RANK>` (RANK = mask dimensionality).
+///   * SparseIdx<keys>   -> `Sparse<T, RANK>` (RANK = key tuple arity).
+///   * Rank-1 ragged/dep-idx -> `RaggedRow<T>` (a peeled-row slice; kernel-side
+///     peeling of a 2D ragged's inner dim, never a source-level annotation --
+///     rank-1 ragged at the source level is malformed, `__error_ragged_no_prior`).
+///   * Rank >= 2 ragged/dep-idx -> `Ragged<T>` (full multi-row container).
+///   * Otherwise -> `Array<T, N>`.
+/// The rank-1 case matters because `Ragged<T>::operator[]` returns `RaggedRow<T>`,
+/// not `T`: a lambda whose param IS a peeled row must declare the row type
+/// directly so `g[0]` resolves to the element.
+///
+/// THE single wrapper chooser. Every site that spells an array type in a
+/// DECLARATION position -- function params and returns, captures, and
+/// std::function<> slots via arrowSlotTypeForFuncSig -- goes through here, so
+/// a signature can never disagree with the peel/binding that feeds it. Lives
+/// in this recursion group (rather than below it, where it used to) precisely
+/// so arrowSlotTypeForFuncSig can reach it.
+and cppArrayTypeStr (arr: IRArrayType) : string =
+    if isCompoundArrayType arr then
+        // Compound<T, RANK>: a masked product space. RANK is the mask's
+        // dimensionality, carried on the compound index type's Rank (a generic
+        // "dimensions spanned" -- a rank here, not a symmetric arity). Read off
+        // the compound index type directly rather than via arrayRank so that a
+        // future surrounding-dims form would not fold extra axes into RANK.
+        let rank =
+            arr.IndexTypes
+            |> List.tryFind (fun idx -> idx.IxKind = IxKCompound)
+            |> Option.map (fun idx -> idx.Rank)
+            |> Option.defaultValue (arrayRank arr)
+        sprintf "Compound<%s, %d>" (elemTypeToCpp arr.ElemType) rank
+    elif isSparseArrayType arr then
+        // Sparse<T, RANK>: an explicit key enumeration. RANK is the key tuple
+        // arity, carried on the sparse index type's Rank -- same read-off
+        // discipline as the compound arm above.
+        let rank =
+            arr.IndexTypes
+            |> List.tryFind (fun idx -> idx.IxKind = IxKSparse)
+            |> Option.map (fun idx -> idx.Rank)
+            |> Option.defaultValue (arrayRank arr)
+        sprintf "Sparse<%s, %d>" (elemTypeToCpp arr.ElemType) rank
+    elif declaresAsRaggedRow arr then
+        // Rank-1 peeled row: carries its length inline as `.len`. Shared with
+        // the peel's row bindings via `declaresAsRaggedRow` (see its doc for
+        // the IxKGroupMember gap).
+        sprintf "RaggedRow<%s>" (elemTypeToCpp arr.ElemType)
+    elif isRaggedArrayType arr || isDepIdxArrayType arr then
+        // Rank >= 2 ragged/dep-idx container. A grouped array
+        // ([__group_outer; __group_member]) deliberately does NOT land here:
+        // group_by materializes a row-pointer skeleton (`Array<T*, 1>`), not
+        // a Ragged<T>, and that representation is unchanged.
+        sprintf "Ragged<%s>" (elemTypeToCpp arr.ElemType)
+    else
+        sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+
 /// Render a type for use inside a std::function<...> signature. Array types
-/// render as the wrapper form (`Array<T, N>`) to match function declarations
-/// at the call boundary; everything else delegates to `irTypeToCpp`. Without
-/// this, std::function<> templates would use the raw-pointer form
+/// render as the WRAPPER form to match function declarations at the call
+/// boundary; everything else delegates to `irTypeToCpp`. Without this,
+/// std::function<> templates would use the raw-pointer form
 /// (`promote<T, N>::type`), mismatching genFuncDef's wrapper-form return type
 /// and blocking `funcs[i] = arrayReturningFunc;` assignments.
+///
+/// Delegates to `cppArrayTypeStr` rather than hardcoding `Array<T, N>`: a
+/// std::function<> slot is a DECLARATION position, and a
+/// ragged/DepIdx/compound/sparse param must be spelled with the same wrapper
+/// its function declaration uses or the assignment `std::function<...> f =
+/// namedFn;` has no viable conversion. This previously hardcoded the dense
+/// form, so passing a `function f(row: Array<T like RaggedIdx<_>>)` as a
+/// kernel emitted `std::function<R(Array<T,1>)>` against a declared
+/// `R f(RaggedRow<T>)` -- a g++ type mismatch at the forwarding call.
 and arrowSlotTypeForFuncSig (ty: IRType) : string =
-    // Sits inside the elemTypeToCpp/irTypeToCpp recursion group, so it cannot
-    // forward-reference isRaggedArrayType/isDepIdxArrayType/isCompoundArrayType
-    // defined later. A ragged/DepIdx/compound array type inside a function
-    // signature would mismatch its declaration-site wrapper (Ragged<T> /
-    // Compound<T, RANK>) here; no current test exercises that combination.
     match ty with
-    | ArrayElem arr ->
-        sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+    | ArrayElem arr -> cppArrayTypeStr arr
     | _ -> irTypeToCpp ty
 
 
@@ -1447,61 +1593,11 @@ let litToCpp (lit: IRLit) : string =
     | IRLitString s -> sprintf "std::string(%s)" (escapeStringLit s)
     | IRLitUnit -> "((void)0)"  // Valid C++ no-op; should be elided by callers
 
-/// Detect whether an IRArrayType represents a ragged array (any RaggedIdx
-/// variant). True when at least one IndexType has a ragged tag:
-///   - __raggedidx_inline   : inferred from a ragged literal
-///   - __raggedidx          : closed RaggedIdx<lens> from a type annotation
-///   - __raggedidx_opaque   : opaque RaggedIdx<_> (kernel param / sub-array)
-/// All three share the property that the array shape carries a per-row
-/// lengths companion at codegen time.
-///
-/// Defined here (before exprToCpp) because IRApp's call-site emission needs
-/// it to decide whether to pass an `_lens` companion argument. Other ragged-
-/// aware sites (genArrayLiteral, print path) live further down and use the
-/// same predicate.
-let isRaggedArrayType (arrTy: IRArrayType) : bool =
-    arrTy.IndexTypes |> List.exists (fun idx -> isRaggedFamilyKind idx.IxKind)
-
-/// A rank-1 value whose single axis is a RAGGED-FAMILY inner dimension: a
-/// peeled/indexed row of a ragged literal (__raggedidx*), a DepIdx-allocated
-/// array (__depidx_inner), or a group_by result (__group_member). All three
-/// share the same runtime row shape -- a pointer plus a per-row length --
-/// and are represented as `RaggedRow<T>` when bound (`.len`, operator[]).
-/// This is the ONE predicate for "does this rank-1 operand carry its length
-/// inline as .len rather than via .extents", used consistently by the
-/// sub-view binding emission, reduce (both forms), IRExtent, and print, so
-/// the accessor never disagrees with the declared type.
-let isRaggedRowType (arrTy: IRArrayType) : bool =
-    arrTy.IndexTypes.Length = 1 && isRaggedRowKind arrTy.IndexTypes.[0].IxKind
-
-/// Detect whether an IRArrayType represents a DepIdx array -- outer Idx plus an
-/// inner record whose Extent is a function of the outer iteration index
-/// (the `__depidx_inner` tag on a non-first index). Once allocated it has the
-/// same `_lens`/`_offsets`/row-pointer runtime layout as ragged, so iteration
-/// predicates treat both as "has row-lengths companion" via `isRaggedArrayType
-/// OR isDepIdxArrayType`; genArrayLiteral keeps a separate branch since lens
-/// come from the formula, not literal structure.
-let isDepIdxArrayType (arrTy: IRArrayType) : bool =
-    arrTy.IndexTypes |> List.exists (fun idx ->
-        idx.IxKind = IxKDepInner)
-
-/// Detect whether an IRArrayType is a CompoundIdx<mask> array -- a masked
-/// product space (formalism 4.5), tabulated at runtime, rendered as
-/// `Compound<T, RANK>`, accessed by whole-tuple gather. Matches the
-/// `__compoundidx` tag by EXACT equality, NOT a prefix test:
-/// `__compoundidx_dynamic` is the unrelated group_by compound-key index and
-/// must not be rendered as Compound<T,RANK>.
-let isCompoundArrayType (arrTy: IRArrayType) : bool =
-    arrTy.IndexTypes |> List.exists (fun idx ->
-        idx.IxKind = IxKCompound)
-
-/// Detect whether an IRArrayType is a SparseIdx<keys> array -- an explicit
-/// valid-tuple enumeration (formalism 3.5) rendered as `Sparse<T, RANK>`,
-/// accessed by whole-tuple hash lookup. Twin of isCompoundArrayType over the
-/// sparse kind.
-let isSparseArrayType (arrTy: IRArrayType) : bool =
-    arrTy.IndexTypes |> List.exists (fun idx ->
-        idx.IxKind = IxKSparse)
+// isRaggedArrayType / isRaggedRowType / isDepIdxArrayType /
+// isCompoundArrayType / isSparseArrayType are declared ABOVE the
+// irTypeToCpp/elemTypeToCpp recursion group (search "Array-SHAPE predicates"),
+// so that `cppArrayTypeStr` can join that group and every signature-rendering
+// site inside it reaches the same wrapper decision.
 
 /// Array types whose storage is the plain dense pool + pointer skeleton that
 /// `deallocate` walks. Ragged, compound and dep-idx layouts carry side tables
@@ -1543,46 +1639,10 @@ let copyInPlaceAssign (target: IRExpr) (value: IRExpr) : (IRId * IRId * int) opt
         | None -> None
     | _ -> None
 
-/// Render an array type as its C++ type string. Four cases:
-///   * CompoundIdx<mask> -> `Compound<T, RANK>` (RANK = mask dimensionality).
-///   * Rank-1 ragged/dep-idx -> `RaggedRow<T>` (a peeled-row slice; kernel-side
-///     peeling of a 2D ragged's inner dim, never a source-level annotation --
-///     rank-1 ragged at the source level is malformed, `__error_ragged_no_prior`).
-///   * Rank >= 2 ragged/dep-idx -> `Ragged<T>` (full multi-row container).
-///   * Otherwise -> `Array<T, N>`.
-/// The rank-1 case matters because `Ragged<T>::operator[]` returns `RaggedRow<T>`,
-/// not `T`: a lambda whose param IS a peeled row must declare the row type
-/// directly so `g[0]` resolves to the element.
-let cppArrayTypeStr (arr: IRArrayType) : string =
-    if isCompoundArrayType arr then
-        // Compound<T, RANK>: a masked product space. RANK is the mask's
-        // dimensionality, carried on the compound index type's Rank (a generic
-        // "dimensions spanned" -- a rank here, not a symmetric arity). Read off
-        // the compound index type directly rather than via arrayRank so that a
-        // future surrounding-dims form would not fold extra axes into RANK.
-        let rank =
-            arr.IndexTypes
-            |> List.tryFind (fun idx -> idx.IxKind = IxKCompound)
-            |> Option.map (fun idx -> idx.Rank)
-            |> Option.defaultValue (arrayRank arr)
-        sprintf "Compound<%s, %d>" (elemTypeToCpp arr.ElemType) rank
-    elif isSparseArrayType arr then
-        // Sparse<T, RANK>: an explicit key enumeration. RANK is the key tuple
-        // arity, carried on the sparse index type's Rank -- same read-off
-        // discipline as the compound arm above.
-        let rank =
-            arr.IndexTypes
-            |> List.tryFind (fun idx -> idx.IxKind = IxKSparse)
-            |> Option.map (fun idx -> idx.Rank)
-            |> Option.defaultValue (arrayRank arr)
-        sprintf "Sparse<%s, %d>" (elemTypeToCpp arr.ElemType) rank
-    elif isRaggedArrayType arr || isDepIdxArrayType arr then
-        if arr.IndexTypes.Length = 1 then
-            sprintf "RaggedRow<%s>" (elemTypeToCpp arr.ElemType)
-        else
-            sprintf "Ragged<%s>" (elemTypeToCpp arr.ElemType)
-    else
-        sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+// cppArrayTypeStr is defined ABOVE, inside the irTypeToCpp/elemTypeToCpp
+// recursion group, so that arrowSlotTypeForFuncSig (which renders
+// std::function<> slots and lives in that group) reaches the SAME wrapper
+// decision the declaration sites use.
 
 /// P0 (compound-index materialization keystone): emit the C++ that builds a
 /// `compound_index_t<RANK>` from a Blade bool mask VALUE, independent of any
@@ -10174,9 +10234,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         // predicate cppArrayTypeStr uses.
                         let paramIsRaggedRow =
                             match param.Type with
-                            | ArrayElem at ->
-                                (isRaggedArrayType at || isDepIdxArrayType at)
-                                && at.IndexTypes.Length = 1
+                            | ArrayElem at -> declaresAsRaggedRow at
                             | _ -> false
                         let subDeclLines =
                             if paramIsRaggedRow then
@@ -10276,7 +10334,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         let elemStr = elemTypeToCpp at.ElemType
                         let paramIsRaggedRow =
                             match param.Type with
-                            | ArrayElem pt -> (isRaggedArrayType pt || isDepIdxArrayType pt) && pt.IndexTypes.Length = 1
+                            | ArrayElem pt -> declaresAsRaggedRow pt
                             | _ -> false
                         let lines =
                             if paramIsRaggedRow then
