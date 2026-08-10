@@ -1119,3 +1119,185 @@ let runLinAlgProbeTests () : BlockResult =
                 printFooter blockName ["FAILED"]
                 { Block = blockName; Passed = pPassed; Failed = max 1 pFailed; Skipped = 0
                   FailedNames = (if failNames.IsEmpty then [sprintf "<exit %d>" rproc.ExitCode] else failNames) }
+
+
+/// The four-tier BLAS/LAPACK resolution (docs/plan-toolchain-packaging.md):
+/// pure in-process unit checks of `resolveBlasTier` / `blasAvailable` /
+/// `lapackAvailable` / `blasFlavor` / `blasBuildFlags`, plus `Toolchain.get`'s
+/// env-over-file precedence. No g++, no BLAS runtime, no filesystem beyond a
+/// temp prefix -- always runs.
+///
+/// Every case pins the WHOLE configuration surface (the six variables plus
+/// BLADE_TOOLCHAIN_FILE), because the ambient environment on a dev box
+/// legitimately carries OPENBLAS_DIR -- one unpinned variable would make
+/// these outcomes machine-dependent. BLADE_TOOLCHAIN_FILE is pinned to a
+/// NONEXISTENT path rather than null: null would fall back to a
+/// blade.toolchain.json beside the test binary, which a configured machine
+/// may genuinely have.
+let runBlasTierTests () : BlockResult =
+    printHeader "BLAS Tier Resolution"
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames = []
+    let check name cond detail =
+        if cond then
+            passed <- passed + 1
+            resultLine Pass name detail
+        else
+            failed <- failed + 1
+            failedNames <- failedNames @ [name]
+            resultLine Fail name detail
+    use _a = pinEnv "BLADE_BLAS" null
+    use _b = pinEnv "BLADE_BLAS_LINK" null
+    use _c = pinEnv "OPENBLAS_DIR" null
+    use _d = pinEnv "BLADE_LAPACK_LINK" null
+    use _e = pinEnv "BLADE_BLAS_FLAVOR" null
+    use _f = pinEnv "BLADE_BLAS_INCLUDE" null
+    use _g = pinEnv "BLADE_LAPACK_INCLUDE" null
+    use _h = pinEnv "BLADE_TOOLCHAIN_FILE" (Path.Combine(Path.GetTempPath(), "blade_no_such_toolchain.json"))
+
+    // ---- tier selection ----
+    check "unconfigured -> TierOff, both gates off"
+        (LinAlgPatterns.resolveBlasTier () = LinAlgPatterns.TierOff
+         && not (LinAlgPatterns.blasAvailable ())
+         && not (LinAlgPatterns.lapackAvailable ()))
+        "default-off preserved"
+    do
+        use _t = pinEnv "OPENBLAS_DIR" "/nonexistent/openblas-prefix"
+        check "OPENBLAS_DIR -> TierOpenBlasDir, both gates on"
+            (LinAlgPatterns.resolveBlasTier () = LinAlgPatterns.TierOpenBlasDir
+             && LinAlgPatterns.blasAvailable ()
+             && LinAlgPatterns.lapackAvailable ())
+            "prefix shorthand"
+    do
+        use _t = pinEnv "OPENBLAS_DIR" "/nonexistent/openblas-prefix"
+        use _u = pinEnv "BLADE_BLAS" "0"
+        check "BLADE_BLAS=0 beats OPENBLAS_DIR -> TierOff"
+            (LinAlgPatterns.resolveBlasTier () = LinAlgPatterns.TierOff
+             && not (LinAlgPatterns.blasAvailable ()))
+            "explicit off wins"
+    do
+        use _t = pinEnv "BLADE_BLAS" "1"
+        check "BLADE_BLAS=1 alone -> TierSystem"
+            (LinAlgPatterns.resolveBlasTier () = LinAlgPatterns.TierSystem
+             && LinAlgPatterns.lapackAvailable ())
+            "bare -lopenblas tier"
+        check "TierSystem expansion is bare -lopenblas"
+            (LinAlgPatterns.blasBuildFlags true false = (" -DBLADE_HAS_BLAS", " -lopenblas"))
+            "exact compile/link halves"
+    do
+        use _t = pinEnv "BLADE_BLAS_LINK" "-lmkl_rt"
+        check "BLADE_BLAS_LINK -> TierExplicit, BLAS on"
+            (LinAlgPatterns.resolveBlasTier () = LinAlgPatterns.TierExplicit
+             && LinAlgPatterns.blasAvailable ())
+            "vendor-neutral tier"
+        check "TierExplicit without BLADE_LAPACK_LINK -> LAPACK off"
+            (not (LinAlgPatterns.lapackAvailable ()))
+            "decoupled: BLIS-style BLAS-only install"
+        do
+            use _u = pinEnv "BLADE_BLAS" "1"
+            check "explicit link beats BLADE_BLAS=1 -> TierExplicit"
+                (LinAlgPatterns.resolveBlasTier () = LinAlgPatterns.TierExplicit)
+                "tier order"
+        do
+            use _u = pinEnv "BLADE_LAPACK_LINK" "-llapacke_custom"
+            check "TierExplicit with BLADE_LAPACK_LINK -> LAPACK on"
+                (LinAlgPatterns.lapackAvailable ())
+                "lapack gate follows its own link var"
+            let (compileHalf, linkHalf) = LinAlgPatterns.blasBuildFlags true true
+            check "explicit expansion: defines + verbatim link, BLAS first"
+                (compileHalf.Contains "-DBLADE_HAS_BLAS"
+                 && compileHalf.Contains "-DBLADE_HAS_LAPACK"
+                 && linkHalf = " -lmkl_rt -llapacke_custom")
+                "linker order preserved"
+    // ---- flavor define ----
+    do
+        use _t = pinEnv "BLADE_BLAS_LINK" "-lmkl_rt"
+        use _u = pinEnv "BLADE_BLAS_FLAVOR" "MKL"
+        let (compileHalf, _) = LinAlgPatterns.blasBuildFlags true false
+        check "BLADE_BLAS_FLAVOR=MKL (case-insensitive) -> -DBLADE_BLAS_MKL"
+            (LinAlgPatterns.blasFlavor () = LinAlgPatterns.FlavorMkl
+             && compileHalf.Contains " -DBLADE_BLAS_MKL")
+            "header indirection define"
+    do
+        use _t = pinEnv "BLADE_BLAS_LINK" "-lopenblas"
+        let (compileHalf, _) = LinAlgPatterns.blasBuildFlags true false
+        check "flavor unset -> no MKL define"
+            (LinAlgPatterns.blasFlavor () = LinAlgPatterns.FlavorOpenBlas
+             && not (compileHalf.Contains "BLADE_BLAS_MKL"))
+            "default flavor is openblas"
+    // ---- include-dir lists (PathSeparator-delimited) ----
+    do
+        use _t = pinEnv "BLADE_BLAS_LINK" "-lmkl_rt"
+        use _u = pinEnv "BLADE_BLAS_INCLUDE" (sprintf "/inc/one%c/inc/two" Path.PathSeparator)
+        let (compileHalf, _) = LinAlgPatterns.blasBuildFlags true false
+        check "BLADE_BLAS_INCLUDE list -> one -I per dir"
+            (compileHalf.Contains " -I\"/inc/one\"" && compileHalf.Contains " -I\"/inc/two\"")
+            "path-separator split"
+    // ---- OPENBLAS_DIR expansion against a real prefix ----
+    let tmpPrefix = Path.Combine(Path.GetTempPath(), sprintf "blade_tier_prefix_%d" (System.Diagnostics.Process.GetCurrentProcess().Id))
+    do
+        try
+            // Empty prefix: no library file anywhere -> the -L/-l fallback.
+            Directory.CreateDirectory(tmpPrefix) |> ignore
+            use _t = pinEnv "OPENBLAS_DIR" tmpPrefix
+            let (compileHalf, linkHalf) = LinAlgPatterns.blasBuildFlags true false
+            check "OpenBlasDir expansion, no lib present -> -L fallback"
+                (compileHalf.Contains (sprintf " -I\"%s\"" (Path.Combine(tmpPrefix, "include")))
+                 && linkHalf = sprintf " -L\"%s\" -lopenblas" (Path.Combine(tmpPrefix, "lib")))
+                "include + -L/-lopenblas"
+            // Now materialize the OS-conventional shared library and expect
+            // the DIRECT path link (MinGW links a DLL's export table; ld
+            // accepts a .so path verbatim).
+            let libDir =
+                Path.Combine(tmpPrefix, (if Platforms.os = Platforms.Windows then "bin" else "lib"))
+            Directory.CreateDirectory(libDir) |> ignore
+            let libPath = Path.Combine(libDir, "libopenblas" + Platforms.sharedLibExtension)
+            File.WriteAllText(libPath, "")
+            let (_, linkHalf2) = LinAlgPatterns.blasBuildFlags true false
+            check "OpenBlasDir expansion, lib present -> direct path link"
+                (linkHalf2 = sprintf " \"%s\"" libPath)
+                "Platforms.findSharedLib hit"
+        finally
+            try Directory.Delete(tmpPrefix, true) with _ -> ()
+    // ---- toolchain file: env-over-file precedence ----
+    let tmpFile suffix content =
+        let p = Path.Combine(Path.GetTempPath(), sprintf "blade_tier_%s_%d.json" suffix (System.Diagnostics.Process.GetCurrentProcess().Id))
+        File.WriteAllText(p, content)
+        p
+    do
+        let fileA = tmpFile "gate_on" "{\"BLADE_BLAS\": \"1\"}"
+        try
+            use _t = pinEnv "BLADE_TOOLCHAIN_FILE" fileA
+            check "toolchain file alone configures the gate"
+                (LinAlgPatterns.resolveBlasTier () = LinAlgPatterns.TierSystem)
+                "file supplies BLADE_BLAS=1"
+            do
+                use _u = pinEnv "BLADE_BLAS" "0"
+                check "env var beats the toolchain file"
+                    (LinAlgPatterns.resolveBlasTier () = LinAlgPatterns.TierOff)
+                    "env is live, file is fallback"
+        finally
+            try File.Delete fileA with _ -> ()
+    do
+        // Non-string members are skipped and malformed JSON degrades to
+        // unconfigured -- a broken toolchain file must never crash a check.
+        let fileB = tmpFile "nonstring" "{\"BLADE_BLAS\": 1}"
+        let fileC = tmpFile "malformed" "not json at all {"
+        try
+            do
+                use _t = pinEnv "BLADE_TOOLCHAIN_FILE" fileB
+                check "non-string JSON member is ignored"
+                    (LinAlgPatterns.resolveBlasTier () = LinAlgPatterns.TierOff)
+                    "number-valued BLADE_BLAS skipped"
+            do
+                use _t = pinEnv "BLADE_TOOLCHAIN_FILE" fileC
+                check "malformed toolchain file degrades to unconfigured"
+                    (LinAlgPatterns.resolveBlasTier () = LinAlgPatterns.TierOff)
+                    "no crash, empty map"
+        finally
+            try File.Delete fileB with _ -> ()
+            try File.Delete fileC with _ -> ()
+
+    printFooter "BLAS Tier Resolution" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    { Block = "BLAS Tier Resolution"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

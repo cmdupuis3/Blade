@@ -1,0 +1,27 @@
+{
+  "comment": "Native-dependency pins consumed by `blade setup`/`blade doctor` (docs/plan-toolchain-packaging.md). Versions live HERE, not in scripts or docs. The Blade-REPL repo has a sibling deps.json for its vendored plotting packages.",
+  "dependencies": [
+    {
+      "name": "openblas",
+      "kind": "git",
+      "url": "https://github.com/OpenMathLib/OpenBLAS",
+      "tag": "v0.3.34",
+      "note": "Default BLAS/LAPACK, pinned to the same version as the known-good prebuilt (C:\\Users\\cdupu\\tools\\OpenBLAS-0.3.34-x64). `blade setup --blas=source` shallow-clones this tag and runs `make && make install PREFIX=...` (needs make + gfortran; NO_LAPACK=1 without gfortran). Prebuilt installs are configured via OPENBLAS_DIR or the explicit BLADE_BLAS_* tier instead."
+    },
+    {
+      "name": "netcdf-c",
+      "kind": "system",
+      "note": "Recommended via package manager (MSYS2 pacman mingw-w64-ucrt-x86_64-netcdf / apt libnetcdf-dev / brew netcdf); NETCDF_DIR points at a custom prefix. No pinned version: the C API surface Blade uses is stable."
+    },
+    {
+      "name": "mpi",
+      "kind": "system",
+      "note": "MS-MPI runtime + MSYS2 msmpi import lib on Windows; OpenMPI or MPICH elsewhere. Link spelling owned by Platforms.mpiLinkFlag."
+    },
+    {
+      "name": "cuda",
+      "kind": "system",
+      "note": "Optional. nvcc on PATH; on Windows nvcc drives cl.exe (VS Build Tools, vcvars64)."
+    }
+  ]
+}

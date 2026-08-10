@@ -1884,7 +1884,8 @@ let private dispatchTest (rest: string list) : int =
         // must be REFUSED, not handed to BLAS past its pool.
         let emitFailed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
         let probeFailed = (Blade.Tests.LinAlgTests.runLinAlgProbeTests ()).Failed
-        if emitFailed + probeFailed = 0 then 0 else 1
+        let tierFailed = (Blade.Tests.LinAlgTests.runBlasTierTests ()).Failed
+        if emitFailed + probeFailed + tierFailed = 0 then 0 else 1
     | [ "multifile" ] ->
         // The cross-module corpus (tests/corpus/multifile), standalone. Also
         // part of the full suite; broken out because it is the only slice that

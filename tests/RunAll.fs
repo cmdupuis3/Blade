@@ -322,6 +322,11 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Skipped without it — but needs no BLAS (it includes the BLAS-free
     // blade_linalg_views.hpp). (Also `blade test linalg`.)
     let linalgProbe = Blade.Tests.LinAlgTests.runLinAlgProbeTests ()
+    // The four-tier BLAS/LAPACK configuration resolution (off / explicit
+    // BLADE_BLAS_LINK / OPENBLAS_DIR prefix / bare system) plus Toolchain's
+    // env-over-file precedence. Pure in-process unit checks with the whole
+    // env surface pinned — no toolchain needed. (Also `blade test linalg`.)
+    let blasTier = Blade.Tests.LinAlgTests.runBlasTierTests ()
     // Factory flat emission: the chained factory sugar and by-nominal
     // argument routing elaborate BEFORE typing, so a chain must emit
     // byte-identical C++ to its flat spelling, with exactly one call and no
@@ -442,7 +447,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield factoryFlat; yield lapackEmit; yield shapeSpec; yield moduleResolve
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield factoryFlat; yield lapackEmit; yield shapeSpec; yield moduleResolve
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType
