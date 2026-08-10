@@ -332,6 +332,9 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // for real; machine-dependent statuses are not asserted.
     // (Also `blade test doctor`.)
     let doctorBlock = Blade.Tests.DoctorTests.runDoctorTests ()
+    // `blade setup` pure halves: parseArgs + the toolchain-file
+    // merge/remove roundtrip through the live reader. (Also `blade test setup`.)
+    let setupBlock = Blade.Tests.SetupTests.runSetupTests ()
     // Factory flat emission: the chained factory sugar and by-nominal
     // argument routing elaborate BEFORE typing, so a chain must emit
     // byte-identical C++ to its flat spelling, with exactly one call and no
@@ -452,7 +455,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield factoryFlat; yield lapackEmit; yield shapeSpec; yield moduleResolve
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield lapackEmit; yield shapeSpec; yield moduleResolve
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

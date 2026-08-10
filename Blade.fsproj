@@ -271,6 +271,12 @@
          over Build.fs's helpers and LinAlgPatterns' tier expansion; must
          follow Build.fs and precede Cli.fs, which dispatches the verb. -->
     <Compile Include="src/Doctor.fs" />
+    <!-- `blade setup`: non-interactive bootstrap. Verifies every candidate
+         config with Doctor's probes BEFORE persisting it to
+         blade.toolchain.json; owns the OpenBLAS source build and the per-OS
+         package-hint table. After Doctor.fs (verification), before Cli.fs
+         (dispatch). -->
+    <Compile Include="src/Setup.fs" />
     <Compile Include="tests/TestHarness.fs" />
     <Compile Include="tests/Expect.fs" />
     <Compile Include="tests/Corpus.fs" />
@@ -369,6 +375,9 @@
          the pinned-surface determinism (BLADE_BLAS=0 -> blas row off).
          Statuses of real probes are machine facts and are NOT asserted. -->
     <Compile Include="tests/DoctorTests.fs" />
+    <!-- `blade setup` pure-half pins: parseArgs and the toolchain-file
+         merge/remove roundtrip through the live Toolchain reader. -->
+    <Compile Include="tests/SetupTests.fs" />
     <!-- Shape-monomorphization reach: which call sites earn a specialized copy
          (cross-module, self-recursive) and which must still decline. Emission
          text only — the decision is invisible in the values. -->
@@ -400,6 +409,12 @@
        the binary so the suite runs regardless of the working directory. -->
   <ItemGroup>
     <None Include="tests/corpus/**/*.blade">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Native-dependency pins (OpenBLAS tag/url). Copied beside the binary
+         so the setup verb's source-build mode reads the manifest rather
+         than embedding a drifting twin of it. -->
+    <None Include="deps.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

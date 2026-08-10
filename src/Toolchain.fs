@@ -49,12 +49,22 @@ let private parseFile (path: string) : Map<string, string> =
 let private fileCache =
     System.Collections.Concurrent.ConcurrentDictionary<string, Map<string, string>>()
 
+/// The file consulted for THIS process: $BLADE_TOOLCHAIN_FILE if set, else
+/// beside the executable. Public so `blade setup` writes exactly where the
+/// reader reads, and doctor can name the file it consulted.
+let activePath () : string =
+    match Environment.GetEnvironmentVariable "BLADE_TOOLCHAIN_FILE" with
+    | null | "" -> Path.Combine(AppContext.BaseDirectory, "blade.toolchain.json")
+    | p -> p
+
+/// Drop the per-path parse cache. `blade setup` calls this after writing the
+/// file (the cache exists because setup normally writes and EXITS; setup
+/// itself is the one process that edits mid-run), as do tests.
+let refresh () : unit =
+    fileCache.Clear()
+
 let private fileValues () : Map<string, string> =
-    let path =
-        match Environment.GetEnvironmentVariable "BLADE_TOOLCHAIN_FILE" with
-        | null | "" -> Path.Combine(AppContext.BaseDirectory, "blade.toolchain.json")
-        | p -> p
-    fileCache.GetOrAdd(path, parseFile)
+    fileCache.GetOrAdd(activePath (), parseFile)
 
 /// Which source supplied a configuration value -- `blade doctor` reports
 /// this so a stale toolchain.json shadowed by an env var (or vice versa) is

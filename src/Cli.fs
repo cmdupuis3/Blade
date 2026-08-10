@@ -56,6 +56,10 @@ let printUsage () =
     printfn "  doctor [--json]                   Report native-toolchain health: g++/OpenMP core"
     printfn "                                    (real compile+run), BLAS/LAPACK tier, NetCDF, MPI,"
     printfn "                                    CUDA, setup tools; exit 0 iff the g++ core works"
+    printfn "  setup [--blas=MODE]               Bootstrap the environment: verify a BLAS config"
+    printfn "                                    with the doctor probes, persist it to"
+    printfn "                                    blade.toolchain.json; --blas=source builds OpenBLAS"
+    printfn "                                    from the deps.json pin ('blade setup --help')"
     printfn "  ide check --json <file.edgi>      Type-check and emit JSON diagnostics + binding types"
     printfn "                                    (machine-readable, for editor tooling)"
     printfn "  ide serve                         Persistent editor daemon: NDJSON check requests on"
@@ -86,6 +90,7 @@ let printUsage () =
     printfn "  test linalg                       Run the blade_linalg dispatch-emission block standalone"
     printfn "                                    (+ the BLAS tier-resolution unit block)"
     printfn "  test doctor                       Run the `blade doctor` structural pins standalone"
+    printfn "  test setup                        Run the `blade setup` parse/persist pins standalone"
     printfn "  test lapack                       Run the blade_lapack eigensolver-dispatch block standalone"
     printfn "  test multifile                    Run the cross-module (multi-file) corpus standalone"
     printfn "  test module-resolve               Run the file-based module resolver + units.SI block"
@@ -1896,6 +1901,11 @@ let private dispatchTest (rest: string list) : int =
         // run for real but machine-dependent statuses are not asserted.
         let failed = (Blade.Tests.DoctorTests.runDoctorTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "setup" ] ->
+        // `blade setup`'s pure halves: argument parsing + the toolchain-file
+        // merge/remove roundtrip. No network, no git, no make.
+        let failed = (Blade.Tests.SetupTests.runSetupTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "multifile" ] ->
         // The cross-module corpus (tests/corpus/multifile), standalone. Also
         // part of the full suite; broken out because it is the only slice that
@@ -2278,6 +2288,10 @@ let private dispatchInner (args: string[]) : int =
     // Native-toolchain health report (docs/plan-toolchain-packaging.md).
     | [| "doctor" |] -> Blade.Doctor.runDoctor false
     | [| "doctor"; "--json" |] -> Blade.Doctor.runDoctor true
+
+    // Environment bootstrap: verify-then-persist configuration modes.
+    | _ when args.Length >= 1 && args.[0] = "setup" ->
+        Blade.Setup.runSetup (args.[1..] |> Array.toList)
 
     | [| "repl" |] -> replLoop ()
 
