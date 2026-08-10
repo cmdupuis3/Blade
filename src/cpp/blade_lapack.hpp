@@ -59,7 +59,14 @@
 #error "blade_lapack.hpp requires -DBLADE_HAS_LAPACK: the Blade compiler emits its synthesized Jacobi source when LAPACK is unavailable; this call should not have been emitted"
 #endif
 
+// LAPACKE header flavor. `-DBLADE_BLAS_MKL` is emitted by Build.fs when BLADE_BLAS_FLAVOR=mkl (the define is added by
+// LinAlgPatterns.blasBuildFlags). MKL implements the standard LAPACKE interface -- same functions, same layout
+// constants, same semantics, so nothing below changes -- but ships it under its own header names.
+#if defined(BLADE_BLAS_MKL)
+#include <mkl_lapacke.h>
+#else
 #include <lapacke.h>
+#endif
 
 namespace blade_lapack {
 
