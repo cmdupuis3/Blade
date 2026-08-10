@@ -7889,6 +7889,57 @@ let rec isFreshPoolForm (e: IRExpr) : bool =
     | IRApp (f, _, _) -> freshReturnOf f = FreshPool
     | _ -> false
 
+/// May a binding whose value is a bare reference to a scope-local STAGING let be
+/// emitted as a plain ALIAS, instead of genVarAliasBinding's defensive deep copy?
+///
+/// The copy exists because an ASSIGNABLE binding must not share storage with a
+/// value some other name can still reach: `let mut a = Z` followed by
+/// `a(i) = ...` would otherwise corrupt `Z`. When the source is a scope-local
+/// staging let that SOLELY OWNS a freshly allocated pool, there is no `Z` to
+/// protect and the copy is pure duplication -- and that is precisely the
+/// recursive-array elaboration's shape (`{ let buf = zeros(...); ...; buf }`),
+/// whose double materialization cost 2x the resident footprint of every
+/// `let rec` trajectory.
+///
+/// `scopeLets` is the enclosing let list: a block's own chain at module level,
+/// or the FLATTENED function body inside a frame (genFuncBody's deepUnroll
+/// dissolves the block, so the same shape arrives as an ordinary sibling let).
+/// `selfId` is the alias binding's own id where it appears in that list, so it
+/// is not counted as a rival name. Conditions:
+///  (1) the staging let OWNS its pool (isFreshPoolForm: a view/alias value could
+///      be sharing a USER binding's storage, which the copy exists to protect);
+///  (2) no assign in the scope can have leaked that storage to a target OUTSIDE
+///      the scope (an outer whole-array or row assign aliases pools; assigns
+///      whose target is scope-internal die with the scope); and
+///  (3) no OTHER let in the scope is a bare reference to the same staging let.
+///      Two aliases of one pool would each act as its owner, so a write through
+///      either would be visible through the other. A block chain cannot pose
+///      this (it has exactly one value, which is not itself one of `scopeLets`);
+///      a flattened function body can.
+let canAliasStagingLet (scopeLets: (IRId * IRExpr) list) (selfId: IRId option) (srcId: IRId) : bool =
+    let scopeIds = scopeLets |> List.map fst |> Set.ofList
+    let srcOwnsPool =
+        scopeLets |> List.exists (fun (id, v) -> id = srcId && isFreshPoolForm v)
+    let assignLeaksSrc =
+        scopeLets
+        |> List.collect (fun (_, v) -> allSubExprs v)
+        |> List.exists (fun e ->
+            match e with
+            | IRAssign (target, value) when Set.contains srcId (collectVarRefsIR value) ->
+                let targetInScope =
+                    match target with
+                    | LVVar tid -> Set.contains tid scopeIds
+                    | LVIndex (IRVar (tid, _), _) -> Set.contains tid scopeIds
+                    | _ -> false
+                not targetInScope
+            | _ -> false)
+    let rivalAlias =
+        scopeLets
+        |> List.exists (fun (id, v) ->
+            Some id <> selfId
+            && (match v with IRVar (vid, _) -> vid = srcId | _ -> false))
+    Set.contains srcId scopeIds && srcOwnsPool && not assignLeaksSrc && not rivalAlias
+
 // Whole-array mut reassignment as copy-into-place.
 //
 // `STG = t` inside a step function REBINDS the wrapper by default (`STG.data`
@@ -15914,39 +15965,21 @@ and genLetChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     // bindings are never scope-freed: 2x the footprint of every `let rec`
     // trajectory (~1.5 GB of 09_qg_atmosphere's residency, measured). The
     // staging let is block-scoped -- no name outside this chain can reach
-    // it -- so the final binding may ALIAS its wrapper instead when
-    //  (1) the staging let OWNS its pool (isFreshPoolForm: a view/alias
-    //      value could be sharing a USER binding's storage, which the copy
-    //      exists to protect);
-    //  (2) no assign in the chain can have leaked its storage to a target
-    //      OUTSIDE the chain (an outer whole-array or row assign aliases
-    //      pools; assigns whose target is chain-internal die with the
-    //      block); and
-    //  (3) there is no live alloc frame (main's top level): inside a
-    //      function/loop frame the staging registration and the escape
-    //      analysis already recycle the block correctly, and the alias
-    //      would complicate that reasoning for no residency gain.
-    let chainIds = lets |> List.map fst |> Set.ofList
+    // it -- so the final binding may ALIAS its wrapper instead, under
+    // canAliasStagingLet's three conditions (sole-owned fresh pool, no assign
+    // leaking it out of the chain, no rival alias).
+    //
+    // The original form also required an EMPTY alloc-scope stack, on the
+    // reasoning that a function/loop frame's registration plus escape analysis
+    // already recycled the block. That gate is gone: it is the frame case that
+    // leaks hardest (a `let rec` built inside a function is re-materialized on
+    // EVERY call), and the alias changes nothing the frame reasons about --
+    // both the staging alloc and the elided copy carry the same owner stamp
+    // (setAllocOwner is per OUTER let), so the frame simply tracks one
+    // allocation instead of two.
     let aliasableStagingRef =
         match finalExpr with
-        | IRVar (srcId, _) when Set.contains srcId chainIds
-                                && (currentAllocScope ()).IsNone ->
-            let srcOwnsPool =
-                lets |> List.exists (fun (id, v) -> id = srcId && isFreshPoolForm v)
-            let assignLeaksSrc =
-                lets
-                |> List.collect (fun (_, v) -> allSubExprs v)
-                |> List.exists (fun e ->
-                    match e with
-                    | IRAssign (target, value) when Set.contains srcId (collectVarRefsIR value) ->
-                        let targetInChain =
-                            match target with
-                            | LVVar tid -> Set.contains tid chainIds
-                            | LVIndex (IRVar (tid, _), _) -> Set.contains tid chainIds
-                            | _ -> false
-                        not targetInChain
-                    | _ -> false)
-            srcOwnsPool && not assignLeaksSrc
+        | IRVar (srcId, _) -> canAliasStagingLet lets None srcId
         | _ -> false
     let finalBinding = {
         Id = binding.Id; Name = name; Type = binding.Type
@@ -16224,10 +16257,29 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // genBinding so genVarAliasBinding's mut-copy path runs (fresh
             // alloc + pool copy). The default arm's `auto` alias would share
             // Z's storage and let mutations through `a` corrupt it.
+            //
+            // UNLESS Z is a scope-local staging let that solely owns a fresh
+            // pool (canAliasStagingLet): nothing else names that storage, so
+            // there is no Z to corrupt and the copy is the same double
+            // materialization genLetChainBinding elides at module level. A
+            // `let rec` written INSIDE a function body arrives here rather than
+            // at genLetChainBinding because genFuncBody's deepUnroll flattens
+            // the block's chain into this let list, leaving the block's value
+            // as an ordinary `let traj = <staging>` sibling. Suppressing the
+            // marks routes genVarAliasBinding to its plain-alias arm; it checks
+            // MutableArrayLets independently of IsMutable, so both must go.
+            let aliasStaging =
+                match value with
+                | IRVar (srcId, _) -> canAliasStagingLet lets (Some id) srcId
+                | _ -> false
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx =
+                if aliasStaging
+                then { bodyCtx with MutableArrayLets = Set.remove id bodyCtx.MutableArrayLets }
+                else bodyCtx
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
-                Value = value; IsConst = false; IsMutable = true
+                Value = value; IsConst = false; IsMutable = not aliasStaging
             }
             let (code, _) = genBinding bodyCtx tempBinding builder
             currentNames <- Map.add id varName currentNames
