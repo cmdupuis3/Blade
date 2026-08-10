@@ -250,10 +250,20 @@ let private ompReduceCases : (string * string * string list * string list) list 
        ["#pragma omp parallel num_threads("], [])
       // Path B over a DEFERRED computation: no intermediate array is
       // materialized, and the OUTERMOST level is the one chunked.
+      //
+      // `axes = 2` IS THE FEATURE'S SPELLING, not a decoration. The chunked
+      // fold collapses the whole cell grid into one scalar accumulator, and
+      // since the 2026-08-09 ruling on `reduce` (docs/features/sql.md 10) the
+      // full fold is `axes = rank` -- the default is the innermost axis only.
+      // A rank-2 deferred computation reduced WITHOUT the count is a partial
+      // fold to a rank-1 array, which is a different program: it takes the
+      // row-wise `<@>` route, materializes the grid, and never reaches the
+      // fused reduction terminal that owns this emission. Dropping the count
+      // here is what made this case (and the two knob arms below) vacuous.
       ("reduce_over_computation_chunked",
        "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
        "let B = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n" +
-       "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
+       "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n",
        ["comm-licensed parallel fold, outer level chunked"
         "#pragma omp parallel num_threads("
         "for (size_t __i0 = __rlo; __i0 < __rhi; __i0++)"], [])
@@ -262,8 +272,45 @@ let private ompReduceCases : (string * string * string list * string list) list 
       ("reduce_over_computation_no_clause",
        "function myAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n" + arr +
        "let B = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n" +
-       "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
-       [], ["#pragma omp"]) ]
+       "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n",
+       [], ["#pragma omp"])
+      // ---- the EXPRESSION-form reduce: declined, but no longer silent -------
+      // A reduce in expression position (kernel body, inline arithmetic) opens
+      // no team ON PURPOSE -- its context is routinely already inside a parallel
+      // region, so a nested team would be a pessimisation or the wrong size (see
+      // the note atop `renderReduceExpr`). The decline is legitimate; being
+      // SILENT about it was the bug, and these cases are what keep it audible.
+      //
+      // A BLOCK comment is asserted, not just the phrase: every arm of that
+      // emitter space-joins its statements into ONE line, so a `//` marker would
+      // swallow the fold. That is a compile error, which makes the comment STYLE
+      // load-bearing rather than cosmetic.
+      ("reduce_in_kernel_body_marks_dropped_omp",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" +
+       "let M = [[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]]\n" +
+       "let r = method_for(M) <@> lambda(row) -> reduce(row, myAdd, 0.0) |> compute\n",
+       ["/* [omp] requested but emitted serial: reduce in expression position"],
+       ["#pragma omp"; "omp_get_"])
+      // The same drop reached through the PARTIAL FOLD, which is what makes this
+      // marker matter: since the 2026-08-09 `reduce` ruling the default folds the
+      // innermost axis only, and `partialFold` desugars that into the row-wise
+      // form above -- so this perfectly ordinary rank-2 `reduce` lands in
+      // expression position and its `omp` clause buys nothing. `axes = 2` is the
+      // spelling that gets the parallel fold (reduce_over_computation_chunked).
+      ("reduce_partial_default_marks_dropped_omp",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" +
+       "let M = [[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]]\n" +
+       "let r = reduce(M, myAdd, 0.0)\n",
+       ["/* [omp] requested but emitted serial: reduce in expression position"],
+       ["#pragma omp"; "omp_get_"])
+      // Negative control, and the one that keeps the two above honest: the marker
+      // reports a DROPPED CLAUSE, so a kernel that never asked must not carry it.
+      // Without this the emitter could pass both cases by marking every reduce.
+      ("reduce_in_kernel_body_no_clause_no_marker",
+       "function myAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n" +
+       "let M = [[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]]\n" +
+       "let r = reduce(M, myAdd, 0.0)\n",
+       [], ["[omp]"; "#pragma omp"]) ]
 
 /// The BL-coded refusal for an UNLICENSED `omp` on a fold kernel. Pinned in the
 /// diagnostics corpus too (049_fold_omp_needs_license.blade); repeated here so
@@ -497,10 +544,13 @@ let private ompThreadsKnobCases : (string * string * string list * string list) 
        "let s = reduce(A, myAdd)\n",
        [ marker; "// reduce: accumulator loop, eager" ],
        [ "#pragma omp"; "omp_get_"; "__rpart_s" ])
+      // `axes = 2` for the reason spelled out at `reduce_over_computation_chunked`:
+      // without it this is a partial fold that never had a chunk plan to drop,
+      // so the knob arm and its `_control_knob_off` twin both go vacuous.
       ("knob_reduce_over_computation_serial",
        "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
        "let B = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n" +
-       "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
+       "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n",
        [ marker ],
        [ "#pragma omp"; "omp_get_"; "outer level chunked" ])
       // ---- the intrinsic emitters (gram / matmul) --------------------------
@@ -816,11 +866,14 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
         // parallel region is an explicit team with per-thread partials, not a
         // `parallel for`, so pragma text alone cannot say whether a team really
         // forms — this is the ground-truth check that it does.
+        // `axes = 2` is the full fold's spelling (see the note at
+        // `reduce_over_computation_chunked`); without it this is a partial fold
+        // with no team to observe, and the coverage check goes vacuous.
         let foldSrc =
             "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" +
             "let A = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
             "let B = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
-            "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n"
+            "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n"
         let programs =
             [ ("rect_outer_product", rectSrc)
               ("symmetric_triangular", symSrc)
@@ -1257,9 +1310,12 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                arrDecl + "let s = reduce(A, lambda(a, b) where comm(a, b), omp -> (a + b) * 1.0)\n",
                arrDecl + "let s = reduce(A, lambda(a, b) where comm(a, b) -> (a + b) * 1.0)\n",
                true)
+              // `axes = 2`: the full fold to the scalar `s` this case compares.
+              // The default (innermost axis only) would bind `s` to a rank-1
+              // array and the comparison would have nothing to read.
               ("path_b_reduce_over_computation",
-               commFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
-               serialFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n",
+               commFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n",
+               serialFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n",
                true) ]
 
         for (name, ompSrc, serialSrc, isPathB) in cases do
@@ -1797,8 +1853,9 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                knobDecl + "let s = reduce(A, lambda(a, b) where omp -> a + b)\n")
               ("path_b_named_comm",
                commFn + knobDecl + "let s = reduce(A, myAdd)\n")
+              // `axes = 2` for the same reason as the differential case above.
               ("path_b_reduce_over_computation",
-               commFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n") ]
+               commFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n") ]
         for (label, src) in knobCases do
             let name = "omp_threads_knob_" + label
             match withOmpThreads "1" (fun () -> compileProgram outputDir (name + "_serial") src),
