@@ -714,6 +714,20 @@ let splitTimingOnlyBinding () : string option =
 let ompTestModeEnabled () : bool =
     (ompTestModeCell ()).Value
 
+/// Memcheck emission gate (BLADE_MEMCHECK=1): the generated program includes
+/// blade_memcheck.hpp, whose static Report object brackets main() with
+/// ASan-hook allocation accounting and prints one BLADE-MEMCHECK line on
+/// stderr at exit; Build.fs switches to the Debug+ASan compile profile off
+/// the same read. An environment read, not an AsyncLocal: the flag is a
+/// per-process harness pin (like BLADE_MARCH/BLADE_FP_CONTRACT in Build.fs),
+/// set by `blade run --memcheck` before codegen starts. Default
+/// (unset/empty/"0") emits NOTHING -- default output stays byte-identical,
+/// and the interpreter/REPL lanes never pay for it.
+let memcheckEnabled () : bool =
+    match System.Environment.GetEnvironmentVariable "BLADE_MEMCHECK" with
+    | null | "" | "0" -> false
+    | _ -> true
+
 /// CUDA emission gate. genCudaKernel[Simplicial] emits an `extern "C"` launch
 /// call into the host .cpp plus a `__global__` kernel into a separate .cu, which
 /// only links when the .cu is built alongside it -- true only in the dedicated
@@ -7488,7 +7502,13 @@ let genIncludes () : string list =
      "#include \"rand_runtime.hpp\""
      "#include <exception>"                 // std::exception for main()'s BL8005 catch
      "#include \"blade_runtime.hpp\""        // blade_rt::panic + BLADE_FRAME shadow stack
-     "using namespace nested_array_utilities;"
+     ]
+    // Memcheck instrumentation (BLADE_MEMCHECK=1 only): appended as an extra
+    // element, never a placeholder comment, so default output stays
+    // byte-identical to a build without the feature.
+    @ (if memcheckEnabled () then ["#include \"blade_memcheck.hpp\""] else [])
+    @
+    ["using namespace nested_array_utilities;"
      "using std::cout;"
      "using std::endl;"
      ""]
@@ -7620,7 +7640,13 @@ let runtimeHeaderNames : string list =
       // #error`) and included only by programs that emit a `blade_lapack::`
       // call, so a BLAS program carries no LAPACK dependency -- deployed
       // unconditionally like every other runtime header.
-      "blade_lapack.hpp" ]
+      "blade_lapack.hpp"
+      // ASan allocator-stats export bracketing main() (one BLADE-MEMCHECK
+      // line on stderr at exit). Included only by programs generated under
+      // BLADE_MEMCHECK=1 -- Build.fs pairs the include with a Debug+ASan
+      // compile -- but deployed unconditionally so the deploy/cleanup
+      // bookkeeping stays uniform.
+      "blade_memcheck.hpp" ]
 
 /// Deploy every C++ runtime header next to a generated .cpp so its `#include`s
 /// resolve at g++ time with no -I flag. These are pre-existing static files in
@@ -7659,7 +7685,11 @@ let genIncludesExternal () : string list =
      "#include \"rand_runtime.hpp\""
      "#include <exception>"                 // std::exception for main()'s BL8005 catch
      "#include \"blade_runtime.hpp\""        // blade_rt::panic + BLADE_FRAME shadow stack
-     "using std::cout;"
+     ]
+    // Memcheck instrumentation -- see the sibling include block above.
+    @ (if memcheckEnabled () then ["#include \"blade_memcheck.hpp\""] else [])
+    @
+    ["using std::cout;"
      "using std::endl;"
      ""]
     // Display-frame emitter -- see the sibling include block above.

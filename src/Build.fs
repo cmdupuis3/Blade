@@ -277,10 +277,103 @@ let buildCublasDevice (cppFullPath: string) : Result<string, string> =
         | Error e -> Error e
         | Ok () -> Ok libFile
 
+/// Best-effort copy of a runtime DLL from PATH to the exe's directory, so a
+/// memcheck build keeps running outside the vcvars64 shell that produced it.
+/// Silence on failure is deliberate: the exe still runs fine in any shell
+/// whose PATH carries the DLL, so a copy problem must not fail the compile.
+let private copyRuntimeDllBesideExe (exeFullPath: string) (dllName: string) : unit =
+    try
+        let exeDir = Path.GetDirectoryName(exeFullPath)
+        let target = Path.Combine(exeDir, dllName)
+        if not (File.Exists target) then
+            let pathVar = Environment.GetEnvironmentVariable "PATH"
+            if not (isNull pathVar) then
+                pathVar.Split(Path.PathSeparator)
+                |> Array.tryPick (fun d ->
+                    try
+                        let c = Path.Combine(d.Trim(), dllName)
+                        if File.Exists c then Some c else None
+                    with _ -> None)
+                |> Option.iter (fun src -> File.Copy(src, target, true))
+    with _ -> ()
+
+/// Memcheck (BLADE_MEMCHECK=1) compile: a Debug+AddressSanitizer build of the
+/// generated C++, pairing the blade_memcheck.hpp instrumentation codegen
+/// included with a runtime that actually feeds it allocation events.
+///
+/// Windows drives cl.exe, NOT g++: the MSYS2 ucrt64 toolchain ships no
+/// libasan (`-fsanitize=address` dies at link), while MSVC's ASan is present
+/// and its /openmp:llvm front end accepts the `collapse` clauses codegen
+/// emits (measured working together with /fsanitize=address, 2026-08-09).
+/// cl.exe needs a vcvars64 environment; INCLUDE unset is a hard, actionable
+/// error rather than a silent fallback to g++, which would produce a program
+/// whose report line says asan=0. /Od /Zi keeps this an honest Debug build;
+/// the ASan runtime is ALWAYS a DLL since VS 17.7, so the two runtime DLLs
+/// are copied beside the exe afterwards. The .obj (and its /Fd sidecar) are
+/// deleted on success -- they'd otherwise litter the .blade's directory --
+/// but the linker's .pdb next to the exe is KEPT: ASan symbolizes error
+/// stacks from it at run time.
+///
+/// Deliberately unsupported (clean error, so a census records the skip
+/// instead of chasing a broken link): MPI programs, netcdf provider
+/// programs, and extra link inputs (nvcc-built device DLLs) -- each needs
+/// its own MSVC link recipe that no current memcheck consumer exercises.
+let compileCppMemcheck (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
+    try
+        let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+        let exeExt = if onWindows then ".exe" else ".out"
+        let cppFullPath = Path.GetFullPath(cppFile)
+        let exeFullPath = Path.GetFullPath(Path.ChangeExtension(cppFile, exeExt))
+        let source = try File.ReadAllText cppFullPath with _ -> ""
+        if not (List.isEmpty extraLinkInputs) then
+            Error "Skipped: memcheck does not support extra link inputs (device DLLs)"
+        elif source.Contains "#include <mpi.h>" then
+            Error "Skipped: memcheck does not support MPI programs"
+        elif source.Contains "#include <netcdf.h>" then
+            Error "Skipped: memcheck does not support netcdf provider programs"
+        elif onWindows then
+            if not capabilities.Value.HasCl then
+                Error "memcheck requires cl.exe on PATH (run from a vcvars64 / VS x64 Native Tools environment)"
+            elif String.IsNullOrEmpty(Environment.GetEnvironmentVariable "INCLUDE") then
+                Error "memcheck found cl.exe but INCLUDE is unset -- run from a vcvars64 / VS x64 Native Tools environment"
+            else
+                let objPath = Path.ChangeExtension(cppFullPath, ".obj")
+                let fdPath = Path.ChangeExtension(cppFullPath, "_obj.pdb")
+                let args =
+                    sprintf "/nologo /fsanitize=address /Zi /Od /MT /std:c++17 /EHsc /openmp:llvm /Fo\"%s\" /Fd\"%s\" /Fe\"%s\" \"%s\""
+                        objPath fdPath exeFullPath cppFullPath
+                match runProc "cl" args 300000 with
+                | Error e -> Error e
+                | Ok () ->
+                    for leftover in [objPath; fdPath] do
+                        try File.Delete leftover with _ -> ()
+                    // clang_rt DLL: required (ASan is dynamic-only since VS
+                    // 17.7). libomp DLL: only used when a parallel region
+                    // actually runs, same best-effort copy either way.
+                    copyRuntimeDllBesideExe exeFullPath "clang_rt.asan_dynamic-x86_64.dll"
+                    copyRuntimeDllBesideExe exeFullPath "libomp140.x86_64.dll"
+                    Ok exeFullPath
+        else
+            // Linux/macOS: g++/clang++ carry ASan natively; -O0 -g mirrors
+            // the /Od /Zi profile. LeakSanitizer (where the platform has it)
+            // comes for free on top of the BLADE-MEMCHECK report line.
+            let args =
+                sprintf "-std=c++17 -O0 -g -fopenmp -fsanitize=address -Werror=float-conversion -Werror=narrowing -o \"%s\" \"%s\""
+                    exeFullPath cppFullPath
+            match runProc "g++" args 300000 with
+            | Error e -> Error e
+            | Ok () -> Ok exeFullPath
+    with ex ->
+        Error (sprintf "Memcheck compilation exception: %s\n%s" ex.Message ex.StackTrace)
+
 /// Compile a C++ file with g++. `extraLinkInputs` are appended after the
 /// source (linker order) -- e.g. the hybrid mpi+cuda build passes the
 /// nvcc-built device DLL here (MinGW links DLL export tables directly).
+/// Under BLADE_MEMCHECK=1 the whole invocation is rerouted to the
+/// Debug+ASan profile instead (codegen already included the matching
+/// blade_memcheck.hpp instrumentation in the same process).
 let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
+    if CodeGen.memcheckEnabled () then compileCppMemcheck extraLinkInputs cppFile outputDir else
     try
         let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
         let exeFile = Path.ChangeExtension(cppFile, exeExt)
@@ -578,6 +671,11 @@ let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) 
 let compileForBackend (caps: Capabilities) (req: BackendReq) (srcFile: string) (outputDir: string) : Result<string, string> =
     match resolveCompile caps req with
     | UseGpp          -> compileCpp srcFile outputDir
+    // ASan cannot instrument device code, and nvcc's host-side ASan story on
+    // Windows is unsupported; a memcheck run of a CUDA-emitting program is a
+    // skip, not a silently-uninstrumented build.
+    | UseNvcc when CodeGen.memcheckEnabled () ->
+        Error "Skipped: memcheck does not support the CUDA backend"
     | UseNvcc         -> compileCuda srcFile outputDir
     | SkipCompile why -> Error ("Skipped: " + why)
 
@@ -600,14 +698,17 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
         
         // 120s: simulation-scale examples (thousands of spectral steps) can
         // legitimately run long; corpus tests still finish well under a second.
-        if proc.WaitForExit(120000) then
+        // Memcheck runs get 600s: /Od plus ASan interception is a 5-20x
+        // slowdown on exactly those simulation-scale programs.
+        let timeoutMs = if CodeGen.memcheckEnabled () then 600000 else 120000
+        if proc.WaitForExit(timeoutMs) then
             let stdout = stdoutTask.Result
             let stderr = stderrTask.Result
             let output = if String.IsNullOrEmpty(stderr) then stdout else stdout + "\n[stderr]: " + stderr
             Ok (proc.ExitCode, output)
         else
             try proc.Kill() with _ -> ()
-            Error "Execution timed out after 120s"
+            Error (sprintf "Execution timed out after %ds" (timeoutMs / 1000))
     with ex ->
         Error (sprintf "Execution exception: %s" ex.Message)
 

@@ -52,6 +52,10 @@ let printUsage () =
     printfn "  run <file.edgi>                   Compile and run a Blade program"
     printfn "  run <file.edgi> --mpi <N>         ... with `where mpi` kernels decomposed across"
     printfn "                                    N ranks (compiled -lmsmpi, run under mpiexec)"
+    printfn "  run <file.edgi> --memcheck        ... as a Debug+AddressSanitizer build that prints"
+    printfn "                                    a BLADE-MEMCHECK allocator-stats line on stderr"
+    printfn "                                    at exit (Windows: needs a vcvars64 environment;"
+    printfn "                                    equivalently set BLADE_MEMCHECK=1)"
     printfn "  check <file.edgi>                 Type-check only (no code generation)"
     printfn "  ide check --json <file.edgi>      Type-check and emit JSON diagnostics + binding types"
     printfn "                                    (machine-readable, for editor tooling)"
@@ -2224,7 +2228,8 @@ let private dispatchInner (args: string[]) : int =
     let args = if strictPins then args |> Array.filter (fun a -> a <> "--strict-pins") else args
     match args with
     // User-facing commands.
-    // `run <file> [--verbose] [--mpi N]` -- flags in any order after the file.
+    // `run <file> [--verbose] [--mpi N] [--memcheck]` -- flags in any order
+    // after the file.
     | _ when args.Length >= 2 && args.[0] = "run" ->
         let rest = args.[1..] |> Array.toList
         let mutable verbose = false
@@ -2235,6 +2240,14 @@ let private dispatchInner (args: string[]) : int =
             match toks with
             | [] -> ()
             | "--verbose" :: tl -> verbose <- true; parse tl
+            | "--memcheck" :: tl ->
+                // A process-level pin rather than a parameter: CodeGen (the
+                // blade_memcheck.hpp include), Build (the Debug+ASan compile
+                // profile and the longer run timeout) all read BLADE_MEMCHECK
+                // at their own sites, and exporting the variable directly is
+                // the equivalent harness spelling.
+                System.Environment.SetEnvironmentVariable("BLADE_MEMCHECK", "1")
+                parse tl
             | "--mpi" :: n :: tl ->
                 (match System.Int32.TryParse n with
                  | true, v when v > 0 -> mpiRanks <- Some v; parse tl
