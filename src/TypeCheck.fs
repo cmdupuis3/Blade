@@ -1460,6 +1460,14 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
 // 5. Capture Analysis
 
 /// Collect free variables in an expression (names not bound in local scope).
+///
+/// This is the CAPTURE ANALYSIS for lambdas: a name it fails to report is a
+/// name that never rides the capture list, and the lifted kernel then emits a
+/// dangling reference (BL6001). So the match is deliberately EXHAUSTIVE with
+/// no wildcard arm -- a new ExprKind case must fail to compile (FS0025) rather
+/// than silently join the dropped set, the same discipline `Unfold.mapExprPre`
+/// follows. Over-reporting is safe (`buildCaptures` drops names that resolve
+/// to no binding); under-reporting is the bug.
 let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     match expr.Kind with
     | ExprKind.ExprVar name ->
@@ -1472,7 +1480,20 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
         Set.unionMany (collectFreeVars bound f :: (args |> List.map (collectFreeVars bound)))
     | ExprKind.ExprLambda (parms, _, body) ->
         let bound' = parms |> List.fold (fun s p -> Set.add p.Name s) bound
-        collectFreeVars bound' body
+        // A default's free variables are captures too: at the kernel-apply
+        // seam the default is spliced into the body as a body-entry let, so a
+        // name it reads from the enclosing scope must ride the capture list.
+        // Walked with every param bound, matching the top-level lambda checker
+        // (a default may reference required params; BL3012 rejects references
+        // to other DEFAULTED ones, so they can never be genuinely free here).
+        // The where-clause holds only parameter idents -- comm/anticomm/omp
+        // groups -- never expressions, so it contributes nothing.
+        let defaultFree =
+            parms
+            |> List.choose (fun p -> p.Default)
+            |> List.map (collectFreeVars bound')
+            |> List.fold Set.union Set.empty
+        Set.union defaultFree (collectFreeVars bound' body)
     | ExprKind.ExprLet (binding, body) ->
         let valFree = collectFreeVars bound binding.Value
         let names = patternNames binding.Pattern
@@ -1570,8 +1591,63 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
                       | ForKernel k -> collectFreeVars bound k
         let kFree = kernelOpt |> Option.map (collectFreeVars bound) |> Option.defaultValue Set.empty
         Set.union srcFree kFree
-    | ExprKind.ExprAlign (es, _) -> es |> List.map (collectFreeVars bound) |> Set.unionMany
-    | _ -> Set.empty
+    | ExprKind.ExprAlign (es, spec) ->
+        // A BndPad boundary carries a pad EXPRESSION, which reads the
+        // enclosing scope exactly like the aligned operands do.
+        // Enumerated rather than wildcarded for the same reason the outer
+        // match is: a future boundary mode carrying an expression must fail
+        // to compile here instead of silently dropping its captures.
+        let padFree =
+            match spec with
+            | None -> Set.empty
+            | Some s ->
+                match s.Boundary with
+                | Ast.BoundaryMode.BndPad p -> collectFreeVars bound p
+                | Ast.BoundaryMode.BndShrink
+                | Ast.BoundaryMode.BndPeriodic
+                | Ast.BoundaryMode.BndReflect -> Set.empty
+        Set.union padFree (es |> List.map (collectFreeVars bound) |> Set.unionMany)
+    | ExprKind.ExprTranspose (array, _, _) -> collectFreeVars bound array
+    | ExprKind.ExprDecompact (array, _) -> collectFreeVars bound array
+    | ExprKind.ExprGram (left, right) ->
+        Set.union (collectFreeVars bound left) (collectFreeVars bound right)
+    | ExprKind.ExprBlocked (_, e) -> collectFreeVars bound e
+    | ExprKind.ExprHalo (_, offsets) -> collectFreeVars bound offsets
+    | ExprKind.ExprPartialApp (_, e, _) -> collectFreeVars bound e
+    | ExprKind.ExprStatic e -> collectFreeVars bound e
+    | ExprKind.ExprRecArray def ->
+        // `let rec NAME = match NAME with | prefix :: n -> prefix :: SLICE`.
+        // NAME is the family being defined -- a self-reference, not a capture
+        // from an enclosing scope. PrefixVar and StepVar are the inductive
+        // arm's binders; the seed arm carries its own step-var name instead
+        // (its prefix position is the literal `zero`, which binds nothing).
+        let selfBound = Set.add def.Name bound
+        let seedFree =
+            match def.SeedArm with
+            | Some (seedStep, seedExpr) ->
+                collectFreeVars (Set.add seedStep selfBound) seedExpr
+            | None -> Set.empty
+        let sliceBound = selfBound |> Set.add def.PrefixVar |> Set.add def.StepVar
+        Set.union seedFree (collectFreeVars sliceBound def.SliceExpr)
+    // ---- Leaves: nothing to walk, for a stated reason ----
+    | ExprKind.ExprWildcard
+    | ExprKind.ExprNth
+    | ExprKind.ExprZero
+    | ExprKind.ExprSection _ -> Set.empty
+    // A qualified name (Module.Sub.name) never resolves to a LOCAL binding,
+    // so it can never be a capture.
+    | ExprKind.ExprQualified _ -> Set.empty
+    // `arity(p)` is a compile-time query: monomorphization resolves it to an
+    // integer literal (IR.IRArity), so the named param is never read as a
+    // runtime value and never needs to ride the capture list.
+    | ExprKind.ExprArity _ -> Set.empty
+    // Type-level operands only. Extents written inside these TypeExprs must be
+    // statically evaluable -- literals or `let static`, which lower as globals
+    // rather than locals -- so no runtime value reaches them to be captured.
+    // Same reasoning covers the TypeExpr halves of ExprBlocked / ExprHalo /
+    // ExprTyped, whose expression halves are walked above.
+    | ExprKind.ExprRange _
+    | ExprKind.ExprReverse _ -> Set.empty
 
 /// Extract variable names bound by a pattern.
 /// Slot assignment for a tuple pattern's leaves, shared by every `let`

@@ -1,0 +1,24 @@
+// TEST: Lambda Captures Through Transpose
+// ----------------------------------------------------------------------------
+// `collectFreeVars` (TypeCheck.fs) is the capture analysis for lambdas. It used
+// to end in a `| _ -> Set.empty` catch-all, so every ExprKind case the explicit
+// arms had not reached reported ZERO free variables -- even the ones carrying
+// operand expressions. `transpose` was one of them: a lambda that reaches an
+// outer binding ONLY through the transposed array never recorded it as a
+// capture, the lifted kernel emitted a reference to a variable it did not own,
+// and IR validation rejected the program with
+//   error[BL6001]: in function '__lambda_N': dangling VarId reference: vN
+// The match is now exhaustive over ExprKind with no wildcard, so a future AST
+// case fails to compile (FS0025) instead of silently joining the dropped set.
+//
+// `L` must be BLOCK-LOCAL: a module-level binding lowers as a global rather
+// than a capture, so the same body at file scope always worked and would not
+// pin this. Siblings: 071 (decompact), 072 (a param DEFAULT reaching through
+// the same node), 073 (recursive-array arms, which also bind).
+let out = {
+    let L: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    let k = lambda(i: Int) -> transpose(L, [0, 1])(i, 0)
+    // transpose is 3x2 [[1,4],[2,5],[3,6]]; column 0 is (1, 2, 3).
+    k(0) + k(1)
+}
+// EXPECT: out = 3
