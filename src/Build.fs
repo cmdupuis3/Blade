@@ -277,24 +277,27 @@ let buildCublasDevice (cppFullPath: string) : Result<string, string> =
         | Error e -> Error e
         | Ok () -> Ok libFile
 
-/// Best-effort copy of a runtime DLL from PATH to the exe's directory, so a
-/// memcheck build keeps running outside the vcvars64 shell that produced it.
+/// Best-effort copy of a runtime DLL to the exe's directory, so a memcheck
+/// build keeps running outside the shell environment that produced it.
+/// `searchDirs` (the compiler's own bin directory) are probed before PATH.
 /// Silence on failure is deliberate: the exe still runs fine in any shell
 /// whose PATH carries the DLL, so a copy problem must not fail the compile.
-let private copyRuntimeDllBesideExe (exeFullPath: string) (dllName: string) : unit =
+let private copyRuntimeDllBesideExe (searchDirs: string list) (exeFullPath: string) (dllName: string) : unit =
     try
         let exeDir = Path.GetDirectoryName(exeFullPath)
         let target = Path.Combine(exeDir, dllName)
         if not (File.Exists target) then
-            let pathVar = Environment.GetEnvironmentVariable "PATH"
-            if not (isNull pathVar) then
-                pathVar.Split(Path.PathSeparator)
-                |> Array.tryPick (fun d ->
-                    try
-                        let c = Path.Combine(d.Trim(), dllName)
-                        if File.Exists c then Some c else None
-                    with _ -> None)
-                |> Option.iter (fun src -> File.Copy(src, target, true))
+            let pathDirs =
+                match Environment.GetEnvironmentVariable "PATH" with
+                | null -> []
+                | p -> p.Split(Path.PathSeparator) |> Array.toList
+            searchDirs @ pathDirs
+            |> List.tryPick (fun d ->
+                try
+                    let c = Path.Combine(d.Trim(), dllName)
+                    if File.Exists c then Some c else None
+                with _ -> None)
+            |> Option.iter (fun src -> File.Copy(src, target, true))
     with _ -> ()
 
 /// Memcheck (BLADE_MEMCHECK=1) compile: a Debug+AddressSanitizer build of the
@@ -332,10 +335,44 @@ let compileCppMemcheck (extraLinkInputs: string list) (cppFile: string) (outputD
         elif source.Contains "#include <netcdf.h>" then
             Error "Skipped: memcheck does not support netcdf provider programs"
         elif onWindows then
+            // Preferred Windows lane: MSYS2 clang64 clang++. MSVC's front end
+            // dies with C1061 ("blocks nested too deeply") on the deep IIFE
+            // chains physics-scale programs emit (~300 nested lambdas at only
+            // 72 lexical brace levels, measured 2026-08-09) and no flag
+            // raises that limit; clang parses the same file given
+            // -fbracket-depth=1024. BLADE_MEMCHECK_CXX overrides the probe
+            // for a non-default clang location.
+            let clangxx =
+                let overridden = Environment.GetEnvironmentVariable "BLADE_MEMCHECK_CXX"
+                [ if not (String.IsNullOrEmpty overridden) then yield overridden
+                  yield @"C:\msys64\clang64\bin\clang++.exe" ]
+                |> List.tryFind File.Exists
+            match clangxx with
+            | Some cxx ->
+                // No -Werror=float-conversion/narrowing here, unlike the g++
+                // lane: clang's float-conversion net is wider than gcc's, and
+                // a memcheck build is a measurement run, not the enforcement
+                // gate the release compile already provides.
+                let args =
+                    sprintf "-std=c++17 -O0 -g -fopenmp -fsanitize=address -fbracket-depth=1024 -Wno-c++20-extensions -o \"%s\" \"%s\""
+                        exeFullPath cppFullPath
+                match runProc cxx args 300000 with
+                | Error e -> Error e
+                | Ok () ->
+                    // The clang64 build links its runtimes dynamically; all
+                    // four live in the compiler's own bin directory.
+                    let cxxDir = Path.GetDirectoryName cxx
+                    for dll in [ "libclang_rt.asan_dynamic-x86_64.dll"; "libc++.dll"; "libomp.dll"; "libunwind.dll" ] do
+                        copyRuntimeDllBesideExe [cxxDir] exeFullPath dll
+                    Ok exeFullPath
+            | None ->
+            // Fallback: MSVC cl.exe (measured working for shallow programs;
+            // /openmp:llvm accepts codegen's collapse clauses alongside
+            // /fsanitize=address). Requires a vcvars64 environment.
             if not capabilities.Value.HasCl then
-                Error "memcheck requires cl.exe on PATH (run from a vcvars64 / VS x64 Native Tools environment)"
+                Error "memcheck requires MSYS2 clang64 (pacman -S mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-compiler-rt mingw-w64-clang-x86_64-llvm-openmp) or cl.exe on PATH (vcvars64 / VS x64 Native Tools environment)"
             elif String.IsNullOrEmpty(Environment.GetEnvironmentVariable "INCLUDE") then
-                Error "memcheck found cl.exe but INCLUDE is unset -- run from a vcvars64 / VS x64 Native Tools environment"
+                Error "memcheck found cl.exe but INCLUDE is unset -- run from a vcvars64 / VS x64 Native Tools environment (or install MSYS2 clang64)"
             else
                 let objPath = Path.ChangeExtension(cppFullPath, ".obj")
                 let fdPath = Path.ChangeExtension(cppFullPath, "_obj.pdb")
@@ -350,8 +387,8 @@ let compileCppMemcheck (extraLinkInputs: string list) (cppFile: string) (outputD
                     // clang_rt DLL: required (ASan is dynamic-only since VS
                     // 17.7). libomp DLL: only used when a parallel region
                     // actually runs, same best-effort copy either way.
-                    copyRuntimeDllBesideExe exeFullPath "clang_rt.asan_dynamic-x86_64.dll"
-                    copyRuntimeDllBesideExe exeFullPath "libomp140.x86_64.dll"
+                    copyRuntimeDllBesideExe [] exeFullPath "clang_rt.asan_dynamic-x86_64.dll"
+                    copyRuntimeDllBesideExe [] exeFullPath "libomp140.x86_64.dll"
                     Ok exeFullPath
         else
             // Linux/macOS: g++/clang++ carry ASan natively; -O0 -g mirrors
