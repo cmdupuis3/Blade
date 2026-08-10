@@ -132,6 +132,20 @@ type TypeEnv = {
     /// NOT set for named-function declaration bodies: their unannotated params
     /// are dimensionless by contract, so decl-time strictness is correct there.
     InLambdaBody: bool
+    /// True while ANY callable body is being type-inferred -- a lambda body, a
+    /// named-function declaration body, or an impl-method body. Those three are
+    /// exactly the `enterCallableBody` sites, and exactly the bodies Lowering
+    /// runs `forceCallableBody` (S2 + S4) over, so this flag is the
+    /// checker-side name for "a `let` bound here WILL be materialized".
+    /// Distinct from `InLambdaBody`, which is deliberately unset for
+    /// named-function bodies (their unannotated params are dimensionless by
+    /// contract).
+    ///
+    /// Read together with `OuterScope`: since `enterCallableBody` snapshots
+    /// everything visible at the body boundary, a name in `Variables` but NOT
+    /// in `OuterScope` is bound INSIDE the innermost body -- which is what
+    /// `bodyLocalBinding` tests.
+    InCallableBody: bool
     CurrentCommGroups: int list list
     /// Interface name -> InterfaceDecl
     Interfaces: Map<string, InterfaceDecl>
@@ -278,6 +292,7 @@ let emptyEnv () = {
     OuterScope = Map.empty
     InPolyContext = false
     InLambdaBody = false
+    InCallableBody = false
     CurrentCommGroups = []
     Interfaces = Map.empty
     ImplMethods = Map.empty
@@ -811,8 +826,33 @@ let assignOfBindingMut = function
     | BindLet -> Assignable    // let -> assignable in scope
     | BindMut -> MutPassable   // let mut -> assignable + mut-passable
 
-let enterScope env =
-    { env with OuterScope = Map.foldBack Map.add env.Variables env.OuterScope }
+/// Enter a callable body: snapshot every currently-visible binding into
+/// `OuterScope`, and mark the environment as being inside a body.
+///
+/// The two halves are one operation because the only scope boundary that
+/// exists in the checker IS a callable body -- a LAMBDA body, a named-FUNCTION
+/// declaration body, or an IMPL-METHOD body. (A `{ ... }` block does not enter
+/// a scope; its lets go straight into `Variables`.) Keeping them together is
+/// what makes `bodyLocalBinding` below sound.
+let enterCallableBody env =
+    { env with
+        OuterScope = Map.foldBack Map.add env.Variables env.OuterScope
+        InCallableBody = true }
+
+/// Was `name` bound INSIDE the callable body currently being inferred?
+///
+/// `enterCallableBody` snapshots every visible binding into `OuterScope` at the
+/// body boundary, and only a NESTED body extends it again -- so `OuterScope` is
+/// always the snapshot taken at the INNERMOST enclosing body, and a name absent
+/// from it was bound after that boundary. False at module level (no body, so
+/// nothing is body-local) and false for a captured outer binding.
+///
+/// Shadowing reads conservatively: a body-local `let e` that shadows an outer
+/// `e` answers false, because the outer name is in the snapshot. Callers use
+/// this to opt OUT of an optimization, so a false negative costs efficiency,
+/// never correctness.
+let bodyLocalBinding (name: string) (env: TypeEnv) =
+    env.InCallableBody && not (Map.containsKey name env.OuterScope)
 
 let registerTypeDef name info (env: TypeEnv) =
     { env with TypeDefs = Map.add name info env.TypeDefs }
