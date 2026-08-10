@@ -57,7 +57,14 @@
 #include <cstddef>
 #include <vector>
 #include <complex>
+// CBLAS header flavor. `-DBLADE_BLAS_MKL` is emitted by Build.fs when BLADE_BLAS_FLAVOR=mkl (the define is added by
+// LinAlgPatterns.blasBuildFlags). MKL implements the standard CBLAS interface -- same functions, same enums, same
+// semantics, so nothing below changes -- but ships it under its own header names rather than the netlib ones.
+#if defined(BLADE_BLAS_MKL)
+#include <mkl_cblas.h>
+#else
 #include <cblas.h>
+#endif
 
 namespace blade_linalg {
 
