@@ -16,15 +16,32 @@ A VS Code extension is available [here](https://github.com/cmdupuis3/Blade-REPL)
 
 ## Requirements
 
-Building and running the Blade compiler requires support for:
-* F# version 7 or higher
-* C++ 20 or later
+Building the compiler needs only the **.NET SDK 7+** (zero NuGet dependencies):
 
-Optional dependencies include:
-* NetCDF4
-* Zarr
-* MPI
-* CUDA
+```bash
+git clone https://github.com/cmdupuis3/Blade && cd Blade && dotnet build -c Release
+```
+
+Running Blade programs additionally needs **g++ with OpenMP** (C++17; MSYS2
+UCRT64 on Windows, any recent GCC elsewhere). Check your environment with:
+
+```bash
+blade doctor
+```
+
+which compile-and-run probes every dependency and reports what is configured,
+from where, and what is broken (`--json` for tooling).
+
+Optional dependencies, all probed by `doctor`:
+* **BLAS/LAPACK** — OpenBLAS by default (`OPENBLAS_DIR`), or any CBLAS/LAPACKE
+  implementation (e.g. MKL) via `BLADE_BLAS_LINK`/`BLADE_BLAS_INCLUDE`/
+  `BLADE_BLAS_FLAVOR`; off by default, in which case Blade emits its own loops
+* **NetCDF** (`NETCDF_DIR` or system libnetcdf) — Zarr and CSV need no library
+* **MPI** — MS-MPI on Windows, OpenMPI/MPICH elsewhere
+* **CUDA** — nvcc (+ MSVC Build Tools on Windows)
+
+Configuration is env vars or a `blade.toolchain.json` beside the binary (env
+wins per key); see [docs/plan-toolchain-packaging.md](docs/plan-toolchain-packaging.md).
 
 ## Current State
 
