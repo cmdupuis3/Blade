@@ -20,7 +20,8 @@
 //   * Scalar libm intrinsics: on this platform g++'s std::<fn> and .NET Math.*
 //     both bottom out in ucrtbase, so they are bit-identical. The lone exception
 //     is hypot (no .NET managed equivalent; naive sqrt(x*x+y*y) diverges) --
-//     routed through ucrtbase.dll. Backend choice is a data table (mathBackend),
+//     routed through the platform libm, which the `Ucrt` module below binds by
+//     a logical name so the OS decides the file. Backend choice is a data table (mathBackend),
 //     so any function can be re-pinned to the ucrt shim if a future battery
 //     reveals a managed divergence.
 //   * lgamma and digamma are the intrinsics with NEITHER escape hatch: .NET has
@@ -38,39 +39,74 @@
 module Blade.Interp.Numerics
 
 open System
+open System.Reflection
 open System.Runtime.InteropServices
 open Blade.Types
 open Blade.IR
 open Blade.Interp.Value
 
-// ucrtbase.dll shims (the exact library the g++ binaries call).
-// MinGW ucrt64's libstdc++ forwards <cmath> to ucrtbase; calling ucrtbase
-// directly is therefore provably identical to the compiled binary. Verified
-// bit-for-bit over a 284-value battery for every function below.
+/// Logical import name for the platform's libm. No file is called this on any
+/// OS -- the resolver registered immediately below maps it to the real one.
+/// The externs cannot name the real library directly because a DllImport
+/// string is baked at compile time while the library differs per OS.
+[<Literal>]
+let private LibmLibrary = "blade_libm"
+
+// Bind `blade_libm` to whatever this OS calls its C-runtime math library
+// (Blade.Platforms.libmName: ucrtbase.dll / libm.so.6 / libSystem.dylib).
+// Registered once, at this module's static initialization, which is ordered
+// before any function below can run and therefore before the first extern
+// call. Returning IntPtr.Zero for every other name is load-bearing: it means
+// "not mine", handing that import back to the runtime's default resolution --
+// this resolver is per-ASSEMBLY, so it sees every P/Invoke in Blade.dll and
+// must decline the ones it does not own.
+do
+    let resolver =
+        DllImportResolver(fun libraryName _assembly _searchPath ->
+            if libraryName = LibmLibrary then NativeLibrary.Load(Blade.Platforms.libmName)
+            else IntPtr.Zero)
+    NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), resolver)
+
+// Shims for the platform libm -- the exact library the locally compiled g++
+// binary calls, whichever OS that is. On Windows MinGW ucrt64's libstdc++
+// forwards <cmath> to ucrtbase, so calling ucrtbase directly is provably
+// identical to the compiled binary; verified bit-for-bit over a 284-value
+// battery for every function below. glibc and libSystem stand in the same
+// relation to their platform's g++/clang++ output.
+//
+// Byte-identity is therefore a PER-PLATFORM claim, not a cross-platform one:
+// what the differential gate asserts is that the interpreter and the LOCALLY
+// compiled binary agree, because both bottom out in the same libm. Two
+// different OSes may legitimately disagree in the last ULP of a transcendental
+// -- that is a property of their libms, not a regression here.
+//
+// The module keeps its historical name (Windows/ucrtbase was the platform
+// every rule here was pinned on); the binding it uses is `LibmLibrary` above.
 module private Ucrt =
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double exp(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double log(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double log10(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double sqrt(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double sin(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double cos(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double tan(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double sinh(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double cosh(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double tanh(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double asin(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double acos(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double atan(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double floor(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double ceil(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double fabs(double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double pow(double x, double y)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl)>] extern double atan2(double y, double x)
-    [<DllImport("ucrtbase.dll", CallingConvention=CallingConvention.Cdecl, EntryPoint="hypot")>] extern double hypot(double x, double y)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double exp(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double log(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double log10(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double sqrt(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double sin(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double cos(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double tan(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double sinh(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double cosh(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double tanh(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double asin(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double acos(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double atan(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double floor(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double ceil(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double fabs(double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double pow(double x, double y)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double atan2(double y, double x)
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl, EntryPoint="hypot")>] extern double hypot(double x, double y)
 
 /// Per-intrinsic backend. `Managed` = .NET Math.* (exact/correctly-rounded and
-/// identical to ucrt for these; cheaper, no marshalling). `Ucrt` = ucrtbase.dll
-/// P/Invoke (provably what g++ calls). `BladeRt` = neither library, but a
+/// identical to ucrt for these; cheaper, no marshalling). `Ucrt` = the
+/// platform libm P/Invoke (provably what g++ calls -- ucrtbase.dll on Windows,
+/// which is what the name records). `BladeRt` = neither library, but a
 /// series hand-rolled IDENTICALLY here and in src/cpp/blade_runtime.hpp,
 /// for the intrinsics where no shared library exists to borrow. The choice
 /// is data -- flip an entry to Ucrt to eliminate any residual
