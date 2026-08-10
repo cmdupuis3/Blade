@@ -16155,6 +16155,49 @@ let rec private collectAppRankErrors (subst: Subst) (expr: TypedExpr) : CompileE
         | _ -> []
     here @ (typedExprChildren expr |> List.collect (collectAppRankErrors subst))
 
+/// Post-check sweep for MISPLACED provider writes.
+///
+/// `alias.write("path", A)` is a module-level DECLARATION form, not an
+/// expression: `Lowering`'s decl loop intercepts the whole `let _ = c.write(..)`
+/// binding into `IRModule.ProviderWrites` (a spec keyed by the binding's IRId)
+/// and `genProviderWriteBinding` emits the flatten + the provider's writer for
+/// it. Nothing intercepts a write written anywhere ELSE -- inside a block,
+/// a function or lambda body, a loop body, an if/match branch -- so it used to
+/// lower as an ordinary method call on the alias value and reach g++ as
+/// `c.write(std::string("out.csv"), __v5)`, which fails with `'c' was not
+/// declared in this scope`. Refuse it here instead, where the write's own span
+/// is still in hand.
+///
+/// `nested` is false only for the top node of a module-level `let` RHS -- the
+/// one position the decl loop actually intercepts. Every descent sets it, so
+/// the rule needs no per-construct bookkeeping: anything that is not literally
+/// that node is refused, `let static` included (the intercept arm matches
+/// `TDeclLet` alone).
+let rec private collectMisplacedProviderWrites (subst: Subst) (nested: bool) (expr: TypedExpr) : CompileError list =
+    let here =
+        match expr.Kind with
+        | TExprApp ({ Kind = TExprField (recv, "write", _) }, _) when nested ->
+            (match recv.Kind, subst.Resolve recv.Type with
+             | TExprVar (alias, _, _), IRTNamed pn when (Blade.ProviderRegistry.tryFind pn).IsSome ->
+                 [ { Error = ProviderWriteModuleScope alias
+                     Span = expr.Span
+                     Context = []
+                     Code = None } ]
+             | _ -> [])
+        | _ -> []
+    here @ (typedExprChildren expr |> List.collect (collectMisplacedProviderWrites subst true))
+
+/// Declaration entry points for the sweep above, tagged with whether the
+/// expression sits in the one blessed position (a plain `let`'s RHS).
+let private declWriteRoots (decl: TypedDecl) : (bool * TypedExpr) list =
+    let ofFunc (f: TypedFunctionDecl) = [(true, f.Body)]
+    match decl with
+    | TDeclLet b -> [(false, b.Value)]
+    | TDeclStatic b -> [(true, b.Value)]
+    | TDeclFunction f -> ofFunc f
+    | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
+    | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
+
 /// Every expression a zonked declaration carries, for the sweep above.
 let private declExprs (decl: TypedDecl) : TypedExpr list =
     let ofFunc (f: TypedFunctionDecl) = [f.Body]
@@ -16299,7 +16342,13 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             zonked.Decls |> List.collect declExprs
                          |> List.collect (collectAppRankErrors currentEnv.Subst)
         else []
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors)
+    // Misplaced provider writes: structural, inference-independent (an
+    // unresolved receiver simply fails the IRTNamed match), so unlike the rank
+    // sweep it runs even when the module already has errors.
+    let writeErrors =
+        zonked.Decls |> List.collect declWriteRoots
+                     |> List.collect (fun (nested, e) -> collectMisplacedProviderWrites currentEnv.Subst nested e)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ writeErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()

@@ -12379,11 +12379,20 @@ let tupleLeafRanges (ty: IRType) : (int * int) list =
             range)
     | _ -> [(0, 1)]
 
-/// C++-side name for a binding. Anonymous tuple bindings ("_") get a unique
-/// synthesized name to avoid C++ redefinition errors. Shared by the binding
-/// dispatcher and every per-shape generator in its recursive chain.
+/// C++-side name a binding is DECLARED under. Anonymous tuple bindings ("_")
+/// get a unique synthesized name to avoid C++ redefinition errors. Shared by
+/// the binding dispatcher and every per-shape generator in its recursive chain.
+///
+/// Sanitized, because `addVarName` sanitizes every name it records and every
+/// consumer resolves through `ctx.VarNames`: a binding whose source name is a
+/// C++ reserved word (`let final = ...`, `let class = ...`) used to be declared
+/// raw here and referenced as `final_` / `class_` everywhere else, so the
+/// program either failed to compile at the declaration (`double class = ...`)
+/// or at the first use (`'final_' was not declared in this scope`). One
+/// spelling, decided here. `sanitizeCppName` is idempotent, so the second
+/// application inside `addVarName` is a no-op.
 let bindingCppName (binding: IRBinding) : string =
-    if binding.Name = "_" then sprintf "__tup_%d" binding.Id else binding.Name
+    if binding.Name = "_" then sprintf "__tup_%d" binding.Id else sanitizeCppName binding.Name
 
 /// Generate C++ code for an IR binding: the DISPATCHER.
 /// Each binding shape's emission lives in its own named `genXxxBinding`
@@ -17683,9 +17692,16 @@ let genTypeDefs (modul: IRModule) : string list =
             [sprintf "using %s = %s;" name (primTypeToCpp underlying); ""]
     )
 
+// Every printer below takes the binding's SOURCE name and splits it in two:
+// the `name = ...` LABEL keeps the source spelling (that is what the corpus
+// EXPECT pins and the interpreter's twin printers read), while the C++
+// expressions and temporaries go through `sanitizeCppName`, which is the
+// spelling `bindingCppName` declared the binding under. The two differ only
+// for a binding whose name is a C++ reserved word (`let final = ...`).
+
 /// Generate code to print a scalar value
 let genPrintScalar (name: string) : string list =
-    [sprintf "    cout << \"%s = \" << %s << endl;" name name]
+    [sprintf "    cout << \"%s = \" << %s << endl;" name (sanitizeCppName name)]
 
 /// Rank-2 print in the NESTED form -- `name = [[a, b], [c, d]]` -- which is the
 /// shape a rank-2 literal is written in, so the printed line round-trips as
@@ -17698,7 +17714,8 @@ let genPrintScalar (name: string) : string list =
 /// nothing the extents don't already say. The interpreter's twin
 /// (Interp/ArrayOps.emitNested2) must stay byte-identical to this.
 let private genPrintNested2 (name: string) (outerBound: string) (innerBound: string) : string list =
-    let firstVar = sprintf "%s__first" name
+    let v = sanitizeCppName name
+    let firstVar = sprintf "%s__first" v
     [ sprintf "    cout << \"%s = [\";" name
       sprintf "    for (size_t i = 0; i < %s; i++) {" outerBound
       "        if (i) cout << \", \";"
@@ -17707,7 +17724,7 @@ let private genPrintNested2 (name: string) (outerBound: string) (innerBound: str
       sprintf "        for (size_t j = 0; j < %s; j++) {" innerBound
       sprintf "            if (!%s) cout << \", \";" firstVar
       sprintf "            %s = false;" firstVar
-      sprintf "            cout << %s[i][j];" name
+      sprintf "            cout << %s[i][j];" v
       "        }"
       "        cout << \"]\";"
       "    }"
@@ -17716,11 +17733,12 @@ let private genPrintNested2 (name: string) (outerBound: string) (innerBound: str
 /// Generate code to print an array value (rank 2 nested; other ranks flattened
 /// for easy parsing)
 let genPrintArrayFlat (name: string) (rank: int) : string list =
-    let firstVar = sprintf "%s__first" name
+    let v = sanitizeCppName name
+    let firstVar = sprintf "%s__first" v
     if rank < 1 then
         [sprintf "    cout << \"%s = <rank-0>\" << endl;" name]
     elif rank = 2 then
-        genPrintNested2 name (sprintf "%s.extents[0]" name) (sprintf "%s.extents[1]" name)
+        genPrintNested2 name (sprintf "%s.extents[0]" v) (sprintf "%s.extents[1]" v)
     elif rank <= 3 then
         // Ranks 1-3: flat comma-separated output
         let loopVars = [| "i"; "j"; "k" |]
@@ -17730,13 +17748,13 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
         let loops =
             [ for d in 0 .. rank - 1 ->
                 sprintf "    %sfor (size_t %s = 0; %s < %s.extents[%d]; %s++) {"
-                    (String.replicate d "    ") loopVars.[d] loopVars.[d] name d loopVars.[d] ]
+                    (String.replicate d "    ") loopVars.[d] loopVars.[d] v d loopVars.[d] ]
         let inner =
             let ind = "    " + String.replicate rank "    "
             let idx = loopVars.[0..rank-1] |> Array.map (sprintf "[%s]") |> String.concat ""
             [ sprintf "%sif (!%s) cout << \", \";" ind firstVar
               sprintf "%s%s = false;" ind firstVar
-              sprintf "%scout << %s%s;" ind name idx ]
+              sprintf "%scout << %s%s;" ind v idx ]
         let closes =
             [ for d in rank - 1 .. -1 .. 0 ->
                 sprintf "    %s}" (String.replicate d "    ") ]
@@ -17747,16 +17765,16 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
         // Print as: name[i][j] = [ row0; row1; ... ] for each (i,j)
         [
             sprintf "    cout << \"%s (\" << %s.extents[0] << \"x\" << %s.extents[1] << \"x\" << %s.extents[2] << \"x\" << %s.extents[3] << \"):\" << endl;"
-                name name name name name
-            sprintf "    for (size_t i = 0; i < %s.extents[0]; i++) {" name
-            sprintf "        for (size_t j = 0; j < %s.extents[1]; j++) {" name
+                name v v v v
+            sprintf "    for (size_t i = 0; i < %s.extents[0]; i++) {" v
+            sprintf "        for (size_t j = 0; j < %s.extents[1]; j++) {" v
             sprintf "            cout << \"  %s[\" << i << \"][\" << j << \"] = [\";" name
             sprintf "            bool %s = true;" firstVar
-            sprintf "            for (size_t k = 0; k < %s.extents[2]; k++) {" name
-            sprintf "                for (size_t l = 0; l < %s.extents[3]; l++) {" name
+            sprintf "            for (size_t k = 0; k < %s.extents[2]; k++) {" v
+            sprintf "                for (size_t l = 0; l < %s.extents[3]; l++) {" v
             sprintf "                    if (!%s) cout << \", \";" firstVar
             sprintf "                    %s = false;" firstVar
-            sprintf "                    cout << %s[i][j][k][l];" name
+            sprintf "                    cout << %s[i][j][k][l];" v
             "                }"
             "            }"
             sprintf "            cout << \"]\" << endl;"
@@ -17775,6 +17793,7 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
 ///   - Idx<n>: 1 dim, free range
 /// This correctly handles mixed symmetry (e.g. SymIdx<2> + Idx).
 let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string list =
+    let v = sanitizeCppName name
     // Expand index types into per-dimension info: (loopVar, dimIdx, offsetVars)
     // offsetVars = list of loop vars to subtract from extent (empty for free dims)
     let loopVarNames = [| "i"; "j"; "k"; "l"; "m"; "n_"; "p"; "q" |]
@@ -17817,8 +17836,8 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
     let boundAt (loopVar: string, dimIdx: int, offsets: string list, strict: int) =
         ignore loopVar
         match offsets @ (if strict > 0 then [string strict] else []) with
-        | [] -> sprintf "%s.extents[%d]" name dimIdx
-        | subParts -> sprintf "%s.extents[%d] - %s" name dimIdx (String.concat " - " subParts)
+        | [] -> sprintf "%s.extents[%d]" v dimIdx
+        | subParts -> sprintf "%s.extents[%d] - %s" v dimIdx (String.concat " - " subParts)
     if rank < 1 || rank > 8 then
         [sprintf "    cout << \"%s = <rank-%d array>\" << endl;" name rank]
     elif rank = 2 then
@@ -17828,7 +17847,7 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
         // offsets above name.
         genPrintNested2 name (boundAt (List.item 0 dims)) (boundAt (List.item 1 dims))
     else
-        let firstVar = sprintf "%s__first" name
+        let firstVar = sprintf "%s__first" v
         let opens = [
             sprintf "    cout << \"%s = [\";" name
             sprintf "    bool %s = true;" firstVar ]
@@ -17844,7 +17863,7 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
         let inner = [
             sprintf "%sif (!%s) cout << \", \";" innerIndent firstVar
             sprintf "%s%s = false;" innerIndent firstVar
-            sprintf "%scout << %s%s;" innerIndent name idx ]
+            sprintf "%scout << %s%s;" innerIndent v idx ]
         let closes =
             [for d in rank - 1 .. -1 .. 0 ->
                 sprintf "    %s}" (String.replicate d "    ")]
@@ -17867,14 +17886,15 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
 /// stays refused.
 let genPrintArrayWreath (name: string) (levels: (int * bool) list) (extent: int64) : string list =
     let levelArgs = orbLevelArgs levels
-    let firstVar = sprintf "%s__first" name
+    let v = sanitizeCppName name
+    let firstVar = sprintf "%s__first" v
     [ sprintf "    cout << \"%s = [\";" name
       sprintf "    bool %s = true;" firstVar
       sprintf "    for (int64_t __ok = 0; __ok < orbit_wreath_utilities::orb_cell_count<%s>(%d); __ok++) {"
               levelArgs extent
       sprintf "        if (!%s) cout << \", \";" firstVar
       sprintf "        %s = false;" firstVar
-      sprintf "        cout << %s[__ok];" name
+      sprintf "        cout << %s[__ok];" v
       "    }"
       "    cout << \"]\" << endl;" ]
 
@@ -18022,15 +18042,16 @@ let genPrintStatements (modul: IRModule) : string list =
                             | _ -> None)
                     match structFields, rank with
                     | Some fields, 1 when not (List.isEmpty fields) ->
-                        let firstVar = sprintf "%s__first" b.Name
+                        let bv = sanitizeCppName b.Name
+                        let firstVar = sprintf "%s__first" bv
                         let fieldPrints =
                             fields |> List.mapi (fun i (fname, _) ->
                                 let prefix = if i = 0 then "" else ", "
-                                sprintf "        cout << \"%s%s: \" << %s[i].%s;" prefix fname b.Name fname)
+                                sprintf "        cout << \"%s%s: \" << %s[i].%s;" prefix fname bv fname)
                         [
                             sprintf "    cout << \"%s = [\";" b.Name
                             sprintf "    bool %s = true;" firstVar
-                            sprintf "    for (size_t i = 0; i < %s.extents[0]; i++) {" b.Name
+                            sprintf "    for (size_t i = 0; i < %s.extents[0]; i++) {" bv
                             sprintf "        if (!%s) cout << \", \";" firstVar
                             sprintf "        %s = false;" firstVar
                             sprintf "        cout << \"{\";"
@@ -18107,14 +18128,15 @@ let genPrintStatements (modul: IRModule) : string list =
                 if isCompoundRowSubview then
                     [sprintf "    // (trailing-row view '%s' not auto-printed; the raw T* row carries no extents -- derive scalars via %s(t))" b.Name b.Name]
                 elif isRaggedRowBinding then
-                    let firstVar = sprintf "%s__first" b.Name
+                    let bv = sanitizeCppName b.Name
+                    let firstVar = sprintf "%s__first" bv
                     [
                         sprintf "    cout << \"%s = [\";" b.Name
                         sprintf "    bool %s = true;" firstVar
-                        sprintf "    for (size_t __rk = 0; __rk < %s.len; __rk++) {" b.Name
+                        sprintf "    for (size_t __rk = 0; __rk < %s.len; __rk++) {" bv
                         sprintf "        if (!%s) cout << \", \";" firstVar
                         sprintf "        %s = false;" firstVar
-                        sprintf "        cout << %s[__rk];" b.Name
+                        sprintf "        cout << %s[__rk];" bv
                         "    }"
                         "    cout << \"]\" << endl;"
                     ]
@@ -18124,20 +18146,21 @@ let genPrintStatements (modul: IRModule) : string list =
                     // Ragged<T> sharing the parent's metadata). Iterate rows
                     // via .lens; print as the flat value sequence the
                     // validation framework expects.
-                    let firstVar = sprintf "%s__first" b.Name
+                    let bv = sanitizeCppName b.Name
+                    let firstVar = sprintf "%s__first" bv
                     // Nested, like every other rank-2 print (genPrintNested2):
                     // a ragged array's rows are the one thing its flat pool
                     // cannot show, and `lens[i]` is exactly the row boundary.
                     [
                         sprintf "    cout << \"%s = [\";" b.Name
-                        sprintf "    for (size_t __ri = 0; __ri < %s.extents[0]; __ri++) {" b.Name
+                        sprintf "    for (size_t __ri = 0; __ri < %s.extents[0]; __ri++) {" bv
                         "        if (__ri) cout << \", \";"
                         "        cout << \"[\";"
                         sprintf "        bool %s = true;" firstVar
-                        sprintf "        for (size_t __rj = 0; __rj < %s.lens[__ri]; __rj++) {" b.Name
+                        sprintf "        for (size_t __rj = 0; __rj < %s.lens[__ri]; __rj++) {" bv
                         sprintf "            if (!%s) cout << \", \";" firstVar
                         sprintf "            %s = false;" firstVar
-                        sprintf "            cout << %s[__ri][__rj];" b.Name
+                        sprintf "            cout << %s[__ri][__rj];" bv
                         "        }"
                         "        cout << \"]\";"
                         "    }"

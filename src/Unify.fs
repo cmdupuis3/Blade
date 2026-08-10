@@ -300,6 +300,8 @@ type TypeError =
     | ProviderWriteNeedsArray of alias: string
     | ProviderWriteNamedBinding of alias: string
     | ProviderWriteArgs of alias: string
+    /// `alias.write(...)` written anywhere but a module-level `let` binding.
+    | ProviderWriteModuleScope of alias: string
     | ProviderImportByModule of suggestion: string * providers: string
     | ProviderNoSelectiveImport of pname: string
     | Other of string
