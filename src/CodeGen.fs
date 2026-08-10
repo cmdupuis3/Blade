@@ -9117,13 +9117,22 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             | _ -> None
         if densePartialSubview.IsSome then densePartialSubview.Value
         else
-        let producesWrapper =
+        let rec producesWrapperOf value =
             match value with
             | IRFieldAccess _ -> true
             | IRVar _ -> true                // assume wrapper (most producers migrated)
             | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
             | IRApp _ -> true                // function-call returns wrapped Array
             | IRTupleProj _ -> true          // tuple elements carry wrappers (irTypeToCpp IRTTuple)
+            // An array-valued SELECT is a wrapper exactly when both branches
+            // are -- it renders as a C++ ternary, whose type is the branches'
+            // common type. This is what a recursive array's out-of-prefix lag
+            // read binds (`if n - 3 >= 0 then __lag0_m else __zs0_m`, both
+            // Array<T, N> wrappers); declaring it on the raw `promote<>::type`
+            // path instead would drop the extents every `.data`/`.extents`
+            // consumer downstream needs. Branch DISAGREEMENT keeps the raw
+            // path, so no arm gets a wrapper it cannot produce.
+            | IRIf (_, t, e) -> producesWrapperOf t && producesWrapperOf e
             | IRIndex (a, (IRTuple coords) :: _, _) ->
                 // A PARTIAL sparse read (formalism 3.5) produces a wrapper:
                 // Sparse<T, RR> for a residual-rank >= 2 read
@@ -9147,6 +9156,7 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
                       | CompoundFull -> false)
                  | _ -> false)
             | _ -> false
+        let producesWrapper = producesWrapperOf value
         let cppType =
             match resolvedTy with
             | ArrayElem arr when producesWrapper -> cppArrayTypeStr arr

@@ -6014,6 +6014,33 @@ let private isInlineArrayLitArg (e: IRExpr) : bool =
     | IRArrayLit _ -> true
     | _ -> false
 
+/// An ARRAY-VALUED SELECT sitting directly in a loop form's `Arrays` list --
+/// the third instance of the same gap as `isInlineArrayLitArg`. A recursive
+/// array's out-of-prefix lag read desugars to exactly this shape: TypeCheck's
+/// `rewritePrefixReads` hoists the clamped row read into a `__lag<k>_` binding
+/// and leaves the bounds SELECT inline (`if n - 3 >= 0 then __lag0_m else
+/// __zs0_m`), so an elementwise use like `0.5 * prefix(n - 3)` puts the whole
+/// `if` in a loop form's array slot. Codegen's auto-materialize knows only the
+/// blessed mask/intersect/union/unique forms, so the select fell through to the
+/// `arr<i>` placeholder and the nest peeled an identifier it never declared.
+///
+/// Hoisting the select to its own let-RHS is what routing the same expression
+/// through a helper function (`method_for(zip(...)) <@> ... |> compute`) already
+/// does. It is only half the fix: the binding this mints must also be DECLARED
+/// as an `Array<T, N>` rather than a raw `promote<>::type` pointer, which is
+/// CodeGen's `producesWrapperOf` IRIf arm. Changing one without the other trades
+/// the undeclared `arr<i>` for a pointer with no `.extents`.
+///
+/// Scalar selects are untouched -- they render inline as an ordinary ternary
+/// and never occupy an array slot.
+let private isArrayValuedSelect (e: IRExpr) : bool =
+    match e with
+    | IRIf _ ->
+        match typeOf e with
+        | ArrayElem _ -> true
+        | _ -> false
+    | _ -> false
+
 /// Peel any IRLet chain that descendant lifts produced.
 /// When a sub-expression's lift wraps it in `IRLet(id, v, IRLet(...,inner))`,
 /// the chain shouldn't be visible to the parent context (e.g., an outer
@@ -6490,7 +6517,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
+                   || isArrayValuedSelect inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -6506,7 +6534,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
+                   || isArrayValuedSelect inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -6522,7 +6551,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
+                   || isArrayValuedSelect inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
