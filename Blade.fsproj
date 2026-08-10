@@ -469,6 +469,12 @@
       <Link>cpp/blade_lapack.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- ASan allocator-stats export (BLADE-MEMCHECK line at exit); included
+         only by programs generated under BLADE_MEMCHECK=1. -->
+    <None Include="src/cpp/blade_memcheck.hpp">
+      <Link>cpp/blade_memcheck.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <!-- Round D's cuBLAS swap-table verification, compiled with nvcc and run
          by Blade.Tests.CudaTests.runCublasSwapTests (`blade test cuda`).
          Needs a real GPU, so it rides the opt-in CUDA phase. -->
