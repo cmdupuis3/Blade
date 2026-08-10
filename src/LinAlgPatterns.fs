@@ -24,6 +24,69 @@ open Blade.Types
 
 // Availability gate
 
+/// How the BLAS/LAPACK toolchain was configured: the four TIERS of
+/// docs/plan-toolchain-packaging.md, resolved through `Toolchain.get`
+/// (process env first and live, blade.toolchain.json second). First match
+/// wins:
+///
+///   BLADE_BLAS=0|off     -> TierOff        (everything native)
+///   BLADE_BLAS_LINK set  -> TierExplicit   (vendor-neutral: verbatim
+///                                           include dirs + link inputs;
+///                                           the MKL/BLIS door)
+///   OPENBLAS_DIR set     -> TierOpenBlasDir (convenience shorthand for an
+///                                           OpenBLAS install prefix;
+///                                           expanded via Platforms)
+///   BLADE_BLAS=1|on      -> TierSystem     (bare -lopenblas on the default
+///                                           search paths)
+///   otherwise            -> TierOff
+type BlasTier =
+    | TierOff
+    | TierExplicit
+    | TierOpenBlasDir
+    | TierSystem
+
+/// Which CBLAS/LAPACKE header family the shim headers should include.
+/// `FlavorMkl` makes `blasBuildFlags` add `-DBLADE_BLAS_MKL`, under which
+/// blade_linalg.hpp / blade_lapack.hpp include mkl_cblas.h / mkl_lapacke.h
+/// (MKL implements the standard interfaces but does not ship the netlib
+/// header names). `FlavorGeneric` is any other conforming install; both it
+/// and the default `FlavorOpenBlas` use <cblas.h> / <lapacke.h>.
+type BlasFlavor =
+    | FlavorOpenBlas
+    | FlavorMkl
+    | FlavorGeneric
+
+/// BLADE_BLAS_FLAVOR: "openblas" (default when unset) | "mkl" | anything
+/// else -> generic.
+let blasFlavor () : BlasFlavor =
+    match Toolchain.get "BLADE_BLAS_FLAVOR" with
+    | None -> FlavorOpenBlas
+    | Some v ->
+        match v.Trim().ToLowerInvariant() with
+        | "mkl" -> FlavorMkl
+        | "openblas" -> FlavorOpenBlas
+        | _ -> FlavorGeneric
+
+/// Resolve the tier. Deliberately CHEAP -- a handful of env/file lookups and
+/// no filesystem probing -- because the gates below are consulted from
+/// codegen's per-node routing decisions. The filesystem half (locating the
+/// actual library file) lives in `blasBuildFlags`, which only Build.fs calls
+/// and only once per compile.
+///
+/// A FUNCTION, never a module-level `let`: a module-level binding freezes
+/// the environment read at first touch, which would make a mid-process pin
+/// (a test's use-guard, a hand-run) silently ineffective. Every consultation
+/// re-reads.
+let resolveBlasTier () : BlasTier =
+    let gate = Toolchain.get "BLADE_BLAS" |> Option.map (fun v -> v.Trim().ToLowerInvariant())
+    match gate with
+    | Some "0" | Some "off" -> TierOff
+    | _ ->
+        if (Toolchain.get "BLADE_BLAS_LINK").IsSome then TierExplicit
+        elif (Toolchain.get "OPENBLAS_DIR").IsSome then TierOpenBlasDir
+        elif gate = Some "1" || gate = Some "on" then TierSystem
+        else TierOff
+
 /// The BLAS availability gate -- the single source of truth, consulted by
 /// both `shimEntryPoint` below and `Build.fs` (which decides whether the g++
 /// line carries `-DBLADE_HAS_BLAS` plus the include/link flags). Two copies of
@@ -31,30 +94,18 @@ open Blade.Types
 /// configuration where a program emits `blade_linalg::` calls into a header
 /// that will not compile.
 ///
-///   BLADE_BLAS=1|on   -> force on
-///   BLADE_BLAS=0|off  -> force off
-///   unset             -> follow OPENBLAS_DIR (set = on)
-///
 /// Default-off is deliberate: BLAS may differ in the last ULP, and the
 /// interpreter/oracle differentials demand byte-identical output, so Blade's
 /// own emitted loops remain the verification truth.
-///
-/// A FUNCTION, never a module-level `let`: a module-level binding freezes the
-/// environment read at first touch, which would make a mid-process pin (a
-/// test's use-guard, a hand-run) silently ineffective. Every consultation
-/// re-reads.
 let blasAvailable () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_BLAS") with
-    | "1" | "on" -> true
-    | "0" | "off" -> false
-    | _ ->
-        match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
-        | null | "" -> false
-        | _ -> true
+    resolveBlasTier () <> TierOff
 
-/// The LAPACK availability gate. Rides the same environment resolution as
-/// `blasAvailable` (OpenBLAS bundles LAPACKE), but is a SEPARATE FUNCTION with
-/// its own C++ define (`-DBLADE_HAS_LAPACK`) and Build.fs include-sniff arm.
+/// The LAPACK availability gate: a SEPARATE FUNCTION with its own C++ define
+/// (`-DBLADE_HAS_LAPACK`) and Build.fs include-sniff arm. On the OpenBLAS
+/// tiers it rides the BLAS resolution (OpenBLAS bundles LAPACKE); on
+/// TierExplicit it requires its own BLADE_LAPACK_LINK, so a BLAS-only
+/// install (e.g. BLIS without LAPACKE) dispatches contractions while `eigh`
+/// still falls back to the synthesized Jacobi source.
 ///
 /// NUMERICS WARNING: unlike BLAS routes, which differ from Blade's loops only
 /// in the last ULP, an eigensolver's output is NOT UNIQUE (eigenvector signs
@@ -64,13 +115,69 @@ let blasAvailable () : bool =
 /// bit-reproducible against the native Jacobi path -- `interp` /
 /// `diff-oracle` must never run with this gate set.
 let lapackAvailable () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_BLAS") with
-    | "1" | "on" -> true
-    | "0" | "off" -> false
-    | _ ->
-        match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
-        | null | "" -> false
-        | _ -> true
+    match resolveBlasTier () with
+    | TierOff -> false
+    | TierExplicit -> (Toolchain.get "BLADE_LAPACK_LINK").IsSome
+    | TierOpenBlasDir | TierSystem -> true
+
+/// The compile-half / link-half flag strings for a g++ line that must reach
+/// BLAS and/or LAPACK -- the EXPANSION of the resolved tier, separated from
+/// the cheap gates above because this half touches the filesystem
+/// (Platforms.findSharedLib). Build.compileCppWithExtra calls it exactly
+/// when one of its include-sniffs fired with its gate on, so `wantsBlas` /
+/// `wantsLapack` are sniff-AND-gate conjunctions and at least one is true.
+///
+/// Compile half: the `-DBLADE_HAS_*` defines (per header, so a BLAS-only
+/// program stays distinguishable from a LAPACK-carrying one),
+/// `-DBLADE_BLAS_MKL` under FlavorMkl, then `-I` per include dir. Link
+/// half: library inputs, BLAS's first (linker order: LAPACKE may reference
+/// BLAS symbols).
+///
+///   TierExplicit    -> BLADE_BLAS_INCLUDE / BLADE_LAPACK_INCLUDE dirs
+///                      (PathSeparator-delimited lists), BLADE_BLAS_LINK /
+///                      BLADE_LAPACK_LINK verbatim.
+///   TierOpenBlasDir -> -I<dir>/include; link the shared library found under
+///                      the prefix (Platforms.findSharedLib -- MinGW links a
+///                      DLL's export table directly), falling back to
+///                      -L<dir>/lib -lopenblas.
+///   TierSystem      -> bare -lopenblas on the default search paths.
+let blasBuildFlags (wantsBlas: bool) (wantsLapack: bool) : string * string =
+    let defines =
+        (if wantsBlas then " -DBLADE_HAS_BLAS" else "")
+        + (if wantsLapack then " -DBLADE_HAS_LAPACK" else "")
+        + (match blasFlavor () with FlavorMkl -> " -DBLADE_BLAS_MKL" | _ -> "")
+    let splitPaths (v: string option) =
+        match v with
+        | None -> []
+        | Some s ->
+            s.Split(System.IO.Path.PathSeparator)
+            |> Array.map (fun p -> p.Trim())
+            |> Array.filter (fun p -> p <> "")
+            |> Array.toList
+    match resolveBlasTier () with
+    | TierOff -> ("", "")  // gate/sniff mismatch upstream; emit nothing rather than guess
+    | TierExplicit ->
+        let includeFlags =
+            splitPaths (Toolchain.get "BLADE_BLAS_INCLUDE")
+            @ (if wantsLapack then splitPaths (Toolchain.get "BLADE_LAPACK_INCLUDE") else [])
+            |> List.distinct
+            |> List.map (sprintf " -I\"%s\"")
+            |> String.concat ""
+        let verbatim key =
+            match Toolchain.get key with Some l -> " " + l.Trim() | None -> ""
+        let linkFlags =
+            verbatim "BLADE_BLAS_LINK"
+            + (if wantsLapack then verbatim "BLADE_LAPACK_LINK" else "")
+        (defines + includeFlags, linkFlags)
+    | TierOpenBlasDir ->
+        let dir = Toolchain.get "OPENBLAS_DIR" |> Option.defaultValue ""
+        let incFlag = sprintf " -I\"%s\"" (System.IO.Path.Combine(dir, "include"))
+        let linkFlags =
+            match Platforms.findSharedLib dir "openblas" with
+            | Some lib -> sprintf " \"%s\"" lib
+            | None -> sprintf " -L\"%s\" -lopenblas" (System.IO.Path.Combine(dir, "lib"))
+        (defines + incFlag, linkFlags)
+    | TierSystem -> (defines, " -lopenblas")
 
 /// The cuBLAS availability gate -- the device sibling of `blasAvailable`, with
 /// its own environment variable:

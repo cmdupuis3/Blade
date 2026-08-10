@@ -81,7 +81,7 @@ type Capabilities = {
 
 /// Backend requirement inferred from generated source. `RequiresCuda` when
 /// codegen emitted at least one device kernel; `RequiresMpi` when the program
-/// includes <mpi.h> (needs -lmsmpi at link and mpiexec at run); `CpuOnly` otherwise.
+/// includes <mpi.h> (needs the per-OS MPI link flag and mpiexec at run); `CpuOnly` otherwise.
 type BackendReq = CpuOnly | RequiresCuda | RequiresMpi
 
 /// Resolution of (capabilities, requirement) into a concrete compile action.
@@ -142,9 +142,10 @@ let private probeGpu () : bool =
 
 let detectCapabilities () : Capabilities =
     let platform =
-        if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then PWindows
-        elif RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then PMacOS
-        else PLinux
+        match Platforms.os with
+        | Platforms.Windows -> PWindows
+        | Platforms.MacOS -> PMacOS
+        | Platforms.Linux -> PLinux
     {
         Platform = platform
         HasGpp   = probeTool "g++" "--version"
@@ -172,8 +173,9 @@ let inferBackendReq (generatedSource: string) : BackendReq =
 
 /// Resolve (capabilities, requirement) into a compile action. A test never
 /// picks a compiler; it produces a BackendReq and this picks the toolchain.
-/// MPI compiles with plain g++ (compileCpp appends -lmsmpi when it sees the
-/// mpi.h include); a missing MS-MPI import lib fails the g++ link loudly.
+/// MPI compiles with plain g++ (compileCpp appends the per-OS MPI link flag
+/// when it sees the mpi.h include); a missing MPI import lib fails the g++
+/// link loudly.
 let resolveCompile (caps: Capabilities) (req: BackendReq) : CompilePlan =
     match req, caps.Platform with
     | CpuOnly, _ when not caps.HasGpp           -> SkipCompile "requires g++, not found"
@@ -282,7 +284,7 @@ let buildCublasDevice (cppFullPath: string) : Result<string, string> =
 /// nvcc-built device DLL here (MinGW links DLL export tables directly).
 let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
     try
-        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        let exeExt = Platforms.exeExtension
         let exeFile = Path.ChangeExtension(cppFile, exeExt)
         
         let cppFullPath = Path.GetFullPath(cppFile)
@@ -299,39 +301,36 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         // Provider programs emit `#include <netcdf.h>`, needing the netcdf
         // header at compile and library at link -- not on g++'s default
         // search path in the common Windows case (MSVC-built netCDF with
-        // an MSVC-format import lib). Resolution:
-        //   - NETCDF_DIR set: add -I<dir>\include, link the DLL in <dir>\bin
-        //     directly; falls back to -L<dir>\lib -lnetcdf.
-        //   - NETCDF_DIR unset: bare -lnetcdf (default MSYS2 pacman install).
+        // an MSVC-format import lib). Resolution (NETCDF_DIR comes through
+        // Toolchain.get: process env first, blade.toolchain.json second):
+        //   - NETCDF_DIR set: add -I<dir>/include, link the shared library
+        //     Platforms.findSharedLib locates under the prefix (the direct
+        //     DLL/.so path); falls back to -L<dir>/lib -lnetcdf.
+        //   - NETCDF_DIR unset: bare -lnetcdf (default package-manager
+        //     install: MSYS2 pacman, apt, brew).
         let needsNetcdf =
             try (File.ReadAllText cppFullPath).Contains "#include <netcdf.h>" with _ -> false
 
-        // MPI programs include <mpi.h> and call the MPI C API -- the MSYS2
-        // mingw-w64 msmpi package puts mpi.h/libmsmpi.a on g++'s default
-        // search paths, so a bare -lmsmpi suffices (mirrors -lnetcdf above).
+        // MPI programs include <mpi.h> and call the MPI C API -- the MPI
+        // dev package puts the header/import lib on g++'s default search
+        // paths in the supported installs (MSYS2 mingw-w64 `msmpi` on
+        // Windows, OpenMPI/MPICH elsewhere), so the bare per-OS link flag
+        // suffices (mirrors -lnetcdf above; Platforms.mpiLinkFlag owns the
+        // spelling).
         let needsMpi =
             try (File.ReadAllText cppFullPath).Contains "#include <mpi.h>" with _ -> false
-        let mpiFlags = if needsMpi then " -lmsmpi" else ""
+        let mpiFlags = if needsMpi then " " + Platforms.mpiLinkFlag else ""
         let netcdfFlags =
             if not needsNetcdf then ""
             else
-                (match System.Environment.GetEnvironmentVariable("NETCDF_DIR") with
-                 | null | "" -> " -lnetcdf"
-                 | dir ->
+                (match Toolchain.get "NETCDF_DIR" with
+                 | None -> " -lnetcdf"
+                 | Some dir ->
                      let incFlag = sprintf " -I\"%s\"" (Path.Combine(dir, "include"))
-                     let binDir = Path.Combine(dir, "bin")
-                     let dllPath = Path.Combine(binDir, "netcdf.dll")
                      let linkFlag =
-                         if File.Exists dllPath then sprintf " \"%s\"" dllPath
-                         else
-                             let glob =
-                                 try
-                                     if Directory.Exists binDir then Directory.GetFiles(binDir, "netcdf*.dll") |> Array.tryHead
-                                     else None
-                                 with _ -> None
-                             (match glob with
-                              | Some p -> sprintf " \"%s\"" p
-                              | None -> sprintf " -L\"%s\" -lnetcdf" (Path.Combine(dir, "lib")))
+                         match Platforms.findSharedLib dir "netcdf" with
+                         | Some lib -> sprintf " \"%s\"" lib
+                         | None -> sprintf " -L\"%s\" -lnetcdf" (Path.Combine(dir, "lib"))
                      incFlag + linkFlag)
 
         // Linalg-dispatch programs emit `#include "blade_linalg.hpp"` and
@@ -342,50 +341,32 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         // disagree -- an emit and a compile with different gates fails
         // loudly at the `#error` rather than silently miscompiling.
         //
-        // Gate semantics (BLADE_BLAS=1|on / 0|off / unset -> follow
-        // OPENBLAS_DIR) live in `blasAvailable`; default-off since BLAS may
-        // differ in the last ULP and the differentials demand byte-
-        // identical output. Resolution, same as NETCDF_DIR above:
-        //   - OPENBLAS_DIR set: add -I<dir>\include, link the DLL in
-        //     <dir>\bin directly; falls back to -L<dir>\lib -lopenblas.
-        //   - OPENBLAS_DIR unset (BLADE_BLAS forced on): bare -lopenblas.
+        // Gate semantics are the four TIERS of `LinAlgPatterns.resolveBlasTier`
+        // (BLADE_BLAS=0 off / BLADE_BLAS_LINK explicit / OPENBLAS_DIR prefix /
+        // BLADE_BLAS=1 bare-system); default-off since BLAS may differ in the
+        // last ULP and the differentials demand byte-identical output. The
+        // tier's EXPANSION into compile/link halves -- defines, include dirs,
+        // library inputs, the MKL header-flavor define -- is
+        // `LinAlgPatterns.blasBuildFlags`: one gate, one expansion, consumed
+        // here.
         let cppTextForSniff = try File.ReadAllText cppFullPath with _ -> ""
         let usesLinalgShim = cppTextForSniff.Contains "#include \"blade_linalg.hpp\""
         let blasGateOn = Blade.LinAlgPatterns.blasAvailable ()
-        // LAPACK rides the same OpenBLAS install (LAPACKE is bundled) but
-        // gets its own sniff arm and define, so a BLAS-only program stays
-        // distinguishable from a LAPACK-carrying one; same #error-on-mismatch guarantee as BLAS.
+        // LAPACK gets its own sniff arm and define, so a BLAS-only program
+        // stays distinguishable from a LAPACK-carrying one (same
+        // #error-on-mismatch guarantee as BLAS). On the OpenBLAS tiers its
+        // gate rides the BLAS resolution (LAPACKE is bundled); on the
+        // explicit tier it requires BLADE_LAPACK_LINK -- see lapackAvailable.
         let usesLapackShim = cppTextForSniff.Contains "#include \"blade_lapack.hpp\""
         let lapackGateOn = Blade.LinAlgPatterns.lapackAvailable ()
-        // Split into a COMPILE half (define + -I, precedes the source) and
-        // a LINK half (library, follows it); DEFINES stay per-header
+        // Split into a COMPILE half (defines + -I, precedes the source) and
+        // a LINK half (library inputs, follows it); DEFINES stay per-header
         // (`wantsBlas`/`wantsLapack` each gate on include-present AND its own flag).
         let wantsBlas = usesLinalgShim && blasGateOn
         let wantsLapack = usesLapackShim && lapackGateOn
         let (blasCompileFlags, blasLinkFlags) =
             if not (wantsBlas || wantsLapack) then ("", "")
-            else
-                let defines =
-                    (if wantsBlas then " -DBLADE_HAS_BLAS" else "")
-                    + (if wantsLapack then " -DBLADE_HAS_LAPACK" else "")
-                (match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
-                 | null | "" -> (defines, " -lopenblas")
-                 | dir ->
-                     let incFlag = sprintf " -I\"%s\"" (Path.Combine(dir, "include"))
-                     let binDir = Path.Combine(dir, "bin")
-                     let dllPath = Path.Combine(binDir, "libopenblas.dll")
-                     let linkFlag =
-                         if File.Exists dllPath then sprintf " \"%s\"" dllPath
-                         else
-                             let glob =
-                                 try
-                                     if Directory.Exists binDir then Directory.GetFiles(binDir, "*openblas*.dll") |> Array.tryHead
-                                     else None
-                                 with _ -> None
-                             (match glob with
-                              | Some p -> sprintf " \"%s\"" p
-                              | None -> sprintf " -L\"%s\" -lopenblas" (Path.Combine(dir, "lib")))
-                     (defines + incFlag, linkFlag))
+            else Blade.LinAlgPatterns.blasBuildFlags wantsBlas wantsLapack
 
         // The DEVICE half. `blade_linalg_cuda.hpp`'s include line is written
         // by codegen exactly when a node route resolved to `CudaBlas`; the
@@ -448,7 +429,7 @@ let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
 /// through with -Xcompiler. Mirrors compileCpp's subprocess machinery.
 let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
     try
-        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        let exeExt = Platforms.exeExtension
         let exeFile = Path.ChangeExtension(cuFile, exeExt)
         let cuFullPath = Path.GetFullPath(cuFile)
         let exeFullPath = Path.GetFullPath(exeFile)
@@ -458,7 +439,7 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
         // -Xcompiler (cl.exe uses different flag spellings, so Windows drops
         // the g++-specific ones and relies on nvcc/cl defaults).
         let hostWarn =
-            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+            if Platforms.os = Platforms.Windows then
                 // CCCL (thrust/complex.h) refuses MSVC's traditional
                 // preprocessor; the conforming one is safe for all generated
                 // CUDA code, so it is passed unconditionally.
@@ -505,11 +486,11 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
 /// both (resolving the CUDA runtime automatically). The extern "C" launch
 /// wrapper is the unmangled boundary symbol both compilers agree on.
 let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Result<string, string> =
-    let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-    let exeExt = if onWindows then ".exe" else ".out"
+    let onWindows = Platforms.os = Platforms.Windows
+    let exeExt = Platforms.exeExtension
     let cuFull = Path.GetFullPath(cuFile)
     let cppFull = Path.GetFullPath(cppFile)
-    let objExt = if onWindows then ".obj" else ".o"
+    let objExt = Platforms.objExtension
     let cuObj = Path.ChangeExtension(cuFull, ".cu" + objExt)
     let cppObj = Path.ChangeExtension(cppFull, ".cpp" + objExt)
     let exeFull = Path.GetFullPath(Path.Combine(outputDir, Path.GetFileNameWithoutExtension(cppFile) + exeExt))
@@ -620,17 +601,18 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
 /// probed; MS-MPI's exit codes are untrustworthy). Lazy: resolved once.
 let mpiexecPath : Lazy<string option> =
     lazy (
+        let mpiexecName = if Platforms.os = Platforms.Windows then "mpiexec.exe" else "mpiexec"
         let fromEnv (scope: EnvironmentVariableTarget option) =
             try
                 let v =
                     match scope with
                     | Some s -> Environment.GetEnvironmentVariable("MSMPI_BIN", s)
-                    | None -> Environment.GetEnvironmentVariable("MSMPI_BIN")
+                    | None -> (match Toolchain.get "MSMPI_BIN" with Some d -> d | None -> null)
                 match v with
                 | null | "" -> None
-                | d -> Some (Path.Combine(d, "mpiexec.exe"))
+                | d -> Some (Path.Combine(d, mpiexecName))
             with _ -> None
-        let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+        let onWindows = Platforms.os = Platforms.Windows
         [ fromEnv None
           (if onWindows then fromEnv (Some EnvironmentVariableTarget.Machine) else None)
           (if onWindows then Some @"C:\Program Files\Microsoft MPI\Bin\mpiexec.exe" else None)
@@ -640,9 +622,10 @@ let mpiexecPath : Lazy<string option> =
             if Path.IsPathRooted exe then File.Exists exe
             else probeToolLoose exe "-help" "mpi"))
 
-/// Whether g++ can compile+link an MPI program (-lmsmpi resolvable, i.e. the
-/// MSYS2 msmpi package or equivalent is installed): one real link probe in a
-/// temp dir, lazy so ordinary invocations never pay for it.
+/// Whether g++ can compile+link an MPI program (Platforms.mpiLinkFlag
+/// resolvable -- the MSYS2 msmpi package on Windows, the OpenMPI/MPICH dev
+/// package elsewhere): one real link probe in a temp dir, lazy so ordinary
+/// invocations never pay for it.
 let hasMpiLink : Lazy<bool> =
     lazy (
         try
@@ -651,8 +634,8 @@ let hasMpiLink : Lazy<bool> =
             let src = Path.Combine(dir, "mpi_probe.cpp")
             File.WriteAllText(src,
                 "#include <mpi.h>\nint main(int argc, char** argv){ MPI_Init(&argc,&argv); MPI_Finalize(); return 0; }\n")
-            let exe = Path.Combine(dir, "mpi_probe.exe")
-            let psi = ProcessStartInfo("g++", sprintf "-std=c++17 \"%s\" -lmsmpi -o \"%s\"" src exe)
+            let exe = Path.Combine(dir, "mpi_probe" + Platforms.exeExtension)
+            let psi = ProcessStartInfo("g++", sprintf "-std=c++17 \"%s\" %s -o \"%s\"" src Platforms.mpiLinkFlag exe)
             psi.RedirectStandardOutput <- true
             psi.RedirectStandardError <- true
             psi.UseShellExecute <- false
@@ -669,7 +652,7 @@ let hasMpiLink : Lazy<bool> =
 /// rank's exit code. 60s timeout (multi-process startup is slower than a bare exe).
 let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, string> =
     match mpiexecPath.Value with
-    | None -> Error "mpiexec not found (install the MS-MPI runtime)"
+    | None -> Error (sprintf "mpiexec not found (%s)" Platforms.mpiRuntimeHint)
     | Some mpiexec ->
         try
             let exeFullPath = Path.GetFullPath(exeFile)
