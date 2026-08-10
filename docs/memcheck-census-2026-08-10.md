@@ -26,6 +26,25 @@
 > `let rec` build-buffer double-materialize (both the build array and its
 > final copy stay live — 2x the by-design footprint, e.g. ~1.5 GB of
 > 09_qg's remaining 3.39 GB).
+>
+> **Second addendum (521bced).** Both residuals are now resolved:
+>
+> - The **double-materialize is elided** (genLetChainBinding binds the
+>   block's staging buffer as an alias when it is provably sole-owned):
+>   09_qg 3.39 GB → **2.26 GB** (single-copy trajectory residency),
+>   physics/47 7.01 MB → **3.51 MB** (exactly halved), physics/44
+>   12.71 MB → 11.83 MB. Suite 4644/0.
+> - The **small-object residual hypothesis is REFUTED**: content dumps of
+>   physics/44's 4,534 live 64-byte blocks show 8 pointers striding 32 B
+>   into a pool — they are the level-2 skeleton rows of its three live
+>   rank-3 {1500,8,4} module bindings (1500 rows × 3 arrays, plus the
+>   three 12,000 B level-1 tables also visible in the histogram), not
+>   tuple-return or extents leaks. The census-reading rule applies at the
+>   small end too: skeleton rows of a live binding count against its
+>   by-design footprint, block-count arithmetic alone misleads.
+>
+> Post-everything corpus state: zero known scope-tracker escapes; every
+> remaining outstanding byte is single-copy module-binding residency.
 
 First full memory-leak census of `examples/` (11 top-level + 47 physics = 58
 programs), run under the new `blade run --memcheck` Debug+AddressSanitizer

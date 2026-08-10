@@ -15904,12 +15904,71 @@ and genLetChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
             let (code, ctx') = genBinding accCtx tempBinding builder
             (accCode @ code, ctx')
         ) ([], ctx)
-    // Generate the final named binding
+    // Generate the final named binding.
+    //
+    // Double-materialize elision: a chain whose VALUE is a bare reference to
+    // one of its own inner lets (`{ let buf = zeros(...); ...; buf }` -- the
+    // recursive-array elaboration's exact shape) would otherwise go through
+    // genVarAliasBinding's assignability deep copy, leaving BOTH the staging
+    // buffer and the copy live for the rest of the program, since module
+    // bindings are never scope-freed: 2x the footprint of every `let rec`
+    // trajectory (~1.5 GB of 09_qg_atmosphere's residency, measured). The
+    // staging let is block-scoped -- no name outside this chain can reach
+    // it -- so the final binding may ALIAS its wrapper instead when
+    //  (1) the staging let OWNS its pool (isFreshPoolForm: a view/alias
+    //      value could be sharing a USER binding's storage, which the copy
+    //      exists to protect);
+    //  (2) no assign in the chain can have leaked its storage to a target
+    //      OUTSIDE the chain (an outer whole-array or row assign aliases
+    //      pools; assigns whose target is chain-internal die with the
+    //      block); and
+    //  (3) there is no live alloc frame (main's top level): inside a
+    //      function/loop frame the staging registration and the escape
+    //      analysis already recycle the block correctly, and the alias
+    //      would complicate that reasoning for no residency gain.
+    let chainIds = lets |> List.map fst |> Set.ofList
+    let aliasableStagingRef =
+        match finalExpr with
+        | IRVar (srcId, _) when Set.contains srcId chainIds
+                                && (currentAllocScope ()).IsNone ->
+            let srcOwnsPool =
+                lets |> List.exists (fun (id, v) -> id = srcId && isFreshPoolForm v)
+            let assignLeaksSrc =
+                lets
+                |> List.collect (fun (_, v) -> allSubExprs v)
+                |> List.exists (fun e ->
+                    match e with
+                    | IRAssign (target, value) when Set.contains srcId (collectVarRefsIR value) ->
+                        let targetInChain =
+                            match target with
+                            | LVVar tid -> Set.contains tid chainIds
+                            | LVIndex (IRVar (tid, _), _) -> Set.contains tid chainIds
+                            | _ -> false
+                        not targetInChain
+                    | _ -> false)
+            srcOwnsPool && not assignLeaksSrc
+        | _ -> false
     let finalBinding = {
         Id = binding.Id; Name = name; Type = binding.Type
-        Value = finalExpr; IsConst = binding.IsConst; IsMutable = binding.IsMutable
+        Value = finalExpr; IsConst = binding.IsConst
+        // Dropping the mutability marks routes genVarAliasBinding to its
+        // plain-alias arm; assignment through the binding then writes the
+        // sole-owner staging pool, which is observationally identical.
+        IsMutable = binding.IsMutable && not aliasableStagingRef
     }
-    let (finalCode, finalCtx) = genBinding foldCtx finalBinding builder
+    // A block-local `let rec` arrives here with its id in MutableArrayLets
+    // (every block array let is assignable), which genVarAliasBinding checks
+    // INDEPENDENTLY of IsMutable -- lift the membership for the final bind
+    // only, restoring the caller-visible set afterwards.
+    let foldCtxForFinal =
+        if aliasableStagingRef
+        then { foldCtx with MutableArrayLets = Set.remove binding.Id foldCtx.MutableArrayLets }
+        else foldCtx
+    let (finalCode, finalCtx) = genBinding foldCtxForFinal finalBinding builder
+    let finalCtx =
+        if aliasableStagingRef
+        then { finalCtx with MutableArrayLets = foldCtx.MutableArrayLets }
+        else finalCtx
     (forceCode @ allCode @ finalCode, finalCtx)
 
 
