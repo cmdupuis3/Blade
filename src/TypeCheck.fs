@@ -9526,10 +9526,40 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                     | _ ->
                         arrays <- arrays @ [expr]
                         isCoIterGroup <- isCoIterGroup @ [false]
+                // S1 SEAM 3, CO-ITERATION TWIN (cd0f202 left this open for lack
+                // of a repro; `object_for(k) <@> zip(a, b)` inside a function
+                // whose params are the caret shorthand is one). These records
+                // become the apply's SharedIndexTypes, and two independent
+                // degradations both ended in a rank-0 record and so in `recs = []`:
+                //
+                //   * the arity demand ran only at the `materializeArityVar`
+                //     line further down, so a `T^k` operand was still an open
+                //     var at THIS point and could not match `ArrayElem`;
+                //   * the match read `a.Type` RAW, so an operand whose var the
+                //     substitution had already bound to an array missed the
+                //     `ArrayElem` arm regardless of the arity demand.
+                //
+                // Losing the shared records is not a compile error here -- it is
+                // a SILENT OUTER PRODUCT, since buildApplyInfo reads no shared
+                // axis and falls back to the full product grid.
+                // `function f(a: Float64^1, b: Float64^1) =
+                //  object_for(lambda(x, y) -> x * y) <@> zip(a, b)` returned the
+                // 3x3 grid [[10,20,30],[20,40,60],[30,60,90]] where the concrete
+                // twin returns the co-iterated [10,40,90]; at `Float64^2` it
+                // returned a 2x3x2x3 grid for a 2x3 elementwise product.
+                //
+                // Demand the arity FIRST, so these records are minted from the
+                // same extents `arrayTypes` reads below -- shared records built
+                // from a DIFFERENT extent name than the operands carry emit a
+                // loop bound nothing declares. The demand is idempotent (the
+                // iteration at the bottom re-runs it over these same flattened
+                // operands and finds them resolved). Then resolve through the
+                // substitution, and fall back exactly as the non-zip path does.
+                arrays |> List.iter (fun a -> materializeArityVar env a "map")
                 let arrTypes = arrays |> List.map (fun a ->
-                    match a.Type with
+                    match env.Subst.Resolve a.Type with
                     | ArrayElem at -> reSDimOperand at
-                    | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+                    | _ -> objectForOperandFallback env a)
                 let allCoIter = isCoIterGroup |> List.forall id
                 let recs =
                     if allCoIter then
