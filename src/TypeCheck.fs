@@ -7368,6 +7368,14 @@ and inferUnaryOp (env: TypeEnv) op operand : TypeResult<TypedExpr> =
         match op, tOp.Type with
         | OpConj, ArrayElem _ ->
             Ok (mkTyped (TExprArrayConjugate tOp) tOp.Type)
+        // The negation half of the same routing. Without it `-A` over an array
+        // reached codegen as a scalar IRUnaryOp(IRNeg, _) and emitted `-arr`
+        // against an Array value ("no match for 'operator-'"). It bites hardest
+        // on `-(A [-] B)`: for a bracketed op the operand order fixes the AXIS
+        // order, so an outer `-` is the only free way to correct the sign --
+        // swapping the operands transposes instead.
+        | OpNeg, ArrayElem _ ->
+            Ok (mkTyped (TExprArrayNegate tOp) tOp.Type)
         | _ ->
             let resTy = match op with
                         | OpNot -> IRTScalar ETBool

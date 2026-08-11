@@ -12929,6 +12929,15 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genGuardBinding ctx binding builder body
     | IRSequence elems ->
         genSequenceBinding ctx binding builder elems
+    // `|> compute` on an ALREADY-EAGER whole-array form is the identity: negate
+    // and conjugate materialize a fresh pool by construction, so there is
+    // nothing deferred left to force. genComputeBinding's dispatch has no arm
+    // for either, so they fell through to the unsupported-node sentinel --
+    // `let n = -A` worked while `let n = -A |> compute` did not (and the same
+    // for conj, which has routed to IRArrayConjugate since before this change).
+    // Re-dispatch on the unwrapped form, which the arm above already handles.
+    | IRCompute ((IRArrayNegate _ | IRArrayConjugate _) as eager) ->
+        genBinding ctx { binding with Value = eager } builder
     | IRCompute inner ->
         genComputeBinding ctx binding builder inner
     | IRMethodFor _ ->

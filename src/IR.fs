@@ -6350,13 +6350,20 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (bindsA, aFinal) = liftChildEvaluatedOnce builder a'
         let (bindsB, bFinal) = liftChildEvaluatedOnce builder b'
         wrapLets (bindsA @ bindsB) (IRSolve (aFinal, bFinal))
+    // liftChildIncludingLoopApp, not liftChild, for the same reason as
+    // IRReduce/IRProdSum above: the whole-array negate/conjugate emitters have
+    // no rendering for a synthesized elementwise loop application, so
+    // `-(A [-] B)` -- a bracketed op, which lowers to IRApp(IRObjectFor ..) --
+    // reached exprToCpp and rendered as codegen's LOOP_OBJECT_USED_AS_VALUE
+    // sentinel. Bare `A [-] B` already worked because a let-RHS is a blessed
+    // position; only the wrapped form fell through.
     | IRArrayNegate arr ->
         let arr' = liftExpr builder arr
-        let (binds, arrFinal) = liftChild builder arr'
+        let (binds, arrFinal) = liftChildIncludingLoopApp builder arr'
         wrapLets binds (IRArrayNegate arrFinal)
     | IRArrayConjugate arr ->
         let arr' = liftExpr builder arr
-        let (binds, arrFinal) = liftChild builder arr'
+        let (binds, arrFinal) = liftChildIncludingLoopApp builder arr'
         wrapLets binds (IRArrayConjugate arrFinal)
     | IRReverse (arr, d) ->
         let arr' = liftExpr builder arr
