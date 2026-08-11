@@ -9380,6 +9380,50 @@ let cudaDeviceBodyRefusal (declared: Set<IRId>) (names: Map<IRId, string>) (body
             | Some fn -> Some (sprintf "the call to host function '%s'" fn)
             | None -> deviceParamRef body |> Option.map (sprintf "the parameter reference '%s'")
 
+/// How many cells a device buffer has.
+///
+/// STATIC is the only shape this emitter originally had, and it stays
+/// byte-identical: the count is a literal in the .cu. RUNTIME is what a kernel
+/// inside a GENERIC FUNCTION needs -- its operands' extents are not known until
+/// the call, so the count is evaluated at the launch site (`HostExpr`, host C++
+/// naming the host `Array<T,N>` wrapper) and travels into the .cu as an extra
+/// `size_t` parameter (`ParamName`) that the wrapper and the kernel both read.
+type CudaCells =
+    | CellsStatic of int64
+    | CellsRuntime of hostExpr: string * paramName: string
+
+/// The .cu-side text for a cell count: a literal, or the parameter carrying it.
+let cudaCellsText (c: CudaCells) : string =
+    match c with
+    | CellsStatic n -> sprintf "%dUL" n
+    | CellsRuntime (_, p) -> p
+
+/// The extra `size_t` parameter a runtime count contributes to the kernel and
+/// wrapper signatures (none for a static one).
+let cudaCellsParam (c: CudaCells) : string option =
+    match c with
+    | CellsStatic _ -> None
+    | CellsRuntime (_, p) -> Some (sprintf "size_t %s" p)
+
+/// The argument a runtime count contributes at the host call site.
+let cudaCellsHostArg (c: CudaCells) : string option =
+    match c with
+    | CellsStatic _ -> None
+    | CellsRuntime (h, _) -> Some h
+
+/// Two device buffers may be folded together iff their cell counts AGREE.
+/// Two STATIC counts are compared exactly. A count that is only known at
+/// runtime is TRUSTED -- the same rule the host applies to a join's legs
+/// (docs/plan-reduction-joins.md section 1.5): only a PROVABLE disagreement is
+/// refused, and nothing is provable about an extent neither side knows here.
+/// Comparing the two host EXPRESSIONS textually instead would refuse
+/// `prodsum(s, ct)` beside `prodsum(ct, ct)` -- different arrays, same axis --
+/// which is the shape this whole path exists for.
+let cudaCellsCompatible (a: CudaCells) (b: CudaCells) : bool =
+    match a, b with
+    | CellsStatic x, CellsStatic y -> x = y
+    | _ -> true
+
 /// One captured value forwarded into a device kernel as an extra parameter.
 type CudaFwdCapture = {
     /// Identifier naming it in the HOST scope that emits the launch. Resolved
@@ -9390,7 +9434,7 @@ type CudaFwdCapture = {
     /// Parameter name inside the .cu (and the device buffer's stem).
     DevName: string
     /// Pool cells for an array capture; `None` for a scalar (passed by value).
-    Cells: int64 option
+    Cells: CudaCells option
     /// Host (`std::`) spelling for the `extern "C"` wrapper signature, and the
     /// device (`thrust::`) spelling for the kernel signature / device buffer.
     HostCpp: string
@@ -9416,14 +9460,25 @@ let private cudaFwdScalarCpp (ty: IRType) : (string * string) option =
 /// the device sees a flat pool, and only a plain single-axis array has
 /// `pool[k] == A(k)` -- a packed (sym/antisym), compound or ragged axis
 /// addresses through machinery the device side does not carry.
-let private cudaFwdArrayShape (ty: IRType) : (int64 * string * string) option =
+///
+/// A NON-LITERAL extent is no longer a refusal: the host wrapper is an
+/// `Array<T,1>`, so its own extents table names the count at the launch site,
+/// and it rides into the .cu as the `<devName>_n` parameter. The shape gate is
+/// unchanged -- plain, dense, rank <= 1, non-virtual -- only the *knowability*
+/// of the count relaxed. Rank 0 (`ix.Rank = 0`, a scalar-shaped slot) keeps
+/// `extents[0]` as its count for the same reason the static arm used the type's
+/// single extent: the pool is still one contiguous axis.
+let private cudaFwdArrayShape (hostName: string) (devName: string) (ty: IRType)
+        : (CudaCells * string * string) option =
     match ty with
     | ArrayElem arr when isCudaBoundarySafeElem arr.ElemType && not arr.IsVirtual ->
         match arr.IndexTypes with
         | [ix] when ix.Rank <= 1 && ix.Symmetry = SymNone && ix.Kind = SDimension && ix.IxKind = IxKPlain ->
-            match ix.Extent with
-            | IRLit (IRLitInt n) -> Some (n, elemTypeToCpp arr.ElemType, cudaDevElemTypeToCpp arr.ElemType)
-            | _ -> None
+            let cells =
+                match ix.Extent with
+                | IRLit (IRLitInt n) -> CellsStatic n
+                | _ -> CellsRuntime (sprintf "%s.extents[0]" hostName, sprintf "%s_n" devName)
+            Some (cells, elemTypeToCpp arr.ElemType, cudaDevElemTypeToCpp arr.ElemType)
         | _ -> None
     | _ -> None
 
@@ -9450,7 +9505,7 @@ let private cudaFwdArrayShape (ty: IRType) : (int64 * string * string) option =
 /// elements at the same `k` -- so a chain of maps composes without ever being
 /// materialized.
 type private DevArray = {
-    Cells: int64
+    Cells: CudaCells
     Elem: IRType
     At: string -> string
 }
@@ -9549,6 +9604,14 @@ let planCudaDeviceBody
 
     let mutable scalars : Map<IRId, string> = paramBinds |> List.choose id |> Map.ofList
     let mutable arrays : Map<IRId, DevArray> = Map.empty
+    /// Kernel-local deferred maps, in BINDING order. A join's share locals are
+    /// emitted in this order, so a producer reading an earlier producer is
+    /// always declared after it. Forwarded captures are deliberately absent:
+    /// they are memory reads, not recomputation.
+    let mutable producerOrder : IRId list = []
+    /// A join binding's per-leg accumulators, as synthetic ids already present
+    /// in `scalars`. `get<i>` of that binding resolves through this map.
+    let mutable joinLegs : Map<IRId, (IRId * IRType) list> = Map.empty
     let mutable fwd : CudaFwdCapture list = []
     let stmts = System.Collections.Generic.List<string>()
     let mutable err : string option = None
@@ -9572,7 +9635,7 @@ let planCudaDeviceBody
             let stem' = sprintf "__blade_cap_%s" (sanitizeCppName cap.Name)
             if Set.contains stem' devNamesUsed then sprintf "%s_%d" stem' cap.Id else stem'
         devNamesUsed <- Set.add devName devNamesUsed
-        match cudaFwdArrayShape cap.Type with
+        match cudaFwdArrayShape hostName devName cap.Type with
         | Some (cells, hostCpp, devCpp) ->
             fwd <- fwd @ [ { HostName = hostName; DevName = devName; Cells = Some cells
                              HostCpp = hostCpp; DevCpp = devCpp } ]
@@ -9590,11 +9653,12 @@ let planCudaDeviceBody
 with a compile-time shape are forwarded to the device)" hostName)
 
     // --- device rendering of a scalar expression ---------------------------
-    // Calls are inlined first (no host function may be named), then folds are
+    // Calls are inlined first (no host function may be named), then join
+    // projections are resolved to the accumulators they name, then folds are
     // hoisted into accumulator loops, then what is left must be plain device
     // arithmetic over names this kernel declares.
     let rec renderScalar (extra: Map<IRId, string>) (e: IRExpr) : string =
-        let hoisted = hoistFolds (cudaInlineCalls 8 e)
+        let hoisted = hoistFolds (resolveJoinProjs (cudaInlineCalls 8 e))
         let env = extra |> Map.fold (fun acc k v -> Map.add k v acc) scalars
         if not (cudaScalarNodeOk hoisted) then
             fail "a scalar operation with no device form"
@@ -9606,6 +9670,24 @@ with a compile-time shape are forwarded to the device)" hostName)
                         (Map.tryFind id outerNames |> Option.defaultValue (sprintf "__v%d" id)))
                 ""
             | [] -> withCudaDeviceDialect (fun () -> exprToCpp env hoisted)
+
+    /// Rewrite `get<i>` of a JOIN's tuple into a reference to that leg's own
+    /// accumulator. A reduction join answers a FLAT `Tuple<k>`
+    /// (docs/plan-reduction-joins.md section 1.3), so the projection index IS
+    /// the leg index -- no nested-get chain to unwind, in either the `isFlat`
+    /// or the structural spelling.
+    and resolveJoinProjs (e: IRExpr) : IRExpr =
+        mapIRExpr (fun x ->
+            match x with
+            | IRTupleProj (IRVar (tid, _), i, _) when err.IsNone ->
+                match Map.tryFind tid joinLegs with
+                | Some legIds when i >= 0 && i < List.length legIds ->
+                    let (vid, ty) = List.item i legIds
+                    IRVar (vid, ty)
+                | Some legIds ->
+                    fail (sprintf "a join projection past its %d leg(s)" (List.length legIds)); x
+                | None -> x
+            | _ -> x) e
 
     /// Replace every `prodsum` over device arrays with a hoisted accumulator,
     /// emitting its fused loop into `stmts` first. `mapIRExpr` is bottom-up, so
@@ -9620,7 +9702,7 @@ with a compile-time shape are forwarded to the device)" hostName)
                 else
                     let ds = resolved |> List.choose id
                     let cells = (List.head ds).Cells
-                    if ds |> List.exists (fun d -> d.Cells <> cells) then
+                    if ds |> List.exists (fun d -> not (cudaCellsCompatible d.Cells cells)) then
                         fail "a prodsum over arrays of differing extents"; x
                     else
                         // Accumulator type from the FIRST operand's element
@@ -9634,7 +9716,7 @@ with a compile-time shape are forwarded to the device)" hostName)
                         let acc = fresh "acc"
                         let k = fresh "k"
                         stmts.Add (sprintf "    %s %s = %s();" cpp acc cpp)
-                        stmts.Add (sprintf "    for (size_t %s = 0; %s < %dUL; %s++) {" k k cells k)
+                        stmts.Add (sprintf "    for (size_t %s = 0; %s < %s; %s++) {" k k (cudaCellsText cells) k)
                         stmts.Add (sprintf "        %s += %s;" acc
                                      (ds |> List.map (fun d -> d.At k) |> String.concat " * "))
                         stmts.Add "    }"
@@ -9643,6 +9725,133 @@ with a compile-time shape are forwarded to the device)" hostName)
                         IRVar (id, ty)
             | _ -> x) e
 
+    /// The REDUCTION JOIN on the device: k legs sharing one traversal, folded
+    /// into k per-thread accumulators (registers), with each distinct named
+    /// deferred operand evaluated ONCE per iteration into a per-thread `const`
+    /// local. That is the same loop the host emitter builds
+    /// (docs/plan-reduction-joins.md section 1.4) -- the surface DECLARED the
+    /// sharing, so this emitter only has to express it, never rediscover it.
+    ///
+    /// Returns one (accumulator name, element type) per leg, in leg order.
+    /// The single-leg (non-tuple) encoding routes here too: it is the same loop
+    /// with k = 1, and the caller binds the scalar directly.
+    and emitJoin (comp: IRExpr) (kernels: IRExpr list) (seeds: IRExpr list) : (string * IRType) list option =
+        // Peel any binders the traversal carries (`peelCompLets`'s device twin)
+        // so a let-wrapped fusion tree reaches the leaf walk.
+        let rec peel (e: IRExpr) =
+            match e with
+            | IRLet (id, rhs, body) -> bindLet id rhs; (if err.IsSome then e else peel body)
+            | IRCompute inner -> peel inner
+            | other -> other
+        let rec leavesOf (e: IRExpr) =
+            match peel e with
+            | IRFusion (l, r) -> leavesOf l @ leavesOf r
+            | other -> [other]
+        let leaves = leavesOf comp
+        if err.IsSome then None
+        elif leaves.Length <> kernels.Length || leaves.Length <> seeds.Length then
+            fail "a join whose leg count disagrees with its fold kernels"; None
+        else
+        let folds = kernels |> List.map resolveCallable
+        if folds |> List.exists (fun c -> match c with Some cb -> cb.Params.Length <> 2 | None -> true) then
+            fail "a join fold kernel that is not a binary device callable"; None
+        else
+        let folds = folds |> List.map Option.get
+        if folds |> List.exists (fun cb -> not (isCudaBoundarySafeElem cb.RetType)) then
+            fail "a join accumulator whose type is not a device scalar"; None
+        else
+        // SHARE LOCALS. A named deferred map (`let ct = ts <@> ...`, no
+        // `compute`) that this traversal names is evaluated ONCE per iteration
+        // and read by every leg. Ordered by BINDING order, so a share that
+        // reads an earlier share is declared after it; `producerOrder` is that
+        // order by construction.
+        //
+        // Collected from the legs' OPERAND SLOTS specifically, not from every
+        // var reference under `comp`. A share local is indexed by this join's
+        // own loop variable, so it is only sound for a value that iterates this
+        // join's axis -- which an operand slot is by construction and an
+        // arbitrary reference is not. One level deep, matching the host rule
+        // (a deferred map reading another deferred map shares the OUTER one,
+        // whose text inlines the inner one once anyway).
+        let rec operandIds (e: IRExpr) : IRId list =
+            match e with
+            | IRLet (_, _, body) -> operandIds body
+            | IRCompute inner -> operandIds inner
+            | IRApplyCombinator info -> info.Arrays |> List.choose (function IRVar (i, _) -> Some i | _ -> None)
+            | IRApp (IRObjectFor _, [src], _) -> (match src with IRVar (i, _) -> [i] | _ -> [])
+            | IRVar (i, _) -> [i]
+            | _ -> []
+        let named = leaves |> List.collect operandIds |> Set.ofList
+        let shares = producerOrder |> List.filter (fun i -> Set.contains i named)
+        let k = fresh "k"
+        let accs = folds |> List.map (fun cb -> (fresh "jacc", cb.RetType))
+        // Render every text BEFORE touching `stmts`: `renderScalar` hoists a
+        // nested fold into `stmts` itself, and such a hoist has no correct
+        // placement relative to a loop it would have to run inside. Snapshot
+        // the count and refuse if one happened, rather than emit a kernel whose
+        // accumulator loop reads a variable declared after it.
+        let before = stmts.Count
+        let seedTexts = seeds |> List.map (renderScalar Map.empty)
+        // ORDER IS LOAD-BEARING: the shares are rebound BEFORE the legs are
+        // resolved. `pointwise` closes over the DevArrays it was handed, so a
+        // leg resolved first would have captured the producer's kernel and gone
+        // on rendering `cos(w*ts[k])` inline no matter what the share local
+        // said -- the loop would declare a shared value nothing reads, which is
+        // exactly the "compiles, right answer, wrong loop" failure the CPU side
+        // had to be caught doing (plan section 3 of the differential findings).
+        let saved = shares |> List.map (fun sid -> (sid, arrays.[sid]))
+        let shareLines =
+            shares |> List.map (fun sid ->
+                let d = arrays.[sid]
+                let nm = fresh "shr"
+                let text = d.At k
+                // Rebind AFTER rendering this one: a producer must not read its
+                // own local, but it may read every share declared before it.
+                arrays <- Map.add sid { d with At = fun _ -> nm } arrays
+                sprintf "        const %s %s = %s;" (cudaDevElemTypeToCpp d.Elem) nm text)
+        let legs = leaves |> List.map resolveArray
+        let legCells =
+            if legs |> List.exists Option.isNone then None
+            else
+                let ls = legs |> List.choose id
+                if ls |> List.exists (fun d -> not (cudaCellsCompatible d.Cells (List.head ls).Cells))
+                then None else Some ((List.head ls).Cells, ls)
+        let legLines =
+            match legCells with
+            | None -> []
+            | Some (_, ls) ->
+                List.map3 (fun (acc, _) (cb: IRCallable) (leg: DevArray) ->
+                    let extra =
+                        Map.ofList [ ((List.item 0 cb.Params).VarId, acc)
+                                     ((List.item 1 cb.Params).VarId, sprintf "(%s)" (leg.At k)) ]
+                    sprintf "        %s = %s;" acc (renderScalar extra cb.Body)) accs folds ls
+        // RESTORE the producers. The share locals are scoped to the loop this
+        // emitter is about to write, so leaving the rebinding in place would
+        // let a LATER use of the same deferred map -- another join, a bare
+        // `prodsum(ct, ts)` after this one -- render a name that is out of
+        // scope by then, which nvcc reports as an undefined identifier long
+        // after the host half has been told the kernel exists.
+        for (sid, d) in saved do arrays <- Map.add sid d arrays
+        match legCells with
+        | None ->
+            (if legs |> List.exists Option.isNone
+             then fail "a join leg that is not a pointwise map over device arrays"
+             else fail "a join over legs of differing extents")
+            None
+        | Some (cells, _) ->
+        let accLines = legLines
+        if err.IsSome then None
+        elif stmts.Count <> before then
+            fail "a join leg containing a nested fold"; None
+        else
+        for ((acc, ty), seed) in List.zip accs seedTexts do
+            stmts.Add (sprintf "    %s %s = %s;" (cudaDevElemTypeToCpp ty) acc seed)
+        stmts.Add (sprintf "    for (size_t %s = 0; %s < %s; %s++) {" k k (cudaCellsText cells) k)
+        for l in shareLines do stmts.Add l
+        for l in accLines do stmts.Add l
+        stmts.Add "    }"
+        Some accs
+
     /// Bind one kernel-local `let` into the device environment: an array-valued
     /// one is recorded as a producer and never materialized, a scalar one gets a
     /// device local. Shared by the body walk and by `resolveArray`, because a
@@ -9650,10 +9859,37 @@ with a compile-time shape are forwarded to the device)" hostName)
     /// (`let c = (let w' = w in let u = ... in cos <@> u)`), so the same binder
     /// has to be understood in both positions.
     and bindLet (id: IRId) (rhs: IRExpr) : unit =
+        match rhs with
+        // A REDUCTION JOIN's tuple is k device scalars, not one -- so it is
+        // bound before the device-scalar test below, which a `Tuple<k>` could
+        // never pass. `joinLegs` is what makes the downstream `get<i>`
+        // projections resolve to the individual accumulators.
+        | IRReduceCompute (comp, IRTuple ks, IRTuple ss) when ks.Length = ss.Length && ks.Length >= 2 ->
+            match emitJoin comp ks ss with
+            | Some accs ->
+                let legIds =
+                    accs |> List.map (fun (nm, ty) ->
+                        let vid = freshId ()
+                        scalars <- Map.add vid nm scalars
+                        (vid, ty))
+                joinLegs <- Map.add id legIds joinLegs
+            | None -> ()
+        // The one-leg encoding: `reduce(<deferred>, op, init)` in a kernel body
+        // is the SAME loop at k = 1, and its value is a plain scalar.
+        | IRReduceCompute (comp, kernel, seed) ->
+            match emitJoin comp [kernel] [seed] with
+            | Some [ (nm, _) ] -> scalars <- Map.add id nm scalars
+            | _ -> ()
+        | _ ->
         match inferExprType rhs with
         | ArrayElem _ ->
             match resolveArray rhs with
-            | Some d -> arrays <- Map.add id d arrays
+            | Some d ->
+                arrays <- Map.add id d arrays
+                // A kernel-local map is a PRODUCER: unlike a forwarded capture
+                // (a memory read), re-reading it re-evaluates its kernel, so it
+                // is exactly what a join's share locals exist to evaluate once.
+                if not (List.contains id producerOrder) then producerOrder <- producerOrder @ [id]
             | None -> fail "a kernel-local array that is not a pointwise map"
         | ty when not (isCudaBoundarySafeElem ty) ->
             // Tuples, strings, function values: no device local to declare.
@@ -9695,7 +9931,7 @@ with a compile-time shape are forwarded to the device)" hostName)
         else
             let ds = ds |> List.choose id
             let cells = (List.head ds).Cells
-            if ds |> List.exists (fun d -> d.Cells <> cells) then None
+            if ds |> List.exists (fun d -> not (cudaCellsCompatible d.Cells cells)) then None
             else
                 match resolveCallable kernel with
                 | Some c when c.Params.Length = ds.Length
@@ -10252,11 +10488,47 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
 let genCudaKernel (softSplit: bool) (outerNames: Map<IRId, string>) (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
     let bindings = codeGen.Bindings
     let nDims = List.length bindings
+    /// A level's extent as HOST C++, when the level is a plain dense axis whose
+    /// bound is a pure function of its own array's shape. `None` means the
+    /// launch grid cannot be computed at all -- which is a genuine refusal, and
+    /// a different thing from "not known until run time".
+    ///
+    /// A LITERAL keeps its literal spelling everywhere downstream, so a kernel
+    /// whose extents were static before this existed emits byte-identically.
+    let hostExtentOf (b: LoopIndexBinding) : CudaCells option =
+        match b.Extent with
+        | IRLit (IRLitInt n) -> Some (CellsStatic n)
+        | _ when System.String.IsNullOrEmpty b.ExtentArrayRef -> None
+        | _ ->
+            // The same expression `emitExtentsTable` renders for this level (a
+            // fused level's bound is the product of the dims it spans), so the
+            // grid and the output's own extents table cannot disagree.
+            let e =
+                match b.FusedRank with
+                | Some d -> [0 .. d - 1] |> List.map (sprintf "%s.extents[%d]" b.ExtentArrayRef) |> String.concat " * "
+                | None -> sprintf "%s.extents[%d]" b.ExtentArrayRef b.ExtentDimRef
+            Some (CellsRuntime (e, sprintf "__blade_ext%d" b.Level))
+    let dimCells = bindings |> List.map hostExtentOf
+    // RECTANGULARITY is about the SHAPE of the iteration space, not about when
+    // its size is known: a dependent bound (`for j < i`), a strict offset, or a
+    // virtual (range/reverse) operand has no flat thread grid at any time. A
+    // plain dense axis always does -- `(n + block - 1) / block` is computable at
+    // the launch, so a RUNTIME extent (every kernel inside a generic function)
+    // is emitted, not refused.
     let rectOk =
-        bindings |> List.forall (fun b ->
-            b.BoundDependencies.IsEmpty && b.StrictOffset = 0
-            && (match b.Extent with IRLit (IRLitInt _) -> true | _ -> false)
-            && (b.Elements |> List.forall (fun e -> match e.Virtual with RealArray -> true | _ -> false)))
+        (dimCells |> List.forall Option.isSome)
+        && (bindings |> List.forall (fun b ->
+                b.BoundDependencies.IsEmpty && b.StrictOffset = 0
+                && (b.Elements |> List.forall (fun e -> match e.Virtual with RealArray -> true | _ -> false))))
+    /// Every input must be indexed by at least one level, because that is where
+    /// its POOL SIZE comes from (`inputCellsText`). An input reachable by no
+    /// level has no size this emitter can derive, and guessing one would size a
+    /// `cudaMemcpy` off the host pool by something other than its length.
+    let inputsSized =
+        codeGen.InputArrayNames |> List.mapi (fun pos _ -> pos)
+        |> List.forall (fun pos ->
+            bindings |> List.exists (fun b -> b.Elements |> List.exists (fun e -> e.ArrayPosition = pos)))
+    let allStatic = dimCells |> List.forall (function Some (CellsStatic _) -> true | _ -> false)
     let outElemTyOpt =
         match codeGen.OutputType with
         | ArrayElem arr when isCudaBoundarySafeElem arr.ElemType -> Some arr.ElemType
@@ -10275,10 +10547,19 @@ kernel cannot express %s (nest '%s')" reason name ]
     let shapeRefusal =
         if codeGen.HasReynolds then Some "a Reynolds (symmetrized) kernel over a rectangular nest"
         elif not rectOk then
-            Some "an iteration space that is not rectangular with compile-time extents \
-(a dependent, offset, virtual or runtime-sized axis has no flat thread grid)"
+            Some "an iteration space that is not rectangular \
+(a dependent, offset or virtual axis has no flat thread grid)"
         elif outElemTyOpt.IsNone then
             Some "an output element type that cannot cross the extern \"C\" device boundary"
+        elif not inputsSized then
+            Some "an operand no loop level indexes (its device buffer has no derivable size)"
+        elif softSplit && not allStatic then
+            // The soft-join begin/end wrappers stage through FILE-STATIC device
+            // buffers sized at their declaration; a runtime extent has nothing
+            // to size them with there. The plain (non-split) launch below has no
+            // such constraint -- it allocates inside the wrapper.
+            Some "a runtime-sized axis under a <&> soft-join leaf (its begin/end \
+wrappers bake the staging sizes)"
         else None
     match shapeRefusal with
     | Some r -> refuseToHost r
@@ -10300,9 +10581,33 @@ kernel cannot express %s (nest '%s')" reason name ]
             |> Option.defaultValue outElemTy)
     let inputHostCpp = inputElemTys |> List.map elemTypeToCpp
     let inputDevCpp = inputElemTys |> List.map cudaDevElemTypeToCpp
+    // Per-level cell counts, literal or runtime, in nesting order. `rectOk`
+    // established every entry is Some.
+    let dims = dimCells |> List.map Option.get
+    let dimText (i: int) = cudaCellsText (List.item i dims)
     let extentLits =
         bindings |> List.map (fun b -> match b.Extent with IRLit (IRLitInt n) -> n | _ -> 0L)
-    let cardinality = extentLits |> List.fold (fun a n -> a * n) 1L
+    /// Grid cardinality: the literal product when every extent is static (the
+    /// text this emitter has always produced), else the runtime product of the
+    /// extent parameters.
+    let cardinalityText =
+        if allStatic then sprintf "%dUL" (extentLits |> List.fold (fun a n -> a * n) 1L)
+        else [0 .. nDims - 1] |> List.map dimText |> String.concat " * "
+    /// An input's POOL SIZE, for staging it onto the device: the product of the
+    /// extents of the levels that actually index it.
+    ///
+    /// Derived rather than read off `extentLits.[pos]` (this emitter's original
+    /// spelling), which silently assumed input `i` is indexed by level `i` and
+    /// nothing else. It agrees with that assumption wherever the assumption
+    /// held -- one input per level, in order -- and is right where it did not:
+    /// a co-iterated `zip(A, B)` has two inputs on ONE level (and indexed past
+    /// the end of the list), a rank-2 input spans two.
+    let inputCellsText (pos: int) : string option =
+        let ds = bindings |> List.mapi (fun i b -> (i, b))
+                 |> List.filter (fun (_, b) -> b.Elements |> List.exists (fun e -> e.ArrayPosition = pos))
+        match ds with
+        | [] -> None
+        | ds -> Some (ds |> List.map (fst >> dimText) |> String.concat " * ")
     let kernelName = sprintf "__cuda_%s" (sanitizeCppName name)
     let launchName = sprintf "__launch_%s" (sanitizeCppName name)
     let mutable paramFinalNames : Map<IRId, string> = Map.empty
@@ -10335,33 +10640,56 @@ wrappers stage only the leaf's own operands)"
     let caps = plan.Captures
     // Extra kernel/wrapper parameters, in one order used by the kernel
     // signature, the wrapper signature, the launch, and the host call site.
+    // A RUNTIME-sized array capture contributes its cell count right after its
+    // pointer, so the three lists stay positionally aligned by construction.
     let capKernelParams =
-        caps |> List.map (fun c ->
+        caps |> List.collect (fun c ->
             match c.Cells with
-            | Some _ -> sprintf "const %s* %s" c.DevCpp c.DevName
-            | None -> sprintf "%s %s" c.DevCpp c.DevName)
+            | Some cells -> sprintf "const %s* %s" c.DevCpp c.DevName :: Option.toList (cudaCellsParam cells)
+            | None -> [ sprintf "%s %s" c.DevCpp c.DevName ])
     let capWrapParams =
-        caps |> List.map (fun c ->
+        caps |> List.collect (fun c ->
             match c.Cells with
-            | Some _ -> sprintf "const %s* %s" c.HostCpp c.DevName
-            | None -> sprintf "%s %s" c.HostCpp c.DevName)
+            | Some cells -> sprintf "const %s* %s" c.HostCpp c.DevName :: Option.toList (cudaCellsParam cells)
+            | None -> [ sprintf "%s %s" c.HostCpp c.DevName ])
     /// The argument each capture contributes at the launch, given a prefix for
     /// the device buffer of an array one (scalars pass straight through).
     let capLaunchArgs (bufPrefix: string) =
-        caps |> List.map (fun c ->
+        caps |> List.collect (fun c ->
             match c.Cells with
-            | Some _ -> sprintf "%s%s" bufPrefix c.DevName
-            | None -> c.DevName)
+            | Some cells ->
+                sprintf "%s%s" bufPrefix c.DevName
+                // At the HOST call site a runtime count is its host expression;
+                // INSIDE the wrapper it is already the parameter, so the same
+                // list serves both (the wrapper forwards the name it was given).
+                :: (match cells with
+                    | CellsStatic _ -> []
+                    | CellsRuntime (_, p) -> [ p ])
+            | None -> [ c.DevName ])
+    /// What the HOST passes for a capture: array pointer (staged by the
+    /// wrapper from the host pool) plus, when runtime-sized, its cell count.
+    let capHostArgs =
+        caps |> List.collect (fun c ->
+            match c.Cells with
+            | Some cells ->
+                sprintf "pool_base(%s.data)" c.HostName :: Option.toList (cudaCellsHostArg cells)
+            | None -> [ c.HostName ])
+    // Extent parameters for the runtime levels, in nesting order: the kernel
+    // needs them to unrank its flat thread id, the wrapper to size the grid and
+    // the staging copies. A fully static nest contributes none, so its
+    // signature is unchanged.
+    let extKernelParams = dims |> List.choose cudaCellsParam
+    let extHostArgs = dims |> List.choose cudaCellsHostArg
     let recover =
         [ yield "    size_t __blade_g = __blade_i;"
           for i in (nDims - 1) .. -1 .. 0 do
-            let e = extentLits.[i]
+            let e = dimText i
             let b = bindings.[i]
-            yield sprintf "    size_t %s = __blade_g %% %dUL;" b.IndexName e
-            if i > 0 then yield sprintf "    __blade_g /= %dUL;" e ]
+            yield sprintf "    size_t %s = __blade_g %% %s;" b.IndexName e
+            if i > 0 then yield sprintf "    __blade_g /= %s;" e ]
     let kernelParams =
         ((codeGen.InputArrayNames, inputDevCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n))
-        @ capKernelParams |> String.concat ", "
+        @ capKernelParams @ extKernelParams |> String.concat ", "
     let kernelDef =
         // NOTE on naming: generated CUDA-internal identifiers use a `__blade_`
         // prefix. A plain `__out` collides with MSVC's SAL
@@ -10377,7 +10705,7 @@ wrappers stage only the leaf's own operands)"
         @ [ sprintf "    __blade_out[__blade_i] = %s;" plan.Expr; "}" ]
     let wrapInParams =
         ((codeGen.InputArrayNames, inputHostCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n))
-        @ capWrapParams |> String.concat ", "
+        @ capWrapParams @ extKernelParams |> String.concat ", "
     let sdPrefix = sprintf "__blade_sd_%s" (sanitizeCppName name)
     let wrapper =
         if softSplit then
@@ -10392,12 +10720,12 @@ wrappers stage only the leaf's own operands)"
                 "    int __blade_dc = 1; cudaGetDeviceCount(&__blade_dc); if (__blade_dc < 1) __blade_dc = 1;"
                 sprintf "    %s_dev = __blade_leaf %% __blade_dc;" sdPrefix
                 sprintf "    cudaSetDevice(%s_dev);" sdPrefix
-                sprintf "    size_t __blade_card = %dUL;" cardinality ]
+                sprintf "    size_t __blade_card = %s;" cardinalityText ]
             @ [ for (i, n) in List.mapi (fun i n -> (i, n)) codeGen.InputArrayNames do
-                  let sz = extentLits.[i]
+                  let sz = inputCellsText i |> Option.defaultValue cardinalityText
                   let et = inputDevCpp.[i]
-                  yield sprintf "    cudaMalloc(&%s_d_%s, %dUL * sizeof(%s));" sdPrefix n sz et
-                  yield sprintf "    cudaMemcpy(%s_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" sdPrefix n n sz et ]
+                  yield sprintf "    cudaMalloc(&%s_d_%s, %s * sizeof(%s));" sdPrefix n sz et
+                  yield sprintf "    cudaMemcpy(%s_d_%s, %s, %s * sizeof(%s), cudaMemcpyHostToDevice);" sdPrefix n n sz et ]
             @ [ sprintf "    cudaMalloc(&%s_d_out, __blade_card * sizeof(%s));" sdPrefix devElemCpp
                 sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
                 sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, %s_d_out, __blade_card);" kernelName blockSize
@@ -10406,31 +10734,37 @@ wrappers stage only the leaf's own operands)"
                 sprintf "extern \"C\" void %s_end(%s* __blade_host_out) {" launchName elemCpp
                 sprintf "    cudaSetDevice(%s_dev);" sdPrefix
                 "    cudaDeviceSynchronize();"
-                sprintf "    cudaMemcpy(__blade_host_out, %s_d_out, %dUL * sizeof(%s), cudaMemcpyDeviceToHost);" sdPrefix cardinality devElemCpp ]
+                sprintf "    cudaMemcpy(__blade_host_out, %s_d_out, %s * sizeof(%s), cudaMemcpyDeviceToHost);" sdPrefix cardinalityText devElemCpp ]
             @ [ for n in codeGen.InputArrayNames -> sprintf "    cudaFree(%s_d_%s);" sdPrefix n ]
             @ [ sprintf "    cudaFree(%s_d_out);" sdPrefix
                 "    cudaSetDevice(0);"; "}" ]
         else
         [ sprintf "extern \"C\" void %s(%s, %s* __blade_host_out) {" launchName wrapInParams elemCpp
-          sprintf "    size_t __blade_card = %dUL;" cardinality ]
+          sprintf "    size_t __blade_card = %s;" cardinalityText ]
         @ [ for (i, n) in List.mapi (fun i n -> (i, n)) codeGen.InputArrayNames do
-              let sz = extentLits.[i]
+              let sz = inputCellsText i |> Option.defaultValue cardinalityText
               let et = inputDevCpp.[i]
-              yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" et n n sz et
-              yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" n n sz et ]
+              yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %s * sizeof(%s));" et n n sz et
+              yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %s * sizeof(%s), cudaMemcpyHostToDevice);" n n sz et ]
         // Forwarded captures travel exactly as the operands do: an array capture
         // gets its own device buffer staged here (the wrapper takes the host
         // pool pointer), a scalar one rides the signature by value.
         @ [ for c in caps do
               match c.Cells with
               | Some cells ->
-                  yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" c.DevCpp c.DevName c.DevName cells c.DevCpp
-                  yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" c.DevName c.DevName cells c.DevCpp
+                  let sz = cudaCellsText cells
+                  yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %s * sizeof(%s));" c.DevCpp c.DevName c.DevName sz c.DevCpp
+                  yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %s * sizeof(%s), cudaMemcpyHostToDevice);" c.DevName c.DevName sz c.DevCpp
               | None -> () ]
         @ [ sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" devElemCpp devElemCpp
             sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
             sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, __blade_d_out, __blade_card);" kernelName blockSize
-              ((codeGen.InputArrayNames |> List.map (sprintf "__blade_d_%s")) @ capLaunchArgs "__blade_d_" |> String.concat ", ")
+              ((codeGen.InputArrayNames |> List.map (sprintf "__blade_d_%s"))
+               @ capLaunchArgs "__blade_d_"
+               // The runtime extents the wrapper was handed, forwarded verbatim:
+               // `cudaCellsParam` named them, so the parameter IS the argument.
+               @ (dims |> List.choose (function CellsRuntime (_, p) -> Some p | CellsStatic _ -> None))
+               |> String.concat ", ")
             "    cudaDeviceSynchronize();"
             sprintf "    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof(%s), cudaMemcpyDeviceToHost);" devElemCpp ]
         @ [ for n in codeGen.InputArrayNames -> sprintf "    cudaFree(__blade_d_%s);" n ]
@@ -10445,10 +10779,10 @@ wrappers stage only the leaf's own operands)"
     let extentsName = sprintf "%s_extents" name
     // First-kernel scope is rectangular (no symmetry), so pass `nullptr` directly
     // as the symm template arg -- not via a function-local static (MSVC C2131).
-    // Extent entries: rectOk already forced every binding to IRLit, so the
-    // non-literal arms below are structurally unreachable -- kept so the dims
-    // pairing stays derived from the SAME match that renders each value, and
-    // the table degrades to the heap form (not garbage) if the gate ever widens.
+    // Extent entries: the non-literal arms are LIVE now that a runtime-sized
+    // axis is emitted rather than refused, and they render the same expressions
+    // `hostExtentOf` hands the launch grid -- one source for both, so the
+    // allocation and the grid cannot disagree about how many cells exist.
     let extentDims =
         bindings |> List.map (fun b ->
             match b.Extent with
@@ -10476,10 +10810,11 @@ wrappers stage only the leaf's own operands)"
                 // `let` is `__v<id>` here, and passing the SOURCE name is the
                 // trap every new forwarding site in this file has to avoid.
                 (((codeGen.InputArrayNames |> List.map (fun n -> sprintf "pool_base(%s.data)" n))
-                  @ (caps |> List.map (fun c ->
-                        match c.Cells with
-                        | Some _ -> sprintf "pool_base(%s.data)" c.HostName
-                        | None -> c.HostName)))
+                  @ capHostArgs
+                  // Runtime extents are read off the HOST wrappers at the call
+                  // site -- the same expressions the output's extents table
+                  // above is built from, so grid and allocation cannot diverge.
+                  @ extHostArgs)
                  |> String.concat ", ")
                 name ]
     // dealloc(D): the rectangular HOST output (dense, so the SYMM argument is
