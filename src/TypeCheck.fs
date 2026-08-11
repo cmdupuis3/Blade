@@ -2059,15 +2059,21 @@ let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
 /// around a `double` loop body and `Array<double,1>` returns ("cannot convert
 /// std::complex<double> to double in initialization").
 ///
-/// NOT INSIDE A LAMBDA BODY, though, and the two guards are not the same
-/// question. A LAMBDA param may also be written `T^1` (`lambda(r: T^1) -> ...`)
-/// and its var carries the same mark, but nothing monomorphizes a lambda: it
-/// is unified with the iterated ROW type moments later, in `buildApplyInfo`.
-/// This snapshot is taken while the body is being typed, i.e. BEFORE that
-/// unification, and is never revisited -- so keeping the var here just carries
-/// an unresolvable `IRTInfer` into codegen (measured: loops/117 and sql's
-/// two-compound-operand reduce emitted "unresolved type variable T?N in element
-/// position"). Inside a lambda the Float64 default is still the right answer.
+/// INSIDE A LAMBDA BODY the marked var is kept too. A LAMBDA param may also be
+/// written `T^1` (`lambda(r: T^1) -> ...`) and its var carries the same mark;
+/// nothing monomorphizes a lambda, but the var is not stranded either -- it is
+/// unified with the iterated ROW type moments later, in `buildApplyInfo`
+/// (kernelParamUnifyResult), and Zonk re-resolves the ApplyInfo.ArrayTypes
+/// snapshot through the final substitution (see the "ELEMENT TYPES TOO" note in
+/// Zonk.fs), so a late binding reaches codegen. Defaulting here instead PINNED
+/// the snapshot: a nested `row <@> f` inside `lambda(row: T^1)` handed `f`'s
+/// param a Float64 row element, so a Complex128 named-function kernel refused
+/// with BL3001 "expected Complex128, got Float64" at the OUTER apply -- while
+/// the identical Float64 kernel compiled by coincidence (measured; the
+/// unannotated-lambda spelling of the same kernel instead bound the param to
+/// Float64 and died in g++ reading `double` off a complex row). An earlier form
+/// of this arm defaulted every lambda-body element because the snapshot was
+/// "never revisited"; that premise died when Zonk gained the ArrayTypes walk.
 /// AN INDEX RECORD'S `Kind` IS A STATEMENT ABOUT ONE APPLY, NOT ABOUT THE VALUE.
 /// `SDimension` means "this apply's grid iterates it"; `TDimension` means "this
 /// apply's KERNEL contributed it" -- `kernelTDims` stamps the kernel's return
@@ -2099,7 +2105,7 @@ let loopOperandArrayType (env: TypeEnv) (fallback: unit -> IRArrayType) (ty: IRT
     | ArrayElem at0 ->
         let at = reSDimOperand at0
         match env.Subst.Resolve at.ElemType with
-        | IRTInfer id when env.InLambdaBody || not (env.Subst.IsPolymorphicId id) ->
+        | IRTInfer id when not (env.Subst.IsPolymorphicId id) ->
             { at with ElemType = IRTScalar ETFloat64 }
         | _ -> at
     | _ -> fallback ()
@@ -5906,6 +5912,162 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) (axes: Expr opti
                                     Type = None
                                     Value = array } ],
                         Some (appliedOver (synAt (ExprVar srcName)))))))
+    // ---- LEADING-AXIS fold (array-valued kernel) ------------------------
+    // `reduce(G, lambda(a: T^{r-1}, b: T^{r-1}) -> a + b)` over a rank-r
+    // operand folds the LEADING axis: the fold's elements are the rank-(r-1)
+    // slices G(0), G(1), ..., and the result is ONE rank-(r-1) array. The
+    // complement of the innermost-axis default (a scalar kernel folds cells;
+    // an (r-1)-slice kernel can only be folding leading-axis slices), and the
+    // spelling examples/lswosa.blade's family_spectra tracks as a feature: it
+    // replaces that function's (grid + transpose + per-column innermost fold)
+    // with one pass and no transposed intermediate.
+    //
+    // REWRITTEN into existing machinery, like every other reduce form: the
+    // internal loop statement rankKDesugar already synthesizes (StmtForIn is
+    // refused for USERS in the parser -- BL1003/BL1999 -- but fully supported
+    // downstream, with runtime bounds), plus whole-array assignment through a
+    // named intermediate (the mut copy-in-place path; measured working inside
+    // function bodies). Fold order and seed match the rank-1 scalar fold one
+    // slice up (measured: the seedless scalar fold is a LEFT fold seeded with
+    // the FIRST element -- reduce([10,1,100], (-)) = (10-1)-100 = -91):
+    //
+    //     let mut acc = <copy of G(0)>          // of `init`, when given
+    //     for j in 1..N { let nxt = kernel(acc, G(j)) |> compute; acc = nxt }
+    //     acc
+    //
+    // The identity-map copy at the seed keeps `acc` a buffer the loop owns:
+    // seeding with the raw `G(0)` view would alias the source row, and the
+    // first assignment through the copy-in-place path would overwrite source
+    // cells mid-read. The per-step `|> compute` materializes into a fresh
+    // buffer BEFORE the assign copies it into `acc`, so `kernel(acc, ...)`
+    // reads a stable accumulator. Type stability of the accumulator (the
+    // endomorphism the rank-1 unit gate checks) is enforced by the loop
+    // itself: the assignment unifies `acc`'s type with the kernel result, so
+    // a unit- or type-growing kernel fails to type right here.
+    //
+    // DETECTION IS SYNTACTIC -- the lambda's parameter annotations, or a
+    // named function's declared signature read through lookupVar + Resolve,
+    // never an inference run -- so every existing path mints exactly the ids
+    // it always did and stays byte-identical. The arm activates only on
+    // shapes that previously could not compile at all (an array-arity fold
+    // kernel died in every route, unifying a rank-k parameter against a
+    // scalar cell), so it strictly widens the language.
+    let leadingAxisFold (r: int) : TypeResult<TypedExpr> option =
+        // The kernel's slice arity, read WITHOUT inference. None = not an
+        // array-valued fold kernel (or not knowably one): fall through to the
+        // existing routes and their existing diagnostics.
+        let annotRank (t: TypeExpr option) : int option =
+            match t with
+            | Some (TyVar (_, Some k)) when k >= 1 -> Some k
+            | Some (TyAbstractArray (_, rankE, _)) ->
+                (match rankE.Kind with
+                 | ExprKind.ExprLit (LitInt k) when k >= 1L -> Some (int k)
+                 | _ -> None)
+            | Some (TyArray (_, idxs)) when not idxs.IsEmpty -> Some idxs.Length
+            | _ -> None
+        // LAMBDA KERNELS ONLY, deliberately. A NAMED function's `T^1` params
+        // are silently vacuous on the existing fold routes -- `reduce(G, f)`
+        // for `function f(a: T^1, b: T^1) = a + b` over rank-2 G compiles
+        // TODAY and returns ROW sums (the params specialize to scalars; the
+        // dispatch-looseness family), measured on master. Routing that
+        // spelling here would silently change a green program's answer from
+        // row sums to column sums -- the exact verdict flip this arm's
+        // syntactic detection exists to rule out. The lambda spelling has no
+        // such history: every array-annotated fold-kernel lambda was an error
+        // before this arm, so claiming it is pure widening.
+        let kernelParallel : bool =
+            match kernel.Kind with
+            | ExprKind.ExprLambda (_, Some wc, _) -> not (List.isEmpty wc.Parallel)
+            | _ -> false
+        let sliceArity : int option =
+            match kernel.Kind with
+            | ExprKind.ExprLambda ([p1; p2], _, _) ->
+                (match annotRank p1.Type, annotRank p2.Type with
+                 | Some k1, Some k2 when k1 = k2 -> Some k1
+                 | _ -> None)
+            | _ -> None
+        match sliceArity with
+        | None -> None
+        | Some q ->
+            if axisCountOpt.IsSome then
+                Some (Error (Other "reduce: an array-valued kernel folds the LEADING axis (its elements are whole slices), so `axes = n` -- which counts INNERMOST axes -- cannot combine with it. Drop the axes argument, or fold cells with a scalar kernel."))
+            elif q <> r - 1 then
+                Some (Error (Other (sprintf "reduce: this kernel combines rank-%d slices, but a rank-%d operand's leading-axis slices have rank %d. Only the leading-axis fold (slice rank = rank(A) - 1) is supported; peel or reshape for anything deeper." q r (r - 1))))
+            elif kernelParallel then
+                Some (Error (Other "reduce: the leading-axis fold is sequential by construction (each step consumes the previous accumulator), so a `where omp/cuda/mpi` clause on its kernel licenses nothing and would be dropped silently. Remove the clause; the per-step slice combine is an ordinary elementwise apply and may carry its own licence inside the kernel body."))
+            else
+            match tArrCache.Force() |> Result.map (fun t -> env.Subst.Resolve t.Type) with
+            | Ok (ArrayElem at) when at.IndexTypes.Length = r ->
+                let lead = at.IndexTypes.Head
+                // The LEADING axis may be plain -- or GROUP-OUTER: a grid a
+                // grouped apply returned (group axis x static kernel axes) is
+                // rectangular storage whose member axis was consumed by the
+                // kernel, so its slices are uniform. What it may NOT be is
+                // anything whose slices differ in shape -- and that is
+                // exactly "some TRAILING axis is not plain dense", checked
+                // below, since a surviving ragged member/dep/compound slot
+                // lives in the trailing positions.
+                if lead.Symmetry <> SymNone then
+                    Some (Error (Other "reduce: leading-axis fold over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical slices and folding the logical (mirrored) slices differ. decompact(A, d) first for the logical fold."))
+                elif lead.IxKind <> IxKPlain && lead.IxKind <> IxKGroupOuter then
+                    Some (Error (Other "reduce: leading-axis fold needs a plain dense (or group-outer) leading axis -- ragged, compound, or sparse leading slices have no uniform slice shape to combine. Fold each row to a scalar instead, or restructure."))
+                elif at.IndexTypes.Tail |> List.exists (fun ix ->
+                        ix.IxKind <> IxKPlain || ix.Symmetry <> SymNone || ix.Rank <> 1) then
+                    Some (Error (Other "reduce: leading-axis fold needs plain dense trailing axes (the slices being combined must share one rectangular shape) -- ragged, grouped, compact, or multi-rank trailing axes do not. Fold each row to a scalar instead, or restructure."))
+                else
+                let staticLead = tryEvalIntIR lead.Extent
+                match staticLead with
+                | Some n when n <= 0L && init.IsNone -> Some (Error (ReduceEmptyArray n))
+                | _ ->
+                let uid = env.Builder.FreshId()
+                let span = array.Span
+                let synAt k = mkExpr span k
+                let srcIsNamed = match array.Kind with ExprKind.ExprVar _ -> true | _ -> false
+                let srcName = sprintf "__lasrc%d" uid
+                let srcVar = if srcIsNamed then array else synAt (ExprVar srcName)
+                let accName = sprintf "__laacc%d" uid
+                let accVar = synAt (ExprVar accName)
+                let nxtName = sprintf "__lanxt%d" uid
+                let jName = sprintf "__laj%d" uid
+                let cpName = sprintf "__lacp%d" uid
+                // Materialize a private copy: identity map + compute (the
+                // measured-working function-body shape).
+                let matCopy (e: Expr) =
+                    let idLam = synAt (ExprLambda ([{ Name = cpName; Type = None; Default = None; NameSpan = span }], None, synAt (ExprVar cpName)))
+                    synAt (ExprCompute (synAt (ExprBinOp (Elementwise, OpApply, e, idLam))))
+                let sliceAt (ix: Expr) = synAt (ExprApp (srcVar, [ix]))
+                let seedExpr =
+                    match init with
+                    | Some ie -> matCopy ie
+                    | None -> matCopy (sliceAt (synAt (ExprLit (LitInt 0L))))
+                // Static leading extent bakes the bound (the loop-bound rule
+                // literal Idx<N> params already follow); a runtime extent
+                // reads the operand's leading slot of the extents tuple.
+                let hiExpr =
+                    match staticLead with
+                    | Some n -> synAt (ExprLit (LitInt n))
+                    | None ->
+                        synAt (ExprTupleIndex (synAt (ExprExtents srcVar),
+                                               synAt (ExprLit (LitInt 0L))))
+                let startLit = if init.IsSome then 0L else 1L
+                let combined = synAt (ExprCompute (synAt (ExprApp (kernel, [accVar; sliceAt (synAt (ExprVar jName))]))))
+                let loopBody =
+                    [ StmtLet { Mutability = BindLet; Pattern = mkPat span (PatVar nxtName); Type = None; Value = combined }
+                      StmtAssign (synAt (ExprVar accName), AssignEq, synAt (ExprVar nxtName)) ]
+                let stmts =
+                    (if srcIsNamed then []
+                     else [ StmtLet { Mutability = BindLet; Pattern = mkPat span (PatVar srcName); Type = None; Value = array } ])
+                    @ [ StmtLet { Mutability = BindMut; Pattern = mkPat span (PatVar accName); Type = None; Value = seedExpr }
+                        StmtForIn (jName, synAt (ExprKind.ExprDotDot (synAt (ExprLit (LitInt startLit)), hiExpr)), loopBody) ]
+                Some (inferExpr env (synAt (ExprBlock (stmts, Some accVar))))
+            | _ -> None
+    let leadingResult =
+        match rk with
+        | Some r when r >= 2 -> leadingAxisFold r
+        | _ -> None
+    match leadingResult with
+    | Some result -> result
+    | None ->
     let partialResult =
         match rk with
         | Some r when r >= 2 && (defaultArg axisCountOpt 1) < r -> partialFold r (defaultArg axisCountOpt 1)
@@ -7535,12 +7697,22 @@ and inferExtents (env: TypeEnv) array : TypeResult<TypedExpr> =
                 // tuple form is statically ill-posed for such arrays
                 // (the runtime fallback would read a meaningless 0
                 // placeholder). Reject with guidance instead.
+                // A GROUP-OUTER slot is deliberately NOT in this list: its
+                // runtime extent is the group COUNT, a perfectly scalar
+                // answer. What has no scalar answer is the ragged MEMBER
+                // dimension -- and an array that still carries one wears
+                // IxKGroupMember (or a ragged kind) on THAT slot and is
+                // refused by it. A rectangular grid a grouped apply returned
+                // (group axis x static kernel axes -- the lswosa family grid)
+                // has consumed the member axis, so every slot it has left
+                // answers, and `extents(G)[0]` is the group count the
+                // leading-axis fold's runtime loop bound reads.
                 let raggedFamilySlot =
                     arrTy.IndexTypes |> List.exists (fun ix ->
                         match ix.IxKind with
                         | IxKRagged | IxKRaggedInline | IxKRaggedOpaque
                         | IxKDepInner
-                        | IxKGroupOuter | IxKGroupMember
+                        | IxKGroupMember
                         | IxKCompound | IxKCompoundDynamic | IxKSparse -> true
                         | _ -> false)
                 if raggedFamilySlot then

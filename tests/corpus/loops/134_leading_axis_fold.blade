@@ -1,0 +1,46 @@
+// TEST: Leading Axis Fold
+// ============================================================================
+// The fold-over-leading-axis spelling examples/lswosa.blade's family_spectra
+// tracked as a feature: an ARRAY-VALUED kernel (`lambda(a: T^1, b: T^1) ->
+// a + b`) folds a rank-2 operand's LEADING axis, combining whole rows into
+// one rank-1 result -- the complement of the innermost-axis default, and the
+// spelling that removes that function's (grid + transpose + innermost fold).
+//
+// Detection is SYNTACTIC (the lambda's written parameter arities), so every
+// existing route mints the ids it always did; the arm activates only on
+// shapes that previously could not compile. Fold order and seed match the
+// rank-1 scalar fold one slice up: a LEFT fold seeded with the first slice
+// (or `init`, when given -- then the loop covers every slice).
+//
+// LAMBDA KERNELS ONLY, deliberately: a NAMED function's `T^1` params are
+// silently vacuous on the existing fold routes (`reduce(G, f)` compiles today
+// and returns ROW sums via scalar specialization), so routing it here would
+// flip a green program's answer. The lambda spelling had no prior meaning.
+// ============================================================================
+let g = (method_for(range<Idx<4>>) <@> lambda(r) ->
+          (method_for(range<Idx<3>>) <@> lambda(c) -> 1.0 * r * 10.0 + 1.0 * c)) |> compute
+// EXPECT: g = [[0, 1, 2], [10, 11, 12], [20, 21, 22], [30, 31, 32]]
+
+// Column sums: fold the leading (row) axis.
+let s1 = reduce(g, lambda(a: T^1, b: T^1) -> a + b)
+// EXPECT: s1 = [60, 64, 68]
+
+// With an explicit init the fold is seeded there and covers every row.
+let seed = (method_for(range<Idx<3>>) <@> lambda(c) -> 100.0) |> compute
+let s2 = reduce(g, lambda(a: T^1, b: T^1) -> a + b, seed)
+// EXPECT: s2 = [160, 164, 168]
+
+// Non-commutative kernel pins the ORDER: left fold seeded with the first
+// row, exactly the scalar fold's order one slice up ((10-1)-100 = -91).
+let h = (method_for(range<Idx<3>>) <@> lambda(r) ->
+          (method_for(range<Idx<2>>) <@> lambda(c) ->
+            (if r == 0 then 10.0 else (if r == 1 then 1.0 else 100.0)) + 1.0 * c)) |> compute
+// EXPECT: h = [[10, 11], [1, 2], [100, 101]]
+let d = reduce(h, lambda(a: T^1, b: T^1) -> a - b)
+// EXPECT: d = [-91, -92]
+
+// Complex elements ride the same arm.
+let cg = (method_for(range<Idx<4>>) <@> lambda(r) ->
+          (method_for(range<Idx<3>>) <@> lambda(c) -> complex(1.0 * r + 1.0 * c, 1.0))) |> compute
+let s3 = reduce(cg, lambda(a: T^1, b: T^1) -> a + b)
+// EXPECT: s3 = [(6,4), (10,4), (14,4)]

@@ -124,11 +124,11 @@ function family_spectra(ts: T<time>^1, s: U^1, freqs: T<frequency>^1,
         let sw = hanning((trow, srow), shift, shift + seg_span)
         wosa_lsdft((sw, trow), freqs, t_zero)
     } |> compute
-    // Freq-major so the caller's per-frequency segment folds are plain
-    // row-mode. The transpose is this function's implementation detail; the
-    // language-level fix is a fold-over-leading-axis spelling
-    // (reduce(grid, lambda(a: T^1, b: T^1) -> a + b)), tracked as a feature.
-    transpose(grid, [0, 1])
+    // GROUP-major (segment x freq), no transpose: the caller's per-frequency
+    // segment folds are LEADING-axis folds -- an array-valued kernel
+    // (reduce(grid, lambda(a: T^1, b: T^1) -> a + b)) combines whole
+    // freq-rows, the feature this comment used to track.
+    grid
 }
 
 /// WOSA: 50%-overlapped segments as two interleaved group_by families,
@@ -174,18 +174,25 @@ where omp(st: 1) = {
 
     // Segment accumulations, per frequency, across BOTH families:
     // |ls|^2, cos(arg), sin(arg). atan2(imag, real) is the reference's arg.
-    // Family grids come back FREQ-major, and `reduce` folds RIGHT-TO-LEFT
-    // (innermost axis, one by default; `axes = n` folds n), so a bare
-    // reduce over each mapped grid is the per-frequency segment fold.
+    // Family grids come back GROUP-major (segment x freq), and the
+    // per-frequency segment fold is the LEADING-axis fold: an array-valued
+    // kernel (`lambda(a: T^1, b: T^1) -> a + b`) folds whole freq-rows, so
+    // no transposed intermediate exists at all.
     function cosatan2(z: Complex128) = cos(atan2(imag(z), real(z)))
     function sinatan2(z: Complex128) = sin(atan2(imag(z), real(z)))
     function mag2(z: Complex128) = real(z)^2 + imag(z)^2
-    let mod2 = (reduce(ls_e <@> mag2, (+)) |> compute)
-             + (reduce(ls_o <@> mag2, (+)) |> compute)
-    let cos_sum = (reduce(ls_e <@> cosatan2, (+)) |> compute)
-                + (reduce(ls_o <@> cosatan2, (+)) |> compute)
-    let sin_sum = (reduce(ls_e <@> sinatan2, (+)) |> compute)
-                + (reduce(ls_o <@> sinatan2, (+)) |> compute)
+    let m_e = (ls_e <@> mag2) |> compute
+    let m_o = (ls_o <@> mag2) |> compute
+    let mod2 = reduce(m_e, lambda(a: T^1, b: T^1) -> a + b)
+             + reduce(m_o, lambda(a: T^1, b: T^1) -> a + b)
+    let c_e = (ls_e <@> cosatan2) |> compute
+    let c_o = (ls_o <@> cosatan2) |> compute
+    let cos_sum = reduce(c_e, lambda(a: T^1, b: T^1) -> a + b)
+                + reduce(c_o, lambda(a: T^1, b: T^1) -> a + b)
+    let s_e = (ls_e <@> sinatan2) |> compute
+    let s_o = (ls_o <@> sinatan2) |> compute
+    let sin_sum = reduce(s_e, lambda(a: T^1, b: T^1) -> a + b)
+                + reduce(s_o, lambda(a: T^1, b: T^1) -> a + b)
 
     let mod_avg = mod2 / n_segments
     let arg_avg = atan2(sin_sum / n_segments, cos_sum / n_segments)

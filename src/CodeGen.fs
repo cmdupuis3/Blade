@@ -3082,9 +3082,23 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
     // BINDING path builds (densePartialSubview) as a prvalue instead: data
     // steps through the consumed leading dims, extents shifts past them.
     // Same scoping as the binding path -- fully plain-dense rectangular
-    // (IxKPlain/SymNone/SDimension/arity-1); compound reads go through
+    // (IxKPlain/SymNone/arity-1); compound reads go through
     // compoundRead above, and ragged/packed-symmetric row pointers must NOT be
     // re-wrapped (their axes fail the predicate).
+    //
+    // Deliberately NOT gated on `ix.Kind = SDimension`: an index record's Kind
+    // is a statement about ONE apply (S = this apply's grid iterates it, T =
+    // this apply's kernel contributed it), never about the value's storage --
+    // see reSDimOperand's doc in TypeCheck. An array a kernel RETURNED carries
+    // inherited TDimension stamps, and its rows are exactly as rectangular as
+    // anyone else's; gating on Kind sent `G(j)` of such a G (the leading-axis
+    // fold's step slice) to the raw `data[j]` pointer, which then failed g++ in
+    // every consuming position (call argument, apply operand, let binding).
+    // A CONSUMED (leading, subscripted-through) axis may also be GROUP-OUTER:
+    // the rectangular grid a grouped apply returns is a dense pool whose
+    // extents[0] is the group count, so `data[j]` / `extents + 1` are exact.
+    // RESIDUAL axes must stay plain -- a surviving ragged member axis means
+    // the row shapes differ and the aggregate would lie.
     let densePartialSubviewExpr () : string option =
         if List.isEmpty indices
            || indices |> List.exists (function IRTuple _ -> true | _ -> false) then None
@@ -3092,9 +3106,12 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
             match inferExprType arr with
             | ArrayElem arrTy
                     when arrTy.IndexTypes.Length > indices.Length
-                         && arrTy.IndexTypes |> List.forall (fun ix ->
-                                ix.IxKind = IxKPlain && ix.Symmetry = SymNone
-                                && ix.Kind = SDimension && ix.Rank = 1) ->
+                         && arrTy.IndexTypes |> List.mapi (fun d ix -> (d, ix))
+                            |> List.forall (fun (d, ix) ->
+                                (ix.IxKind = IxKPlain
+                                 || (d < indices.Length && ix.IxKind = IxKGroupOuter))
+                                && ix.Symmetry = SymNone
+                                && ix.Rank = 1) ->
                 let residTy = { arrTy with IndexTypes = List.skip indices.Length arrTy.IndexTypes }
                 let subscripts =
                     indices
@@ -9139,12 +9156,16 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
         // them, e.g. `Array<double,1> r0 = { A.data[0L], A.extents + 1 };`.
         //
         // Scoped to fully plain-dense rectangular arrays (every axis IxKPlain /
-        // SymNone / SDimension / arity-1) so the consumed-dims count equals the
+        // SymNone / arity-1) so the consumed-dims count equals the
         // subscript count and the extents shift is exact. Compound partial reads
         // take the IRTuple arm in producesWrapper; ragged/dep-idx rows take
         // raggedRowSubview above; and a flat single-subscript into PACKED
         // symmetric storage returns a row pointer under compact semantics that
         // must NOT be re-wrapped here -- all excluded by the axis predicate.
+        // NOT gated on `ix.Kind = SDimension` -- Kind describes one apply, not
+        // the value's storage (see densePartialSubviewExpr's note; both twins
+        // must answer identically or a let-bound slice and an inline slice
+        // diverge in shape).
         let densePartialSubview =
             match value, resolvedTy with
             | IRIndex (arr, indices, _), ArrayElem residTy
@@ -9153,9 +9174,12 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
                 match inferExprType arr with
                 | ArrayElem arrTy
                         when arrTy.IndexTypes.Length > indices.Length
-                             && arrTy.IndexTypes |> List.forall (fun ix ->
-                                    ix.IxKind = IxKPlain && ix.Symmetry = SymNone
-                                    && ix.Kind = SDimension && ix.Rank = 1) ->
+                             && arrTy.IndexTypes |> List.mapi (fun d ix -> (d, ix))
+                                |> List.forall (fun (d, ix) ->
+                                    (ix.IxKind = IxKPlain
+                                     || (d < indices.Length && ix.IxKind = IxKGroupOuter))
+                                    && ix.Symmetry = SymNone
+                                    && ix.Rank = 1) ->
                     let arrStr = exprToCppCtx ctx arr
                     let subscripts =
                         indices
