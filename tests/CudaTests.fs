@@ -633,9 +633,150 @@ let ws = [1.0, 2.0, 3.0]
 let R = ws <@> lambda(w) where cuda(block: 32) -> { let c = t * w
                                                    prodsum(s, c) } |> compute
 """
+        // REDUCTION JOIN in a device kernel body. Three legs over ONE traversal
+        // of the sample axis, two of them reading the same named deferred maps
+        // (`c`, `d` -- no `compute`, which is the sharing declaration). On the
+        // device that is three per-thread accumulator registers plus a `const`
+        // share local per deferred operand; the host oracle is the same loop.
+        //
+        // Values are exact in binary64 (integers and halves throughout, every
+        // partial product and sum representable), so this is a byte-identical
+        // differential and not a tolerance comparison -- same rule as
+        // `captured_arrays`. A join is a TRAVERSAL rewrite, so anything but
+        // equality here means the legs stopped folding the same cells.
+        let joinHost = """
+let t = [1.0, 2.0, 3.0, 4.0]
+let s = [0.5, 1.5, 2.5, 3.5]
+let ws = [1.0, 2.0, 3.0]
+let R = ws <@> lambda(w) -> {
+    let c = t <@> lambda(x) -> x * w
+    let d = t <@> lambda(x) -> x + w
+    let p, q, r = object_for(<&!>) <@> (prodsum(s, c), prodsum(s, d), prodsum(c, d))
+    p + 2.0 * q - r
+} |> compute
+"""
+        let joinCuda = """
+let t = [1.0, 2.0, 3.0, 4.0]
+let s = [0.5, 1.5, 2.5, 3.5]
+let ws = [1.0, 2.0, 3.0]
+let R = ws <@> lambda(w) where cuda(block: 32) -> {
+    let c = t <@> lambda(x) -> x * w
+    let d = t <@> lambda(x) -> x + w
+    let p, q, r = object_for(<&!>) <@> (prodsum(s, c), prodsum(s, d), prodsum(c, d))
+    p + 2.0 * q - r
+} |> compute
+"""
+        // HETEROGENEOUS legs: three different fold kernels and three different
+        // seeds in one device traversal -- `prodsum` folding (+) from 0, `(*)`
+        // from 1, and a lambda max from a sentinel. This is what forces per-leg
+        // kernel and seed slots on the device side too; a shared accumulator
+        // type or a shared operator could not express it at any width.
+        let joinHeteroHost = """
+let a = [1.0, 2.0, 4.0, 0.5]
+let b = [3.0, 1.0, 0.25, 8.0]
+let ws = [1.0, 2.0]
+let R = ws <@> lambda(w) -> {
+    let c = a <@> lambda(x) -> x * w
+    let x, y, z = object_for(<&!>) <@> (prodsum(b, c), reduce(c, (*), 1.0), reduce(c, lambda(p, q) -> if p > q then p else q, 0.0 - 1.0e30))
+    x + y + z
+} |> compute
+"""
+        let joinHeteroCuda = """
+let a = [1.0, 2.0, 4.0, 0.5]
+let b = [3.0, 1.0, 0.25, 8.0]
+let ws = [1.0, 2.0]
+let R = ws <@> lambda(w) where cuda(block: 32) -> {
+    let c = a <@> lambda(x) -> x * w
+    let x, y, z = object_for(<&!>) <@> (prodsum(b, c), reduce(c, (*), 1.0), reduce(c, lambda(p, q) -> if p > q then p else q, 0.0 - 1.0e30))
+    x + y + z
+} |> compute
+"""
+        // A deferred map REUSED after the join that shared it. The share local
+        // is scoped to the join's own loop, so the bare `prodsum(c, t)` between
+        // the two joins must go back to recomputing `c` -- and the second join
+        // must mint its own locals rather than name the first join's. Getting
+        // this wrong emits an identifier that is out of scope by the time it is
+        // used, which nvcc only reports after the host half has already been
+        // told the kernel exists.
+        let joinReuseHost = """
+let t = [1.0, 2.0, 3.0, 4.0]
+let s = [0.5, 1.5, 2.5, 3.5]
+let ws = [1.0, 2.0, 3.0]
+let R = ws <@> lambda(w) -> {
+    let c = t <@> lambda(x) -> x * w
+    let d = t <@> lambda(x) -> x + w
+    let p, q = object_for(<&!>) <@> (prodsum(s, c), prodsum(c, d))
+    let z = prodsum(c, t)
+    let e, f = object_for(<&!>) <@> (prodsum(d, d), prodsum(c, s))
+    p + q + z + e + f
+} |> compute
+"""
+        let joinReuseCuda = """
+let t = [1.0, 2.0, 3.0, 4.0]
+let s = [0.5, 1.5, 2.5, 3.5]
+let ws = [1.0, 2.0, 3.0]
+let R = ws <@> lambda(w) where cuda(block: 32) -> {
+    let c = t <@> lambda(x) -> x * w
+    let d = t <@> lambda(x) -> x + w
+    let p, q = object_for(<&!>) <@> (prodsum(s, c), prodsum(c, d))
+    let z = prodsum(c, t)
+    let e, f = object_for(<&!>) <@> (prodsum(d, d), prodsum(c, s))
+    p + q + z + e + f
+} |> compute
+"""
+        // RUNTIME-EXTENT launch grid: a kernel inside a GENERIC function, whose
+        // operand extent is not known until the call. The grid is
+        // `(n + block - 1) / block` either way, so the extent travels as a
+        // `size_t` parameter instead of being baked as a literal.
+        let rtHost = """
+function fscale(xs: T^1) -> T^1 = xs <@> lambda(x) -> x * 3.0 + 1.0
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let R = fscale(A) |> compute
+"""
+        let rtCuda = """
+function fscale(xs: T^1) -> T^1 = xs <@> lambda(x) where cuda(block: 64) -> x * 3.0 + 1.0
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let R = fscale(A) |> compute
+"""
+        // Both at once -- a join inside a generic function, which is the shape
+        // the whole arc exists for (one per-frequency kernel, k statistics, no
+        // extent known before the call). The runtime count reaches three
+        // places that have to agree: the thread grid, the staging copies for
+        // the forwarded array captures, and the join's own fold bound.
+        let rtJoinHost = """
+function stats(xs: T^1, ys: T^1, ws: T^1) -> T^1 =
+    ws <@> lambda(w) -> {
+        let c = xs <@> lambda(x) -> x * w
+        let d = xs <@> lambda(x) -> x + w
+        let p, q, r = object_for(<&!>) <@> (prodsum(ys, c), prodsum(ys, d), prodsum(c, d))
+        p + 2.0 * q - r
+    }
+let t = [1.0, 2.0, 3.0, 4.0]
+let s = [0.5, 1.5, 2.5, 3.5]
+let ws = [1.0, 2.0, 3.0]
+let R = stats(t, s, ws) |> compute
+"""
+        let rtJoinCuda = """
+function stats(xs: T^1, ys: T^1, ws: T^1) -> T^1 =
+    ws <@> lambda(w) where cuda(block: 64) -> {
+        let c = xs <@> lambda(x) -> x * w
+        let d = xs <@> lambda(x) -> x + w
+        let p, q, r = object_for(<&!>) <@> (prodsum(ys, c), prodsum(ys, d), prodsum(c, d))
+        p + 2.0 * q - r
+    }
+let t = [1.0, 2.0, 3.0, 4.0]
+let s = [0.5, 1.5, 2.5, 3.5]
+let ws = [1.0, 2.0, 3.0]
+let R = stats(t, s, ws) |> compute
+"""
         let cases =
             [ ("rank1", rank1Host, rank1Cuda)
               ("captured_arrays", capHost, capCuda)
+              ("reduction_join", joinHost, joinCuda)
+              ("reduction_join_hetero", joinHeteroHost, joinHeteroCuda)
+              ("reduction_join_reuse", joinReuseHost, joinReuseCuda)
+              ("runtime_extent", rtHost, rtCuda)
+              ("runtime_extent_join", rtJoinHost, rtJoinCuda)
               ("complex_rank1", cxHost, cxCuda)
               ("complex_mixed_inputs", cxMixHost, cxMixCuda)
               ("complex_ctor_parts", cxPartsHost, cxPartsCuda)
@@ -854,6 +995,122 @@ let R = ws <@> lambda(w) where cuda(block: 32) -> { let c = t * w
                 1
         if capStructRc = 0 then passed <- passed + 1
         else (failures <- failures + 1; failedNames <- failedNames @ ["capture_forward_structure"])
+        // REDUCTION JOIN structure. The value differential above cannot tell a
+        // fused traversal from four separate ones -- both give the same
+        // numbers. So this pins the LOOP: exactly one `for` in the whole .cu,
+        // one accumulator per leg, and each shared transcendental evaluated
+        // ONCE. Textual for exactly the reason the CPU side's acceptance
+        // criterion is textual (docs/plan-reduction-joins.md, section 3 of the
+        // differential findings): sharing silently not firing was numerically
+        // invisible and only showed up in the emitted code.
+        let joinStructRc =
+            let label = "reduction_join_structure"
+            let src = """
+let t = [1.0, 2.0, 3.0, 4.0]
+let s = [0.5, 1.5, 2.5, 3.5]
+let ws = [1.0, 2.0, 3.0]
+let R = ws <@> lambda(w) where cuda(block: 32) -> {
+    let ct = t <@> lambda(x) -> cos(w * x)
+    let st = t <@> lambda(x) -> sin(w * x)
+    let a, b, c, d = object_for(<&!>) <@> (prodsum(s, ct), prodsum(s, st), prodsum(ct, ct), prodsum(ct, st))
+    a + b + c + d
+} |> compute
+"""
+            for ext in [".cu"; ".cpp"; ".cu.obj"; ".cpp.obj"; ".cu.o"; ".cpp.o"; ".exe"; ".out"] do
+                let f = Path.Combine(outputDir, "cuda_join_struct" + ext)
+                try if File.Exists f then File.Delete f with _ -> ()
+            let countOf (needle: string) (hay: string) =
+                let mutable n, i = 0, 0
+                while i >= 0 && i < hay.Length do
+                    let j = hay.IndexOf(needle, i)
+                    if j < 0 then i <- -1 else (n <- n + 1; i <- j + needle.Length)
+                n
+            try
+                CodeGen.setCudaEmitMode true
+                let outcome =
+                    match genVariant "cuda_join_struct" src with
+                    | Error e -> Error e
+                    | Ok (_, None) -> Error "no .cu emitted for the reduction-join kernel"
+                    | Ok (_cppFile, Some cuFile) ->
+                        let cu = File.ReadAllText cuFile
+                        let loops = countOf "for (" cu
+                        let accs = countOf "_jacc" cu
+                        if loops <> 1 then
+                            Error (sprintf "the join emitted %d loops, not ONE fused traversal" loops)
+                        // 4 declarations + 4 reads on the left of the fold + 4
+                        // on the right + 4 tail reads = the accumulators are
+                        // used, not merely declared. The exact count is not the
+                        // point; ZERO would mean the join never reached the
+                        // device emitter at all.
+                        elif accs < 4 then
+                            Error (sprintf "the join declared %d accumulator references (expected one per leg)" accs)
+                        elif countOf "cos(" cu <> 1 then
+                            Error (sprintf "the shared `cos` is evaluated %d times per iteration, not once" (countOf "cos(" cu))
+                        elif countOf "sin(" cu <> 1 then
+                            Error (sprintf "the shared `sin` is evaluated %d times per iteration, not once" (countOf "sin(" cu))
+                        elif not (cu.Contains "const double") then
+                            Error "the shared deferred operands are not per-thread const locals"
+                        else Ok ()
+                CodeGen.setCudaEmitMode false
+                match outcome with
+                | Ok () ->
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label
+                        "one fused loop, one accumulator per leg, each shared map evaluated once"
+                    0
+                | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e; 1
+            with ex ->
+                CodeGen.setCudaEmitMode false
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ex.Message
+                1
+        if joinStructRc = 0 then passed <- passed + 1
+        else (failures <- failures + 1; failedNames <- failedNames @ ["reduction_join_structure"])
+        // RUNTIME-EXTENT structure. Four things have to line up or the launch
+        // is sized by something other than the actual operand: the __global__
+        // takes the extent as a parameter and unranks against it, the wrapper
+        // derives the grid from it, the staging copies use it, and the HOST
+        // reads it off the operand's own extents table. Pinned because a
+        // literal that happened to match would pass the value differential.
+        let rtStructRc =
+            let label = "runtime_extent_structure"
+            let src = """
+function fscale(xs: T^1) -> T^1 = xs <@> lambda(x) where cuda(block: 64) -> x * 3.0 + 1.0
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let R = fscale(A) |> compute
+"""
+            for ext in [".cu"; ".cpp"; ".cu.obj"; ".cpp.obj"; ".cu.o"; ".cpp.o"; ".exe"; ".out"] do
+                let f = Path.Combine(outputDir, "cuda_rtext_struct" + ext)
+                try if File.Exists f then File.Delete f with _ -> ()
+            try
+                CodeGen.setCudaEmitMode true
+                let outcome =
+                    match genVariant "cuda_rtext_struct" src with
+                    | Error e -> Error e
+                    | Ok (_, None) -> Error "no .cu emitted for the runtime-extent kernel"
+                    | Ok (cppFile, Some cuFile) ->
+                        let cu = File.ReadAllText cuFile
+                        let cpp = File.ReadAllText cppFile
+                        if not (cu.Contains "size_t __blade_ext0") then
+                            Error "the kernel does not take the runtime extent as a parameter"
+                        elif not (cu.Contains "__blade_card = __blade_ext0") then
+                            Error "the launch grid is not derived from the runtime extent"
+                        elif not (cu.Contains "__blade_ext0 * sizeof") then
+                            Error "the staging copy is not sized by the runtime extent"
+                        elif not (cpp.Contains "xs.extents[0]") then
+                            Error "the host call site does not read the extent off the operand"
+                        else Ok ()
+                CodeGen.setCudaEmitMode false
+                match outcome with
+                | Ok () ->
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label
+                        "grid, staging and unranking all derived from the runtime extent"
+                    0
+                | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e; 1
+            with ex ->
+                CodeGen.setCudaEmitMode false
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ex.Message
+                1
+        if rtStructRc = 0 then passed <- passed + 1
+        else (failures <- failures + 1; failedNames <- failedNames @ ["runtime_extent_structure"])
         printFooter "CUDA Kernel" [sprintf "%d passed" passed; sprintf "%d failure(s)" failures]
         { Block = "CUDA Kernel"; Passed = passed; Failed = failures; Skipped = 0; FailedNames = failedNames }
 

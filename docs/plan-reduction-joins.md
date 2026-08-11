@@ -351,12 +351,159 @@ has both, §5) is where the rest of it is.
   the same message and for the same reason `reduce` and `prodsum` refuse it:
   folding canonical vs logical cells differ.
 * **Ragged / grouped / compound leg inputs** — refused at codegen.
-* **`omp` / `cuda` / `mpi` on a join** — refused: joined accumulators are shared
-  scalars. The single-leaf terminal's chunked `omp` fold (Path B) is untouched
-  and a 1-leg join still reaches it.
+* **`omp` / `cuda` / `mpi` on a join's LEGS** — refused: joined accumulators are
+  shared scalars. The single-leaf terminal's chunked `omp` fold (Path B) is
+  untouched and a 1-leg join still reaches it.
+
+  A join **inside** a `where cuda` kernel body is a different thing and is
+  emitted — see §6. There the accumulators are per-thread registers, not shared
+  scalars, so the objection above does not apply.
 * **Staggered-rank legs.** The merged nest supports them; a join requires equal
   rank, because "the same joint index space" is what the surface declares.
 * **Suppressing Form 2's eager leg-list binding** — §1.7.
 * **A shared deferred map with several source arrays** is handled (the leading
   source supplies the bound; the share leaf peels all of them), but is only
   exercised at one array by the corpus.
+
+---
+
+## 6. The join on the device
+
+Added 2026-08-11. A join inside a `where cuda` kernel body now emits, and so
+does a kernel whose iteration space is only sized at run time. The two arrived
+together because the shape the feature exists for — one per-frequency kernel,
+k statistics, inside a generic function — needs both.
+
+### 6.1 k accumulators are k registers
+
+The host emitter's objection to `cuda` on a join (§5) is about a join whose
+*legs* are device kernels: joined accumulators would be shared scalars. Inside
+a device kernel body the situation inverts. Each thread owns the whole
+traversal, so the k accumulators are k **per-thread registers** and the share
+locals are per-thread `const` scalars. Nothing is shared between threads, and
+there is no reduction across the grid to arrange.
+
+`planCudaDeviceBody` grew one node (`emitJoin`) that renders exactly the loop
+§1.4 shows, into the `__global__`:
+
+```cpp
+double jacc2 = 0.0, jacc3 = 0.0, jacc4 = 0.0, jacc5 = 0.0;
+for (size_t k = 0; k < 4801UL; k++) {
+    const double shr6 = cos((oms__i0 * (cap_ts[k])));
+    const double shr7 = sin((oms__i0 * (cap_ts[k])));
+    jacc2 = (jacc2 + ((cap_s[k]) * (shr6)));
+    jacc3 = (jacc3 + ((cap_s[k]) * (shr7)));
+    jacc4 = (jacc4 + ((shr6) * (shr6)));
+    jacc5 = (jacc5 + ((shr6) * (shr7)));
+}
+```
+
+The `Tuple<k>` the join answers never exists on the device: the binding records
+k synthetic scalar ids, and each `get<i>` projection resolves to the i-th
+accumulator directly. A join types FLAT (§1.3), so the projection index IS the
+leg index and there is no nested-get chain to unwind — the same property that
+made the kernel-body case work on the host.
+
+The single-leg (non-tuple) encoding routes through the same emitter at k = 1,
+which is what makes `reduce(<deferred>, op, init)` in a device kernel body work
+as a side effect.
+
+**Two ordering rules are load-bearing**, both found by reading emitted `.cu`
+rather than by a failing value comparison:
+
+1. **Shares are rebound before the legs are resolved.** A pointwise producer
+   closes over the DevArrays it was handed, so a leg resolved first keeps
+   rendering `cos(w*ts[k])` inline no matter what the share local says. The
+   first version did exactly that: it declared `shr6`/`shr7` and then never
+   read them — right answer, four `cos` calls, an unused-variable warning as
+   the only trace.
+2. **Producers are restored afterwards.** A share local is scoped to the join's
+   own loop, so a *later* use of the same deferred map — a second join, or a
+   bare `prodsum(ct, ts)` between two joins — must go back to recomputing. The
+   `reduction_join_reuse` case pins it; without the restore, the emitted `.cu`
+   names a variable that is out of scope by then.
+
+Sharing is collected from the legs' **operand slots**, not from every variable
+reference under the traversal: a share local is indexed by this join's loop
+variable, which is sound for an operand by construction and not for an
+arbitrary reference.
+
+### 6.2 A launch grid does not need compile-time extents
+
+`genCudaKernel` refused any nest without literal extents, which excluded every
+kernel inside a generic function — the extent is not known until the call. But
+rectangularity is about the SHAPE of the iteration space, not about *when* its
+size is known: a dependent bound, a strict offset, or a virtual operand has no
+flat thread grid at any time, while a plain dense axis always does, because
+`(n + block - 1) / block` is computable at the launch.
+
+So the gate now splits those two questions. A runtime extent is read off the
+host `Array<T,N>` wrapper at the call site (`xs.extents[0]` — the same
+expression the output's own extents table is built from, so grid and allocation
+cannot disagree) and travels into the `.cu` as a `size_t` parameter that the
+wrapper uses for the grid and the staging copies, and the kernel uses to unrank
+its flat thread id. Forwarded array captures gained the same treatment
+(`<devName>_n`), independently per capture — a nest with static extents and a
+runtime-sized capture gets exactly one runtime count.
+
+A fully static nest contributes no parameters and emits byte-identically to
+before.
+
+Two consequences worth naming:
+
+* **Cell counts became comparable rather than equal.** `DevArray.Cells` is now
+  literal-or-runtime, and two counts agree unless BOTH are literal and differ —
+  the same "only a provable disagreement is an error" rule §1.5 applies to a
+  join's legs. Comparing the host expressions textually instead would refuse
+  `prodsum(s, ct)` beside `prodsum(ct, ct)`, which is the shape this exists for.
+* **Operand pool sizes are now derived, not assumed.** The old wrapper sized
+  input `i` by level `i`'s extent, which silently assumed one input per level in
+  order. The size now comes from the levels that actually index that operand, so
+  a co-iterated `zip(A, B)` (two inputs, one level — previously an index past
+  the end of the list) and a rank-2 operand spanning two levels are both sized
+  correctly.
+
+### 6.3 Measured
+
+`C:\bt_bench\omega_join.blade` is `omega_gpu` with its four `prodsum`s respelled
+as a Form-1 join over shared deferred `ct`/`stt`. Device kernels timed with
+cudaEvents, 30 launches after a warm-up (whole-process wall clock is useless at
+this size: the GTX 1650 idles at 300 MHz against a 1785 MHz boost, and CUDA
+context init is ~90–210 ms and drifts):
+
+| kernel | per launch | vs hand |
+|---|---|---|
+| hand `omega_id` (`lswosa_cuda.cu`, one `sincos`, 4 accumulators) | 12.7 ms | 1.00x |
+| **Blade join** | **15.1 ms** | **1.18x** |
+| Blade 4-separate-`prodsum` (what `omega_gpu` emitted) | 37.2 ms | 2.92x |
+
+So the join takes the emitted device kernel from 2.9x of hand-written CUDA to
+1.18x — a 2.47x speedup on device, from a surface change of four lines.
+
+The residual 1.18x is one identifiable thing: the hand kernel calls `sincos`
+once where Blade emits `cos` and `sin` separately. Recognising a share pair over
+the same argument and emitting `sincos` is a peephole in the share-local
+emitter, and is where the rest of that gap is.
+
+Values match the host oracle to 12+ significant digits on `chk_re`/`chk_im`
+(the residual is the frequency-axis checksum's own cancellation, not the
+kernel's — the same digit agreement the pre-existing device path shows).
+
+### 6.4 Not done here
+
+* **The simplicial path.** `genCudaKernelSimplicial` (symmetric / antisymmetric
+  outputs) still declines a join, because it declines every materializing body:
+  it has no capture forwarding and does not go through `planCudaDeviceBody` at
+  all. A join under a packed output therefore falls back to the host with the
+  usual `[cuda]` warning — correct values, no device kernel. Giving that path
+  the planner is a separate arc, not a widening of this one.
+* **Captures into an EXPRESSION-shaped body.** Capture forwarding still only
+  happens on the materializing (routed) path, so
+  `function f(xs: T^1, k: Float64) = xs <@> lambda(x) where cuda -> x * k`
+  refuses on the captured `k` — a limitation of capture forwarding, not of
+  runtime extents (`wosa_v2_gpu`, whose body materializes, forwards its scalar
+  captures and runs on device). Adjacent, pre-existing, and unrelated to the
+  extent gate.
+* **Soft-join (`<&>`) leaves keep the static-extent requirement**, since their
+  begin/end wrappers stage through file-static buffers sized at declaration.
+  Refused with its own message rather than silently mis-sized.
