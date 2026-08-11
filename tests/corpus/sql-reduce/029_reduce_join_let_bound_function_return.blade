@@ -1,0 +1,23 @@
+// TEST: Reduce Join Let-Bound Then Returned
+// Same defect as 027, reached through a DIFFERENT return arm, which is the
+// only reason this test exists separately.
+//
+// 027/028 return the join directly, so the emitter's IRReduceCompute return
+// arm binds a `__retN` and returns it. Naming the join in a `let` first and
+// returning the NAME sends an ordinary IRVar to the fall-through return arm
+// instead -- a different site, with the same flat local behind a nested
+// signature. Fixing one arm and not the other leaves a program that compiles
+// or does not compile depending on whether its author named an intermediate.
+//   v1 = sum(x) = 6, v2 = sum(x^2) = 14, v3 = sum(x^3) = 36
+let B: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function moments_named(x: T^1) = {
+    let L = method_for(x)
+    let acc = reduce((L <@> lambda(a) -> a)
+                <&!> (L <@> lambda(b) -> b * b)
+                <&!> (L <@> lambda(c) -> c * c * c), (+))
+    acc
+}
+let (v1, v2, v3) = moments_named(B)
+// EXPECT: v1 = 6.0
+// EXPECT: v2 = 14.0
+// EXPECT: v3 = 36.0

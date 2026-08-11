@@ -17079,6 +17079,58 @@ and genLetChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     (forceCode @ allCode @ finalCode, finalCtx)
 
 
+/// Re-spell a FLAT tuple local as the NESTED shape the function's declared C++
+/// return type has, or hand back `flatName` unchanged when there is nothing to
+/// reconcile.
+///
+/// Two conventions meet at a `return`, and only here do they have to agree on
+/// one C++ TYPE rather than merely on which leaf is which:
+///   - every fusion emitter builds ONE FLAT tuple (`std::make_tuple(t_0, t_1,
+///     t_2)`) and registers its leaf names in ctx.TupleChildren;
+///   - the function's C++ signature is `irTypeToCpp` of the IR type, which is
+///     the LEFT-NESTED pair tree `<&!>`/`<&>` parse -- `std::tuple<std::tuple<
+///     double, double>, double>` for three legs.
+/// Inside a body that mismatch is invisible (a destructure resolves through
+/// TupleChildren and never names the tuple); across the call boundary it is a
+/// hard type error in the CALLEE -- returning a flat 3-tuple as a nested one.
+/// Two legs are exempt because nested and flat coincide at width 2, which is
+/// why this only ever showed up at three.
+///
+/// Rebuilding at the return keeps the FLAT convention everywhere the emitters
+/// own (accumulators, TupleChildren, destructures) and pays the one nesting
+/// exactly where the ABI demands it. The caller needs no change: its
+/// destructure already navigates the nested declared type (TypeCheck's
+/// flatTupleLeafPaths and CodeGen's flat IRTupleProj arm agree on that path),
+/// which is precisely why it was the RETURN that was wrong, not the read.
+///
+/// Applicability is deliberately narrow -- a registered flat-children entry
+/// whose width equals the type's leaf count. A genuine nested `IRTuple` value
+/// registers no children and renders nested already, so it falls through.
+let private nestedTupleReturn (retTy: IRType) (flatName: string) (children: Map<string, string list>) : string =
+    let isNested =
+        match retTy with
+        | IRTTuple ts -> ts |> List.exists (function IRTTuple _ -> true | _ -> false)
+        | _ -> false
+    match (if isNested then Map.tryFind flatName children else None) with
+    | Some leaves when leaves.Length = (IR.flattenTupleLeaves retTy).Length ->
+        // Consume leaf names left-to-right along the type's structure -- the
+        // same order flattenTupleLeaves produces them in, so leaf i of the
+        // emission lands at leaf i of the type by construction.
+        let rec build (ty: IRType) (remaining: string list) : string * string list =
+            match ty with
+            | IRTTuple ts ->
+                let (parts, rest) =
+                    ts |> List.fold (fun (acc, rem) t ->
+                        let (s, rem') = build t rem
+                        (acc @ [s], rem')) ([], remaining)
+                (sprintf "std::make_tuple(%s)" (parts |> String.concat ", "), rest)
+            | _ ->
+                match remaining with
+                | l :: rest -> (l, rest)
+                | [] -> (flatName, [])   // width-checked above; unreachable
+        fst (build retTy leaves)
+    | _ -> flatName
+
 /// Function-body emission proper: the per-let statement fold plus the return-arm
 /// dispatch, over an already-unrolled let chain. Split out of genFuncBody so the
 /// deterministic-deallocation frame can be pushed and popped around it inside a
@@ -17107,6 +17159,21 @@ let private genFuncBodyScoped
     // ONLY as a join operand. Computed over the whole body at once, because
     // the accounting that makes the exemption safe is global.
     let joinDeferredIds = Blade.Lowering.joinDeferrableIdsMany ((lets |> List.map snd) @ [retExpr])
+    // Flat-tuple child names registered by THIS body's lets, threaded for the
+    // same reason as currentGrouped above. EVERY tuple this file emits is FLAT
+    // (`std::make_tuple(x_0, x_1, x_2)` -- tryGenMergedCompute, genParallelTree
+    // and genReduceComputeBinding's fused arm all share that convention), while
+    // the tuple's IR TYPE is the left-nested pair tree the `<&!>`/`<&>` parse
+    // built. TupleChildren is what reconciles the two: a destructure resolves
+    // through it straight to the accumulator names. Dropping it sent the
+    // projection to genScalarBinding's std::get fallback, which navigates the
+    // NESTED type -- `std::get<0>(std::get<0>(t))` against a flat 3-tuple, an
+    // uncompilable C++ that only two leaves (where nested == flat) survived.
+    //
+    // A REDUCTION JOIN (`object_for(<&!>) <@> (...)`) answers a flat Tuple<k>
+    // and so never needs this reconciliation; the binary `<&!>` chain, whose
+    // typing IS nested, still does.
+    let mutable currentTupleChildren = ctx.TupleChildren
     // Indentation for genApplyCombinator emissions: the function body lives one
     // level deeper than the function declaration's ctx.Indent.
     let bodyIndent = ctx.Indent + 1
@@ -17167,7 +17234,7 @@ let private genFuncBodyScoped
             // exactly as they do at module level. The old inline renderer
             // here was flat: a nested IRForRange fell through exprToCpp and
             // emitted an unsupported-expression marker.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = IRTUnit
                 Value = value; IsConst = true; IsMutable = false
@@ -17207,7 +17274,7 @@ let private genFuncBodyScoped
             // Materialize it here, through the same statement-form path the
             // `|> compute` arm below uses, or the read names an identifier
             // this arm never declared.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; TupleChildren = currentTupleChildren }
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
@@ -17255,7 +17322,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // not visible in the enclosing scope) and only handles the 2-array
             // accumulation form anyway. Routing through genApplyCombinator here
             // mirrors what genBinding does at the module level.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
@@ -17266,12 +17333,13 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // peels the IRCompute and routes to genComposeApply -- the same
             // statement form module level uses. exprToCpp has no expression
             // rendering for it.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRReduceCompute _ ->
@@ -17283,14 +17351,19 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             //
             // `currentDeferred` (not ctx's map) so a REDUCTION JOIN can resolve
             // an operand this body left deferred and share it per iteration.
+            // `currentTupleChildren` so a binary-chain join's destructure
+            // resolves to the per-leaf accumulator names rather than std::get
+            // on its nested type.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent
                                      GroupedArrays = currentGrouped
-                                     DeferredComputations = currentDeferred }
+                                     DeferredComputations = currentDeferred
+                                     TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRApp (IRObjectFor _, _, _) ->
@@ -17300,12 +17373,13 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // at module level. Capture forwarding for the kernel resolves
             // through currentNames (the hoisted scalar lets precede this
             // entry in dependency order).
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | _ when (let rec chainTail e =
@@ -17329,12 +17403,13 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // rule, which does not reach this form because the wrap sits
             // OUTSIDE the let chain).
             let bare = (match value with IRCompute inner -> inner | v -> v)
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType bare
                 Value = bare; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRArrayLit _ ->
@@ -17343,12 +17418,13 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // IRArrayLit arm emits the statement form (extents + allocate +
             // per-element init). The default arm's exprToCpp has no inline
             // rendering for array literals.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRVar _ when Set.contains id ctx.MutableArrayLets ->
@@ -17371,7 +17447,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 match value with
                 | IRVar (srcId, _) -> canAliasStagingLet lets (Some id) srcId
                 | _ -> false
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let bodyCtx =
                 if aliasStaging
                 then { bodyCtx with MutableArrayLets = Set.remove id bodyCtx.MutableArrayLets }
@@ -17380,7 +17456,8 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = not aliasStaging
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | (IRReduce _ | IRCompute (IRReduce _)) when
@@ -17395,13 +17472,14 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // The default arm's inline exprToCpp rendering only serves the
             // SCALAR fold (a self-contained IIFE), which is why scalar reduces
             // deliberately stay below.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName
                 Type = inferExprType (match value with IRCompute e -> e | e -> e)
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRGroupKeys _ | IRGroupBy _ ->
@@ -17438,13 +17516,40 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                     }
                     IRTGroupKeys (dynIdx, dynIdx, None)
                 | _ -> inferExprType value
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = tempType
                 Value = value; IsConst = false; IsMutable = true
             }
             let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
             currentGrouped <- ctxAfter.GroupedArrays
+            currentTupleChildren <- ctxAfter.TupleChildren
+            currentNames <- Map.add id varName currentNames
+            code
+        | IRTupleProj _ ->
+            // Destructure of a tuple bound EARLIER IN THIS BODY -- the
+            // `let (sc, ss, cc) = reduce(k1 <&!> k2 <&!> k3, (+))` shape, whose
+            // producer is the fused-reduce arm above. Route through genBinding
+            // (genTupleProjBinding) so the projection resolves through the
+            // currentTupleChildren threaded from that producer, straight to the
+            // per-leaf accumulator names -- exactly what module level does.
+            //
+            // The default arm below renders IRTupleProj inline instead, and
+            // inline rendering has only the tuple's IR TYPE to navigate: it
+            // walks the nested pair tree the `<&!>` parse built and emits
+            // `std::get<0>(std::get<0>(t))` against a FLAT `std::make_tuple`.
+            // Two leaves survived that (nested and flat agree at width 2);
+            // three or more did not compile. genTupleProjBinding keeps the
+            // std::get form as its own fallback for tuples with no registered
+            // children (a callee's returned tuple), so nothing that worked
+            // before is rerouted.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = true; IsMutable = false
+            }
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ | IRMatmul _ | IREigh _ | IRSolve _
@@ -17525,7 +17630,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         match retExpr with
         | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let combCode = genApplyCombinator bodyCtx retVarName info builder
             // The returned pool leaves with the value; free everything else.
             suppressAllocName retVarName
@@ -17561,7 +17666,7 @@ or return a scalar and materialize at the call site"
             // genComposeApply -- the same statement form module level uses.
             // exprToCpp has no expression rendering for it.
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
                 Value = retExpr; IsConst = false; IsMutable = true
@@ -17577,15 +17682,20 @@ or return a scalar and materialize at the call site"
             // arm is a sentinel. Reached by every kernel body whose tail is a
             // reduce over a body-local computation (plan section 1, M-A).
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
                 Value = retExpr; IsConst = false; IsMutable = true
             }
-            let (redCode, _) = genBinding bodyCtx tempBinding builder
+            let (redCode, ctxAfter) = genBinding bodyCtx tempBinding builder
+            // A JOINED reduce (`reduce(k1 <&!> k2 <&!> k3, (+))`) yields a flat
+            // tuple of accumulators, which the signature declares nested -- see
+            // nestedTupleReturn. Unjoined folds and two-leg joins pass through
+            // it unchanged.
+            let retName = nestedTupleReturn (inferExprType retExpr) retVarName ctxAfter.TupleChildren
             // A reduce yields a SCALAR: nothing to spare from the frees, and the
             // value is already in a local, so the frees may close before return.
-            stmts @ redCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
+            stmts @ redCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retName]
         | IRTranspose _ ->
             // Transpose in RETURN position (lswosa's `family_spectra` tail:
             // `transpose(grid, [0, 1])`). Statement-shaped -- swapped-extent
@@ -17595,7 +17705,7 @@ or return a scalar and materialize at the call site"
             // sentinel. The transposed pool leaves with the value, so it is
             // spared from the scope frees by name.
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
                 Value = retExpr; IsConst = false; IsMutable = true
@@ -17633,7 +17743,7 @@ or return a scalar and materialize at the call site"
             // via allocate<>) lives on the heap so the caller receives a
             // valid array.
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let arrayCode = genArrayLiteral bodyCtx retVarName elements arrType
             suppressAllocName retVarName
             stmts @ arrayCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
@@ -17652,6 +17762,19 @@ or return a scalar and materialize at the call site"
             // caller already binds the returned wrapper and reads shape off
             // it (`c.extents[0]`), never off a companion `c_extents`.
             let retStr = exprToCpp currentNames retExpr
+            // `return t` where a body let bound `t` to a JOINED reduce: the
+            // local is the emitters' flat tuple, the signature says nested.
+            // Same reconciliation as the IRReduceCompute arm above, one step
+            // later -- the join is a LET here, so it is the plain identifier
+            // that reaches the return rather than a __retN. Everything else
+            // (a genuine IRTuple, an array, a scalar) passes through untouched.
+            //
+            // Re-spelling before the suppress-by-token loop below is deliberate
+            // and strictly better: for an ARRAY-leaf join it is the per-leaf
+            // names that are the REGISTERED allocations, so the rewritten text
+            // spares exactly the pools that leave with the value, where the
+            // flat tuple's own name matched nothing.
+            let retStr = nestedTupleReturn (inferExprType retExpr) retStr currentTupleChildren
             // The returned EXPRESSION may name a registered allocation directly
             // (`return r;`, `return std::make_tuple(r0, r1);`). Whole-token match,
             // so `r_extents` / `rows` do not spuriously spare `r`. Anything the

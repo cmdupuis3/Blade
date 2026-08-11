@@ -1,0 +1,28 @@
+// TEST: Reduce Join Three Legs In Function Return
+// The RETURN-position sibling of 025. Same flat-vs-nested tuple mismatch, but
+// it bites in a different place and for a different reason.
+//
+// Inside a body the mismatch is invisible: a destructure resolves through the
+// emitter's TupleChildren registry and never names the tuple, so nothing has
+// to agree on one C++ type. Across a call boundary it does. The signature is
+// `irTypeToCpp` of the IR type -- the left-nested pair tree `<&!>` parses,
+// `std::tuple<std::tuple<double, double>, double>` -- while the value the
+// fusion emitters build is a FLAT `std::make_tuple(v_0, v_1, v_2)`. Returning
+// one as the other is a hard type error in the CALLEE, so this program did not
+// compile at all; the caller's `std::get<0>(std::get<0>(t))` was already
+// correct for the declared type. Two legs are exempt (nested == flat there).
+//
+// The three moments are pairwise distinct, so a permutation of the
+// accumulators moves the pin -- as in 025, this tests the wiring.
+//   m1 = sum(x) = 10, m2 = sum(x^2) = 30, m3 = sum(x^3) = 100
+let A: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+function moments3(x: T^1) = {
+    let L = method_for(x)
+    reduce((L <@> lambda(a) -> a)
+      <&!> (L <@> lambda(b) -> b * b)
+      <&!> (L <@> lambda(c) -> c * c * c), (+))
+}
+let (m1, m2, m3) = moments3(A)
+// EXPECT: m1 = 10.0
+// EXPECT: m2 = 30.0
+// EXPECT: m3 = 100.0
