@@ -1,0 +1,33 @@
+// TEST: Caret Fold Kernel Is Not Vacuous (rejects)
+// ERROR: BL3999
+// ERROR-CONTAINS: the caret is a rank CLAIM, not a shorthand
+// ============================================================================
+// A `T^k` parameter must MEAN rank k at every seam, including the one where
+// the annotated name never reaches a demand site.
+//
+// `reduce(A, f)` hands its kernel the ELEMENT type, so a `T^1` fold kernel
+// over a scalar-element array is a rank contradiction and is refused -- the
+// verdict the LAMBDA spelling of the same kernel already gave.
+//
+// The NAMED spelling below used to be accepted instead, and silently folded
+// SCALARS: over a rank-2 operand `reduce(g, addrow)` returned the innermost
+// (row) sums [3, 33, 63, 93], with the `T^1` on both parameters contributing
+// nothing. One kernel body, two meanings by spelling.
+//
+// The loss was in `unify`, not in `reduce`. An arity pin lives on an inference
+// var ID (`Subst.arityConstraints`), and a var-to-var bind moved the pinned var
+// behind an UNPINNED survivor without carrying the pin over -- the survivor
+// then answered `GetArityConstraint = None` and every later check read "no
+// claim". The seam that supplies the unpinned survivor is an UNANNOTATED
+// RETURN TYPE: `= a + b` unifies the signature's `T^1` var against the decl's
+// fresh retType var. Spelling the identical function `-> T^1` made retType the
+// SAME var, so no bind happened, so nothing was lost -- which is why the two
+// spellings below disagreed. `CopyPolymorphic`, the rank lower bound, and
+// `CopyLiteralDefault` all already travel on that bind; the arity pin now does
+// too.
+// ============================================================================
+function addrow(a: T^1, b: T^1) = a + b
+
+let g: Array<Int64 like Idx<4>, Idx<3>> = [[0, 1, 2], [10, 11, 12], [20, 21, 22], [30, 31, 32]]
+
+let named = reduce(g, addrow)
