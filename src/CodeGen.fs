@@ -11465,9 +11465,21 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                                 [ sprintf "%s    size_t %s_extents[1] = {%s};" ind subName perRowLenExpr
                                   sprintf "%s    Array<%s, 1> %s = { %s[__g], %s_extents };" ind arrElemStr subName arrName subName ]
                         let code =
-                            [ sprintf "%s// ragged peel over %s '%s'" ind originLabel arrName
-                              sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
-                              sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name ]
+                            [ sprintf "%s// ragged peel over %s '%s'" ind originLabel arrName ]
+                            // Return-extent ABI (see emitExtentsTable): `Array<T,R>`
+                            // stores only a POINTER to its extents, so a frame-local
+                            // `size_t[R]` table dangles the moment the wrapper crosses
+                            // a call boundary -- the caller then sizes its own
+                            // allocations off garbage (measured as bad_alloc/BL8005 in
+                            // the first consumer that allocates from the shape). Every
+                            // entry here is a runtime read (`gk__ngroups`), so the
+                            // helper always picks its heap form. The table is
+                            // deliberately NOT registered for a free: it leaves with
+                            // the value whenever this result is returned, and the few
+                            // bytes it costs otherwise are not worth a second
+                            // ownership rule beside the pool's.
+                            @ fst (emitExtentsTable ind (name + "_extents") 1 [(ngroupsExpr, false)])
+                            @ [ sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name ]
                             // Row-disjoint by construction, so no data clause is
                             // needed and adding one would be wrong: `subDeclLines`
                             // are emitted INSIDE the body (C++ block scope already
@@ -11645,10 +11657,14 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                                       ind outElemStr (outRank - 1) ]
                             | _ -> []
                         if innerDims |> List.forall Option.isSome then
-                            [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows" ind opNames gkName
-                              sprintf "%ssize_t %s_extents[%d] = {%s};" ind name outRank
-                                  ((ngroupsExpr :: (innerDims |> List.map Option.get)) |> String.concat ", ")
-                              sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
+                            [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows" ind opNames gkName ]
+                            // Heap extents: the return-extent ABI, exactly as in the
+                            // ragged peel above. The leading entry is `gk__ngroups`,
+                            // so the table is never all-literal and the helper always
+                            // takes its heap form.
+                            @ fst (emitExtentsTable ind (name + "_extents") outRank
+                                       ((ngroupsExpr, false) :: (innerDims |> List.map (fun d -> (Option.get d, true)))))
+                            @ [ sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
                                   ind outElemStr outRank name outElemStr outRank name name ]
                             // Array-valued rows, pool allocated UP FRONT: iteration
                             // __g copies into `pool_base(name.data) + __g * __rowc`,
@@ -11673,10 +11689,16 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             // own runtime extents and allocates the pool. With
                             // zero groups nothing allocates and every consumer
                             // iterates an honest empty shape.
-                            [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows, inner extents from the first row (length-agnostic callee)" ind opNames gkName
-                              sprintf "%ssize_t %s_extents[%d] = {%s};" ind name outRank
-                                  ((ngroupsExpr :: (innerDims |> List.map (fun d -> defaultArg d "0"))) |> String.concat ", ")
-                              sprintf "%sArray<%s, %d> %s = { nullptr, %s_extents };" ind outElemStr outRank name name ]
+                            [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows, inner extents from the first row (length-agnostic callee)" ind opNames gkName ]
+                            // Heap extents (return-extent ABI, see the ragged peel
+                            // above). This arm needs it for a SECOND reason as well:
+                            // the trailing slots are WRITTEN below, from iteration 0's
+                            // row -- so the table is mutable state the wrapper reads
+                            // through its pointer, and a caller that outlives this
+                            // frame must still see those writes.
+                            @ fst (emitExtentsTable ind (name + "_extents") outRank
+                                       ((ngroupsExpr, false) :: (innerDims |> List.map (fun d -> (defaultArg d "0", false)))))
+                            @ [ sprintf "%sArray<%s, %d> %s = { nullptr, %s_extents };" ind outElemStr outRank name name ]
                             // THIS ARM CANNOT BE THREADED, and the reason is the
                             // `if (__g == 0)` below rather than anything about the
                             // kernel: iteration 0 is what settles the trailing
@@ -11712,9 +11734,10 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             @ [ sprintf "%s    }" ind
                                 sprintf "%s}" ind ]
                     else
-                        [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s" ind opNames gkName
-                          sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
-                          sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name ]
+                        [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s" ind opNames gkName ]
+                        // Heap extents (return-extent ABI, see the ragged peel above).
+                        @ fst (emitExtentsTable ind (name + "_extents") 1 [(ngroupsExpr, false)])
+                        @ [ sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name ]
                         // Every operand peels at the SAME `__g` from ONE offsets
                         // table, so `peelRowLicensed`'s `List.max` over the depths
                         // is `IR.coIterLicense`'s rule literally: no per-argument
@@ -15599,18 +15622,25 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // the surviving cells of a mask). gk__perm indexes the same COMPACT order
     // the key scan walked, so the gather just needs the matching accessor.
     let (_, valsAt) = compactOrDenseSource vals valsName
-    let code = elemErrCode @ [
-        sprintf "%s// group_by: per-group nested allocation, group-contiguous via gk__perm" ind
-        sprintf "%ssize_t %s_extents[2] = {%s__ngroups, 0}; // inner extent is ragged" ind name gkName
-        sprintf "%sArray<%s*, 1> %s = { new %s*[%s__ngroups], %s_extents };" ind elemStr name elemStr gkName name
-        sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
-        sprintf "%s    size_t __sz = %s__offsets[__g + 1] - %s__offsets[__g];" ind gkName gkName
-        sprintf "%s    %s[__g] = new %s[__sz];" ind name elemStr
-        sprintf "%s    for (size_t __k = 0; __k < __sz; __k++) {" ind
-        sprintf "%s        %s[__g][__k] = %s;" ind name (valsAt (sprintf "%s__perm[%s__offsets[__g] + __k]" gkName gkName))
-        sprintf "%s    }" ind
-        sprintf "%s}" ind
-    ]
+    // Heap extents, not a frame-local `size_t[2]`: `Array<T*,1>` stores only a
+    // POINTER to the table, so a grouped array that is RETURNED (or otherwise
+    // outlives this frame) would hand its consumer a dangling shape. Same
+    // return-extent ABI the peel emitters follow; see emitExtentsTable.
+    let extentsDecl =
+        fst (emitExtentsTable ind (name + "_extents") 2
+                 [(sprintf "%s__ngroups" gkName, false); ("0 /* inner extent is ragged */", false)])
+    let code =
+        elemErrCode
+        @ [ sprintf "%s// group_by: per-group nested allocation, group-contiguous via gk__perm" ind ]
+        @ extentsDecl
+        @ [ sprintf "%sArray<%s*, 1> %s = { new %s*[%s__ngroups], %s_extents };" ind elemStr name elemStr gkName name
+            sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
+            sprintf "%s    size_t __sz = %s__offsets[__g + 1] - %s__offsets[__g];" ind gkName gkName
+            sprintf "%s    %s[__g] = new %s[__sz];" ind name elemStr
+            sprintf "%s    for (size_t __k = 0; __k < __sz; __k++) {" ind
+            sprintf "%s        %s[__g][__k] = %s;" ind name (valsAt (sprintf "%s__perm[%s__offsets[__g] + __k]" gkName gkName))
+            sprintf "%s    }" ind
+            sprintf "%s}" ind ]
     // Owns the row table AND every per-group row (each a separate new[]).
     // The wrapper is Array<T*,1> whose .extents[1] is the ragged placeholder
     // 0, so the row count comes from the gk__ngroups local -- a plain size_t
