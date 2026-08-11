@@ -9302,6 +9302,431 @@ let buildSimpleApplyInfo (arrays: IRExpr list) (kernel: IRExpr) (outputType: IRT
         IsCoIteration = false
     }
 
+// ---------------------------------------------------------------------------
+// What a __global__ can NAME (device-body expressibility) -- section 1 of 2
+// ---------------------------------------------------------------------------
+//
+// The .cu is a SEPARATE translation unit: it sees the kernel's own parameters
+// and nothing else. `exprToCpp`, though, renders a capture by its HOST
+// identifier and a materializing kernel body as a CALL to that body's lifted
+// HOST function (routeKernelBodyThroughCall) -- both undeclared inside the .cu,
+// which nvcc reports as `identifier "s" is undefined` after the host half has
+// already been told a device kernel exists. So the capability gate and the
+// emitter have to be derived from ONE predicate: the emitters below ask what a
+// device body may name, and refuse (host fallback) whatever it may not.
+
+/// Free variable ids of an expression: every `IRVar` NOT bound by a binder
+/// inside it. Folds over the canonical `BinderShape`/`ExprShape` pair, so a new
+/// IRExpr variant is scoped correctly here the moment it is declared there
+/// (unlike `collectVarRefsIR`, which deliberately keeps let-bound ids).
+let private deviceFreeVarIds (expr: IRExpr) : Set<IRId> =
+    let rec go (bound: Set<IRId>) (e: IRExpr) : Set<IRId> =
+        let anyOf b kids = kids |> List.fold (fun acc k -> Set.union acc (go b k)) Set.empty
+        match e with
+        | IRVar (id, _) -> if Set.contains id bound then Set.empty else Set.singleton id
+        | BinderShape (plain, scopes) ->
+            scopes
+            |> List.fold (fun acc (ids, kids) -> Set.union acc (anyOf (Set.union bound ids) kids))
+                         (anyOf bound plain)
+        | ExprShape (kids, _) -> anyOf bound kids
+    go Set.empty expr
+
+/// The C++ name of the first user/lifted callable this expression CALLS, if any.
+/// Such a call renders as `<fnName>(...)`; the .cu declares no host functions,
+/// so its presence is a refusal (unless the caller inlines the callee first).
+let private deviceCalleeName (expr: IRExpr) : string option =
+    let mutable hit : string option = None
+    let rec go (e: IRExpr) =
+        if hit.IsSome then () else
+        match e with
+        | IRApp (f, args, _) ->
+            (match resolveCallable f with
+             | Some c -> hit <- Some (sanitizeCppName c.Name)
+             | None -> ())
+            if hit.IsNone then f :: args |> List.iter go
+        | ExprShape (kids, _) -> kids |> List.iter go
+    go expr
+    hit
+
+/// The first `IRParam` name mentioned. `exprToCppCore` renders one as the bare
+/// SOURCE parameter name, which no device kernel declares (its operands are the
+/// peeled `<array>__<index>` reads).
+let private deviceParamRef (expr: IRExpr) : string option =
+    let mutable hit : string option = None
+    let rec go (e: IRExpr) =
+        if hit.IsSome then () else
+        match e with
+        | IRParam (n, _, _) -> hit <- Some n
+        | ExprShape (kids, _) -> kids |> List.iter go
+    go expr
+    hit
+
+/// Why this kernel body cannot be rendered into the .cu as one device
+/// expression, given `declared` -- the ids the `__global__` itself binds (the
+/// peeled operand reads, plus any forwarded captures). `None` means it can.
+///
+/// Every arm names a construct the emitter genuinely cannot express, so the
+/// gate and the emission agree by construction: a refusal is a HOST FALLBACK
+/// (correct values, no device kernel), never a half-emitted one.
+let cudaDeviceBodyRefusal (declared: Set<IRId>) (names: Map<IRId, string>) (body: IRExpr) : string option =
+    let spell id = Map.tryFind id names |> Option.defaultValue (sprintf "__v%d" id)
+    if not (kernelBodyIsExpressionShaped body) then
+        Some "a kernel-local array materialization"
+    else
+        match deviceFreeVarIds body |> Set.toList |> List.filter (fun id -> not (Set.contains id declared)) with
+        | id :: _ -> Some (sprintf "the captured value '%s'" (spell id))
+        | [] ->
+            match deviceCalleeName body with
+            | Some fn -> Some (sprintf "the call to host function '%s'" fn)
+            | None -> deviceParamRef body |> Option.map (sprintf "the parameter reference '%s'")
+
+/// One captured value forwarded into a device kernel as an extra parameter.
+type CudaFwdCapture = {
+    /// Identifier naming it in the HOST scope that emits the launch. Resolved
+    /// through `captureForwardName`, i.e. the EMITTED spelling -- a block-local
+    /// `let` is renamed to `__v<id>`, and forwarding the source name there is
+    /// the trap this repo has hit before (block-local-capture-forwarding.md).
+    HostName: string
+    /// Parameter name inside the .cu (and the device buffer's stem).
+    DevName: string
+    /// Pool cells for an array capture; `None` for a scalar (passed by value).
+    Cells: int64 option
+    /// Host (`std::`) spelling for the `extern "C"` wrapper signature, and the
+    /// device (`thrust::`) spelling for the kernel signature / device buffer.
+    HostCpp: string
+    DevCpp: string
+}
+
+/// A device-side rendering of one kernel body: the captures it needs forwarded,
+/// the statements to place inside the `__global__` ahead of the output write,
+/// and the expression that write assigns.
+type CudaDeviceBody = {
+    Captures: CudaFwdCapture list
+    Stmts: string list
+    Expr: string
+}
+
+/// Scalar element types that cross the host/device boundary and render in the
+/// device dialect. Shares `isCudaBoundarySafeElem`'s judgement so a capture can
+/// never be forwarded in a shape an operand would be refused in.
+let private cudaFwdScalarCpp (ty: IRType) : (string * string) option =
+    if isCudaBoundarySafeElem ty then Some (elemTypeToCpp ty, cudaDevElemTypeToCpp ty) else None
+
+/// A DENSE RANK-1 array type's (cells, host elem, device elem). Rank 1 only:
+/// the device sees a flat pool, and only a plain single-axis array has
+/// `pool[k] == A(k)` -- a packed (sym/antisym), compound or ragged axis
+/// addresses through machinery the device side does not carry.
+let private cudaFwdArrayShape (ty: IRType) : (int64 * string * string) option =
+    match ty with
+    | ArrayElem arr when isCudaBoundarySafeElem arr.ElemType && not arr.IsVirtual ->
+        match arr.IndexTypes with
+        | [ix] when ix.Rank <= 1 && ix.Symmetry = SymNone && ix.Kind = SDimension && ix.IxKind = IxKPlain ->
+            match ix.Extent with
+            | IRLit (IRLitInt n) -> Some (n, elemTypeToCpp arr.ElemType, cudaDevElemTypeToCpp arr.ElemType)
+            | _ -> None
+        | _ -> None
+    | _ -> None
+
+// ---------------------------------------------------------------------------
+// Device-body planning -- section 2 of 2
+// ---------------------------------------------------------------------------
+//
+// A `where cuda` kernel whose body MATERIALIZES an array (`let c = cos <@> (w *
+// t); prodsum(s, c)`) has no inline expression form, so the S2 router turns it
+// into a call to its lifted host function. That call cannot cross into the .cu,
+// but the body itself can: every array it names is either a forwarded capture
+// (a device pointer) or a POINTWISE producer over the same index space, and
+// the space is consumed by folds. So the device form is one fused loop per
+// fold -- which is also what a hand-written kernel would do, and needs no
+// per-thread temporary buffer for the intermediate rows at all.
+//
+// The gate is deliberately narrow (rank-1 static extents, pointwise producers,
+// `prodsum` folds, expression-shaped helper lambdas). Anything outside it
+// returns `Error <reason>`, and the caller falls back to the host loop.
+
+/// A device-side array value: how many cells it has, its element type, and how
+/// to render its element at an index variable. A forwarded capture renders as
+/// `ptr[k]`; a pointwise producer renders as its kernel applied to its sources'
+/// elements at the same `k` -- so a chain of maps composes without ever being
+/// materialized.
+type private DevArray = {
+    Cells: int64
+    Elem: IRType
+    At: string -> string
+}
+
+/// Beta-reduce every call to a resolvable lifted/user callable, so the device
+/// renderer never has to name a host function. A callee's CAPTURES stay free
+/// after substitution (their ids are the enclosing bindings') and resolve
+/// through the caller's environment, which is exactly the discipline the host
+/// side uses when it forwards them as extra arguments.
+let rec private cudaInlineCalls (fuel: int) (expr: IRExpr) : IRExpr =
+    if fuel <= 0 then expr
+    else
+        mapIRExpr (fun e ->
+            match e with
+            | IRApp ((IRVar (fid, _) as callee), args, _) ->
+                // Resolve the CALLEE, not the application: `resolveCallable`
+                // also sees through let-aliases, and the `c.Id = fid` guard is
+                // what keeps this to a direct lifted-callable reference (the
+                // same pairing exprToCppCore's IRApp arm uses).
+                match resolveCallable callee with
+                | Some c when c.Id = fid && c.Params.Length = args.Length
+                              && kernelBodyIsExpressionShaped c.Body ->
+                    let m =
+                        List.zip (c.Params |> List.map (fun p -> p.VarId)) args |> Map.ofList
+                    cudaInlineCalls (fuel - 1) (substituteIRVars m c.Body)
+                | _ -> e
+            | _ -> e) expr
+
+/// Nodes a device SCALAR expression may contain once calls are inlined and
+/// folds hoisted. A whitelist, not a blacklist: an unrecognized node means the
+/// emitter has no evidence it renders as valid device code, so it refuses.
+let rec private cudaScalarNodeOk (e: IRExpr) : bool =
+    match e with
+    | IRLit _ | IRVar _ -> true
+    | IRBinOp (IRElementwise, _, l, r) -> cudaScalarNodeOk l && cudaScalarNodeOk r
+    | IRUnaryOp (_, x) -> cudaScalarNodeOk x
+    | IRComplex (re, im) -> cudaScalarNodeOk re && cudaScalarNodeOk im
+    | IRIf (c, t, f) -> cudaScalarNodeOk c && cudaScalarNodeOk t && cudaScalarNodeOk f
+    | _ -> false
+
+/// Plan the device rendering of a kernel body, forwarding whatever captures it
+/// needs. `paramFinalNames` maps each kernel parameter id to the device local
+/// holding its peeled operand read; `outerNames` is the host scope's name map
+/// (for `captureForwardName`); `stem` disambiguates generated locals per kernel.
+///
+/// The simple case -- a body that already renders as one device expression over
+/// its operands -- returns the same text as before, with no captures, so every
+/// kernel that compiled before this planner existed still emits byte-identically.
+let planCudaDeviceBody
+        (codeGen: LoopNestCodeGen)
+        (paramFinalNames: Map<IRId, string>)
+        (outerNames: Map<IRId, string>)
+        (stem: string)
+        : Result<CudaDeviceBody, string> =
+    let declared = paramFinalNames |> Map.toList |> List.map fst |> Set.ofList
+    match cudaDeviceBodyRefusal declared paramFinalNames codeGen.KernelExpr with
+    | None ->
+        let r =
+            withCudaDeviceDialect (fun () ->
+                genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams
+                                          false false paramFinalNames paramFinalNames)
+        Ok { Captures = []; Stmts = []; Expr = r.CppExpr }
+    | Some plainReason ->
+
+    // The materializing form: the S2 router replaced the body with a call to
+    // its lifted callable, so the callable IS the body -- reopen it and emit it
+    // into the device kernel directly.
+    let routed =
+        match codeGen.KernelExpr with
+        | IRApp (IRVar (fid, _) as f, args, _) ->
+            match resolveCallable f with
+            | Some c when c.Id = fid && c.Params.Length = args.Length -> Some (c, args)
+            | _ -> None
+        | _ -> None
+    match routed with
+    | None -> Error plainReason
+    | Some (callable, args) ->
+
+    // Kernel parameters: the routed call passes `IRVar(param.VarId)` for each
+    // param, and that id is what `paramFinalNames` is keyed on.
+    let paramBinds =
+        List.zip callable.Params args
+        |> List.map (fun (p, a) ->
+            match a with
+            | IRVar (aid, _) -> Map.tryFind aid paramFinalNames |> Option.map (fun nm -> (p.VarId, nm))
+            | _ -> None)
+    if paramBinds |> List.exists Option.isNone then
+        Error "a kernel parameter that is not a peeled operand read"
+    elif not (isCudaBoundarySafeElem callable.RetType) then
+        // `isCudaBoundarySafeElem` matches only boundary-crossing SCALARS
+        // (through AnyPrimElem, so a unit-annotated one still counts), which is
+        // exactly the condition here: an array- or tuple-valued kernel result
+        // has no single cell to write.
+        Error "a kernel result that is not a boundary-crossing scalar"
+    else
+
+    let mutable scalars : Map<IRId, string> = paramBinds |> List.choose id |> Map.ofList
+    let mutable arrays : Map<IRId, DevArray> = Map.empty
+    let mutable fwd : CudaFwdCapture list = []
+    let stmts = System.Collections.Generic.List<string>()
+    let mutable err : string option = None
+    let fail (r: string) = if err.IsNone then err <- Some r
+    let mutable serial = 0
+    let fresh (p: string) = serial <- serial + 1; sprintf "__blade_%s_%s%d" stem p serial
+    // Synthetic ids for hoisted fold accumulators. Far above any builder id, and
+    // only ever placed in the local `scalars` map, so they cannot shadow real IR.
+    let mutable synth = 1500000000
+    let freshId () = synth <- synth + 1; synth
+
+    // --- captures -> device parameters -------------------------------------
+    // Device parameter names are derived from the SOURCE name (so the .cu reads
+    // like the program), but two captures can share one -- a shadowed binding
+    // closed over at both depths. The id disambiguates the second onwards, and
+    // only then, so the common case keeps the readable spelling.
+    let mutable devNamesUsed : Set<string> = Set.empty
+    for cap in callable.Captures do
+        let hostName = captureForwardName outerNames cap
+        let devName =
+            let stem' = sprintf "__blade_cap_%s" (sanitizeCppName cap.Name)
+            if Set.contains stem' devNamesUsed then sprintf "%s_%d" stem' cap.Id else stem'
+        devNamesUsed <- Set.add devName devNamesUsed
+        match cudaFwdArrayShape cap.Type with
+        | Some (cells, hostCpp, devCpp) ->
+            fwd <- fwd @ [ { HostName = hostName; DevName = devName; Cells = Some cells
+                             HostCpp = hostCpp; DevCpp = devCpp } ]
+            let elem = match cap.Type with ArrayElem arr -> arr.ElemType | t -> t
+            arrays <- Map.add cap.Id { Cells = cells; Elem = elem
+                                       At = fun k -> sprintf "%s[%s]" devName k } arrays
+        | None ->
+            match cudaFwdScalarCpp cap.Type with
+            | Some (hostCpp, devCpp) ->
+                fwd <- fwd @ [ { HostName = hostName; DevName = devName; Cells = None
+                                 HostCpp = hostCpp; DevCpp = devCpp } ]
+                scalars <- Map.add cap.Id devName scalars
+            | None ->
+                fail (sprintf "the captured value '%s' (only dense rank-1 arrays and scalars \
+with a compile-time shape are forwarded to the device)" hostName)
+
+    // --- device rendering of a scalar expression ---------------------------
+    // Calls are inlined first (no host function may be named), then folds are
+    // hoisted into accumulator loops, then what is left must be plain device
+    // arithmetic over names this kernel declares.
+    let rec renderScalar (extra: Map<IRId, string>) (e: IRExpr) : string =
+        let hoisted = hoistFolds (cudaInlineCalls 8 e)
+        let env = extra |> Map.fold (fun acc k v -> Map.add k v acc) scalars
+        if not (cudaScalarNodeOk hoisted) then
+            fail "a scalar operation with no device form"
+            ""
+        else
+            match deviceFreeVarIds hoisted |> Set.toList |> List.filter (fun i -> not (Map.containsKey i env)) with
+            | id :: _ ->
+                fail (sprintf "the value '%s' (no device binding)"
+                        (Map.tryFind id outerNames |> Option.defaultValue (sprintf "__v%d" id)))
+                ""
+            | [] -> withCudaDeviceDialect (fun () -> exprToCpp env hoisted)
+
+    /// Replace every `prodsum` over device arrays with a hoisted accumulator,
+    /// emitting its fused loop into `stmts` first. `mapIRExpr` is bottom-up, so
+    /// a fold's operands are already resolved when its node is reached.
+    and hoistFolds (e: IRExpr) : IRExpr =
+        mapIRExpr (fun x ->
+            match x with
+            | IRProdSum operands when operands.Length >= 2 && err.IsNone ->
+                let resolved = operands |> List.map resolveArray
+                if resolved |> List.exists Option.isNone then
+                    fail "a prodsum operand that is not a device array"; x
+                else
+                    let ds = resolved |> List.choose id
+                    let cells = (List.head ds).Cells
+                    if ds |> List.exists (fun d -> d.Cells <> cells) then
+                        fail "a prodsum over arrays of differing extents"; x
+                    else
+                        // Accumulator type from the FIRST operand's element
+                        // type, which is what the host IIFE uses (`%s __ps = 0`
+                        // off `inferExprType (List.head args)`). Taking the
+                        // prodsum node's own type instead would silently widen a
+                        // real-headed mixed product the host truncates, and the
+                        // two lanes have to agree cell for cell.
+                        let ty = (List.head ds).Elem
+                        let cpp = cudaDevElemTypeToCpp ty
+                        let acc = fresh "acc"
+                        let k = fresh "k"
+                        stmts.Add (sprintf "    %s %s = %s();" cpp acc cpp)
+                        stmts.Add (sprintf "    for (size_t %s = 0; %s < %dUL; %s++) {" k k cells k)
+                        stmts.Add (sprintf "        %s += %s;" acc
+                                     (ds |> List.map (fun d -> d.At k) |> String.concat " * "))
+                        stmts.Add "    }"
+                        let id = freshId ()
+                        scalars <- Map.add id acc scalars
+                        IRVar (id, ty)
+            | _ -> x) e
+
+    /// Bind one kernel-local `let` into the device environment: an array-valued
+    /// one is recorded as a producer and never materialized, a scalar one gets a
+    /// device local. Shared by the body walk and by `resolveArray`, because a
+    /// materializing body nests its whole chain inside the OUTER let's rhs
+    /// (`let c = (let w' = w in let u = ... in cos <@> u)`), so the same binder
+    /// has to be understood in both positions.
+    and bindLet (id: IRId) (rhs: IRExpr) : unit =
+        match inferExprType rhs with
+        | ArrayElem _ ->
+            match resolveArray rhs with
+            | Some d -> arrays <- Map.add id d arrays
+            | None -> fail "a kernel-local array that is not a pointwise map"
+        | ty when not (isCudaBoundarySafeElem ty) ->
+            // Tuples, strings, function values: no device local to declare.
+            fail "a kernel-local binding whose type is not a device scalar"
+        | ty ->
+            let s = renderScalar Map.empty rhs
+            if err.IsNone then
+                let nm = fresh "v"
+                stmts.Add (sprintf "    %s %s = %s;" (cudaDevElemTypeToCpp ty) nm s)
+                scalars <- Map.add id nm scalars
+
+    /// Resolve an array-valued expression to its device form: a forwarded
+    /// capture, or a pointwise producer over one (never materialized).
+    and resolveArray (e: IRExpr) : DevArray option =
+        match e with
+        | IRVar (id, _) -> Map.tryFind id arrays
+        | IRLet (id, rhs, body) -> bindLet id rhs; (if err.IsSome then None else resolveArray body)
+        | IRCompute inner -> resolveArray inner
+        // Exactly ONE source axis. Several operands with no co-iteration record
+        // are an OUTER product, whose result has a higher rank than a fused
+        // rank-1 read of it would assume -- rendering that as a zip would be
+        // silently wrong, so it is refused, not approximated.
+        | IRApp (IRObjectFor oi, [src], _)
+              when oi.OutputRank = 0 && oi.InputRanks |> List.forall ((=) 0) ->
+            pointwise oi.Kernel [src]
+        | IRApplyCombinator info
+              when info.KernelOutputRank = 0
+                   && info.KernelInputRanks |> List.forall ((=) 0)
+                   && not info.HasReynolds
+                   && (info.IsCoIteration || info.Arrays.Length = 1) ->
+            pointwise info.Kernel info.Arrays
+        | _ -> None
+
+    /// A map of `kernel` over co-iterated `srcs`, as a renderer of the result's
+    /// element at an index -- the producer form that is never materialized.
+    and pointwise (kernel: IRExpr) (srcs: IRExpr list) : DevArray option =
+        let ds = srcs |> List.map resolveArray
+        if ds |> List.exists Option.isNone || List.isEmpty srcs then None
+        else
+            let ds = ds |> List.choose id
+            let cells = (List.head ds).Cells
+            if ds |> List.exists (fun d -> d.Cells <> cells) then None
+            else
+                match resolveCallable kernel with
+                | Some c when c.Params.Length = ds.Length
+                              && isCudaBoundarySafeElem c.RetType ->
+                    let elem = c.RetType
+                    Some { Cells = cells
+                           Elem = elem
+                           At = fun k ->
+                                    // The map kernel is rendered per element by
+                                    // binding its params to the sources' element
+                                    // TEXT: pure, so a repeated use just repeats
+                                    // the (already-peeled) read.
+                                    let extra =
+                                        List.zip c.Params ds
+                                        |> List.map (fun (p, d) -> (p.VarId, sprintf "(%s)" (d.At k)))
+                                        |> Map.ofList
+                                    renderScalar extra c.Body }
+                | _ -> None
+
+    // --- walk the body's let-chain ------------------------------------------
+    let rec walk (e: IRExpr) : string =
+        if err.IsSome then "" else
+        match e with
+        | IRLet (id, rhs, body) -> bindLet id rhs; walk body
+        | tail -> renderScalar Map.empty tail
+
+    let expr = walk callable.Body
+    match err with
+    | Some r -> Error r
+    | None -> Ok { Captures = fwd; Stmts = List.ofSeq stmts; Expr = expr }
+
 /// Emit a CUDA kernel for any single S-dimension symmetry group of arity >= 2,
 /// symmetric (inclusive simplex i0<=i1<=...) or antisymmetric (strict simplex
 /// i0<i1<...) -- the GENERAL simplicial-unrank kernel, one path for every rank
@@ -9421,6 +9846,15 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
                 yield sprintf "    %s %s = %s[%s];" etStr readName srcName idxVar ]
     let nameMap =
         codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
+    // CAPABILITY GATE. The simplicial kernel declares exactly the peeled operand
+    // reads, so a body naming anything else (a capture, a lifted host function)
+    // would emit an undefined identifier into the .cu. Refuse to the host loop
+    // instead. Capture forwarding is implemented for the rectangular path only;
+    // a simplicial nest reaching here with captures falls back, which is correct
+    // (slower) rather than uncompilable.
+    if (cudaDeviceBodyRefusal (paramFinalNames |> Map.toList |> List.map fst |> Set.ofList)
+                              nameMap codeGen.KernelExpr).IsSome then None
+    else
     // Antisym: Reynolds fold (true,true) emits the signed antisymmetrization.
     // Symmetric: raw comm kernel (false,false). Rendered in the CUDA device
     // dialect (thrust complex vocabulary) -- this is __global__ body text.
@@ -9815,7 +10249,7 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
 /// Gates: every binding rectangular const-extent RealArray scalar-leaf; array
 /// output with boundary-safe elem type; no Reynolds. Only flat T*/size_t cross
 /// the extern "C" boundary (pool_base supplies flat host pointers).
-let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
+let genCudaKernel (softSplit: bool) (outerNames: Map<IRId, string>) (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
     let bindings = codeGen.Bindings
     let nDims = List.length bindings
     let rectOk =
@@ -9827,8 +10261,28 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
         match codeGen.OutputType with
         | ArrayElem arr when isCudaBoundarySafeElem arr.ElemType -> Some arr.ElemType
         | _ -> None
-    if codeGen.HasReynolds || not rectOk || outElemTyOpt.IsNone then None
-    else
+    // A `where cuda` kernel that ends up on the host must SAY SO -- a device
+    // request is not something to drop silently (same rule the `omp` census
+    // marker enforces). This is the last emitter the CUDA dispatch tries, so
+    // its refusal is the whole dispatch's refusal and the only one worth a
+    // message; the simplicial path declining just means "not that shape".
+    let refuseToHost (reason: string) : string list option =
+        (exprWarningsCell ()).Value <-
+            (exprWarningsCell ()).Value @
+            [ sprintf "[cuda] a `where cuda` kernel ran on the HOST instead: the device \
+kernel cannot express %s (nest '%s')" reason name ]
+        None
+    let shapeRefusal =
+        if codeGen.HasReynolds then Some "a Reynolds (symmetrized) kernel over a rectangular nest"
+        elif not rectOk then
+            Some "an iteration space that is not rectangular with compile-time extents \
+(a dependent, offset, virtual or runtime-sized axis has no flat thread grid)"
+        elif outElemTyOpt.IsNone then
+            Some "an output element type that cannot cross the extern \"C\" device boundary"
+        else None
+    match shapeRefusal with
+    | Some r -> refuseToHost r
+    | None ->
     let outElemTy = outElemTyOpt.Value
     let elemCpp = elemTypeToCpp outElemTy
     // Device spellings (.cu internals): complex renders as thrust::complex;
@@ -9868,12 +10322,36 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                 if not (Set.contains newName declared) then
                     declared <- Set.add newName declared
                     yield sprintf "    %s %s = %s[%s];" etStr newName cur b.IndexName ]
-    let nameMap =
-        codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
-    // Kernel-body text lives in the __global__ -- render in the device dialect.
-    let reynolds =
-        withCudaDeviceDialect (fun () ->
-            genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams false false nameMap paramFinalNames)
+    // Kernel-body text lives in the __global__ -- rendered in the device dialect
+    // by the planner, which also decides which captures have to travel with it.
+    // `None` (and a captures-under-soft-split refusal, whose begin/end wrappers
+    // do not carry extra buffers) means host fallback -- see planCudaDeviceBody.
+    match planCudaDeviceBody codeGen paramFinalNames outerNames (sanitizeCppName name) with
+    | Error reason -> refuseToHost reason
+    | Ok plan when softSplit && not plan.Captures.IsEmpty ->
+        refuseToHost "captures forwarded from a <&> soft-join leaf (its begin/end \
+wrappers stage only the leaf's own operands)"
+    | Ok plan ->
+    let caps = plan.Captures
+    // Extra kernel/wrapper parameters, in one order used by the kernel
+    // signature, the wrapper signature, the launch, and the host call site.
+    let capKernelParams =
+        caps |> List.map (fun c ->
+            match c.Cells with
+            | Some _ -> sprintf "const %s* %s" c.DevCpp c.DevName
+            | None -> sprintf "%s %s" c.DevCpp c.DevName)
+    let capWrapParams =
+        caps |> List.map (fun c ->
+            match c.Cells with
+            | Some _ -> sprintf "const %s* %s" c.HostCpp c.DevName
+            | None -> sprintf "%s %s" c.HostCpp c.DevName)
+    /// The argument each capture contributes at the launch, given a prefix for
+    /// the device buffer of an array one (scalars pass straight through).
+    let capLaunchArgs (bufPrefix: string) =
+        caps |> List.map (fun c ->
+            match c.Cells with
+            | Some _ -> sprintf "%s%s" bufPrefix c.DevName
+            | None -> c.DevName)
     let recover =
         [ yield "    size_t __blade_g = __blade_i;"
           for i in (nDims - 1) .. -1 .. 0 do
@@ -9882,7 +10360,8 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
             yield sprintf "    size_t %s = __blade_g %% %dUL;" b.IndexName e
             if i > 0 then yield sprintf "    __blade_g /= %dUL;" e ]
     let kernelParams =
-        (codeGen.InputArrayNames, inputDevCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n) |> String.concat ", "
+        ((codeGen.InputArrayNames, inputDevCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n))
+        @ capKernelParams |> String.concat ", "
     let kernelDef =
         // NOTE on naming: generated CUDA-internal identifiers use a `__blade_`
         // prefix. A plain `__out` collides with MSVC's SAL
@@ -9894,10 +10373,11 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
         [ sprintf "__global__ void %s(%s, %s* __blade_out, size_t __blade_card) {" kernelName kernelParams devElemCpp
           "    size_t __blade_i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;"
           "    if (__blade_i >= __blade_card) return;" ]
-        @ recover @ bodyBinds
-        @ [ sprintf "    __blade_out[__blade_i] = %s;" reynolds.CppExpr; "}" ]
+        @ recover @ bodyBinds @ plan.Stmts
+        @ [ sprintf "    __blade_out[__blade_i] = %s;" plan.Expr; "}" ]
     let wrapInParams =
-        (codeGen.InputArrayNames, inputHostCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n) |> String.concat ", "
+        ((codeGen.InputArrayNames, inputHostCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n))
+        @ capWrapParams |> String.concat ", "
     let sdPrefix = sprintf "__blade_sd_%s" (sanitizeCppName name)
     let wrapper =
         if softSplit then
@@ -9938,13 +10418,26 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
               let et = inputDevCpp.[i]
               yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" et n n sz et
               yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" n n sz et ]
+        // Forwarded captures travel exactly as the operands do: an array capture
+        // gets its own device buffer staged here (the wrapper takes the host
+        // pool pointer), a scalar one rides the signature by value.
+        @ [ for c in caps do
+              match c.Cells with
+              | Some cells ->
+                  yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" c.DevCpp c.DevName c.DevName cells c.DevCpp
+                  yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" c.DevName c.DevName cells c.DevCpp
+              | None -> () ]
         @ [ sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" devElemCpp devElemCpp
             sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
             sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, __blade_d_out, __blade_card);" kernelName blockSize
-              (codeGen.InputArrayNames |> List.map (sprintf "__blade_d_%s") |> String.concat ", ")
+              ((codeGen.InputArrayNames |> List.map (sprintf "__blade_d_%s")) @ capLaunchArgs "__blade_d_" |> String.concat ", ")
             "    cudaDeviceSynchronize();"
             sprintf "    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof(%s), cudaMemcpyDeviceToHost);" devElemCpp ]
         @ [ for n in codeGen.InputArrayNames -> sprintf "    cudaFree(__blade_d_%s);" n ]
+        @ [ for c in caps do
+              match c.Cells with
+              | Some _ -> yield sprintf "    cudaFree(__blade_d_%s);" c.DevName
+              | None -> () ]
         @ [ "    cudaFree(__blade_d_out);"; "}" ]
     let cell = cudaKernelDefsCell ()
     cell.Value <- cell.Value @ (kernelDef @ [""] @ wrapper @ [""])
@@ -9977,7 +10470,17 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                 // `Array<T,1> A = { ... }`), same as the output -- so the flat pool
                 // is reached via `.data`. Do not gate `.data` on a host-shape test:
                 // inputs are wrappers here, never bare pointers.
-                (codeGen.InputArrayNames |> List.map (fun n -> sprintf "pool_base(%s.data)" n) |> String.concat ", ")
+                //
+                // A forwarded capture is named by its EMITTED host spelling
+                // (captureForwardName, resolved in the planner) -- a block-local
+                // `let` is `__v<id>` here, and passing the SOURCE name is the
+                // trap every new forwarding site in this file has to avoid.
+                (((codeGen.InputArrayNames |> List.map (fun n -> sprintf "pool_base(%s.data)" n))
+                  @ (caps |> List.map (fun c ->
+                        match c.Cells with
+                        | Some _ -> sprintf "pool_base(%s.data)" c.HostName
+                        | None -> c.HostName)))
+                 |> String.concat ", ")
                 name ]
     // dealloc(D): the rectangular HOST output (dense, so the SYMM argument is
     // the `nullptr` literal emitted just above; extents are static here, so
@@ -11285,7 +11788,7 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                     // arity >= 2 (symmetric inclusive / antisymmetric strict, any
                     // rank); then the rectangular pointwise path; None => host loop.
                     genCudaKernelSimplicial false false codeGen name rk.Callable.CudaBlockSize
-                    |> Option.orElseWith (fun () -> genCudaKernel false codeGen name rk.Callable.CudaBlockSize)
+                    |> Option.orElseWith (fun () -> genCudaKernel false tempCtx.VarNames codeGen name rk.Callable.CudaBlockSize)
                 | _ -> None
             match cudaInline with
             | Some launchLines -> preCode @ [""] @ launchLines
@@ -12424,7 +12927,7 @@ let tryGenCudaSoftJoin (ctx: CodeGenContext) (name: string) (infos: ApplyInfo li
             match genCudaKernelSimplicial false true cg lname bs with
             | Some alloc -> Some (alloc, [List.head cg.InputArrayNames], lname)
             | None ->
-                genCudaKernel true cg lname bs
+                genCudaKernel true ctx.VarNames cg lname bs
                 |> Option.map (fun alloc -> (alloc, cg.InputArrayNames, lname)))
     if pieces |> List.exists Option.isNone then None
     else

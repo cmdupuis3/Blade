@@ -234,6 +234,20 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                     | Error e -> Error e
                     | Ok (_cppFile, None) -> Error "cuda variant did not emit a .cu (kernel not generated)"
                     | Ok (cppFile, Some cuFile) ->
+                        // SELF-CONTAINMENT. The .cu is its own translation unit:
+                        // it may name its parameters and device helpers, never a
+                        // HOST identifier. A lifted kernel body (`__lambda_N`) or
+                        // a codegen sentinel reaching it is the emitter promising
+                        // a device kernel it cannot write -- nvcc reports it as
+                        // "identifier ... is undefined" only AFTER the host half
+                        // has been told the kernel exists, so pin it here where
+                        // the message names the actual cause.
+                        let cu = File.ReadAllText cuFile
+                        if cu.Contains "__lambda_" then
+                            Error "the .cu names a lifted HOST function (__lambda_*) -- the capability gate let through a body it cannot emit"
+                        elif cu.Contains "BLADE_CODEGEN_ERROR" then
+                            Error "the .cu contains a codegen sentinel"
+                        else
                         match compileCudaSplit cuFile cppFile outputDir with
                         | Error e -> Error (sprintf "cuda split-compile: %s" e)
                         | Ok exe -> runExeChecked "cuda" exe
@@ -593,8 +607,35 @@ let (u, v) = (method_for(Z) <@> lambda(z) -> z * 2.0) <&!> (method_for(Z) <@> la
 let Z = [complex(1.0, 2.0), complex(3.0, -1.0), complex(-2.0, 0.5), complex(0.0, 1.0)]
 let (u, v) = (method_for(Z) <@> lambda(z) where cuda(block: 64) -> z * 2.0) <&!> (method_for(Z) <@> lambda(z) where cuda(block: 64) -> z + conj(z)) |> compute
 """
+        // CAPTURED ARRAYS in a MATERIALIZING body. `let c = t * w` is a
+        // kernel-local array over a CAPTURED array, so the body has no inline
+        // expression form and the S2 router turns it into a call to its lifted
+        // host function -- which cannot cross into the .cu. The device form
+        // forwards `t`/`s` as device pointers and fuses the map into the
+        // prodsum's accumulator loop, so nothing is materialized per thread.
+        //
+        // Arithmetic is EXACT (small integral/half values: every product and
+        // partial sum is representable in binary64), so this is a byte-identical
+        // value differential despite FMA contraction differing between the two
+        // compilers -- the same reason the complex transcendental case below is
+        // structure-only.
+        let capHost = """
+let t = [1.0, 2.0, 3.0, 4.0]
+let s = [0.5, 1.5, 2.5, 3.5]
+let ws = [1.0, 2.0, 3.0]
+let R = ws <@> lambda(w) -> { let c = t * w
+                              prodsum(s, c) } |> compute
+"""
+        let capCuda = """
+let t = [1.0, 2.0, 3.0, 4.0]
+let s = [0.5, 1.5, 2.5, 3.5]
+let ws = [1.0, 2.0, 3.0]
+let R = ws <@> lambda(w) where cuda(block: 32) -> { let c = t * w
+                                                   prodsum(s, c) } |> compute
+"""
         let cases =
             [ ("rank1", rank1Host, rank1Cuda)
+              ("captured_arrays", capHost, capCuda)
               ("complex_rank1", cxHost, cxCuda)
               ("complex_mixed_inputs", cxMixHost, cxMixCuda)
               ("complex_ctor_parts", cxPartsHost, cxPartsCuda)
@@ -761,6 +802,58 @@ let R = method_for(Z) <@> lambda(z) where cuda(block: 32) -> exp(z) * conj(z) |>
                 1
         if cxExpRc = 0 then passed <- passed + 1
         else (failures <- failures + 1; failedNames <- failedNames @ ["complex_exp_device"])
+        // CAPTURE-FORWARDING STRUCTURE. The value differential above proves the
+        // kernel computes the right thing; this pins HOW, because the same
+        // numbers would come back from a silent host fallback. Three links have
+        // to line up or the split build does not resolve: the __global__ takes a
+        // device pointer per captured array, the wrapper stages one buffer per
+        // capture, and the HOST call site passes that capture's pool. It also
+        // pins the fusion -- no per-thread buffer for the intermediate row.
+        let capStructRc =
+            let label = "capture_forward_structure"
+            let src = """
+let t = [1.0, 2.0, 3.0, 4.0]
+let s = [0.5, 1.5, 2.5, 3.5]
+let ws = [1.0, 2.0, 3.0]
+let R = ws <@> lambda(w) where cuda(block: 32) -> { let c = t * w
+                                                   prodsum(s, c) } |> compute
+"""
+            for ext in [".cu"; ".cpp"; ".cu.obj"; ".cpp.obj"; ".cu.o"; ".cpp.o"; ".exe"; ".out"] do
+                let f = Path.Combine(outputDir, "cuda_capture_struct" + ext)
+                try if File.Exists f then File.Delete f with _ -> ()
+            try
+                CodeGen.setCudaEmitMode true
+                let outcome =
+                    match genVariant "cuda_capture_struct" src with
+                    | Error e -> Error e
+                    | Ok (_, None) -> Error "no .cu emitted for the captured-array kernel"
+                    | Ok (cppFile, Some cuFile) ->
+                        let cu = File.ReadAllText cuFile
+                        let cpp = File.ReadAllText cppFile
+                        if not (cu.Contains "const double* __blade_cap_t") then
+                            Error "the __global__ does not take the captured array as a device pointer"
+                        elif not (cu.Contains "cudaMalloc(&__blade_d___blade_cap_t") then
+                            Error "the launch wrapper does not stage a device buffer for the capture"
+                        elif not (cpp.Contains "pool_base(t.data)") then
+                            Error "the host call site does not pass the capture's pool"
+                        elif cu.Contains "__lambda_" then
+                            Error "the .cu still names a lifted host function"
+                        else Ok ()
+                CodeGen.setCudaEmitMode false
+                match outcome with
+                | Ok () ->
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label
+                        "captures forwarded as device pointers, staged by the wrapper, passed by the host"
+                    0
+                | Error e ->
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e
+                    1
+            with ex ->
+                CodeGen.setCudaEmitMode false
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ex.Message
+                1
+        if capStructRc = 0 then passed <- passed + 1
+        else (failures <- failures + 1; failedNames <- failedNames @ ["capture_forward_structure"])
         printFooter "CUDA Kernel" [sprintf "%d passed" passed; sprintf "%d failure(s)" failures]
         { Block = "CUDA Kernel"; Passed = passed; Failed = failures; Skipped = 0; FailedNames = failedNames }
 

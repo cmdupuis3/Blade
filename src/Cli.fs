@@ -178,6 +178,15 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
                 if verbose then
                     for w in warnings do
                         eprintfn "[Warning] %s" w
+                else
+                    // A `where cuda` kernel that fell back to the host prints
+                    // WITHOUT --verbose: device emission is an explicit opt-in
+                    // (`--cuda` / the CUDA test phase), so "you asked and did not
+                    // get it" is the one codegen warning the user is entitled to
+                    // see unprompted. Every other warning keeps its --verbose gate,
+                    // and outside cuda emit mode this list is empty.
+                    for w in warnings do
+                        if w.StartsWith "[cuda] " then eprintfn "warning: %s" w
                 Ok (cppCode, warnings)
 
 /// Compile a .edgi file to an executable
