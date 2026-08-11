@@ -193,6 +193,20 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         let ext = match backendReq with RequiresCuda -> ".cu" | RequiresMpi | CpuOnly -> ".cpp"
         let cppFile = Path.Combine(dir, baseName + ext)
         File.WriteAllText(cppFile, cppCode)
+        // `blade run --cuda`: `where cuda` device kernels are collected
+        // SEPARATELY from the host source (cudaKernelDefsCell), so
+        // inferBackendReq -- which greps the host half -- cannot see them.
+        // Write the .cu beside the host .cpp and split-compile (nvcc for the
+        // .cu, host compiler for the .cpp, then link), exactly as the CUDA
+        // test harness does. Without this, the host half's extern "C" launch
+        // declarations dangle and the link fails.
+        let cudaSplitFile =
+            match CodeGen.getCudaFileContent () with
+            | Some cu when ext = ".cpp" ->
+                let cuFile = Path.Combine(dir, baseName + "_kernels.cu")
+                File.WriteAllText(cuFile, cu)
+                Some cuFile
+            | _ -> None
         // Runtime headers are #include'd with plain quotes and no -I, so they
         // must sit next to the .cpp; record which ones we create so cleanup removes only our copies.
         let deployedHeaders =
@@ -202,7 +216,9 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         CodeGen.deployRuntimeHeaders dir
         if verbose then
             eprintfn "[Emit] %s" cppFile
-        match compileForBackend capabilities.Value backendReq cppFile dir with
+        match (match cudaSplitFile with
+               | Some cuFile -> compileCudaSplit cuFile cppFile dir
+               | None -> compileForBackend capabilities.Value backendReq cppFile dir) with
         | Error e ->
             Error (sprintf "Compilation failed:\n%s" e)
         | Ok exePath ->
@@ -2240,6 +2256,15 @@ let private dispatchInner (args: string[]) : int =
             match toks with
             | [] -> ()
             | "--verbose" :: tl -> verbose <- true; parse tl
+            | "--cuda" :: tl ->
+                // Flip device-kernel emission for `where cuda` licences --
+                // the same gate the CUDA test harness sets (setCudaEmitMode).
+                // Downstream is untouched: emitted __global__ kernels make the
+                // backend inference pick .cu + the nvcc split-compile path.
+                // Off by default so a licence alone never changes the compile
+                // toolchain out from under a plain `blade run`.
+                CodeGen.setCudaEmitMode true
+                parse tl
             | "--memcheck" :: tl ->
                 // A process-level pin rather than a parameter: CodeGen (the
                 // blade_memcheck.hpp include), Build (the Debug+ASan compile
