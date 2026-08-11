@@ -1,0 +1,39 @@
+// TEST: Reduction Join Two Legs Four Ways
+// The DIFFERENTIAL pin for reduction joins (docs/plan-reduction-joins.md):
+// the same two statistics computed FOUR ways must agree exactly.
+//   (1) Form 1, the pack join   object_for(<&!>) <@> (r1, r2)
+//   (2) Form 2, the array fold  reduce([r1, r2], (<&!>))
+//   (3) the existing infix chain reduce((L <@> k1) <&!> (L <@> k2), (+))
+//   (4) separate eager reductions
+// Exact equality (not a tolerance) is the pin: a join reorders nothing, it
+// only shares the traversal, so every route sums the same doubles in the same
+// ascending order.
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let b: Array<Float64 like I> = [2.0, 3.0, 4.0, 5.0, 6.0]
+
+// (1) pack join
+let f1_ab, f1_bb = object_for(<&!>) <@> (prodsum(a, b), prodsum(b, b))
+
+// (2) array fold
+let legs = [prodsum(a, b), prodsum(b, b)]
+let f2_ab, f2_bb = reduce(legs, (<&!>))
+
+// (3) infix chain over one shared loop object
+let L = method_for(zip(a, b))
+let f3_ab, f3_bb = reduce((L <@> lambda(x, y) -> x * y) <&!> (L <@> lambda(x, y) -> y * y), (+))
+
+// (4) separate eager reductions
+let f4_ab = prodsum(a, b)
+let f4_bb = prodsum(b, b)
+
+// EXPECT: f1_ab = 70.0
+// EXPECT: f1_bb = 90.0
+// EXPECT: f2_ab = 70.0
+// EXPECT: f2_bb = 90.0
+// EXPECT: f3_ab = 70.0
+// EXPECT: f3_bb = 90.0
+// EXPECT: f4_ab = 70.0
+// EXPECT: f4_bb = 90.0
+// The eager leg-list binding of Form 2 keeps its ordinary array meaning.
+// EXPECT: legs = [70.0, 90.0]

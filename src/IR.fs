@@ -125,6 +125,17 @@ type IRExpr =
     // accumulator per fusion leaf (tuple of scalars for trees). init is
     // ALWAYS filled by the checker (identity for (+)/(*) sections, user's
     // init otherwise -- arbitrary kernels REQUIRE an explicit init).
+    //
+    // THE JOIN ENCODING (docs/plan-reduction-joins.md). A REDUCTION JOIN --
+    // `object_for(<&!>) <@> (r1, .., rk)` / `reduce([r1, .., rk], (<&!>))` --
+    // is the same node with PER-LEG folds: `kernel` and `init` are each an
+    // `IRTuple` of k entries in leaf order, one per fusion leaf. Legs need
+    // their own seed even when they share an operator (`prodsum` seeds at 0,
+    // `reduce(x, (+), 10.0)` at 10.0), and their own kernel when they do not.
+    // A single (non-tuple) kernel/init is the shared-fold form `<&!>` maps
+    // have always used; every generic walker treats both slots as opaque
+    // children, so only typeOf, the fold emitter, and the interpreter's fold
+    // read the distinction.
     | IRReduceCompute of computation: IRExpr * kernel: IRExpr * init: IRExpr
     | IRProdSum of args: IRExpr list  // prodsum(x1..xk): fused sum_t prod_l x_l(t) over rank-1 arrays of equal extent; empty extent => 0
     | IRZip of IRExpr list
@@ -2551,6 +2562,15 @@ type LoopNestCodeGen = {
     /// with FoldWrapper; None everywhere else. See FoldChunkPlan for the
     /// shape guarantees.
     FoldChunk: FoldChunkPlan option
+    /// SHARED-VALUE mode (reduction joins): when `Some cppElemType` the nest
+    /// neither writes cells nor accumulates -- it DECLARES
+    /// `const <cppElemType> OutputName = <kernel>;` once per iteration of the
+    /// joint nest, and other leaves read that name. This is how a named
+    /// deferred map consumed by several legs (`let ct = cos <@> ph`, no
+    /// `compute`) is evaluated ONCE per cell instead of once per leg (or
+    /// materialized into an array). Meaningful only inside a merged nest, and
+    /// only for leaves ordered BEFORE their consumers; None everywhere else.
+    ShareDecl: string option
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -3727,6 +3747,7 @@ let buildLoopNestCodeGen
         MpiSlab = false
         OmpRequested = kernelRequestedOmp
         FoldChunk = None
+        ShareDecl = None
     }
 
 // Canonical expression traversal -- ExprShape (audit section 3.2)
@@ -5892,11 +5913,26 @@ let rec typeOf (expr: IRExpr) : IRType =
         // Fused reduction terminal: one scalar per fusion leaf. The seed
         // carries the accumulator type (checker-unified with every leaf's
         // element type); the result mirrors the tree's nested-pair shape.
-        let rec shape e =
-            match e with
-            | IRFusion (l, r) -> IRTTuple [shape l; shape r]
-            | _ -> typeOf seed
-        shape comp
+        //
+        // JOIN ENCODING: a reduction join seeds each leg separately, so `seed`
+        // is an `IRTuple` of k seeds in leaf order and each leaf takes its OWN
+        // one. A shared-fold terminal keeps one seed for every leaf.
+        match seed with
+        | IRTuple seeds when seeds.Length >= 2 ->
+            // A JOIN answers a FLAT Tuple<k>, not the chain's nested pairs.
+            // `<&!>` between two maps is a binary operator, so its result
+            // nests; a join is k-ary by construction and its VALUE is one flat
+            // `make_tuple` of k accumulators. Nesting the TYPE over a flat
+            // value is what makes a nested `std::get` chain project the wrong
+            // slot (and, in a kernel body, not compile at all) -- so the join
+            // types flat, and every projection is `get<i>`.
+            IRTTuple (seeds |> List.map typeOf)
+        | _ ->
+            let rec shape e =
+                match e with
+                | IRFusion (l, r) -> IRTTuple [shape l; shape r]
+                | _ -> typeOf seed
+            shape comp
     | IRProdSum args ->
         // Scalar: the fused fold of rank-1 operands (TypeCheck enforces rank 1).
         (match args with

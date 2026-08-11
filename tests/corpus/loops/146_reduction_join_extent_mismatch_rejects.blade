@@ -1,0 +1,10 @@
+// TEST: Reduction Join Extent Mismatch (rejects)
+// A join emits ONE loop nest, so its legs must fold the same cell grid.
+// Provably different static extents are refused at typecheck -- the same rule
+// `prodsum` applies to its own operands, lifted to the join's legs.
+// ERROR-CONTAINS: reduction-join legs do not share an index space
+type I = Idx<5>
+type J = Idx<3>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let c: Array<Float64 like J> = [1.0, 2.0, 3.0]
+let x, y = object_for(<&!>) <@> (prodsum(a, a), prodsum(c, c))

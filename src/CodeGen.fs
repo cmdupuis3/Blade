@@ -12151,6 +12151,48 @@ let checkMergeCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGe
     | Some reason -> Error reason
     | None -> Ok primary
 
+/// checkMergeCompatible's rule for a REDUCTION JOIN. Same structural
+/// obligations (level count, bound dependencies, triangular offset, fused
+/// rank) with ONE relaxation: two legs may take their extent from DIFFERENT
+/// arrays. A join's legs are independent reductions that the SOURCE declared
+/// share an index space -- `prodsum(s, ct)` walks `s` while `prodsum(ct, ct)`
+/// walks `ct`'s source -- so requiring one array to name every level's extent
+/// would refuse the shape the feature exists for.
+///
+/// What is checked instead is exactly what `prodsum` has always checked over
+/// its own operands: a provable LITERAL disagreement is an error, an unknown
+/// extent is trusted, and the nest takes its bound from the leading leg. The
+/// typechecker performs the same comparison one level up (over index types)
+/// and refuses there first; this is the codegen-side backstop.
+let checkJoinCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGen, string> =
+    if leafCgs.IsEmpty then Error "no join legs" else
+    if leafCgs |> List.exists (fun cg -> cg.Bindings.IsEmpty) then
+        Error "a join leg has no loop levels (scalar reduction)"
+    else
+    let primary = leafCgs |> List.maxBy (fun cg -> cg.Bindings.Length)
+    let boundOk (a: LoopIndexBinding) (b: LoopIndexBinding) =
+        (match a.Extent, b.Extent with
+         | IRLit la, IRLit lb -> la = lb
+         | _ -> true)
+        && a.BoundDependencies = b.BoundDependencies
+        && a.StrictOffset = b.StrictOffset
+        && a.FusedRank = b.FusedRank
+    let incompat =
+        leafCgs |> List.tryPick (fun cg ->
+            if cg.Bindings.Length <> primary.Bindings.Length then
+                Some (sprintf "leg '%s' traverses %d loop level(s) and leg '%s' traverses %d -- every leg of a join folds the same cell grid"
+                          cg.OutputName cg.Bindings.Length primary.OutputName primary.Bindings.Length)
+            else
+                cg.Bindings
+                |> List.mapi (fun j b -> (j, b))
+                |> List.tryPick (fun (j, b) ->
+                    if boundOk primary.Bindings.[j] b then None
+                    else Some (sprintf "loop level %d of '%s' does not match '%s' (extent or triangular structure differs)"
+                                   j cg.OutputName primary.OutputName)))
+    match incompat with
+    | Some reason -> Error reason
+    | None -> Ok primary
+
 /// Generate ONE merged loop nest for a set of fusion leaves (<&!>, fusable
 /// <&>, and reduce over fused trees). Nest structure comes from the DEEPEST
 /// leaf (validated by checkMergeCompatible); each leaf's assignment emits at
@@ -12346,8 +12388,13 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                 if cg.HasReynolds && rr.UniqueTerms < rr.TotalPerms then
                     lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" rr.UniqueTerms rr.TotalPerms (rr.TotalPerms / max 1 rr.UniqueTerms)]
                 // Cell write for compute; accumulate-through-wrapper for the
-                // fused fold (scalar accumulators, no cell indexing).
+                // fused fold (scalar accumulators, no cell indexing); a
+                // per-iteration CONST for a reduction join's shared leaf,
+                // which every later leaf at this level reads by name.
                 let assign =
+                    match cg.ShareDecl with
+                    | Some elemCpp -> sprintf "const %s %s = %s;" elemCpp cg.OutputName rr.CppExpr
+                    | None ->
                     match cg.FoldWrapper with
                     | Some wname -> sprintf "%s = %s(%s, %s);" cg.OutputName wname cg.OutputName rr.CppExpr
                     | None ->
@@ -15824,6 +15871,13 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     (prelude @ code, outCtx)
 
 and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
+    // THE JOIN ENCODING (IR.fs, IRReduceCompute): tuple kernel + tuple seed =
+    // one fold per leg. Routed to its own emitter, because everything below
+    // this line assumes ONE fold callable shared by every leaf.
+    match kernelExpr, seedExpr with
+    | IRTuple kernels, IRTuple seeds when kernels.Length = seeds.Length && kernels.Length >= 2 ->
+        genReduceJoinCore ctx binding builder compExpr kernels seeds
+    | _ ->
     let ind = indentStr ctx
     let name = bindingCppName binding
     // The fused reduction terminal: reduce(deferred, op[, init]). Fold every
@@ -16257,6 +16311,216 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                 (codegenError ctx ind "reduce over a deferred computation: fold kernel must resolve to a binary callable (typechecker or IR bug if not)", ctx')
 
 
+
+/// REDUCTION JOIN (docs/plan-reduction-joins.md): k reductions, one traversal,
+/// a flat tuple of k accumulators. The shape is the fused tree's -- one merged
+/// nest, one scalar accumulator per leaf, `make_tuple` at the end -- with two
+/// things the shared-fold tree does not have:
+///
+///   PER-LEG FOLDS. Each leg brings its own kernel wrapper, its own seed, and
+///   its own accumulator type, because a join's legs are independent
+///   reductions (`prodsum` folds `(+)` from 0; `reduce(x, max, -inf)` folds a
+///   lambda from a user seed) that only agree on WHERE they iterate.
+///
+///   SHARING BY NAMING. A leg operand that is a named DEFERRED map -- `let ct
+///   = cos <@> ph`, never forced -- becomes a per-iteration `const` computed
+///   ONCE in the joint nest, and every leg reading that name reads the local.
+///   The declaration is the NAME: nothing is deduced about what the legs
+///   compute, only that they spell the same binding. A `|> compute`d operand
+///   is an array and keeps today's behavior (read from memory).
+///
+/// The rewrite that makes sharing work is small and local: a consumer leg's
+/// deferred operand slot is repointed at the deferred map's OWN source array
+/// (so the level's extent and peel name exist in C++, and dedup with the share
+/// leaf's peel), and the kernel param that slot bound is substituted for a
+/// reference to the deferred binding -- whose emitted name is exactly the
+/// shared local's. Nothing else in the nest emitter needs to know.
+and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder)
+                      (compExpr: IRExpr) (kernelExprs: IRExpr list) (seedExprs: IRExpr list)
+                      : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let rec resolveDeferred e =
+        match e with
+        | IRVar (id, _) ->
+            (match Map.tryFind id ctx.DeferredComputations with
+             | Some d -> resolveDeferred d
+             | None -> e)
+        | _ -> e
+    let rec collectLeaves e =
+        match resolveDeferred e with
+        | IRFusion (l, r) -> collectLeaves l @ collectLeaves r
+        | other -> [other]
+    let leaves = collectLeaves compExpr
+    let infos = leaves |> List.choose (function IRApplyCombinator i -> Some i | _ -> None)
+    let ctx' = addVarName binding.Id name ctx
+    if infos.Length <> leaves.Length || infos.Length <> kernelExprs.Length then
+        (codegenError ctx ind "reduction join: every leg must resolve to an unforced kernel application (typechecker or IR bug if not)", ctx')
+    else
+    let unsupportedInput =
+        infos |> List.exists (fun info ->
+            info.ArrayTypes |> List.exists (fun at ->
+                at.IndexTypes |> List.exists (fun ix ->
+                    isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKDepInner
+                    || ix.IxKind = IxKGroupOuter || ix.IxKind = IxKCompound)))
+    if unsupportedInput then
+        (codegenError ctx ind "reduction join over ragged/grouped/compound inputs is not supported yet -- force the legs with |> compute and reduce the arrays", ctx')
+    else
+    let deviceLeaf =
+        infos |> List.tryPick (fun info ->
+            match classifyLeafBackend info with
+            | BkCuda _ -> Some "cuda" | BkMpi -> Some "mpi" | _ -> None)
+    match deviceLeaf with
+    | Some bk ->
+        (codegenError ctx ind (sprintf "reduction join with a %s leg: device/parallel reductions over a joined traversal are not supported yet -- force the leg with |> compute and reduce the array" bk), ctx')
+    | None ->
+    let callables = kernelExprs |> List.map resolveCallable
+    if callables |> List.exists (fun c -> match c with Some cb -> cb.Params.Length <> 2 | None -> true) then
+        (codegenError ctx ind "reduction join: every leg's fold kernel must resolve to a binary callable (typechecker or IR bug if not)", ctx')
+    else
+    let callables = callables |> List.map Option.get
+    // ---- SHARED DEFERRED OPERANDS -----------------------------------------
+    // A leg operand that resolves (through the binding) to another unforced
+    // apply. Distinct ids, in first-use order: that order is the order the
+    // share leaves are emitted in, and a shared value must be declared before
+    // the leg that reads it.
+    let deferredOperand (e: IRExpr) : (IRId * ApplyInfo) option =
+        match e with
+        | IRVar (id, _) ->
+            (match Map.tryFind id ctx.DeferredComputations with
+             | Some (IRApplyCombinator dinfo) -> Some (id, dinfo)
+             | _ -> None)
+        | _ -> None
+    let sharedIds =
+        infos
+        |> List.collect (fun info -> info.Arrays |> List.choose deferredOperand)
+        |> List.fold (fun acc (id, di) -> if acc |> List.exists (fun (i, _) -> i = id) then acc else acc @ [(id, di)]) []
+    let badShare =
+        sharedIds |> List.tryPick (fun (id, di) ->
+            let who = Map.tryFind id ctx.VarNames |> Option.defaultValue "<anon>"
+            if di.Arrays.IsEmpty then
+                Some (sprintf "shared deferred operand '%s' has no array source to take its traversal from" who)
+            // A deferred map OVER a deferred map: the share leaf would name an
+            // operand that has no C++ definition either. One level only.
+            elif di.Arrays |> List.exists (fun a -> (deferredOperand a).IsSome) then
+                Some (sprintf "shared deferred operand '%s' reads another deferred computation; only one level of sharing is supported" who)
+            else None)
+    match badShare with
+    | Some reason ->
+        (codegenError ctx ind (sprintf "reduction join: %s -- force it with |> compute and join over the array" reason), ctx')
+    | None ->
+    let sharedName (id: IRId) = Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "__jshr%d" id)
+    let arrayNamesOf (info: ApplyInfo) =
+        info.Arrays |> List.mapi (fun i arr ->
+            match arr with
+            | IRVar (id, _) ->
+                (match sharedIds |> List.tryFind (fun (sid, _) -> sid = id) with
+                 // A deferred operand keeps the SOURCE array's name: the slot
+                 // has already been repointed at it below.
+                 | Some (_, di) ->
+                    (match di.Arrays.Head with
+                     | IRVar (srcId, _) -> Map.tryFind srcId ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
+                     | _ -> sprintf "arr%d" i)
+                 | None -> Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i))
+            | IRRange _ -> sprintf "__range%d" i
+            | IRVirtualReverse _ -> sprintf "__rev%d" i
+            | IRBlocked _ -> sprintf "__blk%d" i
+            | _ -> sprintf "arr%d" i)
+    /// Repoint every deferred operand slot at the deferred map's own leading
+    /// source array, so the level's bound and peel name exist in C++ (and
+    /// dedup with the share leaf's identical peel). Which slots were repointed
+    /// is returned, so the kernel params they bound can be substituted.
+    let repoint (info: ApplyInfo) : ApplyInfo * (int * IRId) list =
+        let mutable moved = []
+        let arrays =
+            info.Arrays |> List.mapi (fun pos a ->
+                match deferredOperand a with
+                | Some (id, di) ->
+                    moved <- moved @ [(pos, id)]
+                    di.Arrays.Head
+                | None -> a)
+        let arrayTypes =
+            info.ArrayTypes |> List.mapi (fun pos t ->
+                match List.tryItem pos info.Arrays |> Option.bind deferredOperand with
+                | Some (_, di) -> (match List.tryHead di.ArrayTypes with Some dt -> dt | None -> t)
+                | None -> t)
+        ({ info with Arrays = arrays; ArrayTypes = arrayTypes }, moved)
+    /// Replace every reference to `fromId` with `toExpr`, everywhere.
+    let rec substVar (fromId: IRId) (toExpr: IRExpr) (e: IRExpr) : IRExpr =
+        match e with
+        | IRVar (id, _) when id = fromId -> toExpr
+        | ExprShape (children, rebuild) ->
+            if children.IsEmpty then e else rebuild (children |> List.map (substVar fromId toExpr))
+    // ---- Share leaves ------------------------------------------------------
+    let shareCgs =
+        sharedIds |> List.map (fun (id, di) ->
+            let shName = sanitizeCppName (sharedName id)
+            let elemCpp =
+                match inferExprType (IRApplyCombinator di) with
+                | ArrayElem at -> elemTypeToCpp at.ElemType
+                | IRTScalar et -> primTypeToCpp et
+                | t -> irTypeToCpp t
+            let cg = routeKernelBodyThroughCall di (buildLoopNestCodeGen di (arrayNamesOf di) shName builder)
+            { cg with ShareDecl = Some elemCpp })
+    // ---- Leg leaves --------------------------------------------------------
+    // One wrapper per leg, never deduplicated: two legs folding the same
+    // operator get two identical lambdas, which costs a line of text and keeps
+    // the wrapper name a pure function of the leg index.
+    let wrappers =
+        callables |> List.mapi (fun i cb -> genCallableWrapper ctx.VarNames (sprintf "%s_j%d" name i) cb)
+    let wnames = wrappers |> List.map snd
+    let sharedElemTy (id: IRId) =
+        match sharedIds |> List.tryFind (fun (sid, _) -> sid = id) with
+        | Some (_, di) ->
+            (match inferExprType (IRApplyCombinator di) with
+             | ArrayElem at -> at.ElemType
+             | t -> t)
+        | None -> IRTScalar ETFloat64
+    let leafNames = infos |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+    let leafCgs =
+        List.mapi (fun i (info: ApplyInfo) ->
+            let (info', moved) = repoint info
+            let cg0 = routeKernelBodyThroughCall info' (buildLoopNestCodeGen info' (arrayNamesOf info') leafNames.[i] builder)
+            // Every param bound by a repointed slot now reads the SHARED local
+            // instead of the source cell. The deferred binding's own id renders
+            // through ctx.VarNames as exactly the share leaf's output name.
+            let kernelExpr =
+                moved |> List.fold (fun body (pos, sid) ->
+                    let paramIds =
+                        cg0.Bindings
+                        |> List.collect (fun b -> b.Elements)
+                        |> List.filter (fun el -> el.ArrayPosition = pos)
+                        |> List.map (fun el -> el.ParamVarId)
+                    paramIds |> List.fold (fun acc pid ->
+                        substVar pid (IRVar (sid, sharedElemTy sid)) acc) body) cg0.KernelExpr
+            { cg0 with KernelExpr = kernelExpr
+                       OutputType = callables.[i].RetType
+                       FoldWrapper = Some wnames.[i] })
+            infos
+    match checkJoinCompatible (shareCgs @ leafCgs) with
+    | Error reason ->
+        (codegenError ctx ind (sprintf "reduction join: cannot fold the legs in one traversal: %s" reason), ctx')
+    | Ok _ ->
+        let wrapperLines = wrappers |> List.collect fst |> List.map (fun s -> ind + s)
+        let elemStrs =
+            callables |> List.map (fun cb ->
+                match cb.RetType with
+                | IRTScalar et -> primTypeToCpp et
+                | t -> irTypeToCpp t)
+        let declCode =
+            List.mapi (fun i ln ->
+                sprintf "%s%s %s = %s;" ind elemStrs.[i] ln (exprToCppCtx ctx seedExprs.[i])) leafNames
+        let allCgs = shareCgs @ leafCgs
+        let (sm, sp, sNew) = streamedNestSetup ctx.StreamedArrays ind allCgs
+        registerStreamBufDecls sNew
+        let loopCode = sp @ genFusedLoopNestStreamed sm allCgs ctx.VarNames ctx.Indent false None
+        let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (leafNames |> String.concat ", ")
+        let shareNote =
+            if sharedIds.IsEmpty then []
+            else [ sprintf "%s// reduction join: %d leg(s), sharing %s per iteration" ind leafNames.Length
+                       (sharedIds |> List.map (fst >> sharedName) |> String.concat ", ") ]
+        let ctxOut = { ctx' with TupleChildren = Map.add name leafNames ctx'.TupleChildren }
+        (wrapperLines @ shareNote @ declCode @ loopCode @ [tupleLine], ctxOut)
 
 and genTupleProjBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (parentExpr: IRExpr) (projIdx: int) (isFlat: bool) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -16833,6 +17097,16 @@ let private genFuncBodyScoped
     // dropping them makes `method_for(zip(gt, gs))` inside a function body
     // fall past the peel into the multi-array refusal.
     let mutable currentGrouped = ctx.GroupedArrays
+    // Deferred computations bound by THIS body's lets. Only a REDUCTION-JOIN
+    // operand gets to stay deferred inside a body (S2 forces everything else,
+    // and the arm below is a hard error for anything that arrives unforced
+    // without being one); the join's emitter resolves the operand through this
+    // map to inline it as a shared per-iteration local.
+    let mutable currentDeferred = ctx.DeferredComputations
+    // Ids S2 deliberately left unforced: bound to a bare combinator and read
+    // ONLY as a join operand. Computed over the whole body at once, because
+    // the accounting that makes the exemption safe is global.
+    let joinDeferredIds = Blade.Lowering.joinDeferrableIdsMany ((lets |> List.map snd) @ [retExpr])
     // Indentation for genApplyCombinator emissions: the function body lives one
     // level deeper than the function declaration's ctx.Indent.
     let bodyIndent = ctx.Indent + 1
@@ -16937,6 +17211,16 @@ let private genFuncBodyScoped
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
+        | IRApplyCombinator _ when Set.contains id joinDeferredIds ->
+            // REDUCTION-JOIN OPERAND: the one body-level let that legitimately
+            // stays deferred. A later join in this same body inlines it as a
+            // per-iteration `const` in the joint nest, so materializing it here
+            // would build (and read back) a whole array per outer cell -- the
+            // cost the join exists to remove. Nothing else may read it: S2's
+            // exemption only fires when every reference is a join operand.
+            currentNames <- Map.add id varName currentNames
+            currentDeferred <- Map.add id value currentDeferred
+            [sprintf "%s// %s = <deferred computation (reduction-join operand)>" indent varName]
         | IRApplyCombinator _ | IRComposeApply _ ->
             // WAS: "unevaluated computations -- deferred until |> compute forces
             // them", registering the name and emitting NOTHING. That premise is
@@ -16996,7 +17280,12 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // accumulators and a loop nest -- so it routes through genBinding's
             // genReduceComputeBinding exactly as at module level. exprToCpp has
             // no expression form for it and would emit its sentinel.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            //
+            // `currentDeferred` (not ctx's map) so a REDUCTION JOIN can resolve
+            // an operand this body left deferred and share it per iteration.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent
+                                     GroupedArrays = currentGrouped
+                                     DeferredComputations = currentDeferred }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true

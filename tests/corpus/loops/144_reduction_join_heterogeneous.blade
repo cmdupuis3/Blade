@@ -1,0 +1,26 @@
+// TEST: Reduction Join Heterogeneous Folds
+// The legs of a join do NOT have to share an operator or a seed -- only an
+// index space. `prodsum` folds (+) from 0, `reduce(x, (*), 1.0)` folds (*)
+// from 1, and a lambda max fold seeds from the user's sentinel. One traversal,
+// four accumulators, three different fold kernels.
+//
+// This is what forces the join encoding (IR.fs, IRReduceCompute): the kernel
+// and seed slots each carry a tuple of k entries. Even an all-(+) join needs
+// it, since `prodsum` seeds at 0 while `reduce(x, (+), 10.0)` seeds at 10.
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 0.5, 2.0]
+let b: Array<Float64 like I> = [3.0, 1.0, 0.25, 8.0, 1.5]
+
+let dot, prod, biggest, offsum = object_for(<&!>) <@> (prodsum(a, b), reduce(a, (*), 1.0), reduce(b, lambda(p, q) -> if p > q then p else q, 0.0 - 1.0e30), reduce(a, (+), 10.0))
+
+// Same four, computed separately.
+let e_dot = prodsum(a, b)
+let e_prod = reduce(a, (*), 1.0)
+let e_biggest = reduce(b, lambda(p, q) -> if p > q then p else q, 0.0 - 1.0e30)
+let e_offsum = reduce(a, (+), 10.0)
+let d = (dot - e_dot) + (prod - e_prod) + (biggest - e_biggest) + (offsum - e_offsum)
+// EXPECT: d = 0.0
+// EXPECT: dot = 13.0
+// EXPECT: prod = 8.0
+// EXPECT: biggest = 8.0
+// EXPECT: offsum = 19.5

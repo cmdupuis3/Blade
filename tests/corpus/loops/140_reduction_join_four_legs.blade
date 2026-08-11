@@ -1,0 +1,37 @@
+// TEST: Reduction Join Four Legs Four Ways
+// The 4-leg differential (139 is the 2-leg one), over values with no exact
+// binary representation so the equality pin is a real floating-point claim:
+// all four routes must produce BIT-IDENTICAL doubles, which they do because a
+// join changes only WHERE the accumulators live, never the summation order.
+type I = Idx<6>
+let a: Array<Float64 like I> = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+let b: Array<Float64 like I> = [1.7, 2.3, 3.1, 4.9, 5.3, 6.7]
+
+// (1) pack join
+let f1_aa, f1_ab, f1_bb, f1_sa = object_for(<&!>) <@> (prodsum(a, a), prodsum(a, b), prodsum(b, b), reduce(a, (+)))
+
+// (2) array fold
+let legs = [prodsum(a, a), prodsum(a, b), prodsum(b, b), reduce(a, (+))]
+let f2_aa, f2_ab, f2_bb, f2_sa = reduce(legs, (<&!>))
+
+// (3) infix chain over one shared loop object
+let L = method_for(zip(a, b))
+let f3_aa, f3_ab, f3_bb, f3_sa = reduce((L <@> lambda(x, y) -> x * x) <&!> (L <@> lambda(x, y) -> x * y) <&!> (L <@> lambda(x, y) -> y * y) <&!> (L <@> lambda(x, y) -> x), (+))
+
+// (4) separate eager reductions
+let f4_aa = prodsum(a, a)
+let f4_ab = prodsum(a, b)
+let f4_bb = prodsum(b, b)
+let f4_sa = reduce(a, (+))
+
+// Differential residuals: every route agrees to the last bit.
+let d12 = (f1_aa - f2_aa) + (f1_ab - f2_ab) + (f1_bb - f2_bb) + (f1_sa - f2_sa)
+let d13 = (f1_aa - f3_aa) + (f1_ab - f3_ab) + (f1_bb - f3_bb) + (f1_sa - f3_sa)
+let d14 = (f1_aa - f4_aa) + (f1_ab - f4_ab) + (f1_bb - f4_bb) + (f1_sa - f4_sa)
+// EXPECT: d12 = 0.0
+// EXPECT: d13 = 0.0
+// EXPECT: d14 = 0.0
+// EXPECT: f1_aa = 0.91
+// EXPECT: f1_ab = 10.19
+// EXPECT: f1_bb = 114.78
+// EXPECT: f1_sa = 2.1

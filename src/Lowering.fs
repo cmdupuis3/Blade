@@ -263,19 +263,83 @@ let extractParallelism (strategies: ParallelStrategy list) (paramNames: string l
 /// own operand slots, where a deferred node is the working protocol, and never
 /// into a nested lambda (which is already an IRVar to its own callable by the
 /// time this runs, and got this same treatment when IT was lowered).
-let rec forceBareCombinatorLets (expr: IRExpr) : IRExpr =
+/// S2's EXEMPTION: bindings a reduction join consumes as a deferred operand,
+/// and consumes NOWHERE else (docs/plan-reduction-joins.md, "sharing by
+/// naming"). `let ct = cos <@> ph` inside a kernel body, read only by the legs
+/// of `object_for(<&!>) <@> (prodsum(s, ct), prodsum(ct, ct))`, must stay
+/// deferred: the join inlines it as ONE per-iteration `const` in the joint
+/// nest, and forcing it first would build a whole array per outer cell and
+/// read it back -- the exact cost the join exists to remove.
+///
+/// The "nowhere else" half is what makes the exemption safe rather than a
+/// guess. An id whose occurrences are not ALL join operands still has a
+/// consumer that wants an array, and S2's rule (there is no forcing site
+/// downstream of a body-local let) still holds for it, so it is left alone.
+/// The set over SEVERAL expressions at once -- the reference accounting is
+/// global, so a function body already split into its statement list must be
+/// counted as one unit, not per statement (CodeGen.genFuncBodyScoped).
+let joinDeferrableIdsMany (exprs: IRExpr list) : Set<IRId> =
+    let joinRefs = System.Collections.Generic.Dictionary<IRId, int>()
+    let allRefs = System.Collections.Generic.Dictionary<IRId, int>()
+    let bump (d: System.Collections.Generic.Dictionary<IRId, int>) id =
+        d.[id] <- (match d.TryGetValue id with | true, n -> n + 1 | _ -> 0) + 1
+    let rec walk (e: IRExpr) =
+        (match e with
+         | IRVar (id, _) -> bump allRefs id
+         | IRReduceCompute (comp, IRTuple ks, IRTuple ss) when ks.Length = ss.Length && ks.Length >= 2 ->
+            let rec leavesOf x =
+                match x with
+                | IRFusion (l, r) -> leavesOf l @ leavesOf r
+                | other -> [other]
+            // The OPERAND slots -- `Arrays`, plus the `Loop` provenance that
+            // repeats them (`method_for(zip(s, ct))` names `ct` twice, and an
+            // accounting that saw only one of the two could never balance).
+            // Deliberately NOT the kernel bodies: an operand a leg's kernel
+            // reads as a whole ARRAY is a capture the join cannot inline.
+            let rec bumpVars x =
+                match x with
+                | IRVar (id, _) -> bump joinRefs id
+                | ExprShape (children, _) -> children |> List.iter bumpVars
+            for leaf in leavesOf comp do
+                match leaf with
+                | IRApplyCombinator info ->
+                    bumpVars info.Loop
+                    for a in info.Arrays do
+                        match a with
+                        | IRVar (id, _) -> bump joinRefs id
+                        | _ -> ()
+                | _ -> ()
+         | _ -> ())
+        match e with
+        | ExprShape (children, _) -> children |> List.iter walk
+    exprs |> List.iter walk
+    joinRefs
+    |> Seq.filter (fun kv ->
+        match allRefs.TryGetValue kv.Key with
+        | true, total -> total = kv.Value
+        | _ -> false)
+    |> Seq.map (fun kv -> kv.Key)
+    |> Set.ofSeq
+
+let joinDeferrableIds (expr: IRExpr) : Set<IRId> = joinDeferrableIdsMany [expr]
+
+let rec forceBareCombinatorLetsExcept (skip: Set<IRId>) (expr: IRExpr) : IRExpr =
     match expr with
     | IRLet (id, value, body) ->
         let value' =
             match value with
+            | IRApplyCombinator _ | IRComposeApply _ when Set.contains id skip -> value
             | IRApplyCombinator _ | IRComposeApply _ -> IRCompute value
-            | _ -> forceBareCombinatorLets value
-        IRLet (id, value', forceBareCombinatorLets body)
-    | IRIf (c, t, e) -> IRIf (c, forceBareCombinatorLets t, forceBareCombinatorLets e)
-    | IRForRange (vid, lo, hi, body) -> IRForRange (vid, lo, hi, forceBareCombinatorLets body)
+            | _ -> forceBareCombinatorLetsExcept skip value
+        IRLet (id, value', forceBareCombinatorLetsExcept skip body)
+    | IRIf (c, t, e) -> IRIf (c, forceBareCombinatorLetsExcept skip t, forceBareCombinatorLetsExcept skip e)
+    | IRForRange (vid, lo, hi, body) -> IRForRange (vid, lo, hi, forceBareCombinatorLetsExcept skip body)
     | IRMatch (scrut, cases) ->
-        IRMatch (scrut, cases |> List.map (fun c -> { c with Body = forceBareCombinatorLets c.Body }))
+        IRMatch (scrut, cases |> List.map (fun c -> { c with Body = forceBareCombinatorLetsExcept skip c.Body }))
     | _ -> expr
+
+let forceBareCombinatorLets (expr: IRExpr) : IRExpr =
+    forceBareCombinatorLetsExcept (joinDeferrableIds expr) expr
 
 /// The RETURN half of the same rule (docs/plan-kernel-body-materialization.md
 /// manifestation M-D, stage S4): **the callee forces**. A callable whose return

@@ -1534,9 +1534,20 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
     let infos = leaves |> List.choose (function IRApplyCombinator i -> Some i | _ -> None)
     if infos.IsEmpty || infos.Length <> leaves.Length then
         raise (InterpUnsupported "reduce over a deferred computation with non-apply leaves")
-    let fold = resolveBinaryFold st kernel
+    // JOIN ENCODING (IR.fs, IRReduceCompute): per-leg kernels and seeds. The
+    // interpreter needs no shared-value machinery -- sharing a named deferred
+    // map is a per-iteration CSE of a pure map, so the values are identical
+    // either way, and each leg gets its own nest here as it always has.
+    let legFolds =
+        match kernel with
+        | IRTuple ks when ks.Length = infos.Length -> ks |> List.map (resolveBinaryFold st)
+        | _ -> infos |> List.map (fun _ -> resolveBinaryFold st kernel)
+    let legSeeds =
+        match seed with
+        | VTuple ss when ss.Length = infos.Length -> List.ofArray ss
+        | _ -> infos |> List.map (fun _ -> seed)
     let accVals =
-        infos |> List.map (fun info ->
+        infos |> List.mapi (fun li info ->
             gateInputs info
             let names = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
             let cg = buildLoopNestCodeGen info names "acc" st.Builder
@@ -1552,11 +1563,20 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
                 | _ ->
                     let pos = match b.Elements with e :: _ -> e.ArrayPosition | [] -> 0
                     match inputs.TryGetValue pos with | true, SReal a -> a.Extents.[b.ExtentDimRef] | _ -> toI64 (Core.evalExpr st env b.Extent)
-            let acc = { V = seed }
-            interpretNest st env cg inputs realAt levelExtent (OutFold (acc, fold))
+            let acc = { V = legSeeds.[li] }
+            interpretNest st env cg inputs realAt levelExtent (OutFold (acc, legFolds.[li]))
             acc.V)
     match accVals with
     | [ single ] -> single
+    // JOIN: a FLAT Tuple<k>, matching typeOf's shape for the join encoding and
+    // codegen's flat `make_tuple` (IR.fs, IRReduceCompute). The chain below
+    // nests because `<&!>` between two maps is a binary operator; a join is
+    // k-ary, and assembling it into pairs made every projection past index 1
+    // fail with BL8003 "tuple projection index out of range".
+    | _ when (match kernel with
+              | IRTuple ks -> ks.Length = accVals.Length
+              | _ -> false) ->
+        VTuple (Array.ofList accVals)
     | _ ->
         // Reassemble the accumulators into the TREE shape (accVals is the
         // in-order leaf list, so consuming it left-to-right while walking the

@@ -1,0 +1,10 @@
+// TEST: Reduction Join Leg Needs Init (rejects)
+// Every leg of a join is seeded, because a joined fold has no "first element"
+// to start from -- the legs are filled together, in one pass, from the same
+// cells. `(+)` and `(*)` carry implicit identities and `prodsum` seeds at 0;
+// anything else must say what it starts from. Same rule the shared-fold
+// terminal already applies, per leg.
+// ERROR-CONTAINS: needs an explicit init
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let x, y = object_for(<&!>) <@> (prodsum(a, a), reduce(a, lambda(p, q) -> p + q))

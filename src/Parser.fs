@@ -2734,17 +2734,7 @@ and parseObjectFor (tokens: Token list) : ParseResult<Expr> =
         let afterOp = advance afterLParen
         match peek afterOp with
         | Some TokRParen ->
-            let binOp = 
-                match op with
-                | "<&>" -> Some OpParallel
-                | "<&!>" -> Some OpFusion
-                | "<*>" -> Some OpArrayProd
-                | "<@>" -> Some OpApply
-                | "<$>" -> Some OpFunctor
-                | "<|>" -> Some OpChoice
-                | "<|:>" -> Some OpFallback
-                | ">>=" -> Some OpBind
-                | _ -> stringToBinOp op  // fall back to scalar ops (+, *, etc.)
+            let binOp = combinatorOrScalarSection op
             match binOp with
             | Some b ->
                 let remaining = advance afterOp
@@ -2767,12 +2757,12 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
     | Some TokRParen ->
         let remaining = advance tokens
         success (mkE tokens remaining (ExprTuple [])) remaining
-    // Operator section: (+), (*), etc.
+    // Operator section: (+), (*), (<&!>), etc.
     | Some (TokOp op) ->
         let afterOp = advance tokens
         match peek afterOp with
         | Some TokRParen ->
-            match stringToBinOp op with
+            match combinatorOrScalarSection op with
             | Some binOp ->
                 let remaining = advance afterOp
                 success (mkE tokens remaining (ExprSection binOp)) remaining
@@ -2805,6 +2795,25 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
             errorC "BL1001" "Expected ')' or ',' in parenthesized expression" line col
 
 /// Convert operator string to BinOp
+/// The section table shared by `(op)` and `object_for(op)`: the COMBINATOR
+/// operators first, then the scalar ops. One table, so the two spellings can
+/// never disagree about which operators have a section -- which is what let
+/// `object_for(<&!>)` parse while `(<&!>)` did not (BL1999 "Unknown operator
+/// in section"), even though the reduction-join forms need both.
+and combinatorOrScalarSection (op: string) : BinOp option =
+    match op with
+    | "<&>" -> Some OpParallel
+    | "<&!>" -> Some OpFusion
+    | "<*>" -> Some OpArrayProd
+    | "<@>" -> Some OpApply
+    | "<$>" -> Some OpFunctor
+    | "<|>" -> Some OpChoice
+    | "<|:>" -> Some OpFallback
+    | ">>=" -> Some OpBind
+    | ">>@" -> Some OpComposeObj
+    | "@>>" -> Some OpComposeMeth
+    | _ -> stringToBinOp op  // scalar ops (+, *, etc.)
+
 and stringToBinOp (op: string) : BinOp option =
     match op with
     | "+" -> Some OpAdd

@@ -1006,6 +1006,28 @@ pure   : α → Computation α
 - `<&!>` demands full fusion; restricted to computations from the same
   MethodLoop (ObjectLoop fixes S-dims only at application, so structural
   identity can't be verified).
+
+**Reduction join.** `<&!>` also joins REDUCTIONS, not only maps:
+
+```
+object_for(<&!>) <@> (r₁, …, r_k)   :  Reduction σ₁ × … × Reduction σ_k → σ₁ × … × σ_k
+reduce([r₁, …, r_k], (<&!>))        :  the same, as an associative join chain
+```
+
+where each `rᵢ` is `prodsum(x₁ .. x_m)` or `reduce(c, op[, init])`. Each leg
+normalizes to its `(traversal, fold, seed)` triple, the traversals fuse into one
+nest, and the legs accumulate side by side — so a join is the shared-fold
+terminal generalized to a fold PER leg. Unlike the map form, the legs need not
+come from the same MethodLoop: they must only agree on the joint index space
+(equal rank, and equal extents where statically known), because a reduction
+writes no cells and so has no output shape to reconcile.
+
+Legs referring to the same **named deferred** computation evaluate it once per
+joint cell; the name is the declaration. One leg is the identity (a scalar, not
+a 1-tuple); zero legs has no index space and is refused. Both spellings are
+`docs/plan-reduction-joins.md`; note that `object_for(<&!>) <@> (c₁, …, c_k)`
+over deferred MAPS keeps its existing reading (n-ary map fusion answering k
+arrays) — the legs, not the operator, say which join is meant.
 - `<*>` concatenates array lists: `method_for(A) <*> method_for(B) ≡
   method_for(A, B)`; identity `method_for()`; commutative up to index
   reordering; associative. It is proved to be exactly shape concatenation with

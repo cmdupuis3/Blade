@@ -1,0 +1,9 @@
+// TEST: Reduction Join Fold Operand Not A Leg List (rejects)
+// `(<&!>)` in the FOLD position declares "this operand is a list of legs, join
+// them". A data array is not one, and folding its VALUES with a join operator
+// means nothing -- so the steering diagnostic names both spellings rather than
+// letting the elements fall through as would-be legs.
+// ERROR-CONTAINS: folds a LIST OF LEGS
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let x, y = reduce(a, (<&!>))

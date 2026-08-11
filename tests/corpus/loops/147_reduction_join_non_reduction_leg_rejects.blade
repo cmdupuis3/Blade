@@ -1,0 +1,10 @@
+// TEST: Reduction Join Non-Reduction Leg (rejects)
+// `<&!>` over a PACK joins reductions, and only reductions: every leg must
+// bring an accumulator for the joint traversal to fill. An array (or any other
+// value) in a leg slot has none, so it is refused rather than silently
+// iterated over or dropped -- the pack spelling used to typecheck and emit
+// nothing at all.
+// ERROR-CONTAINS: a reduction-join leg must be a REDUCTION
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let x, y = object_for(<&!>) <@> (prodsum(a, a), a)

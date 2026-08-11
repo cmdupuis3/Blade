@@ -281,6 +281,18 @@ type TypeEnv = {
     /// buildApplyInfo's schema matcher and by the direct-call arg pairing.
     /// Shared by reference.
     DeclaredTupleWidths: System.Collections.Generic.Dictionary<IRId, int>
+    /// REDUCTION-JOIN leg lists (docs/plan-reduction-joins.md, Form 2): the
+    /// SURFACE elements of an array literal bound to a name,
+    /// `let ps = [prodsum(a, b), reduce(c, (+))]`. `reduce(ps, (<&!>))` reads
+    /// them back and joins the legs into one traversal; the elements never
+    /// escape as values, so the surface list is what the join needs and the
+    /// TYPED literal (four independent scalars) is not.
+    ///
+    /// Name-keyed, with FuncDefaults' known shadowing weakness and the same
+    /// justification: it is a SURFACE side channel, and the join re-validates
+    /// what it finds against the resolved binding (an array literal of the
+    /// same width) before using it. Shared by reference.
+    JoinLegLists: System.Collections.Generic.Dictionary<string, Expr list>
 }
 
 let emptyEnv () = {
@@ -321,6 +333,7 @@ let emptyEnv () = {
     FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
     FuncFoldBuiltin = System.Collections.Generic.Dictionary<string, bool>()
     DeclaredTupleWidths = System.Collections.Generic.Dictionary<IRId, int>()
+    JoinLegLists = System.Collections.Generic.Dictionary<string, Expr list>()
 }
 
 /// Structured twin of `TypeEnv.Warnings`: every warning as a coded, spanned

@@ -151,6 +151,7 @@ the computation monad.
 | Monadic | `>>=`, `pure`, `<$>` | Monadic bind, pure, functor. Computation monad (bind = loop-nest flat_map at the value level) |
 | Loop join |`<&>` | Parallel composition with automatic prefix fusion |
 | Force join | `<&!>` | Mandatory fusion; same-MethodLoop restriction |
+| Reduction join | `object_for(<&!>) <@> (r₁, …, r_k)`<br>`reduce([r₁, …, r_k], (<&!>))` | k REDUCTIONS (`prodsum`, `reduce`) in one traversal → `Tuple<k>`; per-leg fold and seed, so the legs may differ in both. Legs naming the same **deferred** map (`let ct = cos <@> ph`, no `compute`) evaluate it once per cell — sharing declared by the NAME. 1 leg = identity, 0 refused. `docs/plan-reduction-joins.md` |
 | Product | `<*>` | Array product = MethodLoop concatenation; identity `method_for()` |
 | Compose-apply | `>>@` | ObjectLoop (kernel) composition |
 | Apply-compose | `@>>` | Within-MethodLoop sequential composition <br>Compose-apply duality `(o_f >>@ o_g) <@> A ≡ (m <@> f) @>> (m <@> g)` |

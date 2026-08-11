@@ -1,0 +1,47 @@
+// TEST: Reduction Join WOSA Kernel Shape
+// The shape the feature was designed for, in miniature: a per-frequency inner
+// reduction that needs FOUR sums over one sample axis, all of them functions
+// of the same two transcendental maps. Spelled as a join over shared deferred
+// `ct`/`stt`, the emitted inner loop calls `cos` once and `sin` once per
+// sample and fills four accumulators; spelled eagerly it builds two arrays per
+// frequency and makes four passes over them.
+//
+// Pinned differentially against that eager spelling -- the join is a
+// TRAVERSAL rewrite, so the doubles must be identical, not merely close.
+type T = Idx<8>
+type F = Idx<4>
+let ts: Array<Float64 like T> = [0.0, 0.13, 0.29, 0.41, 0.58, 0.66, 0.83, 0.97]
+let s: Array<Float64 like T> = [1.0, 0.7, 0.2, 0.0 - 0.4, 0.0 - 0.9, 0.0 - 0.6, 0.1, 0.8]
+let frs: Array<Float64 like F> = [0.5, 1.25, 2.0, 3.5]
+
+let joined = (frs <@> lambda(f) -> {
+    let w = 6.283185307179586 * f
+    let ct = ts <@> lambda(t) -> cos(w * t)
+    let stt = ts <@> lambda(t) -> sin(w * t)
+    let pc, ps, qcc, qcs = object_for(<&!>) <@> (prodsum(s, ct), prodsum(s, stt), prodsum(ct, ct), prodsum(ct, stt))
+    pc * pc + ps * ps + qcc - qcs
+}) |> compute
+
+let eager = (frs <@> lambda(f) -> {
+    let w = 6.283185307179586 * f
+    let ct = (ts <@> lambda(t) -> cos(w * t)) |> compute
+    let stt = (ts <@> lambda(t) -> sin(w * t)) |> compute
+    let pc = prodsum(s, ct)
+    let ps = prodsum(s, stt)
+    let qcc = prodsum(ct, ct)
+    let qcs = prodsum(ct, stt)
+    pc * pc + ps * ps + qcc - qcs
+}) |> compute
+
+let diff = reduce((method_for(zip(joined, eager)) <@> lambda(p, q) -> p - q), (+))
+// The one place a join is NOT bit-identical to the spelling it replaces:
+// FMA CONTRACTION. `prodsum`'s own `__ps += a[t]*b[t]` loop and the join's
+// `acc = w(acc, a*b)` accumulate present g++ with different contraction
+// opportunities under the default `-ffp-contract=fast`, so the last ulp can
+// differ. Under `BLADE_FP_CONTRACT=off` this residual is exactly 0 -- verified
+// -- which is what identifies the cause. Summation ORDER is never affected: a
+// join shares the traversal, it does not reorder the fold.
+let agree = abs(diff) < 1.0e-12
+// EXPECT: agree = true
+// EXPECT: joined = [7.53489894384392, 15.9092581264575, 5.08977917718998, 7.96822396272156]
+// EXPECT: eager = [7.53489894384392, 15.9092581264575, 5.08977917718998, 7.96822396272156]

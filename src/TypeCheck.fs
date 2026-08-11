@@ -5381,7 +5381,21 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprDecompact (array, d) ->
         inferDecompact env array d
     | ExprKind.ExprReduce (array, kernel, init, axes) ->
-        inferReduce env array kernel init axes
+        // REDUCTION JOIN, Form 2: `reduce(<leg list>, (<&!>))`. The `(<&!>)`
+        // section in the FOLD position is the declaration -- the fold is the
+        // associative join chain leg1 <&!> leg2 <&!> ..., so the operand is a
+        // list of legs, not an array of values.
+        (match kernel.Kind with
+         | ExprKind.ExprSection OpFusion ->
+            (match init, axes with
+             | None, None ->
+                (match joinLegListOf env array with
+                 | Some legs -> inferReductionJoin env legs array
+                 | None ->
+                    Error (Other "reduce(..., (<&!>)) folds a LIST OF LEGS into one traversal, so its operand must be an array literal of reductions -- written inline, `reduce([prodsum(a, b), reduce(c, (+))], (<&!>))`, or bound to a name by a literal. Use `object_for(<&!>) <@> (r1, r2, ...)` for the pack spelling."))
+             | _ ->
+                Error (Other "reduce(..., (<&!>)) takes neither an init nor `axes = n`: the join carries each leg's OWN fold and seed, so there is nothing shared to seed, and every leg folds its whole traversal."))
+         | _ -> inferReduce env array kernel init axes)
     | ExprKind.ExprExtents array ->
         inferExtents env array
     | ExprKind.ExprSequence exprs ->
@@ -5655,6 +5669,223 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                 | _ :: rest -> rest |> List.fold (fun acc _ -> IRTTuple [acc; elem0]) elem0
                 | [] -> elem0
             mkTyped (TExprReduce (rebuilt, tKernel, Some tSeed)) resultType)))))))
+
+// ---- REDUCTION JOINS (docs/plan-reduction-joins.md) ------------------------
+//
+// `<&!>` is the DECLARED join surface. It already joined `<@>` maps; these
+// three functions make the REDUCTION primitives valid legs, in two spellings:
+//
+//   Form 1 (pack)   let a, b = object_for(<&!>) <@> (prodsum(s, c), reduce(x, (+)))
+//   Form 2 (fold)   let ps = [prodsum(s, c), reduce(x, (+))]
+//                   let a, b = reduce(ps, (<&!>))
+//
+// Both elaborate to ONE node -- the fused reduction terminal `<&!>` maps
+// already use (`TExprReduce` over a fusion tree, lowered to `IRReduceCompute`)
+// -- by NORMALIZING each leg into the (traversal, fold kernel, seed) triple
+// that terminal is made of:
+//
+//   prodsum(x1..xk)      ->  method_for(zip(x1..xk)) <@> lambda(p1..pk) -> p1*..*pk,  (+),  0
+//   reduce(<map>, op, i) ->  the map itself,                                          op,   i
+//   reduce(<array>, op, i) -> method_for(A) <@> lambda(p) -> p,                       op,   i
+//
+// so a join is exactly the existing chain with a PER-LEG fold instead of one
+// shared fold. That per-leg part is the only new capability: the kernel and
+// seed slots carry an `IRTuple` of k kernels / k seeds (the JOIN ENCODING,
+// documented at IRReduceCompute), which is what lets `prodsum` (which folds
+// `(+)` from 0) join `reduce(x, max, -inf)` in one traversal.
+//
+// SEEDS ARE WHY THE ENCODING IS NEEDED AT ALL, not just heterogeneous ops:
+// `prodsum(a, b)` seeds at 0 and `reduce(x, (+), 10.0)` seeds at 10.0, so even
+// an all-(+) join has k distinct seeds.
+//
+// ONE LEG IS THE IDENTITY. `reduce([r], (<&!>))` is `r` -- a scalar, not a
+// `Tuple<1>` (Blade has no 1-tuple), and the SINGLE-leaf terminal keeps every
+// specialization the multi-leaf nest declines (BLAS dot dispatch, the chunked
+// `omp` fold, the reassociated lane forms). ZERO legs is refused: an empty
+// join names no index space and no element type.
+
+/// One leg's normalization: surface leg -> (traversal leaf, fold kernel, init).
+/// Purely syntactic apart from ONE probe -- a `reduce` leg's operand is
+/// inferred to decide whether it is already a deferred map (use it as the
+/// leaf) or a materialized array (wrap it in the identity map). The probe's
+/// typed result is discarded; only the classification is kept.
+and joinLegSurface (env: TypeEnv) (idx: int) (leg: Expr) : Result<Expr * Expr * Expr option, TypeError> =
+    let sp = leg.Span
+    let v n = mkExpr sp (ExprKind.ExprVar n)
+    let par i = { Name = sprintf "__jl%d_%d" idx i; Type = None; Default = None; NameSpan = noSpan }
+    let mapOver (src: Expr) (parms: LambdaParam list) (body: Expr) =
+        mkExpr sp (ExprKind.ExprBinOp (Elementwise, OpApply,
+                                       mkExpr sp (ExprKind.ExprMethodFor [src]),
+                                       mkExpr sp (ExprKind.ExprLambda (parms, None, body))))
+    match leg.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "prodsum" }, args)
+            when not args.IsEmpty && (lookupVar "prodsum" env).IsNone ->
+        // sum_t prod_L x_L(t): the product is the map, `(+)` from 0 is the
+        // fold. Co-iteration (zip), never the outer product -- prodsum walks
+        // ONE index space, and `method_for(a, b)` would walk |a|*|b|.
+        let parms = args |> List.mapi (fun i _ -> par i)
+        let body =
+            parms |> List.map (fun p -> v p.Name)
+                  |> List.reduce (fun a b -> mkExpr sp (ExprKind.ExprBinOp (Elementwise, OpMul, a, b)))
+        let src = match args with [one] -> one | many -> mkExpr sp (ExprKind.ExprZip many)
+        Ok (mapOver src parms body, mkExpr sp (ExprKind.ExprSection OpAdd), None)
+    | ExprKind.ExprReduce (_, _, _, Some _) ->
+        Error (Other "a reduction-join leg cannot carry `axes = n`: a join folds every leg to a SCALAR over one shared traversal, and a partial fold answers an array. Force the partial fold with `|> compute` and join over its result, or drop the `axes` clause.")
+    | ExprKind.ExprReduce (arr, kernel, init, None) ->
+        inferExpr env arr |> Result.map (fun tA ->
+            match (resolveTypedExpr env tA).Kind with
+            // Already a deferred traversal: it IS the leaf.
+            | TExprApply info when not info.IsComposeApply -> (arr, kernel, init)
+            // A materialized array (or anything else the fold accepts): the
+            // identity map over it reads the same cells in the same order.
+            | _ -> (mapOver arr [par 0] (v (par 0).Name), kernel, init))
+    | _ ->
+        Error (Other "a reduction-join leg must be a REDUCTION: `prodsum(...)` or `reduce(...)`. `<&!>` joins the traversals of reductions into one loop; an expression that is not a reduction has no accumulator to join.")
+
+/// Form 2's leg list: an array literal written inline, or a name bound to one
+/// (recovered from `JoinLegLists`, the surface side channel). Anything else
+/// answers None and the caller refuses.
+/// Is this surface expression written as a REDUCTION? The dispatch predicate
+/// for both join forms, and deliberately syntactic.
+///
+/// `<&!>` over a pack is OVERLOADED, and has been since before joins existed:
+/// `object_for(<&!>) <@> (c1, c2, c3)` over deferred MAPS is n-ary map fusion
+/// answering k ARRAYS (`tests/corpus/loops/029`), while the same shape over
+/// REDUCTIONS is a join answering k scalars. Both readings are right; the LEGS
+/// say which. So the leading leg decides, and a pack that does not start with a
+/// reduction falls through to the map-fusion path untouched.
+///
+/// Leading-leg (not every-leg), so a genuine leg list with a bad element in the
+/// middle still reaches `inferReductionJoin`, which names the offending leg,
+/// instead of silently becoming a map fusion that fails somewhere else.
+and isJoinLegShape (e: Expr) : bool =
+    match e.Kind with
+    | ExprKind.ExprReduce _ -> true
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "prodsum" }, args) -> not args.IsEmpty
+    | _ -> false
+
+and joinLegListOf (env: TypeEnv) (arr: Expr) : Expr list option =
+    // Data arrays are array literals too (`let a = [1.0, 2.0, 3.0]`), and
+    // `reduce(a, (<&!>))` over one of those is a different mistake deserving a
+    // different message.
+    let legShaped = isJoinLegShape
+    let elemsOf =
+        match arr.Kind with
+        | ExprKind.ExprArrayLit elems -> Some elems
+        | ExprKind.ExprVar name ->
+            (match env.JoinLegLists.TryGetValue name with
+             | true, elems -> Some elems
+             | _ -> None)
+        | _ -> None
+    match elemsOf with
+    | Some (first :: _ as elems) when legShaped first -> Some elems
+    | _ -> None
+
+/// The join itself. `legs` are the SURFACE legs, in traversal order; the
+/// result is a scalar at one leg and a left-nested tuple of k scalars beyond
+/// (the fusion terminal's own convention, so destructuring projects flat).
+and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResult<TypedExpr> =
+    let sp = site.Span
+    if legs.IsEmpty then
+        Error (Other "a reduction join needs at least one leg: `object_for(<&!>) <@> (r1, r2, ...)` (or `reduce([r1, r2, ...], (<&!>))`) joins reductions over one traversal, and an empty join names neither an index space nor an element type.")
+    else
+    legs |> List.mapi (joinLegSurface env) |> sequenceResults |> Result.bind (fun parts ->
+    parts |> List.map (fun (leaf, _, _) -> inferExpr env leaf) |> sequenceResults
+    |> Result.bind (fun tLeaves0 ->
+    // RESOLVED leaves, like the `<&!>` chain: the typed node holds the apply
+    // itself, never a variable pointing at one, so lowering and codegen never
+    // chase bindings.
+    let tLeaves = tLeaves0 |> List.map (resolveTypedExpr env)
+    let leafShape (i: int) (t: TypedExpr) : Result<IRType * IRIndexType list, TypeError> =
+        match t.Kind with
+        | TExprApply info when not info.IsComposeApply ->
+            (match env.Subst.Resolve info.OutputType with
+             | ArrayElem arr ->
+                let packed =
+                    arr.IndexTypes |> List.exists (fun ix ->
+                        match ix.Symmetry with SymNone -> false | _ -> true)
+                if packed then
+                    Error (Other (sprintf "reduction-join leg %d traverses compact symmetric/antisymmetric/Hermitian storage: folding the canonical cells and folding the logical (mirrored) cells differ. Force with `|> compute` and `decompact(A, d)` first for the logical fold." (i + 1)))
+                else Ok (arr.ElemType, arr.IndexTypes)
+             | _ ->
+                Error (Other (sprintf "reduction-join leg %d does not traverse an index space -- a join leg needs an array-producing kernel application to fold over." (i + 1))))
+        | TExprApply _ ->
+            Error (Other (sprintf "reduction-join leg %d reduces a COMPOSED (>>@/@>>) application, which is not supported yet -- force it with `|> compute` and join over the resulting array." (i + 1)))
+        | _ ->
+            Error (Other (sprintf "reduction-join leg %d could not be resolved to a traversal -- a join leg must be `prodsum(...)` or `reduce(<computation or array>, op)`." (i + 1)))
+    tLeaves |> List.mapi leafShape |> sequenceResults |> Result.bind (fun shapes ->
+    // ---- JOINT INDEX SPACE -------------------------------------------------
+    // A join emits ONE loop nest, so every leg must walk the SAME cell grid:
+    // equal rank, and equal extents wherever both are statically known. Only
+    // a provable disagreement is an error -- unknown extents are trusted and
+    // the nest takes its bound from the first leg, exactly the rule `prodsum`
+    // has always applied to its own operands.
+    let (elem0, ix0) = List.head shapes
+    let spaceErr =
+        shapes |> List.mapi (fun i s -> (i, s)) |> List.tryPick (fun (i, (_, ixs)) ->
+            if ixs.Length <> ix0.Length then
+                Some (Other (sprintf "reduction-join legs do not share an index space: leg 1 traverses a rank-%d space and leg %d traverses a rank-%d one. Every leg of a join folds the SAME cell grid." ix0.Length (i + 1) ixs.Length))
+            else
+                List.zip ix0 ixs |> List.mapi (fun d (a, b) -> (d, a, b)) |> List.tryPick (fun (d, a, b) ->
+                    match tryEvalIntIR a.Extent, tryEvalIntIR b.Extent with
+                    | Some na, Some nb when na <> nb ->
+                        Some (Other (sprintf "reduction-join legs do not share an index space: axis %d has extent %d in leg 1 and %d in leg %d. Every leg of a join folds the SAME cell grid." d na nb (i + 1)))
+                    | _ -> None))
+    match spaceErr with
+    | Some e -> Error e
+    | None ->
+    parts |> List.map (fun (_, k, _) -> inferExpr env k) |> sequenceResults |> Result.bind (fun tKernels ->
+    parts
+    |> List.map (fun (_, _, i) -> match i with
+                                  | Some e -> inferExpr env e |> Result.map Some
+                                  | None -> Ok None)
+    |> sequenceResults |> Result.bind (fun tInits ->
+    // Per leg: the fold kernel's params and the seed live in that leg's OWN
+    // element type (the shared-fold terminal unifies them all with one; a join
+    // must not, or a complex leg would drag a real one complex).
+    let seedFor (i: int) : Result<TypedExpr, TypeError> =
+        let (elem, _) = shapes.[i]
+        let tK = tKernels.[i]
+        (match env.Subst.Resolve tK.Type with
+         | FuncElem (paramTys, _) ->
+            paramTys |> List.fold (fun acc pTy -> acc |> Result.bind (fun () -> unify env.Subst pTy elem)) (Ok ())
+         | _ -> Ok ())
+        |> Result.bind (fun () ->
+        match tInits.[i] with
+        | Some tInit -> unify env.Subst tInit.Type elem |> Result.map (fun () -> tInit)
+        | None ->
+            let et = match env.Subst.Resolve elem with AnyPrimElem e -> e | _ -> ETFloat64
+            let lit () = match et with
+                         | ETInt32 | ETInt64 -> TExprLit (LitInt 0L)
+                         | _ -> TExprLit (LitFloat 0.0)
+            let one () = match et with
+                         | ETInt32 | ETInt64 -> TExprLit (LitInt 1L)
+                         | _ -> TExprLit (LitFloat 1.0)
+            match (resolveTypedExpr env tK).Kind with
+            | TExprSection OpAdd -> Ok (mkTyped (lit ()) elem)
+            | TExprSection OpMul -> Ok (mkTyped (one ()) elem)
+            | TExprSection _ ->
+                Error (Other (sprintf "reduction-join leg %d needs an explicit init (`reduce(x, op, init)`): only (+) and (*) carry implicit identities, and a joined fold cannot seed from its first element." (i + 1)))
+            | _ ->
+                Error (Other (sprintf "reduction-join leg %d needs an explicit init (`reduce(x, op, init)`) for a lambda or named fold kernel -- a joined fold cannot seed from its first element." (i + 1))))
+    List.init legs.Length seedFor |> sequenceResults |> Result.map (fun seeds ->
+    match tLeaves with
+    | [one] ->
+        // 1 leg = the identity: the ordinary single-leaf fused terminal.
+        mkTyped (TExprReduce (one, List.head tKernels, Some (List.head seeds))) elem0
+    | first :: rest ->
+        let tree =
+            rest |> List.fold (fun acc leaf ->
+                mkTyped (TExprFusion (acc, leaf)) (IRTTuple [acc.Type; leaf.Type])) first
+        // FLAT `Tuple<k>`, mirroring the flat `make_tuple` of k accumulators
+        // the join emits (see typeOf IRReduceCompute). The `<&!>` CHAIN nests
+        // its type because the operator is binary; a join is k-ary.
+        let resultType = IRTTuple (shapes |> List.map fst)
+        // The JOIN ENCODING: k kernels and k seeds, in leaf order.
+        let kCarrier = mkTyped (TExprTuple tKernels) (IRTTuple (tKernels |> List.map (fun k -> k.Type)))
+        let sCarrier = mkTyped (TExprTuple seeds) (IRTTuple (seeds |> List.map (fun s -> s.Type)))
+        mkTyped (TExprReduce (tree, kCarrier, Some sCarrier)) resultType
+    | [] -> mkTyped (TExprReduce (List.head tLeaves, List.head tKernels, Some (List.head seeds))) elem0))))))
 
 and inferReduce (env: TypeEnv) array kernel (init: Expr option) (axes: Expr option) : TypeResult<TypedExpr> =
     // ---- Axis count (`axes = n`, default 1) --------------------------------
@@ -7833,6 +8064,31 @@ and private wreathLeafRefusal (opName: string) (leaves: TypedExpr list) : TypeEr
 list to share, and a wreath's nest is the segment-peeled orb_visit traversal)" opName))
 
 and inferBinOp env mode op left right : TypeResult<TypedExpr> =
+    // REDUCTION JOIN, Form 1: `object_for(<&!>) <@> (r1, r2, ...)`. The
+    // fusion operator as the kernel of a loop former (operator sections are
+    // already legal kernels) applied over a PACK of reductions joins them into
+    // one traversal answering a Tuple<k>. Matched on the SURFACE, before the
+    // former/kernel classification below, because the pack elements are legs
+    // to be normalized -- not arrays to be iterated over.
+    //
+    // Only when the leading leg is written as a REDUCTION. The same shape over
+    // deferred MAPS is n-ary map fusion answering k arrays and predates joins
+    // (loops/029); `isJoinLegShape` is what keeps the two readings apart.
+    let joinPackLegs =
+        match op, left.Kind with
+        | OpApply, ExprKind.ExprObjectFor { Kind = ExprKind.ExprSection OpFusion } ->
+            let legs =
+                match right.Kind with
+                | ExprKind.ExprTuple legs -> legs
+                | _ -> [right]
+            (match legs with
+             | first :: _ when isJoinLegShape first -> Some legs
+             | _ -> None)
+        | _ -> None
+    match joinPackLegs with
+    | Some legs -> inferReductionJoin env legs right
+    | None ->
+
     match op with
     | OpApply ->
         // A bare named-function reference on the kernel side (the right
@@ -12534,6 +12790,15 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
      | PatVar name, ExprKind.ExprLambda (parms, _, _)
             when parms |> List.exists (fun p -> p.Default.IsSome) ->
          env.FuncDefaults.[name] <- (parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
+     | _ -> ())
+    // REDUCTION JOIN, Form 2: an array literal bound to a name is a candidate
+    // LEG LIST for `reduce(name, (<&!>))`. Recorded unconditionally and read
+    // by nothing else, so a literal nobody joins keeps its ordinary eager
+    // array meaning -- this only preserves the SURFACE elements, which the
+    // typed literal (k independent scalar folds) has already dissolved.
+    (match binding.Pattern.Kind, binding.Value.Kind with
+     | PatVar name, ExprKind.ExprArrayLit elems when not elems.IsEmpty ->
+         env.JoinLegLists.[name] <- elems
      | _ -> ())
     // A let binding is a value-forming boundary. A wildcard `_` is a hole, not a
     // value: it is only meaningful as a compound-index coordinate (consumed by

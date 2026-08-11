@@ -1,0 +1,40 @@
+// TEST: Reduction Join Shared Deferred Operand
+// SHARING BY NAMING (docs/plan-reduction-joins.md). `ct` and `st` are named
+// deferred maps -- no `|> compute`, so nothing materializes them -- and four
+// legs read them. Each is evaluated ONCE per joint iteration, bound to a
+// per-iteration `const` in the fused loop: the emitted nest contains exactly
+// one `std::cos` and one `std::sin` call, not five.
+//
+// The declaration is the NAME, not a similarity the compiler noticed: the legs
+// spell the same binding, so the join binds it once. The pin here is the
+// VALUE side of that -- sharing must not change a single bit versus reading
+// the same maps out of materialized arrays.
+type I = Idx<6>
+let ph: Array<Float64 like I> = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+let s: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+// Deferred, shared by every leg below.
+let ct = cos <@> ph
+let st = sin <@> ph
+let j_pc, j_ps, j_cc, j_cs = object_for(<&!>) <@> (prodsum(s, ct), prodsum(s, st), prodsum(ct, ct), prodsum(ct, st))
+
+// Same four statistics, read out of MATERIALIZED arrays instead.
+let ctm = (cos <@> ph) |> compute
+let stm = (sin <@> ph) |> compute
+let e_pc = prodsum(s, ctm)
+let e_ps = prodsum(s, stm)
+let e_cc = prodsum(ctm, ctm)
+let e_cs = prodsum(ctm, stm)
+
+let dpc = j_pc - e_pc
+let dps = j_ps - e_ps
+let dcc = j_cc - e_cc
+let dcs = j_cs - e_cs
+// EXPECT: dpc = 0.0
+// EXPECT: dps = 0.0
+// EXPECT: dcc = 0.0
+// EXPECT: dcs = 0.0
+// EXPECT: j_pc = 18.8453172632588
+// EXPECT: j_ps = 8.7263886008468
+// EXPECT: j_cc = 5.16291497822289
+// EXPECT: j_cs = 1.8217981540867
