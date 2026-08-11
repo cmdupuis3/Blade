@@ -1,0 +1,35 @@
+// TEST: Rand Categorical Gather
+// The reason categorical returns Int64 rather than Float64: the drawn indices
+// SUBSCRIPT an array directly, with no coercion. `V[i]` inside a method_for
+// kernel over the draws is the whole idiom, and it type-checks as-is -- no
+// index tag blocks it, because a plain Idx<4> axis is subscripted by an
+// ordinary integer and the draws are ordinary Int64. Had this family joined
+// the all-Float64 convention, this file would not compile.
+//
+// The shape of the test is SMC resampling, the motivating consumer: `V` are
+// particle values, `W` their unnormalized weights, and resampling replaces the
+// weighted ensemble with an equally-weighted one drawn in proportion to W. The
+// check is that resampling PRESERVES THE MEAN: the resampled average must
+// approach the W-weighted average of V,
+//     10(1/8) + 20(1/8) + 30(1/4) + 40(1/2) = 31.25,
+// which is a property of the gather and the draw distribution together -- a
+// gather that read the wrong slot, or draws with the wrong weights, both miss
+// it, while either one alone could still pass 014.
+//
+// TOLERANCE. Per-draw sd is sqrt(1087.5 - 31.25^2) ~ 10.53, so over n = 4096
+// the standard error is ~0.165; the realized mean is ~31.05 and 0.6 is ~3.6 SE.
+// Deterministic (fixed key), so this is a fixed number, not a live test.
+import rand as r
+let V: Array<Float64 like Idx<4>> = [10.0, 20.0, 30.0, 40.0]
+let W: Array<Float64 like Idx<4>> = [1.0, 1.0, 2.0, 4.0]
+let pick = r.categorical(101, W, 4096)
+let resampled = method_for(pick) <@> lambda(i) -> V[i] |> compute
+let mean = reduce(resampled, (+)) / 4096.0
+let meanPreserved = abs(mean - 31.25) < 0.6
+// The same gather on a handful of draws, pinned exactly: this fixes WHICH
+// slot each index reads, which the aggregate mean above cannot see.
+let head = r.categorical(101, W, 6)
+let headVals = method_for(head) <@> lambda(i) -> V[i] |> compute
+// EXPECT: head = [3, 3, 2, 1, 0, 3]
+// EXPECT: headVals = [40, 40, 30, 20, 10, 40]
+// EXPECT: meanPreserved = true

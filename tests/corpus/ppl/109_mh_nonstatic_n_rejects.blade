@@ -1,0 +1,10 @@
+// TEST: MH Non-Static Chain Length (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: the chain length must be a compile-time integer
+import ppl as ppl
+// Shapes are static everywhere in Blade and the chain length is a shape: a
+// plain runtime `let` does not resolve statically, so mh refuses with
+// steering. x0, scale, and the key stay ordinary runtime expressions.
+function lp(x: Float64) -> Float64 = 0.0 - x * x
+let n = 64
+let c = ppl.mh(lp, 0.0, n, 1.0, 7)

@@ -1,0 +1,27 @@
+// TEST: Autocorr Hand Values
+import ppl as ppl
+// autocorr(chain, maxlag): rho_k = sum_{t<n-k} (x_t-m)(x_{t+k}-m) divided by
+// the full centered sum of squares (the BIASED estimator, the one ESS
+// uses); rho_0 = 1 by construction. Literal chains, exact hand pins,
+// verified two ways each.
+//
+// ramp [1,2,3,4]: m = 2.5, d = [-1.5,-0.5,0.5,1.5], denom = 5.
+//   lag1: 0.75 - 0.25 + 0.75 = 1.25 -> 0.25
+//   lag2: -0.75 - 0.75 = -1.5 -> -0.3
+//   lag3: -2.25 -> -0.45
+// (cross-check: the biased ACF of any 4-term arithmetic ramp is
+// [1, 0.25, -0.3, -0.45] -- the d-vector is fixed up to scale, which the
+// ratio cancels.)
+// tent [2,4,6,4]: m = 4, d = [-2,0,2,0], denom = 8.
+//   lag1: 0 + 0 + 0 = 0 -> 0
+//   lag2: -4 + 0 = -4 -> -0.5
+// (cross-check: d is orthogonal to shift-by-1 term by term, and lag 2 pairs
+// the two nonzero entries with opposite signs: -2*2 / 8 = -0.5.)
+// The Float spelling on the tent exercises elem-type unification through
+// the synthesized function parameter.
+let ramp: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let ar = ppl.autocorr(ramp, 3)
+// EXPECT: ar = [1.0, 0.25, -0.3, -0.45]
+let tent: Array<Float like Idx<4>> = [2.0, 4.0, 6.0, 4.0]
+let at = ppl.autocorr(tent, 2)
+// EXPECT: at = [1.0, 0.0, -0.5]

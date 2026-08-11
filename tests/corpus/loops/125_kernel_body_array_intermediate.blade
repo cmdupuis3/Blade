@@ -1,0 +1,43 @@
+// TEST: Kernel Body Array Intermediate
+// ============================================================================
+// docs/plan-kernel-body-materialization.md manifestation M-B, as its minimal
+// program: an array-valued INTERMEDIATE inside a kernel body, over a
+// caret-shorthand row param.
+//
+// WAS a `REJECT-AT: codegen` probe carrying
+//   // WARN-CODEGEN: array-valued elementwise kernel body not supported inside a kernel
+// Both pins are gone with S2, which is what the probe's own header asked for.
+// S1 gave the type checker's half (`w` is a rank-1 array, `prodsum(w, w)` is a
+// scalar, the kernel's return type is a scalar, the output grid is rank 1);
+// S2 gives codegen's: the loop emitter no longer renders this body as one C++
+// EXPRESSION (`genKernelExprWithReynolds` -> `exprToCpp`, whose nested
+// materialization landed in `genApplyCombinatorExpr`'s unconditional
+// `exprError`). `routeKernelBodyThroughCall` sends the nest to the lifted
+// `__lambda_N` -- which the same build already emitted, and emitted correctly.
+//
+// TWO ASSERTIONS AT ONCE, and both matter:
+//   * the VALUES below -- 4 * prodsum(row, row) per row: 4 * (1+4+9) = 56 and
+//     4 * (16+25+36) = 308;
+//   * that this program is not refused at LOWER. The row param `r: T^1` is an
+//     arity-constrained inference VAR, not an IRTArray, and before S1 the
+//     array-producing arms of the elementwise binop were gated on the operand
+//     RESOLVING to an array -- so `r * 2.0` fell to the scalar arm and
+//     `prodsum(w, w)` honestly refused with "prodsum() requires array
+//     arguments", a type error about a value that IS an array. A regression
+//     there turns this into a BL3999 and fails the test.
+//
+// The `|> compute` on the intermediate is decorative: the same program without
+// it types identically (the discriminating matrix in the plan's section 1),
+// and loops/120 pins the unforced spelling directly.
+//
+// The FUNCTION-body twin, which codegen handled all along, is
+// functions/059_array_intermediate_over_caret_param.
+// ============================================================================
+let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+let out = method_for(m) <@> lambda(r: T^1) -> {
+    let w = (r * 2.0) |> compute
+    prodsum(w, w)
+} |> compute
+
+// EXPECT: out = [56, 308]

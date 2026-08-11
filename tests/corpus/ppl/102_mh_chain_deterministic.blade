@@ -1,0 +1,25 @@
+// TEST: MH Chain Deterministic
+import ppl as ppl
+// ppl.mh(logpost, x0, n, scale, key): random-walk Metropolis as a recursive
+// array (the language's sequential construct) over PREGENERATED randomness --
+// proposals __rand_normal(key + 1000003, n), accept draws
+// __rand_uniform(key + 2000003, n); the mix64 finalizer decorrelates the
+// derived keys (the rand/004 precedent). Convention: chain(0) = x0, steps
+// t >= 1 read fill slot t (slot 0 unused). Everything here is a keyed
+// change-detector: the full length-12 chain is pinned (bit-reproducible
+// across C++/interp, like the rand corpus), same key twice must agree to the
+// last bit, a different key must diverge. The target is a hand-written
+// standard normal, so accepted moves are exactly prev + eps(t) (scale 1).
+function lp(x: Float64) -> Float64 = 0.0 - x * x / 2.0
+let c = ppl.mh(lp, 0.3, 12, 1.0, 7)
+// The seed slice and the first transition are hand-checkable against the
+// key-7 fills: c(1) = 0.3 + eps(1) = 0.3 - 0.241563934590472 (accepted).
+// EXPECT: c = [0.3, 0.0584360654095279, 1.33947181365002, 1.4656968324195, 1.4656968324195, 0.172126483857429, 0.172126483857429, 0.420382985576953, -0.575324861346204, -0.575324861346204, -0.0263065200815421, 0.453005440791978]
+let c2 = ppl.mh(lp, 0.3, 12, 1.0, 7)
+let c3 = ppl.mh(lp, 0.3, 12, 1.0, 8)
+// EXPECT: c0 = 0.3
+let c0 = c(0)
+let same_key_same_tail = abs(c(11) - c2(11)) + abs(c(6) - c2(6)) < 1.0e-300
+// EXPECT: same_key_same_tail = true
+let other_key_differs = abs(c(11) - c3(11)) + abs(c(6) - c3(6)) > 0.0000001
+// EXPECT: other_key_differs = true

@@ -1,0 +1,37 @@
+// TEST: Rand Categorical Scale Invariance
+// The weights need not be normalized: only their RATIOS may matter. Scaling
+// every weight by the same factor must leave the draws alone -- and here not
+// merely close, but slot-for-slot IDENTICAL.
+//
+// WHY EXACT EQUALITY IS FAIR TO DEMAND. In general a float reduction is not
+// scale-invariant to the last bit, because summing c*w_i and scaling sum(w_i)
+// round differently. The scale factors used here are POWERS OF TWO (1/8 and
+// 2), which are exact in binary: every product, every partial sum of the scan,
+// and the final division by the total all scale exactly, so the comparison
+// `u >= cum[j]` reaches the same verdict at every step. That makes this an
+// exact pin rather than a tolerance, which is the strongest form the property
+// can take. A general scale factor would agree only up to scan rounding.
+//
+// The certificate is the sum of SQUARED elementwise differences (see 013):
+// non-negative termwise, so zero forces equality slot by slot rather than mere
+// cancellation. `spread` guards against the whole construction being vacuous
+// by showing a genuinely DIFFERENT weight vector -- not a rescaling of this
+// one -- does move the draws.
+import rand as r
+let W: Array<Float64 like Idx<4>> = [1.0, 1.0, 2.0, 4.0]
+let Wsmall: Array<Float64 like Idx<4>> = [0.125, 0.125, 0.25, 0.5]
+let Wbig: Array<Float64 like Idx<4>> = [2.0, 2.0, 4.0, 8.0]
+let Wother: Array<Float64 like Idx<4>> = [4.0, 2.0, 1.0, 1.0]
+let a = r.categorical(11, W, 32)
+let s = r.categorical(11, Wsmall, 32)
+let g = r.categorical(11, Wbig, 32)
+let o = r.categorical(11, Wother, 32)
+let dS = a - s
+let dG = a - g
+let dO = a - o
+let normalizedAgrees = reduce(dS * dS, (+)) == 0
+let scaledUpAgrees = reduce(dG * dG, (+)) == 0
+let spread = reduce(dO * dO, (+)) > 0
+// EXPECT: normalizedAgrees = true
+// EXPECT: scaledUpAgrees = true
+// EXPECT: spread = true

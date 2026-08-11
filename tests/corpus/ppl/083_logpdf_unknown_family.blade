@@ -1,0 +1,8 @@
+// TEST: Logpdf Unknown Family (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: unknown family 'cauchy'
+import ppl as ppl
+// The family argument is symbolic, so an unknown tag is a steering error
+// listing the available families — not an unbound-variable failure later.
+// (Cauchy specifically stays out as a tower value: undefined moments.)
+let l = ppl.logpdf(cauchy(0.0, 1.0), 0.5)

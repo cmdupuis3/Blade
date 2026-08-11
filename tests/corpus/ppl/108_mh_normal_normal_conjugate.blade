@@ -1,0 +1,53 @@
+// TEST: MH Normal-Normal Conjugate Acceptance
+import ppl as ppl
+// THE P4 acceptance test: random-walk Metropolis on the exact
+// ORACLE_PINS.md dump-conjugate Normal-Normal block -- prior N(m0=0, v0=4),
+// known likelihood variance sigma2=2, data [1.2, 0.7, 2.3, -0.4, 1.9] --
+// whose closed-form posterior is N(1.0363636363636362, 0.36363636363636365)
+// (post_var = 1/(1/4 + 5/2) = 4/11, posterior sd 0.6030). The log-posterior
+// is a MODEL BODY: expression-position ppl.logpdf (prior term) +
+// ppl.loglik (data term) in an ordinary named function, exactly the
+// density-form layer the plan describes.
+//
+// All assertions are deterministic booleans under fixed keys (the rand
+// corpus idiom). With key 1234, n = 4096, burn = 512, scale = 1.0 the
+// post-burn estimates land at mean 1.0514 / var 0.3543 (key 987654321:
+// 1.0028 / 0.3968), so the pinned tolerances -- mean within 0.05, variance
+// within 0.06 -- hold with real margin for BOTH chains yet sit far inside
+// what any wrong posterior produces (the prior alone is off by 1.04 in mean
+// and 3.6 in variance; the MCSE at ess ~ 900 is ~0.02). Mixing sanity:
+// split-Rhat over the two independent-key chains must be under 1.01 and the
+// Geyer ess above 500 of 4096. Determinism: a third chain under the SAME
+// key must reproduce tail states to the last bit.
+let data: Array<Float64 like Idx<5>> = [1.2, 0.7, 2.3, -0.4, 1.9]
+function logpost(theta: Float64) -> Float64 =
+    ppl.logpdf(gaussian(0.0, 4.0), theta) + ppl.loglik(gaussian(theta, 2.0), data)
+
+let c1 = ppl.mh(logpost, 0.0, 4096, 1.0, 1234)
+let c2 = ppl.mh(logpost, 0.0, 4096, 1.0, 987654321)
+let c3 = ppl.mh(logpost, 0.0, 4096, 1.0, 1234)
+
+let m1 = ppl.chain_mean(c1, 512)
+let v1 = ppl.chain_var(c1, 512)
+let m2 = ppl.chain_mean(c2, 512)
+let v2 = ppl.chain_var(c2, 512)
+let mean_ok_1 = abs(m1 - 1.0363636363636362) < 0.05
+// EXPECT: mean_ok_1 = true
+let var_ok_1 = abs(v1 - 0.36363636363636365) < 0.06
+// EXPECT: var_ok_1 = true
+let mean_ok_2 = abs(m2 - 1.0363636363636362) < 0.05
+// EXPECT: mean_ok_2 = true
+let var_ok_2 = abs(v2 - 0.36363636363636365) < 0.06
+// EXPECT: var_ok_2 = true
+
+let rh = ppl.rhat(c1, c2)
+let rhat_ok = rh < 1.01
+// EXPECT: rhat_ok = true
+let es = ppl.ess(c1)
+let ess_ok = es > 500.0
+// EXPECT: ess_ok = true
+
+let same_key_bitexact = abs(c1(4095) - c3(4095)) + abs(c1(2048) - c3(2048)) + abs(c1(513) - c3(513)) < 1.0e-300
+// EXPECT: same_key_bitexact = true
+let keys_differ = abs(c1(4095) - c2(4095)) + abs(c1(2048) - c2(2048)) > 0.0000001
+// EXPECT: keys_differ = true

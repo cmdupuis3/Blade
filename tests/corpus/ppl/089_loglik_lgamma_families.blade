@@ -1,0 +1,33 @@
+// TEST: Loglik Lgamma Families
+import ppl as ppl
+// Summed log-likelihoods for the four lgamma-gated families, each emitted as
+// the module's scalar accumulation loop (`let mut` + for + `+=`) with the
+// data-independent normalizer hoisted out:
+//   gamma:     (shape-1)Σlog x - rateΣx + n(shape·log rate - lgamma shape)
+//   poisson:   log(lam)Σk - n·lam - Σ lgamma(k_i+1)   (per-k term stays in loop)
+//   beta:      (a-1)Σlog x + (b-1)Σlog(1-x) - n·log B(a, b)
+//   bernoulli: log(p)Σx + log(1-p)(n - Σx)
+// The loop SHAPE is AD-able, but the lgamma calls are not differentiable
+// until the digamma rule lands in Grad. Expected values are the sums of the
+// oracle's per-point dump-logpdf entries; the gamma one is cross-checked
+// in-file against pointwise logpdf calls.
+type BIdx = Idx<3>
+let B: Array<Float64 like BIdx> = [0.5, 1.0, 2.5]
+let llg = ppl.loglik(gamma(2.0, 1.0), B)
+let s1 = ppl.logpdf(gamma(2.0, 1.0), 0.5)
+let s2 = ppl.logpdf(gamma(2.0, 1.0), 1.0)
+let s3 = ppl.logpdf(gamma(2.0, 1.0), 2.5)
+let ok = abs(llg - (s1 + s2 + s3)) < 0.000000000001
+type KIdx = Idx<4>
+let K: Array<Float64 like KIdx> = [0.0, 1.0, 2.0, 5.0]
+let llp = ppl.loglik(poisson(1.0), K)
+let X: Array<Float64 like BIdx> = [0.25, 0.5, 0.75]
+let llb = ppl.loglik(beta(2.0, 3.0), X)
+type DIdx = Idx<5>
+let D: Array<Float64 like DIdx> = [0.0, 1.0, 1.0, 0.0, 1.0]
+let llbern = ppl.loglik(bernoulli(0.3), D)
+// EXPECT: llg = -3.7768564486857903
+// EXPECT: ok = true
+// EXPECT: llp = -9.4806389233419948
+// EXPECT: llb = 0.3533491069691430
+// EXPECT: llbern = -4.3252683008552732

@@ -1,0 +1,24 @@
+// TEST: Family Lognormal Bernoulli
+import ppl as ppl
+// The moment-route constructors: lognormal's raw moments are
+// m_j = exp(j·mu + j²·s2/2) and bernoulli's are all p; both towers come
+// from Möbius inversion over set partitions (the dist_atoms machinery).
+// lognormal(0, 1): m = (e^½, e², e^4.5), so
+//   κ1 = e^½                      = 1.64872127070013
+//   κ2 = e² - e                   = 4.6707742704716
+//   κ3 = e^4.5 - 3e^2.5 + 2e^1.5  = 62.4330275590875
+// bernoulli(¼): κ1 = p, κ2 = p(1-p), κ3 = p - 3p² + 2p³ = 0.09375.
+let ln = ppl.lognormal(0.0, 1.0, 3)
+let n1 = ppl.cumulant(ln, 1)
+let n2 = ppl.cumulant(ln, 2)
+let n3 = ppl.cumulant(ln, 3)
+let bn = ppl.bernoulli(0.25, 3)
+let b1 = ppl.cumulant(bn, 1)
+let b2 = ppl.cumulant(bn, 2)
+let b3 = ppl.cumulant(bn, 3)
+// EXPECT: n1 = [1.64872127070013]
+// EXPECT: n2 = [4.6707742704716]
+// EXPECT: n3 = [62.4330275590875]
+// EXPECT: b1 = [0.25]
+// EXPECT: b2 = [0.1875]
+// EXPECT: b3 = [0.09375]

@@ -162,7 +162,10 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprCompute e -> TExprCompute (z e)
         | TExprRead e -> TExprRead (z e)
         | TExprFillRandom e -> TExprFillRandom (z e)
-        | TExprRandGen (k, key, dims) -> TExprRandGen (k, z key, dims)
+        // The weights extent is a resolved static int, not a type -- only the
+        // paired expression is zonked.
+        | TExprRandGen (k, key, pars, weights, dims) ->
+            TExprRandGen (k, z key, List.map z pars, weights |> Option.map (fun (w, n) -> (z w, n)), dims)
         | TExprRank e -> TExprRank (z e)
         | TExprDotDot (lo, hi) -> TExprDotDot (z lo, z hi)
         | TExprReynolds (k, a) -> TExprReynolds (z k, a)
@@ -236,7 +239,8 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
             TExprMethodFor { info with
                                 Arrays = zs info.Arrays
                                 ArrayTypes = info.ArrayTypes |> List.map (fun at ->
-                                    { at with IndexTypes = at.IndexTypes |> List.map (zonkIndexType subst) }) }
+                                    { at with ElemType = zt at.ElemType
+                                              IndexTypes = at.IndexTypes |> List.map (zonkIndexType subst) }) }
         | TExprObjectFor info ->
             TExprObjectFor { info with Kernel = z info.Kernel }
         | TExprApply info ->
@@ -244,8 +248,19 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
                             Loop = z info.Loop
                             Kernel = z info.Kernel
                             Arrays = zs info.Arrays
+                            // ELEMENT TYPES TOO, not just the index records. A
+                            // loop's ArrayTypes are a SNAPSHOT taken while the
+                            // body was being typed, so an element that was an
+                            // open var then and got unified later (two `T^1`
+                            // params' synthesized elements merging, say) kept
+                            // the stale var here and reached codegen as
+                            // `BLADE_UNRESOLVED_ELEM_TYPE_N`. Invisible before
+                            // the element could legitimately still be a var at
+                            // this point -- `loopOperandArrayType` used to
+                            // hard-default every unresolved element to Float64.
                             ArrayTypes = info.ArrayTypes |> List.map (fun at ->
-                                { at with IndexTypes = at.IndexTypes |> List.map (zonkIndexType subst) })
+                                { at with ElemType = zt at.ElemType
+                                          IndexTypes = at.IndexTypes |> List.map (zonkIndexType subst) })
                             SharedIndexTypes = info.SharedIndexTypes |> List.map (zonkIndexType subst)
                             OutputType = zt info.OutputType }
     { expr with Kind = kind; Type = zt expr.Type }

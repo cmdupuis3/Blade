@@ -1,0 +1,58 @@
+// TEST: Kernel Body Unannotated Param Broadcast
+// ============================================================================
+// 119's program with the kernel parameter's `: Float64` annotation REMOVED --
+// the spelling lsdft's kernel is actually written in, and the one that used to
+// refuse with "BL3999: prodsum() requires array arguments" reported against the
+// enclosing `<@>`, several lines from the expression that decided it.
+//
+// The mechanism was operand ORDER in `w * xs`. A kernel body is inferred
+// BEFORE its parameters unify with the iterated element type (that happens in
+// buildApplyInfo, after), so `w` arrives at the multiplication as an
+// unresolved inference variable beside the concrete capture `xs`. The
+// arithmetic result rule had arms for array-op-scalar and scalar-op-array but
+// none for var-op-array, so it fell through to "the left operand's type" and
+// answered with the VAR. `exp <@>` then saw a non-array operand and mapped it
+// as a scalar, and `prodsum(xs, e)` refused an `e` that should have been an
+// array. Written the other way round (`xs * w`) the same fallthrough answered
+// with the ARRAY and the identical program compiled -- pure operand order.
+//
+// Both readings of the unresolved var agree on the SHAPE (scalar -> broadcast
+// over xs; row -> zip against xs; either way an array shaped like xs), so the
+// rule now answers with the concrete operand's shape from either side. The
+// element type stays the array's: that is what the left-operand spelling has
+// always done, and buildApplyInfo's post-unification complex re-stamp is what
+// upgrades a result whose param later resolves complex.
+//
+// Values are 119's, unchanged -- the annotation was never supposed to alter
+// what the program computes, only whether it typed.
+// ============================================================================
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function specish(ws: Array<Float64 like Idx<m>>) = {
+    ws <@> lambda(w) -> {
+        let e = exp <@> (w * xs)
+        let z1 = prodsum(xs, e)
+        let z2 = prodsum(e, e)
+        z1 / sqrt(z2)
+    }
+}
+let ws: Array<Float64 like Idx<2>> = [0.5, 2.0]
+let r = specish(ws)
+let r0 = r(0)
+let r1 = r(1)
+// The mirrored spelling, pinned in the same program so the two orders cannot
+// drift apart again.
+function specish_flipped(vs: Array<Float64 like Idx<m>>) = {
+    vs <@> lambda(w) -> {
+        let e = exp <@> (xs * w)
+        prodsum(xs, e) / sqrt(prodsum(e, e))
+    }
+}
+let f = specish_flipped(ws)
+let f0 = f(0)
+let f1 = f(1)
+// EXPECT: r = [3.73632086402877, 3.25873708058511]
+// EXPECT: r0 = 3.73632086402877
+// EXPECT: r1 = 3.25873708058511
+// EXPECT: f = [3.73632086402877, 3.25873708058511]
+// EXPECT: f0 = 3.73632086402877
+// EXPECT: f1 = 3.25873708058511

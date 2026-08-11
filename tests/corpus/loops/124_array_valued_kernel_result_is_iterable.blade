@@ -1,0 +1,53 @@
+// TEST: Array Valued Kernel Result Is Iterable
+// ============================================================================
+// The FOLLOW-ON to 121: once an array-valued kernel return exists as a value,
+// the next `<@>` has to iterate ALL of its axes.
+//
+// An index record's `Kind` is a statement about ONE apply -- `SDimension` means
+// "this apply's grid iterates it", `TDimension` means "this apply's KERNEL
+// contributed it". `kernelTDims` stamps the kernel's return axes `TDimension`
+// and `deduceOutputType` bakes them into the result TYPE, which is right for
+// the apply that built the grid and meaningless for the value afterwards: `grid`
+// is simply a rank-2 array. But `computeSDimsPerArray` counts only
+// `SDimension`, so an operand carrying an inherited `TDimension` record lost
+// that axis at the next apply. `grid <@> sq` came back RANK 1, and
+// `reduce(rowsum, (+))` then refused a value that is plainly an array --
+// "reduce() requires an array as first argument", which is exactly the wall
+// `examples/lswosa.blade` hit at its per-frequency segment folds.
+//
+// Unreachable before S3: an array-valued kernel return had no way to exist, so
+// no value ever carried a `TDimension` record into an operand slot. The fix
+// normalizes inherited kinds back to `SDimension` where an array is ADOPTED as
+// a loop operand, which runs before `buildApplyInfo` re-tags the fibers THIS
+// apply consumes -- the two compose rather than fight.
+//
+// Values: `spec` returns fs scaled by prodsum(row, row) = 14 and 77, so `grid`
+// is 121's grid; `mg` squares it; `rowsum` folds the inner (freq) axis; `total`
+// folds what is left. `tg` re-checks the rank a second way -- transpose reads
+// the RANK off the type, and it agreed with rank 2 even while the map did not,
+// which is what made the collapse hard to see.
+// ============================================================================
+let m: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let fs: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+
+function spec(r: Array<Float64 like Idx<3>>, f: Array<Float64 like Idx<4>>) = {
+    (f <@> lambda(x) -> x * prodsum(r, r)) |> compute
+}
+
+let grid = method_for(m) <@> lambda(r: Array<Float64 like Idx<3>>) -> spec(r, fs) |> compute
+// EXPECT: grid = [[14, 28, 42, 56], [77, 154, 231, 308]]
+
+function sq(z: Float64) = z * z
+
+// THE POINT: a named scalar kernel over the rank-2 result stays rank 2.
+let mg = (grid <@> sq) |> compute
+// EXPECT: mg = [[196, 784, 1764, 3136], [5929, 23716, 53361, 94864]]
+
+let rowsum = reduce(mg, (+)) |> compute
+// EXPECT: rowsum = [5880, 177870]
+
+let total = reduce(rowsum, (+))
+// EXPECT: total = 183750
+
+let tg = transpose(grid, [0, 1])
+// EXPECT: tg = [[14, 77], [28, 154], [42, 231], [56, 308]]

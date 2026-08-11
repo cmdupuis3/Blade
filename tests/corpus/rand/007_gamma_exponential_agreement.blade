@@ -1,0 +1,27 @@
+// TEST: Rand Gamma Unit Shape Matches Exponential
+// Gamma(1, rate) IS Exp(rate). This is a cross-family consistency check: the two
+// fills reach the same distribution by completely different routes (inverse CDF
+// vs a Marsaglia-Tsang rejection loop), so agreeing to within sampling error is
+// evidence about the ALGORITHMS, not just about the shared mt19937_64 stream.
+//
+// The agreement is DISTRIBUTIONAL, not per-draw: the two transforms consume
+// different numbers of uniforms per element (1 vs >= 3), so even at the same key
+// the sequences diverge immediately. Only the moments are comparable, hence the
+// separate keys.
+//
+// Exp(1.5): mean = 1/1.5 = 0.6667, var = 1/1.5^2 = 0.4444. SE(mean) over 4096
+// draws is 0.6667/64 ~ 0.0104, so a 0.06 tolerance on the DIFFERENCE of two
+// independent sample means (SE ~ 0.0147) is ~4 SE.
+import rand as r
+let g = r.gamma(21, 1.0, 1.5, 4096)
+let e = r.exponential(22, 1.5, 4096)
+let gs = reduce(g, (+))
+let es = reduce(e, (+))
+let gmean = gs / 4096.0
+let emean = es / 4096.0
+let agree = abs(gmean - emean) < 0.06
+let gmeanOk = abs(gmean - 0.666666666666667) < 0.06
+let emeanOk = abs(emean - 0.666666666666667) < 0.06
+// EXPECT: agree = true
+// EXPECT: gmeanOk = true
+// EXPECT: emeanOk = true

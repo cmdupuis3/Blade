@@ -1,0 +1,10 @@
+// TEST: Dist Condition Univariate (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: conditioning fixes one coordinate of a JOINT tower
+import ppl as ppl
+// Conditioning splits a joint tower into the observed coordinate and the
+// rest; a univariate tower has no rest, so there is nothing to return.
+// The steer distinguishes the two "update" roads: dist_condition is for
+// joint towers, ppl.bayes for updating a univariate prior on data.
+let d = ppl.gaussian(1.5, 2.0, 2)
+let c = ppl.dist_condition(d, 0, 1.0)

@@ -8,7 +8,12 @@ Unit angular_frequency: 1 / day
 
 let i = complex(0.0, 1.0)
 
-function variance(x: T^1) = {
+// Spelled `Array<T like Idx<n>>` rather than `T^1`: a caret param's element
+// type is materialized as a fresh inference var that loses the HM-polymorphic
+// flag, so `T^1` silently defaults to Float64 and a Complex128 caller dies in
+// g++. The explicit spelling keeps `T` polymorphic. (The caret half of that
+// defect is known and unfixed; its candidate patch regresses recursive packs.)
+function variance(x: Array<T like Idx<n>>) = {
     let n = extents(x)
     let d = x - reduce(x, (+)) / n
     prodsum(d, d) / n
@@ -19,6 +24,17 @@ function variance(x: T^1) = {
 ///
 /// `t_zero` is the shared phase epoch -- "time since xyz". Hold it constant
 /// across a field of series and the returned phases are directly comparable.
+///
+/// WHAT THE RETURNED NUMBER IS, measured. A unit-amplitude sinusoid at a
+/// sampled Fourier frequency comes back with MAGNITUDE sqrt(n/2) -- exactly 2
+/// for n = 8, exactly sqrt(2) for n = 4. Its PHASE is referenced to `t_zero`
+/// only where |Z2| > 0. Z2 is the quantity tau is read off (below), and on an
+/// EVENLY sampled grid at a Fourier frequency Z2 is identically 0: tau is then
+/// arbitrary, the two quadratures have equal norm, and the returned phase
+/// rotates with whatever `arg(0)` happens to be. That is the degenerate case
+/// the generalized form is *for* -- uneven sampling gives |Z2| > 0 and a
+/// determinate phase. Do not read a phase back where |Z2| is at the noise
+/// floor; the magnitude is well defined either way.
 ///
 /// The series rides as ONE tuple parameter -- a caller's loop co-iterates
 /// samples and timestamps together, so they arrive as one operand node.
@@ -50,13 +66,23 @@ where omp(st_raw: 1) = {
         let Z2 = prodsum(e, e)              // sum_t e^{2iwt} -- one complex multiply
 
         // tau enters only as w*tau = arg(Z2)/2: the 1/(2w) inside tau cancels
-        // the w that multiplies it, so tau is never formed and w = 0 is not a
-        // singularity.
+        // the w that multiplies it, so tau is never formed and no 1/w appears
+        // anywhere below. That removes the one singularity TAU would have
+        // introduced. It does not make w = 0 a usable frequency -- see the note
+        // on the b quadrature.
         let P = Z1 * exp(-i * arg(Z2) / 2)  // sum_t s_t e^{iw(t-tau)}
 
         // sum cos^2(w(t-tau)) = (n + |Z2|)/2 and sum sin^2 = (n - |Z2|)/2,
         // exactly -- tau is *defined* to null the cross term, so neither
-        // denominator needs a reduction of its own.
+        // denominator needs a reduction of its own. (Verified to the last
+        // printed digit against a brute-force sum on an uneven grid.)
+        //
+        // AT w = 0 THE SINE QUADRATURE IS EMPTY, and `b` is 0/0. Every
+        // e^{i*0*t} is 1, so Z2 = n exactly and sum sin^2 = (n - n)/2 = 0 --
+        // the sine basis vector at zero frequency IS the zero vector, so there
+        // is nothing to project onto and the cell comes back nan. That is the
+        // formula being honest, not a defect: leave 0 out of `omegas`, or read
+        // only the `a` quadrature there.
         let a = real(P) / sqrt((n + abs(Z2)) / 2)
         let b = imag(P) / sqrt((n - abs(Z2)) / 2)
 

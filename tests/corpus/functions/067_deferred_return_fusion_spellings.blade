@@ -1,0 +1,42 @@
+// TEST: Deferred Return Fusion Spellings
+// ============================================================================
+// The three consumers that made "keep the return lazy" look attractive, and
+// that docs/plan-kernel-body-materialization.md section 1 (M-D) measured ALL
+// dying with the same sentinel before stage S4:
+//
+//   reduce(mk(a), (+))              -- fold the callee's result without
+//                                      materializing it
+//   (mk(a) <&> mk2(a)) |> compute   -- fuse two callees into one nest
+//   (dbl >>@ inc) <@> (xs)          -- a composed-object apply in RETURN
+//                                      position (the IRComposeApply half of the
+//                                      same force)
+//
+// That they all failed identically is the ARGUMENT for "the callee forces":
+// there was no working lazy-return path to protect, so forcing at the boundary
+// costs nothing that existed. They now work, and their values are pinned here
+// rather than merely "no longer refused" -- a fused fold that silently folded
+// the wrong nest would still compile.
+//
+// `folded` also exercises the seam S2 fixed one level down: with the callee
+// forcing, `reduce` sees a materialized array rather than a deferred
+// computation, so this is the eager path, not genReduceComputeBinding's.
+// ============================================================================
+let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+
+function mk(xs: Array<Float like Idx<4>>) = { xs <@> lambda(x) -> x * 2.0 }
+function mk2(xs: Array<Float like Idx<4>>) = { xs <@> lambda(x) -> x + 1.0 }
+
+let dbl = object_for(lambda(x: Float64) -> x * 2.0)
+let inc = object_for(lambda(x: Float64) -> x + 1.0)
+function comp(xs: Array<Float like Idx<4>>) = { (dbl >>@ inc) <@> (xs) }
+
+let folded = reduce(mk(a), (+))
+let (fusedA, fusedB) = (mk(a) <&> mk2(a)) |> compute
+let composed = comp(a)
+
+// mk(a) = [2, 4, 6, 8] so the fold is 2+4+6+8
+// EXPECT: folded = 20
+// EXPECT: fusedA = [2, 4, 6, 8]
+// EXPECT: fusedB = [2, 3, 4, 5]
+// dbl then inc: 2x + 1
+// EXPECT: composed = [3, 5, 7, 9]

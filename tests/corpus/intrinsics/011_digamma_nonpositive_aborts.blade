@@ -1,0 +1,22 @@
+// TEST: Intrinsics Digamma Non-Positive (aborts)
+// ABORT: error[BL8008]
+// ABORT: digamma: argument must be positive
+// ============================================================================
+// digamma is defined for x > 0 only, on the same terms as lgamma (009) and
+// sharing its diagnostic code: the reflection formula that would extend it to
+// negative arguments is a second thing to keep bit-identical between
+// blade_rt::digamma and its interpreter twin, and the callers this intrinsic
+// exists for -- the gamma / beta / poisson log-likelihood GRADIENTS, which is
+// what makes those models HMC-able -- never need it.
+//
+// A non-positive argument is therefore a caller bug and PANICS. Returning a
+// silent NaN would be worse here than in lgamma's case: this value is a
+// derivative, so it would seep into a gradient, and a NaN gradient surfaces as
+// a sampler that quietly stops moving rather than as an error.
+//
+// The guard is `!(x > 0.0)`, so NaN is refused on the same branch. Both the
+// compiled binary (blade_rt::panic) and the interpreter (InterpPanic) raise
+// BL8008 with this message, which is what the differential gate compares.
+// ============================================================================
+let x = 0.0 - 1.0
+let bad = digamma(x)

@@ -1,0 +1,12 @@
+// TEST: HMC Missing Import Ad (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: the module needs `import ad as ad`
+import ppl as ppl
+// Gate (a) of the plan's import-ad options: hmc's leapfrog gradient is
+// emitted as the `<alias>.grad(logpost)` SURFACE FORM for the Grad pass
+// (which runs after ppl elaboration) to expand. Without `import ad` that
+// pass is a no-op and the emitted form would be left unbound, so hmc
+// refuses up front with steering instead of leaking an unbound-name error
+// from the middle of a synthesized step function.
+function lp(x: Float64) -> Float64 = 0.0 - x * x / 2.0
+let c = ppl.hmc(lp, 0.0, 64, 0.5, 4, 7)

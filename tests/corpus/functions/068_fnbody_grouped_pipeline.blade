@@ -1,0 +1,54 @@
+// TEST: Function-Body Grouped Pipeline With Generic Callees
+// The whole lswosa `family_spectra` shape reduced to a pin: group_keys /
+// group_by / method_for(zip) with an array-valued kernel calling GENERIC
+// helpers / transpose -- all inside a NAMED function's body. Every stage
+// here was impossible before the kernel-body materialization work:
+//   * group_keys/group_by as function-body lets (they only had module-level
+//     binding emitters; the function-body arm reconstructs the dynamic
+//     group-keys form and threads GroupedArrays so the grouped-zip peel
+//     still recognizes the co-iteration),
+//   * the grid sized on its FIRST ROW at runtime (a length-agnostic generic
+//     callee's row length is not in the static type; the minted extent
+//     names carry the index id so shape monomorphization cannot bake two
+//     distinct vars sharing a display name to one value -- that collision
+//     overflowed every row copy here),
+//   * transpose in RETURN position, re-wrapped on a HEAP extents table (the
+//     frame-local table dangled across the call boundary: the caller
+//     printed [] and the next consumer died on bad_array_new_length).
+// The values are the module-level twin's, byte for byte -- moving the
+// pipeline into a function must not change a digit.
+let vals: Array<Float64 like Idx<6>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let tms:  Array<Float64 like Idx<6>> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+let fs: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+
+function taperG(st: Tuple<T^1, U^1>, lo: T, hi: T) = {
+    let a, b = st
+    let w = (a <@> lambda(x) -> x * 2.0) |> compute
+    (b * w / sqrt(prodsum(w, w))) |> compute
+}
+function specG(st: Tuple<U^1, T^1>, f: V^1, z: T = 0.0)
+where omp(st: 1) = {
+    let a, b = st
+    (f <@> lambda(x) -> x * prodsum(a, b) + z) |> compute
+}
+function famG(ts: T^1, s: U^1, f: V^1, cut: T) = {
+    let keys = (ts <@> lambda(t) -> if t < cut then 0.0 else 1.0) |> compute
+    let gk = group_keys(keys)
+    let gt = group_by(ts, gk)
+    let gs = group_by(s, gk)
+    let grid = method_for(zip(gt, gs)) <@> lambda(tr: T^1, vr: U^1) -> {
+        let sw = taperG((tr, vr), 0.0, 5.0)
+        specG((sw, tr), f, 0.0)
+    } |> compute
+    transpose(grid, [0, 1])
+}
+let tg = famG(tms, vals, fs, 3.0)
+// EXPECT: tg = [[6.26099033699941, 37.6180807591243], [12.5219806739988, 75.2361615182487], [18.7829710109982, 112.854242277373], [25.0439613479976, 150.472323036497]]
+
+function sq(z: Float64) = z * z
+let mg = (tg <@> sq) |> compute
+let colsum = (reduce(mg, (+)) |> compute) + (reduce(mg, (+)) |> compute)
+let tot = reduce(colsum, (+))
+// EXPECT: mg = [[39.2, 1415.12], [156.8, 5660.48], [352.8, 12736.08], [627.2, 22641.92]]
+// EXPECT: colsum = [2908.64, 11634.56, 26177.76, 46538.24]
+// EXPECT: tot = 87259.2

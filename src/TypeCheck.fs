@@ -1460,6 +1460,14 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
 // 5. Capture Analysis
 
 /// Collect free variables in an expression (names not bound in local scope).
+///
+/// This is the CAPTURE ANALYSIS for lambdas: a name it fails to report is a
+/// name that never rides the capture list, and the lifted kernel then emits a
+/// dangling reference (BL6001). So the match is deliberately EXHAUSTIVE with
+/// no wildcard arm -- a new ExprKind case must fail to compile (FS0025) rather
+/// than silently join the dropped set, the same discipline `Unfold.mapExprPre`
+/// follows. Over-reporting is safe (`buildCaptures` drops names that resolve
+/// to no binding); under-reporting is the bug.
 let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     match expr.Kind with
     | ExprKind.ExprVar name ->
@@ -1472,7 +1480,20 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
         Set.unionMany (collectFreeVars bound f :: (args |> List.map (collectFreeVars bound)))
     | ExprKind.ExprLambda (parms, _, body) ->
         let bound' = parms |> List.fold (fun s p -> Set.add p.Name s) bound
-        collectFreeVars bound' body
+        // A default's free variables are captures too: at the kernel-apply
+        // seam the default is spliced into the body as a body-entry let, so a
+        // name it reads from the enclosing scope must ride the capture list.
+        // Walked with every param bound, matching the top-level lambda checker
+        // (a default may reference required params; BL3012 rejects references
+        // to other DEFAULTED ones, so they can never be genuinely free here).
+        // The where-clause holds only parameter idents -- comm/anticomm/omp
+        // groups -- never expressions, so it contributes nothing.
+        let defaultFree =
+            parms
+            |> List.choose (fun p -> p.Default)
+            |> List.map (collectFreeVars bound')
+            |> List.fold Set.union Set.empty
+        Set.union defaultFree (collectFreeVars bound' body)
     | ExprKind.ExprLet (binding, body) ->
         let valFree = collectFreeVars bound binding.Value
         let names = patternNames binding.Pattern
@@ -1570,10 +1591,101 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
                       | ForKernel k -> collectFreeVars bound k
         let kFree = kernelOpt |> Option.map (collectFreeVars bound) |> Option.defaultValue Set.empty
         Set.union srcFree kFree
-    | ExprKind.ExprAlign (es, _) -> es |> List.map (collectFreeVars bound) |> Set.unionMany
-    | _ -> Set.empty
+    | ExprKind.ExprAlign (es, spec) ->
+        // A BndPad boundary carries a pad EXPRESSION, which reads the
+        // enclosing scope exactly like the aligned operands do.
+        // Enumerated rather than wildcarded for the same reason the outer
+        // match is: a future boundary mode carrying an expression must fail
+        // to compile here instead of silently dropping its captures.
+        let padFree =
+            match spec with
+            | None -> Set.empty
+            | Some s ->
+                match s.Boundary with
+                | Ast.BoundaryMode.BndPad p -> collectFreeVars bound p
+                | Ast.BoundaryMode.BndShrink
+                | Ast.BoundaryMode.BndPeriodic
+                | Ast.BoundaryMode.BndReflect -> Set.empty
+        Set.union padFree (es |> List.map (collectFreeVars bound) |> Set.unionMany)
+    | ExprKind.ExprTranspose (array, _, _) -> collectFreeVars bound array
+    | ExprKind.ExprDecompact (array, _) -> collectFreeVars bound array
+    | ExprKind.ExprGram (left, right) ->
+        Set.union (collectFreeVars bound left) (collectFreeVars bound right)
+    | ExprKind.ExprBlocked (_, e) -> collectFreeVars bound e
+    | ExprKind.ExprHalo (_, offsets) -> collectFreeVars bound offsets
+    | ExprKind.ExprPartialApp (_, e, _) -> collectFreeVars bound e
+    | ExprKind.ExprStatic e -> collectFreeVars bound e
+    | ExprKind.ExprRecArray def ->
+        // `let rec NAME = match NAME with | prefix :: n -> prefix :: SLICE`.
+        // NAME is the family being defined -- a self-reference, not a capture
+        // from an enclosing scope. PrefixVar and StepVar are the inductive
+        // arm's binders; the seed arm carries its own step-var name instead
+        // (its prefix position is the literal `zero`, which binds nothing).
+        let selfBound = Set.add def.Name bound
+        let seedFree =
+            match def.SeedArm with
+            | Some (seedStep, seedExpr) ->
+                collectFreeVars (Set.add seedStep selfBound) seedExpr
+            | None -> Set.empty
+        let sliceBound = selfBound |> Set.add def.PrefixVar |> Set.add def.StepVar
+        Set.union seedFree (collectFreeVars sliceBound def.SliceExpr)
+    // ---- Leaves: nothing to walk, for a stated reason ----
+    | ExprKind.ExprWildcard
+    | ExprKind.ExprNth
+    | ExprKind.ExprZero
+    | ExprKind.ExprSection _ -> Set.empty
+    // A qualified name (Module.Sub.name) never resolves to a LOCAL binding,
+    // so it can never be a capture.
+    | ExprKind.ExprQualified _ -> Set.empty
+    // `arity(p)` is a compile-time query: monomorphization resolves it to an
+    // integer literal (IR.IRArity), so the named param is never read as a
+    // runtime value and never needs to ride the capture list.
+    | ExprKind.ExprArity _ -> Set.empty
+    // Type-level operands only. Extents written inside these TypeExprs must be
+    // statically evaluable -- literals or `let static`, which lower as globals
+    // rather than locals -- so no runtime value reaches them to be captured.
+    // Same reasoning covers the TypeExpr halves of ExprBlocked / ExprHalo /
+    // ExprTyped, whose expression halves are walked above.
+    | ExprKind.ExprRange _
+    | ExprKind.ExprReverse _ -> Set.empty
 
 /// Extract variable names bound by a pattern.
+/// Slot assignment for a tuple pattern's leaves, shared by every `let`
+/// destructuring site (block statement, top-level decl, `let static`).
+/// Returns one entry per BOUND name, in binding order, as
+/// (name, patternPositionType, slot), plus the total slot count.
+///
+/// A pattern position that binds nothing -- `_`, a literal -- still consumes
+/// its slot. Without that, the leaves after it compact onto the leading
+/// components and read the wrong element (the `let (_, g) = f(x)` bug).
+///
+/// A compound position (a nested tuple) consumes one slot PER NAME it binds,
+/// which is what makes the flat regime work: `let ((a,b), c) = ((1,2),3)`
+/// assigns slots 0,1,2 and, being 3 slots wide against a 2-component
+/// scrutinee, is projected as flat leaves by Lowering. Nested patterns are
+/// still not destructured RECURSIVELY here (their names take fresh type
+/// vars, per the callers' long-standing rule) -- so a nested pattern that
+/// binds fewer names than its position has leaves, e.g. `((_, b), c)`,
+/// remains as unsupported as it was before this helper existed.
+and tuplePatternSlots (pats: Pattern list) : (string * int option * int) list * int =
+    let mutable slot = 0
+    let entries = ResizeArray<string * int option * int>()
+    pats |> List.iteri (fun i p ->
+        match p.Kind with
+        | PatternKind.PatVar n ->
+            entries.Add (n, Some i, slot)
+            slot <- slot + 1
+        | _ ->
+            match patternNames p with
+            | [] ->
+                // binds nothing, but still covers a component
+                slot <- slot + 1
+            | names ->
+                for n in names do
+                    entries.Add (n, None, slot)
+                    slot <- slot + 1)
+    (List.ofSeq entries, slot)
+
 and patternNames (pat: Pattern) : string list =
     match pat.Kind with
     | PatternKind.PatWildcard -> []
@@ -1933,18 +2045,109 @@ let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
 /// ExprVar arm recovers a rank-1 record from env.
 ///
 /// The ELEMENT type keeps getArrayType's Float64 default whenever it is still
-/// unresolved. Inside a rank-polymorphic body a `T^1` parameter's element is
-/// only pinned at the call site, so the honest answer here is an inference var
-/// -- and codegen has no C++ spelling for one (it emits a
-/// BLADE_UNRESOLVED_ELEM_TYPE placeholder). Defaulting matches what the
-/// getArrayType fallback already supplied on this path.
+/// unresolved AND NOT HM-POLYMORPHIC. Codegen has no C++ spelling for a bare
+/// inference var (it emits a BLADE_UNRESOLVED_ELEM_TYPE placeholder), so an
+/// element nothing will ever pin has to default, and defaulting matches what
+/// the getArrayType fallback already supplied on this path.
+///
+/// A DECLARATION's signature var is the one case that does get pinned:
+/// `function f(xs: T^1)` -- once `requireArrayArgMinRank` gives `T` its shape,
+/// the element is a polymorphic-marked var that IR-phase HM monomorphization
+/// substitutes PER CALL SITE. Defaulting it here silently collapsed the
+/// function to Float64 while its PARAMETER type stayed polymorphic, so a
+/// specialization at Complex128 emitted `Array<complex<double>>` parameters
+/// around a `double` loop body and `Array<double,1>` returns ("cannot convert
+/// std::complex<double> to double in initialization").
+///
+/// NOT INSIDE A LAMBDA BODY, though, and the two guards are not the same
+/// question. A LAMBDA param may also be written `T^1` (`lambda(r: T^1) -> ...`)
+/// and its var carries the same mark, but nothing monomorphizes a lambda: it
+/// is unified with the iterated ROW type moments later, in `buildApplyInfo`.
+/// This snapshot is taken while the body is being typed, i.e. BEFORE that
+/// unification, and is never revisited -- so keeping the var here just carries
+/// an unresolvable `IRTInfer` into codegen (measured: loops/117 and sql's
+/// two-compound-operand reduce emitted "unresolved type variable T?N in element
+/// position"). Inside a lambda the Float64 default is still the right answer.
+/// AN INDEX RECORD'S `Kind` IS A STATEMENT ABOUT ONE APPLY, NOT ABOUT THE VALUE.
+/// `SDimension` means "this apply's grid iterates it"; `TDimension` means "this
+/// apply's KERNEL contributed it" -- `kernelTDims` stamps the kernel's return
+/// axes that way, and `deduceOutputType` bakes them into the result TYPE. The
+/// resulting VALUE has no T-shaped axes: it is an array with n axes, and the
+/// NEXT apply must iterate all of them.
+///
+/// `computeSDimsPerArray` counts only `SDimension`, so an operand carrying an
+/// inherited `TDimension` record silently lost that axis at the next `<@>`.
+/// Measured on `examples/lswosa.blade`: `ls_e` is the (freq x segment) grid a
+/// grouped kernel returned, `transpose(ls_e, [0,1])` accepts it as rank 2, and
+/// `ls_e <@> mag2` came back RANK 1 -- so `reduce(mod_avg, (+))` refused a value
+/// that is an array (line 187). The same shape with a lambda kernel came back a
+/// SCALAR, because the ragged-inner accounting in `kernelInputRanks` subtracts
+/// the (undercounted) S-dims and re-attributes the difference to the kernel.
+///
+/// Unreachable before S3 -- an array-valued kernel return had no way to exist,
+/// so no value ever carried a `TDimension` record into an operand slot. This
+/// normalization runs BEFORE `buildApplyInfo` re-tags the fibers THIS apply
+/// consumes, so the two compose: inherited kinds reset to S, then this apply
+/// stamps its own T-dims.
+let private reSDimOperand (at: IRArrayType) : IRArrayType =
+    if at.IndexTypes |> List.exists (fun ix -> ix.Kind <> SDimension) then
+        { at with IndexTypes = at.IndexTypes |> List.map (fun ix -> { ix with Kind = SDimension }) }
+    else at
+
 let loopOperandArrayType (env: TypeEnv) (fallback: unit -> IRArrayType) (ty: IRType) : IRArrayType =
     match env.Subst.Resolve ty with
-    | ArrayElem at ->
+    | ArrayElem at0 ->
+        let at = reSDimOperand at0
         match env.Subst.Resolve at.ElemType with
-        | IRTInfer _ -> { at with ElemType = IRTScalar ETFloat64 }
+        | IRTInfer id when env.InLambdaBody || not (env.Subst.IsPolymorphicId id) ->
+            { at with ElemType = IRTScalar ETFloat64 }
         | _ -> at
     | _ -> fallback ()
+
+/// The `object_for(k) <@> X` orientation's operand-shape fallback, and the
+/// TypedExpr twin of `getArrayType`'s `ExprVar` arm.
+///
+/// The two orientations of the SAME apply disagreed about an operand whose type
+/// is still an unresolved inference var. `method_for` falls back through
+/// `getArrayType`, which recovers a RANK-1 record (extent `<name>_n`, Identity =
+/// the variable) for a named operand; `object_for` degraded to a RANK-0 record,
+/// which types the whole apply SCALAR. Measured on
+///
+///     function g(ws: Float64^1, t: Float64^1) = {
+///         ws <@> lambda(w) -> { let wt = (w * t) |> compute
+///                               let c = sin <@> wt
+///                               reduce(c, (+)) } }
+///
+/// `wt <@> sin` compiled and ran; the identical `sin <@> wt` emitted
+/// `double __v7 = 0; __v7 += std::sin(__v6);` -- `genApplyCombinator`'s
+/// SCALAR-output accumulation path, with no loop and a phantom element name
+/// g++ rejects ("'__v6' was not declared in this scope"). Only the abstract
+/// (`T^k`) spelling reaches it: with concrete `Array<..>` params the operand
+/// resolves to an array and neither fallback runs.
+///
+/// The rank-1 claim is NOT a guess: `<@>` has nothing to iterate unless the
+/// operand is an array, so rank >= 1 is pinned by the apply itself. It is also
+/// the CHEAP half of that claim -- a local metadata record, NOT a `Bind`. The
+/// var stays open, so this cannot spend a declaration's HM-polymorphic
+/// signature/return var (the S1 regression: `materializeArityVar`'s two call-site
+/// guards exist precisely because BINDING one collapses every specialization).
+/// Restricted to a still-unresolved `IRTInfer`: a var that already resolved to a
+/// concrete SCALAR is not an unknown, so it keeps the rank-0 degradation and its
+/// existing diagnostic.
+let objectForOperandFallback (env: TypeEnv) (t: TypedExpr) : IRArrayType =
+    let rank0 = { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None }
+    match t.Kind with
+    | TExprVar (name, _, _) ->
+        (match env.Subst.Resolve t.Type with
+         | IRTInfer _ ->
+             { ElemType = IRTScalar ETFloat64
+               IndexTypes = [ { Id = env.Builder.FreshId(); Rank = 1
+                                Extent = IRParam (name + "_n", 0, IRTNat None)
+                                Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                                Kind = SDimension; Dependencies = [] } ]
+               IsVirtual = false; Identity = Some (AIDVariable name) }
+         | _ -> rank0)
+    | _ -> rank0
 
 // 8. Helpers
 
@@ -2114,21 +2317,60 @@ let requireArrayArgMinRank (env: TypeEnv) (tArr: TypedExpr) (opName: string) (mi
     let resolved = env.Subst.Resolve(tArr.Type)
     match resolved with
     | ArrayElem arrTy -> Ok arrTy
-    | IRTInfer _ ->
+    | IRTInfer vid ->
         let k = max 1 minRank
-        let freshIdx i = {
-            Id = env.Builder.FreshId()
-            Rank = 1
-            Extent =
-                IRParam ((if k = 1 then sprintf "__%s_inferred_n" opName
-                          else sprintf "__%s_inferred_n%d" opName i),
+        let freshIdx i =
+            // The minted extent name carries the index record's own fresh id.
+            // These names are IDENTITY, not just display: shape
+            // monomorphization (IR.shapeMonomorphizeModules) bakes call-site
+            // extents into a spec BY NAME, so two distinct inference vars
+            // sharing a display name (`__method_for_inferred_n` minted once
+            // for a caller's param and once inside its callee) would be baked
+            // to ONE value -- measured: a grouped pipeline whose spec baked
+            // the callee's freqs-length T-dim (4) to the caller's input
+            // length (6), overflowing every row copy at runtime.
+            let idxId = env.Builder.FreshId()
+            { Id = idxId
+              Rank = 1
+              Extent =
+                IRParam ((if k = 1 then sprintf "__%s_inferred_n_%d" opName idxId
+                          else sprintf "__%s_inferred_n%d_%d" opName i idxId),
                          0, IRTNat None)
-            Symmetry = SymNone
-            Tag = None; IxKind = IxKPlain
-            Kind = SDimension
-            Dependencies = []
-        }
-        let freshElem = env.Builder.FreshInferType()
+              Symmetry = SymNone
+              Tag = None; IxKind = IxKPlain
+              Kind = SDimension
+              Dependencies = []
+            }
+        // ELEMENT POLYMORPHISM SURVIVES THE SHAPE. This synthesis is where a
+        // `T^k` DECLARATION parameter used to lose its HM element
+        // polymorphism: giving `T` its shape rewrites it to `Array<E, ..>`,
+        // and with `E` a plain fresh var zonk defaulted `E` to whatever the
+        // first call site wanted, so the function existed at exactly one
+        // element type (`function variance(x: T^1) = { let n = extents(x);
+        // ... }` over a real and then a complex series failed in g++ with
+        // "could not convert Array<complex<double>> to Array<double>").
+        //
+        // Fix: when the var being given its shape is itself a signature var
+        // (IsPolymorphicId -- i.e. it came from a declared type-var NAME),
+        // mint `E` in the SUBSTITUTION's id space and carry the mark onto it.
+        // Zonk then leaves `E` open, `hasTypeVarsInParams` still sees the
+        // function as HM, and IR-phase monomorphization specializes it per
+        // call site exactly as it did before the shape was known. Subst.Bind
+        // propagates the mark on var-to-var binds so a deferral inside the
+        // body cannot drop it.
+        //
+        // Non-signature vars (an unannotated kernel parameter, a synthesized
+        // intermediate) keep the plain builder-minted var: they are
+        // monomorphic by construction and marking them would keep genuinely
+        // dead vars alive through zonk.
+        let freshElem =
+            if env.Subst.IsPolymorphicId vid then
+                let e = env.Subst.Fresh()
+                (match e with
+                 | IRTInfer eid -> env.Subst.MarkPolymorphic eid
+                 | _ -> ())
+                e
+            else env.Builder.FreshInferType()
         let freshArrType = {
             ElemType = freshElem
             IndexTypes = List.init k freshIdx
@@ -2147,6 +2389,60 @@ let requireArrayArgMinRank (env: TypeEnv) (tArr: TypedExpr) (opName: string) (mi
 
 let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResult<IRArrayType> =
     requireArrayArgMinRank env tArr opName 1
+
+/// S1 (docs/plan-kernel-body-materialization.md, M-B): materialize a
+/// caret-shorthand `T^k` operand into the rank-k array it is already pinned to
+/// be.
+///
+/// A `T^k` parameter is an arity-constrained inference VAR, not an IRTArray
+/// (Subst.LookupOrCreateTypeVar): the caret pins the RANK and the array shape
+/// is only built when some demand supplies it. Every array INTRINSIC issues
+/// that demand (`requireArrayArg`; see inferProdSum's note for the long
+/// version) -- but the two seams that make an array-valued INTERMEDIATE
+/// (an elementwise binop, and a nested `<@>` whose operand is the var) both
+/// gate their array-producing arms on the operand RESOLVING to an array, so
+/// against an unmaterialized var they fall to the scalar arm and the
+/// intermediate is scalar-typed. Every array consumer downstream then honestly
+/// refuses a value that IS an array.
+///
+/// This is NOT a guess. Unify.fs's arity invariant already says an arity-k var
+/// can bind to nothing but a rank-k array (anything else is an outright type
+/// error there), so supplying the shape early can only pre-compute a binding
+/// unification would have been forced into later. Errors are therefore
+/// swallowed: the demand is an optimization of WHEN, never of WHETHER, and a
+/// failure leaves the var exactly as it was for the pre-existing diagnostic to
+/// report. Non-arity vars are left alone -- an unannotated kernel parameter is
+/// one of those and may still resolve to a scalar.
+///
+/// THE DEMAND IS NOT FREE, and both of its call-site restrictions were paid for
+/// in regressions. Binding a `T^k` var SPENDS it: in a named function's
+/// declaration body that var is the HM-polymorphic signature var the
+/// monomorphizer specializes on, so an unguarded demand collapses the function
+/// to one specialization -- or worse, hands codegen a synthetic shape whose
+/// invented `__..._inferred_n` extent nothing ever declares. Measured:
+///
+///   * `function packsum1(A: Poly<T^1>) -> T^1` folding `head + packsum1(tail)`
+///     lost every `_HM_..._arr_double__r1s0e2` suffix across arity/019, 020,
+///     021, 022, 024, 025, 026, 028; the recursive call vanished from the
+///     emitted C++ and the surviving loop read `arr0.extents[0]` off an
+///     undeclared name. Guard: the binop seam demands only when the OTHER
+///     operand pins the shape (there, both were unresolved).
+///   * `function dbl(xs: T^1) = xs <@> lambda(x) -> x + x |> compute`, applied
+///     to a Float array and then an Int array, collapsed to ONE specialization
+///     ("could not convert Array<long long int> to Array<double>"). Guard: the
+///     loop-former seam demands only inside a LAMBDA body, where the var is
+///     monomorphic anyway -- `buildApplyInfo` unifies a kernel param with the
+///     iterated row type moments later, so pre-computing can only agree with
+///     what unification was about to do.
+///
+/// Both guards live at the call sites, since they differ per seam.
+let materializeArityVar (env: TypeEnv) (tArg: TypedExpr) (opName: string) : unit =
+    match env.Subst.Resolve tArg.Type with
+    | IRTInfer vid ->
+        (match env.Subst.GetArityConstraint vid with
+         | Some k when k >= 1 -> requireArrayArgMinRank env tArg opName k |> ignore
+         | _ -> ())
+    | _ -> ()
 
 /// Tag-check helper: validate that each index argument's nominal tag (if any)
 /// agrees with the corresponding array slot's nominal tag. Slot tags starting
@@ -2822,9 +3118,10 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         // declares a tuple parameter AND the flat pairing does not fit, so the
         // ordinary call path is untouched.
         let tArgs = regroupArgsByWidth env paramTys tArgs
-        // Four checks direct-application would otherwise skip (params are
-        // NOT unified against args here, unlike kernel application); each
-        // catches a mismatch g++ rejects that Blade would typecheck clean:
+        // Checks direct-application would otherwise skip (params are NOT
+        // unified against args here, unlike kernel application); each catches
+        // a mismatch g++ rejects that Blade would typecheck clean -- except
+        // extentClash, which g++ accepts and which faults at RUNTIME:
         //   irrepsClash  - BLOCK-SPEC (irreps/point-group) pairs must match
         //                  identity, not just extent.
         //   rankClash    - a rank-k compact slot is k emitted dims but ONE
@@ -2860,6 +3157,19 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                     |> List.tryPick (fun (slot, (pi, ai)) ->
                         if indexRankDiffers pi ai then Some (i, slot, pi, ai) else None)
                 | _ -> None)
+        // POINT THE CARET AT THE ARGUMENT THE MESSAGE NAMES. `currentExprSpan`
+        // is stamped by `inferExpr` on entry to EVERY node and the last stamp
+        // wins (TypeEnv.locateError), so by the time these checks run it holds
+        // the LAST argument inferred -- the text said "argument 4" while the
+        // caret underlined argument 8 (`examples/lswosa.blade`'s BL3010, and
+        // every other argument-indexed refusal below shares the defect). Each
+        // check already knows the offending index; re-stamp before building the
+        // error so the two agree. No-op when the argument carries no span
+        // (synthesized nodes), which leaves the previous behaviour intact.
+        let atArg (i: int) =
+            if i >= 0 && i < tArgs.Length then
+                let s = (List.item i tArgs).Span
+                if s.StartLine > 0 then setCurrentExprSpan s
         let unitClash =
             let n = min paramTys.Length tArgs.Length
             // (sig, concrete): `concrete` is false while the (element) type is
@@ -2885,12 +3195,14 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             |> List.tryPick (fun (i, (pu, _), (au, aConcrete)) ->
                 match pu, au with
                 | Some pu, Some au when not (unitCompatible pu au) ->
+                    atArg i
                     Some (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
                 // Convertible but at a different MAGNITUDE. Argument passing
                 // is a seam that does not (yet) insert a factor, so name the
                 // difference instead of handing the callee a raw number in
                 // the wrong magnitude.
                 | Some pu, Some au when not (unitSameScale pu au) ->
+                    atArg i
                     Some (Other (sprintf
                             "argument %d expects %s but got %s: same dimensions, magnitudes differing by the factor %s"
                             (i + 1) (ppUnitSig pu) (ppUnitSig au)
@@ -2905,6 +3217,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                                   && (match au with
                                       | Some a -> a.Nominal <> pu.Nominal
                                       | None -> true) ->
+                    atArg i
                     Some (QuantityArgMismatch (i + 1, pu.Nominal.Value, describeArg au))
                 | _ -> None)
         // ONE LEVEL INTO A TUPLE ARGUMENT. Every check above reads
@@ -2961,8 +3274,10 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                             else
                             match IR.getUnits pe, IR.getUnits ae with
                             | Some pu, Some au when not (unitCompatible pu au) ->
+                                atArg i
                                 Some (UnitMismatch (where, ppUnitSig pu, ppUnitSig au))
                             | _ when isConcrete ae && pr <> ar ->
+                                atArg i
                                 Some (Other (sprintf
                                         "%s: the parameter component is declared %s (rank %d) but the argument component is %s (rank %d). A call site performs no conversion between these -- pass a value of the declared type, or change the declared component type."
                                         where (ppIRType (env.Subst.Resolve pc)) pr
@@ -2976,8 +3291,38 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             paramTys |> List.exists (fun t ->
                 match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)
         let argRankClash = firstArgRankClash env.Subst paramTys (tArgs |> List.map (fun a -> a.Type))
+        // extentClash (BL3016) - consumed LAST (see the arm below), and the
+        // only check here whose failure is a MEMORY error rather than a g++
+        // rejection or a discipline violation. Codegen treats
+        // a parameter's LITERAL extent as ground truth: it bakes it into the
+        // emitted subscripts, loop bounds and result allocations, and never
+        // consults the argument's runtime extent. So `Idx<2>` into an `Idx<4>`
+        // parameter emits reads two doubles past the allocation -- in the
+        // DECLARATIVE path (`method_for(w) <@> ...`) exactly as in the
+        // raw-index path, and worse there, since the over-long result array
+        // carries the garbage out as a value.
+        //
+        // Literal-vs-literal only, ranks equal. A symbolic extent (`Idx<n>`,
+        // ragged/compound/opaque) emits a runtime `.extents[d]` read and is
+        // already correct, so it keeps the historical looseness -- as does an
+        // argument still unresolved here.
+        let extentClash =
+            let n = min paramTys.Length tArgs.Length
+            List.zip (List.truncate n paramTys) (List.truncate n tArgs)
+            |> List.mapi (fun i pair -> (i, pair))
+            |> List.tryPick (fun (i, (pTy, arg)) ->
+                match env.Subst.Resolve pTy, env.Subst.Resolve arg.Type with
+                | ArrayElem pa, ArrayElem aa when pa.IndexTypes.Length = aa.IndexTypes.Length ->
+                    List.zip pa.IndexTypes aa.IndexTypes
+                    |> List.mapi (fun d pair -> (d, pair))
+                    |> List.tryPick (fun (d, (pi, ai)) ->
+                        match tryEvalIntIR pi.Extent, tryEvalIntIR ai.Extent with
+                        | Some pe, Some ae when pe <> ae -> Some (i, d, pe, ae)
+                        | _ -> None)
+                | _ -> None)
         match irrepsClash, rankClash, unitClash, argRankClash with
         | Some (i, pi, ai), _, _, _ ->
+            atArg i
             // O(3) member gets a named message; pg-vs-pg or a cross-member
             // pair gets the family-level twin naming the discipline instead.
             (match pi.Tag, ai.Tag with
@@ -2986,12 +3331,14 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
              | _ ->
                  Error (BlockSpecArgMismatch (i + 1, ppIndexType pi, ppIndexType ai)))
         | None, Some (i, slot, pi, ai), _, _ ->
+            atArg i
             Error (IndexRankMismatch (sprintf "argument %d, index slot %d" (i + 1) slot,
                                       ppIndexType pi, max 1 pi.Rank,
                                       ppIndexType ai, max 1 ai.Rank))
         | None, None, Some unitErr, _ ->
             Error unitErr
         | None, None, None, Some (i, pr, ar, pTy, aTy) ->
+            atArg i
             Error (ArgRankMismatch (i + 1, pr, ar,
                                     ppIRType (env.Subst.Resolve pTy),
                                     ppIRType (env.Subst.Resolve aTy)))
@@ -3000,6 +3347,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             // defect more precisely: element CLASS. See firstArgTypeClash.
             match firstArgTypeClash env.Subst paramTys (tArgs |> List.map (fun a -> a.Type)) with
             | Some (i, pTy, aTy) ->
+                atArg i
                 let callee =
                     match tFunc.Kind with
                     | TExprVar (name, _, _) -> sprintf "'%s'" name
@@ -3007,6 +3355,15 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 Error (ArgTypeMismatch (i + 1, callee,
                                         ppIRType (env.Subst.Resolve pTy),
                                         ppIRType (env.Subst.Resolve aTy)))
+            | None ->
+            // The SIXTH check, after element class because a wrong-class
+            // argument that is also the wrong length should be reported as
+            // the class error. See `extentClash` above for why this one is a
+            // memory error rather than a typing disagreement.
+            match extentClash with
+            | Some (i, d, pe, ae) ->
+                atArg i
+                Error (ExtentArgMismatch (i + 1, d + 1, pe, ae))
             | None ->
             // Rank propagation (the INFERENCE half of argRankClash's
             // CHECKING): impose the callee param's rank as a LOWER BOUND on
@@ -3099,7 +3456,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprBlocked (_, bs) -> [bs]
         | TExprPure e | TExprCompute e | TExprRead e | TExprFillRandom e | TExprRank e
         | TExprExtents e | TExprReynolds (e, _) -> [e]
-        | TExprRandGen (_, key, _) -> [key]
+        | TExprRandGen (_, key, pars, weights, _) -> (key :: pars) @ (weights |> Option.map fst |> Option.toList)
         | TExprGuard (c, b) -> [c; b]
         | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
         | TExprGroupBy (a, p) | TExprSort (a, p)
@@ -3653,7 +4010,33 @@ let private tryFillDefaultArgs (env: TypeEnv) (callSpan: Span) (func: Expr) (arg
             then trailingArgs |> List.map (argQuantityTag env)
             else trailingArgs |> List.map (fun _ -> None)
         let anyTagged = argTags |> List.exists Option.isSome
-        if not anyTagged && k >= total then None      // full-arity positional call: untouched
+        // TAGS THAT ONLY CONFIRM THE POSITIONAL READING ARE A NO-OP, and saying
+        // so is what makes THIS FUNCTION IDEMPOTENT. A partial call is rewritten
+        // to full arity and re-inferred, which lands back here -- and the
+        // rewrite appends the missing defaults UNTAGGED, because a slot with no
+        // quantity (`n_segments: Float64 = 10.0`) has no tag to carry. On the
+        // second pass those appended arguments read as untagged stragglers
+        // after the user's tagged one and the straggler check below refused a
+        // call it had itself just built: `lswosa((s, t), freqs, (0.0 : time))`
+        // -- three arguments -- was reported as "argument 4 has no quantity tag"
+        // (examples/lswosa.blade could not be called at all).
+        //
+        // The test is exact rather than a re-entry flag: routing has nothing to
+        // do when every TAGGED trailing argument already sits in the slot
+        // carrying its quantity and the call is complete. Reordering calls
+        // (`plot(1.0, 3.0: cmap, 2.0: levels)`, functions/049) disagree with
+        // their positions and still route; the genuine ambiguity
+        // (`plot(1.0, 3.0: cmap, 2.0)`, functions/053) still refuses. Full
+        // arity is required because a SHORT call still needs this function to
+        // fill its defaults.
+        let tagsConfirmPositions =
+            argTags
+            |> List.indexed
+            |> List.forall (fun (j, t) ->
+                match t with
+                | Some q -> j < slotQs.Length && slotQs.[j] = Some q
+                | None -> true)
+        if k >= total && (not anyTagged || tagsConfirmPositions) then None
         else
         // Per trailing slot, in DECLARED order: Some suppliedArg | None (use default).
         let assembled : TypeResult<Expr option list> =
@@ -4053,11 +4436,32 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // so pinning Float64 now would reject complex kernels; the
                 // kernel re-stamp in buildApplyInfo corrects the result type.
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
-            | IRTInfer _ ->
-                // floor/ceil have no complex overload -- the operand really is
-                // real; pin it to Float64, the intrinsic's natural domain.
+            | IRTInfer _ when not env.InLambdaBody ->
+                // floor/ceil/log10 have no complex overload -- the operand
+                // really is real; pin it to Float64, the intrinsic's natural
+                // domain, which also rejects a later complex binding here
+                // instead of letting it reach codegen as std::floor(complex).
                 unify env.Subst tArg.Type (IRTScalar ETFloat64) |> Result.bind (fun () ->
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
+            | IRTInfer _ ->
+                // NOT inside a lambda body, though -- the same carve-out
+                // inferBinaryIntrinsic's `pin` makes. There the operand is a
+                // kernel parameter that apply-site unification has not bound
+                // yet, and binding it to BARE Float64 would erase the element's
+                // unit annotation -- after which buildApplyInfo's
+                // kernelBodyUnits walk re-runs this op's unit rule against no
+                // signature and silently accepts `D: m <@> lambda(d) ->
+                // floor(d)`. DEFER (what the complex arm above does, and why
+                // `log` rejects that shape while the PINNING arm did not): the
+                // param binds to the real element type and the unit walk sees
+                // it. The complex operand the pin used to catch is caught after
+                // unification instead, by findBadComplexIntrinsic.
+                //
+                // Result is bare Float64, not the operand's variable: these
+                // intrinsics are Float64-valued at any operand width, it
+                // matches the provisional-annotation defer arm below, and the
+                // kernel re-stamp's real-operand arm normalizes to it anyway.
+                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64))
             | IRTUnitAnnotated _ when env.InLambdaBody && typedExprHasProvisionalUnits env tArg ->
                 // PROVISIONAL annotation inside a lambda body: something the
                 // argument depends on is still an unresolved inference variable
@@ -4235,15 +4639,54 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__dist_pack" }, args) when not args.IsEmpty ->
         inferDistPack env args
 
-    // ---- __rand_uniform / __rand_normal(key, d1, ..., dn): rand module ----
+    // ---- __rand_<fam>(key, p1, .., pk, d1, ..., dn): rand module ----
     // Compiler-internal (double-underscore reserved): emitted by the `rand`
-    // elaboration stage from `alias.uniform/normal(key, shape)`. `key` is an
-    // Int64 stream key; the trailing args are the (elaborator-resolved) static
-    // extents. Self-typed as a dense Float64 array of that shape -- no annotation
-    // needed. Lowering records (kind, key) in RandomInits; codegen emits
-    // allocate<> + the runtime blade_rand fill.
-    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar (("__rand_uniform" | "__rand_normal") as fn) }, (keyE :: dimArgs)) when not dimArgs.IsEmpty ->
-        let kind = if fn = "__rand_uniform" then "uniform" else "normal"
+    // elaboration stage from `alias.<fam>(key, params.., shape)`. `key` is an
+    // Int64 stream key; the next `nPars` args are the family's RUNTIME Float64
+    // scalar parameters (any Float64-typed expression -- only the shape must be
+    // static); the trailing args are the (elaborator-resolved) static extents.
+    // Self-typed as a dense array of that shape -- no annotation needed. The
+    // element type is Float64 for every scalar-parameter family, including the
+    // integer-valued poisson and bernoulli, and Int64 for `categorical` alone
+    // (see the element-type note in cpp/rand_runtime.hpp: its draws are
+    // subscripts, not measurements). Lowering records (kind, key, pars, weights)
+    // in RandomInits; codegen emits allocate<> + the runtime blade_rand fill,
+    // and picks the C++ pool type straight off this ElemType.
+    //
+    // `categorical` also carries the ARRAY parameter channel: its single
+    // non-shape argument is a rank-1 Float64 weights array, and this arm is
+    // where its extent is PINNED -- the extent has to be a static literal
+    // because codegen passes a compile-time length beside the pool pointer and
+    // the interpreter mirror needs the same length to scan. A symbolic extent
+    // is refused here rather than producing a fill whose k is unknown.
+    //
+    // The per-family parameter count is fixed HERE (not by the elaborator), so
+    // it is enforced on the intrinsic itself and any future direct emitter of
+    // __rand_* -- e.g. the ppl module -- is held to the same arity.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar (("__rand_uniform" | "__rand_normal" | "__rand_exponential"
+                                                   | "__rand_gamma" | "__rand_poisson" | "__rand_bernoulli"
+                                                   | "__rand_beta" | "__rand_categorical") as fn) }, (keyE :: rest)) when not rest.IsEmpty ->
+        // nPars = scalar Float64 parameters; hasWeights = the array channel.
+        // No family uses both today, but the two are counted independently so
+        // the argument split does not assume that.
+        let kind, nPars, hasWeights =
+            match fn with
+            | "__rand_uniform"     -> "uniform", 0, false
+            | "__rand_normal"      -> "normal", 0, false
+            | "__rand_exponential" -> "exponential", 1, false
+            | "__rand_gamma"       -> "gamma", 2, false
+            | "__rand_poisson"     -> "poisson", 1, false
+            | "__rand_bernoulli"   -> "bernoulli", 1, false
+            | "__rand_categorical" -> "categorical", 0, true
+            | _                    -> "beta", 2, false
+        // Surface order is key, [weights], scalar pars.., shape.
+        let nLead = nPars + (if hasWeights then 1 else 0)
+        if List.length rest <= nLead then
+            Error (Other (sprintf "rand.%s: expected %d distribution parameter(s) and a shape" kind nLead))
+        else
+        let leadArgs, dimArgs = List.splitAt nLead rest
+        let weightsArg = if hasWeights then Some (List.head leadArgs) else None
+        let parArgs = if hasWeights then List.tail leadArgs else leadArgs
         // Extents must be static ints (the elaborator resolves them to literals).
         let dimResults =
             dimArgs |> List.map (fun d ->
@@ -4254,13 +4697,64 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         match dimResults |> List.fold (fun acc r -> match acc, r with Ok xs, Ok x -> Ok (xs @ [x]) | Error e, _ -> Error e | _, Error e -> Error e) (Ok []) with
         | Error e -> Error (Other e)
         | Ok dims ->
+            // The weights channel: inferred (not checked against a demand --
+            // its extent is what we are trying to LEARN), then required to be a
+            // rank-1 Float64 array with a static positive extent. AnyPrimElem
+            // so a unit-annotated Float64 still passes: units erase at codegen
+            // and the pool is a `double` pool either way.
+            // Split out of the pipeline below so each refusal is one flat arm:
+            // rank, element type and extent-staticness are three separate
+            // reasons and each gets its own message.
+            let pinWeights (tW: TypedExpr) : TypeResult<TypedExpr * int> =
+                match env.Subst.Resolve(tW.Type) with
+                | ArrayElem arrTy ->
+                    let rank = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+                    if rank <> 1 then
+                        Error (Other (sprintf "rand.%s: weights must be a rank-1 array (got rank %d)" kind rank))
+                    else
+                        match env.Subst.Resolve(arrTy.ElemType) with
+                        | AnyPrimElem ETFloat64 ->
+                            match arrTy.IndexTypes with
+                            | [ix] ->
+                                match ix.Extent with
+                                | IRLit (IRLitInt k) when k > 0L -> Ok (tW, int k)
+                                | IRLit (IRLitInt k) ->
+                                    Error (Other (sprintf "rand.%s: weights extent must be positive (got %d)" kind k))
+                                | _ ->
+                                    Error (Other (sprintf "rand.%s: the weights array must have a STATIC extent -- codegen passes its length beside the pool pointer, so a symbolic or parameter extent cannot be filled" kind))
+                            | _ -> Error (Other (sprintf "rand.%s: weights must be a rank-1 Float64 array" kind))
+                        | AnyPrimElem et ->
+                            Error (Other (sprintf "rand.%s: weights must have Float64 elements (got %A)" kind et))
+                        | _ ->
+                            Error (Other (sprintf "rand.%s: weights must be a rank-1 Float64 array" kind))
+                | _ ->
+                    Error (Other (sprintf "rand.%s: weights must be a rank-1 Float64 array, not a scalar" kind))
+            let weightsResult : TypeResult<(TypedExpr * int) option> =
+                match weightsArg with
+                | None -> Ok None
+                | Some wE ->
+                    inferExpr env wE
+                    |> Result.bind pinWeights
+                    |> Result.map Some
+            weightsResult |> Result.bind (fun tWeights ->
+            // Params check against Float64 (an int literal promotes; an
+            // array-typed argument is refused by the check, not silently taken).
+            let parResults =
+                parArgs |> List.fold (fun acc p ->
+                    acc |> Result.bind (fun ps ->
+                        checkExpr env (IRTScalar ETFloat64) p |> Result.map (fun tp -> ps @ [tp])))
+                    (Ok [])
+            parResults |> Result.bind (fun tPars ->
             checkExpr env (IRTScalar ETInt64) keyE |> Result.map (fun tKey ->
                 let indices =
                     dims |> List.map (fun n ->
                         { Id = env.Builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 n))
                           Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] })
-                let arrTy = mkArrayArrow indices (IRTScalar ETFloat64) None
-                mkTyped (TExprRandGen (kind, tKey, dims)) arrTy)
+                // Element type: Int64 for categorical (its draws are indices),
+                // Float64 for every other family.
+                let elemTy = if kind = "categorical" then IRTScalar ETInt64 else IRTScalar ETFloat64
+                let arrTy = mkArrayArrow indices elemTy None
+                mkTyped (TExprRandGen (kind, tKey, tPars, tWeights, dims)) arrTy)))
 
     // ---- __display_emit(head, quoted, data, metaTail): display module ----
     // Compiler-internal (double-underscore reserved): emitted by the `display`
@@ -5002,6 +5496,87 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
         | TExprApply _ ->
             Some (Error (Other "reduce() over a composed (>>@/@>>) application is not supported yet -- force it with `|> compute` and reduce the resulting array"))
         | _ -> None
+    // ---- Don't splice a SECOND copy of an already-materialized let --------
+    // The fusion above resolves through bindings and splices the RESOLVED
+    // apply into the typed node -- a COPY of the computation, not a reference
+    // to the binding. At module level that is exactly right: `let c = A <@> k`
+    // stays deferred, nothing materializes it, and the fold is the only
+    // consumer, so fusing is strictly cheaper than forcing.
+    //
+    // Inside a callable body the arithmetic inverts. Lowering's S2
+    // (`forceBareCombinatorLets`) wraps every body-local `let` whose RHS is a
+    // bare combinator in `IRCompute` -- there is no forcing site downstream of
+    // it, so the array gets built whether or not anyone reads it. Splicing on
+    // top of that materializes the SAME computation twice per outer cell: the
+    // now-dead let, plus the fused nest. `units/065`'s
+    // `let e = exp <@> (i*w*ts); reduce(e, (+))` emitted 3 arrays and 2 full
+    // `std::exp` passes where 2 arrays and 1 pass compute the same values.
+    // Declining here drops the fold to the ordinary `IRReduce` over the array
+    // the let already built.
+    //
+    // A CAPTURED binding declines for the mirror-image reason. Splicing inside
+    // a kernel body puts the two halves of the same lambda into disagreement:
+    // the body fuses a copy of `c`'s producer (and so spells `c`'s OWN inputs,
+    // dragging them in as module references), while lambda-lifting still lists
+    // `c` itself in `Captures` and forwards it BY NAME at every call site. The
+    // capture is undeclared (`c` is deferred, so it has no C++ definition), and
+    // the extra module references demote the lambda to a main() local emitted
+    // in id order -- after the very binding that calls it:
+    //
+    //   let c   = method_for(A) <@> lambda(x) -> x * 2.0        // deferred
+    //   let out = ws <@> lambda(w) -> w * reduce(c, (+)) |> compute
+    //   // 'c' was not declared in this scope
+    //   // '__lambda_16' was not declared in this scope
+    //
+    // CodeGen now materializes a deferred capture at the boundary that
+    // forwards it (collectDeferredKernelCaptures), so the array IS built by
+    // the time the body runs and the ordinary `IRReduce` over it is right --
+    // the same trade the body-local clause makes, for the same reason.
+    //
+    // Deliberately narrow, because every clause pays for itself:
+    //  * `bodyLocalBinding` / `capturedOuterBinding` -- a MODULE-LEVEL fold
+    //    (`loops/095`, the deferred-concrete corpus) is inside no callable at
+    //    all, so nothing captures or materializes `c` and fusing stays
+    //    strictly cheaper than forcing. That case is untouched.
+    //  * a bare `TExprVar` root only -- a written-out `reduce(A <@> k, (+))`
+    //    has no binding and nothing materialized, so it must still fuse.
+    //  * a SINGLE apply, never a `<&!>` fusion tree -- a tree has no array
+    //    form to fall back to (staggered leaf ranks, tuple result).
+    //  * a plain array output -- compact symmetric/antisymmetric/Hermitian
+    //    output still reaches the error below rather than silently changing
+    //    which cells get folded.
+    //  * an UNANNOTATED fold kernel -- see `foldKernelIsParallel`.
+    //
+    // A fold kernel carrying `omp`/`cuda`/`mpi` keeps the fused terminal, for
+    // the same reason `rankKDesugar` declines for it (see `deferredWithOmpKernel`
+    // there): the fused nest is what chunks the outer level, and the ordinary
+    // `IRReduce` carries no clause, so declining would turn a licensed parallel
+    // fold serial with no diagnostic -- the exact silent drop that feature
+    // exists to prevent. Today's omp reduce-over-computation cases are all
+    // module-level and written inline, so none of them reach this guard anyway;
+    // it is here so the body-local spelling cannot regress into a silent
+    // serialization.
+    let foldKernelIsParallel () =
+        match (resolveTypedExpr env tKernel).Kind with
+        | TExprLambda li -> not li.Parallel.IsEmpty
+        | TExprVar (fn, _, _) ->
+            (match env.FuncParallel.TryGetValue fn with
+             | true, (_, s) -> not s.IsEmpty
+             | _ -> false)
+        | _ -> false
+    let alreadyMaterializedLet () =
+        match tArr.Kind with
+        | TExprVar (name, _, _) when (bodyLocalBinding name env || capturedOuterBinding name env)
+                                     && not (foldKernelIsParallel ()) ->
+            (match (resolveTypedExpr env tArr).Kind with
+             | TExprApply info when not info.IsComposeApply ->
+                (match env.Subst.Resolve info.OutputType with
+                 | ArrayElem arr ->
+                    arr.IndexTypes |> List.forall (fun ix -> ix.Symmetry = SymNone)
+                 | _ -> false)
+             | _ -> false)
+        | _ -> false
+    if alreadyMaterializedLet () then None else
     match collect tArr with
     | None -> None
     | Some leavesR ->
@@ -5718,12 +6293,50 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                      | Some a, Some b when a <> b ->
                          Error (ProdsumExtentMismatch (a, b))
                      | _ ->
-                        let unifyElem =
-                            match elemTy with
-                            | Some e -> unify env.Subst e arrTy.ElemType
-                            | None -> Ok ()
-                        unifyElem |> Result.bind (fun () ->
-                            go (Some (elemTy |> Option.defaultValue arrTy.ElemType))
+                        // ELEMENT TYPES PROMOTE, THEY DO NOT UNIFY (issue #18,
+                        // docs/plan-array-expression-fixes.md row 18).
+                        //
+                        // `prodsum` is sum_i a_i * b_i, and `*` between a real
+                        // and a complex operand promotes -- the operands keep
+                        // their own element types and only the RESULT widens.
+                        // Unifying them instead made the two operands' element
+                        // types the same type, which is a claim prodsum never
+                        // makes. In `lsdft`, `prodsum(s, e)` with `s : U^1` and
+                        // `e` complex bound `U := Complex128` from inside the
+                        // function's own body: `blade check` still said OK for a
+                        // real-valued caller, but the emitted signature read
+                        // `lsdft(tuple<Array<complex<double>>, ...>)` while the
+                        // call site passed `Array<double>` -- a check-time
+                        // soundness gap that only g++ caught.
+                        //
+                        // So: two concrete element types JOIN through the same
+                        // `promoteElemType` the scalar and broadcast seams use
+                        // (Float64 |_| Complex128 = Complex128), and a still-
+                        // generic operand element contributes nothing and is
+                        // LEFT FREE for the call site to fix. Anything
+                        // promotion cannot join (Float64 with String) falls
+                        // through to `unify`, which reports it exactly as
+                        // before -- the refusals are unchanged, only the
+                        // accepted mixed-numeric case moves.
+                        let joinElem (acc: IRType) (next: IRType) : Result<IRType, TypeError> =
+                            match IR.stripUnits (env.Subst.Resolve acc),
+                                  IR.stripUnits (env.Subst.Resolve next) with
+                            | IRTScalar a, IRTScalar b when a = b -> Ok acc
+                            | IRTScalar a, IRTScalar b ->
+                                (match IR.promoteElemType a b with
+                                 | Some p -> Ok (IRTScalar p)
+                                 | None -> unify env.Subst acc next |> Result.map (fun () -> acc))
+                            // One side still generic: the concrete side is the
+                            // best answer available, and binding the var to it
+                            // is the #18 miscompile.
+                            | IRTScalar _, IRTInfer _ -> Ok acc
+                            | IRTInfer _, IRTScalar _ -> Ok next
+                            | _ -> unify env.Subst acc next |> Result.map (fun () -> acc)
+                        (match elemTy with
+                         | Some e -> joinElem e arrTy.ElemType
+                         | None -> Ok arrTy.ElemType)
+                        |> Result.bind (fun joined ->
+                            go (Some joined)
                                (match staticN with Some _ -> staticN | None -> thisN)
                                more))
                 | ArrayElem _ ->
@@ -5736,7 +6349,48 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                 | _ ->
                     Error (Other "prodsum() requires array arguments"))
         go None None tArgs |> Result.map (fun elemTy ->
-            mkTyped (TExprProdSum tArgs) elemTy))
+            // WIDEST OPERAND LEADS. `IRProdSum` carries no result type of its
+            // own: codegen sizes the accumulator from the FIRST operand
+            // (`inferExprType (List.head args)`, CodeGen.fs's IRProdSum arm),
+            // which was exactly right while every operand shared one element
+            // type and is wrong the moment they promote -- `prodsum(s, e)` with
+            // real `s` and complex `e` accumulated into a `double` and g++
+            // refused `__ps += s[t] * e[t]`.
+            //
+            // Rotating the operand that already carries the joined type to the
+            // front costs nothing and asserts nothing new: prodsum is
+            // sum_t prod_L a_L[t], the product is commutative, and the
+            // summation order over t -- the only order floating-point
+            // accumulation is sensitive to -- is untouched. It fires ONLY when
+            // the operands' element types actually differ, so no program that
+            // compiles today changes shape or rounding.
+            //
+            // Ragged/grouped operands opt out: codegen also reads the loop
+            // BOUND off the head (`.len` for a peeled row, `.extents[0]`
+            // otherwise), and swapping a peeled row out of that position would
+            // change which rule applies.
+            let bareElemOf (t: TypedExpr) =
+                match env.Subst.Resolve t.Type with
+                | ArrayElem a -> Some (IR.stripUnits (env.Subst.Resolve a.ElemType))
+                | _ -> None
+            let anyRagged =
+                tArgs |> List.exists (fun t ->
+                    match env.Subst.Resolve t.Type with
+                    | ArrayElem a ->
+                        a.IndexTypes |> List.exists (fun ix ->
+                            isRaggedRowKind ix.IxKind || isRaggedFamilyKind ix.IxKind)
+                    | _ -> false)
+            let joined = IR.stripUnits (env.Subst.Resolve elemTy)
+            let ordered =
+                if anyRagged || tArgs.Length < 2 || bareElemOf (List.head tArgs) = Some joined then tArgs
+                else
+                    match tArgs |> List.tryFindIndex (fun a -> bareElemOf a = Some joined) with
+                    | Some idx when idx > 0 ->
+                        tArgs.[idx] :: (tArgs |> List.indexed
+                                              |> List.filter (fun (j, _) -> j <> idx)
+                                              |> List.map snd)
+                    | _ -> tArgs
+            mkTyped (TExprProdSum ordered) elemTy))
 
 /// __dist_pack(kappa1, ..., kappar): construct a Dist<r, tau like axes> value from
 /// its cumulant component arrays. Compiler-internal -- the PPL elaboration
@@ -6232,6 +6886,13 @@ and isDenseStackableSlot (ix: IRIndexType) : bool =
 /// runtime expressions answer None and are simply not compared (the emitted
 /// C++ reads `.extents[d]` either way; this is a compile-time courtesy check,
 /// not a soundness requirement).
+///
+/// "Reads `.extents[d]` either way" holds for the stack/join operands this
+/// serves, NOT in general: at a PARAMETER position codegen treats a literal
+/// extent as ground truth and bakes it into subscripts, loop bounds and result
+/// allocations. There the same comparison is a soundness requirement, which is
+/// what BL3016 (`extentClash` / `kernelExtentClash`) enforces -- do not
+/// generalize this docstring's permissiveness to that seam.
 and staticExtentOf (e: IRExpr) : int64 option =
     match e with
     | IRLit (IRLitInt n) -> Some n
@@ -7349,15 +8010,69 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         // Arithmetic, comparison, logical
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
-            let lRes = env.Subst.Resolve tL.Type
-            let rRes = env.Subst.Resolve tR.Type
+            // NOTE (merge, 2026-08-09): master reached this same demand site
+            // independently (fix/kernel-capture-module-binding) with a
+            // `concreteOperand`/`materializeCaretOperand` pair. Both arrived at
+            // the same load-bearing restriction -- demand a shape ONLY when the
+            // other operand already pins it, because `packsum1`'s
+            // `head + packsum1(tail)` has an arity-1 var on both sides and
+            // shaping both emits an undeclared `arr1`. This branch's version is
+            // kept: it additionally gates on `mode = Elementwise` and on the
+            // operator, and tests the PRE-materialization snapshots so shaping
+            // one side cannot make the other look pinned. See the S1 SEAM 1
+            // block below.
+            let lRes0 = env.Subst.Resolve tL.Type
+            let rRes0 = env.Subst.Resolve tR.Type
             let isDist t = match t with IRTDist _ -> true | _ -> false
-            if isDist lRes || isDist rRes then
+            if isDist lRes0 || isDist rRes0 then
                 // Typed-Dist operator dispatch (checker-level; the surface
                 // operand exprs are re-synthesized into the expansion, so
                 // this works in any expression position -- see inferDistBinOp).
-                inferDistBinOp env op left right lRes rRes
+                inferDistBinOp env op left right lRes0 rRes0
             else
+            // S1 SEAM 1 (docs/plan-kernel-body-materialization.md, M-B).
+            // Both array-producing arms below -- the two-array zip and the
+            // array/scalar broadcast -- are gated on an operand RESOLVING to
+            // an array. A caret-shorthand `T^k` row parameter never does on
+            // its own, so `r * 2.0` inside `lambda(r: T^1) -> ...` fell to the
+            // scalar fallback and typed the row product `IRTScalar Float64`;
+            // every array consumer of that intermediate then refused it.
+            // Issue the same demand the array intrinsics issue, BEFORE the
+            // arms are chosen. See materializeArityVar: the arity constraint
+            // already forces a rank-k array, so this changes when the shape
+            // appears, not whether it may.
+            //
+            // ONLY WHEN THE OTHER OPERAND PINS THE SHAPE -- the second of the
+            // two restrictions this demand carries (the first, lambda bodies
+            // only, lives in materializeArityVar). When the other side is a
+            // concrete array (zip) or a concrete scalar (broadcast), the rank is
+            // already decided by this expression and unification would reach the
+            // same binding, so the demand is not speculation. When BOTH sides
+            // are unresolved -- `packsum1`'s `head + packsum1(tail)`, a plain
+            // destructure var against the function's own generic return var --
+            // nothing here knows the shape, and deferring to lowering (master's
+            // behaviour) is the correct answer.
+            let pinsShape (t: IRType) =
+                match IR.stripUnits t with
+                | ArrayElem _ -> true       // zip partner: rank decided
+                | IRTScalar _ -> true       // broadcast partner: scalar by construction
+                // `T<u>^0` lowers to a unit-annotated VAR but the caret already
+                // said rank 0, so it pins just as a scalar does. A BARE var
+                // pins nothing.
+                | IRTInfer _ -> (match t with IRTUnitAnnotated (IRTInfer _, _) -> true | _ -> false)
+                | _ -> false
+            (match op with
+             | (OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
+               | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
+               | OpAnd | OpOr) when mode = Elementwise ->
+                 // Both tested against the PRE-materialization snapshots, so
+                 // materializing one operand can never make the other look
+                 // pinned (`r1 * r2` over two `T^1` params stays deferred).
+                 if pinsShape rRes0 then materializeArityVar env tL "elementwise"
+                 if pinsShape lRes0 then materializeArityVar env tR "elementwise"
+             | _ -> ())
+            let lRes = env.Subst.Resolve tL.Type
+            let rRes = env.Subst.Resolve tR.Type
             // Elementwise op on TWO ARRAYS: re-synthesize as the zip
             // co-iteration pipeline -- method_for(zip(l, r)) <@>
             // lambda(u, w) -> u op w |> compute -- and re-infer
@@ -7500,7 +8215,70 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // env.Builder: inferArithType mints fresh index-type ids for a
             // synthesized outer-product result (same allocator deduceOutputType
             // uses for the method_for output type).
-            inferArithType env.Builder mode op tL.Type tR.Type (Some tR) |> Result.bind (fun resTy ->
+            inferArithType env.Builder mode op tL.Type tR.Type (Some tR) |> Result.bind (fun resTy0 ->
+                // S1 SEAM 2 (docs/plan-kernel-body-materialization.md, M-B, the
+                // concrete-operand triple). One operand is a real array, the
+                // other an UNRESOLVED inference var -- the shape an enclosing
+                // kernel's own parameter has while its body is being inferred
+                // (`ws <@> lambda(w) -> { let e = exp <@> (w * ts); ... }`).
+                // inferArithType's Elementwise table has no arm for that pair,
+                // so it fell through to `| _ -> lBare` and handed back THE VAR
+                // ITSELF as the product's type. Two things followed, both
+                // wrong: the nested `<@>` saw a non-array operand, degraded it
+                // to a rank-0 record, and typed `e` a scalar, so `prodsum(e,e)`
+                // refused a value that is an array; and any consumer that DID
+                // issue an array demand (prodsum, reduce) satisfied it by
+                // binding the ALIASED var -- i.e. by making the enclosing
+                // kernel's scalar parameter an array, which lowering then
+                // emitted as a bogus zip over the parameter.
+                //
+                // The result SHAPE is knowable without settling which arm
+                // applies: whether `w` turns out to be a scalar (broadcast) or
+                // an array (zip), an elementwise op against a rank-r array
+                // yields that same rank-r shape -- a zip requires the shapes to
+                // agree. So stamp the shape and nothing else. The node stays a
+                // plain TExprBinOp, so lowering still reads the RESOLVED
+                // operands and picks broadcast or zip exactly as before.
+                //
+                // Element type follows the array operand, which is
+                // `promoteElem`'s own answer when the other side carries no
+                // information. A var that later resolves complex against a real
+                // array is the pre-existing mixed real/complex promotion gap
+                // (issue #18), not something this seam can settle -- and the
+                // spelling that pins it (`i * w * ts`, complex first) already
+                // reaches the resolved-scalar broadcast arm above.
+                //
+                // Narrow on purpose: only the case where inferArithType handed
+                // back a bare VAR is repaired. `ts * w` (array on the LEFT)
+                // already answers with the array -- `| _ -> lBare` happens to be
+                // right in that orientation -- and is left untouched, wrapper
+                // and all.
+                //
+                // A caret-shorthand `T^k` var counts as unresolved here TOO, and
+                // this is what carries M-B inside a NAMED function body, where
+                // materializeArityVar deliberately abstains so HM keeps the
+                // signature var (see its note). `examples/lswosa.blade`'s
+                // `hanning` ends `(s_sub * w / sqrt(scale)) |> compute` with
+                // `s_sub: U^1` and `w` a concrete array: repairing the SHAPE
+                // makes the function's return array-typed -- which is all the
+                // caller's `reduce(sw, (+))` ever needed -- while `U` stays free
+                // for the monomorphizer. Nothing is bound; only this node's own
+                // type is stamped.
+                let resTy =
+                    let unboundVar t =
+                        match IR.stripUnits t with
+                        | IRTInfer _ -> true
+                        | _ -> false
+                    let reshape (arr: IRArrayType) =
+                        match IR.getUnits resTy0 with
+                        | Some u -> mkArrayLike { arr with ElemType = IRTUnitAnnotated (IR.stripUnits arr.ElemType, u) }
+                        | None -> mkArrayLike arr
+                    if mode <> Elementwise || not isZipOp || not (unboundVar resTy0) then resTy0
+                    else
+                        match lRes, rRes with
+                        | ArrayElem arr, other when unboundVar other -> reshape arr
+                        | other, ArrayElem arr when unboundVar other -> reshape arr
+                        | _ -> resTy0
                 // THE conversion seam. `*` and `/` need nothing: unitMul and
                 // unitDiv fold the magnitudes into the result TYPE, so the
                 // emitted code is untouched. Only the ops that require two
@@ -8343,6 +9121,34 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy (rExpr: TypedExpr
                     mkArrayLike { arrL with ElemType = promoteElem arrL.ElemType s }
                 | (IRTScalar _ as s), ArrayElem arrR ->
                     mkArrayLike { arrR with ElemType = promoteElem arrR.ElemType s }
+                // UNRESOLVED operand beside a concrete array. An unannotated
+                // kernel parameter is an inference var while its body is typed
+                // -- it only unifies with the iterated element type later, in
+                // buildApplyInfo -- so `w * xs` inside `ws <@> lambda(w) -> ...`
+                // arrives here with `w` unresolved. BOTH readings of the var
+                // agree on the SHAPE: if it resolves to a scalar this is a
+                // broadcast over `xs`, and if it resolves to a row it is a zip
+                // against `xs`; either way the result is an array shaped like
+                // the concrete operand. Only the ELEMENT type is unknowable
+                // now, so it stays the array's (the complex re-stamp in
+                // buildApplyInfo is what upgrades a kernel result whose param
+                // later resolves complex).
+                //
+                // The array-on-the-LEFT spelling (`xs * w`) has always answered
+                // this way, by falling through to `lBare`; without the mirror,
+                // `w * xs` answered with the VAR, and the difference was pure
+                // operand order. Downstream that read as a scalar: the enclosing
+                // `exp <@> (w * xs)` saw a non-array operand, mapped it as a
+                // scalar, and a later `prodsum(xs, e)` refused an `e` that
+                // should have been an array -- reported against the `<@>` site,
+                // far from the multiplication that decided it.
+                //
+                // A caret (`T^k`, k >= 1) operand never reaches here as a var:
+                // `materializeCaretOperand` above shapes it against the concrete
+                // partner first, so this arm sees only genuinely unconstrained
+                // vars. Elementwise only -- Outer keeps its own left-operand
+                // convention.
+                | IRTInfer _, ArrayElem _ -> rBare
                 // Scalar complex promotion (mixed real/complex or mixed-width
                 // complex): must precede the float rules so complex wins.
                 | IRTScalar le, IRTScalar re
@@ -8842,10 +9648,40 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                     | _ ->
                         arrays <- arrays @ [expr]
                         isCoIterGroup <- isCoIterGroup @ [false]
+                // S1 SEAM 3, CO-ITERATION TWIN (cd0f202 left this open for lack
+                // of a repro; `object_for(k) <@> zip(a, b)` inside a function
+                // whose params are the caret shorthand is one). These records
+                // become the apply's SharedIndexTypes, and two independent
+                // degradations both ended in a rank-0 record and so in `recs = []`:
+                //
+                //   * the arity demand ran only at the `materializeArityVar`
+                //     line further down, so a `T^k` operand was still an open
+                //     var at THIS point and could not match `ArrayElem`;
+                //   * the match read `a.Type` RAW, so an operand whose var the
+                //     substitution had already bound to an array missed the
+                //     `ArrayElem` arm regardless of the arity demand.
+                //
+                // Losing the shared records is not a compile error here -- it is
+                // a SILENT OUTER PRODUCT, since buildApplyInfo reads no shared
+                // axis and falls back to the full product grid.
+                // `function f(a: Float64^1, b: Float64^1) =
+                //  object_for(lambda(x, y) -> x * y) <@> zip(a, b)` returned the
+                // 3x3 grid [[10,20,30],[20,40,60],[30,60,90]] where the concrete
+                // twin returns the co-iterated [10,40,90]; at `Float64^2` it
+                // returned a 2x3x2x3 grid for a 2x3 elementwise product.
+                //
+                // Demand the arity FIRST, so these records are minted from the
+                // same extents `arrayTypes` reads below -- shared records built
+                // from a DIFFERENT extent name than the operands carry emit a
+                // loop bound nothing declares. The demand is idempotent (the
+                // iteration at the bottom re-runs it over these same flattened
+                // operands and finds them resolved). Then resolve through the
+                // substitution, and fall back exactly as the non-zip path does.
+                arrays |> List.iter (fun a -> materializeArityVar env a "map")
                 let arrTypes = arrays |> List.map (fun a ->
-                    match a.Type with
-                    | ArrayElem at -> at
-                    | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+                    match env.Subst.Resolve a.Type with
+                    | ArrayElem at -> reSDimOperand at
+                    | _ -> objectForOperandFallback env a)
                 let allCoIter = isCoIterGroup |> List.forall id
                 let recs =
                     if allCoIter then
@@ -8869,10 +9705,34 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             match arr.Kind with
             | TExprVar (name, _, _) -> AIDVariable name
             | _ -> AIDLiteral (env.Builder.FreshId()))
+        // S1 SEAM 3 (docs/plan-kernel-body-materialization.md, M-B): the
+        // operand-shape fallback just below degrades anything that is not
+        // already an IRTArray to a RANK-0 record, which types the whole apply
+        // scalar. A caret-shorthand `T^k` operand (`lambda(r: T^1) -> exp <@> r`)
+        // is an arity-constrained var, not an IRTArray, so it landed there and
+        // the nested map's result was typed a scalar. Supply the shape the
+        // arity constraint already forces -- see materializeArityVar.
+        //
+        // NAMED FUNCTION BODIES TOO, since requireArrayArgMinRank now carries
+        // the polymorphic mark onto the synthesized element type. Binding `T`
+        // here used to SPEND the declaration's HM-polymorphic signature var
+        // (`function dbl(xs: T^1) = xs <@> lambda(x) -> x + x |> compute`
+        // collapsed to its first call site's element type and dropped the
+        // `_HM_` specializations from loops/115 and loops/116); with the mark,
+        // the shape is supplied and the ELEMENT stays open, so the IR
+        // monomorphizer still specializes per call site.
+        flatArrays |> List.iter (fun arr -> materializeArityVar env arr "map")
+        // S1 SEAM 3, second half: `materializeArityVar` covers the operand that
+        // still WEARS the caret-shorthand var, but an array-valued INTERMEDIATE
+        // built from one (`let wt = w * t` over a `t: Float64^1` the binop seam
+        // left deferred) is a plain unresolved var, so the demand is a no-op and
+        // the old rank-0 fallback typed the apply scalar. Fall back exactly as
+        // the method_for orientation of this same apply already does -- see
+        // objectForOperandFallback.
         let arrayTypes = flatArrays |> List.map (fun arr ->
-            match arr.Type with
-            | ArrayElem at -> at
-            | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+            match env.Subst.Resolve arr.Type with
+            | ArrayElem at -> reSDimOperand at
+            | _ -> objectForOperandFallback env arr)
         // Real per-array S-dim counts in BOTH modes: the co-iteration case needs
         // them so buildApplyInfo's IRTInfer fallback computes the kernel slice
         // rank against the true array rank (a scalar kernel over rank-2 zips
@@ -10128,6 +10988,40 @@ and buildApplyInfo (env: TypeEnv)
                     Some (QuantityArgMismatch (i + 1, pu.Nominal.Value, got))
                 | _ -> None)
 
+    // STRICT static EXTENT agreement for KERNEL parameters (BL3016, the <@>
+    // twin of the extentClash check at the dispatch seam). The unification
+    // below is real, but it is blind here: `unify`'s ArrayElem arm compares
+    // element type, tag and symmetry and explicitly NOT extents ("extents
+    // never compared", Unify.fs) -- correct for inference, wrong as an
+    // agreement check, because codegen does not treat a literal extent as a
+    // runtime value. A parameter's LITERAL extent is baked into the emitted
+    // subscripts and loop bounds, so `lambda(row: Array<Float64 like Idx<5>>)`
+    // iterated over a 3-wide row emits `row[3]`/`row[4]` past the row -- and
+    // past the whole allocation on the last row. Observed as silent wrong
+    // data, not a reliable crash.
+    //
+    // Literal-vs-literal only, ranks equal. When either side's extent is
+    // symbolic (`Idx<n>`, ragged/compound/opaque markers) codegen emits a
+    // runtime `.extents[d]` read and is already correct; those keep the
+    // historical looseness, as does an unresolved row.
+    let kernelExtentClash =
+        match schemaRows with
+        | None -> None
+        | Some expandedRows ->
+            List.zip resolvedParamTypes expandedRows
+            |> List.mapi (fun i pair -> (i, pair))
+            |> List.tryPick (fun (i, (paramTy, row)) ->
+                match env.Subst.Resolve paramTy, env.Subst.Resolve row with
+                | ArrayElem pa, ArrayElem ra when pa.IndexTypes.Length = ra.IndexTypes.Length ->
+                    List.zip pa.IndexTypes ra.IndexTypes
+                    |> List.mapi (fun d pair -> (d, pair))
+                    |> List.tryPick (fun (d, (pi, ri)) ->
+                        match tryEvalIntIR pi.Extent, tryEvalIntIR ri.Extent with
+                        | Some pe, Some re when pe <> re ->
+                            Some (ExtentArgMismatch (i + 1, d + 1, pe, re))
+                        | _ -> None)
+                | _ -> None)
+
     // A PACK parameter (`Poly<T^k>`) absorbs the whole argument list and has no
     // fixed width, so the schema does not describe it. Every supported spelling
     // eta-expands to the pack width BEFORE reaching this seam (the deferred-
@@ -10140,9 +11034,10 @@ and buildApplyInfo (env: TypeEnv)
             match t with IRTPoly _ -> true | _ -> false)
 
     let kernelParamUnifyResult =
-        match kernelQuantityClash with
-        | Some err -> Error err
-        | None ->
+        match kernelQuantityClash, kernelExtentClash with
+        | Some err, _ -> Error err
+        | None, Some err -> Error err
+        | None, None ->
         match schemaRows with
         | Some rows ->
             // Use resolved types so the unify call sees the same shape we used
@@ -10212,15 +11107,68 @@ and buildApplyInfo (env: TypeEnv)
                     when (match env.Subst.Resolve operand.Type with ArrayElem _ -> true | _ -> false) ->
                 Some (match op with OpReal -> "real" | OpImag -> "imag" | _ -> "arg")
             | _ -> typedExprChildren e |> List.tryPick findBadComplexAccessor
-        let arrayValuedComputeBody =
-            kernelOutputRank >= 1 &&
-            (match lambdaInfo.Body.Kind with TExprCompute _ -> true | _ -> false)
+        // (3) A REAL-ONLY math intrinsic whose operand unified to COMPLEX.
+        //     Scalar position rejects this eagerly, but in a kernel body the
+        //     operand is a param, and both real-only families DEFER rather than
+        //     pin so the unit walk can see the element's annotation
+        //     (floor/ceil/log10's IRTInfer arm, inferBinaryIntrinsic's `pin`).
+        //     Nothing downstream catches it: kernelBodyUnits is units-only, and
+        //     the complex re-stamp below keys on the OPERAND's element type
+        //     without consulting isComplexMathIntrinsic, so it would UPGRADE
+        //     floor to complex and lower to std::floor(std::complex<double>)
+        //     -- measured: g++ answers "no matching function", which is a C++
+        //     error where a Blade one belongs. Reject here instead.
+        //
+        //     Membership in mathIntrinsics, not a name list, is what excludes
+        //     `abs`: it is spelled OpMath "abs" but is not one of the
+        //     intrinsics, and abs of a complex is the legal real magnitude.
+        //     Every binaryMathIntrinsic is real-only by construction, so
+        //     OpMath2 needs no such filter.
+        //
+        //     Only a RESOLVED complex operand fires. An unresolved one belongs
+        //     to an enclosing kernel still being inferred, and its own second
+        //     pass rechecks this body (see the NESTED-APPLY DEFERRAL below).
+        let rec findBadComplexIntrinsic (e: TypedExpr) : string option =
+            let isComplexOperand (o: TypedExpr) =
+                match IR.stripUnits (env.Subst.Resolve o.Type) with
+                | IRTScalar (ETComplex64 | ETComplex128) -> true
+                | _ -> false
+            match e.Kind with
+            | TExprUnaryOp (OpMath name, operand)
+                    when isMathIntrinsic name && not (isComplexMathIntrinsic name)
+                         && isComplexOperand operand -> Some name
+            | TExprBinOp (_, OpMath2 name, l, r)
+                    when isComplexOperand l || isComplexOperand r -> Some name
+            | _ -> typedExprChildren e |> List.tryPick findBadComplexIntrinsic
+        // AN ARRAY-VALUED KERNEL RETURN IS NOW SUPPORTED (stage S3,
+        // docs/plan-kernel-body-materialization.md manifestation M-C). The S0
+        // guard that stood here -- "kernelOutputRank >= 1 and the body is not a
+        // bare row passthrough" -> reject -- is gone, together with its pin
+        // (diagnostics/069_array_valued_kernel_return_rejects, deleted; its
+        // value twin is loops/121).
+        //
+        // What it was holding the line against, and what replaced it:
+        // `kernelTDims` is computed just above and `deduceOutputType` has always
+        // appended it to the output TYPE, so the deduced grid was already
+        // rank-(outer+inner). Nothing sized the emitted grid to match: codegen
+        // built the extents table from the LOOP BINDINGS alone, so a rank-2 grid
+        // got a one-entry table ({ 2 }), the inner extent read as 0, and the
+        // program printed `[[], []]` with no diagnostic anywhere -- the same
+        // silent-wrong-answer class as func-arrays/011's rank-2 literal of
+        // computed rows. S3 closes exactly that gap in CodeGen (the trailing
+        // T-dim extents now come from the output type, and the nest writes a
+        // whole row per outer cell); the type side needed no change at all.
+        //
+        // Rejection (2) below survives on its own terms: a complex ACCESSOR
+        // (real/imag/arg) applied to an array operand is still refused, because
+        // that is an elementwise array-valued body the inline path collapses to
+        // a scalar -- a different failure from the one S3 fixed.
         match findBadComplexAccessor lambdaInfo.Body with
         | Some name -> Error (IntrinsicComplexScalarOnly name)
         | None ->
-        if arrayValuedComputeBody then
-            Error (Other "array-valued elementwise kernel body is not supported inside a kernel; reduce the row to a scalar with prodsum or reduce, or compute the elementwise product at top level")
-        else
+        match findBadComplexIntrinsic lambdaInfo.Body with
+        | Some name -> Error (IntrinsicNotComplex name)
+        | None ->
         // After param-type unification, inference variables that flowed into
         // the body's TExprIndex sites may now resolve to nominally-tagged
         // types (e.g., `r` in `lambda(r) -> by_country(r)` is unified with
@@ -10548,9 +11496,25 @@ and buildApplyInfo (env: TypeEnv)
                 if nShared <= 0 then [] else full |> List.truncate nShared
         let isCoIter = not (List.isEmpty coIterSharedRecords)
         // For co-iteration, output type spans the co-iterated records (not the
-        // operands' outer product).
+        // operands' outer product) -- PLUS the kernel's T-dimensions, exactly as
+        // `deduceOutputType`'s step 4 appends them on the outer-product path.
+        //
+        // S3, manifestation M-C. This override replaces deduceOutputType's
+        // result wholesale, so before S3 it silently dropped the kernel's array
+        // return: `method_for(zip(A, B)) <@> lambda(ra, rb) -> ra * rb` came out
+        // rank 1 (just the co-iterated Y axis) even though every cell holds a
+        // whole X row, and lswosa's `family_spectra` grid came out rank 1
+        // Float64 instead of rank 2 Complex128 -- which is why `transpose(grid,
+        // [0,1])` reported "axis 1 out of range" and `grid <@> mag2` reported a
+        // Complex128/Float64 mismatch one line later. Both are the same missing
+        // append. Fresh ids and Kind = TDimension mirror deduceOutputType so the
+        // two paths produce structurally identical records.
         let outputType =
-            if isCoIter then mkArrayArrow coIterSharedRecords outputElemType None
+            if isCoIter then
+                let outputTDims =
+                    kernelTDims
+                    |> List.map (fun idx -> { idx with Kind = TDimension; Id = env.Builder.FreshId() })
+                mkArrayArrow (coIterSharedRecords @ outputTDims) outputElemType None
             else outputType
         let info : TypedApplyInfo = {
             Loop = tLoop; Kernel = resolvedKernel
@@ -10638,7 +11602,7 @@ and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
     types |> List.iter (Option.iter scan)
 
 and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
-    let scopeEnv = enterScope env
+    let scopeEnv = enterCallableBody env
     let commGroups = extractCommGroups parms whereClause
     let antisymGroups = extractAntisymGroups parms whereClause
 
@@ -11749,10 +12713,16 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                             let read = synAt (ExprApp (bufVar, safeIdx :: rest))
                             if isPartial then
                                 // Only the READ is hoisted (that is what the
-                                // row-view wrap keys off). The select stays
-                                // INLINE: a binding whose value is an
-                                // array-valued `if` is declared as a raw
-                                // element pointer, not an Array<T,N>.
+                                // row-view wrap keys off); the select stays
+                                // INLINE. Whichever consumer needs the select
+                                // under a name binds it itself -- IR's lift
+                                // pass hoists an array-valued select out of a
+                                // loop form's `Arrays` slot
+                                // (`isArrayValuedSelect`), and CodeGen declares
+                                // such a binding on the Array<T,N> wrapper path
+                                // (`producesWrapperOf`). Hoisting it here
+                                // instead would name it even where it is only
+                                // ever read inline.
                                 let raw = emit key (fun () -> read)
                                 Some (guardWrap needsLo needsHi idx (synAt (ExprVar raw)) (zeroSliceFor rest.Length))
                             else Some (guardWrap needsLo needsHi idx read zed)
@@ -12436,15 +13406,14 @@ and stmtDestructureBindings (env: TypeEnv) (pat: Pattern) (valueTy: IRType)
                     let flat = IR.flattenTupleLeaves resolvedTy
                     if pats.Length = flat.Length then flat else ts
             | _ -> []
-        pats |> List.iteri (fun i p ->
-            match p.Kind with
-            | PatternKind.PatVar n ->
-                let eTy =
-                    if i < typeList.Length then e.Subst.Resolve(typeList.[i])
-                    else e.Subst.Fresh()
-                bindLeaf n eTy
-            | _ -> bindCompound p)
-        Ok (e, subs, DSPositional)
+        let (entries, slots) = tuplePatternSlots pats
+        for (n, posOpt, _) in entries do
+            let eTy =
+                match posOpt with
+                | Some i when i < typeList.Length -> e.Subst.Resolve(typeList.[i])
+                | _ -> e.Subst.Fresh()
+            bindLeaf n eTy
+        Ok (e, subs, DSTupleAt (entries |> List.map (fun (_, _, s) -> s), slots))
     | PatternKind.PatCons (h, t) ->
         // `let head :: tail = tup`. Flatten/typing/reject rules live in
         // consDestructureLeaves, shared with the top-level, `let static` and
@@ -12726,6 +13695,11 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
         else
         let identities = arrays |> List.map (fun arr ->
             match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+        // S1 SEAM 3, method_for orientation (see the object_for site): a
+        // caret-shorthand `T^k` operand is an arity-constrained var, so
+        // loopOperandArrayType takes its `fallback ()` branch and the loop
+        // iterates a shape nobody declared. Supply the forced shape first.
+        tArrays |> List.iter (fun ta -> materializeArityVar env ta "method_for")
         // Same stale-IRTInfer hazard as the zip arms above.
         let arrayTypes = tArrays |> List.mapi (fun i ta ->
             loopOperandArrayType env (fun () -> getArrayType env arrays.[i]) ta.Type)
@@ -13514,21 +14488,17 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 if pats.Length = flat.Length then flat
                                 else ts  // arity already parked above
                         | _ -> []
-                    pats |> List.mapi (fun i p -> (i, p))
-                    |> List.fold (fun e (i, p) ->
-                        match p.Kind with
-                        | PatternKind.PatVar n ->
-                            let eTy =
-                                if i < typeList.Length then env.Subst.Resolve(typeList.[i])
-                                else env.Subst.Fresh()
-                            let subId = env.Builder.FreshId()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e
-                        | _ -> patternNames p |> List.fold (fun e2 n ->
-                            let subId = env.Builder.FreshId()
-                            let eTy = env.Subst.Fresh()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e2) e) env'
+                    let (entries, slots) = tuplePatternSlots pats
+                    destructure <- DSTupleAt (entries |> List.map (fun (_, _, s) -> s), slots)
+                    entries
+                    |> List.fold (fun e (n, posOpt, _) ->
+                        let eTy =
+                            match posOpt with
+                            | Some i when i < typeList.Length -> env.Subst.Resolve(typeList.[i])
+                            | _ -> env.Subst.Fresh()
+                        let subId = env.Builder.FreshId()
+                        subBindings <- subBindings @ [(n, subId, eTy)]
+                        bindVarSimple n subId eTy e) env'
                 | PatternKind.PatCons (h, t) ->
                     // `let head :: tail = tup` splits an n-tuple into element 0
                     // and the REMAINDER (`tail` is the (n-1)-tuple, not the
@@ -13728,21 +14698,17 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 let flat = IR.flattenTupleLeaves resolvedTy
                                 if pats.Length = flat.Length then flat else ts
                         | _ -> []
-                    pats |> List.mapi (fun i p -> (i, p))
-                    |> List.fold (fun e (i, p) ->
-                        match p.Kind with
-                        | PatternKind.PatVar n ->
-                            let eTy =
-                                if i < typeList.Length then env.Subst.Resolve(typeList.[i])
-                                else env.Subst.Fresh()
-                            let subId = env.Builder.FreshId()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e
-                        | _ -> patternNames p |> List.fold (fun e2 n ->
-                            let subId = env.Builder.FreshId()
-                            let eTy = env.Subst.Fresh()
-                            subBindings <- subBindings @ [(n, subId, eTy)]
-                            bindVarSimple n subId eTy e2) e) env'
+                    let (entries, slots) = tuplePatternSlots pats
+                    destructure <- DSTupleAt (entries |> List.map (fun (_, _, s) -> s), slots)
+                    entries
+                    |> List.fold (fun e (n, posOpt, _) ->
+                        let eTy =
+                            match posOpt with
+                            | Some i when i < typeList.Length -> env.Subst.Resolve(typeList.[i])
+                            | _ -> env.Subst.Fresh()
+                        let subId = env.Builder.FreshId()
+                        subBindings <- subBindings @ [(n, subId, eTy)]
+                        bindVarSimple n subId eTy e) env'
                 | PatternKind.PatCons (h, t) ->
                     match consDestructureLeaves env tValue.Type h t with
                     | Error e ->
@@ -13875,7 +14841,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 for (method, (mangledName, funcVarId, paramTypes, retType)) in List.zip implDecl.Methods methodIds do
                     if methodErr.IsNone then
                         let savedScope = env'.Subst.PushTypeVarScope()
-                        let mutable bodyEnv = enterScope env'
+                        let mutable bodyEnv = enterCallableBody env'
                         let typedParams = method.Params |> List.mapi (fun i p ->
                             let varId = env'.Builder.FreshId()
                             let ty =
@@ -14164,7 +15130,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     if not customConjuncts.IsEmpty then
         env.FuncConstraints.[funcDecl.Name] <- (paramNames, customConjuncts)
 
-    let mutable bodyEnv = enterScope envWithFunc
+    let mutable bodyEnv = enterCallableBody envWithFunc
     let typedParams = funcDecl.Params |> List.mapi (fun i p ->
         let varId = env.Builder.FreshId()
         let assign = match p.Mutability with
@@ -15271,6 +16237,49 @@ let rec private collectAppRankErrors (subst: Subst) (expr: TypedExpr) : CompileE
         | _ -> []
     here @ (typedExprChildren expr |> List.collect (collectAppRankErrors subst))
 
+/// Post-check sweep for MISPLACED provider writes.
+///
+/// `alias.write("path", A)` is a module-level DECLARATION form, not an
+/// expression: `Lowering`'s decl loop intercepts the whole `let _ = c.write(..)`
+/// binding into `IRModule.ProviderWrites` (a spec keyed by the binding's IRId)
+/// and `genProviderWriteBinding` emits the flatten + the provider's writer for
+/// it. Nothing intercepts a write written anywhere ELSE -- inside a block,
+/// a function or lambda body, a loop body, an if/match branch -- so it used to
+/// lower as an ordinary method call on the alias value and reach g++ as
+/// `c.write(std::string("out.csv"), __v5)`, which fails with `'c' was not
+/// declared in this scope`. Refuse it here instead, where the write's own span
+/// is still in hand.
+///
+/// `nested` is false only for the top node of a module-level `let` RHS -- the
+/// one position the decl loop actually intercepts. Every descent sets it, so
+/// the rule needs no per-construct bookkeeping: anything that is not literally
+/// that node is refused, `let static` included (the intercept arm matches
+/// `TDeclLet` alone).
+let rec private collectMisplacedProviderWrites (subst: Subst) (nested: bool) (expr: TypedExpr) : CompileError list =
+    let here =
+        match expr.Kind with
+        | TExprApp ({ Kind = TExprField (recv, "write", _) }, _) when nested ->
+            (match recv.Kind, subst.Resolve recv.Type with
+             | TExprVar (alias, _, _), IRTNamed pn when (Blade.ProviderRegistry.tryFind pn).IsSome ->
+                 [ { Error = ProviderWriteModuleScope alias
+                     Span = expr.Span
+                     Context = []
+                     Code = None } ]
+             | _ -> [])
+        | _ -> []
+    here @ (typedExprChildren expr |> List.collect (collectMisplacedProviderWrites subst true))
+
+/// Declaration entry points for the sweep above, tagged with whether the
+/// expression sits in the one blessed position (a plain `let`'s RHS).
+let private declWriteRoots (decl: TypedDecl) : (bool * TypedExpr) list =
+    let ofFunc (f: TypedFunctionDecl) = [(true, f.Body)]
+    match decl with
+    | TDeclLet b -> [(false, b.Value)]
+    | TDeclStatic b -> [(true, b.Value)]
+    | TDeclFunction f -> ofFunc f
+    | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
+    | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
+
 /// Every expression a zonked declaration carries, for the sweep above.
 let private declExprs (decl: TypedDecl) : TypedExpr list =
     let ofFunc (f: TypedFunctionDecl) = [f.Body]
@@ -15415,7 +16424,13 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             zonked.Decls |> List.collect declExprs
                          |> List.collect (collectAppRankErrors currentEnv.Subst)
         else []
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors)
+    // Misplaced provider writes: structural, inference-independent (an
+    // unresolved receiver simply fails the IRTNamed match), so unlike the rank
+    // sweep it runs even when the module already has errors.
+    let writeErrors =
+        zonked.Decls |> List.collect declWriteRoots
+                     |> List.collect (fun (nested, e) -> collectMisplacedProviderWrites currentEnv.Subst nested e)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ writeErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()

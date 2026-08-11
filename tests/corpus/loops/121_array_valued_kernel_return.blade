@@ -1,0 +1,48 @@
+// TEST: Array Valued Kernel Return
+// ============================================================================
+// docs/plan-kernel-body-materialization.md manifestation M-C1/M-C2, stage S3.
+// The VALUE twin of the deleted diagnostics/069_array_valued_kernel_return_rejects,
+// which held the line from S0 and whose header recorded exactly these numbers.
+//
+// THIS PROGRAM ONCE COMPILED, RAN, AND PRINTED `grid = [[], []]` with no
+// diagnostic on any channel. `kernelTDims` was computed at the apply seam and
+// `deduceOutputType` had always appended it, so the deduced grid was already
+// rank 2 -- but codegen built the extents table from the LOOP BINDINGS alone,
+// so a rank-2 grid got a one-entry table (`{ 2 }`), the inner extent read as 0,
+// and every row printed empty. Byte for byte the failure
+// func-arrays/011 documents for rank-2 literals of computed rows, and its fix is
+// the same one: the missing trailing extents come from the array TYPE.
+//
+// What S3 added, and what each half is pinned by:
+//   * the extents table now carries the kernel's T-dimension extents, so the
+//     table is `{ 2, 4 }` and the allocation matches the declared rank;
+//   * the nest writes a whole ROW per outer cell (copy the returned pool into
+//     the output row at its offset) instead of assigning an `Array<T,1>`
+//     wrapper into a scalar slot;
+//   * the callee's row is freed when it owned it (`freshReturnOf`), so this is
+//     one alloc/free per outer cell, not a leak per cell.
+//
+// BOTH SPELLINGS are pinned because the deleted guard's whole point was that
+// spelling should not matter: `gridCall` returns a CALL (`-> spec(r, fs)`) and
+// `gridInline` writes the same computation inline. They must agree cell for
+// cell. A block body (`-> { ... |> compute }`) is the third spelling and is
+// covered by loops/117.
+//
+// Values: row k of `grid` is fs * prodsum(m_k, m_k), i.e.
+//   row 0: (1+4+9)   * [1,2,3,4] = 14  * [1,2,3,4]
+//   row 1: (16+25+36)* [1,2,3,4] = 77  * [1,2,3,4]
+// ============================================================================
+let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let fs: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+
+function spec(r: Array<Float like Idx<3>>, f: Array<Float like Idx<4>>) = {
+    (f <@> lambda(x) -> x * prodsum(r, r)) |> compute
+}
+
+let gridCall = method_for(m) <@> lambda(r: Array<Float like Idx<3>>) -> spec(r, fs) |> compute
+
+let gridInline = method_for(m) <@> lambda(r: Array<Float like Idx<3>>) ->
+    (fs <@> lambda(x) -> x * prodsum(r, r)) |> compute
+
+// EXPECT: gridCall = [[14, 28, 42, 56], [77, 154, 231, 308]]
+// EXPECT: gridInline = [[14, 28, 42, 56], [77, 154, 231, 308]]

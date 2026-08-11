@@ -1,0 +1,8 @@
+// TEST: Autocorr Maxlag Range (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: maxlag must be in 1..
+import ppl as ppl
+// A lag needs at least one product term: maxlag is confined to 1..n-1, and
+// asking a length-4 chain for lag 4 is refused with the valid range.
+let chain4: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let ac = ppl.autocorr(chain4, 4)

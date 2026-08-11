@@ -1,0 +1,12 @@
+// TEST: Log10 Kernel Param Dimensioned (rejects)
+// ERROR: BL3006
+// The non-complex intrinsics are exactly {floor, ceil, log10} (mathIntrinsics
+// minus complexMathIntrinsics), so all three took the pin arm and all three
+// leaked a dimensioned kernel param -- not just the rounding pair. This is the
+// kernel-position twin of unit-errors/007, and it reaches the SAME rejection by
+// a different route: log10 has no case of its own in unitRulesForUnaryOp, so
+// the OpMath catch-all's transcendental rule is what refuses it here, while
+// floor/ceil (unit-errors/015) hit the dedicated scale-invariance case.
+Unit meters
+let D: Array<Float<meters> like Idx<3>> = [10.0, 100.0, 1000.0]
+let bad = (method_for(D) <@> lambda(d) -> log10(d)) |> compute

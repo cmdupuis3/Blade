@@ -1,16 +1,28 @@
-/// `rand`-module elaboration: rewrites `alias.uniform/normal(key, shape)` into the compiler-internal builtins
-/// `__rand_uniform` / `__rand_normal`, which the type-checker self-types (dense Float64 array of the static shape) and
-/// codegen materializes via the blade_rand runtime.
+/// `rand`-module elaboration: rewrites `alias.<fam>(key, params.., shape)` into the compiler-internal builtins
+/// `__rand_<fam>`, which the type-checker self-types (dense Float64 array of the static shape) and codegen
+/// materializes via the blade_rand runtime.
 ///
 /// Surface (reachable only through `import rand [as <alias>]`):
 ///
-///   rand.uniform(key, n)          -- rank-1 Array<Float64 like Idx<n>> ~ U[0,1)
-///   rand.uniform(key, [m, n])     -- rank-2, row-major
-///   rand.normal(key, n)           -- N(0,1) via Box-Muller
+///   rand.uniform(key, n)                 -- rank-1 Array<Float64 like Idx<n>> ~ U[0,1)
+///   rand.uniform(key, [m, n])            -- rank-2, row-major
+///   rand.normal(key, n)                  -- N(0,1) via Box-Muller
+///   rand.exponential(key, rate, n)       -- Exp(rate), inverse CDF
+///   rand.gamma(key, shape, rate, n)      -- Gamma(shape, rate), Marsaglia-Tsang
+///   rand.poisson(key, lam, n)            -- Poisson(lam), Knuth
+///   rand.bernoulli(key, p, n)            -- Bernoulli(p), as 0.0/1.0
+///   rand.beta(key, a, b, n)              -- Beta(a, b), from two gammas
+///   rand.categorical(key, W, n)          -- index in [0,|W|), P(i) ~ W_i; Int64 elements
 ///
-/// `key` is an Int64 stream key (same key => same draws). `shape` is a static int or a list of static ints (`let static`
-/// names or literals). Unlike the math module this pass synthesizes no Blade source -- a counter-free RNG is not
-/// expressible in Blade (no unsigned/bitwise ops), so the RNG lives in the C++ runtime and this pass only rewrites the call.
+/// `key` is an Int64 stream key (same key => same draws). The distribution parameters are ordinary RUNTIME Float64
+/// expressions -- they need not be static, and are evaluated once per fill. `shape` is a static int or a list of static
+/// ints (`let static` names or literals) and is always the LAST argument. Every family yields Float64 elements,
+/// including the integer-valued poisson/bernoulli (see cpp/rand_runtime.hpp for why) -- except `categorical`, which
+/// yields Int64 because its draws are subscripts. `categorical`'s `W` is a rank-1 Float64 array (unnormalized weights
+/// are fine) with a STATIC extent, not a scalar; it is the one array-valued parameter in the surface.
+///
+/// Unlike the math module this pass synthesizes no Blade source -- a counter-free RNG is not expressible in Blade
+/// (no unsigned/bitwise ops), so the RNG lives in the C++ runtime and this pass only rewrites the call.
 ///
 /// Pipeline position: after Math elaboration, BEFORE Grad expansion -- rand output is not differentiable, so Grad sees
 /// only the settled opaque builtin.
@@ -46,18 +58,76 @@ let private resolveShape (statics: StaticEnv) (what: string) (shapeE: Expr) : Re
                 else Error (sprintf "%s: shape extents must be positive (got %d)" what n))))
         (Ok [])
 
-/// Elaborate one qualified rand op. `keyE` is passed through verbatim; the shape becomes trailing int-literal args.
+/// The `rand` surface: (op, internal builtin, count of non-shape parameter arguments).
+/// Every op has the shape `rand.<op>(key, p1, .., pk, shape)` -- key first, shape LAST, the family's
+/// parameters in between. This pass does not type the parameters at all; it counts them, passes them
+/// through verbatim, and lets the checker arm decide what each one must be. The checker fixes the same
+/// arity on the intrinsic, so this table is the surface spelling, not the authority.
+///
+/// Those parameters are ordinary runtime SCALAR Float64 expressions (only the shape is static) for
+/// every family EXCEPT `categorical`, whose single parameter is an ARRAY: a rank-1 Float64 weights
+/// array whose extent the checker pins statically. Adding a scalar-parameter family = one row here,
+/// one row in the checker arm, a C++ fill, and a mirror.
+///
+/// CATEGORICAL, formerly deferred here, resolved the two design questions that kept it out of wave 1:
+///
+///  1. ARRAY PARAMETER CHANNEL. Every other parameter is a Float64 scalar -- a `TypedExpr` in
+///     TExprRandGen, an `IRExpr` in RandGen, a `(double)`-cast argument in codegen, a `float` in
+///     RandMirror.draws. Weights get a SECOND, differently-shaped channel carried alongside rather
+///     than inside `pars`: an explicit `weights` field paired with the checker-pinned static extent,
+///     emitted by codegen as `pool_base(W.data), (size_t)k` and unwrapped by the interpreter from a
+///     VArray's SFloat store. The extent must be a literal because the length travels with the
+///     pointer; a symbolic extent is refused in the checker arm.
+///  2. OUTPUT TYPE. Categorical yields INDICES, so it returns Int64 rather than joining
+///     poisson/bernoulli in the all-Float64 convention -- Float64 indices would need a coercion the
+///     rand surface does not have, defeating the purpose. This is the first non-`double` fill, and it
+///     cost less than expected: codegen's allocation was already generic in `elemTypeToCpp`, so the
+///     checker choosing ETInt64 selects an `int64_t` pool by itself. Only the fill signature
+///     (`int64_t* out`) and the mirror's return type (`int64[]` into an SInt store) are new.
+///
+/// The drawn indices DO subscript arrays directly -- `method_for(idx) <@> lambda(i) -> w[i]` gathers,
+/// pinned by corpus test 017 -- so no index-tag seam blocks the motivating SMC-resampling use.
+let private ops : (string * string * int) list =
+    [ "uniform",     "__rand_uniform",     0
+      "normal",      "__rand_normal",      0
+      "exponential", "__rand_exponential", 1   // rate
+      "gamma",       "__rand_gamma",       2   // shape, rate
+      "poisson",     "__rand_poisson",     1   // lam
+      "bernoulli",   "__rand_bernoulli",   1   // p
+      "beta",        "__rand_beta",        2   // a, b
+      "categorical", "__rand_categorical", 1 ] // weights (ARRAY, not a scalar)
+
+/// Per-op parameter names, for the arity error message only.
+let private paramNames (op: string) : string list =
+    match op with
+    | "exponential" -> ["rate"]
+    | "gamma"       -> ["shape"; "rate"]
+    | "poisson"     -> ["lam"]
+    | "bernoulli"   -> ["p"]
+    | "beta"        -> ["a"; "b"]
+    | "categorical" -> ["weights"]
+    | _             -> []
+
+/// Elaborate one qualified rand op. `keyE` and the distribution parameters are passed through verbatim
+/// (they are runtime Float64 expressions); the shape becomes trailing int-literal args.
 let private elabOp (statics: StaticEnv) (op: string) (args: Expr list) : Result<Expr, string> =
-    let build fn keyE shapeE =
-        resolveShape statics (sprintf "rand.%s" op) shapeE
-        |> Result.map (fun dims ->
-            syn (ExprApp (v fn, keyE :: (dims |> List.map (fun n -> syn (ExprLit (LitInt (int64 n))))))))
-    match op, args with
-    | "uniform", [keyE; shapeE] -> build "__rand_uniform" keyE shapeE
-    | "normal",  [keyE; shapeE] -> build "__rand_normal"  keyE shapeE
-    | ("uniform" | "normal"), _ ->
-        Error (sprintf "rand.%s: expected rand.%s(key, shape) where shape is a static int or list of static ints" op op)
-    | _ -> Error (sprintf "rand: unknown op '%s' (available: uniform, normal)" op)
+    match ops |> List.tryFind (fun (o, _, _) -> o = op) with
+    | None ->
+        Error (sprintf "rand: unknown op '%s' (available: %s)" op
+                   (ops |> List.map (fun (o, _, _) -> o) |> String.concat ", "))
+    | Some (_, fn, nPars) ->
+        // key + nPars distribution params + exactly one shape argument.
+        if List.length args <> nPars + 2 then
+            Error (sprintf "rand.%s: expected rand.%s(key%s, shape) where shape is a static int or list of static ints"
+                       op op (paramNames op |> List.map (sprintf ", %s") |> String.concat ""))
+        else
+            let keyE = List.head args
+            let parEs = args |> List.skip 1 |> List.take nPars
+            let shapeE = List.last args
+            resolveShape statics (sprintf "rand.%s" op) shapeE
+            |> Result.map (fun dims ->
+                let dimEs = dims |> List.map (fun n -> syn (ExprLit (LitInt (int64 n))))
+                syn (ExprApp (v fn, (keyE :: parEs) @ dimEs)))
 
 // Rewrite walker (same shape as MathElaborate.rewriteExpr)
 let rec private rewriteExpr (statics: StaticEnv) (aliases: Set<string>) (e: Expr) : Result<Expr, string> =

@@ -1,0 +1,86 @@
+// TEST: Generic Function Body Nested Map
+// ============================================================================
+// loops/126 pins the kernel-body nested map at MODULE level with concrete
+// array types. This pins the note 126's merge deliberately left open: the same
+// shape inside a NAMED FUNCTION BODY whose parameters are the caret shorthand
+// (`Float64^1`), which makes the whole function HM-polymorphic and the loop
+// run against a SPECIALIZED clone of the lambda.
+//
+// `sin <@> wt` emitted `double __v7 = 0; __v7 += std::sin(__v6);` --
+// genApplyCombinator's SCALAR-output accumulation path: no loop at all, and an
+// element name (`__v6`) nothing declares, so g++ refused the specialization
+// with "'__v6' was not declared in this scope".
+//
+// The apply's OutputType was the culprit, and the two ORIENTATIONS of one
+// apply disagreed about it. `wt` is an array-valued INTERMEDIATE built from a
+// caret-shorthand operand, so at the moment `sin <@> wt` is typed its type is
+// still an unresolved inference var (the binop seam defers when neither side
+// pins the shape). `method_for`'s operand fallback recovers a RANK-1 record for
+// a named operand; `object_for`'s degraded to RANK 0, which types the whole
+// apply SCALAR. So `wt <@> sin` compiled and ran while the identical
+// `sin <@> wt` miscompiled -- hence BOTH spellings below, plus the `|> compute`
+// and bare forms of the intermediate, which take different emitter routes
+// (an IRLet-wrapped loop application vs. an IRCompute).
+//
+// Only the ABSTRACT spelling reaches it: with `Array<Float64 like Idx<n>>`
+// parameters the operand resolves to an array and no fallback runs. loops/126
+// is that concrete control; `conc` below is its in-function twin.
+//
+// Same constant family as loops/117 and 126, out[k] = sum_t sin(w[k] * t) over
+// t = [1, 2, 3]:
+//   k=0: sin1 + sin2 + sin3 =  1.89188841969345
+//   k=1: sin2 + sin4 + sin6 = -0.126920566681172
+// All four spellings must agree with that and with each other.
+// ============================================================================
+
+// Abstract params, intermediate forced with `|> compute`.
+function g_open(ws: Float64^1, t: Float64^1) = {
+    ws <@> lambda(w) -> {
+        let wt = (w * t) |> compute
+        let c = sin <@> wt
+        reduce(c, (+))
+    }
+}
+
+// Abstract params, intermediate left bare (Lowering's forceBareCombinatorLets
+// supplies the force a body-level let has no downstream site for).
+function g_bare(ws: Float64^1, t: Float64^1) = {
+    ws <@> lambda(w) -> {
+        let wt = (w * t)
+        let c = sin <@> wt
+        reduce(c, (+))
+    }
+}
+
+// The method_for orientation of the same apply -- the one that always worked,
+// kept as the control that the fix must not move.
+function g_mf(ws: Float64^1, t: Float64^1) = {
+    ws <@> lambda(w) -> {
+        let wt = (w * t) |> compute
+        let c = wt <@> sin
+        reduce(c, (+))
+    }
+}
+
+// Concrete-typed twin: no HM specialization, no fallback, loops/126's shape
+// moved inside a function body.
+function g_conc(ws: Array<Float64 like Idx<2>>, t: Array<Float64 like Idx<3>>) = {
+    ws <@> lambda(w) -> {
+        let wt = (w * t) |> compute
+        let c = sin <@> wt
+        reduce(c, (+))
+    }
+}
+
+let ws: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let t: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+
+let open_form = g_open(ws, t) |> compute
+let bare_form = g_bare(ws, t)
+let mf_form = g_mf(ws, t) |> compute
+let conc = g_conc(ws, t) |> compute
+
+// EXPECT: open_form = [1.89188841969345, -0.126920566681172]
+// EXPECT: bare_form = [1.89188841969345, -0.126920566681172]
+// EXPECT: mf_form = [1.89188841969345, -0.126920566681172]
+// EXPECT: conc = [1.89188841969345, -0.126920566681172]

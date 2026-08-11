@@ -1,0 +1,35 @@
+// TEST: Zip Rank-2 Elementwise Kernel Body
+// ============================================================================
+// `ra * rb` between two rank-1 ROW params is an elementwise ARRAY-VALUED kernel
+// body: the both-array binop arm re-synthesizes it into a nested
+// `compute(method_for(zip(ra, rb)) <@> lambda(zl, zr) -> zl * zr)` whose output
+// rank is 1, so every cell of the outer grid holds a whole row.
+//
+// THIS FILE WAS A REJECT PROBE (`ERROR: BL3999`) and is now a VALUE test, which
+// docs/plan-kernel-body-materialization.md section 8 asked for by name --
+// including its instruction to pin the VALUES rather than merely the absence of
+// the error. The reason that instruction exists is the history: in expression
+// position the inline codegen used to collapse this body to (sum ra)(sum rb), a
+// SILENT MISCOMPILE that printed [360, 2250] = [6*60, 15*150] instead of the
+// elementwise rows. "It no longer errors" would not have caught that; the
+// numbers below would.
+//
+// Two S3 pieces make it work, and this is the only corpus program that needs
+// BOTH: the co-iteration output type now appends the kernel's T-dimensions
+// (before S3 the `isCoIter` override in buildApplyInfo replaced
+// deduceOutputType's result wholesale and silently dropped them, so P came out
+// rank 1 over the Y axis alone), and the nest writes a whole row per outer cell.
+//
+// loops/085 is the supported scalar-collapsing form (prodsum/reduce over the
+// rows); it stays as the discriminator that a row-CONSUMING kernel is still the
+// cheaper spelling when you only need a scalar.
+// ============================================================================
+type Y = Idx<2>
+type X = Idx<3>
+let A: Array<Float64 like Y, X> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Y, X> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+
+let P = method_for(zip(A, B)) <@> lambda(ra: Array<Float64 like X>, rb: Array<Float64 like X>) -> ra * rb |> compute
+
+// Elementwise per row -- NOT (sum ra)(sum rb), which would be [360, 2250].
+// EXPECT: P = [[10, 40, 90], [160, 250, 360]]

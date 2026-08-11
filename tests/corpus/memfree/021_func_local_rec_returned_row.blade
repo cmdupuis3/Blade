@@ -1,0 +1,42 @@
+// TEST: Memfree Function Local Rec Returned Row
+// ============================================================================
+// Free-hazard guard: a `let rec` trajectory built INSIDE a function body whose
+// tail returns one of its ROWS. Two properties have to hold at once, and each
+// one breaks the other's evidence if it regresses alone.
+//
+//   1. The block's staging buffer must not be re-materialized into a second
+//      pool. genFuncBody's deepUnroll flattens the block's chain into the
+//      body's let list, so the block value arrives as an ordinary
+//      `let traj = <staging>` sibling rather than at genLetChainBinding --
+//      a second site with the same double-materialize to elide.
+//   2. The returned row must not stay a VIEW into the trajectory's pool.
+//      Nothing could free that pool afterwards: not the frame (the view still
+//      reads it) and not the caller (it never sees the base wrapper), so it
+//      leaked once PER CALL. The row is copied out and the trajectory is
+//      scope-freed like any other temporary.
+//
+// The values below are the check that neither repair moved data: the caller
+// must still read the trajectory's LAST row, not its first or a stale pool.
+// ============================================================================
+type C = Idx<3>
+type Inner = Idx<4>
+type Steps = Idx<4>
+function half(u: Array<Float like C>) -> Array<Float like C> = 0.5 * u
+function evolve(u0: Array<Float like C>) -> Array<Float like C> = {
+    let rec traj: Array<Float like Inner, C> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: half(prefix(n - 1))
+    traj((3 : Inner))
+}
+let rec outer: Array<Float like Steps, C> =
+    match outer with
+    | zero -> zero
+    | zero :: s -> zero :: [8.0, 16.0, 24.0]
+    | prefix :: n -> prefix :: evolve(prefix(n - 1))
+let fin = outer((3 : Steps))
+let mass = reduce(fin, (+))
+// EXPECT: outer = [[8, 16, 24], [1, 2, 3], [0.125, 0.25, 0.375], [0.015625, 0.03125, 0.046875]]
+// EXPECT: fin = [0.015625, 0.03125, 0.046875]
+// EXPECT: mass = 0.09375

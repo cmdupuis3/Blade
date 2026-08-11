@@ -1790,12 +1790,26 @@ type ProviderWriteSpec = {
 
 /// Deferred array-fill constructor spec, keyed in RandomInits by the receiving
 /// binding's IRId. `fill_random(mod)` records a FillModulus (rand() % mod, C
-/// rand(), nondeterministic); `rand.uniform/normal(key)` records a RandGen
+/// rand(), nondeterministic); `rand.<fam>(key, params..)` records a RandGen
 /// (deterministic mt19937_64-based runtime, keyed by `key`). Both allocate the
 /// binding's array type and fill its pool at codegen.
+///
+/// RandGen `pars` are the family's runtime Float64 scalar parameters in surface
+/// order -- ordinary IRExprs evaluated ONCE at the binding's position (not per
+/// draw), emitted as trailing `(double)` arguments after the key. Empty for
+/// uniform/normal; one for exponential/poisson/bernoulli; two for gamma/beta.
+///
+/// `weights` is the array-valued parameter channel, `Some` only for
+/// `categorical` (which has no scalar pars). It pairs the lowered rank-1
+/// Float64 array expression with the STATIC extent the checker pinned: codegen
+/// emits `pool_base(<expr>.data), (size_t)<len>` in the parameter position, so
+/// the length travels with the pointer rather than being re-derived from the
+/// expression's type at each consumer.
 type RandomFillSpec =
     | FillModulus of IRExpr              // fill_random(mod)
-    | RandGen of kind: string * key: IRExpr   // rand.<kind>(key), kind = "uniform" | "normal"
+    // rand.<kind>(key, pars..[, weights]); kind = uniform | normal | exponential
+    // | gamma | poisson | bernoulli | beta | categorical
+    | RandGen of kind: string * key: IRExpr * pars: IRExpr list * weights: (IRExpr * int) option
 
 type IRModule = {
     Name: string
@@ -4092,9 +4106,28 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
 /// pre-substitution type variables, so only node-carried types are safe.
 /// Anything else returns None; the call site falls back to the function's
 /// declared type-var positions.
-let exprTypeIfKnown (expr: IRExpr) : IRType option =
+let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
     match expr with
     | CarriedType ty -> Some ty
+    // A TUPLE LITERAL carries no type of its own -- `IRTuple` is a bare
+    // component list -- so an HM call site whose argument is written
+    // `f((a, b))` learned NOTHING about the parameter's component type vars.
+    // With `f(st: Tuple<T^1, U^1>)` that leaves T and U unbound, `paramVarsCovered`
+    // false, no specialization generated, and the (dropped) HM original's call
+    // site left dangling: `blade check` passes and IR validation then reports
+    // BL6001 "unresolved type variable" plus a dangling VarId. Measured on
+    // `functions/059`'s fully-abstract spelling, `sql-group-by/029`'s
+    // `rowdotT`, and `examples/lswosa.blade`'s `hanning`/`wosa_lsdft`.
+    //
+    // Recursing COMPONENTWISE keeps the node-carried discipline this function
+    // exists to enforce: every leaf type still comes from `CarriedType`, and a
+    // tuple with even one unknown component still answers None rather than
+    // inventing a partial type.
+    | IRTuple es ->
+        let comps = es |> List.map exprTypeIfKnown
+        if comps |> List.forall Option.isSome then
+            Some (IRTTuple (comps |> List.map Option.get))
+        else None
     | _ -> None
 
 /// Unify a parameter type against an argument type, accumulating
@@ -4304,19 +4337,20 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
     // The original lambda stays in module.Functions unchanged.
     let origParamIds = func.Params |> List.map (fun p -> p.VarId) |> Set.ofList
     let lambdaClones = System.Collections.Generic.Dictionary<IRId, IRCallable>()
-    // Ids applied directly in the body (heads of IRApp). These go through the
+    // Ids applied directly in a body (heads of IRApp). These go through the
     // module-level call-site rewrite + memoized spec path, so we must NOT
     // clone them into this parent -- doing so would bypass spec dedup and
-    // leave any inner HM calls in the clone unrewritten.
-    let appliedIds =
+    // leave any inner HM calls in the clone unrewritten. Computed per body,
+    // since the discovery walk below visits clone bodies too.
+    let appliedIdsOf (body: IRExpr) =
         let acc = System.Collections.Generic.HashSet<IRId>()
         mapIRExpr (fun e ->
             (match e with
              | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
              | _ -> ())
-            e) bodyWithTypes |> ignore
+            e) body |> ignore
         acc
-    let needsClone (c: IRCallable) : bool =
+    let needsClone (appliedIds: System.Collections.Generic.HashSet<IRId>) (c: IRCallable) : bool =
         // (a) closures capturing one of this function's params, or (b)
         // HM-polymorphic callables referenced as first-class values (e.g. an
         // operator-section lambda passed as a `reduce` kernel): the
@@ -4325,13 +4359,25 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
         // callees are excluded -- they specialize via the normal spec path.
         (c.Captures |> List.exists (fun cap -> Set.contains cap.Id origParamIds))
         || (hasTypeVarsInSignature c && not (appliedIds.Contains c.Id))
-    // Walk bodyWithTypes to identify referenced lambdas needing clones.
-    let _ =
+    // Walk bodyWithTypes to identify referenced lambdas needing clones --
+    // TRANSITIVELY. A lifted kernel can reference a SECOND callable as a value
+    // (`__lambda_49`'s broadcast body holding `__lambda_48`), and that second
+    // one is visible only from inside the first one's body. Scanning the
+    // parent's body alone left it uncloned while the module-level filter
+    // dropped it for having type vars in its params, so the clone referenced a
+    // deleted id -- BL6001 "dangling VarId reference: v48" on `functions/055`.
+    // Worklist over clone bodies, terminating because `lambdaClones` is keyed
+    // by ORIGINAL id and each id is cloned at most once.
+    let pendingBodies = System.Collections.Generic.Queue<IRExpr>()
+    pendingBodies.Enqueue bodyWithTypes
+    while pendingBodies.Count > 0 do
+        let scanBody = pendingBodies.Dequeue()
+        let appliedIds = appliedIdsOf scanBody
         mapIRExpr (fun e ->
             (match e with
              | IRVar (id, _) when callables.ContainsKey id && not (lambdaClones.ContainsKey id) ->
                  let lam = callables.[id]
-                 if needsClone lam then
+                 if needsClone appliedIds lam then
                      let cloneId = builder.FreshId()
                      let newCaps =
                          lam.Captures |> List.map (fun cap ->
@@ -4371,18 +4417,29 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
                              Body = newBody
                              RetType = newRet }
                      lambdaClones.[id] <- clone
+                     pendingBodies.Enqueue newBody
              | _ -> ())
-            e) bodyWithTypes
+            e) scanBody |> ignore
 
+    // Point every reference at the CLONE. The parent's body needs its param
+    // remap as well; clone bodies already had theirs applied at construction,
+    // and only need the callable-id redirect -- but they DO need it, or a
+    // clone keeps calling the about-to-be-deleted original (the other half of
+    // the `functions/055` dangle).
+    let redirectToClones (e: IRExpr) =
+        match e with
+        | IRVar (id, _) when lambdaClones.ContainsKey id ->
+            let clone = lambdaClones.[id]
+            let funcTy = mkFuncArrow (clone.Params |> List.map (fun p -> p.Type)) clone.RetType
+            IRVar (clone.Id, funcTy)
+        | _ -> e
     let bodyRewritten =
         mapIRExpr (fun e ->
             match e with
             | IRVar (id, ty) when varIdRemap.ContainsKey id -> IRVar (varIdRemap.[id], ty)
-            | IRVar (id, _) when lambdaClones.ContainsKey id ->
-                let clone = lambdaClones.[id]
-                let funcTy = mkFuncArrow (clone.Params |> List.map (fun p -> p.Type)) clone.RetType
-                IRVar (clone.Id, funcTy)
-            | _ -> e) bodyWithTypes
+            | _ -> redirectToClones e) bodyWithTypes
+    for kv in lambdaClones |> Seq.toList do
+        lambdaClones.[kv.Key] <- { kv.Value with Body = mapIRExpr redirectToClones kv.Value.Body }
     // Name-mangle by binding signature, using the occurrence-id-independent
     // canonTypeKey so the emitted name matches the HM dedup key exactly (arrays
     // don't collapse to a colliding "T"; see canonTypeKey).
@@ -4438,6 +4495,19 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     // Cloned lambdas accumulated across spec generation.
     // See specializeHMFunction's clone logic.
     let lambdaClones = System.Collections.Generic.List<IRCallable>()
+    // EMISSION ORDER for the functions this pass synthesizes, keyed on the
+    // ORIGIN they were derived from (IRModule.DerivedFuncOrigins; the rule and
+    // its rationale live at CodeGen.emissionOrderedItems). Shape
+    // monomorphization has always registered its copies; HM specs and their
+    // lambda clones did not, and their freshly-minted ids sort after every
+    // call site that names them. That is invisible while the caller is a
+    // namespace-scope C++ function -- a forward declaration covers it -- and
+    // FATAL once the caller is one of the `std::function` locals
+    // `computeMainLocalFuncIds` puts inside main(), which get no forward
+    // declaration: "'family_spectra_HM_...' was not declared in this scope".
+    // Measured on examples/lswosa.blade, whose whole call chain is main-local
+    // (it captures module bindings) and HM-specialized at every level.
+    let mutable derivedOrigins : Map<IRId, IRId> = Map.empty
     let mutable changed = true
     let mutable iterationGuard = 0
     let MAX_ITERATIONS = 16  // pathological safety net; real programs converge in 2-3
@@ -4455,8 +4525,21 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         let sitesFromSpecs =
             specMap |> Map.toList
                     |> List.collect (fun (_, spec) -> collectHMCallSites hmFuncMap spec.Body)
+        // AND CLONE BODIES, for the same reason spec bodies are scanned. A
+        // lifted kernel that calls an HM helper (`lambda(trow, srow) ->
+        // hanning((trow, srow), ..)`) is cloned-and-substituted alongside its
+        // enclosing spec, and only in the CLONE do that inner call's argument
+        // types become concrete -- in the original the helper's own signature
+        // vars are still bound to the enclosing function's vars. Without this
+        // source the helper's concrete specialization was never requested, the
+        // clone kept calling the (about-to-be-dropped) abstract original, and
+        // its still-open var reached the validator as BL6001. Measured on
+        // `examples/lswosa.blade`: `family_spectra`'s grid kernel, calling
+        // `hanning` and `wosa_lsdft`.
+        let sitesFromClones =
+            lambdaClones |> Seq.collect (fun c -> collectHMCallSites hmFuncMap c.Body) |> List.ofSeq
         let uniqueSites =
-            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs) |> List.distinct
+            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs @ sitesFromClones) |> List.distinct
 
         for (funcId, sortedBindings) in uniqueSites do
             let key = (funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
@@ -4489,6 +4572,12 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                 let (spec, clones) = specializeHMFunction origFunc bindingMap builder availableCallables
                 specMap <- Map.add key spec specMap
                 lambdaClones.AddRange(clones)
+                // Both the spec and every lambda it cloned belong at the
+                // ORIGIN's program point: the spec replaces calls the origin
+                // served, and the clones are referenced only from the spec.
+                derivedOrigins <- Map.add spec.Id origFunc.Id derivedOrigins
+                for c in clones do
+                    derivedOrigins <- Map.add c.Id origFunc.Id derivedOrigins
                 changed <- true
 
     // 3. Build the call-site rewriter using the now-frozen specMap.
@@ -4538,7 +4627,9 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         let fromSpecs =
             specMap |> Map.toList
                     |> List.collect (fun (_, s) -> collectAllBindingsFromExpr s.Body)
-        fromFns @ fromBindings @ fromSpecs
+        let fromClones =
+            lambdaClones |> Seq.collect (fun c -> collectAllBindingsFromExpr c.Body) |> List.ofSeq
+        fromFns @ fromBindings @ fromSpecs @ fromClones
     // Group by ID; keep only IDs whose observations all agree.
     let globalBindings : Map<int, IRType> =
         allObservedBindings
@@ -4608,9 +4699,33 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                         Captures = spec.Captures |> List.map (fun c ->
                                    { c with Type = substTypeInIRType bindings c.Type }) })
 
+    // Clone bodies get the SAME treatment as ordinary and spec function
+    // bodies, and for the same two reasons: their inner HM calls must be
+    // rewritten to the specs the fixpoint generated for them (the abstract
+    // originals are dropped from `newFunctions` just below), and any residual
+    // IRTInfer -- in the body, the return type, the params, or a CAPTURE's
+    // type -- substituted out. Appending them raw left an lswosa kernel clone
+    // still calling the deleted `hanning` and carrying `T?10014` in both its
+    // body and its captured function-value type.
+    let cloneFuncs =
+        lambdaClones
+        |> List.ofSeq
+        |> List.map (fun c ->
+            let bindings = mergeBindings (unionBindingsFromExpr c.Body)
+            let bodyWithRewrittenCalls = mapIRExpr rewriteCallSite c.Body
+            let bodyWithSubstitutedTypes = substTypeInIRExpr bindings bodyWithRewrittenCalls
+            { c with Body = bodyWithSubstitutedTypes
+                     RetType = substTypeInIRType bindings c.RetType
+                     Params = c.Params |> List.map (fun p ->
+                                { p with Type = substTypeInIRType bindings p.Type })
+                     Captures = c.Captures |> List.map (fun cap ->
+                                { cap with Type = substTypeInIRType bindings cap.Type }) })
     { modul with
-        Functions = newFunctions @ specFuncs @ (lambdaClones |> List.ofSeq)
-        Bindings = newBindings }
+        Functions = newFunctions @ specFuncs @ cloneFuncs
+        Bindings = newBindings
+        DerivedFuncOrigins =
+            derivedOrigins
+            |> Map.fold (fun acc k v -> Map.add k v acc) modul.DerivedFuncOrigins }
 
 /// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose
 /// operands are BOTH arrays becomes the `method_for(zip ..) <@> kernel |>
@@ -5899,6 +6014,33 @@ let private isInlineArrayLitArg (e: IRExpr) : bool =
     | IRArrayLit _ -> true
     | _ -> false
 
+/// An ARRAY-VALUED SELECT sitting directly in a loop form's `Arrays` list --
+/// the third instance of the same gap as `isInlineArrayLitArg`. A recursive
+/// array's out-of-prefix lag read desugars to exactly this shape: TypeCheck's
+/// `rewritePrefixReads` hoists the clamped row read into a `__lag<k>_` binding
+/// and leaves the bounds SELECT inline (`if n - 3 >= 0 then __lag0_m else
+/// __zs0_m`), so an elementwise use like `0.5 * prefix(n - 3)` puts the whole
+/// `if` in a loop form's array slot. Codegen's auto-materialize knows only the
+/// blessed mask/intersect/union/unique forms, so the select fell through to the
+/// `arr<i>` placeholder and the nest peeled an identifier it never declared.
+///
+/// Hoisting the select to its own let-RHS is what routing the same expression
+/// through a helper function (`method_for(zip(...)) <@> ... |> compute`) already
+/// does. It is only half the fix: the binding this mints must also be DECLARED
+/// as an `Array<T, N>` rather than a raw `promote<>::type` pointer, which is
+/// CodeGen's `producesWrapperOf` IRIf arm. Changing one without the other trades
+/// the undeclared `arr<i>` for a pointer with no `.extents`.
+///
+/// Scalar selects are untouched -- they render inline as an ordinary ternary
+/// and never occupy an array slot.
+let private isArrayValuedSelect (e: IRExpr) : bool =
+    match e with
+    | IRIf _ ->
+        match typeOf e with
+        | ArrayElem _ -> true
+        | _ -> false
+    | _ -> false
+
 /// Peel any IRLet chain that descendant lifts produced.
 /// When a sub-expression's lift wraps it in `IRLet(id, v, IRLet(...,inner))`,
 /// the chain shouldn't be visible to the parent context (e.g., an outer
@@ -6375,7 +6517,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
+                   || isArrayValuedSelect inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -6391,7 +6534,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
+                   || isArrayValuedSelect inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -6407,7 +6551,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
+                   || isArrayValuedSelect inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])

@@ -1,0 +1,41 @@
+// TEST: Dist Over Chain Roundtrip
+import ppl as ppl
+import ad as ad
+// The round-trip that unifies the module (plan section 5), now COMPOSABLE
+// directly: `dist(chain, r)` on an mh/hmc chain. A chain binding is rank-1
+// with no declared annotation -- neither of arrayShape's routes sees it --
+// so the dist dispatch arm consults the chain registry and wraps the chain
+// to Idx<1> x Idx<n> through the same range-kernel form corpus 096 writes
+// by hand, then runs the ordinary dist elaboration; the wrapper's shape is
+// pre-registered in ctx.Arrays so downstream tower consumers (dist_expect
+// here) resolve its dimension.
+//
+// Cumulant checks against the chain diagnostics: dist and chain_mean/
+// chain_var both use population normalization over the full chain, so with
+// burn = 0 the tower's first moment must equal chain_mean and its central
+// second moment (E[x^2] - mean^2 via dist_expect) must equal chain_var --
+// same sums in different loop shapes, pinned to 1e-12. Both sampler kinds
+// round-trip (hmc chain AND mh chain), and the values double as keyed
+// change-detectors: the standard-normal hmc chain's tower reads mean
+// -0.01658 / var 1.00458, honest for N(0, 1).
+function lp(x: Float64) -> Float64 = 0.0 - x * x / 2.0
+let c = ppl.hmc(lp, 0.3, 512, 0.5, 4, 7)
+let cmh = ppl.mh(lp, 0.3, 512, 1.0, 7)
+
+let d = ppl.dist(c, 2)
+let m1 = ppl.dist_expect(d, 0.0, 1.0)
+let m2 = ppl.dist_expect(d, 0.0, 0.0, 1.0)
+let cm = ppl.chain_mean(c, 0)
+let cv = ppl.chain_var(c, 0)
+// EXPECT: m1 = -0.0165805505042945
+// EXPECT: cv = 1.0045826636571
+let mean_rt = abs(m1 - cm) < 0.000000000001
+// EXPECT: mean_rt = true
+let var_rt = abs(m2 - m1 * m1 - cv) < 0.000000000001
+// EXPECT: var_rt = true
+
+let dm = ppl.dist(cmh, 2)
+let mm1 = ppl.dist_expect(dm, 0.0, 1.0)
+let cmm = ppl.chain_mean(cmh, 0)
+let mh_mean_rt = abs(mm1 - cmm) < 0.000000000001
+// EXPECT: mh_mean_rt = true

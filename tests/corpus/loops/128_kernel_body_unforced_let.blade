@@ -1,0 +1,39 @@
+// TEST: Kernel Body Unforced Let
+// ============================================================================
+// The `'__v27'` repro from docs/plan-kernel-body-materialization.md section 2,
+// verbatim: a kernel-local `let` bound to a combinator with NO `|> compute`.
+//
+// The bug was a DROPPED STATEMENT, not a name-map bug. `genFuncBodyScoped`'s
+// let dispatch had an arm
+//     | IRApplyCombinator _ | IRComposeApply _ -> currentNames <- add; []
+// whose premise ("deferred until |> compute forces them") is true at MODULE
+// level and false inside a body, where `prodsum(e, e)` is a VALUE consumer and
+// there is no forcing site at all. The name entered the map, the statement was
+// never emitted, every downstream read spelled an undeclared C++ identifier,
+// and the `exp` kernel -- which lived only on the dropped node -- was emitted
+// as a free function and never called.
+//
+// S2 fixes it at the source: `Lowering.forceBareCombinatorLets` wraps a
+// body-level let RHS of that shape in `IRCompute`, and the CodeGen arm above
+// is now a hard internal error rather than a silent `[]` -- so a future
+// lowering path that bypasses the force fails loudly at the drop site instead
+// of hundreds of lines away.
+//
+// The `|> compute` twin of this program is the plan's section-0 headline (the
+// one that "RUNS TODAY"), and it must agree cell for cell -- which is what
+// makes the unforced spelling a real pin rather than a smoke test: the values
+// below are the same ones that program produces.
+//
+// out[k] = sum_t e^{2i * ws[k] * t} over t in [0, 0.5, 1, 1.5], since
+// prodsum(e, e) sums e_t^2 and e_t = e^{i*w*t}.
+// ============================================================================
+let i = complex(0.0, 1.0)
+let ts: Array<Float like Idx<4>> = [0.0, 0.5, 1.0, 1.5]
+let ws: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
+
+let out = ws <@> lambda(w) -> {
+    let e = exp <@> (i * w * ts)
+    prodsum(e, e)
+} |> compute
+
+// EXPECT: out = [(0.134162972720552, 1.89188841969345), (0.890379829239612, -0.126920566681172), (0.0590475281652436, 0.273822995102698)]

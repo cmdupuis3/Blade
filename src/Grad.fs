@@ -37,7 +37,11 @@
 ///     exact for the accumulation subset
 ///   - scalar arithmetic + - * / (and `^` by an int literal), unary minus
 ///   - math intrinsics (exp/log/sqrt/trig/hyperbolic; floor/ceil have zero
-///     derivative)
+///     derivative). lgamma differentiates to digamma, which makes the
+///     gamma/beta/poisson log-likelihoods AD-able. NOT digamma itself: its
+///     derivative is trigamma, which the language does not have, so it is
+///     REFUSED rather than silently differentiated to zero
+///     (zeroDerivIntrinsics vs derivRule's None, below)
 ///   - array reads `a(i...)` at integer index expressions
 ///   - calls to other AD-able functions in the same module, INLINED
 ///     (recursion rejected by a depth cap)
@@ -61,7 +65,10 @@ open Blade.Ast
 // Math intrinsics -- the single source of truth (TypeCheck reads these too)
 
 /// Scalar math intrinsics recognized as plain calls (`exp(x)`) when the name
-/// is not user-bound. Unary, real-valued, rendered as std::<name> in C++.
+/// is not user-bound. Unary, real-valued, rendered as std::<name> in C++ --
+/// except `lgamma` and `digamma`, which render as `blade_rt::<name>`
+/// (CodeGen.unaryOpToCpp) because they have no bit-exact interpreter twin in
+/// any shared library; see src/cpp/blade_runtime.hpp.
 /// Keep in sync with StaticEval.evalBuiltin and derivRule below.
 let mathIntrinsics : Set<string> =
     Set.ofList [
@@ -70,6 +77,7 @@ let mathIntrinsics : Set<string> =
         "sinh"; "cosh"; "tanh"
         "asin"; "acos"; "atan"
         "floor"; "ceil"
+        "lgamma"; "digamma"
     ]
 
 let isMathIntrinsic (name: string) : bool = Set.contains name mathIntrinsics
@@ -118,8 +126,19 @@ let private pow a b = syn (ExprBinOp (Elementwise, OpCaret, a, b))
 let private neg a = syn (ExprUnaryOp (OpNeg, a))
 let private call name args = syn (ExprApp (v name, args))
 
+/// Intrinsics whose derivative is IDENTICALLY ZERO (a.e.), so `derivRule`
+/// returning None for them means "contributes nothing", not "unknown". Split
+/// out from derivRule's None because those two readings must not be confused:
+/// an intrinsic with no rule that is silently treated as zero-derivative
+/// yields a WRONG gradient with no diagnostic, which is worse than a refusal.
+/// adjointOf refuses anything outside this set that derivRule cannot handle.
+let private zeroDerivIntrinsics : Set<string> = Set.ofList [ "floor"; "ceil" ]
+
 /// d/du of intrinsic(u), as a function of the FORWARD expression u.
-/// Returns None for zero-derivative intrinsics (floor/ceil).
+/// Returns None for the zero-derivative intrinsics above AND for any
+/// intrinsic with no rule yet (`digamma`: its derivative is the trigamma
+/// function, which the language does not have) -- adjointOf tells the two
+/// apart via zeroDerivIntrinsics and refuses the latter.
 let private derivRule (name: string) (u: Expr) : Expr option =
     match name with
     | "exp" -> Some (call "exp" [u])
@@ -138,7 +157,17 @@ let private derivRule (name: string) (u: Expr) : Expr option =
     | "asin" -> Some (div (fLit 1.0) (call "sqrt" [sub (fLit 1.0) (mul u u)]))
     | "acos" -> Some (neg (div (fLit 1.0) (call "sqrt" [sub (fLit 1.0) (mul u u)])))
     | "atan" -> Some (div (fLit 1.0) (add (fLit 1.0) (mul u u)))
+    // d/dx log Gamma(x) = psi(x). The chain rule closes here because digamma
+    // is itself an intrinsic (blade_rt::digamma), so the emitted adjoint is
+    // an ordinary Blade expression the rest of the pipeline already handles.
+    // This is what makes gamma / beta / poisson log-likelihoods -- whose
+    // normalizers are all lgamma -- differentiable, and so HMC-able.
+    | "lgamma" -> Some (call "digamma" [u])
     | "floor" | "ceil" -> None
+    // digamma is now the frontier: d/dx psi(x) = psi'(x) is trigamma, which
+    // the language does not have, so it is REFUSED below rather than silently
+    // differentiated to zero. Adding trigamma would move this line, not
+    // change the shape of the rule.
     | _ -> None
 
 // Normalized statement model
@@ -1043,7 +1072,12 @@ let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [u]) when isMathIntrinsic name
                                        && not (Map.containsKey name rc.Ctx.Decls) ->
         (match derivRule name u with
-         | None -> Ok []   // floor/ceil: zero derivative
+         | None when Set.contains name zeroDerivIntrinsics -> Ok []   // floor/ceil
+         | None ->
+             // An intrinsic with no derivative rule. REFUSING is the point:
+             // falling through to `Ok []` here would hand back a gradient that
+             // silently drops this term (`digamma` would differentiate to zero).
+             Error (sprintf "'%s' has no derivative rule, so it cannot appear in a differentiated function (its derivative is not expressible in the AD-able subset). Compute it outside the function passed to ad.grad, or pass the value in as a parameter" name)
          | Some d ->
              let pre, c = bindCot rc cot
              adjointOf rc u (mul c d) |> Result.map (fun ss -> pre @ ss))

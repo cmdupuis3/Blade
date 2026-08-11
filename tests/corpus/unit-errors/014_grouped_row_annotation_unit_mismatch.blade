@@ -1,5 +1,6 @@
-// TEST: Grouped Row Annotation Unit Mismatch
+// TEST: Grouped Row Annotation Unit Mismatch (rejects)
 // ERROR: BL3006
+// ERROR-CONTAINS: metre vs day
 // The other half of sql-group-by/030: a rank-1 ROW annotation over a grouped
 // operand carries its unit onto the row's ELEMENT type, so annotating the row
 // `T<metre>^1` against day-valued grouped data is a unit mismatch, not a
@@ -16,5 +17,10 @@ let s = [10.0, 20.0, 30.0, 40.0]
 let gk = group_keys(region)
 let gt = group_by(t, gk)
 let gs = group_by(s, gk)
+// The refusal is pinned by the `// ERROR:` / `// ERROR-CONTAINS:` lines at the
+// top. This used to read `// EXPECT: BL3006 -- metre vs day`, which is not an
+// EXPECT pin at all (that form is `<var> = <value>`): the parser skipped it, so
+// the file asserted NOTHING about why it was refused, and in the full-suite
+// lane -- where the category is not wrapped as reject-probes -- it read as an
+// ordinary test that simply failed.
 let bad = method_for(zip(gt, gs)) <@> lambda(tr: T<metre>^1, sr: U^1) -> prodsum(tr, sr) |> compute
-// EXPECT: BL3006 -- metre vs day

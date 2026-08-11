@@ -1,0 +1,34 @@
+// TEST: Sample Families Determinism
+import ppl as ppl
+// ppl.sample(family(params), key, n) elaborates STRAIGHT to the __rand_*
+// intrinsics -- no `import rand` needed (they are checker-level builtins).
+// The exponential and gamma pins are byte-identical to the rand corpus's own
+// (rand/005 key 11 rate 2, rand/012 key 77 shape 2 rate 1): one seam, one
+// stream. gaussian/lognormal/uniform are synthesized affine/exp transforms
+// over the normal/uniform fills -- `ln` must be exp(`gs`) element for
+// element because both draw the SAME normal fill under key 5. All pins are
+// keyed change-detectors (the rand corpus idiom), and `e2` under a different
+// key must diverge.
+let e = ppl.sample(exponential(2.0), 11, 6)
+let gm = ppl.sample(gamma(2.0, 1.0), 77, 4)
+let gm2 = ppl.sample(gamma(2.0, 1.0), 77, 4)
+let u = ppl.sample(uniform(2.0, 6.0), 12345, 4)
+let gs = ppl.sample(gaussian(1.0, 4.0), 5, 4)
+let ln = ppl.sample(lognormal(1.0, 4.0), 5, 4)
+let po = ppl.sample(poisson(4.5), 21, 4)
+let be = ppl.sample(bernoulli(0.3), 31, 6)
+let bt = ppl.sample(beta(2.0, 3.0), 41, 4)
+let e2 = ppl.sample(exponential(2.0), 12, 6)
+let differ = abs(reduce(e, (+)) - reduce(e2, (+))) > 0.0001
+let lnOk = abs(ln(0) - exp(gs(0))) + abs(ln(3) - exp(gs(3))) < 0.0000000001
+// EXPECT: e = [0.0604477795738267, 0.138024564764191, 0.655442350547204, 0.00934226141163601, 1.25975764472306, 0.171979344668618]
+// EXPECT: gm = [5.75216582868514, 3.7240948561034, 2.40163305871248, 0.944732080787101]
+// EXPECT: gm2 = [5.75216582868514, 3.7240948561034, 2.40163305871248, 0.944732080787101]
+// EXPECT: u = [4.95642977921447, 5.51523904609055, 4.18453236288515, 3.46258454079103]
+// EXPECT: gs = [-0.142745307109741, 0.54933027712897, 1.61151502169038, 0.203573316204228]
+// EXPECT: ln = [0.866974853109331, 1.73209260730017, 5.01039633971031, 1.22577502351882]
+// EXPECT: po = [4.0, 6.0, 4.0, 4.0]
+// EXPECT: be = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+// EXPECT: bt = [0.54507416560211, 0.20568566700661, 0.643060386003783, 0.210053984346314]
+// EXPECT: differ = true
+// EXPECT: lnOk = true

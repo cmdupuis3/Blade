@@ -1,0 +1,18 @@
+// TEST: Mutual Recursion Main Local (rejects)
+// ERROR: BL2001 @ 15:58
+// Mutual recursion is not supported: a function body sees only names bound
+// BEFORE it, so `isOdd` is unbound inside `isEven`. Pinned here as a
+// TRIPWIRE for a codegen hazard it currently makes unreachable.
+//
+// Both functions read the module binding `K`, so both would be main-local --
+// emitted inside main() as `std::function` locals (computeMainLocalFuncIds,
+// CodeGen.fs). Main-locals get NO forward declaration, so a mutually
+// recursive pair would emit one naming the other before it exists:
+// "'isOdd' was not declared in this scope". Self-recursion is fine and is
+// pinned by 061; it is only the MUTUAL case that has no legal C++ emission
+// under the current scheme. If mutual recursion is ever implemented, this
+// test goes red -- and the forward-declaration hazard must be handled then.
+let K = 1.0
+function isEven(n: Int) -> Float = if n == 0 then K else isOdd(n - 1)
+function isOdd(n: Int) -> Float = if n == 0 then 0.0 else isEven(n - 1)
+let r = isEven(4)

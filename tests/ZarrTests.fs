@@ -600,18 +600,11 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                           (match readVarData storeInDir "A" with
                            | Ok { Payload = ZFloats truth } ->
                                let expected = truth |> Array.map (fun x -> x + x)
-                               let outLine =
-                                   runOut.Split('\n')
-                                   |> Array.tryPick (fun l ->
-                                       let l = l.Trim()
-                                       if l.StartsWith "out = [" && l.EndsWith "]" then Some l else None)
-                               (match outLine with
-                                | None -> check (sprintf "e2e v%d: values match ground truth" version) false "no out = [...] line"
-                                | Some line ->
-                                    let inner = line.Substring("out = [".Length, line.Length - "out = [".Length - 1)
-                                    let parsed =
-                                        inner.Split(',')
-                                        |> Array.map (fun s -> Double.Parse(s.Trim(), Globalization.CultureInfo.InvariantCulture))
+                               // Shape-tolerant flatten (TestHarness): `out`
+                               // is rank 2 and prints NESTED since 7ac4d3a.
+                               (match tryParsePrintedFloats "out" runOut with
+                                | None -> check (sprintf "e2e v%d: values match ground truth" version) false "no parseable out = [...] line"
+                                | Some parsed ->
                                     let ok =
                                         parsed.Length = expected.Length
                                         && Array.forall2 (fun a b -> abs (a - b) <= 1e-9 * max 1.0 (abs b)) parsed expected
@@ -899,14 +892,13 @@ let w = z.write("%s", C)
                           // strict ordered comparison, and the print order of a
                           // packed array is part of the contract: it walks the
                           // canonical pool.
-                          let outLine =
-                              runOut.Split('\n')
-                              |> Array.tryPick (fun l ->
-                                  let l = l.Trim()
-                                  if l.StartsWith "out = [" && l.EndsWith "]" then Some l else None)
-                          (match outLine with
-                           | Some line ->
-                               let inner = line.Substring("out = [".Length, line.Length - "out = [".Length - 1)
+                          // Shape-tolerant flatten (TestHarness): a packed
+                          // rank-2 group prints NESTED (genPrintArraySymAware
+                          // routes rank 2 through genPrintNested2, row shrink
+                          // and all), and flattening the nested walk IS the
+                          // canonical pool order.
+                          (match tryParsePrintedFloats "out" runOut with
+                           | Some got ->
                                // EXACT elementwise equality in pool order, not
                                // the old
                                //   Set.isSubset expected got
@@ -927,14 +919,11 @@ let w = z.write("%s", C)
                                // compare would hide a future re-ordering
                                // regression in exactly the storage path the
                                // off-by-one lived in.
-                               let got =
-                                   inner.Split(',')
-                                   |> Array.map (fun s -> Double.Parse(s.Trim(), Globalization.CultureInfo.InvariantCulture))
                                let expected = pool |> Array.map (fun x -> x + x)
                                check (sprintf "packed %s: kernel values = 2x oracle pool (exact, in pool order)" kind)
                                    (got = expected)
                                    (sprintf "got %A expected %A" got expected)
-                           | None -> check (sprintf "packed %s: kernel values" kind) false "no out = [...] line")
+                           | None -> check (sprintf "packed %s: kernel values" kind) false "no parseable out = [...] line")
                           // Write roundtrip: exact pool order + blade metadata.
                           let outFull = Path.Combine(e2eDir, outStore)
                           (match readVarData outFull "C" with
@@ -1049,20 +1038,14 @@ let w = z.write("%s", C)
                            | Error e -> check (sprintf "kernel-write %s: written pool" label) false e)
                           // ... and the in-process print must agree with it, so
                           // a shift cannot hide by moving between the two.
-                          let printed =
-                              runOut.Split('\n')
-                              |> Array.tryPick (fun l ->
-                                  let l = l.Trim()
-                                  if l.StartsWith "C = [" && l.EndsWith "]" then Some l else None)
-                          (match printed with
-                           | Some line ->
-                               let inner = line.Substring("C = [".Length, line.Length - "C = [".Length - 1)
-                               let got =
-                                   inner.Split(',')
-                                   |> Array.map (fun s -> Double.Parse(s.Trim(), Globalization.CultureInfo.InvariantCulture))
+                          // Shape-tolerant flatten (TestHarness): C is a
+                          // packed rank-2 group and prints NESTED; the
+                          // flattened walk is the canonical pool order.
+                          (match tryParsePrintedFloats "C" runOut with
+                           | Some got ->
                                check (sprintf "kernel-write %s: printed pool = written pool = oracle" label)
                                    (got = oracle) (sprintf "got %A expected %A" got oracle)
-                           | None -> check (sprintf "kernel-write %s: printed pool" label) false "no C = [...] line")
+                           | None -> check (sprintf "kernel-write %s: printed pool" label) false "no parseable C = [...] line")
                       | Ok (code, runOut) -> check (sprintf "kernel-write %s: runs (exit 0)" label) false (sprintf "exit %d: %s" code runOut)
                       | Error e -> check (sprintf "kernel-write %s: runs (exit 0)" label) false e)
                  | Error e ->
@@ -1388,14 +1371,15 @@ let w = z.write("%s", W)
                       | Error e -> check (sprintf "%s: written pool" label) false e)
                      // ... and the in-process print agrees, so a shift cannot
                      // hide by moving between the two.
-                     (match writeOut.Split('\n') |> Array.tryPick (fun l ->
-                                let l = l.Trim()
-                                if l.StartsWith "W = [" && l.EndsWith "]" then Some l else None) with
-                      | Some line ->
-                          let inner = line.Substring("W = [".Length, line.Length - "W = [".Length - 1)
-                          let got = inner.Split(',') |> Array.map (fun s -> Double.Parse(s.Trim(), Globalization.CultureInfo.InvariantCulture))
+                     // Shape-tolerant flatten (TestHarness). A wreath pool
+                     // prints FLAT today (genPrintArrayWreath), so this is a
+                     // no-op flatten -- used anyway so a printer-shape change
+                     // cannot rot this site the way rank-2 nesting rotted the
+                     // packed ones.
+                     (match tryParsePrintedFloats "W" writeOut with
+                      | Some got ->
                           check (sprintf "%s: printed pool = written pool" label) (got = pool) (sprintf "got %A" got)
-                      | None -> check (sprintf "%s: printed pool" label) false "no W = [...] line")
+                      | None -> check (sprintf "%s: printed pool" label) false "no parseable W = [...] line")
                      // (b) The attribute: spec_version 2, orbit head, exact
                      // level list and extent.
                      let attrText = File.ReadAllText (Path.Combine(written, "W", ".zattrs"))
@@ -1454,14 +1438,9 @@ let W = s.vars.W |> z.read
                          check (sprintf "%s: RELOADED array serves every mirrored / zero-set read" label)
                              (List.isEmpty missing)
                              (sprintf "wrong/missing %A in:\n%s" missing readOut)
-                         let reloadedPool =
-                             readOut.Split('\n')
-                             |> Array.tryPick (fun l ->
-                                 let l = l.Trim()
-                                 if l.StartsWith "W = [" && l.EndsWith "]" then
-                                     let inner = l.Substring("W = [".Length, l.Length - "W = [".Length - 1)
-                                     Some (inner.Split(',') |> Array.map (fun s -> Double.Parse(s.Trim(), Globalization.CultureInfo.InvariantCulture)))
-                                 else None)
+                         // Shape-tolerant flatten (TestHarness) -- see the
+                         // write-side W parse above for why.
+                         let reloadedPool = tryParsePrintedFloats "W" readOut
                          check (sprintf "%s: RELOADED array prints the pool in canonical order (%d cells)" label pool.Length)
                              (reloadedPool = Some pool)
                              (sprintf "got %A expected %A" reloadedPool pool)

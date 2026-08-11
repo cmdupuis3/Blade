@@ -78,11 +78,27 @@ let memfreeStressTests = Blade.Tests.Corpus.category "memfree-stress"
 /// `Blade.Tests.RunAll.deferredConcreteTests`, like memfree.
 let deferredConcreteTests = Blade.Tests.Corpus.category "deferred-concrete"
 
+/// The wholly-negative categories carry no "(rejects)" marker in their own
+/// `// TEST:` names -- every file in them is meant to be refused, so the marker
+/// would be noise -- and Runner's classifier keys on exactly that marker. The
+/// STANDALONE verbs supply it (`blade test uniterrors` and friends wrap the
+/// list in Cli.fs's `asRejectProbes`), and the full-suite lane below did not:
+/// the same files were read as ORDINARY tests, so being correctly refused at
+/// lowering counted as a failure. That is why nine unit-errors probes were red
+/// in `[All]` while `blade test uniterrors` reported 14/14 green.
+///
+/// Kept identical to Cli.fs's helper on purpose; if one grows a rule the other
+/// must too, or the two lanes disagree again.
+let private asRejectProbes (tests: (string * string) list) =
+    tests
+    |> List.map (fun (name, source) ->
+        (if name.EndsWith "(rejects)" then name else name + " (rejects)"), source)
+
 /// All tests combined
 let allTests =
     basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
     @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ tupleTests @ replicateTests @ anonRangeTests @ recursiveArrayTests @ bracketedTests
-    @ indexTypeTests @ mutabilityTests @ mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ displayTests @ displayErrorTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ unitErrorTests
+    @ indexTypeTests @ mutabilityTests @ asRejectProbes mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ displayTests @ asRejectProbes displayErrorTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ asRejectProbes unitErrorTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
     @ funcArrayTests

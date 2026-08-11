@@ -1,0 +1,33 @@
+// TEST: AD Gamma Log-Likelihood Shape (lgamma derivative)
+import ad as ad
+// ============================================================================
+// The positive half of the derivRule change that 014 used to reject:
+// d/dx lgamma(x) = digamma(x). This is the rule that unlocks HMC over the
+// gamma / poisson / beta families, whose log-densities are all "closed form
+// plus an lgamma normalizer" -- with lgamma refused, their gradients were not
+// expressible at all.
+//
+// f has the shape of a Gamma(a, rate) log-density read as a function of the
+// SHAPE parameter, with the rate and the observation frozen as literals:
+//
+//   f(a) = a*log(r0) - lgamma(a) + (a - 1)*log(x0)      r0 = 2.5, x0 = 1.75
+//   f'(a) = log(r0) - digamma(a) + log(x0)
+//
+// so the pinned gradient exercises the new rule in the one position that
+// matters -- lgamma sitting under a minus sign inside a larger expression,
+// where a silent zero-derivative (the pre-split behaviour) would have gone
+// unnoticed as a plausible-looking number rather than a NaN.
+//
+// The gradient value is independently checkable: digamma(3.5) = psi(1/2) +
+// 1/0.5 + 1/1.5 + 1/2.5 with psi(1/2) = -gamma - 2*log 2, giving
+// 1.1031566406452431, and log(2.5) + log(1.75) - that = 0.37274987916433466.
+// A central finite difference of f at a = 3.5 converges to the same value.
+//
+// Both evaluators must agree: the compiled path calls blade_rt::digamma and
+// the interpreter calls its transcription, which is exactly the byte-identity
+// claim pinned in intrinsics/010.
+// ============================================================================
+function f(a: Float) -> Float = a * log(2.5) - lgamma(a) + (a - 1.0) * log(1.75)
+let (fv, dfda) = ad.grad(f)(3.5)
+// EXPECT: fv = 3.405083429051024
+// EXPECT: dfda = 0.37274987916433466

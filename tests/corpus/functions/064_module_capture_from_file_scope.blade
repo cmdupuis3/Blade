@@ -1,0 +1,50 @@
+// TEST: Module Let Captured From File Scope
+// ============================================================================
+// A module-level `let` is emitted as a `main()` local, while a top-level
+// `function` and every lifted kernel are namespace-scope C++ functions. So a
+// namespace-scope body that must NAME a module-level binding -- to forward it
+// as a capture argument, or because the kernel body was inlined into its loop
+// -- used to emit an undeclared identifier and fail the C++ compile:
+//
+//     auto __v4 = [&](double t) { return __lambda_6(t, two); };  // 'two' ?
+//     __fp_out[__fk] = (__fp_x[__fk] * k);                       // 'k' ?
+//
+// The declaration of a DEMANDED module binding is now promoted to namespace
+// scope; `main()` still initializes it at exactly its original program point,
+// so evaluation order and values are unchanged. Stage S0 of
+// docs/plan-kernel-body-materialization.md section 6, and the prerequisite for
+// the call-don't-inline routing that issue #3 needs.
+// ============================================================================
+
+// (1) forwarded as a capture argument by a wrapper closure inside a function.
+let two = 2.0
+function scaled(x: Float64) = {
+    let g = lambda(t: Float64) -> t * two
+    g(x)
+}
+let s = scaled(5.0)
+// EXPECT: s = 10
+
+// (2) read directly by a kernel body inlined into a function's loop nest.
+let k = 3.0
+function triple(x: Array<Float like Idx<4>>) = (x <@> lambda(t) -> t * k) |> compute
+let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let t3 = triple(a)
+// EXPECT: t3 = [3, 6, 9, 12]
+
+// (3) an ARRAY module binding captured by a kernel inside a function: the
+// promoted declaration is the `Array<T,N>` wrapper, and main() still runs the
+// pool allocation and the element stores in place.
+let ts: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+function weighted(ws: Array<Float like Idx<3>>) = (ws <@> lambda(w) -> w * prodsum(ts, ts)) |> compute
+let b: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
+let wsum = weighted(b)
+// EXPECT: wsum = [30, 60, 90]
+
+// (4) the promoted binding's RHS need not be a literal: a reduce emits an
+// accumulator loop, and only its leading definition line moves.
+let tot = reduce(ts, (+))
+function byTotal(ws: Array<Float like Idx<3>>) = (ws <@> lambda(w) -> w * tot) |> compute
+let scaledTot = byTotal(b)
+// EXPECT: tot = 10
+// EXPECT: scaledTot = [10, 20, 30]

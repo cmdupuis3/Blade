@@ -1,0 +1,26 @@
+// TEST: Bayes Gamma-Poisson Posterior Tower
+import ppl as ppl
+// ppl.bayes on the exact ORACLE_PINS.md dump-conjugate Gamma-Poisson
+// block: prior Gamma(a0=2, b0=1) on the rate, counts [3, 1, 4, 1, 5]
+// (n=5, sum=14). Posterior hyperparameters:
+//   shape_n = a0 + sum = 16      rate_n = b0 + n = 6
+// (the oracle's post_shape=16, post_rate=6). The tower is the
+// gamma(16, 6) constructor's closed cumulant ladder,
+// kappa_k = shape (k-1)! / rate^k, recomputed by hand:
+//   kappa_1 = 16/6   = 8/3  = 2.6666666666666665   (oracle post_mean)
+//   kappa_2 = 16/36  = 4/9  = 0.44444444444444442  (oracle post_var)
+//   kappa_3 = 16*2/216  = 4/27  = 0.14814814814814814
+//   kappa_4 = 16*6/1296 = 2/27  = 0.07407407407407407
+// -- the oracle's "tower r=4" line verbatim. This is also the conjugate
+// truth corpus 117's HMC chain estimates (mean 2.68547/var 0.43036 at key
+// 4242), closing the exact-vs-sampled loop for this pair.
+let pdata: Array<Float64 like Idx<5>> = [3.0, 1.0, 4.0, 1.0, 5.0]
+let post = ppl.bayes(gamma(2.0, 1.0), poisson_lik(), pdata, 4)
+let g1 = ppl.cumulant(post, 1)
+let g2 = ppl.cumulant(post, 2)
+let g3 = ppl.cumulant(post, 3)
+let g4 = ppl.cumulant(post, 4)
+// EXPECT: g1 = [2.6666666666666665]
+// EXPECT: g2 = [0.44444444444444442]
+// EXPECT: g3 = [0.14814814814814814]
+// EXPECT: g4 = [0.07407407407407407]

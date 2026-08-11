@@ -1,0 +1,50 @@
+// TEST: Deferred Return Forced
+// ============================================================================
+// docs/plan-kernel-body-materialization.md manifestation M-D, stage S4:
+// THE CALLEE FORCES. A function whose return expression is a bare, unforced
+// `<@>` application used to emit
+//   return BLADE_CODEGEN_ERROR_UNEVALUATED_COMPUTATION_USED_AS_VALUE_-_USE_|>_COMPUTE;
+// -- the caller's `|> compute` never reached inside, and there was nothing at
+// the boundary to force it.
+//
+// WHY "the callee forces" rather than "the caller's compute reaches inside".
+// Three facts the plan measured. The emitted signature is ALREADY
+// `Array<double,1> f(Array<double,1>)`, so the ABI has always promised a
+// materialized array. Laziness demonstrably never crossed the boundary:
+// `reduce(mk(a), (+))` and `mk(a) <&> mk2(a)` -- every spelling where a lazy
+// return would have been useful -- died with the same sentinel, so there is no
+// lazy return to preserve (functions/061 pins those, now working). And
+// `compute` is idempotent at inference, so a caller-side `|> compute` stays a
+// legal no-op. Sinking the caller's `compute` into the callee would instead
+// require the return type to vary by call site.
+//
+// THE ASSERTION IS THE AGREEMENT, not any one array: all three spellings of the
+// same call -- forced, bare, and folded -- must produce the same values. That is
+// what "the wrap is a no-op at existing use sites" means operationally, and it
+// is the property a future caller-side optimization must not break.
+//
+// `chained` covers the second shape S4's return walker has to find: the return
+// leaf behind a let chain (`{ let s = ...; xs <@> k }`), where the tail is not
+// the body's top node. A branching return (if/match arms that each materialize)
+// is refused with its own message -- it was never supported and still needs a
+// shared destination; see genFuncBodyScoped's branchingReturnMaterializes arm.
+// ============================================================================
+let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+
+function f(xs: Array<Float like Idx<4>>) = { xs <@> lambda(x) -> x * 2.0 }
+
+// The return leaf sits behind a function-body let, not at the body's top node.
+function chained(xs: Array<Float like Idx<4>>, k: Float64) = {
+    let s = k * 3.0
+    xs <@> lambda(x) -> x * s
+}
+
+let forced = f(a) |> compute
+let bare = f(a)
+let folded = reduce(f(a), (+))
+let viaLet = chained(a, 2.0)
+
+// EXPECT: forced = [2, 4, 6, 8]
+// EXPECT: bare = [2, 4, 6, 8]
+// EXPECT: folded = 20
+// EXPECT: viaLet = [6, 12, 18, 24]

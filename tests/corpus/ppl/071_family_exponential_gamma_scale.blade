@@ -1,0 +1,32 @@
+// TEST: Family Exponential Gamma Scale
+import ppl as ppl
+// exponential(rate): κ_k = (k-1)!/rate^k; gamma(shape, rate):
+// κ_k = shape·(k-1)!/rate^k (both from the prototype's Dist.fs ladder).
+// Multilinearity closes the gamma family under scaling:
+// dist_scale(c, gamma(a, r)) has κ_k = c^k·a·(k-1)!/r^k = gamma(a, r/c) —
+// pinned cell-for-cell against the directly constructed gamma(2, 1.5).
+// exponential(2): 0!/2, 1!/4, 2!/8, 3!/16 = 0.5, 0.25, 0.25, 0.375.
+let ex = ppl.exponential(2.0, 4)
+let e1 = ppl.cumulant(ex, 1)
+let e2 = ppl.cumulant(ex, 2)
+let e3 = ppl.cumulant(ex, 3)
+let e4 = ppl.cumulant(ex, 4)
+let g = ppl.gamma(2.0, 3.0, 3)
+let sc = ppl.dist_scale(2.0, g)
+let sc1 = ppl.cumulant(sc, 1)
+let sc2 = ppl.cumulant(sc, 2)
+let sc3 = ppl.cumulant(sc, 3)
+let g2 = ppl.gamma(2.0, 1.5, 3)
+let g21 = ppl.cumulant(g2, 1)
+let g22 = ppl.cumulant(g2, 2)
+let g23 = ppl.cumulant(g2, 3)
+// EXPECT: e1 = [0.5]
+// EXPECT: e2 = [0.25]
+// EXPECT: e3 = [0.25]
+// EXPECT: e4 = [0.375]
+// EXPECT: sc1 = [1.33333333333333]
+// EXPECT: sc2 = [0.888888888888889]
+// EXPECT: sc3 = [1.18518518518519]
+// EXPECT: g21 = [1.33333333333333]
+// EXPECT: g22 = [0.888888888888889]
+// EXPECT: g23 = [1.18518518518519]

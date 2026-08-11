@@ -1,0 +1,16 @@
+// TEST: Intrinsics Atan2 Complex In Kernel (rejects)
+// ERROR: BL3007
+// intrinsics/014 pins the SCALAR refusal; this is the kernel-position one, and
+// it was a real hole rather than a hypothetical: inferBinaryIntrinsic's `pin`
+// already skips a lambda body (so the unit walk sees the param's annotation),
+// and the re-stamp walk never visits OpMath2 at all, so nothing between the
+// deferral and codegen looked at the operand. `atan2(z, 1.0)` over a complex
+// array typechecked OK and failed in g++ with "no matching function for call to
+// 'atan2(std::complex<double>&, double)'". The same findBadComplexIntrinsic
+// pass that guards floor (intrinsics/016) covers both binary intrinsics --
+// every binaryMathIntrinsic is real-only by construction, so no name filter is
+// needed on that arm. log_base is refused identically.
+let RE: Array<Float like Idx<3>> = [3.0, 0.0, -1.0]
+let IM: Array<Float like Idx<3>> = [4.0, 2.0, 0.0]
+let Z = (zip(RE, IM) <@> lambda(a, b) -> complex(a, b)) |> compute
+let bad = (method_for(Z) <@> lambda(z) -> atan2(z, 1.0)) |> compute

@@ -1,0 +1,38 @@
+// TEST: GroupBy Named Ragged Kernel
+// A NAMED function whose parameter is `Array<T like RaggedIdx<_>>` used as the
+// kernel of a grouped/ragged `method_for`. The peel binds each row as
+// `RaggedRow<T>` and the function declares `RaggedRow<T>` -- but when the named
+// function is FORWARDED as a kernel value it also appears as a
+// `std::function<...>` slot, and that slot used to be rendered with a hardcoded
+// `Array<T, N>` (arrowSlotTypeForFuncSig), which g++ rejects against the
+// declared `RaggedRow<T>`: "could not convert ... from Array<double, 1> to
+// RaggedRow<double>". Every declaration position now goes through the one
+// wrapper chooser (cppArrayTypeStr / declaresAsRaggedRow), so the signature and
+// the peel can no longer disagree.
+function rowsum(row: Array<Float64 like RaggedIdx<_>>) -> Float64 = reduce(row, (+))
+
+// --- grouped source: rows are __group_member ---
+let region = [0, 1, 0, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+
+// The named function AS the kernel (eta position).
+let gsums = method_for(grouped) <@> rowsum |> compute
+// EXPECT: gsums = [80, 70]
+
+// The named function FORWARDED through an annotated lambda -- this is the shape
+// that puts `rowsum` in a std::function<> capture slot.
+let gvia = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> rowsum(g) |> compute
+// EXPECT: gvia = [80, 70]
+
+// --- ragged literal source: rows are __raggedidx (a different IxKind through
+// the same wrapper chooser) ---
+let lens = [3, 2, 1]
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+
+let rsums = method_for(r) <@> rowsum |> compute
+// EXPECT: rsums = [6, 9, 6]
+
+let rvia = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> rowsum(g) |> compute
+// EXPECT: rvia = [6, 9, 6]

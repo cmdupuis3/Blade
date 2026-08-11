@@ -1,0 +1,36 @@
+// TEST: Kernel Body Nested Map
+// ============================================================================
+// docs/plan-kernel-body-materialization.md manifestation M-A, as its minimal
+// program: a kernel body that binds a nested loop-object map and reduces it.
+//
+// This is the shape the plan measured emitting TWO renderings of one body: a
+// LIFTED `__lambda_N` that was correct and never called, and an INLINE
+// expression rendering that carried three codegen sentinels
+// (LOOP_OBJECT_USED_AS_VALUE, UNEVALUATED_COMPUTATION_USED_AS_VALUE,
+// REDUCE_OVER_A_DEFERRED_COMPUTATION) and was what `main()` actually used.
+// S2's whole content is choosing the first one: `kernelBodyIsExpressionShaped`
+// says no, so the loop emitter calls the lifted callable instead of inlining
+// its text -- the same route `genObjectForApplication` already takes for the
+// sibling `IRApp(IRObjectFor ...)` shape.
+//
+// Nothing here needs `|> compute` inside the body: `let c = sin <@> wt` is a
+// bare, unforced combinator, and Lowering's `forceBareCombinatorLets` supplies
+// the force a body-level let has no downstream site for. `wt = f * t` is the
+// broadcast whose synthesized loop application the lift pass hoists into its
+// own let -- the operand shape that made the fused reduce refuse before S2.
+//
+// out[k] = sum_t sin(w[k] * t) over t in [0, 0.5, 1, 1.5]:
+//   k=0: sin0 + sin0.5 + sin1   + sin1.5
+//   k=1: sin0 + sin1   + sin2   + sin3
+//   k=2: sin0 + sin1.5 + sin3   + sin4.5
+// ============================================================================
+let w: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
+let t: Array<Float like Idx<4>> = [0.0, 0.5, 1.0, 1.5]
+
+let out = w <@> lambda(f) -> {
+    let wt = f * t
+    let c = sin <@> wt
+    reduce(c, (+))
+} |> compute
+
+// EXPECT: out = [2.31839151001615, 1.89188841969345, 0.161084876998825]

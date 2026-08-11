@@ -130,6 +130,13 @@ type private ArraySource =
 type private OutTarget =
     | OutArray of BladeArray
     | OutFold of acc: ValueRef * wrapper: (Value -> Value -> Value)
+    /// ARRAY-VALUED KERNEL RETURN (stage S3, manifestation M-C): the kernel
+    /// produces a whole ROW per iterated cell, so the output's rank exceeds the
+    /// nest depth and each store writes `rowRank` trailing coordinates at once.
+    /// The compiled twin copies the returned pool into the output row; here the
+    /// row's own cells are written through the same `writeCell` path, so the two
+    /// lanes agree cell for cell rather than by construction.
+    | OutArrayRows of BladeArray
 
 // applyFunctorWrappers: ported from CodeGen.genComputeBinding (7534). Folds
 // functor-map wrappers into the ApplyInfo kernel body (beta-reduce +
@@ -772,7 +779,20 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
         interpretNest st env cg inputs realAt levelExtent (OutFold (acc, (fun a b -> N.evalBinOp IRAdd a b)))
         acc.V
     | ArrayElem arr ->
-        let extents = cg.Bindings |> List.map levelExtent |> Array.ofList
+        // Outer extents come from the loop bindings; when the kernel returns an
+        // ARRAY the output type carries its T-dimensions after them (stage S3,
+        // manifestation M-C), so the allocation needs those trailing extents too
+        // -- the interpreter's version of the short extents table that made the
+        // compiled lane print `[[], []]`.
+        let outerExtents = cg.Bindings |> List.map levelExtent
+        let trailingExtents =
+            if arr.IndexTypes.Length > outerExtents.Length then
+                arr.IndexTypes
+                |> List.skip outerExtents.Length
+                |> List.map (fun ix -> toI64 (Core.evalExpr st env ix.Extent))
+            else []
+        let rowShaped = not (List.isEmpty trailingExtents)
+        let extents = (outerExtents @ trailingExtents) |> Array.ofList
         st.Cells <- st.Cells + (extents |> Array.fold (*) 1L)
         // Compact storage iff the OUTPUT index type carries a real symmetry
         // group (adjacent-equal storage group). buildSymmVecWithStrict groups
@@ -784,7 +804,8 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
                 A.allocCompact arr.ElemType arr.IndexTypes extents (Array.ofList osym) (Array.ofList ostrict)
             else
                 A.allocDense arr.ElemType arr.IndexTypes extents
-        interpretNest st env cg inputs realAt levelExtent (OutArray outArr)
+        interpretNest st env cg inputs realAt levelExtent
+            (if rowShaped then OutArrayRows outArr else OutArray outArr)
         VArray outArr
     | other -> raise (InterpUnsupported (sprintf "apply output type %s" (nodeTypeName other)))
 
@@ -1428,6 +1449,22 @@ and private interpretNest
         | OutArray a ->
             let coords = [ for lvl in 0 .. n - 1 -> idxVals.[lvl] ]
             A.writeCell a coords v
+        | OutArrayRows a ->
+            // The kernel value IS the row. Walk the row's own coordinate space
+            // and write each cell at (outer coords ++ inner coords); the row's
+            // extents come from the row, so a shorter/longer row than the
+            // output's trailing axes would raise the coordinate/shape mismatch
+            // rather than silently truncate.
+            let outer = [ for lvl in 0 .. n - 1 -> idxVals.[lvl] ]
+            (match v with
+             | VArray row ->
+                 let rec walk (dim: int) (acc: int64 list) =
+                     if dim = row.Extents.Length then
+                         A.writeCell a (outer @ List.rev acc) (A.readCell row (List.rev acc))
+                     else
+                         for j in 0L .. row.Extents.[dim] - 1L do walk (dim + 1) (j :: acc)
+                 walk 0 []
+             | _ -> raise (InterpUnsupported "array-valued kernel return produced a non-array row"))
         | OutFold (acc, wrapper) ->
             acc.V <- wrapper acc.V v
 
@@ -1464,6 +1501,27 @@ and private interpretNest
 /// interact). Single leaf = scalar; fusion tree = a structured tuple
 /// mirroring the tree shape (same rationale as forceTreeShaped).
 let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (kernel: IRExpr) (seed: Value) : Value =
+    // HOISTED-OPERAND PRELUDE -- the twin of CodeGen.genReduceComputeBinding's.
+    // The lift pass pulls a synthesized loop application out of the
+    // combinator's `Arrays` slot into its own let, so a deferred computation
+    // whose operand is a broadcast (`reduce(exp <@> (i * w * ts), (+))`, i.e.
+    // units/065's kernel body) arrives here as
+    // `IRLet(v, IRApp(IRObjectFor ...), IRApplyCombinator ...)`. The leaf check
+    // below then saw an IRLet, not an apply, and raised InterpUnsupported for a
+    // well-formed fold the compiled lane now evaluates.
+    //
+    // Bind the hoisted values into the (flat, SSA-keyed) env exactly as Core's
+    // IRLet arm does -- the combinator underneath then resolves its operand by
+    // id -- and fold over that. Only ever turns an InterpUnsupported into a
+    // value: an IRLet-wrapped computation had no other outcome here.
+    let rec peelCompLets e =
+        match e with
+        | IRLet (id, value, body) ->
+            let v = force st env (Core.evalExpr st env value)
+            envBind env id v |> ignore
+            peelCompLets body
+        | _ -> e
+    let comp = peelCompLets comp
     let rec resolveDeferred e =
         match e with
         | IRVar (id, _) -> (match envTryFind env id with Some cell -> (match cell.V with VDeferred (e2, _) -> resolveDeferred e2 | _ -> e) | None -> e)

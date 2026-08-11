@@ -1,0 +1,32 @@
+// TEST: Bayes Normal-Normal Posterior Tower
+import ppl as ppl
+// ppl.bayes (docs/plan-ppl-proper.md P5): the closed-form conjugate
+// posterior as an ordinary family tower. Pinned against the exact
+// ORACLE_PINS.md dump-conjugate Normal-Normal block: prior N(m0=0, v0=4),
+// KNOWN likelihood variance sigma2=2, data [1.2, 0.7, 2.3, -0.4, 1.9]
+// (n=5, sum=5.6999999999999993 as doubles).
+//
+// Hand recomputation, same arithmetic as the oracle (Density.fs Conjugate):
+//   post_var  vn = 1/(1/v0 + n/sigma2) = 1/(1/4 + 5/2) = 4/11
+//           = 0.36363636363636365
+//   post_mean mn = vn*(m0/v0 + sum/sigma2) = (4/11)*(5.7/2)
+//           = 1.0363636363636362
+// The posterior tower is the gaussian(mn, vn) constructor's: kappa_1 = mn,
+// kappa_2 = vn, kappa_3 = kappa_4 = 0 -- the oracle's "tower r=4" line
+// verbatim. Composition: the result is a registered univariate dist, so
+// dist_expect reads E[theta] = mn and
+// E[theta^2] = vn + mn^2 = 4/11 + (5.7/11)^2*4 = 1.4376859504132228.
+let data: Array<Float64 like Idx<5>> = [1.2, 0.7, 2.3, -0.4, 1.9]
+let post = ppl.bayes(gaussian(0.0, 4.0), gaussian_lik(2.0), data, 4)
+let k1 = ppl.cumulant(post, 1)
+let k2 = ppl.cumulant(post, 2)
+let k3 = ppl.cumulant(post, 3)
+let k4 = ppl.cumulant(post, 4)
+// EXPECT: k1 = [1.0363636363636362]
+// EXPECT: k2 = [0.36363636363636365]
+// EXPECT: k3 = [0.0]
+// EXPECT: k4 = [0.0]
+let pmean = ppl.dist_expect(post, 0.0, 1.0)
+let psecond = ppl.dist_expect(post, 0.0, 0.0, 1.0)
+// EXPECT: pmean = 1.0363636363636362
+// EXPECT: psecond = 1.4376859504132228

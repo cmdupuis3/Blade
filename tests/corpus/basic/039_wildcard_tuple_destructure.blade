@@ -1,0 +1,54 @@
+// TEST: Wildcard Tuple Destructure
+// A `_` in a tuple pattern must CONSUME its component without binding.
+// It used to bind nothing AND consume nothing: the checker recorded one
+// SubBinding per bound name and Lowering projected sub-binding #k as element
+// #k, so every binder after a wildcard slid down onto the leading components.
+// `let (_, b) = (1, 2)` emitted `std::get<0>` for b and silently produced 1.
+//
+// Pinned at every position a wildcard can take, because the failure is
+// positional: a TRAILING wildcard shifts nothing and was always right, so a
+// test that only covered `(a, _)` would have passed against the bug.
+let t3 = (10, 20, 30)
+
+// leading wildcard: both binders shift
+let (_, b1, c1) = t3
+// EXPECT: b1 = 20
+// EXPECT: c1 = 30
+
+// two leading wildcards: the survivor shifts by two
+let (_, _, c2) = t3
+// EXPECT: c2 = 30
+
+// interior wildcard: only what follows it shifts
+let (a3, _, c3) = t3
+// EXPECT: a3 = 10
+// EXPECT: c3 = 30
+
+// trailing wildcard: the always-correct case, kept as the control
+let (a4, b4, _) = t3
+// EXPECT: a4 = 10
+// EXPECT: b4 = 20
+
+// A wider tuple, with the gaps at both ends and in the middle at once.
+let t5 = (1.5, 2.5, 3.5, 4.5, 5.5)
+let (_, p2, _, p4, _) = t5
+// EXPECT: p2 = 2.5
+// EXPECT: p4 = 4.5
+
+// Statement position inside a block goes through a different checker path
+// (stmtDestructureBindings) than the declaration above, with the same defect.
+// Block-local names are not auto-printed, so the block returns a
+// digit-weighted scalar that pins both surviving leaves at once.
+let inBlock = {
+    let (_, q2, q3) = t3
+    q2 * 100 + q3
+}
+// 20*100 + 30 = 2030
+// EXPECT: inBlock = 2030
+
+// `let static` is the third path that records sub-bindings. Its leaves are
+// normally served from StaticEval's folded values (which were always
+// position-correct); this pins that the projection fallback agrees.
+let static (_, s2) = (7, 9)
+let sv = s2 + 1
+// EXPECT: sv = 10

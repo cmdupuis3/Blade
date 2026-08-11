@@ -16,6 +16,7 @@
 // existing `allocate<>` machinery; the wrapper just bundles already-allocated pointers.
 
 #include <cstddef>
+#include <type_traits>     // the integral-subscript overloads' enable_if gate
 #include "nested_array_utilities.hpp"
 #include "index_types.h"   // compound_index_t (+ tabulated bases) for Compound<T,RANK>
 
@@ -32,6 +33,20 @@ namespace nested_array_utilities {
         // Forwarding indexing: returns whatever the underlying pointer's operator[] returns -- for rank > 1, another pointer; for rank 1, a T&.
         constexpr auto& operator[](size_t i) const { return data[i]; }
         constexpr auto& operator[](size_t i) { return data[i]; }
+
+        // Exact-match twin for every OTHER integral subscript (int literals,
+        // int64_t loop counters, ReadIdx-style long long tag aliases). Without
+        // it a signed subscript ties between the size_t operator above
+        // (integral conversion on the index) and the BUILT-IN pointer
+        // subscript reached through the implicit data conversion below (user
+        // conversion on the object, exact index): g++ happens to pick one,
+        // clang correctly rejects the call as ambiguous. Both roads read
+        // data[i], so the template only settles resolution, never behavior;
+        // for a size_t argument the non-template above still wins the tie.
+        template<typename I, typename = std::enable_if_t<std::is_integral<I>::value>>
+        constexpr auto& operator[](I i) const { return data[i]; }
+        template<typename I, typename = std::enable_if_t<std::is_integral<I>::value>>
+        constexpr auto& operator[](I i) { return data[i]; }
 
         // Implicit conversion to the underlying pointer type. Used by (1) producer-side rank-N construction patterns
         // where rank-(N-1) wrappers are assigned into outer-array slots that have type T* (e.g. result[i] = result_i
@@ -57,6 +72,13 @@ namespace nested_array_utilities {
         constexpr T& operator[](size_t i) const { return data[i]; }
         constexpr T& operator[](size_t i) { return data[i]; }
 
+        // Same signed-subscript ambiguity hazard as Array<T,N> (member vs
+        // built-in through the T* conversion below); same exact-match cure.
+        template<typename I, typename = std::enable_if_t<std::is_integral<I>::value>>
+        constexpr T& operator[](I i) const { return data[i]; }
+        template<typename I, typename = std::enable_if_t<std::is_integral<I>::value>>
+        constexpr T& operator[](I i) { return data[i]; }
+
         // Implicit decay to raw pointer, for source compatibility with code written against `Ragged::operator[] -> T*`.
         constexpr operator T*() const { return data; }
     };
@@ -80,6 +102,13 @@ namespace nested_array_utilities {
 
         constexpr RaggedRow<T> operator[](size_t i) const { return RaggedRow<T>{data[i], lens[i]}; }
         constexpr RaggedRow<T> operator[](size_t i) { return RaggedRow<T>{data[i], lens[i]}; }
+
+        // Same signed-subscript ambiguity hazard as Array<T,N> (member vs
+        // built-in through the T** conversion below); same exact-match cure.
+        template<typename I, typename = std::enable_if_t<std::is_integral<I>::value>>
+        constexpr RaggedRow<T> operator[](I i) const { return RaggedRow<T>{data[i], lens[i]}; }
+        template<typename I, typename = std::enable_if_t<std::is_integral<I>::value>>
+        constexpr RaggedRow<T> operator[](I i) { return RaggedRow<T>{data[i], lens[i]}; }
 
         // Implicit conversion to T**. Same rationale as Array<T,N> above.
         constexpr operator T**() const { return data; }

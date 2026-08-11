@@ -1,0 +1,27 @@
+// TEST: Caret Param Arithmetic Demand
+// A bare `T^k` / `U^k` parameter is an arity-k inference VAR, not an array;
+// demand sites materialize it. `prodsum`, `reduce`, and `extents` were
+// demands; an ARITHMETIC operator was not. So `s * 2.0` on `s: U^1` matched
+// neither the both-arrays arm nor the array/scalar broadcast arm (both test
+// ArrayElem, which an infer var is not) and fell through to SCALAR
+// promotion: the whole body typed Float64, the var stayed unbound, and the
+// scalar return surfaced far away at a caller as
+// "BL3999: prodsum() requires array arguments" -- attributed to the CALLER,
+// not the declaration. Whether a body typed depended on whether something
+// else in it happened to materialize the var first (`let n = extents(s)`
+// before the arithmetic made the same body compile): ordering, not meaning.
+// This is examples/lswosa.blade's hanning taper, whose whole body is caret
+// arithmetic.
+//
+// Arithmetic against a CONCRETE operand is now a demand site. Deliberately
+// narrow: an arity var meets an arity var (`head + packsum1(tail)` in a
+// Poly<T^k> recursion) still defers -- shaping both breaks the recursive
+// packs (arity/019 pins that shape).
+//
+// Value pins, not just compilation: 8^2 + 10^2 + 12^2 = 308.
+function h(s: U^1) = (s * 2.0) |> compute
+let b: Array<Float64 like Idx<3>> = [4.0, 5.0, 6.0]
+let sw = h(b)
+let q = prodsum(sw, sw)
+// EXPECT: sw = [8, 10, 12]
+// EXPECT: q = 308

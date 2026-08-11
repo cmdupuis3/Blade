@@ -125,6 +125,16 @@ type TypeError =
     /// structurally-dimensioned arguments are both rejected; the caller must
     /// ascribe (`x : speed`). `got` describes the argument's signature.
     | QuantityArgMismatch of pos: int * quantity: string * got: string
+    /// BL3016: a parameter's index slot and the argument's BOTH carry a
+    /// compile-time-literal extent, and they differ. Codegen bakes a literal
+    /// parameter extent into loop bounds and result allocations (a symbolic
+    /// `Idx<n>` reads `.extents[d]` at runtime instead), so this is an
+    /// out-of-bounds read, not a naming disagreement. `dim` is 1-based over
+    /// the array's index slots. Raised at BOTH param-vs-arg seams: direct
+    /// application (dispatchAppOrIndex) and kernel application
+    /// (buildApplyInfo), which is why `pos` says "argument"/"parameter"
+    /// rather than naming a call form.
+    | ExtentArgMismatch of pos: int * dim: int * expected: int64 * actual: int64
     /// BL3011: a quantity name used inside unit algebra (`Unit x = speed * m`)
     /// or as the RHS of another quantity (`Unit q: speed`). Quantities are
     /// TERMINAL: the nominal layer is exactly one level deep.
@@ -290,6 +300,8 @@ type TypeError =
     | ProviderWriteNeedsArray of alias: string
     | ProviderWriteNamedBinding of alias: string
     | ProviderWriteArgs of alias: string
+    /// `alias.write(...)` written anywhere but a module-level `let` binding.
+    | ProviderWriteModuleScope of alias: string
     | ProviderImportByModule of suggestion: string * providers: string
     | ProviderNoSelectiveImport of pname: string
     | Other of string
@@ -338,6 +350,17 @@ type Subst() =
         IRTInfer id
 
     member _.Bind(id, ty) =
+        // POLYMORPHIC MARK PROPAGATION (var-to-var only). The mark says "zonk
+        // must keep this var open; IR-phase HM monomorphization substitutes
+        // it per call site". When a marked var defers to ANOTHER var the mark
+        // has to travel with it, or the survivor gets defaulted to Float64 by
+        // zonk and the function collapses to one element type. Exactly the
+        // `CopyLiteralDefault` situation, one bind arm up. Concrete binds are
+        // untouched -- a mark on a resolved var means nothing.
+        (match ty with
+         | IRTInfer id2 when Set.contains id polymorphicIds ->
+             polymorphicIds <- Set.add id2 polymorphicIds
+         | _ -> ())
         map <- Map.add id ty map
 
     member _.TryFind(id) =
@@ -376,6 +399,20 @@ type Subst() =
 
     member _.IsPolymorphicId(id: int) : bool =
         Set.contains id polymorphicIds
+
+    /// Mint the mark on a var that was NOT created from a signature type-var
+    /// NAME. The only client is the array-shape synthesis in
+    /// `requireArrayArgMinRank`: giving a `T^k` signature var its array shape
+    /// replaces one polymorphic var with `Array<E, ..>`, and unless `E`
+    /// inherits the mark the function stops being polymorphic in its element
+    /// type at exactly the moment its shape becomes known.
+    member _.MarkPolymorphic(id: int) =
+        polymorphicIds <- Set.add id polymorphicIds
+
+    member _.CopyPolymorphic(fromId: int, toId: int) =
+        if Set.contains fromId polymorphicIds then
+            polymorphicIds <- Set.add toId polymorphicIds
+
 
     member _.AddRankLowerBound(id: int, k: int) =
         if k > 0 then
@@ -614,6 +651,17 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     | IRTInfer id, ty | ty, IRTInfer id ->
         if occursIn id ty then Error (Other "Infinite type detected")
         else
+            // A var-to-var bind must carry the HM-polymorphic flag to the
+            // SURVIVING var. `polymorphicIds` is populated only at
+            // LookupOrCreateTypeVar; every arm below ends in `Bind(id, ty)`,
+            // so when `ty` is itself a var, `id`'s flag would otherwise die
+            // with the bind and Zonk would default the survivor to Float64.
+            // Seam that fires this: an UNANNOTATED return type -- unify of the
+            // body's boundary `T` against the decl's fresh retType var demoted
+            // `T` to a monomorphic Float64 function silently.
+            (match ty with
+             | IRTInfer id2 -> subst.CopyPolymorphic(id, id2)
+             | _ -> ())
             // Rank lower bound (stage-2 deduction): validate/propagate before
             // any bind. A too-low-rank array or a scalar violates the bound;
             // another inference var inherits it (max-join).

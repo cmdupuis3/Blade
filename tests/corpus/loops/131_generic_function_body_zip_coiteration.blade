@@ -1,0 +1,93 @@
+// TEST: Generic Function Body Zip Co-Iteration
+// ============================================================================
+// The CO-ITERATION twin of loops/130, and the repro cd0f202's note said it
+// lacked. Same arm of inferApply, same defect shape -- an operand that does not
+// match `ArrayElem` degrades to a RANK-0 record -- but a different consequence,
+// because these records are the apply's SharedIndexTypes rather than its
+// operand shapes: rank 0 means NO shared axis, so buildApplyInfo built the full
+// OUTER PRODUCT of the zipped operands instead of co-iterating them.
+//
+// That failure is SILENT. `f` below returned the 3x3 grid
+//   [[10, 20, 30], [20, 40, 60], [30, 60, 90]]
+// where its concrete twin `f_conc` returned [10, 40, 90]; the three-way form
+// returned 27 elements for a 3-element co-iteration; and the rank-2 form
+// returned a 2x3x2x3 grid for a 2x3 elementwise product. Only `g` (a zip of
+// array-valued INTERMEDIATES, loops/130's shape) failed loudly, and only
+// downstream: the output extents named `wt_n`, which nothing declares.
+//
+// Two stacked degradations, either of which alone produces the rank-0 record:
+// the arity demand for a caret-shorthand (`T^k`) operand ran only AFTER these
+// records were computed, and the match read the operand's type without
+// resolving it through the substitution. The demand now runs first, so the
+// shared records are minted from the same extents the operand shapes carry.
+//
+// Only the ABSTRACT spelling reaches it -- `f_conc` is the concrete control --
+// and only the `object_for` ORIENTATION: `mf` below is the `method_for`
+// spelling of the identical apply, which was already correct (it routes through
+// inferMethodFor's zip arm, whose `loopOperandArrayType` always resolved) and
+// which the fix must not move.
+// ============================================================================
+
+// Abstract params, kernel-first over a two-way zip.
+function f(a: Float64^1, b: Float64^1) = {
+    object_for(lambda(x, y) -> x * y) <@> zip(a, b)
+}
+
+// Three-way: returned |A|*|B|*|C| = 27 cells as an outer product.
+function three(a: Float64^1, b: Float64^1, c: Float64^1) = {
+    object_for(lambda(x, y, z) -> x * y + z) <@> zip(a, b, c)
+}
+
+// Rank-2 abstract params: the multi-record co-iteration, where the lost shared
+// records cost the whole product space (2x3x2x3 for a 2x3 result).
+function f2(a: Float64^2, b: Float64^2) = {
+    object_for(lambda(x, y) -> x * y) <@> zip(a, b)
+}
+
+// Zip of array-valued INTERMEDIATES inside a lambda inside a generic function
+// -- loops/130's shape with a co-iteration in place of the nested map. This is
+// the one spelling that failed loudly, with `'wt_n' was not declared in this
+// scope` from the outer-product output extents.
+//   out[k] = sum_t (w[k]*t) * t  over t = [1,2,3] -> 1*1+4*2+9*3 = 36 scaled by w
+function g(ws: Float64^1, t: Float64^1) = {
+    ws <@> lambda(w) -> {
+        let wt = (w * t) |> compute
+        let c = object_for(lambda(p, q) -> p * q) <@> zip(wt, t)
+        reduce(c, (+))
+    }
+}
+
+// The method_for orientation of `f`'s apply: the control that always worked.
+function mf(a: Float64^1, b: Float64^1) = {
+    method_for(zip(a, b)) <@> lambda(x, y) -> x * y
+}
+
+// Concrete-typed twin of `f`: no caret shorthand, so no fallback runs.
+function f_conc(a: Array<Float64 like Idx<3>>, b: Array<Float64 like Idx<3>>) = {
+    object_for(lambda(x, y) -> x * y) <@> zip(a, b)
+}
+
+type Y = Idx<2>
+type X = Idx<3>
+
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+let C: Array<Float64 like Idx<3>> = [100.0, 200.0, 300.0]
+let M: Array<Float64 like Y, X> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let N: Array<Float64 like Y, X> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let ws: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let t: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+
+let two_way = f(A, B) |> compute
+let three_way = three(A, B, C) |> compute
+let rank2 = f2(M, N) |> compute
+let inter = g(ws, t) |> compute
+let mf_form = mf(A, B) |> compute
+let conc = f_conc(A, B) |> compute
+
+// EXPECT: two_way = [10, 40, 90]
+// EXPECT: three_way = [110, 240, 390]
+// EXPECT: rank2 = [[10, 40, 90], [160, 250, 360]]
+// EXPECT: inter = [14, 28]
+// EXPECT: mf_form = [10, 40, 90]
+// EXPECT: conc = [10, 40, 90]

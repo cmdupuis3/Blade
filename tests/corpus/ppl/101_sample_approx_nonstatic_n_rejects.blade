@@ -1,0 +1,10 @@
+// TEST: Sample Approx Non-Static Count (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: the sample count must be a compile-time integer
+import ppl as ppl
+// dist_sample_approx shares sample's static-count contract: the uniform
+// fill it synthesizes is a shaped array, and shapes are static. Runtime
+// count -> BL5100 steering, same as ppl.sample (corpus 100).
+let d = ppl.exponential(1.0, 4)
+let n = 64
+let s = ppl.dist_sample_approx(d, 1, n)

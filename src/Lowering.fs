@@ -151,7 +151,34 @@ let emptyTypedEnv () : TypedLowerEnv = {
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
     { env with Variables = Map.add name id env.Variables }
 
-/// Value expression for destructured sub-binding #i of `binding`.
+/// Flat-vs-structural projection mode for a destructuring binding, plus the
+/// slot each sub-binding reads.
+///
+/// The WIDTH that decides the mode is the pattern's slot count, which is only
+/// the same as `SubBindings.Length` when every pattern position binds a name.
+/// A wildcard binds nothing yet still covers a component, so the checker
+/// states both numbers explicitly (DSTupleAt); re-deriving either one from the
+/// sub-binding list is what made `let (_, g) = f(x)` read element 0.
+/// Non-tuple shapes (struct fields, cons leaves, no destructuring) keep the
+/// identity mapping and the historical count.
+let destructureLayout (binding: TypedBinding) : bool * (int -> int) =
+    let slotOfSub, slots =
+        match binding.Destructure with
+        | DSTupleAt (components, slots) ->
+            let arr = List.toArray components
+            (fun i -> if i < arr.Length then arr.[i] else i), slots
+        | DSPositional | DSConsRest -> id, binding.SubBindings.Length
+    let isFlat =
+        match binding.Type with
+        | IRTTuple _ ->
+            let structCount = match binding.Type with IRTTuple ts -> ts.Length | _ -> 0
+            let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
+            slots = flatCount && slots <> structCount
+        | _ -> false
+    (isFlat, slotOfSub)
+
+/// Value expression for destructured sub-binding #i of `binding`, reading
+/// tuple slot `slot` (they differ only when a pattern position binds nothing).
 ///
 /// Positional destructuring reads element i of the tuple (or, for a struct
 /// scrutinee, the field carrying the sub-binding's own name). A CONS binding
@@ -168,9 +195,11 @@ let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
 /// fewer leaves than the tuple has slots, so checkDecl's flat-vs-structural
 /// test never selects flat for one, and the remainder must index the
 /// scrutinee structurally in any case.
-let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: int) (name: string) : IRExpr =
+let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: int) (slot: int) (name: string) : IRExpr =
     let baseVar = IRVar (binding.VarId, binding.Type)
-    let isConsBinding = match binding.Destructure with DSConsRest -> true | DSPositional -> false
+    // Cons/pack shapes never remap (slot = i there), so the rest-leaf test and
+    // the pack reads below stay on the sub-binding index they were written for.
+    let isConsBinding = match binding.Destructure with DSConsRest -> true | DSPositional | DSTupleAt _ -> false
     let isRestLeaf = isConsBinding && i = binding.SubBindings.Length - 1
     if isStruct then IRFieldAccess (baseVar, name)
     else
@@ -184,7 +213,7 @@ let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: 
         | IRTTuple ts when isRestLeaf && ts.Length > i ->
             let rest = [ for j in i .. ts.Length - 1 -> IRTupleProj (baseVar, j, false) ]
             if rest.Length = 1 then rest.Head else IRTuple rest
-        | _ -> IRTupleProj (baseVar, i, isFlat)
+        | _ -> IRTupleProj (baseVar, slot, isFlat)
 
 /// Map a callable's parallelization-strategy list (from a function's
 /// where-clause or a lambda's `Parallel` list) into the five IRCallable
@@ -210,6 +239,82 @@ let extractParallelism (strategies: ParallelStrategy list) (paramNames: string l
     let cudaBlock = match cuda with Some c -> c.BlockSize | None -> 256
     let isMpi = strategies |> List.exists (function Mpi -> true | _ -> false)
     (parallelism, isOmp, isCuda, cudaBlock, isMpi)
+
+/// `computeWrap`'s INSERT direction (docs/plan-kernel-body-materialization.md
+/// sections 2 and 5, stage S2). The TExprCompute arm below owns the DROP
+/// direction -- "this node materializes on its own, so the wrapper is a no-op".
+/// This owns the mirror rule: inside a LAMBDA or FUNCTION body, a `let` whose
+/// RHS is a bare (unforced) `IRApplyCombinator`/`IRComposeApply` must be FORCED,
+/// because there is no forcing site downstream of it.
+///
+/// Why the body scope is load-bearing. At MODULE level the deferred protocol is
+/// real: `genComputeBinding` peels `IRCompute` recursively and the consuming
+/// `|> compute` materializes the producer under its own name. Inside a body
+/// there is no such consumer -- `genFuncBodyScoped`'s let dispatch used to
+/// register the name and emit NOTHING (the `'__v27' was not declared` bug), so
+/// every downstream read named an identifier that was never declared and the
+/// kernel that lived only on the dropped node was emitted and never called.
+///
+/// `compute` is idempotent at inference (Theme B), so a user-written `|> compute`
+/// has already produced `IRCompute (IRApplyCombinator ...)` and is NOT matched
+/// here -- `loops/114` (compute-elementwise-in-function-body) is unaffected.
+/// The walk follows only the STATEMENT SPINE (let chains and the control-flow
+/// forms a body's statements can nest in); it never descends into a combinator's
+/// own operand slots, where a deferred node is the working protocol, and never
+/// into a nested lambda (which is already an IRVar to its own callable by the
+/// time this runs, and got this same treatment when IT was lowered).
+let rec forceBareCombinatorLets (expr: IRExpr) : IRExpr =
+    match expr with
+    | IRLet (id, value, body) ->
+        let value' =
+            match value with
+            | IRApplyCombinator _ | IRComposeApply _ -> IRCompute value
+            | _ -> forceBareCombinatorLets value
+        IRLet (id, value', forceBareCombinatorLets body)
+    | IRIf (c, t, e) -> IRIf (c, forceBareCombinatorLets t, forceBareCombinatorLets e)
+    | IRForRange (vid, lo, hi, body) -> IRForRange (vid, lo, hi, forceBareCombinatorLets body)
+    | IRMatch (scrut, cases) ->
+        IRMatch (scrut, cases |> List.map (fun c -> { c with Body = forceBareCombinatorLets c.Body }))
+    | _ -> expr
+
+/// The RETURN half of the same rule (docs/plan-kernel-body-materialization.md
+/// manifestation M-D, stage S4): **the callee forces**. A callable whose return
+/// expression is a bare `IRApplyCombinator`/`IRComposeApply` gets an `IRCompute`,
+/// so `function f(xs) = { xs <@> lambda(x) -> x * 2.0 }` materializes inside `f`
+/// instead of returning
+/// `BLADE_CODEGEN_ERROR_UNEVALUATED_COMPUTATION_USED_AS_VALUE`.
+///
+/// WHY "THE CALLEE FORCES" AND NOT "THE CALLER'S COMPUTE REACHES INSIDE".
+/// Three measured facts (plan section 1, M-D) settle it: the emitted signature
+/// is ALREADY `Array<double,1> f(...)`, so the ABI promises a materialized
+/// array; laziness demonstrably never crosses a named-function boundary today
+/// (`reduce(mk(a), (+))` and `mk(a) <&> mk2(a)` die with the same sentinel, so
+/// there is no lazy return to preserve); and `compute` is idempotent at
+/// inference, so a caller-side `f(a) |> compute` stays a legal no-op. Sinking
+/// the caller's `compute` into the callee would instead make the return type
+/// vary by call site -- a monomorphization axis with no payoff.
+///
+/// SPINE, not tree. A return leaf hides behind a let chain (`{ let s = ...;
+/// xs <@> k }`), an `if`, or a `match`, so all three are followed to their
+/// tails. `IRForRange` is deliberately NOT followed: a for-body's tail is a
+/// statement, not a return value, and forcing there would materialize a fresh
+/// array per iteration and discard it. Let RHSs are `forceBareCombinatorLets`'
+/// business (S2) -- this pass only ever touches tail position, so running the
+/// two in sequence is exactly "force every leaf on the statement spine".
+let rec forceReturnCombinator (expr: IRExpr) : IRExpr =
+    match expr with
+    | IRApplyCombinator _ | IRComposeApply _ -> IRCompute expr
+    | IRLet (id, value, body) -> IRLet (id, value, forceReturnCombinator body)
+    | IRIf (c, t, e) -> IRIf (c, forceReturnCombinator t, forceReturnCombinator e)
+    | IRMatch (scrut, cases) ->
+        IRMatch (scrut, cases |> List.map (fun c -> { c with Body = forceReturnCombinator c.Body }))
+    | _ -> expr
+
+/// The two body passes a callable's lowered body gets, in the order their
+/// scopes compose: S2 forces every bare combinator bound by a `let` anywhere on
+/// the statement spine, then S4 forces the bare combinator in each RETURN leaf.
+let forceCallableBody (body: IRExpr) : IRExpr =
+    forceReturnCombinator (forceBareCombinatorLets body)
 
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
@@ -541,9 +646,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
 
     | TExprRandGen _ ->
         // Materialized only as a top-level let-binding value, where TDeclLet
-        // intercepts it (records the key/kind in RandomInits, allocates the
-        // self-typed array). Reaching here means it was used inline / nested.
-        failwith "rand.uniform/normal(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n))"
+        // intercepts it (records the kind/key/params in RandomInits, allocates
+        // the self-typed array). Reaching here means it was used inline / nested.
+        failwith "rand.<fam>(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n))"
 
     | TExprCompound _ ->
         // Only meaningful as a top-level let-binding value, where TDeclLet
@@ -734,18 +839,20 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
 
     let body' = lowerTypedExpr paramEnv info.Body
 
-    // If the body's top-level shape is value-position-illegal as a
-    // standalone function return, wrap it in IRCompute. This applies only to
-    // bare IRApplyCombinator -- `method_for { ... }` and similar combinator
-    // forms that need a destination to materialize into. genFuncBody's
-    // return-position match handles `IRCompute(IRApplyCombinator _)` by
-    // synthesizing an internal let binding and running the full combinator
-    // codegen; use-site rendering is identical either way, so the wrap
-    // doesn't change behavior at existing use sites.
-    let bodyWrapped =
-        match body' with
-        | IRApplyCombinator _ | IRComposeApply _ -> IRCompute body'
-        | _ -> body'
+    // A body shape that is value-position-illegal as a standalone function
+    // return is wrapped in IRCompute -- bare IRApplyCombinator/IRComposeApply,
+    // the combinator forms that need a destination to materialize into.
+    // genFuncBody's return-position match handles `IRCompute(IRApplyCombinator
+    // _)` by synthesizing an internal let binding and running the full
+    // combinator codegen; use-site rendering is identical either way, so the
+    // wrap doesn't change behavior at existing use sites.
+    //
+    // S2 forces a `let` INSIDE the body whose RHS is a bare combinator; S4
+    // generalizes the wrap above from "the body's TOP node" to "each RETURN
+    // leaf" (behind a let chain / if / match), which is the same rule this
+    // site always intended. `forceCallableBody` is the pair, and the two
+    // callable-construction sites now share it verbatim.
+    let bodyWrapped = forceCallableBody body'
 
     // Build unified IRCallable. info.ReturnType comes from TypeCheck, so the
     // lambda has a concrete return type; we trust that annotation. Lambda-level
@@ -880,13 +987,7 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
                 // a projection IRLet per pattern leaf after the primary
                 // binding -- without these the leaf VarIds dangle.
                 let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
-                let isFlat =
-                    match binding.Type with
-                    | IRTTuple ts ->
-                        let structCount = ts.Length
-                        let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
-                        binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
-                    | _ -> false
+                let (isFlat, slotOf) = destructureLayout binding
                 let env'' = binding.SubBindings |> List.fold (fun e (name, subId, _) -> bindTypedVar name subId e) env'
                 let body = lowerTypedBlock env'' rest finalExpr
                 // Constraint guards run right after the destructure, before
@@ -898,7 +999,7 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
                     binding.SubBindings |> List.mapi (fun i (name, subId, _subTy) -> (i, name, subId))
                 let chained =
                     List.foldBack (fun (i, name, subId) acc ->
-                        let projExpr = subBindingValue binding isStruct isFlat i name
+                        let projExpr = subBindingValue binding isStruct isFlat i (slotOf i) name
                         IRLet (subId, projExpr, acc)) indexedSubs withChecks
                 IRLet (binding.VarId, value, chained)
         | TStmtAssign (lhs, rhs) ->
@@ -1257,7 +1358,13 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
         paramEnv <- bindTypedVar p.Name p.VarId paramEnv
         { Name = p.Name; Type = p.Type; Index = p.Index; VarId = p.VarId } : IRParam)
 
-    let body = lowerTypedExpr paramEnv decl.Body
+    // A function body is a body in exactly the sense lowerTypedLambda's wrap is
+    // about: a `let` bound to a bare combinator has no forcing site downstream
+    // (S2), and neither does the RETURN expression (S4, manifestation M-D) --
+    // `function f(xs) = { xs <@> lambda(x) -> x * 2.0 }` used to return the
+    // UNEVALUATED_COMPUTATION_USED_AS_VALUE sentinel. Same pair as the lambda
+    // site, so the two share `forceCallableBody`.
+    let body = forceCallableBody (lowerTypedExpr paramEnv decl.Body)
 
     // Source-level functions live at top level and have no enclosing scope to
     // capture from, so Captures = []. The function-only metadata (name, id,
@@ -1318,16 +1425,9 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         let (irBinding, env') = lowerTypedBinding env binding
         // Emit sub-bindings for destructured patterns (tuple, cons, struct)
         let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
-        // Determine if this is a flat destructuring (pattern count = flat leaf count != structural count)
-        let isFlat =
-            match binding.Type with
-            | IRTTuple ts ->
-                let structCount = ts.Length
-                let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
-                binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
-            | _ -> false
+        let (isFlat, slotOf) = destructureLayout binding
         let subIRBindings = binding.SubBindings |> List.mapi (fun i (name, subId, subTy) ->
-            let projExpr = subBindingValue binding isStruct isFlat i name
+            let projExpr = subBindingValue binding isStruct isFlat i (slotOf i) name
             let env' = bindTypedVar name subId env'
             { Id = subId; Name = name; Type = subTy; Value = projExpr; IsConst = true; IsMutable = false })
         let env'' = binding.SubBindings |> List.fold (fun e (name, subId, _) -> bindTypedVar name subId e) env'
@@ -1373,13 +1473,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         // direct constants, falling back to tuple projection of the primary
         // binding for shapes the static evaluator didn't reach.
         let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
-        let isFlat =
-            match binding.Type with
-            | IRTTuple ts ->
-                let structCount = ts.Length
-                let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
-                binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
-            | _ -> false
+        let (isFlat, slotOf) = destructureLayout binding
         let (subIRBindings, envFinal) =
             binding.SubBindings |> List.mapi (fun i (name, subId, subTy) -> (i, name, subId, subTy))
             |> List.fold (fun (acc, e) (i, name, subId, subTy) ->
@@ -1393,7 +1487,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
                           IsConst = true; IsMutable = false }
                     | None ->
                         // Projection fallback -- same shape as TDeclLet's branch.
-                        let projExpr = subBindingValue binding isStruct isFlat i name
+                        let projExpr = subBindingValue binding isStruct isFlat i (slotOf i) name
                         { Id = subId; Name = name; Type = subTy; Value = projExpr
                           IsConst = true; IsMutable = false }
                 (acc @ [bd], bindTypedVar name subId e)
@@ -1871,13 +1965,23 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (FillModulus modIR) currentEnv.RandomInits }
         | TDeclLet binding when (match binding.Value.Kind with TExprRandGen _ -> true | _ -> false) ->
-            // rand.uniform/normal(key, shape): materialized via allocate<> +
+            // rand.<fam>(key, params.., shape): materialized via allocate<> +
             // the runtime blade_rand fill (RandomInits/RandGen intercept).
-            // The key is lowered and recorded. Mirrors the fill_random arm.
-            let kind, keyIR =
+            // The key and the family's runtime Float64 params are lowered in
+            // the CURRENT env (so they may reference earlier bindings, exactly
+            // as the key may) and recorded. Mirrors the fill_random arm.
+            //
+            // The categorical weights array lowers in the same env for the same
+            // reason -- it is always an earlier binding -- and carries the
+            // checker-pinned static extent through unchanged.
+            let kind, keyIR, parIRs, weightsIR =
                 match binding.Value.Kind with
-                | TExprRandGen (k, key, _) -> k, lowerTypedExpr currentEnv key
-                | _ -> "uniform", IRLit (IRLitInt 0L)  // unreachable: guarded by the `when` above
+                | TExprRandGen (k, key, pars, weights, _) ->
+                    k,
+                    lowerTypedExpr currentEnv key,
+                    (pars |> List.map (lowerTypedExpr currentEnv)),
+                    (weights |> Option.map (fun (w, n) -> (lowerTypedExpr currentEnv w, n)))
+                | _ -> "uniform", IRLit (IRLitInt 0L), [], None  // unreachable: guarded by the `when` above
             let bd = {
                 Id = binding.VarId
                 Name = binding.Name
@@ -1888,7 +1992,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             }
             bindings <- bindings @ [bd]
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
-            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (RandGen (kind, keyIR)) currentEnv.RandomInits }
+            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (RandGen (kind, keyIR, parIRs, weightsIR)) currentEnv.RandomInits }
         | TDeclLet binding when (match binding.Value.Kind with TExprCompound _ -> true | _ -> false) ->
             // Compound-construction constructor: materialized via P0
             // (genCompoundIndexFromMask) + a dense->compact scatter (the
@@ -2083,6 +2187,29 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.
         let irModule = IR.liftInlineFormsModule irModule env.Builder
+        // S2/S4, SECOND APPLICATION -- and it has to be here, not only at
+        // `lowerTypedExpr` time. `lowerArrayBinOpsModule` SYNTHESIZES fresh
+        // `IRApplyCombinator` nodes (an array-vs-array binop becomes
+        // `method_for(zip ..) <@> kernel`), and it runs long after
+        // `forceCallableBody` walked each callable's body. A synthesized
+        // combinator landing in a FUNCTION-BODY let RHS therefore arrives at
+        // codegen unforced, which is the shape genFuncBodyScoped refuses
+        // outright (BL9001, "'__vN' as a name with no declaration behind it").
+        // Measured on `examples/lswosa.blade`: `mod2`/`cos_sum`/`sin_sum` are
+        // each a sum of two rank-1 per-frequency folds, six such lets in one
+        // body.
+        //
+        // FUNCTIONS ONLY. At module level the deferred protocol is real --
+        // `genBinding`/`genComputeBinding` materialize a bare combinator under
+        // the binding's own name -- so `Bindings` is deliberately untouched.
+        // Both passes are idempotent (an already-`IRCompute`-wrapped node
+        // matches neither), so re-running over bodies that were forced at
+        // lowering changes nothing.
+        let irModule =
+            { irModule with
+                Functions =
+                    irModule.Functions
+                    |> List.map (fun f -> { f with Body = forceCallableBody f.Body }) }
         // mask+contains fusion always runs a linear scan; the semijoin
         // hash-set is a separate, not-yet-implemented optimization.
         irModule)

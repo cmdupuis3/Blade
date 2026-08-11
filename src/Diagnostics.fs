@@ -171,6 +171,13 @@ module Codes =
             // the declared name as a fresh base unit) types a misspelling
             // into a silently wrong dimension.
             "BL3015", "unknown unit name"
+            // BL3016: a parameter and its argument BOTH carry a literal extent
+            // on the same index slot, and they differ. Not a naming quibble:
+            // codegen treats a literal parameter extent as ground truth and
+            // bakes it into loop bounds and result allocations, so the emitted
+            // C++ indexes past the argument's allocation. A symbolic extent
+            // (`Idx<n>`) reads `.extents[d]` at runtime and stays permissive.
+            "BL3016", "argument extent mismatch"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"
@@ -239,6 +246,12 @@ module Codes =
             // emitted LU loop nest, by the LAPACK ?gesv arm's non-zero `info`,
             // and by the interpreter's twin -- see CodeGen.solveSingularMessage.
             "BL8007", "singular matrix"
+            // A scalar math intrinsic was called outside its domain: lgamma or
+            // digamma at x <= 0, which refuse rather than returning a silent
+            // NaN; raised identically by blade_rt::lgamma / blade_rt::digamma
+            // (blade_runtime.hpp) and by the interpreter's twins
+            // (Interp/Numerics.lgammaLanczos / digammaSeries).
+            "BL8008", "math intrinsic domain error"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"

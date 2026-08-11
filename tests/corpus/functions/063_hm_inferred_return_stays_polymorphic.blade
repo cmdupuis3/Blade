@@ -1,0 +1,22 @@
+// TEST: HM Inferred Return Stays Polymorphic
+// The polymorphic flag must survive a var-to-var bind. `Subst.polymorphicIds`
+// is populated only at LookupOrCreateTypeVar; a decl with an UNANNOTATED
+// return type unifies the body's boundary `T` against a fresh retType var,
+// and the bind killed the flag with the bound var -- Zonk then defaulted the
+// survivor to Float64. `first` below silently became a monomorphic Float64
+// function: at the Complex128 call site the emitted C++ took
+// Array<double, 1> and g++ refused the conversion. Writing `-> T`
+// explicitly always worked, which is what hid this: only the INFERRED
+// return path rebinds var-to-var.
+//
+// unify now copies the flag to the surviving var on every var-to-var bind.
+// Both call sites below must monomorphize independently -- the Float64 one
+// pins that sharing one function at two element types still works (056
+// pins the two-instantiation case where the return was annotated).
+function first(x: Array<T like Idx<n>>) = x(0)
+let cs: Array<Complex128 like Idx<2>> = [complex(1.0, 2.0), complex(3.0, 4.0)]
+let fs: Array<Float64 like Idx<2>> = [7.0, 8.0]
+let c0 = first(cs)
+let f0 = first(fs)
+// EXPECT: c0 = (1,2)
+// EXPECT: f0 = 7

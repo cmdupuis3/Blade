@@ -132,6 +132,20 @@ type TypeEnv = {
     /// NOT set for named-function declaration bodies: their unannotated params
     /// are dimensionless by contract, so decl-time strictness is correct there.
     InLambdaBody: bool
+    /// True while ANY callable body is being type-inferred -- a lambda body, a
+    /// named-function declaration body, or an impl-method body. Those three are
+    /// exactly the `enterCallableBody` sites, and exactly the bodies Lowering
+    /// runs `forceCallableBody` (S2 + S4) over, so this flag is the
+    /// checker-side name for "a `let` bound here WILL be materialized".
+    /// Distinct from `InLambdaBody`, which is deliberately unset for
+    /// named-function bodies (their unannotated params are dimensionless by
+    /// contract).
+    ///
+    /// Read together with `OuterScope`: since `enterCallableBody` snapshots
+    /// everything visible at the body boundary, a name in `Variables` but NOT
+    /// in `OuterScope` is bound INSIDE the innermost body -- which is what
+    /// `bodyLocalBinding` tests.
+    InCallableBody: bool
     CurrentCommGroups: int list list
     /// Interface name -> InterfaceDecl
     Interfaces: Map<string, InterfaceDecl>
@@ -278,6 +292,7 @@ let emptyEnv () = {
     OuterScope = Map.empty
     InPolyContext = false
     InLambdaBody = false
+    InCallableBody = false
     CurrentCommGroups = []
     Interfaces = Map.empty
     ImplMethods = Map.empty
@@ -526,6 +541,8 @@ class IS implemented, and the dense result folds like any other array." op level
     | UnitMismatch (context, left, right) -> sprintf "Unit mismatch in %s: %s vs %s" context left right
     | QuantityArgMismatch (pos, quantity, got) ->
         sprintf "argument %d: the parameter's declared type carries the quantity '%s', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is %s. Ascribe it at the call site (e.g. `x : %s`); matching dimensions alone do not imply the quantity." pos quantity got quantity
+    | ExtentArgMismatch (pos, dim, expected, actual) ->
+        sprintf "argument %d: extent mismatch on index slot %d -- the parameter declares Idx<%d> but the argument has Idx<%d>. A LITERAL parameter extent is baked into the emitted loop bounds and result allocations (a symbolic extent like Idx<n> reads the argument's extent at runtime instead), so this reads past the argument's allocation rather than merely disagreeing. Make the extents match, or declare the parameter over a symbolic extent." pos dim expected actual
     | QuantityTerminal (quantity, declName) ->
         sprintf "unit '%s': the quantity '%s' cannot be used inside a unit expression. Quantities are TERMINAL -- the nominal layer is exactly one level deep -- so a quantity name can neither be composed (`Unit x = %s * m`) nor re-derived from (`Unit q: %s`). Compose from the structural units the quantity was declared over instead." declName quantity quantity quantity
     | UnknownUnitName (name, declName, candidates) ->
@@ -637,6 +654,7 @@ complex half)." where_
     | ProviderWriteNeedsArray alias -> sprintf "%s.write expects an array as its second argument (the variable to store)" alias
     | ProviderWriteNamedBinding alias -> sprintf "%s.write stores a NAMED array binding (its name becomes the store variable's name): bind the value first (let A = ...; %s.write(\"path\", A))" alias alias
     | ProviderWriteArgs alias -> sprintf "%s.write expects (\"path\", array): a string-literal store path and the array to write" alias
+    | ProviderWriteModuleScope alias -> sprintf "%s.write is a MODULE-LEVEL declaration form: it is only allowed as the whole right-hand side of a top-level `let` (let _ = %s.write(\"path\", A)). A write nested inside a block, a function or lambda body, a loop, or a branch is not lowered -- hoist it to module scope, or return the array from the block and write it there." alias alias
     | IrrepsIdxArgMismatch (pos, expected, actual) -> sprintf "argument %d: IrrepsIdx mismatch: the parameter expects %s but the argument carries %s. IrrepsIdx identity is the spec (plus nominative alias name) -- equal total_dim does not make two irreps spaces interchangeable." pos expected actual
     | BlockSpecArgMismatch (pos, expected, actual) -> sprintf "argument %d: block-spec index mismatch: the parameter expects %s but the argument carries %s. A block-structured index's identity is its GROUP FAMILY plus its spec (plus nominative alias name) -- equal total_dim does not make two block spaces interchangeable, and an O(3) irreps space is never a point-group one." pos expected actual
     | IrrepsIdxSpec detail -> sprintf "IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples -- a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." detail
@@ -695,6 +713,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // Promoted variants (Stage 5)
             | UnitMismatch _ -> "BL3006"
             | QuantityArgMismatch _ -> "BL3010"
+            | ExtentArgMismatch _ -> "BL3016"
             | QuantityTerminal _ -> "BL3011"
             | DefaultParamOrder _ | DefaultParamScope _ -> "BL3012"
             | FactoryDupQuantityDecl _ -> "BL3013"
@@ -770,7 +789,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | MutualUnsupportedExpr | MutualConstraintNotBool _ | MutualConstraintError _ -> "BL4006"
             | ProviderStreamNeedsVar _ | ProviderReadWindowBounds _ | ProviderReadWindowLiteralExtent _
             | ProviderReadWindowPacked _ | ProviderReadWindowNeedsVar _ | ProviderReadWindowArgs _
-            | ProviderWriteNeedsArray _ | ProviderWriteNamedBinding _ | ProviderWriteArgs _ -> "BL3007"
+            | ProviderWriteNeedsArray _ | ProviderWriteNamedBinding _ | ProviderWriteArgs _
+            | ProviderWriteModuleScope _ -> "BL3007"
             | ProviderImportByModule _ | ProviderNoSelectiveImport _ -> "BL2003"
             | Other _ -> "BL3999"
     Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) e.Span (formatTypeError e.Error)
@@ -811,8 +831,51 @@ let assignOfBindingMut = function
     | BindLet -> Assignable    // let -> assignable in scope
     | BindMut -> MutPassable   // let mut -> assignable + mut-passable
 
-let enterScope env =
-    { env with OuterScope = Map.foldBack Map.add env.Variables env.OuterScope }
+/// Enter a callable body: snapshot every currently-visible binding into
+/// `OuterScope`, and mark the environment as being inside a body.
+///
+/// The two halves are one operation because the only scope boundary that
+/// exists in the checker IS a callable body -- a LAMBDA body, a named-FUNCTION
+/// declaration body, or an IMPL-METHOD body. (A `{ ... }` block does not enter
+/// a scope; its lets go straight into `Variables`.) Keeping them together is
+/// what makes `bodyLocalBinding` below sound.
+let enterCallableBody env =
+    { env with
+        OuterScope = Map.foldBack Map.add env.Variables env.OuterScope
+        InCallableBody = true }
+
+/// Was `name` bound INSIDE the callable body currently being inferred?
+///
+/// `enterCallableBody` snapshots every visible binding into `OuterScope` at the
+/// body boundary, and only a NESTED body extends it again -- so `OuterScope` is
+/// always the snapshot taken at the INNERMOST enclosing body, and a name absent
+/// from it was bound after that boundary. False at module level (no body, so
+/// nothing is body-local) and false for a captured outer binding.
+///
+/// Shadowing reads conservatively: a body-local `let e` that shadows an outer
+/// `e` answers false, because the outer name is in the snapshot. Callers use
+/// this to opt OUT of an optimization, so a false negative costs efficiency,
+/// never correctness.
+let bodyLocalBinding (name: string) (env: TypeEnv) =
+    env.InCallableBody && not (Map.containsKey name env.OuterScope)
+
+/// Is `name` a CAPTURE of the lambda currently being inferred -- visible here,
+/// but bound outside the innermost enclosing body, so `buildCaptures` will put
+/// it in the lambda's `Captures` and codegen will forward it by name at every
+/// call site?
+///
+/// Gated on `InLambdaBody`, NOT `InCallableBody`, because only a lambda has a
+/// capture list: a NAMED function's `Captures` is always empty (IRCallable),
+/// and the module bindings its body spells are served by main-local emission /
+/// the S0 declaration hoist instead. Widening this to every callable body
+/// silently breaks that path -- a named function reading a deferred binding by
+/// name has nothing to materialize it (`function g(w) = w * reduce(c, (+))`
+/// over a deferred `c` emits `c[0]` with no definition of `c`).
+///
+/// False at module level, like `bodyLocalBinding` -- there is no body, so a
+/// name is neither body-local nor captured.
+let capturedOuterBinding (name: string) (env: TypeEnv) =
+    env.InLambdaBody && Map.containsKey name env.OuterScope
 
 let registerTypeDef name info (env: TypeEnv) =
     { env with TypeDefs = Map.add name info env.TypeDefs }

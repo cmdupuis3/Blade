@@ -1,0 +1,19 @@
+// TEST: C++ Reserved Word Binding Names
+// A binding whose SOURCE name collides with a C++ keyword is declared under a
+// mangled C++ identifier (`final_`, `class_`, ...) and referenced under that
+// same one. Codegen used to declare it raw while recording the mangled name,
+// so the declaration itself was invalid C++ (`double class = ...`) or the
+// first use was (`'final_' was not declared in this scope`). Printed LABELS
+// keep the source spelling -- the pins below are what holds the two apart.
+let final = 2.0
+let s = final + 1.0
+let arr = [1.0, 2.0, 3.0]
+let class = arr(0)
+let delete = class * 4.0
+let template = [[1.0, 2.0], [3.0, 4.0]]
+let operator = template(1, 1)
+// EXPECT: final = 2
+// EXPECT: s = 3
+// EXPECT: class = 1
+// EXPECT: delete = 4
+// EXPECT: operator = 4
