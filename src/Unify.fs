@@ -689,11 +689,37 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                 match ty with
                 | ArrayElem arr when arr.IndexTypes.Length = k ->
                     subst.Bind(id, ty); Ok ()
-                | IRTInfer _ ->
-                    // Binding two inference vars -- defer invariant check
-                    subst.Bind(id, ty); Ok ()
+                | IRTInfer id2 ->
+                    // Binding two inference vars: the invariant travels WITH
+                    // the bind. `id` disappears behind `id2`, so unless `id2`
+                    // inherits the pin every later `GetArityConstraint` reads
+                    // None and the `T^k` annotation goes VACUOUS -- the same
+                    // survivor problem `CopyPolymorphic` (above), the rank
+                    // lower bound (one arm up) and `CopyLiteralDefault`
+                    // (below) each already solve. There is nothing to defer
+                    // to: no seam ever revisits a var-to-var bind.
+                    //
+                    // Seam that fires this is the one named in the polymorphic
+                    // note above -- an UNANNOTATED return type, whose fresh
+                    // retType var swallows the signature's `T^k` var. Measured:
+                    // `function addrow(a: T^1, b: T^1) = a + b` used as a fold
+                    // kernel (`reduce(g, addrow)`) had its params specialize to
+                    // SCALARS and silently computed row sums, while the same
+                    // function spelled `-> T^1` (retType = the same var, so no
+                    // bind, so no loss) refused the scalar correctly.
+                    (match subst.GetArityConstraint(id2) with
+                     | Some k2 when k2 <> k ->
+                        Error (Other (sprintf "a `^%d` type variable cannot unify with a `^%d` one: the caret pins an EXACT rank, so the two annotations describe different shapes" k k2))
+                     | _ ->
+                        subst.CopyArityConstraint(id, id2)
+                        subst.Bind(id, ty); Ok ())
                 | _ ->
-                    Error (Other (sprintf "Type variable with arity %d requires a rank-%d array, got %A" k k ty))
+                    // `ppIRType`, not `%A`: this arm's raw-union rendering
+                    // ("got IRTScalar ETInt64") leaked F# constructor names
+                    // into user-facing output, and the fold-kernel seam above
+                    // now routes ordinary programs here.
+                    Error (Other (sprintf "a `^%d` type variable is a rank-%d array, but this position supplies %s -- the caret is a rank CLAIM, not a shorthand, so drop it (`T`) where the value is an element rather than an array. In fold-kernel position (`reduce(A, f)`) the parameters ARE the element type: a `T^1` kernel fits an array of rank-1 elements, not a rank-1 array of scalars."
+                                          k k (ppIRType ty)))
             | _ ->
                 match subst.GetLiteralDefault(id) with
                 | Some litE ->
