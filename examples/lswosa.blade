@@ -7,10 +7,11 @@ import units.SI
 //
 // The LS kernel here is the REAL-VALUED tau formulation -- similar to
 // examples/lsdft.blade but not the same: tau is formed explicitly as
-// atan2(sum sin 2wt, sum cos 2wt) / 2w, the a/b components are normalized by
-// their own sum-of-squares, and the t_zero phase rotation is applied
-// COMPONENT-wise (cos(w t0) * a, sin(w t0) * b), exactly as the reference
-// does -- not as a complex multiply.
+// atan2(sum sin 2wt, sum cos 2wt) / 2w, and the a/b components are normalized
+// by their own sum-of-squares. The t_zero epoch rotation is the proper complex
+// multiply exp(iwt0); the classic C reference rotates component-wise with a
+// sequential-update quirk (its s_re is overwritten before s_im reads it) --
+// identical at t_zero = 0, where both reduce to the identity.
 //
 // SEGMENTATION. The reference builds ragged per-segment subsets with
 // np.where inside a sequential loop. Blade's reading: segmentation is a
@@ -87,8 +88,8 @@ where omp(st: 1) = {
         let a = prodsum(s, cwt) / sqrt(prodsum(cwt, cwt))
         let b = prodsum(s, swt) / sqrt(prodsum(swt, swt))
 
-        // Component-wise epoch rotation, per the reference.
-        complex(cos(w * t_zero) * a, sin(w * t_zero) * b)
+        // Epoch rotation (see the header note on the reference's variant).
+        complex(a, b) * exp(i * w * t_zero)
     }
 }
 
@@ -106,8 +107,16 @@ function family_spectra(ts: T<time>^1, s: U^1, freqs: T<frequency>^1,
     // from every group (the sentinel rule), so out-of-family samples drop
     // here without a mask/compound pass. The odd family's t < shift prefix
     // is negative naturally; the range guard handles each family's tail.
+    // Clamp the exact-upper-bound sample into the family's LAST cell: hi is
+    // 11h = t_max exactly by construction, and floor would mint a phantom
+    // one-sample segment beyond it -- the reference's inclusive `t <= upper`
+    // puts that sample in the last real segment instead.
     let keys = (ts <@> lambda(t) ->
-        if t >= lo && t <= hi then floor((t - shift) / seg_span) else 0.0 - 1.0) |> compute
+        if t >= lo && t <= hi then {
+            let k = floor((t - shift) / seg_span)
+            let kmax = (hi - shift) / seg_span - 1.0
+            if k > kmax then kmax else k
+        } else 0.0 - 1.0) |> compute
     let gk = group_keys(keys)
     let gt = group_by(ts, gk)
     let gs = group_by(s, gk)
