@@ -327,8 +327,18 @@ let _ = c.write("%s", V)
                    check "e2e: label subscript t1 = 16.5" (runOut.Contains "t1 = 16.5") runOut
                    check "e2e: rank-1 row sums (2-D EXPECTs are unchecked — reduce instead)"
                        (runOut.Contains "rowsum = [6, 15]") runOut
+                   // NESTED, not flat: every rank-2 array prints through
+                   // genPrintNested2 (CodeGen), which landed in 7ac4d3a
+                   // (2026-08-03) and is the intended shape -- a rank-2
+                   // literal's own spelling, so the line round-trips as
+                   // source. This needle predated it (a32e6d7, 2026-07-21)
+                   // and read flat, which is why it was the CSV gate's one
+                   // standing red. The corpus validator accepts BOTH shapes
+                   // for a 2-D pin (Expect.fs, ExpectedArray2D), so nothing
+                   // there caught the drift; a raw substring check like this
+                   // one has no such tolerance and must name the real shape.
                    check "e2e: headered payload (header skipped)"
-                       (runOut.Contains "obs = [0, 14, 101.2, 1, 16.5, 101, 2, 18, 100.8]") runOut
+                       (runOut.Contains "obs = [[0, 14, 101.2], [1, 16.5, 101], [2, 18, 100.8]]") runOut
                    // Runtime shape drift: the exe baked 3 data rows; append a
                    // 4th to the RUNTIME copy and expect a loud abort.
                    let runtimeFix = Path.Combine(e2eDir, fixFile "lw_obs.csv")
