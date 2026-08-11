@@ -1,0 +1,23 @@
+// TEST: Reduce Join Four Legs In Function Return
+// The four-leg twin of 027, over co-iterated operands. Four legs nests as
+// `((a, b), (c, d))` rather than three's `((a, b), c)`, so the re-spelling at
+// the return has to WALK the declared type rather than special-case a shape;
+// this is the width that catches a hand-rolled two-level rebuild.
+//
+// The four accumulators are pairwise distinct, so a permutation moves the pin.
+//   q1 = sum(s) = 20      q2 = sum(t) = 10
+//   q3 = sum(s * t) = 60  q4 = sum(t^2) = 30
+let ts: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let ss: Array<Float64 like Idx<4>> = [2.0, 4.0, 6.0, 8.0]
+function joint4(s: T^1, t: T^1) = {
+    let L = method_for(zip(s, t))
+    reduce((L <@> lambda(a1, t1) -> a1)
+      <&!> (L <@> lambda(a2, t2) -> t2)
+      <&!> (L <@> lambda(a3, t3) -> a3 * t3)
+      <&!> (L <@> lambda(a4, t4) -> t4 * t4), (+))
+}
+let (q1, q2, q3, q4) = joint4(ss, ts)
+// EXPECT: q1 = 20.0
+// EXPECT: q2 = 10.0
+// EXPECT: q3 = 60.0
+// EXPECT: q4 = 30.0

@@ -1,0 +1,27 @@
+// TEST: Reduce Join Four Legs In Kernel Body
+// The four-leg twin of 025, in the shape the WOSA omega kernel actually uses:
+// co-iteration (`method_for(zip(s, ts))`) under a captured frequency, four
+// accumulators from ONE traversal, destructured in the kernel body.
+//
+// Four legs matters independently of three. The nested type is
+// `((a, b), (c, d))` here rather than three's `((a, b), c)`, so a flat-vs-
+// nested mismatch mis-navigates a DIFFERENT set of leaves -- and this is the
+// width the real workload needs.
+//
+// Weighted 1/10/100/1000, so any permutation of the four accumulators moves
+// the pin (see 025's note).
+//   p1 = sum(s * t)     = 60      p2 = sum(s * w)      = 20w
+//   p3 = sum(t * t)     = 30      p4 = sum(s + t * w)  = 20 + 10w
+//   value = p1 + 10*p2 + 100*p3 + 1000*p4 = 23060 + 10200w
+let ts: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let ss: Array<Float64 like Idx<4>> = [2.0, 4.0, 6.0, 8.0]
+let ws: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let out = (ws <@> lambda(w) -> {
+    let L = method_for(zip(ss, ts))
+    let (p1, p2, p3, p4) = reduce((L <@> lambda(a1, t1) -> a1 * t1)
+                             <&!> (L <@> lambda(a2, t2) -> a2 * w)
+                             <&!> (L <@> lambda(a3, t3) -> t3 * t3)
+                             <&!> (L <@> lambda(a4, t4) -> a4 + t4 * w), (+))
+    p1 + 10.0 * p2 + 100.0 * p3 + 1000.0 * p4
+}) |> compute
+// EXPECT: out = [33260.0, 43460.0]
