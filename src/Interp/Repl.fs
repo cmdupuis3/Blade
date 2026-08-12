@@ -67,7 +67,9 @@ let lowerSessionDiag (fileName: string option) (source: string)
         match resolution with
         | Some r when not (List.isEmpty r.Errors) -> Error r.Errors
         | Some r when r.Files.Length > 1 ->
-            Blade.ModuleResolve.parseResolved sources |> Result.mapError List.singleton
+            // Reuses the ASTs resolution already parsed; `sources` above is the
+            // same list, keyed on the same stamps.
+            Blade.ModuleResolve.parseResolvedFiles r.Files |> Result.mapError List.singleton
         | _ ->
             Blade.Parser.parseProgramWithFile fileName source
             |> Result.mapError (fun e -> [ Blade.Parser.diagnosticOfParseError fileName e ])

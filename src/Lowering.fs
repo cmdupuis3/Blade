@@ -2375,48 +2375,55 @@ let lower (source: string) : Result<IRProgram, string> =
             Error (String.concat "\n" msgs)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
 
-/// Structured-diagnostics entry: like `lower`, but errors stay as coded,
-/// spanned Diagnostics, warnings come back structured, and the retained
-/// source text returns as a SourceMap for snippet rendering. `fileName`
-/// (when known) is stamped into spans and keys the SourceMap.
-// TEMP INSTRUMENTATION (compile-speed investigation): env-gated phase timing.
+/// Everything `lowerDiag` does AFTER the parse. Shared by the single-file,
+/// multi-file and already-parsed entry points so they cannot drift.
+/// Env-gated phase timing (`BLADE_PHASE_TIMING=1`): one `[phase] <name>: <ms>`
+/// line per pipeline phase on stderr. See docs/plan-compile-speed.md Stage 0.
 let phaseTimingEnabled () =
     match System.Environment.GetEnvironmentVariable "BLADE_PHASE_TIMING" with
     | null | "" | "0" -> false
     | _ -> true
 
+let phaseMark (sw: System.Diagnostics.Stopwatch) (name: string) : unit =
+    if phaseTimingEnabled () then
+        eprintfn "[phase] %s: %d ms" name sw.ElapsedMilliseconds
+    sw.Restart()
+
+let private lowerCheckedProgram (program: Program)
+    : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> =
+    let sw = System.Diagnostics.Stopwatch.StartNew()
+    let tc = Blade.TypeCheck.typeCheck program
+    phaseMark sw "typecheck"
+    match tc with
+    | Error errors ->
+        Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
+    | Ok (typedProgram, builder, warnings) ->
+        // Lowering can THROW when a compile-time provider load fails
+        // (e.g. `netcdf.load("missing.nc")` raises from tryInvokeProvider).
+        // Convert it to a coded diagnostic so the compile driver reports it
+        // cleanly instead of crashing.
+        try
+            let r = Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+            phaseMark sw "lower"
+            r
+        with ex ->
+            Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+
+/// Structured-diagnostics entry: like `lower`, but errors stay as coded,
+/// spanned Diagnostics, warnings come back structured, and the retained
+/// source text returns as a SourceMap for snippet rendering. `fileName`
+/// (when known) is stamped into spans and keys the SourceMap.
 let lowerDiag (fileName: string option) (source: string)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
     let key = defaultArg fileName "<input>"
     let sm = Blade.Diagnostics.SourceMap.ofSources [ key, source ]
-    let timing = phaseTimingEnabled ()
     let sw = System.Diagnostics.Stopwatch.StartNew()
-    let mark name =
-        if timing then
-            eprintfn "[phase] %s: %d ms" name sw.ElapsedMilliseconds
-        sw.Restart()
     let parsed = Blade.Parser.parseProgramWithFile fileName source
-    mark "parse"
+    phaseMark sw "parse"
     let result =
         match parsed with
         | Error e -> Error [ Blade.Parser.diagnosticOfParseError fileName e ]
-        | Ok program ->
-            let tc = Blade.TypeCheck.typeCheck program
-            mark "typecheck"
-            match tc with
-            | Error errors ->
-                Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
-            | Ok (typedProgram, builder, warnings) ->
-                // Lowering can THROW when a compile-time provider load fails
-                // (e.g. `netcdf.load("missing.nc")` raises from
-                // tryInvokeProvider). Convert it to a coded diagnostic so the
-                // compile driver reports it cleanly instead of crashing.
-                try
-                    let r = Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
-                    mark "lower"
-                    r
-                with ex ->
-                    Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+        | Ok program -> lowerCheckedProgram program
     result, sm
 
 /// Multi-FILE twin of `lowerDiag`. `sources` is (path, source) in dependency
@@ -2431,46 +2438,56 @@ let lowerDiag (fileName: string option) (source: string)
 let lowerDiagMulti (sources: (string * string) list)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
     let sm = Blade.Diagnostics.SourceMap.ofSources sources
-    let timing = phaseTimingEnabled ()
     let sw = System.Diagnostics.Stopwatch.StartNew()
-    let mark name =
-        if timing then
-            eprintfn "[phase] %s: %d ms" name sw.ElapsedMilliseconds
-        sw.Restart()
     let parsed = Blade.ModuleResolve.parseResolved sources
-    mark "parse(multi)"
+    phaseMark sw "parse(multi)"
     let result =
         match parsed with
         | Error d -> Error [ d ]
-        | Ok program ->
-            let tc = Blade.TypeCheck.typeCheck program
-            mark "typecheck(multi)"
-            match tc with
-            | Error errors ->
-                Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
-            | Ok (typedProgram, builder, warnings) ->
-                try
-                    let r = Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
-                    mark "lower(multi)"
-                    r
-                with ex ->
-                    Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+        | Ok program -> lowerCheckedProgram program
     result, sm
 
 /// The CLI's front door: resolve `filePath`'s imports to files, then lower the
 /// whole set.
 ///
+/// The entry file is parsed HERE, once, and the AST is handed to the resolver
+/// (which needs only its header and imports) and then to the checker. Both
+/// used to parse it independently, so every compile paid for the entry file
+/// twice.
+///
 /// A file whose imports all resolve to builtin pseudo-modules (or that has no
-/// imports at all) takes `lowerDiag` UNCHANGED -- same call, same SourceMap
-/// key, same everything -- so the overwhelmingly common single-file case
-/// cannot have been perturbed by the module layer existing.
+/// imports at all) is checked from that one parse with the SourceMap keyed on
+/// `filePath` -- same key, same spans, same everything as before the module
+/// layer existed.
 let lowerFileDiag (filePath: string) (source: string)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
-    let r = Blade.ModuleResolve.resolveEntry filePath source
-    match r.Errors, r.Files with
-    | [], [ _single ] -> lowerDiag (Some filePath) source
-    | [], files -> lowerDiagMulti (Blade.ModuleResolve.sourcesOf files)
-    | ds, _ -> Error ds, Blade.ModuleResolve.sourceMapOf r
+    let selfSm () = Blade.Diagnostics.SourceMap.ofSources [ filePath, source ]
+    let sw = System.Diagnostics.Stopwatch.StartNew()
+    let parsedEntry = Blade.Parser.parseProgramWithFile (Some filePath) source
+    phaseMark sw "parse"
+    match parsedEntry with
+    | Error e ->
+        // A file that does not parse has no imports to resolve: resolution
+        // swallowed this error and the single-file path reported it.
+        Error [ Blade.Parser.diagnosticOfParseError (Some filePath) e ], selfSm ()
+    | Ok program ->
+        let r =
+            match program.Modules with
+            | [ m ] -> Blade.ModuleResolve.resolveParsedEntry filePath source m
+            | _ -> Blade.ModuleResolve.resolveEntry filePath source
+        match r.Errors, r.Files with
+        | [], [ _single ] -> lowerCheckedProgram program, selfSm ()
+        | [], files ->
+            let sm = Blade.Diagnostics.SourceMap.ofSources (Blade.ModuleResolve.sourcesOf files)
+            sw.Restart()
+            let parsedAll = Blade.ModuleResolve.parseResolvedFiles files
+            phaseMark sw "parse(members)"
+            let result =
+                match parsedAll with
+                | Error d -> Error [ d ]
+                | Ok whole -> lowerCheckedProgram whole
+            result, sm
+        | ds, _ -> Error ds, Blade.ModuleResolve.sourceMapOf r
 
 /// Harness twin of `lower`: the same parse -> typecheck -> lower pipeline and
 /// the same `Result`, but the typecheck warnings come back as coded
@@ -2517,7 +2534,7 @@ let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnosti
     | (d: Blade.Diagnostics.Diagnostic) :: _ ->
         Error (sprintf "%s: %s" d.Code d.Message), []
     | [] ->
-    match Blade.ModuleResolve.parseResolved (Blade.ModuleResolve.sourcesOf r.Files) with
+    match Blade.ModuleResolve.parseResolvedFiles r.Files with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
         | Ok (typedProgram, builder, _) ->

@@ -40,13 +40,24 @@ open Blade.Diagnostics
 
 /// One resolved compilation unit.
 type ResolvedFile = {
-    /// Absolute path on disk.
+    /// Absolute path on disk. The file's IDENTITY: cycle detection, duplicate
+    /// detection and the visited set all key on it.
     Path: string
+    /// The path STAMPED into this file's spans (`Span.File`), and therefore the
+    /// key its source must have in a SourceMap. Equal to `Path` for every file
+    /// the resolver parsed itself; for an entry whose caller had already parsed
+    /// it, whatever string the caller stamped -- typically the path the user
+    /// typed, which is what its diagnostics have always rendered.
+    Stamp: string
     /// File contents, read exactly once.
     Source: string
     /// Dotted name the file DECLARES (`module units.SI` -> "units.SI"). The
     /// entry file usually declares nothing, which parses as "Main".
     Declared: string
+    /// The module parsed while resolving, kept so the pipeline does not parse
+    /// every file a second time. `None` only when the file failed to parse --
+    /// the caller re-parses it to obtain the error at its own span.
+    Parsed: ModuleDecl option
 }
 
 /// Builtin pseudo-modules: names that resolve through a hardcoded match in an
@@ -149,14 +160,15 @@ let importsOf (m: ModuleDecl) : (QualifiedName * Span) list =
         | DeclImport (qname, _) -> Some (qname, d.Span)
         | _ -> None)
 
-/// Parse one file for its declared module name and its import list. A file
-/// that does not parse contributes NOTHING here rather than failing
-/// resolution: the real pipeline re-parses every member and reports the parse
-/// error once, at its own span, with the source map already built.
-let private scanFile (path: string) (source: string) : string * (QualifiedName * Span) list =
+/// Parse one file for its declared module name and its import list, KEEPING
+/// the module: resolution used to throw this AST away and the pipeline parsed
+/// every file a second time. A file that does not parse contributes NOTHING
+/// here rather than failing resolution: the caller re-parses it and reports
+/// the parse error once, at its own span, with the source map already built.
+let private scanFile (path: string) (source: string) : string * (QualifiedName * Span) list * ModuleDecl option =
     match Blade.Parser.parseProgramWithFile (Some path) source with
-    | Ok { Modules = [ m ] } -> (String.concat "." m.Name, importsOf m)
-    | _ -> ("", [])
+    | Ok { Modules = [ m ] } -> (String.concat "." m.Name, importsOf m, Some m)
+    | _ -> ("", [], None)
 
 // Diagnostics
 
@@ -208,11 +220,12 @@ type Resolution = {
 /// no imports at all, or only builtin pseudo-modules), and callers are
 /// expected to take their existing single-file path unchanged.
 ///
-/// `preScanned` lets a caller that has ALREADY parsed a file hand over its
-/// (declared name, imports) instead of paying for a second parse -- the IDE
-/// path, which parses the entry buffer first and would otherwise re-parse it on
-/// every keystroke. Empty for everyone else.
-let resolveEntryWith (preScanned: Map<string, string * (QualifiedName * Span) list>)
+/// `preScanned` lets a caller that has ALREADY parsed a file hand over the
+/// module instead of paying for a second parse -- the driver and IDE paths,
+/// which parse the entry buffer first (with their OWN file stamp, carried
+/// along as `ResolvedFile.Stamp`) and would otherwise re-parse it. Empty for
+/// callers holding no AST.
+let resolveEntryWith (preScanned: Map<string, string * ModuleDecl>)
                      (entryPath: string) (entrySource: string) : Resolution =
     // Provider names are a resolution input, and only install () puts them in
     // the registry. Idempotent, and typeCheck runs it again later anyway.
@@ -261,10 +274,12 @@ let resolveEntryWith (preScanned: Map<string, string * (QualifiedName * Span) li
                     errors.Add(mkError "BL2004" PhResolve via
                                    (sprintf "cannot read module file '%s': %s" path ex.Message))
                     ""
-            let (declared, imports) =
+            let (stamp, declared, imports, parsed) =
                 match Map.tryFind path preScanned with
-                | Some pre -> pre
-                | None -> scanFile path source
+                | Some (stamp, m) -> (stamp, String.concat "." m.Name, importsOf m, Some m)
+                | None ->
+                    let (declared, imports, parsed) = scanFile path source
+                    (path, declared, imports, parsed)
             declaredIn.[path] <- declared
             if declared <> "" then
                 match declaredBy.TryGetValue declared with
@@ -287,7 +302,8 @@ let resolveEntryWith (preScanned: Map<string, string * (QualifiedName * Span) li
                         | _ -> ()
             stack.RemoveAt(stack.Count - 1)
             state.[path] <- 2
-            ordered.Add { Path = path; Source = source; Declared = declared }
+            ordered.Add { Path = path; Stamp = stamp; Source = source
+                          Declared = declared; Parsed = parsed }
 
     visit entryFull (Path.GetFileName entryFull) noSpan
     { Files = List.ofSeq ordered; Errors = errors |> List.ofSeq |> List.distinct }
@@ -297,15 +313,18 @@ let resolveEntry (entryPath: string) (entrySource: string) : Resolution =
     resolveEntryWith Map.empty entryPath entrySource
 
 /// `resolveEntry` for a caller holding the entry file's already-parsed module
-/// (the IDE). Identical result, one parse cheaper.
+/// (the compile driver, the IDE). Identical result, one parse cheaper. The
+/// entry's spans keep the caller's stamp -- `entryPath` as it was written, not
+/// its absolutized form -- so its diagnostics render exactly as they do on the
+/// single-file path, where the caller's parse is the only one there is.
 let resolveParsedEntry (entryPath: string) (entrySource: string) (entry: ModuleDecl) : Resolution =
     let key = try Path.GetFullPath entryPath with _ -> entryPath
-    resolveEntryWith (Map.ofList [ key, (String.concat "." entry.Name, importsOf entry) ])
-                     entryPath entrySource
+    resolveEntryWith (Map.ofList [ key, (entryPath, entry) ]) entryPath entrySource
 
-/// The (path, source) pairs the lowering entry points consume.
+/// The (stamp, source) pairs the lowering entry points consume: keyed on the
+/// path each file's SPANS carry, which is what a SourceMap lookup matches on.
 let sourcesOf (files: ResolvedFile list) : (string * string) list =
-    files |> List.map (fun f -> (f.Path, f.Source))
+    files |> List.map (fun f -> (f.Stamp, f.Source))
 
 /// SourceMap over everything a resolution read, so a diagnostic pointing into
 /// a MEMBER file still renders with its snippet.
@@ -330,3 +349,21 @@ let parseResolved (sources: (string * string) list) : Result<Program, Diagnostic
             | Error e -> Error (Blade.Parser.diagnosticOfParseError (Some path) e)
             | Ok p -> go (List.rev p.Modules @ acc) tl
     go [] sources
+
+/// `parseResolved` for a caller holding the resolution itself: every file that
+/// parsed during resolution is REUSED rather than parsed again (which is every
+/// file, on any path that gets as far as lowering). Only a file that failed to
+/// parse is parsed again here -- once, to produce its error at its own span,
+/// which is exactly what resolution deliberately swallowed.
+let parseResolvedFiles (files: ResolvedFile list) : Result<Program, Diagnostic> =
+    let rec go acc rest =
+        match rest with
+        | [] -> Ok { Modules = List.rev acc }
+        | (f: ResolvedFile) :: tl ->
+            match f.Parsed with
+            | Some m -> go (m :: acc) tl
+            | None ->
+                match Blade.Parser.parseProgramWithFile (Some f.Stamp) f.Source with
+                | Error e -> Error (Blade.Parser.diagnosticOfParseError (Some f.Stamp) e)
+                | Ok p -> go (List.rev p.Modules @ acc) tl
+    go [] files

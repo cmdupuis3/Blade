@@ -150,7 +150,7 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
     else
         let source = File.ReadAllText(filePath)
         let testName = Path.GetFileNameWithoutExtension(filePath)
-        // TEMP INSTRUMENTATION (compile-speed investigation)
+        // Env-gated phase timing (BLADE_PHASE_TIMING=1); see docs/plan-compile-speed.md.
         let timing = phaseTimingEnabled ()
         let swAll = System.Diagnostics.Stopwatch.StartNew()
         let sw = System.Diagnostics.Stopwatch.StartNew()
@@ -633,12 +633,22 @@ let checkFile (filePath: string) (strictPins: bool) : int =
     else
         let source = File.ReadAllText(filePath)
         let useColor = not Console.IsErrorRedirected
-        // Same two-step as compileFile's `lowerFileDiag`: resolve file-based
-        // imports, then check the whole set as ONE program. With nothing to
-        // resolve, `sources` is [(filePath, source)] and `parseResolved` is
-        // `parseProgramWithFile (Some filePath) source` -- byte for byte the
+        // Same shape as compileFile's `lowerFileDiag`: parse the entry ONCE,
+        // resolve file-based imports from that AST, then check the whole set as
+        // ONE program. With nothing to resolve, the entry parse is the only
+        // parse and `sources` is [(filePath, source)] -- byte for byte the
         // pre-module behavior, including the SourceMap key.
-        let resolution = Blade.ModuleResolve.resolveEntry filePath source
+        match Blade.Parser.parseProgramWithFile (Some filePath) source with
+        | Error e ->
+            let sm = Blade.Diagnostics.SourceMap.ofSources [ filePath, source ]
+            let d = Blade.Parser.diagnosticOfParseError (Some filePath) e
+            eprintfn "%s" (Blade.Diagnostics.Render.render useColor (Some sm) d)
+            1
+        | Ok entryProgram ->
+        let resolution =
+            match entryProgram.Modules with
+            | [ m ] -> Blade.ModuleResolve.resolveParsedEntry filePath source m
+            | _ -> Blade.ModuleResolve.resolveEntry filePath source
         let sources =
             match resolution.Errors, resolution.Files with
             | [], [ _single ] -> [ filePath, source ]
@@ -648,7 +658,9 @@ let checkFile (filePath: string) (strictPins: bool) : int =
             eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) resolution.Errors)
             1
         else
-        match Blade.ModuleResolve.parseResolved sources with
+        match (match resolution.Files with
+               | [ _single ] -> Ok entryProgram
+               | files -> Blade.ModuleResolve.parseResolvedFiles files) with
         | Error d ->
             eprintfn "%s" (Blade.Diagnostics.Render.render useColor (Some sm) d)
             1

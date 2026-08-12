@@ -33,10 +33,41 @@ let mutable private currentFile : string option = None
 /// of the last token instead of 0:0. Refreshed per file when tokenizing.
 let mutable private lastTokenEnd : int * int = (0, 0)
 
+/// Span tables for the token stream currently being parsed, rebuilt per file
+/// by `setEofFrom`. Indexed by `Token.Index` (the LEXER's numbering, which
+/// still counts the newlines `tokenizeWithNewlines` dropped -- absent tokens
+/// simply never appear as "meaningful").
+///
+///   tokEndAt.[i]        end position (line, col) of the token with index i
+///   tokLastMeaning.[i]  index of the last non-terminator token with index < i,
+///                       or -1; length is tokIndexCount + 1, so entry
+///                       [tokIndexCount] answers "everything was consumed".
+///
+/// They exist to make `consumedEnd` O(1): computing it from list lengths cost
+/// O(tokens remaining) at every AST node, i.e. O(n^2) over a file.
+let mutable private tokEndAt : struct (int * int)[] = [||]
+let mutable private tokLastMeaning : int[] = [||]
+let mutable private tokIndexCount : int = 0
+
 let private setEofFrom (tokens: Token list) =
     match List.tryLast tokens with
     | Some t -> lastTokenEnd <- (t.EndLine, t.EndCol)
     | None -> lastTokenEnd <- (0, 0)
+    // Rebuild the span tables for exactly the list the parser will consume.
+    let n = match List.tryLast tokens with Some t -> t.Index + 1 | None -> 0
+    tokIndexCount <- n
+    let ends : struct (int * int)[] = Array.zeroCreate n
+    let meaningful : bool[] = Array.zeroCreate n
+    for t in tokens do
+        if t.Index >= 0 && t.Index < n then
+            ends.[t.Index] <- struct (t.EndLine, t.EndCol)
+            meaningful.[t.Index] <- (match t.Kind with TokNewline | TokSemi -> false | _ -> true)
+    let last : int[] = Array.zeroCreate (n + 1)
+    last.[0] <- -1
+    for i in 0 .. n - 1 do
+        last.[i + 1] <- (if meaningful.[i] then i else last.[i])
+    tokEndAt <- ends
+    tokLastMeaning <- last
 
 // Basic Combinators
 
@@ -118,7 +149,14 @@ let currentPos (tokens: Token list) =
 /// `before`). Newline/semi terminators are excluded so the span stops at the
 /// statement's real end rather than overshooting to the next token's start.
 /// Falls back to the given start position when nothing was consumed.
-let consumedEnd (before: Token list) (after: Token list) (fallbackLine: int) (fallbackCol: int) : int * int =
+///
+/// O(1): `before` and `after` are suffixes of one token stream, so the tokens
+/// consumed are exactly the index range [before.Head.Index, after.Head.Index)
+/// and the answer is a lookup in the tables `setEofFrom` built. The slow
+/// list-walking form is kept as a fallback for a token list the tables do not
+/// describe (indices out of range -- a caller that parsed without going
+/// through an entry point), so the result is identical either way.
+let private consumedEndSlow (before: Token list) (after: Token list) (fallbackLine: int) (fallbackCol: int) : int * int =
     let n = List.length before - List.length after
     if n <= 0 then (fallbackLine, fallbackCol)
     else
@@ -129,6 +167,23 @@ let consumedEnd (before: Token list) (after: Token list) (fallbackLine: int) (fa
         match List.tryLast meaningful with
         | Some t -> (t.EndLine, t.EndCol)
         | None -> (fallbackLine, fallbackCol)
+
+let consumedEnd (before: Token list) (after: Token list) (fallbackLine: int) (fallbackCol: int) : int * int =
+    match before with
+    | [] -> (fallbackLine, fallbackCol)   // nothing to consume: n <= 0
+    | b :: _ ->
+        let bi = b.Index
+        // Everything consumed (`after` empty) reads as "one past the last token".
+        let ai = match after with a :: _ -> a.Index | [] -> tokIndexCount
+        if bi < 0 || bi >= tokIndexCount || ai < 0 || ai > tokIndexCount then
+            consumedEndSlow before after fallbackLine fallbackCol
+        elif ai <= bi then (fallbackLine, fallbackCol)
+        else
+            let j = tokLastMeaning.[ai]
+            if j >= bi then
+                let struct (l, c) = tokEndAt.[j]
+                (l, c)
+            else (fallbackLine, fallbackCol)
 
 /// Build a Span from a single token, stamped with the current file.
 let spanOfToken (t: Token) : Span =
