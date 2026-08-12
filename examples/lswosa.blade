@@ -1,120 +1,104 @@
 import units.SI
 
 // Welch's overlapped segment averaging (WOSA) over the generalized
-// Lomb-Scargle DFT, for unevenly sampled series. Translated from the dask
-// reference implementation; same estimator, spelled in Blade's typed-tuple +
-// group_by idiom -- but NOT the same decomposition, because the overlap has
-// structure the reference's sequential loop cannot see.
+// Lomb-Scargle DFT, for unevenly sampled series. Same estimator as the dask
+// reference, different decomposition.
 //
 // THE OVERLAP IS A SLIDING WINDOW. 50%-overlapped segments are not a
-// partition: each sample lands in up to two segments, so a per-segment loop
-// evaluates cos(w t) and sin(w t) TWICE for every (sample, frequency), and
-// those transcendentals are ~90% of the run time. With h = span/(N+1), the N
-// segments are exactly the N ADJACENT PAIRS of the N+1 half-width cells
-//     cell m = [m h, (m+1) h),   segment j = cell j + cell j+1
-// so the even/odd families of non-overlapping segments collapse into ONE
-// window of 2 over cells, and each transcendental is evaluated exactly ONCE.
+// partition, so a per-segment loop evaluates cos(w t) and sin(w t) twice for
+// every (sample, frequency) -- and those transcendentals are ~90% of the run
+// time. With h = span/(N+1), the N segments are exactly the N ADJACENT PAIRS
+// of the N+1 half-width cells (cell m = [m h, (m+1) h), segment j = cell j +
+// cell j+1), so the even/odd families collapse into ONE window of 2 and each
+// transcendental is evaluated once.
 //
-// EVERY INPUT THE LS KERNEL NEEDS IS A SUM over a segment's samples, hence a
-// sum of its two cells' sums. That includes the taper, which is the part that
-// looks like it should not decompose: `hanning`'s span is 2h for EVERY segment
-// and its cosine takes the ABSOLUTE time, so the taper VALUES are segment-
-// independent and can be formed once, globally. Only the normalization
-// scale = mean(w^2) over the segment's own samples varies, and that is
-// (sum w^2 over both cells) / (count over both cells). The kernel's
-// mean-centering decomposes the same way. So with u = s * w also global, the
-// six per-(cell, frequency) accumulators below are sufficient.
+// Every input the kernel needs is a sum over a segment's samples, hence a sum
+// of its two cells' sums -- including the taper, which is the part that looks
+// like it should not decompose. `hanning`'s span is 2h for every segment and
+// its cosine takes the ABSOLUTE time, so the taper VALUES are segment-
+// independent and are formed once, globally; only the normalization
+// mean(w^2) varies, and that is a ratio of two per-cell sums. The reference's
+// absolute-time argument is therefore load-bearing here, not a wart.
 //
-// This is why the reference's two quirks are preserved rather than "fixed":
-// the absolute-time taper argument is precisely what makes the decomposition
-// exact. Flagged so nobody corrects one side into disagreement with the other.
-//
-// The LS kernel is the REAL-VALUED tau formulation, algebraically eliminated:
-// with ct = cos(wt) and stt = sin(wt), the double-angle identities give the
-// tau rotation from sum ct^2 and sum ct*stt, and sum cos^2(w(t-tau)) collapses
-// to (n + |Z2|)/2 exactly -- so one shared trig pass feeds everything.
+// The LS kernel is the real-valued tau formulation, algebraically eliminated:
+// with c = cos(wt) and s = sin(wt), double-angle gives the tau rotation from
+// sum c^2 and sum c*s, and sum cos^2(w(t-tau)) collapses to (n + |Z2|)/2.
 
 Unit day = 86400 * second
 Unit time: day
 Unit frequency: 1 / day
 
-// The segment count is a COMPILE-TIME property here, not a runtime argument:
-// the cell axis carries an index type, and `halo` needs its extent. `n_seg`
-// is the single source of truth: the cell axis and the in-function segment
-// count both derive from it, so they cannot drift apart -- and if a
-// disagreeing halo were written anyway, the compiler refuses it (BL3016 when
-// the operand's extent is static, a BL8009 runtime guard when it is a group
-// count).
+// The segment count is compile-time: the cell axis carries an index type and
+// `halo` needs its extent. `n_seg` is the single source of truth.
 let static n_seg = 10
 type CellIdx = Idx<n_seg + 1>
+
+/// The sums accumulated per (cell, frequency), named rather than positional:
+/// `u` is the tapered signal, `c` and `s` are cos(wt) and sin(wt). The IDs
+/// resolve to ordinals at compile time -- `sums("u_c")` emits a constant
+/// subscript, so naming the axis costs nothing at run time.
+type Sum = EnumIdx<["u_c", "u_s", "c", "s", "c_c", "c_s"]>
+
+/// What each segment contributes to its frequency's average.
+type Est = EnumIdx<["power", "cos_arg", "sin_arg"]>
 
 let i = complex(0.0, 1.0)
 let two_pi = 6.283185307179586
 
-function mymean(x: T^1) = reduce(x, (+)) / extents(x)
+// Blade has no min/max/mean over an array; these are the folds.
+function mean(x: T^1) = reduce(x, (+)) / extents(x)
+function min(x: T^1) = reduce(x, lambda(a, b) -> if a < b then a else b)
+function max(x: T^1) = reduce(x, lambda(a, b) -> if a > b then a else b)
 
 function variance(x: T^1) = {
-    let d = x - mymean(x)
+    let d = x - mean(x)
     prodsum(d, d) / extents(d)
 }
 
-function mymin(x: T^1) = reduce(x, lambda(a, b) -> if a < b then a else b)
-function mymax(x: T^1) = reduce(x, lambda(a, b) -> if a > b then a else b)
-
-/// Hamming-family taper (alpha = 0.53836), formed ONCE for the whole series.
-/// Faithful to the reference, including the quirk that makes this possible:
-/// the cosine's argument is the ABSOLUTE (epoch-shifted) time over the segment
-/// span, not t - lower, and the span is 2h for every segment -- so the taper
-/// is a function of t alone. Segments differ only in the normalization applied
-/// downstream, which is why that is left to the caller.
+/// Hamming-family taper (alpha = 0.53836) for the whole series at once: the
+/// span is 2h for every segment and the cosine takes absolute time, so this
+/// is a function of t alone. Per-segment normalization is the caller's.
 function segment_taper(ts: T<time>^1, seg_span: T<time>) = {
     let alpha = 0.53836
-    let beta = 1.0 - alpha
-    (ts <@> lambda(t) -> alpha - beta * cos(two_pi * t / seg_span)) |> compute
+    (ts <@> lambda(t) -> alpha - (1.0 - alpha) * cos(two_pi * t / seg_span)) |> compute
 }
 
-/// WOSA: overlapped segments as ONE sliding window over half-width cells,
-/// Hamming-tapered, per-segment LS spectra, modulus averaged and phase
-/// circular-averaged, Welch normalization verbatim from the reference.
+/// WOSA: overlapped segments as one sliding window over half-width cells,
+/// tapered, LS-transformed, modulus averaged and phase circular-averaged,
+/// Welch normalization verbatim from the reference.
 ///
 /// Reference quirk kept: segment bounds live on [0, t_max - t_min] but are
-/// compared against ts = t_raw - t_zero (NOT shifted by t_min), so a series
-/// whose ts does not start near zero selects off-window segments.
+/// compared against ts = t_raw - t_zero, so a series whose ts does not start
+/// near zero selects off-window segments.
 function lswosa(st: Tuple<U^1, T<time>^1>,
                 freqs: T<frequency>^1, t_zero: T<time> = 0.0)
 where omp(st: 1) = {
     let s_raw, t_raw = st
     let ts = t_raw - t_zero
-    // `mymin`/`mymax` are generic over `T^1`, so the fold hands back a bare
-    // number -- the `time` quantity does not survive a unit-agnostic callee.
-    // Re-assert it here, at the one place the value is known to be a time.
-    let t_min: Float64<time> = mymin(ts)
-    let t_max: Float64<time> = mymax(ts)
-    let span_total = t_max - t_min
+    // `min`/`max` are generic over `T^1`, so the quantity does not survive a
+    // unit-agnostic callee; re-assert it where the value is known to be a time.
+    let t_min: Float64<time> = min(ts)
+    let t_max: Float64<time> = max(ts)
 
     let s_var = variance(s_raw)
     let n_samples = extents(s_raw)
-    // Derived from the same `let static` the cell axis is built over.
     let n_segments = 1.0 * n_seg
 
-    // QUANTITIES ARE TERMINAL, so every derived value here is STRUCTURALLY
-    // dimensioned (`86400 * second`) rather than carrying the nominal `time`.
-    // Assert it once per binding, where the value is named.
-    let h: Float64<time> = span_total / (n_segments + 1.0)
+    // Quantities are terminal, so these derived values are structurally
+    // dimensioned; assert once per binding, where the value is named.
+    let h: Float64<time> = (t_max - t_min) / (n_segments + 1.0)
     let seg_span: Float64<time> = 2.0 * h
     let hi: Float64<time> = (n_segments + 1.0) * h
 
-    // Global, segment-independent: the taper, the tapered signal, and w^2.
+    // Segment-independent, so hoisted out of everything below.
     let tap = segment_taper(ts, seg_span)
     let uu  = (s_raw * tap) |> compute
     let w2  = (tap * tap) |> compute
 
-    // CELL PARTITION. Selection lives in the KEY function: a negative key
-    // excludes the sample from every group (the sentinel rule), so nothing
-    // needs a mask/compound pass. The top bound is inclusive -- hi is (N+1)h
-    // = t_max exactly by construction, and a bare floor would mint a phantom
-    // one-sample cell past the end, which is what the reference's inclusive
-    // `t <= upper` avoids.
+    // Cell partition. Selection lives in the key function: a negative key
+    // excludes the sample from every group, so no mask pass is needed. The
+    // clamp keeps the closing sample (hi is exactly t_max) in the last cell
+    // instead of minting a phantom one past the end.
     let keys = (ts <@> lambda(t) ->
         if t >= 0.0 && t <= hi then {
             let k = floor(t / h)
@@ -125,9 +109,7 @@ where omp(st: 1) = {
     let gu  = group_by(uu, gk)
     let gw2 = group_by(w2, gk)
 
-    // Frequency-INDEPENDENT per-cell sums, hoisted clear of the omega loop:
-    // the taper does not depend on the frequency, so its normalization and
-    // the mean-centering are computed once for the whole spectrum.
+    // Frequency-independent per-cell sums, hoisted clear of the omega loop.
     let n_cell  = (gt  <@> lambda(row: T^1) -> 1.0 * extents(row)) |> compute
     let w2_cell = (gw2 <@> lambda(row: T^1) -> reduce(row, (+))) |> compute
     let u_cell  = (gu  <@> lambda(row: T^1) -> reduce(row, (+))) |> compute
@@ -135,66 +117,65 @@ where omp(st: 1) = {
     let spec = freqs <@> lambda(f) where omp(f: 1) -> {
         let w = two_pi * f
 
-        // ONE shared trig pass per (cell, frequency). ct/stt stay DEFERRED --
-        // naming them IS the sharing declaration -- so the reduction join
-        // fills all six accumulators in a single traversal of the cell's
-        // samples, and the rank-raising literal hands them back per row.
-        let cellacc = method_for(zip(gt, gu)) <@> lambda(trow: T<time>^1, urow: U^1) -> {
-            let ct  = trow <@> lambda(t) -> cos(w * t)
-            let stt = trow <@> lambda(t) -> sin(w * t)
-            let a, b, c, d, e, g = object_for(<&!>) <@> (prodsum(urow, ct), prodsum(urow, stt),
-                                                         reduce(ct, (+)), reduce(stt, (+)),
-                                                         prodsum(ct, ct), prodsum(ct, stt))
-            [a, b, c, d, e, g]
-        } |> compute
+        // ONE shared trig pass per (cell, frequency): c and s stay DEFERRED,
+        // so naming them is the sharing declaration and the reduction join
+        // fills all six sums in a single traversal of the cell's samples.
+        let cellacc: Array<Float64 like CellIdx, Sum> =
+            method_for(zip(gt, gu)) <@> lambda(trow: T<time>^1, urow: U^1) -> {
+                let c = trow <@> lambda(t) -> cos(w * t)
+                let s = trow <@> lambda(t) -> sin(w * t)
+                // The literal's order is the `Sum` axis order.
+                let u_c, u_s, sum_c, sum_s, c_c, c_s =
+                    object_for(<&!>) <@> (prodsum(urow, c), prodsum(urow, s),
+                                          reduce(c, (+)), reduce(s, (+)),
+                                          prodsum(c, c), prodsum(c, s))
+                [u_c, u_s, sum_c, sum_s, c_c, c_s]
+            } |> compute
 
-        // SEGMENT = adjacent cell pair. Every read is X(win(0)) / X(win(1)),
-        // so the taper normalization, the mean-centering and the six
-        // accumulators all combine in one window.
-        let segv = method_for(halo<CellIdx, [0, 1]>) <@> lambda(win) -> {
-            let nf  = n_cell(win(0))  + n_cell(win(1))
-            let sw2 = w2_cell(win(0)) + w2_cell(win(1))
-            let su  = u_cell(win(0))  + u_cell(win(1))
-            let rs  = 1.0 / sqrt(sw2 / nf)      // 1 / sqrt(scale) for this segment
-            let mk  = rs * su / nf              // mean of the tapered row
+        // A segment is an adjacent cell pair, and every quantity it needs is
+        // a sum over its samples -- so each is the two cells' sums added.
+        // (`cellacc(win(0)) + cellacc(win(1))` adds the whole rows in one
+        // line, but materializes a row per window and measured ~4% slower.)
+        let segv: Array<Float64 like Idx<n_seg>, Est> =
+            method_for(halo<CellIdx, [0, 1]>) <@> lambda(win) -> {
+                let s_uc = cellacc(win(0), "u_c") + cellacc(win(1), "u_c")
+                let s_us = cellacc(win(0), "u_s") + cellacc(win(1), "u_s")
+                let s_c  = cellacc(win(0), "c")   + cellacc(win(1), "c")
+                let s_s  = cellacc(win(0), "s")   + cellacc(win(1), "s")
+                let s_cc = cellacc(win(0), "c_c") + cellacc(win(1), "c_c")
+                let s_cs = cellacc(win(0), "c_s") + cellacc(win(1), "c_s")
+                let n    = n_cell(win(0)) + n_cell(win(1))
+                let norm = 1.0 / sqrt((w2_cell(win(0)) + w2_cell(win(1))) / n)
+                let ctr  = norm * (u_cell(win(0)) + u_cell(win(1))) / n
 
-            let sa_ = cellacc(win(0), 0) + cellacc(win(1), 0)
-            let sb_ = cellacc(win(0), 1) + cellacc(win(1), 1)
-            let sc_ = cellacc(win(0), 2) + cellacc(win(1), 2)
-            let sd_ = cellacc(win(0), 3) + cellacc(win(1), 3)
-            let qcc = cellacc(win(0), 4) + cellacc(win(1), 4)
-            let qcs = cellacc(win(0), 5) + cellacc(win(1), 5)
+                // Centering is linear, so it applies to the summed sums.
+                let pc = norm * s_uc - ctr * s_c
+                let ps = norm * s_us - ctr * s_s
 
-            // Centering is linear, so it applies to the SUMMED accumulators.
-            let pc = rs * sa_ - mk * sc_
-            let ps = rs * sb_ - mk * sd_
+                // tau nulls the cross term, and 2*ha = arg(Z2) is what makes
+                // sum cos^2(w(t-tau)) collapse to (n + |Z2|)/2 exactly.
+                let c2 = 2.0 * s_cc - n
+                let s2 = 2.0 * s_cs
+                let r  = sqrt(c2 * c2 + s2 * s2)
+                let ha = atan2(s2, c2) / 2.0        // = w * tau, exactly
+                let ca = cos(ha)
+                let sa = sin(ha)
 
-            // tau nulls the cross term. 2A = arg(Z2) makes cos2A*C2 + sin2A*S2
-            // collapse to |Z2|, so sum cos^2(w(t-tau)) = (n + |Z2|)/2 exactly.
-            let c2 = 2.0 * qcc - nf
-            let s2 = 2.0 * qcs
-            let r  = sqrt(c2 * c2 + s2 * s2)
-            let ha = atan2(s2, c2) / 2.0        // = w * tau, exactly
-            let ca = cos(ha)
-            let sa = sin(ha)
-
-            let av = (ca * pc + sa * ps) / sqrt((nf + r) / 2.0)
-            let bv = (ca * ps - sa * pc) / sqrt((nf - r) / 2.0)
-
-            let zz = complex(av, bv) * exp(i * w * t_zero)
-            let re = real(zz)
-            let im = imag(zz)
-            let ar = atan2(im, re)
-            [re * re + im * im, cos(ar), sin(ar)]
-        } |> compute
+                let z = complex((ca * pc + sa * ps) / sqrt((n + r) / 2.0),
+                                (ca * ps - sa * pc) / sqrt((n - r) / 2.0))
+                        * exp(i * w * t_zero)
+                let re = real(z)
+                let im = imag(z)
+                let arg = atan2(im, re)
+                [re * re + im * im, cos(arg), sin(arg)]
+            } |> compute
 
         // Fold the LEADING (segment) axis: an array-valued kernel combines
-        // whole 3-vectors, leaving one set of accumulations per frequency.
+        // whole rows, leaving one Est per frequency. The two outputs travel
+        // as one complex so the frequency map stays rank 1.
         let acc = reduce(segv, lambda(a: T^1, b: T^1) -> a + b)
-        // Two per-frequency outputs travel as ONE complex, so the frequency
-        // map stays rank 1 and both fall out elementwise below (`<@>` over a
-        // rank-2 array maps ELEMENTS, not rows, so it could not be sliced).
-        complex(acc(0) / n_segments, atan2(acc(2) / n_segments, acc(1) / n_segments))
+        complex(acc("power") / n_segments,
+                atan2(acc("sin_arg") / n_segments, acc("cos_arg") / n_segments))
     } |> compute
 
     let mod_avg = (spec <@> lambda(z) -> real(z)) |> compute
