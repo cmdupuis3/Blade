@@ -235,6 +235,13 @@ module Codes =
             "BL7001", "feature not yet supported by this backend"
             "BL7002", "CUDA backend limit"
             "BL7003", "MPI backend limit"
+            // A DELIBERATE codegen refusal (codegen understood the construct
+            // and declined, with guidance in the message) surfaced through the
+            // compile driver -- the same messages the generated `#error`
+            // directives carry, delivered as a coded, spanned diagnostic
+            // instead of a g++ preprocessor error. BL7001 stays the
+            // unhandled-node (back-end gap) code.
+            "BL7004", "construct not supported by the C++ backend"
             // BL8xxx: runtime (generated C++)
             "BL8001", "constraint violation"
             "BL8002", "non-exhaustive match"
@@ -317,6 +324,13 @@ module Codes =
 
     let backendLimit (span: Span) (message: string) : Diagnostic =
         mkError "BL7001" PhBackend span message
+
+    /// A deliberate codegen refusal (see BL7004's registry note). The message
+    /// carries its own what-to-write-instead guidance, so no generic note is
+    /// attached -- unlike BL7001, this is a statement about the program's
+    /// shape, not a request to report a compiler gap.
+    let backendRefusal (span: Span) (message: string) : Diagnostic =
+        mkError "BL7004" PhBackend span message
 
 // Rendering.
 

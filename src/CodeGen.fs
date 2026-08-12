@@ -927,6 +927,61 @@ let takeUnhandledIRNodeDiagnostics () : Blade.Diagnostics.Diagnostic list =
              materializing the sub-expression with `|> compute` and binding it to \
              a name often routes around the hole.")
 
+// DELIBERATE CODEGEN REFUSALS, surfaced as coded diagnostics.
+//
+// Every `#error` / `BLADE_CODEGEN_ERROR_` splice that reaches the generated
+// C++ is a refusal codegen chose on purpose -- but delivering it THROUGH g++
+// hands the user a preprocessor error (or an undeclared-identifier error)
+// with no Blade file/line and no code to search for. So refusal sites ALSO
+// record here, tagged with the declaration being emitted, and the compile
+// driver turns a non-empty channel into BL7004 diagnostics and refuses
+// before the C++ compiler runs -- the exact mechanism BL7001 uses for
+// unhandled nodes, applied to the refusal class.
+//
+// The `#error` halves are kept as-is: the test harness drives codegen
+// directly (never through the driver), and its `// REJECT-AT: codegen`
+// verdict reads `cppCode.Contains "#error"`.
+//
+// GATING (see takeCodegenRefusalDiagnostics): a rendered-then-DISCARDED
+// refusal line records here but never reaches the translation unit (the
+// lazy-rendering trap documented at the row-write emitter). The driver
+// therefore refuses only when the generated source actually carries a
+// marker; otherwise the channel is drained and dropped, preserving the
+// discarded-render behavior byte for byte.
+let private codegenRefusalsStorage =
+    System.Threading.AsyncLocal<(string * string) list ref>()
+
+let codegenRefusalsCell () : (string * string) list ref =
+    let v = codegenRefusalsStorage.Value
+    if isNull (box v) then
+        let fresh = ref []
+        codegenRefusalsStorage.Value <- fresh
+        fresh
+    else v
+
+let recordCodegenRefusal (msg: string) : unit =
+    let cell = codegenRefusalsCell ()
+    let entry = (msg, (currentDeclCell ()).Value)
+    if not (List.contains entry cell.Value) then
+        cell.Value <- cell.Value @ [entry]
+
+/// Drain the refusal channel as BL7004 diagnostics, spanned at the enclosing
+/// declaration. `cppCode` gates delivery: entries are returned only when the
+/// generated source actually carries a refusal marker (a discarded render
+/// records a message but splices nothing -- see the channel's note). The
+/// channel is drained either way so state never leaks across compilations.
+let takeCodegenRefusalDiagnostics (cppCode: string) : Blade.Diagnostics.Diagnostic list =
+    let cell = codegenRefusalsCell ()
+    let entries = cell.Value
+    cell.Value <- []
+    if entries.IsEmpty
+       || not (cppCode.Contains "#error" || cppCode.Contains "BLADE_CODEGEN_ERROR_") then []
+    else
+        entries |> List.map (fun (msg, declName) ->
+            let where = if declName = "" then "" else sprintf " (while emitting '%s')" declName
+            Blade.Diagnostics.Codes.backendRefusal (IR.declSpanOf declName)
+                (sprintf "%s%s" msg where))
+
 /// Record an expression-level warning and return a C++ expression that causes a compile error.
 /// The identifier is the in-place marker; the companion `#error` directive is
 /// appended to the translation unit by `genSelfContainedProgramFromIR` (an
@@ -938,6 +993,12 @@ let exprError (msg: string) : string =
     let sentinels = exprSentinelsCell ()
     if not (List.contains msg sentinels.Value) then
         sentinels.Value <- sentinels.Value @ [msg]
+    // Refusal channel (BL7004): every sentinel becomes an `#error` in the
+    // translation unit, so record it -- EXCEPT the unhandled-node catch-alls,
+    // which have already recorded themselves on the BL7001 channel and would
+    // otherwise be reported twice under two codes.
+    if not (msg.StartsWith "unsupported IR node") then
+        recordCodegenRefusal msg
     sprintf "BLADE_CODEGEN_ERROR_%s" (msg.Replace(" ", "_").Replace("'", "").Replace("(", "").Replace(")", "").Replace(",", "").Replace(":", "").Replace("\"", "").ToUpper())
 
 // Substitution map for contains-aware mask rendering.
@@ -995,10 +1056,22 @@ let indent ctx = { ctx with Indent = ctx.Indent + 1 }
 let indentStr ctx = String.replicate ctx.Indent "    "
 
 /// Record a codegen warning and return a C++ #error directive.
-/// This ensures the generated C++ will not compile silently.
+/// This ensures the generated C++ will not compile silently. Also records on
+/// the refusal channel so the compile driver reports it as BL7004 instead of
+/// letting g++ deliver the raw `#error`.
 let codegenError (ctx: CodeGenContext) (ind: string) (msg: string) : string list =
     ctx.Warnings.Value <- ctx.Warnings.Value @ [msg]
+    recordCodegenRefusal msg
     [sprintf "%s#error \"Blade codegen: %s\"" ind (msg.Replace("\"", "'"))]
+
+/// Direct-splice refusal for the sprintf-`#error` sites that have no ctx at
+/// hand: record on the BL7004 channel and return the `#error` line, quoted
+/// exactly as the site has always emitted it (msg goes inside the quotes
+/// verbatim -- callers that historically carried a "Blade codegen: " prefix
+/// pass it in msg).
+let refusalErrorLine (ind: string) (msg: string) : string =
+    recordCodegenRefusal msg
+    sprintf "%s#error \"%s\"" ind (msg.Replace("\"", "'"))
 
 /// C++ reserved words and built-in type names that cannot be used as identifiers
 let cppReservedWords = Set.ofList [
@@ -1804,7 +1877,7 @@ let genSparseIndexFromKeys (source: SparseKeysSource) (keysName: string option) 
               sprintf "sparse_index_t<%d>* %s = new sparse_index_t<%d>(\"%s\", std::move(%s_keys));"
                       rank idxName rank idxName idxName ]
         | None ->
-            [ "#error \"SparseIdx: runtime keys variable not found in scope at codegen\"" ]
+            [ refusalErrorLine "" "SparseIdx: runtime keys variable not found in scope at codegen" ]
 
 /// Resolve a capture to the C++ identifier naming it in the SCOPE where the
 /// forwarding closure is emitted. A capture's `Name` is its SOURCE name,
@@ -1815,6 +1888,111 @@ let genSparseIndexFromKeys (source: SparseKeysSource) (keysName: string option) 
 /// the source name when unmapped.
 let captureForwardName (names: Map<IRId, string>) (c: CaptureInfo) : string =
     Map.tryFind c.Id names |> Option.defaultValue c.Name
+
+// GROUPED-CAPTURE FORWARDING.
+//
+// A `group_by` result is a row-pointer table (`Array<T*, 1>`, see
+// genGroupByBinding) whose per-row lengths live OUTSIDE the value, in the
+// driving `group_keys` binding's side state (`<gk>__ngroups`,
+// `<gk>__offsets`). A lifted callable that captures one therefore needs
+// three things the plain capture path cannot give it:
+//
+//   1. the row table typed as what it IS (`Array<T*, 1>&`) -- the IR rank-2
+//      type would render `Array<T, 2>&`, which the call site's actual
+//      `Array<T*, 1>` value cannot bind to;
+//   2. the gk side state, forwarded as trailing hidden params (`size_t
+//      __gk<id>__ngroups, const size_t* __gk<id>__offsets`), ONE pair per
+//      DISTINCT gk across the captures -- the grouped-zip peel requires
+//      co-grouped operands to resolve to the SAME stem, so two captures
+//      grouped by one gk must share a pair;
+//   3. a `ctx.GroupedArrays` seed in the callable's body context mapping the
+//      capture's body-scope name to that stem, so every downstream consumer
+//      (tryRaggedPeel, tryGroupedZipPeel, the peel-result extent sites)
+//      resolves lengths exactly as it does in the frame that built the group.
+//
+// Parameter names and argument spellings agree by POSITION, not by text: the
+// signature always spells the stem off the gk's VAR ID (`__gk<id>`), while a
+// call site spells whatever the gk is named in ITS scope -- the emitted
+// binding name where the gk is local (`__v<id>`/`gk`), or `__gk<id>` when the
+// caller is itself a lifted callable holding the forwarded pair.
+//
+// Which capture is grouped comes from a module-level pre-pass
+// (computeGroupedCaptureFacts): binding var id of a group_by result -> the
+// gk binding's var id, harvested from `IRLet (id, IRGroupBy (_, IRVar gk), _)`
+// in every function body plus module-level group_by bindings. HM
+// specialization preserves body let ids (only param VarIds are remapped), so
+// one fact set serves the original, the spec, and every lambda clone.
+let private groupedCaptureFactsStorage =
+    System.Threading.AsyncLocal<Map<IRId, IRId> ref>()
+
+let groupedCaptureFactsCell () : Map<IRId, IRId> ref =
+    let v = groupedCaptureFactsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        groupedCaptureFactsStorage.Value <- fresh
+        fresh
+    else v
+
+let groupedCaptureGkOf (c: CaptureInfo) : IRId option =
+    Map.tryFind c.Id (groupedCaptureFactsCell ()).Value
+
+/// The C++ spelling of a gk's side-state stem in the CURRENT scope: the gk's
+/// emitted name where it is in scope, `__gk<id>` (the forwarded-pair param
+/// stem) where it is not.
+let gkSidecarStem (names: Map<IRId, string>) (gkId: IRId) : string =
+    match Map.tryFind gkId names with
+    | Some n -> n
+    | None -> sprintf "__gk%d" gkId
+
+/// Distinct gk ids across a callable's captures, in first-appearance order
+/// (the order both the signature and every call site iterate).
+let groupedCaptureGks (caps: CaptureInfo list) : IRId list =
+    caps |> List.choose groupedCaptureGkOf |> List.distinct
+
+/// Trailing hidden params carrying the gk side state, for genFuncDef and
+/// genForwardDecls (which must agree token for token).
+let gkSidecarParams (caps: CaptureInfo list) : string list =
+    groupedCaptureGks caps
+    |> List.collect (fun gkId ->
+        [ sprintf "size_t __gk%d__ngroups" gkId
+          sprintf "const size_t* __gk%d__offsets" gkId ])
+
+/// Capture ARGUMENTS at a call/wrapper site: the regular captures resolved
+/// through the active name map, then the gk side-state pairs in the same
+/// order the signature declares them.
+let captureForwardArgs (names: Map<IRId, string>) (caps: CaptureInfo list) : string list =
+    (caps |> List.map (captureForwardName names))
+    @ (groupedCaptureGks caps
+       |> List.collect (fun gkId ->
+           let stem = gkSidecarStem names gkId
+           [ sprintf "%s__ngroups" stem; sprintf "%s__offsets" stem ]))
+
+/// The pre-pass behind groupedCaptureGkOf: every `let <id> = group_by(_, gk)`
+/// in any function body (and any module-level group_by binding) contributes
+/// id -> gk's var id. Installed by genModule/genModuleSplit alongside the
+/// other module-level fact caches.
+let computeGroupedCaptureFacts (modul: IRModule) : Map<IRId, IRId> =
+    let acc = System.Collections.Generic.Dictionary<IRId, IRId>()
+    let strip e = match e with IRCompute inner -> inner | e -> e
+    let note (id: IRId) (v: IRExpr) =
+        match strip v with
+        | IRGroupBy (_, gkE) ->
+            (match strip gkE with
+             | IRVar (gkId, _) -> acc.[id] <- gkId
+             | _ -> ())
+        | _ -> ()
+    let walkBody (b: IRExpr) =
+        mapIRExpr (fun e ->
+            (match e with
+             | IRLet (id, v, _) -> note id v
+             | _ -> ())
+            e) b |> ignore
+    for bind in modul.Bindings do
+        note bind.Id bind.Value
+        walkBody bind.Value
+    for f in modul.Functions do
+        walkBody f.Body
+    acc |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
 
 /// Wrapper-emission helper: a local C++ closure mediating between a lifted
 /// function's signature (regular + capture params) and a consumer's expected
@@ -1851,7 +2029,7 @@ let genCallableWrapper (names: Map<IRId, string>) (suffix: string) (callable: IR
             | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
         |> String.concat ", "
     let regularArgs = callable.Params |> List.map (fun p -> p.Name)
-    let captureArgs = callable.Captures |> List.map (captureForwardName names)
+    let captureArgs = captureForwardArgs names callable.Captures
     let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
     let code =
         [sprintf "auto %s = [&](%s) { return %s(%s); };" wrapperName paramSig safeName allArgs]
@@ -2464,7 +2642,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 |> String.concat ", "
             let allArgs =
                 (callable.Params |> List.map (fun p -> p.Name))
-                @ (callable.Captures |> List.map (captureForwardName names))
+                @ (captureForwardArgs names callable.Captures)
                 |> String.concat ", "
             sprintf "[&](%s) { return %s(%s); }" paramSig safeName allArgs
         | _ ->
@@ -2568,7 +2746,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             match func, resolveCallable func with
             | IRVar (fid, _), Some callable when callable.Id = fid && not (List.isEmpty callable.Captures) ->
                 (sanitizeCppName callable.Name,
-                 callable.Captures |> List.map (captureForwardName names))
+                 captureForwardArgs names callable.Captures)
             | _ -> (exprToCppCore subst names func, [])
         let argStrs =
             args |> List.collect (fun a ->
@@ -3839,7 +4017,7 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         | ArrayElem a -> literalOrRuntimeExtentOfArray a arrName 0
         | _ -> sprintf "%s.extents[0]" arrName
     if maskRank <> 1 then
-        Some ([sprintf "#error \"Blade codegen: mask over a rank-%d array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)\"" maskRank], [])
+        Some ([refusalErrorLine "" (sprintf "Blade codegen: mask over a rank-%d array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)" maskRank)], [])
     else
     match resolveCallable predExpr with
     | Some callable when callable.Params.Length = 1 ->
@@ -4603,7 +4781,7 @@ and materializeNegateConjugateForm (subst: SubstMap) (names: Map<IRId, string>) 
         let allocRhs =
             match emitAllocRhs spec elemTypeStr rank symmArg extentsName with
             | Ok rhs -> rhs
-            | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+            | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
         let allocDecl = sprintf "Array<%s, %d> %s = %s;" elemTypeStr rank varName allocRhs
         // Element count: count_antisym for antisym storage, count_leaves
         // (with the SYMM mask) otherwise. Matches the allocator's traversal.
@@ -4668,7 +4846,7 @@ and materializeArrayCopyForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let allocRhs =
             match emitAllocRhs spec elemTypeStr rank symmArg extentsName with
             | Ok rhs -> rhs
-            | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+            | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
         let allocDecl = sprintf "Array<%s, %d> %s = %s;" elemTypeStr rank varName allocRhs
         let countExpr =
             match spec with
@@ -5187,7 +5365,7 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             // Jacobi source the elaborator did not emit -- so refuse loudly at
             // C++ compile time rather than declaring nothing and leaving the
             // destructuring to reference an undefined name.
-            Some ([ sprintf "#error \"Blade codegen: eigh reached emission with no LAPACK route (availability gate changed after elaboration?); the synthesized Jacobi path is chosen at elaboration time and cannot be recovered here\"" ], [])
+            Some ([ refusalErrorLine "" "Blade codegen: eigh reached emission with no LAPACK route (availability gate changed after elaboration?); the synthesized Jacobi path is chosen at elaboration time and cannot be recovered here" ], [])
      | _ -> None)
 
 
@@ -6999,10 +7177,18 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             // excluded -- symmetrizing a body means SUMMING its permuted
             // copies, and a per-cell sum of array literals is not what the
             // stores below write; that shape falls through to the generic arm.
+            //
+            // A BLOCK-bodied literal kernel -- scalar lets ahead of the array
+            // literal (`lambda(w) -> { let x = ...; [x + y, x - y] }`, the
+            // halo/segment shape) -- takes the same direct-store path: the
+            // lets render as statements inside the row-write scope, visible
+            // to the leaf stores. The shape check is PURE (no rendering), so
+            // a declined shape leaves no sentinel side effect behind.
+            let rec literalTailOf e = match e with IRLet (_, _, b) -> literalTailOf b | t -> t
             let literalLeaves =
-                match codeGen.KernelExpr with
-                | IRArrayLit _ when not codeGen.HasReynolds ->
-                    match arrayLitScalarLeaves codeGen.KernelExpr,
+                match literalTailOf codeGen.KernelExpr with
+                | IRArrayLit _ as tail when not codeGen.HasReynolds ->
+                    match arrayLitScalarLeaves tail,
                           staticCellsOfAxes at outer (rank - 1) with
                     // Leaf count MUST equal the destination row's cell count:
                     // the output extents are deduced from the literal's shape,
@@ -7014,13 +7200,31 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             match literalLeaves with
             | Some leaves ->
                 let subst = match carousel with Some (csubst, _, _) -> csubst | None -> emptySubst
+                // Render the let prefix (empty for a bare literal body): each
+                // non-unit value becomes a scoped local named __v<id> --
+                // renderLetExpr's convention, so the leaves' IRVar references
+                // resolve -- and unit values keep their statement form.
+                let rec renderLetPrefix nm acc e =
+                    match e with
+                    | IRLet (lid, v, b) ->
+                        let nm' = Map.add lid (sprintf "__v%d" lid) nm
+                        let lines =
+                            if isUnitExpr v then
+                                match renderUnitStmts subst nm v with
+                                | "" -> []
+                                | s -> [sprintf "    %s" s]
+                            else [sprintf "    auto __v%d = %s;" lid (exprToCppCore subst nm v)]
+                        renderLetPrefix nm' (acc @ lines) b
+                    | _ -> (nm, acc)
+                let (leafMap, letLines) = renderLetPrefix nameMap [] codeGen.KernelExpr
                 Some ([
                         "{"
+                      ] @ letLines @ [
                         sprintf "    const size_t __rowc = (size_t)(%s);" innerCells
                         sprintf "    %s* __rowd = nested_array_utilities::pool_base(%s.data) + ((%s) * __rowc);"
                             elemStr codeGen.OutputName flatOuter
                       ] @ (leaves |> List.mapi (fun k leaf ->
-                                sprintf "    __rowd[%d] = %s;" k (exprToCppCore subst nameMap leaf)))
+                                sprintf "    __rowd[%d] = %s;" k (exprToCppCore subst leafMap leaf)))
                         @ [ "}" ])
             | None ->
             Some ([
@@ -8925,16 +9129,14 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             let outerExtentOpt = tryEvalIntIR outer.Extent
             match outerExtentOpt with
             | None ->
-                [sprintf "%s#error \"Blade codegen: DepIdx outer extent is not a compile-time integer for binding '%s'\""
-                    ind varName]
+                [refusalErrorLine ind (sprintf "Blade codegen: DepIdx outer extent is not a compile-time integer for binding '%s'" varName)]
             | Some n ->
                 // Evaluate the inner formula for each i in [0..n).
                 let lenResults =
                     [0 .. (int n) - 1]
                     |> List.map (fun i -> evalDepIdxExtent outer.Id i inner.Extent)
                 if lenResults |> List.exists Option.isNone then
-                    [sprintf "%s#error \"Blade codegen: DepIdx inner extent formula not statically evaluable for binding '%s' (runtime-extent formulas are not yet supported)\""
-                        ind varName]
+                    [refusalErrorLine ind (sprintf "Blade codegen: DepIdx inner extent formula not statically evaluable for binding '%s' (runtime-extent formulas are not yet supported)" varName)]
                 else
                     let lens = lenResults |> List.map Option.get
                     // Verify literal row counts match the formula-computed lens.
@@ -8945,14 +9147,12 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                     if mismatch then
                         let expected = lens |> List.map string |> String.concat ", "
                         let actual = actualRowLengths |> List.map string |> String.concat ", "
-                        [sprintf "%s#error \"Blade codegen: DepIdx literal row lengths [%s] do not match formula-computed lens [%s] for binding '%s'\""
-                            ind actual expected varName]
+                        [refusalErrorLine ind (sprintf "Blade codegen: DepIdx literal row lengths [%s] do not match formula-computed lens [%s] for binding '%s'" actual expected varName)]
                     else
                         let total = lens |> List.sum
                         let allValues = extractLiteralValues (IRArrayLit (elements, arrType))
                         if allValues.Length <> total then
-                            [sprintf "%s#error \"Blade codegen: DepIdx literal value count (%d) does not match sum of formula-computed lens (%d) for binding '%s'\""
-                                ind allValues.Length total varName]
+                            [refusalErrorLine ind (sprintf "Blade codegen: DepIdx literal value count (%d) does not match sum of formula-computed lens (%d) for binding '%s'" allValues.Length total varName)]
                         else
                             // Layout is identical to ragged from here on.
                             let nRows = lens.Length
@@ -8984,8 +9184,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                                                 ind elemType varName varName varName varName varName
                             [extentsDecl; lensDecl; offsetsDecl; flatDecl; rowPtrsDecl] @ rowPtrsInit @ [wrapperDecl]
         | _ ->
-            [sprintf "%s#error \"Blade codegen: DepIdx array type missing outer or inner record for binding '%s' (typechecker bug)\""
-                ind varName]
+            [refusalErrorLine ind (sprintf "Blade codegen: DepIdx array type missing outer or inner record for binding '%s' (typechecker bug)" varName)]
     elif isRaggedArrayType arrType then
         let rowLengths = computeRaggedRowLengths elements
         let n = rowLengths.Length
@@ -8994,8 +9193,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
         let allValues = extractLiteralValues (IRArrayLit (elements, arrType))
         if allValues.Length <> total then
             // Sanity check: number of leaf values must match sum of row lengths.
-            [sprintf "%s#error \"Blade codegen: ragged literal value count (%d) does not match sum of row lengths (%d) for binding '%s'\""
-                ind allValues.Length total varName]
+            [refusalErrorLine ind (sprintf "Blade codegen: ragged literal value count (%d) does not match sum of row lengths (%d) for binding '%s'" allValues.Length total varName)]
         else
             let lensList = rowLengths |> List.map string |> String.concat ", "
             let offsets =
@@ -9060,12 +9258,12 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             | leaf -> [(idxPath, leaf)]
         let leaves = walkLeaves [] (IRArrayLit (elements, arrType))
         if extentInts |> List.exists Option.isNone then
-            [sprintf "%s#error \"Blade codegen: compact array literal for '%s' needs compile-time extents\"" ind varName]
+            [refusalErrorLine ind (sprintf "Blade codegen: compact array literal for '%s' needs compile-time extents" varName)]
         elif leaves |> List.exists (fun (path, _) -> path.Length <> rank) then
             // Array-VALUED leaves (a computed row) would need a deep copy into a
             // shrinking row; the checker refuses that shape, so reaching here is
             // a front-end change, not user input.
-            [sprintf "%s#error \"Blade codegen: compact array literal for '%s' has a leaf at the wrong depth (typechecker bug)\"" ind varName]
+            [refusalErrorLine ind (sprintf "Blade codegen: compact array literal for '%s' has a leaf at the wrong depth (typechecker bug)" varName)]
         else
             let extentsName = sprintf "%s_extents" varName
             // `static constexpr`, exactly like the rectangular literal path
@@ -9085,7 +9283,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             let allocLines =
                 match emitAllocRhs (classifyOutputStorage ty) elemType rank symmArg extentsName with
                 | Ok rhs -> [sprintf "%sArray<%s, %d> %s = %s;" ind elemType rank varName rhs]
-                | Error msg -> [sprintf "%s#error \"compact literal '%s': %s\"" ind varName msg]
+                | Error msg -> [refusalErrorLine ind (sprintf "compact literal '%s': %s" varName msg)]
             let initCode =
                 leaves |> List.map (fun (path, leaf) ->
                     let suffix = path |> List.map (sprintf "[%d]") |> String.concat ""
@@ -9125,8 +9323,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             // Inner extents couldn't be recovered statically (parametric or
             // compound index types). Refuse loudly rather than emit the
             // short-extents table that silently reads as empty.
-            [sprintf "%s#error \"Blade codegen: array literal for '%s' nests %d level(s) but the declared rank is %d, and the missing inner extents are not static -- bind the rows to a fully-literal array or annotate with static Idx<n> extents\""
-                ind varName dims.Length rank]
+            [refusalErrorLine ind (sprintf "Blade codegen: array literal for '%s' nests %d level(s) but the declared rank is %d, and the missing inner extents are not static -- bind the rows to a fully-literal array or annotate with static Idx<n> extents" varName dims.Length rank)]
         else
             // Generate extents declaration
             let extentsValues = dims |> List.map string |> String.concat ", "
@@ -11685,7 +11882,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
         | Some rk -> rk.Callable.IsMpiParallel && mpiEmitModeEnabled ()
         | None -> false
     let mpiError (reason: string) : string list =
-        [sprintf "%s#error \"mpi: kernel for '%s' is not MPI-eligible: %s\"" ind name reason]
+        [refusalErrorLine ind (sprintf "mpi: kernel for '%s' is not MPI-eligible: %s" name reason)]
 
     // SAME-KEYS GROUPED CO-ITERATION: `method_for(zip(g1, ..., gk)) <@>
     // lambda(r1, ..., rk) -> <scalar>`, every operand a group_by result over
@@ -11759,15 +11956,34 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 let nameMap =
                     let withRows =
                         rowDecls |> List.fold (fun m (vid, sub, _) -> Map.add vid sub m) ctx.VarNames
-                    callable.Captures |> List.fold (fun m c -> Map.add c.Id c.Name m) withRows
+                    // Captures are a FALLBACK, never an override (same
+                    // precedence rule as the kernel-body sites): a capture of
+                    // a block-local `let` is renamed `__v<id>` in this scope,
+                    // and ctx.VarNames already carries that emitted name --
+                    // overriding it with the SOURCE name forwards an
+                    // undeclared identifier.
+                    callable.Captures
+                    |> List.fold (fun m c -> if Map.containsKey c.Id m then m else Map.add c.Id c.Name m) withRows
                 // S2 routing, in the peel's own idiom: a body that materializes
                 // an array cannot render as one C++ expression, so call the
                 // lifted callable instead of inlining its text. The peel's row
                 // declarations already bind each param name, and the lifted
                 // signature takes those same RaggedRow/Array row types, so the
                 // call is the row decls handed straight through.
+                //
+                // An ARRAY-LITERAL tail also routes through the call: the
+                // literal has no expression rendering (`exprToCppCore`'s
+                // catch-all), and unlike the dense nest -- whose row-write arm
+                // stores literal leaves straight into the output pool -- this
+                // peel renders the body as ONE `auto __rowv = <expr>` slot.
+                // The lifted body compiles it fine (genFuncBody's return-
+                // position IRArrayLit arm), and the S3 row copy below already
+                // handles a call that returns a whole row.
                 let bodyExpr =
-                    if kernelBodyIsExpressionShaped callable.Body then callable.Body
+                    let rec chainTail e = match e with IRLet (_, _, b) -> chainTail b | t -> t
+                    let arrayLitTail =
+                        match chainTail callable.Body with IRArrayLit _ -> true | _ -> false
+                    if kernelBodyIsExpressionShaped callable.Body && not arrayLitTail then callable.Body
                     else
                         let paramTypes = callable.Params |> List.map (fun p -> p.Type)
                         IRApp (IRVar (callable.Id, mkFuncArrow paramTypes callable.RetType),
@@ -12410,7 +12626,7 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 match emitAllocRhs (classifyOutputStorage codeGen.OutputType)
                           outputElemType outputRank symmArg extentsName with
                 | Ok rhs -> rhs
-                | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+                | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
             let allocDecl = sprintf "%sArray<%s, %d> %s = %s;"
                                 ind outputElemType outputRank name allocRhs
 
@@ -13311,7 +13527,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                 match emitAllocRhs (classifyOutputStorage cg.OutputType)
                           outputElemType outputRank symmArg extentsName with
                 | Ok rhs -> rhs
-                | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+                | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
             let allocDecl = sprintf "%sArray<%s, %d> %s = %s;"
                                 ind outputElemType outputRank lname allocRhs
             (match cg.OutputType with
@@ -15374,7 +15590,7 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         let rank = extents.Length
         let nonLiteral = extents |> List.exists (fun e -> match e with IRLit (IRLitInt _) -> false | _ -> true)
         if nonLiteral then
-            ([sprintf "%s#error \"rand binding '%s' requires literal extents\"" ind name], addVarName binding.Id name ctx)
+            ([refusalErrorLine ind (sprintf "rand binding '%s' requires literal extents" name)], addVarName binding.Id name ctx)
         else
             let extentTerms = extents |> List.map (fun e -> match e with IRLit (IRLitInt n) -> string n | _ -> "0")
             let extentsName = sprintf "%s_extents" name
@@ -15400,7 +15616,7 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                     ind kind name card (exprToCpp ctx.VarNames keyExpr) weightsArgs parArgs
             ([extentsArr; allocLine; fillLine], addVarName binding.Id name ctx)
     | _ ->
-        ([sprintf "%s#error \"rand binding '%s' is not an array type\"" ind name], addVarName binding.Id name ctx)
+        ([refusalErrorLine ind (sprintf "rand binding '%s' is not an array type" name)], addVarName binding.Id name ctx)
 
 and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -15432,7 +15648,7 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
                  arrTy.IndexTypes |> List.mapi (fun i idx ->
                      match idx.Extent with
                      | IRLit (IRLitInt n) -> sprintf "%ssize_t %s_extent_%d = %d;" ind name i n
-                     | _ -> sprintf "%s#error \"fill_random binding '%s' has a non-literal extent at dim %d\"" ind name i)
+                     | _ -> refusalErrorLine ind (sprintf "fill_random binding '%s' has a non-literal extent at dim %d" name i))
              let extentsArr = sprintf "%ssize_t %s_extents[] = { %s };" ind name (String.concat ", " extentNames)
              let allocLine =
                  sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
@@ -15445,7 +15661,7 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
              // COUPLED (A(i,j) = conj(A(j,i))): independent pool draws would
              // violate the invariant, so hermitian fill needs a canonical-
              // half fill + mirrored conjugation -- not yet emitted.
-             ([sprintf "%s#error \"fill_random binding '%s': HermitianIdx is not supported (stored cells are constraint-coupled)\"" ind name],
+             ([refusalErrorLine ind (sprintf "fill_random binding '%s': HermitianIdx is not supported (stored cells are constraint-coupled)" name)],
               addVarName binding.Id name ctx)
          else
              // GENERALIZED fill (arc 3, formalism 3.5): one draw per STORED
@@ -15461,7 +15677,7 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
              let nonLiteral =
                  componentExtents |> List.exists (fun e -> match e with IRLit (IRLitInt _) -> false | _ -> true)
              if nonLiteral then
-                 ([sprintf "%s#error \"fill_random binding '%s' requires literal extents\"" ind name],
+                 ([refusalErrorLine ind (sprintf "fill_random binding '%s' requires literal extents" name)],
                   addVarName binding.Id name ctx)
              else
                  let extentTerms =
@@ -15476,7 +15692,7 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
                  let allocLines =
                      match emitAllocRhs (classifyOutputStorage binding.Type) elemCpp rank symmArg extentsName with
                      | Ok rhs -> [sprintf "%sArray<%s, %d> %s = %s;" ind elemCpp rank name rhs]
-                     | Error msg -> [sprintf "%s#error \"fill_random '%s': %s\"" ind name msg]
+                     | Error msg -> [refusalErrorLine ind (sprintf "fill_random '%s': %s" name msg)]
                  let poolCount =
                      deviceBufferCardinality (deviceBufferTypeOfArray arrTy)
                      |> exprToCpp ctx.VarNames
@@ -15486,7 +15702,7 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
                            ind poolCount elemCpp (exprToCpp ctx.VarNames modExpr) ]
                  (extentsArr :: allocLines @ fillLines, addVarName binding.Id name ctx)
      | _ ->
-         ([sprintf "%s#error \"fill_random binding '%s' is not an array type\"" ind name], addVarName binding.Id name ctx))
+         ([refusalErrorLine ind (sprintf "fill_random binding '%s' is not an array type" name)], addVarName binding.Id name ctx))
 
 
 and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
@@ -15561,7 +15777,7 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          registerShapedAlloc name "deallocate_compound" name
          (lines, addVarName binding.Id name ctx)
      | _ ->
-         ([sprintf "%s#error \"compound() binding '%s' is not a CompoundIdx array type\"" ind name], addVarName binding.Id name ctx))
+         ([refusalErrorLine ind (sprintf "compound() binding '%s' is not a CompoundIdx array type" name)], addVarName binding.Id name ctx))
 
 and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -15595,7 +15811,7 @@ and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string lis
              | IRSparseKeys (SkStatic _ as src) -> genSparseIndexFromKeys src None leadRank idxName
              | IRSparseKeys (SkRuntime (IRVar (kid, _)) as src) ->
                  genSparseIndexFromKeys src (Map.tryFind kid ctx.VarNames) leadRank idxName
-             | _ -> [ sprintf "#error \"sparse() binding '%s': keys source is not a SparseIdx extent\"" name ]
+             | _ -> [ refusalErrorLine "" (sprintf "sparse() binding '%s': keys source is not a SparseIdx extent" name) ]
          let trailTerms =
              [ for d in 1 .. trailingDimCount -> sprintf "%s.extents[%d]" valuesName d ]
          let trailExpr = match trailTerms with | [] -> "1" | xs -> String.concat " * " xs
@@ -15611,7 +15827,7 @@ and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string lis
          registerShapedAlloc name "deallocate_sparse" name
          (lines, addVarName binding.Id name ctx)
      | _ ->
-         ([sprintf "%s#error \"sparse() binding '%s' is not a SparseIdx array type\"" ind name], addVarName binding.Id name ctx))
+         ([refusalErrorLine ind (sprintf "sparse() binding '%s' is not a SparseIdx array type" name)], addVarName binding.Id name ctx))
 
 
 /// Rearrangement combinators (group_by, sort, mask, transpose, decompact,
@@ -17200,7 +17416,7 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                     | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
                 |> String.concat ", "
             let regularArgs = callable.Params |> List.map (fun p -> p.Name)
-            let captureArgs = callable.Captures |> List.map (captureForwardName ctx.VarNames)
+            let captureArgs = captureForwardArgs ctx.VarNames callable.Captures
             let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
             // Wrapper type: `std::function<Ret(P1, P2, ...)>`. Explicit
             // type per the codegen convention (auto reserved for thin
@@ -18383,7 +18599,7 @@ or return a scalar and materialize at the call site"
                 let allocRhs =
                     match emitAllocRhs AllocDense elemStr rank "nullptr" extentsName with
                     | Ok rhs -> rhs
-                    | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+                    | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
                 // The slice is a CONTIGUOUS sub-block of a dense pool
                 // (returnedInteriorView proved the leading-prefix, all-scalar,
                 // unsymmetric shape), so `pool_base` on the sub-skeleton lands
@@ -18691,6 +18907,11 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
         // mutation propagates and lifetimes tie to the wrapper's `[&]` capture
         // at the use site: `T&` for plain types, `Array<T, N>&` for arrays.
         //
+        // A GROUPED capture (a `group_by` result -- see the grouped-capture
+        // forwarding block) is typed as the row-pointer table it actually is,
+        // `Array<T*, 1>&`; the IR rank-2 rendering would not bind to the call
+        // site's value.
+        //
         // Function-typed captures use `const std::function<...>&` instead:
         // Blade's top-level `function name(args) = body` emits an ordinary C++
         // function, whose name denotes a function reference, not a
@@ -18700,11 +18921,13 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
         // mutation-through-capture for function values, which is fine since
         // they're immutable bindings in Blade.
         match cap.Type with
+        | ArrayElem arr when (groupedCaptureGkOf cap).IsSome ->
+            sprintf "Array<%s*, 1>& %s" (elemTypeToCpp arr.ElemType) cap.Name
         | ArrayElem arr -> sprintf "%s& %s" (cppArrayTypeStr arr) cap.Name
         | FuncElem _ -> sprintf "const %s& %s" (irTypeToCpp cap.Type) cap.Name
         | _ -> sprintf "%s& %s" (irTypeToCpp cap.Type) cap.Name
     let regularParams = funcDef.Params |> List.map (fun p -> paramStr p.Name p.Type)
-    let captureParams = funcDef.Captures |> List.map captureParamStr
+    let captureParams = (funcDef.Captures |> List.map captureParamStr) @ gkSidecarParams funcDef.Captures
     let paramList = (regularParams @ captureParams) |> String.concat ", "
 
     // Use declared return type, or infer from body as fallback
@@ -18726,7 +18949,18 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
 
     // Generate proper C++ function
     let safeName = sanitizeCppName funcDef.Name
-    let bodyStmts = genFuncBody ctx builder bodyNames bodyInd funcDef.Body
+    // Grouped captures: seed the body context so the peels resolve per-row
+    // lengths through the forwarded `__gk<id>__*` params exactly as they
+    // resolve them in the frame that built the group (grouped-capture
+    // forwarding, requirement 3).
+    let bodyCtx =
+        funcDef.Captures
+        |> List.fold (fun c cap ->
+            match groupedCaptureGkOf cap with
+            | Some gkId ->
+                { c with GroupedArrays = Map.add cap.Name (gkSidecarStem ctx.VarNames gkId) c.GroupedArrays }
+            | None -> c) ctx
+    let bodyStmts = genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
     // Shadow-stack frame: named as the Blade function so a runtime
     // panic prints a Blade call stack. file/line are nullptr/0 because
     // IRCallable carries no span (adding one touches TypeCheck.fs's IRCallable
@@ -18787,6 +19021,16 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
     // expression.
     let bodyInd = ind + "    "
     let bodyCtx = { ctx with VarNames = bodyNames; Indent = ctx.Indent + 1 }
+    // Grouped captures resolve by NAME here (the [&] closure sees main's
+    // locals), so only the GroupedArrays seed is needed -- the stem is the
+    // gk's emitted name in the enclosing scope, no hidden params.
+    let bodyCtx =
+        funcDef.Captures
+        |> List.fold (fun c cap ->
+            match groupedCaptureGkOf cap with
+            | Some gkId ->
+                { c with GroupedArrays = Map.add cap.Name (gkSidecarStem ctx.VarNames gkId) c.GroupedArrays }
+            | None -> c) bodyCtx
     let bodyStmts = genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
     // Shadow-stack frame; see genFuncDef. Name-only (nullptr/0),
     // and marker-form so resolveShadowFrames can drop it if no panic is
@@ -18819,10 +19063,14 @@ let private genForwardDecls (fileScopeFuncs: IRFuncDef list) : string list =
                 funcDef.Captures
                 |> List.map (fun cap ->
                     match cap.Type with
+                    // Grouped capture: the row-pointer table form, matching
+                    // genFuncDef's captureParamStr token for token.
+                    | ArrayElem arr when (groupedCaptureGkOf cap).IsSome ->
+                        sprintf "Array<%s*, 1>& %s" (elemTypeToCpp arr.ElemType) cap.Name
                     | ArrayElem arr -> sprintf "%s& %s" (cppArrayTypeStr arr) cap.Name
                     | FuncElem _ -> sprintf "const %s& %s" (irTypeToCpp cap.Type) cap.Name
                     | _ -> sprintf "%s& %s" (irTypeToCpp cap.Type) cap.Name)
-            let allParams = (paramList @ captureList) |> String.concat ", "
+            let allParams = (paramList @ captureList @ gkSidecarParams funcDef.Captures) |> String.concat ", "
             let retType =
                 match funcDef.RetType with
                 | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)
@@ -19131,6 +19379,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // mid-emission must not leave a frame active for this one's bindings.
     (freshReturnFactsCell ()).Value <- computeFreshReturnFacts modul
     (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
+    (groupedCaptureFactsCell ()).Value <- computeGroupedCaptureFacts modul
     resetAllocScopeStack ()
 
     let ctx0 = emptyContext ()
@@ -19237,6 +19486,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     // NotFresh (leaks only, but a divergence between the two modes).
     (freshReturnFactsCell ()).Value <- computeFreshReturnFacts modul
     (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
+    (groupedCaptureFactsCell ()).Value <- computeGroupedCaptureFacts modul
     resetAllocScopeStack ()
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
@@ -20354,6 +20604,7 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
     // one (the driver drains the channel, but a caller that never drains --
     // the test harness -- would otherwise accumulate across tests).
     (unhandledNodesCell ()).Value <- []
+    (codegenRefusalsCell ()).Value <- []
     (currentDeclCell ()).Value <- ""
     // Deterministic deallocation: see genMainProgram.
     (freshReturnFactsCell ()).Value <- Map.empty

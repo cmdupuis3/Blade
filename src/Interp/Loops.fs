@@ -972,8 +972,7 @@ and private materializeCompoundRangeMap
         | other -> raise (InterpUnsupported (sprintf "range<CompoundIdx> map output type %s" (nodeTypeName other)))
     // Kernel env: captures + reusable param cells (as interpretNest builds them).
     let kenv = envChild env
-    for c in cg.Captures do
-        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let paramCells = Dictionary<IRId, ValueRef>()
     for p in cg.KernelParams do
         let cell = { V = VUnit }
@@ -1055,8 +1054,7 @@ and private materializeSparseRangeMap
         | ArrayElem arr -> (arr.ElemType, arr.IndexTypes)
         | other -> raise (InterpUnsupported (sprintf "range<SparseIdx> map output type %s" (nodeTypeName other)))
     let kenv = envChild env
-    for c in cg.Captures do
-        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let paramCells = Dictionary<IRId, ValueRef>()
     for p in cg.KernelParams do
         let cell = { V = VUnit }
@@ -1137,8 +1135,7 @@ and private materializeCompoundHaloMap
         | [ p ] -> p
         | _ -> raise (InterpUnsupported "compound-halo map: kernel is not single-parameter")
     let kenv = envChild env
-    for c in cg.Captures do
-        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let cell = { V = VUnit }
     envBindRef kenv param.VarId cell
     st.Cells <- st.Cells + (if outLen > 0L then outLen else 0L)
@@ -1181,8 +1178,7 @@ and private materializeGroupedMap (st: InterpState) (env: Env) (info: ApplyInfo)
         | [ p ] -> p
         | _ -> raise (InterpUnsupported "grouped map: kernel is not single-parameter")
     let kenv = envChild env
-    for c in cg.Captures do
-        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let cell = { V = VUnit }
     envBindRef kenv param.VarId cell
     let ngroups = int grouped.Extents.[0]
@@ -1286,6 +1282,37 @@ and private resolveArraySource (st: InterpState) (env: Env) (arr: IRExpr) : Arra
         | VSparse sv -> SReal (A.sparseToDense sv)
         | _ -> raise (InterpUnsupported "array input expression is not an array")
 
+// Bind a kernel's capture cells into `kenv`. A capture id absent from the
+// environment AND from the callables table cannot be resolved -- if the
+// kernel expression actually READS it, evaluation is guaranteed to panic
+// BL8004 (unbound variable) mid-kernel. That is an interpreter LIMIT, not a
+// program error: the compiled side resolves such captures by NAME
+// (captureForwardName's source-name fallback), e.g. an HM-cloned nested
+// kernel slot whose capture ids still point at the original function's
+// params. Classify it as unsupported so the harness reports
+// SKIP-UNSUPPORTED instead of a crash-red.
+//
+// The reference check matters: capture analysis deliberately OVER-reports
+// free vars (safe on the emit side, where buildCaptures filters), so a dead
+// capture that the kernel never reads must keep the silent-skip behavior --
+// refusing on it would demote passing diffs to skips. A miss that IS in the
+// callables table also stays silent: evalExpr's IRVar arm reifies it as a
+// closure.
+and private bindKernelCaptures (st: InterpState) (env: Env) (kenv: Env) (caps: CaptureInfo list) (kernelExpr: IRExpr) : unit =
+    let mutable referenced = Unchecked.defaultof<Set<IRId>>
+    let mutable referencedComputed = false
+    for c in caps do
+        match envTryFind env c.Id with
+        | Some cell -> envBindRef kenv c.Id cell
+        | None ->
+            if not (st.Callables.ContainsKey c.Id) then
+                if not referencedComputed then
+                    referenced <- collectVarRefsIR kernelExpr
+                    referencedComputed <- true
+                if Set.contains c.Id referenced then
+                    raise (InterpUnsupported
+                               (sprintf "kernel capture '%s' not resolvable by id (nested HM-specialized kernel)" c.Name))
+
 // interpretNest: the nest interpreter (analog of genLoopNest). Outermost-first
 // recursion; bound = Extent - SumBoundDependencies - StrictOffset; per-level
 // element peeling arm-for-arm; innermost kernel via Core.evalExpr.
@@ -1300,8 +1327,7 @@ and private interpretNest
     // Kernel env: child of the deferred env (so module bindings + enclosing
     // locals remain reachable), with capture cells + reusable param cells.
     let kenv = envChild env
-    for c in cg.Captures do
-        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let paramCells = Dictionary<IRId, ValueRef>()
     for p in cg.KernelParams do
         let cell = { V = VUnit }

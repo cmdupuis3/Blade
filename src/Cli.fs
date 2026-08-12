@@ -185,6 +185,16 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
                 | (_ :: _) as ds ->
                     Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
                 | [] ->
+                // DELIBERATE refusals (BL7004): the same messages the emitted
+                // `#error` directives carry, reported as coded diagnostics
+                // before g++ ever runs. Gated on the generated source actually
+                // carrying a marker -- a rendered-then-discarded refusal
+                // records a message but splices nothing, and must not fail a
+                // program whose translation unit is clean.
+                match CodeGen.takeCodegenRefusalDiagnostics cppCode with
+                | (_ :: _) as ds ->
+                    Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+                | [] ->
                 if verbose then
                     for w in warnings do
                         eprintfn "[Warning] %s" w

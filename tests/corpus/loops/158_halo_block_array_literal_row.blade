@@ -1,0 +1,42 @@
+// TEST: Halo Map With Block Kernel Returning An Array Literal
+// ============================================================================
+// RANK-RAISING MAP, part 3 (151/152 are the bare-literal forms): a kernel
+// whose body is a BLOCK -- scalar lets ahead of the array literal
+// (`lambda(w) -> { let x = ...; [x + y, x - y, x * y] }`), the half-cell
+// LSWOSA segment shape. The lets render as statements inside the row-write
+// scope and the literal's leaves store straight into the output pool, so
+// the block form costs exactly what the bare literal costs: no temporary,
+// no copy, no free.
+//
+// Previously the block fell out of the literal-row arm (which matched only a
+// bare IRArrayLit body), so the generic arm rendered the let chain as an
+// expression and the trailing array literal hit exprToCpp's catch-all --
+// BL7001, "no rule for IRArrayLit in expression position".
+// ============================================================================
+let A: Array<Float64 like Idx<5>> = [1.0, 2.0, 4.0, 7.0, 11.0]
+
+// Top level: halo pairing with a block kernel.
+let segv = method_for(halo<Idx<5>, [0, 1]>) <@> lambda(w) -> {
+    let x = A(w(0)) + 1.0
+    let y = A(w(1)) * 2.0
+    [x + y, x - y, x * y]
+} |> compute
+// EXPECT: segv = [[6, -2, 8], [11, -5, 24], [19, -9, 70], [30, -14, 176]]
+
+// Same shape nested inside a frequency lambda inside a function -- the
+// grid materializes per outer iteration and is indexed in the same body.
+function work(frs: T^1, B: T^1) = {
+    frs <@> lambda(f) -> {
+        let sv = method_for(halo<Idx<5>, [0, 1]>) <@> lambda(w) -> {
+            let x = B(w(0)) + f
+            let y = B(w(1)) * f
+            [x + y, x - y, x * y]
+        } |> compute
+        sv(0, 0) + sv(1, 2)
+    } |> compute
+}
+let B: Array<Float64 like Idx<5>> = [1.0, 2.0, 4.0, 7.0, 11.0]
+let frs = [0.1, 0.2, 0.3]
+let out = work(frs, B)
+// out(f) = (1 + 3f) + (2 + f) * 4f = 1 + 3f + 8f + 4f^2
+// EXPECT: out = [2.14, 3.36, 4.66]
