@@ -163,6 +163,15 @@ let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
         | Some a, Some b when b <> 0L -> Some (a / b) | _ -> None
     | _ -> None
 
+/// Single-entry memo for staticEnvOf's `StaticFunctions -> StaticFuncDef`
+/// projection, which was rebuilt on every call. Keyed on the REFERENCE identity
+/// of the source map, so it is correct however calls interleave: an F# Map is
+/// immutable, and any change to `env.StaticFunctions` yields a different object,
+/// which misses the cache. The per-call `CalledFunctions` ref is deliberately
+/// NOT cached -- it accumulates per evaluation and must stay fresh.
+let mutable private staticFuncProjCache
+    : (obj * Map<string, StaticEval.StaticFuncDef>) option = None
+
 /// Evaluate an expression to a compile-time int under the FULL static
 /// contract (the replicate-count rule): a literal, a Nat-typed var, a
 /// `let static` value, or a static-function call. Two tiers: the cheap
@@ -171,13 +180,21 @@ let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
 /// Dist annotation order (lowerTypeExpr's TyDist arm) and the cumulant
 /// projection order (inferCumulantProj).
 let staticEnvOf (env: TypeEnv) : StaticEval.StaticEnv =
+    let src = env.StaticFunctions
+    let projected =
+        match staticFuncProjCache with
+        | Some (key, cached) when System.Object.ReferenceEquals (key, box src) -> cached
+        | _ ->
+            let p =
+                src
+                |> Map.map (fun _ (fd: FunctionDecl) ->
+                    { StaticEval.Name = fd.Name
+                      StaticEval.Params = fd.Params |> List.map (fun p -> p.Name)
+                      StaticEval.Body = fd.Body })
+            staticFuncProjCache <- Some (box src, p)
+            p
     { Values = env.StaticValues
-      Functions =
-        env.StaticFunctions
-        |> Map.map (fun _ (fd: FunctionDecl) ->
-            { StaticEval.Name = fd.Name
-              StaticEval.Params = fd.Params |> List.map (fun p -> p.Name)
-              StaticEval.Body = fd.Body })
+      Functions = projected
       CalledFunctions = ref Set.empty
       ProviderRoots = Map.empty
       Structs = Map.empty }
@@ -13741,7 +13758,10 @@ and tryScalarFill (env: TypeEnv) (tE: TypedExpr) (expected: IRType) : TypedExpr 
 and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<TypedExpr> =
     let mutable curEnv = env
     let mutable err : TypeError option = None
-    let mutable typedStmts : TypedStmt list = []
+    // ResizeArray, not `typedStmts <- typedStmts @ [s]`: the append copied the
+    // whole prefix per statement, quadratic in block length. Read back as a
+    // list at the (single) exit points, in the same order.
+    let typedStmts = ResizeArray<TypedStmt>()
 
     for stmt in stmts do
         if err.IsNone then
@@ -13880,7 +13900,7 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                         Destructure = destructure
                         PostChecks = postChecks
                     }
-                    typedStmts <- typedStmts @ [TStmtLet tb]
+                    typedStmts.Add (TStmtLet tb)
                 | Error e -> err <- Some e
             | StmtAssign (lhs, _, rhs) ->
                 match inferExpr curEnv lhs, inferExpr curEnv rhs with
@@ -13898,18 +13918,20 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                             err <- Some (ImmutableStaticAssign name)
                         | _ ->
                             let _ = unify curEnv.Subst tL.Type tR.Type
-                            typedStmts <- typedStmts @ [TStmtAssign (tL, tR)] @ assignChecks ()
+                            typedStmts.Add (TStmtAssign (tL, tR))
+                            typedStmts.AddRange (assignChecks ())
                     | _ ->
                         let _ = unify curEnv.Subst tL.Type tR.Type
-                        typedStmts <- typedStmts @ [TStmtAssign (tL, tR)] @ assignChecks ()
+                        typedStmts.Add (TStmtAssign (tL, tR))
+                        typedStmts.AddRange (assignChecks ())
                 | Error e, _ | _, Error e -> err <- Some e
             | StmtExpr e ->
                 match inferExpr curEnv e with
-                | Ok tE -> typedStmts <- typedStmts @ [TStmtExpr tE]
+                | Ok tE -> typedStmts.Add (TStmtExpr tE)
                 | Error e -> err <- Some e
             | StmtForIn (varName, rangeExpr, bodyStmts) ->
                 match inferForIn curEnv varName rangeExpr bodyStmts with
-                | Ok tStmt -> typedStmts <- typedStmts @ [tStmt]
+                | Ok tStmt -> typedStmts.Add tStmt
                 | Error e -> err <- Some e
 
     match err with
@@ -13924,8 +13946,8 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                 | Some ty -> checkExpr curEnv ty e
                 | None -> inferExpr curEnv e
             tFR |> Result.map (fun tF ->
-                mkTyped (TExprBlock (typedStmts, Some tF)) tF.Type)
-        | None -> Ok (mkTyped (TExprBlock (typedStmts, None)) IRTUnit)
+                mkTyped (TExprBlock (List.ofSeq typedStmts, Some tF)) tF.Type)
+        | None -> Ok (mkTyped (TExprBlock (List.ofSeq typedStmts, None)) IRTUnit)
 
 /// Leaf bindings for a destructuring `let` in STATEMENT position. Returns the
 /// environment extended with every leaf, the (name, id, type) sub-binding
@@ -14019,7 +14041,9 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
             let loopEnv = bindVarSimple varName varId (IRTScalar ETInt64) env
             let mutable bodyEnv = loopEnv
             let mutable bodyErr = None
-            let mutable typedBodyStmts : TypedStmt list = []
+            // ResizeArray for the same reason as inferBlock's typedStmts (these
+            // two statement walkers are deliberate twins).
+            let typedBodyStmts = ResizeArray<TypedStmt>()
             for bodyStmt in bodyStmts do
                 if bodyErr.IsNone then
                     let bodyStmt =
@@ -14056,7 +14080,7 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
                                 SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, bodyEnv.Subst.Resolve ty))
                                 Destructure = destructure; PostChecks = []
                             }
-                            typedBodyStmts <- typedBodyStmts @ [TStmtLet tb]
+                            typedBodyStmts.Add (TStmtLet tb)
                         | Error e -> bodyErr <- Some e
                     | StmtAssign (lhs, _, rhs) ->
                         match inferExpr bodyEnv lhs, inferExpr bodyEnv rhs with
@@ -14067,19 +14091,20 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
                                 match structChecksForAssign bodyEnv lhs tL with
                                 | Ok cs -> cs |> List.map TStmtExpr
                                 | Error e -> bodyErr <- Some e; []
-                            typedBodyStmts <- typedBodyStmts @ [TStmtAssign (tL, tR)] @ checks
+                            typedBodyStmts.Add (TStmtAssign (tL, tR))
+                            typedBodyStmts.AddRange checks
                         | Error e, _ | _, Error e -> bodyErr <- Some e
                     | StmtExpr e ->
                         match inferExpr bodyEnv e with
-                        | Ok tE -> typedBodyStmts <- typedBodyStmts @ [TStmtExpr tE]
+                        | Ok tE -> typedBodyStmts.Add (TStmtExpr tE)
                         | Error e -> bodyErr <- Some e
                     | StmtForIn (v2, range2, body2) ->
                         match inferForIn bodyEnv v2 range2 body2 with
-                        | Ok tStmt -> typedBodyStmts <- typedBodyStmts @ [tStmt]
+                        | Ok tStmt -> typedBodyStmts.Add tStmt
                         | Error e -> bodyErr <- Some e
             match bodyErr with
             | Some e -> Error e
-            | None -> Ok (TStmtForIn (varName, varId, tLo, tHi, typedBodyStmts))
+            | None -> Ok (TStmtForIn (varName, varId, tLo, tHi, List.ofSeq typedBodyStmts))
     | _ -> Error (Other "for-in range must use a..b syntax")
 
 and inferMethodFor env arrays : TypeResult<TypedExpr> =

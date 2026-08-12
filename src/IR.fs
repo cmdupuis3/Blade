@@ -3918,14 +3918,16 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
          | scrut' :: rest ->
              // Re-thread the flat list back through the (guard?, body) case
              // structure; leftovers or shortfalls are shape violations.
-             let cases', leftover =
+             // Accumulated reversed (cons, not `acc @ [x]`): this fold runs on
+             // every IRMatch rebuild in every mapIRExpr pass.
+             let casesRev, leftover =
                  cases |> List.fold (fun (acc, remaining) c ->
                      match c.Guard, remaining with
-                     | Some _, g' :: b' :: tl -> (acc @ [{ c with Guard = Some g'; Body = b' }], tl)
-                     | None, b' :: tl -> (acc @ [{ c with Body = b' }], tl)
+                     | Some _, g' :: b' :: tl -> ({ c with Guard = Some g'; Body = b' } :: acc, tl)
+                     | None, b' :: tl -> ({ c with Body = b' } :: acc, tl)
                      | _ -> badChildren "IRMatch") ([], rest)
              if not (List.isEmpty leftover) then badChildren "IRMatch"
-             else IRMatch (scrut', cases')
+             else IRMatch (scrut', List.rev casesRev)
          | [] -> badChildren "IRMatch")
 
     // -- Info-record combinators ----------------------------------------------
@@ -4005,6 +4007,19 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | ExprShape ([], _) -> expr
         | ExprShape (children, rebuild) -> rebuild (children |> List.map (mapIRExpr f))
     f mapped
+
+/// Visit every sub-expression, in EXACTLY the order `mapIRExpr` applies its
+/// callback -- children left-to-right, then the node itself (post-order) --
+/// without rebuilding a single node. The visitor twin of `mapIRExpr`: any
+/// site that only wanted the traversal (and threw the rebuilt tree away with
+/// `|> ignore`) uses this instead, so a whole IR copy is not allocated per
+/// analysis pass. The post-order contract is load-bearing: accumulators that
+/// prepend, or dictionaries where a later write wins, depend on it.
+let rec iterIRExpr (f: IRExpr -> unit) (expr: IRExpr) : unit =
+    (match expr with
+     | ExprShape ([], _) -> ()
+     | ExprShape (children, _) -> children |> List.iter (iterIRExpr f))
+    f expr
 
 /// Collect every variable id referenced (IRVar) anywhere in an expression.
 /// The one var-ref collector (audit section 3.2): capture computation and
@@ -4276,8 +4291,7 @@ let collectHMCallSites (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId 
                 bindings |> Map.toList |> List.sortBy fst
             results.Add((funcId, sortedBindings))
         | _ -> ()
-        e
-    mapIRExpr walk expr |> ignore
+    iterIRExpr walk expr
     results |> Seq.toList
 
 /// Occurrence-id-INDEPENDENT structural key for a type: same element, rank,
@@ -4365,11 +4379,10 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
     // since the discovery walk below visits clone bodies too.
     let appliedIdsOf (body: IRExpr) =
         let acc = System.Collections.Generic.HashSet<IRId>()
-        mapIRExpr (fun e ->
-            (match e with
-             | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
-             | _ -> ())
-            e) body |> ignore
+        iterIRExpr (fun e ->
+            match e with
+            | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
+            | _ -> ()) body
         acc
     let needsClone (appliedIds: System.Collections.Generic.HashSet<IRId>) (c: IRCallable) : bool =
         // (a) closures capturing one of this function's params, or (b)
@@ -4559,11 +4572,25 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         // `hanning` and `wosa_lsdft`.
         let sitesFromClones =
             lambdaClones |> Seq.collect (fun c -> collectHMCallSites hmFuncMap c.Body) |> List.ofSeq
+        // Dedup on the SPEC KEY (the canonTypeKey string form), not on raw
+        // `IRType` trees: `List.distinct` had to structurally hash and compare
+        // whole type trees -- extent expressions included -- once per call site
+        // per fixpoint round. The key is what the loop body already computes and
+        // what `specMap` is keyed on, so deduping on it is behaviour-preserving:
+        // two sites sharing a key would have had the second one skipped by the
+        // `Map.containsKey key specMap` test anyway, and `distinctBy` keeps the
+        // same (first) occurrence `List.distinct` did. `allConcrete` and
+        // `paramVarsCovered` are both functions of the key alone -- an `IRTInfer
+        // n` renders as `vn` and nothing else does -- so key-equal sites never
+        // disagree about whether they are specializable.
         let uniqueSites =
-            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs @ sitesFromClones) |> List.distinct
+            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs @ sitesFromClones)
+            |> List.map (fun (funcId, sortedBindings) ->
+                ((funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty))),
+                 (funcId, sortedBindings)))
+            |> List.distinctBy fst
 
-        for (funcId, sortedBindings) in uniqueSites do
-            let key = (funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
+        for (key, (funcId, sortedBindings)) in uniqueSites do
             // Only generate specs whose bindings are entirely concrete. A
             // self-binding like (10001, IRTInfer 10002) means the call site
             // was inside a still-abstract context; the fixpoint revisits it
@@ -4780,11 +4807,10 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             let hmById = hmFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
             let referencedIn (e: IRExpr) =
                 let acc = System.Collections.Generic.HashSet<IRId>()
-                mapIRExpr (fun n ->
-                    (match n with
-                     | IRVar (id, _) when hmById.ContainsKey id -> acc.Add id |> ignore
-                     | _ -> ())
-                    n) e |> ignore
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRVar (id, _) when hmById.ContainsKey id -> acc.Add id |> ignore
+                    | _ -> ()) e
                 acc
             let seedRefs =
                 let acc = System.Collections.Generic.HashSet<IRId>()
@@ -4856,6 +4882,36 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         | IRLet (_, _, body) -> operandType body
         | CarriedType ty -> Some ty
         | _ -> None
+    // TRIGGER PRE-SCAN. `rewrite` below fires on exactly three operand-type
+    // pairs -- (array, array), (array, scalar), (scalar, array) -- so a module
+    // with no array-typed elementwise binop anywhere cannot be changed by this
+    // pass, and rebuilding every function body and binding value to discover
+    // that is pure waste (post-TypeCheck, almost every `x + y` over arrays is
+    // ALREADY a combinator; this pass exists only for pack elements whose array
+    // type resolves after monomorphization).
+    //
+    // Deliberately an OVER-approximation: `Some _, Some (ArrayElem _)` also
+    // admits pairs `rewrite` falls through on, which costs a no-op pass, never
+    // a missed rewrite. Nesting is covered because the pass is bottom-up: an
+    // outer binop only becomes array-typed once an INNER one was rewritten, and
+    // that inner one is itself a trigger in the un-rewritten tree.
+    let isArrayBinOpTrigger (e: IRExpr) : bool =
+        match e with
+        | IRBinOp (IRElementwise, _, l, r) ->
+            (match operandType l, operandType r with
+             | Some (ArrayElem _), Some _ | Some _, Some (ArrayElem _) -> true
+             | _ -> false)
+        | _ -> false
+    let hasArrayBinOp =
+        let mutable hit = false
+        let scan (b: IRExpr) =
+            if not hit then
+                iterIRExpr (fun e -> if not hit && isArrayBinOpTrigger e then hit <- true) b
+        modul.Functions |> List.iter (fun f -> scan f.Body)
+        modul.Bindings |> List.iter (fun b -> scan b.Value)
+        hit
+    if not hasArrayBinOp then modul
+    else
     // Broadcast a scalar against an array (`arr op scalar` / `scalar op
     // arr`): value-space twin of TypeCheck.inferBinOp's array-scalar path,
     // for pack elements whose array type only resolves post-monomorphization
@@ -5089,8 +5145,7 @@ let collectPolyCallSites (polyFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (I
             | Some arities -> results.Add((funcId, arities))
             | None -> ()
         | _ -> ()
-        e
-    mapIRExpr walk expr |> ignore
+    iterIRExpr walk expr
     results |> Seq.toList
 
 /// Create a monomorphized copy of a poly function for a list of slot arities.
@@ -5301,12 +5356,11 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                     | [ordinalParam] ->
                         // Which pack slot (if any) does the lambda body read?
                         let mutable packSlot = None
-                        mapIRExpr (fun e ->
+                        iterIRExpr (fun e ->
                             match e with
                             | IRPolyIndex (IRVar (pid, _), _) when Map.containsKey pid aliasToSlot ->
                                 packSlot <- Some aliasToSlot.[pid]
-                                e
-                            | _ -> e) lam.Body |> ignore
+                            | _ -> ()) lam.Body
                         match packSlot with
                         | Some slotIdx ->
                             let n = aritiesArr.[slotIdx]
@@ -7103,14 +7157,13 @@ let private shapeSignatureAt (func: IRFuncDef) (args: IRExpr list) : (string * i
 /// get one.
 let private shapeSpecWorthwhile (func: IRFuncDef) : bool =
     let mutable found = false
-    mapIRExpr (fun e ->
-        (match e with
-         | IRApplyCombinator _ | IRComposeApply _ | IRMethodFor _
-         | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRForRange _
-         | IRGram _ | IRMatmul _ | IRSolve _ | IRArrayProduct _ | IRArrayNegate _ | IRArrayConjugate _
-         | IRReynolds _ | IRDecompact _ | IRTranspose _ -> found <- true
-         | _ -> ())
-        e) func.Body |> ignore
+    iterIRExpr (fun e ->
+        match e with
+        | IRApplyCombinator _ | IRComposeApply _ | IRMethodFor _
+        | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRForRange _
+        | IRGram _ | IRMatmul _ | IRSolve _ | IRArrayProduct _ | IRArrayNegate _ | IRArrayConjugate _
+        | IRReynolds _ | IRDecompact _ | IRTranspose _ -> found <- true
+        | _ -> ()) func.Body
     found
 
 /// PROVENANCE GATE. A spec bakes its literals by NAME, over every index record
@@ -7200,11 +7253,10 @@ let private shapeRecursiveIdsOf (reach: Map<IRId, Set<IRId>>) : Set<IRId> =
 /// Every call site a body makes to a named function, as (callee id, args).
 let private shapeCallSitesIn (body: IRExpr) : (IRId * IRExpr list) list =
     let mutable acc = []
-    mapIRExpr (fun e ->
-        (match e with
-         | IRApp (IRVar (fid, _), args, _) -> acc <- (fid, args) :: acc
-         | _ -> ())
-        e) body |> ignore
+    iterIRExpr (fun e ->
+        match e with
+        | IRApp (IRVar (fid, _), args, _) -> acc <- (fid, args) :: acc
+        | _ -> ()) body
     acc
 
 /// Does this call hand the callee the CALLER's own extents, unchanged and in
@@ -7403,11 +7455,10 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
     let programAppliedIds =
         let acc = System.Collections.Generic.HashSet<IRId>()
         let scan (b: IRExpr) =
-            mapIRExpr (fun e ->
-                (match e with
-                 | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
-                 | _ -> ())
-                e) b |> ignore
+            iterIRExpr (fun e ->
+                match e with
+                | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
+                | _ -> ()) b
         allFuncs |> List.iter (fun f -> scan f.Body)
         modules |> List.iter (fun m -> m.Bindings |> List.iter (fun b -> scan b.Value))
         Set.ofSeq acc
@@ -7610,13 +7661,12 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
             bodies
             |> List.collect (fun b ->
                 let mutable found = []
-                mapIRExpr (fun e ->
-                    (match e with
-                     | IRApp (IRVar (fid, _), args, _) when candMap.ContainsKey fid ->
-                         let sign = shapeSignatureAt candMap.[fid] args
-                         if not (List.isEmpty sign) then found <- (fid, sign) :: found
-                     | _ -> ())
-                    e) (rewriteCallSites b) |> ignore
+                iterIRExpr (fun e ->
+                    match e with
+                    | IRApp (IRVar (fid, _), args, _) when candMap.ContainsKey fid ->
+                        let sign = shapeSignatureAt candMap.[fid] args
+                        if not (List.isEmpty sign) then found <- (fid, sign) :: found
+                    | _ -> ()) (rewriteCallSites b)
                 found)
             |> List.distinct
         for (fid, sign) in sites do
@@ -8213,15 +8263,15 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
     let baseTable = buildCallablesTable modul.Functions
     let aliases = System.Collections.Generic.Dictionary<IRId, IRId>()
     // Side-effecting visitor: at every IRLet, record bindingId -> targetId
-    // if the value is a direct IRVar reference. Returns the expression
-    // unchanged so `mapIRExpr` walks the whole tree.
-    let visitor (e: IRExpr) : IRExpr =
+    // if the value is a direct IRVar reference. `iterIRExpr` walks the whole
+    // tree in the same post-order `mapIRExpr` used, so a repeated binding id
+    // still resolves to the same (last-written) target.
+    let visitor (e: IRExpr) : unit =
         match e with
         | IRLet (bindingId, IRVar (targetId, _), _) ->
             aliases.[bindingId] <- targetId
         | _ -> ()
-        e
-    let walk (e: IRExpr) : unit = mapIRExpr visitor e |> ignore
+    let walk (e: IRExpr) : unit = iterIRExpr visitor e
     // Walk top-level binding values; also record alias if a top-level
     // binding's value is a direct IRVar (handles `let f = lambda(...)`
     // at module scope).

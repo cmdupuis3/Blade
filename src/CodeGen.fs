@@ -115,17 +115,45 @@ let forcedDeferredIdsCell () : Set<int> ref =
         fresh
     else v
 
+/// Append-only, insertion-ordered line collector for the emission-side cells
+/// below. Replaces the `string list ref` they used to be: every contribution
+/// was `cell.Value <- cell.Value @ lines` (an O(n) list copy per append) and the
+/// de-duplicating ones added an O(n) `List.contains` scan on top, so collecting
+/// n declarations cost O(n^2). Here appends are amortized O(1) and membership is
+/// a hash lookup, while `Value` still reads the lines back as a list in exactly
+/// the insertion order the emitted C++ depends on.
+///
+/// `Value` is settable so the existing per-program reset sites (`.Value <- []`)
+/// keep working unchanged; assignment replaces the contents wholesale.
+type DeclCollector() =
+    let items = System.Collections.Generic.List<string>()
+    let seen = System.Collections.Generic.HashSet<string>()
+    /// Append lines unconditionally, in order.
+    member _.Append (lines: string list) = items.AddRange lines
+    /// Append `line` only if an identical line was never appended (by any
+    /// route) -- the idempotent-declaration case. Insertion order is kept.
+    member _.AppendDistinct (line: string) = if seen.Add line then items.Add line
+    /// Does any collected line satisfy `p`? Non-allocating.
+    member _.Exists (p: string -> bool) = Seq.exists p items
+    member _.Value
+        with get () : string list = List.ofSeq items
+        and set (v: string list) =
+            items.Clear()
+            seen.Clear()
+            items.AddRange v
+            for l in v do seen.Add l |> ignore
+
 /// Collector for CUDA kernel definitions destined for the .cu file. genCudaKernel
 /// appends each __global__ kernel + extern "C" wrapper here; the assembler reads
-/// it to produce the .cu (only when non-empty). AsyncLocal per-flow ref, like
+/// it to produce the .cu (only when non-empty). AsyncLocal per-flow cell, like
 /// exprWarningsCell, so a deep emission site can contribute without a threaded return.
 let private cudaKernelDefsStorage =
-    System.Threading.AsyncLocal<string list ref>()
+    System.Threading.AsyncLocal<DeclCollector>()
 
-let cudaKernelDefsCell () : string list ref =
+let cudaKernelDefsCell () : DeclCollector =
     let v = cudaKernelDefsStorage.Value
     if isNull (box v) then
-        let fresh = ref []
+        let fresh = DeclCollector()
         cudaKernelDefsStorage.Value <- fresh
         fresh
     else v
@@ -136,12 +164,12 @@ let cudaKernelDefsCell () : string list ref =
 /// argument for a symmetric output needs one (rectangular outputs dodge this by
 /// passing nullptr). Mirrors cudaKernelDefsCell; reset at program assembly.
 let private symmDeclsStorage =
-    System.Threading.AsyncLocal<string list ref>()
+    System.Threading.AsyncLocal<DeclCollector>()
 
-let symmDeclsCell () : string list ref =
+let symmDeclsCell () : DeclCollector =
     let v = symmDeclsStorage.Value
     if isNull (box v) then
-        let fresh = ref []
+        let fresh = DeclCollector()
         symmDeclsStorage.Value <- fresh
         fresh
     else v
@@ -157,15 +185,28 @@ let symmDeclsCell () : string list ref =
 /// plain assignment, so evaluation order, timing phases and allocation scopes
 /// are untouched. Mirrors symmDeclsCell; reset at program assembly.
 let private moduleGlobalDeclsStorage =
-    System.Threading.AsyncLocal<string list ref>()
+    System.Threading.AsyncLocal<DeclCollector>()
 
-let moduleGlobalDeclsCell () : string list ref =
+let moduleGlobalDeclsCell () : DeclCollector =
     let v = moduleGlobalDeclsStorage.Value
     if isNull (box v) then
-        let fresh = ref []
+        let fresh = DeclCollector()
         moduleGlobalDeclsStorage.Value <- fresh
         fresh
     else v
+
+/// Per-binding-name cache for tryHoistModuleBindingDecl's pattern. The pattern
+/// embeds the binding name, so it cannot be compiled once globally -- but it
+/// CAN be compiled once per name instead of once per call, which is what this
+/// gives. Concurrent-safe (the parallel test runner shares this process, and a
+/// `Regex` is immutable and thread-safe for matching).
+let private hoistDeclRegexCache =
+    System.Collections.Concurrent.ConcurrentDictionary<string, System.Text.RegularExpressions.Regex>()
+
+/// Declaration keywords that disqualify a line from the split (hoisted out of
+/// tryHoistModuleBindingDecl so the set is built once, not per call).
+let private hoistDeclReserved =
+    set ["auto"; "const"; "constexpr"; "static"; "register"; "volatile"; "return"; "else"]
 
 /// Split a module-level binding's emitted code into (namespace-scope
 /// declaration, rewritten body) when its definition is a single ordinary
@@ -182,11 +223,13 @@ let moduleGlobalDeclsCell () : string list ref =
 /// assignment happens at exactly the original program point, so the promoted
 /// binding holds the same value at every point the un-promoted one did.
 let tryHoistModuleBindingDecl (name: string) (lines: string list) : (string * string list) option =
-    let pattern =
-        sprintf "^(?<ind>\\s*)(?<ty>[A-Za-z_][A-Za-z0-9_:<>,\\* ]*?)\\s+%s\\s*=\\s*(?<rhs>.*;)\\s*$"
-                (System.Text.RegularExpressions.Regex.Escape name)
-    let re = System.Text.RegularExpressions.Regex(pattern)
-    let reserved = set ["auto"; "const"; "constexpr"; "static"; "register"; "volatile"; "return"; "else"]
+    let re =
+        hoistDeclRegexCache.GetOrAdd(name, fun n ->
+            let pattern =
+                sprintf "^(?<ind>\\s*)(?<ty>[A-Za-z_][A-Za-z0-9_:<>,\\* ]*?)\\s+%s\\s*=\\s*(?<rhs>.*;)\\s*$"
+                        (System.Text.RegularExpressions.Regex.Escape n)
+            System.Text.RegularExpressions.Regex(pattern))
+    let reserved = hoistDeclReserved
     let matches =
         lines
         |> List.mapi (fun i l -> (i, re.Match l))
@@ -214,8 +257,7 @@ let hoistSymmDecl (name: string) (symmVec: int list) : string =
     let cell = symmDeclsCell ()
     let values = symmVec |> List.map string |> String.concat ", "
     let decl = sprintf "static constexpr const size_t %s[%d] = {%s};" name symmVec.Length values
-    if not (List.contains decl cell.Value) then
-        cell.Value <- cell.Value @ [decl]
+    cell.AppendDistinct decl
     name
 
 /// Emit the right-hand side of an output array allocation from a backend-neutral
@@ -1982,11 +2024,10 @@ let computeGroupedCaptureFacts (modul: IRModule) : Map<IRId, IRId> =
              | _ -> ())
         | _ -> ()
     let walkBody (b: IRExpr) =
-        mapIRExpr (fun e ->
-            (match e with
-             | IRLet (id, v, _) -> note id v
-             | _ -> ())
-            e) b |> ignore
+        iterIRExpr (fun e ->
+            match e with
+            | IRLet (id, v, _) -> note id v
+            | _ -> ()) b
     for bind in modul.Bindings do
         note bind.Id bind.Value
         walkBody bind.Value
@@ -10634,7 +10675,7 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
     let cell = cudaKernelDefsCell ()
     let helperMarker = "__device__ static long long __blade_binom"
     let binomHelper =
-        if cell.Value |> List.exists (fun l -> l.StartsWith helperMarker) then []
+        if cell.Exists (fun l -> l.StartsWith helperMarker) then []
         else
             [ "__device__ static long long __blade_binom(long m, long k) {"
               "    if (k < 0 || m < (long)k) return 0;"
@@ -10644,7 +10685,7 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
               "    return num / den;"
               "}"
               "" ]
-    cell.Value <- cell.Value @ (binomHelper @ kernelDef @ [""] @ wrapper @ [""])
+    cell.Append (binomHelper @ kernelDef @ [""] @ wrapper @ [""])
     // Host-side inline allocation matching the host storage:
     //   symmetric  -> allocate<T, SYMM={1..1}>
     //   antisym    -> allocate_strict<T, SYMM={1..1}, STRICT={1..1}>
@@ -11187,7 +11228,7 @@ wrappers stage only the leaf's own operands)"
               | None -> () ]
         @ [ "    cudaFree(__blade_d_out);"; "}" ]
     let cell = cudaKernelDefsCell ()
-    cell.Value <- cell.Value @ (kernelDef @ [""] @ wrapper @ [""])
+    cell.Append (kernelDef @ [""] @ wrapper @ [""])
     let outputRank = nDims
     let extentsName = sprintf "%s_extents" name
     // First-kernel scope is rectangular (no symmetry), so pass `nullptr` directly
@@ -11373,7 +11414,7 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
         @ [ for k in 0 .. leafCgs.Length - 1 -> sprintf "    cudaFree(__blade_d_out_%d);" k ]
         @ [ "}" ]
     let cell = cudaKernelDefsCell ()
-    cell.Value <- cell.Value @ (kernelDef @ [""] @ wrapper @ [""])
+    cell.Append (kernelDef @ [""] @ wrapper @ [""])
     // Inline: allocate each output Array on the host, then a single launch.
     // Per-leaf extents: the co-fusion gate (rectOk over every leaf) forces
     // every binding extent to IRLit, so each table is all-literal and static;
@@ -12508,18 +12549,17 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     when t.StartsWith (haloWinTagPrefix + "d:") -> Some t
                 | _ -> None
             let mutable guards : (string * int * int64) list = []
-            mapIRExpr (fun e ->
-                (match e with
-                 | IRIndex (IRVar (tid, _), idxs, _) ->
-                     idxs |> List.iteri (fun d ix ->
-                         match haloTagOfIdx ix |> Option.bind (fun t -> Map.tryFind t haloDecl) with
-                         | Some declared ->
-                             (match Map.tryFind tid tempCtx.VarNames with
-                              | Some tname -> guards <- (tname, d, declared) :: guards
-                              | None -> ())
-                         | None -> ())
-                 | _ -> ())
-                e) callable.Body |> ignore
+            iterIRExpr (fun e ->
+                match e with
+                | IRIndex (IRVar (tid, _), idxs, _) ->
+                    idxs |> List.iteri (fun d ix ->
+                        match haloTagOfIdx ix |> Option.bind (fun t -> Map.tryFind t haloDecl) with
+                        | Some declared ->
+                            (match Map.tryFind tid tempCtx.VarNames with
+                             | Some tname -> guards <- (tname, d, declared) :: guards
+                             | None -> ())
+                        | None -> ())
+                | _ -> ()) callable.Body
             let guardLines =
                 guards
                 |> List.distinct
@@ -12592,12 +12632,11 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
         let codeGen =
             let rec bodyNeedsStatementForm (e: IRExpr) : bool =
                 let mutable found = false
-                mapIRExpr (fun x ->
-                    (match x with
-                     | IRApplyCombinator _ | IRComposeApply _ | IRReduceCompute _
-                     | IRCompute (IRApplyCombinator _) -> found <- true
-                     | _ -> ())
-                    x) e |> ignore
+                iterIRExpr (fun x ->
+                    match x with
+                    | IRApplyCombinator _ | IRComposeApply _ | IRReduceCompute _
+                    | IRCompute (IRApplyCombinator _) -> found <- true
+                    | _ -> ()) e
                 found
             if codeGen.HasReynolds || not (bodyNeedsStatementForm codeGen.KernelExpr) then codeGen
             else
@@ -19482,7 +19521,7 @@ let private genModuleBinding
         match tryHoistModuleBindingDecl name code with
         | Some (decl, rewritten) ->
             let cell = moduleGlobalDeclsCell ()
-            if not (List.contains decl cell.Value) then cell.Value <- cell.Value @ [decl]
+            cell.AppendDistinct decl
             (rewritten, ctx')
         | None ->
             // Status quo, plus a breadcrumb: this binding stays a main() local
@@ -19615,23 +19654,37 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // able to NAME get their declaration promoted to namespace scope.
     let hoistIds = computeModuleCaptureHoistIds modul mainLocalFuncIds
 
-    let (funcCode, bindCode, finalCtx) =
-        allItems |> List.fold (fun (fc, bc, c) (_, item) ->
+    // Line accumulation is a ResizeArray per bucket (the fold still threads the
+    // context, which is what makes emission order-dependent); the old
+    // `bc @ code @ [""]` copied the whole bucket once per item, quadratic in
+    // module size. Append order is byte-for-byte the same.
+    let funcLines = ResizeArray<string>(forwardDecls)
+    let bindLines = ResizeArray<string>()
+    let finalCtx =
+        allItems |> List.fold (fun c (_, item) ->
             match item with
             | Choice1Of2 binding ->
                 setCurrentCodegenDecl binding.Name
                 let (code, c') = genModuleBinding c binding builder hoistIds
-                (fc, bc @ code @ [""], c')
+                bindLines.AddRange code
+                bindLines.Add ""
+                c'
             | Choice2Of2 funcDef ->
                 setCurrentCodegenDecl funcDef.Name
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     let (code, c') = genFuncDefAsLambda c builder funcDef
-                    (fc, bc @ code @ [""], c')
+                    bindLines.AddRange code
+                    bindLines.Add ""
+                    c'
                 else
                     let (code, c') = genFuncDef c builder funcDef
-                    (fc @ code @ [""], bc, c')
-        ) (forwardDecls, [], ctx0)
-    
+                    funcLines.AddRange code
+                    funcLines.Add ""
+                    c'
+        ) ctx0
+    let funcCode = List.ofSeq funcLines
+    let bindCode = List.ofSeq bindLines
+
     // Merge context warnings into module-level collector
     let cell = exprWarningsCell ()
     cell.Value <- cell.Value @ finalCtx.Warnings.Value
@@ -19692,9 +19745,14 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     // (Per-binding classification was wrong: it floated a non-compute consumer
     // like decompact UP into setup, above the compute binding it depends on,
     // producing an out-of-order "'sym' was not declared" C++ error.)
-    let (funcCode, setupCode, computeCode, _seenCompute, finalCtx) =
+    // Same ResizeArray accumulation as genModule -- see the comment there. The
+    // phase flag and the context are still threaded through the fold.
+    let funcLines = ResizeArray<string>(forwardDecls)
+    let setupLines = ResizeArray<string>()
+    let computeLines = ResizeArray<string>()
+    let (_seenCompute, finalCtx) =
         let onlyBinding = splitTimingOnlyBinding ()
-        allItems |> List.fold (fun (fc, sc, cc, seen, c) (_, item) ->
+        allItems |> List.fold (fun (seen, c) (_, item) ->
             match item with
             | Choice1Of2 binding ->
                 // When a specific binding name is designated as the timed
@@ -19708,9 +19766,13 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                 setCurrentCodegenDecl binding.Name
                 let (code, c') = genModuleBinding c binding builder hoistIds
                 if nowCompute then
-                    (fc, sc, cc @ code @ [""], true, c')
+                    computeLines.AddRange code
+                    computeLines.Add ""
+                    (true, c')
                 else
-                    (fc, sc @ code @ [""], cc, false, c')
+                    setupLines.AddRange code
+                    setupLines.Add ""
+                    (false, c')
             | Choice2Of2 funcDef ->
                 setCurrentCodegenDecl funcDef.Name
                 if Set.contains funcDef.Id mainLocalFuncIds then
@@ -19718,14 +19780,25 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     // current phase -- setup if before the first compute, else
                     // compute -- so it never floats across a dependency.
                     let (code, c') = genFuncDefAsLambda c builder funcDef
-                    if seen then (fc, sc, cc @ code @ [""], true, c')
-                    else (fc, sc @ code @ [""], cc, false, c')
+                    if seen then
+                        computeLines.AddRange code
+                        computeLines.Add ""
+                        (true, c')
+                    else
+                        setupLines.AddRange code
+                        setupLines.Add ""
+                        (false, c')
                 else
                     // True top-level function: always the function-def bucket,
                     // emitted in the preamble (no effect on the phase flag).
                     let (code, c') = genFuncDef c builder funcDef
-                    (fc @ code @ [""], sc, cc, seen, c')
-        ) (forwardDecls, [], [], false, ctx0)
+                    funcLines.AddRange code
+                    funcLines.Add ""
+                    (seen, c')
+        ) (false, ctx0)
+    let funcCode = List.ofSeq funcLines
+    let setupCode = List.ofSeq setupLines
+    let computeCode = List.ofSeq computeLines
     let cell = exprWarningsCell ()
     cell.Value <- cell.Value @ finalCtx.Warnings.Value
     // See genModule: markers are resolved across all three buckets at once.
