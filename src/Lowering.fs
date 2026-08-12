@@ -2373,15 +2373,31 @@ let lower (source: string) : Result<IRProgram, string> =
 /// spanned Diagnostics, warnings come back structured, and the retained
 /// source text returns as a SourceMap for snippet rendering. `fileName`
 /// (when known) is stamped into spans and keys the SourceMap.
+// TEMP INSTRUMENTATION (compile-speed investigation): env-gated phase timing.
+let phaseTimingEnabled () =
+    match System.Environment.GetEnvironmentVariable "BLADE_PHASE_TIMING" with
+    | null | "" | "0" -> false
+    | _ -> true
+
 let lowerDiag (fileName: string option) (source: string)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
     let key = defaultArg fileName "<input>"
     let sm = Blade.Diagnostics.SourceMap.ofSources [ key, source ]
+    let timing = phaseTimingEnabled ()
+    let sw = System.Diagnostics.Stopwatch.StartNew()
+    let mark name =
+        if timing then
+            eprintfn "[phase] %s: %d ms" name sw.ElapsedMilliseconds
+        sw.Restart()
+    let parsed = Blade.Parser.parseProgramWithFile fileName source
+    mark "parse"
     let result =
-        match Blade.Parser.parseProgramWithFile fileName source with
+        match parsed with
         | Error e -> Error [ Blade.Parser.diagnosticOfParseError fileName e ]
         | Ok program ->
-            match Blade.TypeCheck.typeCheck program with
+            let tc = Blade.TypeCheck.typeCheck program
+            mark "typecheck"
+            match tc with
             | Error errors ->
                 Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
             | Ok (typedProgram, builder, warnings) ->
@@ -2389,7 +2405,10 @@ let lowerDiag (fileName: string option) (source: string)
                 // (e.g. `netcdf.load("missing.nc")` raises from
                 // tryInvokeProvider). Convert it to a coded diagnostic so the
                 // compile driver reports it cleanly instead of crashing.
-                try Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+                try
+                    let r = Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+                    mark "lower"
+                    r
                 with ex ->
                     Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
     result, sm
@@ -2406,15 +2425,28 @@ let lowerDiag (fileName: string option) (source: string)
 let lowerDiagMulti (sources: (string * string) list)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
     let sm = Blade.Diagnostics.SourceMap.ofSources sources
+    let timing = phaseTimingEnabled ()
+    let sw = System.Diagnostics.Stopwatch.StartNew()
+    let mark name =
+        if timing then
+            eprintfn "[phase] %s: %d ms" name sw.ElapsedMilliseconds
+        sw.Restart()
+    let parsed = Blade.ModuleResolve.parseResolved sources
+    mark "parse(multi)"
     let result =
-        match Blade.ModuleResolve.parseResolved sources with
+        match parsed with
         | Error d -> Error [ d ]
         | Ok program ->
-            match Blade.TypeCheck.typeCheck program with
+            let tc = Blade.TypeCheck.typeCheck program
+            mark "typecheck(multi)"
+            match tc with
             | Error errors ->
                 Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
             | Ok (typedProgram, builder, warnings) ->
-                try Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+                try
+                    let r = Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+                    mark "lower(multi)"
+                    r
                 with ex ->
                     Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
     result, sm

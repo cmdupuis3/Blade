@@ -150,12 +150,22 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
     else
         let source = File.ReadAllText(filePath)
         let testName = Path.GetFileNameWithoutExtension(filePath)
+        // TEMP INSTRUMENTATION (compile-speed investigation)
+        let timing = phaseTimingEnabled ()
+        let swAll = System.Diagnostics.Stopwatch.StartNew()
+        let sw = System.Diagnostics.Stopwatch.StartNew()
+        let mark name =
+            if timing then
+                eprintfn "[phase] %s: %d ms" name sw.ElapsedMilliseconds
+            sw.Restart()
         // Errors come back as coded, spanned Diagnostics, rendered rustc-style with source snippets.
         let useColor = not Console.IsErrorRedirected
         // `lowerFileDiag` resolves file-based imports (`import units.SI` ->
         // stdlib/units/SI.blade) first and lowers the whole set. With nothing
         // to resolve it IS `lowerDiag (Some filePath) source`.
-        match lowerFileDiag filePath source with
+        let lowered = lowerFileDiag filePath source
+        mark "frontend-total(lowerFileDiag)"
+        match lowered with
         | Error ds, sm ->
             // A file with a hard error has still EARNED every warning the checker produced before it failed.
             printTypeCheckWarnings useColor (Some sm) false
@@ -167,7 +177,9 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
             | Some rendered -> Error rendered
             | None ->
             printTypeCheckWarnings useColor (Some sm) false
-            match IR.validateIR ir with
+            let validated = IR.validateIR ir
+            mark "validateIR"
+            match validated with
             | Error errs ->
                 let ds =
                     errs |> List.map (fun s ->
@@ -175,6 +187,7 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
                 Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
             | Ok ir ->
                 let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                mark "codegen"
                 // A shape that reached codegen with no arm for it. Refuse HERE,
                 // as a coded Blade diagnostic spanned at the declaration --
                 // handing the emitted `BLADE_CODEGEN_ERROR_...` placeholder to
@@ -195,6 +208,9 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
                 | (_ :: _) as ds ->
                     Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
                 | [] ->
+                mark "post-codegen-scans"
+                if timing then
+                    eprintfn "[phase] compileFile total: %d ms (cpp %d chars)" swAll.ElapsedMilliseconds cppCode.Length
                 if verbose then
                     for w in warnings do
                         eprintfn "[Warning] %s" w
