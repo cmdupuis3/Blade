@@ -1,9 +1,10 @@
 # Plan: Compile-Speed Exploitation (F# pipeline, lexer → codegen)
 
-Status: investigation complete 2026-08-12; nothing below is implemented except the
-env-gated phase-timing instrumentation used to gather the numbers (uncommitted in
-this worktree, proposed as Stage 0). All timings measured on the development box
-(16 cores, Windows 11, .NET 7, Release build), warm, per-invocation unless noted.
+Status: investigation 2026-08-12; Stages 0–3 implemented the same day on
+`claude/blade-compile-speed-ca1877` (see the *Implemented* markers and the
+achieved-results table in §5). Stages 4–5 remain future work. All timings
+measured on the development box (16 cores, Windows 11, .NET 7, Release build),
+warm, per-invocation unless noted.
 
 ## 1. Where the time actually goes (measured)
 
@@ -200,6 +201,13 @@ R2R image is ~2× the DLL size (11.5→24.7 MB) and is RID-specific — it is a
 shipping artifact, not a dev one.
 
 ### Stage 2 — Front-end asymptotics (the scaling cliff)
+*Implemented (F1/F2/F3). Achieved: 2000-line `check` 4819→477 ms, 4000-line
+22824→582 ms (linear now); full 2000-line emit pipeline 10.4 s→0.6 s. `Token`
+gained an `Index` field; `setEofFrom` builds the per-parse span tables, so every
+entry point gets O(1) `consumedEnd` for free. One rendering change: in
+multi-file mode a diagnostic in the ENTRY file now renders the path as typed
+rather than absolutized (single-file mode always did); spans and codes
+unchanged.*
 1. **Lexer append → ResizeArray** (F1). Trivial, byte-identical.
 2. **Token index for O(1) spans** (F2). The one genuinely delicate change:
    corpus span pins are the acceptance test.
@@ -212,6 +220,13 @@ gap); every future file gains the headroom — this is what makes 5k-line Blade
 programs viable at all.
 
 ### Stage 3 — Middle/back-end structural hygiene (S–M each, batch as one PR)
+*Implemented, with two notes: (a) 11 `mapIRExpr`-as-visitor sites were converted
+(a wider sweep than the 5 in F8), and zero `|> ignore`d `mapIRExpr` calls
+remain; (b) the `liftInlineFormsModule` gate was deliberately DROPPED — its
+`liftExpr` is a ~100-arm traversal whose sound trigger predicate includes
+`IRCompute _`, true for essentially every program, so a gate buys nothing; the
+`lowerArrayBinOpsModule` gate shipped and skips the pass on ~98% of modules
+(measured 344/352 across four categories).*
 `iterIRExpr` + convert the 5 visitor sites (F8); gate the two unconditional IR
 passes (F9); `ResizeArray` accumulators in `genModule`/`genModuleSplit` + the
 small CodeGen fixes (F10); `canonTypeKey` for the HM dedup (F8). Ride-alongs
@@ -240,12 +255,18 @@ With Stage 0 timing + a real profiler pass (dotnet-trace/ETW on a large program)
 memoization / n-ary flattening for deep un-let-bound chains, fusing
 `validateIR`'s 5 walks. Each is only worth it if the profile says so.
 
-## 5. Expected end state
+## 5. Expected vs achieved (Stages 0–3 landed 2026-08-12)
 
-| Scenario | Today | After 1–3 | Mechanism |
-|---|---|---|---|
-| `blade check` small file | ~460 ms | ~250 ms | R2R + single parse |
-| `blade emit` lsdft | ~1.4 s | ~0.55 s | R2R (measured 591 ms) + parse fixes |
-| `blade run` small file (F# side) | ~3.5 s | ~2.1 s | + lazy probes, header/IO hygiene |
-| 2000-line file, F# pipeline | ~10.4 s | ~1.5 s | front-end asymptotics |
-| full `blade test` | ~10 min | ~9 min; **2–5 min re-runs with Stage 4 cache** | 89% is g++ |
+| Scenario | Before | Predicted after 1–3 | Achieved (JIT dev build) | Mechanism |
+|---|---|---|---|---|
+| `blade check` small file | ~460 ms | ~250 ms | ~370 ms JIT; ~250 ms on the R2R image | R2R + single parse |
+| `blade emit` lsdft (pipeline) | 1068 ms | ~0.55 s | 994 ms JIT / **591 ms R2R** | R2R + parse fixes |
+| `blade compile` (probe overhead) | +165–870 ms | −~700 ms | −127 ms warm GPU; scales with GPU idle state | lazy probes |
+| 2000-line file, F# pipeline | 10399 ms | ~1.5 s | **602 ms** | front-end asymptotics |
+| 4000-line `blade check` | 22.8 s | — | **582 ms** (linear now) | front-end asymptotics |
+| full `blade test` | ~10 min | ~9 min; 2–5 min re-runs with Stage 4 cache | not re-measured (89% is g++) | Stage 4 pending |
+
+Byte-identity held at every merge point: 291-file sweep (1164 artifacts:
+cpp/stdout/stderr/exit), zero diffs after Stage 1+3 and again after Stage 2 +
+the master merge; the Stage 2 agent independently verified 439 files including
+the diagnostics-heavy categories.
