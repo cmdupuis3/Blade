@@ -235,25 +235,110 @@ today (codegen/lower are 100–400 ms), but removes every known quadratic from t
 middle end before programs get big enough to hit them.
 
 ### Stage 4 — Suite-level throughput (only lever on the 89%)
-1. **Emitted-C++ → executable cache** (M–L, medium risk): content-addressed on
-   hash(emitted .cpp + flags + deployed header contents + every emission-relevant
-   env gate: BLADE_BLAS/CUBLAS/OMP_THREADS/FP_REASSOC/MARCH/FP_CONTRACT/MEMCHECK,
-   OPENBLAS_DIR, NETCDF_DIR). Skip g++ on hit; explicit `--no-cache`; key errs
-   toward over-invalidation. Side-channels don't block it — the cache stores
-   artifacts, not pipeline state. Expected: near-total on warm `blade run`;
-   −50–80% on suite re-runs where sources didn't change.
-2. **`fsharpPipelineLock` removal experiment** (M, high risk): first the free
-   part — delete the stale `codegenStructFieldsCache` comment and correct the
-   lock's justification (S, riskless). Then, behind a flag, remove the lock and
-   run the full suite ≥10× hunting intermittents (AsyncLocal-under-Parallel leak
-   is the expected failure mode). Ceiling −11% suite wall; abandon without guilt
-   if flaky.
 
-### Stage 5 — Profile-gated follow-ups (do not start without data)
-With Stage 0 timing + a real profiler pass (dotnet-trace/ETW on a large program):
-`Subst.Resolve` path compression (instrument chain lengths first), `typeOf`
-memoization / n-ary flattening for deep un-let-bound chains, fusing
-`validateIR`'s 5 walks. Each is only worth it if the profile says so.
+#### 4.1 Emitted-C++ → executable cache (M, medium risk)
+
+**Where.** Entirely inside `Build.compileCppWithExtraSource` (Build.fs:457), after
+the g++ `args` string is assembled and `cppText` is in hand, before the process
+spawn. Every consumer — `Cli.compileToExe`, `blade run`, both harness lanes, the
+provider blocks — calls through this function, so nothing else changes and
+`tests/Runner.fs` is untouched (that file belongs to 4.2).
+
+**Key.** SHA256 over, in order:
+1. compiler identity: resolved `g++` path + first line of `g++ --version`
+   (probed once, memoized per process);
+2. the `args` string with the two volatile absolute paths (`exeFullPath`,
+   `cppFullPath`) replaced by fixed placeholders — everything else in `args`
+   (opt flags from `BLADE_MARCH`/`BLADE_FP_CONTRACT`, safety flags, BLAS/LAPACK
+   defines and `-I`/link flags, netcdf/mpi flags) is config that must key;
+3. `cppText` (the full translation unit);
+4. the contents of all 13 runtime headers (`CodeGen.runtimeHeaderNames`, via the
+   memoized reader) — the TU `#include`s a subset with quotes, hashing all of
+   them over-invalidates, which is the stance;
+5. for any explicit `*.dll` path embedded in the link flags (OpenBLAS/NetCDF
+   direct-DLL linking): its size + last-write-time (an in-place DLL upgrade
+   invalidates without a path change).
+
+**Not cached (v1, over-invalidation bias):** the memcheck lane
+(`compileCppMemcheck` — different compilers, measurement builds), any call with
+non-empty `extraLinkInputs` or a cuBLAS `deviceInputs` build (multi-compiler
+links), and non-Windows (untested here).
+
+**Layout & flow.** `%LOCALAPPDATA%\Blade\exe-cache\<hash>.exe`. Hit: copy the
+cached exe to `exeFullPath` (the exe-beside-source contract every caller and
+test relies on is preserved), bump the cache file's mtime, return `Ok`. Miss:
+run g++; on success, copy the exe into the cache via temp-file + atomic
+`File.Move` (parallel harness compiles race here; a lost race is a no-op).
+Eviction on store: if the directory exceeds 8192 entries or 6 GB, delete
+oldest-mtime entries down to 3/4 of the cap (the full suite populates ~4.6k
+entries; caps must exceed one suite generation).
+
+**Gates.** `BLADE_EXE_CACHE`: unset/`1`/`on` = enabled, `0`/`off` = disabled, an
+absolute path = enabled at that location. `--no-cache` on
+`compile`/`run`/`test` sets the process-local env to `0` (read per-call, so the
+existing pin/restore discipline holds). `--verbose` prints `[cache] hit/store
+<hash8>`. A cache hit must be observationally identical to a compile: same
+`Ok exeFullPath`, same exe bytes at the same path.
+
+**Acceptance.** (a) run→edit→run loop: second identical `blade run` skips g++
+(verify with `--verbose` + timing); (b) full suite twice: run 1 (cold) within
+noise of baseline wall, run 2 (warm) target −50–80% of the g++ share; both
+green with identical totals; (c) key honesty probes: flip `BLADE_MARCH`, edit a
+runtime header on disk at the source (`src/cpp/`), rebuild, confirm misses;
+(d) `--no-cache` forces a real compile.
+
+#### 4.2 Harness F# parallelism experiment (M, high risk, opt-in only)
+
+**Free part (riskless, do unconditionally):** the lock's justification comment
+(`tests/Runner.fs:110-126`) names two caches — `structFieldsCache` is already
+`AsyncLocal` (IR.fs:5478) and `codegenStructFieldsCache` no longer exists (its
+stale mention at CodeGen.fs:9465 goes too). Rewrite the comment to state the
+real, current situation: the lock serializes the F# pipeline as a *conservative
+guard* over ~30 AsyncLocal side-channels whose isolation under
+`Array.Parallel.mapi` is unproven, because `AsyncLocal` values written in one
+iteration persist into later iterations scheduled on the same worker thread.
+
+**Experiment part:** `BLADE_TEST_FSHARP_PARALLEL=1` (read per-call) turns the
+lock body into a no-op. Default stays LOCKED. Why it may be sound anyway: every
+per-compile channel is reset at `typeCheck` entry, and `runOnLargeStack` gives
+each test a fresh dedicated thread whose AsyncLocal writes do not flow back —
+but that reasoning is exactly what the flake hunt must test, not assume.
+
+**Promotion criterion:** flip the default only after ≥10 full-suite greens with
+the gate on across ≥2 sessions, with zero unexplained diffs vs the locked run's
+totals. Expected ceiling −11% suite wall (the freed F# CPU overlaps g++), so
+abandon without guilt at the first flake.
+
+### Stage 5 — Profile-gated follow-ups (instrument first, act on data)
+
+#### 5.1 Perf counters (`BLADE_PERF_COUNTERS=1`)
+
+A `PerfCounters` module (TypeEnv.fs or its own file before Unify.fs): Interlocked
+counters + an enabled flag *refreshed at pipeline entry* (`compileFile`,
+`lowerDiag`, harness compile entry) rather than read per increment — a getenv
+per `Resolve` call would itself be a hotspot; refresh-per-compile keeps the
+test pin/restore discipline at compile granularity. Counters:
+- `Subst.Resolve` (Unify.fs:495): calls, chain hops walked, max chain length;
+- `IR.typeOf` (IR.fs:5659): calls, plus calls that recursed (non-CarriedType);
+- `validateIR` per-walk share is already visible via `BLADE_PHASE_TIMING`.
+Printed once per compile to stderr as `[perf] name: value` lines when enabled.
+
+**Measurement set:** lsdft, 01_weather_stations, synth-2000 (flat lets),
+block-800 (one big block), plus a deep-chain synthetic built for the purpose
+(a single expression of ~200+ chained binops, un-let-bound) to probe the
+typeOf/exprToCpp quadratics specifically.
+
+#### 5.2 Entry criteria — implement only what the data clears
+
+| Candidate | Implement iff | Fix |
+|---|---|---|
+| `Subst.Resolve` path compression (Unify.fs:495-517) | max chain > ~16 on real programs, or chain hops grow superlinearly in program size | compress on resolve; the id-keyed side tables (arity/rank/literal/poly marks) must keep their travel-with-the-bind semantics — audit each `Bind` caller |
+| `typeOf` memoization (IR.fs:5659) | typeOf calls ≳ 5× IR node count, or deep-chain synthetic shows superlinear codegen time | `ConditionalWeakTable<IRExpr, IRType>` keyed on node reference; pure-structural results only |
+| `validateIR` walk fusion | validateIR > 10% of compileFile on the measurement set (today ~2–6% — expected NOT to trigger; record the numbers and close it) | fuse the 5 walks into one descent |
+| n-ary flattening for emit chains | only if typeOf memo is insufficient on the deep-chain probe | flatten at lowering, never in `exprToCppCore` |
+
+Byte-identity gate applies to every 5.2 change; counters themselves must be
+output-neutral (stderr only, gated off by default).
 
 ## 5. Expected vs achieved (Stages 0–3 landed 2026-08-12)
 
