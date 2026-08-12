@@ -8440,6 +8440,99 @@ and collectPatternIds (pat: IRPattern) : Set<IRId> =
     | IRPatVariant (_, _, Some inner, _) -> collectPatternIds inner
     | _ -> Set.empty
 
+// Dead-polymorph elimination (whole program, post-monomorphization)
+
+/// Does this function still carry an unresolved type variable ANYWHERE -- its
+/// params, its return type, or a type inside its body? The monomorphizers'
+/// own boundary test is `hasTypeVarsInParams`, which reads the SIGNATURE only;
+/// this is the test validation actually applies, so it is what "cannot be
+/// emitted as C++" means.
+let private funcStillPolymorphic (f: IRFuncDef) : bool =
+    let inSig =
+        (f.Params |> List.exists (fun p -> (containsInfer p.Type).IsSome))
+        || (containsInfer f.RetType).IsSome
+    inSig || (collectTypesInExpr f.Body |> List.exists (fun t -> (containsInfer t).IsSome))
+
+/// Drop functions that are STILL POLYMORPHIC after monomorphization and are
+/// unreachable from the program's roots (its module bindings).
+///
+/// WHY THIS IS NEEDED. `monomorphizeHMFunctions` drops an uninstantiated
+/// generic and keeps whatever is still referenced ("orphan rescue"), but its
+/// membership test -- `hasTypeVarsInParams` -- reads the SIGNATURE only. A
+/// lambda LIFTED out of a never-called generic's body can easily have concrete
+/// params while its body is full of the parent's type vars: it is then not an
+/// hmFunc at all, so it survives in `Functions` unconditionally, is validated,
+/// and reports BL6001 "unresolved type variable T?N in body" for a function
+/// nothing can ever call. Worse, it and its siblings then keep EACH OTHER
+/// alive: a call from the dead parent to another generic still registers as an
+/// HM call site, so a spec (and its lambda clones) is built for a call that
+/// will never run, and `specFuncs`/`cloneFuncs` are two of the four things the
+/// orphan rescue seeds from -- so the abstract kernels get rescued as well.
+/// Measured on `examples/lswosa.blade` with no driver: one uncalled generic
+/// produced 11 BL6001s across three lifted lambdas. The corpus reduction
+/// (functions/084) shows all three ingredients are needed -- unit-annotated
+/// type vars, a call to another generic, and a grouped zip row map nested in a
+/// per-element lambda -- which is why no simpler uncalled generic ever tripped
+/// it and the gap survived this long.
+///
+/// The rule is REACHABILITY, not shape: roots are the module bindings (the
+/// program proper), closed transitively through the bodies of functions that
+/// survive. Reachability is computed over ALL functions, not just polymorphic
+/// ones, so a concrete helper called only from a live abstract function keeps
+/// that function alive.
+///
+/// SAFETY. Only a still-polymorphic function is ever dropped, and such a
+/// function cannot be emitted as valid C++ regardless -- today it produces
+/// either this BL6001 or an unresolved-type sentinel in the generated source.
+/// So the choice is between refusing a program that has no error in it and
+/// dropping code no call site can reach; a fully concrete unused function is
+/// untouched, and emission order for everything kept is unchanged.
+///
+/// WHOLE-PROGRAM, because a binding in module A can be the only reference to a
+/// function defined in module B; per-module reachability would drop it.
+let eliminateDeadPolymorphs (program: IRProgram) : IRProgram =
+    let allFuncs =
+        program.Modules |> List.collect (fun m -> m.Functions)
+    if not (allFuncs |> List.exists funcStillPolymorphic) then program
+    else
+    let funcById = allFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    // Every id an expression names. `IRVar` is the one reference form that
+    // matters here and it covers first-class kernel slots as well as calls --
+    // the same walk the orphan rescue uses.
+    let referencedIn (e: IRExpr) : Set<IRId> =
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        mapIRExpr (fun n ->
+            (match n with
+             | IRVar (id, _) -> acc.Add id |> ignore
+             | _ -> ())
+            n) e |> ignore
+        Set.ofSeq acc
+    let mutable reachable : Set<IRId> = Set.empty
+    let mutable frontier =
+        program.Modules
+        |> List.collect (fun m -> m.Bindings |> List.map (fun b -> b.Value))
+        |> List.map referencedIn
+        |> List.fold Set.union Set.empty
+        |> Set.toList
+    while not frontier.IsEmpty do
+        let mutable next = Set.empty
+        for id in frontier do
+            if not (Set.contains id reachable) then
+                reachable <- Set.add id reachable
+                match Map.tryFind id funcById with
+                | Some f -> next <- Set.union next (referencedIn f.Body)
+                | None -> ()
+        frontier <- next |> Set.filter (fun i -> not (Set.contains i reachable)) |> Set.toList
+    { program with
+        Modules =
+            program.Modules
+            |> List.map (fun m ->
+                { m with
+                    Functions =
+                        m.Functions
+                        |> List.filter (fun f ->
+                            Set.contains f.Id reachable || not (funcStillPolymorphic f)) }) }
+
 /// Validate a single IRModule, returning a list of errors
 let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationError list =
     let errors = ResizeArray<IRValidationError>()
