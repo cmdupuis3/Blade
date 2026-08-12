@@ -1,0 +1,62 @@
+// TEST: Half-Cell Window Composition End To End
+// ============================================================================
+// The composition examples/lswosa.blade is built on, at a size whose every
+// value is checkable by hand. 158 pins the halo/array-literal row on its own
+// and sql-group-by/034 pins the grouped zip under a nested lambda; this pins
+// the four stages COMPOSED, which is where they were originally found broken:
+//
+//   group_by  ->  per-row reduction join  ->  rank-raising array literal
+//             ->  halo<[0, 1]> over adjacent rows  ->  leading-axis fold
+//
+// Why the shape matters: 50%-overlapped segments are exactly the adjacent
+// PAIRS of half-width cells, so a segmented statistic can be accumulated once
+// per cell and combined pairwise, instead of recomputing every shared
+// per-sample quantity in each of the two segments that own it.
+//
+// 12 samples fall into 3 cells of 4 by floor(t / 4), and each cell reports
+// (sum, sum of squares, count):
+//   cell 0: t = 0,1,2,3     6    14   4
+//   cell 1: t = 4,5,6,7    22   126   4
+//   cell 2: t = 8,9,10,11  38   366   4
+// The two windows are the adjacent pairs, summing all three accumulators:
+//   window 0 = cells 0+1:  28   140   8
+//   window 1 = cells 1+2:  60   492   8
+// and the leading-axis fold adds the windows componentwise. Cell 1 is counted
+// in BOTH windows -- that overlap is the point of the decomposition, and a
+// halo that silently dropped a window would show up here as 28, 140, 8.
+//
+// NOTE ON THE SPELLING: the grouped map is written over `zip` of two grouped
+// operands because the SINGLE-operand forms -- `method_for(gt) <@> lambda(row)`
+// and `gt <@> lambda(row)` -- both still fail this shape with
+//     error[BL7001]: no rule for IRArrayLit in expression position
+// when the kernel is a BLOCK ending in an array literal. Only the two-operand
+// zip form lowers, which is the inverse of what the old ragged-operand refusal
+// text claimed. Pinned here in the form that works; the single-operand hole is
+// filed separately, and this comment should go when it closes.
+// ============================================================================
+let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> 1.0 * k) |> compute
+let ones = (ts <@> lambda(t) -> 1.0) |> compute
+
+let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
+let gk = group_keys(keys)
+let gt = group_by(ts, gk)
+let go = group_by(ones, gk)
+
+// One traversal per cell fills all three accumulators; the literal hands them
+// back as the row, raising the result to rank 2.
+let cells = method_for(zip(gt, go)) <@> lambda(row: T^1, orow: T^1) -> {
+    let s, q, n = object_for(<&!>) <@> (reduce(row, (+)), prodsum(row, row), reduce(orow, (+)))
+    [s, q, n]
+} |> compute
+// EXPECT: cells = [[6, 14, 4], [22, 126, 4], [38, 366, 4]]
+
+// Adjacent cells combine into overlapping windows.
+let windows = method_for(halo<Idx<3>, [0, 1]>) <@> lambda(w) ->
+    [cells(w(0), 0) + cells(w(1), 0),
+     cells(w(0), 1) + cells(w(1), 1),
+     cells(w(0), 2) + cells(w(1), 2)] |> compute
+// EXPECT: windows = [[28, 140, 8], [60, 492, 8]]
+
+// Fold the LEADING (window) axis: an array-valued kernel combines whole rows.
+let total = reduce(windows, lambda(a: T^1, b: T^1) -> a + b)
+// EXPECT: total = [88, 632, 16]
