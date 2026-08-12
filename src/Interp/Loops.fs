@@ -733,7 +733,7 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     match trySparseRangeMap info0 with
     | Some (src, leadRank) -> materializeSparseRangeMap st env info0 wrappers src leadRank
     | None ->
-    if tryGroupedMap info0 then materializeGroupedMap st env info0 wrappers
+    if tryRowPeelMap info0 then materializeRowPeelMap st env info0 wrappers
     else
     match tryWreathApply info0 with
     | Some tie -> materializeWreathApply st env info0 wrappers tie
@@ -1194,61 +1194,118 @@ and private materializeCompoundHaloMap
             force st kenv (Core.evalExpr st kenv cg.KernelExpr))
     VArray (A.mkDenseArray elemTy [] [| int64 n |] (A.storeOfValues elemTy results))
 
-/// Detect a `method_for(grouped) <@> lambda(g) -> ...` map: the sole input is a
-/// group_by result (its first index is IxKGroupOuter). CodeGen supports exactly
-/// the single-array, single-row-param form here (CodeGen.fs:5933-5936); the
-/// kernel receives each group's ragged ROW as `g`.
-and private tryGroupedMap (info: ApplyInfo) : bool =
+/// Detect a `method_for(x) <@> lambda(g) -> ...` ROW-PEEL map: the sole input
+/// is a group_by result (first index IxKGroupOuter) or a ragged/DepIdx array
+/// (some non-first index is ragged-family or IxKDepInner). Deliberately the
+/// SAME predicate CodeGen's `tryRaggedPeel` gates on, so the two lanes agree
+/// about which applies take the peel; the kernel receives each row as `g`.
+and private tryRowPeelMap (info: ApplyInfo) : bool =
     match info.ArrayTypes with
-    | [ at ] -> (match at.IndexTypes with h :: _ -> h.IxKind = IxKGroupOuter | [] -> false)
+    | [ at ] ->
+        let groupedOuter =
+            match at.IndexTypes with h :: _ -> h.IxKind = IxKGroupOuter | [] -> false
+        let raggedInner =
+            at.IndexTypes.Length >= 2 &&
+            at.IndexTypes |> List.skip 1 |> List.exists (fun ix ->
+                isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKDepInner)
+        groupedOuter || raggedInner
     | _ -> false
 
-/// Materialize a grouped map: iterate the outer group axis, bind the kernel's
-/// single row-param to each peeled group row (a ragged-row sub-array), and store
-/// the per-group scalar result into a dense rank-1 output. `g(0)`, `reduce(g,+)`,
-/// `extents(g)` in the body all operate on the peeled row (a plain rank-1 array).
-and private materializeGroupedMap (st: InterpState) (env: Env) (info: ApplyInfo) (wrappers: IRExpr list) : Value =
+/// Materialize a ROW-PEEL map (CodeGen's `tryRaggedPeel` in value space):
+/// iterate the outer axis, bind the kernel's single param, and build the
+/// output in whichever of the three shapes the OUTPUT TYPE calls for --
+/// keyed on the output exactly as the emitter is, so the two lanes cannot
+/// disagree about which shape an apply has:
+///
+///   * ELEMENTWISE (output keeps a ragged-family inner slot): the param binds
+///     each ELEMENT and the result is shape-preserving ragged.
+///   * ARRAY-VALUED ROWS (output rank >= 2, dense trailing): the param binds
+///     the ROW and the kernel hands back a whole dense row.
+///   * CONSUMING (output rank 1): the param binds the ROW and the kernel
+///     collapses it to a scalar.
+///
+/// The input is a group_by result or a ragged/DepIdx array; `A.peelDim`
+/// serves both from one SRagged store (per-row `lens`, not the parent's
+/// placeholder inner extent), so `g(0)`, `reduce(g, +)` and `extents(g)` in
+/// the body all see an ordinary rank-1 row.
+and private materializeRowPeelMap (st: InterpState) (env: Env) (info: ApplyInfo) (wrappers: IRExpr list) : Value =
     if not (List.isEmpty wrappers) then
-        raise (InterpUnsupported "functor-map wrapper over a grouped map")
+        raise (InterpUnsupported "functor-map wrapper over a row-peel map")
     let grouped =
         match resolveArraySource st env info.Arrays.[0] with
         | SReal a -> a
-        | _ -> raise (InterpUnsupported "grouped map: input is not a materialized array")
+        | _ -> raise (InterpUnsupported "row-peel map: input is not a materialized array")
     let arrayNames = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
     let cg = buildLoopNestCodeGen info arrayNames "out" st.Builder
     let elemTy =
         match cg.OutputType with
         | ArrayElem arr -> arr.ElemType
         | IRTScalar et -> IRTScalar et
-        | other -> raise (InterpUnsupported (sprintf "grouped map output type %s" (nodeTypeName other)))
+        | other -> raise (InterpUnsupported (sprintf "row-peel map output type %s" (nodeTypeName other)))
     let param =
         match cg.KernelParams with
         | [ p ] -> p
-        | _ -> raise (InterpUnsupported "grouped map: kernel is not single-parameter")
+        | _ -> raise (InterpUnsupported "row-peel map: kernel is not single-parameter")
     let kenv = envChild env
     bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let cell = { V = VUnit }
     envBindRef kenv param.VarId cell
     let ngroups = int grouped.Extents.[0]
-    // RANK-RAISING rows (the compiled side's S3 row copy through the grouped
-    // peel): the kernel returns a whole dense row per group, so the output is
-    // [ngroups x trailing] rather than a rank-1 of scalars. Dense trailing
-    // axes only -- a group-shaped output (elementwise map over group_by) is
-    // refused by codegen and keeps the scalar path here.
     let outIdxTys =
         match cg.OutputType with
         | ArrayElem arr -> arr.IndexTypes
         | _ -> []
+    let outputIsRaggedShaped =
+        outIdxTys.Length >= 2 &&
+        (outIdxTys |> List.skip 1 |> List.exists (fun ix ->
+            isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKDepInner))
     let denseTrailingRows =
+        not outputIsRaggedShaped &&
         outIdxTys.Length >= 2 &&
         (outIdxTys |> List.skip 1 |> List.forall (fun ix -> ix.IxKind = IxKPlain))
-    if denseTrailingRows then
+    if outputIsRaggedShaped then
+        // ELEMENTWISE over a ragged array: shape-preserving. The param binds
+        // each ELEMENT (not the row), and the result keeps the input's row
+        // lengths -- the value-space twin of the emitter's fresh pool over
+        // the parent's shared extents/lens/offsets.
+        //
+        // Grouped inputs never reach here: codegen refuses an elementwise map
+        // over a group_by result outright (its output would need a grouped
+        // type nothing downstream resolves lengths for), so such a program is
+        // rejected before either lane runs it.
+        let (rowStores, lens, offsets) =
+            match grouped.Data with
+            | SRagged (rows, lens, offs) -> (rows, lens, offs)
+            | _ -> raise (InterpUnsupported "elementwise map over a ragged array: input is not a CSR ragged store")
+        st.Cells <- st.Cells + (lens |> Array.fold (+) 0L)
+        let outRows =
+            rowStores
+            |> Array.mapi (fun g rowStore ->
+                // `lens` is the authority on a row's length (the parent's
+                // inner extent is the max-row placeholder), same rule
+                // A.peelDim follows.
+                let rlen = if g < lens.Length then lens.[g] else 0L
+                let rowArr =
+                    { ElemType = grouped.ElemType
+                      IndexTypes = (match grouped.IndexTypes with _ :: t -> t | [] -> [])
+                      Extents = [| rlen |]
+                      Data = rowStore }
+                let vals =
+                    Array.init (int rlen) (fun k ->
+                        cell.V <- A.readCell rowArr [ int64 k ]
+                        force st kenv (Core.evalExpr st kenv cg.KernelExpr))
+                A.storeOfValues elemTy vals)
+        VArray { ElemType = elemTy
+                 IndexTypes = outIdxTys
+                 Extents = Array.copy grouped.Extents
+                 Data = SRagged (outRows, Array.copy lens, Array.copy offsets) }
+    elif denseTrailingRows then
         let rows =
             Array.init ngroups (fun g ->
                 cell.V <- A.peelDim grouped (int64 g)
                 match force st kenv (Core.evalExpr st kenv cg.KernelExpr) with
                 | VArray row -> row
-                | _ -> raise (InterpUnsupported "grouped map: array-valued kernel return produced a non-array row"))
+                | _ -> raise (InterpUnsupported "row-peel map: array-valued kernel return produced a non-array row"))
         // Trailing extents come off the FIRST row (self-describing, like the
         // compiled size-on-first-row form); an empty grouping falls back to
         // the output type's own trailing extents.
