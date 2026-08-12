@@ -1,0 +1,24 @@
+// TEST: Halo Runtime Extent Oversized (aborts)
+// ABORT: error[BL8009]
+// ABORT: halo extent mismatch
+// ============================================================================
+// The runtime half of 161: the array read through the halo window is a
+// grouped row map, so its leading extent is a RUNTIME group count that
+// typecheck cannot compare against the halo's hand-written literal. The
+// emitted guard (one comparison before the nest, not per element) panics
+// BL8009 instead of letting the window walk read out of bounds -- this
+// oversized case used to die 0xC0000005 with no diagnostic.
+//
+// 12 samples in 3 groups of 4; the halo claims 5 cells.
+// ============================================================================
+let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> 1.0 * k) |> compute
+let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
+let gk = group_keys(keys)
+let gt = group_by(ts, gk)
+
+let cells = gt <@> lambda(row: T^1) -> {
+    let s = reduce(row, (+))
+    [s, s * s]
+} |> compute
+
+let pairs = method_for(halo<Idx<5>, [0, 1]>) <@> lambda(w) -> cells(w(0), 0) + cells(w(1), 0) |> compute

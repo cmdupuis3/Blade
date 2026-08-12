@@ -259,6 +259,13 @@ module Codes =
             // (blade_runtime.hpp) and by the interpreter's twins
             // (Interp/Numerics.lgammaLanczos / digammaSeries).
             "BL8008", "math intrinsic domain error"
+            // A halo window's declared inner extent disagrees with the RUNTIME
+            // extent of an array read through the window (a group_by count,
+            // typically). The compile-time twin is BL3016's HaloExtentMismatch;
+            // this guard covers the extents typecheck cannot see. Emitted once
+            // before the nest by genApplyCombinator's haloExtentGuards, and
+            // mirrored by the interpreter's halo loop.
+            "BL8009", "halo extent mismatch"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"

@@ -556,6 +556,8 @@ class IS implemented, and the dense result folds like any other array." op level
         sprintf "argument %d: the parameter's declared type carries the quantity '%s', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is %s. Ascribe it at the call site (e.g. `x : %s`); matching dimensions alone do not imply the quantity." pos quantity got quantity
     | ExtentArgMismatch (pos, dim, expected, actual) ->
         sprintf "argument %d: extent mismatch on index slot %d -- the parameter declares Idx<%d> but the argument has Idx<%d>. A LITERAL parameter extent is baked into the emitted loop bounds and result allocations (a symbolic extent like Idx<n> reads the argument's extent at runtime instead), so this reads past the argument's allocation rather than merely disagreeing. Make the extents match, or declare the parameter over a symbolic extent." pos dim expected actual
+    | HaloExtentMismatch (declared, dim, targetName, actual) ->
+        sprintf "halo extent mismatch: the halo declares an inner extent of %d, but '%s' (read through the window at index slot %d) has extent %d. The window walk is bounded by the DECLARED extent, so an oversized halo reads past '%s''s allocation and an undersized one silently emits fewer windows. Make the halo's inner index match the array it windows over." declared targetName dim actual targetName
     | QuantityTerminal (quantity, declName) ->
         sprintf "unit '%s': the quantity '%s' cannot be used inside a unit expression. Quantities are TERMINAL -- the nominal layer is exactly one level deep -- so a quantity name can neither be composed (`Unit x = %s * m`) nor re-derived from (`Unit q: %s`). Compose from the structural units the quantity was declared over instead." declName quantity quantity quantity
     | UnknownUnitName (name, declName, candidates) ->
@@ -726,7 +728,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // Promoted variants (Stage 5)
             | UnitMismatch _ -> "BL3006"
             | QuantityArgMismatch _ -> "BL3010"
-            | ExtentArgMismatch _ -> "BL3016"
+            | ExtentArgMismatch _ | HaloExtentMismatch _ -> "BL3016"
             | QuantityTerminal _ -> "BL3011"
             | DefaultParamOrder _ | DefaultParamScope _ -> "BL3012"
             | FactoryDupQuantityDecl _ -> "BL3013"

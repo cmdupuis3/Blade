@@ -39,17 +39,14 @@ Unit time: day
 Unit frequency: 1 / day
 
 // The segment count is a COMPILE-TIME property here, not a runtime argument:
-// the cell axis carries an index type, and `halo` needs its extent. So the
-// CELL COUNT is the single source of truth and the segment count is derived
-// from it -- a halo whose extent overshoots its operand reads out of bounds,
-// and one that undershoots silently drops trailing windows, so the two must
-// not be able to drift apart.
-//
-// The extent has to be a LITERAL: `Idx<n + 1>` over a `let static n`, whether
-// written inline or behind an alias, currently mis-emits inside a lifted
-// kernel (the halo's range is not forwarded). Hence 11 spelled out, with the
-// segment count read back off the axis rather than written twice.
-type CellIdx = Idx<11>
+// the cell axis carries an index type, and `halo` needs its extent. `n_seg`
+// is the single source of truth: the cell axis and the in-function segment
+// count both derive from it, so they cannot drift apart -- and if a
+// disagreeing halo were written anyway, the compiler refuses it (BL3016 when
+// the operand's extent is static, a BL8009 runtime guard when it is a group
+// count).
+let static n_seg = 10
+type CellIdx = Idx<n_seg + 1>
 
 let i = complex(0.0, 1.0)
 let two_pi = 6.283185307179586
@@ -97,10 +94,8 @@ where omp(st: 1) = {
 
     let s_var = variance(s_raw)
     let n_samples = extents(s_raw)
-    // MUST equal CellIdx's extent - 1 (see the note by CellIdx). Reading it
-    // back off the axis instead would tie the two, but neither
-    // `extents(range<CellIdx>)` nor a static-expression extent emits today.
-    let n_segments = 10.0
+    // Derived from the same `let static` the cell axis is built over.
+    let n_segments = 1.0 * n_seg
 
     // QUANTITIES ARE TERMINAL, so every derived value here is STRUCTURALLY
     // dimensioned (`86400 * second`) rather than carrying the nominal `time`.

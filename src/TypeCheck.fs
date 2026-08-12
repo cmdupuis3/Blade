@@ -243,10 +243,19 @@ let lowerExtentExpr (env: TypeEnv) (expr: Expr) : IRExpr =
     match evalConstExpr env expr with
     | Some n -> IRLit (IRLitInt n)
     | None ->
-        match expr.Kind with
-        | ExprKind.ExprVar name -> IRParam (name, 0, IRTNat None)
-        | ExprKind.ExprLit (LitInt n) -> IRLit (IRLitInt n)
-        | _ -> IRParam ("?", 0, IRTNat None)
+        // Full static contract (`let static`, static functions) BEFORE the
+        // symbolic fallbacks: `Idx<n_seg + 1>` with `let static n_seg = 10`
+        // must lower to the literal 11, not to a symbolic IRParam -- a
+        // symbolic extent survives to codegen sites (virtual-range extents
+        // fills, `extents(range<T>)`) that have no runtime object to read
+        // it from, and emits undeclared `__range<i>` references.
+        match evalStaticIntExpr env expr with
+        | Some n -> IRLit (IRLitInt (int64 n))
+        | None ->
+            match expr.Kind with
+            | ExprKind.ExprVar name -> IRParam (name, 0, IRTNat None)
+            | ExprKind.ExprLit (LitInt n) -> IRLit (IRLitInt n)
+            | _ -> IRParam ("?", 0, IRTNat None)
 
 /// Lower an extent expression with one bound parameter substituted for an IR
 /// expression. Used by DepIdx to substitute the lambda parameter (the outer
@@ -11633,6 +11642,85 @@ and buildApplyInfo (env: TypeEnv)
         | None ->
         match findBadComplexIntrinsic lambdaInfo.Body with
         | Some name -> Error (IntrinsicNotComplex name)
+        | None ->
+        // HALO-EXTENT AGREEMENT (BL3016, the halo twin of kernelExtentClash).
+        // A halo's declared inner extent is written by hand while the array it
+        // windows over has its own extent; nothing else ever compares them.
+        // The window walk is bounded by the DECLARED extent, so an oversized
+        // halo reads past the array's allocation (access violation) and an
+        // undersized one silently emits fewer windows -- a wrong answer with
+        // no symptom. Literal-vs-literal only, here: a runtime operand extent
+        // (a group count) is guarded by the emitted runtime check in
+        // genApplyCombinator's haloExtentGuards instead.
+        //
+        // A window read is `A(w(o))`: the index arg is an application whose
+        // HEAD carries the "__halowin|d:" tag (the same shape Lowering's
+        // window-read arm keys on). The declared extent is recovered from the
+        // operand slot: the slot's extent is the interior-SHRUNK one, so
+        // original = shrunk + shrink, with the shrink re-derived from the
+        // tag's offset set (haloShrinkOfTag). Compound-inner halos ("c:") are
+        // skipped -- their extent is a runtime mask cardinality.
+        let haloExtentClash : TypeError option =
+            let haloDeclared =
+                arrayTypes
+                |> List.collect (fun at -> at.IndexTypes)
+                |> List.choose (fun ix ->
+                    match ix.Tag with
+                    | Some tag when tag.StartsWith (haloWinTagPrefix + "d:") ->
+                        (match tryEvalIntIR ix.Extent, haloShrinkOfTag tag with
+                         | Some shrunk, Some shrink -> Some (tag, shrunk + shrink)
+                         | _ -> None)
+                    | _ -> None)
+                // The tag encodes inner NAME + offsets, not the extent, so two
+                // anonymous halos with the same offsets but different extents
+                // share one tag. Ambiguous -- drop the tag (fail-open) rather
+                // than check one window against the other's extent.
+                |> List.groupBy fst
+                |> List.choose (fun (tag, entries) ->
+                    match entries |> List.map snd |> List.distinct with
+                    | [ n ] -> Some (tag, n)
+                    | _ -> None)
+                |> Map.ofList
+            if Map.isEmpty haloDeclared then None
+            else
+                let haloTagOfArg (arg: TypedExpr) : string option =
+                    match arg.Kind with
+                    | TExprApp (f, _) ->
+                        (match env.Subst.Resolve f.Type with
+                         | IRTIdxTagged (_, IRefNamed t) when t.StartsWith (haloWinTagPrefix + "d:") -> Some t
+                         | _ -> None)
+                    | _ -> None
+                let checkSite (arr: TypedExpr) (args: TypedExpr list) : TypeError option =
+                    match env.Subst.Resolve arr.Type with
+                    | ArrayElem at when args.Length <= at.IndexTypes.Length ->
+                        args
+                        |> List.mapi (fun d a -> (d, a))
+                        |> List.tryPick (fun (d, a) ->
+                            match haloTagOfArg a |> Option.bind (fun t -> Map.tryFind t haloDeclared) with
+                            | Some declared ->
+                                (match tryEvalIntIR at.IndexTypes.[d].Extent with
+                                 | Some actual when actual <> declared ->
+                                     let targetName =
+                                         match arr.Kind with
+                                         | TExprVar (n, _, _) -> n
+                                         | _ -> "<array>"
+                                     Some (HaloExtentMismatch (declared, d + 1, targetName, actual))
+                                 | _ -> None)
+                            | None -> None)
+                    | _ -> None
+                let rec walk (e: TypedExpr) : TypeError option =
+                    let self =
+                        match e.Kind with
+                        | TExprIndex (arr, args, _) -> checkSite arr args
+                        | TExprApp (f, args) when (match env.Subst.Resolve f.Type with ArrayElem _ -> true | _ -> false) ->
+                            checkSite f args
+                        | _ -> None
+                    match self with
+                    | Some _ -> self
+                    | None -> typedExprChildren e |> List.tryPick walk
+                walk lambdaInfo.Body
+        match haloExtentClash with
+        | Some err -> Error err
         | None ->
         // After param-type unification, inference variables that flowed into
         // the body's TExprIndex sites may now resolve to nominally-tagged

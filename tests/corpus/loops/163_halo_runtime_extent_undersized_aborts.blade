@@ -1,0 +1,24 @@
+// TEST: Halo Runtime Extent Undersized (aborts)
+// ABORT: error[BL8009]
+// ABORT: halo extent mismatch
+// ============================================================================
+// 162's silent sibling, and the worse one: an UNDERSIZED halo used to run
+// "successfully" and emit fewer windows -- for a windowed statistic the
+// truncated result looks entirely plausible, so nothing downstream can tell.
+// The same BL8009 guard refuses it: the halo's declared inner extent must
+// EQUAL the runtime group count, not merely fit inside it.
+//
+// 12 samples in 3 groups of 4; the halo claims 2 cells (would emit 1 window
+// instead of 2).
+// ============================================================================
+let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> 1.0 * k) |> compute
+let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
+let gk = group_keys(keys)
+let gt = group_by(ts, gk)
+
+let cells = gt <@> lambda(row: T^1) -> {
+    let s = reduce(row, (+))
+    [s, s * s]
+} |> compute
+
+let pairs = method_for(halo<Idx<2>, [0, 1]>) <@> lambda(w) -> cells(w(0), 0) + cells(w(1), 0) |> compute

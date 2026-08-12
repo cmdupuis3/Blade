@@ -1,0 +1,26 @@
+// TEST: Grouped Row Map Bare Apply With Block Array Literal Kernel
+// ============================================================================
+// The BARE-apply twin of 159's grouped map: `gt <@> lambda(row: T^1) -> {...}`
+// with a block kernel ending in an array literal (rank-raising row). Both
+// single-operand spellings -- this one and `method_for(gt) <@> ...` -- used to
+// die BL7001 ("no rule for IRArrayLit in expression position"): tryRaggedPeel
+// claimed the grouped operand and its consuming arm emits scalar row writes
+// only. It now DECLINES the dense-trailing rank-raising shape to the grouped
+// peel (tryGroupedZipPeel), whose lifted-callable routing and row copy accept
+// a single operand.
+// ============================================================================
+let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> 1.0 * k) |> compute
+
+let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
+let gk = group_keys(keys)
+let gt = group_by(ts, gk)
+
+let cells = gt <@> lambda(row: T^1) -> {
+    let s = reduce(row, (+))
+    let q = prodsum(row, row)
+    [s, q]
+} |> compute
+// EXPECT: cells = [[6, 14], [22, 126], [38, 366]]
+
+let total = reduce(cells, lambda(a: T^1, b: T^1) -> a + b)
+// EXPECT: total = [66, 506]

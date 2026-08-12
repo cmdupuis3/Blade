@@ -1,0 +1,12 @@
+// TEST: Halo Static Extent Mismatch (rejects)
+// ============================================================================
+// A halo's declared inner extent is written by hand; the array read through
+// its window has its own. When BOTH are compile-time literals a disagreement
+// is refused outright (BL3016, the halo twin of the param-extent clash): the
+// window walk is bounded by the DECLARED extent, so an oversized halo reads
+// past the array's allocation and an undersized one silently emits fewer
+// windows -- a wrong answer with no symptom. The runtime-extent sibling (a
+// group_by count) is guarded at runtime instead: 162/163.
+// ERROR: BL3016
+let a = (method_for(range<Idx<6>>) <@> lambda(i) -> 1.0 * i) |> compute
+let w = method_for(halo<Idx<8>, [0, 1]>) <@> lambda(win) -> a(win(0)) + a(win(1)) |> compute

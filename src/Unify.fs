@@ -135,6 +135,14 @@ type TypeError =
     /// (buildApplyInfo), which is why `pos` says "argument"/"parameter"
     /// rather than naming a call form.
     | ExtentArgMismatch of pos: int * dim: int * expected: int64 * actual: int64
+    /// BL3016 (same family as ExtentArgMismatch, the halo twin): a kernel body
+    /// reads an array through a halo window (`A(w(o))`), the halo's declared
+    /// inner extent and the array's extent on that slot are BOTH compile-time
+    /// literals, and they differ. The window walk is bounded by the DECLARED
+    /// extent, so an oversized halo reads past the array's allocation and an
+    /// undersized one silently emits fewer windows -- a wrong answer with no
+    /// symptom. `dim` is 1-based over the indexed array's slots.
+    | HaloExtentMismatch of declared: int64 * dim: int * targetName: string * actual: int64
     /// BL3011: a quantity name used inside unit algebra (`Unit x = speed * m`)
     /// or as the RHS of another quantity (`Unit q: speed`). Quantities are
     /// TERMINAL: the nominal layer is exactly one level deep.

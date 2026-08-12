@@ -24,29 +24,22 @@
 // and the leading-axis fold adds the windows componentwise. Cell 1 is counted
 // in BOTH windows -- that overlap is the point of the decomposition, and a
 // halo that silently dropped a window would show up here as 28, 140, 8.
-//
-// NOTE ON THE SPELLING: the grouped map is written over `zip` of two grouped
-// operands because the SINGLE-operand forms -- `method_for(gt) <@> lambda(row)`
-// and `gt <@> lambda(row)` -- both still fail this shape with
-//     error[BL7001]: no rule for IRArrayLit in expression position
-// when the kernel is a BLOCK ending in an array literal. Only the two-operand
-// zip form lowers, which is the inverse of what the old ragged-operand refusal
-// text claimed. Pinned here in the form that works; the single-operand hole is
-// filed separately, and this comment should go when it closes.
 // ============================================================================
 let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> 1.0 * k) |> compute
-let ones = (ts <@> lambda(t) -> 1.0) |> compute
 
 let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
 let gk = group_keys(keys)
 let gt = group_by(ts, gk)
-let go = group_by(ones, gk)
 
-// One traversal per cell fills all three accumulators; the literal hands them
-// back as the row, raising the result to rank 2.
-let cells = method_for(zip(gt, go)) <@> lambda(row: T^1, orow: T^1) -> {
-    let s, q, n = object_for(<&!>) <@> (reduce(row, (+)), prodsum(row, row), reduce(orow, (+)))
-    [s, q, n]
+// One traversal per cell fills the accumulators; the literal hands them back
+// as the row, raising the result to rank 2. SINGLE-operand grouped row map --
+// this spelling used to die BL7001 ("no rule for IRArrayLit in expression
+// position") on a block kernel ending in an array literal, forcing a zip of
+// two grouped operands; it now routes through the same lifted-callable row
+// copy as the zip form.
+let cells = method_for(gt) <@> lambda(row: T^1) -> {
+    let s, q = object_for(<&!>) <@> (reduce(row, (+)), prodsum(row, row))
+    [s, q, 1.0 * extents(row)]
 } |> compute
 // EXPECT: cells = [[6, 14, 4], [22, 126, 4], [38, 366, 4]]
 

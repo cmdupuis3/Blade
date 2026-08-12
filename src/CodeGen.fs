@@ -3880,9 +3880,20 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
             else
                 sprintf "(int64_t)(%s.extents[%d])" arrName dim
     | _ ->
-        // Should be unreachable -- typecheck rejects non-arrays. Surface a
-        // visible #error rather than emit garbage if the IR is malformed.
-        "/* extents: argument is not an array (typechecker bug) */"
+        // `extents(range<T>)`: a virtual range has no materialized C++ object
+        // to read `.extents[]` off, but its slot extents are part of the IR --
+        // statically evaluable ones (Idx<11>, Idx<n_seg + 1> with n_seg
+        // `let static`) emit as literals. A genuinely runtime slot extent has
+        // no object either, so it stays a deliberate refusal.
+        match arr with
+        | IRRange (idxTys, _) when dim < idxTys.Length ->
+            (match tryEvalIntIR idxTys.[dim].Extent with
+             | Some n -> sprintf "%dL" n
+             | None -> exprError "extents(range<...>): the range's extent is not statically evaluable, and a virtual range has no runtime object to read it from -- take extents of a materialized array instead")
+        | _ ->
+            // Should be unreachable -- typecheck rejects non-arrays. Surface a
+            // visible marker rather than emit garbage if the IR is malformed.
+            "/* extents: argument is not an array (typechecker bug) */"
 
 
 and genApplyCombinatorExpr (subst: SubstMap) (names: Map<IRId, string>) (info: ApplyInfo) : string =
@@ -11704,6 +11715,23 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         outputInnerKinds |> List.exists (fun k -> isRaggedFamilyKind k || k = IxKDepInner)
                     let outputIsGroupShaped =
                         outputInnerKinds |> List.exists ((=) IxKGroupMember)
+                    // GROUPED operand whose kernel collapses each row to a whole
+                    // DENSE row (rank >= 2 output with dense trailing axes --
+                    // the `lambda(row) -> { ...; [s, q] }` rank-raising shape,
+                    // and any other array-valued row body). This arm's emission
+                    // below is scalar-only (`name[__g] = <expr>`), so DECLINE
+                    // and let `tryGroupedZipPeel` serve it: its S3 row-copy and
+                    // lifted-callable routing handle array-valued rows, and it
+                    // degenerates correctly to one operand. Grouped only -- the
+                    // zip peel resolves per-row lengths through
+                    // ctx.GroupedArrays, which a ragged literal does not have.
+                    let outputHasDenseTrailing =
+                        match info.OutputType with
+                        | ArrayElem a when a.IndexTypes.Length >= 2 ->
+                            not outputIsRaggedShaped && not outputIsGroupShaped
+                        | _ -> false
+                    if isGroupedOuter && outputHasDenseTrailing then None
+                    else
                     match resolveCallable info.Kernel with
                     | Some callable when callable.Params.Length = 1 && outputIsGroupShaped ->
                         // Elementwise map over a group_by result. The grouped
@@ -11899,7 +11927,12 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     // unsupported shape still gets the honest refusal rather than a nest that
     // knows nothing about per-row lengths.
     let tryGroupedZipPeel () : string list option =
-        if info.Arrays.Length < 2 || info.Arrays.Length <> info.ArrayTypes.Length then None
+        // Accepts ONE grouped operand as well: `tryRaggedPeel` declines the
+        // grouped array-valued-row shape (dense trailing axes) to this site,
+        // whose machinery -- per-operand row decls, lifted-callable routing
+        // for array-literal tails, the S3 row copy -- degenerates correctly
+        // to k = 1.
+        if info.Arrays.Length < 1 || info.Arrays.Length <> info.ArrayTypes.Length then None
         else
         // Every operand grouped, and all by the same group_keys emission.
         let gkNames =
@@ -12357,7 +12390,75 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     let arrayNames = materializedArrays |> List.map fst
     let updatedArrays = materializedArrays |> List.map snd
     let info = { info with Arrays = updatedArrays }
-    
+
+    // HALO-EXTENT RUNTIME GUARD (BL8009; the runtime half of TypeCheck's
+    // HaloExtentMismatch/BL3016). A halo's declared inner extent is a
+    // compile-time literal, but the array read through the window can have a
+    // RUNTIME extent -- a group_by count, typically -- which typecheck cannot
+    // compare. The window loop is bounded by the DECLARED extent, so a
+    // disagreement is an out-of-bounds read (oversized halo) or silently
+    // fewer windows (undersized). One comparison per (array, slot) pair,
+    // emitted ONCE before the nest -- not per element.
+    //
+    // A dense window read lowers to `IRBinOp(IRAdd, w, off)` with `w` typed
+    // by the "__halowin|d:" tag (Lowering's window-read arm); the guard keys
+    // on exactly that shape inside the kernel body. Targets whose emitted
+    // name is unknown here (not in ctx.VarNames) are skipped rather than
+    // guessed -- fail-open, never an undeclared identifier in the guard.
+    (let haloDecl =
+        info.Arrays
+        |> List.collect (fun a -> match a with IRRange (ixs, _) -> ixs | _ -> [])
+        |> List.choose (fun ix ->
+            match ix.Tag with
+            | Some tag when tag.StartsWith (haloWinTagPrefix + "d:") ->
+                (match ix.Extent, haloShrinkOfTag tag with
+                 | IRLit (IRLitInt shrunk), Some shrink -> Some (tag, shrunk + shrink)
+                 | _ -> None)
+            | _ -> None)
+        // Same-tag ambiguity rule as TypeCheck's haloExtentClash: the tag
+        // carries name + offsets, not the extent, so two anonymous halos with
+        // equal offsets but different extents collide -- drop the tag rather
+        // than guard one window against the other's extent.
+        |> List.groupBy fst
+        |> List.choose (fun (tag, entries) ->
+            match entries |> List.map snd |> List.distinct with
+            | [ n ] -> Some (tag, n)
+            | _ -> None)
+        |> Map.ofList
+     if not (Map.isEmpty haloDecl) then
+        match resolveCallable info.Kernel with
+        | None -> ()
+        | Some callable ->
+            let haloTagOfIdx (e: IRExpr) =
+                match e with
+                | IRBinOp (_, IRAdd, IRVar (_, IRTIdxTagged (_, IRefNamed t)), _)
+                | IRBinOp (_, IRAdd, IRParam (_, _, IRTIdxTagged (_, IRefNamed t)), _)
+                    when t.StartsWith (haloWinTagPrefix + "d:") -> Some t
+                | _ -> None
+            let mutable guards : (string * int * int64) list = []
+            mapIRExpr (fun e ->
+                (match e with
+                 | IRIndex (IRVar (tid, _), idxs, _) ->
+                     idxs |> List.iteri (fun d ix ->
+                         match haloTagOfIdx ix |> Option.bind (fun t -> Map.tryFind t haloDecl) with
+                         | Some declared ->
+                             (match Map.tryFind tid tempCtx.VarNames with
+                              | Some tname -> guards <- (tname, d, declared) :: guards
+                              | None -> ())
+                         | None -> ())
+                 | _ -> ())
+                e) callable.Body |> ignore
+            let guardLines =
+                guards
+                |> List.distinct
+                |> List.rev
+                |> List.collect (fun (tname, d, declared) ->
+                    [ sprintf "%sif ((int64_t)(%s.extents[%d]) != %dLL) {" ind tname d declared
+                      sprintf "%s    std::cerr << \"Blade runtime: the halo window over '%s' declares an inner extent of %d, but '%s' has runtime extent \" << %s.extents[%d] << \" on index slot %d -- the window walk would read out of bounds (oversized halo) or silently emit fewer windows (undersized)\" << std::endl;" ind tname declared tname tname d d
+                      sprintf "%s    blade_rt::panic(\"BL8009\", \"halo extent mismatch\", nullptr, 0);" ind
+                      sprintf "%s}" ind ])
+            preCode <- preCode @ guardLines)
+
     if arrayNames.IsEmpty then
         codegenError ctx ind (sprintf "no arrays in method_for for '%s' -- kernel cannot be applied" name)
     else
