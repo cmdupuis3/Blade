@@ -442,6 +442,221 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
     with ex ->
         Error (sprintf "Memcheck compilation exception: %s\n%s" ex.Message ex.StackTrace)
 
+// ---------------------------------------------------------------------------
+// Content-addressed executable cache (docs/plan-compile-speed.md Stage 4.1)
+//
+// 89% of a full `blade test` is g++, and a suite re-run compiles a translation
+// unit byte-identical to the one it compiled last time. The cache turns that
+// re-compile into a file copy: key = SHA256 over everything g++ reads or is
+// told (compiler identity, command line, the .cpp, the 13 deployed runtime
+// headers, the identity of every explicitly-linked DLL), value = the produced
+// .exe under %LOCALAPPDATA%\Blade\exe-cache.
+//
+// The key errs toward OVER-invalidation: every emission-relevant env gate
+// (BLADE_MARCH / BLADE_FP_CONTRACT / BLADE_BLAS+OPENBLAS_DIR / BLADE_CUBLAS /
+// NETCDF_DIR) reaches the key through the flags or the source text it already
+// changes, so no gate needs its own hash term -- but a gate that changed
+// NEITHER could not have changed the output either.
+// ---------------------------------------------------------------------------
+
+/// Where the cache lives, or `None` when it is off. Read PER CALL like every
+/// other env gate in this file (a harness may pin it mid-process):
+///   unset | `1` | `on` | `true`  -> %LOCALAPPDATA%\Blade\exe-cache
+///   `0` | `off` | `false`        -> disabled
+///   an ABSOLUTE path             -> that directory
+///   anything else                -> disabled (an unreadable setting must not
+///                                   silently serve stale binaries)
+let private exeCacheDir () : string option =
+    let defaultDir () =
+        let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+        if String.IsNullOrEmpty root then None
+        else Some (Path.Combine(root, "Blade", "exe-cache"))
+    match Environment.GetEnvironmentVariable "BLADE_EXE_CACHE" with
+    | null | "" -> defaultDir ()
+    | v ->
+        match v.Trim() with
+        | "" -> defaultDir ()
+        | t when t = "1" || t.ToLowerInvariant() = "on" || t.ToLowerInvariant() = "true" -> defaultDir ()
+        | t when t = "0" || t.ToLowerInvariant() = "off" || t.ToLowerInvariant() = "false" -> None
+        | t when Path.IsPathRooted t -> Some t
+        | _ -> None
+
+/// `[cache] hit/store <hash8>` tracing on stderr. `compileCppWithExtraSource`
+/// takes no verbose parameter (it is reached from the CLI, the REPL and five
+/// test blocks), so the flag travels as a process-level env pin -- the same
+/// spelling `--memcheck` uses for BLADE_MEMCHECK. `blade run --verbose` sets it
+/// during argument parsing (Cli.fs).
+let private exeCacheVerbose () =
+    match Environment.GetEnvironmentVariable "BLADE_EXE_CACHE_VERBOSE" with
+    | null | "" | "0" -> false
+    | _ -> true
+
+/// The compiler's identity: resolved g++ path + the first line of
+/// `g++ --version`. Memoized for the process (one subprocess, ~50-170 ms, and
+/// only on the first compile of a run) -- a g++ upgrade mid-process is not a
+/// case worth a probe per compile. `lazy` is ExecutionAndPublication, so the
+/// parallel harness launches it at most once.
+let private gppIdentity : Lazy<string> =
+    lazy (
+        let resolved =
+            let exeName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "g++.exe" else "g++"
+            match Environment.GetEnvironmentVariable "PATH" with
+            | null -> None
+            | p ->
+                p.Split(Path.PathSeparator)
+                |> Array.tryPick (fun d ->
+                    try
+                        if String.IsNullOrWhiteSpace d then None
+                        else
+                            let c = Path.Combine(d.Trim(), exeName)
+                            if File.Exists c then Some c else None
+                    with _ -> None)
+        let version =
+            try
+                let psi = ProcessStartInfo("g++", "--version")
+                psi.RedirectStandardOutput <- true
+                psi.RedirectStandardError <- true
+                psi.UseShellExecute <- false
+                psi.CreateNoWindow <- true
+                use proc = Process.Start(psi)
+                let out = proc.StandardOutput.ReadToEndAsync()
+                proc.StandardError.ReadToEndAsync() |> ignore
+                proc.WaitForExit(10000) |> ignore
+                let text = out.Result
+                match text.Split('\n') |> Array.tryHead with
+                | Some l -> l.Trim()
+                | None -> ""
+            with _ -> ""
+        sprintf "%s|%s" (defaultArg resolved "g++") version)
+
+/// The runtime headers' contribution to the key, computed once per process:
+/// all 13 shipped header texts (~264 KB), name-tagged. They are static files
+/// beside the binary and already memoized by CodeGen, so hashing them costs
+/// one SHA pass on the first compile and nothing afterwards.
+///
+/// This hashes the SHIPPED headers, while g++ reads the copies deployed beside
+/// the .cpp -- `deployRuntimeHeaders` runs before every compile and rewrites
+/// any deployed file whose content differs, so at g++ time the two agree
+/// (that is exactly the hand-edit workflow its doc comment describes).
+let private runtimeHeaderDigest : Lazy<string> =
+    lazy (
+        try
+            use sha = System.Security.Cryptography.SHA256.Create()
+            let sb = System.Text.StringBuilder()
+            for name in CodeGen.runtimeHeaderNames do
+                sb.Append(name).Append(' ').Append(CodeGen.runtimeHeaderText name).Append(' ') |> ignore
+            sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(sb.ToString()))
+            |> Array.map (fun b -> b.ToString("x2"))
+            |> String.concat ""
+        with _ -> "")
+
+/// Size + mtime of every DLL named outright on the link line (netcdf.dll,
+/// libopenblas.dll). Their PATH is already in `args`, but their CONTENT is
+/// not: a reinstalled OpenBLAS at the same path must invalidate.
+let private linkedDllStamp (args: string) : string =
+    args.Split('"')
+    |> Array.filter (fun tok -> tok.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+    |> Array.map (fun p ->
+        try
+            let fi = FileInfo(p)
+            if fi.Exists then sprintf "%s:%d:%d" p fi.Length fi.LastWriteTimeUtc.Ticks else sprintf "%s:missing" p
+        with _ -> sprintf "%s:?" p)
+    |> String.concat ";"
+
+/// The cache key for one g++ invocation. `exeFullPath`/`cppFullPath` are
+/// replaced by placeholders: WHERE the translation unit sits does not change
+/// what g++ produces from it, and that is what lets the same program compiled
+/// in two directories share one entry.
+let private exeCacheKey (args: string) (cppText: string) (exeFullPath: string) (cppFullPath: string) : string =
+    let normalizedArgs =
+        args.Replace(exeFullPath, "<EXE>").Replace(cppFullPath, "<CPP>")
+    let material =
+        String.concat " "
+            [ "blade-exe-cache-v1"
+              gppIdentity.Value
+              normalizedArgs
+              runtimeHeaderDigest.Value
+              linkedDllStamp args
+              cppText ]
+    use sha = System.Security.Cryptography.SHA256.Create()
+    sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes material)
+    |> Array.map (fun b -> b.ToString("x2"))
+    |> String.concat ""
+
+// Eviction caps. Entries are whole executables (~150 KB-2 MB each), so both a
+// count and a byte ceiling are needed; a trip on either prunes oldest-mtime
+// first down to 3/4 of the cap, so eviction runs rarely rather than on every
+// store past the line.
+let private exeCacheMaxEntries = 8192
+let private exeCacheMaxBytes = 6L * 1024L * 1024L * 1024L
+
+/// Prune the cache when either ceiling is exceeded. Called only on STORE (a
+/// hit does no directory scan). Every delete is race-tolerant: a concurrent
+/// process may have removed or be reading the same entry.
+let private evictExeCache (dir: string) : unit =
+    try
+        let entries = DirectoryInfo(dir).GetFiles("*.exe")
+        let total = entries |> Array.sumBy (fun f -> f.Length)
+        if entries.Length > exeCacheMaxEntries || total > exeCacheMaxBytes then
+            let targetCount = (exeCacheMaxEntries * 3) / 4
+            let targetBytes = (exeCacheMaxBytes / 4L) * 3L
+            let oldestFirst = entries |> Array.sortBy (fun f -> f.LastWriteTimeUtc)
+            let mutable count = entries.Length
+            let mutable bytes = total
+            for f in oldestFirst do
+                if count > targetCount || bytes > targetBytes then
+                    let len = f.Length
+                    try
+                        f.Delete()
+                        count <- count - 1
+                        bytes <- bytes - len
+                    with _ ->
+                        // Another process holds or already removed it; it still
+                        // stops counting against us on the next scan.
+                        count <- count - 1
+                        bytes <- bytes - len
+    with _ -> ()
+
+/// Cache lookup. On a hit the entry is copied to `exeFullPath` (the exact file
+/// a real compile would have written) and its mtime is bumped so eviction sees
+/// it as recently used. Any failure -- a racing evictor deleted it, the copy
+/// was denied -- reports a miss and the real compile proceeds.
+let private tryExeCacheHit (dir: string) (key: string) (exeFullPath: string) : bool =
+    try
+        let entry = Path.Combine(dir, key + ".exe")
+        if not (File.Exists entry) then false
+        else
+            File.Copy(entry, exeFullPath, true)
+            // File.Copy carries the SOURCE mtime across on Windows, which
+            // would date a hit to whenever the entry was first published.
+            // Both files are stamped now: the delivered exe so it looks
+            // exactly as freshly built as it behaves, the entry so eviction
+            // reads mtime as last-USED.
+            let now = DateTime.UtcNow
+            (try File.SetLastWriteTimeUtc(exeFullPath, now) with _ -> ())
+            (try File.SetLastWriteTimeUtc(entry, now) with _ -> ())
+            if exeCacheVerbose () then eprintfn "[cache] hit %s" (key.Substring(0, 8))
+            true
+    with _ -> false
+
+/// Publish a freshly compiled executable. Written to a unique temp name in the
+/// cache directory first, then File.Move'd into place -- the move is atomic
+/// within the volume, so a concurrent reader never sees a half-copied entry.
+/// Losing the race (another process published the same key first) is a no-op:
+/// the two files are the same content by construction.
+let private storeExeCache (dir: string) (key: string) (exeFullPath: string) : unit =
+    try
+        let entry = Path.Combine(dir, key + ".exe")
+        if not (File.Exists entry) then
+            Directory.CreateDirectory dir |> ignore
+            let tmp = Path.Combine(dir, sprintf "%s.%s.tmp" key (Guid.NewGuid().ToString("N")))
+            File.Copy(exeFullPath, tmp, true)
+            (try File.Move(tmp, entry)
+             with _ -> (try File.Delete tmp with _ -> ()))
+            if exeCacheVerbose () then eprintfn "[cache] store %s" (key.Substring(0, 8))
+            evictExeCache dir
+    with _ -> ()
+
 /// Compile a C++ file with g++. `extraLinkInputs` are appended after the
 /// source (linker order) -- e.g. the hybrid mpi+cuda build passes the
 /// nvcc-built device DLL here (MinGW links DLL export tables directly).
@@ -584,12 +799,33 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
         let extraFlags = (extraLinkInputs @ deviceInputs) |> List.map (fun p -> sprintf " \"%s\"" (Path.GetFullPath p)) |> String.concat ""
         let args = sprintf "-std=c++17 %s %s %s%s -o \"%s\" \"%s\"%s%s%s%s" (optFlags ()) ompFlag safetyFlags blasCompileFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags blasLinkFlags
         
+        // The executable cache (Stage 4.1, above). v1 scope, deliberately
+        // narrow -- every excluded lane is one whose inputs are not fully
+        // captured by (args, cppText, headers):
+        //   - extra link inputs / the cuBLAS device half: the .dll or .so was
+        //     built by another toolchain in this same run; its content is not
+        //     in the key.
+        //   - non-Windows: %LOCALAPPDATA% has no counterpart here and no
+        //     consumer runs there yet.
+        //   - memcheck: rerouted to compileCppMemcheck long before this point.
+        let cacheSlot =
+            if not (List.isEmpty extraLinkInputs) || not (List.isEmpty deviceInputs) then None
+            elif not (RuntimeInformation.IsOSPlatform OSPlatform.Windows) then None
+            else
+                match exeCacheDir () with
+                | None -> None
+                | Some dir -> Some (dir, exeCacheKey args cppText exeFullPath cppFullPath)
+
+        match cacheSlot with
+        | Some (dir, key) when tryExeCacheHit dir key exeFullPath -> Ok exeFullPath
+        | _ ->
+
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true
         psi.UseShellExecute <- false
         psi.CreateNoWindow <- true
-        
+
         use proc = Process.Start(psi)
         // Read both streams asynchronously to prevent pipe deadlocks
         let stdoutTask = proc.StandardOutput.ReadToEndAsync()
@@ -611,6 +847,11 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
             |> String.concat "\n"
         
         if proc.ExitCode = 0 then
+            // Publish for the next identical translation unit. Best-effort:
+            // a store that fails costs a future recompile, never this result.
+            (match cacheSlot with
+             | Some (dir, key) -> storeExeCache dir key exeFullPath
+             | None -> ())
             Ok exeFullPath
         else
             if String.IsNullOrWhiteSpace allOutput then

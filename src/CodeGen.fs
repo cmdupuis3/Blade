@@ -8158,6 +8158,13 @@ let runtimeHeaderNames : string list =
       // bookkeeping stays uniform.
       "blade_memcheck.hpp" ]
 
+/// The shipped text of one runtime header, through the same per-process memo
+/// `deployRuntimeHeaders` uses -- so a consumer that only wants to *read* the
+/// header set (Build.fs's executable cache hashes all 13 into its key) pays no
+/// extra disk I/O beyond the one read the deploy already did. Same
+/// fail-loudly-on-missing contract as the deploy path.
+let runtimeHeaderText (filename: string) : string = readCppRuntimeHeader filename
+
 /// Deploy every C++ runtime header next to a generated .cpp so its `#include`s
 /// resolve at g++ time with no -I flag. These are pre-existing static files in
 /// cpp/, copied verbatim -- nothing is generated or transformed.

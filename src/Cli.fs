@@ -109,6 +109,9 @@ let printUsage () =
     printfn "  --strict-pins  Fail the build on unpinned confirm-and-pin deductions"
     printfn "                 (BL4010, normally warnings). For CI: forces the pin"
     printfn "                 decision into source. check / compile / emit / run."
+    printfn "  --no-cache     Always run g++, ignoring the content-addressed"
+    printfn "                 executable cache (%%LOCALAPPDATA%%\\Blade\\exe-cache;"
+    printfn "                 BLADE_EXE_CACHE=0 / a path override it). compile / run / test."
     printfn "  --help         Show this help"
     printfn ""
     printfn "Examples:"
@@ -2301,6 +2304,21 @@ let private dispatchInner (args: string[]) : int =
          | _ -> false)
     let strictPins = strictPinVerb && Array.contains "--strict-pins" args
     let args = if strictPins then args |> Array.filter (fun a -> a <> "--strict-pins") else args
+    // `--no-cache` is likewise a MODE, not a positional argument: it disables
+    // the content-addressed executable cache for the verbs that own a g++
+    // invocation. Like `--memcheck`, it travels as a process-level env pin
+    // rather than a parameter, because the gate is read in Build.fs -- five
+    // test blocks and the REPL reach that compile without passing through any
+    // CLI-shaped option record. Stripped from argv so every verb pattern
+    // accepts it in any position.
+    let noCacheVerb =
+        args.Length >= 1 &&
+        (match args.[0] with
+         | "compile" | "run" | "test" -> true
+         | _ -> false)
+    if noCacheVerb && Array.contains "--no-cache" args then
+        System.Environment.SetEnvironmentVariable("BLADE_EXE_CACHE", "0")
+    let args = if noCacheVerb then args |> Array.filter (fun a -> a <> "--no-cache") else args
     match args with
     // User-facing commands.
     // `run <file> [--verbose] [--mpi N] [--memcheck]` -- flags in any order
@@ -2314,7 +2332,13 @@ let private dispatchInner (args: string[]) : int =
         let rec parse toks =
             match toks with
             | [] -> ()
-            | "--verbose" :: tl -> verbose <- true; parse tl
+            | "--verbose" :: tl ->
+                verbose <- true
+                // Build.fs's executable cache reports `[cache] hit/store
+                // <hash8>` on stderr under this pin (it has no verbose
+                // parameter of its own; see exeCacheVerbose).
+                System.Environment.SetEnvironmentVariable("BLADE_EXE_CACHE_VERBOSE", "1")
+                parse tl
             | "--cuda" :: tl ->
                 // Flip device-kernel emission for `where cuda` licences --
                 // the same gate the CUDA test harness sets (setCudaEmitMode).

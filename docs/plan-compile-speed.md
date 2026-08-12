@@ -289,6 +289,38 @@ green with identical totals; (c) key honesty probes: flip `BLADE_MARCH`, edit a
 runtime header on disk at the source (`src/cpp/`), rebuild, confirm misses;
 (d) `--no-cache` forces a real compile.
 
+*Implemented 2026-08-12* (`Build.compileCppWithExtraSource`). Key = SHA256
+over the resolved g++ path + `g++ --version` line (memoized per process),
+the command line with the exe/cpp paths replaced by placeholders, the .cpp
+text, all 13 runtime header contents, and size+mtime of every DLL named
+outright on the link line — so each env gate reaches the key through the
+flags or the source text it already changes. Entries land in
+`%LOCALAPPDATA%\Blade\exe-cache\<sha>.exe`, published by temp-write +
+atomic move (a lost race is a no-op) and evicted oldest-mtime-first to 3/4
+of the caps at >8192 entries or >6 GB. Gates: `BLADE_EXE_CACHE`
+(unset/`1`/`on` = on, `0`/`off` = off, absolute path = custom location) and
+`--no-cache` on `compile`/`run`/`test`; `blade run --verbose` traces
+`[cache] hit|store <hash8>` (carried as the process pin
+`BLADE_EXE_CACHE_VERBOSE`). v1 skips the memcheck lane, non-Windows, and
+any compile with extra link inputs or a cuBLAS device half (their inputs
+are not in the key). Measured (this box, Release JIT build; category counts
+byte-identical warm and cold):
+
+| Scenario | Cold / `--no-cache` | Warm (cache hit) |
+|---|---|---|
+| `blade run examples/lsdft.blade` | 2.4–4.0 s | 1.30–1.43 s |
+| `blade test basic` (41) | 8.1–12.0 s | 2.7–4.2 s |
+| `blade test sql` (103) | 24.3–25.9 s | 5.3–6.8 s |
+| `blade test indextypes` (238) | 38.2–44.9 s | 7.9–14.7 s |
+
+A hit is not *byte*-identical to a fresh compile, because a fresh compile is
+not byte-identical to itself: two consecutive g++ runs on the same input
+differ in 3–4 bytes (the PE `TimeDateStamp` and its debug-directory twin).
+Fresh-vs-cached differs in exactly the same 4 bytes, same length. Key-honesty
+probes passed: `BLADE_MARCH=x86-64` produced a new key; `BLADE_EXE_CACHE=0`
+and `--no-cache` compile for real; a cross-process same-TU race stored once,
+both exited 0, no temp residue.
+
 #### 4.2 Harness F# parallelism experiment (M, high risk, opt-in only)
 
 **Free part (riskless, do unconditionally):** the lock's justification comment
@@ -401,7 +433,7 @@ output-neutral (stderr only, gated off by default).
 | `blade compile` (probe overhead) | +165–870 ms | −~700 ms | −127 ms warm GPU; scales with GPU idle state | lazy probes |
 | 2000-line file, F# pipeline | 10399 ms | ~1.5 s | **602 ms** | front-end asymptotics |
 | 4000-line `blade check` | 22.8 s | — | **582 ms** (linear now) | front-end asymptotics |
-| full `blade test` | ~10 min | ~9 min; 2–5 min re-runs with Stage 4 cache | not re-measured (89% is g++) | Stage 4 pending |
+| full `blade test` | ~10 min | ~9 min; 2–5 min re-runs with Stage 4 cache | not re-measured; per-category re-runs 3.0–4.8× faster with the 4.1 cache | Stage 4.1 landed, 4.2 pending |
 
 Byte-identity held at every merge point: 291-file sweep (1164 artifacts:
 cpp/stdout/stderr/exit), zero diffs after Stage 1+3 and again after Stage 2 +
