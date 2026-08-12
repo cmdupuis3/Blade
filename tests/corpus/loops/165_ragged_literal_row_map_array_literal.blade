@@ -1,0 +1,32 @@
+// TEST: Ragged Literal Row Map With Block Array Literal Kernel
+// ============================================================================
+// The RAGGED-LITERAL sibling of 160's grouped row map: one operand, a block
+// kernel ending in an array literal, so each peeled row collapses to a whole
+// DENSE row and the result is rank 2.
+//
+// This spelling used to die BL7001 ("no rule for IRArrayLit in expression
+// position") after the grouped twin was fixed, because the grouped fix routed
+// through the co-iteration peel -- which resolves per-row lengths through the
+// group_keys offsets table a ragged literal does not have (its lengths live
+// in its own `.lens`/`.offsets`). The array-valued row emission is now ONE
+// helper (`emitRowValuedPeel`) that both peels call with their own outer
+// count and row bindings, so the two operand kinds cannot drift apart on the
+// extents ABI, the sizing forms, or the row copy.
+//
+// Rows of 3, 2 and 4 elements; each reports (sum, sum^2):
+//   [1,2,3]     -> 6,  36
+//   [4,5]       -> 9,  81
+//   [6,7,8,9]   -> 30, 900
+// The uneven lengths are the point: a peel that read a fixed row length would
+// come out with the wrong sums here and nowhere else.
+// ============================================================================
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+
+let cells = method_for(r) <@> lambda(row: T^1) -> {
+    let s = reduce(row, (+))
+    [s, s * s]
+} |> compute
+// EXPECT: cells = [[6, 36], [9, 81], [30, 900]]
+
+let total = reduce(cells, lambda(a: T^1, b: T^1) -> a + b)
+// EXPECT: total = [45, 1017]

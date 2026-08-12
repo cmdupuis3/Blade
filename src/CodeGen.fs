@@ -11635,6 +11635,152 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             Some "the peeled source is a streamed provider read (shared per-source handles and per-argument buffers are not thread-safe)"
         else None
 
+    // ARRAY-VALUED KERNEL ROWS over a PEELED outer axis (stage S3,
+    // manifestation M-C3 -- lswosa's `family_spectra` / `cellacc` shape). The
+    // kernel collapses each peeled row (or tuple of rows) to a whole DENSE
+    // row, so the output is [outer] x [kernel T-dims]: rank >= 2, one row per
+    // outer cell, flat row-major pool. Callers have already taken the
+    // genuinely ragged/group-SHAPED results away, so everything arriving here
+    // has dense trailing axes.
+    //
+    // SHARED BY BOTH PEELS. They differ only in where the outer count and the
+    // per-row bindings come from -- a group_keys offsets table (`gk__ngroups`
+    // / `gk__offsets[__g+1] - gk__offsets[__g]`) or a ragged literal's own
+    // `arr.extents[0]` / `arr.lens[__g]` -- and those arrive as strings.
+    // Everything that is genuinely about array-valued rows (the two sizing
+    // forms, the extents ABI, the row copy, the threading rules) lives here
+    // once, so a single-operand ragged literal and a k-operand grouped
+    // co-iteration cannot drift apart on any of it.
+    let emitRowValuedPeel
+            (headerLine: string) (headerRuntimeSuffix: string)
+            (ngroupsExpr: string) (rowDeclLines: string list)
+            (bodyExpr: IRExpr) (bodyStr: string)
+            (outElemStr: string) (outRank: int) : string list =
+        // A trailing extent the static evaluator can settle is emitted as a
+        // literal. Everything else -- a compiler-minted `__<op>_inferred_n`
+        // param (the length a LENGTH-AGNOSTIC generic callee keeps abstract:
+        // `f: V^1` -> the returned row is as long as the argument, and the
+        // static type never learns the number; extents are deliberately
+        // outside type identity), or a function-scope symbolic extent whose
+        // rendered spelling names no declared C++ identifier -- takes the
+        // size-on-first-row form below: the returned row is self-describing
+        // at runtime (`__rowv.extents`), so the trailing extents are read off
+        // the FIRST row and the pool is allocated then. Runtime sizing is
+        // correct for every one of these shapes; the static table is kept for
+        // literals so the common pinned shapes emit exactly as before.
+        let innerDims =
+            match info.OutputType with
+            | ArrayElem a ->
+                a.IndexTypes
+                |> List.skip 1
+                |> List.map (fun ix ->
+                    match tryEvalIntIR ix.Extent with
+                    | Some n -> Some (sprintf "%d" n)
+                    | None -> None)
+            | _ -> []
+        let innerCells =
+            [ 1 .. outRank - 1 ] |> List.map (sprintf "%s_extents[%d]" name) |> String.concat " * "
+        let freeLine =
+            match bodyExpr with
+            | IRApp (f, _, _) when freshReturnOf f = FreshPool ->
+                [ sprintf "%s        deallocate<typename promote<%s, %d>::type, nullptr>(__rowv.data, __rowv.extents);"
+                      ind outElemStr (outRank - 1) ]
+            | _ -> []
+        let rowCopyLines =
+            [ sprintf "%s        const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" ind outElemStr
+              sprintf "%s        const size_t __rowc = (size_t)(%s);" ind innerCells
+              sprintf "%s        %s* __rowd = nested_array_utilities::pool_base(%s.data) + (__g * __rowc);" ind outElemStr name
+              sprintf "%s        for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];" ind ]
+        if innerDims |> List.forall Option.isSome then
+            [ headerLine ]
+            // Heap extents: the return-extent ABI (see emitExtentsTable).
+            // `Array<T,R>` stores only a POINTER to its extents, so a
+            // frame-local `size_t[R]` table dangles the moment the wrapper
+            // crosses a call boundary. The leading entry is a runtime read
+            // (`gk__ngroups` / `arr.extents[0]`), so the table is never
+            // all-literal and the helper always takes its heap form.
+            @ fst (emitExtentsTable ind (name + "_extents") outRank
+                       ((ngroupsExpr, false) :: (innerDims |> List.map (fun d -> (Option.get d, true)))))
+            @ [ sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
+                  ind outElemStr outRank name outElemStr outRank name name ]
+            // Array-valued rows, pool allocated UP FRONT: iteration __g copies
+            // into `pool_base(name.data) + __g * __rowc`, a slice disjoint from
+            // every other iteration's, and `__rowv` / `__rows` / `__rowd` are
+            // declared inside the body. Same licence as the scalar arms.
+            @ peelRowPragma peelOmpRequested peelRowLicensed (peelStreamBlocker ()) ind
+            @ [ sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+            @ rowDeclLines
+            @ [ sprintf "%s    {" ind
+                sprintf "%s        auto __rowv = %s;" ind bodyStr ]
+            @ rowCopyLines
+            @ freeLine
+            @ [ sprintf "%s    }" ind
+                sprintf "%s}" ind ]
+        else
+            // Size-on-first-row form: extents start {ngroups, 0..}, iteration 0
+            // fills the trailing slots from the row's own runtime extents and
+            // allocates the pool. With zero rows nothing allocates and every
+            // consumer iterates an honest empty shape.
+            [ headerLine + headerRuntimeSuffix ]
+            // Heap extents (return-extent ABI, above). This arm needs it for a
+            // SECOND reason as well: the trailing slots are WRITTEN below, from
+            // iteration 0's row -- so the table is mutable state the wrapper
+            // reads through its pointer, and a caller that outlives this frame
+            // must still see those writes.
+            @ fst (emitExtentsTable ind (name + "_extents") outRank
+                       ((ngroupsExpr, false) :: (innerDims |> List.map (fun d -> (defaultArg d "0", false)))))
+            @ [ sprintf "%sArray<%s, %d> %s = { nullptr, %s_extents };" ind outElemStr outRank name name ]
+            // THIS ARM CANNOT BE THREADED, and the reason is the `if (__g == 0)`
+            // below rather than anything about the kernel: iteration 0 is what
+            // settles the trailing extents and ALLOCATES the pool that every
+            // other iteration writes into. Under a parallel for, a thread
+            // holding __g = 5 can reach `pool_base(name.data)` before the
+            // thread holding __g = 0 has run the allocation -- a null-base
+            // write, not merely a torn one. Hoisting the allocation out would
+            // mean sizing the pool before any row has been evaluated, which is
+            // exactly what this arm exists because we cannot do.
+            //
+            // So it declines, and says so: a licensed kernel that lands here
+            // would otherwise be the same silent drop this whole path removes.
+            @ peelRowPragma peelOmpRequested peelRowLicensed
+                  (Some (defaultArg (peelStreamBlocker ())
+                            "the row pool is sized and allocated from the first iteration (length-agnostic callee), so the row loop must run serially"))
+                  ind
+            @ [ sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+            @ rowDeclLines
+            @ [ sprintf "%s    {" ind
+                sprintf "%s        auto __rowv = %s;" ind bodyStr
+                sprintf "%s        if (__g == 0) {" ind
+                sprintf "%s            for (size_t __rx = 1; __rx < %d; __rx++) %s_extents[__rx] = __rowv.extents[__rx - 1];" ind outRank name
+                sprintf "%s            %s.data = allocate<typename promote<%s, %d>::type, nullptr>(%s_extents);" ind name outElemStr outRank name
+                sprintf "%s        }" ind ]
+            @ rowCopyLines
+            @ freeLine
+            @ [ sprintf "%s    }" ind
+                sprintf "%s}" ind ]
+
+    /// The kernel body as it must be RENDERED at a peel site: inline text when
+    /// it is expression-shaped, otherwise a CALL to the lifted callable.
+    ///
+    /// An ARRAY-LITERAL tail also routes through the call: the literal has no
+    /// expression rendering (`exprToCppCore`'s catch-all), and unlike the dense
+    /// nest -- whose row-write arm stores literal leaves straight into the
+    /// output pool -- a peel renders the body as ONE `auto __rowv = <expr>`
+    /// slot. The lifted body compiles it fine (genFuncBody's return-position
+    /// IRArrayLit arm), and the row copy above already handles a call that
+    /// returns a whole row. Shared by both peels so neither can regress the
+    /// other's array-literal support.
+    let peelBodyExpr (callable: IRCallable) : IRExpr =
+        let rec chainTail e = match e with IRLet (_, _, b) -> chainTail b | t -> t
+        let arrayLitTail =
+            match chainTail callable.Body with IRArrayLit _ -> true | _ -> false
+        if kernelBodyIsExpressionShaped callable.Body && not arrayLitTail then callable.Body
+        else
+            let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+            IRApp (IRVar (callable.Id, mkFuncArrow paramTypes callable.RetType),
+                   callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type)),
+                   callable.RetType)
+
     // Special case: ragged peel for grouped arrays.
     // Triggered when method_for is applied to a single grouped array
     // (recognized by Tag = "__group_outer" on its first index type).
@@ -11715,23 +11861,18 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         outputInnerKinds |> List.exists (fun k -> isRaggedFamilyKind k || k = IxKDepInner)
                     let outputIsGroupShaped =
                         outputInnerKinds |> List.exists ((=) IxKGroupMember)
-                    // GROUPED operand whose kernel collapses each row to a whole
-                    // DENSE row (rank >= 2 output with dense trailing axes --
-                    // the `lambda(row) -> { ...; [s, q] }` rank-raising shape,
-                    // and any other array-valued row body). This arm's emission
-                    // below is scalar-only (`name[__g] = <expr>`), so DECLINE
-                    // and let `tryGroupedZipPeel` serve it: its S3 row-copy and
-                    // lifted-callable routing handle array-valued rows, and it
-                    // degenerates correctly to one operand. Grouped only -- the
-                    // zip peel resolves per-row lengths through
-                    // ctx.GroupedArrays, which a ragged literal does not have.
+                    // ARRAY-VALUED ROWS: the kernel collapses each peeled row to
+                    // a whole DENSE row (the `lambda(row) -> { ...; [s, q] }`
+                    // rank-raising shape). Serviced by this peel's own
+                    // array-valued arm below, for BOTH operand kinds -- the
+                    // group-shaped and ragged-shaped outputs are already taken
+                    // away above, so a rank >= 2 output left here has dense
+                    // trailing axes.
                     let outputHasDenseTrailing =
                         match info.OutputType with
                         | ArrayElem a when a.IndexTypes.Length >= 2 ->
                             not outputIsRaggedShaped && not outputIsGroupShaped
                         | _ -> false
-                    if isGroupedOuter && outputHasDenseTrailing then None
-                    else
                     match resolveCallable info.Kernel with
                     | Some callable when callable.Params.Length = 1 && outputIsGroupShaped ->
                         // Elementwise map over a group_by result. The grouped
@@ -11836,7 +11977,14 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         let nameMap =
                             callable.Captures
                             |> List.fold (fun m c -> Map.add c.Id c.Name m) nameMap0
-                        let bodyStr = exprToCpp nameMap body
+                        // Array-valued rows render as a CALL to the lifted
+                        // callable when the body is not expression-shaped (or
+                        // ends in an array literal); `body` above is the same
+                        // tree with the defensive `g(args)` -> `g[args]`
+                        // rewrite, which the call form does not need.
+                        let bodyExpr =
+                            if outputHasDenseTrailing then peelBodyExpr callable else body
+                        let bodyStr = exprToCpp nameMap bodyExpr
                         let originLabel =
                             if isGroupedOuter then "grouped array" else "ragged literal"
                         // The peeled sub-row's C++ type must match the kernel
@@ -11860,7 +12008,22 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                                 // Array<T,1>: length via a materialized _extents buffer.
                                 [ sprintf "%s    size_t %s_extents[1] = {%s};" ind subName perRowLenExpr
                                   sprintf "%s    Array<%s, 1> %s = { %s[__g], %s_extents };" ind arrElemStr subName arrName subName ]
+                        let outRank =
+                            match info.OutputType with
+                            | ArrayElem a -> arrayRank a
+                            | _ -> 1
                         let code =
+                            if outputHasDenseTrailing && outRank >= 2 then
+                                // ARRAY-VALUED ROWS. Same emission the grouped
+                                // co-iteration uses -- one helper, so a
+                                // single-operand ragged literal and a k-operand
+                                // zip cannot disagree about the extents ABI,
+                                // the two sizing forms, or the row copy.
+                                emitRowValuedPeel
+                                    (sprintf "%s// ragged peel over %s '%s' -- array-valued rows" ind originLabel arrName)
+                                    " (inner extents from the first row, length-agnostic callee)"
+                                    ngroupsExpr subDeclLines bodyExpr bodyStr outElemStr outRank
+                            else
                             [ sprintf "%s// ragged peel over %s '%s'" ind originLabel arrName ]
                             // Return-extent ABI (see emitExtentsTable): `Array<T,R>`
                             // stores only a POINTER to its extents, so a frame-local
@@ -11891,10 +12054,13 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             @ [ sprintf "%s    %s[__g] = %s;" ind name bodyStr
                                 sprintf "%s}" ind ]
                         // Raw `new T[n]` backing (not allocate<>), stack extents.
-                        // Scalar outputs only: an array-valued kernel body makes
-                        // the row entries ALIASES of storage owned elsewhere.
+                        // Scalar rank-1 outputs only: the array-valued arm
+                        // allocates its pool through `allocate<>` instead, and
+                        // an array-valued kernel body otherwise makes the row
+                        // entries ALIASES of storage owned elsewhere.
                         (match outElem with
-                         | IRTScalar _ -> registerAlloc (RawArrayData (name, None))
+                         | IRTScalar _ when not (outputHasDenseTrailing && outRank >= 2) ->
+                             registerAlloc (RawArrayData (name, None))
                          | _ -> ())
                         Some code
                     | _ -> None
@@ -11927,12 +12093,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     // unsupported shape still gets the honest refusal rather than a nest that
     // knows nothing about per-row lengths.
     let tryGroupedZipPeel () : string list option =
-        // Accepts ONE grouped operand as well: `tryRaggedPeel` declines the
-        // grouped array-valued-row shape (dense trailing axes) to this site,
-        // whose machinery -- per-operand row decls, lifted-callable routing
-        // for array-literal tails, the S3 row copy -- degenerates correctly
-        // to k = 1.
-        if info.Arrays.Length < 1 || info.Arrays.Length <> info.ArrayTypes.Length then None
+        if info.Arrays.Length < 2 || info.Arrays.Length <> info.ArrayTypes.Length then None
         else
         // Every operand grouped, and all by the same group_keys emission.
         let gkNames =
@@ -12002,26 +12163,9 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 // lifted callable instead of inlining its text. The peel's row
                 // declarations already bind each param name, and the lifted
                 // signature takes those same RaggedRow/Array row types, so the
-                // call is the row decls handed straight through.
-                //
-                // An ARRAY-LITERAL tail also routes through the call: the
-                // literal has no expression rendering (`exprToCppCore`'s
-                // catch-all), and unlike the dense nest -- whose row-write arm
-                // stores literal leaves straight into the output pool -- this
-                // peel renders the body as ONE `auto __rowv = <expr>` slot.
-                // The lifted body compiles it fine (genFuncBody's return-
-                // position IRArrayLit arm), and the S3 row copy below already
-                // handles a call that returns a whole row.
-                let bodyExpr =
-                    let rec chainTail e = match e with IRLet (_, _, b) -> chainTail b | t -> t
-                    let arrayLitTail =
-                        match chainTail callable.Body with IRArrayLit _ -> true | _ -> false
-                    if kernelBodyIsExpressionShaped callable.Body && not arrayLitTail then callable.Body
-                    else
-                        let paramTypes = callable.Params |> List.map (fun p -> p.Type)
-                        IRApp (IRVar (callable.Id, mkFuncArrow paramTypes callable.RetType),
-                               callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type)),
-                               callable.RetType)
+                // call is the row decls handed straight through. (Array-literal
+                // tails included -- see peelBodyExpr.)
+                let bodyExpr = peelBodyExpr callable
                 let bodyStr = exprToCpp nameMap bodyExpr
                 let opNames = info.Arrays |> List.map (exprToCppCtx ctx) |> String.concat ", "
                 // ARRAY-VALUED KERNEL RETURN over a GROUPED co-iteration (stage
@@ -12042,117 +12186,11 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     | _ -> 1
                 let code =
                     if outRank >= 2 then
-                        // A trailing extent the static evaluator can settle is
-                        // emitted as a literal. Everything else -- a
-                        // compiler-minted `__<op>_inferred_n` param (the length
-                        // a LENGTH-AGNOSTIC generic callee keeps abstract:
-                        // `f: V^1` -> the returned row is as long as the
-                        // argument, and the static type never learns the
-                        // number; extents are deliberately outside type
-                        // identity), or a function-scope symbolic extent whose
-                        // rendered spelling names no declared C++ identifier --
-                        // takes the size-on-first-row form below: the returned
-                        // row is self-describing at runtime (`__rowv.extents`),
-                        // so the trailing extents are read off the FIRST row
-                        // and the pool is allocated then. Runtime sizing is
-                        // correct for every one of these shapes; the static
-                        // table is kept for literals so the common pinned
-                        // shapes emit exactly as before.
-                        let innerDims =
-                            match info.OutputType with
-                            | ArrayElem a ->
-                                a.IndexTypes
-                                |> List.skip 1
-                                |> List.map (fun ix ->
-                                    match tryEvalIntIR ix.Extent with
-                                    | Some n -> Some (sprintf "%d" n)
-                                    | None -> None)
-                            | _ -> []
-                        let innerCells =
-                            [ 1 .. outRank - 1 ] |> List.map (sprintf "%s_extents[%d]" name) |> String.concat " * "
-                        let freeLine =
-                            match bodyExpr with
-                            | IRApp (f, _, _) when freshReturnOf f = FreshPool ->
-                                [ sprintf "%s        deallocate<typename promote<%s, %d>::type, nullptr>(__rowv.data, __rowv.extents);"
-                                      ind outElemStr (outRank - 1) ]
-                            | _ -> []
-                        if innerDims |> List.forall Option.isSome then
-                            [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows" ind opNames gkName ]
-                            // Heap extents: the return-extent ABI, exactly as in the
-                            // ragged peel above. The leading entry is `gk__ngroups`,
-                            // so the table is never all-literal and the helper always
-                            // takes its heap form.
-                            @ fst (emitExtentsTable ind (name + "_extents") outRank
-                                       ((ngroupsExpr, false) :: (innerDims |> List.map (fun d -> (Option.get d, true)))))
-                            @ [ sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
-                                  ind outElemStr outRank name outElemStr outRank name name ]
-                            // Array-valued rows, pool allocated UP FRONT: iteration
-                            // __g copies into `pool_base(name.data) + __g * __rowc`,
-                            // a slice disjoint from every other iteration's, and
-                            // `__rowv` / `__rows` / `__rowd` are declared inside the
-                            // body. Same licence as the scalar arm below.
-                            @ peelRowPragma peelOmpRequested peelRowLicensed (peelStreamBlocker ()) ind
-                            @ [ sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
-                            @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
-                            @ [ sprintf "%s    {" ind
-                                sprintf "%s        auto __rowv = %s;" ind bodyStr
-                                sprintf "%s        const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" ind outElemStr
-                                sprintf "%s        const size_t __rowc = (size_t)(%s);" ind innerCells
-                                sprintf "%s        %s* __rowd = nested_array_utilities::pool_base(%s.data) + (__g * __rowc);" ind outElemStr name
-                                sprintf "%s        for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];" ind ]
-                            @ freeLine
-                            @ [ sprintf "%s    }" ind
-                                sprintf "%s}" ind ]
-                        else
-                            // Size-on-first-row form: extents start {ngroups, 0..},
-                            // iteration 0 fills the trailing slots from the row's
-                            // own runtime extents and allocates the pool. With
-                            // zero groups nothing allocates and every consumer
-                            // iterates an honest empty shape.
-                            [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows, inner extents from the first row (length-agnostic callee)" ind opNames gkName ]
-                            // Heap extents (return-extent ABI, see the ragged peel
-                            // above). This arm needs it for a SECOND reason as well:
-                            // the trailing slots are WRITTEN below, from iteration 0's
-                            // row -- so the table is mutable state the wrapper reads
-                            // through its pointer, and a caller that outlives this
-                            // frame must still see those writes.
-                            @ fst (emitExtentsTable ind (name + "_extents") outRank
-                                       ((ngroupsExpr, false) :: (innerDims |> List.map (fun d -> (defaultArg d "0", false)))))
-                            @ [ sprintf "%sArray<%s, %d> %s = { nullptr, %s_extents };" ind outElemStr outRank name name ]
-                            // THIS ARM CANNOT BE THREADED, and the reason is the
-                            // `if (__g == 0)` below rather than anything about the
-                            // kernel: iteration 0 is what settles the trailing
-                            // extents and ALLOCATES the pool that every other
-                            // iteration writes into. Under a parallel for, a thread
-                            // holding __g = 5 can reach `pool_base(name.data)`
-                            // before the thread holding __g = 0 has run the
-                            // allocation -- a null-base write, not merely a torn
-                            // one. Hoisting the allocation out would mean sizing
-                            // the pool before any row has been evaluated, which is
-                            // exactly what this arm exists because we cannot do.
-                            //
-                            // So it declines, and says so: a licensed kernel that
-                            // lands here would otherwise be the same silent drop
-                            // this whole change removes.
-                            @ peelRowPragma peelOmpRequested peelRowLicensed
-                                  (Some (defaultArg (peelStreamBlocker ())
-                                            "the row pool is sized and allocated from the first iteration (length-agnostic callee), so the row loop must run serially"))
-                                  ind
-                            @ [ sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
-                            @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
-                            @ [ sprintf "%s    {" ind
-                                sprintf "%s        auto __rowv = %s;" ind bodyStr
-                                sprintf "%s        if (__g == 0) {" ind
-                                sprintf "%s            for (size_t __rx = 1; __rx < %d; __rx++) %s_extents[__rx] = __rowv.extents[__rx - 1];" ind outRank name
-                                sprintf "%s            %s.data = allocate<typename promote<%s, %d>::type, nullptr>(%s_extents);" ind name outElemStr outRank name
-                                sprintf "%s        }" ind
-                                sprintf "%s        const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" ind outElemStr
-                                sprintf "%s        const size_t __rowc = (size_t)(%s);" ind innerCells
-                                sprintf "%s        %s* __rowd = nested_array_utilities::pool_base(%s.data) + (__g * __rowc);" ind outElemStr name
-                                sprintf "%s        for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];" ind ]
-                            @ freeLine
-                            @ [ sprintf "%s    }" ind
-                                sprintf "%s}" ind ]
+                        emitRowValuedPeel
+                            (sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows" ind opNames gkName)
+                            ", inner extents from the first row (length-agnostic callee)"
+                            ngroupsExpr (rowDecls |> List.collect (fun (_, _, lines) -> lines))
+                            bodyExpr bodyStr outElemStr outRank
                     else
                         [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s" ind opNames gkName ]
                         // Heap extents (return-extent ABI, see the ragged peel above).
