@@ -9549,9 +9549,10 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
     // No `auto <name> = <expr>;` fallback for a shape-bearing RHS (IRMask/
     // IRSort/IRVar/IRFieldAccess/IRIntersect/IRUnion) that resolves to
     // IRTUnit: those RHS shapes always resolve to a non-IRTUnit type by this
-    // point (both the codegen and IR-side struct-fields caches are
-    // AsyncLocal'd per task specifically so they can't race and return a
-    // stale IRTUnit). If a regression reaches this branch anyway, the
+    // point (there is ONE struct-fields cache -- IR.fs's AsyncLocal registry,
+    // which `setCodegenStructFieldsCache` merely forwards into -- and it is
+    // per-flow specifically so parallel tasks can't race and return a stale
+    // IRTUnit). If a regression reaches this branch anyway, the
     // expression-statement form below deliberately produces invalid C++
     // rather than papering over it with auto-deduction -- diagnose the
     // upstream resolution bug instead.

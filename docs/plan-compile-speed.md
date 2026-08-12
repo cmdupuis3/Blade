@@ -139,7 +139,9 @@ source; empirical confirmation noted where we have it.
   `CodeGen.fs:9465`). Ceiling: −11% of suite wall. Caveat: `AsyncLocal` under
   `Array.Parallel.mapi` leaks values between iterations on the same worker
   thread, and `runOnLargeStack` spawns threads inside the locked region — lock
-  removal is an *experiment*, not a cleanup.
+  removal is an *experiment*, not a cleanup. *(Both comments corrected and the
+  experiment landed opt-in as `BLADE_TEST_FSHARP_PARALLEL`; the caveat's failure
+  mode reproduced. See Stage 4.2.)*
 - Downgraded after measurement (real anti-patterns, negligible at realistic
   scale; fix opportunistically): `inferBlock`/`inferForIn` `typedStmts @ [x]`
   (`TypeCheck.fs:13883-13912, 14059-14078` — flat at 800 statements),
@@ -308,6 +310,56 @@ but that reasoning is exactly what the flake hunt must test, not assume.
 the gate on across ≥2 sessions, with zero unexplained diffs vs the locked run's
 totals. Expected ceiling −11% suite wall (the freed F# CPU overlaps g++), so
 abandon without guilt at the first flake.
+
+**Implemented (opt-in), 2026-08-12 — and the expected failure mode FIRED.**
+Gate: `BLADE_TEST_FSHARP_PARALLEL=1|on` runs the harness F# pipeline without
+taking `fsharpPipelineLock` (`tests/Runner.fs`, `fsharpParallelEnabled` /
+`withFsharpPipelineLock`; the lock has exactly one use site and it goes
+through the helper). Read per call, not cached. Default (unset/`0`/anything
+else) keeps the lock, byte-for-byte as before. The two stale comments are
+corrected in the same change (`tests/Runner.fs` lock docstring,
+`src/CodeGen.fs` `genScalarBinding`): `structFieldsCache` is AsyncLocal
+(`IR.fs`, `structFieldsCacheStorage`), and `setCodegenStructFieldsCache`
+merely forwards into it — there is only ONE struct-fields cache.
+
+Stress evidence (gate ON, Release, ucrt64 g++, category counts vs the locked
+reference `238 passed / 0 failed / 0 skipped` and `163 passed / 0 failed /
+0 skipped`):
+
+| Category | Run | Result | Wall |
+|---|---|---|---|
+| indextypes | 1 | 238/0/0, C++ 159, Compiled 158, Full 158, Values 153/153 | 39.7 s |
+| indextypes | 2 | identical | 37.6 s |
+| indextypes | 3 | **CRASH after ~10 tests** | 8.8 s |
+| indextypes | 4 | identical to run 1 | 38.4 s |
+| loops | 1 | **CRASH after ~29 tests** | 27.3 s |
+| loops | 2 | 163/0/0, C++ 150, Compiled 148, Full 146, Values 146/146 | 33.6 s |
+| loops | 3 | identical | 32.6 s |
+
+Verbatim failure (both crashes, identical text, no test name attached):
+
+```
+error[BL9001]: internal compiler error: One or more errors occurred. (Index was outside the bounds of the array.)
+  = note: this is a bug in the Blade compiler, not in your program -- please report it
+```
+
+It aborts the whole category run, not one test, and it is intermittent (2 of
+7 unlocked runs; 0 of 4 locked runs of the same two categories, before and
+after the change). Not chased — this is precisely the AsyncLocal-under-
+`Array.Parallel.mapi` hazard the caveat predicted, and it lands on some
+shared per-flow list/array read at an index another iteration's value made
+invalid.
+
+Wall-clock, locked vs unlocked (clean runs only): `indextypes` 55.3 s / 43.2 s
+locked vs 37.6–39.7 s unlocked (~−15% against the faster locked run);
+`loops` 32.6 s / 34.2 s locked vs 32.6–33.6 s unlocked (no measurable gain —
+the category is g++-bound). So even the upside is smaller than the −11%
+ceiling suggests for the shorter categories.
+
+**Default stays LOCKED.** Promotion criterion is unchanged and currently not
+met: ≥10 consecutive clean full-suite runs with the gate on. The gate exists
+so the intermittent can be reproduced and diagnosed on demand, not because it
+is ready.
 
 ### Stage 5 — Profile-gated follow-ups (instrument first, act on data)
 
