@@ -1,10 +1,11 @@
 # Plan: Compile-Speed Exploitation (F# pipeline, lexer → codegen)
 
-Status: investigation 2026-08-12; Stages 0–3 implemented the same day on
+Status: investigation 2026-08-12; Stages 0–5 implemented the same day on
 `claude/blade-compile-speed-ca1877` (see the *Implemented* markers and the
-achieved-results table in §5). Stages 4–5 remain future work. All timings
-measured on the development box (16 cores, Windows 11, .NET 7, Release build),
-warm, per-invocation unless noted.
+achieved-results table in §5). Stage 4.2 is landed opt-in only (its flake
+hunt failed, as documented); the remaining §5.2 candidates are closed with
+data. All timings measured on the development box (16 cores, Windows 11,
+.NET 7, Release build), warm, per-invocation unless noted.
 
 ## 1. Where the time actually goes (measured)
 
@@ -500,7 +501,8 @@ both unchanged from the pre-Stage-5 build.
 | `blade compile` (probe overhead) | +165–870 ms | −~700 ms | −127 ms warm GPU; scales with GPU idle state | lazy probes |
 | 2000-line file, F# pipeline | 10399 ms | ~1.5 s | **602 ms** | front-end asymptotics |
 | 4000-line `blade check` | 22.8 s | — | **582 ms** (linear now) | front-end asymptotics |
-| full `blade test` | ~10 min | ~9 min; 2–5 min re-runs with Stage 4 cache | not re-measured; per-category re-runs 3.0–4.8× faster with the 4.1 cache | Stage 4.1 landed, 4.2 pending |
+| full `blade test`, cold cache | ~10 min | ~9 min | **364 s**, 4714/0 | Stages 1–3 |
+| full `blade test`, warm cache | — | 2–5 min re-runs | **149 s** (−59%), identical 4714/0; cache 1206 entries / 172 MB | Stage 4.1 |
 
 Byte-identity held at every merge point: 291-file sweep (1164 artifacts:
 cpp/stdout/stderr/exit), zero diffs after Stage 1+3 and again after Stage 2 +
