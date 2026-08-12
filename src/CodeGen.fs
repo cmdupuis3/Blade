@@ -8180,16 +8180,37 @@ let runtimeHeaderText (filename: string) : string = readCppRuntimeHeader filenam
 /// This preserves the hand-edit workflow: a deployed header edited in place
 /// DIFFERS from the shipped one, so the next `blade run` overwrites it exactly
 /// as before -- "if changed" is a content test, not a timestamp test.
+///
+/// CONCURRENT WRITERS: two compiles sharing an output directory (parallel
+/// sweeps, two agents in one scratch dir) can collide on the same destination,
+/// and on Windows the loser gets a sharing violation. That is NOT a failure
+/// here: both processes deploy the SAME shipped bytes, so the only question is
+/// whether the file on disk ends up correct. Re-check the content after a
+/// failed write, retry briefly (the other writer's handle lives for
+/// microseconds), and surface the IO error only if the destination genuinely
+/// does not hold the header -- in which case the compile must not proceed to a
+/// g++ that would read a truncated include.
 let deployRuntimeHeaders (outputDir: string) : unit =
     runtimeHeaderNames
     |> List.iter (fun name ->
         let dest = System.IO.Path.Combine(outputDir, name)
         let text = readCppRuntimeHeader name
-        let alreadyDeployed =
+        let alreadyDeployed () =
             try System.IO.File.Exists dest && System.IO.File.ReadAllText dest = text
             with _ -> false
-        if not alreadyDeployed then
-            System.IO.File.WriteAllText(dest, text))
+        if not (alreadyDeployed ()) then
+            let rec attempt (retriesLeft: int) =
+                try
+                    System.IO.File.WriteAllText(dest, text)
+                with
+                // A concurrent writer got there first with identical bytes.
+                | _ when alreadyDeployed () -> ()
+                | _ when retriesLeft > 0 ->
+                    System.Threading.Thread.Sleep 10
+                    attempt (retriesLeft - 1)
+                // No rule matches when the retries are spent and the file is
+                // still wrong: F# re-raises, and the driver reports it.
+            attempt 5)
 
 /// Generate includes that reference external header
 let genIncludesExternal () : string list =

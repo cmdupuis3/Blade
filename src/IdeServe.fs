@@ -186,9 +186,11 @@ let evalResponse (id: int) (r: Blade.ReplSession.EvalResult) : string =
 
 // The loop
 
-/// One request at a time, deliberately: `Parser.currentFile` /
-/// `Parser.lastTokenEnd` and `Ast.synthSpan` are plain mutable globals, and
-/// serializing is what keeps a daemon honest about them. Factored over
+/// One request at a time, deliberately: `Ast.synthSpan` is a plain mutable
+/// global, and serializing is what keeps a daemon honest about it. (The
+/// parser's own per-parse state no longer needs this -- it is `[<ThreadStatic>]`
+/// as of the span-table race fix, Parser.fs -- but one shared global is enough
+/// to keep the rule.) Factored over
 /// TextReader/TextWriter so the test suite can drive a whole conversation
 /// in-process without spawning anything.
 let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =

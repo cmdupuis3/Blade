@@ -2,9 +2,10 @@
 
 Status: investigation 2026-08-12; Stages 0–5 implemented the same day on
 `claude/blade-compile-speed-ca1877` (see the *Implemented* markers and the
-achieved-results table in §5). Stage 4.2 is landed opt-in only (its flake
-hunt failed, as documented); the remaining §5.2 candidates are closed with
-data. All timings measured on the development box (16 cores, Windows 11,
+achieved-results table in §5). Stage 4.2 is landed opt-in only — its flake was
+CHASED, ROOT-CAUSED and FIXED (a shared-parser-state race, §4.2), but the
+promotion criterion is full-suite evidence this change did not gather; the
+remaining §5.2 candidates are closed with data. All timings measured on the development box (16 cores, Windows 11,
 .NET 7, Release build), warm, per-invocation unless noted.
 
 ## 1. Where the time actually goes (measured)
@@ -58,6 +59,15 @@ is JIT, recovered by R2R.
   benchmark at power-of-two extents; run 3× and take medians (zombie Blade.exe
   processes and Defender scans of freshly written files both add multi-second
   noise — kill strays first).
+- **Never `taskkill /F /IM Blade.exe` while anyone else is building or
+  sweeping.** `/IM` matches by IMAGE NAME, so it kills every `Blade.exe` on the
+  machine — including another worktree's in-flight compile. `taskkill /F` is
+  `TerminateProcess(handle, 1)`, so the victim exits **1 with zero bytes on
+  both streams and no event-log entry**: indistinguishable at a glance from a
+  compiler bug, and it cost this investigation a full agent-session to run to
+  ground (§4.3). Kill by PID, or scope to your own worktree's binary. Treat
+  "exit 1 + empty stdout + empty stderr" as an external kill and re-run before
+  reporting it as a defect.
 
 ## 3. Verified findings inventory
 
@@ -141,8 +151,9 @@ source; empirical confirmation noted where we have it.
   `Array.Parallel.mapi` leaks values between iterations on the same worker
   thread, and `runOnLargeStack` spawns threads inside the locked region — lock
   removal is an *experiment*, not a cleanup. *(Both comments corrected and the
-  experiment landed opt-in as `BLADE_TEST_FSHARP_PARALLEL`; the caveat's failure
-  mode reproduced. See Stage 4.2.)*
+  experiment landed opt-in as `BLADE_TEST_FSHARP_PARALLEL`; an intermittent
+  BL9001 reproduced — but it was NOT the AsyncLocal caveat, it was the parser's
+  module-level span tables, since fixed. See Stage 4.2.)*
 - Downgraded after measurement (real anti-patterns, negligible at realistic
   scale; fix opportunistically): `inferBlock`/`inferForIn` `typedStmts @ [x]`
   (`TypeCheck.fs:13883-13912, 14059-14078` — flat at 800 statements),
@@ -213,7 +224,10 @@ rather than absolutized (single-file mode always did); spans and codes
 unchanged.*
 1. **Lexer append → ResizeArray** (F1). Trivial, byte-identical.
 2. **Token index for O(1) spans** (F2). The one genuinely delicate change:
-   corpus span pins are the acceptance test.
+   corpus span pins are the acceptance test. *(Landed — and note the tables it
+   introduces are per-PARSE state: they shipped as module-level `let mutable`s,
+   which raced as soon as Stage 4.2 let two parses run at once. They are
+   `[<ThreadStatic>]` now; see §4.2.)*
 3. **Single-parse pipeline** (F3): CLI lanes adopt `resolveParsedEntry`; thread
    member ASTs through `Resolution`.
 
@@ -378,21 +392,130 @@ error[BL9001]: internal compiler error: One or more errors occurred. (Index was 
 
 It aborts the whole category run, not one test, and it is intermittent (2 of
 7 unlocked runs; 0 of 4 locked runs of the same two categories, before and
-after the change). Not chased — this is precisely the AsyncLocal-under-
-`Array.Parallel.mapi` hazard the caveat predicted, and it lands on some
-shared per-flow list/array read at an index another iteration's value made
-invalid.
+after the change).
 
-Wall-clock, locked vs unlocked (clean runs only): `indextypes` 55.3 s / 43.2 s
-locked vs 37.6–39.7 s unlocked (~−15% against the faster locked run);
-`loops` 32.6 s / 34.2 s locked vs 32.6–33.6 s unlocked (no measurable gain —
-the category is g++-bound). So even the upside is smaller than the −11%
-ceiling suggests for the shorter categories.
+**Chased and FIXED, 2026-08-12 (same day).** The guess above — an
+AsyncLocal-under-`Array.Parallel.mapi` hazard — was WRONG. Printing the
+`AggregateException`'s inner exceptions at the BL9001 boundary (temporary
+instrumentation; reproduced on the 2nd of 6 `blade test loops` runs) named the
+site immediately:
 
-**Default stays LOCKED.** Promotion criterion is unchanged and currently not
-met: ≥10 consecutive clean full-suite runs with the gate on. The gate exists
-so the intermittent can be reproduced and diagnosed on demand, not because it
-is ready.
+```
+System.IndexOutOfRangeException: Index was outside the bounds of the array.
+   at Blade.Parser.consumedEnd$cont@175(...)
+   at Blade.Parser.consumedEnd(...) in src\Parser.fs:line 173
+   at Blade.Parser.rangeSpan(...) in src\Parser.fs:line 205
+   ... parsePrimary / parsePostfix / ... / parseModule ...
+   at Blade.Parser.parseProgramWithFile(...) in src\Parser.fs:line 3757
+   at Blade.ModuleResolve.scanFile(...)  at Blade.Lowering.lowerCaptured(...)
+   at Blade.Tests.Runner.runFsharpPipelineLocked@201 ... runFullTest@310
+   at Blade.Runtime.body@34 ... ArrayModule.Parallel.MapIndexed ...
+```
+
+Root cause: **the parser's per-parse state was per-PROCESS, not per-parse.**
+`src/Parser.fs` held `currentFile`, `lastTokenEnd` and the Stage 3.2 O(1) span
+tables (`tokEndAt`, `tokLastMeaning`, `tokIndexCount`) as plain module-level
+`let mutable`s. `setEofFrom` publishes the token COUNT and the two tables it
+describes as three separate writes, so a second parse running concurrently
+could clear `consumedEnd`'s bounds guard against the NEW count and then index
+the OLD, shorter `tokLastMeaning` — IndexOutOfRangeException at whatever AST
+node happened to be building its span. Nothing to do with AsyncLocal: these
+fields are ordinary statics, shared by every thread regardless of execution
+context. `Span.File` had the same shape with a quieter symptom (one parse
+stamping another's spans with its filename). The lock hid it because it
+serialized the front end, parse included; the O(1) span tables (Stage 3.2)
+are what gave the race an array to run off the end of.
+
+Fix: the five fields become one `ParseState` object behind a `[<ThreadStatic>]`
+holder (`PS.Cur`), created on first touch. Per-thread is exactly per-parse here
+— a parse is synchronous from entry to return, and each harness test already
+gets its own thread via `Runtime.runOnLargeStack`. `[<ThreadStatic>]` rather
+than the `AsyncLocal` used elsewhere in the compiler because `consumedEnd` and
+the span builders run at EVERY AST node: a thread-static field read is a couple
+of instructions, an AsyncLocal read is an execution-context map lookup, which
+would hand back the very win the tables exist for.
+
+Post-fix stress, gate ON, Release, ucrt64 g++ — **20/20 clean, all identical**
+to the locked reference (not just the verdict line: `C++ Generated`,
+`Compiled`, `Full Pass` and `Value Check` are identical across all runs too):
+
+| Category | Runs | Verdict (all runs) | Sub-counts (all runs) |
+|---|---|---|---|
+| indextypes | 10/10 clean | 238 passed, 0 failed, 0 skipped | C++ 159/238, Compiled 158, Full 158, Values 153/153 |
+| loops | 10/10 clean | 163 passed, 0 failed, 0 skipped | C++ 150/163, Compiled 148, Full 146, Values 146/146 |
+
+Gate OFF (the default) is unchanged and green: 3× `indextypes` 238/0/0,
+3× `loops` 163/0/0, plus `blade test basic` 41/0/0 and
+`blade test interp index-types` 237 passed / 0 failed / 2 skip-unsupported.
+Emitted C++ is byte-identical before vs after the fix: `blade emit` over
+`tests/corpus/basic` + `tests/corpus/index-types` + `examples/lsdft.blade` +
+`examples/01_weather_stations.blade` (281 programs; generated source, stdout,
+stderr and exit code each captured) — `diff -r` over 1055 files, zero diffs.
+
+Known remaining shared-global in the same class, NOT fixed here: `Ast.synthSpan`
+(the ambient span elaborators stamp onto synthesized nodes) is still a plain
+module-level mutable. It cannot crash — a record-reference assignment is atomic
+— but under the unlocked gate one test's declaration span can bleed into
+another's synthesized diagnostics, i.e. a wrong `@ l:c` on an `// ERROR:` pin.
+It did not fire in these 20 runs. It has ~15 write sites across
+`Grad.fs`/`math`/`ml`/`ppl`/`display` elaborators, so converting it is its own
+change. `IdeServe.serveLoop` still serializes requests for exactly this reason.
+
+Wall-clock, locked vs unlocked, re-measured post-fix with the Stage 4.1 exe
+cache WARM (which is now the steady state, and which removes most of the g++
+work the unlock was supposed to overlap with): `indextypes` 11.1 / 12.2 s
+locked vs 10.7 / 11.0 / 11.6 s unlocked; `loops` 9.7 / 9.2 s locked vs
+9.1 / 9.2 / 9.3 s unlocked. No measurable gain on either category. The earlier
+cold-cache −15% on `indextypes` is not reproducible now that the exe cache
+absorbs the compile step.
+
+**Default stays LOCKED, and this change does not propose flipping it.** The
+crash that blocked the experiment is gone, but the promotion criterion (≥10
+consecutive clean FULL-suite runs with the gate on, across ≥2 sessions) is
+deliberately out of scope here, and the measured upside on a warm cache is now
+~0 for these categories. Recommended next step for whoever picks it up: run the
+promotion criterion against the full suite, and expect the payoff — if any — on
+COLD runs only.
+
+#### 4.3 The "silent emit failure" — diagnosed, and it was not a compiler bug
+
+During the Stage 1–5 sweeps two observers hit a `blade emit` that exited **1
+with empty stdout, empty stderr, and no `.cpp`**, and that re-ran clean on the
+same binary. Two hypotheses were on the table: a mute exit path in the compiler,
+or a shared-output-directory race between concurrent sweeps. **Both are
+refuted; the cause was external process termination (H3).**
+
+Evidence: reproduced 4 times in 4,700 emits (~1/1175) in a *sequential,
+single-process, private-directory* loop — so not a directory race. Captured to
+files, both streams were **exactly 0 bytes** — not the single newline the only
+candidate compiler path (`Error ""`) would emit. With `BLADE_PHASE_TIMING=1` the
+truncation point differed per failure (once mid-codegen, once mid-typecheck), so
+the process was vanishing mid-pipeline rather than returning 1 from a dispatch
+arm; `Process.ExitCode` was exactly `0x00000001` (not a crash NTSTATUS), and the
+Windows Application event log had no WER/crash entry in the window — ruling out
+stack overflow, unhandled exception and FailFast. The control experiment closed
+it: `taskkill /F` against a live `blade emit` reproduces the signature byte for
+byte. `taskkill /F /IM Blade.exe` — this repo's own remedy for MSB3027 build
+locks — matches by image name and therefore kills **every** `Blade.exe` on the
+machine, including sibling worktrees' running compilers; sibling worktrees were
+rebuilt inside the probe window. See the §2 protocol note.
+
+A directly-tested non-cause: 900 concurrent emits across three regimes (6
+workers in private dirs, 6 in one shared dir, 6 writing the *same* `.cpp` path)
+produced 0 failures.
+
+What still changed, as hardening rather than as a fix (none of it would have
+prevented a killed process): every CLI path that could exit non-zero while
+printing nothing is now loud — `Render.renderAll` returns `""` for an empty
+diagnostic list, which made each `eprintfn "%s" e; 1` site a potential mute
+exit, so those now fall back to a BL9001 internal-error report; the three
+`printUsage (); 1` arms now put their reason on **stderr** (a stderr-only sweep
+saw nothing before); the top-level ICE boundary falls back to the exception type
+name when `Message` is empty; and `deployRuntimeHeaders` tolerates a concurrent
+writer (re-check content, retry, re-raise only if the file is genuinely wrong)
+so a truncated include can never reach g++. Not proven, and labelled as such:
+no input was ever found that actually produces `Error ""`, and no
+shared-directory race was ever observed.
 
 ### Stage 5 — Profile-gated follow-ups (instrument first, act on data)
 

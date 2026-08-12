@@ -146,6 +146,37 @@ let private strictPinFailure (strictPins: bool) (useColor: bool)
                         "--strict-pins: an unpinned deduction that would change storage fails the build. Add the pin shown above, or drop --strict-pins for the default dense-until-pinned behavior.")
             Some (Blade.Diagnostics.Render.renderAll useColor sm ds)
 
+/// EVERY non-zero exit must carry a diagnostic the user can act on: a compiler
+/// that refuses a program and says nothing is indistinguishable from a crashed
+/// one. The failure strings the compile driver hands back are
+/// `Render.renderAll` output, and `renderAll` of the EMPTY list is the EMPTY
+/// STRING -- a rendered diagnostic is never empty, since `render` always emits
+/// a severity header, so the empty string can only mean the list was empty.
+/// Printing that as-is exits 1 with a blank stderr and no .cpp, which is
+/// exactly the mute failure this guard exists to prevent.
+///
+/// A non-empty message is printed byte for byte, as before; only the
+/// nothing-to-say case changes, and it becomes a BL9001 internal error.
+let private reportFailure (message: string) : int =
+    if String.IsNullOrWhiteSpace message then
+        let useColor = not Console.IsErrorRedirected
+        let d =
+            Blade.Diagnostics.Codes.ice
+                "the compilation failed but recorded no diagnostic, so there is nothing to \
+                 report about your program. Re-run with --verbose and please report the input"
+        eprintfn "%s" (Blade.Diagnostics.Render.render useColor None d)
+    else
+        eprintfn "%s" message
+    1
+
+/// Argument-shape failure: the usage text goes to stdout as before, but the
+/// REASON goes to stderr, so a caller that only captures stderr (every sweep
+/// script) sees why the invocation was rejected instead of an empty exit 1.
+let private usageFailure (reason: string) : int =
+    eprintfn "error: %s" reason
+    printUsage ()
+    1
+
 /// Compile a .edgi file to C++ source string
 let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<string * string list, string> =
     if not (File.Exists filePath) then
@@ -304,9 +335,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
     match mpiRanks with
     | None ->
         match compileToExe filePath None verbose strictPins with
-        | Error e ->
-            eprintfn "%s" e
-            1
+        | Error e -> reportFailure e
         | Ok exePath ->
             match runExecutable exePath with
             | Error e ->
@@ -319,9 +348,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
         CodeGen.setMpiEmitMode true
         try
             match compileToExe filePath None verbose strictPins with
-            | Error e ->
-                eprintfn "%s" e
-                1
+            | Error e -> reportFailure e
             | Ok exePath ->
                 match runExecutableMpi ranks exePath with
                 | Error e ->
@@ -639,8 +666,7 @@ let runCliSmokeTests () : TH.BlockResult =
 /// Type-check a file without generating code
 let checkFile (filePath: string) (strictPins: bool) : int =
     if not (File.Exists filePath) then
-        eprintfn "File not found: %s" filePath
-        1
+        reportFailure (sprintf "File not found: %s" filePath)
     else
         let source = File.ReadAllText(filePath)
         let useColor = not Console.IsErrorRedirected
@@ -653,8 +679,7 @@ let checkFile (filePath: string) (strictPins: bool) : int =
         | Error e ->
             let sm = Blade.Diagnostics.SourceMap.ofSources [ filePath, source ]
             let d = Blade.Parser.diagnosticOfParseError (Some filePath) e
-            eprintfn "%s" (Blade.Diagnostics.Render.render useColor (Some sm) d)
-            1
+            reportFailure (Blade.Diagnostics.Render.render useColor (Some sm) d)
         | Ok entryProgram ->
         let resolution =
             match entryProgram.Modules with
@@ -666,23 +691,20 @@ let checkFile (filePath: string) (strictPins: bool) : int =
             | _, files -> Blade.ModuleResolve.sourcesOf files
         let sm = Blade.Diagnostics.SourceMap.ofSources sources
         if not (List.isEmpty resolution.Errors) then
-            eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) resolution.Errors)
-            1
+            reportFailure (Blade.Diagnostics.Render.renderAll useColor (Some sm) resolution.Errors)
         else
         match (match resolution.Files with
                | [ _single ] -> Ok entryProgram
                | files -> Blade.ModuleResolve.parseResolvedFiles files) with
         | Error d ->
-            eprintfn "%s" (Blade.Diagnostics.Render.render useColor (Some sm) d)
-            1
+            reportFailure (Blade.Diagnostics.Render.render useColor (Some sm) d)
         | Ok program ->
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
                 // S1: warnings earned before the error are printed, not dropped.
                 printTypeCheckWarnings useColor (Some sm) false
                 let ds = errors |> List.map Blade.TypeEnv.diagnosticOfCompileError
-                eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-                1
+                reportFailure (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
             | Ok _ ->
                 match strictPinFailure strictPins useColor (Some sm) with
                 | Some rendered ->
@@ -691,8 +713,7 @@ let checkFile (filePath: string) (strictPins: bool) : int =
                     // check`) so each is reported exactly once, as an error;
                     // the twins are BL4010 by construction so filtering on the code is exact.
                     printTypeCheckWarnings useColor (Some sm) true
-                    eprintfn "%s" rendered
-                    1
+                    reportFailure rendered
                 | None ->
                     printTypeCheckWarnings useColor (Some sm) false
                     printfn "OK"
@@ -701,19 +722,25 @@ let checkFile (filePath: string) (strictPins: bool) : int =
 /// Emit C++ source to file or stdout
 let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : int =
     match compileFile filePath verbose strictPins with
-    | Error e ->
-        eprintfn "%s" e
-        1
+    | Error e -> reportFailure e
     | Ok (cppCode, _) ->
         match outputPath with
         | Some outPath ->
-            File.WriteAllText(outPath, cppCode)
-            // Ship the runtime headers next to the emitted .cpp so `g++ file.cpp` compiles as-is (no -I flag needed).
-            let outDir = Path.GetDirectoryName(Path.GetFullPath(outPath))
-            CodeGen.deployRuntimeHeaders (if String.IsNullOrEmpty outDir then "." else outDir)
-            if verbose then
-                eprintfn "[Emit] %s" outPath
-            0
+            // The write and the header deploy are the two ways an emit can fail
+            // for a reason that is not about the program (read-only path, full
+            // disk, a concurrent writer holding the destination). Name the file
+            // rather than letting the top-level boundary report a bare .NET
+            // message with no path in it.
+            try
+                File.WriteAllText(outPath, cppCode)
+                // Ship the runtime headers next to the emitted .cpp so `g++ file.cpp` compiles as-is (no -I flag needed).
+                let outDir = Path.GetDirectoryName(Path.GetFullPath(outPath))
+                CodeGen.deployRuntimeHeaders (if String.IsNullOrEmpty outDir then "." else outDir)
+                if verbose then
+                    eprintfn "[Emit] %s" outPath
+                0
+            with ex ->
+                reportFailure (sprintf "Failed to write %s: %s" outPath ex.Message)
         | None ->
             printf "%s" cppCode
             0
@@ -2290,7 +2317,7 @@ let private dispatchTest (rest: string list) : int =
             let r = runTestCategoryFull name tests "./generated_cpp_tests"
             if r.Failed = 0 then 0 else 1
         | None -> eprintfn "Unknown test category: %s" cat; 1
-    | _ -> printUsage (); 1
+    | _ -> usageFailure (sprintf "unrecognized test invocation: test %s" (String.concat " " rest))
 
 /// Top-level command dispatch.
 let private dispatchInner (args: string[]) : int =
@@ -2374,17 +2401,17 @@ let private dispatchInner (args: string[]) : int =
         parse rest
         match bad, file with
         | Some msg, _ -> eprintfn "Error: %s" msg; 1
-        | None, None -> printUsage (); 1
+        | None, None -> usageFailure "run needs a source file (e.g. run prog.blade)"
         | None, Some f -> runFile f verbose mpiRanks strictPins
 
     | [| "compile"; file |] ->
         match compileToExe file None false strictPins with
         | Ok path -> printfn "%s" path; 0
-        | Error e -> eprintfn "%s" e; 1
+        | Error e -> reportFailure e
     | [| "compile"; file; "-o"; output |] ->
         match compileToExe file (Some output) false strictPins with
         | Ok path -> printfn "%s" path; 0
-        | Error e -> eprintfn "%s" e; 1
+        | Error e -> reportFailure e
 
     | [| "emit"; file |] -> emitFile file None false strictPins
     | [| "emit"; file; "-o"; output |] -> emitFile file (Some output) false strictPins
@@ -2410,7 +2437,7 @@ let private dispatchInner (args: string[]) : int =
     | [||] -> runFullSuite defaultFullSuiteOptions
     | [| "--full" |] -> runFullSuite defaultFullSuiteOptions
     | [| "--help" |] -> printUsage (); 0
-    | _ -> printUsage (); 1
+    | _ -> usageFailure (sprintf "unrecognized command: %s" (String.Join(" ", args)))
 
 /// Top-level error boundary: turns any escaping exception into a rendered
 /// diagnostic on stderr (exit 1) instead of a raw .NET stack trace. A typed
@@ -2427,7 +2454,14 @@ let dispatch (args: string[]) : int =
         eprintfn "%s" (Blade.Diagnostics.Render.render useColor None d)
         1
     | ex ->
-        let d = Blade.Diagnostics.Codes.ice ex.Message
+        // An exception is allowed to carry an empty Message (a bare `raise
+        // (Exception())`, some interop failures); falling back to the type name
+        // keeps the ICE from reading as "internal compiler error: " with
+        // nothing after the colon.
+        let detail =
+            if System.String.IsNullOrWhiteSpace ex.Message then ex.GetType().FullName
+            else ex.Message
+        let d = Blade.Diagnostics.Codes.ice detail
         let useColor = not System.Console.IsErrorRedirected
         eprintfn "%s" (Blade.Diagnostics.Render.render useColor None d)
         if verbose then eprintfn "%s" (ex.ToString())
