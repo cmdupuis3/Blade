@@ -37,6 +37,11 @@
          these directly. -->
     <Compile Include="src/Diagnostics.fs" />
     <Compile Include="src/Types.fs" />
+    <!-- Env-gated compiler perf counters (docs/plan-compile-speed.md Stage 5).
+         Dependency-free, and deliberately in FRONT of the pipeline: its two
+         instrumented consumers (IR.fs and Unify.fs) sit ~175 entries apart in
+         this list, so anything later than here is invisible to one of them. -->
+    <Compile Include="src/PerfCounters.fs" />
     <Compile Include="src/Lexer.fs" />
     <Compile Include="src/Parser.fs" />
     <Compile Include="src/Grad.fs" />

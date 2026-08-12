@@ -424,6 +424,73 @@ typeOf/exprToCpp quadratics specifically.
 Byte-identity gate applies to every 5.2 change; counters themselves must be
 output-neutral (stderr only, gated off by default).
 
+**Implemented 2026-08-12.** Counters first (`src/PerfCounters.fs`,
+`BLADE_PERF_COUNTERS=1`, `[perf] name: value` on stderr beside `[phase]`), then
+only the one candidate whose numbers cleared its bar.
+
+`PerfCounters` is an int64[] behind a plain static `bool`: a disabled increment
+is one field load and a predicted branch, no getenv (the gate is refreshed at
+`Cli.compileFile` and the three `Lowering.lower*Diag` entries). Instrumented:
+`Subst.Resolve` (invocations; chain walks, hops, longest chain -- the `IRTInfer`
+self-recursion became an equivalent tail-recursive member so the hop count is
+observable without changing what it returns) and `IR.typeOf` (invocations,
+`CarriedType` fast-path hits, memo hits), plus `IR.countProgramNodes` for the
+calls-per-node ratio.
+
+Measurement set -- min of 5 `blade emit` runs per file, JIT dev build, counters
+off for the timings and on for the counts. The two chain probes are one
+un-let-bound expression of n `x * k` terms:
+
+| Probe | IR nodes | typeOf calls | calls/node | Resolve calls | chains | max chain | codegen before | codegen after | total before | total after |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `examples/lsdft.blade` | 153 | 296 | 1.9 | 1532 | 346 | **2** | 220 ms | 220 ms | 1006 ms | 1004 ms |
+| `examples/01_weather_stations.blade` | 418 | 560 | 1.3 | 5233 | 531 | **2** | 307 ms | 308 ms | 1021 ms | 1028 ms |
+| 2000 flat top-level lets | 6003 | 4002 | 0.7 | 30015 | 0 | 0 | 90 ms | 79 ms | 577 ms | 552 ms |
+| one 800-statement block | 3205 | 1611 | 0.5 | 11234 | 0 | 0 | 127 ms | 118 ms | 645 ms | 611 ms |
+| chain, 200 terms | 800 | 80398 | 100.5 | 3403 | 0 | 0 | 80 ms | 75 ms | 443 ms | 442 ms |
+| chain, 500 terms | 2000 | 500998 | 250.5 | 8503 | 0 | 0 | 96 ms | 76 ms | 480 ms | 446 ms |
+| chain, 1000 terms | 4000 | 2001998 | 500.5 | 17003 | 0 | 0 | 165 ms | 84 ms | 583 ms | 487 ms |
+| chain, 2000 terms | 8000 | 8003998 | 1000.5 | 34003 | 0 | 0 | 376 ms | **98 ms** | 875 ms | 592 ms |
+
+("before" = this branch without Stage 5. Both sweeps ran back-to-back on the
+same quiet machine with parse times agreeing within 3%; an earlier pair was
+thrown out for machine-load drift -- a concurrently building agent moved parse
+time 1.8x, which is larger than everything measured here. typeOf counts are the
+*before* traffic: after the memo, chain-2000 falls 8,003,998 -> 15,994.)
+
+Verdicts, one per candidate:
+
+- **`Subst.Resolve` path compression -- CLOSED, bar not met.** Longest inference
+  chain anywhere: **2 hops** (both examples; <= 1 across all 199 corpus programs
+  swept), 0.39-0.89 hops per chain walk, and zero chain walks on every
+  synthetic. The bar was a max chain > ~16 or superlinear hop growth. There is
+  nothing to compress, so the travel-with-the-bind audit of `arityConstraints` /
+  `rankLowerBounds` / `literalDefaults` / `polymorphicIds` was not needed and is
+  not owed.
+- **`typeOf` memoization -- IMPLEMENTED.** typeOf traffic on the chain probes is
+  exactly 2n^2 (100x the node count at n=200, 1000x at n=2000), far past the
+  "≳5x node count" bar, and the wall clock bends with it. A
+  `ConditionalWeakTable<IRExpr, IRType>` sits BEHIND the `CarriedType` fast path
+  (a table probe would cost more than a carried answer), so only reconstructing
+  arms consult it. Soundness: every arm is a pure function of node structure
+  except `IRFieldAccess`, which reads the struct-fields cache -- so the memo is
+  dropped whenever `setStructFieldsCache` installs a new generation, and an
+  entry can only outlive a generation in which nothing changed. Real programs
+  are unaffected either way (1.3-1.9 calls/node), but it is not synthetic-only:
+  `index-types/049_decompact_anti_interior_r5` runs 35.8 calls/node and takes
+  979 memo hits.
+- **`validateIR` walk fusion -- CLOSED, as predicted.** Its share of a compile:
+  1.5% (lsdft, 01_weather_stations), 2.2% (800-statement block), 3.5% (2000 flat
+  lets) -- inside the estimated 2-6%. The only probe where it grows (9.5% at
+  chain-2000) is the degenerate one the memo already fixed.
+
+Byte-identity: 281 files (`tests/corpus/basic`, `tests/corpus/index-types`, both
+examples) x cpp/stdout/stderr/exit plus the deployed headers = 1055 artifacts,
+zero diffs before vs after. With `BLADE_PERF_COUNTERS=1` the only change is
+added `[perf]` lines on stderr (199 files -- the ones that reach codegen), never
+a `.cpp` byte. `blade test basic` 41/0/0 and `blade test indextypes` 238/0/0,
+both unchanged from the pre-Stage-5 build.
+
 ## 5. Expected vs achieved (Stages 0–3 landed 2026-08-12)
 
 | Scenario | Before | Predicted after 1–3 | Achieved (JIT dev build) | Mechanism |

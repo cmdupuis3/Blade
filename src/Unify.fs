@@ -490,11 +490,32 @@ type Subst() =
         typeVarScope <- fst saved
         knownTypeVarNames <- snd saved
 
+    /// Instrumented twin of the `IRTInfer` hop below, used ONLY when
+    /// `PerfCounters.enabled` (docs/plan-compile-speed.md Stage 5): the same
+    /// walk -- follow each bound inference variable, stop at the first unbound
+    /// id or non-infer type and resolve that structurally -- with the number of
+    /// indirections recorded. A member rather than a local `let rec` so the
+    /// measurement allocates no closure, and tail-recursive so it costs no more
+    /// stack than the hop it mirrors.
+    member private this.WalkInferChain(t: IRType, hops: int) : IRType =
+        match t with
+        | IRTInfer id ->
+            match this.TryFind id with
+            | Some next -> this.WalkInferChain(next, hops + 1)
+            | None ->
+                PerfCounters.resolveChain hops
+                t
+        | other ->
+            PerfCounters.resolveChain hops
+            this.Resolve other
+
     /// Recursively resolve a type through the substitution.
     /// Applies rank-0 collapse: Array<T, (no indices)> -> Scalar T.
     member this.Resolve(ty: IRType) : IRType =
+        if PerfCounters.enabled then PerfCounters.resolveCall ()
         match ty with
         | IRTInfer id ->
+            if PerfCounters.enabled then this.WalkInferChain(ty, 0) else
             match this.TryFind id with
             | Some ty' -> this.Resolve ty'
             | None -> ty

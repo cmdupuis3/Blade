@@ -3960,6 +3960,19 @@ let rebuildWith (expr: IRExpr) (children: IRExpr list) : IRExpr =
     let (ExprShape (_, rebuild)) = expr
     rebuild children
 
+/// Expression-node count of a lowered program: every binding value plus every
+/// function body, counted through `childrenOf`. Measurement support only
+/// (docs/plan-compile-speed.md Stage 5 -- the "typeOf calls vs IR node count"
+/// ratio), so it is called from the driver ONLY when PerfCounters are on and
+/// costs nothing otherwise.
+let countProgramNodes (program: IRProgram) : int64 =
+    let rec count (e: IRExpr) : int64 =
+        childrenOf e |> List.fold (fun acc c -> acc + count c) 1L
+    program.Modules
+    |> List.sumBy (fun m ->
+        (m.Bindings |> List.sumBy (fun b -> count b.Value))
+        + (m.Functions |> List.sumBy (fun f -> count f.Body)))
+
 /// Pattern bindings: IRPatVar introduces an IRId visible in the case body
 /// and (if present) the guard. Nested patterns (tuple, cons, variant
 /// payload) accumulate all their child bindings.
@@ -5540,6 +5553,37 @@ let private getStructFieldsCache () : System.Collections.Generic.Dictionary<stri
         fresh
     else v
 
+// typeOf memoization (docs/plan-compile-speed.md Stage 5)
+//
+// WHY: `typeOf` reconstructs a node's type from its children, so one call on
+// the root of a deep un-let-bound expression costs O(depth) -- and every pass
+// that asks each node in turn therefore pays O(n^2). Measured on the Stage 5
+// chain probes (one expression, n `x * k` terms): typeOf calls come out at
+// EXACTLY 2n^2 (n=200 -> 80,398 calls over 800 IR nodes = 100x the node
+// count; n=2000 -> 8,003,998 over 8,000 nodes = 1000x). Real programs sit at
+// 1.3-1.9x (lsdft, 01_weather_stations), so this is purely a cliff-remover.
+//
+// SOUNDNESS: every `typeOf` arm is a pure function of the node's structure
+// with ONE exception -- `IRFieldAccess` consults `tryLookupFieldType`, i.e.
+// the struct-fields cache, which is (re)populated per module at
+// liftInlineFormsModule entry and again at codegen entry. A result computed
+// before a population would otherwise be served after it. So the memo is
+// dropped whenever that cache is set (below): entries can only outlive a
+// generation in which nothing changed. Everything else typeOf touches
+// (promoteElemType, mkArrayLike, flattenTupleLeaves, classifyCompound...,
+// orbitBaseExtent) is pure, and IRExpr values are immutable -- a rebuilt node
+// is a NEW reference and therefore a new key.
+//
+// Keyed by REFERENCE (ConditionalWeakTable), so there is no structural
+// hashing cost and no lifetime extension: entries die with their nodes.
+let mutable private typeOfMemo =
+    System.Runtime.CompilerServices.ConditionalWeakTable<IRExpr, IRType>()
+
+/// Drop every memoized `typeOf` result. See the note above: this is what keeps
+/// the memo honest across struct-fields-cache generations.
+let private invalidateTypeOfMemo () =
+    typeOfMemo <- System.Runtime.CompilerServices.ConditionalWeakTable<IRExpr, IRType>()
+
 let setStructFieldsCache (types: IRTypeDef list) =
     // Create a fresh Dictionary for this async context -- do not reuse and
     // .Clear() a shared instance, since other tasks may hold the same
@@ -5550,6 +5594,9 @@ let setStructFieldsCache (types: IRTypeDef list) =
         | IRTDStruct (name, fields) -> cache.[name] <- fields
         | _ -> ()
     structFieldsCacheStorage.Value <- cache
+    // A new struct-fields generation invalidates every reconstruction that
+    // could have consulted the old one (typeOf's IRFieldAccess arm).
+    invalidateTypeOfMemo ()
 
 // Declaration spans, by top-level name.
 //
@@ -5711,8 +5758,40 @@ let private unreachableTyping (family: string) (expr: IRExpr) : 'a =
 /// The canonical expression type reconstruction. See the section comment
 /// above for how this relates to exprTypeIfKnown and CodeGen.inferExprType.
 let rec typeOf (expr: IRExpr) : IRType =
+    // Stage 5 instrumentation (docs/plan-compile-speed.md): total invocations,
+    // and how many of them the CarriedType fast path answers outright. The
+    // difference is the reconstructing traffic the memo below pays for.
+    if PerfCounters.enabled then PerfCounters.typeOfCall ()
+    match expr with
+    // Node-carried types answer without touching a child, so they stay AHEAD
+    // of the memo: a table probe would cost more than the answer.
+    | CarriedType ty ->
+        if PerfCounters.enabled then PerfCounters.typeOfCarried ()
+        ty
+    | _ ->
+        // Reconstructing arms only (see the memo note above setStructFieldsCache).
+        match typeOfMemo.TryGetValue expr with
+        | true, ty ->
+            if PerfCounters.enabled then PerfCounters.typeOfMemoHit ()
+            ty
+        | _ ->
+            let ty = typeOfReconstruct expr
+            // AddOrUpdate, not Add: two threads reconstructing the same node
+            // compute the same (deterministic) answer, so a race is benign --
+            // but Add would throw on the duplicate key.
+            typeOfMemo.AddOrUpdate(expr, ty)
+            ty
+
+/// `typeOf`'s reconstruction body. Call `typeOf`, never this: the memo and the
+/// carried-type fast path both live in the wrapper above, and the recursive
+/// calls inside here deliberately go back through it so every intermediate
+/// result is memoized once.
+and private typeOfReconstruct (expr: IRExpr) : IRType =
     match expr with
     // -- Node-carried types (shared with exprTypeIfKnown) --
+    // Unreachable through `typeOf` (the wrapper answers these), but kept so
+    // this match stays exhaustive the same way it always was -- the coverage
+    // tail below attributes IRVar/IRParam/... to exactly this arm.
     | CarriedType ty -> ty
 
     // -- Pass-throughs: the type of one distinguished child --

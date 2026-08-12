@@ -2415,6 +2415,7 @@ let private lowerCheckedProgram (program: Program)
 /// (when known) is stamped into spans and keys the SourceMap.
 let lowerDiag (fileName: string option) (source: string)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    Blade.PerfCounters.refresh ()
     let key = defaultArg fileName "<input>"
     let sm = Blade.Diagnostics.SourceMap.ofSources [ key, source ]
     let sw = System.Diagnostics.Stopwatch.StartNew()
@@ -2437,6 +2438,7 @@ let lowerDiag (fileName: string option) (source: string)
 /// absolute path; see the note there.
 let lowerDiagMulti (sources: (string * string) list)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    Blade.PerfCounters.refresh ()
     let sm = Blade.Diagnostics.SourceMap.ofSources sources
     let sw = System.Diagnostics.Stopwatch.StartNew()
     let parsed = Blade.ModuleResolve.parseResolved sources
@@ -2461,6 +2463,7 @@ let lowerDiagMulti (sources: (string * string) list)
 /// layer existed.
 let lowerFileDiag (filePath: string) (source: string)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    Blade.PerfCounters.refresh ()
     let selfSm () = Blade.Diagnostics.SourceMap.ofSources [ filePath, source ]
     let sw = System.Diagnostics.Stopwatch.StartNew()
     let parsedEntry = Blade.Parser.parseProgramWithFile (Some filePath) source

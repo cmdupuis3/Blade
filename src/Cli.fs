@@ -151,6 +151,10 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
     if not (File.Exists filePath) then
         Error (sprintf "File not found: %s" filePath)
     else
+        // Env-gated compiler perf counters (BLADE_PERF_COUNTERS=1); refreshed
+        // here so the gate is live before the front end runs. See
+        // docs/plan-compile-speed.md Stage 5.
+        Blade.PerfCounters.refresh ()
         let source = File.ReadAllText(filePath)
         let testName = Path.GetFileNameWithoutExtension(filePath)
         // Env-gated phase timing (BLADE_PHASE_TIMING=1); see docs/plan-compile-speed.md.
@@ -214,6 +218,10 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
                 mark "post-codegen-scans"
                 if timing then
                     eprintfn "[phase] compileFile total: %d ms (cpp %d chars)" swAll.ElapsedMilliseconds cppCode.Length
+                if Blade.PerfCounters.enabled then
+                    // The IR walk is measurement-only, hence inside the gate.
+                    Blade.PerfCounters.noteIRNodes (IR.countProgramNodes ir)
+                    Blade.PerfCounters.report ()
                 if verbose then
                     for w in warnings do
                         eprintfn "[Warning] %s" w
