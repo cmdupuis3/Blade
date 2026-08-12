@@ -71,13 +71,31 @@ let optFlags () = "-O3" + marchFlag () + fpContractFlag ()
 
 type HostPlatform = PWindows | PLinux | PMacOS
 
-type Capabilities = {
-    Platform : HostPlatform
-    HasGpp   : bool
-    HasNvcc  : bool
-    HasCl    : bool      // cl.exe on PATH (the host compiler nvcc drives on Windows)
-    HasGpu   : bool      // a runnable CUDA device is present
-}
+/// The environment's toolchain capabilities.
+///
+/// Every field is backed by its OWN memoized probe, forced on first read and
+/// never again in the process. Property syntax at the call sites is unchanged
+/// (`caps.HasGpp`), but the cost model is: a consumer pays only for the tools
+/// it actually asks about. That matters because the probes are subprocess
+/// launches on wildly different budgets (measured: g++ 167 ms, nvcc 138 ms,
+/// cl 52 ms, `nvidia-smi -L` 510 ms) while the overwhelmingly common consumer
+/// -- the CpuOnly / RequiresMpi arms of `resolveCompile`, i.e. every plain
+/// `blade compile` / `blade run` -- reads `HasGpp` and nothing else. Probing
+/// all four eagerly cost ~700 ms on every such invocation.
+///
+/// A "report the environment" consumer (the harness's end-of-run banner) does
+/// legitimately read all four, and pays for all four, once.
+[<Sealed>]
+type Capabilities (platform: HostPlatform,
+                   gpp: Lazy<bool>,
+                   nvcc: Lazy<bool>,
+                   cl: Lazy<bool>,
+                   gpu: Lazy<bool>) =
+    member _.Platform = platform
+    member _.HasGpp   = gpp.Value
+    member _.HasNvcc  = nvcc.Value
+    member _.HasCl    = cl.Value      // cl.exe on PATH (the host compiler nvcc drives on Windows)
+    member _.HasGpu   = gpu.Value     // a runnable CUDA device is present
 
 /// Backend requirement inferred from generated source. `RequiresCuda` when
 /// codegen emitted at least one device kernel; `RequiresMpi` when the program
@@ -140,20 +158,35 @@ let private probeGpu () : bool =
         proc.ExitCode = 0 && out.Contains("GPU")
     with _ -> false
 
-let detectCapabilities () : Capabilities =
-    let platform =
-        if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then PWindows
-        elif RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then PMacOS
-        else PLinux
-    {
-        Platform = platform
-        HasGpp   = probeTool "g++" "--version"
-        HasNvcc  = probeTool "nvcc" "--version"
-        HasCl    = (platform = PWindows) && probeTool "cl" "/?"
-        HasGpu   = probeGpu ()
-    }
+/// The host platform. Pure runtime introspection -- no subprocess -- so it is
+/// computed eagerly wherever a Capabilities is built.
+let private hostPlatform () =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then PWindows
+    elif RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then PMacOS
+    else PLinux
 
-/// Capabilities are environment-global; detect once, lazily.
+// One memoized probe per tool, at module level so the memo outlives any
+// individual Capabilities value (repeat `detectCapabilities ()` calls share
+// them). `lazy` in F# is LazyThreadSafetyMode.ExecutionAndPublication, which
+// is what the parallel test harness needs: at most one subprocess per tool per
+// process, no matter how many threads ask at once.
+//
+// These stay probes-behind-lazies rather than cached booleans read from the
+// environment: nothing here consults an env var, so the "env gates are
+// functions" rule (marchFlag/fpContractFlag above, LinAlgPatterns' BLAS gate)
+// is untouched -- a harness that pins BLADE_* mid-process still gets the pin
+// honored, because those gates were never part of this record.
+let private gppProbe  : Lazy<bool> = lazy (probeTool "g++" "--version")
+let private nvccProbe : Lazy<bool> = lazy (probeTool "nvcc" "--version")
+let private clProbe   : Lazy<bool> = lazy (hostPlatform () = PWindows && probeTool "cl" "/?")
+let private gpuProbe  : Lazy<bool> = lazy (probeGpu ())
+
+/// Build the capability view. Free to call: it wires up the shared per-tool
+/// lazies and runs no probe by itself.
+let detectCapabilities () : Capabilities =
+    Capabilities(hostPlatform (), gppProbe, nvccProbe, clProbe, gpuProbe)
+
+/// Capabilities are environment-global; one shared view for every consumer.
 let capabilities = lazy (detectCapabilities ())
 
 /// Whether g++ is actually present and runnable on PATH. Delegates to the
@@ -321,13 +354,19 @@ let private copyRuntimeDllBesideExe (searchDirs: string list) (exeFullPath: stri
 /// instead of chasing a broken link): MPI programs, netcdf provider
 /// programs, and extra link inputs (nvcc-built device DLLs) -- each needs
 /// its own MSVC link recipe that no current memcheck consumer exercises.
-let compileCppMemcheck (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
+///
+/// `srcText` is the generated source the caller just wrote to `cppFile`, when
+/// it still has it in memory; `None` falls back to reading the file back.
+let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
     try
         let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
         let exeExt = if onWindows then ".exe" else ".out"
         let cppFullPath = Path.GetFullPath(cppFile)
         let exeFullPath = Path.GetFullPath(Path.ChangeExtension(cppFile, exeExt))
-        let source = try File.ReadAllText cppFullPath with _ -> ""
+        let source =
+            match srcText with
+            | Some t -> t
+            | None -> (try File.ReadAllText cppFullPath with _ -> "")
         if not (List.isEmpty extraLinkInputs) then
             Error "Skipped: memcheck does not support extra link inputs (device DLLs)"
         elif source.Contains "#include <mpi.h>" then
@@ -409,8 +448,14 @@ let compileCppMemcheck (extraLinkInputs: string list) (cppFile: string) (outputD
 /// Under BLADE_MEMCHECK=1 the whole invocation is rerouted to the
 /// Debug+ASan profile instead (codegen already included the matching
 /// blade_memcheck.hpp instrumentation in the same process).
-let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
-    if CodeGen.memcheckEnabled () then compileCppMemcheck extraLinkInputs cppFile outputDir else
+///
+/// `srcText`: the generated source, when the caller still holds the string it
+/// wrote to `cppFile` moments ago. Every backend decision below (netcdf, mpi,
+/// BLAS/LAPACK, cuBLAS device half) is a substring sniff of that same text, so
+/// passing it avoids reading the file back off disk. `None` reads it ONCE and
+/// reuses that one read for all four sniffs.
+let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
+    if CodeGen.memcheckEnabled () then compileCppMemcheck srcText extraLinkInputs cppFile outputDir else
     try
         let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
         let exeFile = Path.ChangeExtension(cppFile, exeExt)
@@ -419,6 +464,15 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         let exeFullPath = Path.GetFullPath(exeFile)
         
         let ompFlag = "-fopenmp"
+
+        // The one view of the generated source every sniff below shares:
+        // handed in by the caller that just wrote it, or read back exactly
+        // once. (This used to be three independent File.ReadAllText calls of
+        // the same file, one per sniff.)
+        let cppText =
+            match srcText with
+            | Some t -> t
+            | None -> (try File.ReadAllText cppFullPath with _ -> "")
 
         // Backstops the Blade type system: implicit float->integer narrowing
         // in generated C++ must be a hard error. -Wnarrowing alone only
@@ -433,14 +487,12 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         //   - NETCDF_DIR set: add -I<dir>\include, link the DLL in <dir>\bin
         //     directly; falls back to -L<dir>\lib -lnetcdf.
         //   - NETCDF_DIR unset: bare -lnetcdf (default MSYS2 pacman install).
-        let needsNetcdf =
-            try (File.ReadAllText cppFullPath).Contains "#include <netcdf.h>" with _ -> false
+        let needsNetcdf = cppText.Contains "#include <netcdf.h>"
 
         // MPI programs include <mpi.h> and call the MPI C API -- the MSYS2
         // mingw-w64 msmpi package puts mpi.h/libmsmpi.a on g++'s default
         // search paths, so a bare -lmsmpi suffices (mirrors -lnetcdf above).
-        let needsMpi =
-            try (File.ReadAllText cppFullPath).Contains "#include <mpi.h>" with _ -> false
+        let needsMpi = cppText.Contains "#include <mpi.h>"
         let mpiFlags = if needsMpi then " -lmsmpi" else ""
         let netcdfFlags =
             if not needsNetcdf then ""
@@ -479,13 +531,12 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         //   - OPENBLAS_DIR set: add -I<dir>\include, link the DLL in
         //     <dir>\bin directly; falls back to -L<dir>\lib -lopenblas.
         //   - OPENBLAS_DIR unset (BLADE_BLAS forced on): bare -lopenblas.
-        let cppTextForSniff = try File.ReadAllText cppFullPath with _ -> ""
-        let usesLinalgShim = cppTextForSniff.Contains "#include \"blade_linalg.hpp\""
+        let usesLinalgShim = cppText.Contains "#include \"blade_linalg.hpp\""
         let blasGateOn = Blade.LinAlgPatterns.blasAvailable ()
         // LAPACK rides the same OpenBLAS install (LAPACKE is bundled) but
         // gets its own sniff arm and define, so a BLAS-only program stays
         // distinguishable from a LAPACK-carrying one; same #error-on-mismatch guarantee as BLAS.
-        let usesLapackShim = cppTextForSniff.Contains "#include \"blade_lapack.hpp\""
+        let usesLapackShim = cppText.Contains "#include \"blade_lapack.hpp\""
         let lapackGateOn = Blade.LinAlgPatterns.lapackAvailable ()
         // Split into a COMPILE half (define + -I, precedes the source) and
         // a LINK half (library, follows it); DEFINES stay per-header
@@ -523,7 +574,7 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         // the source. Handled here rather than at each caller, so every
         // caller gets it without knowing the backend exists.
         let deviceBuild =
-            if cppTextForSniff.Contains cublasShimInclude then
+            if cppText.Contains cublasShimInclude then
                 buildCublasDevice cppFullPath |> Result.map (fun lib -> [lib])
             else Ok []
         match deviceBuild with
@@ -569,9 +620,19 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
     with ex ->
         Error (sprintf "Compilation exception: %s\n%s" ex.Message ex.StackTrace)
 
+/// `compileCppWithExtraSource` for a caller that does not hold the generated
+/// source in memory (it is read back off disk, once).
+let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
+    compileCppWithExtraSource None extraLinkInputs cppFile outputDir
+
+/// Compile a C++ file with g++ (no extra link inputs), passing the generated
+/// source the caller just wrote so the backend sniffs need no disk read.
+let compileCppSource (srcText: string option) (cppFile: string) (outputDir: string) : Result<string, string> =
+    compileCppWithExtraSource srcText [] cppFile outputDir
+
 /// Compile a C++ file with g++ (no extra link inputs).
 let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
-    compileCppWithExtra [] cppFile outputDir
+    compileCppWithExtraSource None [] cppFile outputDir
 
 /// Compile a CUDA (.cu) file with nvcc. nvcc auto-selects the host compiler
 /// (cl.exe on Windows, g++ on Linux). Host-side warning flags are passed
@@ -705,6 +766,20 @@ let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) 
 /// Compiles a generated source file according to its backend requirement,
 /// resolved against the environment's capabilities. A skip is reported as
 /// `Error "Skipped: <reason>"` so downstream skip handling recognizes it.
+/// `srcText` is the generated source the caller just wrote to `srcFile`, when
+/// it still holds it; the g++ arm uses it instead of reading the file back.
+let compileForBackendSource (srcText: string option) (caps: Capabilities) (req: BackendReq) (srcFile: string) (outputDir: string) : Result<string, string> =
+    match resolveCompile caps req with
+    | UseGpp          -> compileCppSource srcText srcFile outputDir
+    // ASan cannot instrument device code, and nvcc's host-side ASan story on
+    // Windows is unsupported; a memcheck run of a CUDA-emitting program is a
+    // skip, not a silently-uninstrumented build.
+    | UseNvcc when CodeGen.memcheckEnabled () ->
+        Error "Skipped: memcheck does not support the CUDA backend"
+    | UseNvcc         -> compileCuda srcFile outputDir
+    | SkipCompile why -> Error ("Skipped: " + why)
+
+/// `compileForBackendSource` for a caller without the source in memory.
 let compileForBackend (caps: Capabilities) (req: BackendReq) (srcFile: string) (outputDir: string) : Result<string, string> =
     match resolveCompile caps req with
     | UseGpp          -> compileCpp srcFile outputDir

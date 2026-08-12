@@ -3,6 +3,23 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <RootNamespace>Blade</RootNamespace>
+    <!-- Ahead-of-time compile the IL when publishing a RID-specific image.
+         Blade is a short-lived batch CLI: on a plain `dotnet build` image every
+         invocation re-JITs an 11.5 MB assembly, and that JIT warm-up is most of
+         the ~435 ms floor a trivial file pays (measured: `check` -32%, `emit`
+         -43% with R2R, emitted C++ hash-identical, so this is packaging, not
+         semantics).
+
+         The RuntimeIdentifier CONDITION is load-bearing, not decoration.
+         ReadyToRun requires a RID, and the SDK's RID inference reacts to a bare
+         `PublishReadyToRun=true` by inferring one for `dotnet build` too, which
+         silently relocates the dev binary from bin/Release/net7.0/Blade.exe to
+         bin/Release/net7.0/win-x64/Blade.exe and breaks every consumer of the
+         documented path. Gating on an explicitly supplied RID keeps the default
+         build byte-for-byte where it was: `dotnet build -c Release` passes no
+         RID, so this property never materializes.
+         See docs/plan-compile-speed.md "Building for speed" for the command. -->
+    <PublishReadyToRun Condition="'$(RuntimeIdentifier)' != ''">true</PublishReadyToRun>
   </PropertyGroup>
 
   <ItemGroup>

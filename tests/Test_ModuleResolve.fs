@@ -339,7 +339,7 @@ let runModuleResolveTests () : BlockResult =
             let cpp = cppOf "si_main" ir
             let cppFile = Path.Combine(outDir, "si_main.cpp")
             File.WriteAllText(cppFile, cpp)
-            match compileForBackend capabilities.Value (inferBackendReq cpp) cppFile outDir with
+            match compileForBackendSource (Some cpp) capabilities.Value (inferBackendReq cpp) cppFile outDir with
             | Error e when isSkipError e -> skip "units_SI_program_computes_the_right_values" e
             | Error e -> check "units_SI_program_computes_the_right_values" false (sprintf "compile: %s" e)
             | Ok exe ->

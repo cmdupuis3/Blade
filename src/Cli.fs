@@ -263,7 +263,9 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
             eprintfn "[Emit] %s" cppFile
         match (match cudaSplitFile with
                | Some cuFile -> compileCudaSplit cuFile cppFile dir
-               | None -> compileForBackend capabilities.Value backendReq cppFile dir) with
+               // cppCode is the exact text just written to cppFile; handing it
+               // over spares the backend sniffs a read-back of what we wrote.
+               | None -> compileForBackendSource (Some cppCode) capabilities.Value backendReq cppFile dir) with
         | Error e ->
             Error (sprintf "Compilation failed:\n%s" e)
         | Ok exePath ->

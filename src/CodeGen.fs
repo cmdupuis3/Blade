@@ -7997,19 +7997,35 @@ let genIncludes () : string list =
 let private cppRuntimeHeaderPath (filename: string) : string =
     System.IO.Path.Combine(System.AppContext.BaseDirectory, "cpp", filename)
 
-/// Read a Blade C++ runtime header from disk. Fails loudly if the build
-/// hasn't copied cpp/ into the output directory -- this is a configuration
-/// error rather than a compiler bug, so the message points at .fsproj.
+/// Memo for `readCppRuntimeHeader`. The cpp/ headers are static files shipped
+/// beside the binary: within one process their contents cannot change, so each
+/// is read from disk at most once however many programs get compiled (the test
+/// harness compiles ~1500 of them, each deploying the same 13 headers,
+/// ~264 KB in total). Concurrent because the harness generates in parallel.
+let private cppRuntimeHeaderCache =
+    System.Collections.Concurrent.ConcurrentDictionary<string, string>()
+
+/// Read a Blade C++ runtime header from disk (memoized). Fails loudly if the
+/// build hasn't copied cpp/ into the output directory -- this is a
+/// configuration error rather than a compiler bug, so the message points at
+/// .fsproj. Deliberately a FUNCTION over a lazily-populated table rather than
+/// an eagerly-built map, so the not-found diagnostic still fires at the first
+/// *use* of a missing header and never for headers nobody asked for.
 let private readCppRuntimeHeader (filename: string) : string =
-    let path = cppRuntimeHeaderPath filename
-    if not (System.IO.File.Exists path) then
-        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf
-            "C++ runtime header not found at: %s\n\
-             The build should copy cpp/%s into the output directory.\n\
-             Check that Blade.fsproj contains a <None Include=\"cpp/%s\">\n\
-             item with <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>."
-            path filename filename)))
-    System.IO.File.ReadAllText path
+    match cppRuntimeHeaderCache.TryGetValue filename with
+    | true, cached -> cached
+    | _ ->
+        let path = cppRuntimeHeaderPath filename
+        if not (System.IO.File.Exists path) then
+            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf
+                "C++ runtime header not found at: %s\n\
+                 The build should copy cpp/%s into the output directory.\n\
+                 Check that Blade.fsproj contains a <None Include=\"cpp/%s\">\n\
+                 item with <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>."
+                path filename filename)))
+        let text = System.IO.File.ReadAllText path
+        cppRuntimeHeaderCache.[filename] <- text
+        text
 
 /// Generate the runtime header file content (read from cpp/nested_array_utilities.hpp).
 /// Main.fs writes the result alongside each test's generated .cpp so
@@ -8104,10 +8120,28 @@ let runtimeHeaderNames : string list =
 /// Deploy every C++ runtime header next to a generated .cpp so its `#include`s
 /// resolve at g++ time with no -I flag. These are pre-existing static files in
 /// cpp/, copied verbatim -- nothing is generated or transformed.
+///
+/// ALL headers are deployed uniformly, unconditionally (see runtimeHeaderNames:
+/// the deploy/cleanup bookkeeping is deliberately not per-program) -- but a
+/// deployment whose destination already holds byte-identical content is not
+/// rewritten. Only the physically redundant write is skipped: rewriting ~264 KB
+/// beside every generated .cpp on every compile re-triggers an antivirus scan
+/// of each file (measured multi-second variance on a one-line `blade compile`)
+/// for no change in what g++ sees.
+///
+/// This preserves the hand-edit workflow: a deployed header edited in place
+/// DIFFERS from the shipped one, so the next `blade run` overwrites it exactly
+/// as before -- "if changed" is a content test, not a timestamp test.
 let deployRuntimeHeaders (outputDir: string) : unit =
     runtimeHeaderNames
     |> List.iter (fun name ->
-        System.IO.File.WriteAllText(System.IO.Path.Combine(outputDir, name), readCppRuntimeHeader name))
+        let dest = System.IO.Path.Combine(outputDir, name)
+        let text = readCppRuntimeHeader name
+        let alreadyDeployed =
+            try System.IO.File.Exists dest && System.IO.File.ReadAllText dest = text
+            with _ -> false
+        if not alreadyDeployed then
+            System.IO.File.WriteAllText(dest, text))
 
 /// Generate includes that reference external header
 let genIncludesExternal () : string list =

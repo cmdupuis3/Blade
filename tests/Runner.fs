@@ -136,14 +136,17 @@ type private FsPipelineOutcome =
     | FpIRValidationError of string list
     | FpIROnly of IRProgram          // compileAndRun = false, no .cpp generated
     /// ir, srcFile, warnings, backend, emitted-#error-guard, codegen refusal
-    /// diagnostics. The guard flag is read off the generated source HERE, while
-    /// it is in memory, because a codegen-stage reject-probe's verdict depends
-    /// on it. The diagnostics are the coded (BL7001) half of the same refusal
-    /// -- drained from codegen's unhandled-node channel, spanned at the
-    /// declaration -- so a `// ERROR: BL7001` pin on a codegen-stage probe is
-    /// checked against a real diagnostic rather than scraped out of g++'s echo
-    /// of the `#error` text.
-    | FpCppGenerated of IRProgram * string * string list * BackendReq * bool * Blade.Diagnostics.Diagnostic list
+    /// diagnostics, generated source. The guard flag is read off the generated
+    /// source HERE, while it is in memory, because a codegen-stage
+    /// reject-probe's verdict depends on it. The diagnostics are the coded
+    /// (BL7001) half of the same refusal -- drained from codegen's
+    /// unhandled-node channel, spanned at the declaration -- so a
+    /// `// ERROR: BL7001` pin on a codegen-stage probe is checked against a
+    /// real diagnostic rather than scraped out of g++'s echo of the `#error`
+    /// text. The source itself rides along for the same reason the guard does:
+    /// the compile step's backend sniffs would otherwise read back off disk the
+    /// file this pipeline just wrote.
+    | FpCppGenerated of IRProgram * string * string list * BackendReq * bool * Blade.Diagnostics.Diagnostic list * string
     | FpGenError of IRProgram * string  // ir was valid but codegen threw
 
 /// `wantDiags`: also recover the CODED diagnostics for a refused program.
@@ -216,7 +219,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                             // them would attribute this test's back-end hole to
                             // whichever test generated next on this flow.
                             let refusalDiags = CodeGen.takeUnhandledIRNodeDiagnostics ()
-                            FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, emittedErrorGuard, refusalDiags)
+                            FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, emittedErrorGuard, refusalDiags, cppCode)
                         with ex ->
                             FpGenError (ir, sprintf "Generation failed: %s" ex.Message)
         outcome, capturedWarnings
@@ -277,7 +280,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
     // "no C++ was produced" must read as "no guard", never as unknown.
     let emittedErrorGuard =
         match pipelineOutcome with
-        | FpCppGenerated (_, _, _, _, guard, _) -> guard
+        | FpCppGenerated (_, _, _, _, guard, _, _) -> guard
         | _ -> false
 
     // Likewise hoisted: the front-end-rejection branch carries the checker's
@@ -287,7 +290,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
     let producedDiags =
         match pipelineOutcome with
         | FpIRError (_, ds) -> ds
-        | FpCppGenerated (_, _, _, _, _, ds) -> ds
+        | FpCppGenerated (_, _, _, _, _, ds, _) -> ds
         | _ -> []
 
     // Hoisted for the same reason: only the generated-source branch can carry
@@ -296,7 +299,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
     // reached codegen must fail, not pass vacuously.
     let producedCodegenWarnings =
         match pipelineOutcome with
-        | FpCppGenerated (_, _, ws, _, _, _) -> ws
+        | FpCppGenerated (_, _, ws, _, _, _, _) -> ws
         | _ -> []
 
     match pipelineOutcome with
@@ -338,7 +341,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
           DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
           WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
           CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
-    | FpCppGenerated (ir, srcFile, _codegenWarnings, backendReq, _, _) ->
+    | FpCppGenerated (ir, srcFile, _codegenWarnings, backendReq, _, _, generatedSrc) ->
         // Codegen warnings are NOT printed here. They rode into
         // `producedCodegenWarnings` above and are judged against the source's
         // `// WARN-CODEGEN:` pins by the verdict; an expected one is silent and
@@ -351,7 +354,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
         // toolchain is resolved from the inferred backend requirement
         // against the environment's capabilities; an unsatisfiable
         // requirement comes back as Error "Skipped: <reason>".
-        let compileResult = compileForBackend caps backendReq srcFile outputDir
+        let compileResult = compileForBackendSource (Some generatedSrc) caps backendReq srcFile outputDir
 
         match compileResult with
         | Error e ->
@@ -989,7 +992,7 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                     failed <- failed + 1
                     failedNames <- failedNames @ [testName]
                 elif gppAvailable then
-                    match compileForBackend capabilities.Value backendReq cppFile outputDir with
+                    match compileForBackendSource (Some cppCode) capabilities.Value backendReq cppFile outputDir with
                     | Error e when isSkipError e ->
                         Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Skip testName e
                         skipped <- skipped + 1

@@ -163,6 +163,7 @@ Everything later cites this output; it also becomes the regression tripwire.
 Add the §1 synthetic-scaling script to the bench notes.
 
 ### Stage 1 — Free constants: packaging + I/O (all S, low risk, ~independent)
+*Implemented (F4/F5/F6/F7). See "Building for speed" below for the packaging half.*
 1. **ReadyToRun** (F4): publish-based packaging with `PublishReadyToRun=true`;
    keep `dotnet build` for dev. Expected: −30–45% on every `check`/`emit`, −0.5 s
    on every `compile`/`run`. Consider later splitting the ~70 test modules out of
@@ -173,6 +174,30 @@ Add the §1 synthetic-scaling script to the bench notes.
 
 Combined expectation: interactive `blade run` on a small program drops from
 ~3.5 s to ~2.1 s of F#-side + orchestration work before touching g++.
+
+#### Building for speed
+
+`dotnet build` stays the dev loop and is deliberately untouched — it produces
+the same `bin/Release/net7.0/Blade.exe` at the same path as before. The fast
+image is a *publish*:
+
+```bash
+dotnet publish Blade.fsproj -c Release -r win-x64 --self-contained false -o out/r2r
+```
+
+`Blade.fsproj` sets `PublishReadyToRun` only when a `RuntimeIdentifier` is
+supplied, so the RID on that command line is what turns it on (`-p:PublishReadyToRun=true`
+is redundant but harmless). The condition is load-bearing: an unconditional
+`PublishReadyToRun=true` makes the SDK infer a RID for plain `dotnet build`
+too, which relocates the dev binary to `bin/Release/net7.0/win-x64/` and breaks
+every consumer of the documented path.
+
+Measured win (§3 F4): `check` −32%, `emit` −43%, `lsdft` compileFile
+1068→591 ms, with hash-identical emitted C++. Re-confirmed on the Stage 1
+tree against `examples/lsdft.blade`: `check` 865→605 ms (−30%), `emit`
+1205→770 ms (−36%), `emit` output byte-identical between the two images. The
+R2R image is ~2× the DLL size (11.5→24.7 MB) and is RID-specific — it is a
+shipping artifact, not a dev one.
 
 ### Stage 2 — Front-end asymptotics (the scaling cliff)
 1. **Lexer append → ResizeArray** (F1). Trivial, byte-identical.
