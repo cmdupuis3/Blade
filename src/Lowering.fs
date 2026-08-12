@@ -2306,7 +2306,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // hash-set is a separate, not-yet-implemented optimization.
         irModule)
 
-    { Modules = irModules }
+    // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out
+    // of a never-instantiated generic keeps that generic's type vars in its
+    // body, and (with concrete params) is not an hmFunc, so no monomorphizer
+    // drops it. Unreachable from any binding, it can only ever be a BL6001.
+    // Must run after EVERY specializing pass -- each can make a function
+    // concrete or mint new references -- and before validateIR.
+    IR.eliminateDeadPolymorphs { Modules = irModules }
 
 // Typecheck warning surfacing (shared by every CLI lane)
 
