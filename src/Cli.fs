@@ -175,6 +175,16 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
                 Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
             | Ok ir ->
                 let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                // A shape that reached codegen with no arm for it. Refuse HERE,
+                // as a coded Blade diagnostic spanned at the declaration --
+                // handing the emitted `BLADE_CODEGEN_ERROR_...` placeholder to
+                // g++ instead reports a Blade back-end gap as an undeclared
+                // C++ identifier. Deliberate codegen refusals are unaffected:
+                // they keep their `#error` guard and their own wording.
+                match CodeGen.takeUnhandledIRNodeDiagnostics () with
+                | (_ :: _) as ds ->
+                    Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+                | [] ->
                 if verbose then
                     for w in warnings do
                         eprintfn "[Warning] %s" w

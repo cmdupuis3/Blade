@@ -219,7 +219,21 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         // Collections
         | TExprTuple es -> TExprTuple (zs es)
         | TExprComplexLit (re, im) -> TExprComplexLit (z re, z im)
-        | TExprArrayLit (es, arrTy) -> TExprArrayLit (zs es, arrTy)
+        // THE LITERAL'S OWN ARRAY TYPE TOO, for TExprApply's reason (see its
+        // ArrayTypes note below). `inferArrayLitType` snapshots the ELEMENT
+        // type off `exprs.[0].Type` at the moment the literal is inferred, so
+        // a literal whose first element is an as-yet-unresolved var --
+        // `lambda(t) -> [t, 2.0 * t]`, where `t` is an unannotated kernel
+        // param resolved later by the apply -- kept that stale var here. The
+        // param itself zonks (via zonkParam), so nothing in the FUNCTION
+        // signature looks wrong; only the literal's ElemType stays open, and
+        // it reaches IR validation as BL6001 "unresolved type variable T?N in
+        // body". Writing `[2.0 * t, t]` instead hid the bug entirely, since
+        // element 0 was then already Float64.
+        | TExprArrayLit (es, arrTy) ->
+            TExprArrayLit (zs es,
+                           { arrTy with ElemType = zt arrTy.ElemType
+                                        IndexTypes = arrTy.IndexTypes |> List.map (zonkIndexType subst) })
         | TExprZip es -> TExprZip (zs es)
         | TExprStack es -> TExprStack (zs es)
         | TExprJoin (es, d) -> TExprJoin (zs es, d)

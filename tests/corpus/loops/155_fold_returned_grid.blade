@@ -1,0 +1,59 @@
+// TEST: Fold And Index A Grid Returned From A Function
+// ============================================================================
+// 150 folds a returned grouped grid INSIDE the function that built it. Hoist
+// the fold to the CALLER and it used to emit uncompilable C++:
+//
+//     __v43 += __v41;                              // '__v41' not declared
+//     double __v47 = __lambda_55_HM_10013_double(__v43, Array<double,1>{...});
+//                                                  // (double, double) params
+//
+// The leading-axis desugar had fired correctly; what collapsed was its SEED.
+// It seeds from `G(0)`, and `G(0)` had typed as a SCALAR -- so the accumulator
+// was a `double`, the identity-copy of the seed row vanished, and the fold
+// kernel's `T^1` params specialized to `double`.
+//
+// ROOT CAUSE, one level down and much more general than folding:
+// `dispatchAppOrIndex` matched on the head's RAW `.Type`. A call to a function
+// with a DEDUCED (unannotated) return type is stamped with the inference var
+// minted at that call site -- the array only ever appears in the
+// substitution -- so every arm (all of which need a concrete ArrayElem /
+// FuncElem) missed, and the catch-all minted a fresh var and returned Ok. That
+// is the whole bug: A PARTIAL INDEX ON SUCH A BINDING TYPED AS A FULL ONE.
+// Annotating the function's return, or the binding, hid it by making the head
+// concrete before it got here -- which is why 150 and 134 never saw it.
+//
+// `cols` below is the shape that reported it. The minimal witness -- a bare
+// partial index, no grouping and no fold -- is 157, split out so the
+// interpreter differential gate can run it (this file uses group_by, which
+// the interpreter skips).
+// ============================================================================
+type Sample = Idx<8>
+
+/// The 150 grid, returned rather than folded in place. Rows are
+/// prodsum(t, v) * (1 + f): per-cell 20 and 148, scaled by f = 0, 1, 2.
+function grid(ts: Array<Float64 like Sample>, vals: Array<Float64 like Sample>) = {
+    let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
+    let gk = group_keys(keys)
+    let gt = group_by(ts, gk)
+    let gv = group_by(vals, gk)
+    method_for(zip(gt, gv)) <@> lambda(trow: T^1, vrow: U^1) ->
+        (method_for(range<Idx<3>>) <@> lambda(f) -> prodsum(trow, vrow) * (1.0 + 1.0 * f)) |> compute
+}
+
+let tim = (method_for(range<Sample>) <@> lambda(i) -> 1.0 * i) |> compute
+let vv  = (method_for(range<Sample>) <@> lambda(i) -> 1.0 * i + 1.0) |> compute
+let cells = grid(tim, vv) |> compute
+// EXPECT: cells = [[20, 40, 60], [148, 296, 444]]
+
+// Leading-axis fold at the CALLER: combine the two cell rows.
+let cols = reduce(cells, lambda(a: T^1, b: T^1) -> a + b)
+// EXPECT: cols = [168, 336, 504]
+
+// The innermost-axis default over the same operand, unchanged.
+let rowsum = reduce(cells, (+))
+// EXPECT: rowsum = [120, 888]
+
+// A partial index straight off the returned grid -- the same read the fold's
+// seed makes, spelled by hand. See 157 for the grouping-free witness.
+let cell0 = cells(0)
+// EXPECT: cell0 = [20, 40, 60]

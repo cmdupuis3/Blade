@@ -1,0 +1,51 @@
+// TEST: Row Map Returning An Array Literal Of Param Expressions
+// ============================================================================
+// RANK-RAISING MAP, part 2: the same shape as 151, but the literal's elements
+// DEPEND on the kernel parameter. That died one phase earlier, at IR
+// validation:
+//
+//     error[BL6001]: in function '__lambda_11': unresolved type variable T?N
+//                    in body
+//
+// `inferArrayLitType` snapshots the ELEMENT type off `exprs.[0].Type` at the
+// moment the literal is inferred. With an unannotated kernel param, element 0
+// of `[t, 2.0 * t]` is still an open inference var there; the param itself is
+// resolved moments later by the apply and zonks fine, but Zonk's
+// `TExprArrayLit` arm passed the literal's OWN array type through untouched,
+// so the stale var survived into the IR.
+//
+// Order-sensitivity is why this hid: `[2.0 * t, t]` (below) was always fine,
+// because element 0 was already Float64 by the time the literal was typed.
+// Both orders are pinned, and so is the annotated spelling.
+// ============================================================================
+let ts: Array<Float64 like Idx<4>> = [0.0, 1.0, 2.0, 3.0]
+
+// Leading element is the bare param: the shape that reached BL6001.
+let g = (ts <@> lambda(t) -> [t, 2.0 * t]) |> compute
+// EXPECT: g = [[0, 0], [1, 2], [2, 4], [3, 6]]
+
+// Reversed: element 0 pins the element type on its own. Always compiled;
+// pinned so a regression cannot pass by choosing this order.
+let gr = (ts <@> lambda(t) -> [2.0 * t, t]) |> compute
+// EXPECT: gr = [[0, 0], [2, 1], [4, 2], [6, 3]]
+
+// Annotated param: the third spelling, which resolved the element type
+// eagerly and so also compiled before.
+let ga = (ts <@> lambda(t: Float64) -> [t, 2.0 * t]) |> compute
+// EXPECT: ga = [[0, 0], [1, 2], [2, 4], [3, 6]]
+
+// A NESTED literal raises the rank by two. Its leaves tile the destination
+// row in row-major order, so the pool layout must match the rank-3 type
+// (printed flat, per the rank-3 convention).
+let g3 = (ts <@> lambda(t) -> [[t, t + 1.0], [t + 2.0, t + 3.0]]) |> compute
+// EXPECT: g3 = [0, 1, 2, 3, 1, 2, 3, 4, 2, 3, 4, 5, 3, 4, 5, 6]
+
+// THE COMPOSITION this shape exists for: accumulate a small vector per cell in
+// one pass, then combine ADJACENT cells with a halo of [0, 1]. That is a 50%-
+// overlapped segmentation expressed as a single sliding window over half-width
+// cells, which is what collapses an even/odd family of overlapping passes into
+// one and computes each shared per-sample quantity exactly once.
+let pair0 = method_for(halo<Idx<4>, [0, 1]>) <@> lambda(w) -> g(w(0), 0) + g(w(1), 0) |> compute
+// EXPECT: pair0 = [1, 3, 5]
+let pair1 = method_for(halo<Idx<4>, [0, 1]>) <@> lambda(w) -> g(w(0), 1) + g(w(1), 1) |> compute
+// EXPECT: pair1 = [2, 6, 10]

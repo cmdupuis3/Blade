@@ -2198,11 +2198,39 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     let mutable currentExports = Map.empty<string, ModuleExport>
     let mutable irModules = []
     
-    let rawModules = 
+    let rawModules =
         match rawProgram with
         | Some p -> p.Modules |> List.map (fun m -> Some m.Decls)
         | None -> program.Modules |> List.map (fun _ -> None)
-    
+
+    // Hand the back end a name -> span table for its refusals (see
+    // IR.recordDeclSpan). The surface program is the ONLY place these spans
+    // still exist; a codegen refusal reported without one is a diagnostic the
+    // user cannot locate. Recorded for every top-level `let`/`static`/
+    // `function`; declarations without a surface form simply have no entry and
+    // fall back to `noSpan`, exactly as before.
+    (IR.declSpansCell ()).Value <- Map.empty
+    match rawProgram with
+    | Some p ->
+        // Every name a pattern binds points at the same declaration span; a
+        // destructuring `let a, b = ...` has one source line for both.
+        let rec patNames (pat: Pattern) : string list =
+            match pat.Kind with
+            | PatVar n -> [n]
+            | PatTuple ps -> ps |> List.collect patNames
+            | PatCons (h, t) -> patNames h @ patNames t
+            | PatStruct (_, flds) -> flds |> List.collect (snd >> patNames)
+            | PatVariant (_, Some inner) | PatGuarded (inner, _) | PatTyped (inner, _) -> patNames inner
+            | _ -> []
+        for m in p.Modules do
+            for d in m.Decls do
+                match d.Value with
+                | DeclLet b | DeclStatic b ->
+                    for n in patNames b.Pattern do IR.recordDeclSpan n d.Span
+                | DeclFunction fd -> IR.recordDeclSpan fd.Name d.Span
+                | _ -> ()
+    | None -> ()
+
     for (tmod, rawDecls) in List.zip program.Modules rawModules do
         let moduleName = tmod.Name |> Option.map (String.concat ".") |> Option.defaultValue ""
         let envWithExports = { env with ModuleExports = currentExports }

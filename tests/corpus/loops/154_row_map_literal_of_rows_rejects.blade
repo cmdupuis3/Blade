@@ -1,0 +1,31 @@
+// TEST: Row Map Returning A Literal Of Whole Rows (rejects)
+// REJECT-AT: codegen
+// ERROR: BL7001
+// ERROR-CONTAINS: code generation has no rule for IRArrayLit
+// WARN-CODEGEN: unsupported IR node: IRArrayLit
+// ============================================================================
+// THE OTHER HALF of the array-literal row map, and the pin on how an
+// unhandled IR node is REPORTED.
+//
+// 151-153 cover a literal of SCALARS, whose leaves tile the destination row.
+// A literal whose elements are themselves whole ARRAYS (`[r0, r1]`, the
+// `rowTypedElemArr` branch of inferArrayLitType) is a different construction:
+// it does not flatten to a fixed cell count at the write site, so codegen has
+// no rule for it and says so.
+//
+// What is pinned here is the DELIVERY. A node reaching a codegen catch-all
+// means the back end grew no arm for that shape -- a gap in the compiler, not
+// a statement about this program -- and it used to surface as g++ complaining
+// that `BLADE_CODEGEN_ERROR_UNSUPPORTED_IR_NODE_IRARRAYLIT` was not declared:
+// no code, no file, no line. It is now a coded, spanned Blade diagnostic
+// (BL7001, backend limit), refused by the driver before the C++ compiler is
+// invoked at all. The `#error` guard is still emitted, which is what this
+// codegen-stage probe's verdict reads.
+//
+// Deliberate codegen refusals -- the ones carrying a sentence that says what
+// to write instead -- are unaffected and keep their own wording.
+// ============================================================================
+let ts = (method_for(range<Idx<6>>) <@> lambda(i) -> 1.0 * i) |> compute
+let r0 = (method_for(range<Idx<3>>) <@> lambda(k) -> 1.0 * k) |> compute
+let r1 = (method_for(range<Idx<3>>) <@> lambda(k) -> 2.0 * k) |> compute
+let g = (ts <@> lambda(t) -> [r0, r1]) |> compute

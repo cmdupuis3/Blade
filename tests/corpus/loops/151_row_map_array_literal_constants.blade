@@ -1,0 +1,31 @@
+// TEST: Row Map Returning An Array Literal Of Constants
+// ============================================================================
+// RANK-RAISING MAP, part 1: a kernel whose body IS an array literal, with no
+// dependence on the kernel parameter. The map deduces a rank+1 output and
+// allocates it with the literal's extents trailing the iterated ones -- that
+// much always worked. What had no path was the ROW VALUE: the body is inlined
+// at the write site as a C++ EXPRESSION, and an array literal has no
+// expression form (it needs an extents table, an allocate and per-cell
+// stores). exprToCpp's catch-all fired and spliced
+// `BLADE_CODEGEN_ERROR_UNSUPPORTED_IR_NODE_IRARRAYLIT` into the row slot, so
+// `check` passed and g++ reported an undeclared C++ identifier.
+//
+// The row's cells are known statically and the destination is a contiguous
+// span, so the literal now writes STRAIGHT INTO the output pool -- no
+// temporary, no copy, no free. That is what makes the shape usable as the
+// per-row output of a multi-accumulator join; see 153.
+// ============================================================================
+let ts: Array<Float64 like Idx<4>> = [10.0, 20.0, 30.0, 40.0]
+
+// Every row is the same constant vector.
+let g = (ts <@> lambda(t) -> [1.0, 2.5, 4.0]) |> compute
+// EXPECT: g = [[1, 2.5, 4], [1, 2.5, 4], [1, 2.5, 4], [1, 2.5, 4]]
+
+// Width 1: the degenerate row, which still raises the rank.
+let one = (ts <@> lambda(t) -> [7.0]) |> compute
+// EXPECT: one = [[7], [7], [7], [7]]
+
+// The rank-raised result is an ordinary array -- fold it back down the
+// leading axis to prove the storage is laid out the way its type says.
+let cols = reduce(g, lambda(a: T^1, b: T^1) -> a + b)
+// EXPECT: cols = [4, 10, 16]

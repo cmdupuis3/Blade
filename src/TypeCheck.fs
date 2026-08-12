@@ -2903,7 +2903,36 @@ let firstArgTypeClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
             | _ -> None)
 
 let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
-    match tFunc.Type with
+    // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.
+    //
+    // `tFunc.Type` is whatever the head node was stamped with where it was
+    // BUILT. For a call to a function with a DEDUCED (unannotated) return
+    // type, that is the var the checker minted at the call site -- the real
+    // array only ever appears in the substitution. Every arm below needs a
+    // concrete `ArrayElem` / `FuncElem` shape, so a var head missed all of
+    // them and fell into the catch-all, which mints a FRESH var and returns
+    // Ok. That vacuity is why
+    //
+    //     function grid(ts: Array<Float64 like Idx<4>>) = ...rank 2...
+    //     let cells = grid(tim)
+    //     let row0 = cells(0)
+    //
+    // typed `row0` as a SCALAR: `check` passed, and codegen -- which sees
+    // the post-monomorphization rank-2 binding type -- emitted
+    // `double row0 = Array<double,1>{ cells.data[0L], ... }`. Annotating
+    // either the function's return or the binding hid it, because then the
+    // head was already concrete here.
+    //
+    // Narrow ON PURPOSE: only a bare `IRTInfer` head is resolved. A head that
+    // already matched an arm keeps matching that arm with the same binding,
+    // so this can only convert "fell into the vacuous catch-all" into "routed
+    // properly" -- and a head that is still open after Resolve reaches the
+    // same catch-all it always did.
+    let headTy =
+        match tFunc.Type with
+        | IRTInfer _ -> env.Subst.Resolve tFunc.Type
+        | t -> t
+    match headTy with
     // SUBSCRIPTING A WREATH ARRAY, handled FIRST and EXPLICITLY -- because
     // of the catch-all's vacuity, not tidiness. A depth-2 OrbIdx record is
     // ONE index slot spanning prod(ri) raw axes, so `W(i,j,k,l)` has 4 args
@@ -3093,7 +3122,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 // tryEvalIntIR (which returns None for it, correctly).
                 let parentIR =
                     match tFunc.Kind with
-                    | TExprVar (_, vid, _) -> IRVar (vid, tFunc.Type)
+                    | TExprVar (_, vid, _) -> IRVar (vid, headTy)
                     | _ -> IRLit IRLitUnit
                 let residualFragment =
                     tabulatedResidualType headSlot parentIR j (fun () -> env.Builder.FreshId())

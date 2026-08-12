@@ -856,6 +856,77 @@ let exprSentinelsCell () : string list ref =
         fresh
     else v
 
+// UNHANDLED IR NODES, as opposed to deliberate refusals.
+//
+// Every other message that reaches `exprError` / `codegenError` is a REFUSAL:
+// codegen understood the construct and declined to render it, with a sentence
+// saying what to write instead. Those are features, and their `#error`
+// delivery is the contract `// REJECT-AT: codegen` probes are written against.
+//
+// A node arriving at a catch-all arm is a different animal: it means this
+// position grew no arm for that shape, which is a hole in the back end, not a
+// statement about the user's program. Delivering THAT as a C++ compile error
+// naming `BLADE_CODEGEN_ERROR_UNSUPPORTED_IR_NODE_<X>` hands the user a g++
+// diagnostic about an undeclared C++ identifier for a Blade-side gap -- no
+// code, no file, no line, and nothing to search for.
+//
+// So the catch-alls ALSO record here, and the compile driver turns a non-empty
+// channel into a coded, spanned Blade diagnostic (BL7001) and refuses BEFORE
+// the C++ compiler is ever invoked. The `#error` half is kept as-is: the test
+// harness drives codegen directly rather than through the driver, and the
+// guard is what its codegen-stage verdict reads.
+let private unhandledNodesStorage =
+    System.Threading.AsyncLocal<(string * string) list ref>()
+
+let unhandledNodesCell () : (string * string) list ref =
+    let v = unhandledNodesStorage.Value
+    if isNull (box v) then
+        let fresh = ref []
+        unhandledNodesStorage.Value <- fresh
+        fresh
+    else v
+
+/// The declaration currently being emitted, for attributing an unhandled node
+/// to a source position. `genModule`/`genModuleSplit` set it around each item.
+let private currentDeclStorage = System.Threading.AsyncLocal<string ref>()
+
+let currentDeclCell () : string ref =
+    let v = currentDeclStorage.Value
+    if isNull (box v) then
+        let fresh = ref ""
+        currentDeclStorage.Value <- fresh
+        fresh
+    else v
+
+let setCurrentCodegenDecl (name: string) : unit = (currentDeclCell ()).Value <- name
+
+/// Record that `nodeName` reached codegen with no arm in `position`, tagging it
+/// with the declaration being emitted. Deduplicated: one loop nest can render
+/// the same hole once per iteration of the emitter, and the user needs to be
+/// told once.
+let recordUnhandledIRNode (position: string) (nodeName: string) : unit =
+    let cell = unhandledNodesCell ()
+    let entry = (sprintf "%s in %s" nodeName position, (currentDeclCell ()).Value)
+    if not (List.contains entry cell.Value) then
+        cell.Value <- cell.Value @ [entry]
+
+/// Drain the unhandled-node channel as ready-made diagnostics: BL7001
+/// (backend limit), spanned at the enclosing declaration when Lowering
+/// recorded one. Called by the compile driver after codegen.
+let takeUnhandledIRNodeDiagnostics () : Blade.Diagnostics.Diagnostic list =
+    let cell = unhandledNodesCell ()
+    let entries = cell.Value
+    cell.Value <- []
+    entries |> List.map (fun (what, declName) ->
+        let where = if declName = "" then "" else sprintf " (while emitting '%s')" declName
+        Blade.Diagnostics.Codes.backendLimit (IR.declSpanOf declName)
+            (sprintf "code generation has no rule for %s%s" what where)
+        |> Blade.Diagnostics.withNote
+            "this is a gap in the C++ back end, not an error in your program -- \
+             the construct typechecked and lowered. Please report it; meanwhile, \
+             materializing the sub-expression with `|> compute` and binding it to \
+             a name often routes around the hole.")
+
 /// Record an expression-level warning and return a C++ expression that causes a compile error.
 /// The identifier is the in-place marker; the companion `#error` directive is
 /// appended to the translation unit by `genSelfContainedProgramFromIR` (an
@@ -2804,7 +2875,10 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // sub-array binding (the ExtentArrayRef path). Surface a visible
         // error rather than silently emit the wrong value.
         exprError "opaque-extent marker reached expression rendering -- kernel-param sub-array was not bound to a concrete extent at the peel point (codegen routing bug)"
-    | other -> exprError (sprintf "unsupported IR node: %s" (other.GetType().Name))
+    | other ->
+        // A hole in the back end, not a refusal -- see `recordUnhandledIRNode`.
+        recordUnhandledIRNode "expression position" (other.GetType().Name)
+        exprError (sprintf "unsupported IR node: %s" (other.GetType().Name))
 
 /// Generate inline combinator application as an IIFE expression, for `L <@> f`
 /// in expression context (not a let RHS or function-body return -- those route
@@ -6139,6 +6213,65 @@ let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
         // Use unique repr to prevent false dedup.
         sprintf "(opaque %d %A)" (expr.GetHashCode()) (expr.GetType().Name)
 
+// RANK-RAISING MAP: a kernel body that IS an array literal of scalars.
+//
+// `A <@> lambda(t) -> [f(t), g(t)]` deduces a rank+1 output, and the emitter
+// allocates it with the trailing literal extents already in `<name>_extents`
+// (that part was always right). What had no path was the ROW VALUE: the body
+// is inlined at the write site as a C++ *expression*, and an array literal has
+// no expression form -- it needs an extents table, an allocate and per-cell
+// stores, which are statements. exprToCpp's catch-all therefore fired and
+// spliced a refusal into the row slot.
+//
+// Rendering it as an allocating IIFE would work and be wrong: it puts a heap
+// allocation + a pool copy + a free in the innermost loop of what is otherwise
+// a flat store. The row's cells are known statically and the destination is a
+// contiguous span, so the literal writes STRAIGHT INTO the output pool -- no
+// temporary, no copy, no free. That is what makes this shape usable as the
+// per-row output of a multi-accumulator join, which is the reason it exists.
+//
+// The helper answers the one question the emitter needs: what are this
+// literal's leaf expressions, in row-major (storage) order?
+
+/// Leaves of a (possibly nested) array literal, row-major, when EVERY leaf is
+/// a scalar. `None` for a non-literal body, for a leaf that is itself
+/// array-valued (the row-typed-element literal is a different construction --
+/// see `inferArrayLitType`'s `rowTypedElemArr` branch -- and does not flatten
+/// to a fixed cell count here), and for a ragged nest (rows of differing
+/// width, whose leaves would not tile the destination row).
+let rec arrayLitScalarLeaves (e: IRExpr) : IRExpr list option =
+    match e with
+    | IRArrayLit (es, _) when not es.IsEmpty ->
+        let subs = es |> List.map arrayLitScalarLeaves
+        if subs |> List.exists Option.isNone then None
+        else
+            let got = subs |> List.map Option.get
+            // Rectangular only: sub-literals must all contribute the same
+            // number of cells (a scalar element contributes exactly one).
+            let widths = got |> List.map List.length |> List.distinct
+            if widths.Length > 1 then None else Some (List.concat got)
+    | IRArrayLit _ -> None
+    | _ ->
+        match inferExprType e with
+        | ArrayElem _ -> None
+        | IRTTuple _ | IRTUnit -> None
+        | _ -> Some [e]
+
+/// Static cell count of an array type's axes `[first .. last]` (inclusive),
+/// when every one of them has a literal extent. `None` otherwise -- a runtime
+/// extent cannot be matched against a literal's fixed leaf count.
+let staticCellsOfAxes (at: IRArrayType) (first: int) (last: int) : int option =
+    let axes = at.IndexTypes |> List.indexed |> List.filter (fun (i, _) -> i >= first && i <= last)
+    if axes.Length <> last - first + 1 then None
+    else
+        let ns =
+            axes |> List.map (fun (_, ix) ->
+                match ix.Extent with
+                | IRLit (IRLitInt n) when n > 0L -> Some (int n)
+                | _ -> None)
+        if ns |> List.exists Option.isNone then None
+        else Some (ns |> List.map Option.get |> List.fold (*) 1)
+
 /// Reynolds kernel codegen result: C++ expression + dedup statistics.
 type ReynoldsResult = {
     CppExpr: string
@@ -6783,16 +6916,23 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         | IRTScalar _ -> "+="
         | _ -> "="
 
+    // LAZY, because rendering is not free of side effects: `exprToCpp`'s
+    // refusal path appends to the expression-sentinel cell (which becomes an
+    // `#error` in the translation unit) whether or not the caller keeps the
+    // string. The literal-row arm below discards this value, and an eagerly
+    // rendered array-literal body left a spurious `#error` behind in an
+    // otherwise perfectly good program.
     let reynoldsResult =
-        match carousel with
-        | Some (csubst, _, _) ->
-            // Carousel body: same expression, window reads substituted to the
-            // rotating locals (planHaloCarousel already excluded Reynolds).
-            { CppExpr = exprToCppCore csubst nameMap codeGen.KernelExpr; TotalPerms = 1; UniqueTerms = 1 }
-        | None ->
-            genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames
-    if codeGen.HasReynolds && reynoldsResult.UniqueTerms < reynoldsResult.TotalPerms then
-        lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" reynoldsResult.UniqueTerms reynoldsResult.TotalPerms (reynoldsResult.TotalPerms / max 1 reynoldsResult.UniqueTerms)]
+        lazy (
+            match carousel with
+            | Some (csubst, _, _) ->
+                // Carousel body: same expression, window reads substituted to the
+                // rotating locals (planHaloCarousel already excluded Reynolds).
+                { CppExpr = exprToCppCore csubst nameMap codeGen.KernelExpr; TotalPerms = 1; UniqueTerms = 1 }
+            | None ->
+                genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames)
+    if codeGen.HasReynolds && reynoldsResult.Value.UniqueTerms < reynoldsResult.Value.TotalPerms then
+        lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" reynoldsResult.Value.UniqueTerms reynoldsResult.Value.TotalPerms (reynoldsResult.Value.TotalPerms / max 1 reynoldsResult.Value.UniqueTerms)]
     // When the output row was hoisted, the write goes through the
     // restrict-qualified row pointer and only the innermost subscript remains.
     let (writeTarget, writeIdx) =
@@ -6855,9 +6995,37 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                     [ sprintf "    deallocate<typename promote<%s, %d>::type, nullptr>(__rowv.data, __rowv.extents);"
                           elemStr (rank - outer) ]
                 | _ -> []
+            // Literal row: store the cells directly, no temporary. Reynolds is
+            // excluded -- symmetrizing a body means SUMMING its permuted
+            // copies, and a per-cell sum of array literals is not what the
+            // stores below write; that shape falls through to the generic arm.
+            let literalLeaves =
+                match codeGen.KernelExpr with
+                | IRArrayLit _ when not codeGen.HasReynolds ->
+                    match arrayLitScalarLeaves codeGen.KernelExpr,
+                          staticCellsOfAxes at outer (rank - 1) with
+                    // Leaf count MUST equal the destination row's cell count:
+                    // the output extents are deduced from the literal's shape,
+                    // so a disagreement means the deduction and the body have
+                    // drifted apart, and writing anyway would run off the row.
+                    | Some leaves, Some cells when leaves.Length = cells -> Some leaves
+                    | _ -> None
+                | _ -> None
+            match literalLeaves with
+            | Some leaves ->
+                let subst = match carousel with Some (csubst, _, _) -> csubst | None -> emptySubst
+                Some ([
+                        "{"
+                        sprintf "    const size_t __rowc = (size_t)(%s);" innerCells
+                        sprintf "    %s* __rowd = nested_array_utilities::pool_base(%s.data) + ((%s) * __rowc);"
+                            elemStr codeGen.OutputName flatOuter
+                      ] @ (leaves |> List.mapi (fun k leaf ->
+                                sprintf "    __rowd[%d] = %s;" k (exprToCppCore subst nameMap leaf)))
+                        @ [ "}" ])
+            | None ->
             Some ([
                     "{"
-                    sprintf "    auto __rowv = %s;" reynoldsResult.CppExpr
+                    sprintf "    auto __rowv = %s;" reynoldsResult.Value.CppExpr
                     sprintf "    const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" elemStr
                     sprintf "    const size_t __rowc = (size_t)(%s);" innerCells
                     sprintf "    %s* __rowd = nested_array_utilities::pool_base(%s.data) + ((%s) * __rowc);"
@@ -6865,7 +7033,10 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                     "    for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];"
                   ] @ freeLine @ [ "}" ])
         | _ -> None
-    let assignLine =
+    // Lazy for `reynoldsResult`'s reason: `rowWriteLines`, when it fires, is
+    // the whole write, and rendering this line anyway would re-enter the
+    // kernel expression -- and its sentinel side effect -- for nothing.
+    let assignLine = lazy (
         match codeGen.FoldWrapper, foldChunk with
         // Path B: accumulate into the THREAD-PRIVATE scalar, seeding it
         // from the chunk's first contributed value. The cell value is bound once
@@ -6873,16 +7044,16 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // loop-invariant after the first iteration.
         | Some wname, Some plan ->
             sprintf "{ %s __rv = %s; if (%s) %s = %s(%s, __rv); else { %s = __rv; %s = true; } }"
-                plan.ElemCpp reynoldsResult.CppExpr
+                plan.ElemCpp reynoldsResult.Value.CppExpr
                 fcHas foldAccName wname foldAccName
                 foldAccName fcHas
         // Fused fold: accumulate the kernel value through the fold-kernel
         // wrapper into the caller-declared scalar accumulator.
-        | Some wname, None -> sprintf "%s = %s(%s, %s);" codeGen.OutputName wname codeGen.OutputName reynoldsResult.CppExpr
-        | None, _ -> sprintf "%s%s %s %s;" writeTarget writeIdx assignOp reynoldsResult.CppExpr
+        | Some wname, None -> sprintf "%s = %s(%s, %s);" codeGen.OutputName wname codeGen.OutputName reynoldsResult.Value.CppExpr
+        | None, _ -> sprintf "%s%s %s %s;" writeTarget writeIdx assignOp reynoldsResult.Value.CppExpr)
     match rowWriteLines with
     | Some rw -> for l in rw do lines <- lines @ [ind depth + l]
-    | None -> lines <- lines @ [ind depth + assignLine]
+    | None -> lines <- lines @ [ind depth + assignLine.Value]
     // Carousel rotation: shift the window by one ordinal and load the single
     // new leading value for the next center.
     match carousel with
@@ -13966,6 +14137,9 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | other ->
         let ctx' = addVarName binding.Id name ctx
         let nodeType = other.GetType().Name
+        // Same classification as exprToCpp's catch-all: no arm for this shape
+        // in binding position is a back-end gap, reported as a Blade error.
+        recordUnhandledIRNode (sprintf "binding position (binding '%s')" name) nodeType
         (codegenError ctx ind (sprintf "unsupported expression for binding '%s' (IR node: %s)" name nodeType), ctx')
 
 // Module Generation
@@ -19023,9 +19197,11 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
         allItems |> List.fold (fun (fc, bc, c) (_, item) ->
             match item with
             | Choice1Of2 binding ->
+                setCurrentCodegenDecl binding.Name
                 let (code, c') = genModuleBinding c binding builder hoistIds
                 (fc, bc @ code @ [""], c')
             | Choice2Of2 funcDef ->
+                setCurrentCodegenDecl funcDef.Name
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     let (code, c') = genFuncDefAsLambda c builder funcDef
                     (fc, bc @ code @ [""], c')
@@ -19106,12 +19282,14 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     match onlyBinding with
                     | Some target -> seen || binding.Name = target
                     | None -> seen || isComputeBinding binding
+                setCurrentCodegenDecl binding.Name
                 let (code, c') = genModuleBinding c binding builder hoistIds
                 if nowCompute then
                     (fc, sc, cc @ code @ [""], true, c')
                 else
                     (fc, sc @ code @ [""], cc, false, c')
             | Choice2Of2 funcDef ->
+                setCurrentCodegenDecl funcDef.Name
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     // Lambda-as-binding (closure definition): follows the
                     // current phase -- setup if before the first compute, else
@@ -20172,6 +20350,11 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
     let cell = exprWarningsCell ()
     cell.Value <- []
     (exprSentinelsCell ()).Value <- []
+    // Back-end holes from a previous assembly must not be attributed to this
+    // one (the driver drains the channel, but a caller that never drains --
+    // the test harness -- would otherwise accumulate across tests).
+    (unhandledNodesCell ()).Value <- []
+    (currentDeclCell ()).Value <- ""
     // Deterministic deallocation: see genMainProgram.
     (freshReturnFactsCell ()).Value <- Map.empty
     (copyInPlaceMutsCell ()).Value <- Map.empty

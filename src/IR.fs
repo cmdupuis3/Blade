@@ -4678,22 +4678,26 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    conflict (each call site is locally consistent).
     let mergeBindings (local: Map<int, IRType>) : Map<int, IRType> =
         local |> Map.fold (fun acc k v -> Map.add k v acc) globalBindings
+    // The ordinary rewrite every surviving function gets: inner HM calls
+    // repointed at their specs, residual IRTInfer substituted out of the body,
+    // signature and captures.
+    let rewriteFunc (f: IRFuncDef) =
+        let bindings = mergeBindings (unionBindingsFromExpr f.Body)
+        let bodyWithRewrittenCalls = mapIRExpr rewriteCallSite f.Body
+        let bodyWithSubstitutedTypes = substTypeInIRExpr bindings bodyWithRewrittenCalls
+        { f with Body = bodyWithSubstitutedTypes
+                 RetType = substTypeInIRType bindings f.RetType
+                 Params = f.Params |> List.map (fun p ->
+                            { p with Type = substTypeInIRType bindings p.Type })
+                 Captures = f.Captures |> List.map (fun c ->
+                            { c with Type = substTypeInIRType bindings c.Type }) }
+    // Captures carry types too (a former kernel captures the HM helper it
+    // calls); leaving them abstract emits an unresolved-type sentinel in the
+    // lifted lambda's signature -- see rewriteFunc.
     let newFunctions =
         modul.Functions
         |> List.filter (fun f -> not (Set.contains f.Id hmFuncIdSet))
-        |> List.map (fun f ->
-            let bindings = mergeBindings (unionBindingsFromExpr f.Body)
-            let bodyWithRewrittenCalls = mapIRExpr rewriteCallSite f.Body
-            let bodyWithSubstitutedTypes = substTypeInIRExpr bindings bodyWithRewrittenCalls
-            { f with Body = bodyWithSubstitutedTypes
-                     RetType = substTypeInIRType bindings f.RetType
-                     Params = f.Params |> List.map (fun p ->
-                                { p with Type = substTypeInIRType bindings p.Type })
-                     // Captures carry types too (a former kernel captures the HM
-                     // helper it calls); leaving them abstract emits an
-                     // unresolved-type sentinel in the lifted lambda's signature.
-                     Captures = f.Captures |> List.map (fun c ->
-                                { c with Type = substTypeInIRType bindings c.Type }) })
+        |> List.map rewriteFunc
     let newBindings =
         modul.Bindings
         |> List.map (fun b ->
@@ -4741,8 +4745,72 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                                 { p with Type = substTypeInIRType bindings p.Type })
                      Captures = c.Captures |> List.map (fun cap ->
                                 { cap with Type = substTypeInIRType bindings cap.Type }) })
+    // ORPHAN RESCUE: an hmFunc that nothing replaced must not be deleted.
+    //
+    // Dropping the abstract originals is correct for a function whose call
+    // sites were rewritten to specs -- but the collector only recognises a
+    // call site as `IRApp (IRVar (funcId, _), args, _)`. A lifted callable
+    // referenced ONLY as a first-class KERNEL VALUE (an IRApplyCombinator /
+    // IRComposeApply kernel slot) is never such a call site, so no spec is
+    // ever requested for it -- and it was dropped anyway, leaving the kernel
+    // slot pointing at nothing:
+    //
+    //     error[BL6001]: dangling VarId reference: v23
+    //     error[BL6001]: ApplyInfo: kernel slot is IRVar(v23) [id resolves in
+    //                    neither CallablesTable nor synthetic registry]
+    //
+    // Reached by `reduce(cells, (+))` over a rank-2 returned from a function
+    // with abstract params: the partial fold's synthesized row kernel takes
+    // `T^1`, so `hasTypeVarsInParams` classifies it, and it is only ever named
+    // from the fold's kernel slot.
+    //
+    // The rule is "keep what nothing replaced", decided on the REWRITTEN
+    // module: every genuine call site has by now been repointed at its spec,
+    // so a surviving `IRVar(f.Id)` means a reference the specialization could
+    // not express. Such a function is kept and rewritten like any other -- its
+    // residual type vars are the enclosing program's, which `globalBindings`
+    // resolves. A truly dead abstract original is referenced by nothing and
+    // still goes away, so this adds no unresolved-type signatures.
+    //
+    // Iterated to a fixpoint because a rescued function's own body can be the
+    // only place another one is named.
+    let rescuedHmFuncs =
+        if Set.isEmpty hmFuncIdSet then []
+        else
+            let hmById = hmFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+            let referencedIn (e: IRExpr) =
+                let acc = System.Collections.Generic.HashSet<IRId>()
+                mapIRExpr (fun n ->
+                    (match n with
+                     | IRVar (id, _) when hmById.ContainsKey id -> acc.Add id |> ignore
+                     | _ -> ())
+                    n) e |> ignore
+                acc
+            let seedRefs =
+                let acc = System.Collections.Generic.HashSet<IRId>()
+                for f in newFunctions do acc.UnionWith(referencedIn f.Body)
+                for b in newBindings do acc.UnionWith(referencedIn b.Value)
+                for f in specFuncs do acc.UnionWith(referencedIn f.Body)
+                for c in cloneFuncs do acc.UnionWith(referencedIn c.Body)
+                acc
+            let mutable keep : Map<IRId, IRFuncDef> = Map.empty
+            let mutable frontier = seedRefs |> List.ofSeq
+            while not frontier.IsEmpty do
+                let next = System.Collections.Generic.HashSet<IRId>()
+                for id in frontier do
+                    if not (Map.containsKey id keep) then
+                        match Map.tryFind id hmById with
+                        | Some f ->
+                            let rewritten = rewriteFunc f
+                            keep <- Map.add id rewritten keep
+                            next.UnionWith(referencedIn rewritten.Body)
+                        | None -> ()
+                frontier <- next |> Seq.filter (fun i -> not (Map.containsKey i keep)) |> List.ofSeq
+            // Original module order, so emission order is unchanged for them.
+            hmFuncs |> List.choose (fun f -> Map.tryFind f.Id keep)
+
     { modul with
-        Functions = newFunctions @ specFuncs @ cloneFuncs
+        Functions = newFunctions @ rescuedHmFuncs @ specFuncs @ cloneFuncs
         Bindings = newBindings
         DerivedFuncOrigins =
             derivedOrigins
@@ -5428,6 +5496,43 @@ let setStructFieldsCache (types: IRTypeDef list) =
         | IRTDStruct (name, fields) -> cache.[name] <- fields
         | _ -> ()
     structFieldsCacheStorage.Value <- cache
+
+// Declaration spans, by top-level name.
+//
+// The IR carries NO source positions -- deliberately: it is the phase where
+// surface syntax has been discharged. That is fine until a back-end phase has
+// to REFUSE something, at which point "which line" is the only question the
+// user has. Lowering does see the surface program, so it records the span of
+// every top-level declaration here on the way past, and codegen refusals
+// resolve their enclosing declaration's name through this table.
+//
+// Coarse ON PURPOSE: one span per declaration, not per node. It points the
+// caret at the `let`/`function` the refused construct lives in, which is the
+// granularity codegen can honestly support. AsyncLocal for the parallel test
+// runner's per-task isolation, like every other cache in this file.
+let private declSpansStorage = System.Threading.AsyncLocal<Map<string, Blade.Ast.Span> ref>()
+
+let declSpansCell () : Map<string, Blade.Ast.Span> ref =
+    let v = declSpansStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        declSpansStorage.Value <- fresh
+        fresh
+    else v
+
+/// Record one declaration's span. Later declarations with the same name (a
+/// shadowing `let`) win, matching what the emitted code refers to last.
+let recordDeclSpan (name: string) (span: Blade.Ast.Span) : unit =
+    if span.StartLine > 0 then
+        let cell = declSpansCell ()
+        cell.Value <- Map.add name span cell.Value
+
+/// The recorded span for `name`, or `noSpan` when nothing was recorded
+/// (a synthesized declaration, or a caller that never populated the table).
+let declSpanOf (name: string) : Blade.Ast.Span =
+    match Map.tryFind name (declSpansCell ()).Value with
+    | Some s -> s
+    | None -> Blade.Ast.noSpan
 
 let tryLookupFieldType (objType: IRType) (fieldName: string) : IRType option =
     match objType with

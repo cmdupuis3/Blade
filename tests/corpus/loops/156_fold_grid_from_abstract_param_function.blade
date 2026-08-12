@@ -1,0 +1,47 @@
+// TEST: Fold A Grid Returned From An Abstract-Parameter Function
+// ============================================================================
+// The other half of 155. Same "fold a returned grid" shape, but the producing
+// function takes ABSTRACT parameters (`T^1`), and the failure was earlier and
+// louder -- IR validation rather than g++:
+//
+//     error[BL6001]: in binding 'rows': dangling VarId reference: v23
+//     error[BL6001]: in binding 'rows': ApplyInfo: kernel slot is IRVar(v23)
+//                    [id resolves in neither CallablesTable nor synthetic registry]
+//
+// WHY. The innermost-axis fold synthesizes a row kernel `__lambda_N(row: T^1)`
+// and lifts it into IRModule.Functions. With an abstract-param producer, that
+// row type is still open when `monomorphizeHMFunctions` runs, so
+// `hasTypeVarsInParams` classifies the kernel as HM-polymorphic and the pass
+// DROPS it -- but its call-site collector only recognises
+// `IRApp (IRVar (funcId, _), args, _)`, and this callable is named only from
+// an IRApplyCombinator's KERNEL SLOT. No spec was ever requested, nothing
+// replaced it, and the slot pointed at a deleted function.
+//
+// The rule is now "keep what nothing replaced", decided on the rewritten
+// module: after call sites are repointed at their specs, a surviving
+// `IRVar(f.Id)` means a reference specialization could not express, so the
+// original is kept and rewritten like any other function (its residual vars
+// are the enclosing program's, which the global binding map resolves). A
+// genuinely dead abstract original is referenced by nothing and still goes.
+//
+// The `[t, 2.0 * t]` literal row map is what keeps the kernel's row type open
+// long enough to reach the classifier; the literal itself is pinned by 152.
+// ============================================================================
+function pairs(ts: T^1) = method_for(ts) <@> lambda(t) -> [t, 2.0 * t]
+
+let tim = (method_for(range<Idx<8>>) <@> lambda(i) -> 1.0 * i) |> compute
+let cells = pairs(tim) |> compute
+// EXPECT: cells = [[0, 0], [1, 2], [2, 4], [3, 6], [4, 8], [5, 10], [6, 12], [7, 14]]
+
+// Innermost-axis fold: t + 2t = 3t per row.
+let rows = reduce(cells, (+))
+// EXPECT: rows = [0, 3, 6, 9, 12, 15, 18, 21]
+
+// Leading-axis fold over the same operand: column sums over t = 0..7, so
+// sum(t) = 28 and sum(2t) = 56.
+let cols = reduce(cells, lambda(a: T^1, b: T^1) -> a + b)
+// EXPECT: cols = [28, 56]
+
+// And the partial index, 155's witness read through an abstract-param callee.
+let row3 = cells(3)
+// EXPECT: row3 = [3, 6]
