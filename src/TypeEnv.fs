@@ -146,6 +146,16 @@ type TypeEnv = {
     /// in `OuterScope` is bound INSIDE the innermost body -- which is what
     /// `bodyLocalBinding` tests.
     InCallableBody: bool
+    /// Names of the `mut` parameters of the function whose body is being
+    /// checked (all array-typed -- MutParamNotArray rejects any other kind
+    /// first). Rebinding one WHOLE (`a = <array expr>`) cannot reach the
+    /// caller, because the C++ ABI passes the `Array<>` wrapper by value; only
+    /// element writes travel, through the shared data pointer. A `let mut`
+    /// BINDING, by contrast, may be rebound whole -- that is real rebind
+    /// semantics with its own corpus (memfree/015, 016) -- and both bind
+    /// `MutPassable`, so assignability alone cannot tell them apart. This set
+    /// is how `assignTargetError` does.
+    MutArrayParams: Set<string>
     CurrentCommGroups: int list list
     /// Interface name -> InterfaceDecl
     Interfaces: Map<string, InterfaceDecl>
@@ -321,6 +331,7 @@ let emptyEnv () = {
     InPolyContext = false
     InLambdaBody = false
     InCallableBody = false
+    MutArrayParams = Set.empty
     CurrentCommGroups = []
     Interfaces = Map.empty
     ImplMethods = Map.empty
@@ -655,6 +666,7 @@ complex half)." where_
     | UnknownWhereConstraint (func, name, vocab) -> sprintf "function '%s': unknown where-clause constraint '%s' (registered constraints: %s)" func name vocab
     | DistOrderCompileTime func -> sprintf "function '%s': Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>" func
     | ImmutableStaticAssign name -> sprintf "Cannot assign to '%s': static bindings are immutable" name
+    | MutAssignRefused (target, reason) -> sprintf "Cannot assign to '%s': %s" target reason
     | MutParamNotArray (func, param) -> sprintf "function '%s': parameter '%s' is `mut` but not array-typed. Only array parameters can be mutated in place (scalars pass by value); return the new scalar instead." func param
     | MutualBindJointly (typeName, describe, lowerNames) -> sprintf "type '%s' belongs to mutual group (%s); bind the group jointly: let (%s): (%s) = ..." typeName describe lowerNames describe
     | MutualDirectElementsOnly describe -> sprintf "mutual member types (group %s) may appear only as direct elements of a joint tuple annotation" describe
@@ -810,7 +822,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _
             | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _ -> "BL4004"
-            | ImmutableStaticAssign _ | MutParamNotArray _ -> "BL4005"
+            | ImmutableStaticAssign _ | MutParamNotArray _ | MutAssignRefused _ -> "BL4005"
             | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups
             | MutualDuplicateMember _ | MutualIncompleteAnnotation _ | MutualJointAnnotationOnly _
             | MutualParamMemberType _ | MutualBindTuple _ | MutualReturnTupleElements _

@@ -4270,6 +4270,74 @@ let private tryFlattenFactoryChain (env: TypeEnv) (func: Expr) (args: Expr list)
             else Some (baseFn, List.concat groups)
     | _ -> None
 
+/// The variable an assignment target bottoms out in, walking through element
+/// and field access: `a(i).f = v` roots at `a`.
+let rec private assignRootName (t: TypedExpr) : string option =
+    match t.Kind with
+    | TExprVar (name, _, _) -> Some name
+    | TExprIndex (b, _, _) -> assignRootName b
+    | TExprField (b, _, _) -> assignRootName b
+    | _ -> None
+
+/// Whether an assignment target may be written, shared by the two sites that
+/// check assignments (expression position and block-statement position) so
+/// they cannot drift. `None` = the store is allowed.
+///
+/// Both rules close paths that used to be SILENT -- they typechecked, lowered,
+/// and then mutated nothing:
+///
+///  1. Rebinding a whole array (`a = <array expr>`) names a NEW array; it does
+///     not write into `a`'s storage. For a `mut` array PARAMETER that is a
+///     silent wrong answer: the C++ ABI passes the `Array<>` wrapper by value
+///     (its data pointer aliases the caller, which is what makes ELEMENT
+///     writes land), so a rebind is invisible to the caller -- the emitted
+///     body was literally `void bump(Array<double,1> a) { }`. `a(i) = v` is
+///     the supported form and is untouched (formalism 2.7; corpus
+///     functions/019).
+///
+///     Restricted to PARAMETERS on purpose. Rebinding a `let mut` BINDING
+///     whole is a real, deliberately-tested feature with rebind semantics --
+///     the name is repointed at the new array and existing aliases and views
+///     keep reading the old buffer (memfree/015, 016 pin exactly that). Both
+///     forms bind `MutPassable`, so the parameter set on the env is what
+///     separates them.
+///  2. A write THROUGH an index or field needs the same permission as a bare
+///     store. The old check matched only a bare `TExprVar`, with an explicit
+///     "array element assignment etc. -- allowed" fall-through, so writing
+///     into a non-`mut` parameter (which binds ReadOnly) or a `let static`
+///     array was accepted and then dropped.
+///
+/// `__`-prefixed targets are exempt from BOTH rules: those names are
+/// compiler-synthesized buffers, and one of them (the leading-axis fold's row
+/// accumulator) assigns a whole array on purpose. Neither rule is about
+/// generated code -- same `__` gate the BL4003 buffer checks use.
+let private assignTargetError (env: TypeEnv) (tL: TypedExpr) : TypeError option =
+    match assignRootName tL with
+    | Some name when not (name.StartsWith "__") ->
+        let isWholeArrayRebind =
+            match tL.Kind with
+            | TExprVar _ -> Set.contains name env.MutArrayParams
+            | _ -> false
+        if isWholeArrayRebind then
+            Some (MutAssignRefused (name,
+                    "assigning a whole array rebinds the name, it does not write the array's storage, "
+                    + "so a `mut` parameter's caller would see nothing change. Write the elements "
+                    + "(`a(i) = ...`), or return the new array and rebind at the call site."))
+        else
+            match lookupVar name env with
+            | Some info when info.Assign = ReadOnly ->
+                // A bare store onto a `let static` keeps its own long-standing
+                // wording (pinned by diagnostics/007); only writes THROUGH an
+                // index or field reach the new, more specific message.
+                match tL.Kind with
+                | TExprVar _ -> Some (ImmutableStaticAssign name)
+                | _ ->
+                    Some (MutAssignRefused (name,
+                            "it is not writable here. Parameters are read-only unless declared "
+                            + "`mut` (`x: mut Array<...>`), and `let static` is immutable everywhere."))
+            | _ -> None
+    | _ -> None
+
 /// Entry for every expression: stamps the ambient expression span (for
 /// error location, see TypeEnv.locateError) and back-fills the source span
 /// onto the typed node so TypedExpr.Span is live (full-span AST).
@@ -5649,15 +5717,9 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         // adapt (Int64 literal into an Int32 field) as in every other
         // checked position.
         checkExpr env tL.Type rhs |> Result.bind (fun tR ->
-            // Check assignability of LHS
-            let assignErr =
-                match tL.Kind with
-                | TExprVar (name, _, _) ->
-                    match lookupVar name env with
-                    | Some info when info.Assign = ReadOnly ->
-                        Some (ImmutableStaticAssign name)
-                    | _ -> None
-                | _ -> None  // array element assignment etc. -- allowed
+            // Check assignability of LHS (whole-array rebinds and writes
+            // through an index/field included -- see assignTargetError).
+            let assignErr = assignTargetError env tL
             match assignErr with
             | Some e -> Error e
             | None ->
@@ -14048,17 +14110,11 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                         match structChecksForAssign curEnv lhs tL with
                         | Ok cs -> cs |> List.map TStmtExpr
                         | Error e -> err <- Some e; []
-                    // Check assignability of LHS
-                    match tL.Kind with
-                    | TExprVar (name, _, _) ->
-                        match lookupVar name curEnv with
-                        | Some info when info.Assign = ReadOnly ->
-                            err <- Some (ImmutableStaticAssign name)
-                        | _ ->
-                            let _ = unify curEnv.Subst tL.Type tR.Type
-                            typedStmts.Add (TStmtAssign (tL, tR))
-                            typedStmts.AddRange (assignChecks ())
-                    | _ ->
+                    // Check assignability of LHS (shared with the expression
+                    // -position site so the two cannot drift).
+                    match assignTargetError curEnv tL with
+                    | Some e -> err <- Some e
+                    | None ->
                         let _ = unify curEnv.Subst tL.Type tR.Type
                         typedStmts.Add (TStmtAssign (tL, tR))
                         typedStmts.AddRange (assignChecks ())
@@ -15873,6 +15929,18 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
              env.Provenance.[varId] <- Set.singleton (Blade.Constraints.paramProvenanceToken funcDecl.Name p.Name)
          | _ -> ())
         { Name = p.Name; Type = paramTypes.[i]; Index = i; VarId = varId; Default = None; NameSpan = p.NameSpan } : TypedParam)
+
+    // Which of those params a whole-array rebind must be refused on. Every
+    // surviving `mut` param is array-typed (MutParamNotArray rejected the rest
+    // above), and `let mut` LOCALS must keep their rebind semantics, so the
+    // set is exactly the declared `mut` parameter names. See
+    // TypeEnv.MutArrayParams / assignTargetError.
+    bodyEnv <- { bodyEnv with
+                   MutArrayParams =
+                       funcDecl.Params
+                       |> List.filter (fun p -> p.Mutability = Mutable)
+                       |> List.map (fun p -> p.Name)
+                       |> Set.ofList }
 
     // ---- Parameter defaults (BL3012 rules + declaration-time typing) ----
     // Trailing rule; required-params-only scope rule; then each default

@@ -276,6 +276,12 @@ type TypeError =
     // Mutability violations (BL4005)
     | ImmutableStaticAssign of name: string
     | MutParamNotArray of func: string * param: string
+    /// An assignment whose TARGET the callee may not write through. Carries its
+    /// own reason because the two shapes it covers fail for different causes:
+    /// rebinding a whole array (which names a new array instead of writing the
+    /// old one's storage), and writing through an index/field into a binding
+    /// that never granted write permission.
+    | MutAssignRefused of target: string * reason: string
     // Mutual-group binding / constraint violations (BL4006)
     | MutualBindJointly of typeName: string * describe: string * lowerNames: string
     | MutualDirectElementsOnly of describe: string
