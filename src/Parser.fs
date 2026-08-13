@@ -49,7 +49,16 @@ let mutable private tokEndAt : struct (int * int)[] = [||]
 let mutable private tokLastMeaning : int[] = [||]
 let mutable private tokIndexCount : int = 0
 
+/// Bare top-level expression statements are desugared to a let over a
+/// synthesized name (see `parseDecl`); this numbers them so each name is
+/// unique AND predictable enough to pin with `// EXPECT: __expr1 = ...`.
+/// Reset by `setEofFrom`, which every module/file entry point calls exactly
+/// once before consuming a token, so numbering restarts per module rather
+/// than accumulating across the files of a multi-source program.
+let mutable private topExprCounter = 0
+
 let private setEofFrom (tokens: Token list) =
+    topExprCounter <- 0
     match List.tryLast tokens with
     | Some t -> lastTokenEnd <- (t.EndLine, t.EndCol)
     | None -> lastTokenEnd <- (0, 0)
@@ -1698,6 +1707,27 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             } toks
     loop [] [] [] [] tokens
 
+/// The BL1003 steer for the removed imperative `for`. Shared verbatim by the
+/// two positions the shape can appear in -- a block statement (parseBlock) and
+/// a top-level statement (parseDecl) -- so the wording cannot drift between
+/// them and corpus `ERROR-CONTAINS` pins match either site.
+let forInRemovedMsg =
+    "The imperative `for x in a..b { ... }` statement has been removed. Re-express sequential recurrences as a recursive array (`let rec q: Array<T like Step, ...> = match q with | zero -> zero | prefix :: n -> prefix :: <slice>`), folds as `reduce(...)`, and parallel maps as `method_for(range<...>) <@> lambda(...)`. See formalism 7.5."
+
+/// Does the token stream open with the REMOVED imperative `for IDENT in ...`
+/// (as opposed to the surviving loop-object `for (A, B) in virtualArray`)?
+/// Both parseBlock and parseDecl gate their BL1003 steer on this.
+let private isImperativeForIn (tokens: Token list) : bool =
+    match peek tokens with
+    | Some (TokKeyword KwFor) ->
+        match peek (advance tokens) with
+        | Some (TokIdent _) ->
+            (match peek (advance (advance tokens)) with
+             | Some (TokKeyword KwIn) -> true
+             | _ -> false)
+        | _ -> false
+    | _ -> false
+
 let rec parseExprImpl (tokens: Token list) : ParseResult<Expr> =
     parseAssignment tokens
 
@@ -1708,13 +1738,113 @@ and parseInlineOrBlock (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
     | Some TokLBrace ->
         parseBlock (advance tokens)
+    // A braceless body that OPENS with a binding statement. A `let` is not a
+    // value, so such a body cannot be one statement long -- it is a let-chain
+    // followed by the single expression that is its value. That is most of the
+    // termination rule; `parseBracelessBinders` adds the layout guard for the
+    // rest. The result is ExprBlock, i.e. literally the braced form's AST, so
+    //     | p -> let x = e
+    //            f(x)
+    // and `| p -> { let x = e; f(x) }` are the same program by construction.
+    // Gated on the `let`/`function` opener so every braceless body that parses
+    // today keeps its exact historical path.
+    | Some (TokKeyword KwLet) | Some (TokKeyword KwFunction) ->
+        (match parseBracelessBinders tokens with
+         | Some result -> result
+         // No value expression belongs to the chain (the arm ended, or the
+         // next statement is outdented past this body). Nothing NEW is
+         // expressible there, so re-run the historical parse and let it
+         // produce the historical AST and diagnostic verbatim.
+         | None -> parseInlineExpr tokens)
     | _ ->
-        parseExprImpl tokens >>= fun expr remaining ->
-        let remaining = 
-            match peek remaining with
-            | Some TokNewline -> advance remaining
-            | _ -> remaining
-        success expr remaining
+        parseInlineExpr tokens
+
+/// The historical braceless body: one expression, with a trailing newline
+/// consumed if present. Factored out so the multi-statement path can fall back
+/// to it byte-for-byte.
+and parseInlineExpr (tokens: Token list) : ParseResult<Expr> =
+    parseExprImpl tokens >>= fun expr remaining ->
+    let remaining =
+        match peek remaining with
+        | Some TokNewline -> advance remaining
+        | _ -> remaining
+    success expr remaining
+
+/// Parse a braceless `let`-chain body: binding statements followed by the one
+/// expression that is the body's value, assembled into the same ExprBlock the
+/// braced form builds.
+///
+/// `None` means "this is not that shape after all" -- the caller falls back to
+/// the historical single-expression parse. A genuine parse error INSIDE a
+/// binder is `Some (Error _)` and propagates, so a typo in a let is still
+/// reported at the typo.
+///
+/// Termination has two rules, and it needs both:
+///
+///   1. Structural -- keep going while the last statement read was a binding,
+///      stop at the first statement that is an expression (that expression is
+///      the value). A `let` cannot end a body, so this is forced.
+///   2. Layout -- a continuation statement must start at a column no less than
+///      the body's first statement. Rule 1 alone is not enough at top level,
+///      where a match arm or function body is followed by more DECLARATIONS:
+///          let z = match x with
+///          | 0 -> let a = 1
+///          let w = 2
+///          w
+///      Without the column guard the arm would swallow `let w = 2` as a binder
+///      and `w` as its value, stealing a top-level declaration. The guard is
+///      the only place this parser consults indentation, and it only ever
+///      makes the body SHORTER, never reinterprets what it already took.
+and parseBracelessBinders (tokens: Token list) : ParseResult<Expr> option =
+    let (_, baseCol) = currentPos tokens
+    // The chain ran out of statements without reaching a value. With at least
+    // one binder consumed, that is not a fallback case -- it is the user's
+    // mistake, and it has exactly two shapes: they forgot the result, or they
+    // outdented it past `baseCol` so rule 2 fenced it off. Diagnosing it here
+    // is what keeps it from reaching codegen as a void-valued match arm.
+    // Reported at the body's first token, which is the `let` that cannot be a
+    // value. Generic BL1999 -- no new diagnostic code to register or pin.
+    let noValue () : ParseResult<Expr> option =
+        let (l, c) = currentPos tokens
+        Some (error ("A braceless body cannot consist only of bindings -- a `let` is not a value. "
+                     + "Add the result expression on its own line, indented to at least the column of "
+                     + "this `let`, or wrap the body in braces: `{ let x = ...; expr }`.") l c)
+    let rec loop (stmts: Stmt list) (toks: Token list) : ParseResult<Expr> option =
+        let toks = skipNL toks
+        let (sLine, sCol) = currentPos toks
+        let spanned (remaining: Token list) (stmt: Stmt) =
+            let (eLine, eCol) = consumedEnd toks remaining sLine sCol
+            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol
+                                 EndLine = eLine; EndCol = eCol; File = currentFile })
+        // Rule 2. Checked before dispatch, so it fences the value expression
+        // exactly as it fences a binder.
+        if sCol < baseCol then (if List.isEmpty stmts then None else noValue ())
+        else
+        match peek toks with
+        | Some (TokKeyword KwLet) ->
+            (match parseLetStmt (advance toks) with
+             | Ok (stmt, rest) ->
+                 let rest = skipTerminator rest
+                 loop (spanned rest stmt :: stmts) rest
+             | Error e -> Some (Error e))
+        | Some (TokKeyword KwFunction) ->
+            (match parseNestedFunction (advance toks) with
+             | Ok (stmt, rest) ->
+                 let rest = skipTerminator rest
+                 loop (spanned rest stmt :: stmts) rest
+             | Error e -> Some (Error e))
+        // Closers: the enclosing arm / block / call ended before any value
+        // expression appeared.
+        | Some TokPipe | Some TokRBrace | Some TokRParen | Some TokRBracket
+        | Some TokComma | Some TokEOF | None ->
+            if List.isEmpty stmts then None else noValue ()
+        | Some _ ->
+            (match parseInlineExpr toks with
+             | Ok (value, rest) ->
+                 Some (success (mkExpr (rangeSpan tokens rest)
+                                       (ExprBlock (List.rev stmts, Some value))) rest)
+             | Error e -> Some (Error e))
+    loop [] tokens
 
 and parseAssignment (tokens: Token list) : ParseResult<Expr> =
     parseTyped tokens >>= fun left rest ->
@@ -2933,9 +3063,7 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
                 match peek afterIdent with
                 | Some (TokKeyword KwIn) ->
                     let line, col = currentPos toks
-                    errorC "BL1003"
-                        "The imperative `for x in a..b { ... }` statement has been removed. Re-express sequential recurrences as a recursive array (`let rec q: Array<T like Step, ...> = match q with | zero -> zero | prefix :: n -> prefix :: <slice>`), folds as `reduce(...)`, and parallel maps as `method_for(range<...>) <@> lambda(...)`. See formalism 7.5."
-                        line col
+                    errorC "BL1003" forInRemovedMsg line col
                 | _ ->
                     // Loop-object `for` expression: the surviving form.
                     parseExprImpl toks >>= fun expr remaining ->
@@ -3652,9 +3780,43 @@ let parseDecl (tokens: Token list) : ParseResult<Decl> =
         parseImplDecl (advance tokens)
     | Some (TokKeyword KwUnit) ->
         parseUnitDecl (advance tokens)
-    | Some kind ->
+    // The removed imperative `for IDENT in ...`, in TOP-LEVEL position. This
+    // must precede the bare-expression arm below: `for` also opens the
+    // surviving loop-object form, so without the guard the expression parser
+    // would swallow the shape and report something downstream and confusing
+    // instead of the BL1003 steer. Same predicate and same message as
+    // parseBlock's statement-position shell.
+    | Some (TokKeyword KwFor) when isImperativeForIn tokens ->
         let line, col = currentPos tokens
-        error (sprintf "Expected declaration but got %s" (describeToken kind)) line col
+        errorC "BL1003" forInRemovedMsg line col
+    | Some kind ->
+        // A bare top-level EXPRESSION statement. Blade has no `main`: a
+        // top-level expression evaluates in declaration order and auto-prints,
+        // exactly like a top-level `let`. That equivalence is the
+        // implementation -- the expression desugars to a let over a
+        // synthesized `__exprN` name, which is the same move the REPL/notebook
+        // lane makes with `let __cellN = `. Because the desugar happens HERE,
+        // every downstream phase (typecheck, lowering, codegen, the
+        // interpreter, and the auto-printer) inherits the feature through the
+        // binding path it already has, so the codegen/interpreter twins cannot
+        // drift on it.
+        let line, col = currentPos tokens
+        let classic () =
+            error (sprintf "Expected declaration but got %s" (describeToken kind)) line col
+        match parseExprImpl tokens with
+        | Ok (expr, remaining) ->
+            topExprCounter <- topExprCounter + 1
+            let name = sprintf "__expr%d" topExprCounter
+            success (DeclLet { Mutability = BindLet
+                               Pattern = mkPat (headSpan tokens) (PatVar name)
+                               Type = None
+                               Value = expr }) remaining
+        // The expression parser rejected the very first token, so this was
+        // never an expression: keep the historical declaration-position
+        // wording, which names what the position actually wanted. Only when it
+        // got PAST that token does its own error describe the input better.
+        | Error e when e.Line = line && e.Col = col -> classic ()
+        | Error e -> Error e
     | None ->
         errorEof "Expected declaration but got end of file"
 

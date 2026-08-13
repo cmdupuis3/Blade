@@ -1,0 +1,23 @@
+// TEST: Braceless Arm Needs Value (rejects)
+// ERROR: BL1999
+// The other side of 043's layout rule. A braceless let-chain arm continues
+// only while the next statement starts at a column no less than the chain's
+// first statement, and it must end in an EXPRESSION -- a `let` is not a value.
+//
+// Here `let w = 2` is outdented to column 1, so it does NOT continue the arm.
+// That refusal is the load-bearing part: without the column guard the arm
+// would take `let w = 2` as another binder and `w` as its value, silently
+// swallowing a TOP-LEVEL declaration into a match arm. Having fenced it off,
+// the arm is left as bindings with no value, which is refused rather than
+// lowered (it would otherwise reach codegen as a void-valued arm and fail as a
+// C++ type error instead of a Blade one).
+//
+// Only the CODE is pinned, not the wording: the arm-level error is reported
+// through `many parseMatchCase`, which stops at the first failing arm, so the
+// exact message that surfaces belongs to whatever reads the leftover `|`.
+let x = 0
+let z = match x with
+| 0 -> let a = 1
+let w = 2
+w
+// EXPECT: parse failure -- a braceless arm's continuation must not be outdented.
