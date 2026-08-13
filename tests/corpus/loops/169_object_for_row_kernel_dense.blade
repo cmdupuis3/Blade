@@ -1,0 +1,31 @@
+// TEST: object_for with a row-returning comm kernel over DIFFERENT arrays (dense)
+// ============================================================================
+// The dense twin of loops/168, and the control that proves the symmetric case
+// is really about STORAGE and not about the kernel. Same `comm` kernel, but two
+// different arrays occupy the commuting positions, so no identity group forms
+// and `comm` licenses nothing: the output is the full 3 x 2 rectangle of cells,
+// each a row of 3 -- 18 values here too, but for a different reason than 168's
+// 18 (there: 6 canonical pairs of 3 rows; here: 3 x 2 dense cells).
+//
+// This spelling ALREADY worked once the type-side fix (loops/167) was in, since
+// an all-rank-1 output makes the old entry-counting extents logic agree with
+// the rank-counting one. It is pinned so a future change to that block cannot
+// fix the compact path by breaking the dense path.
+//
+// B rows center to [-1,0,1], [-2,0,2], [-2,0,2].
+// D rows center to [-1,0,1] and [2,0,-2].
+// ============================================================================
+from stats import mean
+
+function covariance(a: T^1, b: T^1) where comm(a, b) = { (a - mean(a)) * (b - mean(b)) }
+
+let B: Array<Float like Idx<3>, Idx<3>> = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 3.0, 5.0]]
+
+let D: Array<Float like Idx<2>, Idx<3>> = [[0.0, 1.0, 2.0], [4.0, 2.0, 0.0]]
+
+// Cells in row-major (B row, D row) order:
+//   (x,p) = [1,0,1]   (x,q) = [-2,0,-2]
+//   (y,p) = [2,0,2]   (y,q) = [-4,0,-4]
+//   (z,p) = [2,0,2]   (z,q) = [-4,0,-4]
+let dense = object_for(covariance) <@> (B, D) |> compute
+// EXPECT: dense = [1, 0, 1, -2, 0, -2, 2, 0, 2, -4, 0, -4, 2, 0, 2, -4, 0, -4]

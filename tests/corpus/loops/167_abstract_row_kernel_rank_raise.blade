@@ -1,0 +1,36 @@
+// TEST: Rank-raising row kernel declared with an ABSTRACT T^1 return
+// ============================================================================
+// The minimal root cause behind loops/168 and 169. loops/121 pinned an
+// array-valued kernel return (stage S3) using a CONCRETE parameter type
+// (`Array<Float like Idx<3>>`), and that spelling worked. Write the same kernel
+// with the abstract `T^1` and it did not:
+//
+//   * a `T^k` annotation leaves the parameter -- and therefore the deduced
+//     RETURN -- an arity-constrained inference var, not a concrete `Array<..>`
+//     (see rankOfCalleeParam). `kernelInputRanks` already had to read that
+//     through `GetArityConstraint`; the T-dimension deduction beside it read
+//     only `ArrayElem`, so an abstract rank-1 return deduced ZERO T-dims;
+//   * the output therefore came out one rank short with scalar cells, and
+//     codegen emitted `out[i] = kernel(row)` -- assigning an `Array<double,1>`
+//     into a `double`, which is a g++ error, not a Blade diagnostic.
+//
+// docs/formalism.md section 7.2 ("Output rank = S + T") and section 8.4 step 5
+// ("T-dims of output: from the kernel's `T^m`") specify this shape; nothing
+// made it conditional on how the `T^m` was spelled.
+//
+// Extents are 3 and 5 -- neither a power of two, per the benchmark discipline
+// note in CLAUDE.md, and 3 != 5 so a transposed extent table cannot pass.
+// ============================================================================
+from stats import mean
+
+let B: Array<Float like Idx<3>, Idx<5>> = [[1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 4.0, 6.0, 8.0, 10.0], [3.0, 1.0, 4.0, 1.0, 5.0]]
+
+// Row in, row out: means are 3, 6 and 2.8.
+let centered = method_for(B) <@> lambda(r: T^1) -> r - mean(r) |> compute
+// EXPECT: centered = [[-2, -1, 0, 1, 2], [-4, -2, 0, 2, 4], [0.2, -1.8, 1.2, -1.8, 2.2]]
+
+// The same kernel as a NAMED function, which reaches the seam through a
+// different arm (eta-surfaced rather than an inline lambda) and must agree.
+function center(r: T^1) -> T^1 = r - mean(r)
+let centered2 = method_for(B) <@> center |> compute
+// EXPECT: centered2 = [[-2, -1, 0, 1, 2], [-4, -2, 0, 2, 4], [0.2, -1.8, 1.2, -1.8, 2.2]]

@@ -11498,7 +11498,58 @@ and buildApplyInfo (env: TypeEnv)
         | ArrayElem arr ->
             let tDims = arr.IndexTypes |> List.map (fun idx -> { idx with Kind = TDimension })
             (tDims, tDims.Length)
-        | _ -> ([], 0)
+        | _ ->
+            // ABSTRACT rank-k return (`T^k` / `T<u>^k`). `Resolve` leaves such a
+            // return an ARITY-CONSTRAINED inference var rather than a concrete
+            // `Array<..>` -- the identical situation `kernelInputRanks` above has
+            // to read through `GetArityConstraint`, for the identical reason
+            // (see rankOfCalleeParam). Reading only `ArrayElem` here meant a
+            // row-in/row-out kernel deduced ZERO T-dims: the output came out one
+            // rank short, its cells typed scalar, and codegen emitted
+            // `out[i] = kernel(..)` assigning an `Array<T,1>` into a `double`.
+            // That is docs/formalism.md sections 7.2 / 8.4 step 5 ("T-dims of output:
+            // from the kernel's `T^m`") simply not being applied when the `T^m`
+            // is written abstractly -- and it is the shape of quickstart-1's
+            // section 9 covariance kernel, `(a - mean(a)) * (b - mean(b))`.
+            //
+            // The T-dims are the FIBER the kernel consumed. A body built only
+            // from rank-k parameters is rank-k over those same index types: the
+            // centered row above is a row over the row axis it was handed. This
+            // arm is sound precisely because it is unreachable once the body's
+            // own type is concrete -- a kernel returning a DIFFERENT extent
+            // (loops/121's `fs`, rank 1 over Idx<4> from a row over Idx<3>)
+            // resolves to `ArrayElem` and takes the arm above, which stays
+            // authoritative.
+            let abstractRank =
+                match IR.stripUnits resolved with
+                | IRTInfer id ->
+                    match env.Subst.GetArityConstraint id with
+                    | Some k when k >= 1 -> Some k
+                    | _ -> None
+                | _ -> None
+            match abstractRank with
+            | None -> ([], 0)
+            | Some k ->
+                // First operand whose kernel actually consumes k or more dims;
+                // its innermost k are the fiber. Indexed rather than zipped:
+                // a Poly pack makes kernelInputRanks and arrayTypes differ in
+                // length.
+                let fiberOf =
+                    arrayTypes |> List.mapi (fun i at ->
+                        let irank =
+                            if i < kernelInputRanks.Length then kernelInputRanks.[i] else 0
+                        if irank >= k && at.IndexTypes.Length >= k then
+                            Some (at.IndexTypes
+                                  |> List.skip (at.IndexTypes.Length - k)
+                                  |> List.map (fun idx -> { idx with Kind = TDimension }))
+                        else None)
+                    |> List.tryPick id
+                match fiberOf with
+                | Some tDims -> (tDims, k)
+                // No operand supplies a k-deep fiber: leave it alone rather
+                // than invent an extent, so the pre-existing behaviour (and
+                // whatever diagnostic follows from it) is unchanged.
+                | None -> ([], 0)
 
     // Mark each array's consumed fiber dimensions as T-dimensions (section 9.2). The
     // kernel consumes its innermost irank(f,i) = kernelInputRanks.[i] dims as a

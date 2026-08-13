@@ -832,13 +832,37 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
         // manifestation M-C), so the allocation needs those trailing extents too
         // -- the interpreter's version of the short extents table that made the
         // compiled lane print `[[], []]`.
+        // COUNTED BY RANK, NOT BY ENTRY -- the twin of the same correction in
+        // CodeGen's extents table. A comm-licensed application over one identity
+        // group gives the output a COMPOUND leading index (`SymIdx<2, I>` is ONE
+        // entry of Rank 2), so comparing `IndexTypes.Length` against the loop-
+        // level count made a rank-3 compact output look like it had no trailing
+        // T-dimension at all: the allocation came out one axis short and the row
+        // write ran off the end of the pool. Flat rank on both sides, and the
+        // trailing ENTRIES peeled off the end until their ranks account for the
+        // missing dims. Identical to the old `List.skip` on an all-rank-1
+        // output, so the dense path is untouched.
         let outerExtents = cg.Bindings |> List.map levelExtent
         let trailingExtents =
-            if arr.IndexTypes.Length > outerExtents.Length then
-                arr.IndexTypes
-                |> List.skip outerExtents.Length
-                |> List.map (fun ix -> toI64 (Core.evalExpr st env ix.Extent))
-            else []
+            let flatRank = arr.IndexTypes |> List.sumBy (fun ix -> ix.Rank)
+            let missing = flatRank - outerExtents.Length
+            if missing <= 0 then []
+            else
+                let rec peel (acc: IRIndexType list) (taken: int)
+                             (remaining: IRIndexType list) : IRIndexType list option =
+                    if taken = missing then Some acc
+                    elif taken > missing then None
+                    else
+                        match remaining with
+                        | [] -> None
+                        | ix :: rest -> peel (ix :: acc) (taken + ix.Rank) rest
+                match peel [] 0 (List.rev arr.IndexTypes) with
+                | Some tDimEntries ->
+                    tDimEntries |> List.map (fun (ix: IRIndexType) ->
+                        toI64 (Core.evalExpr st env ix.Extent))
+                // Boundary falls INSIDE a compound index: not a shape this
+                // describes, so leave the allocation as it was.
+                | None -> []
         let rowShaped = not (List.isEmpty trailingExtents)
         let extents = (outerExtents @ trailingExtents) |> Array.ofList
         st.Cells <- st.Cells + (extents |> Array.fold (*) 1L)

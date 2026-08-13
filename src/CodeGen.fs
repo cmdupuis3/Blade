@@ -12813,20 +12813,50 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
             // them off `codeGen.OutputType` rather than off `info.KernelTDims`
             // keeps the table and the `Array<T, outputRank>` allocation derived
             // from ONE type, so they cannot disagree about rank.
+            // COMPACT (SymIdx/AntisymIdx) OUTPUTS COUNT BY RANK, NOT BY ENTRY.
+            // The trailing T-dims used to be found with `List.skip outerCount`
+            // under the guard `List.length at.IndexTypes = outputRank` -- both of
+            // which silently assume every index type is rank 1. A comm-licensed
+            // application over the same array gives the output a COMPOUND leading
+            // index (`SymIdx<2, I>` is ONE entry of Rank 2), so the guard was
+            // false and the trailing extents were dropped again: `object_for(cov)
+            // <@> (B, B)` with a row-returning kernel printed `cv = []`, the exact
+            // M-C1 symptom this block exists to prevent, just on the symmetric
+            // path instead of the dense one.
+            //
+            // Both quantities are therefore computed in FLAT rank: how many
+            // trailing dims are missing (`outputRank - outerCount`), and which
+            // trailing ENTRIES supply them (taken from the end until their ranks
+            // sum to that). On an all-rank-1 output this is identical to the old
+            // `List.skip outerCount`, so the dense path is untouched.
             let extentDims =
                 let outerCount = List.length extentDims
                 if outputRank <= outerCount then extentDims
                 else
                     match codeGen.OutputType with
-                    | ArrayElem at when List.length at.IndexTypes = outputRank ->
-                        let trailing =
-                            at.IndexTypes
-                            |> List.skip outerCount
-                            |> List.map (fun ix ->
-                                match tryEvalIntIR ix.Extent with
-                                | Some n -> (sprintf "%d" n, true)
-                                | None -> (exprToCppCtx tempCtx ix.Extent, false))
-                        extentDims @ trailing
+                    | ArrayElem at when arrayRank at = outputRank ->
+                        // Peel entries off the END until they account for the
+                        // missing flat dims exactly; a partial match means the
+                        // boundary falls INSIDE a compound index, which is not a
+                        // shape this rewrite can describe -- leave it alone.
+                        let missing = outputRank - outerCount
+                        let rec peel (acc: IRIndexType list) (taken: int)
+                                     (remaining: IRIndexType list) : IRIndexType list option =
+                            if taken = missing then Some acc
+                            elif taken > missing then None
+                            else
+                                match remaining with
+                                | [] -> None
+                                | ix :: rest -> peel (ix :: acc) (taken + ix.Rank) rest
+                        match peel [] 0 (List.rev at.IndexTypes) with
+                        | Some tDimEntries ->
+                            let trailing =
+                                tDimEntries |> List.map (fun (ix: IRIndexType) ->
+                                    match tryEvalIntIR ix.Extent with
+                                    | Some n -> (sprintf "%d" n, true)
+                                    | None -> (exprToCppCtx tempCtx ix.Extent, false))
+                            extentDims @ trailing
+                        | None -> extentDims
                     | _ -> extentDims
             let (extentDecls, ownedExtents) = emitExtentsTable ind extentsName outputRank extentDims
 
