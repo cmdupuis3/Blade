@@ -1,0 +1,23 @@
+// TEST: Tuple Equality Array Component (rejects)
+// ERROR: BL3999
+// ERROR-CONTAINS: compares as its data POINTER
+// ============================================================================
+// A tuple with an ARRAY component is refused in `==`, and this is the one
+// refusal here that exists to prevent a WRONG ANSWER rather than a compile
+// failure. `Array` promotes to its data pointer, so `std::tuple`'s member-wise
+// `operator==` compares ADDRESSES: before this check the program below
+// compiled, ran, and printed `same = false` for two structurally equal arrays
+// -- while the same array named twice would have printed `true`.
+//
+// There is no honest scalar answer to give instead. Comparing arrays at TOP
+// level is elementwise and yields an ARRAY of Bool (TypeCheck.boolResultTy),
+// which is not something a tuple slot can hold, so the operand is refused
+// rather than given a third meaning. Compare the array components directly and
+// combine the results.
+// ============================================================================
+let x = [1.0, 2.0]
+let y = [1.0, 2.0]
+let t1 = x, 1
+let t2 = y, 1
+let same = t1 == t2
+// EXPECT: typecheck failure -- an Array component has no scalar equality

@@ -9690,12 +9690,54 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy (rExpr: TypedExpr
             // keeps the left operand's ElemType instead.
             mkOuterResult arrL arrR (IRTScalar ETBool)
         | _ -> IRTScalar ETBool
+    // Comparison over TUPLE operands. `std::tuple` supplies `==`/`!=`
+    // (element-wise) and the ordered operators (lexicographic) for free, which
+    // is what codegen emits and what the interpreter's tuple arm mirrors --
+    // but only for components C++ compares the way Blade means them. Three
+    // shapes are refused here, in the front end, rather than reaching g++ or
+    // silently answering wrong:
+    //
+    //   - WIDTH disagreement. `(2, 3) == (2, 3, 4)` has no `operator==` at all
+    //     and dies as a page of <tuple> template instantiation errors.
+    //   - A tuple against a NON-tuple, for the same reason.
+    //   - An ARRAY component. `Array` promotes to its data pointer, so
+    //     `(x, 1) == (y, 1)` compares ADDRESSES: two structurally equal arrays
+    //     answer `false` and the same array twice answers `true`. Comparing
+    //     arrays at TOP level is elementwise and yields an ARRAY of Bool (see
+    //     `boolResultTy`), and there is no scalar Bool for a tuple slot to
+    //     hold -- so the component is refused rather than given a third meaning.
+    //
+    // Units are checked per COMPONENT, because `IR.getUnits` reads the top of
+    // a type and a tuple carries none there: without this walk a `Float64<mps>`
+    // slot compared against a `Float64<meters>` slot passed unremarked.
+    // An unresolved operand makes no claim and is left to the ordinary
+    // machinery, exactly as the scalar path leaves it.
+    let rec peelAnnotations t =
+        match t with
+        | IRTUnitAnnotated (inner, _) -> peelAnnotations inner
+        | _ -> t
+    let isTupleTy t = match peelAnnotations t with IRTTuple _ -> true | _ -> false
+    let rec tupleCompareCheck (l: IRType) (r: IRType) : TypeResult<unit> =
+        match peelAnnotations l, peelAnnotations r with
+        | IRTInfer _, _ | _, IRTInfer _ -> Ok ()
+        | IRTTuple ls, IRTTuple rs when ls.Length = rs.Length ->
+            List.zip ls rs
+            |> List.fold (fun acc (a, b) -> acc |> Result.bind (fun () -> tupleCompareCheck a b)) (Ok ())
+        | IRTTuple _, _ | _, IRTTuple _ -> Error (TypeMismatch (l, r))
+        | ArrayElem _, _ | _, ArrayElem _ ->
+            Error (Other "comparison of tuples whose components are arrays: an Array component \
+compares as its data POINTER, not element-wise, so two structurally equal arrays would answer \
+`false`. Compare the array components directly (`x == y` is elementwise and yields an array of \
+Bool) and combine the results, or compare tuples of scalars.")
+        | _ -> unitRulesForOp op (IR.getUnits l) (IR.getUnits r) |> Result.map ignore
     match op with
     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
         // Comparisons require compatible units (unitRulesForOp errors on
         // mismatch; the result carries no annotation)
-        unitRulesForOp op (IR.getUnits leftTy) (IR.getUnits rightTy)
-        |> Result.map (fun _ -> boolResultTy ())
+        (if isTupleTy leftTy || isTupleTy rightTy then tupleCompareCheck leftTy rightTy else Ok ())
+        |> Result.bind (fun () ->
+            unitRulesForOp op (IR.getUnits leftTy) (IR.getUnits rightTy)
+            |> Result.map (fun _ -> boolResultTy ()))
     | OpAnd | OpOr -> Ok (boolResultTy ())
     | _ ->
         // Extract unit annotations if present

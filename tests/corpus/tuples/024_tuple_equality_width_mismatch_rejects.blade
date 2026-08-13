@@ -1,0 +1,15 @@
+// TEST: Tuple Equality Width Mismatch (rejects)
+// ERROR: BL3001
+// ERROR-CONTAINS: (Int64, Int64, Int64)
+// ============================================================================
+// Comparing tuples of different WIDTHS is a type mismatch, refused in the
+// front end. C++ has no `operator==` across widths at all, so without this the
+// program type-checked clean and died in g++ as a page of <tuple> template
+// instantiation errors naming a header the user never wrote -- and on the
+// interpreter lane it died later still, at run time.
+//
+// BL3001 rather than a new code because that is what it is: the width of a
+// tuple-typed name is STATIC (Design C, `004`), so two widths are two types.
+// ============================================================================
+let r = (2, 3) == (2, 3, 4)
+// EXPECT: typecheck failure -- a 2-tuple and a 3-tuple are different types

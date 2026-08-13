@@ -619,8 +619,34 @@ let private cmpI32 op (a: int32) (b: int32) =
     match op with
     | IREq -> a = b | IRNeq -> a <> b | IRLt -> a < b | IRLe -> a <= b | IRGt -> a > b | IRGe -> a >= b | _ -> false
 
-let private evalCompare (op: IRBinOp) (l: Value) (r: Value) : Value =
+let rec private evalCompare (op: IRBinOp) (l: Value) (r: Value) : Value =
     match l, r with
+    // Tuples, mirroring `std::tuple`'s own operators -- which is what codegen
+    // emits, so the twins agree by construction: `==`/`!=` are the conjunction
+    // of the component comparisons, the ordered ones are LEXICOGRAPHIC (the
+    // first differing component decides, and `<=`/`>=` are what "all equal"
+    // answers true to). Recursive, so a nested tuple component compares
+    // structurally the way `std::tuple`'s nested operator== does.
+    //
+    // Widths agree by construction: TypeCheck refuses a comparison of two
+    // different widths (BL3001), as it must -- C++ has no `operator==` across
+    // widths at all. A disagreement reaching here is a compiler bug, not user
+    // input, so it panics rather than quietly answering `false`.
+    | VTuple ls, VTuple rs ->
+        if ls.Length <> rs.Length then
+            raise (InterpPanic("BL8010", "comparison of tuples of different widths", None, 0))
+        else
+            let compEq (a: Value) (b: Value) =
+                match evalCompare IREq a b with VBool t -> t | _ -> false
+            match op with
+            | IREq -> VBool (Array.forall2 compEq ls rs)
+            | IRNeq -> VBool (not (Array.forall2 compEq ls rs))
+            | _ ->
+                let rec lex i =
+                    if i >= ls.Length then VBool (match op with IRLe | IRGe -> true | _ -> false)
+                    elif compEq ls.[i] rs.[i] then lex (i + 1)
+                    else evalCompare op ls.[i] rs.[i]
+                lex 0
     | VComplex _, _ | _, VComplex _ ->
         // std::complex has only == / != ; ordered comparisons never type-check.
         let (ar, ai) = asComplex l
