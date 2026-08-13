@@ -1,0 +1,8 @@
+// TEST: Cross-module GENERIC function
+// MODULE: Stats
+// A module exporting an HM-polymorphic function -- the shape a Blade-source
+// stdlib needs and could not have. See 02_Main.blade for what was broken.
+module Stats
+
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function centered(row: T^1) -> T^1 = row - mean(row)

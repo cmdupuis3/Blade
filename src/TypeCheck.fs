@@ -2255,6 +2255,27 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
                  Bindings = [(name, varId, expected)] }
 
     | PatternKind.PatLit lit ->
+        // A pattern literal is an UNTYPED literal exactly as a value-position one
+        // is, so it must adopt the scrutinee's numeric type instead of pinning it
+        // to the literal's default. `match (a: Nat) with | 1 -> ...` otherwise
+        // unified Int64 against Nat<?> and reported BL3001. The adopting cases
+        // mirror `checkExpr`'s context-driven literal arms (sec. 4.18.3): an int
+        // literal takes a Nat / unit-annotated Nat / index-tagged-int target.
+        // Deliberately narrow -- every other combination still goes through
+        // `unify`, so a float literal against a Nat scrutinee is the mismatch it
+        // has always been, and no NON-literal ever flows across these edges.
+        let adoptsExpected =
+            match lit with
+            | LitInt _ ->
+                match env.Subst.Resolve expected with
+                | IRTNat _
+                | IRTUnitAnnotated (IRTNat _, _)
+                | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) -> true
+                | _ -> false
+            | _ -> false
+        if adoptsExpected then
+            Ok { Kind = TPatLit lit; Type = expected; Bindings = [] }
+        else
         let litTy = inferLiteralType lit
         unify env.Subst litTy expected |> Result.map (fun () ->
             { Kind = TPatLit lit; Type = expected; Bindings = [] })

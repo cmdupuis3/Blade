@@ -4294,6 +4294,49 @@ let collectHMCallSites (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId 
     iterIRExpr walk expr
     results |> Seq.toList
 
+/// What a call site teaches about the CALLER's OWN type variables.
+///
+/// `collectHMCallSites` learns the CALLEE's vars from the argument types, which
+/// is what a specialization is keyed and named on. It cannot learn the caller's,
+/// and across a MODULE BOUNDARY those are a second, disjoint namespace:
+/// TypeCheck instantiates an imported signature with fresh vars at the import
+/// site, while the callee's `IRFuncDef` keeps the ones it was declared with. So
+/// an imported `mean(row: T^1) -> T^0` specialized correctly to
+/// `mean_HM_10001_double` while every expression AROUND the call still carried
+/// the caller's `T?10007` -- which nothing then substituted, giving BL6001
+/// "unresolved type variable" on a program whose types were all perfectly well
+/// determined. Same-module calls share one namespace, which is why this was
+/// invisible until a Blade-source stdlib started exporting generics.
+///
+/// The missing equation is the RETURN type: the callee's return, substituted
+/// with what the arguments taught, IS the call's recorded result type, so
+/// matching the two binds the caller-side vars. That is the exact mirror of the
+/// param/arg direction, and it adds no new information about the callee.
+///
+/// Deliberately NOT folded into `collectHMCallSites`: these bindings must stay
+/// out of the specialization KEY, or two call sites differing only in
+/// caller-side var numbering would mint two identical specs under two names.
+let collectHMCallSiteReturnBindings
+    (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (int * IRType) list =
+    let results = System.Collections.Generic.List<_>()
+    let walk e =
+        match e with
+        | IRApp (IRVar (funcId, _), args, retTy) when hmFuncMap.ContainsKey funcId ->
+            let func = hmFuncMap.[funcId]
+            if args.Length = func.Params.Length then
+                let calleeBindings =
+                    List.zip func.Params args
+                    |> List.fold (fun acc (p, arg) ->
+                        match exprTypeIfKnown arg with
+                        | Some argTy -> unifyParamWithArg p.Type argTy acc
+                        | None -> acc) Map.empty
+                let concreteRet = substTypeInIRType calleeBindings func.RetType
+                unifyParamWithArg retTy concreteRet Map.empty
+                |> Map.iter (fun k v -> results.Add((k, v)))
+        | _ -> ()
+    iterIRExpr walk expr
+    results |> Seq.toList
+
 /// Occurrence-id-INDEPENDENT structural key for a type: same element, rank,
 /// extent, and symmetry => same key, regardless of the per-occurrence index-type
 /// `Id`s. Used BOTH to dedup HM specializations and to NAME them, so the two
@@ -4661,12 +4704,18 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    global map -- the per-call-site rewrite still produces the right
     //    specs, and the per-binding fallback covers r.Type.
     let collectAllBindingsFromExpr (expr: IRExpr) : (int * IRType) list =
-        collectHMCallSites hmFuncMap expr
-        |> List.collect (fun (_, sortedBindings) ->
-            sortedBindings |> List.choose (fun (k, v) ->
-                match v with
-                | IRTInfer _ -> None  // self-binding; ignore
-                | _ -> Some (k, v)))
+        let calleeSide =
+            collectHMCallSites hmFuncMap expr
+            |> List.collect (fun (_, sortedBindings) -> sortedBindings)
+        // The caller's own vars, which a cross-module call site can only teach
+        // through its return type (see collectHMCallSiteReturnBindings).
+        // Substitution-only: these never reach a specialization key.
+        let callerSide = collectHMCallSiteReturnBindings hmFuncMap expr
+        calleeSide @ callerSide
+        |> List.choose (fun (k, v) ->
+            match v with
+            | IRTInfer _ -> None  // self-binding; ignore
+            | _ -> Some (k, v))
     let allObservedBindings : (int * IRType) list =
         let fromFns =
             modul.Functions |> List.collect (fun f -> collectAllBindingsFromExpr f.Body)
@@ -4841,6 +4890,85 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         DerivedFuncOrigins =
             derivedOrigins
             |> Map.fold (fun acc k v -> Map.add k v acc) modul.DerivedFuncOrigins }
+
+/// Whole-program driver for `monomorphizeHMFunctions`.
+///
+/// HM specialization is CALL-SITE driven, so a generic function DEFINED in one
+/// module and CALLED from another had nowhere to learn its bindings. Run per
+/// module, the defining module sees no call site at all (its generic is dropped
+/// as an uninstantiated polymorph) and the calling module does not own the
+/// callee, so the call survived carrying `IRTInfer` -- a guaranteed BL6001
+/// "unresolved type variable" plus a dangling VarId. The practical consequence
+/// was that a stdlib written in Blade source could not export anything generic;
+/// `stdlib/plot.blade` says so in its own header and shares only String-typed
+/// helpers because of it.
+///
+/// The fix is the one `shapeMonomorphizeModules` already applies for extents:
+/// run the pass ONCE over a merged view of every module's functions and
+/// bindings, then split the result back. Sound for the same two reasons given
+/// there -- a module's EXPORTS are fixed by `lowerTypedModule` before any of
+/// these passes run, so widening what this pass can see cannot change what a
+/// later module resolves; and both back ends already merge modules before
+/// consuming them (`CodeGen.genProgramFromIR`, `Interp.Run.printableModule`),
+/// so which module a synthesized spec lands in is not observable.
+///
+/// SPLIT-BACK. Bindings are rewritten 1:1 and in order, so per-module counts
+/// restore them exactly. A surviving function keeps its Id and returns to its
+/// own module. A SYNTHESIZED function (spec or lambda clone) follows its origin
+/// through `DerivedFuncOrigins`, mirroring shapeMonomorphizeModules' "record
+/// the copy in the module that DEFINES its origin"; an unknown origin lands in
+/// the entry module.
+///
+/// A single-module program takes the fast path and is bit-identical to before,
+/// down to the ids the builder mints.
+let monomorphizeHMFunctionsModules (modules: IRModule list) (builder: IRBuilder) : IRModule list =
+    match modules with
+    | [] -> []
+    | [ single ] -> [ monomorphizeHMFunctions single builder ]
+    | _ ->
+
+    let merged =
+        { modules.Head with
+            Functions = modules |> List.collect (fun m -> m.Functions)
+            Bindings = modules |> List.collect (fun m -> m.Bindings)
+            DerivedFuncOrigins =
+                modules |> List.fold (fun acc m ->
+                    m.DerivedFuncOrigins |> Map.fold (fun a k v -> Map.add k v a) acc) Map.empty }
+    let out = monomorphizeHMFunctions merged builder
+
+    // Where each PRE-EXISTING function id came from.
+    let homeOf =
+        modules
+        |> List.mapi (fun i m -> m.Functions |> List.map (fun f -> (f.Id, i)))
+        |> List.concat
+        |> Map.ofList
+    let lastIdx = modules.Length - 1
+    let placementOf (f: IRFuncDef) =
+        match Map.tryFind f.Id homeOf with
+        | Some i -> i
+        | None ->
+            match Map.tryFind f.Id out.DerivedFuncOrigins with
+            | Some origin -> Map.tryFind origin homeOf |> Option.defaultValue lastIdx
+            | None -> lastIdx
+    let funcsByModule = out.Functions |> List.groupBy placementOf |> Map.ofList
+
+    let mutable remainingBindings = out.Bindings
+    modules
+    |> List.mapi (fun i m ->
+        let n = m.Bindings.Length
+        let mine = remainingBindings |> List.truncate n
+        remainingBindings <- remainingBindings |> List.skip (min n remainingBindings.Length)
+        { m with
+            Functions = Map.tryFind i funcsByModule |> Option.defaultValue []
+            Bindings = mine
+            // The whole derived-origin map rides on the entry module: codegen
+            // and the interpreter both UNION these across modules, so one
+            // carrier is enough and duplicating it would only invite drift.
+            DerivedFuncOrigins =
+                if i = lastIdx then
+                    out.DerivedFuncOrigins
+                    |> Map.fold (fun acc k v -> Map.add k v acc) m.DerivedFuncOrigins
+                else m.DerivedFuncOrigins })
 
 /// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose
 /// operands are BOTH arrays becomes the `method_for(zip ..) <@> kernel |>

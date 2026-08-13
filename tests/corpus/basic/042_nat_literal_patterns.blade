@@ -1,0 +1,47 @@
+// TEST: Integer literal patterns against a Nat scrutinee
+// A pattern literal is an UNTYPED literal exactly as a value-position one is,
+// so it must adopt the scrutinee's numeric type. `match (a: Nat) with | 1 ->`
+// used to unify the literal's default Int64 against Nat<?> and fail BL3001 --
+// and, because checkPattern errors carry no span of their own, it reported at
+// whichever arm BODY was current, pointing the user at `| _ -> ...` for a
+// problem in `| 1`. checkPattern now mirrors checkExpr's context-driven literal
+// arms (sec. 4.18.3) for Nat / unit-annotated Nat / index-tagged-int targets.
+//
+// `test1` is the comparison twin, which always worked: `a == 2` on a Nat
+// already types the literal from its operand. Both are pinned so a regression
+// in either direction is visible.
+function test1(a: Nat) = if a == 2 then true else false
+
+function test2(a: Nat) = {
+    match a with
+    | 1 -> true
+    | 2 -> false
+    | 3 -> false
+    | _ -> true
+}
+
+// A named index type is the same rule through IRTIdxTagged: `Nat<Slot>`.
+type Slot = Idx<4>
+function test3(i: Nat<Slot>) = {
+    match i with
+    | 0 -> 10
+    | 1 -> 20
+    | _ -> 30
+}
+
+let a1 = test1(2)
+// EXPECT: a1 = true
+let a2 = test1(5)
+// EXPECT: a2 = false
+let b1 = test2(1)
+// EXPECT: b1 = true
+let b2 = test2(2)
+// EXPECT: b2 = false
+let b3 = test2(7)
+// EXPECT: b3 = true
+let c1 = test3(0)
+// EXPECT: c1 = 10
+let c2 = test3(1)
+// EXPECT: c2 = 20
+let c3 = test3(3)
+// EXPECT: c3 = 30

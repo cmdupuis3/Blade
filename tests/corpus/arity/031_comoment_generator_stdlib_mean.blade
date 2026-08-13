@@ -1,0 +1,37 @@
+// TEST: comoment generator over stdlib mean, one loop object at three arities
+// docs/quickstart-1.md section 10 verbatim, with `mean` coming from the stdlib
+// instead of being re-declared in the file. Everything else here already worked
+// (arity/024 pins the `| 0 -> 1` scalar identity base, arity/028 the comm-
+// licensed SymIdx compaction); what is new is that the recursive Poly kernel
+// calls a generic ACROSS A MODULE BOUNDARY, and that the generator's own return
+// type is that generic's return -- the exact shape that survived whole-program
+// HM monomorphization but still needed the caller-side return binding
+// (IR.collectHMCallSiteReturnBindings). See multifile/014 for the mechanism.
+//
+// One `object_for` value, applied at arity 2, 3 and 4: each application deduces
+// its own SymIdx<r, 2> output, so the pins are 3, 4 and 5 canonical cells --
+// not 4, 8 and 16 dense ones.
+from stats import mean
+
+function comoment_prod(A: Poly<T^1>)
+where comm(A) -> T^1 = {
+    match arity(A) with
+    | 0 -> 1
+    | _ -> {
+        let head :: tail = A
+        (head - mean(head)) * comoment_prod(tail)
+    }
+}
+
+function comoment_generator(A: Poly<T^1>) where comm(A) -> T^0 = { mean(comoment_prod(A)) }
+
+// x = [1,2,3] (centered [-1,0,1]); y = [2,4,6] (centered [-2,0,2]).
+let A = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+
+let comomentLoop = object_for(comoment_generator)
+let covariance = comomentLoop <@> (A, A) |> compute
+// EXPECT: covariance = [0.666666666666667, 1.33333333333333, 2.66666666666667]
+let coskewness = comomentLoop <@> (A, A, A) |> compute
+// EXPECT: coskewness = [0, 0, 0, 0]
+let cokurtosis = comomentLoop <@> (A, A, A, A) |> compute
+// EXPECT: cokurtosis = [0.666666666666667, 1.33333333333333, 2.66666666666667, 5.33333333333333, 10.6666666666667]

@@ -2239,14 +2239,25 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // get expanded into N concrete params per call site. After this,
         // every function has a fixed param count matching its call sites.
         let irModule = IR.monomorphizeModule irModule env.Builder
-        // HM monomorphization: substitute function-boundary type variables
-        // (e.g. `T` in `Array<T like Idx<n>>`, or `T` extracted from
-        // `Poly<T^N>`'s base type) with concrete types learned from each
-        // call site. Runs after Poly so per-param/per-arg unification is
-        // straightforward -- each pack has already been expanded.
-        let irModule = IR.monomorphizeHMFunctions irModule env.Builder
         currentExports <- Map.add moduleName exports currentExports
         irModules <- irModules @ [irModule]
+
+    // HM monomorphization: substitute function-boundary type variables (e.g.
+    // `T` in `Array<T like Idx<n>>`, or `T` extracted from `Poly<T^N>`'s base
+    // type) with concrete types learned from each call site. Runs after Poly so
+    // per-param/per-arg unification is straightforward -- each pack has already
+    // been expanded.
+    //
+    // WHOLE-PROGRAM, and it has to be: specialization is driven by call sites,
+    // so a generic DEFINED in module A and CALLED from module B learned nothing
+    // while this ran inside the loop -- A saw no call site and dropped it, B did
+    // not own it, and the call reached validateIR still carrying `IRTInfer`
+    // (BL6001). That is what stopped a Blade-source stdlib from exporting a
+    // generic function; `stdlib/stats.blade`'s `mean(row: T^1) -> T^0` is the
+    // motivating case. See IR.monomorphizeHMFunctionsModules for why merging is
+    // sound and how the result is split back; a single-module program is
+    // unaffected, down to the ids the builder mints.
+    let irModules = IR.monomorphizeHMFunctionsModules irModules env.Builder
 
     // SHAPE monomorphization: a function over a symbolic extent (`Idx<n>`)
     // gets a specialized copy per distinct call-site extent signature, with

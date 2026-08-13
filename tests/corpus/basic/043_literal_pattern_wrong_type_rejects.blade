@@ -1,0 +1,13 @@
+// TEST: Literal pattern of the wrong TYPE against a Nat scrutinee (rejects)
+// The guard on basic/042. Letting an INT literal pattern adopt a Nat scrutinee
+// is a rule about untyped numeric literals, not a general "patterns don't have
+// to match" licence: a String literal pattern still cannot match a numeric
+// scrutinee, and is still BL3001. Everything outside the narrow adopting set
+// goes through `unify` exactly as before.
+function t(a: Nat) = {
+    match a with
+    | "x" -> true
+    | _ -> false
+}
+let r = t(2)
+// ERROR: BL3001
