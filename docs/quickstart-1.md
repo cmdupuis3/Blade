@@ -1,20 +1,17 @@
 # Blade: Quickstart Guide (Part 1)
 
-> Supersedes `rewrite/QUICKSTART.md`. Sections 6–9 are rewritten to match the
-> corrected symmetry semantics (see [formalism.md](formalism.md) §12 and
-> [proofs.md](proofs.md)); the rest is carried over with light cleanup.
-
 Blade is an array-oriented functional programming language, designed for
 scientific applications. Blade is useful for general-purpose array math, and
 particularly for math involving symmetric calculations.
 
 Transparent access to optimal coding patterns is a core concern. The type
-system guarantees that array computations are cache-optimal, and Blade uses
+system guarantees that individual array computations are cache-optimal, and Blade uses
 type deduction to encode data symmetry and function commutativity, which
 together yield extreme accelerations for certain kinds of problems.
 
-Blade can look and behave very similarly to Python and R with numpy and
-xarray. However, it is built on a radically different foundation.
+Blade can look and behave very similarly to Python with numpy and
+xarray or other array-oriented languages like R. However, it is built 
+on a radically different foundation.
 
 The three most important concepts in Blade (beyond basic programming) are:
 
@@ -66,8 +63,8 @@ False
 ## 2. Array and Index Types
 
 Arrays are the main collection type. "Index types" define the
-multidimensional space an array spans. The simplest works like Python's
-`range`:
+multidimensional space an array spans. The simplest works somewhat like 
+ Python's `range`:
 
 ```F#
 Idx<N>
@@ -82,7 +79,7 @@ type LonIdx = Idx<360>
 type EarthArray = Array<Float like LatIdx, LonIdx>
 ```
 
-Index types don't evaluate to values — you cannot see the numbers inside —
+Index types don't evaluate to values, so you cannot see the numbers inside,
 but they guarantee that the `Array` types they define iterate in the fastest
 order.
 
@@ -95,8 +92,8 @@ has.
 
 ## 3. Tuples and Currying
 
-Tuples are the other collection type. A bare comma **constructs** one — no
-parentheses needed:
+Tuples are the other collection type. A bare comma constructs one, parentheses
+aren't strictly needed:
 
 ```F#
 let a = 1
@@ -113,11 +110,10 @@ True
 
 Parentheses on the pattern side are optional: `let (e, d, f) = myTuple` binds
 exactly the same thing. Both halves of one statement may use the bare form at
-once — `let a, b = c, d` destructures the pair built from `c` and `d`, with no
-rule needed to arbitrate the two, because the left list is bounded by the `=`
-and the right list starts after it.
+once: `let a, b = c, d`.
 
-A tuple doesn't need to be destructured at all; `t[k]` projects one component:
+A tuple doesn't need to be destructured; tuples can be indexed with `[ ]` to extract
+their components.
 
 ```F#
 let t = b, c        // width-2 tuple, same construction
@@ -127,7 +123,9 @@ t[0] + t[1]
 5
 ```
 
-Destructuring a collection one element at a time is "currying". It applies to
+However, arrays are indexed with parentheses.
+
+Destructuring a collection one element at a time is called "currying". It applies to
 function arguments and to array indexing:
 
 ```F#
@@ -154,7 +152,7 @@ guarantees cache-optimal iteration.
 
 Blade has two parallel type systems: *concrete types* and *abstract types*.
 `EarthArray` is concrete — a 180 × 360 `Array` of `Float`. Functions are on a
-need-to-know basis; they see only abstract types:
+need-to-know basis; they only need abstract types:
 
 ```F#
 type EarthArray = Array<Float like LatIdx, LonIdx>   // concrete
@@ -220,7 +218,7 @@ them — every element of `A` against every element of `B`:
 T^2 -> T^2 -> T^4
 ```
 
-Not what numpy does! That cross-iteration operator is spelled `[+]` in Blade;
+Not what numpy does! This cross-iteration operator is spelled `[+]` in Blade;
 plain `+` stays elementwise, like other languages:
 
 ```F#
@@ -231,19 +229,19 @@ function add2(a: T^0, b: T^0) -> T^0 = a + b
 method_for(A, B) <@> add2       // A [+] B (outer-product style)
 ```
 
-The **loop former** decides *iteration*: `zip(A, B)` co-iterates the two
-arrays over one shared index space; `A, B` (no `zip`) iterates every pair —
-the outer product. The **kernel's written parameter shape** decides
-*packing*: `p: Tuple<2>` takes the whole co-iterated pair as one value
-(project its parts with `p[0]`/`p[1]`); two plain parameters take one
-component each. A kernel's parameter list is a *width schema* over the loop's
-operands — an unannotated parameter consumes one operand, a `Tuple<k>`
-parameter consumes `k` — so `add`'s single `Tuple<2>` parameter and `add2`'s
-two plain parameters are just two different schemas over the same pair, and
-either schema works with either loop former as long as the widths add up.
+These aren't two spellings of one operation. They differ in *which pairs of
+elements get visited*:
 
-`zip` reduces what Blade sees to one shared index space before iteration. So
-why would we ever want the bracketed operators?
+```
+A  +  B     A(i,j) + B(i,j)      one pair per index    -> 2D
+A [+] B     A(i,j) + B(k,l)      every pair            -> 4D
+```
+
+`zip` is what makes the first one elementwise: it fuses `A` and `B` into a
+single shared index space, so only two dimensions are left for Blade to
+consume. Without it, all four are in play. 
+
+So why would we ever want the bracketed operators?
 
 ## 6. Comoments: The Motivating Problem
 
@@ -256,7 +254,7 @@ matrix needs $\forall m,n: cov(A_m, A_n)$: very nearly an outer product,
 i.e. `[*]` territory.
 
 Covariance is *commutative*: $cov(x, y) = cov(y, x)$. So of all pairs
-$(m, n)$, only about half are unique — triangular iteration visits just those:
+$(m, n)$, only about half are unique. With triangular iteration, we can visit only those. In Python:
 
 ```python
 for x1 in range(0, xmax):
@@ -278,22 +276,7 @@ Commutativity gives us exactly this symmetry:
 
 $$cov(B(x_1, y_1), B(x_2, y_2)) = cov(B(x_2, y_2), B(x_1, y_1))$$
 
-Note carefully what moved: the *whole coordinate pairs* $(x_1, y_1)$ and
-$(x_2, y_2)$ swapped together. That is the **joint (diagonal) symmetry**, and
-it is the only symmetry commutativity buys here. It is tempting to go
-further and also swap components independently —
-$cov(B(x_1, y_2), B(x_2, y_1))$ and so on — hoping for a $1/4$ unique
-fraction from two independent triangles. **That is not a real symmetry**,
-and the two-triangles loop nest doesn't even visit all the unique work: this
-is machine-checked, both as a direct counterexample and as a counting theorem
-(per-dimension triangular storage has strictly fewer cells than the joint
-computation has unique values — see [proofs.md](proofs.md), BladeCore and
-BladeCounting).
-
-The right mental model: the pair $(x, y)$ acts as ONE compound spatial index
-$p$. Commutativity makes $cov(B_p, B_q)$ symmetric in $(p, q)$, so the unique
-fraction is about $1/2$ over compound points — triangular iteration over the
-*compound* space:
+Commutativity makes $cov(B_p, B_q)$ symmetric in $(p, q)$, so the unique fraction is about $1/2$ over the *compound* space:
 
 ```python
 for p in range(0, xmax*ymax):        # compound spatial index
@@ -302,18 +285,23 @@ for p in range(0, xmax*ymax):        # compound spatial index
 ```
 
 For coskewness (three copies, still one array), the joint symmetry is the
-full permutation group on the three compound indices — $1/6$ of the compound
-space, a $3! = 6\times$ speedup. In general, $r$ copies of one array give
-$r!$ — over the compound index, not per dimension.
+full permutation group on the three compound indices — $1/6$ of the compound space, a $3! = 6\times$ speedup. In general, $r$ copies of one array give $r!$ over the compound index.
+
+
+```python
+for x1 in range(0, xmax):
+    for y1 in range(0, ymax):
+        for x2 in range(0, xmax):
+            for y2 in range(0, ymax):
+                for x3 in range(0, xmax):
+                    for y3 in range(0, ymax):
+                        skw(B[x1, y1], B[x2, y2], B[x3, y3])
+```
 
 Where do *bigger* products come from? From **distinct commutative groups**:
-e.g. a kernel commutative in $(a, b)$ and separately in $(c, d)$, applied to
-$(A, A, C, C)$, gets $2! \times 2! = 4\times$ — one factor per group. And at
-$r = 2$ there is a beautiful refinement (the Cauchy split) that recovers
-per-dimension *structure* without changing the count — see
-[formalism.md](formalism.md) §12.4.
+e.g. a kernel commutative in $(a, b)$ and separately in $(c, d)$, applied to $(A, A, C, C)$, gets $2! \times 2! = 4$, so one factor per group. 
 
-These are still major speedups — if only we could exploit them easily...
+These can be major speedups — if only we could exploit them easily...
 
 ## 7. Symmetry Optimization
 
@@ -325,7 +313,7 @@ type like this?
 let array = Array<Float like Idx<100>, Idx<100>>
 ```
 
-It can't — the bounds of a triangular loop depend on each other. We need an
+It can't! The bounds of a triangular loop depend on each other. We need an
 index type that describes multiple symmetric positions simultaneously:
 
 ```F#
@@ -349,17 +337,11 @@ let calc = cov(B, B)
 ```
 
 `cov` consumes the time dimension from each copy; each copy contributes its
-two spatial dimensions; commutativity symmetrizes the two *compound* spatial
-positions jointly:
+two spatial dimensions; commutativity symmetrizes the two *compound* spatial positions jointly:
 
 ```
 calc : Array<Float like SymIdx<2, <Idx<100>, Idx<200>>>>
 ```
-
-— symmetric pairs over 100×200 = 20,000 compound points: ~200 million unique
-elements instead of 400 million, iterated and stored triangularly. (Not
-`SymIdx<2,100>, SymIdx<2,200>` — that type has only ~101 million cells, too
-few to hold the answer; that's the counting theorem at work.)
 
 ## 8. Loop Objects
 
@@ -413,8 +395,18 @@ covC : Array<T like SymIdx<2, <Idx<M>, Idx<N>, Idx<P>>>>
 
 One symmetric pair index per application — over whatever compound spatial
 space each array has. Most array languages cannot track this at the type
-level at all; users would have to allocate symmetric storage by hand and know
-the symmetry theory themselves.
+level at all; users would have to allocate symmetric storage by hand and know the symmetry theory themselves.
+
+In practice though, we can imagine that *every* array is wrapped in a trivial `method_for` loop, and *every* function, including combinators, is wapped in a trivial `object_for` loop. This simplifies the syntax to the point that explicit `method_for` and `object_for` are rarely needed... but they are there. The clearest hint is the `<@>` combinator.
+
+```F#
+cov <@> (A, A) 
+    == object_for(cov) <@> (A, A)
+
+(A, A) <@> cov 
+    == method_for(A) <*> method_for(A) <@> cov 
+    == method_for(A, A) <@> cov
+```
 
 ## 9. Kernel Functions
 
@@ -439,14 +431,7 @@ let sameArray = covariance(B, B)    // triangular: SymIdx output
 let different = covariance(B, D)    // rectangular: dense output, even with comm
 ```
 
-Commutativity without identity buys nothing — even when `B` and `D` share
-the same index types and extents. (Checked: `shared_units_insufficient` in
-[proofs.md](proofs.md).) Identity without commutativity also buys nothing.
-The compiler detects identity from the call site and commutativity from the
-kernel — which, incidentally, is *why* Blade has exactly these two loop
-constructors: `method_for` binds all the arrays (identity is detectable),
-`object_for` binds the kernel (commutativity is detectable). That's a
-theorem, too.
+Commutativity without identity buys nothing, and vice versa. The compiler detects identity from the call site and commutativity from the kernel, which is why Blade has exactly the two loop combinators `method_for` and `object_for`. Each of them detect one property and defer the other.
 
 ## 10. Arity Polymorphism
 
@@ -487,8 +472,7 @@ coskewness : Array<Float like SymIdx<3, X>>    // 3!  = 6x
 cokurtosis : Array<Float like SymIdx<4, X>>    // 4!  = 24x
 ```
 
-Arity determines loop depth, output rank, and symmetry — deduced, typed, and
-optimized automatically.
+Arity determines loop depth, output rank, and symmetry — deduced, typed, and optimized automatically.
 
 ## 11. Units of Measure
 
@@ -518,6 +502,4 @@ on.
 
 ---
 
-Continue with [quickstart-2.md](quickstart-2.md): virtual arrays, for-loop
-sugar, zero elements, parallelism, combinators, Reynolds operators,
-equivariance, and metaprogramming.
+Continue with [quickstart-2.md](quickstart-2.md) for more complex concepts: virtual arrays, for-loop sugar, zero elements, parallelism, combinators, Reynolds operators, equivariance, and metaprogramming.
