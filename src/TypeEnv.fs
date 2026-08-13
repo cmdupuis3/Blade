@@ -222,6 +222,15 @@ type TypeEnv = {
     /// Functions whose return type introduces a mutual group (`-> (P1, P2)`):
     /// funcName -> groupId. Joint check emitted at return; callers don't re-check. Shared by reference.
     MutualReturnFuncs: System.Collections.Generic.Dictionary<string, string>
+    /// Callee name -> the 0-based positions of its `mut` parameters. A `mut`
+    /// parameter grants the callee WRITE access to the caller's array, so the
+    /// caller has to have write access to grant: formalism 2.7 lists only
+    /// `let mut x = e` as passable to a `mut` param. The check needs the
+    /// callee's DECLARATION at the call site, and the function type carries
+    /// only param types, so the positions ride here. Name-keyed like
+    /// FuncConstraints/FuncDefaults, and shares their known shadowing
+    /// weakness. Shared by reference.
+    MutParamPositions: System.Collections.Generic.Dictionary<string, int list>
     /// Named functions' `where comm(...)` groups (by param index): funcName ->
     /// int list list. Populated by checkFunctionDecl; must survive
     /// eta-expansion (etaExpandFunctionKernel) onto the loop-kernel wrapper, or
@@ -350,6 +359,7 @@ let emptyEnv () = {
     MutualGroups = Map.empty
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
+    MutParamPositions = System.Collections.Generic.Dictionary<string, int list>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
@@ -667,6 +677,8 @@ complex half)." where_
     | DistOrderCompileTime func -> sprintf "function '%s': Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>" func
     | ImmutableStaticAssign name -> sprintf "Cannot assign to '%s': static bindings are immutable" name
     | MutAssignRefused (target, reason) -> sprintf "Cannot assign to '%s': %s" target reason
+    | MutArgNotPassable (func, argIndex, got) ->
+        sprintf "function '%s': argument %d is passed to a `mut` parameter, which writes back into the caller's array, but %s. Only a `let mut` binding (or another `mut` parameter being forwarded) may be passed there -- declare it `let mut`, or drop `mut` from the parameter if the callee does not write to it." func argIndex got
     | MutParamNotArray (func, param) -> sprintf "function '%s': parameter '%s' is `mut` but not array-typed. Only array parameters can be mutated in place (scalars pass by value); return the new scalar instead." func param
     | MutualBindJointly (typeName, describe, lowerNames) -> sprintf "type '%s' belongs to mutual group (%s); bind the group jointly: let (%s): (%s) = ..." typeName describe lowerNames describe
     | MutualDirectElementsOnly describe -> sprintf "mutual member types (group %s) may appear only as direct elements of a joint tuple annotation" describe
@@ -822,7 +834,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _
             | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _ -> "BL4004"
-            | ImmutableStaticAssign _ | MutParamNotArray _ | MutAssignRefused _ -> "BL4005"
+            | ImmutableStaticAssign _ | MutParamNotArray _ | MutAssignRefused _
+            | MutArgNotPassable _ -> "BL4005"
             | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups
             | MutualDuplicateMember _ | MutualIncompleteAnnotation _ | MutualJointAnnotationOnly _
             | MutualParamMemberType _ | MutualBindTuple _ | MutualReturnTupleElements _

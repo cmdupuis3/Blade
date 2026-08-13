@@ -1,0 +1,17 @@
+// TEST: Mut Arg Static (rejects)
+// ERROR: BL4005
+// ERROR-CONTAINS: is a `let static` or a non-`mut` parameter
+// ============================================================================
+// The immutable end of formalism 2.7's table: `let static` is not mutable in
+// its own scope and not passable to a `mut` param. Refusing it at the CALL
+// SITE matters because the callee's write is legal on its own terms -- the
+// parameter really is `mut` -- so without this check the only thing standing
+// between a `let static` and a mutation would be whatever the back end
+// happened to emit for a static array.
+// ============================================================================
+function accum(out: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    out(0) = 99.0
+    out(0)
+}
+let static g = [0.0, 0.0, 0.0]
+let r = accum(g)

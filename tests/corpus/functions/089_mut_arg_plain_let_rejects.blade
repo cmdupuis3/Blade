@@ -1,0 +1,22 @@
+// TEST: Mut Arg Plain Let (rejects)
+// ERROR: BL4005
+// ERROR-CONTAINS: is a plain `let`
+// ============================================================================
+// Formalism 2.7's binding table: `let x = e` is mutable in its own scope but
+// NOT passable to a `mut` param. A `mut` parameter writes back into the
+// caller's array, so the caller has to hold write permission to grant it, and
+// a plain `let` does not.
+//
+// Nothing enforced this, and the damage was worse than a missing check: it was
+// SHAPE-DEPENDENT. Passed to a function with a return value the plain `let`
+// really was mutated behind the user's back; passed to one whose body was a
+// single statement the call was elided and the mutation silently vanished.
+// The binding form promised one thing and the program did whichever the call
+// shape produced. Refused at the call site now, for every shape.
+// ============================================================================
+function accum(out: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    out(0) = 99.0
+    out(0)
+}
+let g = [0.0, 0.0, 0.0]
+let r = accum(g)

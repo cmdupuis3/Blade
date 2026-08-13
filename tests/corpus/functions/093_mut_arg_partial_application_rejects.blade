@@ -1,0 +1,25 @@
+// TEST: Mut Arg Partial Application (rejects)
+// ERROR: BL4005
+// ERROR-CONTAINS: left unsupplied by a partial application
+// ============================================================================
+// The seam that made the call-site check leak, pinned so it cannot reopen.
+//
+// A partial application does not stay a partial application: `f(w)` desugars
+// to a synthesized lambda whose body calls `f(w, __paN_0)`. The write
+// -permission check has to EXEMPT synthesized `__` names -- compiler-generated
+// buffers (grad's out-buffer ABI) legitimately pass through `mut` slots -- so
+// the caller's real argument arrived at the inner call wearing a `__pa` name
+// and the permission was lost exactly at the seam, not enforced.
+//
+// It was not theoretical: `accum2(w)(g)` mutated a plain `let g` through the
+// `mut` slot while the direct `accum2(w, g)` was refused, so the two spellings
+// of the same call disagreed. Currying a write-back parameter is refused;
+// supplying it directly is the fix, and 088 shows that path working.
+// ============================================================================
+function accum2(x: Array<Float64 like Idx<3>>, out: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    out(0) = x(0)
+    out(0)
+}
+let w = [1.0, 2.0, 3.0]
+let mut g = [0.0, 0.0, 0.0]
+let r = accum2(w)(g)

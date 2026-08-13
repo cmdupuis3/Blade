@@ -1,0 +1,20 @@
+// TEST: Mut Arg Non-Mut Param Forwarded (rejects)
+// ERROR: BL4005
+// ERROR-CONTAINS: is a `let static` or a non-`mut` parameter
+// ============================================================================
+// The negative twin of 088's forwarding chain. `outer` receives `buf` WITHOUT
+// `mut`, so it holds no write permission and cannot hand one to `inner`. A
+// parameter without `mut` binds ReadOnly, the same assignability a `let
+// static` gets, which is why it shares that message.
+//
+// This is the link that makes the chain sound: permission has to be checked at
+// every hop, not just where the array was originally bound. `chained` in 088
+// is only safe because EVERY parameter it flows through is declared `mut`.
+// ============================================================================
+function inner(out: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    out(0) = 99.0
+    out(0)
+}
+function outer(buf: Array<Float64 like Idx<3>>) -> Float64 = { inner(buf) }
+let mut g = [0.0, 0.0, 0.0]
+let r = outer(g)

@@ -3385,6 +3385,61 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             paramTys |> List.exists (fun t ->
                 match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)
         let argRankClash = firstArgRankClash env.Subst paramTys (tArgs |> List.map (fun a -> a.Type))
+        // mutClash (BL4005) - WRITE PERMISSION, the one check here about the
+        // caller's binding form rather than its type. A `mut` parameter writes
+        // back into the caller's array, so the caller must hold write access
+        // to grant it: formalism 2.7 lists only `let mut x = e` as passable to
+        // a `mut` param. Nothing enforced that, and the damage was
+        // shape-dependent rather than merely absent -- a plain `let` passed
+        // directly WAS mutated in some call shapes and silently was not in
+        // others, so the binding form promised one thing and the program did
+        // whichever the call shape happened to produce.
+        //
+        // Keyed on the callee NAME through the application spine, so a curried
+        // call reaches it: `f(a)(b)` arrives here with `f(a)` as the head, and
+        // `appRootAndOffset` recovers both the root name and how many
+        // arguments earlier groups already consumed, which is what turns a
+        // declared position into a position in THIS group.
+        //
+        // Forwarding one `mut` parameter into another is exactly the case that
+        // must keep working: a `mut` param binds MutPassable, so it satisfies
+        // the same predicate a `let mut` binding does, and no special case is
+        // needed. `__`-prefixed callees and arguments are exempt (synthesized
+        // buffers, e.g. grad()'s out-buffer ABI).
+        let mutClash =
+            let rec appRootAndOffset (t: TypedExpr) : (string * int) option =
+                match t.Kind with
+                | TExprVar (name, _, _) -> Some (name, 0)
+                | TExprApp (f, args) ->
+                    appRootAndOffset f |> Option.map (fun (n, off) -> (n, off + List.length args))
+                | _ -> None
+            match appRootAndOffset tFunc with
+            | Some (fname, offset) when not (fname.StartsWith "__") ->
+                (match env.MutParamPositions.TryGetValue fname with
+                 | true, positions ->
+                     positions
+                     |> List.tryPick (fun declPos ->
+                         let i = declPos - offset
+                         if i < 0 || i >= tArgs.Length then None
+                         else
+                             match (List.item i tArgs).Kind with
+                             | TExprVar (aname, _, _) when aname.StartsWith "__" -> None
+                             | TExprVar (aname, _, _) ->
+                                 (match lookupVar aname env with
+                                  | Some info when info.Assign = MutPassable -> None
+                                  | Some info when info.Assign = ReadOnly ->
+                                      Some (i, fname, declPos, sprintf "'%s' is a `let static` or a non-`mut` parameter" aname)
+                                  | Some _ -> Some (i, fname, declPos, sprintf "'%s' is a plain `let`" aname)
+                                  // Not a tracked binding (an import or a
+                                  // builtin): no permission to reason about,
+                                  // so leave it to the checks that do.
+                                  | None -> None)
+                             // Anything that is not a NAME has no storage the
+                             // caller could observe a write through: the
+                             // callee would write into a temporary.
+                             | _ -> Some (i, fname, declPos, "a computed expression has no binding to write back into"))
+                 | _ -> None)
+            | _ -> None
         // extentClash (BL3016) - consumed LAST (see the arm below), and the
         // only check here whose failure is a MEMORY error rather than a g++
         // rejection or a discipline violation. Codegen treats
@@ -3414,6 +3469,15 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                         | Some pe, Some ae when pe <> ae -> Some (i, d, pe, ae)
                         | _ -> None)
                 | _ -> None)
+        // Consumed ahead of the type clashes: a write-permission violation is
+        // about the caller's BINDING FORM, so it stands whatever the types do,
+        // and reporting it first keeps a `let` that also needs a cast from
+        // being told about the cast instead of the real problem.
+        match mutClash with
+        | Some (i, fname, declPos, got) ->
+            atArg i
+            Error (MutArgNotPassable (fname, declPos + 1, got))
+        | None ->
         match irrepsClash, rankClash, unitClash, argRankClash with
         | Some (i, pi, ai), _, _, _ ->
             atArg i
@@ -5244,6 +5308,28 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     unify env.Subst tLam.Type (mkFuncArrow [paramTys.[wildPos]] retTy)
                     |> Result.map (fun () -> tLam))
         | FuncElem (paramTys, retTy) when not (hasPolyParam paramTys) && not args.IsEmpty && args.Length < paramTys.Length ->
+            // A `mut` parameter left UNSUPPLIED by a partial application would
+            // be filled through the residual closure, whose parameter is a
+            // synthesized `__pa` name -- and a synthesized name is exactly what
+            // the call-site write-permission check has to exempt, so the
+            // permission would be lost at the seam rather than enforced. That
+            // is not hypothetical: `f(w)(g)` mutated a plain `let g` through a
+            // `mut` slot while the direct `f(w, g)` was refused. Currying a
+            // write-back parameter is refused instead; supply it directly.
+            let unsuppliedMut =
+                match func.Kind with
+                | ExprKind.ExprVar fname when not (fname.StartsWith "__") ->
+                    (match env.MutParamPositions.TryGetValue fname with
+                     | true, positions -> positions |> List.tryFind (fun p -> p >= args.Length)
+                                          |> Option.map (fun p -> (fname, p))
+                     | _ -> None)
+                | _ -> None
+            match unsuppliedMut with
+            | Some (fname, p) ->
+                Error (MutArgNotPassable (fname, p + 1,
+                        "it is left unsupplied by a partial application, which would fill it through a "
+                        + "closure and lose the caller's write permission at that seam"))
+            | None ->
             let residual = paramTys |> List.skip args.Length
             let uid = env.Builder.FreshId()
             let names = residual |> List.mapi (fun i _ -> sprintf "__pa%d_%d" uid i)
@@ -16117,6 +16203,18 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // so recursive calls inside the body may omit them too.
     if funcDecl.Params |> List.exists (fun p -> p.Default.IsSome) then
         env.FuncDefaults.[funcDecl.Name] <- (funcDecl.Params |> List.map (fun p -> (p.Name, p.Type, p.Default)))
+
+    // Register which parameter positions are `mut`, for the call-site write
+    // -permission check (dispatchAppOrIndex's FuncElem arm). Registered here,
+    // alongside FuncDefaults and BEFORE the body is checked, so a recursive
+    // call inside the body is held to it too -- which is what makes the
+    // mut-forwarding chain check itself rather than being assumed.
+    let mutPositions =
+        funcDecl.Params |> List.mapi (fun i p -> (i, p))
+        |> List.filter (fun (_, p) -> p.Mutability = Mutable)
+        |> List.map fst
+    if not mutPositions.IsEmpty then
+        env.MutParamPositions.[funcDecl.Name] <- mutPositions
 
     // Open the license scope for the body; closed after `result` is
     // computed (both success and error paths flow past the exit below).

@@ -282,6 +282,10 @@ type TypeError =
     /// old one's storage), and writing through an index/field into a binding
     /// that never granted write permission.
     | MutAssignRefused of target: string * reason: string
+    /// A call-site argument handed to a `mut` parameter without the write
+    /// permission that parameter implies (formalism 2.7: only `let mut`
+    /// is mut-passable). `got` renders what was actually passed.
+    | MutArgNotPassable of func: string * argIndex: int * got: string
     // Mutual-group binding / constraint violations (BL4006)
     | MutualBindJointly of typeName: string * describe: string * lowerNames: string
     | MutualDirectElementsOnly of describe: string
