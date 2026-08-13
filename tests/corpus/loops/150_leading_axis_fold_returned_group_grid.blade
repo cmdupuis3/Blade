@@ -1,0 +1,107 @@
+// TEST: Leading Axis Fold Returned Group Grid
+// ============================================================================
+// 135 folds a grouped grid in the SAME function that built it. This file folds
+// one the callee RETURNED -- the shape lswosa's `family_spectra` has, and the
+// one that crashed.
+//
+// THE DEFECT. `Array<T,R>` stores only a POINTER to its extents table, and the
+// grouped/ragged peel emitters (plus group_by itself) declared that table as a
+// frame-local `size_t[R]`. Consumed in the same frame that is invisible; the
+// moment the wrapper is RETURNED, the caller holds a pointer into a destroyed
+// frame and sizes its own allocations off whatever now sits there. Measured as
+// `error[BL8005]: std::bad_array_new_length` on the host and
+// `error[BL8005]: bad allocation` under `--cuda` -- crashing in the FOLD's
+// output allocation, several steps away from the emitter that was wrong.
+//
+// Only the RETURN makes it deterministic. Inside one frame the dead slot
+// usually still holds the right numbers, which is why the same program can
+// "work" on the host and die once a device launch reuses the stack. The pins
+// below therefore cover every peel arm that mints a result table, each read
+// ACROSS a call boundary:
+//   * grouped co-iteration, array-valued rows, static inner extents  (`g`)
+//   * ... same, inner extents sized from the first row (length-agnostic
+//     callee -- the arm `fan` forces)                                (`ga`)
+//   * grouped co-iteration, scalar rows                              (`dots`)
+//   * single-operand ragged peel over a grouped array                (`sums`)
+//   * group_by's own row table, read through all of the above
+//
+// Values: keys floor(t/3) split t = 0..8 into three groups of three; vals are
+// t+1, so per-group prodsum(v, v) is 14, 77, 194 and column f scales by 1 + f.
+// The folds double each cell first (`twice`), so the leading-axis fold's
+// operand is a fresh rank-2 whose SHAPE came off the returned grid -- exactly
+// the read that used to be garbage.
+// ============================================================================
+
+/// Length-agnostic row producer: the row is as long as `ks`, a number the
+/// static type never learns, which is what routes the caller's peel to the
+/// size-on-first-row arm.
+function fan(srow: U^1, ks: T^1) = ks <@> lambda(f) -> prodsum(srow, srow) * (1.0 + f)
+
+function family_grid(ts: T^1, vals: U^1) = {
+    let keys = (ts <@> lambda(t) -> floor(t / 3.0)) |> compute
+    let gk = group_keys(keys)
+    let gt = group_by(ts, gk)
+    let gv = group_by(vals, gk)
+    method_for(zip(gt, gv)) <@> lambda(trow: T^1, srow: U^1) ->
+        (method_for(range<Idx<4>>) <@> lambda(f) -> prodsum(srow, srow) * (1.0 + 1.0 * f)) |> compute
+}
+
+function family_grid_agnostic(ts: T^1, vals: U^1, ks: T^1) = {
+    let keys = (ts <@> lambda(t) -> floor(t / 3.0)) |> compute
+    let gk = group_keys(keys)
+    let gt = group_by(ts, gk)
+    let gv = group_by(vals, gk)
+    method_for(zip(gt, gv)) <@> lambda(trow: T^1, srow: U^1) -> fan(srow, ks)
+}
+
+/// Scalar-row grouped co-iteration, returned.
+function group_dots(ts: T^1, vals: U^1) = {
+    let keys = (ts <@> lambda(t) -> floor(t / 3.0)) |> compute
+    let gk = group_keys(keys)
+    let gt = group_by(ts, gk)
+    let gv = group_by(vals, gk)
+    method_for(zip(gt, gv)) <@> lambda(trow: T^1, srow: U^1) -> prodsum(trow, srow)
+}
+
+/// Single-operand ragged peel over a grouped array, returned.
+function group_sums(ts: T^1, vals: U^1) = {
+    let keys = (ts <@> lambda(t) -> floor(t / 3.0)) |> compute
+    let gk = group_keys(keys)
+    let gv = group_by(vals, gk)
+    method_for(gv) <@> lambda(g: T^1) -> reduce(g, (+))
+}
+
+function twice(x: Float64) = 2.0 * x
+
+function fold_cols(ts: T^1, vals: U^1) = {
+    let grid = family_grid(ts, vals)
+    reduce((grid <@> twice) |> compute, lambda(a: T^1, b: T^1) -> a + b)
+}
+
+function fold_cols_agnostic(ts: T^1, vals: U^1, ks: T^1) = {
+    let grid = family_grid_agnostic(ts, vals, ks)
+    reduce((grid <@> twice) |> compute, lambda(a: T^1, b: T^1) -> a + b)
+}
+
+let tim = (method_for(range<Idx<9>>) <@> lambda(i) -> 1.0 * i) |> compute
+let vv = (method_for(range<Idx<9>>) <@> lambda(i) -> 1.0 * i + 1.0) |> compute
+let kk = (method_for(range<Idx<4>>) <@> lambda(f) -> 1.0 * f) |> compute
+
+// The fold's loop bound and its output allocation both read the RETURNED
+// grid's extents. Pre-fix this is where the crash landed.
+let r = fold_cols(tim, vv)
+// EXPECT: r = [570, 1140, 1710, 2280]
+let ra = fold_cols_agnostic(tim, vv, kk)
+// EXPECT: ra = [570, 1140, 1710, 2280]
+
+// The grids themselves, printed across the same boundary: a dangling table
+// shows up here as a wrong row/column count rather than a wrong value.
+let g = family_grid(tim, vv)
+// EXPECT: g = [[14, 28, 42, 56], [77, 154, 231, 308], [194, 388, 582, 776]]
+let ga = family_grid_agnostic(tim, vv, kk)
+// EXPECT: ga = [[14, 28, 42, 56], [77, 154, 231, 308], [194, 388, 582, 776]]
+
+let dots = group_dots(tim, vv)
+// EXPECT: dots = [8, 62, 170]
+let sums = group_sums(tim, vv)
+// EXPECT: sums = [6, 15, 24]

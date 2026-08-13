@@ -71,13 +71,31 @@ let optFlags () = "-O3" + marchFlag () + fpContractFlag ()
 
 type HostPlatform = PWindows | PLinux | PMacOS
 
-type Capabilities = {
-    Platform : HostPlatform
-    HasGpp   : bool
-    HasNvcc  : bool
-    HasCl    : bool      // cl.exe on PATH (the host compiler nvcc drives on Windows)
-    HasGpu   : bool      // a runnable CUDA device is present
-}
+/// The environment's toolchain capabilities.
+///
+/// Every field is backed by its OWN memoized probe, forced on first read and
+/// never again in the process. Property syntax at the call sites is unchanged
+/// (`caps.HasGpp`), but the cost model is: a consumer pays only for the tools
+/// it actually asks about. That matters because the probes are subprocess
+/// launches on wildly different budgets (measured: g++ 167 ms, nvcc 138 ms,
+/// cl 52 ms, `nvidia-smi -L` 510 ms) while the overwhelmingly common consumer
+/// -- the CpuOnly / RequiresMpi arms of `resolveCompile`, i.e. every plain
+/// `blade compile` / `blade run` -- reads `HasGpp` and nothing else. Probing
+/// all four eagerly cost ~700 ms on every such invocation.
+///
+/// A "report the environment" consumer (the harness's end-of-run banner) does
+/// legitimately read all four, and pays for all four, once.
+[<Sealed>]
+type Capabilities (platform: HostPlatform,
+                   gpp: Lazy<bool>,
+                   nvcc: Lazy<bool>,
+                   cl: Lazy<bool>,
+                   gpu: Lazy<bool>) =
+    member _.Platform = platform
+    member _.HasGpp   = gpp.Value
+    member _.HasNvcc  = nvcc.Value
+    member _.HasCl    = cl.Value      // cl.exe on PATH (the host compiler nvcc drives on Windows)
+    member _.HasGpu   = gpu.Value     // a runnable CUDA device is present
 
 /// Backend requirement inferred from generated source. `RequiresCuda` when
 /// codegen emitted at least one device kernel; `RequiresMpi` when the program
@@ -142,21 +160,37 @@ let private probeGpu () : bool =
         proc.ExitCode = 0 && out.Contains("GPU")
     with _ -> false
 
-let detectCapabilities () : Capabilities =
-    let platform =
-        match Platforms.os with
-        | Platforms.Windows -> PWindows
-        | Platforms.MacOS -> PMacOS
-        | Platforms.Linux -> PLinux
-    {
-        Platform = platform
-        HasGpp   = probeTool "g++" "--version"
-        HasNvcc  = probeTool "nvcc" "--version"
-        HasCl    = (platform = PWindows) && probeTool "cl" "/?"
-        HasGpu   = probeGpu ()
-    }
+/// The host platform. A pure remap of `Platforms.os` -- the ONE detection
+/// site -- so no subprocess is involved and it is computed eagerly wherever
+/// a Capabilities is built.
+let private hostPlatform () =
+    match Platforms.os with
+    | Platforms.Windows -> PWindows
+    | Platforms.MacOS -> PMacOS
+    | Platforms.Linux -> PLinux
 
-/// Capabilities are environment-global; detect once, lazily.
+// One memoized probe per tool, at module level so the memo outlives any
+// individual Capabilities value (repeat `detectCapabilities ()` calls share
+// them). `lazy` in F# is LazyThreadSafetyMode.ExecutionAndPublication, which
+// is what the parallel test harness needs: at most one subprocess per tool per
+// process, no matter how many threads ask at once.
+//
+// These stay probes-behind-lazies rather than cached booleans read from the
+// environment: nothing here consults an env var, so the "env gates are
+// functions" rule (marchFlag/fpContractFlag above, LinAlgPatterns' BLAS gate)
+// is untouched -- a harness that pins BLADE_* mid-process still gets the pin
+// honored, because those gates were never part of this record.
+let private gppProbe  : Lazy<bool> = lazy (probeTool "g++" "--version")
+let private nvccProbe : Lazy<bool> = lazy (probeTool "nvcc" "--version")
+let private clProbe   : Lazy<bool> = lazy (hostPlatform () = PWindows && probeTool "cl" "/?")
+let private gpuProbe  : Lazy<bool> = lazy (probeGpu ())
+
+/// Build the capability view. Free to call: it wires up the shared per-tool
+/// lazies and runs no probe by itself.
+let detectCapabilities () : Capabilities =
+    Capabilities(hostPlatform (), gppProbe, nvccProbe, clProbe, gpuProbe)
+
+/// Capabilities are environment-global; one shared view for every consumer.
 let capabilities = lazy (detectCapabilities ())
 
 /// Whether g++ is actually present and runnable on PATH. Delegates to the
@@ -281,10 +315,367 @@ let buildCublasDevice (cppFullPath: string) : Result<string, string> =
         | Error e -> Error e
         | Ok () -> Ok libFile
 
+/// Best-effort copy of a runtime DLL to the exe's directory, so a memcheck
+/// build keeps running outside the shell environment that produced it.
+/// `searchDirs` (the compiler's own bin directory) are probed before PATH.
+/// Silence on failure is deliberate: the exe still runs fine in any shell
+/// whose PATH carries the DLL, so a copy problem must not fail the compile.
+let private copyRuntimeDllBesideExe (searchDirs: string list) (exeFullPath: string) (dllName: string) : unit =
+    try
+        let exeDir = Path.GetDirectoryName(exeFullPath)
+        let target = Path.Combine(exeDir, dllName)
+        if not (File.Exists target) then
+            let pathDirs =
+                match Environment.GetEnvironmentVariable "PATH" with
+                | null -> []
+                | p -> p.Split(Path.PathSeparator) |> Array.toList
+            searchDirs @ pathDirs
+            |> List.tryPick (fun d ->
+                try
+                    let c = Path.Combine(d.Trim(), dllName)
+                    if File.Exists c then Some c else None
+                with _ -> None)
+            |> Option.iter (fun src -> File.Copy(src, target, true))
+    with _ -> ()
+
+/// Memcheck (BLADE_MEMCHECK=1) compile: a Debug+AddressSanitizer build of the
+/// generated C++, pairing the blade_memcheck.hpp instrumentation codegen
+/// included with a runtime that actually feeds it allocation events.
+///
+/// Windows drives cl.exe, NOT g++: the MSYS2 ucrt64 toolchain ships no
+/// libasan (`-fsanitize=address` dies at link), while MSVC's ASan is present
+/// and its /openmp:llvm front end accepts the `collapse` clauses codegen
+/// emits (measured working together with /fsanitize=address, 2026-08-09).
+/// cl.exe needs a vcvars64 environment; INCLUDE unset is a hard, actionable
+/// error rather than a silent fallback to g++, which would produce a program
+/// whose report line says asan=0. /Od /Zi keeps this an honest Debug build;
+/// the ASan runtime is ALWAYS a DLL since VS 17.7, so the two runtime DLLs
+/// are copied beside the exe afterwards. The .obj (and its /Fd sidecar) are
+/// deleted on success -- they'd otherwise litter the .blade's directory --
+/// but the linker's .pdb next to the exe is KEPT: ASan symbolizes error
+/// stacks from it at run time.
+///
+/// Deliberately unsupported (clean error, so a census records the skip
+/// instead of chasing a broken link): MPI programs, netcdf provider
+/// programs, and extra link inputs (nvcc-built device DLLs) -- each needs
+/// its own MSVC link recipe that no current memcheck consumer exercises.
+///
+/// `srcText` is the generated source the caller just wrote to `cppFile`, when
+/// it still has it in memory; `None` falls back to reading the file back.
+let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
+    try
+        let onWindows = Platforms.os = Platforms.Windows
+        let exeExt = Platforms.exeExtension
+        let cppFullPath = Path.GetFullPath(cppFile)
+        let exeFullPath = Path.GetFullPath(Path.ChangeExtension(cppFile, exeExt))
+        let source =
+            match srcText with
+            | Some t -> t
+            | None -> (try File.ReadAllText cppFullPath with _ -> "")
+        if not (List.isEmpty extraLinkInputs) then
+            Error "Skipped: memcheck does not support extra link inputs (device DLLs)"
+        elif source.Contains "#include <mpi.h>" then
+            Error "Skipped: memcheck does not support MPI programs"
+        elif source.Contains "#include <netcdf.h>" then
+            Error "Skipped: memcheck does not support netcdf provider programs"
+        elif onWindows then
+            // Preferred Windows lane: MSYS2 clang64 clang++. MSVC's front end
+            // dies with C1061 ("blocks nested too deeply") on the deep IIFE
+            // chains physics-scale programs emit (~300 nested lambdas at only
+            // 72 lexical brace levels, measured 2026-08-09) and no flag
+            // raises that limit; clang parses the same file given
+            // -fbracket-depth=1024. BLADE_MEMCHECK_CXX overrides the probe
+            // for a non-default clang location.
+            let clangxx =
+                let overridden = Environment.GetEnvironmentVariable "BLADE_MEMCHECK_CXX"
+                [ if not (String.IsNullOrEmpty overridden) then yield overridden
+                  yield @"C:\msys64\clang64\bin\clang++.exe" ]
+                |> List.tryFind File.Exists
+            match clangxx with
+            | Some cxx ->
+                // No -Werror=float-conversion/narrowing here, unlike the g++
+                // lane: clang's float-conversion net is wider than gcc's, and
+                // a memcheck build is a measurement run, not the enforcement
+                // gate the release compile already provides.
+                let args =
+                    sprintf "-std=c++17 -O0 -g -fopenmp -fsanitize=address -fbracket-depth=1024 -Wno-c++20-extensions -o \"%s\" \"%s\""
+                        exeFullPath cppFullPath
+                match runProc cxx args 300000 with
+                | Error e -> Error e
+                | Ok () ->
+                    // The clang64 build links its runtimes dynamically; all
+                    // four live in the compiler's own bin directory.
+                    let cxxDir = Path.GetDirectoryName cxx
+                    for dll in [ "libclang_rt.asan_dynamic-x86_64.dll"; "libc++.dll"; "libomp.dll"; "libunwind.dll" ] do
+                        copyRuntimeDllBesideExe [cxxDir] exeFullPath dll
+                    Ok exeFullPath
+            | None ->
+            // Fallback: MSVC cl.exe (measured working for shallow programs;
+            // /openmp:llvm accepts codegen's collapse clauses alongside
+            // /fsanitize=address). Requires a vcvars64 environment.
+            if not capabilities.Value.HasCl then
+                Error "memcheck requires MSYS2 clang64 (pacman -S mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-compiler-rt mingw-w64-clang-x86_64-llvm-openmp) or cl.exe on PATH (vcvars64 / VS x64 Native Tools environment)"
+            elif String.IsNullOrEmpty(Environment.GetEnvironmentVariable "INCLUDE") then
+                Error "memcheck found cl.exe but INCLUDE is unset -- run from a vcvars64 / VS x64 Native Tools environment (or install MSYS2 clang64)"
+            else
+                let objPath = Path.ChangeExtension(cppFullPath, ".obj")
+                let fdPath = Path.ChangeExtension(cppFullPath, "_obj.pdb")
+                let args =
+                    sprintf "/nologo /fsanitize=address /Zi /Od /MT /std:c++17 /EHsc /openmp:llvm /Fo\"%s\" /Fd\"%s\" /Fe\"%s\" \"%s\""
+                        objPath fdPath exeFullPath cppFullPath
+                match runProc "cl" args 300000 with
+                | Error e -> Error e
+                | Ok () ->
+                    for leftover in [objPath; fdPath] do
+                        try File.Delete leftover with _ -> ()
+                    // clang_rt DLL: required (ASan is dynamic-only since VS
+                    // 17.7). libomp DLL: only used when a parallel region
+                    // actually runs, same best-effort copy either way.
+                    copyRuntimeDllBesideExe [] exeFullPath "clang_rt.asan_dynamic-x86_64.dll"
+                    copyRuntimeDllBesideExe [] exeFullPath "libomp140.x86_64.dll"
+                    Ok exeFullPath
+        else
+            // Linux/macOS: g++/clang++ carry ASan natively; -O0 -g mirrors
+            // the /Od /Zi profile. LeakSanitizer (where the platform has it)
+            // comes for free on top of the BLADE-MEMCHECK report line.
+            let args =
+                sprintf "-std=c++17 -O0 -g -fopenmp -fsanitize=address -Werror=float-conversion -Werror=narrowing -o \"%s\" \"%s\""
+                    exeFullPath cppFullPath
+            match runProc "g++" args 300000 with
+            | Error e -> Error e
+            | Ok () -> Ok exeFullPath
+    with ex ->
+        Error (sprintf "Memcheck compilation exception: %s\n%s" ex.Message ex.StackTrace)
+
+// ---------------------------------------------------------------------------
+// Content-addressed executable cache (docs/plan-compile-speed.md Stage 4.1)
+//
+// 89% of a full `blade test` is g++, and a suite re-run compiles a translation
+// unit byte-identical to the one it compiled last time. The cache turns that
+// re-compile into a file copy: key = SHA256 over everything g++ reads or is
+// told (compiler identity, command line, the .cpp, the 13 deployed runtime
+// headers, the identity of every explicitly-linked DLL), value = the produced
+// .exe under %LOCALAPPDATA%\Blade\exe-cache.
+//
+// The key errs toward OVER-invalidation: every emission-relevant env gate
+// (BLADE_MARCH / BLADE_FP_CONTRACT / BLADE_BLAS+OPENBLAS_DIR / BLADE_CUBLAS /
+// NETCDF_DIR) reaches the key through the flags or the source text it already
+// changes, so no gate needs its own hash term -- but a gate that changed
+// NEITHER could not have changed the output either.
+// ---------------------------------------------------------------------------
+
+/// Where the cache lives, or `None` when it is off. Read PER CALL like every
+/// other env gate in this file (a harness may pin it mid-process):
+///   unset | `1` | `on` | `true`  -> %LOCALAPPDATA%\Blade\exe-cache
+///   `0` | `off` | `false`        -> disabled
+///   an ABSOLUTE path             -> that directory
+///   anything else                -> disabled (an unreadable setting must not
+///                                   silently serve stale binaries)
+let private exeCacheDir () : string option =
+    let defaultDir () =
+        let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+        if String.IsNullOrEmpty root then None
+        else Some (Path.Combine(root, "Blade", "exe-cache"))
+    match Environment.GetEnvironmentVariable "BLADE_EXE_CACHE" with
+    | null | "" -> defaultDir ()
+    | v ->
+        match v.Trim() with
+        | "" -> defaultDir ()
+        | t when t = "1" || t.ToLowerInvariant() = "on" || t.ToLowerInvariant() = "true" -> defaultDir ()
+        | t when t = "0" || t.ToLowerInvariant() = "off" || t.ToLowerInvariant() = "false" -> None
+        | t when Path.IsPathRooted t -> Some t
+        | _ -> None
+
+/// `[cache] hit/store <hash8>` tracing on stderr. `compileCppWithExtraSource`
+/// takes no verbose parameter (it is reached from the CLI, the REPL and five
+/// test blocks), so the flag travels as a process-level env pin -- the same
+/// spelling `--memcheck` uses for BLADE_MEMCHECK. `blade run --verbose` sets it
+/// during argument parsing (Cli.fs).
+let private exeCacheVerbose () =
+    match Environment.GetEnvironmentVariable "BLADE_EXE_CACHE_VERBOSE" with
+    | null | "" | "0" -> false
+    | _ -> true
+
+/// The compiler's identity: resolved g++ path + the first line of
+/// `g++ --version`. Memoized for the process (one subprocess, ~50-170 ms, and
+/// only on the first compile of a run) -- a g++ upgrade mid-process is not a
+/// case worth a probe per compile. `lazy` is ExecutionAndPublication, so the
+/// parallel harness launches it at most once.
+let private gppIdentity : Lazy<string> =
+    lazy (
+        let resolved =
+            let exeName = if Platforms.os = Platforms.Windows then "g++.exe" else "g++"
+            match Environment.GetEnvironmentVariable "PATH" with
+            | null -> None
+            | p ->
+                p.Split(Path.PathSeparator)
+                |> Array.tryPick (fun d ->
+                    try
+                        if String.IsNullOrWhiteSpace d then None
+                        else
+                            let c = Path.Combine(d.Trim(), exeName)
+                            if File.Exists c then Some c else None
+                    with _ -> None)
+        let version =
+            try
+                let psi = ProcessStartInfo("g++", "--version")
+                psi.RedirectStandardOutput <- true
+                psi.RedirectStandardError <- true
+                psi.UseShellExecute <- false
+                psi.CreateNoWindow <- true
+                use proc = Process.Start(psi)
+                let out = proc.StandardOutput.ReadToEndAsync()
+                proc.StandardError.ReadToEndAsync() |> ignore
+                proc.WaitForExit(10000) |> ignore
+                let text = out.Result
+                match text.Split('\n') |> Array.tryHead with
+                | Some l -> l.Trim()
+                | None -> ""
+            with _ -> ""
+        sprintf "%s|%s" (defaultArg resolved "g++") version)
+
+/// The runtime headers' contribution to the key, computed once per process:
+/// all 13 shipped header texts (~264 KB), name-tagged. They are static files
+/// beside the binary and already memoized by CodeGen, so hashing them costs
+/// one SHA pass on the first compile and nothing afterwards.
+///
+/// This hashes the SHIPPED headers, while g++ reads the copies deployed beside
+/// the .cpp -- `deployRuntimeHeaders` runs before every compile and rewrites
+/// any deployed file whose content differs, so at g++ time the two agree
+/// (that is exactly the hand-edit workflow its doc comment describes).
+let private runtimeHeaderDigest : Lazy<string> =
+    lazy (
+        try
+            use sha = System.Security.Cryptography.SHA256.Create()
+            let sb = System.Text.StringBuilder()
+            for name in CodeGen.runtimeHeaderNames do
+                sb.Append(name).Append(' ').Append(CodeGen.runtimeHeaderText name).Append(' ') |> ignore
+            sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(sb.ToString()))
+            |> Array.map (fun b -> b.ToString("x2"))
+            |> String.concat ""
+        with _ -> "")
+
+/// Size + mtime of every DLL named outright on the link line (netcdf.dll,
+/// libopenblas.dll). Their PATH is already in `args`, but their CONTENT is
+/// not: a reinstalled OpenBLAS at the same path must invalidate.
+let private linkedDllStamp (args: string) : string =
+    args.Split('"')
+    |> Array.filter (fun tok -> tok.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+    |> Array.map (fun p ->
+        try
+            let fi = FileInfo(p)
+            if fi.Exists then sprintf "%s:%d:%d" p fi.Length fi.LastWriteTimeUtc.Ticks else sprintf "%s:missing" p
+        with _ -> sprintf "%s:?" p)
+    |> String.concat ";"
+
+/// The cache key for one g++ invocation. `exeFullPath`/`cppFullPath` are
+/// replaced by placeholders: WHERE the translation unit sits does not change
+/// what g++ produces from it, and that is what lets the same program compiled
+/// in two directories share one entry.
+let private exeCacheKey (args: string) (cppText: string) (exeFullPath: string) (cppFullPath: string) : string =
+    let normalizedArgs =
+        args.Replace(exeFullPath, "<EXE>").Replace(cppFullPath, "<CPP>")
+    let material =
+        String.concat " "
+            [ "blade-exe-cache-v1"
+              gppIdentity.Value
+              normalizedArgs
+              runtimeHeaderDigest.Value
+              linkedDllStamp args
+              cppText ]
+    use sha = System.Security.Cryptography.SHA256.Create()
+    sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes material)
+    |> Array.map (fun b -> b.ToString("x2"))
+    |> String.concat ""
+
+// Eviction caps. Entries are whole executables (~150 KB-2 MB each), so both a
+// count and a byte ceiling are needed; a trip on either prunes oldest-mtime
+// first down to 3/4 of the cap, so eviction runs rarely rather than on every
+// store past the line.
+let private exeCacheMaxEntries = 8192
+let private exeCacheMaxBytes = 6L * 1024L * 1024L * 1024L
+
+/// Prune the cache when either ceiling is exceeded. Called only on STORE (a
+/// hit does no directory scan). Every delete is race-tolerant: a concurrent
+/// process may have removed or be reading the same entry.
+let private evictExeCache (dir: string) : unit =
+    try
+        let entries = DirectoryInfo(dir).GetFiles("*.exe")
+        let total = entries |> Array.sumBy (fun f -> f.Length)
+        if entries.Length > exeCacheMaxEntries || total > exeCacheMaxBytes then
+            let targetCount = (exeCacheMaxEntries * 3) / 4
+            let targetBytes = (exeCacheMaxBytes / 4L) * 3L
+            let oldestFirst = entries |> Array.sortBy (fun f -> f.LastWriteTimeUtc)
+            let mutable count = entries.Length
+            let mutable bytes = total
+            for f in oldestFirst do
+                if count > targetCount || bytes > targetBytes then
+                    let len = f.Length
+                    try
+                        f.Delete()
+                        count <- count - 1
+                        bytes <- bytes - len
+                    with _ ->
+                        // Another process holds or already removed it; it still
+                        // stops counting against us on the next scan.
+                        count <- count - 1
+                        bytes <- bytes - len
+    with _ -> ()
+
+/// Cache lookup. On a hit the entry is copied to `exeFullPath` (the exact file
+/// a real compile would have written) and its mtime is bumped so eviction sees
+/// it as recently used. Any failure -- a racing evictor deleted it, the copy
+/// was denied -- reports a miss and the real compile proceeds.
+let private tryExeCacheHit (dir: string) (key: string) (exeFullPath: string) : bool =
+    try
+        let entry = Path.Combine(dir, key + ".exe")
+        if not (File.Exists entry) then false
+        else
+            File.Copy(entry, exeFullPath, true)
+            // File.Copy carries the SOURCE mtime across on Windows, which
+            // would date a hit to whenever the entry was first published.
+            // Both files are stamped now: the delivered exe so it looks
+            // exactly as freshly built as it behaves, the entry so eviction
+            // reads mtime as last-USED.
+            let now = DateTime.UtcNow
+            (try File.SetLastWriteTimeUtc(exeFullPath, now) with _ -> ())
+            (try File.SetLastWriteTimeUtc(entry, now) with _ -> ())
+            if exeCacheVerbose () then eprintfn "[cache] hit %s" (key.Substring(0, 8))
+            true
+    with _ -> false
+
+/// Publish a freshly compiled executable. Written to a unique temp name in the
+/// cache directory first, then File.Move'd into place -- the move is atomic
+/// within the volume, so a concurrent reader never sees a half-copied entry.
+/// Losing the race (another process published the same key first) is a no-op:
+/// the two files are the same content by construction.
+let private storeExeCache (dir: string) (key: string) (exeFullPath: string) : unit =
+    try
+        let entry = Path.Combine(dir, key + ".exe")
+        if not (File.Exists entry) then
+            Directory.CreateDirectory dir |> ignore
+            let tmp = Path.Combine(dir, sprintf "%s.%s.tmp" key (Guid.NewGuid().ToString("N")))
+            File.Copy(exeFullPath, tmp, true)
+            (try File.Move(tmp, entry)
+             with _ -> (try File.Delete tmp with _ -> ()))
+            if exeCacheVerbose () then eprintfn "[cache] store %s" (key.Substring(0, 8))
+            evictExeCache dir
+    with _ -> ()
+
 /// Compile a C++ file with g++. `extraLinkInputs` are appended after the
 /// source (linker order) -- e.g. the hybrid mpi+cuda build passes the
 /// nvcc-built device DLL here (MinGW links DLL export tables directly).
-let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
+/// Under BLADE_MEMCHECK=1 the whole invocation is rerouted to the
+/// Debug+ASan profile instead (codegen already included the matching
+/// blade_memcheck.hpp instrumentation in the same process).
+///
+/// `srcText`: the generated source, when the caller still holds the string it
+/// wrote to `cppFile` moments ago. Every backend decision below (netcdf, mpi,
+/// BLAS/LAPACK, cuBLAS device half) is a substring sniff of that same text, so
+/// passing it avoids reading the file back off disk. `None` reads it ONCE and
+/// reuses that one read for all four sniffs.
+let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
+    if CodeGen.memcheckEnabled () then compileCppMemcheck srcText extraLinkInputs cppFile outputDir else
     try
         let exeExt = Platforms.exeExtension
         let exeFile = Path.ChangeExtension(cppFile, exeExt)
@@ -293,6 +684,15 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         let exeFullPath = Path.GetFullPath(exeFile)
         
         let ompFlag = "-fopenmp"
+
+        // The one view of the generated source every sniff below shares:
+        // handed in by the caller that just wrote it, or read back exactly
+        // once. (This used to be three independent File.ReadAllText calls of
+        // the same file, one per sniff.)
+        let cppText =
+            match srcText with
+            | Some t -> t
+            | None -> (try File.ReadAllText cppFullPath with _ -> "")
 
         // Backstops the Blade type system: implicit float->integer narrowing
         // in generated C++ must be a hard error. -Wnarrowing alone only
@@ -310,8 +710,7 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         //     DLL/.so path); falls back to -L<dir>/lib -lnetcdf.
         //   - NETCDF_DIR unset: bare -lnetcdf (default package-manager
         //     install: MSYS2 pacman, apt, brew).
-        let needsNetcdf =
-            try (File.ReadAllText cppFullPath).Contains "#include <netcdf.h>" with _ -> false
+        let needsNetcdf = cppText.Contains "#include <netcdf.h>"
 
         // MPI programs include <mpi.h> and call the MPI C API -- the MPI
         // dev package puts the header/import lib on g++'s default search
@@ -319,8 +718,7 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         // Windows, OpenMPI/MPICH elsewhere), so the bare per-OS link flag
         // suffices (mirrors -lnetcdf above; Platforms.mpiLinkFlag owns the
         // spelling).
-        let needsMpi =
-            try (File.ReadAllText cppFullPath).Contains "#include <mpi.h>" with _ -> false
+        let needsMpi = cppText.Contains "#include <mpi.h>"
         let mpiFlags = if needsMpi then " " + Platforms.mpiLinkFlag else ""
         let netcdfFlags =
             if not needsNetcdf then ""
@@ -351,15 +749,14 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         // library inputs, the MKL header-flavor define -- is
         // `LinAlgPatterns.blasBuildFlags`: one gate, one expansion, consumed
         // here.
-        let cppTextForSniff = try File.ReadAllText cppFullPath with _ -> ""
-        let usesLinalgShim = cppTextForSniff.Contains "#include \"blade_linalg.hpp\""
+        let usesLinalgShim = cppText.Contains "#include \"blade_linalg.hpp\""
         let blasGateOn = Blade.LinAlgPatterns.blasAvailable ()
         // LAPACK gets its own sniff arm and define, so a BLAS-only program
         // stays distinguishable from a LAPACK-carrying one (same
         // #error-on-mismatch guarantee as BLAS). On the OpenBLAS tiers its
         // gate rides the BLAS resolution (LAPACKE is bundled); on the
         // explicit tier it requires BLADE_LAPACK_LINK -- see lapackAvailable.
-        let usesLapackShim = cppTextForSniff.Contains "#include \"blade_lapack.hpp\""
+        let usesLapackShim = cppText.Contains "#include \"blade_lapack.hpp\""
         let lapackGateOn = Blade.LinAlgPatterns.lapackAvailable ()
         // Split into a COMPILE half (defines + -I, precedes the source) and
         // a LINK half (library inputs, follows it); DEFINES stay per-header
@@ -376,7 +773,7 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         // the source. Handled here rather than at each caller, so every
         // caller gets it without knowing the backend exists.
         let deviceBuild =
-            if cppTextForSniff.Contains cublasShimInclude then
+            if cppText.Contains cublasShimInclude then
                 buildCublasDevice cppFullPath |> Result.map (fun lib -> [lib])
             else Ok []
         match deviceBuild with
@@ -386,12 +783,33 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         let extraFlags = (extraLinkInputs @ deviceInputs) |> List.map (fun p -> sprintf " \"%s\"" (Path.GetFullPath p)) |> String.concat ""
         let args = sprintf "-std=c++17 %s %s %s%s -o \"%s\" \"%s\"%s%s%s%s" (optFlags ()) ompFlag safetyFlags blasCompileFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags blasLinkFlags
         
+        // The executable cache (Stage 4.1, above). v1 scope, deliberately
+        // narrow -- every excluded lane is one whose inputs are not fully
+        // captured by (args, cppText, headers):
+        //   - extra link inputs / the cuBLAS device half: the .dll or .so was
+        //     built by another toolchain in this same run; its content is not
+        //     in the key.
+        //   - non-Windows: %LOCALAPPDATA% has no counterpart here and no
+        //     consumer runs there yet.
+        //   - memcheck: rerouted to compileCppMemcheck long before this point.
+        let cacheSlot =
+            if not (List.isEmpty extraLinkInputs) || not (List.isEmpty deviceInputs) then None
+            elif Platforms.os <> Platforms.Windows then None
+            else
+                match exeCacheDir () with
+                | None -> None
+                | Some dir -> Some (dir, exeCacheKey args cppText exeFullPath cppFullPath)
+
+        match cacheSlot with
+        | Some (dir, key) when tryExeCacheHit dir key exeFullPath -> Ok exeFullPath
+        | _ ->
+
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true
         psi.UseShellExecute <- false
         psi.CreateNoWindow <- true
-        
+
         use proc = Process.Start(psi)
         // Read both streams asynchronously to prevent pipe deadlocks
         let stdoutTask = proc.StandardOutput.ReadToEndAsync()
@@ -413,6 +831,11 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
             |> String.concat "\n"
         
         if proc.ExitCode = 0 then
+            // Publish for the next identical translation unit. Best-effort:
+            // a store that fails costs a future recompile, never this result.
+            (match cacheSlot with
+             | Some (dir, key) -> storeExeCache dir key exeFullPath
+             | None -> ())
             Ok exeFullPath
         else
             if String.IsNullOrWhiteSpace allOutput then
@@ -422,9 +845,19 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
     with ex ->
         Error (sprintf "Compilation exception: %s\n%s" ex.Message ex.StackTrace)
 
+/// `compileCppWithExtraSource` for a caller that does not hold the generated
+/// source in memory (it is read back off disk, once).
+let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
+    compileCppWithExtraSource None extraLinkInputs cppFile outputDir
+
+/// Compile a C++ file with g++ (no extra link inputs), passing the generated
+/// source the caller just wrote so the backend sniffs need no disk read.
+let compileCppSource (srcText: string option) (cppFile: string) (outputDir: string) : Result<string, string> =
+    compileCppWithExtraSource srcText [] cppFile outputDir
+
 /// Compile a C++ file with g++ (no extra link inputs).
 let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
-    compileCppWithExtra [] cppFile outputDir
+    compileCppWithExtraSource None [] cppFile outputDir
 
 /// Compile a CUDA (.cu) file with nvcc. nvcc auto-selects the host compiler
 /// (cl.exe on Windows, g++ on Linux). Host-side warning flags are passed
@@ -558,9 +991,28 @@ let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) 
 /// Compiles a generated source file according to its backend requirement,
 /// resolved against the environment's capabilities. A skip is reported as
 /// `Error "Skipped: <reason>"` so downstream skip handling recognizes it.
+/// `srcText` is the generated source the caller just wrote to `srcFile`, when
+/// it still holds it; the g++ arm uses it instead of reading the file back.
+let compileForBackendSource (srcText: string option) (caps: Capabilities) (req: BackendReq) (srcFile: string) (outputDir: string) : Result<string, string> =
+    match resolveCompile caps req with
+    | UseGpp          -> compileCppSource srcText srcFile outputDir
+    // ASan cannot instrument device code, and nvcc's host-side ASan story on
+    // Windows is unsupported; a memcheck run of a CUDA-emitting program is a
+    // skip, not a silently-uninstrumented build.
+    | UseNvcc when CodeGen.memcheckEnabled () ->
+        Error "Skipped: memcheck does not support the CUDA backend"
+    | UseNvcc         -> compileCuda srcFile outputDir
+    | SkipCompile why -> Error ("Skipped: " + why)
+
+/// `compileForBackendSource` for a caller without the source in memory.
 let compileForBackend (caps: Capabilities) (req: BackendReq) (srcFile: string) (outputDir: string) : Result<string, string> =
     match resolveCompile caps req with
     | UseGpp          -> compileCpp srcFile outputDir
+    // ASan cannot instrument device code, and nvcc's host-side ASan story on
+    // Windows is unsupported; a memcheck run of a CUDA-emitting program is a
+    // skip, not a silently-uninstrumented build.
+    | UseNvcc when CodeGen.memcheckEnabled () ->
+        Error "Skipped: memcheck does not support the CUDA backend"
     | UseNvcc         -> compileCuda srcFile outputDir
     | SkipCompile why -> Error ("Skipped: " + why)
 
@@ -583,14 +1035,17 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
         
         // 120s: simulation-scale examples (thousands of spectral steps) can
         // legitimately run long; corpus tests still finish well under a second.
-        if proc.WaitForExit(120000) then
+        // Memcheck runs get 600s: /Od plus ASan interception is a 5-20x
+        // slowdown on exactly those simulation-scale programs.
+        let timeoutMs = if CodeGen.memcheckEnabled () then 600000 else 120000
+        if proc.WaitForExit(timeoutMs) then
             let stdout = stdoutTask.Result
             let stderr = stderrTask.Result
             let output = if String.IsNullOrEmpty(stderr) then stdout else stdout + "\n[stderr]: " + stderr
             Ok (proc.ExitCode, output)
         else
             try proc.Kill() with _ -> ()
-            Error "Execution timed out after 120s"
+            Error (sprintf "Execution timed out after %ds" (timeoutMs / 1000))
     with ex ->
         Error (sprintf "Execution exception: %s" ex.Message)
 

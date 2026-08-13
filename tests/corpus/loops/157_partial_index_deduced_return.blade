@@ -1,0 +1,58 @@
+// TEST: Partial Index On A Deduced-Return Function Result
+// ============================================================================
+// THE MINIMAL WITNESS behind 155, with no grouping and no fold in sight, so
+// the interpreter differential gate can run it too.
+//
+// `dispatchAppOrIndex` matched on the head's RAW `.Type`. A call to a function
+// with a DEDUCED (unannotated) return type is stamped with the inference var
+// minted at that call site; the array itself only ever appears in the
+// substitution. Every arm of that dispatcher needs a concrete ArrayElem /
+// FuncElem shape, so a var head missed all of them and fell into the
+// catch-all -- which mints a FRESH var and returns Ok.
+//
+// A PARTIAL INDEX ON SUCH A BINDING THEREFORE TYPED AS A FULL ONE. `check`
+// passed; codegen, which sees the post-monomorphization rank-2 binding type,
+// emitted the row view into a scalar slot:
+//
+//     double prow = Array<double, 1>{ pg.data[1L], pg.extents + 1 };
+//
+// Annotating either the function's return type or the binding hid it, by
+// making the head concrete before it reached the dispatcher -- which is why
+// the existing corpus never caught it. Both spellings are pinned below beside
+// the unannotated one, so a regression cannot pass on the easy two.
+// ============================================================================
+
+/// Deduced return type: nothing here says "rank 2" at the signature.
+function plain(ts: Array<Float64 like Idx<4>>) =
+    (method_for(ts) <@> lambda(t) -> (method_for(range<Idx<3>>) <@> lambda(f) -> t * (1.0 + 1.0 * f)) |> compute) |> compute
+
+/// The same body with the rank spelled out. Always worked.
+function annotated(ts: Array<Float64 like Idx<4>>) -> Array<Float64 like Idx<4>, Idx<3>> =
+    (method_for(ts) <@> lambda(t) -> (method_for(range<Idx<3>>) <@> lambda(f) -> t * (1.0 + 1.0 * f)) |> compute) |> compute
+
+let small = (method_for(range<Idx<4>>) <@> lambda(i) -> 1.0 * i) |> compute
+
+let pg = plain(small)
+// EXPECT: pg = [[0, 0, 0], [1, 2, 3], [2, 4, 6], [3, 6, 9]]
+
+// The read that used to be typed as a scalar.
+let prow = pg(1)
+// EXPECT: prow = [1, 2, 3]
+// The FULL index was always right; pinned so a fix cannot trade one for the other.
+let pcell = pg(1, 2)
+// EXPECT: pcell = 3
+
+// Annotated return: the spelling that hid the defect.
+let ag = annotated(small)
+let arow = ag(2)
+// EXPECT: arow = [2, 4, 6]
+
+// Annotated BINDING over the deduced-return callee: the other spelling that hid it.
+let bg: Array<Float64 like Idx<4>, Idx<3>> = plain(small)
+let brow = bg(3)
+// EXPECT: brow = [3, 6, 9]
+
+// A row read straight back down to a scalar, so the row view is not merely
+// well-typed but actually addresses the right cells.
+let rsum = reduce(prow, (+))
+// EXPECT: rsum = 6

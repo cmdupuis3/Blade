@@ -125,6 +125,24 @@ type TypeError =
     /// structurally-dimensioned arguments are both rejected; the caller must
     /// ascribe (`x : speed`). `got` describes the argument's signature.
     | QuantityArgMismatch of pos: int * quantity: string * got: string
+    /// BL3016: a parameter's index slot and the argument's BOTH carry a
+    /// compile-time-literal extent, and they differ. Codegen bakes a literal
+    /// parameter extent into loop bounds and result allocations (a symbolic
+    /// `Idx<n>` reads `.extents[d]` at runtime instead), so this is an
+    /// out-of-bounds read, not a naming disagreement. `dim` is 1-based over
+    /// the array's index slots. Raised at BOTH param-vs-arg seams: direct
+    /// application (dispatchAppOrIndex) and kernel application
+    /// (buildApplyInfo), which is why `pos` says "argument"/"parameter"
+    /// rather than naming a call form.
+    | ExtentArgMismatch of pos: int * dim: int * expected: int64 * actual: int64
+    /// BL3016 (same family as ExtentArgMismatch, the halo twin): a kernel body
+    /// reads an array through a halo window (`A(w(o))`), the halo's declared
+    /// inner extent and the array's extent on that slot are BOTH compile-time
+    /// literals, and they differ. The window walk is bounded by the DECLARED
+    /// extent, so an oversized halo reads past the array's allocation and an
+    /// undersized one silently emits fewer windows -- a wrong answer with no
+    /// symptom. `dim` is 1-based over the indexed array's slots.
+    | HaloExtentMismatch of declared: int64 * dim: int * targetName: string * actual: int64
     /// BL3011: a quantity name used inside unit algebra (`Unit x = speed * m`)
     /// or as the RHS of another quantity (`Unit q: speed`). Quantities are
     /// TERMINAL: the nominal layer is exactly one level deep.
@@ -162,7 +180,6 @@ type TypeError =
     // Invalid builtin/intrinsic argument (BL3007)
     | IntrinsicBindArrayFailed of op: string
     | IntrinsicNeedsArray of op: string
-    | IntrinsicScalarOnly of name: string
     | IntrinsicNotComplex of name: string
     | IntrinsicNeedsNumeric of name: string
     | AbsNeedsNumericScalar of got: string
@@ -259,6 +276,16 @@ type TypeError =
     // Mutability violations (BL4005)
     | ImmutableStaticAssign of name: string
     | MutParamNotArray of func: string * param: string
+    /// An assignment whose TARGET the callee may not write through. Carries its
+    /// own reason because the two shapes it covers fail for different causes:
+    /// rebinding a whole array (which names a new array instead of writing the
+    /// old one's storage), and writing through an index/field into a binding
+    /// that never granted write permission.
+    | MutAssignRefused of target: string * reason: string
+    /// A call-site argument handed to a `mut` parameter without the write
+    /// permission that parameter implies (formalism 2.7: only `let mut`
+    /// is mut-passable). `got` renders what was actually passed.
+    | MutArgNotPassable of func: string * argIndex: int * got: string
     // Mutual-group binding / constraint violations (BL4006)
     | MutualBindJointly of typeName: string * describe: string * lowerNames: string
     | MutualDirectElementsOnly of describe: string
@@ -290,6 +317,8 @@ type TypeError =
     | ProviderWriteNeedsArray of alias: string
     | ProviderWriteNamedBinding of alias: string
     | ProviderWriteArgs of alias: string
+    /// `alias.write(...)` written anywhere but a module-level `let` binding.
+    | ProviderWriteModuleScope of alias: string
     | ProviderImportByModule of suggestion: string * providers: string
     | ProviderNoSelectiveImport of pname: string
     | Other of string
@@ -470,11 +499,32 @@ type Subst() =
         typeVarScope <- fst saved
         knownTypeVarNames <- snd saved
 
+    /// Instrumented twin of the `IRTInfer` hop below, used ONLY when
+    /// `PerfCounters.enabled` (docs/plan-compile-speed.md Stage 5): the same
+    /// walk -- follow each bound inference variable, stop at the first unbound
+    /// id or non-infer type and resolve that structurally -- with the number of
+    /// indirections recorded. A member rather than a local `let rec` so the
+    /// measurement allocates no closure, and tail-recursive so it costs no more
+    /// stack than the hop it mirrors.
+    member private this.WalkInferChain(t: IRType, hops: int) : IRType =
+        match t with
+        | IRTInfer id ->
+            match this.TryFind id with
+            | Some next -> this.WalkInferChain(next, hops + 1)
+            | None ->
+                PerfCounters.resolveChain hops
+                t
+        | other ->
+            PerfCounters.resolveChain hops
+            this.Resolve other
+
     /// Recursively resolve a type through the substitution.
     /// Applies rank-0 collapse: Array<T, (no indices)> -> Scalar T.
     member this.Resolve(ty: IRType) : IRType =
+        if PerfCounters.enabled then PerfCounters.resolveCall ()
         match ty with
         | IRTInfer id ->
+            if PerfCounters.enabled then this.WalkInferChain(ty, 0) else
             match this.TryFind id with
             | Some ty' -> this.Resolve ty'
             | None -> ty
@@ -677,11 +727,37 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                 match ty with
                 | ArrayElem arr when arr.IndexTypes.Length = k ->
                     subst.Bind(id, ty); Ok ()
-                | IRTInfer _ ->
-                    // Binding two inference vars -- defer invariant check
-                    subst.Bind(id, ty); Ok ()
+                | IRTInfer id2 ->
+                    // Binding two inference vars: the invariant travels WITH
+                    // the bind. `id` disappears behind `id2`, so unless `id2`
+                    // inherits the pin every later `GetArityConstraint` reads
+                    // None and the `T^k` annotation goes VACUOUS -- the same
+                    // survivor problem `CopyPolymorphic` (above), the rank
+                    // lower bound (one arm up) and `CopyLiteralDefault`
+                    // (below) each already solve. There is nothing to defer
+                    // to: no seam ever revisits a var-to-var bind.
+                    //
+                    // Seam that fires this is the one named in the polymorphic
+                    // note above -- an UNANNOTATED return type, whose fresh
+                    // retType var swallows the signature's `T^k` var. Measured:
+                    // `function addrow(a: T^1, b: T^1) = a + b` used as a fold
+                    // kernel (`reduce(g, addrow)`) had its params specialize to
+                    // SCALARS and silently computed row sums, while the same
+                    // function spelled `-> T^1` (retType = the same var, so no
+                    // bind, so no loss) refused the scalar correctly.
+                    (match subst.GetArityConstraint(id2) with
+                     | Some k2 when k2 <> k ->
+                        Error (Other (sprintf "a `^%d` type variable cannot unify with a `^%d` one: the caret pins an EXACT rank, so the two annotations describe different shapes" k k2))
+                     | _ ->
+                        subst.CopyArityConstraint(id, id2)
+                        subst.Bind(id, ty); Ok ())
                 | _ ->
-                    Error (Other (sprintf "Type variable with arity %d requires a rank-%d array, got %A" k k ty))
+                    // `ppIRType`, not `%A`: this arm's raw-union rendering
+                    // ("got IRTScalar ETInt64") leaked F# constructor names
+                    // into user-facing output, and the fold-kernel seam above
+                    // now routes ordinary programs here.
+                    Error (Other (sprintf "a `^%d` type variable is a rank-%d array, but this position supplies %s -- the caret is a rank CLAIM, not a shorthand, so drop it (`T`) where the value is an element rather than an array. In fold-kernel position (`reduce(A, f)`) the parameters ARE the element type: a `T^1` kernel fits an array of rank-1 elements, not a rank-1 array of scalars."
+                                          k k (ppIRType ty)))
             | _ ->
                 match subst.GetLiteralDefault(id) with
                 | Some litE ->

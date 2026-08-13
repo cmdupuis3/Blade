@@ -6,8 +6,8 @@
 // (asin' = 1/sqrt(1-x^2), acos' = -1/sqrt(1-x^2), atan' = 1/(1+x^2)), in
 // StaticEval.evalBuiltin's table. They are also in Grad.complexMathIntrinsics;
 // the complex-operand half lives in intrinsics/015 rather than here, because
-// the interpreter refuses complex asin/acos/atan as not-yet-bit-verified
-// (BL8011) and that would skip this whole file out of the interp differential.
+// the interpreter declines complex asin/acos/atan as not-yet-bit-verified and
+// that would skip this whole file out of the interp differential.
 // ============================================================================
 let a = asin(0.5)
 let b = acos(0.5)

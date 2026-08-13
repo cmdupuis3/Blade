@@ -1,0 +1,40 @@
+// TEST: GroupBy Zip Co-Iteration Nested Inside A Lambda
+// The grouped-zip peel (025/029's shape) working INSIDE a lifted lambda
+// inside a function body. The lambda captures the group_by results, and a
+// captured grouped array is a row-pointer table whose per-row lengths live
+// in the driving group_keys binding's side state -- so the lift forwards
+// the table as `Array<T*, 1>&` plus one hidden `__ngroups`/`__offsets`
+// pair per distinct gk, and seeds the body's grouped-array map so the peel
+// resolves lengths exactly as it does in the frame that built the group.
+//
+// Previously the peel could not resolve the gk inside the lambda, fell
+// through to the mixed-operands gate, and the program died twice over: a
+// spliced refusal plus an undeclared `__v<id>` at the grid's use site --
+// while the SAME kernel shape at function-body level compiled fine
+// (examples/lswosa.blade's family_spectra).
+//
+// The row kernel's body is a block ending in an array literal (a
+// rank-raising row map, loops/151-153), so this also pins the S2-lifted
+// row-kernel call inside the peel, including the capture of the enclosing
+// lambda's block-local `let s2` under its EMITTED name.
+function work(t0: T^1, u0: U^1, frs: X^1) = {
+    let keys = (t0 <@> lambda(t) -> floor(t / 3.0)) |> compute
+    let gk = group_keys(keys)
+    let gt = group_by(t0, gk)
+    let gu = group_by(u0, gk)
+    frs <@> lambda(f) -> {
+        let s2 = f + 1.0
+        let cellacc = method_for(zip(gt, gu)) <@> lambda(trow: T^1, urow: U^1) -> {
+            let s = prodsum(trow, urow)
+            [s + f, s * s2]
+        } |> compute
+        cellacc(0, 0) + cellacc(1, 1)
+    } |> compute
+}
+let t0 = [1.0, 2.0, 3.0, 4.0]
+let u0 = [10.0, 20.0, 30.0, 40.0]
+let frs = [1.0, 2.0]
+// keys = [0, 0, 1, 1]; group 0: 1*10 + 2*20 = 50; group 1: 3*30 + 4*40 = 250.
+// out(f) = (50 + f) + 250 * (f + 1)
+let out = work(t0, u0, frs)
+// EXPECT: out = [551, 802]

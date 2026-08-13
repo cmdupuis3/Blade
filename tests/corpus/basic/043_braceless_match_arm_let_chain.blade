@@ -1,0 +1,41 @@
+// TEST: Braceless Match Arm Let Chain
+// A match arm body written WITHOUT braces may be a let-chain followed by the
+// expression that is the arm's value -- it means exactly what the braced form
+// `| p -> { let x = ...; expr }` means, and builds the same ExprBlock. Before
+// this, only the braced form worked: the braceless arm parsed as a lone
+// ExprLet with a synthesized unit body, the chain's names died with it, and
+// the continuation line was re-read as a statement of the ENCLOSING scope,
+// where the arm's names came back BL2001-unbound.
+//
+// Termination needs no `end` token and no braces because a `let` is not a
+// value: the body keeps taking statements while the last one was a binding and
+// stops at the first one that is an expression. `| 1 ->` here proves the arm
+// still ends in time for the NEXT `|` arm to be seen, and `| _ ->` proves a
+// nested `match` can be the RHS of a chained binder -- the inner match's own
+// arms are consumed by the inner match, not by the outer arm's chain.
+//
+// The layout guard (a continuation must start at a column no less than the
+// chain's first statement) is what stops the last arm from swallowing the
+// top-level `let r0 = ...` declarations that follow it; 044 pins the refusal
+// on the other side of that rule.
+function classify(n: Int64) -> Int64 =
+    match n with
+    | 0 -> 100
+    | 1 ->
+        let doubled = n * 2
+        let bumped = doubled + 1
+        bumped * 10
+    | _ ->
+        let inner = match n with
+                    | 2 -> 20
+                    | _ -> 30
+        inner + 1
+
+let r0 = classify(0)
+let r1 = classify(1)
+let r2 = classify(2)
+let r3 = classify(7)
+// EXPECT: r0 = 100
+// EXPECT: r1 = 30
+// EXPECT: r2 = 21
+// EXPECT: r3 = 31

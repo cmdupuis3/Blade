@@ -115,17 +115,45 @@ let forcedDeferredIdsCell () : Set<int> ref =
         fresh
     else v
 
+/// Append-only, insertion-ordered line collector for the emission-side cells
+/// below. Replaces the `string list ref` they used to be: every contribution
+/// was `cell.Value <- cell.Value @ lines` (an O(n) list copy per append) and the
+/// de-duplicating ones added an O(n) `List.contains` scan on top, so collecting
+/// n declarations cost O(n^2). Here appends are amortized O(1) and membership is
+/// a hash lookup, while `Value` still reads the lines back as a list in exactly
+/// the insertion order the emitted C++ depends on.
+///
+/// `Value` is settable so the existing per-program reset sites (`.Value <- []`)
+/// keep working unchanged; assignment replaces the contents wholesale.
+type DeclCollector() =
+    let items = System.Collections.Generic.List<string>()
+    let seen = System.Collections.Generic.HashSet<string>()
+    /// Append lines unconditionally, in order.
+    member _.Append (lines: string list) = items.AddRange lines
+    /// Append `line` only if an identical line was never appended (by any
+    /// route) -- the idempotent-declaration case. Insertion order is kept.
+    member _.AppendDistinct (line: string) = if seen.Add line then items.Add line
+    /// Does any collected line satisfy `p`? Non-allocating.
+    member _.Exists (p: string -> bool) = Seq.exists p items
+    member _.Value
+        with get () : string list = List.ofSeq items
+        and set (v: string list) =
+            items.Clear()
+            seen.Clear()
+            items.AddRange v
+            for l in v do seen.Add l |> ignore
+
 /// Collector for CUDA kernel definitions destined for the .cu file. genCudaKernel
 /// appends each __global__ kernel + extern "C" wrapper here; the assembler reads
-/// it to produce the .cu (only when non-empty). AsyncLocal per-flow ref, like
+/// it to produce the .cu (only when non-empty). AsyncLocal per-flow cell, like
 /// exprWarningsCell, so a deep emission site can contribute without a threaded return.
 let private cudaKernelDefsStorage =
-    System.Threading.AsyncLocal<string list ref>()
+    System.Threading.AsyncLocal<DeclCollector>()
 
-let cudaKernelDefsCell () : string list ref =
+let cudaKernelDefsCell () : DeclCollector =
     let v = cudaKernelDefsStorage.Value
     if isNull (box v) then
-        let fresh = ref []
+        let fresh = DeclCollector()
         cudaKernelDefsStorage.Value <- fresh
         fresh
     else v
@@ -136,12 +164,12 @@ let cudaKernelDefsCell () : string list ref =
 /// argument for a symmetric output needs one (rectangular outputs dodge this by
 /// passing nullptr). Mirrors cudaKernelDefsCell; reset at program assembly.
 let private symmDeclsStorage =
-    System.Threading.AsyncLocal<string list ref>()
+    System.Threading.AsyncLocal<DeclCollector>()
 
-let symmDeclsCell () : string list ref =
+let symmDeclsCell () : DeclCollector =
     let v = symmDeclsStorage.Value
     if isNull (box v) then
-        let fresh = ref []
+        let fresh = DeclCollector()
         symmDeclsStorage.Value <- fresh
         fresh
     else v
@@ -157,15 +185,28 @@ let symmDeclsCell () : string list ref =
 /// plain assignment, so evaluation order, timing phases and allocation scopes
 /// are untouched. Mirrors symmDeclsCell; reset at program assembly.
 let private moduleGlobalDeclsStorage =
-    System.Threading.AsyncLocal<string list ref>()
+    System.Threading.AsyncLocal<DeclCollector>()
 
-let moduleGlobalDeclsCell () : string list ref =
+let moduleGlobalDeclsCell () : DeclCollector =
     let v = moduleGlobalDeclsStorage.Value
     if isNull (box v) then
-        let fresh = ref []
+        let fresh = DeclCollector()
         moduleGlobalDeclsStorage.Value <- fresh
         fresh
     else v
+
+/// Per-binding-name cache for tryHoistModuleBindingDecl's pattern. The pattern
+/// embeds the binding name, so it cannot be compiled once globally -- but it
+/// CAN be compiled once per name instead of once per call, which is what this
+/// gives. Concurrent-safe (the parallel test runner shares this process, and a
+/// `Regex` is immutable and thread-safe for matching).
+let private hoistDeclRegexCache =
+    System.Collections.Concurrent.ConcurrentDictionary<string, System.Text.RegularExpressions.Regex>()
+
+/// Declaration keywords that disqualify a line from the split (hoisted out of
+/// tryHoistModuleBindingDecl so the set is built once, not per call).
+let private hoistDeclReserved =
+    set ["auto"; "const"; "constexpr"; "static"; "register"; "volatile"; "return"; "else"]
 
 /// Split a module-level binding's emitted code into (namespace-scope
 /// declaration, rewritten body) when its definition is a single ordinary
@@ -182,11 +223,13 @@ let moduleGlobalDeclsCell () : string list ref =
 /// assignment happens at exactly the original program point, so the promoted
 /// binding holds the same value at every point the un-promoted one did.
 let tryHoistModuleBindingDecl (name: string) (lines: string list) : (string * string list) option =
-    let pattern =
-        sprintf "^(?<ind>\\s*)(?<ty>[A-Za-z_][A-Za-z0-9_:<>,\\* ]*?)\\s+%s\\s*=\\s*(?<rhs>.*;)\\s*$"
-                (System.Text.RegularExpressions.Regex.Escape name)
-    let re = System.Text.RegularExpressions.Regex(pattern)
-    let reserved = set ["auto"; "const"; "constexpr"; "static"; "register"; "volatile"; "return"; "else"]
+    let re =
+        hoistDeclRegexCache.GetOrAdd(name, fun n ->
+            let pattern =
+                sprintf "^(?<ind>\\s*)(?<ty>[A-Za-z_][A-Za-z0-9_:<>,\\* ]*?)\\s+%s\\s*=\\s*(?<rhs>.*;)\\s*$"
+                        (System.Text.RegularExpressions.Regex.Escape n)
+            System.Text.RegularExpressions.Regex(pattern))
+    let reserved = hoistDeclReserved
     let matches =
         lines
         |> List.mapi (fun i l -> (i, re.Match l))
@@ -214,8 +257,7 @@ let hoistSymmDecl (name: string) (symmVec: int list) : string =
     let cell = symmDeclsCell ()
     let values = symmVec |> List.map string |> String.concat ", "
     let decl = sprintf "static constexpr const size_t %s[%d] = {%s};" name symmVec.Length values
-    if not (List.contains decl cell.Value) then
-        cell.Value <- cell.Value @ [decl]
+    cell.AppendDistinct decl
     name
 
 /// Emit the right-hand side of an output array allocation from a backend-neutral
@@ -714,6 +756,20 @@ let splitTimingOnlyBinding () : string option =
 let ompTestModeEnabled () : bool =
     (ompTestModeCell ()).Value
 
+/// Memcheck emission gate (BLADE_MEMCHECK=1): the generated program includes
+/// blade_memcheck.hpp, whose static Report object brackets main() with
+/// ASan-hook allocation accounting and prints one BLADE-MEMCHECK line on
+/// stderr at exit; Build.fs switches to the Debug+ASan compile profile off
+/// the same read. An environment read, not an AsyncLocal: the flag is a
+/// per-process harness pin (like BLADE_MARCH/BLADE_FP_CONTRACT in Build.fs),
+/// set by `blade run --memcheck` before codegen starts. Default
+/// (unset/empty/"0") emits NOTHING -- default output stays byte-identical,
+/// and the interpreter/REPL lanes never pay for it.
+let memcheckEnabled () : bool =
+    match System.Environment.GetEnvironmentVariable "BLADE_MEMCHECK" with
+    | null | "" | "0" -> false
+    | _ -> true
+
 /// CUDA emission gate. genCudaKernel[Simplicial] emits an `extern "C"` launch
 /// call into the host .cpp plus a `__global__` kernel into a separate .cu, which
 /// only links when the .cu is built alongside it -- true only in the dedicated
@@ -842,6 +898,132 @@ let exprSentinelsCell () : string list ref =
         fresh
     else v
 
+// UNHANDLED IR NODES, as opposed to deliberate refusals.
+//
+// Every other message that reaches `exprError` / `codegenError` is a REFUSAL:
+// codegen understood the construct and declined to render it, with a sentence
+// saying what to write instead. Those are features, and their `#error`
+// delivery is the contract `// REJECT-AT: codegen` probes are written against.
+//
+// A node arriving at a catch-all arm is a different animal: it means this
+// position grew no arm for that shape, which is a hole in the back end, not a
+// statement about the user's program. Delivering THAT as a C++ compile error
+// naming `BLADE_CODEGEN_ERROR_UNSUPPORTED_IR_NODE_<X>` hands the user a g++
+// diagnostic about an undeclared C++ identifier for a Blade-side gap -- no
+// code, no file, no line, and nothing to search for.
+//
+// So the catch-alls ALSO record here, and the compile driver turns a non-empty
+// channel into a coded, spanned Blade diagnostic (BL7001) and refuses BEFORE
+// the C++ compiler is ever invoked. The `#error` half is kept as-is: the test
+// harness drives codegen directly rather than through the driver, and the
+// guard is what its codegen-stage verdict reads.
+let private unhandledNodesStorage =
+    System.Threading.AsyncLocal<(string * string) list ref>()
+
+let unhandledNodesCell () : (string * string) list ref =
+    let v = unhandledNodesStorage.Value
+    if isNull (box v) then
+        let fresh = ref []
+        unhandledNodesStorage.Value <- fresh
+        fresh
+    else v
+
+/// The declaration currently being emitted, for attributing an unhandled node
+/// to a source position. `genModule`/`genModuleSplit` set it around each item.
+let private currentDeclStorage = System.Threading.AsyncLocal<string ref>()
+
+let currentDeclCell () : string ref =
+    let v = currentDeclStorage.Value
+    if isNull (box v) then
+        let fresh = ref ""
+        currentDeclStorage.Value <- fresh
+        fresh
+    else v
+
+let setCurrentCodegenDecl (name: string) : unit = (currentDeclCell ()).Value <- name
+
+/// Record that `nodeName` reached codegen with no arm in `position`, tagging it
+/// with the declaration being emitted. Deduplicated: one loop nest can render
+/// the same hole once per iteration of the emitter, and the user needs to be
+/// told once.
+let recordUnhandledIRNode (position: string) (nodeName: string) : unit =
+    let cell = unhandledNodesCell ()
+    let entry = (sprintf "%s in %s" nodeName position, (currentDeclCell ()).Value)
+    if not (List.contains entry cell.Value) then
+        cell.Value <- cell.Value @ [entry]
+
+/// Drain the unhandled-node channel as ready-made diagnostics: BL7001
+/// (backend limit), spanned at the enclosing declaration when Lowering
+/// recorded one. Called by the compile driver after codegen.
+let takeUnhandledIRNodeDiagnostics () : Blade.Diagnostics.Diagnostic list =
+    let cell = unhandledNodesCell ()
+    let entries = cell.Value
+    cell.Value <- []
+    entries |> List.map (fun (what, declName) ->
+        let where = if declName = "" then "" else sprintf " (while emitting '%s')" declName
+        Blade.Diagnostics.Codes.backendLimit (IR.declSpanOf declName)
+            (sprintf "code generation has no rule for %s%s" what where)
+        |> Blade.Diagnostics.withNote
+            "this is a gap in the C++ back end, not an error in your program -- \
+             the construct typechecked and lowered. Please report it; meanwhile, \
+             materializing the sub-expression with `|> compute` and binding it to \
+             a name often routes around the hole.")
+
+// DELIBERATE CODEGEN REFUSALS, surfaced as coded diagnostics.
+//
+// Every `#error` / `BLADE_CODEGEN_ERROR_` splice that reaches the generated
+// C++ is a refusal codegen chose on purpose -- but delivering it THROUGH g++
+// hands the user a preprocessor error (or an undeclared-identifier error)
+// with no Blade file/line and no code to search for. So refusal sites ALSO
+// record here, tagged with the declaration being emitted, and the compile
+// driver turns a non-empty channel into BL7004 diagnostics and refuses
+// before the C++ compiler runs -- the exact mechanism BL7001 uses for
+// unhandled nodes, applied to the refusal class.
+//
+// The `#error` halves are kept as-is: the test harness drives codegen
+// directly (never through the driver), and its `// REJECT-AT: codegen`
+// verdict reads `cppCode.Contains "#error"`.
+//
+// GATING (see takeCodegenRefusalDiagnostics): a rendered-then-DISCARDED
+// refusal line records here but never reaches the translation unit (the
+// lazy-rendering trap documented at the row-write emitter). The driver
+// therefore refuses only when the generated source actually carries a
+// marker; otherwise the channel is drained and dropped, preserving the
+// discarded-render behavior byte for byte.
+let private codegenRefusalsStorage =
+    System.Threading.AsyncLocal<(string * string) list ref>()
+
+let codegenRefusalsCell () : (string * string) list ref =
+    let v = codegenRefusalsStorage.Value
+    if isNull (box v) then
+        let fresh = ref []
+        codegenRefusalsStorage.Value <- fresh
+        fresh
+    else v
+
+let recordCodegenRefusal (msg: string) : unit =
+    let cell = codegenRefusalsCell ()
+    let entry = (msg, (currentDeclCell ()).Value)
+    if not (List.contains entry cell.Value) then
+        cell.Value <- cell.Value @ [entry]
+
+/// Drain the refusal channel as BL7004 diagnostics, spanned at the enclosing
+/// declaration. `cppCode` gates delivery: entries are returned only when the
+/// generated source actually carries a refusal marker (a discarded render
+/// records a message but splices nothing -- see the channel's note). The
+/// channel is drained either way so state never leaks across compilations.
+let takeCodegenRefusalDiagnostics (cppCode: string) : Blade.Diagnostics.Diagnostic list =
+    let cell = codegenRefusalsCell ()
+    let entries = cell.Value
+    cell.Value <- []
+    if entries.IsEmpty
+       || not (cppCode.Contains "#error" || cppCode.Contains "BLADE_CODEGEN_ERROR_") then []
+    else
+        entries |> List.map (fun (msg, declName) ->
+            let where = if declName = "" then "" else sprintf " (while emitting '%s')" declName
+            Blade.Diagnostics.Codes.backendRefusal (IR.declSpanOf declName)
+                (sprintf "%s%s" msg where))
+
 /// Record an expression-level warning and return a C++ expression that causes a compile error.
 /// The identifier is the in-place marker; the companion `#error` directive is
 /// appended to the translation unit by `genSelfContainedProgramFromIR` (an
@@ -853,6 +1035,12 @@ let exprError (msg: string) : string =
     let sentinels = exprSentinelsCell ()
     if not (List.contains msg sentinels.Value) then
         sentinels.Value <- sentinels.Value @ [msg]
+    // Refusal channel (BL7004): every sentinel becomes an `#error` in the
+    // translation unit, so record it -- EXCEPT the unhandled-node catch-alls,
+    // which have already recorded themselves on the BL7001 channel and would
+    // otherwise be reported twice under two codes.
+    if not (msg.StartsWith "unsupported IR node") then
+        recordCodegenRefusal msg
     sprintf "BLADE_CODEGEN_ERROR_%s" (msg.Replace(" ", "_").Replace("'", "").Replace("(", "").Replace(")", "").Replace(",", "").Replace(":", "").Replace("\"", "").ToUpper())
 
 // Substitution map for contains-aware mask rendering.
@@ -910,10 +1098,22 @@ let indent ctx = { ctx with Indent = ctx.Indent + 1 }
 let indentStr ctx = String.replicate ctx.Indent "    "
 
 /// Record a codegen warning and return a C++ #error directive.
-/// This ensures the generated C++ will not compile silently.
+/// This ensures the generated C++ will not compile silently. Also records on
+/// the refusal channel so the compile driver reports it as BL7004 instead of
+/// letting g++ deliver the raw `#error`.
 let codegenError (ctx: CodeGenContext) (ind: string) (msg: string) : string list =
     ctx.Warnings.Value <- ctx.Warnings.Value @ [msg]
+    recordCodegenRefusal msg
     [sprintf "%s#error \"Blade codegen: %s\"" ind (msg.Replace("\"", "'"))]
+
+/// Direct-splice refusal for the sprintf-`#error` sites that have no ctx at
+/// hand: record on the BL7004 channel and return the `#error` line, quoted
+/// exactly as the site has always emitted it (msg goes inside the quotes
+/// verbatim -- callers that historically carried a "Blade codegen: " prefix
+/// pass it in msg).
+let refusalErrorLine (ind: string) (msg: string) : string =
+    recordCodegenRefusal msg
+    sprintf "%s#error \"%s\"" ind (msg.Replace("\"", "'"))
 
 /// C++ reserved words and built-in type names that cannot be used as identifiers
 let cppReservedWords = Set.ofList [
@@ -1719,7 +1919,7 @@ let genSparseIndexFromKeys (source: SparseKeysSource) (keysName: string option) 
               sprintf "sparse_index_t<%d>* %s = new sparse_index_t<%d>(\"%s\", std::move(%s_keys));"
                       rank idxName rank idxName idxName ]
         | None ->
-            [ "#error \"SparseIdx: runtime keys variable not found in scope at codegen\"" ]
+            [ refusalErrorLine "" "SparseIdx: runtime keys variable not found in scope at codegen" ]
 
 /// Resolve a capture to the C++ identifier naming it in the SCOPE where the
 /// forwarding closure is emitted. A capture's `Name` is its SOURCE name,
@@ -1730,6 +1930,110 @@ let genSparseIndexFromKeys (source: SparseKeysSource) (keysName: string option) 
 /// the source name when unmapped.
 let captureForwardName (names: Map<IRId, string>) (c: CaptureInfo) : string =
     Map.tryFind c.Id names |> Option.defaultValue c.Name
+
+// GROUPED-CAPTURE FORWARDING.
+//
+// A `group_by` result is a row-pointer table (`Array<T*, 1>`, see
+// genGroupByBinding) whose per-row lengths live OUTSIDE the value, in the
+// driving `group_keys` binding's side state (`<gk>__ngroups`,
+// `<gk>__offsets`). A lifted callable that captures one therefore needs
+// three things the plain capture path cannot give it:
+//
+//   1. the row table typed as what it IS (`Array<T*, 1>&`) -- the IR rank-2
+//      type would render `Array<T, 2>&`, which the call site's actual
+//      `Array<T*, 1>` value cannot bind to;
+//   2. the gk side state, forwarded as trailing hidden params (`size_t
+//      __gk<id>__ngroups, const size_t* __gk<id>__offsets`), ONE pair per
+//      DISTINCT gk across the captures -- the grouped-zip peel requires
+//      co-grouped operands to resolve to the SAME stem, so two captures
+//      grouped by one gk must share a pair;
+//   3. a `ctx.GroupedArrays` seed in the callable's body context mapping the
+//      capture's body-scope name to that stem, so every downstream consumer
+//      (tryRaggedPeel, tryGroupedZipPeel, the peel-result extent sites)
+//      resolves lengths exactly as it does in the frame that built the group.
+//
+// Parameter names and argument spellings agree by POSITION, not by text: the
+// signature always spells the stem off the gk's VAR ID (`__gk<id>`), while a
+// call site spells whatever the gk is named in ITS scope -- the emitted
+// binding name where the gk is local (`__v<id>`/`gk`), or `__gk<id>` when the
+// caller is itself a lifted callable holding the forwarded pair.
+//
+// Which capture is grouped comes from a module-level pre-pass
+// (computeGroupedCaptureFacts): binding var id of a group_by result -> the
+// gk binding's var id, harvested from `IRLet (id, IRGroupBy (_, IRVar gk), _)`
+// in every function body plus module-level group_by bindings. HM
+// specialization preserves body let ids (only param VarIds are remapped), so
+// one fact set serves the original, the spec, and every lambda clone.
+let private groupedCaptureFactsStorage =
+    System.Threading.AsyncLocal<Map<IRId, IRId> ref>()
+
+let groupedCaptureFactsCell () : Map<IRId, IRId> ref =
+    let v = groupedCaptureFactsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        groupedCaptureFactsStorage.Value <- fresh
+        fresh
+    else v
+
+let groupedCaptureGkOf (c: CaptureInfo) : IRId option =
+    Map.tryFind c.Id (groupedCaptureFactsCell ()).Value
+
+/// The C++ spelling of a gk's side-state stem in the CURRENT scope: the gk's
+/// emitted name where it is in scope, `__gk<id>` (the forwarded-pair param
+/// stem) where it is not.
+let gkSidecarStem (names: Map<IRId, string>) (gkId: IRId) : string =
+    match Map.tryFind gkId names with
+    | Some n -> n
+    | None -> sprintf "__gk%d" gkId
+
+/// Distinct gk ids across a callable's captures, in first-appearance order
+/// (the order both the signature and every call site iterate).
+let groupedCaptureGks (caps: CaptureInfo list) : IRId list =
+    caps |> List.choose groupedCaptureGkOf |> List.distinct
+
+/// Trailing hidden params carrying the gk side state, for genFuncDef and
+/// genForwardDecls (which must agree token for token).
+let gkSidecarParams (caps: CaptureInfo list) : string list =
+    groupedCaptureGks caps
+    |> List.collect (fun gkId ->
+        [ sprintf "size_t __gk%d__ngroups" gkId
+          sprintf "const size_t* __gk%d__offsets" gkId ])
+
+/// Capture ARGUMENTS at a call/wrapper site: the regular captures resolved
+/// through the active name map, then the gk side-state pairs in the same
+/// order the signature declares them.
+let captureForwardArgs (names: Map<IRId, string>) (caps: CaptureInfo list) : string list =
+    (caps |> List.map (captureForwardName names))
+    @ (groupedCaptureGks caps
+       |> List.collect (fun gkId ->
+           let stem = gkSidecarStem names gkId
+           [ sprintf "%s__ngroups" stem; sprintf "%s__offsets" stem ]))
+
+/// The pre-pass behind groupedCaptureGkOf: every `let <id> = group_by(_, gk)`
+/// in any function body (and any module-level group_by binding) contributes
+/// id -> gk's var id. Installed by genModule/genModuleSplit alongside the
+/// other module-level fact caches.
+let computeGroupedCaptureFacts (modul: IRModule) : Map<IRId, IRId> =
+    let acc = System.Collections.Generic.Dictionary<IRId, IRId>()
+    let strip e = match e with IRCompute inner -> inner | e -> e
+    let note (id: IRId) (v: IRExpr) =
+        match strip v with
+        | IRGroupBy (_, gkE) ->
+            (match strip gkE with
+             | IRVar (gkId, _) -> acc.[id] <- gkId
+             | _ -> ())
+        | _ -> ()
+    let walkBody (b: IRExpr) =
+        iterIRExpr (fun e ->
+            match e with
+            | IRLet (id, v, _) -> note id v
+            | _ -> ()) b
+    for bind in modul.Bindings do
+        note bind.Id bind.Value
+        walkBody bind.Value
+    for f in modul.Functions do
+        walkBody f.Body
+    acc |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
 
 /// Wrapper-emission helper: a local C++ closure mediating between a lifted
 /// function's signature (regular + capture params) and a consumer's expected
@@ -1766,7 +2070,7 @@ let genCallableWrapper (names: Map<IRId, string>) (suffix: string) (callable: IR
             | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
         |> String.concat ", "
     let regularArgs = callable.Params |> List.map (fun p -> p.Name)
-    let captureArgs = callable.Captures |> List.map (captureForwardName names)
+    let captureArgs = captureForwardArgs names callable.Captures
     let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
     let code =
         [sprintf "auto %s = [&](%s) { return %s(%s); };" wrapperName paramSig safeName allArgs]
@@ -2379,7 +2683,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 |> String.concat ", "
             let allArgs =
                 (callable.Params |> List.map (fun p -> p.Name))
-                @ (callable.Captures |> List.map (captureForwardName names))
+                @ (captureForwardArgs names callable.Captures)
                 |> String.concat ", "
             sprintf "[&](%s) { return %s(%s); }" paramSig safeName allArgs
         | _ ->
@@ -2483,7 +2787,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             match func, resolveCallable func with
             | IRVar (fid, _), Some callable when callable.Id = fid && not (List.isEmpty callable.Captures) ->
                 (sanitizeCppName callable.Name,
-                 callable.Captures |> List.map (captureForwardName names))
+                 captureForwardArgs names callable.Captures)
             | _ -> (exprToCppCore subst names func, [])
         let argStrs =
             args |> List.collect (fun a ->
@@ -2790,7 +3094,10 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // sub-array binding (the ExtentArrayRef path). Surface a visible
         // error rather than silently emit the wrong value.
         exprError "opaque-extent marker reached expression rendering -- kernel-param sub-array was not bound to a concrete extent at the peel point (codegen routing bug)"
-    | other -> exprError (sprintf "unsupported IR node: %s" (other.GetType().Name))
+    | other ->
+        // A hole in the back end, not a refusal -- see `recordUnhandledIRNode`.
+        recordUnhandledIRNode "expression position" (other.GetType().Name)
+        exprError (sprintf "unsupported IR node: %s" (other.GetType().Name))
 
 /// Generate inline combinator application as an IIFE expression, for `L <@> f`
 /// in expression context (not a let RHS or function-body return -- those route
@@ -3068,9 +3375,23 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
     // BINDING path builds (densePartialSubview) as a prvalue instead: data
     // steps through the consumed leading dims, extents shifts past them.
     // Same scoping as the binding path -- fully plain-dense rectangular
-    // (IxKPlain/SymNone/SDimension/arity-1); compound reads go through
+    // (IxKPlain/SymNone/arity-1); compound reads go through
     // compoundRead above, and ragged/packed-symmetric row pointers must NOT be
     // re-wrapped (their axes fail the predicate).
+    //
+    // Deliberately NOT gated on `ix.Kind = SDimension`: an index record's Kind
+    // is a statement about ONE apply (S = this apply's grid iterates it, T =
+    // this apply's kernel contributed it), never about the value's storage --
+    // see reSDimOperand's doc in TypeCheck. An array a kernel RETURNED carries
+    // inherited TDimension stamps, and its rows are exactly as rectangular as
+    // anyone else's; gating on Kind sent `G(j)` of such a G (the leading-axis
+    // fold's step slice) to the raw `data[j]` pointer, which then failed g++ in
+    // every consuming position (call argument, apply operand, let binding).
+    // A CONSUMED (leading, subscripted-through) axis may also be GROUP-OUTER:
+    // the rectangular grid a grouped apply returns is a dense pool whose
+    // extents[0] is the group count, so `data[j]` / `extents + 1` are exact.
+    // RESIDUAL axes must stay plain -- a surviving ragged member axis means
+    // the row shapes differ and the aggregate would lie.
     let densePartialSubviewExpr () : string option =
         if List.isEmpty indices
            || indices |> List.exists (function IRTuple _ -> true | _ -> false) then None
@@ -3078,9 +3399,12 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
             match inferExprType arr with
             | ArrayElem arrTy
                     when arrTy.IndexTypes.Length > indices.Length
-                         && arrTy.IndexTypes |> List.forall (fun ix ->
-                                ix.IxKind = IxKPlain && ix.Symmetry = SymNone
-                                && ix.Kind = SDimension && ix.Rank = 1) ->
+                         && arrTy.IndexTypes |> List.mapi (fun d ix -> (d, ix))
+                            |> List.forall (fun (d, ix) ->
+                                (ix.IxKind = IxKPlain
+                                 || (d < indices.Length && ix.IxKind = IxKGroupOuter))
+                                && ix.Symmetry = SymNone
+                                && ix.Rank = 1) ->
                 let residTy = { arrTy with IndexTypes = List.skip indices.Length arrTy.IndexTypes }
                 let subscripts =
                     indices
@@ -3597,9 +3921,20 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
             else
                 sprintf "(int64_t)(%s.extents[%d])" arrName dim
     | _ ->
-        // Should be unreachable -- typecheck rejects non-arrays. Surface a
-        // visible #error rather than emit garbage if the IR is malformed.
-        "/* extents: argument is not an array (typechecker bug) */"
+        // `extents(range<T>)`: a virtual range has no materialized C++ object
+        // to read `.extents[]` off, but its slot extents are part of the IR --
+        // statically evaluable ones (Idx<11>, Idx<n_seg + 1> with n_seg
+        // `let static`) emit as literals. A genuinely runtime slot extent has
+        // no object either, so it stays a deliberate refusal.
+        match arr with
+        | IRRange (idxTys, _) when dim < idxTys.Length ->
+            (match tryEvalIntIR idxTys.[dim].Extent with
+             | Some n -> sprintf "%dL" n
+             | None -> exprError "extents(range<...>): the range's extent is not statically evaluable, and a virtual range has no runtime object to read it from -- take extents of a materialized array instead")
+        | _ ->
+            // Should be unreachable -- typecheck rejects non-arrays. Surface a
+            // visible marker rather than emit garbage if the IR is malformed.
+            "/* extents: argument is not an array (typechecker bug) */"
 
 
 and genApplyCombinatorExpr (subst: SubstMap) (names: Map<IRId, string>) (info: ApplyInfo) : string =
@@ -3734,7 +4069,7 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         | ArrayElem a -> literalOrRuntimeExtentOfArray a arrName 0
         | _ -> sprintf "%s.extents[0]" arrName
     if maskRank <> 1 then
-        Some ([sprintf "#error \"Blade codegen: mask over a rank-%d array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)\"" maskRank], [])
+        Some ([refusalErrorLine "" (sprintf "Blade codegen: mask over a rank-%d array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)" maskRank)], [])
     else
     match resolveCallable predExpr with
     | Some callable when callable.Params.Length = 1 ->
@@ -4498,7 +4833,7 @@ and materializeNegateConjugateForm (subst: SubstMap) (names: Map<IRId, string>) 
         let allocRhs =
             match emitAllocRhs spec elemTypeStr rank symmArg extentsName with
             | Ok rhs -> rhs
-            | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+            | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
         let allocDecl = sprintf "Array<%s, %d> %s = %s;" elemTypeStr rank varName allocRhs
         // Element count: count_antisym for antisym storage, count_leaves
         // (with the SYMM mask) otherwise. Matches the allocator's traversal.
@@ -4563,7 +4898,7 @@ and materializeArrayCopyForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let allocRhs =
             match emitAllocRhs spec elemTypeStr rank symmArg extentsName with
             | Ok rhs -> rhs
-            | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+            | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
         let allocDecl = sprintf "Array<%s, %d> %s = %s;" elemTypeStr rank varName allocRhs
         let countExpr =
             match spec with
@@ -5082,7 +5417,7 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             // Jacobi source the elaborator did not emit -- so refuse loudly at
             // C++ compile time rather than declaring nothing and leaving the
             // destructuring to reference an undefined name.
-            Some ([ sprintf "#error \"Blade codegen: eigh reached emission with no LAPACK route (availability gate changed after elaboration?); the synthesized Jacobi path is chosen at elaboration time and cannot be recovered here\"" ], [])
+            Some ([ refusalErrorLine "" "Blade codegen: eigh reached emission with no LAPACK route (availability gate changed after elaboration?); the synthesized Jacobi path is chosen at elaboration time and cannot be recovered here" ], [])
      | _ -> None)
 
 
@@ -5827,6 +6162,56 @@ let ompSuppressedMarker (requested: bool) (pragmaEmitted: bool) (reason: string)
         [ markerIndent + "// " + ompSuppressedPhrase reason ]
     else []
 
+/// Pragma (or decline marker) for the ROW LOOP of the ragged / grouped peels --
+/// `tryRaggedPeel` and `tryGroupedZipPeel` in `genApplyCombinator`.
+///
+/// WHY THIS IS NOT `genNestPragma`. That function takes a `LoopIndexBinding list`
+/// and picks collapse-vs-dynamic from per-level bound structure. The peels build
+/// no bindings at all -- they bypass the loop-nest builder PRECISELY BECAUSE the
+/// inner extent is ragged (per row, from an offsets table or a `lens[]` load) and
+/// no `LoopIndexBinding` can describe it. Handed a single synthesized binding,
+/// `genNestPragma`'s `rest` is empty, so `hasTriangularBelow` is always false and
+/// it can only ever return a plain `parallel for`: it structurally cannot express
+/// "one level, data-dependent imbalance", which is the entire shape here.
+/// Synthesizing a dummy binding (11 fields, including an `IRExpr` extent and a
+/// `SymcomState`) to extract a string this function returns in one line would be
+/// a fragile lie about the nest's structure.
+///
+/// `schedule(dynamic)` for the same reason `genNestPragma`'s triangular arm uses
+/// it: per-iteration work is proportional to the row length, and group/row lengths
+/// are DATA -- arbitrarily uneven, so a static split hands one thread the long
+/// rows. Unlike the triangular case the imbalance is not even monotone in `__g`,
+/// so there is no ascending/descending ordering argument to make instead; dynamic
+/// is the only schedule that says anything true about this shape.
+///
+/// NEVER SILENT WHEN THE KERNEL ASKED. The `else` branch is a marker, not `[]`,
+/// because "requested but licensed nothing" is REACHABLE: `Parser.parseOmpArgs`
+/// accepts any `TokInt`, so `omp(g: 0)` parses and yields `IsOmpParallel = true`
+/// with a maximum depth of 0. Returning `[]` there would recreate exactly the
+/// silent-drop this function exists to fix.
+///
+/// The decline reasons are DISTINCT STRINGS, and the knob comes first -- the same
+/// order `genLoopNestStreamed` and `genFusedLoopNestStreamed` use -- so a
+/// `grep "[omp]"` census over generated code can tell a knob decline from an
+/// emission-shape decline from a licence decline without reading the source.
+///
+/// `blocker` is "this particular emission cannot be threaded whatever the licence
+/// says", carrying its own reason: a streamed provider source, or a row pool that
+/// only iteration 0 can allocate. An OPTION rather than a bool so a new blocker
+/// arrives with its explanation attached and cannot silently reuse a wrong one.
+let peelRowPragma (requested: bool) (licensed: bool) (blocker: string option)
+                  (ind: string) : string list =
+    if licensed && blocker.IsNone && ompThreadEmissionEnabled () then
+        [ ind + "#pragma omp parallel for schedule(dynamic)" ]
+    else
+        let reason =
+            if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
+            else
+                match blocker with
+                | Some r -> r
+                | None -> "the omp(...) licence covers no level of the peeled row loop"
+        ompSuppressedMarker requested false reason ind
+
 /// Does this kernel body lower to something containing a LOOP of its own?
 ///
 /// The nest machinery sees loop LEVELS; a body's own iteration is invisible to
@@ -6057,6 +6442,65 @@ let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
         // Combinators, compute, reynolds, etc. -- won't appear in kernel bodies.
         // Use unique repr to prevent false dedup.
         sprintf "(opaque %d %A)" (expr.GetHashCode()) (expr.GetType().Name)
+
+// RANK-RAISING MAP: a kernel body that IS an array literal of scalars.
+//
+// `A <@> lambda(t) -> [f(t), g(t)]` deduces a rank+1 output, and the emitter
+// allocates it with the trailing literal extents already in `<name>_extents`
+// (that part was always right). What had no path was the ROW VALUE: the body
+// is inlined at the write site as a C++ *expression*, and an array literal has
+// no expression form -- it needs an extents table, an allocate and per-cell
+// stores, which are statements. exprToCpp's catch-all therefore fired and
+// spliced a refusal into the row slot.
+//
+// Rendering it as an allocating IIFE would work and be wrong: it puts a heap
+// allocation + a pool copy + a free in the innermost loop of what is otherwise
+// a flat store. The row's cells are known statically and the destination is a
+// contiguous span, so the literal writes STRAIGHT INTO the output pool -- no
+// temporary, no copy, no free. That is what makes this shape usable as the
+// per-row output of a multi-accumulator join, which is the reason it exists.
+//
+// The helper answers the one question the emitter needs: what are this
+// literal's leaf expressions, in row-major (storage) order?
+
+/// Leaves of a (possibly nested) array literal, row-major, when EVERY leaf is
+/// a scalar. `None` for a non-literal body, for a leaf that is itself
+/// array-valued (the row-typed-element literal is a different construction --
+/// see `inferArrayLitType`'s `rowTypedElemArr` branch -- and does not flatten
+/// to a fixed cell count here), and for a ragged nest (rows of differing
+/// width, whose leaves would not tile the destination row).
+let rec arrayLitScalarLeaves (e: IRExpr) : IRExpr list option =
+    match e with
+    | IRArrayLit (es, _) when not es.IsEmpty ->
+        let subs = es |> List.map arrayLitScalarLeaves
+        if subs |> List.exists Option.isNone then None
+        else
+            let got = subs |> List.map Option.get
+            // Rectangular only: sub-literals must all contribute the same
+            // number of cells (a scalar element contributes exactly one).
+            let widths = got |> List.map List.length |> List.distinct
+            if widths.Length > 1 then None else Some (List.concat got)
+    | IRArrayLit _ -> None
+    | _ ->
+        match inferExprType e with
+        | ArrayElem _ -> None
+        | IRTTuple _ | IRTUnit -> None
+        | _ -> Some [e]
+
+/// Static cell count of an array type's axes `[first .. last]` (inclusive),
+/// when every one of them has a literal extent. `None` otherwise -- a runtime
+/// extent cannot be matched against a literal's fixed leaf count.
+let staticCellsOfAxes (at: IRArrayType) (first: int) (last: int) : int option =
+    let axes = at.IndexTypes |> List.indexed |> List.filter (fun (i, _) -> i >= first && i <= last)
+    if axes.Length <> last - first + 1 then None
+    else
+        let ns =
+            axes |> List.map (fun (_, ix) ->
+                match ix.Extent with
+                | IRLit (IRLitInt n) when n > 0L -> Some (int n)
+                | _ -> None)
+        if ns |> List.exists Option.isNone then None
+        else Some (ns |> List.map Option.get |> List.fold (*) 1)
 
 /// Reynolds kernel codegen result: C++ expression + dedup statistics.
 type ReynoldsResult = {
@@ -6702,16 +7146,23 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         | IRTScalar _ -> "+="
         | _ -> "="
 
+    // LAZY, because rendering is not free of side effects: `exprToCpp`'s
+    // refusal path appends to the expression-sentinel cell (which becomes an
+    // `#error` in the translation unit) whether or not the caller keeps the
+    // string. The literal-row arm below discards this value, and an eagerly
+    // rendered array-literal body left a spurious `#error` behind in an
+    // otherwise perfectly good program.
     let reynoldsResult =
-        match carousel with
-        | Some (csubst, _, _) ->
-            // Carousel body: same expression, window reads substituted to the
-            // rotating locals (planHaloCarousel already excluded Reynolds).
-            { CppExpr = exprToCppCore csubst nameMap codeGen.KernelExpr; TotalPerms = 1; UniqueTerms = 1 }
-        | None ->
-            genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames
-    if codeGen.HasReynolds && reynoldsResult.UniqueTerms < reynoldsResult.TotalPerms then
-        lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" reynoldsResult.UniqueTerms reynoldsResult.TotalPerms (reynoldsResult.TotalPerms / max 1 reynoldsResult.UniqueTerms)]
+        lazy (
+            match carousel with
+            | Some (csubst, _, _) ->
+                // Carousel body: same expression, window reads substituted to the
+                // rotating locals (planHaloCarousel already excluded Reynolds).
+                { CppExpr = exprToCppCore csubst nameMap codeGen.KernelExpr; TotalPerms = 1; UniqueTerms = 1 }
+            | None ->
+                genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames)
+    if codeGen.HasReynolds && reynoldsResult.Value.UniqueTerms < reynoldsResult.Value.TotalPerms then
+        lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" reynoldsResult.Value.UniqueTerms reynoldsResult.Value.TotalPerms (reynoldsResult.Value.TotalPerms / max 1 reynoldsResult.Value.UniqueTerms)]
     // When the output row was hoisted, the write goes through the
     // restrict-qualified row pointer and only the innermost subscript remains.
     let (writeTarget, writeIdx) =
@@ -6774,9 +7225,63 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                     [ sprintf "    deallocate<typename promote<%s, %d>::type, nullptr>(__rowv.data, __rowv.extents);"
                           elemStr (rank - outer) ]
                 | _ -> []
+            // Literal row: store the cells directly, no temporary. Reynolds is
+            // excluded -- symmetrizing a body means SUMMING its permuted
+            // copies, and a per-cell sum of array literals is not what the
+            // stores below write; that shape falls through to the generic arm.
+            //
+            // A BLOCK-bodied literal kernel -- scalar lets ahead of the array
+            // literal (`lambda(w) -> { let x = ...; [x + y, x - y] }`, the
+            // halo/segment shape) -- takes the same direct-store path: the
+            // lets render as statements inside the row-write scope, visible
+            // to the leaf stores. The shape check is PURE (no rendering), so
+            // a declined shape leaves no sentinel side effect behind.
+            let rec literalTailOf e = match e with IRLet (_, _, b) -> literalTailOf b | t -> t
+            let literalLeaves =
+                match literalTailOf codeGen.KernelExpr with
+                | IRArrayLit _ as tail when not codeGen.HasReynolds ->
+                    match arrayLitScalarLeaves tail,
+                          staticCellsOfAxes at outer (rank - 1) with
+                    // Leaf count MUST equal the destination row's cell count:
+                    // the output extents are deduced from the literal's shape,
+                    // so a disagreement means the deduction and the body have
+                    // drifted apart, and writing anyway would run off the row.
+                    | Some leaves, Some cells when leaves.Length = cells -> Some leaves
+                    | _ -> None
+                | _ -> None
+            match literalLeaves with
+            | Some leaves ->
+                let subst = match carousel with Some (csubst, _, _) -> csubst | None -> emptySubst
+                // Render the let prefix (empty for a bare literal body): each
+                // non-unit value becomes a scoped local named __v<id> --
+                // renderLetExpr's convention, so the leaves' IRVar references
+                // resolve -- and unit values keep their statement form.
+                let rec renderLetPrefix nm acc e =
+                    match e with
+                    | IRLet (lid, v, b) ->
+                        let nm' = Map.add lid (sprintf "__v%d" lid) nm
+                        let lines =
+                            if isUnitExpr v then
+                                match renderUnitStmts subst nm v with
+                                | "" -> []
+                                | s -> [sprintf "    %s" s]
+                            else [sprintf "    auto __v%d = %s;" lid (exprToCppCore subst nm v)]
+                        renderLetPrefix nm' (acc @ lines) b
+                    | _ -> (nm, acc)
+                let (leafMap, letLines) = renderLetPrefix nameMap [] codeGen.KernelExpr
+                Some ([
+                        "{"
+                      ] @ letLines @ [
+                        sprintf "    const size_t __rowc = (size_t)(%s);" innerCells
+                        sprintf "    %s* __rowd = nested_array_utilities::pool_base(%s.data) + ((%s) * __rowc);"
+                            elemStr codeGen.OutputName flatOuter
+                      ] @ (leaves |> List.mapi (fun k leaf ->
+                                sprintf "    __rowd[%d] = %s;" k (exprToCppCore subst leafMap leaf)))
+                        @ [ "}" ])
+            | None ->
             Some ([
                     "{"
-                    sprintf "    auto __rowv = %s;" reynoldsResult.CppExpr
+                    sprintf "    auto __rowv = %s;" reynoldsResult.Value.CppExpr
                     sprintf "    const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" elemStr
                     sprintf "    const size_t __rowc = (size_t)(%s);" innerCells
                     sprintf "    %s* __rowd = nested_array_utilities::pool_base(%s.data) + ((%s) * __rowc);"
@@ -6784,7 +7289,10 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                     "    for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];"
                   ] @ freeLine @ [ "}" ])
         | _ -> None
-    let assignLine =
+    // Lazy for `reynoldsResult`'s reason: `rowWriteLines`, when it fires, is
+    // the whole write, and rendering this line anyway would re-enter the
+    // kernel expression -- and its sentinel side effect -- for nothing.
+    let assignLine = lazy (
         match codeGen.FoldWrapper, foldChunk with
         // Path B: accumulate into the THREAD-PRIVATE scalar, seeding it
         // from the chunk's first contributed value. The cell value is bound once
@@ -6792,16 +7300,16 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // loop-invariant after the first iteration.
         | Some wname, Some plan ->
             sprintf "{ %s __rv = %s; if (%s) %s = %s(%s, __rv); else { %s = __rv; %s = true; } }"
-                plan.ElemCpp reynoldsResult.CppExpr
+                plan.ElemCpp reynoldsResult.Value.CppExpr
                 fcHas foldAccName wname foldAccName
                 foldAccName fcHas
         // Fused fold: accumulate the kernel value through the fold-kernel
         // wrapper into the caller-declared scalar accumulator.
-        | Some wname, None -> sprintf "%s = %s(%s, %s);" codeGen.OutputName wname codeGen.OutputName reynoldsResult.CppExpr
-        | None, _ -> sprintf "%s%s %s %s;" writeTarget writeIdx assignOp reynoldsResult.CppExpr
+        | Some wname, None -> sprintf "%s = %s(%s, %s);" codeGen.OutputName wname codeGen.OutputName reynoldsResult.Value.CppExpr
+        | None, _ -> sprintf "%s%s %s %s;" writeTarget writeIdx assignOp reynoldsResult.Value.CppExpr)
     match rowWriteLines with
     | Some rw -> for l in rw do lines <- lines @ [ind depth + l]
-    | None -> lines <- lines @ [ind depth + assignLine]
+    | None -> lines <- lines @ [ind depth + assignLine.Value]
     // Carousel rotation: shift the window by one ordinal and load the single
     // new leading value for the next center.
     match carousel with
@@ -7488,7 +7996,13 @@ let genIncludes () : string list =
      "#include \"rand_runtime.hpp\""
      "#include <exception>"                 // std::exception for main()'s BL8005 catch
      "#include \"blade_runtime.hpp\""        // blade_rt::panic + BLADE_FRAME shadow stack
-     "using namespace nested_array_utilities;"
+     ]
+    // Memcheck instrumentation (BLADE_MEMCHECK=1 only): appended as an extra
+    // element, never a placeholder comment, so default output stays
+    // byte-identical to a build without the feature.
+    @ (if memcheckEnabled () then ["#include \"blade_memcheck.hpp\""] else [])
+    @
+    ["using namespace nested_array_utilities;"
      "using std::cout;"
      "using std::endl;"
      ""]
@@ -7524,19 +8038,35 @@ let genIncludes () : string list =
 let private cppRuntimeHeaderPath (filename: string) : string =
     System.IO.Path.Combine(System.AppContext.BaseDirectory, "cpp", filename)
 
-/// Read a Blade C++ runtime header from disk. Fails loudly if the build
-/// hasn't copied cpp/ into the output directory -- this is a configuration
-/// error rather than a compiler bug, so the message points at .fsproj.
+/// Memo for `readCppRuntimeHeader`. The cpp/ headers are static files shipped
+/// beside the binary: within one process their contents cannot change, so each
+/// is read from disk at most once however many programs get compiled (the test
+/// harness compiles ~1500 of them, each deploying the same 13 headers,
+/// ~264 KB in total). Concurrent because the harness generates in parallel.
+let private cppRuntimeHeaderCache =
+    System.Collections.Concurrent.ConcurrentDictionary<string, string>()
+
+/// Read a Blade C++ runtime header from disk (memoized). Fails loudly if the
+/// build hasn't copied cpp/ into the output directory -- this is a
+/// configuration error rather than a compiler bug, so the message points at
+/// .fsproj. Deliberately a FUNCTION over a lazily-populated table rather than
+/// an eagerly-built map, so the not-found diagnostic still fires at the first
+/// *use* of a missing header and never for headers nobody asked for.
 let private readCppRuntimeHeader (filename: string) : string =
-    let path = cppRuntimeHeaderPath filename
-    if not (System.IO.File.Exists path) then
-        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf
-            "C++ runtime header not found at: %s\n\
-             The build should copy cpp/%s into the output directory.\n\
-             Check that Blade.fsproj contains a <None Include=\"cpp/%s\">\n\
-             item with <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>."
-            path filename filename)))
-    System.IO.File.ReadAllText path
+    match cppRuntimeHeaderCache.TryGetValue filename with
+    | true, cached -> cached
+    | _ ->
+        let path = cppRuntimeHeaderPath filename
+        if not (System.IO.File.Exists path) then
+            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf
+                "C++ runtime header not found at: %s\n\
+                 The build should copy cpp/%s into the output directory.\n\
+                 Check that Blade.fsproj contains a <None Include=\"cpp/%s\">\n\
+                 item with <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>."
+                path filename filename)))
+        let text = System.IO.File.ReadAllText path
+        cppRuntimeHeaderCache.[filename] <- text
+        text
 
 /// Generate the runtime header file content (read from cpp/nested_array_utilities.hpp).
 /// Main.fs writes the result alongside each test's generated .cpp so
@@ -7620,15 +8150,67 @@ let runtimeHeaderNames : string list =
       // #error`) and included only by programs that emit a `blade_lapack::`
       // call, so a BLAS program carries no LAPACK dependency -- deployed
       // unconditionally like every other runtime header.
-      "blade_lapack.hpp" ]
+      "blade_lapack.hpp"
+      // ASan allocator-stats export bracketing main() (one BLADE-MEMCHECK
+      // line on stderr at exit). Included only by programs generated under
+      // BLADE_MEMCHECK=1 -- Build.fs pairs the include with a Debug+ASan
+      // compile -- but deployed unconditionally so the deploy/cleanup
+      // bookkeeping stays uniform.
+      "blade_memcheck.hpp" ]
+
+/// The shipped text of one runtime header, through the same per-process memo
+/// `deployRuntimeHeaders` uses -- so a consumer that only wants to *read* the
+/// header set (Build.fs's executable cache hashes all 13 into its key) pays no
+/// extra disk I/O beyond the one read the deploy already did. Same
+/// fail-loudly-on-missing contract as the deploy path.
+let runtimeHeaderText (filename: string) : string = readCppRuntimeHeader filename
 
 /// Deploy every C++ runtime header next to a generated .cpp so its `#include`s
 /// resolve at g++ time with no -I flag. These are pre-existing static files in
 /// cpp/, copied verbatim -- nothing is generated or transformed.
+///
+/// ALL headers are deployed uniformly, unconditionally (see runtimeHeaderNames:
+/// the deploy/cleanup bookkeeping is deliberately not per-program) -- but a
+/// deployment whose destination already holds byte-identical content is not
+/// rewritten. Only the physically redundant write is skipped: rewriting ~264 KB
+/// beside every generated .cpp on every compile re-triggers an antivirus scan
+/// of each file (measured multi-second variance on a one-line `blade compile`)
+/// for no change in what g++ sees.
+///
+/// This preserves the hand-edit workflow: a deployed header edited in place
+/// DIFFERS from the shipped one, so the next `blade run` overwrites it exactly
+/// as before -- "if changed" is a content test, not a timestamp test.
+///
+/// CONCURRENT WRITERS: two compiles sharing an output directory (parallel
+/// sweeps, two agents in one scratch dir) can collide on the same destination,
+/// and on Windows the loser gets a sharing violation. That is NOT a failure
+/// here: both processes deploy the SAME shipped bytes, so the only question is
+/// whether the file on disk ends up correct. Re-check the content after a
+/// failed write, retry briefly (the other writer's handle lives for
+/// microseconds), and surface the IO error only if the destination genuinely
+/// does not hold the header -- in which case the compile must not proceed to a
+/// g++ that would read a truncated include.
 let deployRuntimeHeaders (outputDir: string) : unit =
     runtimeHeaderNames
     |> List.iter (fun name ->
-        System.IO.File.WriteAllText(System.IO.Path.Combine(outputDir, name), readCppRuntimeHeader name))
+        let dest = System.IO.Path.Combine(outputDir, name)
+        let text = readCppRuntimeHeader name
+        let alreadyDeployed () =
+            try System.IO.File.Exists dest && System.IO.File.ReadAllText dest = text
+            with _ -> false
+        if not (alreadyDeployed ()) then
+            let rec attempt (retriesLeft: int) =
+                try
+                    System.IO.File.WriteAllText(dest, text)
+                with
+                // A concurrent writer got there first with identical bytes.
+                | _ when alreadyDeployed () -> ()
+                | _ when retriesLeft > 0 ->
+                    System.Threading.Thread.Sleep 10
+                    attempt (retriesLeft - 1)
+                // No rule matches when the retries are spent and the file is
+                // still wrong: F# re-raises, and the driver reports it.
+            attempt 5)
 
 /// Generate includes that reference external header
 let genIncludesExternal () : string list =
@@ -7659,7 +8241,11 @@ let genIncludesExternal () : string list =
      "#include \"rand_runtime.hpp\""
      "#include <exception>"                 // std::exception for main()'s BL8005 catch
      "#include \"blade_runtime.hpp\""        // blade_rt::panic + BLADE_FRAME shadow stack
-     "using std::cout;"
+     ]
+    // Memcheck instrumentation -- see the sibling include block above.
+    @ (if memcheckEnabled () then ["#include \"blade_memcheck.hpp\""] else [])
+    @
+    ["using std::cout;"
      "using std::endl;"
      ""]
     // Display-frame emitter -- see the sibling include block above.
@@ -7772,6 +8358,62 @@ let rec allSubExprs (e: IRExpr) : IRExpr list =
     match e with
     | ExprShape (children, _) -> e :: (children |> List.collect allSubExprs)
 
+/// A return that hands the caller an INTERIOR VIEW of storage this scope owns.
+///
+/// `traj((9999 : T))` at the tail of a function-local `let rec` renders as
+/// `Array<T,1>{ traj.data[9999], traj.extents + 1 }` -- a wrapper POINTING INTO
+/// the trajectory's pool. Nobody can free that pool: not the scope (the
+/// returned view still reads it) and not the caller (it never sees the base
+/// wrapper, only one row of it), so the whole array leaks on every call. The
+/// escape analysis makes that explicit -- seeding the base pins it -- but
+/// pinning is not a fix, it is the leak spelled out.
+///
+/// Returns the base binding's id when the return takes that shape AND the
+/// slice can be copied out, which is the actual repair: materialize the slice
+/// into its own pool before the frees, and the base becomes an ordinary scope
+/// temporary. Three consumers share this ONE predicate so they cannot drift --
+/// computeScopeEscapes (drop the return seed), genFuncBodyScoped's return arm
+/// (emit the copy), and computeFreshReturnFacts (tell callers they now own a
+/// fresh pool). A disagreement between the first two would be a use-after-free,
+/// so a single decision point is not a stylistic preference here.
+///
+/// Guards, each load-bearing for the flat `std::copy_n` the materialization
+/// emits:
+///   * the base is one of THIS scope's lets. A parameter, capture, or module
+///     binding is someone else's storage, correctly returned as a view (and
+///     copying it would hand the caller a pool it has no reason to free);
+///   * base and slice are both plain dense -- no symmetry, compact, ragged,
+///     sparse, dep-idx, or virtual storage -- so the sub-block a leading index
+///     selects is CONTIGUOUS in the pool and `pool_base` on the sub-skeleton
+///     lands on its first cell rather than the whole pool's;
+///   * every subscript is scalar and they form a strict LEADING prefix
+///     (`idxs` exactly consumes the rank the slice drops), which is what makes
+///     the selection a sub-block rather than a strided gather.
+let returnedInteriorView (scopeLets: (IRId * IRExpr) list) (retExpr: IRExpr) : IRId option =
+    let denseUnsymmetric (t: IRType) =
+        match t with
+        | ArrayElem at ->
+            isFreeableDenseArrayType at && not at.IsVirtual
+            && classifyOutputStorage t = AllocDense
+            && not (hasRealSymmetry (buildSymmVec t))
+        | _ -> false
+    match retExpr with
+    | IRIndex ((IRVar (srcId, _)) as baseExpr, idxs, _)
+            when scopeLets |> List.exists (fun (id, _) -> id = srcId) ->
+        let baseTy = inferExprType baseExpr
+        let sliceTy = inferExprType retExpr
+        match baseTy, sliceTy with
+        | ArrayElem bat, ArrayElem sat
+                when denseUnsymmetric baseTy && denseUnsymmetric sliceTy
+                     && not (List.isEmpty idxs)
+                     && arrayRank sat > 0
+                     && List.length idxs = arrayRank bat - arrayRank sat
+                     && idxs |> List.forall (fun i ->
+                            match inferExprType i with IRTScalar _ -> true | _ -> false) ->
+            Some srcId
+        | _ -> None
+    | _ -> None
+
 /// Classify every array-returning module function as FreshPool or NotFresh.
 /// Only array-typed returns are in the domain; anything else is absent and reads
 /// as NotFresh. The iteration is a fixpoint because a function may return the
@@ -7802,6 +8444,12 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
                 let otherUses =
                     lets |> List.filter (fun (id, v) -> id <> rid && Set.contains rid (collectVarRefsIR v))
                 if boundToLifted && List.isEmpty otherUses then FreshPool else NotFresh
+            // An interior view of a scope-local array is no longer returned as
+            // a view: genFuncBodyScoped's return arm copies the slice into its
+            // own pool (see returnedInteriorView), so the caller DOES own the
+            // storage it receives. Classifying it NotFresh here would leave the
+            // caller-side free off and simply move the leak one frame out.
+            | IRIndex _ when (returnedInteriorView lets retExpr).IsSome -> FreshPool
             | IRApp (f, _, _) ->
                 match resolveCallable f with
                 | Some c -> Map.tryFind c.Id facts |> Option.defaultValue NotFresh
@@ -7858,6 +8506,57 @@ let rec isFreshPoolForm (e: IRExpr) : bool =
     | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
     | IRApp (f, _, _) -> freshReturnOf f = FreshPool
     | _ -> false
+
+/// May a binding whose value is a bare reference to a scope-local STAGING let be
+/// emitted as a plain ALIAS, instead of genVarAliasBinding's defensive deep copy?
+///
+/// The copy exists because an ASSIGNABLE binding must not share storage with a
+/// value some other name can still reach: `let mut a = Z` followed by
+/// `a(i) = ...` would otherwise corrupt `Z`. When the source is a scope-local
+/// staging let that SOLELY OWNS a freshly allocated pool, there is no `Z` to
+/// protect and the copy is pure duplication -- and that is precisely the
+/// recursive-array elaboration's shape (`{ let buf = zeros(...); ...; buf }`),
+/// whose double materialization cost 2x the resident footprint of every
+/// `let rec` trajectory.
+///
+/// `scopeLets` is the enclosing let list: a block's own chain at module level,
+/// or the FLATTENED function body inside a frame (genFuncBody's deepUnroll
+/// dissolves the block, so the same shape arrives as an ordinary sibling let).
+/// `selfId` is the alias binding's own id where it appears in that list, so it
+/// is not counted as a rival name. Conditions:
+///  (1) the staging let OWNS its pool (isFreshPoolForm: a view/alias value could
+///      be sharing a USER binding's storage, which the copy exists to protect);
+///  (2) no assign in the scope can have leaked that storage to a target OUTSIDE
+///      the scope (an outer whole-array or row assign aliases pools; assigns
+///      whose target is scope-internal die with the scope); and
+///  (3) no OTHER let in the scope is a bare reference to the same staging let.
+///      Two aliases of one pool would each act as its owner, so a write through
+///      either would be visible through the other. A block chain cannot pose
+///      this (it has exactly one value, which is not itself one of `scopeLets`);
+///      a flattened function body can.
+let canAliasStagingLet (scopeLets: (IRId * IRExpr) list) (selfId: IRId option) (srcId: IRId) : bool =
+    let scopeIds = scopeLets |> List.map fst |> Set.ofList
+    let srcOwnsPool =
+        scopeLets |> List.exists (fun (id, v) -> id = srcId && isFreshPoolForm v)
+    let assignLeaksSrc =
+        scopeLets
+        |> List.collect (fun (_, v) -> allSubExprs v)
+        |> List.exists (fun e ->
+            match e with
+            | IRAssign (target, value) when Set.contains srcId (collectVarRefsIR value) ->
+                let targetInScope =
+                    match target with
+                    | LVVar tid -> Set.contains tid scopeIds
+                    | LVIndex (IRVar (tid, _), _) -> Set.contains tid scopeIds
+                    | _ -> false
+                not targetInScope
+            | _ -> false)
+    let rivalAlias =
+        scopeLets
+        |> List.exists (fun (id, v) ->
+            Some id <> selfId
+            && (match v with IRVar (vid, _) -> vid = srcId | _ -> false))
+    Set.contains srcId scopeIds && srcOwnsPool && not assignLeaksSrc && not rivalAlias
 
 // Whole-array mut reassignment as copy-into-place.
 //
@@ -8075,6 +8774,26 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
         | FuncScope (Some retExpr) ->
             match retExpr with
             | IRCompute (IRApplyCombinator _) | IRArrayLit _ -> []
+            // `return f(x, y, z)` where f is a FreshPool callee: the returned
+            // wrapper is a fresh pool with its own extents, so it can alias
+            // none of the argument bindings -- and the fallthrough return arm
+            // evaluates the call into a local (`auto __rv = f(...);`) BEFORE
+            // the scope frees are emitted, so x/y/z are dead by the time they
+            // are freed. Seeding them only pinned one array per helper call
+            // (measured on 09_qg_atmosphere: three 64x64 fields leaked per
+            // H_single invocation, every timestep). NotFresh callees keep the
+            // wide seeding: their return may hand back an argument itself.
+            | IRApp (f, _, _) when freshReturnOf f = FreshPool -> []
+            // An INTERIOR VIEW of a scope-local array (`return traj(k)`). The
+            // return arm materializes the slice into its own pool before these
+            // frees are emitted, so the base is ordinary scope-owned storage
+            // from here on. Seeding it would pin the WHOLE array for the life
+            // of the program -- and since a function frame runs per CALL, that
+            // is an unbounded leak, not a one-off (measured: a 10000x4
+            // trajectory per `integrate` invocation). Paired with
+            // genFuncBodyScoped's matching arm through returnedInteriorView;
+            // narrowing here WITHOUT that arm would be a use-after-free.
+            | IRIndex _ when (returnedInteriorView scopeLets retExpr).IsSome -> []
             | _ ->
                 match inferExprType retExpr with
                 | IRTScalar _ | IRTUnit -> []
@@ -8087,6 +8806,44 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
                 else s) acc
         if acc' = acc then acc else propagate acc'
     propagate (Set.ofList (assignSeeds @ captureSeeds @ providerSeeds @ retSeeds))
+
+/// Hoist FreshPool-returning calls out of ARGUMENT position into fresh lets.
+/// `g(f(x))` evaluates f's fresh array as a C++ temporary no let ever names,
+/// so the scope tracker cannot register it and its pool leaks every call
+/// (measured on 09_qg_atmosphere: `__spectra_1(uhat(ll, ph))` and
+/// `__spectra_2(flux(u, 0.0, q))` each dropped a 64x64 field per timestep).
+/// Hoisted into `let t = f(x)`, the binding takes the ordinary site-3/3b
+/// registration and scope-exit free. Guards are exactly site 3's: FreshPool
+/// callee, dense + nullptr, no symmetry -- anything else stays inline (and
+/// keeps leaking rather than risking a wrong free). Only IRApp trees are
+/// walked: a lambda in argument position must keep its body expression-shaped.
+/// C++ argument evaluation order is unspecified, so serializing sibling
+/// arguments through lets changes nothing observable.
+let hoistFreshPoolCallArgs (builder: IRBuilder) (e: IRExpr) : (IRId * IRExpr) list * IRExpr =
+    let hoistable (arg: IRExpr) =
+        match arg with
+        | IRApp (f, _, _) when freshReturnOf f = FreshPool ->
+            (match inferExprType arg with
+             | ArrayElem at ->
+                 isFreeableDenseArrayType at
+                 && classifyOutputStorage (inferExprType arg) = AllocDense
+                 && not (hasRealSymmetry (buildSymmVec (inferExprType arg)))
+             | _ -> false)
+        | _ -> false
+    let rec go (e: IRExpr) : (IRId * IRExpr) list * IRExpr =
+        match e with
+        | IRApp (f, args, ty) ->
+            let processed = args |> List.map go
+            let innerLets = processed |> List.collect fst
+            let (extraLets, finalArgs) =
+                processed |> List.fold (fun (ls, acc) (_, a) ->
+                    if hoistable a then
+                        let tmp = builder.FreshId()
+                        (ls @ [(tmp, a)], acc @ [IRVar (tmp, inferExprType a)])
+                    else (ls, acc @ [a])) ([], [])
+            (innerLets @ extraLets, IRApp (f, finalArgs, ty))
+        | _ -> ([], e)
+    go e
 
 /// One tracked allocation, with everything needed to free it recorded at
 /// REGISTRATION time. TemplateArgs in particular is stored verbatim rather than
@@ -8486,16 +9243,14 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             let outerExtentOpt = tryEvalIntIR outer.Extent
             match outerExtentOpt with
             | None ->
-                [sprintf "%s#error \"Blade codegen: DepIdx outer extent is not a compile-time integer for binding '%s'\""
-                    ind varName]
+                [refusalErrorLine ind (sprintf "Blade codegen: DepIdx outer extent is not a compile-time integer for binding '%s'" varName)]
             | Some n ->
                 // Evaluate the inner formula for each i in [0..n).
                 let lenResults =
                     [0 .. (int n) - 1]
                     |> List.map (fun i -> evalDepIdxExtent outer.Id i inner.Extent)
                 if lenResults |> List.exists Option.isNone then
-                    [sprintf "%s#error \"Blade codegen: DepIdx inner extent formula not statically evaluable for binding '%s' (runtime-extent formulas are not yet supported)\""
-                        ind varName]
+                    [refusalErrorLine ind (sprintf "Blade codegen: DepIdx inner extent formula not statically evaluable for binding '%s' (runtime-extent formulas are not yet supported)" varName)]
                 else
                     let lens = lenResults |> List.map Option.get
                     // Verify literal row counts match the formula-computed lens.
@@ -8506,14 +9261,12 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                     if mismatch then
                         let expected = lens |> List.map string |> String.concat ", "
                         let actual = actualRowLengths |> List.map string |> String.concat ", "
-                        [sprintf "%s#error \"Blade codegen: DepIdx literal row lengths [%s] do not match formula-computed lens [%s] for binding '%s'\""
-                            ind actual expected varName]
+                        [refusalErrorLine ind (sprintf "Blade codegen: DepIdx literal row lengths [%s] do not match formula-computed lens [%s] for binding '%s'" actual expected varName)]
                     else
                         let total = lens |> List.sum
                         let allValues = extractLiteralValues (IRArrayLit (elements, arrType))
                         if allValues.Length <> total then
-                            [sprintf "%s#error \"Blade codegen: DepIdx literal value count (%d) does not match sum of formula-computed lens (%d) for binding '%s'\""
-                                ind allValues.Length total varName]
+                            [refusalErrorLine ind (sprintf "Blade codegen: DepIdx literal value count (%d) does not match sum of formula-computed lens (%d) for binding '%s'" allValues.Length total varName)]
                         else
                             // Layout is identical to ragged from here on.
                             let nRows = lens.Length
@@ -8545,8 +9298,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                                                 ind elemType varName varName varName varName varName
                             [extentsDecl; lensDecl; offsetsDecl; flatDecl; rowPtrsDecl] @ rowPtrsInit @ [wrapperDecl]
         | _ ->
-            [sprintf "%s#error \"Blade codegen: DepIdx array type missing outer or inner record for binding '%s' (typechecker bug)\""
-                ind varName]
+            [refusalErrorLine ind (sprintf "Blade codegen: DepIdx array type missing outer or inner record for binding '%s' (typechecker bug)" varName)]
     elif isRaggedArrayType arrType then
         let rowLengths = computeRaggedRowLengths elements
         let n = rowLengths.Length
@@ -8555,8 +9307,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
         let allValues = extractLiteralValues (IRArrayLit (elements, arrType))
         if allValues.Length <> total then
             // Sanity check: number of leaf values must match sum of row lengths.
-            [sprintf "%s#error \"Blade codegen: ragged literal value count (%d) does not match sum of row lengths (%d) for binding '%s'\""
-                ind allValues.Length total varName]
+            [refusalErrorLine ind (sprintf "Blade codegen: ragged literal value count (%d) does not match sum of row lengths (%d) for binding '%s'" allValues.Length total varName)]
         else
             let lensList = rowLengths |> List.map string |> String.concat ", "
             let offsets =
@@ -8621,12 +9372,12 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             | leaf -> [(idxPath, leaf)]
         let leaves = walkLeaves [] (IRArrayLit (elements, arrType))
         if extentInts |> List.exists Option.isNone then
-            [sprintf "%s#error \"Blade codegen: compact array literal for '%s' needs compile-time extents\"" ind varName]
+            [refusalErrorLine ind (sprintf "Blade codegen: compact array literal for '%s' needs compile-time extents" varName)]
         elif leaves |> List.exists (fun (path, _) -> path.Length <> rank) then
             // Array-VALUED leaves (a computed row) would need a deep copy into a
             // shrinking row; the checker refuses that shape, so reaching here is
             // a front-end change, not user input.
-            [sprintf "%s#error \"Blade codegen: compact array literal for '%s' has a leaf at the wrong depth (typechecker bug)\"" ind varName]
+            [refusalErrorLine ind (sprintf "Blade codegen: compact array literal for '%s' has a leaf at the wrong depth (typechecker bug)" varName)]
         else
             let extentsName = sprintf "%s_extents" varName
             // `static constexpr`, exactly like the rectangular literal path
@@ -8646,7 +9397,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             let allocLines =
                 match emitAllocRhs (classifyOutputStorage ty) elemType rank symmArg extentsName with
                 | Ok rhs -> [sprintf "%sArray<%s, %d> %s = %s;" ind elemType rank varName rhs]
-                | Error msg -> [sprintf "%s#error \"compact literal '%s': %s\"" ind varName msg]
+                | Error msg -> [refusalErrorLine ind (sprintf "compact literal '%s': %s" varName msg)]
             let initCode =
                 leaves |> List.map (fun (path, leaf) ->
                     let suffix = path |> List.map (sprintf "[%d]") |> String.concat ""
@@ -8686,8 +9437,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             // Inner extents couldn't be recovered statically (parametric or
             // compound index types). Refuse loudly rather than emit the
             // short-extents table that silently reads as empty.
-            [sprintf "%s#error \"Blade codegen: array literal for '%s' nests %d level(s) but the declared rank is %d, and the missing inner extents are not static -- bind the rows to a fully-literal array or annotate with static Idx<n> extents\""
-                ind varName dims.Length rank]
+            [refusalErrorLine ind (sprintf "Blade codegen: array literal for '%s' nests %d level(s) but the declared rank is %d, and the missing inner extents are not static -- bind the rows to a fully-literal array or annotate with static Idx<n> extents" varName dims.Length rank)]
         else
             // Generate extents declaration
             let extentsValues = dims |> List.map string |> String.concat ", "
@@ -8827,9 +9577,10 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
     // No `auto <name> = <expr>;` fallback for a shape-bearing RHS (IRMask/
     // IRSort/IRVar/IRFieldAccess/IRIntersect/IRUnion) that resolves to
     // IRTUnit: those RHS shapes always resolve to a non-IRTUnit type by this
-    // point (both the codegen and IR-side struct-fields caches are
-    // AsyncLocal'd per task specifically so they can't race and return a
-    // stale IRTUnit). If a regression reaches this branch anyway, the
+    // point (there is ONE struct-fields cache -- IR.fs's AsyncLocal registry,
+    // which `setCodegenStructFieldsCache` merely forwards into -- and it is
+    // per-flow specifically so parallel tasks can't race and return a stale
+    // IRTUnit). If a regression reaches this branch anyway, the
     // expression-statement form below deliberately produces invalid C++
     // rather than papering over it with auto-deduction -- diagnose the
     // upstream resolution bug instead.
@@ -8888,12 +9639,16 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
         // them, e.g. `Array<double,1> r0 = { A.data[0L], A.extents + 1 };`.
         //
         // Scoped to fully plain-dense rectangular arrays (every axis IxKPlain /
-        // SymNone / SDimension / arity-1) so the consumed-dims count equals the
+        // SymNone / arity-1) so the consumed-dims count equals the
         // subscript count and the extents shift is exact. Compound partial reads
         // take the IRTuple arm in producesWrapper; ragged/dep-idx rows take
         // raggedRowSubview above; and a flat single-subscript into PACKED
         // symmetric storage returns a row pointer under compact semantics that
         // must NOT be re-wrapped here -- all excluded by the axis predicate.
+        // NOT gated on `ix.Kind = SDimension` -- Kind describes one apply, not
+        // the value's storage (see densePartialSubviewExpr's note; both twins
+        // must answer identically or a let-bound slice and an inline slice
+        // diverge in shape).
         let densePartialSubview =
             match value, resolvedTy with
             | IRIndex (arr, indices, _), ArrayElem residTy
@@ -8902,9 +9657,12 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
                 match inferExprType arr with
                 | ArrayElem arrTy
                         when arrTy.IndexTypes.Length > indices.Length
-                             && arrTy.IndexTypes |> List.forall (fun ix ->
-                                    ix.IxKind = IxKPlain && ix.Symmetry = SymNone
-                                    && ix.Kind = SDimension && ix.Rank = 1) ->
+                             && arrTy.IndexTypes |> List.mapi (fun d ix -> (d, ix))
+                                |> List.forall (fun (d, ix) ->
+                                    (ix.IxKind = IxKPlain
+                                     || (d < indices.Length && ix.IxKind = IxKGroupOuter))
+                                    && ix.Symmetry = SymNone
+                                    && ix.Rank = 1) ->
                     let arrStr = exprToCppCtx ctx arr
                     let subscripts =
                         indices
@@ -8916,13 +9674,22 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             | _ -> None
         if densePartialSubview.IsSome then densePartialSubview.Value
         else
-        let producesWrapper =
+        let rec producesWrapperOf value =
             match value with
             | IRFieldAccess _ -> true
             | IRVar _ -> true                // assume wrapper (most producers migrated)
             | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
             | IRApp _ -> true                // function-call returns wrapped Array
             | IRTupleProj _ -> true          // tuple elements carry wrappers (irTypeToCpp IRTTuple)
+            // An array-valued SELECT is a wrapper exactly when both branches
+            // are -- it renders as a C++ ternary, whose type is the branches'
+            // common type. This is what a recursive array's out-of-prefix lag
+            // read binds (`if n - 3 >= 0 then __lag0_m else __zs0_m`, both
+            // Array<T, N> wrappers); declaring it on the raw `promote<>::type`
+            // path instead would drop the extents every `.data`/`.extents`
+            // consumer downstream needs. Branch DISAGREEMENT keeps the raw
+            // path, so no arm gets a wrapper it cannot produce.
+            | IRIf (_, t, e) -> producesWrapperOf t && producesWrapperOf e
             | IRIndex (a, (IRTuple coords) :: _, _) ->
                 // A PARTIAL sparse read (formalism 3.5) produces a wrapper:
                 // Sparse<T, RR> for a residual-rank >= 2 read
@@ -8946,6 +9713,7 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
                       | CompoundFull -> false)
                  | _ -> false)
             | _ -> false
+        let producesWrapper = producesWrapperOf value
         let cppType =
             match resolvedTy with
             | ArrayElem arr when producesWrapper -> cppArrayTypeStr arr
@@ -9016,6 +9784,667 @@ let buildSimpleApplyInfo (arrays: IRExpr list) (kernel: IRExpr) (outputType: IRT
         OutputType = outputType
         IsCoIteration = false
     }
+
+// ---------------------------------------------------------------------------
+// What a __global__ can NAME (device-body expressibility) -- section 1 of 2
+// ---------------------------------------------------------------------------
+//
+// The .cu is a SEPARATE translation unit: it sees the kernel's own parameters
+// and nothing else. `exprToCpp`, though, renders a capture by its HOST
+// identifier and a materializing kernel body as a CALL to that body's lifted
+// HOST function (routeKernelBodyThroughCall) -- both undeclared inside the .cu,
+// which nvcc reports as `identifier "s" is undefined` after the host half has
+// already been told a device kernel exists. So the capability gate and the
+// emitter have to be derived from ONE predicate: the emitters below ask what a
+// device body may name, and refuse (host fallback) whatever it may not.
+
+/// Free variable ids of an expression: every `IRVar` NOT bound by a binder
+/// inside it. Folds over the canonical `BinderShape`/`ExprShape` pair, so a new
+/// IRExpr variant is scoped correctly here the moment it is declared there
+/// (unlike `collectVarRefsIR`, which deliberately keeps let-bound ids).
+let private deviceFreeVarIds (expr: IRExpr) : Set<IRId> =
+    let rec go (bound: Set<IRId>) (e: IRExpr) : Set<IRId> =
+        let anyOf b kids = kids |> List.fold (fun acc k -> Set.union acc (go b k)) Set.empty
+        match e with
+        | IRVar (id, _) -> if Set.contains id bound then Set.empty else Set.singleton id
+        | BinderShape (plain, scopes) ->
+            scopes
+            |> List.fold (fun acc (ids, kids) -> Set.union acc (anyOf (Set.union bound ids) kids))
+                         (anyOf bound plain)
+        | ExprShape (kids, _) -> anyOf bound kids
+    go Set.empty expr
+
+/// The C++ name of the first user/lifted callable this expression CALLS, if any.
+/// Such a call renders as `<fnName>(...)`; the .cu declares no host functions,
+/// so its presence is a refusal (unless the caller inlines the callee first).
+let private deviceCalleeName (expr: IRExpr) : string option =
+    let mutable hit : string option = None
+    let rec go (e: IRExpr) =
+        if hit.IsSome then () else
+        match e with
+        | IRApp (f, args, _) ->
+            (match resolveCallable f with
+             | Some c -> hit <- Some (sanitizeCppName c.Name)
+             | None -> ())
+            if hit.IsNone then f :: args |> List.iter go
+        | ExprShape (kids, _) -> kids |> List.iter go
+    go expr
+    hit
+
+/// The first `IRParam` name mentioned. `exprToCppCore` renders one as the bare
+/// SOURCE parameter name, which no device kernel declares (its operands are the
+/// peeled `<array>__<index>` reads).
+let private deviceParamRef (expr: IRExpr) : string option =
+    let mutable hit : string option = None
+    let rec go (e: IRExpr) =
+        if hit.IsSome then () else
+        match e with
+        | IRParam (n, _, _) -> hit <- Some n
+        | ExprShape (kids, _) -> kids |> List.iter go
+    go expr
+    hit
+
+/// Why this kernel body cannot be rendered into the .cu as one device
+/// expression, given `declared` -- the ids the `__global__` itself binds (the
+/// peeled operand reads, plus any forwarded captures). `None` means it can.
+///
+/// Every arm names a construct the emitter genuinely cannot express, so the
+/// gate and the emission agree by construction: a refusal is a HOST FALLBACK
+/// (correct values, no device kernel), never a half-emitted one.
+let cudaDeviceBodyRefusal (declared: Set<IRId>) (names: Map<IRId, string>) (body: IRExpr) : string option =
+    let spell id = Map.tryFind id names |> Option.defaultValue (sprintf "__v%d" id)
+    if not (kernelBodyIsExpressionShaped body) then
+        Some "a kernel-local array materialization"
+    else
+        match deviceFreeVarIds body |> Set.toList |> List.filter (fun id -> not (Set.contains id declared)) with
+        | id :: _ -> Some (sprintf "the captured value '%s'" (spell id))
+        | [] ->
+            match deviceCalleeName body with
+            | Some fn -> Some (sprintf "the call to host function '%s'" fn)
+            | None -> deviceParamRef body |> Option.map (sprintf "the parameter reference '%s'")
+
+/// How many cells a device buffer has.
+///
+/// STATIC is the only shape this emitter originally had, and it stays
+/// byte-identical: the count is a literal in the .cu. RUNTIME is what a kernel
+/// inside a GENERIC FUNCTION needs -- its operands' extents are not known until
+/// the call, so the count is evaluated at the launch site (`HostExpr`, host C++
+/// naming the host `Array<T,N>` wrapper) and travels into the .cu as an extra
+/// `size_t` parameter (`ParamName`) that the wrapper and the kernel both read.
+type CudaCells =
+    | CellsStatic of int64
+    | CellsRuntime of hostExpr: string * paramName: string
+
+/// The .cu-side text for a cell count: a literal, or the parameter carrying it.
+let cudaCellsText (c: CudaCells) : string =
+    match c with
+    | CellsStatic n -> sprintf "%dUL" n
+    | CellsRuntime (_, p) -> p
+
+/// The extra `size_t` parameter a runtime count contributes to the kernel and
+/// wrapper signatures (none for a static one).
+let cudaCellsParam (c: CudaCells) : string option =
+    match c with
+    | CellsStatic _ -> None
+    | CellsRuntime (_, p) -> Some (sprintf "size_t %s" p)
+
+/// The argument a runtime count contributes at the host call site.
+let cudaCellsHostArg (c: CudaCells) : string option =
+    match c with
+    | CellsStatic _ -> None
+    | CellsRuntime (h, _) -> Some h
+
+/// Two device buffers may be folded together iff their cell counts AGREE.
+/// Two STATIC counts are compared exactly. A count that is only known at
+/// runtime is TRUSTED -- the same rule the host applies to a join's legs
+/// (docs/plan-reduction-joins.md section 1.5): only a PROVABLE disagreement is
+/// refused, and nothing is provable about an extent neither side knows here.
+/// Comparing the two host EXPRESSIONS textually instead would refuse
+/// `prodsum(s, ct)` beside `prodsum(ct, ct)` -- different arrays, same axis --
+/// which is the shape this whole path exists for.
+let cudaCellsCompatible (a: CudaCells) (b: CudaCells) : bool =
+    match a, b with
+    | CellsStatic x, CellsStatic y -> x = y
+    | _ -> true
+
+/// One captured value forwarded into a device kernel as an extra parameter.
+type CudaFwdCapture = {
+    /// Identifier naming it in the HOST scope that emits the launch. Resolved
+    /// through `captureForwardName`, i.e. the EMITTED spelling -- a block-local
+    /// `let` is renamed to `__v<id>`, and forwarding the source name there is
+    /// the trap this repo has hit before (block-local-capture-forwarding.md).
+    HostName: string
+    /// Parameter name inside the .cu (and the device buffer's stem).
+    DevName: string
+    /// Pool cells for an array capture; `None` for a scalar (passed by value).
+    Cells: CudaCells option
+    /// Host (`std::`) spelling for the `extern "C"` wrapper signature, and the
+    /// device (`thrust::`) spelling for the kernel signature / device buffer.
+    HostCpp: string
+    DevCpp: string
+}
+
+/// A device-side rendering of one kernel body: the captures it needs forwarded,
+/// the statements to place inside the `__global__` ahead of the output write,
+/// and the expression that write assigns.
+type CudaDeviceBody = {
+    Captures: CudaFwdCapture list
+    Stmts: string list
+    Expr: string
+}
+
+/// Scalar element types that cross the host/device boundary and render in the
+/// device dialect. Shares `isCudaBoundarySafeElem`'s judgement so a capture can
+/// never be forwarded in a shape an operand would be refused in.
+let private cudaFwdScalarCpp (ty: IRType) : (string * string) option =
+    if isCudaBoundarySafeElem ty then Some (elemTypeToCpp ty, cudaDevElemTypeToCpp ty) else None
+
+/// A DENSE RANK-1 array type's (cells, host elem, device elem). Rank 1 only:
+/// the device sees a flat pool, and only a plain single-axis array has
+/// `pool[k] == A(k)` -- a packed (sym/antisym), compound or ragged axis
+/// addresses through machinery the device side does not carry.
+///
+/// A NON-LITERAL extent is no longer a refusal: the host wrapper is an
+/// `Array<T,1>`, so its own extents table names the count at the launch site,
+/// and it rides into the .cu as the `<devName>_n` parameter. The shape gate is
+/// unchanged -- plain, dense, rank <= 1, non-virtual -- only the *knowability*
+/// of the count relaxed. Rank 0 (`ix.Rank = 0`, a scalar-shaped slot) keeps
+/// `extents[0]` as its count for the same reason the static arm used the type's
+/// single extent: the pool is still one contiguous axis.
+let private cudaFwdArrayShape (hostName: string) (devName: string) (ty: IRType)
+        : (CudaCells * string * string) option =
+    match ty with
+    | ArrayElem arr when isCudaBoundarySafeElem arr.ElemType && not arr.IsVirtual ->
+        match arr.IndexTypes with
+        | [ix] when ix.Rank <= 1 && ix.Symmetry = SymNone && ix.Kind = SDimension && ix.IxKind = IxKPlain ->
+            let cells =
+                match ix.Extent with
+                | IRLit (IRLitInt n) -> CellsStatic n
+                | _ -> CellsRuntime (sprintf "%s.extents[0]" hostName, sprintf "%s_n" devName)
+            Some (cells, elemTypeToCpp arr.ElemType, cudaDevElemTypeToCpp arr.ElemType)
+        | _ -> None
+    | _ -> None
+
+// ---------------------------------------------------------------------------
+// Device-body planning -- section 2 of 2
+// ---------------------------------------------------------------------------
+//
+// A `where cuda` kernel whose body MATERIALIZES an array (`let c = cos <@> (w *
+// t); prodsum(s, c)`) has no inline expression form, so the S2 router turns it
+// into a call to its lifted host function. That call cannot cross into the .cu,
+// but the body itself can: every array it names is either a forwarded capture
+// (a device pointer) or a POINTWISE producer over the same index space, and
+// the space is consumed by folds. So the device form is one fused loop per
+// fold -- which is also what a hand-written kernel would do, and needs no
+// per-thread temporary buffer for the intermediate rows at all.
+//
+// The gate is deliberately narrow (rank-1 static extents, pointwise producers,
+// `prodsum` folds, expression-shaped helper lambdas). Anything outside it
+// returns `Error <reason>`, and the caller falls back to the host loop.
+
+/// A device-side array value: how many cells it has, its element type, and how
+/// to render its element at an index variable. A forwarded capture renders as
+/// `ptr[k]`; a pointwise producer renders as its kernel applied to its sources'
+/// elements at the same `k` -- so a chain of maps composes without ever being
+/// materialized.
+type private DevArray = {
+    Cells: CudaCells
+    Elem: IRType
+    At: string -> string
+}
+
+/// Beta-reduce every call to a resolvable lifted/user callable, so the device
+/// renderer never has to name a host function. A callee's CAPTURES stay free
+/// after substitution (their ids are the enclosing bindings') and resolve
+/// through the caller's environment, which is exactly the discipline the host
+/// side uses when it forwards them as extra arguments.
+let rec private cudaInlineCalls (fuel: int) (expr: IRExpr) : IRExpr =
+    if fuel <= 0 then expr
+    else
+        mapIRExpr (fun e ->
+            match e with
+            | IRApp ((IRVar (fid, _) as callee), args, _) ->
+                // Resolve the CALLEE, not the application: `resolveCallable`
+                // also sees through let-aliases, and the `c.Id = fid` guard is
+                // what keeps this to a direct lifted-callable reference (the
+                // same pairing exprToCppCore's IRApp arm uses).
+                match resolveCallable callee with
+                | Some c when c.Id = fid && c.Params.Length = args.Length
+                              && kernelBodyIsExpressionShaped c.Body ->
+                    let m =
+                        List.zip (c.Params |> List.map (fun p -> p.VarId)) args |> Map.ofList
+                    cudaInlineCalls (fuel - 1) (substituteIRVars m c.Body)
+                | _ -> e
+            | _ -> e) expr
+
+/// Nodes a device SCALAR expression may contain once calls are inlined and
+/// folds hoisted. A whitelist, not a blacklist: an unrecognized node means the
+/// emitter has no evidence it renders as valid device code, so it refuses.
+let rec private cudaScalarNodeOk (e: IRExpr) : bool =
+    match e with
+    | IRLit _ | IRVar _ -> true
+    | IRBinOp (IRElementwise, _, l, r) -> cudaScalarNodeOk l && cudaScalarNodeOk r
+    | IRUnaryOp (_, x) -> cudaScalarNodeOk x
+    | IRComplex (re, im) -> cudaScalarNodeOk re && cudaScalarNodeOk im
+    | IRIf (c, t, f) -> cudaScalarNodeOk c && cudaScalarNodeOk t && cudaScalarNodeOk f
+    | _ -> false
+
+/// Plan the device rendering of a kernel body, forwarding whatever captures it
+/// needs. `paramFinalNames` maps each kernel parameter id to the device local
+/// holding its peeled operand read; `outerNames` is the host scope's name map
+/// (for `captureForwardName`); `stem` disambiguates generated locals per kernel.
+///
+/// The simple case -- a body that already renders as one device expression over
+/// its operands -- returns the same text as before, with no captures, so every
+/// kernel that compiled before this planner existed still emits byte-identically.
+let planCudaDeviceBody
+        (codeGen: LoopNestCodeGen)
+        (paramFinalNames: Map<IRId, string>)
+        (outerNames: Map<IRId, string>)
+        (stem: string)
+        : Result<CudaDeviceBody, string> =
+    let declared = paramFinalNames |> Map.toList |> List.map fst |> Set.ofList
+    match cudaDeviceBodyRefusal declared paramFinalNames codeGen.KernelExpr with
+    | None ->
+        let r =
+            withCudaDeviceDialect (fun () ->
+                genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams
+                                          false false paramFinalNames paramFinalNames)
+        Ok { Captures = []; Stmts = []; Expr = r.CppExpr }
+    | Some plainReason ->
+
+    // The materializing form: the S2 router replaced the body with a call to
+    // its lifted callable, so the callable IS the body -- reopen it and emit it
+    // into the device kernel directly.
+    let routed =
+        match codeGen.KernelExpr with
+        | IRApp (IRVar (fid, _) as f, args, _) ->
+            match resolveCallable f with
+            | Some c when c.Id = fid && c.Params.Length = args.Length -> Some (c, args)
+            | _ -> None
+        | _ -> None
+    match routed with
+    | None -> Error plainReason
+    | Some (callable, args) ->
+
+    // Kernel parameters: the routed call passes `IRVar(param.VarId)` for each
+    // param, and that id is what `paramFinalNames` is keyed on.
+    let paramBinds =
+        List.zip callable.Params args
+        |> List.map (fun (p, a) ->
+            match a with
+            | IRVar (aid, _) -> Map.tryFind aid paramFinalNames |> Option.map (fun nm -> (p.VarId, nm))
+            | _ -> None)
+    if paramBinds |> List.exists Option.isNone then
+        Error "a kernel parameter that is not a peeled operand read"
+    elif not (isCudaBoundarySafeElem callable.RetType) then
+        // `isCudaBoundarySafeElem` matches only boundary-crossing SCALARS
+        // (through AnyPrimElem, so a unit-annotated one still counts), which is
+        // exactly the condition here: an array- or tuple-valued kernel result
+        // has no single cell to write.
+        Error "a kernel result that is not a boundary-crossing scalar"
+    else
+
+    let mutable scalars : Map<IRId, string> = paramBinds |> List.choose id |> Map.ofList
+    let mutable arrays : Map<IRId, DevArray> = Map.empty
+    /// Kernel-local deferred maps, in BINDING order. A join's share locals are
+    /// emitted in this order, so a producer reading an earlier producer is
+    /// always declared after it. Forwarded captures are deliberately absent:
+    /// they are memory reads, not recomputation.
+    let mutable producerOrder : IRId list = []
+    /// A join binding's per-leg accumulators, as synthetic ids already present
+    /// in `scalars`. `get<i>` of that binding resolves through this map.
+    let mutable joinLegs : Map<IRId, (IRId * IRType) list> = Map.empty
+    let mutable fwd : CudaFwdCapture list = []
+    let stmts = System.Collections.Generic.List<string>()
+    let mutable err : string option = None
+    let fail (r: string) = if err.IsNone then err <- Some r
+    let mutable serial = 0
+    let fresh (p: string) = serial <- serial + 1; sprintf "__blade_%s_%s%d" stem p serial
+    // Synthetic ids for hoisted fold accumulators. Far above any builder id, and
+    // only ever placed in the local `scalars` map, so they cannot shadow real IR.
+    let mutable synth = 1500000000
+    let freshId () = synth <- synth + 1; synth
+
+    // --- captures -> device parameters -------------------------------------
+    // Device parameter names are derived from the SOURCE name (so the .cu reads
+    // like the program), but two captures can share one -- a shadowed binding
+    // closed over at both depths. The id disambiguates the second onwards, and
+    // only then, so the common case keeps the readable spelling.
+    let mutable devNamesUsed : Set<string> = Set.empty
+    for cap in callable.Captures do
+        let hostName = captureForwardName outerNames cap
+        let devName =
+            let stem' = sprintf "__blade_cap_%s" (sanitizeCppName cap.Name)
+            if Set.contains stem' devNamesUsed then sprintf "%s_%d" stem' cap.Id else stem'
+        devNamesUsed <- Set.add devName devNamesUsed
+        match cudaFwdArrayShape hostName devName cap.Type with
+        | Some (cells, hostCpp, devCpp) ->
+            fwd <- fwd @ [ { HostName = hostName; DevName = devName; Cells = Some cells
+                             HostCpp = hostCpp; DevCpp = devCpp } ]
+            let elem = match cap.Type with ArrayElem arr -> arr.ElemType | t -> t
+            arrays <- Map.add cap.Id { Cells = cells; Elem = elem
+                                       At = fun k -> sprintf "%s[%s]" devName k } arrays
+        | None ->
+            match cudaFwdScalarCpp cap.Type with
+            | Some (hostCpp, devCpp) ->
+                fwd <- fwd @ [ { HostName = hostName; DevName = devName; Cells = None
+                                 HostCpp = hostCpp; DevCpp = devCpp } ]
+                scalars <- Map.add cap.Id devName scalars
+            | None ->
+                fail (sprintf "the captured value '%s' (only dense rank-1 arrays and scalars \
+with a compile-time shape are forwarded to the device)" hostName)
+
+    // --- device rendering of a scalar expression ---------------------------
+    // Calls are inlined first (no host function may be named), then join
+    // projections are resolved to the accumulators they name, then folds are
+    // hoisted into accumulator loops, then what is left must be plain device
+    // arithmetic over names this kernel declares.
+    let rec renderScalar (extra: Map<IRId, string>) (e: IRExpr) : string =
+        let hoisted = hoistFolds (resolveJoinProjs (cudaInlineCalls 8 e))
+        let env = extra |> Map.fold (fun acc k v -> Map.add k v acc) scalars
+        if not (cudaScalarNodeOk hoisted) then
+            fail "a scalar operation with no device form"
+            ""
+        else
+            match deviceFreeVarIds hoisted |> Set.toList |> List.filter (fun i -> not (Map.containsKey i env)) with
+            | id :: _ ->
+                fail (sprintf "the value '%s' (no device binding)"
+                        (Map.tryFind id outerNames |> Option.defaultValue (sprintf "__v%d" id)))
+                ""
+            | [] -> withCudaDeviceDialect (fun () -> exprToCpp env hoisted)
+
+    /// Rewrite `get<i>` of a JOIN's tuple into a reference to that leg's own
+    /// accumulator. A reduction join answers a FLAT `Tuple<k>`
+    /// (docs/plan-reduction-joins.md section 1.3), so the projection index IS
+    /// the leg index -- no nested-get chain to unwind, in either the `isFlat`
+    /// or the structural spelling.
+    and resolveJoinProjs (e: IRExpr) : IRExpr =
+        mapIRExpr (fun x ->
+            match x with
+            | IRTupleProj (IRVar (tid, _), i, _) when err.IsNone ->
+                match Map.tryFind tid joinLegs with
+                | Some legIds when i >= 0 && i < List.length legIds ->
+                    let (vid, ty) = List.item i legIds
+                    IRVar (vid, ty)
+                | Some legIds ->
+                    fail (sprintf "a join projection past its %d leg(s)" (List.length legIds)); x
+                | None -> x
+            | _ -> x) e
+
+    /// Replace every `prodsum` over device arrays with a hoisted accumulator,
+    /// emitting its fused loop into `stmts` first. `mapIRExpr` is bottom-up, so
+    /// a fold's operands are already resolved when its node is reached.
+    and hoistFolds (e: IRExpr) : IRExpr =
+        mapIRExpr (fun x ->
+            match x with
+            | IRProdSum operands when operands.Length >= 2 && err.IsNone ->
+                let resolved = operands |> List.map resolveArray
+                if resolved |> List.exists Option.isNone then
+                    fail "a prodsum operand that is not a device array"; x
+                else
+                    let ds = resolved |> List.choose id
+                    let cells = (List.head ds).Cells
+                    if ds |> List.exists (fun d -> not (cudaCellsCompatible d.Cells cells)) then
+                        fail "a prodsum over arrays of differing extents"; x
+                    else
+                        // Accumulator type from the FIRST operand's element
+                        // type, which is what the host IIFE uses (`%s __ps = 0`
+                        // off `inferExprType (List.head args)`). Taking the
+                        // prodsum node's own type instead would silently widen a
+                        // real-headed mixed product the host truncates, and the
+                        // two lanes have to agree cell for cell.
+                        let ty = (List.head ds).Elem
+                        let cpp = cudaDevElemTypeToCpp ty
+                        let acc = fresh "acc"
+                        let k = fresh "k"
+                        stmts.Add (sprintf "    %s %s = %s();" cpp acc cpp)
+                        stmts.Add (sprintf "    for (size_t %s = 0; %s < %s; %s++) {" k k (cudaCellsText cells) k)
+                        stmts.Add (sprintf "        %s += %s;" acc
+                                     (ds |> List.map (fun d -> d.At k) |> String.concat " * "))
+                        stmts.Add "    }"
+                        let id = freshId ()
+                        scalars <- Map.add id acc scalars
+                        IRVar (id, ty)
+            | _ -> x) e
+
+    /// The REDUCTION JOIN on the device: k legs sharing one traversal, folded
+    /// into k per-thread accumulators (registers), with each distinct named
+    /// deferred operand evaluated ONCE per iteration into a per-thread `const`
+    /// local. That is the same loop the host emitter builds
+    /// (docs/plan-reduction-joins.md section 1.4) -- the surface DECLARED the
+    /// sharing, so this emitter only has to express it, never rediscover it.
+    ///
+    /// Returns one (accumulator name, element type) per leg, in leg order.
+    /// The single-leg (non-tuple) encoding routes here too: it is the same loop
+    /// with k = 1, and the caller binds the scalar directly.
+    and emitJoin (comp: IRExpr) (kernels: IRExpr list) (seeds: IRExpr list) : (string * IRType) list option =
+        // Peel any binders the traversal carries (`peelCompLets`'s device twin)
+        // so a let-wrapped fusion tree reaches the leaf walk.
+        let rec peel (e: IRExpr) =
+            match e with
+            | IRLet (id, rhs, body) -> bindLet id rhs; (if err.IsSome then e else peel body)
+            | IRCompute inner -> peel inner
+            | other -> other
+        let rec leavesOf (e: IRExpr) =
+            match peel e with
+            | IRFusion (l, r) -> leavesOf l @ leavesOf r
+            | other -> [other]
+        let leaves = leavesOf comp
+        if err.IsSome then None
+        elif leaves.Length <> kernels.Length || leaves.Length <> seeds.Length then
+            fail "a join whose leg count disagrees with its fold kernels"; None
+        else
+        let folds = kernels |> List.map resolveCallable
+        if folds |> List.exists (fun c -> match c with Some cb -> cb.Params.Length <> 2 | None -> true) then
+            fail "a join fold kernel that is not a binary device callable"; None
+        else
+        let folds = folds |> List.map Option.get
+        if folds |> List.exists (fun cb -> not (isCudaBoundarySafeElem cb.RetType)) then
+            fail "a join accumulator whose type is not a device scalar"; None
+        else
+        // SHARE LOCALS. A named deferred map (`let ct = ts <@> ...`, no
+        // `compute`) that this traversal names is evaluated ONCE per iteration
+        // and read by every leg. Ordered by BINDING order, so a share that
+        // reads an earlier share is declared after it; `producerOrder` is that
+        // order by construction.
+        //
+        // Collected from the legs' OPERAND SLOTS specifically, not from every
+        // var reference under `comp`. A share local is indexed by this join's
+        // own loop variable, so it is only sound for a value that iterates this
+        // join's axis -- which an operand slot is by construction and an
+        // arbitrary reference is not. One level deep, matching the host rule
+        // (a deferred map reading another deferred map shares the OUTER one,
+        // whose text inlines the inner one once anyway).
+        let rec operandIds (e: IRExpr) : IRId list =
+            match e with
+            | IRLet (_, _, body) -> operandIds body
+            | IRCompute inner -> operandIds inner
+            | IRApplyCombinator info -> info.Arrays |> List.choose (function IRVar (i, _) -> Some i | _ -> None)
+            | IRApp (IRObjectFor _, [src], _) -> (match src with IRVar (i, _) -> [i] | _ -> [])
+            | IRVar (i, _) -> [i]
+            | _ -> []
+        let named = leaves |> List.collect operandIds |> Set.ofList
+        let shares = producerOrder |> List.filter (fun i -> Set.contains i named)
+        let k = fresh "k"
+        let accs = folds |> List.map (fun cb -> (fresh "jacc", cb.RetType))
+        // Render every text BEFORE touching `stmts`: `renderScalar` hoists a
+        // nested fold into `stmts` itself, and such a hoist has no correct
+        // placement relative to a loop it would have to run inside. Snapshot
+        // the count and refuse if one happened, rather than emit a kernel whose
+        // accumulator loop reads a variable declared after it.
+        let before = stmts.Count
+        let seedTexts = seeds |> List.map (renderScalar Map.empty)
+        // ORDER IS LOAD-BEARING: the shares are rebound BEFORE the legs are
+        // resolved. `pointwise` closes over the DevArrays it was handed, so a
+        // leg resolved first would have captured the producer's kernel and gone
+        // on rendering `cos(w*ts[k])` inline no matter what the share local
+        // said -- the loop would declare a shared value nothing reads, which is
+        // exactly the "compiles, right answer, wrong loop" failure the CPU side
+        // had to be caught doing (plan section 3 of the differential findings).
+        let saved = shares |> List.map (fun sid -> (sid, arrays.[sid]))
+        let shareLines =
+            shares |> List.map (fun sid ->
+                let d = arrays.[sid]
+                let nm = fresh "shr"
+                let text = d.At k
+                // Rebind AFTER rendering this one: a producer must not read its
+                // own local, but it may read every share declared before it.
+                arrays <- Map.add sid { d with At = fun _ -> nm } arrays
+                sprintf "        const %s %s = %s;" (cudaDevElemTypeToCpp d.Elem) nm text)
+        let legs = leaves |> List.map resolveArray
+        let legCells =
+            if legs |> List.exists Option.isNone then None
+            else
+                let ls = legs |> List.choose id
+                if ls |> List.exists (fun d -> not (cudaCellsCompatible d.Cells (List.head ls).Cells))
+                then None else Some ((List.head ls).Cells, ls)
+        let legLines =
+            match legCells with
+            | None -> []
+            | Some (_, ls) ->
+                List.map3 (fun (acc, _) (cb: IRCallable) (leg: DevArray) ->
+                    let extra =
+                        Map.ofList [ ((List.item 0 cb.Params).VarId, acc)
+                                     ((List.item 1 cb.Params).VarId, sprintf "(%s)" (leg.At k)) ]
+                    sprintf "        %s = %s;" acc (renderScalar extra cb.Body)) accs folds ls
+        // RESTORE the producers. The share locals are scoped to the loop this
+        // emitter is about to write, so leaving the rebinding in place would
+        // let a LATER use of the same deferred map -- another join, a bare
+        // `prodsum(ct, ts)` after this one -- render a name that is out of
+        // scope by then, which nvcc reports as an undefined identifier long
+        // after the host half has been told the kernel exists.
+        for (sid, d) in saved do arrays <- Map.add sid d arrays
+        match legCells with
+        | None ->
+            (if legs |> List.exists Option.isNone
+             then fail "a join leg that is not a pointwise map over device arrays"
+             else fail "a join over legs of differing extents")
+            None
+        | Some (cells, _) ->
+        let accLines = legLines
+        if err.IsSome then None
+        elif stmts.Count <> before then
+            fail "a join leg containing a nested fold"; None
+        else
+        for ((acc, ty), seed) in List.zip accs seedTexts do
+            stmts.Add (sprintf "    %s %s = %s;" (cudaDevElemTypeToCpp ty) acc seed)
+        stmts.Add (sprintf "    for (size_t %s = 0; %s < %s; %s++) {" k k (cudaCellsText cells) k)
+        for l in shareLines do stmts.Add l
+        for l in accLines do stmts.Add l
+        stmts.Add "    }"
+        Some accs
+
+    /// Bind one kernel-local `let` into the device environment: an array-valued
+    /// one is recorded as a producer and never materialized, a scalar one gets a
+    /// device local. Shared by the body walk and by `resolveArray`, because a
+    /// materializing body nests its whole chain inside the OUTER let's rhs
+    /// (`let c = (let w' = w in let u = ... in cos <@> u)`), so the same binder
+    /// has to be understood in both positions.
+    and bindLet (id: IRId) (rhs: IRExpr) : unit =
+        match rhs with
+        // A REDUCTION JOIN's tuple is k device scalars, not one -- so it is
+        // bound before the device-scalar test below, which a `Tuple<k>` could
+        // never pass. `joinLegs` is what makes the downstream `get<i>`
+        // projections resolve to the individual accumulators.
+        | IRReduceCompute (comp, IRTuple ks, IRTuple ss) when ks.Length = ss.Length && ks.Length >= 2 ->
+            match emitJoin comp ks ss with
+            | Some accs ->
+                let legIds =
+                    accs |> List.map (fun (nm, ty) ->
+                        let vid = freshId ()
+                        scalars <- Map.add vid nm scalars
+                        (vid, ty))
+                joinLegs <- Map.add id legIds joinLegs
+            | None -> ()
+        // The one-leg encoding: `reduce(<deferred>, op, init)` in a kernel body
+        // is the SAME loop at k = 1, and its value is a plain scalar.
+        | IRReduceCompute (comp, kernel, seed) ->
+            match emitJoin comp [kernel] [seed] with
+            | Some [ (nm, _) ] -> scalars <- Map.add id nm scalars
+            | _ -> ()
+        | _ ->
+        match inferExprType rhs with
+        | ArrayElem _ ->
+            match resolveArray rhs with
+            | Some d ->
+                arrays <- Map.add id d arrays
+                // A kernel-local map is a PRODUCER: unlike a forwarded capture
+                // (a memory read), re-reading it re-evaluates its kernel, so it
+                // is exactly what a join's share locals exist to evaluate once.
+                if not (List.contains id producerOrder) then producerOrder <- producerOrder @ [id]
+            | None -> fail "a kernel-local array that is not a pointwise map"
+        | ty when not (isCudaBoundarySafeElem ty) ->
+            // Tuples, strings, function values: no device local to declare.
+            fail "a kernel-local binding whose type is not a device scalar"
+        | ty ->
+            let s = renderScalar Map.empty rhs
+            if err.IsNone then
+                let nm = fresh "v"
+                stmts.Add (sprintf "    %s %s = %s;" (cudaDevElemTypeToCpp ty) nm s)
+                scalars <- Map.add id nm scalars
+
+    /// Resolve an array-valued expression to its device form: a forwarded
+    /// capture, or a pointwise producer over one (never materialized).
+    and resolveArray (e: IRExpr) : DevArray option =
+        match e with
+        | IRVar (id, _) -> Map.tryFind id arrays
+        | IRLet (id, rhs, body) -> bindLet id rhs; (if err.IsSome then None else resolveArray body)
+        | IRCompute inner -> resolveArray inner
+        // Exactly ONE source axis. Several operands with no co-iteration record
+        // are an OUTER product, whose result has a higher rank than a fused
+        // rank-1 read of it would assume -- rendering that as a zip would be
+        // silently wrong, so it is refused, not approximated.
+        | IRApp (IRObjectFor oi, [src], _)
+              when oi.OutputRank = 0 && oi.InputRanks |> List.forall ((=) 0) ->
+            pointwise oi.Kernel [src]
+        | IRApplyCombinator info
+              when info.KernelOutputRank = 0
+                   && info.KernelInputRanks |> List.forall ((=) 0)
+                   && not info.HasReynolds
+                   && (info.IsCoIteration || info.Arrays.Length = 1) ->
+            pointwise info.Kernel info.Arrays
+        | _ -> None
+
+    /// A map of `kernel` over co-iterated `srcs`, as a renderer of the result's
+    /// element at an index -- the producer form that is never materialized.
+    and pointwise (kernel: IRExpr) (srcs: IRExpr list) : DevArray option =
+        let ds = srcs |> List.map resolveArray
+        if ds |> List.exists Option.isNone || List.isEmpty srcs then None
+        else
+            let ds = ds |> List.choose id
+            let cells = (List.head ds).Cells
+            if ds |> List.exists (fun d -> not (cudaCellsCompatible d.Cells cells)) then None
+            else
+                match resolveCallable kernel with
+                | Some c when c.Params.Length = ds.Length
+                              && isCudaBoundarySafeElem c.RetType ->
+                    let elem = c.RetType
+                    Some { Cells = cells
+                           Elem = elem
+                           At = fun k ->
+                                    // The map kernel is rendered per element by
+                                    // binding its params to the sources' element
+                                    // TEXT: pure, so a repeated use just repeats
+                                    // the (already-peeled) read.
+                                    let extra =
+                                        List.zip c.Params ds
+                                        |> List.map (fun (p, d) -> (p.VarId, sprintf "(%s)" (d.At k)))
+                                        |> Map.ofList
+                                    renderScalar extra c.Body }
+                | _ -> None
+
+    // --- walk the body's let-chain ------------------------------------------
+    let rec walk (e: IRExpr) : string =
+        if err.IsSome then "" else
+        match e with
+        | IRLet (id, rhs, body) -> bindLet id rhs; walk body
+        | tail -> renderScalar Map.empty tail
+
+    let expr = walk callable.Body
+    match err with
+    | Some r -> Error r
+    | None -> Ok { Captures = fwd; Stmts = List.ofSeq stmts; Expr = expr }
 
 /// Emit a CUDA kernel for any single S-dimension symmetry group of arity >= 2,
 /// symmetric (inclusive simplex i0<=i1<=...) or antisymmetric (strict simplex
@@ -9136,6 +10565,15 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
                 yield sprintf "    %s %s = %s[%s];" etStr readName srcName idxVar ]
     let nameMap =
         codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
+    // CAPABILITY GATE. The simplicial kernel declares exactly the peeled operand
+    // reads, so a body naming anything else (a capture, a lifted host function)
+    // would emit an undefined identifier into the .cu. Refuse to the host loop
+    // instead. Capture forwarding is implemented for the rectangular path only;
+    // a simplicial nest reaching here with captures falls back, which is correct
+    // (slower) rather than uncompilable.
+    if (cudaDeviceBodyRefusal (paramFinalNames |> Map.toList |> List.map fst |> Set.ofList)
+                              nameMap codeGen.KernelExpr).IsSome then None
+    else
     // Antisym: Reynolds fold (true,true) emits the signed antisymmetrization.
     // Symmetric: raw comm kernel (false,false). Rendered in the CUDA device
     // dialect (thrust complex vocabulary) -- this is __global__ body text.
@@ -9266,7 +10704,7 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
     let cell = cudaKernelDefsCell ()
     let helperMarker = "__device__ static long long __blade_binom"
     let binomHelper =
-        if cell.Value |> List.exists (fun l -> l.StartsWith helperMarker) then []
+        if cell.Exists (fun l -> l.StartsWith helperMarker) then []
         else
             [ "__device__ static long long __blade_binom(long m, long k) {"
               "    if (k < 0 || m < (long)k) return 0;"
@@ -9276,7 +10714,7 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
               "    return num / den;"
               "}"
               "" ]
-    cell.Value <- cell.Value @ (binomHelper @ kernelDef @ [""] @ wrapper @ [""])
+    cell.Append (binomHelper @ kernelDef @ [""] @ wrapper @ [""])
     // Host-side inline allocation matching the host storage:
     //   symmetric  -> allocate<T, SYMM={1..1}>
     //   antisym    -> allocate_strict<T, SYMM={1..1}, STRICT={1..1}>
@@ -9530,20 +10968,85 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
 /// Gates: every binding rectangular const-extent RealArray scalar-leaf; array
 /// output with boundary-safe elem type; no Reynolds. Only flat T*/size_t cross
 /// the extern "C" boundary (pool_base supplies flat host pointers).
-let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
+let genCudaKernel (softSplit: bool) (outerNames: Map<IRId, string>) (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
     let bindings = codeGen.Bindings
     let nDims = List.length bindings
+    /// A level's extent as HOST C++, when the level is a plain dense axis whose
+    /// bound is a pure function of its own array's shape. `None` means the
+    /// launch grid cannot be computed at all -- which is a genuine refusal, and
+    /// a different thing from "not known until run time".
+    ///
+    /// A LITERAL keeps its literal spelling everywhere downstream, so a kernel
+    /// whose extents were static before this existed emits byte-identically.
+    let hostExtentOf (b: LoopIndexBinding) : CudaCells option =
+        match b.Extent with
+        | IRLit (IRLitInt n) -> Some (CellsStatic n)
+        | _ when System.String.IsNullOrEmpty b.ExtentArrayRef -> None
+        | _ ->
+            // The same expression `emitExtentsTable` renders for this level (a
+            // fused level's bound is the product of the dims it spans), so the
+            // grid and the output's own extents table cannot disagree.
+            let e =
+                match b.FusedRank with
+                | Some d -> [0 .. d - 1] |> List.map (sprintf "%s.extents[%d]" b.ExtentArrayRef) |> String.concat " * "
+                | None -> sprintf "%s.extents[%d]" b.ExtentArrayRef b.ExtentDimRef
+            Some (CellsRuntime (e, sprintf "__blade_ext%d" b.Level))
+    let dimCells = bindings |> List.map hostExtentOf
+    // RECTANGULARITY is about the SHAPE of the iteration space, not about when
+    // its size is known: a dependent bound (`for j < i`), a strict offset, or a
+    // virtual (range/reverse) operand has no flat thread grid at any time. A
+    // plain dense axis always does -- `(n + block - 1) / block` is computable at
+    // the launch, so a RUNTIME extent (every kernel inside a generic function)
+    // is emitted, not refused.
     let rectOk =
-        bindings |> List.forall (fun b ->
-            b.BoundDependencies.IsEmpty && b.StrictOffset = 0
-            && (match b.Extent with IRLit (IRLitInt _) -> true | _ -> false)
-            && (b.Elements |> List.forall (fun e -> match e.Virtual with RealArray -> true | _ -> false)))
+        (dimCells |> List.forall Option.isSome)
+        && (bindings |> List.forall (fun b ->
+                b.BoundDependencies.IsEmpty && b.StrictOffset = 0
+                && (b.Elements |> List.forall (fun e -> match e.Virtual with RealArray -> true | _ -> false))))
+    /// Every input must be indexed by at least one level, because that is where
+    /// its POOL SIZE comes from (`inputCellsText`). An input reachable by no
+    /// level has no size this emitter can derive, and guessing one would size a
+    /// `cudaMemcpy` off the host pool by something other than its length.
+    let inputsSized =
+        codeGen.InputArrayNames |> List.mapi (fun pos _ -> pos)
+        |> List.forall (fun pos ->
+            bindings |> List.exists (fun b -> b.Elements |> List.exists (fun e -> e.ArrayPosition = pos)))
+    let allStatic = dimCells |> List.forall (function Some (CellsStatic _) -> true | _ -> false)
     let outElemTyOpt =
         match codeGen.OutputType with
         | ArrayElem arr when isCudaBoundarySafeElem arr.ElemType -> Some arr.ElemType
         | _ -> None
-    if codeGen.HasReynolds || not rectOk || outElemTyOpt.IsNone then None
-    else
+    // A `where cuda` kernel that ends up on the host must SAY SO -- a device
+    // request is not something to drop silently (same rule the `omp` census
+    // marker enforces). This is the last emitter the CUDA dispatch tries, so
+    // its refusal is the whole dispatch's refusal and the only one worth a
+    // message; the simplicial path declining just means "not that shape".
+    let refuseToHost (reason: string) : string list option =
+        (exprWarningsCell ()).Value <-
+            (exprWarningsCell ()).Value @
+            [ sprintf "[cuda] a `where cuda` kernel ran on the HOST instead: the device \
+kernel cannot express %s (nest '%s')" reason name ]
+        None
+    let shapeRefusal =
+        if codeGen.HasReynolds then Some "a Reynolds (symmetrized) kernel over a rectangular nest"
+        elif not rectOk then
+            Some "an iteration space that is not rectangular \
+(a dependent, offset or virtual axis has no flat thread grid)"
+        elif outElemTyOpt.IsNone then
+            Some "an output element type that cannot cross the extern \"C\" device boundary"
+        elif not inputsSized then
+            Some "an operand no loop level indexes (its device buffer has no derivable size)"
+        elif softSplit && not allStatic then
+            // The soft-join begin/end wrappers stage through FILE-STATIC device
+            // buffers sized at their declaration; a runtime extent has nothing
+            // to size them with there. The plain (non-split) launch below has no
+            // such constraint -- it allocates inside the wrapper.
+            Some "a runtime-sized axis under a <&> soft-join leaf (its begin/end \
+wrappers bake the staging sizes)"
+        else None
+    match shapeRefusal with
+    | Some r -> refuseToHost r
+    | None ->
     let outElemTy = outElemTyOpt.Value
     let elemCpp = elemTypeToCpp outElemTy
     // Device spellings (.cu internals): complex renders as thrust::complex;
@@ -9561,9 +11064,33 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
             |> Option.defaultValue outElemTy)
     let inputHostCpp = inputElemTys |> List.map elemTypeToCpp
     let inputDevCpp = inputElemTys |> List.map cudaDevElemTypeToCpp
+    // Per-level cell counts, literal or runtime, in nesting order. `rectOk`
+    // established every entry is Some.
+    let dims = dimCells |> List.map Option.get
+    let dimText (i: int) = cudaCellsText (List.item i dims)
     let extentLits =
         bindings |> List.map (fun b -> match b.Extent with IRLit (IRLitInt n) -> n | _ -> 0L)
-    let cardinality = extentLits |> List.fold (fun a n -> a * n) 1L
+    /// Grid cardinality: the literal product when every extent is static (the
+    /// text this emitter has always produced), else the runtime product of the
+    /// extent parameters.
+    let cardinalityText =
+        if allStatic then sprintf "%dUL" (extentLits |> List.fold (fun a n -> a * n) 1L)
+        else [0 .. nDims - 1] |> List.map dimText |> String.concat " * "
+    /// An input's POOL SIZE, for staging it onto the device: the product of the
+    /// extents of the levels that actually index it.
+    ///
+    /// Derived rather than read off `extentLits.[pos]` (this emitter's original
+    /// spelling), which silently assumed input `i` is indexed by level `i` and
+    /// nothing else. It agrees with that assumption wherever the assumption
+    /// held -- one input per level, in order -- and is right where it did not:
+    /// a co-iterated `zip(A, B)` has two inputs on ONE level (and indexed past
+    /// the end of the list), a rank-2 input spans two.
+    let inputCellsText (pos: int) : string option =
+        let ds = bindings |> List.mapi (fun i b -> (i, b))
+                 |> List.filter (fun (_, b) -> b.Elements |> List.exists (fun e -> e.ArrayPosition = pos))
+        match ds with
+        | [] -> None
+        | ds -> Some (ds |> List.map (fst >> dimText) |> String.concat " * ")
     let kernelName = sprintf "__cuda_%s" (sanitizeCppName name)
     let launchName = sprintf "__launch_%s" (sanitizeCppName name)
     let mutable paramFinalNames : Map<IRId, string> = Map.empty
@@ -9583,21 +11110,69 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                 if not (Set.contains newName declared) then
                     declared <- Set.add newName declared
                     yield sprintf "    %s %s = %s[%s];" etStr newName cur b.IndexName ]
-    let nameMap =
-        codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
-    // Kernel-body text lives in the __global__ -- render in the device dialect.
-    let reynolds =
-        withCudaDeviceDialect (fun () ->
-            genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams false false nameMap paramFinalNames)
+    // Kernel-body text lives in the __global__ -- rendered in the device dialect
+    // by the planner, which also decides which captures have to travel with it.
+    // `None` (and a captures-under-soft-split refusal, whose begin/end wrappers
+    // do not carry extra buffers) means host fallback -- see planCudaDeviceBody.
+    match planCudaDeviceBody codeGen paramFinalNames outerNames (sanitizeCppName name) with
+    | Error reason -> refuseToHost reason
+    | Ok plan when softSplit && not plan.Captures.IsEmpty ->
+        refuseToHost "captures forwarded from a <&> soft-join leaf (its begin/end \
+wrappers stage only the leaf's own operands)"
+    | Ok plan ->
+    let caps = plan.Captures
+    // Extra kernel/wrapper parameters, in one order used by the kernel
+    // signature, the wrapper signature, the launch, and the host call site.
+    // A RUNTIME-sized array capture contributes its cell count right after its
+    // pointer, so the three lists stay positionally aligned by construction.
+    let capKernelParams =
+        caps |> List.collect (fun c ->
+            match c.Cells with
+            | Some cells -> sprintf "const %s* %s" c.DevCpp c.DevName :: Option.toList (cudaCellsParam cells)
+            | None -> [ sprintf "%s %s" c.DevCpp c.DevName ])
+    let capWrapParams =
+        caps |> List.collect (fun c ->
+            match c.Cells with
+            | Some cells -> sprintf "const %s* %s" c.HostCpp c.DevName :: Option.toList (cudaCellsParam cells)
+            | None -> [ sprintf "%s %s" c.HostCpp c.DevName ])
+    /// The argument each capture contributes at the launch, given a prefix for
+    /// the device buffer of an array one (scalars pass straight through).
+    let capLaunchArgs (bufPrefix: string) =
+        caps |> List.collect (fun c ->
+            match c.Cells with
+            | Some cells ->
+                sprintf "%s%s" bufPrefix c.DevName
+                // At the HOST call site a runtime count is its host expression;
+                // INSIDE the wrapper it is already the parameter, so the same
+                // list serves both (the wrapper forwards the name it was given).
+                :: (match cells with
+                    | CellsStatic _ -> []
+                    | CellsRuntime (_, p) -> [ p ])
+            | None -> [ c.DevName ])
+    /// What the HOST passes for a capture: array pointer (staged by the
+    /// wrapper from the host pool) plus, when runtime-sized, its cell count.
+    let capHostArgs =
+        caps |> List.collect (fun c ->
+            match c.Cells with
+            | Some cells ->
+                sprintf "pool_base(%s.data)" c.HostName :: Option.toList (cudaCellsHostArg cells)
+            | None -> [ c.HostName ])
+    // Extent parameters for the runtime levels, in nesting order: the kernel
+    // needs them to unrank its flat thread id, the wrapper to size the grid and
+    // the staging copies. A fully static nest contributes none, so its
+    // signature is unchanged.
+    let extKernelParams = dims |> List.choose cudaCellsParam
+    let extHostArgs = dims |> List.choose cudaCellsHostArg
     let recover =
         [ yield "    size_t __blade_g = __blade_i;"
           for i in (nDims - 1) .. -1 .. 0 do
-            let e = extentLits.[i]
+            let e = dimText i
             let b = bindings.[i]
-            yield sprintf "    size_t %s = __blade_g %% %dUL;" b.IndexName e
-            if i > 0 then yield sprintf "    __blade_g /= %dUL;" e ]
+            yield sprintf "    size_t %s = __blade_g %% %s;" b.IndexName e
+            if i > 0 then yield sprintf "    __blade_g /= %s;" e ]
     let kernelParams =
-        (codeGen.InputArrayNames, inputDevCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n) |> String.concat ", "
+        ((codeGen.InputArrayNames, inputDevCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n))
+        @ capKernelParams @ extKernelParams |> String.concat ", "
     let kernelDef =
         // NOTE on naming: generated CUDA-internal identifiers use a `__blade_`
         // prefix. A plain `__out` collides with MSVC's SAL
@@ -9609,10 +11184,11 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
         [ sprintf "__global__ void %s(%s, %s* __blade_out, size_t __blade_card) {" kernelName kernelParams devElemCpp
           "    size_t __blade_i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;"
           "    if (__blade_i >= __blade_card) return;" ]
-        @ recover @ bodyBinds
-        @ [ sprintf "    __blade_out[__blade_i] = %s;" reynolds.CppExpr; "}" ]
+        @ recover @ bodyBinds @ plan.Stmts
+        @ [ sprintf "    __blade_out[__blade_i] = %s;" plan.Expr; "}" ]
     let wrapInParams =
-        (codeGen.InputArrayNames, inputHostCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n) |> String.concat ", "
+        ((codeGen.InputArrayNames, inputHostCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n))
+        @ capWrapParams @ extKernelParams |> String.concat ", "
     let sdPrefix = sprintf "__blade_sd_%s" (sanitizeCppName name)
     let wrapper =
         if softSplit then
@@ -9627,12 +11203,12 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                 "    int __blade_dc = 1; cudaGetDeviceCount(&__blade_dc); if (__blade_dc < 1) __blade_dc = 1;"
                 sprintf "    %s_dev = __blade_leaf %% __blade_dc;" sdPrefix
                 sprintf "    cudaSetDevice(%s_dev);" sdPrefix
-                sprintf "    size_t __blade_card = %dUL;" cardinality ]
+                sprintf "    size_t __blade_card = %s;" cardinalityText ]
             @ [ for (i, n) in List.mapi (fun i n -> (i, n)) codeGen.InputArrayNames do
-                  let sz = extentLits.[i]
+                  let sz = inputCellsText i |> Option.defaultValue cardinalityText
                   let et = inputDevCpp.[i]
-                  yield sprintf "    cudaMalloc(&%s_d_%s, %dUL * sizeof(%s));" sdPrefix n sz et
-                  yield sprintf "    cudaMemcpy(%s_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" sdPrefix n n sz et ]
+                  yield sprintf "    cudaMalloc(&%s_d_%s, %s * sizeof(%s));" sdPrefix n sz et
+                  yield sprintf "    cudaMemcpy(%s_d_%s, %s, %s * sizeof(%s), cudaMemcpyHostToDevice);" sdPrefix n n sz et ]
             @ [ sprintf "    cudaMalloc(&%s_d_out, __blade_card * sizeof(%s));" sdPrefix devElemCpp
                 sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
                 sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, %s_d_out, __blade_card);" kernelName blockSize
@@ -9641,36 +11217,55 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                 sprintf "extern \"C\" void %s_end(%s* __blade_host_out) {" launchName elemCpp
                 sprintf "    cudaSetDevice(%s_dev);" sdPrefix
                 "    cudaDeviceSynchronize();"
-                sprintf "    cudaMemcpy(__blade_host_out, %s_d_out, %dUL * sizeof(%s), cudaMemcpyDeviceToHost);" sdPrefix cardinality devElemCpp ]
+                sprintf "    cudaMemcpy(__blade_host_out, %s_d_out, %s * sizeof(%s), cudaMemcpyDeviceToHost);" sdPrefix cardinalityText devElemCpp ]
             @ [ for n in codeGen.InputArrayNames -> sprintf "    cudaFree(%s_d_%s);" sdPrefix n ]
             @ [ sprintf "    cudaFree(%s_d_out);" sdPrefix
                 "    cudaSetDevice(0);"; "}" ]
         else
         [ sprintf "extern \"C\" void %s(%s, %s* __blade_host_out) {" launchName wrapInParams elemCpp
-          sprintf "    size_t __blade_card = %dUL;" cardinality ]
+          sprintf "    size_t __blade_card = %s;" cardinalityText ]
         @ [ for (i, n) in List.mapi (fun i n -> (i, n)) codeGen.InputArrayNames do
-              let sz = extentLits.[i]
+              let sz = inputCellsText i |> Option.defaultValue cardinalityText
               let et = inputDevCpp.[i]
-              yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" et n n sz et
-              yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" n n sz et ]
+              yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %s * sizeof(%s));" et n n sz et
+              yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %s * sizeof(%s), cudaMemcpyHostToDevice);" n n sz et ]
+        // Forwarded captures travel exactly as the operands do: an array capture
+        // gets its own device buffer staged here (the wrapper takes the host
+        // pool pointer), a scalar one rides the signature by value.
+        @ [ for c in caps do
+              match c.Cells with
+              | Some cells ->
+                  let sz = cudaCellsText cells
+                  yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %s * sizeof(%s));" c.DevCpp c.DevName c.DevName sz c.DevCpp
+                  yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %s * sizeof(%s), cudaMemcpyHostToDevice);" c.DevName c.DevName sz c.DevCpp
+              | None -> () ]
         @ [ sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" devElemCpp devElemCpp
             sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
             sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, __blade_d_out, __blade_card);" kernelName blockSize
-              (codeGen.InputArrayNames |> List.map (sprintf "__blade_d_%s") |> String.concat ", ")
+              ((codeGen.InputArrayNames |> List.map (sprintf "__blade_d_%s"))
+               @ capLaunchArgs "__blade_d_"
+               // The runtime extents the wrapper was handed, forwarded verbatim:
+               // `cudaCellsParam` named them, so the parameter IS the argument.
+               @ (dims |> List.choose (function CellsRuntime (_, p) -> Some p | CellsStatic _ -> None))
+               |> String.concat ", ")
             "    cudaDeviceSynchronize();"
             sprintf "    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof(%s), cudaMemcpyDeviceToHost);" devElemCpp ]
         @ [ for n in codeGen.InputArrayNames -> sprintf "    cudaFree(__blade_d_%s);" n ]
+        @ [ for c in caps do
+              match c.Cells with
+              | Some _ -> yield sprintf "    cudaFree(__blade_d_%s);" c.DevName
+              | None -> () ]
         @ [ "    cudaFree(__blade_d_out);"; "}" ]
     let cell = cudaKernelDefsCell ()
-    cell.Value <- cell.Value @ (kernelDef @ [""] @ wrapper @ [""])
+    cell.Append (kernelDef @ [""] @ wrapper @ [""])
     let outputRank = nDims
     let extentsName = sprintf "%s_extents" name
     // First-kernel scope is rectangular (no symmetry), so pass `nullptr` directly
     // as the symm template arg -- not via a function-local static (MSVC C2131).
-    // Extent entries: rectOk already forced every binding to IRLit, so the
-    // non-literal arms below are structurally unreachable -- kept so the dims
-    // pairing stays derived from the SAME match that renders each value, and
-    // the table degrades to the heap form (not garbage) if the gate ever widens.
+    // Extent entries: the non-literal arms are LIVE now that a runtime-sized
+    // axis is emitted rather than refused, and they render the same expressions
+    // `hostExtentOf` hands the launch grid -- one source for both, so the
+    // allocation and the grid cannot disagree about how many cells exist.
     let extentDims =
         bindings |> List.map (fun b ->
             match b.Extent with
@@ -9692,7 +11287,18 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                 // `Array<T,1> A = { ... }`), same as the output -- so the flat pool
                 // is reached via `.data`. Do not gate `.data` on a host-shape test:
                 // inputs are wrappers here, never bare pointers.
-                (codeGen.InputArrayNames |> List.map (fun n -> sprintf "pool_base(%s.data)" n) |> String.concat ", ")
+                //
+                // A forwarded capture is named by its EMITTED host spelling
+                // (captureForwardName, resolved in the planner) -- a block-local
+                // `let` is `__v<id>` here, and passing the SOURCE name is the
+                // trap every new forwarding site in this file has to avoid.
+                (((codeGen.InputArrayNames |> List.map (fun n -> sprintf "pool_base(%s.data)" n))
+                  @ capHostArgs
+                  // Runtime extents are read off the HOST wrappers at the call
+                  // site -- the same expressions the output's extents table
+                  // above is built from, so grid and allocation cannot diverge.
+                  @ extHostArgs)
+                 |> String.concat ", ")
                 name ]
     // dealloc(D): the rectangular HOST output (dense, so the SYMM argument is
     // the `nullptr` literal emitted just above; extents are static here, so
@@ -9837,7 +11443,7 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
         @ [ for k in 0 .. leafCgs.Length - 1 -> sprintf "    cudaFree(__blade_d_out_%d);" k ]
         @ [ "}" ]
     let cell = cudaKernelDefsCell ()
-    cell.Value <- cell.Value @ (kernelDef @ [""] @ wrapper @ [""])
+    cell.Append (kernelDef @ [""] @ wrapper @ [""])
     // Inline: allocate each output Array on the host, then a single launch.
     // Per-leaf extents: the co-fusion gate (rectOk over every leaf) forces
     // every binding extent to IRLit, so each table is all-literal and static;
@@ -10066,7 +11672,219 @@ let private genWreathApply
 
 let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (builder: IRBuilder) : string list =
     let ind = indentStr ctx
-    
+
+    // OMP LICENCE FOR THE PEELED ROW LOOP. Bound HERE, above `tryRaggedPeel`,
+    // because both peel closures capture it.
+    //
+    // WHAT THE LICENCE MEANS AT THIS SITE. `omp(g: n)` licenses the EXTERNAL
+    // S-dims `g` contributes -- the loop levels that argument brings to a nest
+    // built AROUND the kernel -- and NOT a loop the body generates over that same
+    // argument (the rule tests/corpus/loops/115 states, and the misreading BL4001
+    // exists to name). A peeled ROW param contributes exactly ONE such level, the
+    // `__g` loop, so any n >= 1 licenses it and a larger n caps there -- matching
+    // `ompDepthCases.depth_2_on_rank1_arg_caps_at_1`. The `__k` loop inside a
+    // body's `reduce(g, ...)` is generated BY THE BODY and takes its licence from
+    // that reduce's own kernel, never from this clause.
+    //
+    // `List.max` over the depths, with TWO DIFFERENT JUSTIFICATIONS -- the same
+    // expression, so this is worth saying rather than leaving to be re-derived:
+    //   * `tryRaggedPeel` has ONE array and ONE param, so the max degenerates to
+    //     that param's own depth. Nothing about co-iteration is involved.
+    //   * `tryGroupedZipPeel` is the genuine `IR.coIterLicense` rule: k row params
+    //     all peel at the SAME `__g`, there is no per-argument level ownership to
+    //     distinguish, so the most permissive licence wins.
+    //
+    // Empty depths with the flag set is IR's `licenseUnresolved` fallback, and it
+    // covers two source situations that must BOTH license `__g`: a bare `where
+    // omp` (the parser's `Omp { Vars = [] }`) and an `omp(typo: n)` naming no
+    // parameter (BL4001 warns, but the nest must not silently serialize).
+    //
+    // `resolveKernel`, not the `resolveCallable` the peel arms use: it peels an
+    // `IRReynolds` wrapper before resolving, so it succeeds wherever
+    // `resolveCallable` does, and it is what `mpiRequested` below and IR's own
+    // `kernelRequestedOmp` / `ompDepths` consult -- one resolver, both paths.
+    let (peelOmpRequested, peelRowLicensed) =
+        match resolveKernel info.Kernel with
+        | Some rk ->
+            let requested = rk.Callable.IsOmpParallel
+            let depths = rk.Callable.Parallelism
+            (requested,
+             requested && (List.isEmpty depths
+                           || (depths |> List.map snd |> List.max) >= 1))
+        | None -> (false, false)
+
+    // Threading a peel whose source is a STREAMED provider read is the one shape
+    // the generic path refuses outright (`genFusedLoopNestStreamed`: per-source
+    // handles and per-argument buffers are shared, so a team races on them). The
+    // peels bypass that check entirely, so re-apply it here.
+    //
+    // A DECLINE, not a raise, unlike the generic site. Reachability is dubious --
+    // a streamed source carrying a ragged / `__group_outer` index type would
+    // likely already miscompile at `%s.extents[0]` -- and a raise could reject a
+    // program that compiles today. Declining adds no new refusals, and the marker
+    // keeps it from being silent.
+    //
+    // Short-circuited on the map being non-empty, and only forced from inside the
+    // peel arms: `exprToCppCtx` is a full render of the operand expression, and
+    // `StreamedArrays` is empty in every program that reads no provider. Rendering
+    // every operand of every apply -- dense paths included, none of which can
+    // reach a peel -- to answer a question whose answer is almost always "no" is
+    // work this site has no business doing.
+    let peelSourceStreamed =
+        lazy (not (Map.isEmpty ctx.StreamedArrays)
+              && info.Arrays |> List.exists (fun a ->
+                    Map.containsKey (exprToCppCtx ctx a) ctx.StreamedArrays))
+    let peelStreamBlocker () : string option =
+        if peelSourceStreamed.Force () then
+            Some "the peeled source is a streamed provider read (shared per-source handles and per-argument buffers are not thread-safe)"
+        else None
+
+    // ARRAY-VALUED KERNEL ROWS over a PEELED outer axis (stage S3,
+    // manifestation M-C3 -- lswosa's `family_spectra` / `cellacc` shape). The
+    // kernel collapses each peeled row (or tuple of rows) to a whole DENSE
+    // row, so the output is [outer] x [kernel T-dims]: rank >= 2, one row per
+    // outer cell, flat row-major pool. Callers have already taken the
+    // genuinely ragged/group-SHAPED results away, so everything arriving here
+    // has dense trailing axes.
+    //
+    // SHARED BY BOTH PEELS. They differ only in where the outer count and the
+    // per-row bindings come from -- a group_keys offsets table (`gk__ngroups`
+    // / `gk__offsets[__g+1] - gk__offsets[__g]`) or a ragged literal's own
+    // `arr.extents[0]` / `arr.lens[__g]` -- and those arrive as strings.
+    // Everything that is genuinely about array-valued rows (the two sizing
+    // forms, the extents ABI, the row copy, the threading rules) lives here
+    // once, so a single-operand ragged literal and a k-operand grouped
+    // co-iteration cannot drift apart on any of it.
+    let emitRowValuedPeel
+            (headerLine: string) (headerRuntimeSuffix: string)
+            (ngroupsExpr: string) (rowDeclLines: string list)
+            (bodyExpr: IRExpr) (bodyStr: string)
+            (outElemStr: string) (outRank: int) : string list =
+        // A trailing extent the static evaluator can settle is emitted as a
+        // literal. Everything else -- a compiler-minted `__<op>_inferred_n`
+        // param (the length a LENGTH-AGNOSTIC generic callee keeps abstract:
+        // `f: V^1` -> the returned row is as long as the argument, and the
+        // static type never learns the number; extents are deliberately
+        // outside type identity), or a function-scope symbolic extent whose
+        // rendered spelling names no declared C++ identifier -- takes the
+        // size-on-first-row form below: the returned row is self-describing
+        // at runtime (`__rowv.extents`), so the trailing extents are read off
+        // the FIRST row and the pool is allocated then. Runtime sizing is
+        // correct for every one of these shapes; the static table is kept for
+        // literals so the common pinned shapes emit exactly as before.
+        let innerDims =
+            match info.OutputType with
+            | ArrayElem a ->
+                a.IndexTypes
+                |> List.skip 1
+                |> List.map (fun ix ->
+                    match tryEvalIntIR ix.Extent with
+                    | Some n -> Some (sprintf "%d" n)
+                    | None -> None)
+            | _ -> []
+        let innerCells =
+            [ 1 .. outRank - 1 ] |> List.map (sprintf "%s_extents[%d]" name) |> String.concat " * "
+        let freeLine =
+            match bodyExpr with
+            | IRApp (f, _, _) when freshReturnOf f = FreshPool ->
+                [ sprintf "%s        deallocate<typename promote<%s, %d>::type, nullptr>(__rowv.data, __rowv.extents);"
+                      ind outElemStr (outRank - 1) ]
+            | _ -> []
+        let rowCopyLines =
+            [ sprintf "%s        const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" ind outElemStr
+              sprintf "%s        const size_t __rowc = (size_t)(%s);" ind innerCells
+              sprintf "%s        %s* __rowd = nested_array_utilities::pool_base(%s.data) + (__g * __rowc);" ind outElemStr name
+              sprintf "%s        for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];" ind ]
+        if innerDims |> List.forall Option.isSome then
+            [ headerLine ]
+            // Heap extents: the return-extent ABI (see emitExtentsTable).
+            // `Array<T,R>` stores only a POINTER to its extents, so a
+            // frame-local `size_t[R]` table dangles the moment the wrapper
+            // crosses a call boundary. The leading entry is a runtime read
+            // (`gk__ngroups` / `arr.extents[0]`), so the table is never
+            // all-literal and the helper always takes its heap form.
+            @ fst (emitExtentsTable ind (name + "_extents") outRank
+                       ((ngroupsExpr, false) :: (innerDims |> List.map (fun d -> (Option.get d, true)))))
+            @ [ sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
+                  ind outElemStr outRank name outElemStr outRank name name ]
+            // Array-valued rows, pool allocated UP FRONT: iteration __g copies
+            // into `pool_base(name.data) + __g * __rowc`, a slice disjoint from
+            // every other iteration's, and `__rowv` / `__rows` / `__rowd` are
+            // declared inside the body. Same licence as the scalar arms.
+            @ peelRowPragma peelOmpRequested peelRowLicensed (peelStreamBlocker ()) ind
+            @ [ sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+            @ rowDeclLines
+            @ [ sprintf "%s    {" ind
+                sprintf "%s        auto __rowv = %s;" ind bodyStr ]
+            @ rowCopyLines
+            @ freeLine
+            @ [ sprintf "%s    }" ind
+                sprintf "%s}" ind ]
+        else
+            // Size-on-first-row form: extents start {ngroups, 0..}, iteration 0
+            // fills the trailing slots from the row's own runtime extents and
+            // allocates the pool. With zero rows nothing allocates and every
+            // consumer iterates an honest empty shape.
+            [ headerLine + headerRuntimeSuffix ]
+            // Heap extents (return-extent ABI, above). This arm needs it for a
+            // SECOND reason as well: the trailing slots are WRITTEN below, from
+            // iteration 0's row -- so the table is mutable state the wrapper
+            // reads through its pointer, and a caller that outlives this frame
+            // must still see those writes.
+            @ fst (emitExtentsTable ind (name + "_extents") outRank
+                       ((ngroupsExpr, false) :: (innerDims |> List.map (fun d -> (defaultArg d "0", false)))))
+            @ [ sprintf "%sArray<%s, %d> %s = { nullptr, %s_extents };" ind outElemStr outRank name name ]
+            // THIS ARM CANNOT BE THREADED, and the reason is the `if (__g == 0)`
+            // below rather than anything about the kernel: iteration 0 is what
+            // settles the trailing extents and ALLOCATES the pool that every
+            // other iteration writes into. Under a parallel for, a thread
+            // holding __g = 5 can reach `pool_base(name.data)` before the
+            // thread holding __g = 0 has run the allocation -- a null-base
+            // write, not merely a torn one. Hoisting the allocation out would
+            // mean sizing the pool before any row has been evaluated, which is
+            // exactly what this arm exists because we cannot do.
+            //
+            // So it declines, and says so: a licensed kernel that lands here
+            // would otherwise be the same silent drop this whole path removes.
+            @ peelRowPragma peelOmpRequested peelRowLicensed
+                  (Some (defaultArg (peelStreamBlocker ())
+                            "the row pool is sized and allocated from the first iteration (length-agnostic callee), so the row loop must run serially"))
+                  ind
+            @ [ sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+            @ rowDeclLines
+            @ [ sprintf "%s    {" ind
+                sprintf "%s        auto __rowv = %s;" ind bodyStr
+                sprintf "%s        if (__g == 0) {" ind
+                sprintf "%s            for (size_t __rx = 1; __rx < %d; __rx++) %s_extents[__rx] = __rowv.extents[__rx - 1];" ind outRank name
+                sprintf "%s            %s.data = allocate<typename promote<%s, %d>::type, nullptr>(%s_extents);" ind name outElemStr outRank name
+                sprintf "%s        }" ind ]
+            @ rowCopyLines
+            @ freeLine
+            @ [ sprintf "%s    }" ind
+                sprintf "%s}" ind ]
+
+    /// The kernel body as it must be RENDERED at a peel site: inline text when
+    /// it is expression-shaped, otherwise a CALL to the lifted callable.
+    ///
+    /// An ARRAY-LITERAL tail also routes through the call: the literal has no
+    /// expression rendering (`exprToCppCore`'s catch-all), and unlike the dense
+    /// nest -- whose row-write arm stores literal leaves straight into the
+    /// output pool -- a peel renders the body as ONE `auto __rowv = <expr>`
+    /// slot. The lifted body compiles it fine (genFuncBody's return-position
+    /// IRArrayLit arm), and the row copy above already handles a call that
+    /// returns a whole row. Shared by both peels so neither can regress the
+    /// other's array-literal support.
+    let peelBodyExpr (callable: IRCallable) : IRExpr =
+        let rec chainTail e = match e with IRLet (_, _, b) -> chainTail b | t -> t
+        let arrayLitTail =
+            match chainTail callable.Body with IRArrayLit _ -> true | _ -> false
+        if kernelBodyIsExpressionShaped callable.Body && not arrayLitTail then callable.Body
+        else
+            let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+            IRApp (IRVar (callable.Id, mkFuncArrow paramTypes callable.RetType),
+                   callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type)),
+                   callable.RetType)
+
     // Special case: ragged peel for grouped arrays.
     // Triggered when method_for is applied to a single grouped array
     // (recognized by Tag = "__group_outer" on its first index type).
@@ -10147,6 +11965,18 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         outputInnerKinds |> List.exists (fun k -> isRaggedFamilyKind k || k = IxKDepInner)
                     let outputIsGroupShaped =
                         outputInnerKinds |> List.exists ((=) IxKGroupMember)
+                    // ARRAY-VALUED ROWS: the kernel collapses each peeled row to
+                    // a whole DENSE row (the `lambda(row) -> { ...; [s, q] }`
+                    // rank-raising shape). Serviced by this peel's own
+                    // array-valued arm below, for BOTH operand kinds -- the
+                    // group-shaped and ragged-shaped outputs are already taken
+                    // away above, so a rank >= 2 output left here has dense
+                    // trailing axes.
+                    let outputHasDenseTrailing =
+                        match info.OutputType with
+                        | ArrayElem a when a.IndexTypes.Length >= 2 ->
+                            not outputIsRaggedShaped && not outputIsGroupShaped
+                        | _ -> false
                     match resolveCallable info.Kernel with
                     | Some callable when callable.Params.Length = 1 && outputIsGroupShaped ->
                         // Elementwise map over a group_by result. The grouped
@@ -10182,14 +12012,38 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             [ sprintf "%s// ragged elementwise map over '%s' (shape-preserving; shares extents/lens/offsets)" ind arrName
                               sprintf "%s%s* %s__pool = new %s[%s.offsets[%s.extents[0]]];" ind outElemStr name outElemStr arrName arrName
                               sprintf "%s%s** %s__rows = new %s*[%s.extents[0]];" ind outElemStr name outElemStr arrName
-                              sprintf "%sRagged<%s> %s = { %s__rows, %s.extents, %s.lens, %s.offsets };" ind outElemStr name name arrName arrName arrName
-                              sprintf "%sfor (size_t __g = 0; __g < %s.extents[0]; __g++) {" ind arrName
-                              sprintf "%s    %s__rows[__g] = %s__pool + %s.offsets[__g];" ind name name arrName
-                              sprintf "%s    for (size_t __k = 0; __k < %s.lens[__g]; __k++) {" ind arrName
-                              sprintf "%s        const %s %s = %s[__g][__k];" ind inElemStr eName arrName
-                              sprintf "%s        %s__rows[__g][__k] = %s;" ind name bodyStr
-                              sprintf "%s    }" ind
-                              sprintf "%s}" ind ]
+                              sprintf "%sRagged<%s> %s = { %s__rows, %s.extents, %s.lens, %s.offsets };" ind outElemStr name name arrName arrName arrName ]
+                            // The ROW loop carries the licence; `__k` stays serial
+                            // for a STRUCTURAL reason, not a conventional one.
+                            // `omp(e: 2)` on this rank-2 ragged argument names
+                            // `__k` too, but honouring it needs collapse(2) -- and
+                            // the inner bound `%s.lens[__g]` is a MEMORY LOAD, not
+                            // affine in `__g`, which is outside even OpenMP 5.0's
+                            // non-rectangular collapse. The pragma would be
+                            // ill-formed, not merely unwise, so depth caps at
+                            // `__g`. (This is the same fact that makes
+                            // `genNestPragma` unable to serve this site: its
+                            // `collapseEligible` requires `isRectangular`, and a
+                            // `lens[]`-bound level is not.)
+                            //
+                            // NON-GOAL, recorded so it is neither silently shipped
+                            // nor silently forgotten: `#pragma omp simd` on `__k`.
+                            // It is tempting (contiguous elementwise write, and
+                            // simd survives BLADE_OMP_THREADS=1), but it needs
+                            // `kernelBodyContainsInnerLoop` as a gate or it lands
+                            // on bodies hiding an IIFE loop, where it is dead text
+                            // that READS like the optimization happened.
+                            //
+                            // Row-disjoint: each `__g` writes its own `__rows` slot
+                            // and the pool slice [offsets[__g], offsets[__g+1]).
+                            @ peelRowPragma peelOmpRequested peelRowLicensed (peelStreamBlocker ()) ind
+                            @ [ sprintf "%sfor (size_t __g = 0; __g < %s.extents[0]; __g++) {" ind arrName
+                                sprintf "%s    %s__rows[__g] = %s__pool + %s.offsets[__g];" ind name name arrName
+                                sprintf "%s    for (size_t __k = 0; __k < %s.lens[__g]; __k++) {" ind arrName
+                                sprintf "%s        const %s %s = %s[__g][__k];" ind inElemStr eName arrName
+                                sprintf "%s        %s__rows[__g][__k] = %s;" ind name bodyStr
+                                sprintf "%s    }" ind
+                                sprintf "%s}" ind ]
                         // Owns pool + row table; extents/lens/offsets belong to
                         // the INPUT ragged. deallocate_ragged frees exactly the
                         // two owned pieces (a per-row free would be an interior
@@ -10227,7 +12081,14 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         let nameMap =
                             callable.Captures
                             |> List.fold (fun m c -> Map.add c.Id c.Name m) nameMap0
-                        let bodyStr = exprToCpp nameMap body
+                        // Array-valued rows render as a CALL to the lifted
+                        // callable when the body is not expression-shaped (or
+                        // ends in an array literal); `body` above is the same
+                        // tree with the defensive `g(args)` -> `g[args]`
+                        // rewrite, which the call form does not need.
+                        let bodyExpr =
+                            if outputHasDenseTrailing then peelBodyExpr callable else body
+                        let bodyStr = exprToCpp nameMap bodyExpr
                         let originLabel =
                             if isGroupedOuter then "grouped array" else "ragged literal"
                         // The peeled sub-row's C++ type must match the kernel
@@ -10251,19 +12112,59 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                                 // Array<T,1>: length via a materialized _extents buffer.
                                 [ sprintf "%s    size_t %s_extents[1] = {%s};" ind subName perRowLenExpr
                                   sprintf "%s    Array<%s, 1> %s = { %s[__g], %s_extents };" ind arrElemStr subName arrName subName ]
+                        let outRank =
+                            match info.OutputType with
+                            | ArrayElem a -> arrayRank a
+                            | _ -> 1
                         let code =
-                            [ sprintf "%s// ragged peel over %s '%s'" ind originLabel arrName
-                              sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
-                              sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name
-                              sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+                            if outputHasDenseTrailing && outRank >= 2 then
+                                // ARRAY-VALUED ROWS. Same emission the grouped
+                                // co-iteration uses -- one helper, so a
+                                // single-operand ragged literal and a k-operand
+                                // zip cannot disagree about the extents ABI,
+                                // the two sizing forms, or the row copy.
+                                emitRowValuedPeel
+                                    (sprintf "%s// ragged peel over %s '%s' -- array-valued rows" ind originLabel arrName)
+                                    " (inner extents from the first row, length-agnostic callee)"
+                                    ngroupsExpr subDeclLines bodyExpr bodyStr outElemStr outRank
+                            else
+                            [ sprintf "%s// ragged peel over %s '%s'" ind originLabel arrName ]
+                            // Return-extent ABI (see emitExtentsTable): `Array<T,R>`
+                            // stores only a POINTER to its extents, so a frame-local
+                            // `size_t[R]` table dangles the moment the wrapper crosses
+                            // a call boundary -- the caller then sizes its own
+                            // allocations off garbage (measured as bad_alloc/BL8005 in
+                            // the first consumer that allocates from the shape). Every
+                            // entry here is a runtime read (`gk__ngroups`), so the
+                            // helper always picks its heap form. The table is
+                            // deliberately NOT registered for a free: it leaves with
+                            // the value whenever this result is returned, and the few
+                            // bytes it costs otherwise are not worth a second
+                            // ownership rule beside the pool's.
+                            @ fst (emitExtentsTable ind (name + "_extents") 1 [(ngroupsExpr, false)])
+                            @ [ sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name ]
+                            // Row-disjoint by construction, so no data clause is
+                            // needed and adding one would be wrong: `subDeclLines`
+                            // are emitted INSIDE the body (C++ block scope already
+                            // makes them per-thread), `bodyStr` is expression-only
+                            // so any accumulator lives in its own IIFE, and each
+                            // iteration writes only `name[__g]`. Per-row reduce
+                            // ORDER is untouched -- only which row a thread reaches
+                            // first is reordered -- so the values are bitwise
+                            // identical to the serial emission.
+                            @ peelRowPragma peelOmpRequested peelRowLicensed (peelStreamBlocker ()) ind
+                            @ [ sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
                             @ subDeclLines
                             @ [ sprintf "%s    %s[__g] = %s;" ind name bodyStr
                                 sprintf "%s}" ind ]
                         // Raw `new T[n]` backing (not allocate<>), stack extents.
-                        // Scalar outputs only: an array-valued kernel body makes
-                        // the row entries ALIASES of storage owned elsewhere.
+                        // Scalar rank-1 outputs only: the array-valued arm
+                        // allocates its pool through `allocate<>` instead, and
+                        // an array-valued kernel body otherwise makes the row
+                        // entries ALIASES of storage owned elsewhere.
                         (match outElem with
-                         | IRTScalar _ -> registerAlloc (RawArrayData (name, None))
+                         | IRTScalar _ when not (outputHasDenseTrailing && outRank >= 2) ->
+                             registerAlloc (RawArrayData (name, None))
                          | _ -> ())
                         Some code
                     | _ -> None
@@ -10279,7 +12180,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
         | Some rk -> rk.Callable.IsMpiParallel && mpiEmitModeEnabled ()
         | None -> false
     let mpiError (reason: string) : string list =
-        [sprintf "%s#error \"mpi: kernel for '%s' is not MPI-eligible: %s\"" ind name reason]
+        [refusalErrorLine ind (sprintf "mpi: kernel for '%s' is not MPI-eligible: %s" name reason)]
 
     // SAME-KEYS GROUPED CO-ITERATION: `method_for(zip(g1, ..., gk)) <@>
     // lambda(r1, ..., rk) -> <scalar>`, every operand a group_by result over
@@ -10353,20 +12254,22 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 let nameMap =
                     let withRows =
                         rowDecls |> List.fold (fun m (vid, sub, _) -> Map.add vid sub m) ctx.VarNames
-                    callable.Captures |> List.fold (fun m c -> Map.add c.Id c.Name m) withRows
+                    // Captures are a FALLBACK, never an override (same
+                    // precedence rule as the kernel-body sites): a capture of
+                    // a block-local `let` is renamed `__v<id>` in this scope,
+                    // and ctx.VarNames already carries that emitted name --
+                    // overriding it with the SOURCE name forwards an
+                    // undeclared identifier.
+                    callable.Captures
+                    |> List.fold (fun m c -> if Map.containsKey c.Id m then m else Map.add c.Id c.Name m) withRows
                 // S2 routing, in the peel's own idiom: a body that materializes
                 // an array cannot render as one C++ expression, so call the
                 // lifted callable instead of inlining its text. The peel's row
                 // declarations already bind each param name, and the lifted
                 // signature takes those same RaggedRow/Array row types, so the
-                // call is the row decls handed straight through.
-                let bodyExpr =
-                    if kernelBodyIsExpressionShaped callable.Body then callable.Body
-                    else
-                        let paramTypes = callable.Params |> List.map (fun p -> p.Type)
-                        IRApp (IRVar (callable.Id, mkFuncArrow paramTypes callable.RetType),
-                               callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type)),
-                               callable.RetType)
+                // call is the row decls handed straight through. (Array-literal
+                // tails included -- see peelBodyExpr.)
+                let bodyExpr = peelBodyExpr callable
                 let bodyStr = exprToCpp nameMap bodyExpr
                 let opNames = info.Arrays |> List.map (exprToCppCtx ctx) |> String.concat ", "
                 // ARRAY-VALUED KERNEL RETURN over a GROUPED co-iteration (stage
@@ -10387,87 +12290,25 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     | _ -> 1
                 let code =
                     if outRank >= 2 then
-                        // A trailing extent the static evaluator can settle is
-                        // emitted as a literal. Everything else -- a
-                        // compiler-minted `__<op>_inferred_n` param (the length
-                        // a LENGTH-AGNOSTIC generic callee keeps abstract:
-                        // `f: V^1` -> the returned row is as long as the
-                        // argument, and the static type never learns the
-                        // number; extents are deliberately outside type
-                        // identity), or a function-scope symbolic extent whose
-                        // rendered spelling names no declared C++ identifier --
-                        // takes the size-on-first-row form below: the returned
-                        // row is self-describing at runtime (`__rowv.extents`),
-                        // so the trailing extents are read off the FIRST row
-                        // and the pool is allocated then. Runtime sizing is
-                        // correct for every one of these shapes; the static
-                        // table is kept for literals so the common pinned
-                        // shapes emit exactly as before.
-                        let innerDims =
-                            match info.OutputType with
-                            | ArrayElem a ->
-                                a.IndexTypes
-                                |> List.skip 1
-                                |> List.map (fun ix ->
-                                    match tryEvalIntIR ix.Extent with
-                                    | Some n -> Some (sprintf "%d" n)
-                                    | None -> None)
-                            | _ -> []
-                        let innerCells =
-                            [ 1 .. outRank - 1 ] |> List.map (sprintf "%s_extents[%d]" name) |> String.concat " * "
-                        let freeLine =
-                            match bodyExpr with
-                            | IRApp (f, _, _) when freshReturnOf f = FreshPool ->
-                                [ sprintf "%s        deallocate<typename promote<%s, %d>::type, nullptr>(__rowv.data, __rowv.extents);"
-                                      ind outElemStr (outRank - 1) ]
-                            | _ -> []
-                        if innerDims |> List.forall Option.isSome then
-                            [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows" ind opNames gkName
-                              sprintf "%ssize_t %s_extents[%d] = {%s};" ind name outRank
-                                  ((ngroupsExpr :: (innerDims |> List.map Option.get)) |> String.concat ", ")
-                              sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
-                                  ind outElemStr outRank name outElemStr outRank name name
-                              sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
-                            @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
-                            @ [ sprintf "%s    {" ind
-                                sprintf "%s        auto __rowv = %s;" ind bodyStr
-                                sprintf "%s        const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" ind outElemStr
-                                sprintf "%s        const size_t __rowc = (size_t)(%s);" ind innerCells
-                                sprintf "%s        %s* __rowd = nested_array_utilities::pool_base(%s.data) + (__g * __rowc);" ind outElemStr name
-                                sprintf "%s        for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];" ind ]
-                            @ freeLine
-                            @ [ sprintf "%s    }" ind
-                                sprintf "%s}" ind ]
-                        else
-                            // Size-on-first-row form: extents start {ngroups, 0..},
-                            // iteration 0 fills the trailing slots from the row's
-                            // own runtime extents and allocates the pool. With
-                            // zero groups nothing allocates and every consumer
-                            // iterates an honest empty shape.
-                            [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows, inner extents from the first row (length-agnostic callee)" ind opNames gkName
-                              sprintf "%ssize_t %s_extents[%d] = {%s};" ind name outRank
-                                  ((ngroupsExpr :: (innerDims |> List.map (fun d -> defaultArg d "0"))) |> String.concat ", ")
-                              sprintf "%sArray<%s, %d> %s = { nullptr, %s_extents };" ind outElemStr outRank name name
-                              sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
-                            @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
-                            @ [ sprintf "%s    {" ind
-                                sprintf "%s        auto __rowv = %s;" ind bodyStr
-                                sprintf "%s        if (__g == 0) {" ind
-                                sprintf "%s            for (size_t __rx = 1; __rx < %d; __rx++) %s_extents[__rx] = __rowv.extents[__rx - 1];" ind outRank name
-                                sprintf "%s            %s.data = allocate<typename promote<%s, %d>::type, nullptr>(%s_extents);" ind name outElemStr outRank name
-                                sprintf "%s        }" ind
-                                sprintf "%s        const %s* __rows = nested_array_utilities::pool_base(__rowv.data);" ind outElemStr
-                                sprintf "%s        const size_t __rowc = (size_t)(%s);" ind innerCells
-                                sprintf "%s        %s* __rowd = nested_array_utilities::pool_base(%s.data) + (__g * __rowc);" ind outElemStr name
-                                sprintf "%s        for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];" ind ]
-                            @ freeLine
-                            @ [ sprintf "%s    }" ind
-                                sprintf "%s}" ind ]
+                        emitRowValuedPeel
+                            (sprintf "%s// same-keys grouped co-iteration over (%s) via %s -- array-valued rows" ind opNames gkName)
+                            ", inner extents from the first row (length-agnostic callee)"
+                            ngroupsExpr (rowDecls |> List.collect (fun (_, _, lines) -> lines))
+                            bodyExpr bodyStr outElemStr outRank
                     else
-                        [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s" ind opNames gkName
-                          sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
-                          sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name
-                          sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+                        [ sprintf "%s// same-keys grouped co-iteration over (%s) via %s" ind opNames gkName ]
+                        // Heap extents (return-extent ABI, see the ragged peel above).
+                        @ fst (emitExtentsTable ind (name + "_extents") 1 [(ngroupsExpr, false)])
+                        @ [ sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name ]
+                        // Every operand peels at the SAME `__g` from ONE offsets
+                        // table, so `peelRowLicensed`'s `List.max` over the depths
+                        // is `IR.coIterLicense`'s rule literally: no per-argument
+                        // level ownership to distinguish, most permissive wins.
+                        // Row-disjoint exactly as the single-operand peel is -- the
+                        // `rowDecls` are emitted inside the body, and each
+                        // iteration writes only `name[__g]`.
+                        @ peelRowPragma peelOmpRequested peelRowLicensed (peelStreamBlocker ()) ind
+                        @ [ sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
                         @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
                         @ [ sprintf "%s    %s[__g] = %s;" ind name bodyStr
                             sprintf "%s}" ind ]
@@ -10691,7 +12532,74 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     let arrayNames = materializedArrays |> List.map fst
     let updatedArrays = materializedArrays |> List.map snd
     let info = { info with Arrays = updatedArrays }
-    
+
+    // HALO-EXTENT RUNTIME GUARD (BL8009; the runtime half of TypeCheck's
+    // HaloExtentMismatch/BL3016). A halo's declared inner extent is a
+    // compile-time literal, but the array read through the window can have a
+    // RUNTIME extent -- a group_by count, typically -- which typecheck cannot
+    // compare. The window loop is bounded by the DECLARED extent, so a
+    // disagreement is an out-of-bounds read (oversized halo) or silently
+    // fewer windows (undersized). One comparison per (array, slot) pair,
+    // emitted ONCE before the nest -- not per element.
+    //
+    // A dense window read lowers to `IRBinOp(IRAdd, w, off)` with `w` typed
+    // by the "__halowin|d:" tag (Lowering's window-read arm); the guard keys
+    // on exactly that shape inside the kernel body. Targets whose emitted
+    // name is unknown here (not in ctx.VarNames) are skipped rather than
+    // guessed -- fail-open, never an undeclared identifier in the guard.
+    (let haloDecl =
+        info.Arrays
+        |> List.collect (fun a -> match a with IRRange (ixs, _) -> ixs | _ -> [])
+        |> List.choose (fun ix ->
+            match ix.Tag with
+            | Some tag when tag.StartsWith (haloWinTagPrefix + "d:") ->
+                (match ix.Extent, haloShrinkOfTag tag with
+                 | IRLit (IRLitInt shrunk), Some shrink -> Some (tag, shrunk + shrink)
+                 | _ -> None)
+            | _ -> None)
+        // Same-tag ambiguity rule as TypeCheck's haloExtentClash: the tag
+        // carries name + offsets, not the extent, so two anonymous halos with
+        // equal offsets but different extents collide -- drop the tag rather
+        // than guard one window against the other's extent.
+        |> List.groupBy fst
+        |> List.choose (fun (tag, entries) ->
+            match entries |> List.map snd |> List.distinct with
+            | [ n ] -> Some (tag, n)
+            | _ -> None)
+        |> Map.ofList
+     if not (Map.isEmpty haloDecl) then
+        match resolveCallable info.Kernel with
+        | None -> ()
+        | Some callable ->
+            let haloTagOfIdx (e: IRExpr) =
+                match e with
+                | IRBinOp (_, IRAdd, IRVar (_, IRTIdxTagged (_, IRefNamed t)), _)
+                | IRBinOp (_, IRAdd, IRParam (_, _, IRTIdxTagged (_, IRefNamed t)), _)
+                    when t.StartsWith (haloWinTagPrefix + "d:") -> Some t
+                | _ -> None
+            let mutable guards : (string * int * int64) list = []
+            iterIRExpr (fun e ->
+                match e with
+                | IRIndex (IRVar (tid, _), idxs, _) ->
+                    idxs |> List.iteri (fun d ix ->
+                        match haloTagOfIdx ix |> Option.bind (fun t -> Map.tryFind t haloDecl) with
+                        | Some declared ->
+                            (match Map.tryFind tid tempCtx.VarNames with
+                             | Some tname -> guards <- (tname, d, declared) :: guards
+                             | None -> ())
+                        | None -> ())
+                | _ -> ()) callable.Body
+            let guardLines =
+                guards
+                |> List.distinct
+                |> List.rev
+                |> List.collect (fun (tname, d, declared) ->
+                    [ sprintf "%sif ((int64_t)(%s.extents[%d]) != %dLL) {" ind tname d declared
+                      sprintf "%s    std::cerr << \"Blade runtime: the halo window over '%s' declares an inner extent of %d, but '%s' has runtime extent \" << %s.extents[%d] << \" on index slot %d -- the window walk would read out of bounds (oversized halo) or silently emit fewer windows (undersized)\" << std::endl;" ind tname declared tname tname d d
+                      sprintf "%s    blade_rt::panic(\"BL8009\", \"halo extent mismatch\", nullptr, 0);" ind
+                      sprintf "%s}" ind ])
+            preCode <- preCode @ guardLines)
+
     if arrayNames.IsEmpty then
         codegenError ctx ind (sprintf "no arrays in method_for for '%s' -- kernel cannot be applied" name)
     else
@@ -10753,12 +12661,11 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
         let codeGen =
             let rec bodyNeedsStatementForm (e: IRExpr) : bool =
                 let mutable found = false
-                mapIRExpr (fun x ->
-                    (match x with
-                     | IRApplyCombinator _ | IRComposeApply _ | IRReduceCompute _
-                     | IRCompute (IRApplyCombinator _) -> found <- true
-                     | _ -> ())
-                    x) e |> ignore
+                iterIRExpr (fun x ->
+                    match x with
+                    | IRApplyCombinator _ | IRComposeApply _ | IRReduceCompute _
+                    | IRCompute (IRApplyCombinator _) -> found <- true
+                    | _ -> ()) e
                 found
             if codeGen.HasReynolds || not (bodyNeedsStatementForm codeGen.KernelExpr) then codeGen
             else
@@ -10867,7 +12774,7 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                     // arity >= 2 (symmetric inclusive / antisymmetric strict, any
                     // rank); then the rectangular pointwise path; None => host loop.
                     genCudaKernelSimplicial false false codeGen name rk.Callable.CudaBlockSize
-                    |> Option.orElseWith (fun () -> genCudaKernel false codeGen name rk.Callable.CudaBlockSize)
+                    |> Option.orElseWith (fun () -> genCudaKernel false tempCtx.VarNames codeGen name rk.Callable.CudaBlockSize)
                 | _ -> None
             match cudaInline with
             | Some launchLines -> preCode @ [""] @ launchLines
@@ -10935,20 +12842,50 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
             // them off `codeGen.OutputType` rather than off `info.KernelTDims`
             // keeps the table and the `Array<T, outputRank>` allocation derived
             // from ONE type, so they cannot disagree about rank.
+            // COMPACT (SymIdx/AntisymIdx) OUTPUTS COUNT BY RANK, NOT BY ENTRY.
+            // The trailing T-dims used to be found with `List.skip outerCount`
+            // under the guard `List.length at.IndexTypes = outputRank` -- both of
+            // which silently assume every index type is rank 1. A comm-licensed
+            // application over the same array gives the output a COMPOUND leading
+            // index (`SymIdx<2, I>` is ONE entry of Rank 2), so the guard was
+            // false and the trailing extents were dropped again: `object_for(cov)
+            // <@> (B, B)` with a row-returning kernel printed `cv = []`, the exact
+            // M-C1 symptom this block exists to prevent, just on the symmetric
+            // path instead of the dense one.
+            //
+            // Both quantities are therefore computed in FLAT rank: how many
+            // trailing dims are missing (`outputRank - outerCount`), and which
+            // trailing ENTRIES supply them (taken from the end until their ranks
+            // sum to that). On an all-rank-1 output this is identical to the old
+            // `List.skip outerCount`, so the dense path is untouched.
             let extentDims =
                 let outerCount = List.length extentDims
                 if outputRank <= outerCount then extentDims
                 else
                     match codeGen.OutputType with
-                    | ArrayElem at when List.length at.IndexTypes = outputRank ->
-                        let trailing =
-                            at.IndexTypes
-                            |> List.skip outerCount
-                            |> List.map (fun ix ->
-                                match tryEvalIntIR ix.Extent with
-                                | Some n -> (sprintf "%d" n, true)
-                                | None -> (exprToCppCtx tempCtx ix.Extent, false))
-                        extentDims @ trailing
+                    | ArrayElem at when arrayRank at = outputRank ->
+                        // Peel entries off the END until they account for the
+                        // missing flat dims exactly; a partial match means the
+                        // boundary falls INSIDE a compound index, which is not a
+                        // shape this rewrite can describe -- leave it alone.
+                        let missing = outputRank - outerCount
+                        let rec peel (acc: IRIndexType list) (taken: int)
+                                     (remaining: IRIndexType list) : IRIndexType list option =
+                            if taken = missing then Some acc
+                            elif taken > missing then None
+                            else
+                                match remaining with
+                                | [] -> None
+                                | ix :: rest -> peel (ix :: acc) (taken + ix.Rank) rest
+                        match peel [] 0 (List.rev at.IndexTypes) with
+                        | Some tDimEntries ->
+                            let trailing =
+                                tDimEntries |> List.map (fun (ix: IRIndexType) ->
+                                    match tryEvalIntIR ix.Extent with
+                                    | Some n -> (sprintf "%d" n, true)
+                                    | None -> (exprToCppCtx tempCtx ix.Extent, false))
+                            extentDims @ trailing
+                        | None -> extentDims
                     | _ -> extentDims
             let (extentDecls, ownedExtents) = emitExtentsTable ind extentsName outputRank extentDims
 
@@ -10960,7 +12897,7 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 match emitAllocRhs (classifyOutputStorage codeGen.OutputType)
                           outputElemType outputRank symmArg extentsName with
                 | Ok rhs -> rhs
-                | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+                | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
             let allocDecl = sprintf "%sArray<%s, %d> %s = %s;"
                                 ind outputElemType outputRank name allocRhs
 
@@ -11230,6 +13167,48 @@ let checkMergeCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGe
     | Some reason -> Error reason
     | None -> Ok primary
 
+/// checkMergeCompatible's rule for a REDUCTION JOIN. Same structural
+/// obligations (level count, bound dependencies, triangular offset, fused
+/// rank) with ONE relaxation: two legs may take their extent from DIFFERENT
+/// arrays. A join's legs are independent reductions that the SOURCE declared
+/// share an index space -- `prodsum(s, ct)` walks `s` while `prodsum(ct, ct)`
+/// walks `ct`'s source -- so requiring one array to name every level's extent
+/// would refuse the shape the feature exists for.
+///
+/// What is checked instead is exactly what `prodsum` has always checked over
+/// its own operands: a provable LITERAL disagreement is an error, an unknown
+/// extent is trusted, and the nest takes its bound from the leading leg. The
+/// typechecker performs the same comparison one level up (over index types)
+/// and refuses there first; this is the codegen-side backstop.
+let checkJoinCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGen, string> =
+    if leafCgs.IsEmpty then Error "no join legs" else
+    if leafCgs |> List.exists (fun cg -> cg.Bindings.IsEmpty) then
+        Error "a join leg has no loop levels (scalar reduction)"
+    else
+    let primary = leafCgs |> List.maxBy (fun cg -> cg.Bindings.Length)
+    let boundOk (a: LoopIndexBinding) (b: LoopIndexBinding) =
+        (match a.Extent, b.Extent with
+         | IRLit la, IRLit lb -> la = lb
+         | _ -> true)
+        && a.BoundDependencies = b.BoundDependencies
+        && a.StrictOffset = b.StrictOffset
+        && a.FusedRank = b.FusedRank
+    let incompat =
+        leafCgs |> List.tryPick (fun cg ->
+            if cg.Bindings.Length <> primary.Bindings.Length then
+                Some (sprintf "leg '%s' traverses %d loop level(s) and leg '%s' traverses %d -- every leg of a join folds the same cell grid"
+                          cg.OutputName cg.Bindings.Length primary.OutputName primary.Bindings.Length)
+            else
+                cg.Bindings
+                |> List.mapi (fun j b -> (j, b))
+                |> List.tryPick (fun (j, b) ->
+                    if boundOk primary.Bindings.[j] b then None
+                    else Some (sprintf "loop level %d of '%s' does not match '%s' (extent or triangular structure differs)"
+                                   j cg.OutputName primary.OutputName)))
+    match incompat with
+    | Some reason -> Error reason
+    | None -> Ok primary
+
 /// Generate ONE merged loop nest for a set of fusion leaves (<&!>, fusable
 /// <&>, and reduce over fused trees). Nest structure comes from the DEEPEST
 /// leaf (validated by checkMergeCompatible); each leaf's assignment emits at
@@ -11425,8 +13404,13 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                 if cg.HasReynolds && rr.UniqueTerms < rr.TotalPerms then
                     lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" rr.UniqueTerms rr.TotalPerms (rr.TotalPerms / max 1 rr.UniqueTerms)]
                 // Cell write for compute; accumulate-through-wrapper for the
-                // fused fold (scalar accumulators, no cell indexing).
+                // fused fold (scalar accumulators, no cell indexing); a
+                // per-iteration CONST for a reduction join's shared leaf,
+                // which every later leaf at this level reads by name.
                 let assign =
+                    match cg.ShareDecl with
+                    | Some elemCpp -> sprintf "const %s %s = %s;" elemCpp cg.OutputName rr.CppExpr
+                    | None ->
                     match cg.FoldWrapper with
                     | Some wname -> sprintf "%s = %s(%s, %s);" cg.OutputName wname cg.OutputName rr.CppExpr
                     | None ->
@@ -11814,7 +13798,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                 match emitAllocRhs (classifyOutputStorage cg.OutputType)
                           outputElemType outputRank symmArg extentsName with
                 | Ok rhs -> rhs
-                | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+                | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
             let allocDecl = sprintf "%sArray<%s, %d> %s = %s;"
                                 ind outputElemType outputRank lname allocRhs
             (match cg.OutputType with
@@ -12006,7 +13990,7 @@ let tryGenCudaSoftJoin (ctx: CodeGenContext) (name: string) (infos: ApplyInfo li
             match genCudaKernelSimplicial false true cg lname bs with
             | Some alloc -> Some (alloc, [List.head cg.InputArrayNames], lname)
             | None ->
-                genCudaKernel true cg lname bs
+                genCudaKernel true ctx.VarNames cg lname bs
                 |> Option.map (fun alloc -> (alloc, cg.InputArrayNames, lname)))
     if pieces |> List.exists Option.isNone then None
     else
@@ -12178,11 +14162,20 @@ let tupleLeafRanges (ty: IRType) : (int * int) list =
             range)
     | _ -> [(0, 1)]
 
-/// C++-side name for a binding. Anonymous tuple bindings ("_") get a unique
-/// synthesized name to avoid C++ redefinition errors. Shared by the binding
-/// dispatcher and every per-shape generator in its recursive chain.
+/// C++-side name a binding is DECLARED under. Anonymous tuple bindings ("_")
+/// get a unique synthesized name to avoid C++ redefinition errors. Shared by
+/// the binding dispatcher and every per-shape generator in its recursive chain.
+///
+/// Sanitized, because `addVarName` sanitizes every name it records and every
+/// consumer resolves through `ctx.VarNames`: a binding whose source name is a
+/// C++ reserved word (`let final = ...`, `let class = ...`) used to be declared
+/// raw here and referenced as `final_` / `class_` everywhere else, so the
+/// program either failed to compile at the declaration (`double class = ...`)
+/// or at the first use (`'final_' was not declared in this scope`). One
+/// spelling, decided here. `sanitizeCppName` is idempotent, so the second
+/// application inside `addVarName` is a no-op.
 let bindingCppName (binding: IRBinding) : string =
-    if binding.Name = "_" then sprintf "__tup_%d" binding.Id else binding.Name
+    if binding.Name = "_" then sprintf "__tup_%d" binding.Id else sanitizeCppName binding.Name
 
 /// Generate C++ code for an IR binding: the DISPATCHER.
 /// Each binding shape's emission lives in its own named `genXxxBinding`
@@ -12526,6 +14519,15 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genGuardBinding ctx binding builder body
     | IRSequence elems ->
         genSequenceBinding ctx binding builder elems
+    // `|> compute` on an ALREADY-EAGER whole-array form is the identity: negate
+    // and conjugate materialize a fresh pool by construction, so there is
+    // nothing deferred left to force. genComputeBinding's dispatch has no arm
+    // for either, so they fell through to the unsupported-node sentinel --
+    // `let n = -A` worked while `let n = -A |> compute` did not (and the same
+    // for conj, which has routed to IRArrayConjugate since before this change).
+    // Re-dispatch on the unwrapped form, which the arm above already handles.
+    | IRCompute ((IRArrayNegate _ | IRArrayConjugate _) as eager) ->
+        genBinding ctx { binding with Value = eager } builder
     | IRCompute inner ->
         genComputeBinding ctx binding builder inner
     | IRMethodFor _ ->
@@ -12622,6 +14624,9 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | other ->
         let ctx' = addVarName binding.Id name ctx
         let nodeType = other.GetType().Name
+        // Same classification as exprToCpp's catch-all: no arm for this shape
+        // in binding position is a back-end gap, reported as a Blade error.
+        recordUnhandledIRNode (sprintf "binding position (binding '%s')" name) nodeType
         (codegenError ctx ind (sprintf "unsupported expression for binding '%s' (IR node: %s)" name nodeType), ctx')
 
 // Module Generation
@@ -13856,7 +15861,7 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         let rank = extents.Length
         let nonLiteral = extents |> List.exists (fun e -> match e with IRLit (IRLitInt _) -> false | _ -> true)
         if nonLiteral then
-            ([sprintf "%s#error \"rand binding '%s' requires literal extents\"" ind name], addVarName binding.Id name ctx)
+            ([refusalErrorLine ind (sprintf "rand binding '%s' requires literal extents" name)], addVarName binding.Id name ctx)
         else
             let extentTerms = extents |> List.map (fun e -> match e with IRLit (IRLitInt n) -> string n | _ -> "0")
             let extentsName = sprintf "%s_extents" name
@@ -13882,7 +15887,7 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                     ind kind name card (exprToCpp ctx.VarNames keyExpr) weightsArgs parArgs
             ([extentsArr; allocLine; fillLine], addVarName binding.Id name ctx)
     | _ ->
-        ([sprintf "%s#error \"rand binding '%s' is not an array type\"" ind name], addVarName binding.Id name ctx)
+        ([refusalErrorLine ind (sprintf "rand binding '%s' is not an array type" name)], addVarName binding.Id name ctx)
 
 and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -13914,7 +15919,7 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
                  arrTy.IndexTypes |> List.mapi (fun i idx ->
                      match idx.Extent with
                      | IRLit (IRLitInt n) -> sprintf "%ssize_t %s_extent_%d = %d;" ind name i n
-                     | _ -> sprintf "%s#error \"fill_random binding '%s' has a non-literal extent at dim %d\"" ind name i)
+                     | _ -> refusalErrorLine ind (sprintf "fill_random binding '%s' has a non-literal extent at dim %d" name i))
              let extentsArr = sprintf "%ssize_t %s_extents[] = { %s };" ind name (String.concat ", " extentNames)
              let allocLine =
                  sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
@@ -13927,7 +15932,7 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
              // COUPLED (A(i,j) = conj(A(j,i))): independent pool draws would
              // violate the invariant, so hermitian fill needs a canonical-
              // half fill + mirrored conjugation -- not yet emitted.
-             ([sprintf "%s#error \"fill_random binding '%s': HermitianIdx is not supported (stored cells are constraint-coupled)\"" ind name],
+             ([refusalErrorLine ind (sprintf "fill_random binding '%s': HermitianIdx is not supported (stored cells are constraint-coupled)" name)],
               addVarName binding.Id name ctx)
          else
              // GENERALIZED fill (arc 3, formalism 3.5): one draw per STORED
@@ -13943,7 +15948,7 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
              let nonLiteral =
                  componentExtents |> List.exists (fun e -> match e with IRLit (IRLitInt _) -> false | _ -> true)
              if nonLiteral then
-                 ([sprintf "%s#error \"fill_random binding '%s' requires literal extents\"" ind name],
+                 ([refusalErrorLine ind (sprintf "fill_random binding '%s' requires literal extents" name)],
                   addVarName binding.Id name ctx)
              else
                  let extentTerms =
@@ -13958,7 +15963,7 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
                  let allocLines =
                      match emitAllocRhs (classifyOutputStorage binding.Type) elemCpp rank symmArg extentsName with
                      | Ok rhs -> [sprintf "%sArray<%s, %d> %s = %s;" ind elemCpp rank name rhs]
-                     | Error msg -> [sprintf "%s#error \"fill_random '%s': %s\"" ind name msg]
+                     | Error msg -> [refusalErrorLine ind (sprintf "fill_random '%s': %s" name msg)]
                  let poolCount =
                      deviceBufferCardinality (deviceBufferTypeOfArray arrTy)
                      |> exprToCpp ctx.VarNames
@@ -13968,7 +15973,7 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
                            ind poolCount elemCpp (exprToCpp ctx.VarNames modExpr) ]
                  (extentsArr :: allocLines @ fillLines, addVarName binding.Id name ctx)
      | _ ->
-         ([sprintf "%s#error \"fill_random binding '%s' is not an array type\"" ind name], addVarName binding.Id name ctx))
+         ([refusalErrorLine ind (sprintf "fill_random binding '%s' is not an array type" name)], addVarName binding.Id name ctx))
 
 
 and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
@@ -14043,7 +16048,7 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          registerShapedAlloc name "deallocate_compound" name
          (lines, addVarName binding.Id name ctx)
      | _ ->
-         ([sprintf "%s#error \"compound() binding '%s' is not a CompoundIdx array type\"" ind name], addVarName binding.Id name ctx))
+         ([refusalErrorLine ind (sprintf "compound() binding '%s' is not a CompoundIdx array type" name)], addVarName binding.Id name ctx))
 
 and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -14077,7 +16082,7 @@ and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string lis
              | IRSparseKeys (SkStatic _ as src) -> genSparseIndexFromKeys src None leadRank idxName
              | IRSparseKeys (SkRuntime (IRVar (kid, _)) as src) ->
                  genSparseIndexFromKeys src (Map.tryFind kid ctx.VarNames) leadRank idxName
-             | _ -> [ sprintf "#error \"sparse() binding '%s': keys source is not a SparseIdx extent\"" name ]
+             | _ -> [ refusalErrorLine "" (sprintf "sparse() binding '%s': keys source is not a SparseIdx extent" name) ]
          let trailTerms =
              [ for d in 1 .. trailingDimCount -> sprintf "%s.extents[%d]" valuesName d ]
          let trailExpr = match trailTerms with | [] -> "1" | xs -> String.concat " * " xs
@@ -14093,7 +16098,7 @@ and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string lis
          registerShapedAlloc name "deallocate_sparse" name
          (lines, addVarName binding.Id name ctx)
      | _ ->
-         ([sprintf "%s#error \"sparse() binding '%s' is not a SparseIdx array type\"" ind name], addVarName binding.Id name ctx))
+         ([refusalErrorLine ind (sprintf "sparse() binding '%s' is not a SparseIdx array type" name)], addVarName binding.Id name ctx))
 
 
 /// Rearrangement combinators (group_by, sort, mask, transpose, decompact,
@@ -14278,18 +16283,25 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // the surviving cells of a mask). gk__perm indexes the same COMPACT order
     // the key scan walked, so the gather just needs the matching accessor.
     let (_, valsAt) = compactOrDenseSource vals valsName
-    let code = elemErrCode @ [
-        sprintf "%s// group_by: per-group nested allocation, group-contiguous via gk__perm" ind
-        sprintf "%ssize_t %s_extents[2] = {%s__ngroups, 0}; // inner extent is ragged" ind name gkName
-        sprintf "%sArray<%s*, 1> %s = { new %s*[%s__ngroups], %s_extents };" ind elemStr name elemStr gkName name
-        sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
-        sprintf "%s    size_t __sz = %s__offsets[__g + 1] - %s__offsets[__g];" ind gkName gkName
-        sprintf "%s    %s[__g] = new %s[__sz];" ind name elemStr
-        sprintf "%s    for (size_t __k = 0; __k < __sz; __k++) {" ind
-        sprintf "%s        %s[__g][__k] = %s;" ind name (valsAt (sprintf "%s__perm[%s__offsets[__g] + __k]" gkName gkName))
-        sprintf "%s    }" ind
-        sprintf "%s}" ind
-    ]
+    // Heap extents, not a frame-local `size_t[2]`: `Array<T*,1>` stores only a
+    // POINTER to the table, so a grouped array that is RETURNED (or otherwise
+    // outlives this frame) would hand its consumer a dangling shape. Same
+    // return-extent ABI the peel emitters follow; see emitExtentsTable.
+    let extentsDecl =
+        fst (emitExtentsTable ind (name + "_extents") 2
+                 [(sprintf "%s__ngroups" gkName, false); ("0 /* inner extent is ragged */", false)])
+    let code =
+        elemErrCode
+        @ [ sprintf "%s// group_by: per-group nested allocation, group-contiguous via gk__perm" ind ]
+        @ extentsDecl
+        @ [ sprintf "%sArray<%s*, 1> %s = { new %s*[%s__ngroups], %s_extents };" ind elemStr name elemStr gkName name
+            sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
+            sprintf "%s    size_t __sz = %s__offsets[__g + 1] - %s__offsets[__g];" ind gkName gkName
+            sprintf "%s    %s[__g] = new %s[__sz];" ind name elemStr
+            sprintf "%s    for (size_t __k = 0; __k < __sz; __k++) {" ind
+            sprintf "%s        %s[__g][__k] = %s;" ind name (valsAt (sprintf "%s__perm[%s__offsets[__g] + __k]" gkName gkName))
+            sprintf "%s    }" ind
+            sprintf "%s}" ind ]
     // Owns the row table AND every per-group row (each a separate new[]).
     // The wrapper is Array<T*,1> whose .extents[1] is the ragged placeholder
     // 0, so the row count comes from the gk__ngroups local -- a plain size_t
@@ -14885,6 +16897,13 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     (prelude @ code, outCtx)
 
 and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
+    // THE JOIN ENCODING (IR.fs, IRReduceCompute): tuple kernel + tuple seed =
+    // one fold per leg. Routed to its own emitter, because everything below
+    // this line assumes ONE fold callable shared by every leaf.
+    match kernelExpr, seedExpr with
+    | IRTuple kernels, IRTuple seeds when kernels.Length = seeds.Length && kernels.Length >= 2 ->
+        genReduceJoinCore ctx binding builder compExpr kernels seeds
+    | _ ->
     let ind = indentStr ctx
     let name = bindingCppName binding
     // The fused reduction terminal: reduce(deferred, op[, init]). Fold every
@@ -15319,6 +17338,216 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
 
 
 
+/// REDUCTION JOIN (docs/plan-reduction-joins.md): k reductions, one traversal,
+/// a flat tuple of k accumulators. The shape is the fused tree's -- one merged
+/// nest, one scalar accumulator per leaf, `make_tuple` at the end -- with two
+/// things the shared-fold tree does not have:
+///
+///   PER-LEG FOLDS. Each leg brings its own kernel wrapper, its own seed, and
+///   its own accumulator type, because a join's legs are independent
+///   reductions (`prodsum` folds `(+)` from 0; `reduce(x, max, -inf)` folds a
+///   lambda from a user seed) that only agree on WHERE they iterate.
+///
+///   SHARING BY NAMING. A leg operand that is a named DEFERRED map -- `let ct
+///   = cos <@> ph`, never forced -- becomes a per-iteration `const` computed
+///   ONCE in the joint nest, and every leg reading that name reads the local.
+///   The declaration is the NAME: nothing is deduced about what the legs
+///   compute, only that they spell the same binding. A `|> compute`d operand
+///   is an array and keeps today's behavior (read from memory).
+///
+/// The rewrite that makes sharing work is small and local: a consumer leg's
+/// deferred operand slot is repointed at the deferred map's OWN source array
+/// (so the level's extent and peel name exist in C++, and dedup with the share
+/// leaf's peel), and the kernel param that slot bound is substituted for a
+/// reference to the deferred binding -- whose emitted name is exactly the
+/// shared local's. Nothing else in the nest emitter needs to know.
+and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder)
+                      (compExpr: IRExpr) (kernelExprs: IRExpr list) (seedExprs: IRExpr list)
+                      : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let rec resolveDeferred e =
+        match e with
+        | IRVar (id, _) ->
+            (match Map.tryFind id ctx.DeferredComputations with
+             | Some d -> resolveDeferred d
+             | None -> e)
+        | _ -> e
+    let rec collectLeaves e =
+        match resolveDeferred e with
+        | IRFusion (l, r) -> collectLeaves l @ collectLeaves r
+        | other -> [other]
+    let leaves = collectLeaves compExpr
+    let infos = leaves |> List.choose (function IRApplyCombinator i -> Some i | _ -> None)
+    let ctx' = addVarName binding.Id name ctx
+    if infos.Length <> leaves.Length || infos.Length <> kernelExprs.Length then
+        (codegenError ctx ind "reduction join: every leg must resolve to an unforced kernel application (typechecker or IR bug if not)", ctx')
+    else
+    let unsupportedInput =
+        infos |> List.exists (fun info ->
+            info.ArrayTypes |> List.exists (fun at ->
+                at.IndexTypes |> List.exists (fun ix ->
+                    isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKDepInner
+                    || ix.IxKind = IxKGroupOuter || ix.IxKind = IxKCompound)))
+    if unsupportedInput then
+        (codegenError ctx ind "reduction join over ragged/grouped/compound inputs is not supported yet -- force the legs with |> compute and reduce the arrays", ctx')
+    else
+    let deviceLeaf =
+        infos |> List.tryPick (fun info ->
+            match classifyLeafBackend info with
+            | BkCuda _ -> Some "cuda" | BkMpi -> Some "mpi" | _ -> None)
+    match deviceLeaf with
+    | Some bk ->
+        (codegenError ctx ind (sprintf "reduction join with a %s leg: device/parallel reductions over a joined traversal are not supported yet -- force the leg with |> compute and reduce the array" bk), ctx')
+    | None ->
+    let callables = kernelExprs |> List.map resolveCallable
+    if callables |> List.exists (fun c -> match c with Some cb -> cb.Params.Length <> 2 | None -> true) then
+        (codegenError ctx ind "reduction join: every leg's fold kernel must resolve to a binary callable (typechecker or IR bug if not)", ctx')
+    else
+    let callables = callables |> List.map Option.get
+    // ---- SHARED DEFERRED OPERANDS -----------------------------------------
+    // A leg operand that resolves (through the binding) to another unforced
+    // apply. Distinct ids, in first-use order: that order is the order the
+    // share leaves are emitted in, and a shared value must be declared before
+    // the leg that reads it.
+    let deferredOperand (e: IRExpr) : (IRId * ApplyInfo) option =
+        match e with
+        | IRVar (id, _) ->
+            (match Map.tryFind id ctx.DeferredComputations with
+             | Some (IRApplyCombinator dinfo) -> Some (id, dinfo)
+             | _ -> None)
+        | _ -> None
+    let sharedIds =
+        infos
+        |> List.collect (fun info -> info.Arrays |> List.choose deferredOperand)
+        |> List.fold (fun acc (id, di) -> if acc |> List.exists (fun (i, _) -> i = id) then acc else acc @ [(id, di)]) []
+    let badShare =
+        sharedIds |> List.tryPick (fun (id, di) ->
+            let who = Map.tryFind id ctx.VarNames |> Option.defaultValue "<anon>"
+            if di.Arrays.IsEmpty then
+                Some (sprintf "shared deferred operand '%s' has no array source to take its traversal from" who)
+            // A deferred map OVER a deferred map: the share leaf would name an
+            // operand that has no C++ definition either. One level only.
+            elif di.Arrays |> List.exists (fun a -> (deferredOperand a).IsSome) then
+                Some (sprintf "shared deferred operand '%s' reads another deferred computation; only one level of sharing is supported" who)
+            else None)
+    match badShare with
+    | Some reason ->
+        (codegenError ctx ind (sprintf "reduction join: %s -- force it with |> compute and join over the array" reason), ctx')
+    | None ->
+    let sharedName (id: IRId) = Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "__jshr%d" id)
+    let arrayNamesOf (info: ApplyInfo) =
+        info.Arrays |> List.mapi (fun i arr ->
+            match arr with
+            | IRVar (id, _) ->
+                (match sharedIds |> List.tryFind (fun (sid, _) -> sid = id) with
+                 // A deferred operand keeps the SOURCE array's name: the slot
+                 // has already been repointed at it below.
+                 | Some (_, di) ->
+                    (match di.Arrays.Head with
+                     | IRVar (srcId, _) -> Map.tryFind srcId ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
+                     | _ -> sprintf "arr%d" i)
+                 | None -> Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i))
+            | IRRange _ -> sprintf "__range%d" i
+            | IRVirtualReverse _ -> sprintf "__rev%d" i
+            | IRBlocked _ -> sprintf "__blk%d" i
+            | _ -> sprintf "arr%d" i)
+    /// Repoint every deferred operand slot at the deferred map's own leading
+    /// source array, so the level's bound and peel name exist in C++ (and
+    /// dedup with the share leaf's identical peel). Which slots were repointed
+    /// is returned, so the kernel params they bound can be substituted.
+    let repoint (info: ApplyInfo) : ApplyInfo * (int * IRId) list =
+        let mutable moved = []
+        let arrays =
+            info.Arrays |> List.mapi (fun pos a ->
+                match deferredOperand a with
+                | Some (id, di) ->
+                    moved <- moved @ [(pos, id)]
+                    di.Arrays.Head
+                | None -> a)
+        let arrayTypes =
+            info.ArrayTypes |> List.mapi (fun pos t ->
+                match List.tryItem pos info.Arrays |> Option.bind deferredOperand with
+                | Some (_, di) -> (match List.tryHead di.ArrayTypes with Some dt -> dt | None -> t)
+                | None -> t)
+        ({ info with Arrays = arrays; ArrayTypes = arrayTypes }, moved)
+    /// Replace every reference to `fromId` with `toExpr`, everywhere.
+    let rec substVar (fromId: IRId) (toExpr: IRExpr) (e: IRExpr) : IRExpr =
+        match e with
+        | IRVar (id, _) when id = fromId -> toExpr
+        | ExprShape (children, rebuild) ->
+            if children.IsEmpty then e else rebuild (children |> List.map (substVar fromId toExpr))
+    // ---- Share leaves ------------------------------------------------------
+    let shareCgs =
+        sharedIds |> List.map (fun (id, di) ->
+            let shName = sanitizeCppName (sharedName id)
+            let elemCpp =
+                match inferExprType (IRApplyCombinator di) with
+                | ArrayElem at -> elemTypeToCpp at.ElemType
+                | IRTScalar et -> primTypeToCpp et
+                | t -> irTypeToCpp t
+            let cg = routeKernelBodyThroughCall di (buildLoopNestCodeGen di (arrayNamesOf di) shName builder)
+            { cg with ShareDecl = Some elemCpp })
+    // ---- Leg leaves --------------------------------------------------------
+    // One wrapper per leg, never deduplicated: two legs folding the same
+    // operator get two identical lambdas, which costs a line of text and keeps
+    // the wrapper name a pure function of the leg index.
+    let wrappers =
+        callables |> List.mapi (fun i cb -> genCallableWrapper ctx.VarNames (sprintf "%s_j%d" name i) cb)
+    let wnames = wrappers |> List.map snd
+    let sharedElemTy (id: IRId) =
+        match sharedIds |> List.tryFind (fun (sid, _) -> sid = id) with
+        | Some (_, di) ->
+            (match inferExprType (IRApplyCombinator di) with
+             | ArrayElem at -> at.ElemType
+             | t -> t)
+        | None -> IRTScalar ETFloat64
+    let leafNames = infos |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+    let leafCgs =
+        List.mapi (fun i (info: ApplyInfo) ->
+            let (info', moved) = repoint info
+            let cg0 = routeKernelBodyThroughCall info' (buildLoopNestCodeGen info' (arrayNamesOf info') leafNames.[i] builder)
+            // Every param bound by a repointed slot now reads the SHARED local
+            // instead of the source cell. The deferred binding's own id renders
+            // through ctx.VarNames as exactly the share leaf's output name.
+            let kernelExpr =
+                moved |> List.fold (fun body (pos, sid) ->
+                    let paramIds =
+                        cg0.Bindings
+                        |> List.collect (fun b -> b.Elements)
+                        |> List.filter (fun el -> el.ArrayPosition = pos)
+                        |> List.map (fun el -> el.ParamVarId)
+                    paramIds |> List.fold (fun acc pid ->
+                        substVar pid (IRVar (sid, sharedElemTy sid)) acc) body) cg0.KernelExpr
+            { cg0 with KernelExpr = kernelExpr
+                       OutputType = callables.[i].RetType
+                       FoldWrapper = Some wnames.[i] })
+            infos
+    match checkJoinCompatible (shareCgs @ leafCgs) with
+    | Error reason ->
+        (codegenError ctx ind (sprintf "reduction join: cannot fold the legs in one traversal: %s" reason), ctx')
+    | Ok _ ->
+        let wrapperLines = wrappers |> List.collect fst |> List.map (fun s -> ind + s)
+        let elemStrs =
+            callables |> List.map (fun cb ->
+                match cb.RetType with
+                | IRTScalar et -> primTypeToCpp et
+                | t -> irTypeToCpp t)
+        let declCode =
+            List.mapi (fun i ln ->
+                sprintf "%s%s %s = %s;" ind elemStrs.[i] ln (exprToCppCtx ctx seedExprs.[i])) leafNames
+        let allCgs = shareCgs @ leafCgs
+        let (sm, sp, sNew) = streamedNestSetup ctx.StreamedArrays ind allCgs
+        registerStreamBufDecls sNew
+        let loopCode = sp @ genFusedLoopNestStreamed sm allCgs ctx.VarNames ctx.Indent false None
+        let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (leafNames |> String.concat ", ")
+        let shareNote =
+            if sharedIds.IsEmpty then []
+            else [ sprintf "%s// reduction join: %d leg(s), sharing %s per iteration" ind leafNames.Length
+                       (sharedIds |> List.map (fst >> sharedName) |> String.concat ", ") ]
+        let ctxOut = { ctx' with TupleChildren = Map.add name leafNames ctx'.TupleChildren }
+        (wrapperLines @ shareNote @ declCode @ loopCode @ [tupleLine], ctxOut)
+
 and genTupleProjBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (parentExpr: IRExpr) (projIdx: int) (isFlat: bool) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -15458,7 +17687,7 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                     | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
                 |> String.concat ", "
             let regularArgs = callable.Params |> List.map (fun p -> p.Name)
-            let captureArgs = callable.Captures |> List.map (captureForwardName ctx.VarNames)
+            let captureArgs = captureForwardArgs ctx.VarNames callable.Captures
             let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
             // Wrapper type: `std::function<Ret(P1, P2, ...)>`. Explicit
             // type per the codegen convention (auto reserved for thin
@@ -15741,6 +17970,13 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     let innerCtx = addVarName vid varName ctx
     // Unroll the body IRLet chain into statements
     let (bodyLets, _bodyFinal) = unrollLetChain body
+    // FreshPool calls in ARGUMENT position get their own lets here exactly as
+    // in genFuncBody, so a per-iteration `g(f(x))` temporary is registered
+    // and recycled instead of leaking once per trip.
+    let bodyLets =
+        bodyLets |> List.collect (fun (id, v) ->
+            let (hv, v') = hoistFreshPoolCallArgs builder v
+            hv @ [(id, v')])
     // Deterministic deallocation: ONE loop-body frame, pushed AFTER
     // forceDeferredPositionalReads above (whose materializations belong to the
     // OUTER scope and must not be freed per iteration). Registrations always land
@@ -15819,14 +18055,107 @@ and genLetChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
             let (code, ctx') = genBinding accCtx tempBinding builder
             (accCode @ code, ctx')
         ) ([], ctx)
-    // Generate the final named binding
+    // Generate the final named binding.
+    //
+    // Double-materialize elision: a chain whose VALUE is a bare reference to
+    // one of its own inner lets (`{ let buf = zeros(...); ...; buf }` -- the
+    // recursive-array elaboration's exact shape) would otherwise go through
+    // genVarAliasBinding's assignability deep copy, leaving BOTH the staging
+    // buffer and the copy live for the rest of the program, since module
+    // bindings are never scope-freed: 2x the footprint of every `let rec`
+    // trajectory (~1.5 GB of 09_qg_atmosphere's residency, measured). The
+    // staging let is block-scoped -- no name outside this chain can reach
+    // it -- so the final binding may ALIAS its wrapper instead, under
+    // canAliasStagingLet's three conditions (sole-owned fresh pool, no assign
+    // leaking it out of the chain, no rival alias).
+    //
+    // The original form also required an EMPTY alloc-scope stack, on the
+    // reasoning that a function/loop frame's registration plus escape analysis
+    // already recycled the block. That gate is gone: it is the frame case that
+    // leaks hardest (a `let rec` built inside a function is re-materialized on
+    // EVERY call), and the alias changes nothing the frame reasons about --
+    // both the staging alloc and the elided copy carry the same owner stamp
+    // (setAllocOwner is per OUTER let), so the frame simply tracks one
+    // allocation instead of two.
+    let aliasableStagingRef =
+        match finalExpr with
+        | IRVar (srcId, _) -> canAliasStagingLet lets None srcId
+        | _ -> false
     let finalBinding = {
         Id = binding.Id; Name = name; Type = binding.Type
-        Value = finalExpr; IsConst = binding.IsConst; IsMutable = binding.IsMutable
+        Value = finalExpr; IsConst = binding.IsConst
+        // Dropping the mutability marks routes genVarAliasBinding to its
+        // plain-alias arm; assignment through the binding then writes the
+        // sole-owner staging pool, which is observationally identical.
+        IsMutable = binding.IsMutable && not aliasableStagingRef
     }
-    let (finalCode, finalCtx) = genBinding foldCtx finalBinding builder
+    // A block-local `let rec` arrives here with its id in MutableArrayLets
+    // (every block array let is assignable), which genVarAliasBinding checks
+    // INDEPENDENTLY of IsMutable -- lift the membership for the final bind
+    // only, restoring the caller-visible set afterwards.
+    let foldCtxForFinal =
+        if aliasableStagingRef
+        then { foldCtx with MutableArrayLets = Set.remove binding.Id foldCtx.MutableArrayLets }
+        else foldCtx
+    let (finalCode, finalCtx) = genBinding foldCtxForFinal finalBinding builder
+    let finalCtx =
+        if aliasableStagingRef
+        then { finalCtx with MutableArrayLets = foldCtx.MutableArrayLets }
+        else finalCtx
     (forceCode @ allCode @ finalCode, finalCtx)
 
+
+/// Re-spell a FLAT tuple local as the NESTED shape the function's declared C++
+/// return type has, or hand back `flatName` unchanged when there is nothing to
+/// reconcile.
+///
+/// Two conventions meet at a `return`, and only here do they have to agree on
+/// one C++ TYPE rather than merely on which leaf is which:
+///   - every fusion emitter builds ONE FLAT tuple (`std::make_tuple(t_0, t_1,
+///     t_2)`) and registers its leaf names in ctx.TupleChildren;
+///   - the function's C++ signature is `irTypeToCpp` of the IR type, which is
+///     the LEFT-NESTED pair tree `<&!>`/`<&>` parse -- `std::tuple<std::tuple<
+///     double, double>, double>` for three legs.
+/// Inside a body that mismatch is invisible (a destructure resolves through
+/// TupleChildren and never names the tuple); across the call boundary it is a
+/// hard type error in the CALLEE -- returning a flat 3-tuple as a nested one.
+/// Two legs are exempt because nested and flat coincide at width 2, which is
+/// why this only ever showed up at three.
+///
+/// Rebuilding at the return keeps the FLAT convention everywhere the emitters
+/// own (accumulators, TupleChildren, destructures) and pays the one nesting
+/// exactly where the ABI demands it. The caller needs no change: its
+/// destructure already navigates the nested declared type (TypeCheck's
+/// flatTupleLeafPaths and CodeGen's flat IRTupleProj arm agree on that path),
+/// which is precisely why it was the RETURN that was wrong, not the read.
+///
+/// Applicability is deliberately narrow -- a registered flat-children entry
+/// whose width equals the type's leaf count. A genuine nested `IRTuple` value
+/// registers no children and renders nested already, so it falls through.
+let private nestedTupleReturn (retTy: IRType) (flatName: string) (children: Map<string, string list>) : string =
+    let isNested =
+        match retTy with
+        | IRTTuple ts -> ts |> List.exists (function IRTTuple _ -> true | _ -> false)
+        | _ -> false
+    match (if isNested then Map.tryFind flatName children else None) with
+    | Some leaves when leaves.Length = (IR.flattenTupleLeaves retTy).Length ->
+        // Consume leaf names left-to-right along the type's structure -- the
+        // same order flattenTupleLeaves produces them in, so leaf i of the
+        // emission lands at leaf i of the type by construction.
+        let rec build (ty: IRType) (remaining: string list) : string * string list =
+            match ty with
+            | IRTTuple ts ->
+                let (parts, rest) =
+                    ts |> List.fold (fun (acc, rem) t ->
+                        let (s, rem') = build t rem
+                        (acc @ [s], rem')) ([], remaining)
+                (sprintf "std::make_tuple(%s)" (parts |> String.concat ", "), rest)
+            | _ ->
+                match remaining with
+                | l :: rest -> (l, rest)
+                | [] -> (flatName, [])   // width-checked above; unreachable
+        fst (build retTy leaves)
+    | _ -> flatName
 
 /// Function-body emission proper: the per-let statement fold plus the return-arm
 /// dispatch, over an already-unrolled let chain. Split out of genFuncBody so the
@@ -15846,6 +18175,31 @@ let private genFuncBodyScoped
     // dropping them makes `method_for(zip(gt, gs))` inside a function body
     // fall past the peel into the multi-array refusal.
     let mutable currentGrouped = ctx.GroupedArrays
+    // Deferred computations bound by THIS body's lets. Only a REDUCTION-JOIN
+    // operand gets to stay deferred inside a body (S2 forces everything else,
+    // and the arm below is a hard error for anything that arrives unforced
+    // without being one); the join's emitter resolves the operand through this
+    // map to inline it as a shared per-iteration local.
+    let mutable currentDeferred = ctx.DeferredComputations
+    // Ids S2 deliberately left unforced: bound to a bare combinator and read
+    // ONLY as a join operand. Computed over the whole body at once, because
+    // the accounting that makes the exemption safe is global.
+    let joinDeferredIds = Blade.Lowering.joinDeferrableIdsMany ((lets |> List.map snd) @ [retExpr])
+    // Flat-tuple child names registered by THIS body's lets, threaded for the
+    // same reason as currentGrouped above. EVERY tuple this file emits is FLAT
+    // (`std::make_tuple(x_0, x_1, x_2)` -- tryGenMergedCompute, genParallelTree
+    // and genReduceComputeBinding's fused arm all share that convention), while
+    // the tuple's IR TYPE is the left-nested pair tree the `<&!>`/`<&>` parse
+    // built. TupleChildren is what reconciles the two: a destructure resolves
+    // through it straight to the accumulator names. Dropping it sent the
+    // projection to genScalarBinding's std::get fallback, which navigates the
+    // NESTED type -- `std::get<0>(std::get<0>(t))` against a flat 3-tuple, an
+    // uncompilable C++ that only two leaves (where nested == flat) survived.
+    //
+    // A REDUCTION JOIN (`object_for(<&!>) <@> (...)`) answers a flat Tuple<k>
+    // and so never needs this reconciliation; the binary `<&!>` chain, whose
+    // typing IS nested, still does.
+    let mutable currentTupleChildren = ctx.TupleChildren
     // Indentation for genApplyCombinator emissions: the function body lives one
     // level deeper than the function declaration's ctx.Indent.
     let bodyIndent = ctx.Indent + 1
@@ -15906,7 +18260,7 @@ let private genFuncBodyScoped
             // exactly as they do at module level. The old inline renderer
             // here was flat: a nested IRForRange fell through exprToCpp and
             // emitted an unsupported-expression marker.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = IRTUnit
                 Value = value; IsConst = true; IsMutable = false
@@ -15946,10 +18300,20 @@ let private genFuncBodyScoped
             // Materialize it here, through the same statement-form path the
             // `|> compute` arm below uses, or the read names an identifier
             // this arm never declared.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; TupleChildren = currentTupleChildren }
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
+        | IRApplyCombinator _ when Set.contains id joinDeferredIds ->
+            // REDUCTION-JOIN OPERAND: the one body-level let that legitimately
+            // stays deferred. A later join in this same body inlines it as a
+            // per-iteration `const` in the joint nest, so materializing it here
+            // would build (and read back) a whole array per outer cell -- the
+            // cost the join exists to remove. Nothing else may read it: S2's
+            // exemption only fires when every reference is a join operand.
+            currentNames <- Map.add id varName currentNames
+            currentDeferred <- Map.add id value currentDeferred
+            [sprintf "%s// %s = <deferred computation (reduction-join operand)>" indent varName]
         | IRApplyCombinator _ | IRComposeApply _ ->
             // WAS: "unevaluated computations -- deferred until |> compute forces
             // them", registering the name and emitting NOTHING. That premise is
@@ -15984,7 +18348,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // not visible in the enclosing scope) and only handles the 2-array
             // accumulation form anyway. Routing through genApplyCombinator here
             // mirrors what genBinding does at the module level.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
@@ -15995,12 +18359,13 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // peels the IRCompute and routes to genComposeApply -- the same
             // statement form module level uses. exprToCpp has no expression
             // rendering for it.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRReduceCompute _ ->
@@ -16009,12 +18374,22 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // accumulators and a loop nest -- so it routes through genBinding's
             // genReduceComputeBinding exactly as at module level. exprToCpp has
             // no expression form for it and would emit its sentinel.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            //
+            // `currentDeferred` (not ctx's map) so a REDUCTION JOIN can resolve
+            // an operand this body left deferred and share it per iteration.
+            // `currentTupleChildren` so a binary-chain join's destructure
+            // resolves to the per-leaf accumulator names rather than std::get
+            // on its nested type.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent
+                                     GroupedArrays = currentGrouped
+                                     DeferredComputations = currentDeferred
+                                     TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRApp (IRObjectFor _, _, _) ->
@@ -16024,12 +18399,43 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // at module level. Capture forwarding for the kernel resolves
             // through currentNames (the hoisted scalar lets precede this
             // entry in dependency order).
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
+            currentNames <- Map.add id varName currentNames
+            code
+        | _ when (let rec chainTail e =
+                      match e with
+                      | IRCompute inner | IRLet (_, _, inner) -> chainTail inner
+                      | e -> e
+                  match chainTail value with
+                  | IRApp (IRObjectFor _, _, _) -> true
+                  | _ -> false) ->
+            // An IRLet-WRAPPED loop application (possibly under the user's
+            // `|> compute`): the direct-lowered scalar<*>array broadcast form,
+            // `IRLet(s, scalar, IRApp(IRObjectFor kernel, [A]))`. It arises in
+            // a body when the scalar side is an unresolved kernel param at
+            // typing time (the `scalarish` gate skips the compute re-synthesis
+            // -- see Lowering's broadcast arm), so none of the IRCompute(...)
+            // arms above match. The default arm's inline rendering walks into
+            // the chain and hits exprToCpp's loop-object sentinel; module
+            // level routes the identical shape through genLetChainBinding.
+            // Do the same here, stripping a leading IRCompute first (compute
+            // over an already-eager chain is the identity -- computeWrap's
+            // rule, which does not reach this form because the wrap sits
+            // OUTSIDE the let chain).
+            let bare = (match value with IRCompute inner -> inner | v -> v)
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType bare
+                Value = bare; IsConst = false; IsMutable = true
+            }
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRArrayLit _ ->
@@ -16038,12 +18444,13 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // IRArrayLit arm emits the statement form (extents + allocate +
             // per-element init). The default arm's exprToCpp has no inline
             // rendering for array literals.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRVar _ when Set.contains id ctx.MutableArrayLets ->
@@ -16051,12 +18458,32 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // genBinding so genVarAliasBinding's mut-copy path runs (fresh
             // alloc + pool copy). The default arm's `auto` alias would share
             // Z's storage and let mutations through `a` corrupt it.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            //
+            // UNLESS Z is a scope-local staging let that solely owns a fresh
+            // pool (canAliasStagingLet): nothing else names that storage, so
+            // there is no Z to corrupt and the copy is the same double
+            // materialization genLetChainBinding elides at module level. A
+            // `let rec` written INSIDE a function body arrives here rather than
+            // at genLetChainBinding because genFuncBody's deepUnroll flattens
+            // the block's chain into this let list, leaving the block's value
+            // as an ordinary `let traj = <staging>` sibling. Suppressing the
+            // marks routes genVarAliasBinding to its plain-alias arm; it checks
+            // MutableArrayLets independently of IsMutable, so both must go.
+            let aliasStaging =
+                match value with
+                | IRVar (srcId, _) -> canAliasStagingLet lets (Some id) srcId
+                | _ -> false
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            let bodyCtx =
+                if aliasStaging
+                then { bodyCtx with MutableArrayLets = Set.remove id bodyCtx.MutableArrayLets }
+                else bodyCtx
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
-                Value = value; IsConst = false; IsMutable = true
+                Value = value; IsConst = false; IsMutable = not aliasStaging
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | (IRReduce _ | IRCompute (IRReduce _)) when
@@ -16071,13 +18498,14 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // The default arm's inline exprToCpp rendering only serves the
             // SCALAR fold (a self-contained IIFE), which is why scalar reduces
             // deliberately stay below.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName
                 Type = inferExprType (match value with IRCompute e -> e | e -> e)
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, _) = genBinding bodyCtx tempBinding builder
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRGroupKeys _ | IRGroupBy _ ->
@@ -16114,13 +18542,40 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                     }
                     IRTGroupKeys (dynIdx, dynIdx, None)
                 | _ -> inferExprType value
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = tempType
                 Value = value; IsConst = false; IsMutable = true
             }
             let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
             currentGrouped <- ctxAfter.GroupedArrays
+            currentTupleChildren <- ctxAfter.TupleChildren
+            currentNames <- Map.add id varName currentNames
+            code
+        | IRTupleProj _ ->
+            // Destructure of a tuple bound EARLIER IN THIS BODY -- the
+            // `let (sc, ss, cc) = reduce(k1 <&!> k2 <&!> k3, (+))` shape, whose
+            // producer is the fused-reduce arm above. Route through genBinding
+            // (genTupleProjBinding) so the projection resolves through the
+            // currentTupleChildren threaded from that producer, straight to the
+            // per-leaf accumulator names -- exactly what module level does.
+            //
+            // The default arm below renders IRTupleProj inline instead, and
+            // inline rendering has only the tuple's IR TYPE to navigate: it
+            // walks the nested pair tree the `<&!>` parse built and emits
+            // `std::get<0>(std::get<0>(t))` against a FLAT `std::make_tuple`.
+            // Two leaves survived that (nested and flat agree at width 2);
+            // three or more did not compile. genTupleProjBinding keeps the
+            // std::get form as its own fallback for tuples with no registered
+            // children (a callee's returned tuple), so nothing that worked
+            // before is rerouted.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = true; IsMutable = false
+            }
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
         | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ | IRMatmul _ | IREigh _ | IRSolve _
@@ -16142,6 +18597,33 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 let valStr = exprToCpp currentNames value
                 currentNames <- Map.add id varName currentNames
                 [sprintf "%sauto %s = %s;" indent varName valStr]
+        // Deterministic deallocation, site 3b: the FUNCTION-BODY twin of
+        // site 3 (`let r = f(a)` where the CALLEE allocated the pool).
+        // Same guard set, for the same reasons: FreshPool callees only (a
+        // NotFresh return may hand back its own parameter, so registering
+        // the binding would double-free), dense + nullptr only (the one
+        // storage combination whose free cannot disagree with the callee's
+        // allocate). Emission is the fall-through arm's `auto` line
+        // unchanged -- only the scope registration is new. Without this arm
+        // such lets fell through unregistered and every intermediate of a
+        // chained-step helper leaked per call (measured on 08_burgers_les:
+        // dns10's nine burgers_step intermediates, 512 B each, every call).
+        | IRApp (fn, _, _) when
+            (match inferExprType value with
+             | ArrayElem at ->
+                 freshReturnOf fn = FreshPool
+                 && isFreeableDenseArrayType at
+                 && classifyOutputStorage (inferExprType value) = AllocDense
+                 && not (hasRealSymmetry (buildSymmVec (inferExprType value)))
+             | _ -> false) ->
+            let valStr = exprToCpp currentNames value
+            (match inferExprType value with
+             | ArrayElem at ->
+                 registerPoolAlloc AllocDense (elemTypeToCpp at.ElemType) (arrayRank at)
+                     "nullptr" (varName + "_extents") varName None
+             | _ -> ())
+            currentNames <- Map.add id varName currentNames
+            [sprintf "%sauto %s = %s;" indent varName valStr]
         | _ ->
             let valStr = exprToCpp currentNames value
             currentNames <- Map.add id varName currentNames
@@ -16174,7 +18656,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         match retExpr with
         | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let combCode = genApplyCombinator bodyCtx retVarName info builder
             // The returned pool leaves with the value; free everything else.
             suppressAllocName retVarName
@@ -16210,7 +18692,7 @@ or return a scalar and materialize at the call site"
             // genComposeApply -- the same statement form module level uses.
             // exprToCpp has no expression rendering for it.
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
                 Value = retExpr; IsConst = false; IsMutable = true
@@ -16226,15 +18708,20 @@ or return a scalar and materialize at the call site"
             // arm is a sentinel. Reached by every kernel body whose tail is a
             // reduce over a body-local computation (plan section 1, M-A).
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
                 Value = retExpr; IsConst = false; IsMutable = true
             }
-            let (redCode, _) = genBinding bodyCtx tempBinding builder
+            let (redCode, ctxAfter) = genBinding bodyCtx tempBinding builder
+            // A JOINED reduce (`reduce(k1 <&!> k2 <&!> k3, (+))`) yields a flat
+            // tuple of accumulators, which the signature declares nested -- see
+            // nestedTupleReturn. Unjoined folds and two-leg joins pass through
+            // it unchanged.
+            let retName = nestedTupleReturn (inferExprType retExpr) retVarName ctxAfter.TupleChildren
             // A reduce yields a SCALAR: nothing to spare from the frees, and the
             // value is already in a local, so the frees may close before return.
-            stmts @ redCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
+            stmts @ redCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retName]
         | IRTranspose _ ->
             // Transpose in RETURN position (lswosa's `family_spectra` tail:
             // `transpose(grid, [0, 1])`). Statement-shaped -- swapped-extent
@@ -16244,7 +18731,7 @@ or return a scalar and materialize at the call site"
             // sentinel. The transposed pool leaves with the value, so it is
             // spared from the scope frees by name.
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
                 Value = retExpr; IsConst = false; IsMutable = true
@@ -16282,7 +18769,7 @@ or return a scalar and materialize at the call site"
             // via allocate<>) lives on the heap so the caller receives a
             // valid array.
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped }
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let arrayCode = genArrayLiteral bodyCtx retVarName elements arrType
             suppressAllocName retVarName
             stmts @ arrayCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
@@ -16301,6 +18788,19 @@ or return a scalar and materialize at the call site"
             // caller already binds the returned wrapper and reads shape off
             // it (`c.extents[0]`), never off a companion `c_extents`.
             let retStr = exprToCpp currentNames retExpr
+            // `return t` where a body let bound `t` to a JOINED reduce: the
+            // local is the emitters' flat tuple, the signature says nested.
+            // Same reconciliation as the IRReduceCompute arm above, one step
+            // later -- the join is a LET here, so it is the plain identifier
+            // that reaches the return rather than a __retN. Everything else
+            // (a genuine IRTuple, an array, a scalar) passes through untouched.
+            //
+            // Re-spelling before the suppress-by-token loop below is deliberate
+            // and strictly better: for an ARRAY-leaf join it is the per-leaf
+            // names that are the REGISTERED allocations, so the rewritten text
+            // spares exactly the pools that leave with the value, where the
+            // flat tuple's own name matched nothing.
+            let retStr = nestedTupleReturn (inferExprType retExpr) retStr currentTupleChildren
             // The returned EXPRESSION may name a registered allocation directly
             // (`return r;`, `return std::make_tuple(r0, r1);`). Whole-token match,
             // so `r_extents` / `rows` do not spuriously spare `r`. Anything the
@@ -16317,6 +18817,74 @@ or return a scalar and materialize at the call site"
             // frees still sit before `return`, so anything the return names
             // must survive.
             match inferExprType retExpr with
+            // A FreshPool-call ARRAY return takes the value-first shape too:
+            // the callee's wrapper is a fresh pool (own extents) that can
+            // alias none of this scope's bindings, so the call is evaluated
+            // into a local BEFORE the frees and the bindings it consumed are
+            // genuinely freed. The suppress-by-token belt below would instead
+            // spare every binding the return text names -- a per-call leak
+            // (measured on 09_qg_atmosphere: `return tendency(.., uq, vq, ph)`
+            // sparing three 64x64 fields per H_single call, every timestep).
+            // Works with the matching retSeeds narrowing in
+            // computeScopeEscapes; NotFresh callees keep the old shape.
+            | ArrayElem _ when (match retExpr with
+                                | IRApp (f, _, _) -> freshReturnOf f = FreshPool
+                                | _ -> false) ->
+                let frees = popAllocScopeFrees indent
+                if List.isEmpty frees then
+                    stmts @ [sprintf "%sreturn %s;" indent retStr]
+                else
+                    let rv = sprintf "__retv%d" (builder.FreshId())
+                    stmts
+                    @ [sprintf "%sauto %s = %s;" indent rv retStr]
+                    @ frees
+                    @ [sprintf "%sreturn %s;" indent rv]
+            // An INTERIOR VIEW of a scope-local array, materialized. `return
+            // traj(9999)` hands back a wrapper into the trajectory's pool, and
+            // nothing can free that pool afterwards -- not this scope (the view
+            // still reads it) and not the caller (it never sees the base). The
+            // suppress-by-token belt below would only make that official.
+            // Copy the slice into its OWN pool first; the base then falls to
+            // the ordinary frees, and the value the caller gets is
+            // self-contained. computeScopeEscapes drops the matching return
+            // seed and computeFreshReturnFacts promotes the callee to
+            // FreshPool, both off this same predicate.
+            | ArrayElem sat when (returnedInteriorView lets retExpr).IsSome ->
+                let retVarName = sprintf "__ret%d" (builder.FreshId())
+                let viewName = retVarName + "_vw"
+                let extentsName = retVarName + "_extents"
+                let rank = arrayRank sat
+                let elemStr = elemTypeToCpp sat.ElemType
+                // Return-extent ABI (see the IRTranspose arm): a frame-local
+                // `size_t[R]` table dangles the moment the wrapper crosses the
+                // call boundary. emitExtentsTable gives a static-constexpr
+                // table where every extent is literal and a heap one otherwise
+                // -- both outlive the frame. The heap table is deliberately NOT
+                // registered: it leaves with the return value.
+                let dims =
+                    [ for d in 0 .. rank - 1 ->
+                        match literalExtentOfArray sat d with
+                        | Some n -> (sprintf "%d" n, true)
+                        | None -> (sprintf "%s.extents[%d]" viewName d, false) ]
+                let (extentsDecl, _leavesWithValue) = emitExtentsTable indent extentsName rank dims
+                let allocRhs =
+                    match emitAllocRhs AllocDense elemStr rank "nullptr" extentsName with
+                    | Ok rhs -> rhs
+                    | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+                // The slice is a CONTIGUOUS sub-block of a dense pool
+                // (returnedInteriorView proved the leading-prefix, all-scalar,
+                // unsymmetric shape), so `pool_base` on the sub-skeleton lands
+                // on its first cell and one flat copy_n moves the whole slice.
+                let matCode =
+                    [ sprintf "%sArray<%s, %d> %s = %s;" indent elemStr rank viewName retStr ]
+                    @ extentsDecl
+                    @ [ sprintf "%sArray<%s, %d> %s = %s;" indent elemStr rank retVarName allocRhs
+                        sprintf "%ssize_t %s_n = count_leaves<typename promote<%s, %d>::type, nullptr>(%s);"
+                            indent retVarName elemStr rank extentsName
+                        sprintf "%sstd::copy_n(pool_base(%s.data), %s_n, pool_base(%s.data));"
+                            indent viewName retVarName retVarName ]
+                stmts @ matCode @ popAllocScopeFrees indent
+                @ [sprintf "%sreturn %s;" indent retVarName]
             | ArrayElem _ | IRTTuple _ ->
                 for n in registeredAllocNames () do
                     if containsIdentToken retStr n then suppressAllocName n
@@ -16398,6 +18966,15 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             lv @ [(id, v')]))
     let (retLets, retExpr) = hoistLoopApps retExpr0
     let lets = lets @ retLets
+    // Second hoist: FreshPool calls buried in ARGUMENT position (g(f(x))),
+    // whose temporaries the scope tracker could otherwise never register.
+    // Runs before computeScopeEscapes so the minted lets are in its domain.
+    let lets =
+        lets |> List.collect (fun (id, v) ->
+            let (hv, v') = hoistFreshPoolCallArgs builder v
+            hv @ [(id, v')])
+    let (retHoist, retExpr) = hoistFreshPoolCallArgs builder retExpr
+    let lets = lets @ retHoist
     let escapes =
         computeScopeEscapes ctx (FuncScope (if isUnitExpr retExpr then None else Some retExpr)) lets
     let allocDepth = allocScopeDepth ()
@@ -16601,6 +19178,11 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
         // mutation propagates and lifetimes tie to the wrapper's `[&]` capture
         // at the use site: `T&` for plain types, `Array<T, N>&` for arrays.
         //
+        // A GROUPED capture (a `group_by` result -- see the grouped-capture
+        // forwarding block) is typed as the row-pointer table it actually is,
+        // `Array<T*, 1>&`; the IR rank-2 rendering would not bind to the call
+        // site's value.
+        //
         // Function-typed captures use `const std::function<...>&` instead:
         // Blade's top-level `function name(args) = body` emits an ordinary C++
         // function, whose name denotes a function reference, not a
@@ -16610,11 +19192,13 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
         // mutation-through-capture for function values, which is fine since
         // they're immutable bindings in Blade.
         match cap.Type with
+        | ArrayElem arr when (groupedCaptureGkOf cap).IsSome ->
+            sprintf "Array<%s*, 1>& %s" (elemTypeToCpp arr.ElemType) cap.Name
         | ArrayElem arr -> sprintf "%s& %s" (cppArrayTypeStr arr) cap.Name
         | FuncElem _ -> sprintf "const %s& %s" (irTypeToCpp cap.Type) cap.Name
         | _ -> sprintf "%s& %s" (irTypeToCpp cap.Type) cap.Name
     let regularParams = funcDef.Params |> List.map (fun p -> paramStr p.Name p.Type)
-    let captureParams = funcDef.Captures |> List.map captureParamStr
+    let captureParams = (funcDef.Captures |> List.map captureParamStr) @ gkSidecarParams funcDef.Captures
     let paramList = (regularParams @ captureParams) |> String.concat ", "
 
     // Use declared return type, or infer from body as fallback
@@ -16636,7 +19220,18 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
 
     // Generate proper C++ function
     let safeName = sanitizeCppName funcDef.Name
-    let bodyStmts = genFuncBody ctx builder bodyNames bodyInd funcDef.Body
+    // Grouped captures: seed the body context so the peels resolve per-row
+    // lengths through the forwarded `__gk<id>__*` params exactly as they
+    // resolve them in the frame that built the group (grouped-capture
+    // forwarding, requirement 3).
+    let bodyCtx =
+        funcDef.Captures
+        |> List.fold (fun c cap ->
+            match groupedCaptureGkOf cap with
+            | Some gkId ->
+                { c with GroupedArrays = Map.add cap.Name (gkSidecarStem ctx.VarNames gkId) c.GroupedArrays }
+            | None -> c) ctx
+    let bodyStmts = genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
     // Shadow-stack frame: named as the Blade function so a runtime
     // panic prints a Blade call stack. file/line are nullptr/0 because
     // IRCallable carries no span (adding one touches TypeCheck.fs's IRCallable
@@ -16697,6 +19292,16 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
     // expression.
     let bodyInd = ind + "    "
     let bodyCtx = { ctx with VarNames = bodyNames; Indent = ctx.Indent + 1 }
+    // Grouped captures resolve by NAME here (the [&] closure sees main's
+    // locals), so only the GroupedArrays seed is needed -- the stem is the
+    // gk's emitted name in the enclosing scope, no hidden params.
+    let bodyCtx =
+        funcDef.Captures
+        |> List.fold (fun c cap ->
+            match groupedCaptureGkOf cap with
+            | Some gkId ->
+                { c with GroupedArrays = Map.add cap.Name (gkSidecarStem ctx.VarNames gkId) c.GroupedArrays }
+            | None -> c) bodyCtx
     let bodyStmts = genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
     // Shadow-stack frame; see genFuncDef. Name-only (nullptr/0),
     // and marker-form so resolveShadowFrames can drop it if no panic is
@@ -16729,10 +19334,14 @@ let private genForwardDecls (fileScopeFuncs: IRFuncDef list) : string list =
                 funcDef.Captures
                 |> List.map (fun cap ->
                     match cap.Type with
+                    // Grouped capture: the row-pointer table form, matching
+                    // genFuncDef's captureParamStr token for token.
+                    | ArrayElem arr when (groupedCaptureGkOf cap).IsSome ->
+                        sprintf "Array<%s*, 1>& %s" (elemTypeToCpp arr.ElemType) cap.Name
                     | ArrayElem arr -> sprintf "%s& %s" (cppArrayTypeStr arr) cap.Name
                     | FuncElem _ -> sprintf "const %s& %s" (irTypeToCpp cap.Type) cap.Name
                     | _ -> sprintf "%s& %s" (irTypeToCpp cap.Type) cap.Name)
-            let allParams = (paramList @ captureList) |> String.concat ", "
+            let allParams = (paramList @ captureList @ gkSidecarParams funcDef.Captures) |> String.concat ", "
             let retType =
                 match funcDef.RetType with
                 | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)
@@ -16971,7 +19580,7 @@ let private genModuleBinding
         match tryHoistModuleBindingDecl name code with
         | Some (decl, rewritten) ->
             let cell = moduleGlobalDeclsCell ()
-            if not (List.contains decl cell.Value) then cell.Value <- cell.Value @ [decl]
+            cell.AppendDistinct decl
             (rewritten, ctx')
         | None ->
             // Status quo, plus a breadcrumb: this binding stays a main() local
@@ -17041,6 +19650,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // mid-emission must not leave a frame active for this one's bindings.
     (freshReturnFactsCell ()).Value <- computeFreshReturnFacts modul
     (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
+    (groupedCaptureFactsCell ()).Value <- computeGroupedCaptureFacts modul
     resetAllocScopeStack ()
 
     let ctx0 = emptyContext ()
@@ -17103,21 +19713,37 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // able to NAME get their declaration promoted to namespace scope.
     let hoistIds = computeModuleCaptureHoistIds modul mainLocalFuncIds
 
-    let (funcCode, bindCode, finalCtx) =
-        allItems |> List.fold (fun (fc, bc, c) (_, item) ->
+    // Line accumulation is a ResizeArray per bucket (the fold still threads the
+    // context, which is what makes emission order-dependent); the old
+    // `bc @ code @ [""]` copied the whole bucket once per item, quadratic in
+    // module size. Append order is byte-for-byte the same.
+    let funcLines = ResizeArray<string>(forwardDecls)
+    let bindLines = ResizeArray<string>()
+    let finalCtx =
+        allItems |> List.fold (fun c (_, item) ->
             match item with
             | Choice1Of2 binding ->
+                setCurrentCodegenDecl binding.Name
                 let (code, c') = genModuleBinding c binding builder hoistIds
-                (fc, bc @ code @ [""], c')
+                bindLines.AddRange code
+                bindLines.Add ""
+                c'
             | Choice2Of2 funcDef ->
+                setCurrentCodegenDecl funcDef.Name
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     let (code, c') = genFuncDefAsLambda c builder funcDef
-                    (fc, bc @ code @ [""], c')
+                    bindLines.AddRange code
+                    bindLines.Add ""
+                    c'
                 else
                     let (code, c') = genFuncDef c builder funcDef
-                    (fc @ code @ [""], bc, c')
-        ) (forwardDecls, [], ctx0)
-    
+                    funcLines.AddRange code
+                    funcLines.Add ""
+                    c'
+        ) ctx0
+    let funcCode = List.ofSeq funcLines
+    let bindCode = List.ofSeq bindLines
+
     // Merge context warnings into module-level collector
     let cell = exprWarningsCell ()
     cell.Value <- cell.Value @ finalCtx.Warnings.Value
@@ -17145,6 +19771,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     // NotFresh (leaks only, but a divergence between the two modes).
     (freshReturnFactsCell ()).Value <- computeFreshReturnFacts modul
     (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
+    (groupedCaptureFactsCell ()).Value <- computeGroupedCaptureFacts modul
     resetAllocScopeStack ()
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
@@ -17177,9 +19804,14 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     // (Per-binding classification was wrong: it floated a non-compute consumer
     // like decompact UP into setup, above the compute binding it depends on,
     // producing an out-of-order "'sym' was not declared" C++ error.)
-    let (funcCode, setupCode, computeCode, _seenCompute, finalCtx) =
+    // Same ResizeArray accumulation as genModule -- see the comment there. The
+    // phase flag and the context are still threaded through the fold.
+    let funcLines = ResizeArray<string>(forwardDecls)
+    let setupLines = ResizeArray<string>()
+    let computeLines = ResizeArray<string>()
+    let (_seenCompute, finalCtx) =
         let onlyBinding = splitTimingOnlyBinding ()
-        allItems |> List.fold (fun (fc, sc, cc, seen, c) (_, item) ->
+        allItems |> List.fold (fun (seen, c) (_, item) ->
             match item with
             | Choice1Of2 binding ->
                 // When a specific binding name is designated as the timed
@@ -17190,25 +19822,42 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     match onlyBinding with
                     | Some target -> seen || binding.Name = target
                     | None -> seen || isComputeBinding binding
+                setCurrentCodegenDecl binding.Name
                 let (code, c') = genModuleBinding c binding builder hoistIds
                 if nowCompute then
-                    (fc, sc, cc @ code @ [""], true, c')
+                    computeLines.AddRange code
+                    computeLines.Add ""
+                    (true, c')
                 else
-                    (fc, sc @ code @ [""], cc, false, c')
+                    setupLines.AddRange code
+                    setupLines.Add ""
+                    (false, c')
             | Choice2Of2 funcDef ->
+                setCurrentCodegenDecl funcDef.Name
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     // Lambda-as-binding (closure definition): follows the
                     // current phase -- setup if before the first compute, else
                     // compute -- so it never floats across a dependency.
                     let (code, c') = genFuncDefAsLambda c builder funcDef
-                    if seen then (fc, sc, cc @ code @ [""], true, c')
-                    else (fc, sc @ code @ [""], cc, false, c')
+                    if seen then
+                        computeLines.AddRange code
+                        computeLines.Add ""
+                        (true, c')
+                    else
+                        setupLines.AddRange code
+                        setupLines.Add ""
+                        (false, c')
                 else
                     // True top-level function: always the function-def bucket,
                     // emitted in the preamble (no effect on the phase flag).
                     let (code, c') = genFuncDef c builder funcDef
-                    (fc @ code @ [""], sc, cc, seen, c')
-        ) (forwardDecls, [], [], false, ctx0)
+                    funcLines.AddRange code
+                    funcLines.Add ""
+                    (seen, c')
+        ) (false, ctx0)
+    let funcCode = List.ofSeq funcLines
+    let setupCode = List.ofSeq setupLines
+    let computeCode = List.ofSeq computeLines
     let cell = exprWarningsCell ()
     cell.Value <- cell.Value @ finalCtx.Warnings.Value
     // See genModule: markers are resolved across all three buckets at once.
@@ -17282,9 +19931,16 @@ let genTypeDefs (modul: IRModule) : string list =
             [sprintf "using %s = %s;" name (primTypeToCpp underlying); ""]
     )
 
+// Every printer below takes the binding's SOURCE name and splits it in two:
+// the `name = ...` LABEL keeps the source spelling (that is what the corpus
+// EXPECT pins and the interpreter's twin printers read), while the C++
+// expressions and temporaries go through `sanitizeCppName`, which is the
+// spelling `bindingCppName` declared the binding under. The two differ only
+// for a binding whose name is a C++ reserved word (`let final = ...`).
+
 /// Generate code to print a scalar value
 let genPrintScalar (name: string) : string list =
-    [sprintf "    cout << \"%s = \" << %s << endl;" name name]
+    [sprintf "    cout << \"%s = \" << %s << endl;" name (sanitizeCppName name)]
 
 /// Rank-2 print in the NESTED form -- `name = [[a, b], [c, d]]` -- which is the
 /// shape a rank-2 literal is written in, so the printed line round-trips as
@@ -17297,7 +19953,8 @@ let genPrintScalar (name: string) : string list =
 /// nothing the extents don't already say. The interpreter's twin
 /// (Interp/ArrayOps.emitNested2) must stay byte-identical to this.
 let private genPrintNested2 (name: string) (outerBound: string) (innerBound: string) : string list =
-    let firstVar = sprintf "%s__first" name
+    let v = sanitizeCppName name
+    let firstVar = sprintf "%s__first" v
     [ sprintf "    cout << \"%s = [\";" name
       sprintf "    for (size_t i = 0; i < %s; i++) {" outerBound
       "        if (i) cout << \", \";"
@@ -17306,7 +19963,7 @@ let private genPrintNested2 (name: string) (outerBound: string) (innerBound: str
       sprintf "        for (size_t j = 0; j < %s; j++) {" innerBound
       sprintf "            if (!%s) cout << \", \";" firstVar
       sprintf "            %s = false;" firstVar
-      sprintf "            cout << %s[i][j];" name
+      sprintf "            cout << %s[i][j];" v
       "        }"
       "        cout << \"]\";"
       "    }"
@@ -17315,11 +19972,12 @@ let private genPrintNested2 (name: string) (outerBound: string) (innerBound: str
 /// Generate code to print an array value (rank 2 nested; other ranks flattened
 /// for easy parsing)
 let genPrintArrayFlat (name: string) (rank: int) : string list =
-    let firstVar = sprintf "%s__first" name
+    let v = sanitizeCppName name
+    let firstVar = sprintf "%s__first" v
     if rank < 1 then
         [sprintf "    cout << \"%s = <rank-0>\" << endl;" name]
     elif rank = 2 then
-        genPrintNested2 name (sprintf "%s.extents[0]" name) (sprintf "%s.extents[1]" name)
+        genPrintNested2 name (sprintf "%s.extents[0]" v) (sprintf "%s.extents[1]" v)
     elif rank <= 3 then
         // Ranks 1-3: flat comma-separated output
         let loopVars = [| "i"; "j"; "k" |]
@@ -17329,13 +19987,13 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
         let loops =
             [ for d in 0 .. rank - 1 ->
                 sprintf "    %sfor (size_t %s = 0; %s < %s.extents[%d]; %s++) {"
-                    (String.replicate d "    ") loopVars.[d] loopVars.[d] name d loopVars.[d] ]
+                    (String.replicate d "    ") loopVars.[d] loopVars.[d] v d loopVars.[d] ]
         let inner =
             let ind = "    " + String.replicate rank "    "
             let idx = loopVars.[0..rank-1] |> Array.map (sprintf "[%s]") |> String.concat ""
             [ sprintf "%sif (!%s) cout << \", \";" ind firstVar
               sprintf "%s%s = false;" ind firstVar
-              sprintf "%scout << %s%s;" ind name idx ]
+              sprintf "%scout << %s%s;" ind v idx ]
         let closes =
             [ for d in rank - 1 .. -1 .. 0 ->
                 sprintf "    %s}" (String.replicate d "    ") ]
@@ -17346,16 +20004,16 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
         // Print as: name[i][j] = [ row0; row1; ... ] for each (i,j)
         [
             sprintf "    cout << \"%s (\" << %s.extents[0] << \"x\" << %s.extents[1] << \"x\" << %s.extents[2] << \"x\" << %s.extents[3] << \"):\" << endl;"
-                name name name name name
-            sprintf "    for (size_t i = 0; i < %s.extents[0]; i++) {" name
-            sprintf "        for (size_t j = 0; j < %s.extents[1]; j++) {" name
+                name v v v v
+            sprintf "    for (size_t i = 0; i < %s.extents[0]; i++) {" v
+            sprintf "        for (size_t j = 0; j < %s.extents[1]; j++) {" v
             sprintf "            cout << \"  %s[\" << i << \"][\" << j << \"] = [\";" name
             sprintf "            bool %s = true;" firstVar
-            sprintf "            for (size_t k = 0; k < %s.extents[2]; k++) {" name
-            sprintf "                for (size_t l = 0; l < %s.extents[3]; l++) {" name
+            sprintf "            for (size_t k = 0; k < %s.extents[2]; k++) {" v
+            sprintf "                for (size_t l = 0; l < %s.extents[3]; l++) {" v
             sprintf "                    if (!%s) cout << \", \";" firstVar
             sprintf "                    %s = false;" firstVar
-            sprintf "                    cout << %s[i][j][k][l];" name
+            sprintf "                    cout << %s[i][j][k][l];" v
             "                }"
             "            }"
             sprintf "            cout << \"]\" << endl;"
@@ -17374,6 +20032,7 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
 ///   - Idx<n>: 1 dim, free range
 /// This correctly handles mixed symmetry (e.g. SymIdx<2> + Idx).
 let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string list =
+    let v = sanitizeCppName name
     // Expand index types into per-dimension info: (loopVar, dimIdx, offsetVars)
     // offsetVars = list of loop vars to subtract from extent (empty for free dims)
     let loopVarNames = [| "i"; "j"; "k"; "l"; "m"; "n_"; "p"; "q" |]
@@ -17416,8 +20075,8 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
     let boundAt (loopVar: string, dimIdx: int, offsets: string list, strict: int) =
         ignore loopVar
         match offsets @ (if strict > 0 then [string strict] else []) with
-        | [] -> sprintf "%s.extents[%d]" name dimIdx
-        | subParts -> sprintf "%s.extents[%d] - %s" name dimIdx (String.concat " - " subParts)
+        | [] -> sprintf "%s.extents[%d]" v dimIdx
+        | subParts -> sprintf "%s.extents[%d] - %s" v dimIdx (String.concat " - " subParts)
     if rank < 1 || rank > 8 then
         [sprintf "    cout << \"%s = <rank-%d array>\" << endl;" name rank]
     elif rank = 2 then
@@ -17427,7 +20086,7 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
         // offsets above name.
         genPrintNested2 name (boundAt (List.item 0 dims)) (boundAt (List.item 1 dims))
     else
-        let firstVar = sprintf "%s__first" name
+        let firstVar = sprintf "%s__first" v
         let opens = [
             sprintf "    cout << \"%s = [\";" name
             sprintf "    bool %s = true;" firstVar ]
@@ -17443,7 +20102,7 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
         let inner = [
             sprintf "%sif (!%s) cout << \", \";" innerIndent firstVar
             sprintf "%s%s = false;" innerIndent firstVar
-            sprintf "%scout << %s%s;" innerIndent name idx ]
+            sprintf "%scout << %s%s;" innerIndent v idx ]
         let closes =
             [for d in rank - 1 .. -1 .. 0 ->
                 sprintf "    %s}" (String.replicate d "    ")]
@@ -17466,14 +20125,15 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
 /// stays refused.
 let genPrintArrayWreath (name: string) (levels: (int * bool) list) (extent: int64) : string list =
     let levelArgs = orbLevelArgs levels
-    let firstVar = sprintf "%s__first" name
+    let v = sanitizeCppName name
+    let firstVar = sprintf "%s__first" v
     [ sprintf "    cout << \"%s = [\";" name
       sprintf "    bool %s = true;" firstVar
       sprintf "    for (int64_t __ok = 0; __ok < orbit_wreath_utilities::orb_cell_count<%s>(%d); __ok++) {"
               levelArgs extent
       sprintf "        if (!%s) cout << \", \";" firstVar
       sprintf "        %s = false;" firstVar
-      sprintf "        cout << %s[__ok];" name
+      sprintf "        cout << %s[__ok];" v
       "    }"
       "    cout << \"]\" << endl;" ]
 
@@ -17621,15 +20281,16 @@ let genPrintStatements (modul: IRModule) : string list =
                             | _ -> None)
                     match structFields, rank with
                     | Some fields, 1 when not (List.isEmpty fields) ->
-                        let firstVar = sprintf "%s__first" b.Name
+                        let bv = sanitizeCppName b.Name
+                        let firstVar = sprintf "%s__first" bv
                         let fieldPrints =
                             fields |> List.mapi (fun i (fname, _) ->
                                 let prefix = if i = 0 then "" else ", "
-                                sprintf "        cout << \"%s%s: \" << %s[i].%s;" prefix fname b.Name fname)
+                                sprintf "        cout << \"%s%s: \" << %s[i].%s;" prefix fname bv fname)
                         [
                             sprintf "    cout << \"%s = [\";" b.Name
                             sprintf "    bool %s = true;" firstVar
-                            sprintf "    for (size_t i = 0; i < %s.extents[0]; i++) {" b.Name
+                            sprintf "    for (size_t i = 0; i < %s.extents[0]; i++) {" bv
                             sprintf "        if (!%s) cout << \", \";" firstVar
                             sprintf "        %s = false;" firstVar
                             sprintf "        cout << \"{\";"
@@ -17706,14 +20367,15 @@ let genPrintStatements (modul: IRModule) : string list =
                 if isCompoundRowSubview then
                     [sprintf "    // (trailing-row view '%s' not auto-printed; the raw T* row carries no extents -- derive scalars via %s(t))" b.Name b.Name]
                 elif isRaggedRowBinding then
-                    let firstVar = sprintf "%s__first" b.Name
+                    let bv = sanitizeCppName b.Name
+                    let firstVar = sprintf "%s__first" bv
                     [
                         sprintf "    cout << \"%s = [\";" b.Name
                         sprintf "    bool %s = true;" firstVar
-                        sprintf "    for (size_t __rk = 0; __rk < %s.len; __rk++) {" b.Name
+                        sprintf "    for (size_t __rk = 0; __rk < %s.len; __rk++) {" bv
                         sprintf "        if (!%s) cout << \", \";" firstVar
                         sprintf "        %s = false;" firstVar
-                        sprintf "        cout << %s[__rk];" b.Name
+                        sprintf "        cout << %s[__rk];" bv
                         "    }"
                         "    cout << \"]\" << endl;"
                     ]
@@ -17723,20 +20385,21 @@ let genPrintStatements (modul: IRModule) : string list =
                     // Ragged<T> sharing the parent's metadata). Iterate rows
                     // via .lens; print as the flat value sequence the
                     // validation framework expects.
-                    let firstVar = sprintf "%s__first" b.Name
+                    let bv = sanitizeCppName b.Name
+                    let firstVar = sprintf "%s__first" bv
                     // Nested, like every other rank-2 print (genPrintNested2):
                     // a ragged array's rows are the one thing its flat pool
                     // cannot show, and `lens[i]` is exactly the row boundary.
                     [
                         sprintf "    cout << \"%s = [\";" b.Name
-                        sprintf "    for (size_t __ri = 0; __ri < %s.extents[0]; __ri++) {" b.Name
+                        sprintf "    for (size_t __ri = 0; __ri < %s.extents[0]; __ri++) {" bv
                         "        if (__ri) cout << \", \";"
                         "        cout << \"[\";"
                         sprintf "        bool %s = true;" firstVar
-                        sprintf "        for (size_t __rj = 0; __rj < %s.lens[__ri]; __rj++) {" b.Name
+                        sprintf "        for (size_t __rj = 0; __rj < %s.lens[__ri]; __rj++) {" bv
                         sprintf "            if (!%s) cout << \", \";" firstVar
                         sprintf "            %s = false;" firstVar
-                        sprintf "            cout << %s[__ri][__rj];" b.Name
+                        sprintf "            cout << %s[__ri][__rj];" bv
                         "        }"
                         "        cout << \"]\";"
                         "    }"
@@ -18242,6 +20905,12 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
     let cell = exprWarningsCell ()
     cell.Value <- []
     (exprSentinelsCell ()).Value <- []
+    // Back-end holes from a previous assembly must not be attributed to this
+    // one (the driver drains the channel, but a caller that never drains --
+    // the test harness -- would otherwise accumulate across tests).
+    (unhandledNodesCell ()).Value <- []
+    (codegenRefusalsCell ()).Value <- []
+    (currentDeclCell ()).Value <- ""
     // Deterministic deallocation: see genMainProgram.
     (freshReturnFactsCell ()).Value <- Map.empty
     (copyInPlaceMutsCell ()).Value <- Map.empty

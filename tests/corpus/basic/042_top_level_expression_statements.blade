@@ -1,0 +1,34 @@
+// TEST: Top Level Expression Statements
+// Blade has no `main`: a bare top-level EXPRESSION is a statement that
+// evaluates in declaration order and auto-prints, exactly like a top-level
+// `let`. Parser.parseDecl implements that equivalence literally -- the
+// expression desugars to `let __exprN = <expr>`, N counting bare expressions
+// from 1 per module, which is the same wrapping the REPL/notebook lane already
+// applies to a bare cell (`let __cellN = `). Doing the desugar in the PARSER
+// is what makes the feature free downstream: typecheck, lowering, codegen, the
+// interpreter and the auto-printer all reach it through the binding path they
+// already share, so the codegen/interpreter twins cannot drift on it.
+//
+// What this file pins is INTERLEAVING. Declarations and expressions must
+// evaluate in source order, not be sorted into two groups: `__expr2` reads `b`,
+// declared between the two expressions, and `__expr5` reads `d`, declared
+// after three of them. The `__exprN` numbering is itself part of the contract,
+// since it is what an EXPECT pin has to name.
+let a = 1
+a + 10
+let b = 2
+a + b
+let c = [1, 2, 3]
+reduce(c, (+))
+b == 2
+let d = 4
+d * d
+// EXPECT: a = 1
+// EXPECT: __expr1 = 11
+// EXPECT: b = 2
+// EXPECT: __expr2 = 3
+// EXPECT: c = [1, 2, 3]
+// EXPECT: __expr3 = 6
+// EXPECT: __expr4 = true
+// EXPECT: d = 4
+// EXPECT: __expr5 = 16

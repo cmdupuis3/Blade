@@ -1,5 +1,7 @@
 # Blade
 
+[![Project Status: WIP](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip)
+
 Blade is a general purpose array-functional programming language. 
 
 Blade is primarily built to solve array problems with complex grid structures, particularly involving symmetric arrays. 

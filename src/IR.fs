@@ -125,6 +125,17 @@ type IRExpr =
     // accumulator per fusion leaf (tuple of scalars for trees). init is
     // ALWAYS filled by the checker (identity for (+)/(*) sections, user's
     // init otherwise -- arbitrary kernels REQUIRE an explicit init).
+    //
+    // THE JOIN ENCODING (docs/plan-reduction-joins.md). A REDUCTION JOIN --
+    // `object_for(<&!>) <@> (r1, .., rk)` / `reduce([r1, .., rk], (<&!>))` --
+    // is the same node with PER-LEG folds: `kernel` and `init` are each an
+    // `IRTuple` of k entries in leaf order, one per fusion leaf. Legs need
+    // their own seed even when they share an operator (`prodsum` seeds at 0,
+    // `reduce(x, (+), 10.0)` at 10.0), and their own kernel when they do not.
+    // A single (non-tuple) kernel/init is the shared-fold form `<&!>` maps
+    // have always used; every generic walker treats both slots as opaque
+    // children, so only typeOf, the fold emitter, and the interpreter's fold
+    // read the distinction.
     | IRReduceCompute of computation: IRExpr * kernel: IRExpr * init: IRExpr
     | IRProdSum of args: IRExpr list  // prodsum(x1..xk): fused sum_t prod_l x_l(t) over rank-1 arrays of equal extent; empty extent => 0
     | IRZip of IRExpr list
@@ -2551,6 +2562,15 @@ type LoopNestCodeGen = {
     /// with FoldWrapper; None everywhere else. See FoldChunkPlan for the
     /// shape guarantees.
     FoldChunk: FoldChunkPlan option
+    /// SHARED-VALUE mode (reduction joins): when `Some cppElemType` the nest
+    /// neither writes cells nor accumulates -- it DECLARES
+    /// `const <cppElemType> OutputName = <kernel>;` once per iteration of the
+    /// joint nest, and other leaves read that name. This is how a named
+    /// deferred map consumed by several legs (`let ct = cos <@> ph`, no
+    /// `compute`) is evaluated ONCE per cell instead of once per leg (or
+    /// materialized into an array). Meaningful only inside a merged nest, and
+    /// only for leaves ordered BEFORE their consumers; None everywhere else.
+    ShareDecl: string option
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -3727,6 +3747,7 @@ let buildLoopNestCodeGen
         MpiSlab = false
         OmpRequested = kernelRequestedOmp
         FoldChunk = None
+        ShareDecl = None
     }
 
 // Canonical expression traversal -- ExprShape (audit section 3.2)
@@ -3897,14 +3918,16 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
          | scrut' :: rest ->
              // Re-thread the flat list back through the (guard?, body) case
              // structure; leftovers or shortfalls are shape violations.
-             let cases', leftover =
+             // Accumulated reversed (cons, not `acc @ [x]`): this fold runs on
+             // every IRMatch rebuild in every mapIRExpr pass.
+             let casesRev, leftover =
                  cases |> List.fold (fun (acc, remaining) c ->
                      match c.Guard, remaining with
-                     | Some _, g' :: b' :: tl -> (acc @ [{ c with Guard = Some g'; Body = b' }], tl)
-                     | None, b' :: tl -> (acc @ [{ c with Body = b' }], tl)
+                     | Some _, g' :: b' :: tl -> ({ c with Guard = Some g'; Body = b' } :: acc, tl)
+                     | None, b' :: tl -> ({ c with Body = b' } :: acc, tl)
                      | _ -> badChildren "IRMatch") ([], rest)
              if not (List.isEmpty leftover) then badChildren "IRMatch"
-             else IRMatch (scrut', cases')
+             else IRMatch (scrut', List.rev casesRev)
          | [] -> badChildren "IRMatch")
 
     // -- Info-record combinators ----------------------------------------------
@@ -3936,6 +3959,19 @@ let childrenOf (ExprShape (children, _)) : IRExpr list = children
 let rebuildWith (expr: IRExpr) (children: IRExpr list) : IRExpr =
     let (ExprShape (_, rebuild)) = expr
     rebuild children
+
+/// Expression-node count of a lowered program: every binding value plus every
+/// function body, counted through `childrenOf`. Measurement support only
+/// (docs/plan-compile-speed.md Stage 5 -- the "typeOf calls vs IR node count"
+/// ratio), so it is called from the driver ONLY when PerfCounters are on and
+/// costs nothing otherwise.
+let countProgramNodes (program: IRProgram) : int64 =
+    let rec count (e: IRExpr) : int64 =
+        childrenOf e |> List.fold (fun acc c -> acc + count c) 1L
+    program.Modules
+    |> List.sumBy (fun m ->
+        (m.Bindings |> List.sumBy (fun b -> count b.Value))
+        + (m.Functions |> List.sumBy (fun f -> count f.Body)))
 
 /// Pattern bindings: IRPatVar introduces an IRId visible in the case body
 /// and (if present) the guard. Nested patterns (tuple, cons, variant
@@ -3984,6 +4020,19 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | ExprShape ([], _) -> expr
         | ExprShape (children, rebuild) -> rebuild (children |> List.map (mapIRExpr f))
     f mapped
+
+/// Visit every sub-expression, in EXACTLY the order `mapIRExpr` applies its
+/// callback -- children left-to-right, then the node itself (post-order) --
+/// without rebuilding a single node. The visitor twin of `mapIRExpr`: any
+/// site that only wanted the traversal (and threw the rebuilt tree away with
+/// `|> ignore`) uses this instead, so a whole IR copy is not allocated per
+/// analysis pass. The post-order contract is load-bearing: accumulators that
+/// prepend, or dictionaries where a later write wins, depend on it.
+let rec iterIRExpr (f: IRExpr -> unit) (expr: IRExpr) : unit =
+    (match expr with
+     | ExprShape ([], _) -> ()
+     | ExprShape (children, _) -> children |> List.iter (iterIRExpr f))
+    f expr
 
 /// Collect every variable id referenced (IRVar) anywhere in an expression.
 /// The one var-ref collector (audit section 3.2): capture computation and
@@ -4255,8 +4304,50 @@ let collectHMCallSites (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId 
                 bindings |> Map.toList |> List.sortBy fst
             results.Add((funcId, sortedBindings))
         | _ -> ()
-        e
-    mapIRExpr walk expr |> ignore
+    iterIRExpr walk expr
+    results |> Seq.toList
+
+/// What a call site teaches about the CALLER's OWN type variables.
+///
+/// `collectHMCallSites` learns the CALLEE's vars from the argument types, which
+/// is what a specialization is keyed and named on. It cannot learn the caller's,
+/// and across a MODULE BOUNDARY those are a second, disjoint namespace:
+/// TypeCheck instantiates an imported signature with fresh vars at the import
+/// site, while the callee's `IRFuncDef` keeps the ones it was declared with. So
+/// an imported `mean(row: T^1) -> T^0` specialized correctly to
+/// `mean_HM_10001_double` while every expression AROUND the call still carried
+/// the caller's `T?10007` -- which nothing then substituted, giving BL6001
+/// "unresolved type variable" on a program whose types were all perfectly well
+/// determined. Same-module calls share one namespace, which is why this was
+/// invisible until a Blade-source stdlib started exporting generics.
+///
+/// The missing equation is the RETURN type: the callee's return, substituted
+/// with what the arguments taught, IS the call's recorded result type, so
+/// matching the two binds the caller-side vars. That is the exact mirror of the
+/// param/arg direction, and it adds no new information about the callee.
+///
+/// Deliberately NOT folded into `collectHMCallSites`: these bindings must stay
+/// out of the specialization KEY, or two call sites differing only in
+/// caller-side var numbering would mint two identical specs under two names.
+let collectHMCallSiteReturnBindings
+    (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (int * IRType) list =
+    let results = System.Collections.Generic.List<_>()
+    let walk e =
+        match e with
+        | IRApp (IRVar (funcId, _), args, retTy) when hmFuncMap.ContainsKey funcId ->
+            let func = hmFuncMap.[funcId]
+            if args.Length = func.Params.Length then
+                let calleeBindings =
+                    List.zip func.Params args
+                    |> List.fold (fun acc (p, arg) ->
+                        match exprTypeIfKnown arg with
+                        | Some argTy -> unifyParamWithArg p.Type argTy acc
+                        | None -> acc) Map.empty
+                let concreteRet = substTypeInIRType calleeBindings func.RetType
+                unifyParamWithArg retTy concreteRet Map.empty
+                |> Map.iter (fun k v -> results.Add((k, v)))
+        | _ -> ()
+    iterIRExpr walk expr
     results |> Seq.toList
 
 /// Occurrence-id-INDEPENDENT structural key for a type: same element, rank,
@@ -4344,11 +4435,10 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
     // since the discovery walk below visits clone bodies too.
     let appliedIdsOf (body: IRExpr) =
         let acc = System.Collections.Generic.HashSet<IRId>()
-        mapIRExpr (fun e ->
-            (match e with
-             | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
-             | _ -> ())
-            e) body |> ignore
+        iterIRExpr (fun e ->
+            match e with
+            | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
+            | _ -> ()) body
         acc
     let needsClone (appliedIds: System.Collections.Generic.HashSet<IRId>) (c: IRCallable) : bool =
         // (a) closures capturing one of this function's params, or (b)
@@ -4538,11 +4628,25 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         // `hanning` and `wosa_lsdft`.
         let sitesFromClones =
             lambdaClones |> Seq.collect (fun c -> collectHMCallSites hmFuncMap c.Body) |> List.ofSeq
+        // Dedup on the SPEC KEY (the canonTypeKey string form), not on raw
+        // `IRType` trees: `List.distinct` had to structurally hash and compare
+        // whole type trees -- extent expressions included -- once per call site
+        // per fixpoint round. The key is what the loop body already computes and
+        // what `specMap` is keyed on, so deduping on it is behaviour-preserving:
+        // two sites sharing a key would have had the second one skipped by the
+        // `Map.containsKey key specMap` test anyway, and `distinctBy` keeps the
+        // same (first) occurrence `List.distinct` did. `allConcrete` and
+        // `paramVarsCovered` are both functions of the key alone -- an `IRTInfer
+        // n` renders as `vn` and nothing else does -- so key-equal sites never
+        // disagree about whether they are specializable.
         let uniqueSites =
-            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs @ sitesFromClones) |> List.distinct
+            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs @ sitesFromClones)
+            |> List.map (fun (funcId, sortedBindings) ->
+                ((funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty))),
+                 (funcId, sortedBindings)))
+            |> List.distinctBy fst
 
-        for (funcId, sortedBindings) in uniqueSites do
-            let key = (funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
+        for (key, (funcId, sortedBindings)) in uniqueSites do
             // Only generate specs whose bindings are entirely concrete. A
             // self-binding like (10001, IRTInfer 10002) means the call site
             // was inside a still-abstract context; the fixpoint revisits it
@@ -4613,12 +4717,18 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    global map -- the per-call-site rewrite still produces the right
     //    specs, and the per-binding fallback covers r.Type.
     let collectAllBindingsFromExpr (expr: IRExpr) : (int * IRType) list =
-        collectHMCallSites hmFuncMap expr
-        |> List.collect (fun (_, sortedBindings) ->
-            sortedBindings |> List.choose (fun (k, v) ->
-                match v with
-                | IRTInfer _ -> None  // self-binding; ignore
-                | _ -> Some (k, v)))
+        let calleeSide =
+            collectHMCallSites hmFuncMap expr
+            |> List.collect (fun (_, sortedBindings) -> sortedBindings)
+        // The caller's own vars, which a cross-module call site can only teach
+        // through its return type (see collectHMCallSiteReturnBindings).
+        // Substitution-only: these never reach a specialization key.
+        let callerSide = collectHMCallSiteReturnBindings hmFuncMap expr
+        calleeSide @ callerSide
+        |> List.choose (fun (k, v) ->
+            match v with
+            | IRTInfer _ -> None  // self-binding; ignore
+            | _ -> Some (k, v))
     let allObservedBindings : (int * IRType) list =
         let fromFns =
             modul.Functions |> List.collect (fun f -> collectAllBindingsFromExpr f.Body)
@@ -4657,22 +4767,26 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    conflict (each call site is locally consistent).
     let mergeBindings (local: Map<int, IRType>) : Map<int, IRType> =
         local |> Map.fold (fun acc k v -> Map.add k v acc) globalBindings
+    // The ordinary rewrite every surviving function gets: inner HM calls
+    // repointed at their specs, residual IRTInfer substituted out of the body,
+    // signature and captures.
+    let rewriteFunc (f: IRFuncDef) =
+        let bindings = mergeBindings (unionBindingsFromExpr f.Body)
+        let bodyWithRewrittenCalls = mapIRExpr rewriteCallSite f.Body
+        let bodyWithSubstitutedTypes = substTypeInIRExpr bindings bodyWithRewrittenCalls
+        { f with Body = bodyWithSubstitutedTypes
+                 RetType = substTypeInIRType bindings f.RetType
+                 Params = f.Params |> List.map (fun p ->
+                            { p with Type = substTypeInIRType bindings p.Type })
+                 Captures = f.Captures |> List.map (fun c ->
+                            { c with Type = substTypeInIRType bindings c.Type }) }
+    // Captures carry types too (a former kernel captures the HM helper it
+    // calls); leaving them abstract emits an unresolved-type sentinel in the
+    // lifted lambda's signature -- see rewriteFunc.
     let newFunctions =
         modul.Functions
         |> List.filter (fun f -> not (Set.contains f.Id hmFuncIdSet))
-        |> List.map (fun f ->
-            let bindings = mergeBindings (unionBindingsFromExpr f.Body)
-            let bodyWithRewrittenCalls = mapIRExpr rewriteCallSite f.Body
-            let bodyWithSubstitutedTypes = substTypeInIRExpr bindings bodyWithRewrittenCalls
-            { f with Body = bodyWithSubstitutedTypes
-                     RetType = substTypeInIRType bindings f.RetType
-                     Params = f.Params |> List.map (fun p ->
-                                { p with Type = substTypeInIRType bindings p.Type })
-                     // Captures carry types too (a former kernel captures the HM
-                     // helper it calls); leaving them abstract emits an
-                     // unresolved-type sentinel in the lifted lambda's signature.
-                     Captures = f.Captures |> List.map (fun c ->
-                                { c with Type = substTypeInIRType bindings c.Type }) })
+        |> List.map rewriteFunc
     let newBindings =
         modul.Bindings
         |> List.map (fun b ->
@@ -4720,12 +4834,154 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                                 { p with Type = substTypeInIRType bindings p.Type })
                      Captures = c.Captures |> List.map (fun cap ->
                                 { cap with Type = substTypeInIRType bindings cap.Type }) })
+    // ORPHAN RESCUE: an hmFunc that nothing replaced must not be deleted.
+    //
+    // Dropping the abstract originals is correct for a function whose call
+    // sites were rewritten to specs -- but the collector only recognises a
+    // call site as `IRApp (IRVar (funcId, _), args, _)`. A lifted callable
+    // referenced ONLY as a first-class KERNEL VALUE (an IRApplyCombinator /
+    // IRComposeApply kernel slot) is never such a call site, so no spec is
+    // ever requested for it -- and it was dropped anyway, leaving the kernel
+    // slot pointing at nothing:
+    //
+    //     error[BL6001]: dangling VarId reference: v23
+    //     error[BL6001]: ApplyInfo: kernel slot is IRVar(v23) [id resolves in
+    //                    neither CallablesTable nor synthetic registry]
+    //
+    // Reached by `reduce(cells, (+))` over a rank-2 returned from a function
+    // with abstract params: the partial fold's synthesized row kernel takes
+    // `T^1`, so `hasTypeVarsInParams` classifies it, and it is only ever named
+    // from the fold's kernel slot.
+    //
+    // The rule is "keep what nothing replaced", decided on the REWRITTEN
+    // module: every genuine call site has by now been repointed at its spec,
+    // so a surviving `IRVar(f.Id)` means a reference the specialization could
+    // not express. Such a function is kept and rewritten like any other -- its
+    // residual type vars are the enclosing program's, which `globalBindings`
+    // resolves. A truly dead abstract original is referenced by nothing and
+    // still goes away, so this adds no unresolved-type signatures.
+    //
+    // Iterated to a fixpoint because a rescued function's own body can be the
+    // only place another one is named.
+    let rescuedHmFuncs =
+        if Set.isEmpty hmFuncIdSet then []
+        else
+            let hmById = hmFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+            let referencedIn (e: IRExpr) =
+                let acc = System.Collections.Generic.HashSet<IRId>()
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRVar (id, _) when hmById.ContainsKey id -> acc.Add id |> ignore
+                    | _ -> ()) e
+                acc
+            let seedRefs =
+                let acc = System.Collections.Generic.HashSet<IRId>()
+                for f in newFunctions do acc.UnionWith(referencedIn f.Body)
+                for b in newBindings do acc.UnionWith(referencedIn b.Value)
+                for f in specFuncs do acc.UnionWith(referencedIn f.Body)
+                for c in cloneFuncs do acc.UnionWith(referencedIn c.Body)
+                acc
+            let mutable keep : Map<IRId, IRFuncDef> = Map.empty
+            let mutable frontier = seedRefs |> List.ofSeq
+            while not frontier.IsEmpty do
+                let next = System.Collections.Generic.HashSet<IRId>()
+                for id in frontier do
+                    if not (Map.containsKey id keep) then
+                        match Map.tryFind id hmById with
+                        | Some f ->
+                            let rewritten = rewriteFunc f
+                            keep <- Map.add id rewritten keep
+                            next.UnionWith(referencedIn rewritten.Body)
+                        | None -> ()
+                frontier <- next |> Seq.filter (fun i -> not (Map.containsKey i keep)) |> List.ofSeq
+            // Original module order, so emission order is unchanged for them.
+            hmFuncs |> List.choose (fun f -> Map.tryFind f.Id keep)
+
     { modul with
-        Functions = newFunctions @ specFuncs @ cloneFuncs
+        Functions = newFunctions @ rescuedHmFuncs @ specFuncs @ cloneFuncs
         Bindings = newBindings
         DerivedFuncOrigins =
             derivedOrigins
             |> Map.fold (fun acc k v -> Map.add k v acc) modul.DerivedFuncOrigins }
+
+/// Whole-program driver for `monomorphizeHMFunctions`.
+///
+/// HM specialization is CALL-SITE driven, so a generic function DEFINED in one
+/// module and CALLED from another had nowhere to learn its bindings. Run per
+/// module, the defining module sees no call site at all (its generic is dropped
+/// as an uninstantiated polymorph) and the calling module does not own the
+/// callee, so the call survived carrying `IRTInfer` -- a guaranteed BL6001
+/// "unresolved type variable" plus a dangling VarId. The practical consequence
+/// was that a stdlib written in Blade source could not export anything generic;
+/// `stdlib/plot.blade` says so in its own header and shares only String-typed
+/// helpers because of it.
+///
+/// The fix is the one `shapeMonomorphizeModules` already applies for extents:
+/// run the pass ONCE over a merged view of every module's functions and
+/// bindings, then split the result back. Sound for the same two reasons given
+/// there -- a module's EXPORTS are fixed by `lowerTypedModule` before any of
+/// these passes run, so widening what this pass can see cannot change what a
+/// later module resolves; and both back ends already merge modules before
+/// consuming them (`CodeGen.genProgramFromIR`, `Interp.Run.printableModule`),
+/// so which module a synthesized spec lands in is not observable.
+///
+/// SPLIT-BACK. Bindings are rewritten 1:1 and in order, so per-module counts
+/// restore them exactly. A surviving function keeps its Id and returns to its
+/// own module. A SYNTHESIZED function (spec or lambda clone) follows its origin
+/// through `DerivedFuncOrigins`, mirroring shapeMonomorphizeModules' "record
+/// the copy in the module that DEFINES its origin"; an unknown origin lands in
+/// the entry module.
+///
+/// A single-module program takes the fast path and is bit-identical to before,
+/// down to the ids the builder mints.
+let monomorphizeHMFunctionsModules (modules: IRModule list) (builder: IRBuilder) : IRModule list =
+    match modules with
+    | [] -> []
+    | [ single ] -> [ monomorphizeHMFunctions single builder ]
+    | _ ->
+
+    let merged =
+        { modules.Head with
+            Functions = modules |> List.collect (fun m -> m.Functions)
+            Bindings = modules |> List.collect (fun m -> m.Bindings)
+            DerivedFuncOrigins =
+                modules |> List.fold (fun acc m ->
+                    m.DerivedFuncOrigins |> Map.fold (fun a k v -> Map.add k v a) acc) Map.empty }
+    let out = monomorphizeHMFunctions merged builder
+
+    // Where each PRE-EXISTING function id came from.
+    let homeOf =
+        modules
+        |> List.mapi (fun i m -> m.Functions |> List.map (fun f -> (f.Id, i)))
+        |> List.concat
+        |> Map.ofList
+    let lastIdx = modules.Length - 1
+    let placementOf (f: IRFuncDef) =
+        match Map.tryFind f.Id homeOf with
+        | Some i -> i
+        | None ->
+            match Map.tryFind f.Id out.DerivedFuncOrigins with
+            | Some origin -> Map.tryFind origin homeOf |> Option.defaultValue lastIdx
+            | None -> lastIdx
+    let funcsByModule = out.Functions |> List.groupBy placementOf |> Map.ofList
+
+    let mutable remainingBindings = out.Bindings
+    modules
+    |> List.mapi (fun i m ->
+        let n = m.Bindings.Length
+        let mine = remainingBindings |> List.truncate n
+        remainingBindings <- remainingBindings |> List.skip (min n remainingBindings.Length)
+        { m with
+            Functions = Map.tryFind i funcsByModule |> Option.defaultValue []
+            Bindings = mine
+            // The whole derived-origin map rides on the entry module: codegen
+            // and the interpreter both UNION these across modules, so one
+            // carrier is enough and duplicating it would only invite drift.
+            DerivedFuncOrigins =
+                if i = lastIdx then
+                    out.DerivedFuncOrigins
+                    |> Map.fold (fun acc k v -> Map.add k v acc) m.DerivedFuncOrigins
+                else m.DerivedFuncOrigins })
 
 /// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose
 /// operands are BOTH arrays becomes the `method_for(zip ..) <@> kernel |>
@@ -4767,6 +5023,36 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         | IRLet (_, _, body) -> operandType body
         | CarriedType ty -> Some ty
         | _ -> None
+    // TRIGGER PRE-SCAN. `rewrite` below fires on exactly three operand-type
+    // pairs -- (array, array), (array, scalar), (scalar, array) -- so a module
+    // with no array-typed elementwise binop anywhere cannot be changed by this
+    // pass, and rebuilding every function body and binding value to discover
+    // that is pure waste (post-TypeCheck, almost every `x + y` over arrays is
+    // ALREADY a combinator; this pass exists only for pack elements whose array
+    // type resolves after monomorphization).
+    //
+    // Deliberately an OVER-approximation: `Some _, Some (ArrayElem _)` also
+    // admits pairs `rewrite` falls through on, which costs a no-op pass, never
+    // a missed rewrite. Nesting is covered because the pass is bottom-up: an
+    // outer binop only becomes array-typed once an INNER one was rewritten, and
+    // that inner one is itself a trigger in the un-rewritten tree.
+    let isArrayBinOpTrigger (e: IRExpr) : bool =
+        match e with
+        | IRBinOp (IRElementwise, _, l, r) ->
+            (match operandType l, operandType r with
+             | Some (ArrayElem _), Some _ | Some _, Some (ArrayElem _) -> true
+             | _ -> false)
+        | _ -> false
+    let hasArrayBinOp =
+        let mutable hit = false
+        let scan (b: IRExpr) =
+            if not hit then
+                iterIRExpr (fun e -> if not hit && isArrayBinOpTrigger e then hit <- true) b
+        modul.Functions |> List.iter (fun f -> scan f.Body)
+        modul.Bindings |> List.iter (fun b -> scan b.Value)
+        hit
+    if not hasArrayBinOp then modul
+    else
     // Broadcast a scalar against an array (`arr op scalar` / `scalar op
     // arr`): value-space twin of TypeCheck.inferBinOp's array-scalar path,
     // for pack elements whose array type only resolves post-monomorphization
@@ -5000,8 +5286,7 @@ let collectPolyCallSites (polyFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (I
             | Some arities -> results.Add((funcId, arities))
             | None -> ()
         | _ -> ()
-        e
-    mapIRExpr walk expr |> ignore
+    iterIRExpr walk expr
     results |> Seq.toList
 
 /// Create a monomorphized copy of a poly function for a list of slot arities.
@@ -5212,12 +5497,11 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                     | [ordinalParam] ->
                         // Which pack slot (if any) does the lambda body read?
                         let mutable packSlot = None
-                        mapIRExpr (fun e ->
+                        iterIRExpr (fun e ->
                             match e with
                             | IRPolyIndex (IRVar (pid, _), _) when Map.containsKey pid aliasToSlot ->
                                 packSlot <- Some aliasToSlot.[pid]
-                                e
-                            | _ -> e) lam.Body |> ignore
+                            | _ -> ()) lam.Body
                         match packSlot with
                         | Some slotIdx ->
                             let n = aritiesArr.[slotIdx]
@@ -5397,6 +5681,37 @@ let private getStructFieldsCache () : System.Collections.Generic.Dictionary<stri
         fresh
     else v
 
+// typeOf memoization (docs/plan-compile-speed.md Stage 5)
+//
+// WHY: `typeOf` reconstructs a node's type from its children, so one call on
+// the root of a deep un-let-bound expression costs O(depth) -- and every pass
+// that asks each node in turn therefore pays O(n^2). Measured on the Stage 5
+// chain probes (one expression, n `x * k` terms): typeOf calls come out at
+// EXACTLY 2n^2 (n=200 -> 80,398 calls over 800 IR nodes = 100x the node
+// count; n=2000 -> 8,003,998 over 8,000 nodes = 1000x). Real programs sit at
+// 1.3-1.9x (lsdft, 01_weather_stations), so this is purely a cliff-remover.
+//
+// SOUNDNESS: every `typeOf` arm is a pure function of the node's structure
+// with ONE exception -- `IRFieldAccess` consults `tryLookupFieldType`, i.e.
+// the struct-fields cache, which is (re)populated per module at
+// liftInlineFormsModule entry and again at codegen entry. A result computed
+// before a population would otherwise be served after it. So the memo is
+// dropped whenever that cache is set (below): entries can only outlive a
+// generation in which nothing changed. Everything else typeOf touches
+// (promoteElemType, mkArrayLike, flattenTupleLeaves, classifyCompound...,
+// orbitBaseExtent) is pure, and IRExpr values are immutable -- a rebuilt node
+// is a NEW reference and therefore a new key.
+//
+// Keyed by REFERENCE (ConditionalWeakTable), so there is no structural
+// hashing cost and no lifetime extension: entries die with their nodes.
+let mutable private typeOfMemo =
+    System.Runtime.CompilerServices.ConditionalWeakTable<IRExpr, IRType>()
+
+/// Drop every memoized `typeOf` result. See the note above: this is what keeps
+/// the memo honest across struct-fields-cache generations.
+let private invalidateTypeOfMemo () =
+    typeOfMemo <- System.Runtime.CompilerServices.ConditionalWeakTable<IRExpr, IRType>()
+
 let setStructFieldsCache (types: IRTypeDef list) =
     // Create a fresh Dictionary for this async context -- do not reuse and
     // .Clear() a shared instance, since other tasks may hold the same
@@ -5407,6 +5722,46 @@ let setStructFieldsCache (types: IRTypeDef list) =
         | IRTDStruct (name, fields) -> cache.[name] <- fields
         | _ -> ()
     structFieldsCacheStorage.Value <- cache
+    // A new struct-fields generation invalidates every reconstruction that
+    // could have consulted the old one (typeOf's IRFieldAccess arm).
+    invalidateTypeOfMemo ()
+
+// Declaration spans, by top-level name.
+//
+// The IR carries NO source positions -- deliberately: it is the phase where
+// surface syntax has been discharged. That is fine until a back-end phase has
+// to REFUSE something, at which point "which line" is the only question the
+// user has. Lowering does see the surface program, so it records the span of
+// every top-level declaration here on the way past, and codegen refusals
+// resolve their enclosing declaration's name through this table.
+//
+// Coarse ON PURPOSE: one span per declaration, not per node. It points the
+// caret at the `let`/`function` the refused construct lives in, which is the
+// granularity codegen can honestly support. AsyncLocal for the parallel test
+// runner's per-task isolation, like every other cache in this file.
+let private declSpansStorage = System.Threading.AsyncLocal<Map<string, Blade.Ast.Span> ref>()
+
+let declSpansCell () : Map<string, Blade.Ast.Span> ref =
+    let v = declSpansStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        declSpansStorage.Value <- fresh
+        fresh
+    else v
+
+/// Record one declaration's span. Later declarations with the same name (a
+/// shadowing `let`) win, matching what the emitted code refers to last.
+let recordDeclSpan (name: string) (span: Blade.Ast.Span) : unit =
+    if span.StartLine > 0 then
+        let cell = declSpansCell ()
+        cell.Value <- Map.add name span cell.Value
+
+/// The recorded span for `name`, or `noSpan` when nothing was recorded
+/// (a synthesized declaration, or a caller that never populated the table).
+let declSpanOf (name: string) : Blade.Ast.Span =
+    match Map.tryFind name (declSpansCell ()).Value with
+    | Some s -> s
+    | None -> Blade.Ast.noSpan
 
 let tryLookupFieldType (objType: IRType) (fieldName: string) : IRType option =
     match objType with
@@ -5531,8 +5886,40 @@ let private unreachableTyping (family: string) (expr: IRExpr) : 'a =
 /// The canonical expression type reconstruction. See the section comment
 /// above for how this relates to exprTypeIfKnown and CodeGen.inferExprType.
 let rec typeOf (expr: IRExpr) : IRType =
+    // Stage 5 instrumentation (docs/plan-compile-speed.md): total invocations,
+    // and how many of them the CarriedType fast path answers outright. The
+    // difference is the reconstructing traffic the memo below pays for.
+    if PerfCounters.enabled then PerfCounters.typeOfCall ()
+    match expr with
+    // Node-carried types answer without touching a child, so they stay AHEAD
+    // of the memo: a table probe would cost more than the answer.
+    | CarriedType ty ->
+        if PerfCounters.enabled then PerfCounters.typeOfCarried ()
+        ty
+    | _ ->
+        // Reconstructing arms only (see the memo note above setStructFieldsCache).
+        match typeOfMemo.TryGetValue expr with
+        | true, ty ->
+            if PerfCounters.enabled then PerfCounters.typeOfMemoHit ()
+            ty
+        | _ ->
+            let ty = typeOfReconstruct expr
+            // AddOrUpdate, not Add: two threads reconstructing the same node
+            // compute the same (deterministic) answer, so a race is benign --
+            // but Add would throw on the duplicate key.
+            typeOfMemo.AddOrUpdate(expr, ty)
+            ty
+
+/// `typeOf`'s reconstruction body. Call `typeOf`, never this: the memo and the
+/// carried-type fast path both live in the wrapper above, and the recursive
+/// calls inside here deliberately go back through it so every intermediate
+/// result is memoized once.
+and private typeOfReconstruct (expr: IRExpr) : IRType =
     match expr with
     // -- Node-carried types (shared with exprTypeIfKnown) --
+    // Unreachable through `typeOf` (the wrapper answers these), but kept so
+    // this match stays exhaustive the same way it always was -- the coverage
+    // tail below attributes IRVar/IRParam/... to exactly this arm.
     | CarriedType ty -> ty
 
     // -- Pass-throughs: the type of one distinguished child --
@@ -5892,11 +6279,26 @@ let rec typeOf (expr: IRExpr) : IRType =
         // Fused reduction terminal: one scalar per fusion leaf. The seed
         // carries the accumulator type (checker-unified with every leaf's
         // element type); the result mirrors the tree's nested-pair shape.
-        let rec shape e =
-            match e with
-            | IRFusion (l, r) -> IRTTuple [shape l; shape r]
-            | _ -> typeOf seed
-        shape comp
+        //
+        // JOIN ENCODING: a reduction join seeds each leg separately, so `seed`
+        // is an `IRTuple` of k seeds in leaf order and each leaf takes its OWN
+        // one. A shared-fold terminal keeps one seed for every leaf.
+        match seed with
+        | IRTuple seeds when seeds.Length >= 2 ->
+            // A JOIN answers a FLAT Tuple<k>, not the chain's nested pairs.
+            // `<&!>` between two maps is a binary operator, so its result
+            // nests; a join is k-ary by construction and its VALUE is one flat
+            // `make_tuple` of k accumulators. Nesting the TYPE over a flat
+            // value is what makes a nested `std::get` chain project the wrong
+            // slot (and, in a kernel body, not compile at all) -- so the join
+            // types flat, and every projection is `get<i>`.
+            IRTTuple (seeds |> List.map typeOf)
+        | _ ->
+            let rec shape e =
+                match e with
+                | IRFusion (l, r) -> IRTTuple [shape l; shape r]
+                | _ -> typeOf seed
+            shape comp
     | IRProdSum args ->
         // Scalar: the fused fold of rank-1 operands (TypeCheck enforces rank 1).
         (match args with
@@ -6012,6 +6414,54 @@ let private isNestedLoopComputeArg (e: IRExpr) : bool =
 let private isInlineArrayLitArg (e: IRExpr) : bool =
     match e with
     | IRArrayLit _ -> true
+    | _ -> false
+
+/// An ARRAY-VALUED SELECT sitting directly in a loop form's `Arrays` list --
+/// the third instance of the same gap as `isInlineArrayLitArg`. A recursive
+/// array's out-of-prefix lag read desugars to exactly this shape: TypeCheck's
+/// `rewritePrefixReads` hoists the clamped row read into a `__lag<k>_` binding
+/// and leaves the bounds SELECT inline (`if n - 3 >= 0 then __lag0_m else
+/// __zs0_m`), so an elementwise use like `0.5 * prefix(n - 3)` puts the whole
+/// `if` in a loop form's array slot. Codegen's auto-materialize knows only the
+/// blessed mask/intersect/union/unique forms, so the select fell through to the
+/// `arr<i>` placeholder and the nest peeled an identifier it never declared.
+///
+/// Hoisting the select to its own let-RHS is what routing the same expression
+/// through a helper function (`method_for(zip(...)) <@> ... |> compute`) already
+/// does. It is only half the fix: the binding this mints must also be DECLARED
+/// as an `Array<T, N>` rather than a raw `promote<>::type` pointer, which is
+/// CodeGen's `producesWrapperOf` IRIf arm. Changing one without the other trades
+/// the undeclared `arr<i>` for a pointer with no `.extents`.
+///
+/// Scalar selects are untouched -- they render inline as an ordinary ternary
+/// and never occupy an array slot.
+let private isArrayValuedSelect (e: IRExpr) : bool =
+    match e with
+    | IRIf _ ->
+        match typeOf e with
+        | ArrayElem _ -> true
+        | _ -> false
+    | _ -> false
+
+/// A LOOP FORM sitting directly in another loop form's `Arrays` list -- the
+/// fourth instance of the same gap as `isArrayValuedSelect`. A CHAINED MAP
+/// (`(A <@> f) <@> g`, the pipeline shape) lowers to exactly this: the inner
+/// `<@>` is an apply-combinator occupying the outer one's array slot. Codegen's
+/// auto-materialize knows only the blessed mask/intersect/union/unique forms, so
+/// the inner map fell through to the `arr<i>` placeholder -- the outer nest then
+/// read `arr0` for an intermediate that was never emitted, for ANY inner kernel
+/// (lambda or operator section alike).
+///
+/// Hoisting it to its own let-RHS materializes the intermediate, which is
+/// precisely what splitting the chain into two `let`s by hand already does.
+///
+/// Only INLINE forms are caught. A deferred map reaches a consuming slot as an
+/// `IRVar` pointing at its let-binding, so the fusion paths that depend on
+/// deferred operands staying unmaterialized -- `<&!>`'s shared-traversal
+/// repointing above all -- never see this predicate.
+let private isNestedLoopFormArg (e: IRExpr) : bool =
+    match e with
+    | IRApplyCombinator _ | IRComposeApply _ -> true
     | _ -> false
 
 /// Peel any IRLet chain that descendant lifts produced.
@@ -6323,13 +6773,20 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (bindsA, aFinal) = liftChildEvaluatedOnce builder a'
         let (bindsB, bFinal) = liftChildEvaluatedOnce builder b'
         wrapLets (bindsA @ bindsB) (IRSolve (aFinal, bFinal))
+    // liftChildIncludingLoopApp, not liftChild, for the same reason as
+    // IRReduce/IRProdSum above: the whole-array negate/conjugate emitters have
+    // no rendering for a synthesized elementwise loop application, so
+    // `-(A [-] B)` -- a bracketed op, which lowers to IRApp(IRObjectFor ..) --
+    // reached exprToCpp and rendered as codegen's LOOP_OBJECT_USED_AS_VALUE
+    // sentinel. Bare `A [-] B` already worked because a let-RHS is a blessed
+    // position; only the wrapped form fell through.
     | IRArrayNegate arr ->
         let arr' = liftExpr builder arr
-        let (binds, arrFinal) = liftChild builder arr'
+        let (binds, arrFinal) = liftChildIncludingLoopApp builder arr'
         wrapLets binds (IRArrayNegate arrFinal)
     | IRArrayConjugate arr ->
         let arr' = liftExpr builder arr
-        let (binds, arrFinal) = liftChild builder arr'
+        let (binds, arrFinal) = liftChildIncludingLoopApp builder arr'
         wrapLets binds (IRArrayConjugate arrFinal)
     | IRReverse (arr, d) ->
         let arr' = liftExpr builder arr
@@ -6490,7 +6947,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
+                   || isArrayValuedSelect inner || isNestedLoopFormArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -6506,7 +6964,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
+                   || isArrayValuedSelect inner || isNestedLoopFormArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -6522,7 +6981,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
+                   || isArrayValuedSelect inner || isNestedLoopFormArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -6925,14 +7385,13 @@ let private shapeSignatureAt (func: IRFuncDef) (args: IRExpr list) : (string * i
 /// get one.
 let private shapeSpecWorthwhile (func: IRFuncDef) : bool =
     let mutable found = false
-    mapIRExpr (fun e ->
-        (match e with
-         | IRApplyCombinator _ | IRComposeApply _ | IRMethodFor _
-         | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRForRange _
-         | IRGram _ | IRMatmul _ | IRSolve _ | IRArrayProduct _ | IRArrayNegate _ | IRArrayConjugate _
-         | IRReynolds _ | IRDecompact _ | IRTranspose _ -> found <- true
-         | _ -> ())
-        e) func.Body |> ignore
+    iterIRExpr (fun e ->
+        match e with
+        | IRApplyCombinator _ | IRComposeApply _ | IRMethodFor _
+        | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRForRange _
+        | IRGram _ | IRMatmul _ | IRSolve _ | IRArrayProduct _ | IRArrayNegate _ | IRArrayConjugate _
+        | IRReynolds _ | IRDecompact _ | IRTranspose _ -> found <- true
+        | _ -> ()) func.Body
     found
 
 /// PROVENANCE GATE. A spec bakes its literals by NAME, over every index record
@@ -7022,11 +7481,10 @@ let private shapeRecursiveIdsOf (reach: Map<IRId, Set<IRId>>) : Set<IRId> =
 /// Every call site a body makes to a named function, as (callee id, args).
 let private shapeCallSitesIn (body: IRExpr) : (IRId * IRExpr list) list =
     let mutable acc = []
-    mapIRExpr (fun e ->
-        (match e with
-         | IRApp (IRVar (fid, _), args, _) -> acc <- (fid, args) :: acc
-         | _ -> ())
-        e) body |> ignore
+    iterIRExpr (fun e ->
+        match e with
+        | IRApp (IRVar (fid, _), args, _) -> acc <- (fid, args) :: acc
+        | _ -> ()) body
     acc
 
 /// Does this call hand the callee the CALLER's own extents, unchanged and in
@@ -7225,11 +7683,10 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
     let programAppliedIds =
         let acc = System.Collections.Generic.HashSet<IRId>()
         let scan (b: IRExpr) =
-            mapIRExpr (fun e ->
-                (match e with
-                 | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
-                 | _ -> ())
-                e) b |> ignore
+            iterIRExpr (fun e ->
+                match e with
+                | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
+                | _ -> ()) b
         allFuncs |> List.iter (fun f -> scan f.Body)
         modules |> List.iter (fun m -> m.Bindings |> List.iter (fun b -> scan b.Value))
         Set.ofSeq acc
@@ -7432,13 +7889,12 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
             bodies
             |> List.collect (fun b ->
                 let mutable found = []
-                mapIRExpr (fun e ->
-                    (match e with
-                     | IRApp (IRVar (fid, _), args, _) when candMap.ContainsKey fid ->
-                         let sign = shapeSignatureAt candMap.[fid] args
-                         if not (List.isEmpty sign) then found <- (fid, sign) :: found
-                     | _ -> ())
-                    e) (rewriteCallSites b) |> ignore
+                iterIRExpr (fun e ->
+                    match e with
+                    | IRApp (IRVar (fid, _), args, _) when candMap.ContainsKey fid ->
+                        let sign = shapeSignatureAt candMap.[fid] args
+                        if not (List.isEmpty sign) then found <- (fid, sign) :: found
+                    | _ -> ()) (rewriteCallSites b)
                 found)
             |> List.distinct
         for (fid, sign) in sites do
@@ -8035,15 +8491,15 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
     let baseTable = buildCallablesTable modul.Functions
     let aliases = System.Collections.Generic.Dictionary<IRId, IRId>()
     // Side-effecting visitor: at every IRLet, record bindingId -> targetId
-    // if the value is a direct IRVar reference. Returns the expression
-    // unchanged so `mapIRExpr` walks the whole tree.
-    let visitor (e: IRExpr) : IRExpr =
+    // if the value is a direct IRVar reference. `iterIRExpr` walks the whole
+    // tree in the same post-order `mapIRExpr` used, so a repeated binding id
+    // still resolves to the same (last-written) target.
+    let visitor (e: IRExpr) : unit =
         match e with
         | IRLet (bindingId, IRVar (targetId, _), _) ->
             aliases.[bindingId] <- targetId
         | _ -> ()
-        e
-    let walk (e: IRExpr) : unit = mapIRExpr visitor e |> ignore
+    let walk (e: IRExpr) : unit = iterIRExpr visitor e
     // Walk top-level binding values; also record alias if a top-level
     // binding's value is a direct IRVar (handles `let f = lambda(...)`
     // at module scope).
@@ -8261,6 +8717,139 @@ and collectPatternIds (pat: IRPattern) : Set<IRId> =
     | IRPatCons (h, t) -> Set.union (collectPatternIds h) (collectPatternIds t)
     | IRPatVariant (_, _, Some inner, _) -> collectPatternIds inner
     | _ -> Set.empty
+
+// Dead-polymorph elimination (whole program, post-monomorphization)
+
+/// Does this function still carry an unresolved type variable ANYWHERE -- its
+/// params, its return type, or a type inside its body? The monomorphizers'
+/// own boundary test is `hasTypeVarsInParams`, which reads the SIGNATURE only;
+/// this is the test validation actually applies, so it is what "cannot be
+/// emitted as C++" means.
+let private funcStillPolymorphic (f: IRFuncDef) : bool =
+    let inSig =
+        (f.Params |> List.exists (fun p -> (containsInfer p.Type).IsSome))
+        || (containsInfer f.RetType).IsSome
+    inSig || (collectTypesInExpr f.Body |> List.exists (fun t -> (containsInfer t).IsSome))
+
+/// Drop functions that are STILL POLYMORPHIC after monomorphization and are
+/// unreachable from the program's roots (its module bindings).
+///
+/// WHY THIS IS NEEDED. `monomorphizeHMFunctions` drops an uninstantiated
+/// generic and keeps whatever is still referenced ("orphan rescue"), but its
+/// membership test -- `hasTypeVarsInParams` -- reads the SIGNATURE only. A
+/// lambda LIFTED out of a never-called generic's body can easily have concrete
+/// params while its body is full of the parent's type vars: it is then not an
+/// hmFunc at all, so it survives in `Functions` unconditionally, is validated,
+/// and reports BL6001 "unresolved type variable T?N in body" for a function
+/// nothing can ever call. Worse, it and its siblings then keep EACH OTHER
+/// alive: a call from the dead parent to another generic still registers as an
+/// HM call site, so a spec (and its lambda clones) is built for a call that
+/// will never run, and `specFuncs`/`cloneFuncs` are two of the four things the
+/// orphan rescue seeds from -- so the abstract kernels get rescued as well.
+/// Measured on `examples/lswosa.blade` with no driver: one uncalled generic
+/// produced 11 BL6001s across three lifted lambdas. The corpus reduction
+/// (functions/084) shows all three ingredients are needed -- unit-annotated
+/// type vars, a call to another generic, and a grouped zip row map nested in a
+/// per-element lambda -- which is why no simpler uncalled generic ever tripped
+/// it and the gap survived this long.
+///
+/// The rule is REACHABILITY, not shape: roots are the module bindings (the
+/// program proper), closed transitively through the bodies of functions that
+/// survive. Reachability is computed over ALL functions, not just polymorphic
+/// ones, so a concrete helper called only from a live abstract function keeps
+/// that function alive.
+///
+/// SAFETY. Only a still-polymorphic function is ever dropped, and such a
+/// function cannot be emitted as valid C++ regardless -- today it produces
+/// either this BL6001 or an unresolved-type sentinel in the generated source.
+/// So the choice is between refusing a program that has no error in it and
+/// dropping code no call site can reach; a fully concrete unused function is
+/// untouched, and emission order for everything kept is unchanged.
+///
+/// WHOLE-PROGRAM, because a binding in module A can be the only reference to a
+/// function defined in module B; per-module reachability would drop it.
+///
+/// UNAPPLIED-GENERIC BINDINGS ARE ROOTS THAT MUST NOT BE. Reachability starts at
+/// the module bindings, so a binding that merely NAMES a generic keeps it (and
+/// everything its body calls) alive with nothing to pin the type vars. A REPL or
+/// notebook cell containing the bare name of a generic kernel is exactly that
+/// shape -- the cell lowers to `let __exprN = covariance`, eta-expanded to a
+/// function VALUE -- and it sprayed 23 BL6001s naming `mean` and lifted lambdas,
+/// for a cell whose only sin was echoing a function.
+///
+/// Such a binding is itself unrepresentable and is dropped first, for the same
+/// reason the functions are: its C++ type cannot be written. Nothing downstream
+/// loses anything, because the CONCRETE twin of this cell already emits no
+/// output -- `let __exprN = plain` becomes a `std::function` local that is never
+/// printed, since a function value has no printed form. So the fix makes the
+/// generic behave exactly like the non-generic instead of inventing a
+/// presentation, and the type echo a REPL shows for such a cell comes from the
+/// type checker (which resolves it fine) and not from anything here.
+///
+/// A binding referenced by ANOTHER binding is kept regardless: consuming it
+/// would be an application, which pins the vars, and if that somehow did not
+/// happen the reference would dangle. Narrow on purpose -- the value must be a
+/// FUNCTION type that still carries an inference var.
+let eliminateDeadPolymorphs (program: IRProgram) : IRProgram =
+    let allFuncs =
+        program.Modules |> List.collect (fun m -> m.Functions)
+    if not (allFuncs |> List.exists funcStillPolymorphic) then program
+    else
+    let funcById = allFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    // Every id an expression names. `IRVar` is the one reference form that
+    // matters here and it covers first-class kernel slots as well as calls --
+    // the same walk the orphan rescue uses.
+    let referencedIn (e: IRExpr) : Set<IRId> =
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        mapIRExpr (fun n ->
+            (match n with
+             | IRVar (id, _) -> acc.Add id |> ignore
+             | _ -> ())
+            n) e |> ignore
+        Set.ofSeq acc
+    // A function-typed binding that still carries an inference var: see the
+    // unapplied-generic note above. Kept anyway when some other binding names
+    // it, so a reference can never be left dangling.
+    let bindingIdsReferencedElsewhere =
+        program.Modules
+        |> List.collect (fun m -> m.Bindings)
+        |> List.map (fun b -> referencedIn b.Value)
+        |> List.fold Set.union Set.empty
+    let isUnappliedGenericBinding (b: IRBinding) =
+        match b.Type with
+        | FuncElem _ | IRTArrow _ ->
+            (containsInfer b.Type).IsSome
+            && not (Set.contains b.Id bindingIdsReferencedElsewhere)
+        | _ -> false
+    let liveBindingsOf (m: IRModule) =
+        m.Bindings |> List.filter (isUnappliedGenericBinding >> not)
+
+    let mutable reachable : Set<IRId> = Set.empty
+    let mutable frontier =
+        program.Modules
+        |> List.collect (fun m -> liveBindingsOf m |> List.map (fun b -> b.Value))
+        |> List.map referencedIn
+        |> List.fold Set.union Set.empty
+        |> Set.toList
+    while not frontier.IsEmpty do
+        let mutable next = Set.empty
+        for id in frontier do
+            if not (Set.contains id reachable) then
+                reachable <- Set.add id reachable
+                match Map.tryFind id funcById with
+                | Some f -> next <- Set.union next (referencedIn f.Body)
+                | None -> ()
+        frontier <- next |> Set.filter (fun i -> not (Set.contains i reachable)) |> Set.toList
+    { program with
+        Modules =
+            program.Modules
+            |> List.map (fun m ->
+                { m with
+                    Bindings = liveBindingsOf m
+                    Functions =
+                        m.Functions
+                        |> List.filter (fun f ->
+                            Set.contains f.Id reachable || not (funcStillPolymorphic f)) }) }
 
 /// Validate a single IRModule, returning a list of errors
 let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationError list =

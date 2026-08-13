@@ -1,0 +1,25 @@
+// TEST: Tuple Equality Component Unit Mismatch (rejects)
+// ERROR: BL3006
+// ERROR-CONTAINS: meters / seconds vs meters
+// ============================================================================
+// The units discipline reaches INSIDE the tuple. `IR.getUnits` reads the top
+// of a type and an `IRTTuple` carries no annotation there, so the whole-operand
+// unit rule that guards a scalar comparison saw two unannotated values and
+// waved this through: `(4.0 mps, 1) == (4.0 meters, 1)` type-checked, compiled,
+// and printed `true` on the strength of the bare number 4.0 appearing on both
+// sides. Exactly the class of plausible-but-wrong the unit system exists to
+// refuse -- and the same one-level component descent `017` added for the
+// direct-call argument seam.
+//
+// The comparison rule itself is unchanged (`unitRulesForOp`, "comparison"),
+// applied once per component pair instead of once per operand.
+// ============================================================================
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+let speed = 4.0: Float<mps>
+let dist = 4.0: Float<meters>
+let t1 = speed, 1
+let t2 = dist, 1
+let r = t1 == t2
+// EXPECT: typecheck failure -- mps and meters are not comparable

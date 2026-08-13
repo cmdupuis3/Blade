@@ -3,6 +3,23 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <RootNamespace>Blade</RootNamespace>
+    <!-- Ahead-of-time compile the IL when publishing a RID-specific image.
+         Blade is a short-lived batch CLI: on a plain `dotnet build` image every
+         invocation re-JITs an 11.5 MB assembly, and that JIT warm-up is most of
+         the ~435 ms floor a trivial file pays (measured: `check` -32%, `emit`
+         -43% with R2R, emitted C++ hash-identical, so this is packaging, not
+         semantics).
+
+         The RuntimeIdentifier CONDITION is load-bearing, not decoration.
+         ReadyToRun requires a RID, and the SDK's RID inference reacts to a bare
+         `PublishReadyToRun=true` by inferring one for `dotnet build` too, which
+         silently relocates the dev binary from bin/Release/net7.0/Blade.exe to
+         bin/Release/net7.0/win-x64/Blade.exe and breaks every consumer of the
+         documented path. Gating on an explicitly supplied RID keeps the default
+         build byte-for-byte where it was: `dotnet build -c Release` passes no
+         RID, so this property never materializes.
+         See docs/plan-compile-speed.md "Building for speed" for the command. -->
+    <PublishReadyToRun Condition="'$(RuntimeIdentifier)' != ''">true</PublishReadyToRun>
   </PropertyGroup>
 
   <ItemGroup>
@@ -30,6 +47,11 @@
          these directly. -->
     <Compile Include="src/Diagnostics.fs" />
     <Compile Include="src/Types.fs" />
+    <!-- Env-gated compiler perf counters (docs/plan-compile-speed.md Stage 5).
+         Dependency-free, and deliberately in FRONT of the pipeline: its two
+         instrumented consumers (IR.fs and Unify.fs) sit ~175 entries apart in
+         this list, so anything later than here is invisible to one of them. -->
+    <Compile Include="src/PerfCounters.fs" />
     <Compile Include="src/Lexer.fs" />
     <Compile Include="src/Parser.fs" />
     <Compile Include="src/Grad.fs" />
@@ -501,6 +523,12 @@
          by programs that emit a blade_lapack:: call. -->
     <None Include="src/cpp/blade_lapack.hpp">
       <Link>cpp/blade_lapack.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- ASan allocator-stats export (BLADE-MEMCHECK line at exit); included
+         only by programs generated under BLADE_MEMCHECK=1. -->
+    <None Include="src/cpp/blade_memcheck.hpp">
+      <Link>cpp/blade_memcheck.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <!-- Round D's cuBLAS swap-table verification, compiled with nvcc and run

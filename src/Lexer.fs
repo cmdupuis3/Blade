@@ -143,6 +143,12 @@ type Token = {
     // post-lexeme cursor. Length is retained unchanged for existing consumers.
     EndLine: int
     EndCol: int
+    /// Position of this token in the stream the lexer produced, counting from
+    /// 0 and INCLUDING the newline tokens a later filter may drop. Monotone
+    /// along any sublist the parser holds, which is what lets the parser turn
+    /// "what did this production consume" into an array lookup instead of a
+    /// list-length subtraction (see Parser.consumedEnd).
+    Index: int
 }
 
 // Keyword Map
@@ -257,7 +263,10 @@ type LexerState = {
     mutable Pos: int
     mutable Line: int
     mutable Col: int
-    mutable Tokens: Token list
+    // Append-only accumulator. A `Token list` here made `emit` an O(n) list
+    // append per token, i.e. O(n^2) over a file; nothing reads it before
+    // `tokenize` converts it to a list once, so a ResizeArray is a pure win.
+    Tokens: ResizeArray<Token>
 }
 
 let createLexer source = {
@@ -265,7 +274,7 @@ let createLexer source = {
     Pos = 0
     Line = 1
     Col = 1
-    Tokens = []
+    Tokens = ResizeArray<Token>()
 }
 
 // Character Utilities
@@ -314,8 +323,8 @@ let emit (state: LexerState) startLine startCol kind =
     // they are the natural exclusive end -- correct even for multi-line lexemes.
     // For a zero-width token (EOF), End = Start.
     let tok = { Kind = kind; Line = startLine; Col = startCol; Length = max 1 len
-                EndLine = state.Line; EndCol = state.Col }
-    state.Tokens <- state.Tokens @ [tok]
+                EndLine = state.Line; EndCol = state.Col; Index = state.Tokens.Count }
+    state.Tokens.Add tok
 
 // Token Scanners
 
@@ -727,7 +736,7 @@ let scanToken (state: LexerState) =
 let tokenize source =
     let state = createLexer source
     while scanToken state do ()
-    state.Tokens
+    List.ofSeq state.Tokens
 
 /// Filter newlines based on delimiter depth: newlines inside (), [], {} are
 /// removed (treated as whitespace); newlines at depth 0 are kept (statement

@@ -1,0 +1,65 @@
+// TEST: Uncalled Generic With Lifted Kernels
+// ============================================================================
+// A generic function that is DEFINED and never CALLED must compile. Blade
+// monomorphizes at call sites, so an uninstantiated generic has no concrete
+// form -- monomorphizeHMFunctions drops it, and that is right.
+//
+// What did NOT get dropped: the lambdas LIFTED out of its body. The drop test,
+// `hasTypeVarsInParams`, reads the SIGNATURE only, so a lifted kernel whose
+// params came out concrete while its BODY still carries the parent's type vars
+// was not classified as generic at all. It survived into Functions, failed
+// validation with BL6001 "unresolved type variable T?N in body" for a function
+// nothing can call, and -- because the orphan rescue seeds from the survivors --
+// dragged its genuinely abstract siblings back in with it.
+// eliminateDeadPolymorphs now drops any still-polymorphic function unreachable
+// from the module bindings.
+//
+// EVERY INGREDIENT BELOW IS LOAD-BEARING (each was removed in turn and the
+// refusal went away, so none of it is scenery):
+//   * the UNIT-annotated type vars -- unitless T^1/U^1 does not reproduce;
+//   * the call to ANOTHER generic (`mymin`), which is what mints the specs and
+//     lambda clones the orphan rescue then seeds from -- inline `t_raw(0)`
+//     instead and it does not reproduce;
+//   * the grouped ZIP ROW MAP nested inside a per-element lambda -- a plain
+//     nested elementwise map does not reproduce.
+// The `where omp` clauses on the original (examples/lswosa.blade, which is
+// where this came from) are NOT needed and are left out.
+//
+// Reduced from examples/lswosa.blade run with no driver: 11 BL6001s across
+// three lifted lambdas, for a program with nothing wrong in it.
+// ============================================================================
+import units.SI
+
+Unit day = 86400 * second
+Unit time: day
+Unit frequency: 1 / day
+
+function mymin(x: T^1) = reduce(x, lambda(a, b) -> if a < b then a else b)
+
+function dead_generic(st: Tuple<U^1, T<time>^1>, freqs: T<frequency>^1, t_zero: T<time> = 0.0) = {
+    let s_raw, t_raw = st
+    let ts = t_raw - t_zero
+    let t_min: Float64<time> = mymin(ts)
+    let h: Float64<time> = 2.0 * t_min
+    let keys = (ts <@> lambda(x) -> floor(x / h)) |> compute
+    let gk = group_keys(keys)
+    let gt = group_by(ts, gk)
+    let gu = group_by(s_raw, gk)
+    let spec = freqs <@> lambda(f) -> {
+        let w = 6.28 * f
+        let cellacc = method_for(zip(gt, gu)) <@> lambda(trow: T<time>^1, urow: U^1) -> {
+            let ct = trow <@> lambda(t) -> cos(w * t)
+            let a, b = object_for(<&!>) <@> (prodsum(urow, ct), reduce(ct, (+)))
+            [a, b]
+        } |> compute
+        cellacc(0, 0)
+    } |> compute
+    reduce(spec, (+))
+}
+
+// Nothing calls dead_generic. The module must still compile and run, and the
+// bindings below must be unaffected.
+let probe = 6.0
+// EXPECT: probe = 6
+let live = reduce([1.0, 2.0, 3.0], (+))
+// EXPECT: live = 6

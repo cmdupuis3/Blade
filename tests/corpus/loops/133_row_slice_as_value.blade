@@ -1,0 +1,32 @@
+// TEST: Row Slice As Value
+// ============================================================================
+// Dimensional currying's residual as a first-class VALUE: `g(i)` with fewer
+// subscripts than the rank is a row view, and it must survive every consuming
+// position -- direct call argument, let binding then call, and map operand.
+//
+// The dense partial sub-view emitters (densePartialSubview and its expression
+// twin) were gated on every axis being stamped `SDimension`. But Kind is a
+// statement about ONE apply, not about the value (see 124): a grid a kernel
+// RETURNED carries inherited TDimension stamps, so its rows fell through to
+// the raw `data[i]` pointer and every consumer failed in g++ ("could not
+// convert double* to Array<double, 1>"). The gate now reads only storage
+// facts (plain, non-compact, rank-1 axes).
+// ============================================================================
+function rsum(x: T^1) = reduce(x, (+))
+let g = (method_for(range<Idx<4>>) <@> lambda(r) ->
+          (method_for(range<Idx<3>>) <@> lambda(c) -> 1.0 * r * 10.0 + 1.0 * c)) |> compute
+// EXPECT: g = [[0, 1, 2], [10, 11, 12], [20, 21, 22], [30, 31, 32]]
+
+// Direct call argument.
+let a = rsum(g(1))
+// EXPECT: a = 33
+
+// Let binding, then call.
+let r0 = g(2)
+// EXPECT: r0 = [20, 21, 22]
+let b = rsum(r0)
+// EXPECT: b = 63
+
+// Map operand.
+let c2 = (g(1) <@> lambda(x) -> x * 2.0) |> compute
+// EXPECT: c2 = [20, 22, 24]

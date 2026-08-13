@@ -1,8 +1,42 @@
-// TEST: Intrinsics Array Operand (rejects)
-// ERROR: BL3007
+// TEST: Intrinsics Array Operand Lifts
 // ============================================================================
-// Scalar-only: exp(A) on a whole array is a type error with steering toward
-// an elementwise kernel. (Mapping over arrays is a kernel's job.)
+// A scalar intrinsic applied to an ARRAY lifts elementwise. This used to be a
+// BL3007 refusal that steered to `method_for(A) <@> lambda(x) -> exp(x)`, on
+// the rule that mapping over arrays is a kernel's job -- but the intrinsic in
+// KERNEL position (`exp <@> A`, pinned by 007) has always worked, so the two
+// spellings disagreed for no reason the user could see. `complex(re, im)` had
+// already been lifted for the same reason (009_complex_array_lift); this
+// brings the unary intrinsics, the complex accessors and `abs` into line.
+//
+// The lift re-synthesizes exactly the kernel spelling the old error message
+// recommended, so `lifted` and `manual` must agree cell for cell.
+//
+// EAGER, like the array/scalar broadcast it mirrors: a call is a value
+// everywhere else in the language and `A + B` materializes, so `exp(A)` hands
+// back an array, not a deferred loop. `exp <@> A` remains the deferred form.
 // ============================================================================
-let A = [1.0, 2.0, 3.0]
-let bad = exp(A)
+let A: Array<Float64 like Idx<3>> = [0.0, 1.0, 2.0]
+
+let lifted = exp(A)
+let manual = (method_for(A) <@> lambda(x) -> exp(x)) |> compute
+// EXPECT: lifted = [1, 2.71828182845905, 7.38905609893065]
+// EXPECT: manual = [1, 2.71828182845905, 7.38905609893065]
+
+// `|>` is application, so the pipe spelling is the same node and lifts too.
+// This is what makes a left-to-right pipeline read as one.
+let piped = A |> exp
+// EXPECT: piped = [1, 2.71828182845905, 7.38905609893065]
+
+// The complex accessors lift over a complex array.
+let Z: Array<Complex128 like Idx<2>> = [complex(3.0, 4.0), complex(0.0, 1.0)]
+let re = real(Z)
+let im = Z |> imag
+// EXPECT: re = [3, 0]
+// EXPECT: im = [4, 1]
+
+// abs lifts over both element classes, staying real-valued over complex.
+let signed: Array<Float64 like Idx<3>> = [-1.0, 2.0, -3.0]
+let mag_real = abs(signed)
+let mag_cplx = abs(Z)
+// EXPECT: mag_real = [1, 2, 3]
+// EXPECT: mag_cplx = [5, 1]

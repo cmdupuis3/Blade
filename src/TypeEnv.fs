@@ -146,6 +146,16 @@ type TypeEnv = {
     /// in `OuterScope` is bound INSIDE the innermost body -- which is what
     /// `bodyLocalBinding` tests.
     InCallableBody: bool
+    /// Names of the `mut` parameters of the function whose body is being
+    /// checked (all array-typed -- MutParamNotArray rejects any other kind
+    /// first). Rebinding one WHOLE (`a = <array expr>`) cannot reach the
+    /// caller, because the C++ ABI passes the `Array<>` wrapper by value; only
+    /// element writes travel, through the shared data pointer. A `let mut`
+    /// BINDING, by contrast, may be rebound whole -- that is real rebind
+    /// semantics with its own corpus (memfree/015, 016) -- and both bind
+    /// `MutPassable`, so assignability alone cannot tell them apart. This set
+    /// is how `assignTargetError` does.
+    MutArrayParams: Set<string>
     CurrentCommGroups: int list list
     /// Interface name -> InterfaceDecl
     Interfaces: Map<string, InterfaceDecl>
@@ -212,6 +222,15 @@ type TypeEnv = {
     /// Functions whose return type introduces a mutual group (`-> (P1, P2)`):
     /// funcName -> groupId. Joint check emitted at return; callers don't re-check. Shared by reference.
     MutualReturnFuncs: System.Collections.Generic.Dictionary<string, string>
+    /// Callee name -> the 0-based positions of its `mut` parameters. A `mut`
+    /// parameter grants the callee WRITE access to the caller's array, so the
+    /// caller has to have write access to grant: formalism 2.7 lists only
+    /// `let mut x = e` as passable to a `mut` param. The check needs the
+    /// callee's DECLARATION at the call site, and the function type carries
+    /// only param types, so the positions ride here. Name-keyed like
+    /// FuncConstraints/FuncDefaults, and shares their known shadowing
+    /// weakness. Shared by reference.
+    MutParamPositions: System.Collections.Generic.Dictionary<string, int list>
     /// Named functions' `where comm(...)` groups (by param index): funcName ->
     /// int list list. Populated by checkFunctionDecl; must survive
     /// eta-expansion (etaExpandFunctionKernel) onto the loop-kernel wrapper, or
@@ -235,6 +254,22 @@ type TypeEnv = {
     /// gives only PBottom. Keyed by BINDER ID (`FuncId`), not name (a
     /// shadowing local can't borrow the law); DECL ORDER resolution (self/forward -> SUnknown) needs no fixpoint. Shared by reference.
     FuncSignParities: System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>
+    /// Binder IDs of every NAMED function declaration (`function f`, static or
+    /// not, including the static pre-pass registration and any imported
+    /// module's functions -- the set is shared by reference across the whole
+    /// program, like Warnings).
+    ///
+    /// The one consumer is `buildCaptures`: a named function lowers to an
+    /// IRCallable emitted at C++ GLOBAL scope, so a lambda body that calls one
+    /// never needs it on the capture list -- the body already emits the
+    /// callable's own (possibly monomorphized) name. Left on the list it
+    /// becomes a dead parameter that the call site still forwards by SOURCE
+    /// name, which is not a C++ declaration whenever the callee was
+    /// monomorphized: `'scale' was not declared in this scope`.
+    ///
+    /// Keyed by BINDER ID, not name, so a local that SHADOWS a function name
+    /// still captures (its VarId is a different binder).
+    DeclaredFuncIds: System.Collections.Generic.HashSet<IRId>
     /// CERTIFIED half of the typed equivariance lattice (FuncRepSpec below is
     /// the speculative half): per-function rep signatures for functions
     /// carrying an `__ml_equiv` conjunct (a source `where ml.equiv(G)` pin, or
@@ -281,6 +316,18 @@ type TypeEnv = {
     /// buildApplyInfo's schema matcher and by the direct-call arg pairing.
     /// Shared by reference.
     DeclaredTupleWidths: System.Collections.Generic.Dictionary<IRId, int>
+    /// REDUCTION-JOIN leg lists (docs/plan-reduction-joins.md, Form 2): the
+    /// SURFACE elements of an array literal bound to a name,
+    /// `let ps = [prodsum(a, b), reduce(c, (+))]`. `reduce(ps, (<&!>))` reads
+    /// them back and joins the legs into one traversal; the elements never
+    /// escape as values, so the surface list is what the join needs and the
+    /// TYPED literal (four independent scalars) is not.
+    ///
+    /// Name-keyed, with FuncDefaults' known shadowing weakness and the same
+    /// justification: it is a SURFACE side channel, and the join re-validates
+    /// what it finds against the resolved binding (an array literal of the
+    /// same width) before using it. Shared by reference.
+    JoinLegLists: System.Collections.Generic.Dictionary<string, Expr list>
 }
 
 let emptyEnv () = {
@@ -293,6 +340,7 @@ let emptyEnv () = {
     InPolyContext = false
     InLambdaBody = false
     InCallableBody = false
+    MutArrayParams = Set.empty
     CurrentCommGroups = []
     Interfaces = Map.empty
     ImplMethods = Map.empty
@@ -311,16 +359,19 @@ let emptyEnv () = {
     MutualGroups = Map.empty
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
+    MutParamPositions = System.Collections.Generic.Dictionary<string, int list>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
     FuncSignParities = System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>()
+    DeclaredFuncIds = System.Collections.Generic.HashSet<IRId>()
     FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
     FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
     FuncFoldBuiltin = System.Collections.Generic.Dictionary<string, bool>()
     DeclaredTupleWidths = System.Collections.Generic.Dictionary<IRId, int>()
+    JoinLegLists = System.Collections.Generic.Dictionary<string, Expr list>()
 }
 
 /// Structured twin of `TypeEnv.Warnings`: every warning as a coded, spanned
@@ -541,6 +592,10 @@ class IS implemented, and the dense result folds like any other array." op level
     | UnitMismatch (context, left, right) -> sprintf "Unit mismatch in %s: %s vs %s" context left right
     | QuantityArgMismatch (pos, quantity, got) ->
         sprintf "argument %d: the parameter's declared type carries the quantity '%s', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is %s. Ascribe it at the call site (e.g. `x : %s`); matching dimensions alone do not imply the quantity." pos quantity got quantity
+    | ExtentArgMismatch (pos, dim, expected, actual) ->
+        sprintf "argument %d: extent mismatch on index slot %d -- the parameter declares Idx<%d> but the argument has Idx<%d>. A LITERAL parameter extent is baked into the emitted loop bounds and result allocations (a symbolic extent like Idx<n> reads the argument's extent at runtime instead), so this reads past the argument's allocation rather than merely disagreeing. Make the extents match, or declare the parameter over a symbolic extent." pos dim expected actual
+    | HaloExtentMismatch (declared, dim, targetName, actual) ->
+        sprintf "halo extent mismatch: the halo declares an inner extent of %d, but '%s' (read through the window at index slot %d) has extent %d. The window walk is bounded by the DECLARED extent, so an oversized halo reads past '%s''s allocation and an undersized one silently emits fewer windows. Make the halo's inner index match the array it windows over." declared targetName dim actual targetName
     | QuantityTerminal (quantity, declName) ->
         sprintf "unit '%s': the quantity '%s' cannot be used inside a unit expression. Quantities are TERMINAL -- the nominal layer is exactly one level deep -- so a quantity name can neither be composed (`Unit x = %s * m`) nor re-derived from (`Unit q: %s`). Compose from the structural units the quantity was declared over instead." declName quantity quantity quantity
     | UnknownUnitName (name, declName, candidates) ->
@@ -563,7 +618,6 @@ class IS implemented, and the dense result folds like any other array." op level
         sprintf "call to '%s': argument %d has no quantity tag but appears AFTER a quantity-tagged argument, so its slot would be a guess. Positional (untagged) arguments must come first, in declared order; tag the stragglers (`v : quantity`) or reorder the call." callee pos
     | IntrinsicBindArrayFailed op -> sprintf "%s(): failed to bind array type after unification" op
     | IntrinsicNeedsArray op -> sprintf "%s() requires an array as argument" op
-    | IntrinsicScalarOnly name -> sprintf "%s applies to scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(x) -> %s(x) |> compute)." name name
     | IntrinsicNotComplex name -> sprintf "%s is not defined for complex operands." name
     | IntrinsicNeedsNumeric name -> sprintf "%s expects a numeric operand." name
     | AbsNeedsNumericScalar got -> sprintf "abs expects a numeric scalar operand, got %s" got
@@ -622,6 +676,9 @@ complex half)." where_
     | UnknownWhereConstraint (func, name, vocab) -> sprintf "function '%s': unknown where-clause constraint '%s' (registered constraints: %s)" func name vocab
     | DistOrderCompileTime func -> sprintf "function '%s': Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>" func
     | ImmutableStaticAssign name -> sprintf "Cannot assign to '%s': static bindings are immutable" name
+    | MutAssignRefused (target, reason) -> sprintf "Cannot assign to '%s': %s" target reason
+    | MutArgNotPassable (func, argIndex, got) ->
+        sprintf "function '%s': argument %d is passed to a `mut` parameter, which writes back into the caller's array, but %s. Only a `let mut` binding (or another `mut` parameter being forwarded) may be passed there -- declare it `let mut`, or drop `mut` from the parameter if the callee does not write to it." func argIndex got
     | MutParamNotArray (func, param) -> sprintf "function '%s': parameter '%s' is `mut` but not array-typed. Only array parameters can be mutated in place (scalars pass by value); return the new scalar instead." func param
     | MutualBindJointly (typeName, describe, lowerNames) -> sprintf "type '%s' belongs to mutual group (%s); bind the group jointly: let (%s): (%s) = ..." typeName describe lowerNames describe
     | MutualDirectElementsOnly describe -> sprintf "mutual member types (group %s) may appear only as direct elements of a joint tuple annotation" describe
@@ -652,6 +709,7 @@ complex half)." where_
     | ProviderWriteNeedsArray alias -> sprintf "%s.write expects an array as its second argument (the variable to store)" alias
     | ProviderWriteNamedBinding alias -> sprintf "%s.write stores a NAMED array binding (its name becomes the store variable's name): bind the value first (let A = ...; %s.write(\"path\", A))" alias alias
     | ProviderWriteArgs alias -> sprintf "%s.write expects (\"path\", array): a string-literal store path and the array to write" alias
+    | ProviderWriteModuleScope alias -> sprintf "%s.write is a MODULE-LEVEL declaration form: it is only allowed as the whole right-hand side of a top-level `let` (let _ = %s.write(\"path\", A)). A write nested inside a block, a function or lambda body, a loop, or a branch is not lowered -- hoist it to module scope, or return the array from the block and write it there." alias alias
     | IrrepsIdxArgMismatch (pos, expected, actual) -> sprintf "argument %d: IrrepsIdx mismatch: the parameter expects %s but the argument carries %s. IrrepsIdx identity is the spec (plus nominative alias name) -- equal total_dim does not make two irreps spaces interchangeable." pos expected actual
     | BlockSpecArgMismatch (pos, expected, actual) -> sprintf "argument %d: block-spec index mismatch: the parameter expects %s but the argument carries %s. A block-structured index's identity is its GROUP FAMILY plus its spec (plus nominative alias name) -- equal total_dim does not make two block spaces interchangeable, and an O(3) irreps space is never a point-group one." pos expected actual
     | IrrepsIdxSpec detail -> sprintf "IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples -- a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." detail
@@ -710,12 +768,13 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // Promoted variants (Stage 5)
             | UnitMismatch _ -> "BL3006"
             | QuantityArgMismatch _ -> "BL3010"
+            | ExtentArgMismatch _ | HaloExtentMismatch _ -> "BL3016"
             | QuantityTerminal _ -> "BL3011"
             | DefaultParamOrder _ | DefaultParamScope _ -> "BL3012"
             | FactoryDupQuantityDecl _ -> "BL3013"
             | FactoryDupFill _ | FactoryUnknownTag _ | FactoryAmbiguousMix _ -> "BL3014"
             | UnknownUnitName _ -> "BL3015"
-            | IntrinsicBindArrayFailed _ | IntrinsicNeedsArray _ | IntrinsicScalarOnly _
+            | IntrinsicBindArrayFailed _ | IntrinsicNeedsArray _
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
             | ReduceEmptyArray _ | ProdsumExtentMismatch _ | GramNeedsRank2 _
@@ -775,7 +834,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _
             | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _ -> "BL4004"
-            | ImmutableStaticAssign _ | MutParamNotArray _ -> "BL4005"
+            | ImmutableStaticAssign _ | MutParamNotArray _ | MutAssignRefused _
+            | MutArgNotPassable _ -> "BL4005"
             | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups
             | MutualDuplicateMember _ | MutualIncompleteAnnotation _ | MutualJointAnnotationOnly _
             | MutualParamMemberType _ | MutualBindTuple _ | MutualReturnTupleElements _
@@ -785,7 +845,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | MutualUnsupportedExpr | MutualConstraintNotBool _ | MutualConstraintError _ -> "BL4006"
             | ProviderStreamNeedsVar _ | ProviderReadWindowBounds _ | ProviderReadWindowLiteralExtent _
             | ProviderReadWindowPacked _ | ProviderReadWindowNeedsVar _ | ProviderReadWindowArgs _
-            | ProviderWriteNeedsArray _ | ProviderWriteNamedBinding _ | ProviderWriteArgs _ -> "BL3007"
+            | ProviderWriteNeedsArray _ | ProviderWriteNamedBinding _ | ProviderWriteArgs _
+            | ProviderWriteModuleScope _ -> "BL3007"
             | ProviderImportByModule _ | ProviderNoSelectiveImport _ -> "BL2003"
             | Other _ -> "BL3999"
     Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) e.Span (formatTypeError e.Error)

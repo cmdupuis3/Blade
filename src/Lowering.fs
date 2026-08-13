@@ -263,19 +263,83 @@ let extractParallelism (strategies: ParallelStrategy list) (paramNames: string l
 /// own operand slots, where a deferred node is the working protocol, and never
 /// into a nested lambda (which is already an IRVar to its own callable by the
 /// time this runs, and got this same treatment when IT was lowered).
-let rec forceBareCombinatorLets (expr: IRExpr) : IRExpr =
+/// S2's EXEMPTION: bindings a reduction join consumes as a deferred operand,
+/// and consumes NOWHERE else (docs/plan-reduction-joins.md, "sharing by
+/// naming"). `let ct = cos <@> ph` inside a kernel body, read only by the legs
+/// of `object_for(<&!>) <@> (prodsum(s, ct), prodsum(ct, ct))`, must stay
+/// deferred: the join inlines it as ONE per-iteration `const` in the joint
+/// nest, and forcing it first would build a whole array per outer cell and
+/// read it back -- the exact cost the join exists to remove.
+///
+/// The "nowhere else" half is what makes the exemption safe rather than a
+/// guess. An id whose occurrences are not ALL join operands still has a
+/// consumer that wants an array, and S2's rule (there is no forcing site
+/// downstream of a body-local let) still holds for it, so it is left alone.
+/// The set over SEVERAL expressions at once -- the reference accounting is
+/// global, so a function body already split into its statement list must be
+/// counted as one unit, not per statement (CodeGen.genFuncBodyScoped).
+let joinDeferrableIdsMany (exprs: IRExpr list) : Set<IRId> =
+    let joinRefs = System.Collections.Generic.Dictionary<IRId, int>()
+    let allRefs = System.Collections.Generic.Dictionary<IRId, int>()
+    let bump (d: System.Collections.Generic.Dictionary<IRId, int>) id =
+        d.[id] <- (match d.TryGetValue id with | true, n -> n + 1 | _ -> 0) + 1
+    let rec walk (e: IRExpr) =
+        (match e with
+         | IRVar (id, _) -> bump allRefs id
+         | IRReduceCompute (comp, IRTuple ks, IRTuple ss) when ks.Length = ss.Length && ks.Length >= 2 ->
+            let rec leavesOf x =
+                match x with
+                | IRFusion (l, r) -> leavesOf l @ leavesOf r
+                | other -> [other]
+            // The OPERAND slots -- `Arrays`, plus the `Loop` provenance that
+            // repeats them (`method_for(zip(s, ct))` names `ct` twice, and an
+            // accounting that saw only one of the two could never balance).
+            // Deliberately NOT the kernel bodies: an operand a leg's kernel
+            // reads as a whole ARRAY is a capture the join cannot inline.
+            let rec bumpVars x =
+                match x with
+                | IRVar (id, _) -> bump joinRefs id
+                | ExprShape (children, _) -> children |> List.iter bumpVars
+            for leaf in leavesOf comp do
+                match leaf with
+                | IRApplyCombinator info ->
+                    bumpVars info.Loop
+                    for a in info.Arrays do
+                        match a with
+                        | IRVar (id, _) -> bump joinRefs id
+                        | _ -> ()
+                | _ -> ()
+         | _ -> ())
+        match e with
+        | ExprShape (children, _) -> children |> List.iter walk
+    exprs |> List.iter walk
+    joinRefs
+    |> Seq.filter (fun kv ->
+        match allRefs.TryGetValue kv.Key with
+        | true, total -> total = kv.Value
+        | _ -> false)
+    |> Seq.map (fun kv -> kv.Key)
+    |> Set.ofSeq
+
+let joinDeferrableIds (expr: IRExpr) : Set<IRId> = joinDeferrableIdsMany [expr]
+
+let rec forceBareCombinatorLetsExcept (skip: Set<IRId>) (expr: IRExpr) : IRExpr =
     match expr with
     | IRLet (id, value, body) ->
         let value' =
             match value with
+            | IRApplyCombinator _ | IRComposeApply _ when Set.contains id skip -> value
             | IRApplyCombinator _ | IRComposeApply _ -> IRCompute value
-            | _ -> forceBareCombinatorLets value
-        IRLet (id, value', forceBareCombinatorLets body)
-    | IRIf (c, t, e) -> IRIf (c, forceBareCombinatorLets t, forceBareCombinatorLets e)
-    | IRForRange (vid, lo, hi, body) -> IRForRange (vid, lo, hi, forceBareCombinatorLets body)
+            | _ -> forceBareCombinatorLetsExcept skip value
+        IRLet (id, value', forceBareCombinatorLetsExcept skip body)
+    | IRIf (c, t, e) -> IRIf (c, forceBareCombinatorLetsExcept skip t, forceBareCombinatorLetsExcept skip e)
+    | IRForRange (vid, lo, hi, body) -> IRForRange (vid, lo, hi, forceBareCombinatorLetsExcept skip body)
     | IRMatch (scrut, cases) ->
-        IRMatch (scrut, cases |> List.map (fun c -> { c with Body = forceBareCombinatorLets c.Body }))
+        IRMatch (scrut, cases |> List.map (fun c -> { c with Body = forceBareCombinatorLetsExcept skip c.Body }))
     | _ -> expr
+
+let forceBareCombinatorLets (expr: IRExpr) : IRExpr =
+    forceBareCombinatorLetsExcept (joinDeferrableIds expr) expr
 
 /// The RETURN half of the same rule (docs/plan-kernel-body-materialization.md
 /// manifestation M-D, stage S4): **the callee forces**. A callable whose return
@@ -2134,11 +2198,39 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     let mutable currentExports = Map.empty<string, ModuleExport>
     let mutable irModules = []
     
-    let rawModules = 
+    let rawModules =
         match rawProgram with
         | Some p -> p.Modules |> List.map (fun m -> Some m.Decls)
         | None -> program.Modules |> List.map (fun _ -> None)
-    
+
+    // Hand the back end a name -> span table for its refusals (see
+    // IR.recordDeclSpan). The surface program is the ONLY place these spans
+    // still exist; a codegen refusal reported without one is a diagnostic the
+    // user cannot locate. Recorded for every top-level `let`/`static`/
+    // `function`; declarations without a surface form simply have no entry and
+    // fall back to `noSpan`, exactly as before.
+    (IR.declSpansCell ()).Value <- Map.empty
+    match rawProgram with
+    | Some p ->
+        // Every name a pattern binds points at the same declaration span; a
+        // destructuring `let a, b = ...` has one source line for both.
+        let rec patNames (pat: Pattern) : string list =
+            match pat.Kind with
+            | PatVar n -> [n]
+            | PatTuple ps -> ps |> List.collect patNames
+            | PatCons (h, t) -> patNames h @ patNames t
+            | PatStruct (_, flds) -> flds |> List.collect (snd >> patNames)
+            | PatVariant (_, Some inner) | PatGuarded (inner, _) | PatTyped (inner, _) -> patNames inner
+            | _ -> []
+        for m in p.Modules do
+            for d in m.Decls do
+                match d.Value with
+                | DeclLet b | DeclStatic b ->
+                    for n in patNames b.Pattern do IR.recordDeclSpan n d.Span
+                | DeclFunction fd -> IR.recordDeclSpan fd.Name d.Span
+                | _ -> ()
+    | None -> ()
+
     for (tmod, rawDecls) in List.zip program.Modules rawModules do
         let moduleName = tmod.Name |> Option.map (String.concat ".") |> Option.defaultValue ""
         let envWithExports = { env with ModuleExports = currentExports }
@@ -2147,14 +2239,25 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // get expanded into N concrete params per call site. After this,
         // every function has a fixed param count matching its call sites.
         let irModule = IR.monomorphizeModule irModule env.Builder
-        // HM monomorphization: substitute function-boundary type variables
-        // (e.g. `T` in `Array<T like Idx<n>>`, or `T` extracted from
-        // `Poly<T^N>`'s base type) with concrete types learned from each
-        // call site. Runs after Poly so per-param/per-arg unification is
-        // straightforward -- each pack has already been expanded.
-        let irModule = IR.monomorphizeHMFunctions irModule env.Builder
         currentExports <- Map.add moduleName exports currentExports
         irModules <- irModules @ [irModule]
+
+    // HM monomorphization: substitute function-boundary type variables (e.g.
+    // `T` in `Array<T like Idx<n>>`, or `T` extracted from `Poly<T^N>`'s base
+    // type) with concrete types learned from each call site. Runs after Poly so
+    // per-param/per-arg unification is straightforward -- each pack has already
+    // been expanded.
+    //
+    // WHOLE-PROGRAM, and it has to be: specialization is driven by call sites,
+    // so a generic DEFINED in module A and CALLED from module B learned nothing
+    // while this ran inside the loop -- A saw no call site and dropped it, B did
+    // not own it, and the call reached validateIR still carrying `IRTInfer`
+    // (BL6001). That is what stopped a Blade-source stdlib from exporting a
+    // generic function; `stdlib/stats.blade`'s `mean(row: T^1) -> T^0` is the
+    // motivating case. See IR.monomorphizeHMFunctionsModules for why merging is
+    // sound and how the result is split back; a single-module program is
+    // unaffected, down to the ids the builder mints.
+    let irModules = IR.monomorphizeHMFunctionsModules irModules env.Builder
 
     // SHAPE monomorphization: a function over a symbolic extent (`Idx<n>`)
     // gets a specialized copy per distinct call-site extent signature, with
@@ -2214,7 +2317,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // hash-set is a separate, not-yet-implemented optimization.
         irModule)
 
-    { Modules = irModules }
+    // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out
+    // of a never-instantiated generic keeps that generic's type vars in its
+    // body, and (with concrete params) is not an hmFunc, so no monomorphizer
+    // drops it. Unreachable from any binding, it can only ever be a BL6001.
+    // Must run after EVERY specializing pass -- each can make a function
+    // concrete or mint new references -- and before validateIR.
+    IR.eliminateDeadPolymorphs { Modules = irModules }
 
 // Typecheck warning surfacing (shared by every CLI lane)
 
@@ -2277,29 +2386,56 @@ let lower (source: string) : Result<IRProgram, string> =
             Error (String.concat "\n" msgs)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
 
+/// Everything `lowerDiag` does AFTER the parse. Shared by the single-file,
+/// multi-file and already-parsed entry points so they cannot drift.
+/// Env-gated phase timing (`BLADE_PHASE_TIMING=1`): one `[phase] <name>: <ms>`
+/// line per pipeline phase on stderr. See docs/plan-compile-speed.md Stage 0.
+let phaseTimingEnabled () =
+    match System.Environment.GetEnvironmentVariable "BLADE_PHASE_TIMING" with
+    | null | "" | "0" -> false
+    | _ -> true
+
+let phaseMark (sw: System.Diagnostics.Stopwatch) (name: string) : unit =
+    if phaseTimingEnabled () then
+        eprintfn "[phase] %s: %d ms" name sw.ElapsedMilliseconds
+    sw.Restart()
+
+let private lowerCheckedProgram (program: Program)
+    : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> =
+    let sw = System.Diagnostics.Stopwatch.StartNew()
+    let tc = Blade.TypeCheck.typeCheck program
+    phaseMark sw "typecheck"
+    match tc with
+    | Error errors ->
+        Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
+    | Ok (typedProgram, builder, warnings) ->
+        // Lowering can THROW when a compile-time provider load fails
+        // (e.g. `netcdf.load("missing.nc")` raises from tryInvokeProvider).
+        // Convert it to a coded diagnostic so the compile driver reports it
+        // cleanly instead of crashing.
+        try
+            let r = Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+            phaseMark sw "lower"
+            r
+        with ex ->
+            Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+
 /// Structured-diagnostics entry: like `lower`, but errors stay as coded,
 /// spanned Diagnostics, warnings come back structured, and the retained
 /// source text returns as a SourceMap for snippet rendering. `fileName`
 /// (when known) is stamped into spans and keys the SourceMap.
 let lowerDiag (fileName: string option) (source: string)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    Blade.PerfCounters.refresh ()
     let key = defaultArg fileName "<input>"
     let sm = Blade.Diagnostics.SourceMap.ofSources [ key, source ]
+    let sw = System.Diagnostics.Stopwatch.StartNew()
+    let parsed = Blade.Parser.parseProgramWithFile fileName source
+    phaseMark sw "parse"
     let result =
-        match Blade.Parser.parseProgramWithFile fileName source with
+        match parsed with
         | Error e -> Error [ Blade.Parser.diagnosticOfParseError fileName e ]
-        | Ok program ->
-            match Blade.TypeCheck.typeCheck program with
-            | Error errors ->
-                Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
-            | Ok (typedProgram, builder, warnings) ->
-                // Lowering can THROW when a compile-time provider load fails
-                // (e.g. `netcdf.load("missing.nc")` raises from
-                // tryInvokeProvider). Convert it to a coded diagnostic so the
-                // compile driver reports it cleanly instead of crashing.
-                try Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
-                with ex ->
-                    Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+        | Ok program -> lowerCheckedProgram program
     result, sm
 
 /// Multi-FILE twin of `lowerDiag`. `sources` is (path, source) in dependency
@@ -2313,34 +2449,59 @@ let lowerDiag (fileName: string option) (source: string)
 /// absolute path; see the note there.
 let lowerDiagMulti (sources: (string * string) list)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    Blade.PerfCounters.refresh ()
     let sm = Blade.Diagnostics.SourceMap.ofSources sources
+    let sw = System.Diagnostics.Stopwatch.StartNew()
+    let parsed = Blade.ModuleResolve.parseResolved sources
+    phaseMark sw "parse(multi)"
     let result =
-        match Blade.ModuleResolve.parseResolved sources with
+        match parsed with
         | Error d -> Error [ d ]
-        | Ok program ->
-            match Blade.TypeCheck.typeCheck program with
-            | Error errors ->
-                Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
-            | Ok (typedProgram, builder, warnings) ->
-                try Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
-                with ex ->
-                    Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+        | Ok program -> lowerCheckedProgram program
     result, sm
 
 /// The CLI's front door: resolve `filePath`'s imports to files, then lower the
 /// whole set.
 ///
+/// The entry file is parsed HERE, once, and the AST is handed to the resolver
+/// (which needs only its header and imports) and then to the checker. Both
+/// used to parse it independently, so every compile paid for the entry file
+/// twice.
+///
 /// A file whose imports all resolve to builtin pseudo-modules (or that has no
-/// imports at all) takes `lowerDiag` UNCHANGED -- same call, same SourceMap
-/// key, same everything -- so the overwhelmingly common single-file case
-/// cannot have been perturbed by the module layer existing.
+/// imports at all) is checked from that one parse with the SourceMap keyed on
+/// `filePath` -- same key, same spans, same everything as before the module
+/// layer existed.
 let lowerFileDiag (filePath: string) (source: string)
     : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
-    let r = Blade.ModuleResolve.resolveEntry filePath source
-    match r.Errors, r.Files with
-    | [], [ _single ] -> lowerDiag (Some filePath) source
-    | [], files -> lowerDiagMulti (Blade.ModuleResolve.sourcesOf files)
-    | ds, _ -> Error ds, Blade.ModuleResolve.sourceMapOf r
+    Blade.PerfCounters.refresh ()
+    let selfSm () = Blade.Diagnostics.SourceMap.ofSources [ filePath, source ]
+    let sw = System.Diagnostics.Stopwatch.StartNew()
+    let parsedEntry = Blade.Parser.parseProgramWithFile (Some filePath) source
+    phaseMark sw "parse"
+    match parsedEntry with
+    | Error e ->
+        // A file that does not parse has no imports to resolve: resolution
+        // swallowed this error and the single-file path reported it.
+        Error [ Blade.Parser.diagnosticOfParseError (Some filePath) e ], selfSm ()
+    | Ok program ->
+        let r =
+            match program.Modules with
+            | [ m ] -> Blade.ModuleResolve.resolveParsedEntry filePath source m
+            | _ -> Blade.ModuleResolve.resolveEntry filePath source
+        match r.Errors, r.Files with
+        | [], [ _single ] -> lowerCheckedProgram program, selfSm ()
+        | [], files ->
+            let sm = Blade.Diagnostics.SourceMap.ofSources (Blade.ModuleResolve.sourcesOf files)
+            sw.Restart()
+            let parsedAll = Blade.ModuleResolve.parseResolvedFiles files
+            phaseMark sw "parse(members)"
+            let result =
+                match parsedAll with
+                | Error d -> Error [ d ]
+                | Ok whole -> lowerCheckedProgram whole
+            result, sm
+        | ds, _ -> Error ds, Blade.ModuleResolve.sourceMapOf r
 
 /// Harness twin of `lower`: the same parse -> typecheck -> lower pipeline and
 /// the same `Result`, but the typecheck warnings come back as coded
@@ -2387,7 +2548,7 @@ let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnosti
     | (d: Blade.Diagnostics.Diagnostic) :: _ ->
         Error (sprintf "%s: %s" d.Code d.Message), []
     | [] ->
-    match Blade.ModuleResolve.parseResolved (Blade.ModuleResolve.sourcesOf r.Files) with
+    match Blade.ModuleResolve.parseResolvedFiles r.Files with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
         | Ok (typedProgram, builder, _) ->

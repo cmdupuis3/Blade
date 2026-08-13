@@ -1,0 +1,18 @@
+// TEST: Mut Arg Computed Expression (rejects)
+// ERROR: BL4005
+// ERROR-CONTAINS: a computed expression has no binding to write back into
+// ============================================================================
+// A `mut` parameter's whole purpose is that the caller can READ THE WRITE
+// AFTERWARDS. An argument that is not a name has no storage the caller can
+// observe: `a + b` materializes a temporary, the callee dutifully writes into
+// it, and the result is discarded at the end of the statement. There is no
+// binding form to fix here and no diagnostic the callee could give, so the
+// call site refuses it.
+// ============================================================================
+function accum(out: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    out(0) = 99.0
+    out(0)
+}
+let mut a = [1.0, 2.0, 3.0]
+let mut b = [1.0, 2.0, 3.0]
+let r = accum(a + b)

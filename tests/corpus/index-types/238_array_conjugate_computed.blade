@@ -1,0 +1,13 @@
+// TEST: Array Conjugate Computed
+// Sibling pin to bracketed/015. `conj` over a whole array has routed to
+// TExprArrayConjugate for a while, but `conj(z) |> compute` fell through
+// genComputeBinding's dispatch to the unsupported-node sentinel while the
+// unpiped `conj(z)` worked. `|> compute` on an already-eager whole-array form
+// is the identity -- negate and conjugate materialize a fresh pool by
+// construction -- so both spellings must agree.
+type N = Idx<2>
+let z: Array<Complex128 like N> = [complex(1.0, 2.0), complex(3.0, 4.0)]
+let c = conj(z)
+let c_computed = conj(z) |> compute
+// EXPECT: c = [(1, -2), (3, -4)]
+// EXPECT: c_computed = [(1, -2), (3, -4)]

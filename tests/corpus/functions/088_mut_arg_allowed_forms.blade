@@ -1,0 +1,34 @@
+// TEST: Mut Arg Allowed Forms
+// ============================================================================
+// The POSITIVE side of the call-site write-permission rule (formalism 2.7:
+// only `let mut x = e` is passable to a `mut` param). Two forms are allowed
+// and both must keep mutating the caller:
+//
+//   1. a `let mut` binding passed straight in                  (`direct`)
+//   2. a `mut` PARAMETER forwarded into another `mut` param    (`outer`/`inner`)
+//
+// Form 2 needs no special case in the checker and that is the point: a `mut`
+// parameter binds MutPassable, exactly as `let mut` does, so forwarding
+// satisfies the same predicate. The chain is checked at every link rather than
+// assumed -- MutParamPositions is registered BEFORE a function's body is
+// checked, so the `inner(buf)` call inside `outer` is held to the rule too.
+//
+// The companions pin the refusals: 089 (plain `let`), 090 (`let static`),
+// 091 (non-`mut` parameter forwarded), 092 (computed expression), 093
+// (partial application).
+// ============================================================================
+function inner(out: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    out(0) = out(0) + 10.0
+    out(0)
+}
+function outer(buf: mut Array<Float64 like Idx<3>>) -> Float64 = { inner(buf) }
+
+let mut direct = [1.0, 2.0, 3.0]
+let rd = inner(direct)
+
+let mut chained = [5.0, 6.0, 7.0]
+let rc = outer(chained)
+// EXPECT: direct = [11, 2, 3]
+// EXPECT: rd = 11
+// EXPECT: chained = [15, 6, 7]
+// EXPECT: rc = 15

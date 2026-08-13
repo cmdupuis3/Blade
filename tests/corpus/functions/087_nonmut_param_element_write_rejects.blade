@@ -1,0 +1,23 @@
+// TEST: Non-Mut Param Element Write (rejects)
+// ERROR: BL4005
+// ERROR-CONTAINS: Parameters are read-only unless declared `mut`
+// ============================================================================
+// Formalism 2.7: "`mut` on a parameter permits callee mutation" -- so a
+// parameter WITHOUT `mut` permits none, and the checker binds it ReadOnly.
+//
+// That permission was only ever enforced against a BARE store (`a = v`). The
+// assignability check matched a lone TExprVar and fell through on everything
+// else with an explicit "array element assignment etc. -- allowed", so a write
+// THROUGH an index -- the only way to mutate an array in the first place --
+// skipped the check entirely. It typechecked, and the write was then dropped:
+// the caller's array came back unchanged with no diagnostic. The check now
+// walks the target to its root variable, so `a(i) = v` and `a.f = v` need the
+// same permission the bare store always did.
+//
+// The `let static` wording is deliberately left alone for a bare store (that
+// message is pinned by diagnostics/007); only writes through an index or field
+// reach this more specific one.
+// ============================================================================
+function nomut(a: Array<Float64 like Idx<3>>) = { a(0) = 99.0 }
+let mut xs = [1.0, 2.0, 3.0]
+let ignored = nomut(xs)

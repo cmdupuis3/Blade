@@ -1,0 +1,33 @@
+// TEST: Leading Axis Fold Group Grid
+// ============================================================================
+// The lswosa acceptance shape: a grid a GROUPED apply returned (group axis x
+// static kernel axes) has a RUNTIME leading extent (the group count), and the
+// leading-axis fold's loop bound reads it at runtime via `extents(G)[0]`.
+//
+// Three deliberate widenings compose here:
+//   * extents() no longer refuses a group-OUTER slot (its runtime extent IS
+//     the group count; what has no scalar answer is a surviving ragged
+//     MEMBER slot, refused by its own kind);
+//   * the fold's gate admits a group-outer LEADING axis over plain static
+//     trailing axes (the member axis was consumed by the kernel, so slices
+//     are uniform);
+//   * the dense sub-view emitters admit a group-outer CONSUMED axis
+//     (rectangular pool, exact extents shift).
+//
+// Values: keys floor(t/3) split 0..8 into 3 groups; vals are t+1, so group
+// prodsums are 14, 77, 194 (sum 285); column f scales by (1+f).
+// ============================================================================
+function fold_cols(ts: T^1, vals: U^1) = {
+    let keys = (ts <@> lambda(t) -> floor(t / 3.0)) |> compute
+    let gk = group_keys(keys)
+    let gt = group_by(ts, gk)
+    let gv = group_by(vals, gk)
+    let grid = method_for(zip(gt, gv)) <@> lambda(trow: T^1, srow: U^1) ->
+        (method_for(range<Idx<4>>) <@> lambda(f) -> prodsum(srow, srow) * (1.0 + 1.0 * f)) |> compute
+    let g2 = grid |> compute
+    reduce(g2, lambda(a: T^1, b: T^1) -> a + b)
+}
+let tim = (method_for(range<Idx<9>>) <@> lambda(i) -> 1.0 * i) |> compute
+let vv = (method_for(range<Idx<9>>) <@> lambda(i) -> 1.0 * i + 1.0) |> compute
+let r = fold_cols(tim, vv)
+// EXPECT: r = [285, 570, 855, 1140]

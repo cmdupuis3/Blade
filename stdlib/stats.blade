@@ -1,0 +1,62 @@
+// Summary statistics over the innermost axis, as Blade source.
+//
+// These are the one-line reductions that every tutorial and worked example
+// re-declares by hand (`docs/quickstart-1.md`, `examples/01_weather_stations`,
+// CLAUDE.md's style table all open with the same `mean`). They are not
+// intrinsics and deliberately are not: each is a two-token composition of
+// `reduce` / `extents`, so the stdlib is the right home and the compiler is
+// not the right home. Nothing here is privileged -- read the source, it is
+// exactly what you would have written.
+//
+//     from stats import mean
+//     let m = mean([1.0, 2.0, 3.0])       // 2.0
+//
+//     import stats
+//     let m = stats.mean([1.0, 2.0, 3.0]) // same, qualified
+//
+// RANK. Every function takes `T^1` and returns `T^0`: one row in, one scalar
+// out. That is what makes them usable as KERNELS -- `method_for(A) <@> mean`
+// applies `mean` per row of a rank-2 `A` and deduces the rank-1 result, and
+// `(a - mean(a)) * (b - mean(b))` inside a `where comm(a, b)` kernel is the
+// centering step of a covariance. A whole-array fold is `reduce(A, (+),
+// axes = k)`, not one of these.
+//
+// UNITS ride through `mean` and `variance` untouched, and this is checked, not
+// hoped for: `mean` is a sum divided by a COUNT, so its result carries the row's
+// unit (`Float64<meters>` row -> `Float64<meters>`), and `variance` squares it
+// (-> `Float64<meters^2>`). Neither needs a unit annotation to say so; the unit
+// algebra derives it from the body. `stddev` is the exception -- see its own
+// warning below.
+//
+// NO SAMPLE (n-1) VARIANTS, on purpose. `variance` and `stddev` below are the
+// POPULATION forms, dividing by n. A `sample_variance` dividing by n-1 would
+// be a second name one character away from the first whose only difference is
+// invisible at the call site, and picking the wrong one is a silent numerical
+// bug, not a type error. Divide by `extents(row) - 1` explicitly when you want
+// Bessel's correction, so the choice is written down where it is made.
+module stats
+
+/// Arithmetic mean of a row. `mean(row) = (sum of row) / (length of row)`.
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+
+/// Population variance of a row: the mean squared deviation from the mean.
+/// Divides by n, not n-1 (see the module note). Written as one centering pass
+/// plus one fold rather than as `mean((row - mean(row)) ^ 2)` so it does not
+/// depend on cross-module monomorphization of a generic calling a generic.
+function variance(row: T^1) -> T^0 = {
+    let n = extents(row)
+    let m = reduce(row, (+)) / n
+    let centered = row - m
+    reduce(centered * centered, (+)) / n
+}
+
+/// Population standard deviation: the square root of `variance`.
+///
+/// UNIT WARNING, measured: `sqrt` is a real-valued math intrinsic and does not
+/// track units, so unlike `mean` and `variance` this function's result carries
+/// NO unit guarantee -- annotating the result `Float64<meters>` and annotating
+/// it `Float64<meters^2>` are both accepted on the same `Float64<meters>` input.
+/// Do not read a passing annotation here as a check. On unit-carrying data,
+/// prefer writing `sqrt(variance(row))` at the call site, so the exponent
+/// halving is visible where it happens rather than hidden behind a name.
+function stddev(row: T^1) -> T^0 = sqrt(variance(row))

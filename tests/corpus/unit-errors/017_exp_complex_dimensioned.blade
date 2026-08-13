@@ -1,0 +1,13 @@
+// TEST: Exp Complex Dimensioned (rejects)
+// ERROR: BL3006
+// The rejecting residue of units/076. Now that the scalar math-intrinsic arm
+// classifies a complex operand through its unit wrapper, the signature it finds
+// has to keep going through the same non-homogeneous rule the real path uses --
+// a transcendental sums powers of its argument, so `day` is meaningless whether
+// or not the value is complex. Getting complex right must not buy an exemption
+// from the unit table: `i * t` does NOT cancel.
+Unit second
+Unit day = 86400 * second
+let i = complex(0.0, 1.0)
+let t: Float<day> = 1.0
+let bad = exp(i * t)

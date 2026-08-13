@@ -327,8 +327,18 @@ let _ = c.write("%s", V)
                    check "e2e: label subscript t1 = 16.5" (runOut.Contains "t1 = 16.5") runOut
                    check "e2e: rank-1 row sums (2-D EXPECTs are unchecked — reduce instead)"
                        (runOut.Contains "rowsum = [6, 15]") runOut
+                   // NESTED, not flat: every rank-2 array prints through
+                   // genPrintNested2 (CodeGen), which landed in 7ac4d3a
+                   // (2026-08-03) and is the intended shape -- a rank-2
+                   // literal's own spelling, so the line round-trips as
+                   // source. This needle predated it (a32e6d7, 2026-07-21)
+                   // and read flat, which is why it was the CSV gate's one
+                   // standing red. The corpus validator accepts BOTH shapes
+                   // for a 2-D pin (Expect.fs, ExpectedArray2D), so nothing
+                   // there caught the drift; a raw substring check like this
+                   // one has no such tolerance and must name the real shape.
                    check "e2e: headered payload (header skipped)"
-                       (runOut.Contains "obs = [0, 14, 101.2, 1, 16.5, 101, 2, 18, 100.8]") runOut
+                       (runOut.Contains "obs = [[0, 14, 101.2], [1, 16.5, 101], [2, 18, 100.8]]") runOut
                    // Runtime shape drift: the exe baked 3 data rows; append a
                    // 4th to the RUNTIME copy and expect a loud abort.
                    let runtimeFix = Path.Combine(e2eDir, fixFile "lw_obs.csv")
@@ -467,6 +477,96 @@ let out = method_for(V) <@> lambda(x) -> x + 0.0 |> compute
          // A front-end rejection must be at least as specific.
          check "reject: .stream on csv fails loudly"
              (e.Contains "does not support streamed reads" || e.Contains "BL7001") e)
+
+    // ---------------------------------------------------------------
+    // 12. Write-path regressions (two bugs found while authoring the
+    //     windowing corpus, both pre-existing on master @ d3e005d)
+    // ---------------------------------------------------------------
+    printfn "\n--- write-path regressions ---"
+
+    // (a) A binding whose name is a C++ RESERVED WORD. `bindingCppName` used
+    // to declare it raw (`Array<double,2> final = ...`) while `addVarName`
+    // recorded the sanitized `final_`, so every consumer -- the provider
+    // write's flatten loop included -- referenced a name that did not exist
+    // ('final_' was not declared in this scope). The print LABEL must still
+    // read `final`, which is what splits the two spellings apart.
+    writeFixture "wr_kw_in.csv" [ "2.0,4.0"; "6.0,0.5" ]
+    (let kwSource = sprintf """
+import csv as c
+let m = c.load("%s")
+let final = m.vars.data |> c.read
+let class = final(0, 0)
+let _ = c.write("%s", final)
+"""
+                        (fixFile "wr_kw_in.csv") (fixFile "wr_kw_out.csv")
+     match lower kwSource with
+     | Ok ir ->
+         let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "csv_write_kw"
+         let cppFile = Path.Combine(e2eDir, "csv_write_kw.cpp")
+         File.WriteAllText(cppFile, cppCode)
+         (match compileCpp cppFile e2eDir with
+          | Ok exePath ->
+              check "kw-name: reserved-word bindings compile (g++)" true ""
+              (match runExecutable exePath with
+               | Ok (0, runOut) ->
+                   // Labels keep the SOURCE spelling; only the C++ identifier
+                   // is mangled. A corpus EXPECT pin reads these lines.
+                   check "kw-name: print labels keep the source name"
+                       (runOut.Contains "final = [[2, 4], [6, 0.5]]" && runOut.Contains "class = 2") runOut
+                   let kwOut = Path.Combine(e2eDir, fixFile "wr_kw_out.csv")
+                   (match readVarData kwOut "data" with
+                    | Ok { DimLengths = [2; 2]; Payload = Blade.ProviderRegistry.PFloats xs } ->
+                        check "kw-name: write of a reserved-word binding round-trips"
+                            (xs = [| 2.0; 4.0; 6.0; 0.5 |]) (sprintf "%A" xs)
+                    | Ok d -> check "kw-name: write of a reserved-word binding round-trips" false (sprintf "%A" d.Payload)
+                    | Error e -> check "kw-name: write of a reserved-word binding round-trips" false e)
+               | Ok (code, runOut) -> check "kw-name: runs (exit 0)" false (sprintf "exit %d: %s" code runOut)
+               | Error e -> check "kw-name: runs (exit 0)" false e)
+          | Error e ->
+              if isSkipError e then printfn "  SKIP kw-name e2e (compile skipped): %s" e
+              else check "kw-name: reserved-word bindings compile (g++)" false e)
+     | Error e -> check "kw-name: lowers" false e)
+
+    // (b) `c.write` outside module scope. Only the module decl loop
+    // intercepts a write into ProviderWrites; one nested in a block used to
+    // lower as an ordinary method call on the alias VALUE and reach g++ as
+    // `c.write(std::string("out.csv"), __v5)` -> 'c' was not declared in this
+    // scope. It is now a checker refusal (BL3007) that names the fix.
+    (let nestedSource = sprintf """
+import csv as c
+let m = c.load("%s")
+let V = m.vars.data |> c.read
+let x = {
+    let y = V
+    let _ = c.write("%s", y)
+    1.0
+}
+"""
+                            (fixFile "wr_kw_in.csv") (fixFile "wr_nested_out.csv")
+     match lower nestedSource with
+     | Ok _ -> check "reject: c.write inside a block is refused at check time" false "it type-checked"
+     | Error e ->
+         check "reject: c.write inside a block is refused at check time"
+             (e.Contains "MODULE-LEVEL declaration form") e)
+
+    // The same refusal inside a FUNCTION body -- the other half of "anything
+    // that is not literally a top-level let RHS".
+    (let fnSource = sprintf """
+import csv as c
+let m = c.load("%s")
+let V = m.vars.data |> c.read
+function dump(A: Array<Float64 like Idx<2>, Idx<2>>) -> Float64 = {
+    let _ = c.write("%s", A)
+    0.0
+}
+let z = dump(V)
+"""
+                        (fixFile "wr_kw_in.csv") (fixFile "wr_fn_out.csv")
+     match lower fnSource with
+     | Ok _ -> check "reject: c.write inside a function body is refused" false "it type-checked"
+     | Error e ->
+         check "reject: c.write inside a function body is refused"
+             (e.Contains "MODULE-LEVEL declaration form") e)
 
     (try Directory.Delete(tmp, true) with _ -> ())
 

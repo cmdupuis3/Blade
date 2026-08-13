@@ -1,0 +1,34 @@
+// TEST: Negated Bracketed Op
+// A unary minus over an ARRAY routes to the whole-array negate form
+// (TExprArrayNegate), the negation half of the routing conj has always had.
+// Without it `-A` reached codegen as a scalar IRUnaryOp(IRNeg, _) and emitted
+// `-arr` against an Array value ("no match for 'operator-'").
+//
+// The shape that matters is `-(A [-] B)`. For a bracketed op the FIRST operand
+// leads the axis order, so `tau [-] ts` is (M, N) while `ts [-] tau` is (N, M) --
+// operand order is a layout decision, and since reduce/row-mode fold the
+// INNERMOST axis, swapping the operands to fix a sign would transpose the
+// result. The outer `-` is the free way to correct it, so this is what real
+// code writes.
+//
+// Both the piped and unpiped forms are pinned: `|> compute` on an already-eager
+// whole-array form is the identity, and only the piped one used to fail.
+type M = Idx<2>
+type N = Idx<3>
+let tau: Array<Float64 like M> = [100.0, 200.0]
+let ts:  Array<Float64 like N> = [1.0, 2.0, 3.0]
+
+let plain = tau [-] ts
+let negated = -(tau [-] ts)
+let negated_computed = -(tau [-] ts) |> compute
+
+// A bare array negation, the simplest form of the same routing.
+let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let negA = -A
+let negA_computed = -A |> compute
+
+// EXPECT: plain = [[99, 98, 97], [199, 198, 197]]
+// EXPECT: negated = [[-99, -98, -97], [-199, -198, -197]]
+// EXPECT: negated_computed = [[-99, -98, -97], [-199, -198, -197]]
+// EXPECT: negA = [[-1, -2, -3], [-4, -5, -6]]
+// EXPECT: negA_computed = [[-1, -2, -3], [-4, -5, -6]]

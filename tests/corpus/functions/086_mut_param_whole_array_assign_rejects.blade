@@ -1,0 +1,26 @@
+// TEST: Mut Param Whole Array Assign (rejects)
+// ERROR: BL4005
+// ERROR-CONTAINS: rebinds the name, it does not write the array's storage
+// ============================================================================
+// The companion refusal to 019. `mut` array params mutate through the SHARED
+// DATA POINTER: the C++ ABI passes the `Array<>` wrapper by value, so element
+// writes (`a(i) = v`, 019) land in the caller, but rebinding the whole name
+// (`a = <array expr>`) only repoints the callee's local wrapper -- the caller
+// sees nothing change.
+//
+// This used to typecheck, lower, and emit a function with a LITERALLY EMPTY
+// body (`void bump(Array<double,1> a) { }`), so the caller's array came back
+// untouched with no diagnostic anywhere: a silent wrong answer, the worst
+// failure class here.
+//
+// The refusal is deliberately PARAMETER-only. Rebinding a `let mut` BINDING
+// whole is a real feature with rebind semantics -- the name is repointed and
+// existing aliases keep reading the old buffer -- and memfree/015 and 016 pin
+// exactly that. A parameter is the one place the shape cannot mean anything,
+// because the rebind has no way back to the caller. Both forms bind
+// MutPassable, so the checker separates them with the enclosing function's
+// declared `mut` parameter names (TypeEnv.MutArrayParams).
+// ============================================================================
+function bump(a: mut Array<Float64 like Idx<3>>) = { a = a + 10.0 }
+let mut xs = [1.0, 2.0, 3.0]
+let ignored = bump(xs)

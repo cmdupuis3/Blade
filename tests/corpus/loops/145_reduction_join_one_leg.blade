@@ -1,0 +1,23 @@
+// TEST: Reduction Join One Leg Is The Identity
+// THE 1-LEG RULING (docs/plan-reduction-joins.md). A one-leg join is the leg
+// itself -- a scalar, not a `Tuple<1>` (Blade has no 1-tuple) -- in both
+// spellings. That is the right unit for an associative join chain, it keeps
+// `reduce(<literal>, (<&!>))` total over any non-empty leg list, and it routes
+// through the SINGLE-leaf fused terminal, so a one-leg join keeps every
+// specialization the multi-leg nest declines (BLAS dot dispatch, the chunked
+// `omp` fold, the reassociated lane forms).
+//
+// ZERO legs is refused instead: an empty join names neither an index space nor
+// an element type, so there is nothing to give back. It has no spelling here
+// because `object_for(<&!>) <@> ()` cannot be written -- the refusal exists for
+// a generated/edited-down leg list.
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let b: Array<Float64 like I> = [2.0, 3.0, 4.0, 5.0, 6.0]
+
+let pack_one = object_for(<&!>) <@> (prodsum(a, b))
+let fold_one = reduce([prodsum(a, b)], (<&!>))
+let plain = prodsum(a, b)
+// EXPECT: pack_one = 70.0
+// EXPECT: fold_one = 70.0
+// EXPECT: plain = 70.0

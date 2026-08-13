@@ -1,0 +1,27 @@
+// TEST: Reduction Join In A Kernel Body
+// A join inside a kernel body, at 2 legs, differentially against the eager
+// spelling of the same two statistics. The body position is the one that
+// matters for real programs (a per-frequency inner reduction inside an outer
+// map), and it is the position where a body-local deferred `let` is normally
+// FORCED -- S2 exempts an operand read only by a join, so `d` below stays
+// deferred and is inlined into the joint nest.
+type I = Idx<5>
+type F = Idx<3>
+let xs: Array<Float64 like I> = [1.5, 2.5, 3.5, 4.5, 5.5]
+let ws: Array<Float64 like F> = [0.5, 1.0, 2.0]
+
+let joined = (ws <@> lambda(w) -> {
+    let d = xs <@> lambda(x) -> x * w
+    let sum, sq = object_for(<&!>) <@> (reduce(d, (+)), prodsum(d, d))
+    sq - sum
+}) |> compute
+
+let eager = (ws <@> lambda(w) -> {
+    let d = (xs <@> lambda(x) -> x * w) |> compute
+    reduce((method_for(zip(d, d)) <@> lambda(p, q) -> p * q), (+)) - reduce(d, (+))
+}) |> compute
+
+let diff = reduce((method_for(zip(joined, eager)) <@> lambda(p, q) -> p - q), (+))
+// EXPECT: diff = 0.0
+// EXPECT: joined = [9.0625, 53.75, 250.0]
+// EXPECT: eager = [9.0625, 53.75, 250.0]

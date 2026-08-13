@@ -1,0 +1,34 @@
+// TEST: stdlib stats module (mean / variance / stddev)
+// Exercises `stdlib/stats.blade` as a real import, the way units/040 exercises
+// `stdlib/units/SI.blade`: the module has to be FOUND on the stdlib search path
+// AND its generic (`T^1 -> T^0`) functions have to survive the module boundary,
+// which needed whole-program HM monomorphization (see multifile/014).
+//
+// `mean` is the function every tutorial and worked example re-declares by hand
+// (docs/quickstart-1.md sections 8-10, examples/01_weather_stations); this is its
+// home now. Pinned in three positions, because they are three different code
+// paths: a direct call, a `<@>` KERNEL slot over the rows of a rank-2 array,
+// and a call from inside a user kernel's body.
+from stats import mean, variance, stddev
+
+let x = [1.0, 2.0, 3.0]
+let m = mean(x)
+// EXPECT: m = 2
+let v = variance(x)
+// EXPECT: v = 0.666666666666667
+let s = stddev(x)
+// EXPECT: s = 0.816496580927726
+
+let B = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let rowmeans = method_for(B) <@> mean |> compute
+// EXPECT: rowmeans = [2, 4]
+let rowvars = method_for(B) <@> variance |> compute
+// EXPECT: rowvars = [0.666666666666667, 2.66666666666667]
+
+// The stdlib generic called from inside a user kernel that is itself generic,
+// and applied through a loop object. cov(x, y) over the SAME array is the
+// symmetric case, so the output is the compacted SymIdx<2,2> triangle.
+function covariance(a: T^1, b: T^1) where comm(a, b) -> T^0 =
+    mean((a - mean(a)) * (b - mean(b)))
+let cov = object_for(covariance) <@> (B, B) |> compute
+// EXPECT: cov = [0.666666666666667, 1.33333333333333, 2.66666666666667]

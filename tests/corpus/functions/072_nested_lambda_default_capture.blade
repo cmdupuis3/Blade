@@ -1,0 +1,25 @@
+// TEST: Nested Lambda Default Capture
+// ----------------------------------------------------------------------------
+// The ExprLambda arm of `collectFreeVars` walked only the lambda's BODY, never
+// its params' DEFAULT expressions. The top-level lambda checker unions the
+// defaults' free variables in by hand, so a default on the OUTERMOST lambda
+// was always captured correctly -- the hole only opens one level down, where
+// the recursive walker is the sole analysis that runs.
+//
+// Here `outer` reaches `L` exclusively through `inner`'s default. Before the
+// fix `outer` recorded no capture for `L` and IR validation rejected it with
+//   error[BL6001]: in function '__lambda_N': dangling VarId reference: vN
+// (verified against the pre-fix build -- a top-level-lambda spelling of the
+// same test passes either way and pins nothing, which is why this one nests).
+//
+// The default reads `L` through a plain application, NOT through one of the
+// nodes 070/071 restore, so this fails for the default reason alone.
+let out = {
+    let L: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    let outer = lambda(x: Float64) -> {
+        let inner = lambda(y: Float64, d: Float64 = L(0, 1)) -> y + d
+        inner(x)
+    }
+    outer(10.0)
+}
+// EXPECT: out = 12

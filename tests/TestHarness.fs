@@ -41,6 +41,48 @@ let printHeader (title: string) =
 let printSubHeader (title: string) =
     printfn "\n--- %s ---\n" title
 
+/// Locate `name = [...]` in a program's stdout and parse its values as a
+/// FLAT float array, accepting BOTH printer shapes: the flat run
+/// (`x = [1, 2, 3, 4]` -- rank 1, rank 3, wreath pools) and the nested
+/// rank-2 form (`x = [[1, 2], [3, 4]]` -- genPrintNested2, every rank-2
+/// array since 7ac4d3a, packed groups included). Interior brackets carry
+/// only row boundaries, so dropping them yields the row-major / canonical-
+/// pool-order value sequence either way, which is exactly what the e2e
+/// blocks compare against their oracles.
+///
+/// This exists because the provider gates used to inline
+/// `inner.Split(',') |> Array.map Double.Parse` at each site: correct for a
+/// flat line, but against a nested one the first token is `[0`, so the
+/// whole test died in Double.Parse ("The input string '[0' was not in a
+/// correct format") without comparing a single value. Six zarr e2e tests
+/// rotted that way when the rank-2 printer went nested. One shared parser,
+/// shape-tolerant like the corpus validator's ExpectedArray2D, so a future
+/// printer-shape change cannot take the gates down again.
+///
+/// Returns None when no such line exists or any token fails to parse --
+/// callers report both as the check's failure detail.
+let tryParsePrintedFloats (name: string) (stdout: string) : float[] option =
+    let prefix = name + " = ["
+    stdout.Split('\n')
+    |> Array.tryPick (fun l ->
+        let l = l.Trim()
+        if l.StartsWith prefix && l.EndsWith "]" then
+            let inner = l.Substring(prefix.Length, l.Length - prefix.Length - 1)
+            let toks =
+                inner.Replace("[", "").Replace("]", "").Split(',')
+                |> Array.map (fun s -> s.Trim())
+                |> Array.filter (fun s -> s <> "")
+            let parsed =
+                toks |> Array.map (fun s ->
+                    match System.Double.TryParse(s, System.Globalization.NumberStyles.Float,
+                                                 System.Globalization.CultureInfo.InvariantCulture) with
+                    | true, v -> Some v
+                    | _ -> None)
+            if parsed |> Array.forall Option.isSome
+            then Some (parsed |> Array.map Option.get)
+            else None
+        else None)
+
 /// Standardized block footer. `label` names the block; `parts` are the block's
 /// own pre-formatted metric strings, joined with ", ". Renders as:
 ///

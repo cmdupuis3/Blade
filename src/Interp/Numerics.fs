@@ -507,11 +507,41 @@ let private computeReal (op: IRBinOp) (comp: ElemType) (l: Value) (r: Value) : V
         | IRMod -> VFloat (a % b)     // unreachable for well-typed IR
         | _ -> VFloat 0.0
 
+/// A complex intrinsic this module cannot reproduce bit-exactly yet.
+///
+/// A CAPABILITY gap, not a program fault, so it travels the interpreter's
+/// unsupported channel (Run.fs maps it to ExitUnsupported=125, like
+/// ArrayOps.ArrayOpUnsupported and Print.PrintUnsupported) rather than an
+/// InterpPanic. The difference is load-bearing at both consumers: the interp
+/// differential scores it SKIP-UNSUPPORTED instead of FAIL, and the REPL falls
+/// back to g++ for that input instead of showing the user a BL8011 that reads
+/// like a fault in their own program.
+exception NumericsUnsupported of string
+
 // Complex transcendental intrinsics: best-effort, NOT bit-verified.
 // libstdc++ implements complex exp/log/sqrt/trig with its own algorithms; these
 // standard formulas are close but NOT guaranteed to match its exact operation
 // order. The realistic complex corpus (spectra/FFT) uses only +,-,*,/ and abs
-// (bit-exact above). Unsupported names fail loudly rather than miscompute.
+// (bit-exact above). Unsupported names decline loudly rather than miscompute.
+//
+// WHY THE REST ARE NOT COMING (measured 2026-08-12, ucrt64 g++, -ffp-contract=off).
+// sqrt was portable because libstdc++'s std::sqrt(complex) really IS the inline
+// Kahan algorithm in the header. The trig families are not: under
+// _GLIBCXX_USE_C99_COMPLEX, <complex> forwards asin/acos/atan/sin/cos/tan and
+// the hyperbolics to __builtin_casin/cacos/catan/..., i.e. to the platform's
+// libm. Porting the libstdc++ TEMPLATE closed forms therefore does NOT agree
+// with what the compiled side computes -- over 10 operands, asin and acos
+// differed on 7 (last-ULP, e.g. asin(3+4i) 3fe44998882394dd vs ...e3), and even
+// atan, which matched to the ULP on the ordinary ones, differed on every signed
+// zero (atan(-1+0i): +0 vs -0). The same hex appears with a volatile operand, so
+// it is the runtime library, not constant folding.
+//
+// Matching would mean porting mingw-w64's libm arm-for-arm -- and that port
+// would be WRONG under glibc, whose cacos differs again. Since the contract here
+// is bit-identity with whatever libm the compiled side links, declining is the
+// only answer that stays true on every platform. Revisit only if Blade ever
+// emits its own complex trig (the lgamma/digamma treatment: when no library is
+// shared, both sides can run the same hand-rolled series).
 let complexMath (name: string) (re: float) (im: float) : float * float =
     match name with
     | "exp" ->
@@ -537,9 +567,8 @@ let complexMath (name: string) (re: float) (im: float) : float * float =
             if x > 0.0 then (u, y / t)
             else (abs y / t, (if y < 0.0 then -u else u))
     | _ ->
-        raise (InterpPanic("BL8011",
-            sprintf "complex intrinsic '%s' is not yet bit-verified in the interpreter" name,
-            None, 0))
+        raise (NumericsUnsupported
+                (sprintf "complex intrinsic '%s' is not yet bit-verified in the interpreter" name))
 
 /// z ^ w for complex: best-effort exp(w * log z); NOT bit-verified (see above).
 let private complexCaret (l: Value) (r: Value) : Value =
@@ -626,8 +655,34 @@ let private cmpI32 op (a: int32) (b: int32) =
     match op with
     | IREq -> a = b | IRNeq -> a <> b | IRLt -> a < b | IRLe -> a <= b | IRGt -> a > b | IRGe -> a >= b | _ -> false
 
-let private evalCompare (op: IRBinOp) (l: Value) (r: Value) : Value =
+let rec private evalCompare (op: IRBinOp) (l: Value) (r: Value) : Value =
     match l, r with
+    // Tuples, mirroring `std::tuple`'s own operators -- which is what codegen
+    // emits, so the twins agree by construction: `==`/`!=` are the conjunction
+    // of the component comparisons, the ordered ones are LEXICOGRAPHIC (the
+    // first differing component decides, and `<=`/`>=` are what "all equal"
+    // answers true to). Recursive, so a nested tuple component compares
+    // structurally the way `std::tuple`'s nested operator== does.
+    //
+    // Widths agree by construction: TypeCheck refuses a comparison of two
+    // different widths (BL3001), as it must -- C++ has no `operator==` across
+    // widths at all. A disagreement reaching here is a compiler bug, not user
+    // input, so it panics rather than quietly answering `false`.
+    | VTuple ls, VTuple rs ->
+        if ls.Length <> rs.Length then
+            raise (InterpPanic("BL8010", "comparison of tuples of different widths", None, 0))
+        else
+            let compEq (a: Value) (b: Value) =
+                match evalCompare IREq a b with VBool t -> t | _ -> false
+            match op with
+            | IREq -> VBool (Array.forall2 compEq ls rs)
+            | IRNeq -> VBool (not (Array.forall2 compEq ls rs))
+            | _ ->
+                let rec lex i =
+                    if i >= ls.Length then VBool (match op with IRLe | IRGe -> true | _ -> false)
+                    elif compEq ls.[i] rs.[i] then lex (i + 1)
+                    else evalCompare op ls.[i] rs.[i]
+                lex 0
     | VComplex _, _ | _, VComplex _ ->
         // std::complex has only == / != ; ordered comparisons never type-check.
         let (ar, ai) = asComplex l

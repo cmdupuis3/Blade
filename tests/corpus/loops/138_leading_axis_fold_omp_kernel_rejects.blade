@@ -1,0 +1,10 @@
+// TEST: Leading Axis Fold Omp Kernel (rejects)
+// ERROR: BL3999
+// ERROR-CONTAINS: sequential by construction
+// The leading-axis fold is a sequential recurrence (each step consumes the
+// previous accumulator). A `where omp` clause on its kernel would license
+// nothing and be dropped silently -- the exact silent drop the omp-census
+// invariant forbids -- so it is refused with steering instead.
+let g = (method_for(range<Idx<4>>) <@> lambda(r) ->
+          (method_for(range<Idx<3>>) <@> lambda(c) -> 1.0 * r + 1.0 * c)) |> compute
+let s = reduce(g, lambda(a: T^1, b: T^1) where omp(a: 1) -> a + b)

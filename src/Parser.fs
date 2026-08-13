@@ -23,20 +23,102 @@ type ParseError = {
 type ParseResult<'T> = Result<'T * Token list, ParseError>
 
 // Parser-wide mutable state (per-parse)
+//
+// PER-THREAD, not per-process. These fields describe ONE token stream, and
+// several parses can be genuinely in flight at once: the corpus harness maps
+// tests with `Array.Parallel.mapi`, and under `BLADE_TEST_FSHARP_PARALLEL=1`
+// (tests/Runner.fs) the front end runs without the pipeline lock. Sharing them
+// was an observed crash, not a hypothesis -- `setEofFrom` publishes the token
+// COUNT and the two tables it describes as separate writes, so a concurrent
+// `consumedEnd` on another parse could clear the bounds guard against the new
+// count and then index the old, shorter `LastMeaning`:
+//
+//   System.IndexOutOfRangeException: Index was outside the bounds of the array.
+//      at Blade.Parser.consumedEnd ... at Blade.Parser.rangeSpan ...
+//
+// which `Array.Parallel.mapi` wrapped in an AggregateException and Cli.dispatch
+// rendered as `error[BL9001]: internal compiler error: One or more errors
+// occurred. (Index was outside the bounds of the array.)`, killing the whole
+// category run. Reproduced on `blade test loops`, ~1 run in 6. `Span.File`
+// (the `File` field) had the same shape with a quieter symptom: one parse could
+// stamp another's spans with its filename.
+//
+// Per-THREAD is exactly per-parse here: a parse runs synchronously from entry
+// to return (no async, no nested parallelism inside the parser), and each
+// harness test gets its own thread via Runtime.runOnLargeStack.
+//
+// `[<ThreadStatic>]` rather than the `AsyncLocal` the rest of the compiler uses
+// for per-flow channels: those are touched a handful of times per compile,
+// while this state is read at EVERY AST node (`rangeSpan` -> `consumedEnd`).
+// A thread-static field read is a couple of instructions; an AsyncLocal read is
+// a lookup in the execution context's value map, which would hand back the very
+// win these O(1) tables exist to deliver (docs/plan-compile-speed.md Stage 3).
+[<AllowNullLiteral>]
+type private ParseState() =
+    /// The source file currently being parsed. Set by parseMultiSource /
+    /// parseProgramWithFile before parsing each file and reset afterwards;
+    /// every span the parser constructs stamps this into Span.File.
+    member val File : string option = None with get, set
+    /// End position (line, col) of the input, used to report EOF errors at the
+    /// end of the last token instead of 0:0. Refreshed per file when tokenizing.
+    member val LastEnd : int * int = (0, 0) with get, set
+    /// Span tables for the token stream currently being parsed, rebuilt per
+    /// file by `setEofFrom`. Indexed by `Token.Index` (the LEXER's numbering,
+    /// which still counts the newlines `tokenizeWithNewlines` dropped -- absent
+    /// tokens simply never appear as "meaningful").
+    ///
+    ///   EndAt.[i]        end position (line, col) of the token with index i
+    ///   LastMeaning.[i]  index of the last non-terminator token with index < i,
+    ///                    or -1; length is IndexCount + 1, so entry
+    ///                    [IndexCount] answers "everything was consumed".
+    ///
+    /// They exist to make `consumedEnd` O(1): computing it from list lengths
+    /// cost O(tokens remaining) at every AST node, i.e. O(n^2) over a file.
+    member val EndAt : struct (int * int)[] = [||] with get, set
+    member val LastMeaning : int[] = [||] with get, set
+    member val IndexCount : int = 0 with get, set
+    /// Bare top-level expression statements are desugared to a let over a
+    /// synthesized name (see `parseDecl`); this numbers them so each name is
+    /// unique AND predictable enough to pin with `// EXPECT: __expr1 = ...`.
+    /// Reset by `setEofFrom`, which every module/file entry point calls exactly
+    /// once before consuming a token, so numbering restarts per module rather
+    /// than accumulating across the files of a multi-source program. Lives here
+    /// rather than in a module-level `let mutable` for the same reason as the
+    /// rest of this state: concurrent parses would otherwise interleave their
+    /// numbering and hand two files the same `__exprN`.
+    member val TopExprCounter : int = 0 with get, set
 
-/// The source file currently being parsed. Set by parseMultiSource /
-/// parseProgramWithFile before parsing each file and reset afterwards; every
-/// span the parser constructs stamps this into Span.File.
-let mutable private currentFile : string option = None
-
-/// End position (line, col) of the input, used to report EOF errors at the end
-/// of the last token instead of 0:0. Refreshed per file when tokenizing.
-let mutable private lastTokenEnd : int * int = (0, 0)
+/// This thread's `ParseState`, created on first touch. A thread that never
+/// parses never allocates one.
+[<AbstractClass; Sealed>]
+type private PS =
+    [<System.ThreadStatic; DefaultValue>]
+    static val mutable private cur : ParseState
+    static member Cur : ParseState =
+        if isNull PS.cur then PS.cur <- ParseState()
+        PS.cur
 
 let private setEofFrom (tokens: Token list) =
+    let st = PS.Cur
+    st.TopExprCounter <- 0
     match List.tryLast tokens with
-    | Some t -> lastTokenEnd <- (t.EndLine, t.EndCol)
-    | None -> lastTokenEnd <- (0, 0)
+    | Some t -> st.LastEnd <- (t.EndLine, t.EndCol)
+    | None -> st.LastEnd <- (0, 0)
+    // Rebuild the span tables for exactly the list the parser will consume.
+    let n = match List.tryLast tokens with Some t -> t.Index + 1 | None -> 0
+    st.IndexCount <- n
+    let ends : struct (int * int)[] = Array.zeroCreate n
+    let meaningful : bool[] = Array.zeroCreate n
+    for t in tokens do
+        if t.Index >= 0 && t.Index < n then
+            ends.[t.Index] <- struct (t.EndLine, t.EndCol)
+            meaningful.[t.Index] <- (match t.Kind with TokNewline | TokSemi -> false | _ -> true)
+    let last : int[] = Array.zeroCreate (n + 1)
+    last.[0] <- -1
+    for i in 0 .. n - 1 do
+        last.[i + 1] <- (if meaningful.[i] then i else last.[i])
+    st.EndAt <- ends
+    st.LastMeaning <- last
 
 // Basic Combinators
 
@@ -64,7 +146,7 @@ let diagnosticOfParseError (file: string option) (e: ParseError) : Blade.Diagnos
 
 /// Unexpected-EOF error (BL1002) reported at the end of the last token.
 let errorEof msg : ParseResult<'T> =
-    let (l, c) = lastTokenEnd
+    let (l, c) = PS.Cur.LastEnd
     Error { Message = msg; Line = l; Col = c; EndLine = l; EndCol = c; Code = "BL1002" }
 
 /// Human-readable rendering of a token kind for error messages, e.g.
@@ -111,14 +193,21 @@ let describeToken (kind: TokenKind) : string =
 let currentPos (tokens: Token list) =
     match tokens with
     | t :: _ -> t.Line, t.Col
-    | [] -> lastTokenEnd
+    | [] -> PS.Cur.LastEnd
 
 /// End position (line, col) of the last meaningful (non-terminator) token
 /// consumed advancing from `before` to `after` (`after` must be a suffix of
 /// `before`). Newline/semi terminators are excluded so the span stops at the
 /// statement's real end rather than overshooting to the next token's start.
 /// Falls back to the given start position when nothing was consumed.
-let consumedEnd (before: Token list) (after: Token list) (fallbackLine: int) (fallbackCol: int) : int * int =
+///
+/// O(1): `before` and `after` are suffixes of one token stream, so the tokens
+/// consumed are exactly the index range [before.Head.Index, after.Head.Index)
+/// and the answer is a lookup in the tables `setEofFrom` built. The slow
+/// list-walking form is kept as a fallback for a token list the tables do not
+/// describe (indices out of range -- a caller that parsed without going
+/// through an entry point), so the result is identical either way.
+let private consumedEndSlow (before: Token list) (after: Token list) (fallbackLine: int) (fallbackCol: int) : int * int =
     let n = List.length before - List.length after
     if n <= 0 then (fallbackLine, fallbackCol)
     else
@@ -130,9 +219,27 @@ let consumedEnd (before: Token list) (after: Token list) (fallbackLine: int) (fa
         | Some t -> (t.EndLine, t.EndCol)
         | None -> (fallbackLine, fallbackCol)
 
+let consumedEnd (before: Token list) (after: Token list) (fallbackLine: int) (fallbackCol: int) : int * int =
+    match before with
+    | [] -> (fallbackLine, fallbackCol)   // nothing to consume: n <= 0
+    | b :: _ ->
+        let st = PS.Cur
+        let bi = b.Index
+        // Everything consumed (`after` empty) reads as "one past the last token".
+        let ai = match after with a :: _ -> a.Index | [] -> st.IndexCount
+        if bi < 0 || bi >= st.IndexCount || ai < 0 || ai > st.IndexCount then
+            consumedEndSlow before after fallbackLine fallbackCol
+        elif ai <= bi then (fallbackLine, fallbackCol)
+        else
+            let j = st.LastMeaning.[ai]
+            if j >= bi then
+                let struct (l, c) = st.EndAt.[j]
+                (l, c)
+            else (fallbackLine, fallbackCol)
+
 /// Build a Span from a single token, stamped with the current file.
 let spanOfToken (t: Token) : Span =
-    { StartLine = t.Line; StartCol = t.Col; EndLine = t.EndLine; EndCol = t.EndCol; File = currentFile }
+    { StartLine = t.Line; StartCol = t.Col; EndLine = t.EndLine; EndCol = t.EndCol; File = PS.Cur.File }
 
 /// Span of the head token of `tokens` (single-token productions: ExprVar,
 /// ExprLit, PatVar, keyword atoms). noSpan when the list is empty (unreachable
@@ -148,7 +255,7 @@ let private headSpan (tokens: Token list) : Span =
 let private rangeSpan (startToks: Token list) (remaining: Token list) : Span =
     let sL, sC = currentPos startToks
     let eL, eC = consumedEnd startToks remaining sL sC
-    { StartLine = sL; StartCol = sC; EndLine = eL; EndCol = eC; File = currentFile }
+    { StartLine = sL; StartCol = sC; EndLine = eL; EndCol = eC; File = PS.Cur.File }
 
 /// Build an Expr whose span covers the production from `startToks` to `remaining`.
 let private mkE (startToks: Token list) (remaining: Token list) (kind: ExprKind) : Expr =
@@ -167,7 +274,7 @@ let expectedError (expected: TokenKind) (tokens: Token list) : ParseResult<'T> =
     | t :: _ when t.Kind = TokEOF -> errorFull "BL1002" (msg TokEOF) t.Line t.Col t.EndLine t.EndCol
     | t :: _ -> errorFull "BL1001" (msg t.Kind) t.Line t.Col t.EndLine t.EndCol
     | [] ->
-        let (l, c) = lastTokenEnd
+        let (l, c) = PS.Cur.LastEnd
         errorFull "BL1002" (msg TokEOF) l c l c
 
 let peek (tokens: Token list) =
@@ -1643,6 +1750,27 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             } toks
     loop [] [] [] [] tokens
 
+/// The BL1003 steer for the removed imperative `for`. Shared verbatim by the
+/// two positions the shape can appear in -- a block statement (parseBlock) and
+/// a top-level statement (parseDecl) -- so the wording cannot drift between
+/// them and corpus `ERROR-CONTAINS` pins match either site.
+let forInRemovedMsg =
+    "The imperative `for x in a..b { ... }` statement has been removed. Re-express sequential recurrences as a recursive array (`let rec q: Array<T like Step, ...> = match q with | zero -> zero | prefix :: n -> prefix :: <slice>`), folds as `reduce(...)`, and parallel maps as `method_for(range<...>) <@> lambda(...)`. See formalism 7.5."
+
+/// Does the token stream open with the REMOVED imperative `for IDENT in ...`
+/// (as opposed to the surviving loop-object `for (A, B) in virtualArray`)?
+/// Both parseBlock and parseDecl gate their BL1003 steer on this.
+let private isImperativeForIn (tokens: Token list) : bool =
+    match peek tokens with
+    | Some (TokKeyword KwFor) ->
+        match peek (advance tokens) with
+        | Some (TokIdent _) ->
+            (match peek (advance (advance tokens)) with
+             | Some (TokKeyword KwIn) -> true
+             | _ -> false)
+        | _ -> false
+    | _ -> false
+
 let rec parseExprImpl (tokens: Token list) : ParseResult<Expr> =
     parseAssignment tokens
 
@@ -1653,13 +1781,113 @@ and parseInlineOrBlock (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
     | Some TokLBrace ->
         parseBlock (advance tokens)
+    // A braceless body that OPENS with a binding statement. A `let` is not a
+    // value, so such a body cannot be one statement long -- it is a let-chain
+    // followed by the single expression that is its value. That is most of the
+    // termination rule; `parseBracelessBinders` adds the layout guard for the
+    // rest. The result is ExprBlock, i.e. literally the braced form's AST, so
+    //     | p -> let x = e
+    //            f(x)
+    // and `| p -> { let x = e; f(x) }` are the same program by construction.
+    // Gated on the `let`/`function` opener so every braceless body that parses
+    // today keeps its exact historical path.
+    | Some (TokKeyword KwLet) | Some (TokKeyword KwFunction) ->
+        (match parseBracelessBinders tokens with
+         | Some result -> result
+         // No value expression belongs to the chain (the arm ended, or the
+         // next statement is outdented past this body). Nothing NEW is
+         // expressible there, so re-run the historical parse and let it
+         // produce the historical AST and diagnostic verbatim.
+         | None -> parseInlineExpr tokens)
     | _ ->
-        parseExprImpl tokens >>= fun expr remaining ->
-        let remaining = 
-            match peek remaining with
-            | Some TokNewline -> advance remaining
-            | _ -> remaining
-        success expr remaining
+        parseInlineExpr tokens
+
+/// The historical braceless body: one expression, with a trailing newline
+/// consumed if present. Factored out so the multi-statement path can fall back
+/// to it byte-for-byte.
+and parseInlineExpr (tokens: Token list) : ParseResult<Expr> =
+    parseExprImpl tokens >>= fun expr remaining ->
+    let remaining =
+        match peek remaining with
+        | Some TokNewline -> advance remaining
+        | _ -> remaining
+    success expr remaining
+
+/// Parse a braceless `let`-chain body: binding statements followed by the one
+/// expression that is the body's value, assembled into the same ExprBlock the
+/// braced form builds.
+///
+/// `None` means "this is not that shape after all" -- the caller falls back to
+/// the historical single-expression parse. A genuine parse error INSIDE a
+/// binder is `Some (Error _)` and propagates, so a typo in a let is still
+/// reported at the typo.
+///
+/// Termination has two rules, and it needs both:
+///
+///   1. Structural -- keep going while the last statement read was a binding,
+///      stop at the first statement that is an expression (that expression is
+///      the value). A `let` cannot end a body, so this is forced.
+///   2. Layout -- a continuation statement must start at a column no less than
+///      the body's first statement. Rule 1 alone is not enough at top level,
+///      where a match arm or function body is followed by more DECLARATIONS:
+///          let z = match x with
+///          | 0 -> let a = 1
+///          let w = 2
+///          w
+///      Without the column guard the arm would swallow `let w = 2` as a binder
+///      and `w` as its value, stealing a top-level declaration. The guard is
+///      the only place this parser consults indentation, and it only ever
+///      makes the body SHORTER, never reinterprets what it already took.
+and parseBracelessBinders (tokens: Token list) : ParseResult<Expr> option =
+    let (_, baseCol) = currentPos tokens
+    // The chain ran out of statements without reaching a value. With at least
+    // one binder consumed, that is not a fallback case -- it is the user's
+    // mistake, and it has exactly two shapes: they forgot the result, or they
+    // outdented it past `baseCol` so rule 2 fenced it off. Diagnosing it here
+    // is what keeps it from reaching codegen as a void-valued match arm.
+    // Reported at the body's first token, which is the `let` that cannot be a
+    // value. Generic BL1999 -- no new diagnostic code to register or pin.
+    let noValue () : ParseResult<Expr> option =
+        let (l, c) = currentPos tokens
+        Some (error ("A braceless body cannot consist only of bindings -- a `let` is not a value. "
+                     + "Add the result expression on its own line, indented to at least the column of "
+                     + "this `let`, or wrap the body in braces: `{ let x = ...; expr }`.") l c)
+    let rec loop (stmts: Stmt list) (toks: Token list) : ParseResult<Expr> option =
+        let toks = skipNL toks
+        let (sLine, sCol) = currentPos toks
+        let spanned (remaining: Token list) (stmt: Stmt) =
+            let (eLine, eCol) = consumedEnd toks remaining sLine sCol
+            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol
+                                 EndLine = eLine; EndCol = eCol; File = PS.Cur.File })
+        // Rule 2. Checked before dispatch, so it fences the value expression
+        // exactly as it fences a binder.
+        if sCol < baseCol then (if List.isEmpty stmts then None else noValue ())
+        else
+        match peek toks with
+        | Some (TokKeyword KwLet) ->
+            (match parseLetStmt (advance toks) with
+             | Ok (stmt, rest) ->
+                 let rest = skipTerminator rest
+                 loop (spanned rest stmt :: stmts) rest
+             | Error e -> Some (Error e))
+        | Some (TokKeyword KwFunction) ->
+            (match parseNestedFunction (advance toks) with
+             | Ok (stmt, rest) ->
+                 let rest = skipTerminator rest
+                 loop (spanned rest stmt :: stmts) rest
+             | Error e -> Some (Error e))
+        // Closers: the enclosing arm / block / call ended before any value
+        // expression appeared.
+        | Some TokPipe | Some TokRBrace | Some TokRParen | Some TokRBracket
+        | Some TokComma | Some TokEOF | None ->
+            if List.isEmpty stmts then None else noValue ()
+        | Some _ ->
+            (match parseInlineExpr toks with
+             | Ok (value, rest) ->
+                 Some (success (mkExpr (rangeSpan tokens rest)
+                                       (ExprBlock (List.rev stmts, Some value))) rest)
+             | Error e -> Some (Error e))
+    loop [] tokens
 
 and parseAssignment (tokens: Token list) : ParseResult<Expr> =
     parseTyped tokens >>= fun left rest ->
@@ -2734,17 +2962,7 @@ and parseObjectFor (tokens: Token list) : ParseResult<Expr> =
         let afterOp = advance afterLParen
         match peek afterOp with
         | Some TokRParen ->
-            let binOp = 
-                match op with
-                | "<&>" -> Some OpParallel
-                | "<&!>" -> Some OpFusion
-                | "<*>" -> Some OpArrayProd
-                | "<@>" -> Some OpApply
-                | "<$>" -> Some OpFunctor
-                | "<|>" -> Some OpChoice
-                | "<|:>" -> Some OpFallback
-                | ">>=" -> Some OpBind
-                | _ -> stringToBinOp op  // fall back to scalar ops (+, *, etc.)
+            let binOp = combinatorOrScalarSection op
             match binOp with
             | Some b ->
                 let remaining = advance afterOp
@@ -2767,12 +2985,12 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
     | Some TokRParen ->
         let remaining = advance tokens
         success (mkE tokens remaining (ExprTuple [])) remaining
-    // Operator section: (+), (*), etc.
+    // Operator section: (+), (*), (<&!>), etc.
     | Some (TokOp op) ->
         let afterOp = advance tokens
         match peek afterOp with
         | Some TokRParen ->
-            match stringToBinOp op with
+            match combinatorOrScalarSection op with
             | Some binOp ->
                 let remaining = advance afterOp
                 success (mkE tokens remaining (ExprSection binOp)) remaining
@@ -2805,6 +3023,25 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
             errorC "BL1001" "Expected ')' or ',' in parenthesized expression" line col
 
 /// Convert operator string to BinOp
+/// The section table shared by `(op)` and `object_for(op)`: the COMBINATOR
+/// operators first, then the scalar ops. One table, so the two spellings can
+/// never disagree about which operators have a section -- which is what let
+/// `object_for(<&!>)` parse while `(<&!>)` did not (BL1999 "Unknown operator
+/// in section"), even though the reduction-join forms need both.
+and combinatorOrScalarSection (op: string) : BinOp option =
+    match op with
+    | "<&>" -> Some OpParallel
+    | "<&!>" -> Some OpFusion
+    | "<*>" -> Some OpArrayProd
+    | "<@>" -> Some OpApply
+    | "<$>" -> Some OpFunctor
+    | "<|>" -> Some OpChoice
+    | "<|:>" -> Some OpFallback
+    | ">>=" -> Some OpBind
+    | ">>@" -> Some OpComposeObj
+    | "@>>" -> Some OpComposeMeth
+    | _ -> stringToBinOp op  // scalar ops (+, *, etc.)
+
 and stringToBinOp (op: string) : BinOp option =
     match op with
     | "+" -> Some OpAdd
@@ -2832,7 +3069,7 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
         let sLine, sCol = currentPos toks
         let spanned (remaining: Token list) (stmt: Stmt) =
             let eLine, eCol = consumedEnd toks remaining sLine sCol
-            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = eLine; EndCol = eCol; File = currentFile })
+            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = eLine; EndCol = eCol; File = PS.Cur.File })
         match peek toks with
         | Some TokRBrace ->
             // Last expression (if any) is the block's return value. stmts is
@@ -2869,9 +3106,7 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
                 match peek afterIdent with
                 | Some (TokKeyword KwIn) ->
                     let line, col = currentPos toks
-                    errorC "BL1003"
-                        "The imperative `for x in a..b { ... }` statement has been removed. Re-express sequential recurrences as a recursive array (`let rec q: Array<T like Step, ...> = match q with | zero -> zero | prefix :: n -> prefix :: <slice>`), folds as `reduce(...)`, and parallel maps as `method_for(range<...>) <@> lambda(...)`. See formalism 7.5."
-                        line col
+                    errorC "BL1003" forInRemovedMsg line col
                 | _ ->
                     // Loop-object `for` expression: the surviving form.
                     parseExprImpl toks >>= fun expr remaining ->
@@ -3588,9 +3823,44 @@ let parseDecl (tokens: Token list) : ParseResult<Decl> =
         parseImplDecl (advance tokens)
     | Some (TokKeyword KwUnit) ->
         parseUnitDecl (advance tokens)
-    | Some kind ->
+    // The removed imperative `for IDENT in ...`, in TOP-LEVEL position. This
+    // must precede the bare-expression arm below: `for` also opens the
+    // surviving loop-object form, so without the guard the expression parser
+    // would swallow the shape and report something downstream and confusing
+    // instead of the BL1003 steer. Same predicate and same message as
+    // parseBlock's statement-position shell.
+    | Some (TokKeyword KwFor) when isImperativeForIn tokens ->
         let line, col = currentPos tokens
-        error (sprintf "Expected declaration but got %s" (describeToken kind)) line col
+        errorC "BL1003" forInRemovedMsg line col
+    | Some kind ->
+        // A bare top-level EXPRESSION statement. Blade has no `main`: a
+        // top-level expression evaluates in declaration order and auto-prints,
+        // exactly like a top-level `let`. That equivalence is the
+        // implementation -- the expression desugars to a let over a
+        // synthesized `__exprN` name, which is the same move the REPL/notebook
+        // lane makes with `let __cellN = `. Because the desugar happens HERE,
+        // every downstream phase (typecheck, lowering, codegen, the
+        // interpreter, and the auto-printer) inherits the feature through the
+        // binding path it already has, so the codegen/interpreter twins cannot
+        // drift on it.
+        let line, col = currentPos tokens
+        let classic () =
+            error (sprintf "Expected declaration but got %s" (describeToken kind)) line col
+        match parseExprImpl tokens with
+        | Ok (expr, remaining) ->
+            let st = PS.Cur
+            st.TopExprCounter <- st.TopExprCounter + 1
+            let name = sprintf "__expr%d" st.TopExprCounter
+            success (DeclLet { Mutability = BindLet
+                               Pattern = mkPat (headSpan tokens) (PatVar name)
+                               Type = None
+                               Value = expr }) remaining
+        // The expression parser rejected the very first token, so this was
+        // never an expression: keep the historical declaration-position
+        // wording, which names what the position actually wanted. Only when it
+        // got PAST that token does its own error describe the input better.
+        | Error e when e.Line = line && e.Col = col -> classic ()
+        | Error e -> Error e
     | None ->
         errorEof "Expected declaration but got end of file"
 
@@ -3639,7 +3909,7 @@ let parseModuleRecovering (tokens: Token list) : (ModuleDecl * ParseError list) 
             | Ok (decl, remaining) ->
                 let (endLine, endCol) = consumedEnd toks remaining startLine startCol
                 let span = { StartLine = startLine; StartCol = startCol
-                             EndLine = endLine; EndCol = endCol; File = currentFile }
+                             EndLine = endLine; EndCol = endCol; File = PS.Cur.File }
                 let located = { Value = decl; Span = span }
                 decls <- located :: decls
                 toks <- remaining
@@ -3673,7 +3943,7 @@ let parseModule (tokens: Token list) : ParseResult<ModuleDecl> =
             parseDecl toks >>= fun decl remaining ->
             let (endLine, endCol) = consumedEnd toks remaining startLine startCol
             let span = { StartLine = startLine; StartCol = startCol
-                         EndLine = endLine; EndCol = endCol; File = currentFile }
+                         EndLine = endLine; EndCol = endCol; File = PS.Cur.File }
             let located = { Value = decl; Span = span }
             loop (located :: decls) remaining
     
@@ -3686,7 +3956,7 @@ let parseModule (tokens: Token list) : ParseResult<ModuleDecl> =
 
 /// Parse a single source, stamping the given file into every span it builds.
 let parseProgramWithFile (file: string option) (source: string) : Result<Program, ParseError> =
-    currentFile <- file
+    PS.Cur.File <- file
     try
         let tokens = tokenizeWithNewlines source
         setEofFrom tokens
@@ -3694,7 +3964,7 @@ let parseProgramWithFile (file: string option) (source: string) : Result<Program
         | Ok (modul, _) -> Ok { Modules = [modul] }
         | Error e -> Error e
     finally
-        currentFile <- None
+        PS.Cur.File <- None
 
 /// Backward-compatible entry point: parse a single anonymous source (File=None).
 let parseProgram (source: string) : Result<Program, ParseError> =
@@ -3706,10 +3976,10 @@ let parseProgram (source: string) : Result<Program, ParseError> =
 let parseMultiSource (sources: (string * string) list) : Result<Program, ParseError> =
     let rec go acc remaining =
         match remaining with
-        | [] -> currentFile <- None; Ok { Modules = List.rev acc }
+        | [] -> PS.Cur.File <- None; Ok { Modules = List.rev acc }
         | (fileName, source) :: rest ->
             // Stamp this file into every span the parser builds for it.
-            currentFile <- (if fileName <> "" then Some fileName else None)
+            PS.Cur.File <- (if fileName <> "" then Some fileName else None)
             let tokens = tokenizeWithNewlines source
             setEofFrom tokens
             match parseModule tokens with
@@ -3721,7 +3991,7 @@ let parseMultiSource (sources: (string * string) list) : Result<Program, ParseEr
                     else modul
                 go (modul' :: acc) rest
             | Error e ->
-                currentFile <- None
+                PS.Cur.File <- None
                 Error { e with Message = sprintf "[%s] %s" fileName e.Message }
     go [] sources
 

@@ -1,0 +1,30 @@
+// TEST: Reduce Join Three Legs In Kernel Body
+// The multi-statistics-in-one-pass idiom (docs style guide) spelled INSIDE a
+// kernel body: the join and its destructure live in the lambda the outer map
+// applies, so the whole reduce is emitted into a lifted C++ function rather
+// than at module level.
+//
+// That is the position the flat-tuple convention used to be lost in. Every
+// tuple codegen emits is FLAT (`std::make_tuple(v_0, v_1, v_2)`) while its IR
+// type is the left-nested pair tree `<&!>` parses, and the two are reconciled
+// by the emitter's TupleChildren registry. The function-body statement fold
+// dropped that registry, so the destructure fell back to navigating the
+// NESTED type -- `std::get<0>(std::get<0>(t))` against a flat 3-tuple, which
+// does not compile. TWO legs hid the bug (nested and flat agree at width 2);
+// three legs is the smallest witness, which is why this test is three.
+//
+// The legs are weighted 1/10/100 on purpose: a permutation of the three
+// accumulators changes the answer, so the pin tests the wiring, not just that
+// something compiled.
+//   s1 = sum(x * k) = 10k,  s2 = sum(x^2) = 30,  s3 = sum(x + k) = 10 + 4k
+//   value = s1 + 10*s2 + 100*s3 = 410k + 1300
+let xs: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let ks: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let out = (ks <@> lambda(k) -> {
+    let L = method_for(xs)
+    let (s1, s2, s3) = reduce((L <@> lambda(a) -> a * k)
+                         <&!> (L <@> lambda(b) -> b * b)
+                         <&!> (L <@> lambda(c) -> c + k), (+))
+    s1 + 10.0 * s2 + 100.0 * s3
+}) |> compute
+// EXPECT: out = [1710.0, 2120.0, 2530.0]

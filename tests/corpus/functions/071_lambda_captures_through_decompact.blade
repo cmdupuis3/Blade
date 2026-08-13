@@ -1,0 +1,19 @@
+// TEST: Lambda Captures Through Decompact
+// ----------------------------------------------------------------------------
+// The 070 defect, reached through `decompact` instead of `transpose` -- both
+// were dropped by the same `collectFreeVars` catch-all. `sym` is block-local
+// and the lambda reads it ONLY through the decompact, so if the operand is not
+// walked the capture never forms and IR validation reports a dangling VarId.
+//
+// The compact source is the 034_decompact_symmetric shape: reynolds over
+// g = 2x + y is 3(x + y), so the dense 3x3 is M[i][j] = 3*(A[i] + A[j]).
+let out = {
+    let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+    let L = method_for(A, A)
+    let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+    let sym = L <@> reynolds(g) |> compute
+    let k = lambda(i: Int) -> decompact(sym, 0)(i, 0)
+    // M = [[6,9,12],[9,12,15],[12,15,18]]; column 0 is (6, 9, 12).
+    k(0) + k(1)
+}
+// EXPECT: out = 15

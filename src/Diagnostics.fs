@@ -171,6 +171,13 @@ module Codes =
             // the declared name as a fresh base unit) types a misspelling
             // into a silently wrong dimension.
             "BL3015", "unknown unit name"
+            // BL3016: a parameter and its argument BOTH carry a literal extent
+            // on the same index slot, and they differ. Not a naming quibble:
+            // codegen treats a literal parameter extent as ground truth and
+            // bakes it into loop bounds and result allocations, so the emitted
+            // C++ indexes past the argument's allocation. A symbolic extent
+            // (`Idx<n>`) reads `.extents[d]` at runtime and stays permissive.
+            "BL3016", "argument extent mismatch"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"
@@ -228,6 +235,13 @@ module Codes =
             "BL7001", "feature not yet supported by this backend"
             "BL7002", "CUDA backend limit"
             "BL7003", "MPI backend limit"
+            // A DELIBERATE codegen refusal (codegen understood the construct
+            // and declined, with guidance in the message) surfaced through the
+            // compile driver -- the same messages the generated `#error`
+            // directives carry, delivered as a coded, spanned diagnostic
+            // instead of a g++ preprocessor error. BL7001 stays the
+            // unhandled-node (back-end gap) code.
+            "BL7004", "construct not supported by the C++ backend"
             // BL8xxx: runtime (generated C++)
             "BL8001", "constraint violation"
             "BL8002", "non-exhaustive match"
@@ -245,6 +259,13 @@ module Codes =
             // (blade_runtime.hpp) and by the interpreter's twins
             // (Interp/Numerics.lgammaLanczos / digammaSeries).
             "BL8008", "math intrinsic domain error"
+            // A halo window's declared inner extent disagrees with the RUNTIME
+            // extent of an array read through the window (a group_by count,
+            // typically). The compile-time twin is BL3016's HaloExtentMismatch;
+            // this guard covers the extents typecheck cannot see. Emitted once
+            // before the nest by genApplyCombinator's haloExtentGuards, and
+            // mirrored by the interpreter's halo loop.
+            "BL8009", "halo extent mismatch"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"
@@ -310,6 +331,13 @@ module Codes =
 
     let backendLimit (span: Span) (message: string) : Diagnostic =
         mkError "BL7001" PhBackend span message
+
+    /// A deliberate codegen refusal (see BL7004's registry note). The message
+    /// carries its own what-to-write-instead guidance, so no generic note is
+    /// attached -- unlike BL7001, this is a statement about the program's
+    /// shape, not a request to report a compiler gap.
+    let backendRefusal (span: Span) (message: string) : Diagnostic =
+        mkError "BL7004" PhBackend span message
 
 // Rendering.
 

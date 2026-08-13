@@ -1,0 +1,56 @@
+// TEST: Cross-module GENERIC function
+// MODULE: Main
+// ============================================================================
+// HM monomorphization is CALL-SITE driven, and it used to run once per module
+// inside the lowering loop. A generic DEFINED in Stats and CALLED from Main was
+// therefore invisible to it from both sides: Stats saw no call site and dropped
+// `mean` as an uninstantiated polymorph, Main did not own it, and the call
+// reached validateIR still carrying `IRTInfer` -- BL6001 "unresolved type
+// variable" plus a dangling VarId, on a program whose types were all perfectly
+// well determined. `stdlib/plot.blade` documents having worked around exactly
+// this by sharing only String-typed helpers.
+//
+// Two independent fixes are pinned here, and BOTH are needed:
+//
+//  1. The pass now runs ONCE over the whole program (IR.
+//     monomorphizeHMFunctionsModules), mirroring shapeMonomorphizeModules --
+//     which is what lets `mean`'s specialization be requested at all. `m` and
+//     `c` cover this.
+//  2. A cross-module call site also teaches the CALLER's own type variables
+//     through its RETURN type (IR.collectHMCallSiteReturnBindings). TypeCheck
+//     instantiates an imported signature with FRESH vars at the import site
+//     while the callee's IRFuncDef keeps its declared ones, so the two sides
+//     speak different var namespaces: `mean` specialized correctly while every
+//     expression AROUND the call still carried the caller's unresolved var.
+//     `wrapped` covers this -- a LOCAL generic whose own return type is the
+//     imported generic's, which is the shape that still failed with (1) alone.
+//
+// Both qualified (`Stats.mean`) and selective (`from`-imported) call styles are
+// exercised, since they bind through different arms of the import lowering.
+// ============================================================================
+module Main
+import Stats
+from Stats import mean, centered
+
+let x = [1.0, 2.0, 3.0]
+
+let m = Stats.mean(x)
+// EXPECT: m = 2
+let c = centered(x)
+// EXPECT: c = [-1, 0, 1]
+
+// A local generic whose return type IS the imported generic's return: fix (2).
+function spread(row: T^1) -> T^0 = Stats.mean(centered(row) * centered(row))
+let wrapped = spread(x)
+// EXPECT: wrapped = 0.666666666666667
+
+// Kernel position: the imported generic applied per row of a rank-2 array.
+// Named through its SELECTIVE import: a `<@>` kernel slot takes a named
+// function, and a QUALIFIED `Stats.mean` reaches lowering as a variable path,
+// which the slot declines outright ("<@> kernel must be a lambda, operator
+// section, named function, reynolds(...), or zero"). That is a pre-existing
+// limitation of qualified names in kernel position, unrelated to anything this
+// test is about -- the selective import is the spelling that works today.
+let B = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let rowmeans = method_for(B) <@> mean |> compute
+// EXPECT: rowmeans = [2, 4]

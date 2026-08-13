@@ -1,0 +1,40 @@
+// TEST: Ragged Peel Omp Licence
+// The RAGGED-LITERAL half of the peel's `where omp(...)` support -- the grouped
+// half lives in sql-group-by/032. Both arms of tryRaggedPeel are covered here:
+// the row-CONSUMING peel (a kernel that collapses its row to a scalar) and the
+// shape-preserving ELEMENTWISE map, which is the arm that emits two loops.
+//
+// This file pins the VALUES; the pragma itself is pinned by the pure-codegen
+// block (`blade test omp-pragma`), since a corpus EXPECT cannot see emitted C++.
+// Each computation is written twice, licensed and not, against the same EXPECT:
+// each `__g` iteration writes a disjoint output slice, so threading the row loop
+// must not change a result.
+//
+// Rows of length 3/2/4 -- uneven on purpose, since the emitted pragma is
+// `schedule(dynamic)` exactly because row lengths are runtime data.
+
+let lens: Array<Int64 like Idx<3>> = [3, 2, 4]
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+
+// Row-consuming: the peel binds g to a sub-array sized by that row.
+let sums_omp = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) where omp(g: 1) -> reduce(g, (+)) |> compute
+// EXPECT: sums_omp = [6, 9, 30]
+let sums_serial = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: sums_serial = [6, 9, 30]
+
+// Elementwise map: shape-preserving, so the output is a fresh Ragged<T> sharing
+// the parent's extents/lens/offsets. The licence reaches the ROW loop only --
+// the inner `__k` bound is a `lens[__g]` memory load rather than an affine
+// function of __g, so no collapse is possible and depth caps at the row axis.
+// Row-disjoint all the same: iteration __g writes its own row pointer and its
+// own pool slice.
+let dbl_omp = method_for(r) <@> lambda(e) where omp(e: 1) -> e * 2.0 |> compute
+// EXPECT: dbl_omp = [2, 4, 6, 8, 10, 12, 14, 16, 18]
+let dbl_serial = method_for(r) <@> lambda(e) -> e * 2.0 |> compute
+// EXPECT: dbl_serial = [2, 4, 6, 8, 10, 12, 14, 16, 18]
+
+// An inline ragged literal (no annotation) reaches the same peel through the
+// __raggedidx_inline tag rather than the closed RaggedIdx<lens> form.
+let inl = [[1.0, 2.0], [3.0], [4.0, 5.0, 6.0]]
+let inl_sums = method_for(inl) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) where omp(g: 1) -> reduce(g, (+)) |> compute
+// EXPECT: inl_sums = [3, 3, 15]

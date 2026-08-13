@@ -107,24 +107,56 @@ let testLower source =
         printfn "Lower: ERROR - %s" e
         Error e
 
-/// Lock serializing the F# pipeline (lower → IR → genCpp). The lower and
-/// codegen functions rely on module-level mutable struct-field caches
-/// (`structFieldsCache` in IR.fs, `codegenStructFieldsCache` in CodeGen.fs)
-/// that are not thread-safe. With `Array.Parallel.mapi` running tests
-/// concurrently, two tests' lift/codegen phases can race on these caches
-/// — e.g., two tests both define `struct Trace` with different fields,
-/// and test A's codegen reads a cache that test B has already overwritten
-/// with its version of Trace, so A's field lookups fail.
+/// Lock serializing the F# pipeline (lower → IR → genCpp) per test.
 ///
-/// The fix is to serialize the F# pipeline phase per test. C++ compile
-/// and run (external subprocesses) remain outside the lock, so the
-/// expensive parallelism is preserved.
+/// The race this lock was originally written for NO LONGER EXISTS. Both caches
+/// its old justification named are gone: IR.fs's `structFieldsCache` is now an
+/// `AsyncLocal` per-flow cell (`structFieldsCacheStorage`, IR.fs:5532, with a
+/// fresh Dictionary per `setStructFieldsCache`), and there is no
+/// `codegenStructFieldsCache` at all — `setCodegenStructFieldsCache`
+/// (CodeGen.fs:1150) forwards straight into that same AsyncLocal registry, so
+/// the two population points fill one cache rather than two racing ones.
 ///
-/// Proper long-term fix: thread the struct-field map through as an
-/// explicit parameter rather than module-level mutable state. That's
-/// a larger refactor touching every recursive type-inference call;
-/// deferred until needed.
+/// What the lock guards TODAY is a conservative assumption, not a known bug:
+/// the pipeline carries per-run state in roughly fifty `AsyncLocal`
+/// side-channels (CodeGen.fs alone declares ~25 — decl collectors, emission-mode
+/// flags, alloc scopes, hoisted-name maps; plus TypeCheck/DeduceRep/TypeEnv/IR
+/// warning and deduction sinks). Per-execution-context is the right scope for
+/// one pipeline run per flow. The UNPROVEN part is the interaction with
+/// `Array.Parallel.mapi`, which reuses thread-pool threads across iterations:
+/// nobody here has demonstrated that an `AsyncLocal` written during iteration N
+/// is invisible to iteration N+1 on the same worker. (`runOnLargeStack` narrows
+/// the exposure — each pipeline runs on a fresh `Thread`, which captures a COPY
+/// of the pool thread's ExecutionContext, so writes made inside the pipeline do
+/// not flow back out to the pool thread. Narrows; does not close.)
+///
+/// So removing the lock is an experiment, not a cleanup, and it is gated:
+/// `BLADE_TEST_FSHARP_PARALLEL=1` runs the pipeline unlocked. The DEFAULT stays
+/// locked until the unlocked mode has ≥10 consecutive clean full-suite runs
+/// (docs/plan-compile-speed.md §4, Stage 4.2; ceiling −11% suite wall).
+///
+/// C++ compile and run (external subprocesses) are outside the lock either way,
+/// so the expensive parallelism is already preserved in the default mode.
 let private fsharpPipelineLock = obj()
+
+/// Stage 4.2 experiment gate: run the F# pipeline WITHOUT `fsharpPipelineLock`.
+///
+///   BLADE_TEST_FSHARP_PARALLEL=1|on  -> unlocked (experiment)
+///   unset / 0 / anything else        -> locked (the default)
+///
+/// Read per call rather than cached in a module-level `let`, matching the
+/// discipline of the Build.fs/CodeGen.fs environment gates: a test may pin and
+/// restore it mid-process.
+let private fsharpParallelEnabled () : bool =
+    match System.Environment.GetEnvironmentVariable "BLADE_TEST_FSHARP_PARALLEL" with
+    | "1" | "on" -> true
+    | _ -> false
+
+/// The one place the pipeline lock is taken. Every use of `fsharpPipelineLock`
+/// must go through here, or the experiment gate measures half a change.
+let private withFsharpPipelineLock (body: unit -> 'T) : 'T =
+    if fsharpParallelEnabled () then body ()
+    else lock fsharpPipelineLock body
 
 /// Encapsulates the result of the F# pipeline phase (parse → IR → C++
 /// source generation), so the caller can run compile/run outside the lock.
@@ -135,20 +167,29 @@ type private FsPipelineOutcome =
     | FpIRError of string * Blade.Diagnostics.Diagnostic list
     | FpIRValidationError of string list
     | FpIROnly of IRProgram          // compileAndRun = false, no .cpp generated
-    /// ir, srcFile, warnings, backend, emitted-#error-guard. The guard flag is
-    /// read off the generated source HERE, while it is in memory, because a
-    /// codegen-stage reject-probe's verdict depends on it.
-    | FpCppGenerated of IRProgram * string * string list * BackendReq * bool
+    /// ir, srcFile, warnings, backend, emitted-#error-guard, codegen refusal
+    /// diagnostics, generated source. The guard flag is read off the generated
+    /// source HERE, while it is in memory, because a codegen-stage
+    /// reject-probe's verdict depends on it. The diagnostics are the coded
+    /// (BL7001) half of the same refusal -- drained from codegen's
+    /// unhandled-node channel, spanned at the declaration -- so a
+    /// `// ERROR: BL7001` pin on a codegen-stage probe is checked against a
+    /// real diagnostic rather than scraped out of g++'s echo of the `#error`
+    /// text. The source itself rides along for the same reason the guard does:
+    /// the compile step's backend sniffs would otherwise read back off disk the
+    /// file this pipeline just wrote.
+    | FpCppGenerated of IRProgram * string * string list * BackendReq * bool * Blade.Diagnostics.Diagnostic list * string
     | FpGenError of IRProgram * string  // ir was valid but codegen threw
 
 /// `wantDiags`: also recover the CODED diagnostics for a refused program.
 /// `lower` returns a formatted string with the BLxxxx code discarded
 /// (TypeEnv.formatCompileError renders location + message only), so a test that
 /// pins `// ERROR: BLxxxx` needs a second front-end pass through `lowerDiag`.
-/// That pass runs HERE — inside the same lock, on the same large stack, so it
-/// shares the serialization the module-level codegen caches require — and only
-/// for a source that actually carries pins, so the unpinned majority of the
-/// corpus pays nothing for it.
+/// That pass runs HERE — inside the same lock (when it is taken at all; see
+/// `withFsharpPipelineLock`), on the same large stack, so it inherits whatever
+/// serialization the rest of the pipeline has — and only for a source that
+/// actually carries pins, so the unpinned majority of the corpus pays nothing
+/// for it.
 ///
 /// Warnings are CAPTURED here, not printed: `lowerCaptured` hands them back so
 /// the verdict can hold them against the source's `// WARN:` pins. They come
@@ -157,7 +198,7 @@ type private FsPipelineOutcome =
 /// warning channels, so draining after it would count every warning twice on
 /// exactly the pinned reject-probes that can least afford it.
 let private runFsharpPipelineLocked (source: string) (testName: string) (outputDir: string) (compileAndRun: bool) (wantDiags: bool) : FsPipelineOutcome * Blade.Diagnostics.Diagnostic list =
-    lock fsharpPipelineLock (fun () ->
+    withFsharpPipelineLock (fun () ->
         let (irResult, capturedWarnings) = lowerCaptured source
         let outcome =
             match irResult with
@@ -205,7 +246,13 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                             // directive — not the mere fact that g++ returned
                             // nonzero — is what a REJECT-AT: codegen probe pins.
                             let emittedErrorGuard = cppCode.Contains "#error"
-                            FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, emittedErrorGuard)
+                            // Drained here, in the same breath as the generation
+                            // that produced them: the channel is reset at each
+                            // genSelfContainedProgramFromIR entry, so leaving
+                            // them would attribute this test's back-end hole to
+                            // whichever test generated next on this flow.
+                            let refusalDiags = CodeGen.takeUnhandledIRNodeDiagnostics ()
+                            FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, emittedErrorGuard, refusalDiags, cppCode)
                         with ex ->
                             FpGenError (ir, sprintf "Generation failed: %s" ex.Message)
         outcome, capturedWarnings
@@ -249,14 +296,16 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
             reported |> List.filter (fun line -> line.Contains "=")
         else reported
 
-    // F# pipeline (lower + codegen) runs under a lock to avoid cache
-    // races. C++ compile and run (below) stay outside the lock so they
-    // parallelize freely across tests.
+    // F# pipeline (lower + codegen) runs under a lock by default — a
+    // conservative guard over the pipeline's AsyncLocal side-channels, opt-out
+    // via BLADE_TEST_FSHARP_PARALLEL; see `fsharpPipelineLock`. C++ compile and
+    // run (below) stay outside the lock either way, so they parallelize freely
+    // across tests.
     //
     // Array.Parallel.mapi runs each test on a ~1 MB thread-pool thread, which
     // the deep AST/IR recursion (e.g. ppl jet elaboration) can overflow — so
-    // the pipeline runs on a large-stack thread. The lock still serializes it,
-    // so at most one such thread does the deep work at a time. See Runtime.fs.
+    // the pipeline runs on a large-stack thread. In the default (locked) mode
+    // at most one such thread does the deep work at a time. See Runtime.fs.
     let (pipelineOutcome, capturedWarnings) =
         Blade.Runtime.runOnLargeStack (fun () ->
             runFsharpPipelineLocked source testName outputDir compileAndRun wantDiags)
@@ -266,14 +315,17 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
     // "no C++ was produced" must read as "no guard", never as unknown.
     let emittedErrorGuard =
         match pipelineOutcome with
-        | FpCppGenerated (_, _, _, _, guard) -> guard
+        | FpCppGenerated (_, _, _, _, guard, _, _) -> guard
         | _ -> false
 
-    // Likewise hoisted: only the front-end-rejection branch can carry coded
-    // diagnostics, and every other branch must read as "none produced".
+    // Likewise hoisted: the front-end-rejection branch carries the checker's
+    // coded diagnostics, and the generated-source branch carries codegen's own
+    // (a back-end hole reported as BL7001). Every other branch must read as
+    // "none produced".
     let producedDiags =
         match pipelineOutcome with
         | FpIRError (_, ds) -> ds
+        | FpCppGenerated (_, _, _, _, _, ds, _) -> ds
         | _ -> []
 
     // Hoisted for the same reason: only the generated-source branch can carry
@@ -282,7 +334,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
     // reached codegen must fail, not pass vacuously.
     let producedCodegenWarnings =
         match pipelineOutcome with
-        | FpCppGenerated (_, _, ws, _, _) -> ws
+        | FpCppGenerated (_, _, ws, _, _, _, _) -> ws
         | _ -> []
 
     match pipelineOutcome with
@@ -324,7 +376,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
           DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
           WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
           CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
-    | FpCppGenerated (ir, srcFile, _codegenWarnings, backendReq, _) ->
+    | FpCppGenerated (ir, srcFile, _codegenWarnings, backendReq, _, _, generatedSrc) ->
         // Codegen warnings are NOT printed here. They rode into
         // `producedCodegenWarnings` above and are judged against the source's
         // `// WARN-CODEGEN:` pins by the verdict; an expected one is silent and
@@ -337,7 +389,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
         // toolchain is resolved from the inferred backend requirement
         // against the environment's capabilities; an unsatisfiable
         // requirement comes back as Error "Skipped: <reason>".
-        let compileResult = compileForBackend caps backendReq srcFile outputDir
+        let compileResult = compileForBackendSource (Some generatedSrc) caps backendReq srcFile outputDir
 
         match compileResult with
         | Error e ->
@@ -975,7 +1027,7 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                     failed <- failed + 1
                     failedNames <- failedNames @ [testName]
                 elif gppAvailable then
-                    match compileForBackend capabilities.Value backendReq cppFile outputDir with
+                    match compileForBackendSource (Some cppCode) capabilities.Value backendReq cppFile outputDir with
                     | Error e when isSkipError e ->
                         Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Skip testName e
                         skipped <- skipped + 1

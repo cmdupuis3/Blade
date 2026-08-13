@@ -1,0 +1,39 @@
+// TEST: object_for with a row-returning comm kernel over the SAME array (SymIdx)
+// ============================================================================
+// docs/quickstart-1.md section 9's covariance kernel, applied the way that
+// section applies it. Two independent bugs had to be fixed for this to run, and
+// this test pins the second one specifically:
+//
+//  1. TYPE side (loops/167): an abstract `T^1` return deduced no T-dimensions,
+//     so the output was one rank short with scalar cells.
+//  2. CODEGEN side, and it only shows up HERE: with (1) fixed, the deduced
+//     output is `SymIdx<2, Idx<3>> x Idx<3>` -- TWO index entries for THREE
+//     flat dims, because a comm-licensed application over one identity group
+//     gives the output a COMPOUND leading index. The stage-S3 block that
+//     appends the kernel's trailing T-dim extents to the extents table counted
+//     entries, not rank (`List.length at.IndexTypes = outputRank`, then
+//     `List.skip outerCount`), so on a compact output the guard was false, the
+//     trailing extent was dropped, the inner extent read as 0, and this printed
+//     `cv = []` with no diagnostic on any channel -- the same silent-wrong-
+//     answer class loops/121's header describes, surviving on the symmetric
+//     path after being fixed on the dense one.
+//
+// STORAGE IS THE POINT. Three rows with `comm` give SIX canonical pairs
+// (i <= j), not nine: 6 x 3 = 18 values below. A dense output would be 27.
+//
+// x = [1,2,3] centers to [-1,0,1]; y = [2,4,6] to [-2,0,2]; z = [1,3,5] to
+// [-2,0,2]. Every centered middle element is EXACTLY zero (each row's mean is
+// its middle value), so no product can come out as negative zero and the pins
+// are exact.
+// ============================================================================
+from stats import mean
+
+function covariance(a: T^1, b: T^1) where comm(a, b) = { (a - mean(a)) * (b - mean(b)) }
+
+let B: Array<Float like Idx<3>, Idx<3>> = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 3.0, 5.0]]
+
+// Pairs in canonical order (0,0) (0,1) (0,2) (1,1) (1,2) (2,2):
+//   xx = [1,0,1]  xy = [2,0,2]  xz = [2,0,2]
+//   yy = [4,0,4]  yz = [4,0,4]  zz = [4,0,4]
+let cv = object_for(covariance) <@> (B, B) |> compute
+// EXPECT: cv = [1, 0, 1, 2, 0, 2, 2, 0, 2, 4, 0, 4, 4, 0, 4, 4, 0, 4]

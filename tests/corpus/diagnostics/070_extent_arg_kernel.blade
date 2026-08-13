@@ -1,0 +1,11 @@
+// TEST: Diag Extent Arg Kernel (diag)
+// KERNEL APPLICATION twin of 069. buildApplyInfo DOES unify each kernel param
+// against the iterated row type, but `unify`'s ArrayElem arm compares element
+// type, tag and symmetry and explicitly NOT extents -- so this seam was blind
+// to the same defect. M's rows are 3 wide; the kernel's Idx<5> annotation is
+// baked into the emitted subscripts, giving row[3]/row[4] past the row and,
+// on the last row, past the whole allocation. Observed before the fix as
+// silent wrong data (r = [15, 15]), not a reliable crash.
+// ERROR: BL3016
+let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let r = method_for(M) <@> lambda(row: Array<Float64 like Idx<5>>) -> row(0) + row(1) + row(2) + row(3) + row(4) |> compute

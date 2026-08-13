@@ -52,6 +52,10 @@ let printUsage () =
     printfn "  run <file.edgi>                   Compile and run a Blade program"
     printfn "  run <file.edgi> --mpi <N>         ... with `where mpi` kernels decomposed across"
     printfn "                                    N ranks (compiled -lmsmpi, run under mpiexec)"
+    printfn "  run <file.edgi> --memcheck        ... as a Debug+AddressSanitizer build that prints"
+    printfn "                                    a BLADE-MEMCHECK allocator-stats line on stderr"
+    printfn "                                    at exit (Windows: needs a vcvars64 environment;"
+    printfn "                                    equivalently set BLADE_MEMCHECK=1)"
     printfn "  check <file.edgi>                 Type-check only (no code generation)"
     printfn "  doctor [--json]                   Report native-toolchain health: g++/OpenMP core"
     printfn "                                    (real compile+run), BLAS/LAPACK tier, NetCDF, MPI,"
@@ -115,6 +119,9 @@ let printUsage () =
     printfn "  --strict-pins  Fail the build on unpinned confirm-and-pin deductions"
     printfn "                 (BL4010, normally warnings). For CI: forces the pin"
     printfn "                 decision into source. check / compile / emit / run."
+    printfn "  --no-cache     Always run g++, ignoring the content-addressed"
+    printfn "                 executable cache (%%LOCALAPPDATA%%\\Blade\\exe-cache;"
+    printfn "                 BLADE_EXE_CACHE=0 / a path override it). compile / run / test."
     printfn "  --help         Show this help"
     printfn ""
     printfn "Examples:"
@@ -149,19 +156,64 @@ let private strictPinFailure (strictPins: bool) (useColor: bool)
                         "--strict-pins: an unpinned deduction that would change storage fails the build. Add the pin shown above, or drop --strict-pins for the default dense-until-pinned behavior.")
             Some (Blade.Diagnostics.Render.renderAll useColor sm ds)
 
+/// EVERY non-zero exit must carry a diagnostic the user can act on: a compiler
+/// that refuses a program and says nothing is indistinguishable from a crashed
+/// one. The failure strings the compile driver hands back are
+/// `Render.renderAll` output, and `renderAll` of the EMPTY list is the EMPTY
+/// STRING -- a rendered diagnostic is never empty, since `render` always emits
+/// a severity header, so the empty string can only mean the list was empty.
+/// Printing that as-is exits 1 with a blank stderr and no .cpp, which is
+/// exactly the mute failure this guard exists to prevent.
+///
+/// A non-empty message is printed byte for byte, as before; only the
+/// nothing-to-say case changes, and it becomes a BL9001 internal error.
+let private reportFailure (message: string) : int =
+    if String.IsNullOrWhiteSpace message then
+        let useColor = not Console.IsErrorRedirected
+        let d =
+            Blade.Diagnostics.Codes.ice
+                "the compilation failed but recorded no diagnostic, so there is nothing to \
+                 report about your program. Re-run with --verbose and please report the input"
+        eprintfn "%s" (Blade.Diagnostics.Render.render useColor None d)
+    else
+        eprintfn "%s" message
+    1
+
+/// Argument-shape failure: the usage text goes to stdout as before, but the
+/// REASON goes to stderr, so a caller that only captures stderr (every sweep
+/// script) sees why the invocation was rejected instead of an empty exit 1.
+let private usageFailure (reason: string) : int =
+    eprintfn "error: %s" reason
+    printUsage ()
+    1
+
 /// Compile a .edgi file to C++ source string
 let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<string * string list, string> =
     if not (File.Exists filePath) then
         Error (sprintf "File not found: %s" filePath)
     else
+        // Env-gated compiler perf counters (BLADE_PERF_COUNTERS=1); refreshed
+        // here so the gate is live before the front end runs. See
+        // docs/plan-compile-speed.md Stage 5.
+        Blade.PerfCounters.refresh ()
         let source = File.ReadAllText(filePath)
         let testName = Path.GetFileNameWithoutExtension(filePath)
+        // Env-gated phase timing (BLADE_PHASE_TIMING=1); see docs/plan-compile-speed.md.
+        let timing = phaseTimingEnabled ()
+        let swAll = System.Diagnostics.Stopwatch.StartNew()
+        let sw = System.Diagnostics.Stopwatch.StartNew()
+        let mark name =
+            if timing then
+                eprintfn "[phase] %s: %d ms" name sw.ElapsedMilliseconds
+            sw.Restart()
         // Errors come back as coded, spanned Diagnostics, rendered rustc-style with source snippets.
         let useColor = not Console.IsErrorRedirected
         // `lowerFileDiag` resolves file-based imports (`import units.SI` ->
         // stdlib/units/SI.blade) first and lowers the whole set. With nothing
         // to resolve it IS `lowerDiag (Some filePath) source`.
-        match lowerFileDiag filePath source with
+        let lowered = lowerFileDiag filePath source
+        mark "frontend-total(lowerFileDiag)"
+        match lowered with
         | Error ds, sm ->
             // A file with a hard error has still EARNED every warning the checker produced before it failed.
             printTypeCheckWarnings useColor (Some sm) false
@@ -173,7 +225,9 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
             | Some rendered -> Error rendered
             | None ->
             printTypeCheckWarnings useColor (Some sm) false
-            match IR.validateIR ir with
+            let validated = IR.validateIR ir
+            mark "validateIR"
+            match validated with
             | Error errs ->
                 let ds =
                     errs |> List.map (fun s ->
@@ -181,9 +235,46 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
                 Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
             | Ok ir ->
                 let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                mark "codegen"
+                // A shape that reached codegen with no arm for it. Refuse HERE,
+                // as a coded Blade diagnostic spanned at the declaration --
+                // handing the emitted `BLADE_CODEGEN_ERROR_...` placeholder to
+                // g++ instead reports a Blade back-end gap as an undeclared
+                // C++ identifier. Deliberate codegen refusals are unaffected:
+                // they keep their `#error` guard and their own wording.
+                match CodeGen.takeUnhandledIRNodeDiagnostics () with
+                | (_ :: _) as ds ->
+                    Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+                | [] ->
+                // DELIBERATE refusals (BL7004): the same messages the emitted
+                // `#error` directives carry, reported as coded diagnostics
+                // before g++ ever runs. Gated on the generated source actually
+                // carrying a marker -- a rendered-then-discarded refusal
+                // records a message but splices nothing, and must not fail a
+                // program whose translation unit is clean.
+                match CodeGen.takeCodegenRefusalDiagnostics cppCode with
+                | (_ :: _) as ds ->
+                    Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+                | [] ->
+                mark "post-codegen-scans"
+                if timing then
+                    eprintfn "[phase] compileFile total: %d ms (cpp %d chars)" swAll.ElapsedMilliseconds cppCode.Length
+                if Blade.PerfCounters.enabled then
+                    // The IR walk is measurement-only, hence inside the gate.
+                    Blade.PerfCounters.noteIRNodes (IR.countProgramNodes ir)
+                    Blade.PerfCounters.report ()
                 if verbose then
                     for w in warnings do
                         eprintfn "[Warning] %s" w
+                else
+                    // A `where cuda` kernel that fell back to the host prints
+                    // WITHOUT --verbose: device emission is an explicit opt-in
+                    // (`--cuda` / the CUDA test phase), so "you asked and did not
+                    // get it" is the one codegen warning the user is entitled to
+                    // see unprompted. Every other warning keeps its --verbose gate,
+                    // and outside cuda emit mode this list is empty.
+                    for w in warnings do
+                        if w.StartsWith "[cuda] " then eprintfn "warning: %s" w
                 Ok (cppCode, warnings)
 
 /// Compile a .edgi file to an executable
@@ -199,6 +290,20 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         let ext = match backendReq with RequiresCuda -> ".cu" | RequiresMpi | CpuOnly -> ".cpp"
         let cppFile = Path.Combine(dir, baseName + ext)
         File.WriteAllText(cppFile, cppCode)
+        // `blade run --cuda`: `where cuda` device kernels are collected
+        // SEPARATELY from the host source (cudaKernelDefsCell), so
+        // inferBackendReq -- which greps the host half -- cannot see them.
+        // Write the .cu beside the host .cpp and split-compile (nvcc for the
+        // .cu, host compiler for the .cpp, then link), exactly as the CUDA
+        // test harness does. Without this, the host half's extern "C" launch
+        // declarations dangle and the link fails.
+        let cudaSplitFile =
+            match CodeGen.getCudaFileContent () with
+            | Some cu when ext = ".cpp" ->
+                let cuFile = Path.Combine(dir, baseName + "_kernels.cu")
+                File.WriteAllText(cuFile, cu)
+                Some cuFile
+            | _ -> None
         // Runtime headers are #include'd with plain quotes and no -I, so they
         // must sit next to the .cpp; record which ones we create so cleanup removes only our copies.
         let deployedHeaders =
@@ -208,7 +313,11 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         CodeGen.deployRuntimeHeaders dir
         if verbose then
             eprintfn "[Emit] %s" cppFile
-        match compileForBackend capabilities.Value backendReq cppFile dir with
+        match (match cudaSplitFile with
+               | Some cuFile -> compileCudaSplit cuFile cppFile dir
+               // cppCode is the exact text just written to cppFile; handing it
+               // over spares the backend sniffs a read-back of what we wrote.
+               | None -> compileForBackendSource (Some cppCode) capabilities.Value backendReq cppFile dir) with
         | Error e ->
             Error (sprintf "Compilation failed:\n%s" e)
         | Ok exePath ->
@@ -236,9 +345,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
     match mpiRanks with
     | None ->
         match compileToExe filePath None verbose strictPins with
-        | Error e ->
-            eprintfn "%s" e
-            1
+        | Error e -> reportFailure e
         | Ok exePath ->
             match runExecutable exePath with
             | Error e ->
@@ -251,9 +358,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
         CodeGen.setMpiEmitMode true
         try
             match compileToExe filePath None verbose strictPins with
-            | Error e ->
-                eprintfn "%s" e
-                1
+            | Error e -> reportFailure e
             | Ok exePath ->
                 match runExecutableMpi ranks exePath with
                 | Error e ->
@@ -426,8 +531,8 @@ let replLoop () : int =
             // Reassignment (`b = b + 1`, `b += 1`, etc.): the engine wraps it
             // in a hidden binding whose value IS the ExprAssign, and KEEPS the
             // wrapper so the mutation persists.
-            let (candidate, _, _) = engine.AssignmentCandidate trimmed
-            let root = (RS.assignRe.Match trimmed).Groups.[1].Value
+            let (candidate, _, _, _) = engine.AssignmentCandidate trimmed
+            let root = (RS.assignRe.Match (RS.classifyTarget trimmed)).Groups.[1].Value
             match compileRunEcho candidate (Some root) None with
             | None -> ()                                    // static/unknown/etc -> not kept
             | Some (lines, printed, _) ->
@@ -441,18 +546,18 @@ let replLoop () : int =
             // expression echoes again rather than diffing to silence.
             let curInfo = lazy (ReplTypes.sessionInfo (String.concat "\n\n" session + "\n"))
             let asFuncName =
-                if RS.identRe.IsMatch trimmed then
-                    match Map.tryFind trimmed curInfo.Value with
-                    | Some (ReplTypes.RFunc s) -> Some s
-                    | _ -> None
-                else None
+                RS.bareIdentifier trimmed
+                |> Option.bind (fun n ->
+                    match Map.tryFind n curInfo.Value with
+                    | Some (ReplTypes.RFunc s) -> Some (n, s)
+                    | _ -> None)
             match asFuncName with
-            | Some s ->
+            | Some (n, s) ->
                 // A function can't be let-bound just to echo it; print its
                 // signature straight from the typechecker.
-                printfn "%s\n\t%s" trimmed s
+                printfn "%s\n\t%s" n s
             | None ->
-                let (candidate, _, transient) = engine.ExpressionCandidate trimmed
+                let (candidate, _, transient, _) = engine.ExpressionCandidate trimmed
                 match compileRunEcho candidate (Some transient) (Some transient) with
                 | None -> ()
                 | Some (_, printed, info) ->
@@ -571,38 +676,45 @@ let runCliSmokeTests () : TH.BlockResult =
 /// Type-check a file without generating code
 let checkFile (filePath: string) (strictPins: bool) : int =
     if not (File.Exists filePath) then
-        eprintfn "File not found: %s" filePath
-        1
+        reportFailure (sprintf "File not found: %s" filePath)
     else
         let source = File.ReadAllText(filePath)
         let useColor = not Console.IsErrorRedirected
-        // Same two-step as compileFile's `lowerFileDiag`: resolve file-based
-        // imports, then check the whole set as ONE program. With nothing to
-        // resolve, `sources` is [(filePath, source)] and `parseResolved` is
-        // `parseProgramWithFile (Some filePath) source` -- byte for byte the
+        // Same shape as compileFile's `lowerFileDiag`: parse the entry ONCE,
+        // resolve file-based imports from that AST, then check the whole set as
+        // ONE program. With nothing to resolve, the entry parse is the only
+        // parse and `sources` is [(filePath, source)] -- byte for byte the
         // pre-module behavior, including the SourceMap key.
-        let resolution = Blade.ModuleResolve.resolveEntry filePath source
+        match Blade.Parser.parseProgramWithFile (Some filePath) source with
+        | Error e ->
+            let sm = Blade.Diagnostics.SourceMap.ofSources [ filePath, source ]
+            let d = Blade.Parser.diagnosticOfParseError (Some filePath) e
+            reportFailure (Blade.Diagnostics.Render.render useColor (Some sm) d)
+        | Ok entryProgram ->
+        let resolution =
+            match entryProgram.Modules with
+            | [ m ] -> Blade.ModuleResolve.resolveParsedEntry filePath source m
+            | _ -> Blade.ModuleResolve.resolveEntry filePath source
         let sources =
             match resolution.Errors, resolution.Files with
             | [], [ _single ] -> [ filePath, source ]
             | _, files -> Blade.ModuleResolve.sourcesOf files
         let sm = Blade.Diagnostics.SourceMap.ofSources sources
         if not (List.isEmpty resolution.Errors) then
-            eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) resolution.Errors)
-            1
+            reportFailure (Blade.Diagnostics.Render.renderAll useColor (Some sm) resolution.Errors)
         else
-        match Blade.ModuleResolve.parseResolved sources with
+        match (match resolution.Files with
+               | [ _single ] -> Ok entryProgram
+               | files -> Blade.ModuleResolve.parseResolvedFiles files) with
         | Error d ->
-            eprintfn "%s" (Blade.Diagnostics.Render.render useColor (Some sm) d)
-            1
+            reportFailure (Blade.Diagnostics.Render.render useColor (Some sm) d)
         | Ok program ->
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
                 // S1: warnings earned before the error are printed, not dropped.
                 printTypeCheckWarnings useColor (Some sm) false
                 let ds = errors |> List.map Blade.TypeEnv.diagnosticOfCompileError
-                eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-                1
+                reportFailure (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
             | Ok _ ->
                 match strictPinFailure strictPins useColor (Some sm) with
                 | Some rendered ->
@@ -611,8 +723,7 @@ let checkFile (filePath: string) (strictPins: bool) : int =
                     // check`) so each is reported exactly once, as an error;
                     // the twins are BL4010 by construction so filtering on the code is exact.
                     printTypeCheckWarnings useColor (Some sm) true
-                    eprintfn "%s" rendered
-                    1
+                    reportFailure rendered
                 | None ->
                     printTypeCheckWarnings useColor (Some sm) false
                     printfn "OK"
@@ -621,19 +732,25 @@ let checkFile (filePath: string) (strictPins: bool) : int =
 /// Emit C++ source to file or stdout
 let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : int =
     match compileFile filePath verbose strictPins with
-    | Error e ->
-        eprintfn "%s" e
-        1
+    | Error e -> reportFailure e
     | Ok (cppCode, _) ->
         match outputPath with
         | Some outPath ->
-            File.WriteAllText(outPath, cppCode)
-            // Ship the runtime headers next to the emitted .cpp so `g++ file.cpp` compiles as-is (no -I flag needed).
-            let outDir = Path.GetDirectoryName(Path.GetFullPath(outPath))
-            CodeGen.deployRuntimeHeaders (if String.IsNullOrEmpty outDir then "." else outDir)
-            if verbose then
-                eprintfn "[Emit] %s" outPath
-            0
+            // The write and the header deploy are the two ways an emit can fail
+            // for a reason that is not about the program (read-only path, full
+            // disk, a concurrent writer holding the destination). Name the file
+            // rather than letting the top-level boundary report a bare .NET
+            // message with no path in it.
+            try
+                File.WriteAllText(outPath, cppCode)
+                // Ship the runtime headers next to the emitted .cpp so `g++ file.cpp` compiles as-is (no -I flag needed).
+                let outDir = Path.GetDirectoryName(Path.GetFullPath(outPath))
+                CodeGen.deployRuntimeHeaders (if String.IsNullOrEmpty outDir then "." else outDir)
+                if verbose then
+                    eprintfn "[Emit] %s" outPath
+                0
+            with ex ->
+                reportFailure (sprintf "Failed to write %s: %s" outPath ex.Message)
         | None ->
             printf "%s" cppCode
             0
@@ -1396,6 +1513,258 @@ let private runIdeEvalTests () : TH.BlockResult =
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
+        // 15. MIXED CELLS. A notebook cell is prose-driven and routinely ends a
+        // run of declarations with the expression that shows what they did.
+        // Classified as one declaration the cell passed through whole and the
+        // file grammar rejected its last line (BL1999 "Expected declaration");
+        // classified as one expression its FIRST line would have been the thing
+        // that failed. It is neither: it is three statements.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let t1 = 2\nlet t2 = 3\nt1 + t2"
+                    evalReq 2 "nb" "t2"; shutdownReq ]
+        let name = "a cell mixing declarations with a trailing expression runs whole"
+        match responses with
+        | [mixed; after] when code = 0
+                              && mixed.Contains "\"kept\":true" && mixed.Contains "\"diagnostics\":[]"
+                              && mixed.Contains "{\"name\":\"t1\",\"type\":\"Int64\",\"value\":\"2\"}"
+                              && mixed.Contains "{\"name\":\"t2\",\"type\":\"Int64\",\"value\":\"3\"}"
+                              && mixed.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"5\"}"
+                              // The declarations JOINED the session; only the
+                              // expression was transient.
+                              && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"3\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 16. Interleaving, and the ORDER contract: every statement runs where
+        // the user wrote it, and every expression's value comes back in that
+        // same order. A whole-array `bindings` equality rather than a set of
+        // `Contains`, because order is the property under test.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let p = 10\nlet q = p * 2\nq + 1\nlet r = q + p\nr * 2"
+                    shutdownReq ]
+        let name = "an interleaved decl/expr/decl/expr cell reports its values in order"
+        let expectedOrder =
+            "\"bindings\":[{\"name\":\"p\",\"type\":\"Int64\",\"value\":\"10\"},"
+            + "{\"name\":\"q\",\"type\":\"Int64\",\"value\":\"20\"},"
+            + "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"21\"},"
+            + "{\"name\":\"r\",\"type\":\"Int64\",\"value\":\"30\"},"
+            + "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"60\"}]"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"kept\":true" && r.Contains expectedOrder ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 17. The regression the split must not cause: an expression-only cell
+        // still evaluates against the session without joining it, whether it
+        // holds one expression or several.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let e1 = 4"; evalReq 2 "nb" "e1 + 1\ne1 * 2"
+                    evalReq 3 "nb" "e1 + 1\ne1 * 2"; shutdownReq ]
+        let name = "an expression-only cell echoes every value and joins nothing"
+        let twoValues =
+            "\"bindings\":[{\"name\":\"\",\"type\":\"Int64\",\"value\":\"5\"},"
+            + "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"8\"}]"
+        match responses with
+        | [_; first; again] when code = 0
+                                 && first.Contains "\"kept\":true" && first.Contains twoValues
+                                 // Re-running echoes again rather than diffing
+                                 // to silence -- nothing was kept to diff against.
+                                 && again.Contains twoValues ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 18. Re-running a mixed cell REPLACES its earlier contribution. Each
+        // declaration supersedes its own predecessor in place, so nothing is
+        // declared twice (which would not compile) and the expressions -- being
+        // transient -- leave no second copy behind either.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let m = 1\nlet n = m + 1\nn * 10"
+                    evalReq 2 "nb" "let m = 5\nlet n = m + 1\nn * 10"
+                    evalReq 3 "nb" "n"; shutdownReq ]
+        let name = "re-running a mixed cell replaces it instead of redeclaring it"
+        match responses with
+        | [first; again; after] when code = 0
+                                     && first.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"20\"}"
+                                     && again.Contains "\"kept\":true"
+                                     && again.Contains "\"diagnostics\":[]"
+                                     && again.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"60\"}"
+                                     && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"6\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 19. THE reason a mixed cell is split into statements rather than
+        // wrapped in place. `bindingName` reads a snippet's FIRST name, so a
+        // whole-cell snippet holding `g1` and `g2` answers to `g1` alone -- and
+        // a later cell rebinding `g1` would supersede the snippet entire,
+        // taking `g2` down with it and leaving every downstream cell unbound.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let g1 = 1\nlet g2 = 2\ng1 + g2"
+                    evalReq 2 "nb" "let mut g1 = 7"
+                    evalReq 3 "nb" "g1 + g2"; shutdownReq ]
+        let name = "rebinding one name of a mixed cell leaves its other names standing"
+        match responses with
+        | [_; rebind; after] when code = 0
+                                  && rebind.Contains "\"kept\":true"
+                                  && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"9\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 20. A call for EFFECT is a statement too. Its hidden wrapper is a
+        // binding whose value is the call, so the call runs where it was
+        // written and its `mut` write lands in the caller's buffer -- which the
+        // read on the next line of the SAME cell has to see.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb"
+                        ("let mut buf = [0.0, 0.0, 0.0]\n"
+                         + "function fill(out: mut Array<Float like Idx<3>>) = {\n"
+                         + "    out(0) += 1.5\n}\nfill(buf)\nbuf")
+                    shutdownReq ]
+        let name = "a call-for-effect statement mutates what the next statement reads"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"kept\":true"
+                   && r.Contains "{\"name\":\"\",\"type\":\"Array<Float64 like Idx<3>>\",\"value\":\"[1.5, 0.0, 0.0]\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 21. The split's other half: a newline the PARSER goes on to skip is
+        // not a statement boundary. A `where` clause on its own line is the
+        // shape that proves it -- split there and both halves are nonsense.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb"
+                        ("function csum(a: T^1, b: T^1)\nwhere comm(a, b) = {\n    a + b\n}\n"
+                         + "csum([1.0, 2.0], [3.0, 4.0])")
+                    shutdownReq ]
+        let name = "a where clause on its own line does not start a new statement"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"kept\":true"
+                   && r.Contains "\"value\":\"[4.0, 6.0]\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 22. Same rule over a recursive array, whose `match`/`|` arms all sit
+        // at depth 0 -- plus the name it binds. `let rec` is a `let` with a
+        // modifier, and while `bindingNameRe` did not spell `rec` the notebook
+        // echoed a binding literally called `rec`, with no type and no value.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb"
+                        ("let rec seq: Array<Float like Idx<4>> =\n    match seq with\n"
+                         + "    | zero -> zero\n    | zero :: s -> zero :: 1.0\n"
+                         + "    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0\n"
+                         + "reduce(seq, (+))")
+                    shutdownReq ]
+        let name = "a let rec statement stays whole and binds its own name"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"kept\":true"
+                   && r.Contains "{\"name\":\"seq\",\"type\":\"Array<Float64 like Idx<4>>\""
+                   && not (r.Contains "\"name\":\"rec\"")
+                   && r.Contains "{\"name\":\"\",\"type\":\"Float64\",\"value\":\"6.125\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 23. `()` subscripts an array in Blade (`[]` is tuple access), so an
+        // element write is `arr(0) = ...`. Missing from the reassignment
+        // pattern it read as a bare expression, was wrapped in a TRANSIENT
+        // binding, and its write left the session with the wrapper.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let arr = [1.0, 2.0, 3.0]\narr(0) = 9.0"
+                    evalReq 2 "nb" "arr"; shutdownReq ]
+        let name = "an element write is a reassignment and persists in the session"
+        match responses with
+        | [write; after] when code = 0
+                              && write.Contains "\"kept\":true"
+                              && write.Contains "{\"name\":\"arr\",\"type\":\"Array<Float64 like Idx<3>>\",\"value\":\"[9.0, 2.0, 3.0]\"}"
+                              && after.Contains "\"value\":\"[9.0, 2.0, 3.0]\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 24. A mixed cell that FAILS is still a rejection like any other: no
+        // bindings claimed, the session untouched, and the diagnostic in the
+        // CELL's coordinates -- which is what the per-statement placements are
+        // for, since each statement is now its own snippet in the session file.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let keepme = 1"
+                    evalReq 2 "nb" "let bad1 = 1\nlet bad2 = undefined_name_xyz + 1\nbad1"
+                    evalReq 3 "nb" "keepme"; shutdownReq ]
+        let name = "a failing mixed cell reports cell-local spans and keeps nothing"
+        match responses with
+        | [_; bad; after] when code = 0
+                               && bad.Contains "\"kept\":false" && bad.Contains "\"bindings\":[]"
+                               && bad.Contains "\"severity\":\"error\",\"line\":2,\"col\":12"
+                               && not (bad.Contains "elsewhere in session")
+                               && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"1\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 25. A cell containing only the NAME of a generic kernel. The cell
+        // lowers to a function-VALUE binding, which was a reachability root for
+        // dead-polymorph elimination -- so it kept the generic and everything
+        // its body calls alive with no call site to pin the type vars, and the
+        // cell came back with a spray of BL6001 "unresolved type variable"
+        // errors naming `mean` and two lifted lambdas. A cell that echoes a
+        // function must not be able to fail IR validation.
+        //
+        // What is pinned is the CONTRACT, not the spelling of the rendered
+        // type: the cell succeeds and carries NO diagnostics. The declaration
+        // cell before it pins the type echo the checker produces, which is what
+        // a client actually displays.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "from stats import mean"
+                    evalReq 2 "nb" "function covariance(a: T^1, b: T^1) where comm(a, b) = { (a - mean(a)) * (b - mean(b)) }"
+                    evalReq 3 "nb" "covariance"
+                    evalReq 4 "nb" "let after = 6"
+                    shutdownReq ]
+        let name = "a bare reference to an unapplied generic echoes without diagnostics"
+        match responses with
+        | [_; decl; bare; after] when code = 0
+                                      && decl.Contains "\"diagnostics\":[]"
+                                      && decl.Contains "{\"name\":\"covariance\",\"type\":\"(T^1, T^1) -> T^1\",\"value\":\"\"}"
+                                      && bare.Contains "\"exitCode\":0"
+                                      && bare.Contains "\"diagnostics\":[]"
+                                      && not (bare.Contains "BL6001")
+                                      // The session survives it: a later cell
+                                      // still evaluates against the same state.
+                                      && after.Contains "{\"name\":\"after\",\"type\":\"Int64\",\"value\":\"6\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 26. ...and it PRESENTS like the declaration it echoes. A bare
+        // function reference is answered from the declaration's own binding --
+        // its name, and the checker's rendering of the signature -- because
+        // there is nothing else worth showing: the value has no printable form
+        // and the transient wrapper's own IR type (`Arrow<T, T -> T>`) is the
+        // engine's bookkeeping, not an answer to the question asked.
+        //
+        // Three spellings of the same request had three different answers.
+        // `covariance` took the declaration path; `covariance // note` -- which
+        // is how quickstart-1 section 10 writes it -- failed `identRe` against
+        // the RAW text and fell through to the wrapper, reporting anonymously
+        // and in raw IR; and `// note` ABOVE the name put the hidden `let it =`
+        // on the comment line, where it swallowed the expression below and the
+        // cell died with BL1999. All three now read as the declaration.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "function poly(a: T^1, b: T^1) where comm(a, b) = a + b"
+                    evalReq 2 "nb" "poly"
+                    evalReq 3 "nb" "poly   // : the commented spelling"
+                    evalReq 4 "nb" "// a note above it\npoly"
+                    evalReq 5 "nb" "function conc(x: Float64) -> Float64 = x + 1.0\nconc"
+                    evalReq 6 "nb" "let plainval = 6\nplainval"
+                    shutdownReq ]
+        let name = "a bare function reference echoes the declaration, comments and all"
+        let pretty = "{\"name\":\"poly\",\"type\":\"(T^1, T^1) -> T^1\",\"value\":\"\"}"
+        match responses with
+        | [_; bare; commented; noted; mixed; valueCell] when code = 0
+                    && bare.Contains pretty && commented.Contains pretty
+                    && noted.Contains pretty && noted.Contains "\"diagnostics\":[]"
+                    // The same rule inside a MIXED cell, where the echo is one
+                    // statement among several -- and reported ONCE, not twice,
+                    // though two statements name it.
+                    && mixed.Contains "\"bindings\":[{\"name\":\"conc\",\"type\":\"(Float64) -> Float64\",\"value\":\"\"}]"
+                    // A bare identifier naming a VALUE keeps the anonymous
+                    // echo: it has a printed value, which is the thing asked for.
+                    && valueCell.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"6\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
         try Directory.Delete(tmpDir, true) with _ -> ()
     finally
         Directory.SetCurrentDirectory entryDir
@@ -1624,6 +1993,48 @@ let private runIdeCellsTests () : TH.BlockResult =
         if code = 0 && diagCount rebindBody = 0 then record name TH.Pass ""
         else record name TH.Fail (sprintf "exit %d, %d diagnostics: %s"
                                           code (diagCount rebindBody) rebindBody)
+
+        // 10b. A cell that MIXES declarations with bare expressions. The eval
+        // lane splits such a cell into statements; the check lane keeps it in
+        // one contiguous window (the wire carries one window per cell) and
+        // wraps each bare expression where it stands. Unwrapped, the assembled
+        // source does not parse -- and one parse error is the answer for the
+        // WHOLE notebook, so a single mixed cell used to blank every other
+        // cell's hovers and squiggles.
+        let mixedCells =
+            [ "let mx = 2\nlet my = 3\nmx + my"
+              "let mz = mx * my" ]
+        let (code, responses, _) = drive [ cellsReq 71 "fast" nbPath mixedCells; shutdownReq ]
+        let mixedBody = match responses with [r] -> r | _ -> ""
+        let name = "a mixed declaration/expression cell parses and typechecks"
+        match windowsOf mixedBody with
+        | [ (s0, e0, Some wl, Some wc); _ ] when code = 0 && diagCount mixedBody = 0
+                                                 // The wrapper sits on the
+                                                 // cell's THIRD line, not its first.
+                                                 && wl = s0 + 2 && wl <= e0 && wc > 0
+                                                 && (bindingOf mixedBody "mz").IsSome
+                                                 && (bindingOf mixedBody "__cell0").IsSome ->
+            record name TH.Pass ""
+        | ws -> record name TH.Fail (sprintf "exit %d, %d diagnostics, windows %A: %s"
+                                             code (diagCount mixedBody) ws mixedBody)
+
+        // ...and a cell with SEVERAL bare expressions takes one wrapper each,
+        // numbered so they cannot collide. The window still reports only the
+        // first (there is one wrap pair on the wire); what matters here is that
+        // all of them parsed.
+        let (code, responses, _) =
+            drive [ cellsReq 72 "fast" nbPath [ "let ma = 1\nma + 1\nlet mb = 2\nmb + 1" ]
+                    shutdownReq ]
+        let multiBody = match responses with [r] -> r | _ -> ""
+        let name = "several bare expressions in one cell each take their own wrapper"
+        match windowsOf multiBody with
+        | [ (s0, _, Some wl, Some _) ] when code = 0 && diagCount multiBody = 0
+                                            && wl = s0 + 1
+                                            && (bindingOf multiBody "__cell0_0").IsSome
+                                            && (bindingOf multiBody "__cell0_1").IsSome ->
+            record name TH.Pass ""
+        | ws -> record name TH.Fail (sprintf "exit %d, %d diagnostics, windows %A: %s"
+                                             code (diagCount multiBody) ws multiBody)
 
         // 11. An empty notebook is a real state (a fresh .bladenb) and must
         // answer like any other, not fault.
@@ -2221,7 +2632,7 @@ let private dispatchTest (rest: string list) : int =
             let r = runTestCategoryFull name tests "./generated_cpp_tests"
             if r.Failed = 0 then 0 else 1
         | None -> eprintfn "Unknown test category: %s" cat; 1
-    | _ -> printUsage (); 1
+    | _ -> usageFailure (sprintf "unrecognized test invocation: test %s" (String.concat " " rest))
 
 /// Top-level command dispatch.
 let private dispatchInner (args: string[]) : int =
@@ -2243,9 +2654,25 @@ let private dispatchInner (args: string[]) : int =
          | _ -> false)
     let strictPins = strictPinVerb && Array.contains "--strict-pins" args
     let args = if strictPins then args |> Array.filter (fun a -> a <> "--strict-pins") else args
+    // `--no-cache` is likewise a MODE, not a positional argument: it disables
+    // the content-addressed executable cache for the verbs that own a g++
+    // invocation. Like `--memcheck`, it travels as a process-level env pin
+    // rather than a parameter, because the gate is read in Build.fs -- five
+    // test blocks and the REPL reach that compile without passing through any
+    // CLI-shaped option record. Stripped from argv so every verb pattern
+    // accepts it in any position.
+    let noCacheVerb =
+        args.Length >= 1 &&
+        (match args.[0] with
+         | "compile" | "run" | "test" -> true
+         | _ -> false)
+    if noCacheVerb && Array.contains "--no-cache" args then
+        System.Environment.SetEnvironmentVariable("BLADE_EXE_CACHE", "0")
+    let args = if noCacheVerb then args |> Array.filter (fun a -> a <> "--no-cache") else args
     match args with
     // User-facing commands.
-    // `run <file> [--verbose] [--mpi N]` -- flags in any order after the file.
+    // `run <file> [--verbose] [--mpi N] [--memcheck]` -- flags in any order
+    // after the file.
     | _ when args.Length >= 2 && args.[0] = "run" ->
         let rest = args.[1..] |> Array.toList
         let mutable verbose = false
@@ -2255,7 +2682,30 @@ let private dispatchInner (args: string[]) : int =
         let rec parse toks =
             match toks with
             | [] -> ()
-            | "--verbose" :: tl -> verbose <- true; parse tl
+            | "--verbose" :: tl ->
+                verbose <- true
+                // Build.fs's executable cache reports `[cache] hit/store
+                // <hash8>` on stderr under this pin (it has no verbose
+                // parameter of its own; see exeCacheVerbose).
+                System.Environment.SetEnvironmentVariable("BLADE_EXE_CACHE_VERBOSE", "1")
+                parse tl
+            | "--cuda" :: tl ->
+                // Flip device-kernel emission for `where cuda` licences --
+                // the same gate the CUDA test harness sets (setCudaEmitMode).
+                // Downstream is untouched: emitted __global__ kernels make the
+                // backend inference pick .cu + the nvcc split-compile path.
+                // Off by default so a licence alone never changes the compile
+                // toolchain out from under a plain `blade run`.
+                CodeGen.setCudaEmitMode true
+                parse tl
+            | "--memcheck" :: tl ->
+                // A process-level pin rather than a parameter: CodeGen (the
+                // blade_memcheck.hpp include), Build (the Debug+ASan compile
+                // profile and the longer run timeout) all read BLADE_MEMCHECK
+                // at their own sites, and exporting the variable directly is
+                // the equivalent harness spelling.
+                System.Environment.SetEnvironmentVariable("BLADE_MEMCHECK", "1")
+                parse tl
             | "--mpi" :: n :: tl ->
                 (match System.Int32.TryParse n with
                  | true, v when v > 0 -> mpiRanks <- Some v; parse tl
@@ -2266,17 +2716,17 @@ let private dispatchInner (args: string[]) : int =
         parse rest
         match bad, file with
         | Some msg, _ -> eprintfn "Error: %s" msg; 1
-        | None, None -> printUsage (); 1
+        | None, None -> usageFailure "run needs a source file (e.g. run prog.blade)"
         | None, Some f -> runFile f verbose mpiRanks strictPins
 
     | [| "compile"; file |] ->
         match compileToExe file None false strictPins with
         | Ok path -> printfn "%s" path; 0
-        | Error e -> eprintfn "%s" e; 1
+        | Error e -> reportFailure e
     | [| "compile"; file; "-o"; output |] ->
         match compileToExe file (Some output) false strictPins with
         | Ok path -> printfn "%s" path; 0
-        | Error e -> eprintfn "%s" e; 1
+        | Error e -> reportFailure e
 
     | [| "emit"; file |] -> emitFile file None false strictPins
     | [| "emit"; file; "-o"; output |] -> emitFile file (Some output) false strictPins
@@ -2310,7 +2760,7 @@ let private dispatchInner (args: string[]) : int =
     | [||] -> runFullSuite defaultFullSuiteOptions
     | [| "--full" |] -> runFullSuite defaultFullSuiteOptions
     | [| "--help" |] -> printUsage (); 0
-    | _ -> printUsage (); 1
+    | _ -> usageFailure (sprintf "unrecognized command: %s" (String.Join(" ", args)))
 
 /// Top-level error boundary: turns any escaping exception into a rendered
 /// diagnostic on stderr (exit 1) instead of a raw .NET stack trace. A typed
@@ -2327,7 +2777,14 @@ let dispatch (args: string[]) : int =
         eprintfn "%s" (Blade.Diagnostics.Render.render useColor None d)
         1
     | ex ->
-        let d = Blade.Diagnostics.Codes.ice ex.Message
+        // An exception is allowed to carry an empty Message (a bare `raise
+        // (Exception())`, some interop failures); falling back to the type name
+        // keeps the ICE from reading as "internal compiler error: " with
+        // nothing after the colon.
+        let detail =
+            if System.String.IsNullOrWhiteSpace ex.Message then ex.GetType().FullName
+            else ex.Message
+        let d = Blade.Diagnostics.Codes.ice detail
         let useColor = not System.Console.IsErrorRedirected
         eprintfn "%s" (Blade.Diagnostics.Render.render useColor None d)
         if verbose then eprintfn "%s" (ex.ToString())

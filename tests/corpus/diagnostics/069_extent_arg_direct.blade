@@ -1,0 +1,12 @@
+// TEST: Diag Extent Arg Direct (diag)
+// DIRECT APPLICATION: a named array whose DECLARED extent is shorter than the
+// parameter's annotated extent. Not a typing quibble -- codegen bakes a
+// LITERAL parameter extent into the emitted subscripts, so the body reads
+// w[2], w[3] over a 2-element heap block. Direct application does not unify
+// args against params, so this needs its own carve-out at
+// dispatchAppOrIndex's FuncElem arm (`extentClash`). The twin at the kernel
+// seam is 070.
+// ERROR: BL3016
+function f(w: Array<Float64 like Idx<4>>) -> Float64 = w(0) + w(1) + w(2) + w(3)
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let r = f(a)

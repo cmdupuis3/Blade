@@ -1,0 +1,31 @@
+// TEST: Ragged Map Row Structure Survives
+// ============================================================================
+// 021 pins the elementwise ragged map's VALUES, but its EXPECT is the flat
+// sequence -- and a flat sequence is exactly what a mapped result with the
+// wrong row boundaries still prints correctly. This pins the STRUCTURE: the
+// mapped output is read back per row (`d(row, k)` with a different k per row,
+// only in range if that row kept its own length) and then row-peeled again by
+// a consuming map, which reads its bounds from the result's own lens.
+//
+// Written for the interpreter's row-peel arm, which builds the mapped output
+// as its own CSR store rather than sharing the input's metadata the way the
+// emitted C++ does -- two different implementations of "same shape", so the
+// differential gate needs a probe that can tell them apart.
+//
+// Rows of 3, 2, 4 doubled: sums 12, 18, 60.
+// ============================================================================
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let d = method_for(r) <@> lambda(e) -> e * 2.0 |> compute
+// EXPECT: d = [2, 4, 6, 8, 10, 12, 14, 16, 18]
+
+// Last element of each row: in range only if the row kept its own length.
+let row0 = d(0, 2)
+// EXPECT: row0 = 6
+let row1 = d(1, 1)
+// EXPECT: row1 = 10
+let row2 = d(2, 3)
+// EXPECT: row2 = 18
+
+// Peel the mapped result: per-row bounds come from ITS lens, not the input's.
+let sums = method_for(d) <@> lambda(g: T^1) -> reduce(g, (+)) |> compute
+// EXPECT: sums = [12, 18, 60]

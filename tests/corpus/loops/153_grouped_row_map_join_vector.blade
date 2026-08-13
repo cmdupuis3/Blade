@@ -1,0 +1,71 @@
+// TEST: Grouped Row Map Returning A Join Result Vector
+// ============================================================================
+// RANK-RAISING MAP, part 3, and the shape the other two exist to serve: a
+// GROUPED co-iteration whose kernel runs a multi-accumulator reduction join
+// over its rows and hands back the join's k scalars as a fixed-width vector.
+//
+// The join already produces k scalars in ONE traversal; before this there was
+// no way to get them out of a row map (a kernel can return one scalar, or an
+// array built by an inner `<@>`, but not the join's results). Packing them
+// into a literal is the natural spelling, and it is what lets a per-cell
+// statistics pass -- compute the shared quantities once per cell, then
+// combine adjacent cells with a halo -- replace a family of overlapping
+// passes that recompute the same values.
+//
+// This file died at BL6001 exactly like 152: the literal's elements are the
+// join's still-open result vars.
+//
+// Values: keys floor(t/4) split t = 0..7 into two cells of four; vals are
+// t + 1. Per cell the three accumulators are sum(t), sum(v), sum(t*v):
+//   cell 0: t = 0,1,2,3  v = 1,2,3,4  ->  6, 10, 0+2+6+12    = 20
+//   cell 1: t = 4,5,6,7  v = 5,6,7,8  -> 22, 26, 20+30+42+56 = 148
+// The grouping lives inside a function so no grouped array is printed at top
+// level (see 150).
+//
+// The parameters are ABSTRACT (`T^1` / `U^1`), which is how this would
+// actually be written. That spelling used to fail at the CALLER -- folding
+// the returned grid died with a dangling-VarId BL6001 -- for reasons entirely
+// upstream of this shape; 155 and 156 own that pair of defects and their pins.
+// ============================================================================
+type Sample = Idx<8>
+
+function cell_stats(ts: T^1, vals: U^1) = {
+    let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
+    let gk = group_keys(keys)
+    let gt = group_by(ts, gk)
+    let gv = group_by(vals, gk)
+    method_for(zip(gt, gv)) <@> lambda(trow: T^1, vrow: U^1) -> {
+        let a, b, c = object_for(<&!>) <@> (reduce(trow, (+)), reduce(vrow, (+)), prodsum(trow, vrow))
+        [a, b, c]
+    }
+}
+
+let tim = (method_for(range<Sample>) <@> lambda(i) -> 1.0 * i) |> compute
+let vv = (method_for(range<Sample>) <@> lambda(i) -> 1.0 * i + 1.0) |> compute
+
+let cells = cell_stats(tim, vv) |> compute
+// EXPECT: cells = [[6, 10, 20], [22, 26, 148]]
+
+// The result is an ordinary rank-2, so it feeds the ordinary consumers --
+// which is what proves the row literal landed in the storage its type
+// describes rather than merely printing plausibly.
+let rows = reduce(cells, (+))
+// EXPECT: rows = [36, 196]
+// Leading-axis fold: the accumulator totals, which must equal the eager
+// whole-range statistics pinned below.
+let totals = reduce(cells, lambda(a: T^1, b: T^1) -> a + b)
+// EXPECT: totals = [28, 36, 168]
+let c0 = cells(0)
+// EXPECT: c0 = [6, 10, 20]
+let c02 = cells(0, 2)
+// EXPECT: c02 = 20
+let c12 = cells(1, 2)
+// EXPECT: c12 = 148
+
+// Independent check of the same three statistics over the whole range.
+let ta = reduce(tim, (+))
+// EXPECT: ta = 28
+let tb = reduce(vv, (+))
+// EXPECT: tb = 36
+let tc = prodsum(tim, vv)
+// EXPECT: tc = 168

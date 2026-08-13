@@ -1206,20 +1206,16 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                       (match NetcdfProvider.readVarData "tests/fixtures/sample.nc" "A" with
                        | Ok { Payload = NetcdfProvider.NcFloats truth } ->
                            let expected = truth |> Array.map (fun x -> x + x)  // kernel is x + x
-                           let outLine =
-                               runOut.Split('\n')
-                               |> Array.tryPick (fun l ->
-                                   let l = l.Trim()
-                                   if l.StartsWith "out = [" && l.EndsWith "]" then Some l else None)
-                           (match outLine with
+                           // Shape-tolerant flatten (TestHarness). `out` is
+                           // rank 3 and prints FLAT today, so this is a no-op
+                           // flatten -- used anyway so a printer-shape change
+                           // (rank-2 nesting took six zarr tests down) cannot
+                           // rot this site.
+                           (match tryParsePrintedFloats "out" runOut with
                             | None ->
                                 check "dense read e2e: out values match libnetcdf ground truth (2*A)" false
-                                    "no 'out = [...]' line in program output"
-                            | Some line ->
-                                let inner = line.Substring("out = [".Length, line.Length - "out = [".Length - 1)
-                                let parsed =
-                                    inner.Split(',')
-                                    |> Array.map (fun s -> Double.Parse(s.Trim(), System.Globalization.CultureInfo.InvariantCulture))
+                                    "no parseable 'out = [...]' line in program output"
+                            | Some parsed ->
                                 if parsed.Length <> expected.Length then
                                     check "dense read e2e: out values match libnetcdf ground truth (2*A)" false
                                         (sprintf "expected %d values, got %d" expected.Length parsed.Length)

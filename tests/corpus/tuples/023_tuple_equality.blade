@@ -1,0 +1,91 @@
+// TEST: Tuple Equality
+// ============================================================================
+// Structural comparison of VALUE TUPLES: `==` / `!=` are the conjunction of
+// the component comparisons, and the ordered operators are LEXICOGRAPHIC --
+// `std::tuple`'s own semantics, which is exactly what codegen emits, so the
+// interpreter's tuple arm (Interp/Numerics.evalCompare) mirrors them rather
+// than inventing a second rule.
+//
+// It needed a pin because the two lanes DISAGREED. The compiled lane answered
+// correctly by accident of C++ (`std::tuple` carries the operators, and
+// codegen emits the operands straight through), while the interpreter -- the
+// lane the REPL and every notebook cell actually run on -- fell off the end of
+// its scalar dispatch and panicked at RUNTIME with BL8010 "unsupported operand
+// types for comparison". A differential twin that only one twin implements.
+//
+// Components unify the ordinary way (an Int64 slot against a Float64 slot
+// promotes), and nested tuples recurse. The three refusals are pinned
+// separately: width disagreement in `024` (BL3001), an array component in
+// `025` (BL3999), a component unit clash in `026` (BL3006).
+// ============================================================================
+
+// THE NOTEBOOK SHAPE (docs/quickstart-1.bladenb, section 3): construct, then
+// cons-destructure, then compare the tail against a literal pair -- written as
+// the bare top-level EXPRESSION the cell actually is.
+let a = 1
+let b = 2
+let c = 3
+let myTuple = a, b, c
+let head :: tail = myTuple
+tail == (b, c)
+// EXPECT: head = 1
+// EXPECT: __expr1 = true
+
+// Equal and unequal at the same width, both operators. `!=` is not merely
+// "not ==" by accident here: it is its own IR node reaching its own arm.
+let eqSame = (2, 3) == (2, 3)
+// EXPECT: eqSame = true
+let eqDiff = (2, 3) == (2, 4)
+// EXPECT: eqDiff = false
+let neDiff = (2, 3) != (2, 4)
+// EXPECT: neDiff = true
+let neSame = (2, 3) != (2, 3)
+// EXPECT: neSame = false
+
+// A tuple built by the bare comma compares equal to the parenthesized literal
+// it matches byte-for-byte from the checker down (formalism 2.8).
+let t = b, c
+let bareVsParen = t == (2, 3)
+// EXPECT: bareVsParen = true
+
+// Mixed but COMPATIBLE component types promote per the ordinary unification
+// rules: an Int64 slot against a Float64 slot is one comparison, not a refusal.
+let promoted = (2, 3) == (2.0, 3.0)
+// EXPECT: promoted = true
+let mixedElems = (2, 3.5) == (2, 3.5)
+// EXPECT: mixedElems = true
+
+// NESTED components recurse structurally, so a differing leaf inside a nested
+// node decides the whole comparison. `((1, 2), 3)` is TWO top-level slots
+// (formalism 2.8: nesting is preserved, never re-counted), and the comparison
+// reads it that way.
+let nestSame = ((1, 2), 3) == ((1, 2), 3)
+// EXPECT: nestSame = true
+let nestDiff = ((1, 2), 3) == ((1, 9), 3)
+// EXPECT: nestDiff = false
+
+// Ordered comparisons are lexicographic: the first differing component
+// decides, and "every component equal" is what `<=` / `>=` answer true to.
+let lt = (2, 3) < (2, 4)
+// EXPECT: lt = true
+let ltFalse = (2, 4) < (2, 3)
+// EXPECT: ltFalse = false
+let leEqual = (2, 3) <= (2, 3)
+// EXPECT: leEqual = true
+let gtFirst = (2, 3) > (1, 9)
+// EXPECT: gtFirst = true
+
+// UNIT-CARRYING components compare when their units AGREE. The check is
+// per-component on purpose: `IR.getUnits` reads the top of a type and a tuple
+// carries nothing there, so the whole-operand unit rule sees two unannotated
+// values and would wave any pair of components through (`026` is the clash).
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+let v1 = 4.0: Float<mps>
+let v2 = 4.0: Float<mps>
+let v3 = 5.0: Float<mps>
+let unitSame = (v1, 1) == (v2, 1)
+// EXPECT: unitSame = true
+let unitDiff = (v1, 1) == (v3, 1)
+// EXPECT: unitDiff = false

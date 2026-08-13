@@ -1809,7 +1809,7 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
             match resolution.Errors, resolution.Files with
             | [], (_ :: _ :: _ as files) ->
                 let deps = files |> List.take (files.Length - 1)
-                match Blade.ModuleResolve.parseResolved (Blade.ModuleResolve.sourcesOf deps) with
+                match Blade.ModuleResolve.parseResolvedFiles deps with
                 | Ok p -> p.Modules
                 | Error _ -> []          // reported by the member's own check
             | _ -> []

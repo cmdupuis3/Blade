@@ -733,7 +733,7 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     match trySparseRangeMap info0 with
     | Some (src, leadRank) -> materializeSparseRangeMap st env info0 wrappers src leadRank
     | None ->
-    if tryGroupedMap info0 then materializeGroupedMap st env info0 wrappers
+    if tryRowPeelMap info0 then materializeRowPeelMap st env info0 wrappers
     else
     match tryWreathApply info0 with
     | Some tie -> materializeWreathApply st env info0 wrappers tie
@@ -742,6 +742,54 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     let info = applyFunctorWrappers st info0 wrappers
     let arrayNames = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
     let cg = buildLoopNestCodeGen info arrayNames "out" st.Builder
+    // HALO-EXTENT RUNTIME GUARD (BL8009) -- the interpreter twin of
+    // genApplyCombinator's haloExtentGuards, checked ONCE before the nest.
+    // A dense halo slot's declared inner extent is a literal; any array read
+    // through the window (`IRBinOp(IRAdd, w, off)` with `w` typed by the
+    // "__halowin|d:" tag) must have exactly that extent on the indexed slot.
+    // Unresolvable targets are skipped (fail-open), matching the compiled
+    // side's not-in-VarNames rule.
+    (let haloDecl =
+        info.Arrays
+        |> List.collect (fun a -> match a with IRRange (ixs, _) -> ixs | _ -> [])
+        |> List.choose (fun ix ->
+            match ix.Tag with
+            | Some tag when tag.StartsWith (haloWinTagPrefix + "d:") ->
+                (match ix.Extent, haloShrinkOfTag tag with
+                 | IRLit (IRLitInt shrunk), Some shrink -> Some (tag, shrunk + shrink)
+                 | _ -> None)
+            | _ -> None)
+        // Same-tag ambiguity rule as the compiled guard: equal-offset anonymous
+        // halos with different extents collide on one tag -- drop it.
+        |> List.groupBy fst
+        |> List.choose (fun (tag, entries) ->
+            match entries |> List.map snd |> List.distinct with
+            | [ n ] -> Some (tag, n)
+            | _ -> None)
+        |> Map.ofList
+     if not (Map.isEmpty haloDecl) then
+        let haloTagOfIdx (e: IRExpr) =
+            match e with
+            | IRBinOp (_, IRAdd, IRVar (_, IRTIdxTagged (_, IRefNamed t)), _)
+            | IRBinOp (_, IRAdd, IRParam (_, _, IRTIdxTagged (_, IRefNamed t)), _)
+                when t.StartsWith (haloWinTagPrefix + "d:") -> Some t
+            | _ -> None
+        mapIRExpr (fun e ->
+            (match e with
+             | IRIndex (IRVar (tid, _), idxs, _) ->
+                 idxs |> List.iteri (fun d ix ->
+                     match haloTagOfIdx ix |> Option.bind (fun t -> Map.tryFind t haloDecl) with
+                     | Some declared ->
+                         (match envTryFind env tid with
+                          | Some cell ->
+                              (match force st env cell.V with
+                               | VArray a when d < a.Extents.Length && a.Extents.[d] <> declared ->
+                                   raise (InterpPanic ("BL8009", "halo extent mismatch", None, 0))
+                               | _ -> ())
+                          | None -> ())
+                     | None -> ())
+             | _ -> ())
+            e) cg.KernelExpr |> ignore)
     // Symmetric/antisymmetric/Hermitian output storage (compact) and Reynolds
     // kernels (permutation sum) are interpreted -- see the ArrayElem arm's
     // compact allocation and interpretNest's Reynolds path. Fused-joint output
@@ -784,13 +832,37 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
         // manifestation M-C), so the allocation needs those trailing extents too
         // -- the interpreter's version of the short extents table that made the
         // compiled lane print `[[], []]`.
+        // COUNTED BY RANK, NOT BY ENTRY -- the twin of the same correction in
+        // CodeGen's extents table. A comm-licensed application over one identity
+        // group gives the output a COMPOUND leading index (`SymIdx<2, I>` is ONE
+        // entry of Rank 2), so comparing `IndexTypes.Length` against the loop-
+        // level count made a rank-3 compact output look like it had no trailing
+        // T-dimension at all: the allocation came out one axis short and the row
+        // write ran off the end of the pool. Flat rank on both sides, and the
+        // trailing ENTRIES peeled off the end until their ranks account for the
+        // missing dims. Identical to the old `List.skip` on an all-rank-1
+        // output, so the dense path is untouched.
         let outerExtents = cg.Bindings |> List.map levelExtent
         let trailingExtents =
-            if arr.IndexTypes.Length > outerExtents.Length then
-                arr.IndexTypes
-                |> List.skip outerExtents.Length
-                |> List.map (fun ix -> toI64 (Core.evalExpr st env ix.Extent))
-            else []
+            let flatRank = arr.IndexTypes |> List.sumBy (fun ix -> ix.Rank)
+            let missing = flatRank - outerExtents.Length
+            if missing <= 0 then []
+            else
+                let rec peel (acc: IRIndexType list) (taken: int)
+                             (remaining: IRIndexType list) : IRIndexType list option =
+                    if taken = missing then Some acc
+                    elif taken > missing then None
+                    else
+                        match remaining with
+                        | [] -> None
+                        | ix :: rest -> peel (ix :: acc) (taken + ix.Rank) rest
+                match peel [] 0 (List.rev arr.IndexTypes) with
+                | Some tDimEntries ->
+                    tDimEntries |> List.map (fun (ix: IRIndexType) ->
+                        toI64 (Core.evalExpr st env ix.Extent))
+                // Boundary falls INSIDE a compound index: not a shape this
+                // describes, so leave the allocation as it was.
+                | None -> []
         let rowShaped = not (List.isEmpty trailingExtents)
         let extents = (outerExtents @ trailingExtents) |> Array.ofList
         st.Cells <- st.Cells + (extents |> Array.fold (*) 1L)
@@ -972,8 +1044,7 @@ and private materializeCompoundRangeMap
         | other -> raise (InterpUnsupported (sprintf "range<CompoundIdx> map output type %s" (nodeTypeName other)))
     // Kernel env: captures + reusable param cells (as interpretNest builds them).
     let kenv = envChild env
-    for c in cg.Captures do
-        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let paramCells = Dictionary<IRId, ValueRef>()
     for p in cg.KernelParams do
         let cell = { V = VUnit }
@@ -1055,8 +1126,7 @@ and private materializeSparseRangeMap
         | ArrayElem arr -> (arr.ElemType, arr.IndexTypes)
         | other -> raise (InterpUnsupported (sprintf "range<SparseIdx> map output type %s" (nodeTypeName other)))
     let kenv = envChild env
-    for c in cg.Captures do
-        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let paramCells = Dictionary<IRId, ValueRef>()
     for p in cg.KernelParams do
         let cell = { V = VUnit }
@@ -1137,8 +1207,7 @@ and private materializeCompoundHaloMap
         | [ p ] -> p
         | _ -> raise (InterpUnsupported "compound-halo map: kernel is not single-parameter")
     let kenv = envChild env
-    for c in cg.Captures do
-        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let cell = { V = VUnit }
     envBindRef kenv param.VarId cell
     st.Cells <- st.Cells + (if outLen > 0L then outLen else 0L)
@@ -1149,43 +1218,141 @@ and private materializeCompoundHaloMap
             force st kenv (Core.evalExpr st kenv cg.KernelExpr))
     VArray (A.mkDenseArray elemTy [] [| int64 n |] (A.storeOfValues elemTy results))
 
-/// Detect a `method_for(grouped) <@> lambda(g) -> ...` map: the sole input is a
-/// group_by result (its first index is IxKGroupOuter). CodeGen supports exactly
-/// the single-array, single-row-param form here (CodeGen.fs:5933-5936); the
-/// kernel receives each group's ragged ROW as `g`.
-and private tryGroupedMap (info: ApplyInfo) : bool =
+/// Detect a `method_for(x) <@> lambda(g) -> ...` ROW-PEEL map: the sole input
+/// is a group_by result (first index IxKGroupOuter) or a ragged/DepIdx array
+/// (some non-first index is ragged-family or IxKDepInner). Deliberately the
+/// SAME predicate CodeGen's `tryRaggedPeel` gates on, so the two lanes agree
+/// about which applies take the peel; the kernel receives each row as `g`.
+and private tryRowPeelMap (info: ApplyInfo) : bool =
     match info.ArrayTypes with
-    | [ at ] -> (match at.IndexTypes with h :: _ -> h.IxKind = IxKGroupOuter | [] -> false)
+    | [ at ] ->
+        let groupedOuter =
+            match at.IndexTypes with h :: _ -> h.IxKind = IxKGroupOuter | [] -> false
+        let raggedInner =
+            at.IndexTypes.Length >= 2 &&
+            at.IndexTypes |> List.skip 1 |> List.exists (fun ix ->
+                isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKDepInner)
+        groupedOuter || raggedInner
     | _ -> false
 
-/// Materialize a grouped map: iterate the outer group axis, bind the kernel's
-/// single row-param to each peeled group row (a ragged-row sub-array), and store
-/// the per-group scalar result into a dense rank-1 output. `g(0)`, `reduce(g,+)`,
-/// `extents(g)` in the body all operate on the peeled row (a plain rank-1 array).
-and private materializeGroupedMap (st: InterpState) (env: Env) (info: ApplyInfo) (wrappers: IRExpr list) : Value =
+/// Materialize a ROW-PEEL map (CodeGen's `tryRaggedPeel` in value space):
+/// iterate the outer axis, bind the kernel's single param, and build the
+/// output in whichever of the three shapes the OUTPUT TYPE calls for --
+/// keyed on the output exactly as the emitter is, so the two lanes cannot
+/// disagree about which shape an apply has:
+///
+///   * ELEMENTWISE (output keeps a ragged-family inner slot): the param binds
+///     each ELEMENT and the result is shape-preserving ragged.
+///   * ARRAY-VALUED ROWS (output rank >= 2, dense trailing): the param binds
+///     the ROW and the kernel hands back a whole dense row.
+///   * CONSUMING (output rank 1): the param binds the ROW and the kernel
+///     collapses it to a scalar.
+///
+/// The input is a group_by result or a ragged/DepIdx array; `A.peelDim`
+/// serves both from one SRagged store (per-row `lens`, not the parent's
+/// placeholder inner extent), so `g(0)`, `reduce(g, +)` and `extents(g)` in
+/// the body all see an ordinary rank-1 row.
+and private materializeRowPeelMap (st: InterpState) (env: Env) (info: ApplyInfo) (wrappers: IRExpr list) : Value =
     if not (List.isEmpty wrappers) then
-        raise (InterpUnsupported "functor-map wrapper over a grouped map")
+        raise (InterpUnsupported "functor-map wrapper over a row-peel map")
     let grouped =
         match resolveArraySource st env info.Arrays.[0] with
         | SReal a -> a
-        | _ -> raise (InterpUnsupported "grouped map: input is not a materialized array")
+        | _ -> raise (InterpUnsupported "row-peel map: input is not a materialized array")
     let arrayNames = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
     let cg = buildLoopNestCodeGen info arrayNames "out" st.Builder
     let elemTy =
         match cg.OutputType with
         | ArrayElem arr -> arr.ElemType
         | IRTScalar et -> IRTScalar et
-        | other -> raise (InterpUnsupported (sprintf "grouped map output type %s" (nodeTypeName other)))
+        | other -> raise (InterpUnsupported (sprintf "row-peel map output type %s" (nodeTypeName other)))
     let param =
         match cg.KernelParams with
         | [ p ] -> p
-        | _ -> raise (InterpUnsupported "grouped map: kernel is not single-parameter")
+        | _ -> raise (InterpUnsupported "row-peel map: kernel is not single-parameter")
     let kenv = envChild env
-    for c in cg.Captures do
-        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let cell = { V = VUnit }
     envBindRef kenv param.VarId cell
     let ngroups = int grouped.Extents.[0]
+    let outIdxTys =
+        match cg.OutputType with
+        | ArrayElem arr -> arr.IndexTypes
+        | _ -> []
+    let outputIsRaggedShaped =
+        outIdxTys.Length >= 2 &&
+        (outIdxTys |> List.skip 1 |> List.exists (fun ix ->
+            isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKDepInner))
+    let denseTrailingRows =
+        not outputIsRaggedShaped &&
+        outIdxTys.Length >= 2 &&
+        (outIdxTys |> List.skip 1 |> List.forall (fun ix -> ix.IxKind = IxKPlain))
+    if outputIsRaggedShaped then
+        // ELEMENTWISE over a ragged array: shape-preserving. The param binds
+        // each ELEMENT (not the row), and the result keeps the input's row
+        // lengths -- the value-space twin of the emitter's fresh pool over
+        // the parent's shared extents/lens/offsets.
+        //
+        // Grouped inputs never reach here: codegen refuses an elementwise map
+        // over a group_by result outright (its output would need a grouped
+        // type nothing downstream resolves lengths for), so such a program is
+        // rejected before either lane runs it.
+        let (rowStores, lens, offsets) =
+            match grouped.Data with
+            | SRagged (rows, lens, offs) -> (rows, lens, offs)
+            | _ -> raise (InterpUnsupported "elementwise map over a ragged array: input is not a CSR ragged store")
+        st.Cells <- st.Cells + (lens |> Array.fold (+) 0L)
+        let outRows =
+            rowStores
+            |> Array.mapi (fun g rowStore ->
+                // `lens` is the authority on a row's length (the parent's
+                // inner extent is the max-row placeholder), same rule
+                // A.peelDim follows.
+                let rlen = if g < lens.Length then lens.[g] else 0L
+                let rowArr =
+                    { ElemType = grouped.ElemType
+                      IndexTypes = (match grouped.IndexTypes with _ :: t -> t | [] -> [])
+                      Extents = [| rlen |]
+                      Data = rowStore }
+                let vals =
+                    Array.init (int rlen) (fun k ->
+                        cell.V <- A.readCell rowArr [ int64 k ]
+                        force st kenv (Core.evalExpr st kenv cg.KernelExpr))
+                A.storeOfValues elemTy vals)
+        VArray { ElemType = elemTy
+                 IndexTypes = outIdxTys
+                 Extents = Array.copy grouped.Extents
+                 Data = SRagged (outRows, Array.copy lens, Array.copy offsets) }
+    elif denseTrailingRows then
+        let rows =
+            Array.init ngroups (fun g ->
+                cell.V <- A.peelDim grouped (int64 g)
+                match force st kenv (Core.evalExpr st kenv cg.KernelExpr) with
+                | VArray row -> row
+                | _ -> raise (InterpUnsupported "row-peel map: array-valued kernel return produced a non-array row"))
+        // Trailing extents come off the FIRST row (self-describing, like the
+        // compiled size-on-first-row form); an empty grouping falls back to
+        // the output type's own trailing extents.
+        let trailing =
+            match rows |> Array.tryHead with
+            | Some row -> row.Extents
+            | None ->
+                outIdxTys
+                |> List.skip 1
+                |> List.map (fun ix -> toI64 (Core.evalExpr st env ix.Extent))
+                |> Array.ofList
+        let extents = Array.append [| int64 ngroups |] trailing
+        st.Cells <- st.Cells + (extents |> Array.fold (*) 1L)
+        let out = A.allocDense elemTy outIdxTys extents
+        rows |> Array.iteri (fun g row ->
+            let rec walk (dim: int) (acc: int64 list) =
+                if dim = row.Extents.Length then
+                    A.writeCell out (int64 g :: List.rev acc) (A.readCell row (List.rev acc))
+                else
+                    for j in 0L .. row.Extents.[dim] - 1L do walk (dim + 1) (j :: acc)
+            walk 0 [])
+        VArray out
+    else
     st.Cells <- st.Cells + int64 ngroups
     let results =
         Array.init ngroups (fun g ->
@@ -1286,6 +1453,37 @@ and private resolveArraySource (st: InterpState) (env: Env) (arr: IRExpr) : Arra
         | VSparse sv -> SReal (A.sparseToDense sv)
         | _ -> raise (InterpUnsupported "array input expression is not an array")
 
+// Bind a kernel's capture cells into `kenv`. A capture id absent from the
+// environment AND from the callables table cannot be resolved -- if the
+// kernel expression actually READS it, evaluation is guaranteed to panic
+// BL8004 (unbound variable) mid-kernel. That is an interpreter LIMIT, not a
+// program error: the compiled side resolves such captures by NAME
+// (captureForwardName's source-name fallback), e.g. an HM-cloned nested
+// kernel slot whose capture ids still point at the original function's
+// params. Classify it as unsupported so the harness reports
+// SKIP-UNSUPPORTED instead of a crash-red.
+//
+// The reference check matters: capture analysis deliberately OVER-reports
+// free vars (safe on the emit side, where buildCaptures filters), so a dead
+// capture that the kernel never reads must keep the silent-skip behavior --
+// refusing on it would demote passing diffs to skips. A miss that IS in the
+// callables table also stays silent: evalExpr's IRVar arm reifies it as a
+// closure.
+and private bindKernelCaptures (st: InterpState) (env: Env) (kenv: Env) (caps: CaptureInfo list) (kernelExpr: IRExpr) : unit =
+    let mutable referenced = Unchecked.defaultof<Set<IRId>>
+    let mutable referencedComputed = false
+    for c in caps do
+        match envTryFind env c.Id with
+        | Some cell -> envBindRef kenv c.Id cell
+        | None ->
+            if not (st.Callables.ContainsKey c.Id) then
+                if not referencedComputed then
+                    referenced <- collectVarRefsIR kernelExpr
+                    referencedComputed <- true
+                if Set.contains c.Id referenced then
+                    raise (InterpUnsupported
+                               (sprintf "kernel capture '%s' not resolvable by id (nested HM-specialized kernel)" c.Name))
+
 // interpretNest: the nest interpreter (analog of genLoopNest). Outermost-first
 // recursion; bound = Extent - SumBoundDependencies - StrictOffset; per-level
 // element peeling arm-for-arm; innermost kernel via Core.evalExpr.
@@ -1300,8 +1498,7 @@ and private interpretNest
     // Kernel env: child of the deferred env (so module bindings + enclosing
     // locals remain reachable), with capture cells + reusable param cells.
     let kenv = envChild env
-    for c in cg.Captures do
-        match envTryFind env c.Id with Some cell -> envBindRef kenv c.Id cell | None -> ()
+    bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let paramCells = Dictionary<IRId, ValueRef>()
     for p in cg.KernelParams do
         let cell = { V = VUnit }
@@ -1494,6 +1691,45 @@ and private interpretNest
         |> Map.ofSeq
     loop 0 baseMap Set.empty
 
+/// `resolveArraySource` for a FUSED operand -- the legs of a reduction join.
+///
+/// A join does not MATERIALIZE its operands. Codegen fuses each leg's map into
+/// the joint nest and binds it to a per-iteration `const`; that is the whole
+/// point loops/141 pins ("exactly one `std::cos` ... not five"). So a deferred
+/// binding read only by a join is never built as an array, never joins the
+/// auto-print list, and prints nothing -- loops/129's `d` states the same rule
+/// from the other side.
+///
+/// The ordinary resolver forces such a binding through `force`, which is what
+/// registers it in `ForcedDeferred` "under its own name". That is exactly right
+/// for an EAGER consumer -- sort/set-op/reduce over a real array, whose codegen
+/// twin is `forceDeferredArrayInput`, which likewise materializes it and adds it
+/// to `forcedDeferredIdsCell` -- and exactly wrong here. It is why the two lanes
+/// disagreed on loops/141: the interpreter printed `ct` as a materialized array
+/// where the compiled binary printed nothing for it and went straight to `j_pc`.
+///
+/// Deliberately does NOT memoize into the cell either. The compiled lane
+/// recomputes the map inside the nest and materializes SEPARATELY for any eager
+/// consumer, so leaving the cell deferred keeps a later eager read on the
+/// registering path. Memoizing would make that read find a plain `VArray`,
+/// skip registration, and swallow a print the compiled lane does emit --
+/// trading this drift for its mirror image.
+let private resolveFusedArraySource (st: InterpState) (env: Env) (arr: IRExpr) : ArraySource =
+    match arr with
+    | IRVar (id, _) ->
+        (match envTryFind env id with
+         | Some cell ->
+             (match cell.V with
+              | VDeferred (dexpr, denv) ->
+                  (match forceExpr st denv dexpr with
+                   | VArray a -> SReal a
+                   | VCompound cv -> SReal (A.compoundToDense cv)
+                   | VSparse sv -> SReal (A.sparseToDense sv)
+                   | _ -> raise (InterpUnsupported "deferred array input did not force to an array"))
+              | _ -> resolveArraySource st env arr)
+         | None -> resolveArraySource st env arr)
+    | _ -> resolveArraySource st env arr
+
 /// reduce over a deferred computation (genReduceComputeBinding 8714): fold
 /// every cell of each leaf apply into a per-leaf scalar accumulator (all
 /// seeded with `seed`), through the fold kernel wrapper -- one nest per leaf
@@ -1534,16 +1770,29 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
     let infos = leaves |> List.choose (function IRApplyCombinator i -> Some i | _ -> None)
     if infos.IsEmpty || infos.Length <> leaves.Length then
         raise (InterpUnsupported "reduce over a deferred computation with non-apply leaves")
-    let fold = resolveBinaryFold st kernel
+    // JOIN ENCODING (IR.fs, IRReduceCompute): per-leg kernels and seeds. The
+    // interpreter needs no shared-value machinery -- sharing a named deferred
+    // map is a per-iteration CSE of a pure map, so the values are identical
+    // either way, and each leg gets its own nest here as it always has.
+    let legFolds =
+        match kernel with
+        | IRTuple ks when ks.Length = infos.Length -> ks |> List.map (resolveBinaryFold st)
+        | _ -> infos |> List.map (fun _ -> resolveBinaryFold st kernel)
+    let legSeeds =
+        match seed with
+        | VTuple ss when ss.Length = infos.Length -> List.ofArray ss
+        | _ -> infos |> List.map (fun _ -> seed)
     let accVals =
-        infos |> List.map (fun info ->
+        infos |> List.mapi (fun li info ->
             gateInputs info
             let names = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
             let cg = buildLoopNestCodeGen info names "acc" st.Builder
             if hasRealSymmetry cg.OutputSymmVec || cg.HasReynolds || (cg.Bindings |> List.exists (fun b -> b.FusedRank.IsSome)) then
                 raise (InterpUnsupported "reduce over symmetric/Reynolds/fused computation (M2.5)")
             let inputs = Dictionary<int, ArraySource>()
-            info.Arrays |> List.iteri (fun i arr -> inputs.[i] <- resolveArraySource st env arr)
+            // FUSED, not materialized: see resolveFusedArraySource. A deferred
+            // binding read only by these legs must not join the print list.
+            info.Arrays |> List.iteri (fun i arr -> inputs.[i] <- resolveFusedArraySource st env arr)
             let realAt (pos: int) = match inputs.TryGetValue pos with | true, SReal a -> a | _ -> raise (InterpUnsupported "reduce-compute: virtual position needs no realAt")
             let levelExtent (b: LoopIndexBinding) : int64 =
                 match b.Extent with
@@ -1552,11 +1801,20 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
                 | _ ->
                     let pos = match b.Elements with e :: _ -> e.ArrayPosition | [] -> 0
                     match inputs.TryGetValue pos with | true, SReal a -> a.Extents.[b.ExtentDimRef] | _ -> toI64 (Core.evalExpr st env b.Extent)
-            let acc = { V = seed }
-            interpretNest st env cg inputs realAt levelExtent (OutFold (acc, fold))
+            let acc = { V = legSeeds.[li] }
+            interpretNest st env cg inputs realAt levelExtent (OutFold (acc, legFolds.[li]))
             acc.V)
     match accVals with
     | [ single ] -> single
+    // JOIN: a FLAT Tuple<k>, matching typeOf's shape for the join encoding and
+    // codegen's flat `make_tuple` (IR.fs, IRReduceCompute). The chain below
+    // nests because `<&!>` between two maps is a binary operator; a join is
+    // k-ary, and assembling it into pairs made every projection past index 1
+    // fail with BL8003 "tuple projection index out of range".
+    | _ when (match kernel with
+              | IRTuple ks -> ks.Length = accVals.Length
+              | _ -> false) ->
+        VTuple (Array.ofList accVals)
     | _ ->
         // Reassemble the accumulators into the TREE shape (accVals is the
         // in-order leaf list, so consuming it left-to-right while walking the
