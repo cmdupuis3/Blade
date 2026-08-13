@@ -1,0 +1,15 @@
+// TEST: Floor Unit Carrying Complex (rejects)
+// ERROR: BL3007
+// ERROR-CONTAINS: floor is not defined for complex operands
+// The other residue of units/076, and a MESSAGE pin as much as a refusal one.
+// floor/ceil have no std::complex overload at any signature. Before the scalar
+// arm looked through the unit wrapper, a `Complex128<volts>` operand missed the
+// complex arm entirely and landed on the general one, which reported the
+// SIGNATURE (BL3006, "volts is not dimensionless") -- true but beside the
+// point, and it would have kept steering the author toward dividing by a
+// reference quantity when no dimensionless complex would have helped either.
+// Classifying on the stripped base names the real problem first.
+Unit volts
+let v: Float<volts> = 3.0
+let z = complex(1.0, 2.0) * v
+let bad = floor(z)
