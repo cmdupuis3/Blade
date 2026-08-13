@@ -1691,6 +1691,45 @@ and private interpretNest
         |> Map.ofSeq
     loop 0 baseMap Set.empty
 
+/// `resolveArraySource` for a FUSED operand -- the legs of a reduction join.
+///
+/// A join does not MATERIALIZE its operands. Codegen fuses each leg's map into
+/// the joint nest and binds it to a per-iteration `const`; that is the whole
+/// point loops/141 pins ("exactly one `std::cos` ... not five"). So a deferred
+/// binding read only by a join is never built as an array, never joins the
+/// auto-print list, and prints nothing -- loops/129's `d` states the same rule
+/// from the other side.
+///
+/// The ordinary resolver forces such a binding through `force`, which is what
+/// registers it in `ForcedDeferred` "under its own name". That is exactly right
+/// for an EAGER consumer -- sort/set-op/reduce over a real array, whose codegen
+/// twin is `forceDeferredArrayInput`, which likewise materializes it and adds it
+/// to `forcedDeferredIdsCell` -- and exactly wrong here. It is why the two lanes
+/// disagreed on loops/141: the interpreter printed `ct` as a materialized array
+/// where the compiled binary printed nothing for it and went straight to `j_pc`.
+///
+/// Deliberately does NOT memoize into the cell either. The compiled lane
+/// recomputes the map inside the nest and materializes SEPARATELY for any eager
+/// consumer, so leaving the cell deferred keeps a later eager read on the
+/// registering path. Memoizing would make that read find a plain `VArray`,
+/// skip registration, and swallow a print the compiled lane does emit --
+/// trading this drift for its mirror image.
+let private resolveFusedArraySource (st: InterpState) (env: Env) (arr: IRExpr) : ArraySource =
+    match arr with
+    | IRVar (id, _) ->
+        (match envTryFind env id with
+         | Some cell ->
+             (match cell.V with
+              | VDeferred (dexpr, denv) ->
+                  (match forceExpr st denv dexpr with
+                   | VArray a -> SReal a
+                   | VCompound cv -> SReal (A.compoundToDense cv)
+                   | VSparse sv -> SReal (A.sparseToDense sv)
+                   | _ -> raise (InterpUnsupported "deferred array input did not force to an array"))
+              | _ -> resolveArraySource st env arr)
+         | None -> resolveArraySource st env arr)
+    | _ -> resolveArraySource st env arr
+
 /// reduce over a deferred computation (genReduceComputeBinding 8714): fold
 /// every cell of each leaf apply into a per-leaf scalar accumulator (all
 /// seeded with `seed`), through the fold kernel wrapper -- one nest per leaf
@@ -1751,7 +1790,9 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
             if hasRealSymmetry cg.OutputSymmVec || cg.HasReynolds || (cg.Bindings |> List.exists (fun b -> b.FusedRank.IsSome)) then
                 raise (InterpUnsupported "reduce over symmetric/Reynolds/fused computation (M2.5)")
             let inputs = Dictionary<int, ArraySource>()
-            info.Arrays |> List.iteri (fun i arr -> inputs.[i] <- resolveArraySource st env arr)
+            // FUSED, not materialized: see resolveFusedArraySource. A deferred
+            // binding read only by these legs must not join the print list.
+            info.Arrays |> List.iteri (fun i arr -> inputs.[i] <- resolveFusedArraySource st env arr)
             let realAt (pos: int) = match inputs.TryGetValue pos with | true, SReal a -> a | _ -> raise (InterpUnsupported "reduce-compute: virtual position needs no realAt")
             let levelExtent (b: LoopIndexBinding) : int64 =
                 match b.Extent with
