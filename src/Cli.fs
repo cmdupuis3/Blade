@@ -1465,6 +1465,188 @@ let private runIdeEvalTests () : TH.BlockResult =
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
+        // 15. MIXED CELLS. A notebook cell is prose-driven and routinely ends a
+        // run of declarations with the expression that shows what they did.
+        // Classified as one declaration the cell passed through whole and the
+        // file grammar rejected its last line (BL1999 "Expected declaration");
+        // classified as one expression its FIRST line would have been the thing
+        // that failed. It is neither: it is three statements.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let t1 = 2\nlet t2 = 3\nt1 + t2"
+                    evalReq 2 "nb" "t2"; shutdownReq ]
+        let name = "a cell mixing declarations with a trailing expression runs whole"
+        match responses with
+        | [mixed; after] when code = 0
+                              && mixed.Contains "\"kept\":true" && mixed.Contains "\"diagnostics\":[]"
+                              && mixed.Contains "{\"name\":\"t1\",\"type\":\"Int64\",\"value\":\"2\"}"
+                              && mixed.Contains "{\"name\":\"t2\",\"type\":\"Int64\",\"value\":\"3\"}"
+                              && mixed.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"5\"}"
+                              // The declarations JOINED the session; only the
+                              // expression was transient.
+                              && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"3\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 16. Interleaving, and the ORDER contract: every statement runs where
+        // the user wrote it, and every expression's value comes back in that
+        // same order. A whole-array `bindings` equality rather than a set of
+        // `Contains`, because order is the property under test.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let p = 10\nlet q = p * 2\nq + 1\nlet r = q + p\nr * 2"
+                    shutdownReq ]
+        let name = "an interleaved decl/expr/decl/expr cell reports its values in order"
+        let expectedOrder =
+            "\"bindings\":[{\"name\":\"p\",\"type\":\"Int64\",\"value\":\"10\"},"
+            + "{\"name\":\"q\",\"type\":\"Int64\",\"value\":\"20\"},"
+            + "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"21\"},"
+            + "{\"name\":\"r\",\"type\":\"Int64\",\"value\":\"30\"},"
+            + "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"60\"}]"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"kept\":true" && r.Contains expectedOrder ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 17. The regression the split must not cause: an expression-only cell
+        // still evaluates against the session without joining it, whether it
+        // holds one expression or several.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let e1 = 4"; evalReq 2 "nb" "e1 + 1\ne1 * 2"
+                    evalReq 3 "nb" "e1 + 1\ne1 * 2"; shutdownReq ]
+        let name = "an expression-only cell echoes every value and joins nothing"
+        let twoValues =
+            "\"bindings\":[{\"name\":\"\",\"type\":\"Int64\",\"value\":\"5\"},"
+            + "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"8\"}]"
+        match responses with
+        | [_; first; again] when code = 0
+                                 && first.Contains "\"kept\":true" && first.Contains twoValues
+                                 // Re-running echoes again rather than diffing
+                                 // to silence -- nothing was kept to diff against.
+                                 && again.Contains twoValues ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 18. Re-running a mixed cell REPLACES its earlier contribution. Each
+        // declaration supersedes its own predecessor in place, so nothing is
+        // declared twice (which would not compile) and the expressions -- being
+        // transient -- leave no second copy behind either.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let m = 1\nlet n = m + 1\nn * 10"
+                    evalReq 2 "nb" "let m = 5\nlet n = m + 1\nn * 10"
+                    evalReq 3 "nb" "n"; shutdownReq ]
+        let name = "re-running a mixed cell replaces it instead of redeclaring it"
+        match responses with
+        | [first; again; after] when code = 0
+                                     && first.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"20\"}"
+                                     && again.Contains "\"kept\":true"
+                                     && again.Contains "\"diagnostics\":[]"
+                                     && again.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"60\"}"
+                                     && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"6\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 19. THE reason a mixed cell is split into statements rather than
+        // wrapped in place. `bindingName` reads a snippet's FIRST name, so a
+        // whole-cell snippet holding `g1` and `g2` answers to `g1` alone -- and
+        // a later cell rebinding `g1` would supersede the snippet entire,
+        // taking `g2` down with it and leaving every downstream cell unbound.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let g1 = 1\nlet g2 = 2\ng1 + g2"
+                    evalReq 2 "nb" "let mut g1 = 7"
+                    evalReq 3 "nb" "g1 + g2"; shutdownReq ]
+        let name = "rebinding one name of a mixed cell leaves its other names standing"
+        match responses with
+        | [_; rebind; after] when code = 0
+                                  && rebind.Contains "\"kept\":true"
+                                  && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"9\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 20. A call for EFFECT is a statement too. Its hidden wrapper is a
+        // binding whose value is the call, so the call runs where it was
+        // written and its `mut` write lands in the caller's buffer -- which the
+        // read on the next line of the SAME cell has to see.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb"
+                        ("let mut buf = [0.0, 0.0, 0.0]\n"
+                         + "function fill(out: mut Array<Float like Idx<3>>) = {\n"
+                         + "    out(0) += 1.5\n}\nfill(buf)\nbuf")
+                    shutdownReq ]
+        let name = "a call-for-effect statement mutates what the next statement reads"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"kept\":true"
+                   && r.Contains "{\"name\":\"\",\"type\":\"Array<Float64 like Idx<3>>\",\"value\":\"[1.5, 0.0, 0.0]\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 21. The split's other half: a newline the PARSER goes on to skip is
+        // not a statement boundary. A `where` clause on its own line is the
+        // shape that proves it -- split there and both halves are nonsense.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb"
+                        ("function csum(a: T^1, b: T^1)\nwhere comm(a, b) = {\n    a + b\n}\n"
+                         + "csum([1.0, 2.0], [3.0, 4.0])")
+                    shutdownReq ]
+        let name = "a where clause on its own line does not start a new statement"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"kept\":true"
+                   && r.Contains "\"value\":\"[4.0, 6.0]\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 22. Same rule over a recursive array, whose `match`/`|` arms all sit
+        // at depth 0 -- plus the name it binds. `let rec` is a `let` with a
+        // modifier, and while `bindingNameRe` did not spell `rec` the notebook
+        // echoed a binding literally called `rec`, with no type and no value.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb"
+                        ("let rec seq: Array<Float like Idx<4>> =\n    match seq with\n"
+                         + "    | zero -> zero\n    | zero :: s -> zero :: 1.0\n"
+                         + "    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0\n"
+                         + "reduce(seq, (+))")
+                    shutdownReq ]
+        let name = "a let rec statement stays whole and binds its own name"
+        match responses with
+        | [r] when code = 0 && r.Contains "\"kept\":true"
+                   && r.Contains "{\"name\":\"seq\",\"type\":\"Array<Float64 like Idx<4>>\""
+                   && not (r.Contains "\"name\":\"rec\"")
+                   && r.Contains "{\"name\":\"\",\"type\":\"Float64\",\"value\":\"6.125\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 23. `()` subscripts an array in Blade (`[]` is tuple access), so an
+        // element write is `arr(0) = ...`. Missing from the reassignment
+        // pattern it read as a bare expression, was wrapped in a TRANSIENT
+        // binding, and its write left the session with the wrapper.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let arr = [1.0, 2.0, 3.0]\narr(0) = 9.0"
+                    evalReq 2 "nb" "arr"; shutdownReq ]
+        let name = "an element write is a reassignment and persists in the session"
+        match responses with
+        | [write; after] when code = 0
+                              && write.Contains "\"kept\":true"
+                              && write.Contains "{\"name\":\"arr\",\"type\":\"Array<Float64 like Idx<3>>\",\"value\":\"[9.0, 2.0, 3.0]\"}"
+                              && after.Contains "\"value\":\"[9.0, 2.0, 3.0]\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 24. A mixed cell that FAILS is still a rejection like any other: no
+        // bindings claimed, the session untouched, and the diagnostic in the
+        // CELL's coordinates -- which is what the per-statement placements are
+        // for, since each statement is now its own snippet in the session file.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let keepme = 1"
+                    evalReq 2 "nb" "let bad1 = 1\nlet bad2 = undefined_name_xyz + 1\nbad1"
+                    evalReq 3 "nb" "keepme"; shutdownReq ]
+        let name = "a failing mixed cell reports cell-local spans and keeps nothing"
+        match responses with
+        | [_; bad; after] when code = 0
+                               && bad.Contains "\"kept\":false" && bad.Contains "\"bindings\":[]"
+                               && bad.Contains "\"severity\":\"error\",\"line\":2,\"col\":12"
+                               && not (bad.Contains "elsewhere in session")
+                               && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"1\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
         try Directory.Delete(tmpDir, true) with _ -> ()
     finally
         Directory.SetCurrentDirectory entryDir
@@ -1693,6 +1875,48 @@ let private runIdeCellsTests () : TH.BlockResult =
         if code = 0 && diagCount rebindBody = 0 then record name TH.Pass ""
         else record name TH.Fail (sprintf "exit %d, %d diagnostics: %s"
                                           code (diagCount rebindBody) rebindBody)
+
+        // 10b. A cell that MIXES declarations with bare expressions. The eval
+        // lane splits such a cell into statements; the check lane keeps it in
+        // one contiguous window (the wire carries one window per cell) and
+        // wraps each bare expression where it stands. Unwrapped, the assembled
+        // source does not parse -- and one parse error is the answer for the
+        // WHOLE notebook, so a single mixed cell used to blank every other
+        // cell's hovers and squiggles.
+        let mixedCells =
+            [ "let mx = 2\nlet my = 3\nmx + my"
+              "let mz = mx * my" ]
+        let (code, responses, _) = drive [ cellsReq 71 "fast" nbPath mixedCells; shutdownReq ]
+        let mixedBody = match responses with [r] -> r | _ -> ""
+        let name = "a mixed declaration/expression cell parses and typechecks"
+        match windowsOf mixedBody with
+        | [ (s0, e0, Some wl, Some wc); _ ] when code = 0 && diagCount mixedBody = 0
+                                                 // The wrapper sits on the
+                                                 // cell's THIRD line, not its first.
+                                                 && wl = s0 + 2 && wl <= e0 && wc > 0
+                                                 && (bindingOf mixedBody "mz").IsSome
+                                                 && (bindingOf mixedBody "__cell0").IsSome ->
+            record name TH.Pass ""
+        | ws -> record name TH.Fail (sprintf "exit %d, %d diagnostics, windows %A: %s"
+                                             code (diagCount mixedBody) ws mixedBody)
+
+        // ...and a cell with SEVERAL bare expressions takes one wrapper each,
+        // numbered so they cannot collide. The window still reports only the
+        // first (there is one wrap pair on the wire); what matters here is that
+        // all of them parsed.
+        let (code, responses, _) =
+            drive [ cellsReq 72 "fast" nbPath [ "let ma = 1\nma + 1\nlet mb = 2\nmb + 1" ]
+                    shutdownReq ]
+        let multiBody = match responses with [r] -> r | _ -> ""
+        let name = "several bare expressions in one cell each take their own wrapper"
+        match windowsOf multiBody with
+        | [ (s0, _, Some wl, Some _) ] when code = 0 && diagCount multiBody = 0
+                                            && wl = s0 + 1
+                                            && (bindingOf multiBody "__cell0_0").IsSome
+                                            && (bindingOf multiBody "__cell0_1").IsSome ->
+            record name TH.Pass ""
+        | ws -> record name TH.Fail (sprintf "exit %d, %d diagnostics, windows %A: %s"
+                                             code (diagCount multiBody) ws multiBody)
 
         // 11. An empty notebook is a real state (a fresh .bladenb) and must
         // answer like any other, not fault.

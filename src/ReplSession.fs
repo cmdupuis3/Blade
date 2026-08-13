@@ -254,8 +254,13 @@ module ReplTypes =
 /// `Unit` is capitalised because the KEYWORD is (see Lexer.keywords) -- it is
 /// the one declaration keyword that is not lower-case, and both this pattern
 /// and `declRe` have to spell it the way the lexer does.
+///
+/// `rec` is a `let` modifier like `mut` and `static`: without it here a
+/// recursive array bound its name as the literal string "rec", which is not a
+/// name any rebind can match and not a binding any run output carries -- the
+/// notebook echoed `rec` with an empty type and value.
 let private bindingNameRe =
-    Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+)?|static\s+function\s+|function\s+|type\s+|Unit\s+)([A-Za-z_][A-Za-z0-9_]*)")
+    Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+|rec\s+)?|static\s+function\s+|function\s+|type\s+|Unit\s+)([A-Za-z_][A-Za-z0-9_]*)")
 
 let bindingName (snippet: string) : string option =
     let m = bindingNameRe.Match snippet
@@ -319,12 +324,19 @@ let declRe =
 
 let identRe = Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
 
-/// A reassignment `x = e` (or `x[i] = e`, `x.f = e`, `x += e`, etc.): an
+/// A reassignment `x = e` (or `x(i) = e`, `x.f = e`, `x += e`, etc.): an
 /// lvalue followed by an assignment operator. `=(?!=)` matches `=` but not
 /// `==`, so `b == 1` stays a bare expression. Group 1 (leading identifier)
 /// is the ROOT variable to echo. Checked after declRe so `let ...` stays a declaration.
+///
+/// `(...)` is in the suffix set because `()` is how Blade subscripts an array
+/// (`[]` is tuple/pack access): without it `arr(0) = 9.0` missed the
+/// reassignment lane, was wrapped as a bare expression, and its write was
+/// dropped from the session along with the transient wrapper. The trailing
+/// `\s*=` is what keeps the addition tight -- a call with no assignment after
+/// it (`f(x)`) still fails to match and stays an expression.
 let assignRe =
-    Regex(@"^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]*\])*\s*(?:\+=|-=|\*=|/=|=(?!=))")
+    Regex(@"^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]*\]|\([^)]*\))*\s*(?:\+=|-=|\*=|/=|=(?!=))")
 
 /// A raw run-output line is `name = value`; grab the leading name so we can
 /// single out just the one binding we mean to echo.
@@ -348,6 +360,124 @@ let classifyTarget (s: string) =
         let t = l.TrimStart()
         t <> "" && not (t.StartsWith "//"))
     |> Option.defaultValue ""
+
+// Splitting a submission into its top-level statements.
+//
+// `classifyTarget` above reads the FIRST significant line and gives the whole
+// submission one shape. That is right for the interactive REPL, where a
+// submission is a line (or a `:paste` block of declarations), and wrong for a
+// notebook cell, where prose-driven cells routinely mix the two:
+//
+//     let t = b, c
+//     t[0] + t[1]
+//
+// Classified as a declaration, that cell passes through whole and a
+// declarations-only top-level grammar rejects its second line (BL1999
+// "Expected declaration"); classified as an expression it would be wrapped and
+// its first line would be the thing that failed. Neither shape fits, because
+// the cell has TWO statements -- and the split is what lets each of them be a
+// binding this cell can name, echo and later supersede on its own, which stays
+// true however permissive the top-level grammar becomes. So the notebook lane
+// splits first and classifies each piece.
+//
+// The split is the LEXER's, not a regex's: `tokenizeWithNewlines` already
+// answers "is this newline a statement terminator" -- it drops newlines inside
+// (), [] and {} and keeps the ones at depth 0 -- so brace, paren, string and
+// comment nesting are handled by the same code the parser trusts. What the
+// token filter cannot know is the handful of places the PARSER goes on to skip
+// a depth-0 newline anyway: after a trailing `=`, `with` or `->`, and before a
+// continuation line opening with `|`, `where`, `==`, `then`, `else`. Those are
+// the two predicates below, and both are deliberately biased AGAINST splitting:
+// merging two statements reproduces today's behaviour (the parse error the user
+// already sees), while splitting one statement in half would invent a new one.
+module private Segments =
+    open Blade.Lexer
+
+    /// Can this token be the LAST one of a top-level statement? A trailing
+    /// operator, `=`, comma, `with` or `->` means the parser is mid-production
+    /// and the newline after it is not a terminator.
+    let canEnd (k: TokenKind) =
+        match k with
+        | TokInt _ | TokFloat _ | TokString _ | TokChar _ | TokBool _ | TokIdent _ -> true
+        | TokRParen | TokRBracket | TokRBrace | TokUnderscore -> true
+        // `>` closes a type application (`Idx<4>`), and a nested one closes
+        // with the `>>` the lexer produces for `Idx<Array<...>>`.
+        | TokOp op when op.Length > 0 && op |> Seq.forall (fun c -> c = '>') -> true
+        | TokKeyword (KwTrue | KwFalse | KwCompute | KwZero | KwVoid) -> true
+        | _ -> false
+
+    /// Can this token OPEN a top-level statement? Anything that only ever
+    /// continues an expression -- an infix operator, a `|` match arm, a `where`
+    /// clause on its own line -- says the previous line has not finished.
+    let canStart (k: TokenKind) =
+        match k with
+        | TokOp _ | TokNamedInfix _ -> false
+        | TokComma | TokSemi | TokColon | TokColonColon | TokDot | TokDotDot -> false
+        | TokPipe | TokAt | TokHash | TokQuestion -> false
+        | TokRParen | TokRBracket | TokRBrace -> false
+        | TokNewline | TokEOF | TokError _ -> false
+        | TokKeyword (KwWhere | KwWith | KwThen | KwElse | KwAnd | KwIn | KwAs | KwLike) -> false
+        | TokKeyword (KwRec | KwMut | KwComm | KwAntisymm | KwOmp | KwCuda | KwMpi | KwReynolds) -> false
+        | _ -> true
+
+    /// Does this text carry any CODE, or is it blank/comments only? Token-level
+    /// so a `/* ... */` block counts as empty exactly as a `//` line does.
+    let hasCode (text: string) =
+        try
+            Blade.Lexer.tokenize text
+            |> List.exists (fun t ->
+                match t.Kind with
+                | TokNewline | TokEOF | TokError _ -> false
+                | _ -> true)
+        with _ -> text.Trim() <> ""
+
+/// Split a submission into its top-level statements: `(1-based start line
+/// within `source`, text)` per statement, in order, with blank lines trimmed
+/// off each end and blank/comment-only pieces dropped. A leading `//` comment
+/// stays attached to the statement BELOW it, the way a doc comment reads.
+///
+/// A lexer failure yields the whole submission as one statement, which is
+/// exactly what the caller did before this existed: an unlexable cell has to
+/// reach the compiler and earn its own diagnostic, not be mangled here.
+let splitTopLevelStatements (source: string) : (int * string) list =
+    let src = source.Replace("\r\n", "\n")
+    let lines = src.Split('\n')
+    let breaks =
+        try
+            let toks = Blade.Lexer.tokenizeWithNewlines src |> Array.ofList
+            let acc = ResizeArray<int>()
+            let mutable prev : Blade.Lexer.TokenKind option = None
+            for i in 0 .. toks.Length - 1 do
+                match toks.[i].Kind with
+                | Blade.Lexer.TokNewline ->
+                    let next = if i + 1 < toks.Length then Some toks.[i + 1].Kind else None
+                    match prev, next with
+                    | Some p, Some n when Segments.canEnd p && Segments.canStart n ->
+                        // The newline token sits ON the line it terminates.
+                        acc.Add toks.[i].Line
+                    | _ -> ()
+                | Blade.Lexer.TokEOF -> ()
+                | k -> prev <- Some k
+            Set.ofSeq acc
+        with _ -> Set.empty
+    let raw = ResizeArray<int * string>()
+    let cur = ResizeArray<string>()
+    let mutable startLine = 1
+    for i in 0 .. lines.Length - 1 do
+        cur.Add lines.[i]
+        if Set.contains (i + 1) breaks then
+            raw.Add (startLine, String.concat "\n" cur)
+            cur.Clear()
+            startLine <- i + 2
+    if cur.Count > 0 then raw.Add (startLine, String.concat "\n" cur)
+    [ for (sl, text) in raw do
+        let ls = text.Split('\n')
+        match ls |> Array.tryFindIndex (fun l -> l.Trim() <> "") with
+        | None -> ()
+        | Some first ->
+            let last = ls |> Array.findIndexBack (fun l -> l.Trim() <> "")
+            let body = ls.[first .. last] |> String.concat "\n"
+            if Segments.hasCode body then yield (sl + first, body) ]
 
 // The evaluation lanes and their results.
 
@@ -401,6 +531,22 @@ type Binding =
     { Name: string
       Type: string
       Value: string }
+
+/// One top-level statement of a MIXED cell, once placed in a candidate: where
+/// it landed, what hidden wrapper (if any) it carries, which line of the
+/// submission it came from, the bindings it contributes to the cell's result,
+/// and whether it survives the commit.
+type MixedSlot =
+    { Index: int
+      Prefix: int
+      PrefixRow: int
+      SubLine: int
+      /// (name to REPORT, name the session actually bound it under). They
+      /// differ only for a bare expression, whose transient wrapper reports
+      /// as "" exactly as the single-expression lane's does.
+      Names: (string * string) list
+      /// A transient expression wrapper: run and echoed, never committed.
+      Transient: bool }
 
 /// A diagnostic in CELL-LOCAL 1-based coordinates (see `EvalResult`).
 type EvalDiagnostic =
@@ -461,14 +607,18 @@ let installCompiledLane (f: CompiledLane) = compiledLane <- Some f
 
 // Diagnostic remapping: session-file coordinates -> submission coordinates.
 
-/// Where a submission's own text sits inside the assembled session file --
+/// Where one piece of a submission sits inside the assembled session file --
 /// everything the remap needs. `Prefix` is the characters a hidden wrapper
-/// prepended on the snippet's first line (`let it = `), `LeadPad` the source
-/// lines `Trim()` removed from the front of the submission.
+/// prepended (`let it = `), `PrefixRow` the row WITHIN the snippet that carries
+/// them (0 except when a leading comment pushed the wrapper down), and
+/// `SubLine` the 1-based line of the SUBMISSION this snippet's text starts on
+/// -- 1 for a whole-submission placement whose `Trim()` ate nothing, and the
+/// statement's own line for each piece of a split (mixed) cell.
 type private Placement =
     { Index: int
       Prefix: int
-      LeadPad: int }
+      PrefixRow: int
+      SubLine: int }
 
 let private lineCount (s: string) =
     (s.Replace("\r\n", "\n").Split('\n')).Length
@@ -489,6 +639,10 @@ let private severityText (s: Blade.Diagnostics.Severity) =
 
 /// Rebase one session-file diagnostic onto the submission.
 ///
+/// A submission owns one placement per top-level statement it contributed (one
+/// for all of it, until a mixed cell split it), and a diagnostic belongs to
+/// whichever of them its line falls inside.
+///
 /// A rebind splices MID-session, so the compiler can perfectly well report
 /// against a LATER snippet that the rebind just broke -- a position with no
 /// meaning in this cell at all. Those clamp to 1:1 and say so in the message,
@@ -496,22 +650,30 @@ let private severityText (s: Blade.Diagnostics.Severity) =
 /// diagnostic with no span (a provider load that failed at lowering time)
 /// clamps to 1:1 as well, but earns no prefix: it is not elsewhere, it is
 /// nowhere.
-let private remapDiagnostic (candidate: ResizeArray<string>) (p: Placement)
+let private remapDiagnostic (candidate: ResizeArray<string>) (ps: Placement list)
                             (d: Blade.Diagnostics.Diagnostic) : EvalDiagnostic =
     let sev = severityText d.Severity
-    let start = startLineOf candidate p.Index
-    let span = lineCount candidate.[p.Index]
     let sl = d.Span.StartLine
-    if sl <= 0 then
+    let owner =
+        if sl <= 0 then None
+        else
+            ps |> List.tryFind (fun p ->
+                p.Index >= 0 && p.Index < candidate.Count &&
+                let start = startLineOf candidate p.Index
+                sl >= start && sl <= start + lineCount candidate.[p.Index] - 1)
+    match owner with
+    | None when sl <= 0 ->
         { Severity = sev; Line = 1; Col = 1; EndLine = 1; EndCol = 1
           Message = d.Message; Code = d.Code }
-    elif sl < start || sl > start + span - 1 then
+    | None ->
         { Severity = sev; Line = 1; Col = 1; EndLine = 1; EndCol = 1
           Message = "elsewhere in session: " + d.Message; Code = d.Code }
-    else
-        // The wrapper's prefix only ever sits on the snippet's FIRST line.
-        let mapCol (l: int) (c: int) = if l = start then max 1 (c - p.Prefix) else max 1 c
-        let shift = start - 1 - p.LeadPad
+    | Some p ->
+        let start = startLineOf candidate p.Index
+        // The wrapper's prefix sits on exactly one line of the snippet.
+        let prefixLine = start + p.PrefixRow
+        let mapCol (l: int) (c: int) = if l = prefixLine then max 1 (c - p.Prefix) else max 1 c
+        let shift = start - p.SubLine
         let line = max 1 (sl - shift)
         let col = mapCol sl d.Span.StartCol
         let endLine = max line (d.Span.EndLine - shift)
@@ -536,6 +698,56 @@ let private ensureFailureDiagnostic (r: EvalResult) : EvalResult =
                   Message = r.Stderr.Trim(); Code = "" } :: r.Diagnostics }
 
 // The engine.
+
+/// Splice a DECLARATION snippet into a candidate list: rebinding replaces the
+/// earlier definition IN PLACE so later snippets referencing the name see the
+/// update (duplicate lets are a C++ redeclaration error) -- except when the new
+/// text references a name bound LATER in the session, where the rebind moves
+/// just past its last dependency instead.
+///
+/// A rebind may reference a binding added AFTER it (split one cell into two,
+/// then rebind the first: `let pairs = xloop <@> ...` where `xloop` joined the
+/// session after `pairs` did). In place, that reference sits above its
+/// definition in the flat session file and the candidate is rejected as
+/// unbound -- so place the new text just after the LAST later snippet it
+/// references. Only safe when no snippet in between references THIS name; if
+/// one does, the dependency is genuinely circular in a flat file and in-place
+/// (with its honest unbound/type error) stands.
+///
+/// Returns the index the snippet landed at AND how the operation moved the
+/// indices that were already valid: a mixed cell places several statements one
+/// after another and each splice can shift the ones before it.
+let private spliceDeclaration (candidate: ResizeArray<string>) (text: string) : int * (int -> int) =
+    match bindingName text with
+    | Some name ->
+        let idx = candidate.FindIndex(fun s -> bindingName s = Some name)
+        if idx >= 0 then
+            let refs = referencedNames text
+            let lastDep =
+                [ idx + 1 .. candidate.Count - 1 ]
+                |> List.filter (fun j ->
+                    match bindingName candidate.[j] with
+                    | Some n -> Set.contains n refs
+                    | None -> false)
+                |> List.tryLast
+            match lastDep with
+            | Some j when [ idx + 1 .. j ] |> List.forall (fun k ->
+                              not (Set.contains name (referencedNames candidate.[k]))) ->
+                candidate.RemoveAt idx
+                // The removal shifted everything after `idx` down one, so
+                // inserting AT `j` lands immediately after the dependency.
+                candidate.Insert(j, text)
+                let fix k = if k = idx then j elif k > idx && k <= j then k - 1 else k
+                (j, fix)
+            | _ ->
+                candidate.[idx] <- text
+                (idx, id)
+        else
+            candidate.Add text
+            (candidate.Count - 1, id)
+    | None ->
+        candidate.Add text
+        (candidate.Count - 1, id)
 
 /// One accumulating REPL session: the snippet list, the temp directory its
 /// assembled program is written to, and eval-once. Independent instances share
@@ -571,58 +783,88 @@ type ReplSession(runCwd: string) =
     member _.Cleanup() =
         try Directory.Delete(sessionDir, true) with _ -> ()
 
-    /// The candidate a DECLARATION produces: rebinding replaces the earlier
-    /// definition IN PLACE so later snippets referencing the name see the
-    /// update (duplicate lets are a C++ redeclaration error) -- except when
-    /// the new text references a name bound LATER in the session, where the
-    /// rebind moves just past its last dependency instead (see the inline
-    /// comment). Returns the list and the index the snippet landed at.
+    /// The candidate a DECLARATION produces (see `spliceDeclaration` for the
+    /// rebind rule). Returns the list and the index the snippet landed at.
     member _.DeclarationCandidate(trimmed: string) : ResizeArray<string> * int =
         let candidate = ResizeArray(snippets)
-        match bindingName trimmed with
-        | Some name ->
-            let idx = candidate.FindIndex(fun s -> bindingName s = Some name)
-            if idx >= 0 then
-                // Rebind. Splicing IN PLACE is right whenever the new text only
-                // leans on names bound before the old position -- but a rebind
-                // may reference a binding added AFTER it (split one cell into
-                // two, then rebind the first: `let pairs = xloop <@> ...` where
-                // `xloop` joined the session after `pairs` did). In place, that
-                // reference sits above its definition in the flat session file
-                // and the candidate is rejected as unbound -- so place the new
-                // text just after the LAST later snippet it references. Only
-                // safe when no snippet in between references THIS name; if one
-                // does, the dependency is genuinely circular in a flat file and
-                // in-place (with its honest unbound/type error) stands.
-                let refs = referencedNames trimmed
-                let lastDep =
-                    [ idx + 1 .. candidate.Count - 1 ]
-                    |> List.filter (fun j ->
-                        match bindingName candidate.[j] with
-                        | Some n -> Set.contains n refs
-                        | None -> false)
-                    |> List.tryLast
-                match lastDep with
-                | Some j when [ idx + 1 .. j ] |> List.forall (fun k ->
-                                  not (Set.contains name (referencedNames candidate.[k]))) ->
-                    candidate.RemoveAt idx
-                    // The removal shifted everything after `idx` down one, so
-                    // inserting AT `j` lands immediately after the dependency.
-                    candidate.Insert(j, trimmed)
-                    (candidate, j)
-                | _ ->
-                    candidate.[idx] <- trimmed
-                    (candidate, idx)
-            else
-                candidate.Add trimmed
-                (candidate, candidate.Count - 1)
-        | None ->
-            candidate.Add trimmed
-            (candidate, candidate.Count - 1)
+        let (idx, _) = spliceDeclaration candidate trimmed
+        (candidate, idx)
 
-    /// The candidate a REASSIGNMENT produces. A bare assignment does not parse
-    /// at top level, but wrapping it in a hidden binding does -- the wrapper's
-    /// value IS the ExprAssign, which mutates the target's existing cell.
+    /// The candidate a MIXED cell produces: one snippet per TOP-LEVEL
+    /// STATEMENT, placed in cell order.
+    ///
+    /// Splitting is what makes the rebind granularity right, not just what
+    /// makes the cell parse. A cell holding `let a = 1` through `let tail =
+    /// ...` is not one binding called `a`: a later cell's `let mut a = 2`
+    /// would otherwise supersede the WHOLE cell (`bindingName` reads a
+    /// snippet's first name) and take `b`, `c` and the rest down with it.
+    ///
+    /// Each statement is classified exactly as a whole submission would be:
+    /// declarations splice by name, reassignments and bare expressions ride a
+    /// hidden binding. The wrapper is what makes them parse under a grammar
+    /// that admits only declarations at top level, but it is NOT only that:
+    /// the name is the handle this engine reads the value back under (run
+    /// output is `name = value` lines) and the handle a rebind matches on. A
+    /// grammar that auto-names a bare expression names it per MODULE, counting
+    /// across the whole assembled session, which is not a name a cell can
+    /// predict -- so the wrapper stays either way.
+    /// The expression wrappers are TRANSIENT -- run and echoed, dropped from the commit --
+    /// which is the single-expression lane's rule and is also what keeps
+    /// re-running a cell from stacking a second copy of its expressions.
+    /// Statements still run in cell order, so a call-for-effect earlier in the
+    /// cell is visible to a value read later in the same cell.
+    member _.MixedCandidate(segments: (int * string) list) : ResizeArray<string> * MixedSlot list =
+        let candidate = ResizeArray(snippets)
+        let slots = ResizeArray<MixedSlot>()
+        let freshName (stem: string) =
+            let inUse = candidate |> Seq.choose bindingName |> Set.ofSeq
+            Seq.initInfinite (fun i -> if i = 0 then stem else sprintf "%s%d" stem i)
+            |> Seq.find (fun n -> not (Set.contains n inUse))
+        for (subLine, text) in segments do
+            let head = classifyTarget text
+            if declRe.IsMatch head then
+                let (idx, fix) = spliceDeclaration candidate text
+                // A splice that MOVED a snippet renumbers the statements this
+                // cell already placed; without this their diagnostics would
+                // rebase against someone else's text.
+                for k in 0 .. slots.Count - 1 do
+                    slots.[k] <- { slots.[k] with Index = fix slots.[k].Index }
+                slots.Add { Index = idx; Prefix = 0; PrefixRow = 0; SubLine = subLine
+                            Names = topLevelBindingNames text |> List.map (fun n -> (n, n))
+                            Transient = false }
+            else
+                // The wrapper goes on the first SIGNIFICANT line -- the same
+                // line `classifyTarget` classified on -- so a statement that
+                // opens with a comment still gets a parseable binding.
+                let lines = text.Split('\n')
+                let row =
+                    lines
+                    |> Array.tryFindIndex (fun l ->
+                        let t = l.TrimStart()
+                        t <> "" && not (t.StartsWith "//"))
+                    |> Option.defaultValue 0
+                let isAssign = assignRe.IsMatch head
+                let hidden = freshName (if isAssign then "__assign" else "it")
+                let prefix = sprintf "let %s = " hidden
+                let wrapped = Array.copy lines
+                wrapped.[row] <- prefix + wrapped.[row]
+                candidate.Add (String.concat "\n" wrapped)
+                slots.Add
+                    { Index = candidate.Count - 1; Prefix = prefix.Length; PrefixRow = row
+                      SubLine = subLine
+                      Names =
+                        // A reassignment echoes the variable it mutated; a bare
+                        // expression echoes its value under the stripped name.
+                        (if isAssign then
+                            let root = (assignRe.Match head).Groups.[1].Value
+                            [ (root, root) ]
+                         else [ ("", hidden) ])
+                      Transient = not isAssign }
+        (candidate, List.ofSeq slots)
+
+    /// The candidate a REASSIGNMENT produces. Wrapping it in a hidden binding
+    /// is what carries it under a declarations-only top-level grammar, and the
+    /// wrapper's value IS the ExprAssign, which mutates the target's existing cell.
     /// Unlike bare expressions the wrapper is KEPT so the mutation persists;
     /// successive assignments append under fresh __assignN names, so
     /// `b = b + 1` twice accumulates 1->2->3. Returns the list, the index, and
@@ -728,16 +970,19 @@ type ReplSession(runCwd: string) =
         /// Run a candidate and project it onto the submission. `wanted` pairs
         /// the name to REPORT with the name the session actually bound it
         /// under (they differ only for a bare expression, whose transient
-        /// wrapper reports as ""). `commit` is false for the bare-expression
-        /// lane, which never joins the session.
-        let evalWith (candidate: ResizeArray<string>) (placement: Placement)
-                     (target: string option) (wanted: (string * string) list) (commit: bool) =
+        /// wrapper reports as ""). `commit` carries the list to ADOPT, which
+        /// is the candidate itself for the declaration and reassignment lanes,
+        /// the candidate minus its transient wrappers for a mixed cell, and
+        /// None for the bare-expression lane, which never joins the session.
+        let evalWith (candidate: ResizeArray<string>) (placements: Placement list)
+                     (target: string option) (wanted: (string * string) list)
+                     (commit: ResizeArray<string> option) =
             ensureFailureDiagnostic <|
             match this.EvalCandidate(candidate, target, ignore) with
             | CandidateRejected (ds, _) ->
                 { Kept = false; ExitCode = 1; Lane = LaneInterp; ElapsedMs = 0
                   Stdout = ""; Stderr = ""; Bindings = []
-                  Diagnostics = ds |> List.map (remapDiagnostic candidate placement)
+                  Diagnostics = ds |> List.map (remapDiagnostic candidate placements)
                   Display = [] }
             | CandidateFailed msg ->
                 { Kept = false; ExitCode = 1; Lane = LaneGpp; ElapsedMs = 0
@@ -761,7 +1006,9 @@ type ReplSession(runCwd: string) =
                     | Some (ReplTypes.RFunc s) -> s
                     | None -> ""
                 let kept = (r.ExitCode = 0)
-                if kept && commit then this.Commit candidate
+                match commit with
+                | Some adopt when kept -> this.Commit adopt
+                | _ -> ()
                 // Display frames leave the text stream here, once, for every
                 // lane: both the interpreter and the compiled binary put them
                 // on stdout (that is what makes the REPL channel work at all),
@@ -789,8 +1036,29 @@ type ReplSession(runCwd: string) =
                         wanted |> List.map (fun (report, bound) ->
                             { Name = report; Type = typeOf bound; Value = valueOf bound })
                     else []
-                  Diagnostics = r.Warnings |> List.map (remapDiagnostic candidate placement) }
-        if declRe.IsMatch head then
+                  Diagnostics = r.Warnings |> List.map (remapDiagnostic candidate placements) }
+        // How many TOP-LEVEL STATEMENTS did this submission bring? One is the
+        // REPL's world and keeps its three lanes exactly as they were -- including
+        // the bare-identifier function probe and the `it`/`__assign` naming a
+        // front end may already be showing. Two or more is a notebook cell that
+        // mixes shapes, and no single classification fits it.
+        let segments = splitTopLevelStatements source
+        // Comments only: nothing to run, and nothing to reject either.
+        if List.isEmpty segments then blank
+        elif not (List.isEmpty (List.tail segments)) then
+            let (candidate, slots) = this.MixedCandidate segments
+            let committed =
+                let drop = slots |> List.filter (fun s -> s.Transient) |> List.map (fun s -> s.Index) |> Set.ofList
+                let out = ResizeArray<string>()
+                for i in 0 .. candidate.Count - 1 do
+                    if not (Set.contains i drop) then out.Add candidate.[i]
+                out
+            let placements =
+                slots |> List.map (fun s ->
+                    { Index = s.Index; Prefix = s.Prefix; PrefixRow = s.PrefixRow; SubLine = s.SubLine })
+            evalWith candidate placements None
+                     (slots |> List.collect (fun s -> s.Names)) (Some committed)
+        elif declRe.IsMatch head then
             let (candidate, idx) = this.DeclarationCandidate trimmed
             // A :paste block may declare several names; every one of them is a
             // binding this submission made, and the LAST is what the REPL echoes.
@@ -798,14 +1066,15 @@ type ReplSession(runCwd: string) =
             // submission's bindings (see topLevelBindingNames).
             let names = topLevelBindingNames trimmed
             let target = List.tryLast names
-            evalWith candidate { Index = idx; Prefix = 0; LeadPad = leadPad }
-                     target (names |> List.map (fun n -> (n, n))) true
+            evalWith candidate [ { Index = idx; Prefix = 0; PrefixRow = 0; SubLine = leadPad + 1 } ]
+                     target (names |> List.map (fun n -> (n, n))) (Some candidate)
         elif assignRe.IsMatch head then
             let (candidate, idx, hidden) = this.AssignmentCandidate trimmed
             let root = (assignRe.Match trimmed).Groups.[1].Value
             evalWith candidate
-                     { Index = idx; Prefix = (sprintf "let %s = " hidden).Length; LeadPad = leadPad }
-                     (Some root) [ (root, root) ] true
+                     [ { Index = idx; Prefix = (sprintf "let %s = " hidden).Length
+                         PrefixRow = 0; SubLine = leadPad + 1 } ]
+                     (Some root) [ (root, root) ] (Some candidate)
         else
             // A bare identifier naming a session FUNCTION can't be let-bound
             // just to echo it; its signature comes straight from the
@@ -822,8 +1091,9 @@ type ReplSession(runCwd: string) =
             | None ->
                 let (candidate, idx, transient) = this.ExpressionCandidate trimmed
                 evalWith candidate
-                         { Index = idx; Prefix = (sprintf "let %s = " transient).Length; LeadPad = leadPad }
-                         (Some transient) [ ("", transient) ] false
+                         [ { Index = idx; Prefix = (sprintf "let %s = " transient).Length
+                             PrefixRow = 0; SubLine = leadPad + 1 } ]
+                         (Some transient) [ ("", transient) ] None
 
 // Whole-notebook assembly: many cells in, one source out.
 //
@@ -844,12 +1114,61 @@ type ReplSession(runCwd: string) =
 
 /// One cell's contribution to the assembled source: the cell it came from, the
 /// text it contributes (empty for a definition a later rebind superseded), and,
-/// where a synthetic wrapper was prepended, the line index WITHIN this text that
-/// carries it plus the prefix's character count.
+/// for every synthetic wrapper prepended, the line index WITHIN this text that
+/// carries it plus the prefix's character count. A cell mixing declarations
+/// with bare expressions takes ONE wrapper per expression, hence a list.
 type private CellSlot =
     { Cell: int
       Text: string
-      Wrap: (int * int) option }
+      Wrap: (int * int) list }
+
+/// Wrap every bare-expression STATEMENT of one cell in its own synthetic
+/// binding, leaving declarations alone, and report the wrappers.
+///
+/// Under a grammar that admits only declarations at top level an unwrapped
+/// expression does not parse -- and a cell that mixes the two used to poison
+/// the check for EVERY other cell, because one parse error is the whole
+/// assembled source's answer. Splitting the cell first (`splitTopLevelStatements`)
+/// is what lets each statement take the treatment it needs.
+///
+/// The wrapper is worth keeping even where the grammar stops requiring it: the
+/// client filters payload entries by the wrapper's NAME, and a grammar that
+/// auto-names a bare expression numbers it per module, across the whole
+/// assembled notebook -- a name no single cell can predict, and one the
+/// synthetic-name filter would have to re-derive.
+///
+/// The single-expression cell keeps its historical name `__cellK` -- the client
+/// filters synthetic bindings by that shape -- and only a cell with several
+/// wrappers numbers them `__cellK_j`.
+let private wrapCellExpressions (k: int) (src: string) : string * (int * int) list =
+    let lines = src.Split('\n')
+    let segments = splitTopLevelStatements src
+    let exprRows =
+        [ for (subLine, text) in segments do
+            if not (declRe.IsMatch (classifyTarget text)) then
+                // The wrapper goes on the first SIGNIFICANT line of the
+                // statement -- the same line `classifyTarget` classified on --
+                // so a statement opening with a comment still gets a parseable
+                // binding. `subLine` is 1-based within the cell.
+                let rel =
+                    text.Split('\n')
+                    |> Array.tryFindIndex (fun l ->
+                        let t = l.TrimStart()
+                        t <> "" && not (t.StartsWith "//"))
+                    |> Option.defaultValue 0
+                yield subLine - 1 + rel ]
+    if List.isEmpty exprRows then (src, [])
+    else
+        let wrapped = Array.copy lines
+        let wraps =
+            exprRows
+            |> List.mapi (fun j row ->
+                let prefix =
+                    if exprRows.Length = 1 then sprintf "let __cell%d = " k
+                    else sprintf "let __cell%d_%d = " k j
+                wrapped.[row] <- prefix + wrapped.[row]
+                (row, prefix.Length))
+        (String.concat "\n" wrapped, wraps)
 
 /// Assemble ordered CODE cell sources (the client filters markdown out) into
 /// one session source plus one `Blade.Ide.CellWindow` per cell, in input order,
@@ -861,16 +1180,20 @@ let assembleCells (cells: string list) : string * Blade.Ide.CellWindow list =
     |> List.iteri (fun k raw ->
         // Line counting downstream assumes \n, and the client's cell text may
         // still carry the editor's CRLFs.
-        let src = raw.Replace("\r\n", "\n")
+        let raw = raw.Replace("\r\n", "\n")
+        // Wrapping happens FIRST and for every cell shape: a declaration-first
+        // cell can still carry bare expressions after its declarations, and
+        // those need the same synthetic bindings an expression-only cell gets.
+        let (src, wraps) = wrapCellExpressions k raw
         if declRe.IsMatch (classifyTarget src) then
             match bindingName src with
             // A `// doc` line ahead of the keyword defeats bindingName exactly
             // as it does in the eval path: unnamed means unmatchable, so the
             // cell simply appends.
-            | None -> slots.Add { Cell = k; Text = src; Wrap = None }
+            | None -> slots.Add { Cell = k; Text = src; Wrap = wraps }
             | Some name ->
                 let idx = slots.FindIndex(fun s -> bindingName s.Text = Some name)
-                if idx < 0 then slots.Add { Cell = k; Text = src; Wrap = None }
+                if idx < 0 then slots.Add { Cell = k; Text = src; Wrap = wraps }
                 else
                     // A rebind, placed by DeclarationCandidate's rule: in place,
                     // unless the new text leans on a name bound LATER, in which
@@ -895,43 +1218,27 @@ let assembleCells (cells: string list) : string * Blade.Ide.CellWindow list =
                             // The removal shifted everything after `idx` down
                             // one, so inserting AT `j` lands immediately after
                             // the dependency.
-                            slots.Insert(j, { Cell = k; Text = src; Wrap = None })
+                            slots.Insert(j, { Cell = k; Text = src; Wrap = wraps })
                             j
                         | _ ->
-                            slots.[idx] <- { Cell = k; Text = src; Wrap = None }
+                            slots.[idx] <- { Cell = k; Text = src; Wrap = wraps }
                             idx
                     // The superseded cell still owes the client a window, and
                     // windows may not overlap: an empty slot directly above the
                     // winner gives it one blank line of its own, which no
                     // payload position can land inside.
-                    slots.Insert(at, { Cell = displaced; Text = ""; Wrap = None })
+                    slots.Insert(at, { Cell = displaced; Text = ""; Wrap = [] })
         else
-            // A reassignment or a bare expression. The file grammar admits only
-            // declarations at top level, so either would fail to PARSE here and
-            // poison the check for every other cell -- hence the same hidden
-            // binding the eval lanes wrap them in. Named per cell, so it is
-            // unique by construction and needs none of the in-use scan `it` and
-            // `__assign` require: those are committed to a live session, and
-            // this assembly commits nothing.
-            let lines = src.Split('\n')
-            // The wrapper goes on the first SIGNIFICANT line -- the same line
-            // `classifyTarget` classified on -- so a cell that opens with a
-            // comment still gets a parseable binding.
-            let significant =
-                lines
-                |> Array.tryFindIndex (fun l ->
-                    let t = l.TrimStart()
-                    t <> "" && not (t.StartsWith "//"))
-            match significant with
-            | Some li ->
-                let prefix = sprintf "let __cell%d = " k
-                let wrapped = Array.copy lines
-                wrapped.[li] <- prefix + wrapped.[li]
-                let text = String.concat "\n" wrapped
-                slots.Add { Cell = k; Text = text; Wrap = Some (li, prefix.Length) }
-            // Blank or comments only: there is no expression to wrap, and an
-            // unwrapped comment parses fine.
-            | None -> slots.Add { Cell = k; Text = src; Wrap = None })
+            // Nothing declaration-shaped opens this cell, so it appends: a
+            // reassignment, a bare expression, or several of either -- all of
+            // them already wrapped above. Blank or comments only lands here too
+            // and wraps nothing, which is right: an unwrapped comment parses.
+            //
+            // The wrappers are named per cell, so they are unique by
+            // construction and need none of the in-use scan `it` and `__assign`
+            // require: those are committed to a live session, and this assembly
+            // commits nothing.
+            slots.Add { Cell = k; Text = src; Wrap = wraps })
     let source = String.concat "\n" (slots |> Seq.map (fun s -> s.Text)) + "\n"
     // One walk converts each slot into the absolute range it occupies: the join
     // contributes exactly one newline between neighbours, so the next slot opens
@@ -943,11 +1250,18 @@ let assembleCells (cells: string list) : string * Blade.Ide.CellWindow list =
         // computed inside a closure, which cannot capture a mutable local.
         let startLine = line
         let endLine = startLine + lineCount s.Text - 1
+        // `CellWindow` carries ONE wrap pair, so a cell with several wrapped
+        // expressions reports its first. The client uses the pair to shift
+        // columns back on the wrapped line; a later wrapped line in the same
+        // cell therefore reads its columns un-shifted, which is a cosmetic
+        // offset -- and strictly better than the alternative this replaced,
+        // where the cell did not parse at all and the whole notebook's payload
+        // was one BL1999.
         let w : Blade.Ide.CellWindow =
             { StartLine = startLine
               EndLine = endLine
-              WrapLine = s.Wrap |> Option.map (fun (li, _) -> startLine + li)
-              WrapCol = s.Wrap |> Option.map snd }
+              WrapLine = s.Wrap |> List.tryHead |> Option.map (fun (li, _) -> startLine + li)
+              WrapCol = s.Wrap |> List.tryHead |> Option.map snd }
         byCell.[s.Cell] <- w
         line <- endLine + 1
     // Back into CELL order, one window each: every cell owns exactly one slot by
