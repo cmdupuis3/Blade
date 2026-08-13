@@ -8689,6 +8689,28 @@ let private funcStillPolymorphic (f: IRFuncDef) : bool =
 ///
 /// WHOLE-PROGRAM, because a binding in module A can be the only reference to a
 /// function defined in module B; per-module reachability would drop it.
+///
+/// UNAPPLIED-GENERIC BINDINGS ARE ROOTS THAT MUST NOT BE. Reachability starts at
+/// the module bindings, so a binding that merely NAMES a generic keeps it (and
+/// everything its body calls) alive with nothing to pin the type vars. A REPL or
+/// notebook cell containing the bare name of a generic kernel is exactly that
+/// shape -- the cell lowers to `let __exprN = covariance`, eta-expanded to a
+/// function VALUE -- and it sprayed 23 BL6001s naming `mean` and lifted lambdas,
+/// for a cell whose only sin was echoing a function.
+///
+/// Such a binding is itself unrepresentable and is dropped first, for the same
+/// reason the functions are: its C++ type cannot be written. Nothing downstream
+/// loses anything, because the CONCRETE twin of this cell already emits no
+/// output -- `let __exprN = plain` becomes a `std::function` local that is never
+/// printed, since a function value has no printed form. So the fix makes the
+/// generic behave exactly like the non-generic instead of inventing a
+/// presentation, and the type echo a REPL shows for such a cell comes from the
+/// type checker (which resolves it fine) and not from anything here.
+///
+/// A binding referenced by ANOTHER binding is kept regardless: consuming it
+/// would be an application, which pins the vars, and if that somehow did not
+/// happen the reference would dangle. Narrow on purpose -- the value must be a
+/// FUNCTION type that still carries an inference var.
 let eliminateDeadPolymorphs (program: IRProgram) : IRProgram =
     let allFuncs =
         program.Modules |> List.collect (fun m -> m.Functions)
@@ -8706,10 +8728,27 @@ let eliminateDeadPolymorphs (program: IRProgram) : IRProgram =
              | _ -> ())
             n) e |> ignore
         Set.ofSeq acc
+    // A function-typed binding that still carries an inference var: see the
+    // unapplied-generic note above. Kept anyway when some other binding names
+    // it, so a reference can never be left dangling.
+    let bindingIdsReferencedElsewhere =
+        program.Modules
+        |> List.collect (fun m -> m.Bindings)
+        |> List.map (fun b -> referencedIn b.Value)
+        |> List.fold Set.union Set.empty
+    let isUnappliedGenericBinding (b: IRBinding) =
+        match b.Type with
+        | FuncElem _ | IRTArrow _ ->
+            (containsInfer b.Type).IsSome
+            && not (Set.contains b.Id bindingIdsReferencedElsewhere)
+        | _ -> false
+    let liveBindingsOf (m: IRModule) =
+        m.Bindings |> List.filter (isUnappliedGenericBinding >> not)
+
     let mutable reachable : Set<IRId> = Set.empty
     let mutable frontier =
         program.Modules
-        |> List.collect (fun m -> m.Bindings |> List.map (fun b -> b.Value))
+        |> List.collect (fun m -> liveBindingsOf m |> List.map (fun b -> b.Value))
         |> List.map referencedIn
         |> List.fold Set.union Set.empty
         |> Set.toList
@@ -8727,6 +8766,7 @@ let eliminateDeadPolymorphs (program: IRProgram) : IRProgram =
             program.Modules
             |> List.map (fun m ->
                 { m with
+                    Bindings = liveBindingsOf m
                     Functions =
                         m.Functions
                         |> List.filter (fun f ->

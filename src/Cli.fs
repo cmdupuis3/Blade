@@ -1647,6 +1647,38 @@ let private runIdeEvalTests () : TH.BlockResult =
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
+        // 25. A cell containing only the NAME of a generic kernel. The cell
+        // lowers to a function-VALUE binding, which was a reachability root for
+        // dead-polymorph elimination -- so it kept the generic and everything
+        // its body calls alive with no call site to pin the type vars, and the
+        // cell came back with a spray of BL6001 "unresolved type variable"
+        // errors naming `mean` and two lifted lambdas. A cell that echoes a
+        // function must not be able to fail IR validation.
+        //
+        // What is pinned is the CONTRACT, not the spelling of the rendered
+        // type: the cell succeeds and carries NO diagnostics. The declaration
+        // cell before it pins the type echo the checker produces, which is what
+        // a client actually displays.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "from stats import mean"
+                    evalReq 2 "nb" "function covariance(a: T^1, b: T^1) where comm(a, b) = { (a - mean(a)) * (b - mean(b)) }"
+                    evalReq 3 "nb" "covariance"
+                    evalReq 4 "nb" "let after = 6"
+                    shutdownReq ]
+        let name = "a bare reference to an unapplied generic echoes without diagnostics"
+        match responses with
+        | [_; decl; bare; after] when code = 0
+                                      && decl.Contains "\"diagnostics\":[]"
+                                      && decl.Contains "{\"name\":\"covariance\",\"type\":\"(T^1, T^1) -> T^1\",\"value\":\"\"}"
+                                      && bare.Contains "\"exitCode\":0"
+                                      && bare.Contains "\"diagnostics\":[]"
+                                      && not (bare.Contains "BL6001")
+                                      // The session survives it: a later cell
+                                      // still evaluates against the same state.
+                                      && after.Contains "{\"name\":\"after\",\"type\":\"Int64\",\"value\":\"6\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
         try Directory.Delete(tmpDir, true) with _ -> ()
     finally
         Directory.SetCurrentDirectory entryDir

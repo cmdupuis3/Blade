@@ -1,0 +1,45 @@
+// TEST: A bare reference to an UNAPPLIED generic function
+// ============================================================================
+// The notebook/REPL cell that contains nothing but the name of a generic
+// kernel. Such a cell lowers to `let __exprN = covariance`, eta-expanded to a
+// function VALUE -- and that binding is a REACHABILITY ROOT for dead-polymorph
+// elimination, so it kept the generic (and everything the generic's body calls)
+// alive with no call site anywhere to pin the type vars. The result was a spray
+// of 23 BL6001 "unresolved type variable" errors naming `mean` and two lifted
+// lambdas, for a cell whose only sin was echoing a function.
+//
+// THE REFERENCE BEHAVIOUR IS THE CONCRETE TWIN, which is why this is a fix and
+// not a new feature: `plain` below is the same cell shape with no type vars in
+// it, and it has always compiled to a `std::function` local that is never
+// printed -- a function value has no printed form. The generic now does exactly
+// that too (the unrepresentable binding is dropped, and the functions it was
+// the only root for go with it) instead of failing validation. Nothing is
+// printed for either, which is the point: the TYPE echo a REPL shows for such a
+// cell comes from the type checker, which resolves both perfectly well, and
+// never from the emitted program.
+//
+// The two bare references below are the whole regression. Everything after them
+// exists to prove the drop is surgical: the SAME generic, and the same `mean`
+// it calls, must still specialize normally at a real call site in the same
+// program -- a fix that made the errors go away by dropping the generic outright
+// would pass the first half of this test and fail the second.
+// ============================================================================
+from stats import mean
+
+function covariance(a: T^1, b: T^1) where comm(a, b) = { (a - mean(a)) * (b - mean(b)) }
+function plain(x: Float64) -> Float64 = x * 2.0
+
+// The regression: a bare generic reference, and its concrete twin beside it.
+covariance
+plain
+
+// The generic still specializes at a real call site (values as loops/168).
+let B: Array<Float like Idx<3>, Idx<3>> = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 3.0, 5.0]]
+let cv = object_for(covariance) <@> (B, B) |> compute
+// EXPECT: cv = [1, 0, 1, 2, 0, 2, 2, 0, 2, 4, 0, 4, 4, 0, 4, 4, 0, 4]
+
+// ...and so does the imported generic the dropped binding had transitively kept alive.
+let m = mean([1.0, 2.0, 3.0])
+// EXPECT: m = 2
+let doubled = plain(21.0)
+// EXPECT: doubled = 42
