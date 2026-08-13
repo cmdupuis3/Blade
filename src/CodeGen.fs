@@ -8158,6 +8158,13 @@ let runtimeHeaderNames : string list =
       // bookkeeping stays uniform.
       "blade_memcheck.hpp" ]
 
+/// The shipped text of one runtime header, through the same per-process memo
+/// `deployRuntimeHeaders` uses -- so a consumer that only wants to *read* the
+/// header set (Build.fs's executable cache hashes all 13 into its key) pays no
+/// extra disk I/O beyond the one read the deploy already did. Same
+/// fail-loudly-on-missing contract as the deploy path.
+let runtimeHeaderText (filename: string) : string = readCppRuntimeHeader filename
+
 /// Deploy every C++ runtime header next to a generated .cpp so its `#include`s
 /// resolve at g++ time with no -I flag. These are pre-existing static files in
 /// cpp/, copied verbatim -- nothing is generated or transformed.
@@ -8173,16 +8180,37 @@ let runtimeHeaderNames : string list =
 /// This preserves the hand-edit workflow: a deployed header edited in place
 /// DIFFERS from the shipped one, so the next `blade run` overwrites it exactly
 /// as before -- "if changed" is a content test, not a timestamp test.
+///
+/// CONCURRENT WRITERS: two compiles sharing an output directory (parallel
+/// sweeps, two agents in one scratch dir) can collide on the same destination,
+/// and on Windows the loser gets a sharing violation. That is NOT a failure
+/// here: both processes deploy the SAME shipped bytes, so the only question is
+/// whether the file on disk ends up correct. Re-check the content after a
+/// failed write, retry briefly (the other writer's handle lives for
+/// microseconds), and surface the IO error only if the destination genuinely
+/// does not hold the header -- in which case the compile must not proceed to a
+/// g++ that would read a truncated include.
 let deployRuntimeHeaders (outputDir: string) : unit =
     runtimeHeaderNames
     |> List.iter (fun name ->
         let dest = System.IO.Path.Combine(outputDir, name)
         let text = readCppRuntimeHeader name
-        let alreadyDeployed =
+        let alreadyDeployed () =
             try System.IO.File.Exists dest && System.IO.File.ReadAllText dest = text
             with _ -> false
-        if not alreadyDeployed then
-            System.IO.File.WriteAllText(dest, text))
+        if not (alreadyDeployed ()) then
+            let rec attempt (retriesLeft: int) =
+                try
+                    System.IO.File.WriteAllText(dest, text)
+                with
+                // A concurrent writer got there first with identical bytes.
+                | _ when alreadyDeployed () -> ()
+                | _ when retriesLeft > 0 ->
+                    System.Threading.Thread.Sleep 10
+                    attempt (retriesLeft - 1)
+                // No rule matches when the retries are spent and the file is
+                // still wrong: F# re-raises, and the driver reports it.
+            attempt 5)
 
 /// Generate includes that reference external header
 let genIncludesExternal () : string list =
@@ -9549,9 +9577,10 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
     // No `auto <name> = <expr>;` fallback for a shape-bearing RHS (IRMask/
     // IRSort/IRVar/IRFieldAccess/IRIntersect/IRUnion) that resolves to
     // IRTUnit: those RHS shapes always resolve to a non-IRTUnit type by this
-    // point (both the codegen and IR-side struct-fields caches are
-    // AsyncLocal'd per task specifically so they can't race and return a
-    // stale IRTUnit). If a regression reaches this branch anyway, the
+    // point (there is ONE struct-fields cache -- IR.fs's AsyncLocal registry,
+    // which `setCodegenStructFieldsCache` merely forwards into -- and it is
+    // per-flow specifically so parallel tasks can't race and return a stale
+    // IRTUnit). If a regression reaches this branch anyway, the
     // expression-statement form below deliberately produces invalid C++
     // rather than papering over it with auto-deduction -- diagnose the
     // upstream resolution bug instead.

@@ -23,48 +23,90 @@ type ParseError = {
 type ParseResult<'T> = Result<'T * Token list, ParseError>
 
 // Parser-wide mutable state (per-parse)
+//
+// PER-THREAD, not per-process. These fields describe ONE token stream, and
+// several parses can be genuinely in flight at once: the corpus harness maps
+// tests with `Array.Parallel.mapi`, and under `BLADE_TEST_FSHARP_PARALLEL=1`
+// (tests/Runner.fs) the front end runs without the pipeline lock. Sharing them
+// was an observed crash, not a hypothesis -- `setEofFrom` publishes the token
+// COUNT and the two tables it describes as separate writes, so a concurrent
+// `consumedEnd` on another parse could clear the bounds guard against the new
+// count and then index the old, shorter `LastMeaning`:
+//
+//   System.IndexOutOfRangeException: Index was outside the bounds of the array.
+//      at Blade.Parser.consumedEnd ... at Blade.Parser.rangeSpan ...
+//
+// which `Array.Parallel.mapi` wrapped in an AggregateException and Cli.dispatch
+// rendered as `error[BL9001]: internal compiler error: One or more errors
+// occurred. (Index was outside the bounds of the array.)`, killing the whole
+// category run. Reproduced on `blade test loops`, ~1 run in 6. `Span.File`
+// (the `File` field) had the same shape with a quieter symptom: one parse could
+// stamp another's spans with its filename.
+//
+// Per-THREAD is exactly per-parse here: a parse runs synchronously from entry
+// to return (no async, no nested parallelism inside the parser), and each
+// harness test gets its own thread via Runtime.runOnLargeStack.
+//
+// `[<ThreadStatic>]` rather than the `AsyncLocal` the rest of the compiler uses
+// for per-flow channels: those are touched a handful of times per compile,
+// while this state is read at EVERY AST node (`rangeSpan` -> `consumedEnd`).
+// A thread-static field read is a couple of instructions; an AsyncLocal read is
+// a lookup in the execution context's value map, which would hand back the very
+// win these O(1) tables exist to deliver (docs/plan-compile-speed.md Stage 3).
+[<AllowNullLiteral>]
+type private ParseState() =
+    /// The source file currently being parsed. Set by parseMultiSource /
+    /// parseProgramWithFile before parsing each file and reset afterwards;
+    /// every span the parser constructs stamps this into Span.File.
+    member val File : string option = None with get, set
+    /// End position (line, col) of the input, used to report EOF errors at the
+    /// end of the last token instead of 0:0. Refreshed per file when tokenizing.
+    member val LastEnd : int * int = (0, 0) with get, set
+    /// Span tables for the token stream currently being parsed, rebuilt per
+    /// file by `setEofFrom`. Indexed by `Token.Index` (the LEXER's numbering,
+    /// which still counts the newlines `tokenizeWithNewlines` dropped -- absent
+    /// tokens simply never appear as "meaningful").
+    ///
+    ///   EndAt.[i]        end position (line, col) of the token with index i
+    ///   LastMeaning.[i]  index of the last non-terminator token with index < i,
+    ///                    or -1; length is IndexCount + 1, so entry
+    ///                    [IndexCount] answers "everything was consumed".
+    ///
+    /// They exist to make `consumedEnd` O(1): computing it from list lengths
+    /// cost O(tokens remaining) at every AST node, i.e. O(n^2) over a file.
+    member val EndAt : struct (int * int)[] = [||] with get, set
+    member val LastMeaning : int[] = [||] with get, set
+    member val IndexCount : int = 0 with get, set
+    /// Bare top-level expression statements are desugared to a let over a
+    /// synthesized name (see `parseDecl`); this numbers them so each name is
+    /// unique AND predictable enough to pin with `// EXPECT: __expr1 = ...`.
+    /// Reset by `setEofFrom`, which every module/file entry point calls exactly
+    /// once before consuming a token, so numbering restarts per module rather
+    /// than accumulating across the files of a multi-source program. Lives here
+    /// rather than in a module-level `let mutable` for the same reason as the
+    /// rest of this state: concurrent parses would otherwise interleave their
+    /// numbering and hand two files the same `__exprN`.
+    member val TopExprCounter : int = 0 with get, set
 
-/// The source file currently being parsed. Set by parseMultiSource /
-/// parseProgramWithFile before parsing each file and reset afterwards; every
-/// span the parser constructs stamps this into Span.File.
-let mutable private currentFile : string option = None
-
-/// End position (line, col) of the input, used to report EOF errors at the end
-/// of the last token instead of 0:0. Refreshed per file when tokenizing.
-let mutable private lastTokenEnd : int * int = (0, 0)
-
-/// Span tables for the token stream currently being parsed, rebuilt per file
-/// by `setEofFrom`. Indexed by `Token.Index` (the LEXER's numbering, which
-/// still counts the newlines `tokenizeWithNewlines` dropped -- absent tokens
-/// simply never appear as "meaningful").
-///
-///   tokEndAt.[i]        end position (line, col) of the token with index i
-///   tokLastMeaning.[i]  index of the last non-terminator token with index < i,
-///                       or -1; length is tokIndexCount + 1, so entry
-///                       [tokIndexCount] answers "everything was consumed".
-///
-/// They exist to make `consumedEnd` O(1): computing it from list lengths cost
-/// O(tokens remaining) at every AST node, i.e. O(n^2) over a file.
-let mutable private tokEndAt : struct (int * int)[] = [||]
-let mutable private tokLastMeaning : int[] = [||]
-let mutable private tokIndexCount : int = 0
-
-/// Bare top-level expression statements are desugared to a let over a
-/// synthesized name (see `parseDecl`); this numbers them so each name is
-/// unique AND predictable enough to pin with `// EXPECT: __expr1 = ...`.
-/// Reset by `setEofFrom`, which every module/file entry point calls exactly
-/// once before consuming a token, so numbering restarts per module rather
-/// than accumulating across the files of a multi-source program.
-let mutable private topExprCounter = 0
+/// This thread's `ParseState`, created on first touch. A thread that never
+/// parses never allocates one.
+[<AbstractClass; Sealed>]
+type private PS =
+    [<System.ThreadStatic; DefaultValue>]
+    static val mutable private cur : ParseState
+    static member Cur : ParseState =
+        if isNull PS.cur then PS.cur <- ParseState()
+        PS.cur
 
 let private setEofFrom (tokens: Token list) =
-    topExprCounter <- 0
+    let st = PS.Cur
+    st.TopExprCounter <- 0
     match List.tryLast tokens with
-    | Some t -> lastTokenEnd <- (t.EndLine, t.EndCol)
-    | None -> lastTokenEnd <- (0, 0)
+    | Some t -> st.LastEnd <- (t.EndLine, t.EndCol)
+    | None -> st.LastEnd <- (0, 0)
     // Rebuild the span tables for exactly the list the parser will consume.
     let n = match List.tryLast tokens with Some t -> t.Index + 1 | None -> 0
-    tokIndexCount <- n
+    st.IndexCount <- n
     let ends : struct (int * int)[] = Array.zeroCreate n
     let meaningful : bool[] = Array.zeroCreate n
     for t in tokens do
@@ -75,8 +117,8 @@ let private setEofFrom (tokens: Token list) =
     last.[0] <- -1
     for i in 0 .. n - 1 do
         last.[i + 1] <- (if meaningful.[i] then i else last.[i])
-    tokEndAt <- ends
-    tokLastMeaning <- last
+    st.EndAt <- ends
+    st.LastMeaning <- last
 
 // Basic Combinators
 
@@ -104,7 +146,7 @@ let diagnosticOfParseError (file: string option) (e: ParseError) : Blade.Diagnos
 
 /// Unexpected-EOF error (BL1002) reported at the end of the last token.
 let errorEof msg : ParseResult<'T> =
-    let (l, c) = lastTokenEnd
+    let (l, c) = PS.Cur.LastEnd
     Error { Message = msg; Line = l; Col = c; EndLine = l; EndCol = c; Code = "BL1002" }
 
 /// Human-readable rendering of a token kind for error messages, e.g.
@@ -151,7 +193,7 @@ let describeToken (kind: TokenKind) : string =
 let currentPos (tokens: Token list) =
     match tokens with
     | t :: _ -> t.Line, t.Col
-    | [] -> lastTokenEnd
+    | [] -> PS.Cur.LastEnd
 
 /// End position (line, col) of the last meaningful (non-terminator) token
 /// consumed advancing from `before` to `after` (`after` must be a suffix of
@@ -181,22 +223,23 @@ let consumedEnd (before: Token list) (after: Token list) (fallbackLine: int) (fa
     match before with
     | [] -> (fallbackLine, fallbackCol)   // nothing to consume: n <= 0
     | b :: _ ->
+        let st = PS.Cur
         let bi = b.Index
         // Everything consumed (`after` empty) reads as "one past the last token".
-        let ai = match after with a :: _ -> a.Index | [] -> tokIndexCount
-        if bi < 0 || bi >= tokIndexCount || ai < 0 || ai > tokIndexCount then
+        let ai = match after with a :: _ -> a.Index | [] -> st.IndexCount
+        if bi < 0 || bi >= st.IndexCount || ai < 0 || ai > st.IndexCount then
             consumedEndSlow before after fallbackLine fallbackCol
         elif ai <= bi then (fallbackLine, fallbackCol)
         else
-            let j = tokLastMeaning.[ai]
+            let j = st.LastMeaning.[ai]
             if j >= bi then
-                let struct (l, c) = tokEndAt.[j]
+                let struct (l, c) = st.EndAt.[j]
                 (l, c)
             else (fallbackLine, fallbackCol)
 
 /// Build a Span from a single token, stamped with the current file.
 let spanOfToken (t: Token) : Span =
-    { StartLine = t.Line; StartCol = t.Col; EndLine = t.EndLine; EndCol = t.EndCol; File = currentFile }
+    { StartLine = t.Line; StartCol = t.Col; EndLine = t.EndLine; EndCol = t.EndCol; File = PS.Cur.File }
 
 /// Span of the head token of `tokens` (single-token productions: ExprVar,
 /// ExprLit, PatVar, keyword atoms). noSpan when the list is empty (unreachable
@@ -212,7 +255,7 @@ let private headSpan (tokens: Token list) : Span =
 let private rangeSpan (startToks: Token list) (remaining: Token list) : Span =
     let sL, sC = currentPos startToks
     let eL, eC = consumedEnd startToks remaining sL sC
-    { StartLine = sL; StartCol = sC; EndLine = eL; EndCol = eC; File = currentFile }
+    { StartLine = sL; StartCol = sC; EndLine = eL; EndCol = eC; File = PS.Cur.File }
 
 /// Build an Expr whose span covers the production from `startToks` to `remaining`.
 let private mkE (startToks: Token list) (remaining: Token list) (kind: ExprKind) : Expr =
@@ -231,7 +274,7 @@ let expectedError (expected: TokenKind) (tokens: Token list) : ParseResult<'T> =
     | t :: _ when t.Kind = TokEOF -> errorFull "BL1002" (msg TokEOF) t.Line t.Col t.EndLine t.EndCol
     | t :: _ -> errorFull "BL1001" (msg t.Kind) t.Line t.Col t.EndLine t.EndCol
     | [] ->
-        let (l, c) = lastTokenEnd
+        let (l, c) = PS.Cur.LastEnd
         errorFull "BL1002" (msg TokEOF) l c l c
 
 let peek (tokens: Token list) =
@@ -1815,7 +1858,7 @@ and parseBracelessBinders (tokens: Token list) : ParseResult<Expr> option =
         let spanned (remaining: Token list) (stmt: Stmt) =
             let (eLine, eCol) = consumedEnd toks remaining sLine sCol
             StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol
-                                 EndLine = eLine; EndCol = eCol; File = currentFile })
+                                 EndLine = eLine; EndCol = eCol; File = PS.Cur.File })
         // Rule 2. Checked before dispatch, so it fences the value expression
         // exactly as it fences a binder.
         if sCol < baseCol then (if List.isEmpty stmts then None else noValue ())
@@ -3026,7 +3069,7 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
         let sLine, sCol = currentPos toks
         let spanned (remaining: Token list) (stmt: Stmt) =
             let eLine, eCol = consumedEnd toks remaining sLine sCol
-            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = eLine; EndCol = eCol; File = currentFile })
+            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = eLine; EndCol = eCol; File = PS.Cur.File })
         match peek toks with
         | Some TokRBrace ->
             // Last expression (if any) is the block's return value. stmts is
@@ -3805,8 +3848,9 @@ let parseDecl (tokens: Token list) : ParseResult<Decl> =
             error (sprintf "Expected declaration but got %s" (describeToken kind)) line col
         match parseExprImpl tokens with
         | Ok (expr, remaining) ->
-            topExprCounter <- topExprCounter + 1
-            let name = sprintf "__expr%d" topExprCounter
+            let st = PS.Cur
+            st.TopExprCounter <- st.TopExprCounter + 1
+            let name = sprintf "__expr%d" st.TopExprCounter
             success (DeclLet { Mutability = BindLet
                                Pattern = mkPat (headSpan tokens) (PatVar name)
                                Type = None
@@ -3865,7 +3909,7 @@ let parseModuleRecovering (tokens: Token list) : (ModuleDecl * ParseError list) 
             | Ok (decl, remaining) ->
                 let (endLine, endCol) = consumedEnd toks remaining startLine startCol
                 let span = { StartLine = startLine; StartCol = startCol
-                             EndLine = endLine; EndCol = endCol; File = currentFile }
+                             EndLine = endLine; EndCol = endCol; File = PS.Cur.File }
                 let located = { Value = decl; Span = span }
                 decls <- located :: decls
                 toks <- remaining
@@ -3899,7 +3943,7 @@ let parseModule (tokens: Token list) : ParseResult<ModuleDecl> =
             parseDecl toks >>= fun decl remaining ->
             let (endLine, endCol) = consumedEnd toks remaining startLine startCol
             let span = { StartLine = startLine; StartCol = startCol
-                         EndLine = endLine; EndCol = endCol; File = currentFile }
+                         EndLine = endLine; EndCol = endCol; File = PS.Cur.File }
             let located = { Value = decl; Span = span }
             loop (located :: decls) remaining
     
@@ -3912,7 +3956,7 @@ let parseModule (tokens: Token list) : ParseResult<ModuleDecl> =
 
 /// Parse a single source, stamping the given file into every span it builds.
 let parseProgramWithFile (file: string option) (source: string) : Result<Program, ParseError> =
-    currentFile <- file
+    PS.Cur.File <- file
     try
         let tokens = tokenizeWithNewlines source
         setEofFrom tokens
@@ -3920,7 +3964,7 @@ let parseProgramWithFile (file: string option) (source: string) : Result<Program
         | Ok (modul, _) -> Ok { Modules = [modul] }
         | Error e -> Error e
     finally
-        currentFile <- None
+        PS.Cur.File <- None
 
 /// Backward-compatible entry point: parse a single anonymous source (File=None).
 let parseProgram (source: string) : Result<Program, ParseError> =
@@ -3932,10 +3976,10 @@ let parseProgram (source: string) : Result<Program, ParseError> =
 let parseMultiSource (sources: (string * string) list) : Result<Program, ParseError> =
     let rec go acc remaining =
         match remaining with
-        | [] -> currentFile <- None; Ok { Modules = List.rev acc }
+        | [] -> PS.Cur.File <- None; Ok { Modules = List.rev acc }
         | (fileName, source) :: rest ->
             // Stamp this file into every span the parser builds for it.
-            currentFile <- (if fileName <> "" then Some fileName else None)
+            PS.Cur.File <- (if fileName <> "" then Some fileName else None)
             let tokens = tokenizeWithNewlines source
             setEofFrom tokens
             match parseModule tokens with
@@ -3947,7 +3991,7 @@ let parseMultiSource (sources: (string * string) list) : Result<Program, ParseEr
                     else modul
                 go (modul' :: acc) rest
             | Error e ->
-                currentFile <- None
+                PS.Cur.File <- None
                 Error { e with Message = sprintf "[%s] %s" fileName e.Message }
     go [] sources
 
