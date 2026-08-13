@@ -29,9 +29,9 @@ Unit time: day
 Unit frequency: 1 / day
 
 // The segment count is compile-time: the cell axis carries an index type and
-// `halo` needs its extent. `n_seg` is the single source of truth.
-let static n_seg = 10
-type CellIdx = Idx<n_seg + 1>
+// `halo` needs its extent. `n_segments` is the single source of truth.
+let static n_segments = 10
+type CellIdx = Idx<n_segments + 1>
 
 /// The sums accumulated per (cell, frequency), named rather than positional:
 /// `u` is the tapered signal, `c` and `s` are cos(wt) and sin(wt). The IDs
@@ -58,9 +58,12 @@ function variance(x: T^1) = {
 /// Hamming-family taper (alpha = 0.53836) for the whole series at once: the
 /// span is 2h for every segment and the cosine takes absolute time, so this
 /// is a function of t alone. Per-segment normalization is the caller's.
+/// One kernel, not the lifted `alpha - beta * cos(two_pi * ts / seg_span)`:
+/// that spelling is five broadcast passes over the series where this is one.
 function segment_taper(ts: T<time>^1, seg_span: T<time>) = {
     let alpha = 0.53836
-    (ts <@> lambda(t) -> alpha - (1.0 - alpha) * cos(two_pi * t / seg_span)) |> compute
+    let beta = 1.0 - alpha
+    (ts <@> lambda(t) -> alpha - beta * cos(two_pi * t / seg_span)) |> compute
 }
 
 /// WOSA: overlapped segments as one sliding window over half-width cells,
@@ -82,7 +85,6 @@ where omp(st: 1) = {
 
     let s_var = variance(s_raw)
     let n_samples = extents(s_raw)
-    let n_segments = 1.0 * n_seg
 
     // Quantities are terminal, so these derived values are structurally
     // dimensioned; assert once per binding, where the value is named.
@@ -102,7 +104,8 @@ where omp(st: 1) = {
     let keys = (ts <@> lambda(t) ->
         if t >= 0.0 && t <= hi then {
             let k = floor(t / h)
-            if k > n_segments then n_segments else k
+            let kmax = 1.0 * n_segments
+            if k > kmax then kmax else k
         } else 0.0 - 1.0) |> compute
     let gk  = group_keys(keys)
     let gt  = group_by(ts, gk)
@@ -136,7 +139,7 @@ where omp(st: 1) = {
         // a sum over its samples -- so each is the two cells' sums added.
         // (`cellacc(win(0)) + cellacc(win(1))` adds the whole rows in one
         // line, but materializes a row per window and measured ~4% slower.)
-        let segv: Array<Float64 like Idx<n_seg>, Est> =
+        let segv: Array<Float64 like Idx<n_segments>, Est> =
             method_for(halo<CellIdx, [0, 1]>) <@> lambda(win) -> {
                 let s_uc = cellacc(win(0), "u_c") + cellacc(win(1), "u_c")
                 let s_us = cellacc(win(0), "u_s") + cellacc(win(1), "u_s")
@@ -178,13 +181,13 @@ where omp(st: 1) = {
                 atan2(acc("sin_arg") / n_segments, acc("cos_arg") / n_segments))
     } |> compute
 
-    let mod_avg = (spec <@> lambda(z) -> real(z)) |> compute
-    let arg_avg = (spec <@> lambda(z) -> imag(z)) |> compute
+    let mod_avg = real(spec)
+    let arg_avg = imag(spec)
 
     // Welch normalization, verbatim from the reference.
     let nsegs = 2.0 * n_samples / (n_segments + 1.0)
     let df = reduce(freqs, (+)) / nsegs
     let factors = 2.0 / (n_segments * nsegs * df) * (s_var / (df * reduce(mod_avg, (+))))
 
-    complex(cos <@> arg_avg |> compute, sin <@> arg_avg |> compute) * mod_avg * factors
+    complex(cos(arg_avg), sin(arg_avg)) * mod_avg * factors
 }

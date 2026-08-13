@@ -1,0 +1,48 @@
+// TEST: Chained Map Materializes Its Intermediate
+// ============================================================================
+// `(A <@> f) <@> g` -- the pipeline shape, a map whose OPERAND is another map.
+// The inner map is an apply-combinator sitting in the outer one's `Arrays`
+// slot, which the lift pass treated as a blessed position on the assumption
+// that codegen's auto-materialize covers it. That arm knows only the inline
+// mask/intersect/union/unique forms, so the inner map fell through to the
+// `arr<i>` placeholder and the outer nest read an intermediate that was never
+// emitted:
+//
+//     error: 'arr0' was not declared in this scope
+//
+// It failed for ANY inner kernel, lambda or operator section alike -- the
+// fourth instance of the same blessed-position gap as 034 (array literal) and
+// the recursive-array bounds select. Hoisting the inner map to its own let-RHS
+// is exactly what splitting the chain into two `let`s by hand already does,
+// which is the tell for this whole family.
+//
+// Only INLINE forms hoist: a deferred map reaches a consuming slot as an
+// IRVar pointing at its binding, so <&!>'s shared-traversal repointing -- which
+// depends on deferred operands NOT being materialized -- is untouched.
+// ============================================================================
+let A: Array<Float64 like Idx<4>> = [0.0, 1.0, 2.0, 3.0]
+let w = 2.0
+
+// The shape that emitted an undeclared `arr0`, with a lambda inner kernel.
+let chained_lambda = ((A <@> lambda(t) -> w * t) <@> cos) |> compute
+// EXPECT: chained_lambda = [1, -0.416146836547142, -0.653643620863612, 0.960170286650366]
+
+// Same chain with a partially-applied operator section as the inner kernel.
+// Sections are first-class values and partial application already worked; it
+// was the chaining that did not.
+let chained_section = ((A <@> (*)(w)) <@> cos) |> compute
+// EXPECT: chained_section = [1, -0.416146836547142, -0.653643620863612, 0.960170286650366]
+
+// Unparenthesized: `<@>` chains left to right, so this is the same expression.
+let chained_bare = (A <@> (*)(w) <@> cos) |> compute
+// EXPECT: chained_bare = [1, -0.416146836547142, -0.653643620863612, 0.960170286650366]
+
+// The hand-split spelling the chain must agree with -- the workaround that
+// always worked, and the definition of what hoisting the intermediate means.
+let scaled = (A <@> (*)(w)) |> compute
+let split = (scaled <@> cos) |> compute
+// EXPECT: split = [1, -0.416146836547142, -0.653643620863612, 0.960170286650366]
+
+// Three levels: the hoisted intermediate must itself be hoistable.
+let three = ((A <@> (*)(w)) <@> cos <@> lambda(x) -> x + 1.0) |> compute
+// EXPECT: three = [2, 0.583853163452858, 0.346356379136388, 1.96017028665037]

@@ -1,0 +1,14 @@
+// TEST: Intrinsics Array Element Class (rejects)
+// ERROR: BL3007
+// ============================================================================
+// Lifting an intrinsic over an array (006) widened WHERE it applies, not WHAT
+// it applies to. The element class is still judged, and judged HERE rather
+// than one hop later inside the synthesized map, so the message still names
+// the intrinsic against the operand the user wrote.
+//
+// `floor` has no complex overload, so an array of complex elements is refused
+// exactly as a complex scalar is (016 pins the kernel-position twin). If this
+// ever starts compiling, it reaches codegen as std::floor(complex).
+// ============================================================================
+let Z: Array<Complex128 like Idx<2>> = [complex(1.0, 1.0), complex(2.0, 0.0)]
+let bad = floor(Z)

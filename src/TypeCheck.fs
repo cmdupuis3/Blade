@@ -4479,8 +4479,35 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [arg]) when isMathIntrinsic name && (lookupVar name env).IsNone ->
         inferExpr env arg |> Result.bind (fun tArg ->
             match env.Subst.Resolve tArg.Type with
-            | ArrayElem _ ->
-                Error (IntrinsicScalarOnly name)
+            | ArrayElem arr ->
+                // ARRAY operand: lift elementwise. `cos(A)` / `A |> cos`
+                // (same ExprApp after the pipe desugar) re-synthesizes as
+                // `(method_for(A) <@> cos) |> compute` -- the kernel-position
+                // spelling that already exists -- and re-infers, exactly like
+                // the array/scalar broadcast arm for operators. EAGER like
+                // that arm too: a call is a value everywhere else, and
+                // `A + B` materializes, so `cos(A)` must not hand back a
+                // deferred loop. The deferred spelling stays `cos <@> A`.
+                //
+                // Element-CLASS errors are judged here, where the message can
+                // name the intrinsic against the array (the synthesized map
+                // would report the same facts, one hop removed): floor/ceil
+                // and friends still refuse complex ELEMENTS, and bool/string
+                // elements are not numbers. An unresolved element type falls
+                // through to the synthesis -- apply-site unification inside
+                // the map resolves it the same way it does for `cos <@> A`.
+                (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+                 | IRTScalar (ETComplex64 | ETComplex128) when not (isComplexMathIntrinsic name) ->
+                     Error (IntrinsicNotComplex name)
+                 | IRTScalar ETBool | IRTScalar ETString ->
+                     Error (IntrinsicNeedsNumeric name)
+                 | _ ->
+                     let sp = arg.Span
+                     let synth =
+                         mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
+                             mkExpr sp (ExprMethodFor [arg]),
+                             mkExpr sp (ExprVar name)))))
+                     inferExpr env synth)
             | IRTScalar (ETComplex64 | ETComplex128) ->
                 // exp/log/sqrt and the trig/hyperbolic families have std::complex
                 // overloads and preserve the complex type; floor/ceil have no
@@ -4578,6 +4605,22 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // abs preserves the operand's unit annotation -- a unitful
                 // scalar is a perfectly good abs operand.
                 Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) t)
+            | ArrayElem arr ->
+                // ARRAY operand: lift elementwise, same rule as the math
+                // intrinsics and complex accessors above. The element class is
+                // judged here so the message still names abs; anything abs
+                // accepts as a scalar, it accepts as an element.
+                (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+                 | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128)
+                 | IRTInfer _ ->
+                     let sp = arg.Span
+                     let synth =
+                         mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
+                             mkExpr sp (ExprMethodFor [arg]),
+                             mkExpr sp (ExprVar "abs")))))
+                     inferExpr env synth
+                 | other ->
+                     Error (AbsNeedsNumericScalar (sprintf "an array of %s elements" (ppIRType other))))
             | other ->
                 Error (AbsNeedsNumericScalar (ppIRType other)))
 
@@ -4608,8 +4651,26 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // kernel re-stamp corrects the Complex64 width (-> Float32
                 // components).
                 Ok (mkTyped (TExprUnaryOp (op, tArg)) (IRTScalar ETFloat64))
-            | ArrayElem _ ->
-                Error (IntrinsicComplexScalarOnly name)
+            | ArrayElem arr ->
+                // COMPLEX array operand: lift elementwise, same synthesis and
+                // same eagerness as the math-intrinsic arm above -- `real(Z)`
+                // / `Z |> real` become `(method_for(Z) <@> real) |> compute`.
+                // A REAL-elements array keeps the scalar arm's steer: real()
+                // of a real value is the identity and a likely mistake, and
+                // that judgment does not change because there are many of
+                // them. Unresolved elements defer into the synthesis, where
+                // apply-site unification settles them as it does for
+                // `real <@> Z`.
+                (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+                 | IRTScalar (ETComplex64 | ETComplex128) | IRTInfer _ ->
+                     let sp = arg.Span
+                     let synth =
+                         mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
+                             mkExpr sp (ExprMethodFor [arg]),
+                             mkExpr sp (ExprVar name)))))
+                     inferExpr env synth
+                 | other ->
+                     Error (IntrinsicNeedsComplex (name, sprintf "an array of %s elements" (ppIRType other))))
             | other ->
                 Error (IntrinsicNeedsComplex (name, ppIRType other)))
 

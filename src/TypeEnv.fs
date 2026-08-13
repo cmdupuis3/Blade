@@ -580,7 +580,6 @@ class IS implemented, and the dense result folds like any other array." op level
         sprintf "call to '%s': argument %d has no quantity tag but appears AFTER a quantity-tagged argument, so its slot would be a guess. Positional (untagged) arguments must come first, in declared order; tag the stragglers (`v : quantity`) or reorder the call." callee pos
     | IntrinsicBindArrayFailed op -> sprintf "%s(): failed to bind array type after unification" op
     | IntrinsicNeedsArray op -> sprintf "%s() requires an array as argument" op
-    | IntrinsicScalarOnly name -> sprintf "%s applies to scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(x) -> %s(x) |> compute)." name name
     | IntrinsicNotComplex name -> sprintf "%s is not defined for complex operands." name
     | IntrinsicNeedsNumeric name -> sprintf "%s expects a numeric operand." name
     | AbsNeedsNumericScalar got -> sprintf "abs expects a numeric scalar operand, got %s" got
@@ -734,7 +733,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | FactoryDupQuantityDecl _ -> "BL3013"
             | FactoryDupFill _ | FactoryUnknownTag _ | FactoryAmbiguousMix _ -> "BL3014"
             | UnknownUnitName _ -> "BL3015"
-            | IntrinsicBindArrayFailed _ | IntrinsicNeedsArray _ | IntrinsicScalarOnly _
+            | IntrinsicBindArrayFailed _ | IntrinsicNeedsArray _
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
             | ReduceEmptyArray _ | ProdsumExtentMismatch _ | GramNeedsRank2 _

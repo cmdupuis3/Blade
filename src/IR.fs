@@ -6236,6 +6236,27 @@ let private isArrayValuedSelect (e: IRExpr) : bool =
         | _ -> false
     | _ -> false
 
+/// A LOOP FORM sitting directly in another loop form's `Arrays` list -- the
+/// fourth instance of the same gap as `isArrayValuedSelect`. A CHAINED MAP
+/// (`(A <@> f) <@> g`, the pipeline shape) lowers to exactly this: the inner
+/// `<@>` is an apply-combinator occupying the outer one's array slot. Codegen's
+/// auto-materialize knows only the blessed mask/intersect/union/unique forms, so
+/// the inner map fell through to the `arr<i>` placeholder -- the outer nest then
+/// read `arr0` for an intermediate that was never emitted, for ANY inner kernel
+/// (lambda or operator section alike).
+///
+/// Hoisting it to its own let-RHS materializes the intermediate, which is
+/// precisely what splitting the chain into two `let`s by hand already does.
+///
+/// Only INLINE forms are caught. A deferred map reaches a consuming slot as an
+/// `IRVar` pointing at its let-binding, so the fusion paths that depend on
+/// deferred operands staying unmaterialized -- `<&!>`'s shared-traversal
+/// repointing above all -- never see this predicate.
+let private isNestedLoopFormArg (e: IRExpr) : bool =
+    match e with
+    | IRApplyCombinator _ | IRComposeApply _ -> true
+    | _ -> false
+
 /// Peel any IRLet chain that descendant lifts produced.
 /// When a sub-expression's lift wraps it in `IRLet(id, v, IRLet(...,inner))`,
 /// the chain shouldn't be visible to the parent context (e.g., an outer
@@ -6720,7 +6741,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
                 if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
-                   || isArrayValuedSelect inner then
+                   || isArrayValuedSelect inner || isNestedLoopFormArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -6737,7 +6758,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
                 if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
-                   || isArrayValuedSelect inner then
+                   || isArrayValuedSelect inner || isNestedLoopFormArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -6754,7 +6775,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
                 if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
-                   || isArrayValuedSelect inner then
+                   || isArrayValuedSelect inner || isNestedLoopFormArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])

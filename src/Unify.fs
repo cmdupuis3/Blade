@@ -180,7 +180,6 @@ type TypeError =
     // Invalid builtin/intrinsic argument (BL3007)
     | IntrinsicBindArrayFailed of op: string
     | IntrinsicNeedsArray of op: string
-    | IntrinsicScalarOnly of name: string
     | IntrinsicNotComplex of name: string
     | IntrinsicNeedsNumeric of name: string
     | AbsNeedsNumericScalar of got: string
