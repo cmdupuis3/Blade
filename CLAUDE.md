@@ -140,7 +140,7 @@ multi-file programs.
 ```blade
 let static n = 4                 // compile-time, immutable everywhere
 let x = 1                        // reassignable in its OWN scope only
-let mut y = 2                    // also passable to a `mut` parameter (caller-visible mutation)
+let mut y = 2                    // reassignable; `mut` params are ARRAY-only (element writes alias the caller; scalars: return instead, BL4005)
 
 function add1(array: T^2) -> T^2 = { array + 1 }
 

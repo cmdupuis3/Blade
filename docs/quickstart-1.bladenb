@@ -137,13 +137,15 @@ function add1(array: T^2) -> T^2 = {
 }
 // %% [markdown]
 // Scoping and mutability work intuitively; a caller's variable can only be
-// modified if the parameter is marked `mut`:
+// modified if the parameter is marked `mut`. `mut` parameters are array-only
+// and mutate through element writes (a scalar result is simply returned):
 // %%
-let mut a = 2
-function tryToChange(a: mut T^0) = {
-    a = a + 10
+let mut a = [1.0, 2.0, 3.0]
+function tryToChange(xs: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    xs(0) = xs(0) + 10.0
+    xs(0)
 }
-tryToChange(a)
+let changed = tryToChange(a)
 a
 // %% [markdown]
 // The opposite end is `let static` (a compile-time value, immutable
@@ -153,7 +155,7 @@ a
 //
 // Anonymous functions use `lambda`:
 // %%
-function myFunc = lambda(x: Float) -> x + 10
+let myFunc = lambda(x: Float) -> x + 10
 // %% [markdown]
 // ## 5. Structure-First Math
 //
@@ -350,6 +352,8 @@ cov <@> (A, A)
 // ## 9. Kernel Functions
 //
 // How does the compiler know commutativity is available? `where` clauses:
+// %%
+from stats import mean
 // %%
 function covariance(a: T^1, b: T^1)
 where comm(a, b) = {
