@@ -235,6 +235,22 @@ type TypeEnv = {
     /// gives only PBottom. Keyed by BINDER ID (`FuncId`), not name (a
     /// shadowing local can't borrow the law); DECL ORDER resolution (self/forward -> SUnknown) needs no fixpoint. Shared by reference.
     FuncSignParities: System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>
+    /// Binder IDs of every NAMED function declaration (`function f`, static or
+    /// not, including the static pre-pass registration and any imported
+    /// module's functions -- the set is shared by reference across the whole
+    /// program, like Warnings).
+    ///
+    /// The one consumer is `buildCaptures`: a named function lowers to an
+    /// IRCallable emitted at C++ GLOBAL scope, so a lambda body that calls one
+    /// never needs it on the capture list -- the body already emits the
+    /// callable's own (possibly monomorphized) name. Left on the list it
+    /// becomes a dead parameter that the call site still forwards by SOURCE
+    /// name, which is not a C++ declaration whenever the callee was
+    /// monomorphized: `'scale' was not declared in this scope`.
+    ///
+    /// Keyed by BINDER ID, not name, so a local that SHADOWS a function name
+    /// still captures (its VarId is a different binder).
+    DeclaredFuncIds: System.Collections.Generic.HashSet<IRId>
     /// CERTIFIED half of the typed equivariance lattice (FuncRepSpec below is
     /// the speculative half): per-function rep signatures for functions
     /// carrying an `__ml_equiv` conjunct (a source `where ml.equiv(G)` pin, or
@@ -327,6 +343,7 @@ let emptyEnv () = {
     FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
     FuncSignParities = System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>()
+    DeclaredFuncIds = System.Collections.Generic.HashSet<IRId>()
     FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()

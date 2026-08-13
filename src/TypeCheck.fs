@@ -1726,12 +1726,24 @@ and patternNames (pat: Pattern) : string list =
     | PatternKind.PatTyped (p, _) -> patternNames p
 
 /// Build TypedVarInfo capture list from free variable names.
+///
+/// Two names are dropped: one that resolves to no binding at all (over-reporting
+/// by `collectFreeVars` is deliberately safe), and one that resolves to a NAMED
+/// function declaration. The latter lowers to an IRCallable at C++ global scope,
+/// so the lambda body already emits its own -- possibly monomorphized -- name;
+/// capturing it only mints a dead parameter that every call site then forwards
+/// by SOURCE name, which no longer denotes anything once the callee is
+/// monomorphized. One level of nesting hid this (the lambda is inlined into its
+/// loop and the dead parameter goes with it); two levels made the outer lambda a
+/// real call and the forwarded name a hard C++ error.
 let buildCaptures (env: TypeEnv) (freeVars: Set<string>) : TypedVarInfo list =
     freeVars |> Set.toList |> List.choose (fun name ->
         let info = match Map.tryFind name env.OuterScope with
                    | Some i -> Some i
                    | None -> Map.tryFind name env.Variables
-        info |> Option.map (fun i ->
+        info
+        |> Option.filter (fun i -> not (env.DeclaredFuncIds.Contains i.VarId))
+        |> Option.map (fun i ->
             { Name = name; Type = i.Type; Identity = i.Identity
               IsMutable = (i.Assign <> ReadOnly); VarId = i.VarId }))
 
@@ -4508,14 +4520,39 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                              mkExpr sp (ExprMethodFor [arg]),
                              mkExpr sp (ExprVar name)))))
                      inferExpr env synth)
-            | IRTScalar (ETComplex64 | ETComplex128) ->
+            | resolvedArg when (match IR.stripUnits resolvedArg with
+                                | IRTScalar (ETComplex64 | ETComplex128) -> true
+                                | _ -> false) ->
                 // exp/log/sqrt and the trig/hyperbolic families have std::complex
                 // overloads and preserve the complex type; floor/ceil have no
                 // complex overload and stay rejected.
-                if isComplexMathIntrinsic name then
-                    Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
-                else
+                //
+                // Classified on the STRIPPED base, because a complex operand
+                // routinely arrives UNIT-ANNOTATED: `exp(i * w * t_zero)` over
+                // `w : 1/day`, `t_zero : day` types as `Complex128<...>`, which
+                // a bare `IRTScalar` pattern does not match. That fell through
+                // to the general arm below, which hardcodes a Float64 RESULT --
+                // so the whole expression went real and a later `real(z)` was
+                // rejected with BL3007 pointing at the accessor rather than at
+                // the exp. Same table as the real path decides the signature;
+                // only the WIDTH comes from the operand.
+                if not (isComplexMathIntrinsic name) then
                     Error (IntrinsicNotComplex name)
+                elif env.InLambdaBody && typedExprHasProvisionalUnits env tArg then
+                    // Provisional annotation inside a lambda body: defer the
+                    // unit judgement to buildApplyInfo's kernelBodyUnits, for
+                    // the reason the real-operand arm below spells out. Deferring
+                    // means dropping the SIGNATURE, never the complex width.
+                    Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IR.stripUnits resolvedArg))
+                else
+                    unitRulesForUnaryOp (OpMath name) (IR.getUnits resolvedArg)
+                    |> Result.map (fun resUnits ->
+                        let baseTy = IR.stripUnits resolvedArg
+                        let resTy =
+                            match resUnits with
+                            | Some u -> IRTUnitAnnotated (baseTy, u)
+                            | None -> baseTy
+                        mkTyped (TExprUnaryOp (OpMath name, tArg)) resTy)
             | IRTScalar ETBool | IRTScalar ETString ->
                 Error (IntrinsicNeedsNumeric name)
             | IRTInfer _ when isComplexMathIntrinsic name ->
@@ -4638,11 +4675,30 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                      | "imag" -> OpImag
                      | _ -> OpArg
             match env.Subst.Resolve tArg.Type with
-            | IRTScalar ETComplex64 ->
-                let resTy = if name = "arg" then IRTScalar ETFloat64 else IRTScalar ETFloat32
-                Ok (mkTyped (TExprUnaryOp (op, tArg)) resTy)
-            | IRTScalar ETComplex128 ->
-                Ok (mkTyped (TExprUnaryOp (op, tArg)) (IRTScalar ETFloat64))
+            | resolvedArg when (match IR.stripUnits resolvedArg with
+                                | IRTScalar (ETComplex64 | ETComplex128) -> true
+                                | _ -> false) ->
+                // Stripped-base classification, for the reason the math-intrinsic
+                // arm above gives: a complex value that carries a signature
+                // (`z : Complex128<volts>`) is IRTUnitAnnotated, and the bare
+                // patterns missed it -- so `real(z)` fell to the catch-all and
+                // rejected its own operand as "not complex".
+                //
+                // The component keeps the signature (real/imag are degree 1);
+                // `arg` is an angle and drops it. Same table, and the same
+                // widths as before: Complex64 -> Float32 components, everything
+                // else Float64.
+                let width =
+                    match IR.stripUnits resolvedArg with
+                    | IRTScalar ETComplex64 when name <> "arg" -> ETFloat32
+                    | _ -> ETFloat64
+                unitRulesForUnaryOp op (IR.getUnits resolvedArg)
+                |> Result.map (fun resUnits ->
+                    let resTy =
+                        match resUnits with
+                        | Some u -> IRTUnitAnnotated (IRTScalar width, u)
+                        | None -> IRTScalar width
+                    mkTyped (TExprUnaryOp (op, tArg)) resTy)
             | IRTInfer _ ->
                 // Unresolved operand (unannotated kernel/lambda parameter):
                 // DEFER the complex requirement -- the apply-site unification
@@ -15691,6 +15747,9 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         | None -> env.Builder.FreshId()
     // Register function BEFORE body (enables recursion)
     let envWithFunc = bindVarSimple funcDecl.Name funcVarId funcType env
+    // ...and record the binder as a named function, so a lambda that calls it
+    // does not drag it onto its capture list (see DeclaredFuncIds).
+    env.DeclaredFuncIds.Add funcVarId |> ignore
 
     // `x: mut T` params bind MutPassable so the body may assign into them
     // (gradient out-buffers). Array-typed only: the C++ ABI passes the
@@ -16991,6 +17050,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                               | None -> e.Subst.Fresh()
                 let funcType = mkFuncArrow paramTypes retType
                 let funcVarId = e.Builder.FreshId()
+                e.DeclaredFuncIds.Add funcVarId |> ignore
                 let e' = bindVarSimple funcDecl.Name funcVarId funcType e
                 // Stash the AST so lowerIndexTypeList can inline the body when
                 // this function appears in an eta-reduced DepIdx position.

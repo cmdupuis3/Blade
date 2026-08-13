@@ -431,5 +431,11 @@ let runProgram (program: IRProgram) (testName: string) (limits: InterpLimits) : 
             { ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }
         | Print.PrintUnsupported feature ->
             { ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }
+        // Scalar-numerics layer's own signal, on the same footing and for the
+        // same reason (Numerics.fs compiles before Core, so it cannot raise
+        // InterpUnsupported): a complex intrinsic this build cannot reproduce
+        // bit-exactly is a gap in the INTERPRETER, not a fault in the program.
+        | Numerics.NumericsUnsupported feature ->
+            { ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }
         | ex ->
             { ExitCode = ExitInterpBug; Stdout = ""; Stderr = sprintf "interp-error: %s" ex.Message })

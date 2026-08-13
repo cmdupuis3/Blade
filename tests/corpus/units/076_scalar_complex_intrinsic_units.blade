@@ -1,0 +1,70 @@
+// TEST: Scalar Complex Intrinsic Units
+// ============================================================================
+// The SCALAR-position twin of units/065. There the cancelling complex product
+// feeds a nested elementwise map (`exp <@> (i * w * ts)`), which routes through
+// the kernel-apply path and was fixed by the deferral. Here the same product
+// sits directly in a scalar call, `exp(i * w * tz)` -- and that path classified
+// its operand on a BARE `IRTScalar` pattern.
+//
+// A unit-carrying complex is `IRTUnitAnnotated (IRTScalar ETComplex128, u)`, so
+// it never matched the complex arm. It fell through to the general arm, which
+// hardcodes a Float64 RESULT -- silently making the whole expression real. The
+// damage surfaced at the next accessor, as `BL3007: real expects a complex
+// operand, got Float64`, pointing at `real` rather than at the `exp` that
+// dropped the complexity. `real`/`imag`/`arg` had the identical hole in the
+// other direction: handed a genuine `Complex128<volts>` they rejected their own
+// operand as not complex.
+//
+// Both now classify on the STRIPPED base and route the signature through the
+// same `unitRulesForUnaryOp` table as everything else. The one shape that hid
+// this: an expression whose complexity comes from a LITERAL `complex(...)`
+// works either way, so lswosa.blade's `complex(...) * exp(i * w * t_zero)` only
+// broke once the left factor was extracted into a named function whose return
+// type is deduced -- the product then had nothing else asserting complex.
+//
+// WHAT THE VALUES ASSERT.
+//   - `frequency: 1/day` times `time: day` cancels with exact reciprocal
+//     magnitudes, so the exponent passes through UNSCALED -- `exp(i*0.25)`, not
+//     `exp(i*0.25*86400)`. A magnitude slip shows in the first digit.
+//   - real/imag are degree 1, so they PRESERVE the signature: `vsum` is
+//     annotated `Float<volts>` and would not typecheck if the component came
+//     back bare, and `vmag` exercises the same components through sqrt.
+//   - `arg` is an angle and drops the signature, per the same table.
+// The residue twins that must still REJECT are unit-errors/017 (exp of a
+// genuinely DIMENSIONED complex, BL3006) and unit-errors/018 (floor, which has
+// no complex overload at any signature).
+// ============================================================================
+Unit second
+Unit day = 86400 * second
+Unit time: day
+Unit frequency: 1 / day
+Unit volts
+
+let i = complex(0.0, 1.0)
+let w: Float<frequency> = 0.25
+let tz: Float<time> = 1.0
+
+// Scalar position, units cancel: the result stays COMPLEX.
+let z = exp(i * w * tz)
+let zr = real(z)
+let zi = imag(z)
+let za = arg(z)
+// EXPECT: z = (0.968912421710645,0.247403959254523)
+// EXPECT: zr = 0.968912421710645
+// EXPECT: zi = 0.247403959254523
+// arg drops the signature; the angle IS the exponent, unscaled.
+// EXPECT: za = 0.25
+
+// A complex that genuinely CARRIES a signature: real/imag hand back components
+// that still carry it. The `Float<volts>` ascription is the load-bearing part.
+let v: Float<volts> = 3.0
+let zv = complex(3.0, 4.0) * v
+let vr = real(zv)
+let vi = imag(zv)
+let vsum: Float<volts> = vr + vi
+let vmag = sqrt(vr * vr + vi * vi)
+// EXPECT: zv = (9,12)
+// EXPECT: vr = 9
+// EXPECT: vi = 12
+// EXPECT: vsum = 21
+// EXPECT: vmag = 15

@@ -6,10 +6,19 @@
 // and log10, which have no complex overload and refuse (intrinsics/013).
 // atan(0 + i/2) = i*atanh(1/2) = i*ln(3)/2 is the closed form the pin checks.
 //
-// Split out of intrinsics/010 on purpose: the INTERPRETER refuses complex
-// asin/acos/atan with BL8011 ("not yet bit-verified"), which makes any file
-// containing one a skip in the interpreter differential. Keeping the complex
-// half here leaves 010's real-valued pins under that gate.
+// Split out of intrinsics/010 on purpose: the INTERPRETER declines complex
+// asin/acos/atan as "not yet bit-verified", which makes any file containing one
+// a skip in the interpreter differential. Keeping the complex half here leaves
+// 010's real-valued pins under that gate.
+//
+// This file is therefore expected to score SKIP-UNSUPPORTED, never PASS, in
+// `blade test interp intrinsics`. It scored FAIL until the decline was moved off
+// InterpPanic (BL8011, exit 1 -- a PROGRAM fault) onto the interpreter's
+// unsupported channel (Numerics.NumericsUnsupported -> exit 125), which is what
+// the runner's skip bucket keys on. If it ever reads PASS, the interpreter grew
+// a complex-trig implementation and the claim below needs re-measuring rather
+// than celebrating: Numerics.fs records why the libstdc++ closed forms do NOT
+// agree with the libm calls the compiled side actually makes.
 // ============================================================================
 let z = complex(0.0, 0.5)
 let za = atan(z)

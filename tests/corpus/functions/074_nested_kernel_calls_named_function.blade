@@ -1,0 +1,71 @@
+// TEST: Nested Kernel Calls Named Function
+// ============================================================================
+// A top-level named function called from a kernel nested TWO deep. This
+// typechecked and lowered, then emitted C++ that NAMED the callee without
+// declaring it:
+//
+//     __fp_out[__fk] = __lambda_28(__fp_frs[__fk], scale, xs);
+//                                                  ^^^^^ not declared here
+//
+// The cause was capture analysis, not name resolution. `collectFreeVars`
+// reports every ExprVar it does not find bound locally, and a named function
+// IS a binding in `Variables` (registered before its body, so it can recurse)
+// -- so `scale` resolved in `buildCaptures` and rode the lambda's capture list.
+// The lifted kernel then took a dead `std::function` parameter it never used
+// (its body calls the callable directly, under the MONOMORPHIZED name
+// `scale_HM_10000_double`), and every call site forwarded the SOURCE name --
+// which denotes nothing once the callee is monomorphized.
+//
+// buildCaptures now drops names whose binder is a declared function
+// (`DeclaredFuncIds`). Keyed by binder ID rather than name, so a local that
+// shadows a function name still captures normally.
+//
+// WHY TWO LEVELS. One level was equally wrong and equally silent: the capture
+// formed there too, but the single lifted lambda is INLINED into its loop and
+// the dead parameter goes with it, so nothing ever spelled the name. Two
+// levels makes the outer lambda a real call -- and the forwarded argument a
+// hard g++ error. `out1` below is that one-level shape, kept as the control
+// that the latent case still computes the right answer.
+//
+// Both a GENERIC callee (`T^0` params -> monomorphized, the failing case) and
+// a CONCRETE one (`Float64` params -> emitted under its own name, which is
+// why it happened to survive) are exercised: neither may be captured.
+// ============================================================================
+type K = Idx<6>
+type F = Idx<3>
+
+/// Generic: monomorphized to `scale_HM_..._double`, so the source name `scale`
+/// never exists in the emitted C++.
+function scale(a: T^0, b: T^0) -> Float64 = a * 2.0 + b
+
+/// Concrete: emitted as plain `scale`, so a forwarded capture happened to
+/// compile. It must still not be captured.
+function shift(a: Float64, b: Float64) -> Float64 = a * 3.0 - b
+
+let xs  = (method_for(range<K>) <@> lambda(k) -> 1.0 * k) |> compute
+let frs = (method_for(range<F>) <@> lambda(j) -> 1.0 * j) |> compute
+// EXPECT: xs = [0, 1, 2, 3, 4, 5]
+// EXPECT: frs = [0, 1, 2]
+
+// Two deep: frequency kernel -> halo kernel -> named call.
+// inner(f) = sum over the 5 windows of (2*xs[i] + f) = 20 + 5f.
+let out = frs <@> lambda(f) -> {
+    let inner = method_for(halo<K, [0, 1]>) <@> lambda(w) ->
+        scale(xs(w(0)), f) |> compute
+    reduce(inner, (+))
+} |> compute
+// EXPECT: out = [20, 25, 30]
+
+// Same shape, concrete callee, reading the window's FAR end.
+// inner2(f) = sum over xs[1..5] of (3*x - f) = 45 - 5f.
+let out2 = frs <@> lambda(f) -> {
+    let inner2 = method_for(halo<K, [0, 1]>) <@> lambda(w) ->
+        shift(xs(w(1)), f) |> compute
+    reduce(inner2, (+))
+} |> compute
+// EXPECT: out2 = [45, 40, 35]
+
+// One level: the latent case. The capture used to form here too and simply
+// never got spelled.
+let out1 = xs <@> lambda(v) -> scale(v, 3.0) |> compute
+// EXPECT: out1 = [3, 5, 7, 9, 11, 13]
