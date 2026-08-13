@@ -483,8 +483,8 @@ let replLoop () : int =
             // Reassignment (`b = b + 1`, `b += 1`, etc.): the engine wraps it
             // in a hidden binding whose value IS the ExprAssign, and KEEPS the
             // wrapper so the mutation persists.
-            let (candidate, _, _) = engine.AssignmentCandidate trimmed
-            let root = (RS.assignRe.Match trimmed).Groups.[1].Value
+            let (candidate, _, _, _) = engine.AssignmentCandidate trimmed
+            let root = (RS.assignRe.Match (RS.classifyTarget trimmed)).Groups.[1].Value
             match compileRunEcho candidate (Some root) None with
             | None -> ()                                    // static/unknown/etc -> not kept
             | Some (lines, printed, _) ->
@@ -498,18 +498,18 @@ let replLoop () : int =
             // expression echoes again rather than diffing to silence.
             let curInfo = lazy (ReplTypes.sessionInfo (String.concat "\n\n" session + "\n"))
             let asFuncName =
-                if RS.identRe.IsMatch trimmed then
-                    match Map.tryFind trimmed curInfo.Value with
-                    | Some (ReplTypes.RFunc s) -> Some s
-                    | _ -> None
-                else None
+                RS.bareIdentifier trimmed
+                |> Option.bind (fun n ->
+                    match Map.tryFind n curInfo.Value with
+                    | Some (ReplTypes.RFunc s) -> Some (n, s)
+                    | _ -> None)
             match asFuncName with
-            | Some s ->
+            | Some (n, s) ->
                 // A function can't be let-bound just to echo it; print its
                 // signature straight from the typechecker.
-                printfn "%s\n\t%s" trimmed s
+                printfn "%s\n\t%s" n s
             | None ->
-                let (candidate, _, transient) = engine.ExpressionCandidate trimmed
+                let (candidate, _, transient, _) = engine.ExpressionCandidate trimmed
                 match compileRunEcho candidate (Some transient) (Some transient) with
                 | None -> ()
                 | Some (_, printed, info) ->
@@ -1676,6 +1676,44 @@ let private runIdeEvalTests () : TH.BlockResult =
                                       // The session survives it: a later cell
                                       // still evaluates against the same state.
                                       && after.Contains "{\"name\":\"after\",\"type\":\"Int64\",\"value\":\"6\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 26. ...and it PRESENTS like the declaration it echoes. A bare
+        // function reference is answered from the declaration's own binding --
+        // its name, and the checker's rendering of the signature -- because
+        // there is nothing else worth showing: the value has no printable form
+        // and the transient wrapper's own IR type (`Arrow<T, T -> T>`) is the
+        // engine's bookkeeping, not an answer to the question asked.
+        //
+        // Three spellings of the same request had three different answers.
+        // `covariance` took the declaration path; `covariance // note` -- which
+        // is how quickstart-1 section 10 writes it -- failed `identRe` against
+        // the RAW text and fell through to the wrapper, reporting anonymously
+        // and in raw IR; and `// note` ABOVE the name put the hidden `let it =`
+        // on the comment line, where it swallowed the expression below and the
+        // cell died with BL1999. All three now read as the declaration.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "function poly(a: T^1, b: T^1) where comm(a, b) = a + b"
+                    evalReq 2 "nb" "poly"
+                    evalReq 3 "nb" "poly   // : the commented spelling"
+                    evalReq 4 "nb" "// a note above it\npoly"
+                    evalReq 5 "nb" "function conc(x: Float64) -> Float64 = x + 1.0\nconc"
+                    evalReq 6 "nb" "let plainval = 6\nplainval"
+                    shutdownReq ]
+        let name = "a bare function reference echoes the declaration, comments and all"
+        let pretty = "{\"name\":\"poly\",\"type\":\"(T^1, T^1) -> T^1\",\"value\":\"\"}"
+        match responses with
+        | [_; bare; commented; noted; mixed; valueCell] when code = 0
+                    && bare.Contains pretty && commented.Contains pretty
+                    && noted.Contains pretty && noted.Contains "\"diagnostics\":[]"
+                    // The same rule inside a MIXED cell, where the echo is one
+                    // statement among several -- and reported ONCE, not twice,
+                    // though two statements name it.
+                    && mixed.Contains "\"bindings\":[{\"name\":\"conc\",\"type\":\"(Float64) -> Float64\",\"value\":\"\"}]"
+                    // A bare identifier naming a VALUE keeps the anonymous
+                    // echo: it has a printed value, which is the thing asked for.
+                    && valueCell.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"6\"}" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 

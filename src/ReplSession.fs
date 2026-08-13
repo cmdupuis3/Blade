@@ -324,6 +324,76 @@ let declRe =
 
 let identRe = Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
 
+/// Drop `//`-to-end-of-line and `/* ... */` comments, keeping everything else
+/// (including line structure) so the result still lines up statement for
+/// statement. Quote-aware, so a `//` inside a string literal survives.
+let private stripComments (s: string) : string =
+    let sb = System.Text.StringBuilder()
+    let mutable i = 0
+    let mutable inQuotes = false
+    let mutable inBlock = false
+    while i < s.Length do
+        let c = s.[i]
+        if inBlock then
+            if c = '*' && i + 1 < s.Length && s.[i + 1] = '/' then
+                inBlock <- false
+                i <- i + 1
+            elif c = '\n' then sb.Append c |> ignore
+        elif inQuotes then
+            sb.Append c |> ignore
+            if c = '\\' && i + 1 < s.Length then
+                sb.Append s.[i + 1] |> ignore
+                i <- i + 1
+            elif c = '"' then inQuotes <- false
+        elif c = '"' then
+            inQuotes <- true
+            sb.Append c |> ignore
+        elif c = '/' && i + 1 < s.Length && s.[i + 1] = '/' then
+            while i < s.Length && s.[i] <> '\n' do i <- i + 1
+            if i < s.Length then sb.Append '\n' |> ignore
+        elif c = '/' && i + 1 < s.Length && s.[i + 1] = '*' then
+            inBlock <- true
+            i <- i + 1
+        else sb.Append c |> ignore
+        i <- i + 1
+    sb.ToString()
+
+/// The single identifier a submission (or one statement of one) consists of,
+/// once comments and whitespace are set aside.
+///
+/// It matters because a bare identifier naming a session FUNCTION is echoed
+/// from the declaration -- its name and the checker's rendering of its
+/// signature, `(T^1, T^1) -> T^1` -- while everything else is wrapped in a
+/// transient binding and reported anonymously. Matching `identRe` against the
+/// RAW text answered "no" for `covariance // : Array<...>`, which is exactly
+/// how the notebook writes it (quickstart-1 section 10), so the same function
+/// rendered two different ways depending on whether a comment trailed it: the
+/// commented spelling fell through to the wrapper and reported the WRAPPER's
+/// raw IR type under no name at all (`{"name":"", "type":"Arrow<T, T -> T>"}`).
+let bareIdentifier (s: string) : string option =
+    let t = (stripComments s).Trim()
+    if identRe.IsMatch t then Some t else None
+
+/// Prepend `prefix` to the first SIGNIFICANT line of `text` -- the same line
+/// `classifyTarget` classified on -- and report which row took it.
+///
+/// The row matters twice: a hidden wrapper on a comment line does not parse
+/// (`let it = // note` swallows the expression on the line below, BL1999), and
+/// the column shift a diagnostic needs to undo applies to that row alone.
+/// Blank or comment-only text has no significant line and takes the prefix on
+/// row 0, which is what the callers' own "nothing to wrap" guards expect.
+let wrapAtSignificantLine (prefix: string) (text: string) : string * int =
+    let lines = text.Replace("\r\n", "\n").Split('\n')
+    let row =
+        lines
+        |> Array.tryFindIndex (fun l ->
+            let t = l.TrimStart()
+            t <> "" && not (t.StartsWith "//"))
+        |> Option.defaultValue 0
+    let wrapped = Array.copy lines
+    wrapped.[row] <- prefix + wrapped.[row]
+    (String.concat "\n" wrapped, row)
+
 /// A reassignment `x = e` (or `x(i) = e`, `x.f = e`, `x += e`, etc.): an
 /// lvalue followed by an assignment operator. `=(?!=)` matches `=` but not
 /// `==`, so `b == 1` stays a bare expression. Group 1 (leading identifier)
@@ -545,6 +615,13 @@ type MixedSlot =
       /// differ only for a bare expression, whose transient wrapper reports
       /// as "" exactly as the single-expression lane's does.
       Names: (string * string) list
+      /// The identifier this statement consists of, when it is nothing but
+      /// one (`bareIdentifier`). Carried so the report can prefer the
+      /// DECLARATION's binding when that identifier turns out to name a
+      /// function: only the run's own type map knows whether it does, and
+      /// that map does not exist until after the run. `None` for every other
+      /// statement shape.
+      NamedIdent: string option
       /// A transient expression wrapper: run and echoed, never committed.
       Transient: bool }
 
@@ -831,24 +908,17 @@ type ReplSession(runCwd: string) =
                     slots.[k] <- { slots.[k] with Index = fix slots.[k].Index }
                 slots.Add { Index = idx; Prefix = 0; PrefixRow = 0; SubLine = subLine
                             Names = topLevelBindingNames text |> List.map (fun n -> (n, n))
+                            NamedIdent = None
                             Transient = false }
             else
                 // The wrapper goes on the first SIGNIFICANT line -- the same
                 // line `classifyTarget` classified on -- so a statement that
                 // opens with a comment still gets a parseable binding.
-                let lines = text.Split('\n')
-                let row =
-                    lines
-                    |> Array.tryFindIndex (fun l ->
-                        let t = l.TrimStart()
-                        t <> "" && not (t.StartsWith "//"))
-                    |> Option.defaultValue 0
                 let isAssign = assignRe.IsMatch head
                 let hidden = freshName (if isAssign then "__assign" else "it")
                 let prefix = sprintf "let %s = " hidden
-                let wrapped = Array.copy lines
-                wrapped.[row] <- prefix + wrapped.[row]
-                candidate.Add (String.concat "\n" wrapped)
+                let (wrapped, row) = wrapAtSignificantLine prefix text
+                candidate.Add wrapped
                 slots.Add
                     { Index = candidate.Count - 1; Prefix = prefix.Length; PrefixRow = row
                       SubLine = subLine
@@ -859,6 +929,7 @@ type ReplSession(runCwd: string) =
                             let root = (assignRe.Match head).Groups.[1].Value
                             [ (root, root) ]
                          else [ ("", hidden) ])
+                      NamedIdent = (if isAssign then None else bareIdentifier text)
                       Transient = not isAssign }
         (candidate, List.ofSeq slots)
 
@@ -867,30 +938,36 @@ type ReplSession(runCwd: string) =
     /// wrapper's value IS the ExprAssign, which mutates the target's existing cell.
     /// Unlike bare expressions the wrapper is KEPT so the mutation persists;
     /// successive assignments append under fresh __assignN names, so
-    /// `b = b + 1` twice accumulates 1->2->3. Returns the list, the index, and
-    /// the hidden name.
-    member _.AssignmentCandidate(trimmed: string) : ResizeArray<string> * int * string =
+    /// `b = b + 1` twice accumulates 1->2->3. Returns the list, the index, the
+    /// hidden name, and the ROW of the submission the wrapper landed on (see
+    /// `wrapAtSignificantLine`: a comment above the statement pushes it down).
+    member _.AssignmentCandidate(trimmed: string) : ResizeArray<string> * int * string * int =
         let candidate = ResizeArray(snippets)
         let hidden =
             let inUse = candidate |> Seq.choose bindingName |> Set.ofSeq
             Seq.initInfinite (fun i -> if i = 0 then "__assign" else sprintf "__assign%d" i)
             |> Seq.find (fun n -> not (Set.contains n inUse))
-        candidate.Add (sprintf "let %s = %s" hidden trimmed)
-        (candidate, candidate.Count - 1, hidden)
+        let (text, row) = wrapAtSignificantLine (sprintf "let %s = " hidden) trimmed
+        candidate.Add text
+        (candidate, candidate.Count - 1, hidden, row)
 
     /// The candidate a BARE EXPRESSION produces: `blade run` semantics only
     /// print top-level BINDINGS, so the expression is wrapped in a transient
     /// one that is run, echoed, and NOT kept -- re-entering the same expression
     /// echoes again rather than diffing to silence. Returns the list, the
-    /// index, and the transient name.
-    member _.ExpressionCandidate(trimmed: string) : ResizeArray<string> * int * string =
+    /// index, the transient name, and the ROW of the submission the wrapper
+    /// landed on -- `// note` above the expression pushes it down, and putting
+    /// it on row 0 regardless made `let it = // note` swallow the line below
+    /// (BL1999 "Unexpected token: end of line") for a cell that reads fine.
+    member _.ExpressionCandidate(trimmed: string) : ResizeArray<string> * int * string * int =
         let transient =
             let inUse = snippets |> Seq.choose bindingName |> Set.ofSeq
             Seq.initInfinite (fun i -> if i = 0 then "it" else sprintf "it%d" i)
             |> Seq.find (fun n -> not (Set.contains n inUse))
         let candidate = ResizeArray(snippets)
-        candidate.Add (sprintf "let %s = %s" transient trimmed)
-        (candidate, candidate.Count - 1, transient)
+        let (text, row) = wrapAtSignificantLine (sprintf "let %s = " transient) trimmed
+        candidate.Add text
+        (candidate, candidate.Count - 1, transient, row)
 
     /// Evaluate one candidate. INTERP-FIRST: the candidate lowers ONCE
     /// (shared with the type-annotation map), then runs under the tree-walking
@@ -970,12 +1047,17 @@ type ReplSession(runCwd: string) =
         /// Run a candidate and project it onto the submission. `wanted` pairs
         /// the name to REPORT with the name the session actually bound it
         /// under (they differ only for a bare expression, whose transient
-        /// wrapper reports as ""). `commit` carries the list to ADOPT, which
-        /// is the candidate itself for the declaration and reassignment lanes,
-        /// the candidate minus its transient wrappers for a mixed cell, and
-        /// None for the bare-expression lane, which never joins the session.
+        /// wrapper reports as ""); it is a FUNCTION of the run's type map
+        /// because one of those choices -- whether a bare identifier echoes
+        /// from the declaration or from its transient wrapper -- turns on
+        /// whether the identifier names a function, which only the map knows.
+        /// `commit` carries the list to ADOPT, which is the candidate itself
+        /// for the declaration and reassignment lanes, the candidate minus its
+        /// transient wrappers for a mixed cell, and None for the
+        /// bare-expression lane, which never joins the session.
         let evalWith (candidate: ResizeArray<string>) (placements: Placement list)
-                     (target: string option) (wanted: (string * string) list)
+                     (target: string option)
+                     (wanted: Map<string, ReplTypes.Info> -> (string * string) list)
                      (commit: ResizeArray<string> option) =
             ensureFailureDiagnostic <|
             match this.EvalCandidate(candidate, target, ignore) with
@@ -1033,7 +1115,7 @@ type ReplSession(runCwd: string) =
                   Stderr = r.Stderr.Trim()
                   Bindings =
                     if kept then
-                        wanted |> List.map (fun (report, bound) ->
+                        wanted r.Info |> List.map (fun (report, bound) ->
                             { Name = report; Type = typeOf bound; Value = valueOf bound })
                     else []
                   Diagnostics = r.Warnings |> List.map (remapDiagnostic candidate placements) }
@@ -1056,8 +1138,33 @@ type ReplSession(runCwd: string) =
             let placements =
                 slots |> List.map (fun s ->
                     { Index = s.Index; Prefix = s.Prefix; PrefixRow = s.PrefixRow; SubLine = s.SubLine })
-            evalWith candidate placements None
-                     (slots |> List.collect (fun s -> s.Names)) (Some committed)
+            // A statement that is nothing but an identifier NAMING A FUNCTION
+            // echoes from the declaration -- its own name and the checker's
+            // rendering of the signature -- exactly as a one-statement cell
+            // holding the same text does. Without this the wrapper answered
+            // instead, anonymously and in raw IR (`Arrow<T, T -> T>` where the
+            // declaring cell had rendered `(T^1, T^1) -> T^1`), so the SAME
+            // function read two different ways depending on which cell it sat
+            // in. An identifier naming a VALUE keeps the anonymous echo: it
+            // has a printed value to show, which is the thing being asked for.
+            //
+            // `distinct` because that echo can now COLLIDE with the statement
+            // that declared it: a cell holding `function gen ... ` and then
+            // `gen` has two statements naming the same binding, and reporting
+            // it twice puts the same output in the cell twice. Only exact
+            // duplicates collapse, so two anonymous echoes (distinct transient
+            // wrappers) both survive, and a cell that declares a name twice
+            // reports the one binding that actually survived the splice.
+            let report (info: Map<string, ReplTypes.Info>) =
+                slots
+                |> List.collect (fun s ->
+                    match s.NamedIdent with
+                    | Some n when (match Map.tryFind n info with
+                                   | Some (ReplTypes.RFunc _) -> true
+                                   | _ -> false) -> [ (n, n) ]
+                    | _ -> s.Names)
+                |> List.distinct
+            evalWith candidate placements None report (Some committed)
         elif declRe.IsMatch head then
             let (candidate, idx) = this.DeclarationCandidate trimmed
             // A :paste block may declare several names; every one of them is a
@@ -1067,33 +1174,36 @@ type ReplSession(runCwd: string) =
             let names = topLevelBindingNames trimmed
             let target = List.tryLast names
             evalWith candidate [ { Index = idx; Prefix = 0; PrefixRow = 0; SubLine = leadPad + 1 } ]
-                     target (names |> List.map (fun n -> (n, n))) (Some candidate)
+                     target (fun _ -> names |> List.map (fun n -> (n, n))) (Some candidate)
         elif assignRe.IsMatch head then
-            let (candidate, idx, hidden) = this.AssignmentCandidate trimmed
-            let root = (assignRe.Match trimmed).Groups.[1].Value
+            let (candidate, idx, hidden, row) = this.AssignmentCandidate trimmed
+            let root = (assignRe.Match head).Groups.[1].Value
             evalWith candidate
                      [ { Index = idx; Prefix = (sprintf "let %s = " hidden).Length
-                         PrefixRow = 0; SubLine = leadPad + 1 } ]
-                     (Some root) [ (root, root) ] (Some candidate)
+                         PrefixRow = row; SubLine = leadPad + 1 } ]
+                     (Some root) (fun _ -> [ (root, root) ]) (Some candidate)
         else
             // A bare identifier naming a session FUNCTION can't be let-bound
             // just to echo it; its signature comes straight from the
-            // typechecker and nothing runs.
+            // typechecker and nothing runs. `bareIdentifier` rather than
+            // `identRe` over the raw text, so the notebook's own spelling --
+            // the name with a comment trailing it -- takes this path too.
+            let ident = bareIdentifier trimmed
             let asFuncSig =
-                if identRe.IsMatch trimmed then
-                    match Map.tryFind trimmed (ReplTypes.sessionInfo (String.concat "\n\n" snippets + "\n")) with
-                    | Some (ReplTypes.RFunc s) -> Some s
-                    | _ -> None
-                else None
+                ident
+                |> Option.bind (fun n ->
+                    match Map.tryFind n (ReplTypes.sessionInfo (String.concat "\n\n" snippets + "\n")) with
+                    | Some (ReplTypes.RFunc s) -> Some (n, s)
+                    | _ -> None)
             match asFuncSig with
-            | Some s ->
-                { blank with Bindings = [ { Name = trimmed; Type = s; Value = "" } ] }
+            | Some (n, s) ->
+                { blank with Bindings = [ { Name = n; Type = s; Value = "" } ] }
             | None ->
-                let (candidate, idx, transient) = this.ExpressionCandidate trimmed
+                let (candidate, idx, transient, row) = this.ExpressionCandidate trimmed
                 evalWith candidate
                          [ { Index = idx; Prefix = (sprintf "let %s = " transient).Length
-                             PrefixRow = 0; SubLine = leadPad + 1 } ]
-                         (Some transient) [ ("", transient) ] None
+                             PrefixRow = row; SubLine = leadPad + 1 } ]
+                         (Some transient) (fun _ -> [ ("", transient) ]) None
 
 // Whole-notebook assembly: many cells in, one source out.
 //
