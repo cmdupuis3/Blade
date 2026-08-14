@@ -24,6 +24,7 @@
 //    chains of fuzzy-sized balls, the ORDER of events itself becomes a
 //    distribution the tower carries natively.
 // ============================================================================
+import ppl as ppl
 let M1 = [0.8, 0.8, 0.8, 0.8, 0.8, 0.9, 0.9, 0.9, 0.9, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0, 1.1, 1.1, 1.1, 1.1, 1.1, 1.2, 1.2, 1.2, 1.2, 1.2]
 let M2 = [0.8, 0.9, 1.0, 1.1, 1.2, 0.8, 0.9, 1.0, 1.1, 1.2, 0.8, 0.9, 1.0, 1.1, 1.2, 0.8, 0.9, 1.0, 1.1, 1.2, 0.8, 0.9, 1.0, 1.1, 1.2]
 let X1L = [8.14336446655, 7.87714536918, 7.63520248142, 7.41404455748, 7.21082839691, 8.33524032816, 8.06902123079, 7.82580064778, 7.60245354993, 7.39640233853, 8.50816198514, 8.24322058301, 8.0, 7.77570654571, 7.56800883362, 8.66475967817, 8.40200744994, 8.15973322337, 7.93543976909, 7.72702050299, 8.80721893128, 8.5473017539, 8.30667402802, 8.08310212774, 7.87468286163]
@@ -46,10 +47,21 @@ let GD_k2 = GD2 / 25.0 - GD_k1 * GD_k1
 let GD_V = if abs(GD_k2) < 1.0e-20 then "INVISIBLE" else "VISIBLE"
 
 // --- x2 towers at T = 7.5 (before), 8.0 (inside band), 12 (after) ---
-let E1 = reduce(X2E, (+))
-let E2 = prodsum(X2E, X2E)
-let E_k1 = E1 / 25.0
-let E_k2 = E2 / 25.0 - E_k1 * E_k1
+// x2(7.5) is one variable observed over the 25-realization epistemic grid,
+// so its tower is exactly what the ppl estimators are for: the trailing
+// axis IS the sample fiber. X2EV is that column in the (variable, sample)
+// shape the formers read, and ppl.moments/ppl.comoments supply orders 1
+// and 2 -- the degeneracy verdict below is the module's own central second
+// comoment, with no raw power sums to convert by hand. The 8.0 and 12
+// towers keep their folds: they need a third central moment for the skew,
+// and the module's order-3 fold reassociates away from the pinned last
+// digits.
+let X2EV: Array<Float64 like Idx<1>, Idx<25>> = [X2E]
+
+let E_mom = ppl.moments(X2EV, 1)
+let E_com = ppl.comoments(X2EV, 2)
+let E_k1 = E_mom(0)
+let E_k2 = E_com(0)
 let E_V = if abs(E_k2) < 1.0e-20 then "NOT_YET" else "MOVED"
 
 let Mm1 = reduce(X2M, (+))
