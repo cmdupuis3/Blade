@@ -36,6 +36,7 @@
 // s = (v1t - v2t) + R1 w1 + R2 w2 reverses via J_t = -2 mu_t s with
 // 1/mu_t = 3(1/m1 + 1/m2); dw_i = 2 J_t / (m_i R_i).
 // ============================================================================
+import ppl as ppl
 let M2 = [0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5, 0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5]
 let SP = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]
 
@@ -87,10 +88,13 @@ let test0_v1 = t_q1n * t_cf - (0.0 - t_sf + t_jt) * t_sf
 let test0_v2 = t_q2n * t_cf - (0.0 - t_jt / 1.0) * t_sf
 
 // --- the new variant: the translational/rotational partition is fuzzy ---
-let ET1 = reduce(ETR, (+))
-let ET2 = prodsum(ETR, ETR)
-let ETR_k1 = ET1 / 14.0
-let ETR_k2 = ET2 / 14.0 - (ETR_k1 ^ 2.0)
+// ETR is already one realization column over the 14-point sample axis, so
+// its tower is a straight former read: k1 raw, k2 central.
+let ETRV: Array<Float64 like Idx<1>, Idx<14>> = [ETR]
+let etr_m1 = ppl.moments(ETRV, 1)
+let etr_c2 = ppl.comoments(ETRV, 2)
+let ETR_k1 = etr_m1(0)
+let ETR_k2 = etr_c2(0)
 let trans_V = if ETR_k2 > 0.0001 then "VARIANT" else "INVARIANT"
 
 // --- circular tower of the deflection (spinless sub-ensemble) ---

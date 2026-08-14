@@ -31,6 +31,7 @@
 //     of the nuclear optical model's surface diffuseness. Every realization
 //     is hard; the ensemble description is soft.)
 // ============================================================================
+import ppl as ppl
 let XS = [11.2, 11.2, 11.2, 11.2, 11.583916725, 12.6863910271, 14.169446307]
 let XB = [0.0, 0.0, 0.0, 0.0, -0.00103657515753, -0.0109992936009, -0.059388926141]
 let RS = [0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659]
@@ -41,12 +42,16 @@ let RP = [0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.
 // --- joint ensemble: overlap count and gap moments ---
 let CJ = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> (if x - b - 10.0 - r < 0.0 then 1.0 else 0.0), (+))
 let P_joint = CJ / 7.0
-let J1s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> x - b - 10.0 - r, (+))
-let J2s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) ^ 2.0, (+))
-let J3s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> ((x - b - 10.0 - r) ^ 2.0) * (x - b - 10.0 - r), (+))
-let Jm1 = J1s / 7.0
-let Jm2 = J2s / 7.0
-let Jm3 = J3s / 7.0
+// materialize the gap once, then read its raw moment tower off the former:
+// the Stieltjes test below needs orders 1..3 of the SAME derived quantity.
+let GJ = method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> x - b - 10.0 - r |> compute
+let GJV: Array<Float64 like Idx<1>, Idx<7>> = [GJ]
+let gj1 = ppl.moments(GJV, 1)
+let gj2 = ppl.moments(GJV, 2)
+let gj3 = ppl.moments(GJV, 3)
+let Jm1 = gj1(0)
+let Jm2 = gj2(0)
+let Jm3 = gj3(0)
 let sHJ = Jm1 * Jm3 - Jm2 * Jm2
 let joint_V = if P_joint < 0.001 then "EXCLUDED" else "OVERLAPS"
 let lawJ_V = if sHJ > 0.0 then "STIELTJES_OK" else "STIELTJES_VIOLATED"
@@ -56,18 +61,23 @@ let CP = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (if x - b - 1
 let P_prod = CP / 49.0
 let DP = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (if x - b - 10.0 - r < 0.0 then 0.0 - (x - b - 10.0 - r) else 0.0), (+))
 let meanDepth = DP / CP
-let PR1 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> x - b - 10.0 - r, (+))
-let PR2 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) ^ 2.0, (+))
-let PR3 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> ((x - b - 10.0 - r) ^ 2.0) * (x - b - 10.0 - r), (+))
-let Pm1 = PR1 / 49.0
-let Pm2 = PR2 / 49.0
-let Pm3 = PR3 / 49.0
+// the decorrelated gap, same three raw orders off the same former
+let GP = method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> x - b - 10.0 - r |> compute
+let GPV: Array<Float64 like Idx<1>, Idx<49>> = [GP]
+let gp1 = ppl.moments(GPV, 1)
+let gp2 = ppl.moments(GPV, 2)
+let gp3 = ppl.moments(GPV, 3)
+let Pm1 = gp1(0)
+let Pm2 = gp2(0)
+let Pm3 = gp3(0)
 let sHP = Pm1 * Pm3 - Pm2 * Pm2
 let prod_V = if P_prod < 0.001 then "EXCLUDED" else "OVERLAPS"
 let lawP_V = if sHP > 0.0 then "STIELTJES_OK" else "STIELTJES_VIOLATED"
 
 // --- inside, in what sense: the mean ball and the rind's outer edge ---
-let wallMean = 10.0 + (RS(0) + RS(1) + RS(2) + RS(3) + RS(4) + RS(5) + RS(6)) / 7.0
+let RSV: Array<Float64 like Idx<1>, Idx<7>> = [RS]
+let rs1 = ppl.moments(RSV, 1)
+let wallMean = 10.0 + rs1(0)
 let rindOut = 10.0 + RS(6)
 let CM = reduce(method_for(XS) <@> lambda(x) -> (if x < 11.2417325945 then 1.0 else 0.0), (+))
 let P_inMean = CM / 7.0

@@ -52,6 +52,7 @@
 // transports the input tower's shape but cannot reshape the partition
 // lattice: dynamical crossing suppression is a genuinely quantum signature.
 // ============================================================================
+import ppl as ppl
 
 // --- the 3^6 product grid from digits (uniform 3-point jets per mass) ---
 let D1 = method_for(range<Idx<729>>) <@> lambda(r) -> r - 3.0 * floor(r / 3.0) |> compute
@@ -94,12 +95,17 @@ let GUARD = reduce(method_for(zip(W6, X6)) <@> lambda(w, x) -> (if w < x then 0.
 let guard_V = if GUARD < 0.5 then "FRONT_OUTRUNS_ALL" else "ITINERARY_AT_RISK"
 
 // --- centered columns ---
-let mu1 = reduce(X1, (+)) / 729.0
-let mu2 = reduce(X2, (+)) / 729.0
-let mu3 = reduce(X3, (+)) / 729.0
-let mu4 = reduce(X4, (+)) / 729.0
-let mu5 = reduce(X5, (+)) / 729.0
-let mu6 = reduce(X6, (+)) / 729.0
+// the six transmitted fronts are six variables over one 729-realization
+// sample axis -- the multivariate object the whole 4-cumulant analysis is
+// about -- so their first-order block is a single former read.
+let XALL: Array<Float64 like Idx<6>, Idx<729>> = [X1, X2, X3, X4, X5, X6]
+let x_m1 = ppl.moments(XALL, 1)
+let mu1 = x_m1(0)
+let mu2 = x_m1(1)
+let mu3 = x_m1(2)
+let mu4 = x_m1(3)
+let mu5 = x_m1(4)
+let mu6 = x_m1(5)
 let Y1 = method_for(X1) <@> lambda(x) -> x - mu1 |> compute
 let Y2 = method_for(X2) <@> lambda(x) -> x - mu2 |> compute
 let Y3 = method_for(X3) <@> lambda(x) -> x - mu3 |> compute

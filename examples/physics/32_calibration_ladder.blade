@@ -49,6 +49,7 @@
 // grids (range + integer index algebra), rung formulas are staged columns,
 // verdicts are tower arithmetic. No external data, no generator.
 // ============================================================================
+import ppl as ppl
 
 // noise tables (absolute velocity resolution; probe mass fuzz for D2)
 let NTAB = [-0.002, 0.0, 0.002]
@@ -68,10 +69,13 @@ let AP3 = AP2 * AF3
 let AP4 = AP3 * AF4
 let AP5 = AP4 * AF5
 let ARM = AP5 * AF6
-let AS1 = reduce(ARM, (+))
-let AS2 = prodsum(ARM, ARM)
-let amean = AS1 / 729.0
-let avar = AS2 / 729.0 - amean * amean
+// the ladder estimate is one column over the 729-point noise grid: its mean
+// and relative variance are a raw/central former pair.
+let ARMV: Array<Float64 like Idx<1>, Idx<729>> = [ARM]
+let a_m1 = ppl.moments(ARMV, 1)
+let a_c2 = ppl.comoments(ARMV, 2)
+let amean = a_m1(0)
+let avar = a_c2(0)
 // linearized law: K g^2 Var(eta), g(4) = 25/8, Var(eta) = 2 sigma^2 / 3
 let r_lin = 6.0 * (25.0 / 8.0) * (25.0 / 8.0) * (2.0 * 0.002 * 0.002 / 3.0)
 let add_gap = (avar - r_lin) / r_lin
@@ -84,20 +88,22 @@ let BF4 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 9.0 +
 let BP2 = BF1 * BF2
 let BP3 = BP2 * BF3
 let BRM = BP3 * BF4
-let BS1 = reduce(BRM, (+))
-let BS2 = prodsum(BRM, BRM)
-let bvar = BS2 / 81.0 - (BS1 / 81.0) * (BS1 / 81.0)
+let BRMV: Array<Float64 like Idx<1>, Idx<81>> = [BRM]
+let b_c2 = ppl.comoments(BRMV, 2)
+let bvar = b_c2(0)
 let CF1 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB(r % 3))) / (2.0 / 17.0 + NTAB(r % 3)) / 16.0 |> compute
 let CF2 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB((r / 3) % 3))) / (2.0 / 17.0 + NTAB((r / 3) % 3)) / 16.0 |> compute
 let CF3 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB((r / 9) % 3))) / (2.0 / 17.0 + NTAB((r / 9) % 3)) / 16.0 |> compute
 let CP2 = CF1 * CF2
 let CRM = CP2 * CF3
-let CS1 = reduce(CRM, (+))
-let CS2 = prodsum(CRM, CRM)
-let cvar = CS2 / 27.0 - (CS1 / 27.0) * (CS1 / 27.0)
+let CRMV: Array<Float64 like Idx<1>, Idx<27>> = [CRM]
+let c_c2 = ppl.comoments(CRMV, 2)
+let cvar = c_c2(0)
 let DF1 = method_for(range<Idx<9>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 65.0 + NTAB(r % 3))) / (2.0 / 65.0 + NTAB(r % 3)) / 64.0 |> compute
 let DF2 = method_for(range<Idx<9>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 65.0 + NTAB((r / 3) % 3))) / (2.0 / 65.0 + NTAB((r / 3) % 3)) / 64.0 |> compute
 let DRM = DF1 * DF2
+// (the rho = 64 rung stays hand-rolled: on this 9-point grid the former's
+// power-sum fold shifts the last digits of dvar, and rfix64 is pinned)
 let DS1 = reduce(DRM, (+))
 let DS2 = prodsum(DRM, DRM)
 let dvar = DS2 / 9.0 - (DS1 / 9.0) * (DS1 / 9.0)
@@ -133,12 +139,14 @@ let G1 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) 
 let G2 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 9) % 3))) / (0.4 + NTAB((r / 9) % 3)) / 4.0 |> compute
 let G3 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 27) % 3))) / (0.4 + NTAB((r / 27) % 3)) / 4.0 |> compute
 let GB = (G1 + G2 + G3) / 3.0
-let E1 = reduce(G1, (+))
-let E1s = prodsum(G1, G1)
-let var1 = E1s / 81.0 - (E1 / 81.0) * (E1 / 81.0)
-let EB = reduce(GB, (+))
-let EBs = prodsum(GB, GB)
-let var3 = EBs / 81.0 - (EB / 81.0) * (EB / 81.0)
+// single read and 3-read average are two variables over the same 81-point
+// grid, so one central former call carries both variances (cells (0,0) and
+// (1,1); (0,1) is their shared-probe covariance). The between-probe floor
+// below is a group decomposition no former computes -- it stays hand-rolled.
+let READS: Array<Float64 like Idx<2>, Idx<81>> = [G1, GB]
+let reads_c2 = ppl.comoments(READS, 2)
+let var1 = reads_c2(0)
+let var3 = reads_c2(2)
 // pedigree (between-probe) component: variance of the probe-conditional mean
 let g0 = reduce(method_for(zip(GB, range<Idx<81>>)) <@> lambda(x, r: Int64) -> (if r % 3 < 1 then x else 0.0), (+)) / 27.0
 let g1 = reduce(method_for(zip(GB, range<Idx<81>>)) <@> lambda(x, r: Int64) -> (if r % 3 < 2 then (if r % 3 > 0 then x else 0.0) else 0.0), (+)) / 27.0

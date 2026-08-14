@@ -26,22 +26,30 @@
 //     the far ball's inertia into the probe). A collision is a measurement
 //     (ex 06), and it can recover information the record lost.
 // ============================================================================
+import ppl as ppl
 let MA = [0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8]
 let MB = [0.5, 0.5, 0.5, 0.5, 0.5, 0.75, 0.75, 0.75, 0.75, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.35, 1.35, 1.35, 1.35, 1.35, 1.8, 1.8, 1.8, 1.8, 1.8]
 let VF = [0.222222222222, -0.133333333333, -0.37037037037, -0.594594594595, -0.782608695652, 0.285714285714, 0.0408163265306, -0.239067055394, -0.518950437318, -0.765906362545, 0.0, 0.0, 0.0, -0.297872340426, -0.571428571429, -0.297872340426, -0.297872340426, -0.297872340426, -0.297872340426, -0.297872340426, -0.571428571429, -0.571428571429, -0.571428571429, -0.571428571429, -0.571428571429]
 let NC = [2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 // --- m_eff tower from the probe's recoil ---
-let M1s = reduce(method_for(VF) <@> lambda(v) -> 1.0 * (2.0 - v) / (2.0 + v), (+))
-let M2s = reduce(method_for(VF) <@> lambda(v) -> (1.0 * (2.0 - v) / (2.0 + v)) ^ 2.0, (+))
-let meff_k1 = M1s / 25.0
-let meff_k2 = M2s / 25.0 - meff_k1 * meff_k1
+// invert the recoil once per realization, then let the formers carry the
+// tower: mean off the raw block, variance off the central one.
+let MEFF = method_for(VF) <@> lambda(v) -> 1.0 * (2.0 - v) / (2.0 + v) |> compute
+let MEFFV: Array<Float64 like Idx<1>, Idx<25>> = [MEFF]
+let meff_m1 = ppl.moments(MEFFV, 1)
+let meff_c2 = ppl.comoments(MEFFV, 2)
+let meff_k1 = meff_m1(0)
+let meff_k2 = meff_c2(0)
 
 // --- the two naive models ---
-let Bs = reduce(MB, (+))
-let near_k1 = Bs / 25.0
-let Ss = reduce(MA + MB, (+))
-let sum_k1 = Ss / 25.0
+// both naive models are variables over the same 25-realization sample axis,
+// so one former call reports both means.
+let SUMAB = MA + MB
+let NAIVE: Array<Float64 like Idx<2>, Idx<25>> = [MB, SUMAB]
+let naive_m1 = ppl.moments(NAIVE, 1)
+let near_k1 = naive_m1(0)
+let sum_k1 = naive_m1(1)
 let gap_sum = sum_k1 - meff_k1
 let gap_near = meff_k1 - near_k1
 let sum_V = if abs(gap_sum) > 0.3 then "NOT_THE_SUM" else "SUM_LIKE"
