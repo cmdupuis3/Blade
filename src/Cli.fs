@@ -69,6 +69,10 @@ let printUsage () =
     printfn "  ide serve                         Persistent editor daemon: NDJSON check requests on"
     printfn "                                    stdin, one JSON response line each on stdout"
     printfn "                                    (tier fast = typecheck; full = + monomorphization)"
+    printfn "  ide surface                       Dump the language surface -- keywords, operators,"
+    printfn "                                    intrinsics, builtins, scalar types, builtin calls,"
+    printfn "                                    BLxxxx registry -- as one JSON line (the generator"
+    printfn "                                    for protocol/surface.json)"
     printfn "  repl                              Interactive session: each input recompiles and"
     printfn "                                    re-runs the accumulated program, printing new values"
     printfn "                                    with types; bare expressions evaluate and echo"
@@ -2752,6 +2756,12 @@ let private dispatchInner (args: string[]) : int =
 
     // The same payload, served: one long-lived process, NDJSON both ways.
     | [| "ide"; "serve" |] -> Blade.IdeServe.serve compilerVersion
+
+    // The language surface as data -- what protocol/surface.json is generated
+    // from. Redirect it with a tool that writes LF and no BOM (PowerShell `>`
+    // writes both); `blade test surface` pins the committed copy against a
+    // live render.
+    | [| "ide"; "surface" |] -> printfn "%s" (Blade.Ide.renderSurface compilerVersion); 0
 
     | _ when args.Length >= 1 && args.[0] = "test" ->
         dispatchTest (args.[1..] |> Array.toList)

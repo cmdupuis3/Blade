@@ -153,7 +153,11 @@ type Token = {
 
 // Keyword Map
 
-let keywords = 
+/// Declaration-order source of truth for the keyword vocabulary. Split out of
+/// the Map below so the language-surface dump (`blade ide surface`, Ide.fs)
+/// can report each word with its DU token name; the lexer itself only ever
+/// wants the Map.
+let keywordEntries : (string * Keyword) list =
     [ "let", KwLet
       "rec", KwRec
       "mut", KwMut
@@ -243,17 +247,24 @@ let keywords =
       "extents", KwExtents
       "like", KwLike
       "Poly", KwPoly ]
-    |> Map.ofList
+
+let keywords = keywordEntries |> Map.ofList
 
 // Multi-character Operators
 
-let operators = 
+/// Declaration-order source of truth for the operator vocabulary (the surface
+/// dump reads this one). `operators` below is the same set re-ordered for
+/// maximal munch, which is a SCANNING concern, not a vocabulary one.
+let operatorEntries : string list =
     [ "<@>"; ">>="; "<&>"; "<&!>"; "<*>"; "<$>"; "<|>"; "<|:>"
       ">>@"; "@>>"; "|@>"; "::"; "->"; "=>"; ".."; "=="
       "!="; "<="; ">="; "&&"; "||"; ">>"
       "+="; "-="; "*="; "/="
       "|>"; "<-"
       "+"; "-"; "*"; "/"; "%"; "="; "<"; ">"; "!"; "^" ]
+
+let operators =
+    operatorEntries
     |> List.sortByDescending String.length  // Match longer operators first
 
 // Lexer State
