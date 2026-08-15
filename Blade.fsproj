@@ -439,6 +439,15 @@
     <None Include="deps.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- The generated language surface (`blade ide surface`), checked in as the
+         data half of the shared IDE-protocol package. Deployed beside the
+         binary for the reason tests/corpus is: `blade test surface` compares
+         this snapshot against a live render and must FAIL, not vacuously skip,
+         when the suite runs from the output directory. No Link metadata, so
+         the relative path is preserved (protocol/surface.json). -->
+    <None Include="protocol/surface.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <!-- The Blade standard library, in Blade source. ModuleResolve.fs looks for
