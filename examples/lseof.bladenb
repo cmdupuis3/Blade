@@ -276,13 +276,25 @@ plot.heatmap(lons, lats, to_grid(phase_flat), 4: cmap, "LSDFT diurnal phase": ti
 // Verified against the `C` route directly: eigenvalues agree to 3.6e-15 and
 // the eigenpair residual ‖C u − λ u‖ / λ is 1.3e-15.
 //
-// `sweeps = 8` overrides the default of 10. Measured on this matrix, cyclic
-// Jacobi reaches 1e-10 relative eigenvalue error at 6 sweeps and 2e-20 — past
-// double precision — at 8, so the last two default sweeps are pure cost. Note
-// this is a *constant factor*: the honest accounting is that a 48 × 48 Jacobi
-// is a few million scalar operations, which is milliseconds compiled and
-// seconds under the notebook's tree-walking interpreter. The matrix is small;
-// the interpreter is what makes it visible, and every cell re-runs it.
+// **Leave `m.eigh` un-swept.** With LAPACK configured (`blade doctor` shows
+// BLAS and LAPACK OK), `m.eigh(S)` elaborates to the `__math_eigh` node: the
+// compiled lane calls LAPACK's `dsyev`, and the notebook lane runs the
+// interpreter's own compiled eigensolver rather than tree-walking a
+// synthesized Jacobi. Measured here that is 2.8 s versus 0.12 s for this cell.
+//
+// Passing an explicit sweep count — `m.eigh(M, 8)` — *requests the cyclic
+// Jacobi algorithm by name*, and so opts out of that route entirely. It is the
+// right thing to write when you want the algorithm pinned, and the wrong thing
+// to write for speed. With no BLAS configured both spellings take the
+// synthesized path and this cell costs seconds again, so the notebook's
+// runtime depends on toolchain configuration, not just on its own text.
+//
+// The two routes agree on eigenvalues to ~9 significant figures but are not
+// bit-identical, and need not agree on a degenerate subspace's basis. That is
+// harmless here: the real embedding makes every eigenvalue an exact duplicate
+// pair, and a different basis within a pair only rotates the complex
+// eigenvector's global phase — arbitrary anyway, as noted below. Amplitudes
+// are unaffected.
 //
 // %%
 let ST: Array<Complex128 like Freq, Space> = method_for(range<Freq, Space>) <@> lambda(k, p) -> spec(p, k) |> compute
@@ -296,7 +308,7 @@ let M: Array<Float64 like Dual, Dual> = method_for(range<Dual, Dual>) <@> lambda
     if a < n_freq then { if b < n_freq then real(z) else 0.0 - imag(z) } else { if b < n_freq then imag(z) else real(z) }
 } |> compute
 
-let (Q, LAM) = m.eigh(M, 8)
+let (Q, LAM) = m.eigh(M)
 
 // %% [markdown]
 // ## Explained variance and North's rule
@@ -366,13 +378,17 @@ plot.heatmap(lons, lats, to_grid(eof2_phase), 4: cmap, "EOF 2 phase": title)
 //   through `S · v`); frequencies set the solve size, since the Jacobi is
 //   2·n_freq square. Past a few hundred bins that is where the paper's block
 //   strategy comes in.
-// - **Speed** — none of this is expensive arithmetic. The whole pipeline is
-//   milliseconds through `blade run`; the notebook lane is slower only because
-//   it tree-walks the IR and re-runs the entire session per cell. Of the
-//   per-cell cost here, ~0.6 s is fixed session overhead (`import plot` alone
-//   is ~0.25 s of stdlib re-lowering) before any arithmetic happens. Two
-//   compiler-side wins would help every `m.eigh`/`m.svd` caller: dropping
-//   `defaultSweeps` from 10 (8 is already past double precision), and skipping
-//   the three inner update loops when a pivot's convergence guard fires —
-//   today a converged rotation still runs all 3n updates with cs = 1, sn = 0,
-//   which is exactly the identity, so skipping it is bit-for-bit free.
+// - **Speed** — none of this is expensive arithmetic; the whole pipeline is
+//   milliseconds through `blade run`. The notebook lane costs more because it
+//   tree-walks the IR, and because it re-runs the accumulated session on every
+//   cell (values are memoized across submissions, so an unchanged prefix is
+//   adopted rather than recomputed). What remains is ~0.6 s of fixed session
+//   overhead per cell — `import plot` alone is ~0.25 s of stdlib re-lowering —
+//   before any arithmetic happens.
+//
+//   The one thing that made a cell *visibly* slow was tree-walking a
+//   synthesized eigensolver, and configuring LAPACK removes it (see the
+//   covariance cell). If a notebook still feels slow, check `blade doctor`
+//   before rewriting the Blade: the same source runs an order of magnitude
+//   apart depending on whether BLAS is wired up, and a compiler built Debug
+//   rather than Release costs another ~5x on top.
