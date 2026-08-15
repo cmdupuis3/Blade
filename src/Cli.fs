@@ -456,7 +456,7 @@ let replLoop () : int =
     let compileRunEcho (candidate: ResizeArray<string>) (targetName: string option) (transient: string option)
         : (string[] * int * Map<string, ReplTypes.Info>) option =
         let useColor = not Console.IsErrorRedirected
-        match engine.EvalCandidate(candidate, targetName, eprintfn "%s") with
+        match engine.EvalCandidate(candidate, targetName, None, eprintfn "%s") with
         | RS.CandidateRejected (ds, sm) ->
             // Front-end / validate rejection: same diagnostics as compileToExe's Error arm.
             eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
@@ -2256,7 +2256,22 @@ let private runFullSuite opts =
          runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
+///
+/// AMBIENT BLAS ENV IS CLEARED FIRST. The suites were written against the
+/// pristine default -- gate off, Blade emitting its own loops -- and that is a
+/// correctness matter, not a preference: corpus EXPECT pins are exact printed
+/// values and the BLAS routes are licensed to differ in the last ULP, the
+/// emission-shape tests assert the NATIVE loop nests, and `interp` /
+/// `diff-oracle` must never run gate-on (MathElaborate: the synthesized
+/// Jacobi is the verification truth). A developer whose shell carries
+/// OPENBLAS_DIR for notebook work would otherwise see ~8 reds that vanish
+/// when run "clean". Tests that exercise the gate itself set and restore
+/// these variables in-process, which this clear does not disturb.
 let private dispatchTest (rest: string list) : int =
+    for var in [ "OPENBLAS_DIR"; "BLADE_BLAS" ] do
+        if System.Environment.GetEnvironmentVariable var <> null then
+            eprintfn "test: clearing ambient %s for this run (suites assume the BLAS gate off; gate suites manage it themselves)" var
+            System.Environment.SetEnvironmentVariable(var, null)
     // `--omp` / `--cuda` / `--timing` / `--mpi` / `--interp` / `--diff-oracle`
     // opt the corresponding blocks into the full suite, in any combination;
     // each also has a standalone arm below.
