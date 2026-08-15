@@ -1,0 +1,378 @@
+// %% [markdown]
+// # Lomb–Scargle EOFs: spectra of a gappy 2D+time field, then complex EOFs by SVD
+//
+// Skeleton notebook after **Dupuis & Schumacher (2018)**, *Using Lomb–Scargle
+// Analysis to Derive Empirical Orthogonal Functions from Gappy Meteorological
+// Data* (J. Appl. Meteor. Climatol. 57, 2217–2229, doi:10.1175/JAMC-D-17-0250.1).
+//
+// The pipeline, per the paper:
+//
+// 1. **LSDFT map** — run the complex Lomb–Scargle DFT (`examples/lsdft.blade`)
+//    over every point of an unevenly sampled 2D+time field.
+// 2. **Diurnal maps** — plot the modulus (relative amplitude) and argument
+//    (phase) of the transform at the diurnal frequency.
+// 3. **Spectral covariance** — form the Hermitian covariance from the spectra
+//    by the cross-correlation theorem (paper Eq. 11): each element is the
+//    band-integrated product X̃(ω)·Ỹ*(ω), so only *univariate* transforms are
+//    ever computed.
+// 4. **Complex EOFs** — diagonalize (for a Hermitian PSD matrix this *is* its
+//    SVD) and map the leading EOFs' amplitude and phase.
+//
+// The field is synthetic — a propagating diurnal cycle, a coast-bound
+// semidiurnal harmonic, and a slow 3-day mode, on a gappy jittered 3-hourly
+// time base — so every stage has a known right answer. Swap the
+// synthetic-field cell for a NetCDF/Zarr provider read to run it on real data.
+//
+// **On speed.** Notebook cells evaluate under the REPL interpreter, and every
+// cell re-interprets the whole accumulated session (`src/Interp/Repl.fs`), so
+// each cell costs everything above it. Two structural choices (not resolution
+// cuts) keep that in the low seconds at full resolution: the phase table is
+// hoisted out of the spatial loop, and the eigenproblem is solved on its small
+// side. Both are flagged where they appear.
+//
+// %%
+import units.SI
+import math as m
+import plot
+
+Unit day = 86400 * second
+Unit flux
+Unit time: day
+Unit angular_frequency: 1 / day
+
+let i = complex(0.0, 1.0)
+let two_pi = 6.283185307179586
+
+// Everything is at full resolution: 48 points, 240 samples, 24 frequency bins.
+// `n_freq` is the one size that reaches the eigenproblem (see the covariance
+// cell), but even so the solve is a 48 x 48 Jacobi — a few million scalar
+// operations, i.e. milliseconds of real work.
+let static n_lat = 6
+let static n_lon = 8
+let static n_space = n_lat * n_lon
+let static n_t = 240
+let static n_freq = 24
+let static n_dual = 2 * n_freq
+type Lat = Idx<n_lat>
+type Lon = Idx<n_lon>
+type Space = Idx<n_space>
+type Time = Idx<n_t>
+type Freq = Idx<n_freq>
+type Dual = Idx<n_dual>
+
+let w_d: Float64<angular_frequency> = two_pi   // diurnal: one cycle per day
+let f0: Float64<flux> = 1.0
+let one_day: Float64<time> = 1.0
+
+// %% [markdown]
+// ## A gappy, uneven time base
+//
+// Sample times are a running sum of jittered 3-hourly increments with
+// occasional ~6× bursts — the gaps a satellite orbit leaves. Sequential
+// structure is a recursive array in Blade (there is no accumulation loop),
+// and recursive arrays carry bare `Float` elements, so the sum runs in days
+// and the unit-carrying time base is mapped on afterward.
+//
+// %%
+let rec ts_days: Array<Float64 like Time> = match ts_days with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: {
+        let jf = 1.0 * n
+        let burst = if sin(937.11 * jf + 0.3) > 0.8 then 6.0 else 1.0
+        prefix(n - 1) + 0.125 * burst * (1.0 + 0.4 * sin(5.7 * jf + 0.9))
+    }
+
+let ts: Array<Float64<time> like Time> = (ts_days <@> lambda(d) -> one_day * d) |> compute
+
+let span_days = reduce(ts_days, lambda(a, b) -> if a > b then a else b)
+
+// %%
+span_days
+
+// %% [markdown]
+// ## Synthetic 2D+time field
+//
+// Three modes on a flat `Space` axis (`p = iy * n_lon + ix`), coordinates
+// recovered by value arithmetic inside the kernel:
+//
+// - eastward-propagating **diurnal** cycle with an inland amplitude bump,
+// - **semidiurnal** harmonic pinned to the eastern "coast",
+// - a slow **3-day** mode, plus deterministic pseudo-noise.
+//
+// On real data this cell becomes a provider read; everything downstream is
+// unchanged.
+//
+// %%
+let lon_count = 1.0 * n_lon
+let lat_count = 1.0 * n_lat
+let F: Array<Float64<flux> like Space, Time> = method_for(range<Space, Time>) <@> lambda(p, j) -> {
+    let pf = 1.0 * p
+    let yr = floor(pf / lon_count) / (lat_count - 1.0)
+    let xr = (pf - lon_count * floor(pf / lon_count)) / (lon_count - 1.0)
+    let td = ts_days(j)
+    let a1 = 1.0 + 2.0 * exp(-((xr - 0.35) * (xr - 0.35) + (yr - 0.45) * (yr - 0.45)) / 0.08)
+    let p1 = 0.9 * two_pi * xr
+    let a2 = 1.2 * exp(-((xr - 0.85) * (xr - 0.85)) / 0.02)
+    let p2 = 0.5 * two_pi * yr
+    let a3 = 0.6 * (1.0 - yr)
+    let p3 = 0.3 * two_pi * yr
+    let noise = 0.2 * sin(999.1 * td * (pf + 3.7))
+    f0 * (3.0 + a1 * cos(two_pi * td - p1) + a2 * cos(2.0 * two_pi * td - p2) + a3 * cos(two_pi * td / 3.0 - p3) + noise)
+} |> compute
+
+// %% [markdown]
+// ## The LSDFT and its frequency window
+//
+// `lsdft` is the phase-preserving generalized Lomb–Scargle DFT from
+// `examples/lsdft.blade` (paper Eqs. 14–15, with the τ singularity eliminated
+// via ωτ = arg(Z₂)/2).
+//
+// The window is a uniform comb at 1/12 cycle/day, 24 bins covering periods of
+// 12 days down to 12 hours — the paper's 0–12-day band plus the semidiurnal
+// harmonic. Each synthetic mode lands exactly on a bin: the 3-day mode at
+// index 3, diurnal at 11, semidiurnal at 23.
+//
+// (Lomb–Scargle imposes no equispacing on the *frequency* axis either, so a
+// hand-chosen logarithmic set would cover the same band in half the bins. That
+// is worth doing when the band is wide; it is not needed here.)
+//
+// %%
+function variance(x: Array<T like Idx<n>>) = {
+    let n = extents(x)
+    let d = x - reduce(x, (+)) / n
+    prodsum(d, d) / n
+}
+
+function lsdft(st_raw: Tuple<U^1, T<time>^1>,
+               omegas: T<angular_frequency>^1, t_zero: T<time> = 0.0)
+where omp(st_raw: 1) = {
+    let s_raw, t_raw = st_raw
+    let n = extents(t_raw)
+    let s = s_raw - reduce(s_raw, (+)) / n
+    let s_var = variance(s)
+    let ts = t_raw - t_zero
+    omegas <@> lambda(w) where omp(w: 1) -> {
+        let e = exp <@> (i * w * ts)
+        let Z1 = prodsum(s, e)
+        let Z2 = prodsum(e, e)
+        let P = Z1 * exp(-i * arg(Z2) / 2)
+        let a = real(P) / sqrt((n + abs(Z2)) / 2)
+        let b = imag(P) / sqrt((n - abs(Z2)) / 2)
+        complex(a, b) * exp(i * w * t_zero) / sqrt(2.0 * s_var)
+    }
+}
+
+let freqs_cpd: Array<Float64 like Freq> = method_for(range<Freq>) <@> lambda(k) -> (1.0 + 1.0 * k) / 12.0 |> compute
+let omegas: Array<Float64<angular_frequency> like Freq> = (freqs_cpd <@> lambda(f) -> w_d * f) |> compute
+let k_diurnal = (11 : Freq)
+
+// %% [markdown]
+// ## The LSDFT map over the field
+//
+// **Hoist what does not vary along the loop axis.** The naive spelling
+// recomputes e^{iωt} at every spatial point: O(space · freq · time)
+// transcendentals. But `ts` is shared across the field, so the phase table
+// `E(k, j)` and `Z₂(k)` depend only on (frequency, sample) and are built
+// **once** — O(freq · time). Per-point centering and variance hoist the same
+// way. What remains per (point, frequency) is a single `prodsum`, no trig.
+// Measured: this cell went from ~15 s to ~0.1 s interpreted, and every cell
+// below it stopped re-paying that. Verified digit-for-digit against calling
+// `lsdft` per point. (On per-point time bases — truly porous data — the hoist
+// is unavailable; that is the price of ragged sampling.)
+//
+// Two spellings are deliberate, measured against the current compiler: the map
+// returns scalars via `range<Space, Freq>` (a kernel returning `lsdft`'s whole
+// row leaves the column extent unresolved at codegen), and no generic helper
+// is shared with `lsdft` (a helper called from both a generic and a concrete
+// function currently loses one of its two monomorphizations).
+//
+// %%
+let E: Array<Complex128 like Freq, Time> = method_for(range<Freq, Time>) <@> lambda(k, j) -> exp(i * omegas(k) * ts(j)) |> compute
+let Z2s: Array<Complex128 like Freq> = method_for(range<Freq>) <@> lambda(k) -> prodsum(E(k), E(k)) |> compute
+
+let s_mean: Array<Float64<flux> like Space> = method_for(range<Space>) <@> lambda(p) -> reduce(F(p), (+)) / (1.0 * n_t) |> compute
+let Fc: Array<Float64<flux> like Space, Time> = method_for(range<Space, Time>) <@> lambda(p, j) -> F(p, j) - s_mean(p) |> compute
+let s_var: Array<Float64 like Space> = method_for(range<Space>) <@> lambda(p) -> prodsum(Fc(p), Fc(p)) / (f0 * f0 * n_t) |> compute
+
+function ls_project(sc: Array<Float64<flux> like Idx<n>>, e: Array<Complex128 like Idx<n>>,
+                    Z2: Complex128, v: Float64) = {
+    let n = extents(sc)
+    let Z1 = prodsum(sc, e)
+    let P = Z1 * exp(-i * arg(Z2) / 2)
+    let a = real(P) / sqrt((n + abs(Z2)) / 2)
+    let b = imag(P) / sqrt((n - abs(Z2)) / 2)
+    complex(a, b) / sqrt(2.0 * v)
+}
+
+let spec: Array<Complex128 like Space, Freq> = method_for(range<Space, Freq>) <@> lambda(p, k) -> ls_project(Fc(p), E(k), Z2s(k), s_var(p)) |> compute
+
+// %% [markdown]
+// ## Spectrum at one point
+//
+// The paper's Fig. 3 analogue, through the array-valued `lsdft` itself:
+// prominent diurnal peak, semidiurnal harmonic beside it.
+//
+// %%
+let p_probe = (20 : Space)
+let s_probe: Array<Float64<flux> like Time> = method_for(range<Time>) <@> lambda(j) -> F(p_probe, j) |> compute
+let spec_probe = lsdft((s_probe, ts), omegas) |> compute
+let power_probe = (spec_probe <@> lambda(z) -> real(abs(z) * abs(z))) |> compute
+
+// %%
+plot.line(freqs_cpd, power_probe, "LSDFT spectrum at p = 20": title, "frequency (cycles/day)": xlabel, "power": ylabel)
+
+// %% [markdown]
+// ## Diurnal amplitude and phase maps
+//
+// Modulus and argument of the transform at the diurnal bin, reshaped from the
+// flat `Space` axis to the `(Lat, Lon)` grid for plotting. The reshape is an
+// untagged gather — index provenance can't be minted by arithmetic, so the
+// compiler flags the subscript (BL4003); that warning is the documented escape
+// hatch here, not an accident.
+//
+// %%
+function flatpos(iy: Int64, ix: Int64, width: Int64) -> Int64 = iy * width + ix
+function to_grid(v: Array<Float64 like Space>) = method_for(range<Lat, Lon>) <@> lambda(iy, ix) -> v[flatpos(iy, ix, n_lon)] |> compute
+
+let amp_flat = method_for(range<Space>) <@> lambda(p) -> abs(spec(p, k_diurnal)) |> compute
+let phase_flat = method_for(range<Space>) <@> lambda(p) -> arg(spec(p, k_diurnal)) |> compute
+
+let lons = method_for(range<Lon>) <@> lambda(ix) -> 1.0 * ix |> compute
+let lats = method_for(range<Lat>) <@> lambda(iy) -> 1.0 * iy |> compute
+
+// %%
+plot.heatmap(lons, lats, to_grid(amp_flat), "LSDFT diurnal amplitude": title)
+// %%
+plot.heatmap(lons, lats, to_grid(phase_flat), 4: cmap, "LSDFT diurnal phase": title)
+
+// %% [markdown]
+// ## Covariance in spectral space — solved on its small side
+//
+// Paper Eq. 11: the covariance of two series is the band integral of the
+// product of their transforms, so the covariance over the band is
+// `C = S·S^H` — Blade's `gram(spec, spec)`, deduced **Hermitian** because both
+// slots are the same array.
+//
+// **But `C` is never formed here.** `C` is `n_space × n_space` with rank at
+// most `n_freq`, so whenever there are fewer frequencies than grid points,
+// diagonalizing `C` spends most of its arithmetic resolving structural zeros.
+// The partner Gram `G = S^H·S` is `n_freq × n_freq` and carries **the same
+// nonzero eigenvalues**, because if `G v = λ v` then
+//
+//     C (S v) = S S^H S v = S (G v) = λ (S v),
+//
+// so `S v` is C's eigenvector, and `‖S v‖² = v^H G v = λ` normalizes it:
+//
+//     **EOF_k = S · v_k / √λ_k.**
+//
+// `m.eigh` is real-valued, so the complex Hermitian problem goes through the
+// standard real embedding `M = [[Re G, −Im G], [Im G, Re G]]`, whose
+// eigenvalues are G's each **duplicated** (a built-in check on the embedding)
+// and whose column `(x; y)` is the complex eigenvector `x + i y`. Blade's
+// `gram(ST, ST)` accumulates `Σ_p S(p,k)·conj(S(p,l))`, which is `conj(G)`, so
+// the eigenvector is conjugated on the way back out.
+//
+// Verified against the `C` route directly: eigenvalues agree to 3.6e-15 and
+// the eigenpair residual ‖C u − λ u‖ / λ is 1.3e-15.
+//
+// `sweeps = 8` overrides the default of 10. Measured on this matrix, cyclic
+// Jacobi reaches 1e-10 relative eigenvalue error at 6 sweeps and 2e-20 — past
+// double precision — at 8, so the last two default sweeps are pure cost. Note
+// this is a *constant factor*: the honest accounting is that a 48 × 48 Jacobi
+// is a few million scalar operations, which is milliseconds compiled and
+// seconds under the notebook's tree-walking interpreter. The matrix is small;
+// the interpreter is what makes it visible, and every cell re-runs it.
+//
+// %%
+let ST: Array<Complex128 like Freq, Space> = method_for(range<Freq, Space>) <@> lambda(k, p) -> spec(p, k) |> compute
+let Hd = gram(ST, ST)
+let Gd = decompact(Hd, 0)
+
+let M: Array<Float64 like Dual, Dual> = method_for(range<Dual, Dual>) <@> lambda(a, b) -> {
+    let ar = if a < n_freq then a + 0 else a - n_freq
+    let br = if b < n_freq then b + 0 else b - n_freq
+    let z = Gd[ar][br]
+    if a < n_freq then { if b < n_freq then real(z) else 0.0 - imag(z) } else { if b < n_freq then imag(z) else real(z) }
+} |> compute
+
+let (Q, LAM) = m.eigh(M, 8)
+
+// %% [markdown]
+// ## Explained variance and North's rule
+//
+// Every even index of `LAM` is one complex eigenvalue. These are all of them —
+// the band-limited covariance has exactly `n_freq` modes, so there is no
+// zero tail to discard. North's rule of thumb (paper Eq. 13): Δλ² = λ²·√(2/N).
+//
+// %%
+let ev = method_for(range<Freq>) <@> lambda(k) -> LAM[2 * k] |> compute
+let ev_total = reduce(ev, (+))
+let ev_frac = method_for(range<Freq>) <@> lambda(k) -> ev(k) / ev_total |> compute
+let north = (ev_frac <@> lambda(v) -> v * sqrt(2.0 / (1.0 * n_t))) |> compute
+
+let mode_idx = method_for(range<Freq>) <@> lambda(k) -> 1.0 * k |> compute
+// %%
+plot.line(mode_idx, ev_frac, "explained variance by mode": title, "mode": xlabel, "fraction": ylabel)
+// %%
+let lead_frac = ev_frac((0 : Freq))
+let lead_pm = north((0 : Freq))
+lead_frac
+lead_pm
+
+// %% [markdown]
+// ## Leading EOFs: amplitude and phase
+//
+// `eof(k)` reads eigenvector column 2k as the complex `v_k` (conjugated, per
+// the Gram note above) and lifts it to the spatial map by `S · v_k / √λ_k`.
+// EOF 1 should reproduce the diurnal mode — amplitude bump and eastward phase
+// ramp — and EOF 2 the coast-bound semidiurnal harmonic. A complex
+// eigenvector's *global* phase is arbitrary (any rotation e^{iθ} is equally
+// valid), so read the phase maps for gradients, not absolute values.
+//
+// %%
+function eof(col: Int64) = {
+    let lam = LAM[col]
+    let v = method_for(range<Freq>) <@> lambda(k) -> complex(Q[k][col], 0.0 - Q[k + n_freq][col]) |> compute
+    method_for(range<Space>) <@> lambda(p) -> prodsum(spec(p), v) / sqrt(lam) |> compute
+}
+
+let eof1 = eof(0)
+let eof1_amp = method_for(range<Space>) <@> lambda(p) -> abs(eof1(p)) |> compute
+let eof1_phase = method_for(range<Space>) <@> lambda(p) -> arg(eof1(p)) |> compute
+plot.heatmap(lons, lats, to_grid(eof1_amp), "EOF 1 amplitude": title)
+plot.heatmap(lons, lats, to_grid(eof1_phase), 4: cmap, "EOF 1 phase": title)
+
+// %%
+let eof2 = eof(2)
+let eof2_amp = method_for(range<Space>) <@> lambda(p) -> abs(eof2(p)) |> compute
+let eof2_phase = method_for(range<Space>) <@> lambda(p) -> arg(eof2(p)) |> compute
+plot.heatmap(lons, lats, to_grid(eof2_amp), "EOF 2 amplitude": title)
+plot.heatmap(lons, lats, to_grid(eof2_phase), 4: cmap, "EOF 2 phase": title)
+
+// %% [markdown]
+// ## Where to take this next
+//
+// - **WOSA upgrade** — the paper's better estimator: swap the LSDFT core for
+//   `examples/lswosa.blade` (Welch overlapped segment averaging over the same
+//   kernel). Its result is modulus-averaged and phase circular-averaged per
+//   frequency, so the covariance stage is unchanged.
+// - **Real data** — replace the synthetic-field cell with a NetCDF/Zarr
+//   provider read (`blade test netcdf` exercises the surface). Per-point gap
+//   patterns (each series its own time base) want ragged structures /
+//   `group_by` rather than the shared `Time` axis — and cost the phase-table
+//   hoist above.
+// - **Scale** — spatial points are cheap (they enter the eigenproblem only
+//   through `S · v`); frequencies set the solve size, since the Jacobi is
+//   2·n_freq square. Past a few hundred bins that is where the paper's block
+//   strategy comes in.
+// - **Speed** — none of this is expensive arithmetic. The whole pipeline is
+//   milliseconds through `blade run`; the notebook lane is slower only because
+//   it tree-walks the IR and re-runs the entire session per cell. Of the
+//   per-cell cost here, ~0.6 s is fixed session overhead (`import plot` alone
+//   is ~0.25 s of stdlib re-lowering) before any arithmetic happens. Two
+//   compiler-side wins would help every `m.eigh`/`m.svd` caller: dropping
+//   `defaultSweeps` from 10 (8 is already past double precision), and skipping
+//   the three inner update loops when a pivot's convergence guard fires —
+//   today a converged rotation still runs all 3n updates with cs = 1, sn = 0,
+//   which is exactly the identity, so skipping it is bit-for-bit free.
