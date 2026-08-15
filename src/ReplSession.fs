@@ -836,6 +836,23 @@ type ReplSession(runCwd: string) =
     let srcPath = Path.Combine(sessionDir, "session.blade")
     let snippets = ResizeArray<string>()
 
+    /// The snippet list of the last CLEANLY-INTERPRETED candidate, paired with
+    /// the values that run left behind. This is the whole of the session cache:
+    /// the next candidate may adopt those values only if its own snippet list
+    /// STARTS WITH exactly this one (the prefix test in `EvalCandidate`), which
+    /// is what makes the cached values the true end state of the new
+    /// candidate's prefix.
+    ///
+    /// Keyed on the CANDIDATE that ran, which is the only list these values
+    /// describe. A bare-expression or mixed cell drops its transient wrappers
+    /// from the commit, so the NEXT candidate is not an extension of this list
+    /// and recomputes -- one cold cell per such cell. That is deliberate: the
+    /// alternative, trusting a prefix of the cached run, would mean adopting
+    /// values that the dropped snippets could have mutated in place after the
+    /// fact, and there is nothing here that could tell whether they did.
+    let mutable memoSnippets : string[] = [||]
+    let mutable memo = Blade.Interp.Run.emptyMemo
+
     /// Where a COMPILED session executable runs. The interpreter lane ignores
     /// it; the g++ lane needs it so relative data paths resolve where the user
     /// is, not in the session temp dir.
@@ -849,7 +866,11 @@ type ReplSession(runCwd: string) =
     /// through `Commit`.
     member _.Snippets = snippets
 
-    member _.Reset() = snippets.Clear()
+    member _.Reset() =
+        snippets.Clear()
+        // The cache describes a session that no longer exists.
+        memoSnippets <- [||]
+        memo <- Blade.Interp.Run.emptyMemo
 
     /// Adopt a candidate as the new session. Only ever called for a candidate
     /// that ran to exit 0.
@@ -983,6 +1004,19 @@ type ReplSession(runCwd: string) =
                               notice: string -> unit) : CandidateOutcome =
         let src = String.concat "\n\n" candidate + "\n"
         File.WriteAllText(srcPath, src)
+        // THE PREFIX TEST. The cached values may be adopted only when every
+        // snippet that produced them is still present, unchanged, at the same
+        // position -- then they are exactly the state this candidate's prefix
+        // would have reached, and the snippets that remain are the only ones
+        // with work to do. Any edit, reorder, or rebind lands a differing
+        // snippet inside the cached range and drops the whole memo, which is
+        // the conservative answer and the correct one: a redefinition splices
+        // in place, so it is visible here as a changed element.
+        let memoIn =
+            if memoSnippets.Length <= candidate.Count
+               && Seq.forall2 (=) memoSnippets (Seq.take memoSnippets.Length candidate)
+            then memo
+            else Blade.Interp.Run.emptyMemo
         let watch = System.Diagnostics.Stopwatch.StartNew()
         match Blade.Interp.Repl.lowerSessionDiag (Some srcPath) src with
         | Error (ds, sm) ->
@@ -1011,11 +1045,25 @@ type ReplSession(runCwd: string) =
                       Stdout = stdout; Stderr = stderr; Lines = lines; Echo = echo
                       Info = info
                       Warnings = (if lane = LaneInterp then warnings else []) }
-            match Blade.Interp.Repl.evalSession lowered "session" with
-            | Blade.Interp.Repl.InterpDone r ->
+            match Blade.Interp.Repl.evalSessionMemo lowered "session" memoIn with
+            | (Blade.Interp.Repl.InterpDone r, memoOut) ->
                 // Interpreter is authoritative (exit 0 or guard panic 1).
+                // Publish the memo only for a CLEAN run: a guard panic (exit 1)
+                // stopped partway, so the bindings after it never ran and the
+                // values it did produce are not a whole prefix's end state.
+                if r.ExitCode = Blade.Interp.Run.ExitOk then
+                    memoSnippets <- candidate.ToArray()
+                    memo <- memoOut
+                else
+                    memoSnippets <- [||]
+                    memo <- Blade.Interp.Run.emptyMemo
                 finish LaneInterp r.ExitCode r.Stdout r.Stderr
-            | Blade.Interp.Repl.InterpFellShort _ ->
+            | (Blade.Interp.Repl.InterpFellShort _, _) ->
+                // The g++ lane runs its own process; nothing it computes is
+                // visible here, so the cache cannot describe the session state
+                // after it and must be dropped.
+                memoSnippets <- [||]
+                memo <- Blade.Interp.Run.emptyMemo
                 notice "-- falling back to compiled evaluation for this input --"
                 match compiledLane with
                 | None ->

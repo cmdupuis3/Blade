@@ -71,6 +71,12 @@ let resetRun () =
     buffer.Clear()
     ordinal <- 0
 
+/// How many frames this run has emitted so far. Interp/Run.fs brackets each
+/// top-level binding with it to find the frame EMITTERS: a session memo must
+/// never adopt one, because a binding that does not re-run cannot re-emit, and
+/// the editor keys its plot panel on the frames of the run it is showing.
+let emitted () = buffer.Count
+
 /// Take the frames this run produced, in emission order.
 let drain () : string list =
     let xs = List.ofSeq buffer

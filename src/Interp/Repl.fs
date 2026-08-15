@@ -134,3 +134,18 @@ let evalSession (lowered: LoweredSession) (sessionName: string) : ReplOutcome =
         InterpFellShort (r.Stderr.Trim())
     else
         InterpDone r
+
+/// `evalSession` carrying a session memo across submissions: `memoIn` holds the
+/// values a previous run of a PREFIX of this session left behind, and the memo
+/// handed back belongs to the session just run (see Run.SessionMemo for the
+/// prefix rule the caller owes). Only a clean run publishes a memo -- the
+/// fallback classifications come back with `Run.emptyMemo`, so a session that
+/// dropped to the g++ lane starts its next submission cold rather than
+/// inheriting a half-executed state.
+let evalSessionMemo (lowered: LoweredSession) (sessionName: string)
+                    (memoIn: Run.SessionMemo) : ReplOutcome * Run.SessionMemo =
+    let (r, memoOut) = Run.runProgramMemo lowered.Ir sessionName Value.defaultLimits memoIn
+    if r.ExitCode = Run.ExitUnsupported || r.ExitCode = Run.ExitInterpBug then
+        (InterpFellShort (r.Stderr.Trim()), Run.emptyMemo)
+    else
+        (InterpDone r, memoOut)

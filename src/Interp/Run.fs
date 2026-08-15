@@ -1,4 +1,4 @@
-// Interpreter driver (Milestone M0).
+﻿// Interpreter driver (Milestone M0).
 //
 // Wraps the tree-walking evaluator (Blade.Interp.Core) and value printer
 // (Blade.Interp.Print) into a single process-like entry point, runProgram,
@@ -24,6 +24,58 @@ type InterpResult =
     { ExitCode: int
       Stdout: string
       Stderr: string }
+
+/// What a completed run leaves behind for the NEXT run of a session that
+/// EXTENDS it (`ReplSession`, notebook/REPL lanes).
+///
+/// The REPL re-lowers and re-runs the whole accumulated session on every
+/// submission, because SSA IRIds are minted fresh by each lowering pass, so a
+/// root Env keyed by IRId cannot survive into the next pass (Interp/Repl.fs).
+/// That argument is about the Env, not about the VALUES: a top-level binding
+/// whose defining source and preceding session are unchanged computes the same
+/// value whatever ids it drew this time. Keying on the binding NAME -- the one
+/// handle that IS stable across passes -- lets the next run adopt those values
+/// and skip their initializers, which is what turns a session's cost from
+/// quadratic in cell count into linear.
+///
+/// CORRECTNESS RESTS ON THE CALLER'S PREFIX RULE: a memo may only be offered to
+/// a run whose session snippets START WITH exactly the snippets that produced
+/// it (ReplSession.EvalCandidate). Then these values are the true end state of
+/// running that prefix -- including any mutation a later prefix binding
+/// performed on an earlier one, since the memo was taken after the prefix had
+/// wholly run -- and the names it carries are exactly the prefix's, because
+/// top-level names are unique within a session and a redefinition splices in
+/// place (so it changes the snippet list and misses the prefix test).
+type SessionMemo =
+    { /// name -> (the IR type the binding had when cached, its value).
+      Values: Map<string, IRType * Value>
+      /// Names that must never be adopted, because running them is what
+      /// produces this session's display frames (see `emitted` bracketing in
+      /// execProgram). Recorded so the exclusion survives into later runs.
+      FrameEmitters: Set<string> }
+
+let emptyMemo : SessionMemo = { Values = Map.empty; FrameEmitters = Set.empty }
+
+/// Is this value safe to carry across a lowering boundary?
+///
+/// Only self-contained MATERIALIZED data is. `VDeferred` and `VLoopObj` close
+/// over an `Env` and `VClosure` over capture cells keyed by IRId; adopting one
+/// into a freshly lowered program would resurrect ids from a dead pass. They
+/// are also precisely the CHEAP values -- a deferred binding has not computed
+/// anything yet -- so refusing them costs nothing. The expense this memo exists
+/// to remove sits in `|> compute`-materialized arrays, which carry no env.
+///
+/// VCompound/VSparse are excluded deliberately rather than by oversight: they
+/// pair a buffer with an index table, and until that pairing is shown to be
+/// env-free the conservative answer is to recompute them.
+let rec private memoizableValue (v: Value) : bool =
+    match v with
+    | VInt _ | VInt32 _ | VFloat _ | VFloat32 _ | VComplex _
+    | VBool _ | VString _ | VChar _ | VUnit -> true
+    | VArray _ -> true
+    | VTuple vs -> Array.forall memoizableValue vs
+    | VStruct (_, fields) -> fields |> Array.forall (snd >> memoizableValue)
+    | _ -> false
 
 // Exit-code protocol (mirrors the C++ runtime plus a private interpreter lane):
 //   0   - normal completion.
@@ -304,18 +356,39 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
 /// order into the root env (keyed by the binding's globally-unique IRId -- the
 /// SSA scoping discipline in Interp/Value.fs), then print. Raising evaluators
 /// propagate out to runProgram's handler.
-let private execProgram (state: Core.InterpState) (merged: IRModule) (program: IRProgram) (testName: string) : InterpResult =
+let private execProgram (state: Core.InterpState) (merged: IRModule) (program: IRProgram)
+                        (testName: string) (memoIn: SessionMemo) : InterpResult * SessionMemo =
     // Display frames are per-RUN state (their `meta.id` ordinals restart), so
     // a re-run of the same session produces the same ids and the editor's plot
     // panel updates its entries in place instead of appending duplicates.
+    // Frames are NEVER replayed from a memo: the bindings that emit them are
+    // excluded from it below, so they re-run and re-emit every pass, and the
+    // ids stay the dense 0..n-1 sequence the editor expects.
     Blade.Display.Frame.resetRun ()
     let root = envNew ()
+    // Bindings whose evaluation emitted a display frame this run. They are
+    // barred from the outgoing memo so that they re-run next time; a restored
+    // binding produces no frame, and a plot that stopped re-emitting would
+    // vanish from the panel.
+    let frameEmitters = System.Collections.Generic.HashSet<string>(memoIn.FrameEmitters)
     // Function bodies may reference module-level bindings (emitted as
     // main-local capturing lambdas in C++) -- expose the root scope to call
     // frames before any binding evaluates.
     state.Global <- Some root
     for m in program.Modules do
         for b in m.Bindings do
+          // A memo hit adopts the cached value and SKIPS the initializer --
+          // the whole point of the cache. The type guard is load-bearing:
+          // Blade infers across the whole session, so a later cell can pin an
+          // earlier binding's element type (or its rank), and a value cached
+          // under the old type would then be the wrong shape. Types differ ->
+          // fall through and recompute.
+          let framesBefore = Blade.Display.Frame.emitted ()
+          match Map.tryFind b.Name memoIn.Values with
+          | Some (cachedTy, cachedV) when cachedTy = b.Type
+                                          && not (Set.contains b.Name memoIn.FrameEmitters) ->
+              envBind root b.Id cachedV |> ignore
+          | _ ->
             // Defer-aware: a deferred combinator binding stores VDeferred (no
             // eager force); a method_for/object_for binding stores VLoopObj;
             // everything else evaluates eagerly, mirroring CodeGen.genBinding.
@@ -364,6 +437,8 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
                         | None ->
                             Core.evalBinding state root b
             envBind root b.Id v |> ignore
+            if Blade.Display.Frame.emitted () > framesBefore then
+                frameEmitters.Add b.Name |> ignore
 
     // Resolve a binding id to its computed value for the printer. Print decides
     // which bindings render and in what order/format (iostream parity), and
@@ -382,15 +457,36 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
         sb.Append(frame).Append('\n') |> ignore
     Print.printBindings testName lookup state.ForcedDeferred merged sb
 
+    // The memo this run hands to its successor: every top-level binding that
+    // holds carryable data, under the type it holds it at. Bindings that were
+    // themselves restored are re-published unchanged -- a session that keeps
+    // extending keeps its whole prefix warm.
+    let outValues =
+        program.Modules
+        |> List.collect (fun m -> m.Bindings)
+        |> List.fold (fun acc b ->
+            match envTryFind root b.Id with
+            | Some cell when memoizableValue cell.V && not (frameEmitters.Contains b.Name) ->
+                Map.add b.Name (b.Type, cell.V) acc
+            | _ -> acc) Map.empty
+
     // state.Err collects any non-fatal interpreter diagnostics -> stderr.
-    { ExitCode = ExitOk; Stdout = sb.ToString(); Stderr = state.Err.ToString() }
+    ({ ExitCode = ExitOk; Stdout = sb.ToString(); Stderr = state.Err.ToString() },
+     { Values = outValues; FrameEmitters = Set.ofSeq frameEmitters })
 
 /// Run a lowered program under the tree-walking interpreter, mapping each
 /// outcome onto the exit-code protocol above. The whole run executes on the
 /// large stack (Runtime.fs) -- the same worker the compile pipeline uses --
 /// because deep recursion arrives in later milestones; catching on that worker
 /// thread means no exception ever crosses back to the caller.
-let runProgram (program: IRProgram) (testName: string) (limits: InterpLimits) : InterpResult =
+///
+/// `memoIn` carries values from a run of a session this one EXTENDS (see
+/// SessionMemo for the prefix rule the caller must honour); pass `emptyMemo`
+/// for a one-shot run. The returned memo is meaningful only on ExitOk -- any
+/// other outcome hands back `emptyMemo`, so a failed or partially-executed run
+/// can never seed the next one.
+let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits)
+                   (memoIn: SessionMemo) : InterpResult * SessionMemo =
     Blade.Runtime.runOnLargeStack (fun () ->
         // Build the interpreter state OUTSIDE execProgram but capture it in a ref
         // the panic handler can read: on an escaping InterpPanic we render the
@@ -415,27 +511,33 @@ let runProgram (program: IRProgram) (testName: string) (limits: InterpLimits) : 
                       Force = Loops.force }
                 state.Hooks <- Some hooks
                 stateRef.Value <- Some state
-                execProgram state merged program testName
+                execProgram state merged program testName memoIn
             finally
                 Blade.IR.restoreAnalysisContext savedCtx
         with
         | InterpPanic (code, msg, file, line) ->
             let frames = match stateRef.Value with Some st -> Core.capturedFrames st | None -> []
-            { ExitCode = ExitPanic; Stdout = ""; Stderr = formatPanic code msg file line frames }
+            ({ ExitCode = ExitPanic; Stdout = ""; Stderr = formatPanic code msg file line frames }, emptyMemo)
         | Core.InterpUnsupported feature ->
-            { ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }, emptyMemo)
         // Array layer's own "not yet interpreted" signal: ArrayOps compiles
         // before Core, so it raises its own ArrayOpUnsupported instead, which
         // must SKIP-classify identically (Interp/ArrayOps.fs CONTRACT NOTE (2)).
         | ArrayOps.ArrayOpUnsupported feature ->
-            { ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }, emptyMemo)
         | Print.PrintUnsupported feature ->
-            { ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }, emptyMemo)
         // Scalar-numerics layer's own signal, on the same footing and for the
         // same reason (Numerics.fs compiles before Core, so it cannot raise
         // InterpUnsupported): a complex intrinsic this build cannot reproduce
         // bit-exactly is a gap in the INTERPRETER, not a fault in the program.
         | Numerics.NumericsUnsupported feature ->
-            { ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }, emptyMemo)
         | ex ->
-            { ExitCode = ExitInterpBug; Stdout = ""; Stderr = sprintf "interp-error: %s" ex.Message })
+            ({ ExitCode = ExitInterpBug; Stdout = ""; Stderr = sprintf "interp-error: %s" ex.Message }, emptyMemo))
+
+/// The one-shot form: no memo in, memo discarded. Every caller outside the
+/// REPL/notebook session lanes (tests, the differential gate, `blade test
+/// interp`) runs a whole program exactly once and wants this.
+let runProgram (program: IRProgram) (testName: string) (limits: InterpLimits) : InterpResult =
+    fst (runProgramMemo program testName limits emptyMemo)
