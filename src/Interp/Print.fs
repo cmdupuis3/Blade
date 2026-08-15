@@ -156,7 +156,15 @@ let private formatScalar (name: string) (et: ElemType) (v: Value) : string =
 ///
 /// Raises PrintUnsupported for binding kinds not handled in M0 (arrays, or a
 /// scalar binding with a missing / mistyped value) so the caller can classify.
-let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: System.Collections.Generic.HashSet<IRId>) (irModule: IRModule) (sb: StringBuilder) : unit =
+/// `only`: when Some, print ONLY bindings whose names are in the set. The
+/// REPL/notebook lane reads a handful of `name = value` lines out of a run and
+/// discards the rest, and formatting every session binding is O(total data)
+/// per submission -- 600+ KB per eval on a modest field notebook. One-shot
+/// callers (the differential gate, `blade test interp`) pass None and keep the
+/// full compiled-parity output. A filtered-out binding is skipped BEFORE its
+/// value is looked at, so a binding whose PRINT the interpreter does not
+/// support cannot fail a run that never asked to see it.
+let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedIds: System.Collections.Generic.HashSet<IRId>) (irModule: IRModule) (only: Set<string> option) (sb: StringBuilder) : unit =
     // Timing line first, mirroring genMainWrapper, where `timing` precedes
     // `printCode`. Constant elapsed (gate-stripped); see module header.
     sb.Append(progName).Append(" completed in 0s").Append('\n') |> ignore
@@ -353,7 +361,11 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
                   | None -> false) then false
             else printableValue b.Value
 
-        if isPrintable then
+        let wanted =
+            match only with
+            | Some names -> Set.contains b.Name names
+            | None -> true
+        if isPrintable && wanted then
             // Type dispatch mirrors genPrintStatements after IR.stripUnits.
             match stripUnits b.Type with
             | IRTScalar et when isPrintableScalarEt et ->
@@ -380,3 +392,4 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: 
             | IRTNamed _ -> ()   // genPrintStatements: [] -- structs/sum types print nothing
             | IRTUnit -> ()      // genPrintStatements: [] -- unit prints nothing
             | _ -> ()            // function values (IRTArrow non-array), inference vars, etc.
+

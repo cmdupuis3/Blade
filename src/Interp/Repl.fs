@@ -143,8 +143,8 @@ let evalSession (lowered: LoweredSession) (sessionName: string) : ReplOutcome =
 /// dropped to the g++ lane starts its next submission cold rather than
 /// inheriting a half-executed state.
 let evalSessionMemo (lowered: LoweredSession) (sessionName: string)
-                    (memoIn: Run.SessionMemo) : ReplOutcome * Run.SessionMemo =
-    let (r, memoOut) = Run.runProgramMemo lowered.Ir sessionName Value.defaultLimits memoIn
+                    (memoIn: Run.SessionMemo) (printOnly: Set<string> option) : ReplOutcome * Run.SessionMemo =
+    let (r, memoOut) = Run.runProgramMemo lowered.Ir sessionName Value.defaultLimits memoIn printOnly
     if r.ExitCode = Run.ExitUnsupported || r.ExitCode = Run.ExitInterpBug then
         (InterpFellShort (r.Stderr.Trim()), Run.emptyMemo)
     else

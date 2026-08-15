@@ -1,4 +1,4 @@
-﻿// ReplSession.fs: the REPL's eval-once engine, lifted out of `Cli.replLoop` so
+// ReplSession.fs: the REPL's eval-once engine, lifted out of `Cli.replLoop` so
 // two front ends can drive the SAME session semantics -- the interactive REPL
 // (prompts, typed echoes, `[snippet not kept]` on stderr) and `ide serve`'s
 // notebook `eval` command (structured results over NDJSON).
@@ -836,8 +836,10 @@ let private spliceDeclaration (candidate: ResizeArray<string>) (text: string) : 
 /// With no `mut` parameter anywhere, a snippet's effect on OTHER bindings is
 /// confined to what its own text says, which is what lets the session cache
 /// keep a proper prefix of an earlier run (see the prefix test in
-/// `EvalCandidate`). Any declaration form that is not a plain function is
-/// counted as unproven, so the answer is only ever too conservative.
+/// `EvalCandidate`). Top-level `function` declarations are the ONLY place a
+/// `mut` parameter can exist: lambda and nested-function parameters go through
+/// `parseLambdaParam`, whose grammar starts at the identifier and admits no
+/// modifier -- so checking `DeclFunction` params is complete, not shallow.
 let mutationFreeSession (prog: Blade.Ast.Program) : bool =
     prog.Modules
     |> List.forall (fun m ->
@@ -1022,7 +1024,14 @@ type ReplSession(runCwd: string) =
     /// `target` is the binding whose output line to hand back as the echo;
     /// `notice` receives the one-line fallback announcement BEFORE the g++
     /// build starts, so an interactive caller can show it while waiting.
+    /// `printOnly`: the top-level names whose `name = value` output lines this
+    /// caller will actually read (Some) -- the run formats only those, which on
+    /// a data-heavy session is most of the eval -- or None for the full
+    /// compiled-parity print. Must be a SUPERSET of every name the caller
+    /// resolves against the output; the g++ fallback lane ignores it (that
+    /// lane always prints everything, a harmless superset).
     member this.EvalCandidate(candidate: ResizeArray<string>, target: string option,
+                              printOnly: Set<string> option,
                               notice: string -> unit) : CandidateOutcome =
         let src = String.concat "\n\n" candidate + "\n"
         File.WriteAllText(srcPath, src)
@@ -1095,7 +1104,7 @@ type ReplSession(runCwd: string) =
                       Stdout = stdout; Stderr = stderr; Lines = lines; Echo = echo
                       Info = info
                       Warnings = (if lane = LaneInterp then warnings else []) }
-            match Blade.Interp.Repl.evalSessionMemo lowered "session" memoIn with
+            match Blade.Interp.Repl.evalSessionMemo lowered "session" memoIn printOnly with
             | (Blade.Interp.Repl.InterpDone r, memoOut) ->
                 // Interpreter is authoritative (exit 0 or guard panic 1).
                 // Publish the memo only for a CLEAN run: a guard panic (exit 1)
@@ -1155,10 +1164,14 @@ type ReplSession(runCwd: string) =
         /// bare-expression lane, which never joins the session.
         let evalWith (candidate: ResizeArray<string>) (placements: Placement list)
                      (target: string option)
+                     (reads: string list)
                      (wanted: Map<string, ReplTypes.Info> -> (string * string) list)
                      (commit: ResizeArray<string> option) =
+            // `reads` is the static superset of session names this lane can
+            // resolve against the run's output lines; the target rides along.
+            let printOnly = Some (Set.ofList (reads @ Option.toList target))
             ensureFailureDiagnostic <|
-            match this.EvalCandidate(candidate, target, ignore) with
+            match this.EvalCandidate(candidate, target, printOnly, ignore) with
             | CandidateRejected (ds, _) ->
                 { Kept = false; ExitCode = 1; Lane = LaneInterp; ElapsedMs = 0
                   Stdout = ""; Stderr = ""; Bindings = []
@@ -1262,7 +1275,11 @@ type ReplSession(runCwd: string) =
                                    | _ -> false) -> [ (n, n) ]
                     | _ -> s.Names)
                 |> List.distinct
-            evalWith candidate placements None report (Some committed)
+            let reads =
+                slots
+                |> List.collect (fun s ->
+                    (s.Names |> List.map snd) @ Option.toList s.NamedIdent)
+            evalWith candidate placements None reads report (Some committed)
         elif declRe.IsMatch head then
             let (candidate, idx) = this.DeclarationCandidate trimmed
             // A :paste block may declare several names; every one of them is a
@@ -1272,14 +1289,14 @@ type ReplSession(runCwd: string) =
             let names = topLevelBindingNames trimmed
             let target = List.tryLast names
             evalWith candidate [ { Index = idx; Prefix = 0; PrefixRow = 0; SubLine = leadPad + 1 } ]
-                     target (fun _ -> names |> List.map (fun n -> (n, n))) (Some candidate)
+                     target names (fun _ -> names |> List.map (fun n -> (n, n))) (Some candidate)
         elif assignRe.IsMatch head then
             let (candidate, idx, hidden, row) = this.AssignmentCandidate trimmed
             let root = (assignRe.Match head).Groups.[1].Value
             evalWith candidate
                      [ { Index = idx; Prefix = (sprintf "let %s = " hidden).Length
                          PrefixRow = row; SubLine = leadPad + 1 } ]
-                     (Some root) (fun _ -> [ (root, root) ]) (Some candidate)
+                     (Some root) [ root; hidden ] (fun _ -> [ (root, root) ]) (Some candidate)
         else
             // A bare identifier naming a session FUNCTION can't be let-bound
             // just to echo it; its signature comes straight from the
@@ -1301,7 +1318,7 @@ type ReplSession(runCwd: string) =
                 evalWith candidate
                          [ { Index = idx; Prefix = (sprintf "let %s = " transient).Length
                              PrefixRow = row; SubLine = leadPad + 1 } ]
-                         (Some transient) (fun _ -> [ ("", transient) ]) None
+                         (Some transient) [ transient ] (fun _ -> [ ("", transient) ]) None
 
 // Whole-notebook assembly: many cells in, one source out.
 //

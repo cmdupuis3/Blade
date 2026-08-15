@@ -1,4 +1,4 @@
-﻿// Interpreter driver (Milestone M0).
+// Interpreter driver (Milestone M0).
 //
 // Wraps the tree-walking evaluator (Blade.Interp.Core) and value printer
 // (Blade.Interp.Print) into a single process-like entry point, runProgram,
@@ -372,7 +372,8 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
 /// SSA scoping discipline in Interp/Value.fs), then print. Raising evaluators
 /// propagate out to runProgram's handler.
 let private execProgram (state: Core.InterpState) (merged: IRModule) (program: IRProgram)
-                        (testName: string) (memoIn: SessionMemo) : InterpResult * SessionMemo =
+                        (testName: string) (memoIn: SessionMemo)
+                        (printOnly: Set<string> option) : InterpResult * SessionMemo =
     // Display frames are per-RUN state (their `meta.id` ordinals restart), so
     // a re-run of the same session produces the same ids and the editor's plot
     // panel updates its entries in place instead of appending duplicates.
@@ -470,7 +471,7 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     // the print block), which is what keeps the two lanes byte-identical.
     for frame in Blade.Display.Frame.drain () do
         sb.Append(frame).Append('\n') |> ignore
-    Print.printBindings testName lookup state.ForcedDeferred merged sb
+    Print.printBindingsOnly testName lookup state.ForcedDeferred merged printOnly sb
 
     // The memo this run hands to its successor: every top-level binding that
     // holds carryable data, under the type it holds it at. Bindings that were
@@ -504,7 +505,7 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
 /// other outcome hands back `emptyMemo`, so a failed or partially-executed run
 /// can never seed the next one.
 let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits)
-                   (memoIn: SessionMemo) : InterpResult * SessionMemo =
+                   (memoIn: SessionMemo) (printOnly: Set<string> option) : InterpResult * SessionMemo =
     Blade.Runtime.runOnLargeStack (fun () ->
         // Build the interpreter state OUTSIDE execProgram but capture it in a ref
         // the panic handler can read: on an escaping InterpPanic we render the
@@ -529,7 +530,7 @@ let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits
                       Force = Loops.force }
                 state.Hooks <- Some hooks
                 stateRef.Value <- Some state
-                execProgram state merged program testName memoIn
+                execProgram state merged program testName memoIn printOnly
             finally
                 Blade.IR.restoreAnalysisContext savedCtx
         with
@@ -558,4 +559,4 @@ let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits
 /// REPL/notebook session lanes (tests, the differential gate, `blade test
 /// interp`) runs a whole program exactly once and wants this.
 let runProgram (program: IRProgram) (testName: string) (limits: InterpLimits) : InterpResult =
-    fst (runProgramMemo program testName limits emptyMemo)
+    fst (runProgramMemo program testName limits emptyMemo None)
