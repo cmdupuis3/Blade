@@ -49,12 +49,27 @@ type InterpResult =
 type SessionMemo =
     { /// name -> (the IR type the binding had when cached, its value).
       Values: Map<string, IRType * Value>
+      /// Could a snippet write THROUGH an earlier binding, rather than just
+      /// rebinding a name? Only a `mut` array parameter can (element writes
+      /// alias the caller), so this is set by the caller from the session's
+      /// own declarations. It licenses reusing a PROPER prefix of the cached
+      /// snippets: without it, a cached snippet the new candidate drops might
+      /// have written into a binding being kept, and the kept values would no
+      /// longer describe the prefix alone.
+      ///
+      /// Deliberately NOT derived from IRModule.MutableArrayLets: that set
+      /// exists for `let mut a = Z` deep-copy semantics and also catches the
+      /// buffer a `let rec` array is built in, which is the compiler's own
+      /// scratch space and no hazard at all. Using it made every recursive-
+      /// array session opt out of the prefix reuse for no reason.
+      MutationFree: bool
       /// Names that must never be adopted, because running them is what
       /// produces this session's display frames (see `emitted` bracketing in
       /// execProgram). Recorded so the exclusion survives into later runs.
       FrameEmitters: Set<string> }
 
-let emptyMemo : SessionMemo = { Values = Map.empty; FrameEmitters = Set.empty }
+let emptyMemo : SessionMemo =
+    { Values = Map.empty; MutationFree = false; FrameEmitters = Set.empty }
 
 /// Is this value safe to carry across a lowering boundary?
 ///
@@ -472,7 +487,10 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
 
     // state.Err collects any non-fatal interpreter diagnostics -> stderr.
     ({ ExitCode = ExitOk; Stdout = sb.ToString(); Stderr = state.Err.ToString() },
-     { Values = outValues; FrameEmitters = Set.ofSeq frameEmitters })
+     { Values = outValues
+       // Filled in by the caller, which can see the session's declarations.
+       MutationFree = memoIn.MutationFree
+       FrameEmitters = Set.ofSeq frameEmitters })
 
 /// Run a lowered program under the tree-walking interpreter, mapping each
 /// outcome onto the exit-code protocol above. The whole run executes on the

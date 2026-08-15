@@ -1,4 +1,4 @@
-// ReplSession.fs: the REPL's eval-once engine, lifted out of `Cli.replLoop` so
+﻿// ReplSession.fs: the REPL's eval-once engine, lifted out of `Cli.replLoop` so
 // two front ends can drive the SAME session semantics -- the interactive REPL
 // (prompts, typed echoes, `[snippet not kept]` on stderr) and `ide serve`'s
 // notebook `eval` command (structured results over NDJSON).
@@ -826,6 +826,28 @@ let private spliceDeclaration (candidate: ResizeArray<string>) (text: string) : 
         candidate.Add text
         (candidate.Count - 1, id)
 
+/// Does this session declare NOTHING that can write through a binding it was
+/// handed? A `mut` parameter is the only such thing in Blade: it is array-only
+/// and its element writes alias the caller's storage, so a call can change a
+/// value that was bound earlier. Everything else either rebinds a name (which
+/// the snippet list already shows) or writes through a reassignment statement
+/// (which `assignRe` finds in the snippet text).
+///
+/// With no `mut` parameter anywhere, a snippet's effect on OTHER bindings is
+/// confined to what its own text says, which is what lets the session cache
+/// keep a proper prefix of an earlier run (see the prefix test in
+/// `EvalCandidate`). Any declaration form that is not a plain function is
+/// counted as unproven, so the answer is only ever too conservative.
+let mutationFreeSession (prog: Blade.Ast.Program) : bool =
+    prog.Modules
+    |> List.forall (fun m ->
+        m.Decls
+        |> List.forall (fun d ->
+            match d.Value with
+            | Blade.Ast.DeclFunction f ->
+                f.Params |> List.forall (fun p -> p.Mutability <> Blade.Ast.Mutable)
+            | _ -> true))
+
 /// One accumulating REPL session: the snippet list, the temp directory its
 /// assembled program is written to, and eval-once. Independent instances share
 /// nothing, which is what lets `ide serve` hold one per notebook.
@@ -1013,10 +1035,38 @@ type ReplSession(runCwd: string) =
         // the conservative answer and the correct one: a redefinition splices
         // in place, so it is visible here as a changed element.
         let memoIn =
-            if memoSnippets.Length <= candidate.Count
-               && Seq.forall2 (=) memoSnippets (Seq.take memoSnippets.Length candidate)
-            then memo
-            else Blade.Interp.Run.emptyMemo
+            let shared =
+                let n = min memoSnippets.Length candidate.Count
+                let mutable k = 0
+                while k < n && memoSnippets.[k] = candidate.[k] do k <- k + 1
+                k
+            if shared = memoSnippets.Length then
+                // The cached run is a whole prefix of this one: adopt it all.
+                memo
+            elif shared = 0 then Blade.Interp.Run.emptyMemo
+            else
+                // The cached run has snippets this candidate does not. In the
+                // common case they are the TRANSIENT WRAPPERS a bare-expression
+                // or mixed cell runs and never commits -- every `plot.*` cell is
+                // one -- and without this arm each plot would cost the whole
+                // session again, which is most of a plotting notebook.
+                //
+                // Two things must hold to keep the first `shared` values. Their
+                // own bindings must go, so the dropped snippets have to NAME
+                // themselves; and, because they ran AFTER the ones being kept,
+                // they must not have been able to change those. `MutationFree`
+                // rules out writes through a `let mut` array and the `assignRe`
+                // scan rules out a reassignment; anything left unproven drops
+                // the memo rather than guessing.
+                let dropped = [ for i in shared .. memoSnippets.Length - 1 -> memoSnippets.[i] ]
+                let names = dropped |> List.map topLevelBindingNames
+                let allNamed = names |> List.forall (List.isEmpty >> not)
+                let reassigns = dropped |> List.exists (fun s -> assignRe.IsMatch(s.Trim()))
+                if memo.MutationFree && allNamed && not reassigns then
+                    let gone = names |> List.concat |> Set.ofList
+                    { memo with
+                        Values = memo.Values |> Map.filter (fun nm _ -> not (Set.contains nm gone)) }
+                else Blade.Interp.Run.emptyMemo
         let watch = System.Diagnostics.Stopwatch.StartNew()
         match Blade.Interp.Repl.lowerSessionDiag (Some srcPath) src with
         | Error (ds, sm) ->
@@ -1053,7 +1103,7 @@ type ReplSession(runCwd: string) =
                 // values it did produce are not a whole prefix's end state.
                 if r.ExitCode = Blade.Interp.Run.ExitOk then
                     memoSnippets <- candidate.ToArray()
-                    memo <- memoOut
+                    memo <- { memoOut with MutationFree = mutationFreeSession lowered.Prog }
                 else
                     memoSnippets <- [||]
                     memo <- Blade.Interp.Run.emptyMemo
