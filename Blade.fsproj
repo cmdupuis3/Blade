@@ -448,6 +448,14 @@
     <None Include="protocol/surface.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- Its hand-authored companion: per-BLxxxx explanation/fix prose and
+         example corpus paths, the half of the package no generator can
+         produce. Deployed for the same reason, and because its example paths
+         are corpus-relative: corpus ships beside the binary too, so they
+         resolve under both roots. -->
+    <None Include="protocol/data/diagnostics.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <!-- The Blade standard library, in Blade source. ModuleResolve.fs looks for

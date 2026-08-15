@@ -1434,6 +1434,68 @@ let private runSurfaceTests () : TH.BlockResult =
                 (sprintf "diverges at %d (regenerate with `blade ide surface`)\n      file: %s\n      live: %s"
                          at (ctx onDisk) (ctx surfaceJson))
 
+    // 6. The hand-authored knowledge base: the half of the package no generator
+    // can produce, keyed by the SAME registry the surface carries so a new code
+    // cannot ship undocumented. Every example path must exist AND mention its
+    // code -- a stale path is worse than no example, because a client shows it.
+    let kbDocPaths = ResizeArray<string>()
+    let name = "protocol/data/diagnostics.json covers every registry code, with live examples"
+    match artifact "protocol/data/diagnostics.json" with
+    | Error tried ->
+        record name TH.Fail (sprintf "knowledge base not found; looked in %s" tried)
+    | Ok path ->
+        match (try Some (System.Text.Json.JsonDocument.Parse(File.ReadAllText path)) with _ -> None) with
+        | None -> record name TH.Fail (sprintf "%s is not JSON" path)
+        | Some kb ->
+            let entries =
+                match kb.RootElement.TryGetProperty "codes" with
+                | true, c when c.ValueKind = System.Text.Json.JsonValueKind.Object ->
+                    [ for p in c.EnumerateObject() -> (p.Name, p.Value) ]
+                | _ -> []
+            let byCode = dict entries
+            let strOf (el: System.Text.Json.JsonElement) (field: string) =
+                match el.TryGetProperty field with
+                | true, v when v.ValueKind = System.Text.Json.JsonValueKind.String ->
+                    defaultArg (Option.ofObj (v.GetString())) ""
+                | _ -> ""
+            let listOf (el: System.Text.Json.JsonElement) (field: string) =
+                match el.TryGetProperty field with
+                | true, a when a.ValueKind = System.Text.Json.JsonValueKind.Array ->
+                    [ for x in a.EnumerateArray() -> defaultArg (Option.ofObj (x.GetString())) "" ]
+                | _ -> []
+            for (_, e) in entries do kbDocPaths.AddRange(listOf e "docs")
+            let problems =
+                [ for (code, title) in Blade.Diagnostics.Codes.registryEntries do
+                    match byCode.TryGetValue code with
+                    | false, _ -> yield sprintf "%s absent" code
+                    | true, e ->
+                        if strOf e "title" <> title then
+                            yield sprintf "%s title '%s' <> registry '%s'" code (strOf e "title") title
+                        if strOf e "explanation" = "" then yield sprintf "%s has no explanation" code
+                        if strOf e "fix" = "" then yield sprintf "%s has no fix" code
+                        for ex in listOf e "examples" do
+                            match artifact ex with
+                            | Error _ -> yield sprintf "%s example missing: %s" code ex
+                            | Ok p ->
+                                if not ((File.ReadAllText p).Contains code) then
+                                    yield sprintf "%s example never mentions it: %s" code ex
+                  for (code, _) in entries do
+                    if not (Blade.Diagnostics.Codes.isRegistered code) then
+                        yield sprintf "'%s' is not a registered code" code ]
+            if List.isEmpty problems then record name TH.Pass (sprintf "%d codes" entries.Length)
+            else record name TH.Fail (problems |> List.truncate 6 |> String.concat "; ")
+
+    // ...and its docs[] half, which points into docs/ -- repo-only, so this leg
+    // alone skips when the suite runs from the deployed directory.
+    let name = "knowledge-base docs[] paths resolve in the repo tree"
+    if not (Directory.Exists "docs") then
+        record name TH.Skip "no ./docs (running beside the binary)"
+    else
+        let missing = kbDocPaths |> Seq.distinct |> Seq.filter (File.Exists >> not) |> List.ofSeq
+        if List.isEmpty missing then
+            record name TH.Pass (sprintf "%d paths" (kbDocPaths |> Seq.distinct |> Seq.length))
+        else record name TH.Fail (String.concat "; " missing)
+
     let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq

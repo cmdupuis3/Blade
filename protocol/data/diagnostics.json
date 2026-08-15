@@ -1,0 +1,732 @@
+{
+  "version": 1,
+  "codes": {
+    "BL0001": {
+      "title": "unknown character",
+      "explanation": "A character that starts no Blade token appeared in the source. In practice the lexer emits a TokError for it and the parser surfaces that as BL1001/BL1999 with an \"invalid token\" message, so this code is the band's reserved name for the condition rather than a string you will usually see.",
+      "fix": "Delete or replace the character. The usual culprits are smart quotes, non-breaking spaces and em dashes pasted from a document, or text that was meant to be inside a string literal or a comment.",
+      "examples": [],
+      "docs": []
+    },
+    "BL0002": {
+      "title": "unterminated string",
+      "explanation": "A string or character literal was opened and the lexer reached the end of the line or the end of the file without finding its closing quote. Reported today through the parser band as an invalid token.",
+      "fix": "Close the literal. Blade string literals do not span lines, so a long message needs escaping or concatenation rather than a raw newline.",
+      "examples": [],
+      "docs": []
+    },
+    "BL0003": {
+      "title": "invalid numeric literal",
+      "explanation": "A run of digits could not be parsed as an Int64 or a Float: a malformed exponent, a doubled decimal point, a trailing separator, or a value outside the integer range.",
+      "fix": "Rewrite the literal in a form the target type accepts. Integer literals are Int64; a value too large for that must be written as a float, and a float needs digits on both sides of any exponent marker.",
+      "examples": [],
+      "docs": []
+    },
+    "BL0999": {
+      "title": "lexical error",
+      "explanation": "The lexer band's catch-all: a tokenization failure with no more specific BL0xxx code. Reserved so every lexer diagnostic has a code; lexer failures currently reach the user through the parser band instead.",
+      "fix": "Read the accompanying message, which names the offending text, and correct the source at that position.",
+      "examples": [],
+      "docs": []
+    },
+    "BL1001": {
+      "title": "expected token",
+      "explanation": "The parser required one specific token at this position and found a different one. The message names both, and the span points at the token that was actually there, not at the construct that wanted it.",
+      "fix": "Supply the missing token. Most instances are a missing `=` in a declaration, `->` in a function signature or lambda, a comma between arguments, or an unbalanced delimiter earlier on the line.",
+      "examples": [
+        "tests/corpus/basic/028_nested_function_malformed_where_rejects.blade",
+        "tests/corpus/diagnostics/003_parse_expected.blade",
+        "tests/corpus/index-types/197_orbidx_missing_sign_rejects.blade"
+      ],
+      "docs": []
+    },
+    "BL1002": {
+      "title": "unexpected end of file",
+      "explanation": "BL1001's end-of-input twin: the parser still needed a token and the file ran out. The span sits at the end of the file, so the real error is almost always an unclosed construct further up.",
+      "fix": "Find the unbalanced delimiter. Work backwards from the end for an unclosed `{`, `(`, `[` or `<`, or a declaration whose body was never written.",
+      "examples": [
+        "tests/corpus/diagnostics/004_parse_eof.blade"
+      ],
+      "docs": []
+    },
+    "BL1999": {
+      "title": "parse error",
+      "explanation": "The parser band's general failure: the token stream does not form a Blade construct here, and no more specific parse code applies. Note that removed syntax lands here at top level -- an imperative `for` loop inside a block is the dedicated BL1003 steer, but the same text at top level dies earlier, as this code.",
+      "fix": "Read the message, which describes the construct the parser was building. If the text is a loop, an accumulator, or another imperative shape, rewrite it as a loop object, a combinator, or a `let rec` recursive array -- see the style guide in CLAUDE.md and docs/quickstart-1.md.",
+      "examples": [
+        "tests/corpus/basic/044_braceless_arm_needs_value_rejects.blade",
+        "tests/corpus/diagnostics/029_field_double_bound_spec.blade",
+        "tests/corpus/index-types/196_orbidx_rank_zero_rejects.blade"
+      ],
+      "docs": [
+        "docs/quickstart-1.md"
+      ]
+    },
+    "BL2001": {
+      "title": "unbound variable",
+      "explanation": "A name was used where nothing of that name is in scope. Blade resolves strictly in declaration order: a body sees only the names bound before it, which is also why mutual recursion between two runtime functions reports here rather than as a special-cased error.",
+      "fix": "Declare the name first, or correct the spelling. For mutual recursion, restructure into one function, or make both `static function`s -- compile-time functions may refer to each other freely.",
+      "examples": [
+        "tests/corpus/diagnostics/001_unbound_variable.blade",
+        "tests/corpus/diagnostics/002_span_precision.blade",
+        "tests/corpus/functions/060_mutual_recursion_main_local.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL2002": {
+      "title": "unknown qualified name",
+      "explanation": "Reserved for a dotted path (`module.name`) whose qualifier resolves but whose member does not. No emission site maps to it today; qualified-name failures currently arrive as BL2001 or as a domain elaborator's own BL5xxx code.",
+      "fix": "Check the module actually exports the member, and that the module was imported under the alias you are qualifying with.",
+      "examples": [],
+      "docs": []
+    },
+    "BL2003": {
+      "title": "invalid import",
+      "explanation": "The checker can see the import and rejects its form. The live cases are provider modules imported the wrong way: a provider must be bound as a module alias, and it does not support selective (`from X import name`) imports.",
+      "fix": "Write `import csv as csv` (or the provider you need) and reach its members through the alias. Reserve `from X import name` for ordinary Blade modules.",
+      "examples": [],
+      "docs": []
+    },
+    "BL2004": {
+      "title": "module not found",
+      "explanation": "The file-based module resolver could not turn an `import a.b` into a file. It searches the importing file's directory, the stdlib deployed beside the binary (walking up from there, so a dev tree also finds <repo>/stdlib), and any root named by BLADE_STDLIB. Distinct from BL2003, which is the checker's verdict on an import it CAN see.",
+      "fix": "Check the path spelling -- `import units.SI` means `units/SI.blade` -- and that the file is on one of those roots. Set BLADE_STDLIB to add a search root for a library outside the tree.",
+      "examples": [],
+      "docs": []
+    },
+    "BL2005": {
+      "title": "import cycle",
+      "explanation": "The transitive import walk returned to a module already on the stack. Blade's module graph must be acyclic: each module is checked once, in dependency order, and a cycle has no valid order.",
+      "fix": "Break the cycle by moving the shared declarations into a third module that both sides import, or by inlining the smaller half.",
+      "examples": [],
+      "docs": []
+    },
+    "BL2006": {
+      "title": "duplicate module",
+      "explanation": "Two files on the search path claim the same module name, so an import of that name is ambiguous and the resolver refuses to pick.",
+      "fix": "Rename one module, or remove the stale copy -- most often a file left behind in the working directory that shadows a stdlib module of the same name.",
+      "examples": [],
+      "docs": []
+    },
+    "BL3001": {
+      "title": "type mismatch",
+      "explanation": "Unification failed: a value's type cannot be reconciled with the type its position requires. Covers plain mismatches as well as an argument whose RANK or element type disagrees with the parameter, with the expected and actual types printed.",
+      "fix": "Fix whichever side is wrong. Remember that index provenance is part of the type -- `Nat<LatIdx>` and `Nat<LonIdx>` do not unify even at equal extent -- so a mismatch between two same-shaped arrays usually means the index types, not the data, are wrong.",
+      "examples": [
+        "tests/corpus/basic/046_literal_pattern_wrong_type_rejects.blade",
+        "tests/corpus/diagnostics/006_annotation_mismatch.blade",
+        "tests/corpus/diagnostics/052_arg_string_for_float.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3002": {
+      "title": "arity mismatch",
+      "explanation": "A call supplied the wrong number of arguments, or a kernel's parameter pack did not match the number of operands the combinator feeds it. The kernel form matters: `method_for(A, B)` is the outer product and hands the kernel two operands, while `method_for(zip(A, B))` co-iterates and hands it one.",
+      "fix": "Count the operands the combinator actually delivers and match the kernel's parameters to them. Under- and over-arity on a kernel are separate messages; both name the count they expected.",
+      "examples": [
+        "tests/corpus/diagnostics/005_lambda_arity.blade",
+        "tests/corpus/diagnostics/056_kernel_underarity_drops_operand.blade",
+        "tests/corpus/diagnostics/057_kernel_overarity.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3003": {
+      "title": "invalid application",
+      "explanation": "Something that is neither a function nor an indexable array was applied. In Blade `()` is application AND indexing -- an `Array<T like I, J>` is the function `I -> J -> T` -- so this fires when the head of a call is a plain scalar, a tuple, or a value of a type with no such reading.",
+      "fix": "Check what the head actually is. `[]` is only for tuple and pack structural access (`t[0]`); array element access is `A(i)`, and applying a scalar is always an error.",
+      "examples": [],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3004": {
+      "title": "pattern type mismatch",
+      "explanation": "A match arm's pattern cannot describe a value of the scrutinee's type: a literal pattern of the wrong type, a constructor from another sum type, or a structural pattern (a cons `::` spine, a tuple shape) applied to something with no such structure.",
+      "fix": "Rewrite the arm to match the scrutinee's actual type, or ascribe the scrutinee if it was inferred as something other than you intended.",
+      "examples": [
+        "tests/corpus/basic/023_cons_non_tuple_scrutinee_rejects.blade"
+      ],
+      "docs": []
+    },
+    "BL3005": {
+      "title": "invalid array capture",
+      "explanation": "A kernel or lambda body captured an array from its enclosing scope in a way the loop machinery cannot honor -- the capture would have to be resolved per iteration in a position where the emitted nest has no such value.",
+      "fix": "Pass the array as an explicit combinator operand instead of capturing it, or hoist the read out of the kernel body so the captured value is loop-invariant.",
+      "examples": [],
+      "docs": []
+    },
+    "BL3006": {
+      "title": "unit mismatch",
+      "explanation": "Two dimensioned quantities were combined in a way the unit algebra rejects -- adding meters to seconds, comparing incompatible dimensions, or assigning across them. Units are part of the type, and this check runs structurally, on the derived dimension, not on the name.",
+      "fix": "Convert one side explicitly, or correct the declaration. A refusal here usually means the program was wrong, not the annotation: check the derived unit of each operand before reaching for a cast.",
+      "examples": [
+        "tests/corpus/tuples/017_component_unit_mismatch_rejects.blade",
+        "tests/corpus/tuples/026_tuple_equality_unit_mismatch_rejects.blade",
+        "tests/corpus/unit-errors/001_unit_mismatch_add.blade"
+      ],
+      "docs": [
+        "docs/features.md"
+      ]
+    },
+    "BL3007": {
+      "title": "invalid builtin argument",
+      "explanation": "The widest bucket in the type band: a builtin or intrinsic received an argument it cannot serve. It covers the scalar intrinsics (needs an array, needs a numeric, complex-only, arity), the array builtins (`reduce` on an empty array, `prodsum` extent disagreement, `gram` needing rank 2, array-literal length and compact-literal shape), the combinator chain operators, the Dist/cumulant family, EnumIdx label errors, interface `impl` gaps, the dense-fallback rules, and the provider read/write forms.",
+      "fix": "Read the message -- each variant states the specific rule it enforced. The argument, not the builtin, is normally what needs changing.",
+      "examples": [
+        "tests/corpus/fallback/005_scalar_operands_rejects.blade",
+        "tests/corpus/fallback/006_symmetric_left_rejects.blade",
+        "tests/corpus/fallback/008_compound_right_rejects.blade"
+      ],
+      "docs": [
+        "docs/features/ppl.md"
+      ]
+    },
+    "BL3008": {
+      "title": "struct construction error",
+      "explanation": "A struct literal, field access, or spread does not agree with the struct's declaration: a duplicate or unknown field, a missing required field, a field of the wrong type, a bound whose scope reaches a field declared later, or a spread base that is not a struct.",
+      "fix": "Compare the literal against the `struct` declaration field by field. Bounds may only reference fields declared before them.",
+      "examples": [
+        "tests/corpus/diagnostics/011_predicate_unannotated.blade",
+        "tests/corpus/diagnostics/031_static_struct_array_field.blade",
+        "tests/corpus/structs/023_bound_references_later_field.blade"
+      ],
+      "docs": []
+    },
+    "BL3009": {
+      "title": "rank deduction violation",
+      "explanation": "Arity polymorphism deduced a rank for a function that violates a rank bound written on it. One function typechecks differently per call site depending on how many array arguments it receives; this is that deduction disagreeing with a declared bound.",
+      "fix": "Either relax the rank bound in the signature or change the call so the deduced rank falls inside it. The message names both the bound and the rank that was deduced.",
+      "examples": [
+        "tests/corpus/diagnostics/042_rank_bound_violation.blade",
+        "tests/corpus/functions/037_rank_bound_violation_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3010": {
+      "title": "quantity argument needs ascription",
+      "explanation": "A parameter whose declared type carries a QUANTITY (a nominal unit, `Unit speed: mps`) rejects any argument not ascribed with that quantity -- bare values and structurally-dimensioned values alike. Split from BL3006 deliberately: the dimensions may agree perfectly; what is missing is the caller's ASSERTION.",
+      "fix": "Ascribe the argument with the quantity the slot names. The fix is an ascription, never a conversion -- if the dimensions genuinely disagree you would have BL3006 instead.",
+      "examples": [
+        "tests/corpus/units/033_quantity_slot_rejects_bare.blade",
+        "tests/corpus/units/034_quantity_slot_rejects_structural.blade",
+        "tests/corpus/units/039_quantity_default_bare_arg.blade"
+      ],
+      "docs": [
+        "docs/features.md"
+      ]
+    },
+    "BL3011": {
+      "title": "quantity name is terminal",
+      "explanation": "Quantity names are TERMINAL in the unit algebra: the nominal layer is exactly one level deep. So `Unit x = speed * m` (composing with a quantity) and `Unit q: speed` (a quantity of a quantity) are both declaration-site errors.",
+      "fix": "Compose with the underlying units instead of the quantity name, and declare each quantity directly over its structural unit.",
+      "examples": [
+        "tests/corpus/units/028_quantity_terminal_algebra.blade",
+        "tests/corpus/units/029_quantity_terminal_rhs.blade",
+        "tests/corpus/units/044_compound_quantity_terminal.blade"
+      ],
+      "docs": [
+        "docs/features.md"
+      ]
+    },
+    "BL3012": {
+      "title": "invalid parameter default",
+      "explanation": "Parameter defaults are TRAILING -- a required parameter may not follow a defaulted one -- and may reference the REQUIRED parameters only. Defaults evaluate at call entry, left to right, with just the required arguments bound, so a default reaching a later or defaulted parameter has nothing to read.",
+      "fix": "Move defaulted parameters to the end of the list, and restrict a default expression to constants and earlier required parameters.",
+      "examples": [
+        "tests/corpus/functions/046_default_order_error.blade",
+        "tests/corpus/functions/047_default_scope_error.blade"
+      ],
+      "docs": []
+    },
+    "BL3013": {
+      "title": "factory quantity slots must be distinct",
+      "explanation": "Within one function's defaulted trailing group, quantity-typed slots must carry DISTINCT quantities: by-nominal argument routing needs each nominal to name exactly one slot. This is a declaration-site check and fires even if the function is never called.",
+      "fix": "Give the colliding slots different quantities, or move one of them out of the defaulted trailing group so it is filled positionally.",
+      "examples": [
+        "tests/corpus/functions/054_factory_dup_quantity_decl.blade"
+      ],
+      "docs": []
+    },
+    "BL3014": {
+      "title": "invalid quantity-tagged argument routing",
+      "explanation": "By-nominal argument routing failed at a call site: a slot was filled twice, a tag matched no slot, or an untagged positional argument followed a tagged one, which makes the mix ambiguous.",
+      "fix": "Tag each intended slot once, check the tag spelling against the declaration, and put every positional argument before the first tagged one.",
+      "examples": [
+        "tests/corpus/display-errors/004_plot_duplicate_slot.blade",
+        "tests/corpus/functions/051_factory_dup_slot.blade",
+        "tests/corpus/functions/052_factory_unknown_tag.blade"
+      ],
+      "docs": []
+    },
+    "BL3015": {
+      "title": "unknown unit name",
+      "explanation": "A name on the right-hand side of a `Unit` declaration is neither a declared unit nor a built-in scale constant. A unit RHS composes what is already in scope; the alternative -- minting the unknown name as a fresh base unit -- would type a misspelling into a silently wrong dimension. Only literals may be undeclared in a unit expression.",
+      "fix": "Declare the unit before using it, or fix the spelling. `import units.SI` brings the SI vocabulary into scope.",
+      "examples": [
+        "tests/corpus/units/048_unknown_unit_name_rejects.blade",
+        "tests/corpus/units/049_unknown_unit_name_quantity_rhs_rejects.blade",
+        "tests/corpus/units/050_unknown_unit_name_annotation_rejects.blade"
+      ],
+      "docs": [
+        "docs/features.md"
+      ]
+    },
+    "BL3016": {
+      "title": "argument extent mismatch",
+      "explanation": "A parameter and its argument BOTH carry a literal extent on the same index slot, and they differ. This is not a naming quibble: codegen treats a literal parameter extent as ground truth and bakes it into loop bounds and result allocations, so the emitted C++ would index past the argument's allocation. The halo-window variant reports the same way, and has a runtime twin, BL8009, for the extents typecheck cannot see.",
+      "fix": "Make the extents agree, or write the parameter with a SYMBOLIC extent (`Idx<n>`), which reads `.extents[d]` at runtime and stays permissive.",
+      "examples": [
+        "tests/corpus/diagnostics/069_extent_arg_direct.blade",
+        "tests/corpus/diagnostics/070_extent_arg_kernel.blade",
+        "tests/corpus/loops/161_halo_static_extent_mismatch_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3999": {
+      "title": "type error",
+      "explanation": "The type band's catch-all, carried by every checker error that has no more specific code of its own. A large and deliberately heterogeneous set: the message is the diagnosis, not the code.",
+      "fix": "Read the message and the context lines under it, which name the declaration and the expression the checker was working on.",
+      "examples": [
+        "tests/corpus/arity/030_caret_fold_kernel_not_vacuous.blade",
+        "tests/corpus/diagnostics/028_static_struct_bound_violation.blade",
+        "tests/corpus/diagnostics/032_static_bound_forward_ref_violated.blade"
+      ],
+      "docs": [
+        "docs/formalism.md",
+        "docs/features/sql.md"
+      ]
+    },
+    "BL4001": {
+      "title": "constraint violation",
+      "explanation": "A `where` clause did not hold up: a struct predicate that is not Bool, a predicate whose parameter carries no annotation to check against, an unknown `where` conjunct, or a PPL constraint used without importing the ppl layer.",
+      "fix": "Annotate the predicate's parameter, make the predicate return Bool, or correct the conjunct name. `where` conjuncts are a fixed vocabulary -- comm, anticomm, omp, cuda, mpi, reynolds, tdim and the domain layers' own.",
+      "examples": [
+        "tests/corpus/diagnostics/011_predicate_unannotated.blade",
+        "tests/corpus/loops/115_omp_licences_external_dims.blade",
+        "tests/corpus/structs/031_predicate_not_bool.blade"
+      ],
+      "docs": [
+        "docs/features.md",
+        "docs/quickstart-2.md"
+      ]
+    },
+    "BL4002": {
+      "title": "static evaluation failure",
+      "explanation": "Something required to fold at COMPILE time did not: a `let static` whose right-hand side reaches a runtime value, a staged static that escapes its stage, or an order/size argument that must be known statically and is not.",
+      "fix": "Make every input to the fold static, or drop the `static` and accept a runtime value. `blade check` prints the sub-expression that could not be folded.",
+      "examples": [
+        "tests/corpus/static/017_static_methodfor_runtime_count_rejects.blade",
+        "tests/corpus/static/018_staged_static_escapes_rejects.blade"
+      ],
+      "docs": []
+    },
+    "BL4003": {
+      "title": "index type violation",
+      "explanation": "The index TYPE is well formed but this USE cannot be served. Covers index-tag mismatches and the forbidden arithmetic on index tags (crossing nominal or anonymous index spaces), compound and sparse subscript forms (wildcard arity, over/under-supply, bare wildcards), ragged and orbit restrictions, irreps specs, and inverted or misplaced bounds. Deliberately NOT BL7001: both backends refuse, in the front end.",
+      "fix": "Fix the subscript form or the index type, not the backend. Arithmetic ON index tags is forbidden by design -- convert to a plain Nat first if you really mean value arithmetic.",
+      "examples": [
+        "tests/corpus/diagnostics/030_field_bounds_crossed.blade",
+        "tests/corpus/diagnostics/046_bound_on_aggregate.blade",
+        "tests/corpus/diagnostics/047_bound_on_aggregate_in_alias.blade"
+      ],
+      "docs": [
+        "docs/features.md",
+        "docs/formalism.md"
+      ]
+    },
+    "BL4004": {
+      "title": "symmetry violation",
+      "explanation": "A shape or axis operation is inconsistent with the array's index structure: an index-rank mismatch, a transpose whose axes are out of range, equal, or inside one symmetric group, a decompact of a plain axis or a partial dim range, or a stack/join whose operands disagree in shape or touch a compact slot.",
+      "fix": "Check the axis numbers against the array's rank, and remember that axes inside a symmetric group are not independently permutable -- the storage is triangular, so the operation has no meaning there.",
+      "examples": [
+        "tests/corpus/diagnostics/009_transpose_axes.blade",
+        "tests/corpus/diagnostics/034_index_rank_mismatch.blade",
+        "tests/corpus/index-types/030_transpose_same_axis_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL4005": {
+      "title": "immutable assignment",
+      "explanation": "A write hit something that cannot be written: a `let static` binding (compile-time and immutable everywhere), a `mut` parameter that is not an array, or a whole-array assignment to a `mut` parameter. `mut` parameters are ARRAY-only, and only ELEMENT writes alias the caller; for scalars, return the new value instead.",
+      "fix": "Return the value rather than assigning it, or -- for arrays -- write elements through the `mut` parameter instead of rebinding the whole array.",
+      "examples": [
+        "tests/corpus/diagnostics/007_immutable_static_assign.blade",
+        "tests/corpus/functions/020_mut_scalar_param_rejected.blade",
+        "tests/corpus/functions/086_mut_param_whole_array_assign_rejects.blade"
+      ],
+      "docs": []
+    },
+    "BL4006": {
+      "title": "mutual group violation",
+      "explanation": "A mutually-defined group (bindings that must be solved jointly) broke one of its rules: members bound separately, a partial or joint-only annotation, a duplicated member, a member whose type or field reference does not fit the group, or a group constraint that is not Bool.",
+      "fix": "Bind the whole group in one declaration with a complete annotation, and keep every member's type consistent with the group's shape. The message names the specific rule.",
+      "examples": [
+        "tests/corpus/struct-mutual/004_lone_member_annotation.blade",
+        "tests/corpus/struct-mutual/005_partial_group_tuple.blade",
+        "tests/corpus/struct-mutual/006_member_param_type.blade"
+      ],
+      "docs": []
+    },
+    "BL4007": {
+      "title": "no equivariant map exists",
+      "explanation": "An equivariant construction was requested between representations for which no such map exists -- a Schur-lemma refusal, or a tensor-product path with no reachable target irrep. This is a statement about representation theory, not about the implementation: there is nothing to emit.",
+      "fix": "Change the source or target irreps so a non-trivial intertwiner exists, or drop the equivariance requirement for that layer.",
+      "examples": [
+        "tests/corpus/diagnostics/012_schur_no_map.blade",
+        "tests/corpus/diagnostics/013_tp_unreachable.blade",
+        "tests/corpus/diagnostics/018_derive_schur.blade"
+      ],
+      "docs": [
+        "docs/features/equivariant-nn.md"
+      ]
+    },
+    "BL4008": {
+      "title": "equivariance discipline violation",
+      "explanation": "A function claiming equivariance did something the discipline forbids: a Hadamard product across irreps, a raw index read that breaks the group action, or a value escaping the equivariant fragment. The checking judgment is shipped and machine-checked, so this is a proof failure, not a heuristic.",
+      "fix": "Rewrite the body inside the equivariant fragment -- combine irreps through the provided equivariant operations rather than elementwise or index-wise -- or remove the equivariance claim.",
+      "examples": [
+        "tests/corpus/diagnostics/014_equiv_hadamard.blade",
+        "tests/corpus/diagnostics/015_equiv_raw_index.blade",
+        "tests/corpus/diagnostics/016_equiv_escape.blade"
+      ],
+      "docs": [
+        "docs/features/equivariant-nn.md"
+      ]
+    },
+    "BL4009": {
+      "title": "galilean discipline violation",
+      "explanation": "BL4008's Galilean twin: a function pinned `where ml.galilean(u)` used its velocity argument in a way that is not boost-invariant -- a bare sum over velocities, an escape from the invariant fragment, or an argument the classifier cannot place.",
+      "fix": "Express the body in velocity DIFFERENCES rather than absolute velocities, or drop the galilean pin.",
+      "examples": [
+        "tests/corpus/diagnostics/019_galilean_sum.blade",
+        "tests/corpus/diagnostics/020_galilean_escape.blade",
+        "tests/corpus/diagnostics/043_galilean_unclassifiable_arg.blade"
+      ],
+      "docs": [
+        "docs/features/equivariant-nn.md"
+      ]
+    },
+    "BL4010": {
+      "title": "confirm-and-pin storage suggestion",
+      "explanation": "A WARNING, not an error. The deduction proved a symmetry (or another storage-changing property) that you have not declared, and proposes the pin. Storage stays DENSE and nothing changes until you write the annotation in source -- the compiler proposes, the program decides. `--strict-pins` promotes every outstanding suggestion to a build error, which is the CI spelling of forcing the decision into source.",
+      "fix": "Add the suggested `where` clause if the property is intended -- that is what licenses the triangular storage and the r! saving -- or leave it and accept dense storage. Do not silence it by restructuring the kernel.",
+      "examples": [
+        "tests/corpus/arity/022_comoment_covariance_matrix.blade",
+        "tests/corpus/arity/025_deferred_named_former.blade",
+        "tests/corpus/arity/026_multi_arity_dedup.blade"
+      ],
+      "docs": [
+        "docs/features.md"
+      ]
+    },
+    "BL4011": {
+      "title": "equivariance certificate suggestion",
+      "explanation": "A WARNING on the certificate-suggestion channel (\"propose, don't export\"). The equivariance judgment was run speculatively on an uncertified function and succeeded, so the pin is proposed. Always a warning: an uncertified function is correct, just not proved equivariant. Deliberately grows no `--strict-pins` arm -- certificates own no storage decision.",
+      "fix": "Add the proposed certificate if you want the property exported to callers; ignoring it costs nothing but the proof.",
+      "examples": [
+        "tests/corpus/ml-equiv/053_suggest_uncertified_twin.blade",
+        "tests/corpus/ml-equiv/054_suggest_strongest_first.blade",
+        "tests/corpus/ml-equiv/055_suggest_dependency_closure.blade"
+      ],
+      "docs": [
+        "docs/features/equivariant-nn.md"
+      ]
+    },
+    "BL4012": {
+      "title": "permutation-equivariance discipline violation",
+      "explanation": "The permutation-equivariance discipline's refusal: the body reads a raw or opaque index, or sources a value in a way that depends on element ORDER, so the claimed symmetry under permutation of the input cannot hold.",
+      "fix": "Replace the order-dependent read with a permutation-invariant aggregate (a reduce, a symmetric former), or drop the permutation-equivariance claim.",
+      "examples": [
+        "tests/corpus/diagnostics/035_perm_former_source.blade",
+        "tests/corpus/diagnostics/036_perm_write_index.blade",
+        "tests/corpus/diagnostics/038_perm_opaque_index.blade"
+      ],
+      "docs": [
+        "docs/features/equivariant-nn.md"
+      ]
+    },
+    "BL4013": {
+      "title": "symmetry annotation contradicts body",
+      "explanation": "A declared `comm` over a provably antisymmetric pair (or `anticomm` over a provably invariant one). Split out of BL3007's generic bucket because this is not a bad builtin argument: it is an annotation the deduction can PROVE wrong.",
+      "fix": "Remove the clause, or wrap the kernel in `reynolds(...)` -- symmetrization manufactures the commutative kernel you were claiming. Compare BL4016, where nothing is disproved and there is simply no licence to stand on.",
+      "examples": [
+        "tests/corpus/diagnostics/040_comm_contradicts_body.blade",
+        "tests/corpus/diagnostics/041_antisymm_contradicts_body.blade",
+        "tests/corpus/functions/028_comm_contradiction_lambda_rejects.blade"
+      ],
+      "docs": [
+        "docs/features.md"
+      ]
+    },
+    "BL4014": {
+      "title": "galilean certificate suggestion",
+      "explanation": "BL4011's Galilean twin, on the same suggestion channel. The inference pass runs the shipped galilean judgment speculatively -- trying each velocity parameter -- and proposes `where ml.galilean(u)`. Always a warning, and like BL4011 it grows no `--strict-pins` arm.",
+      "fix": "Add the proposed clause to export the property; ignore it otherwise.",
+      "examples": [
+        "tests/corpus/ml-equiv/078_suggest_galilean_stepper_twin.blade",
+        "tests/corpus/ml-equiv/079_suggest_galilean_velocity_difference.blade",
+        "tests/corpus/ml-equiv/082_suggest_galilean_dependency_closure.blade"
+      ],
+      "docs": [
+        "docs/features/equivariant-nn.md"
+      ]
+    },
+    "BL4015": {
+      "title": "compact-class inheritance not certified",
+      "explanation": "The output would INHERIT the input's compact storage class, and the deduction cannot certify the kernel commutes with that class's mirror involution -- the map is not odd over an antisymmetric class, not real over a Hermitian one, or a wreath tie whose kernel fails per-argument oddness. Nothing was declared here: this is the undeclared-gap sibling of BL4013.",
+      "fix": "Make the kernel odd (or real) as the class requires, or decompact the input first and accept dense storage for the result. Demotion of a compact class is not available.",
+      "examples": [
+        "tests/corpus/index-types/164_antisym_even_kernel_rejects.blade",
+        "tests/corpus/index-types/165_antisym_unknown_parity_rejects.blade",
+        "tests/corpus/index-types/166_antisym_even_functor_rejects.blade"
+      ],
+      "docs": [
+        "docs/features.md"
+      ]
+    },
+    "BL4016": {
+      "title": "parallel fold needs a reorder licence",
+      "explanation": "`where ... omp` on a fold kernel with no licence to reorder it. A bare `omp` on a `reduce` kernel licenses fold reordering, which requires commutativity; nothing here is disproved (that would be BL4013) -- there is simply no commutativity/associativity claim to stand on. `reduce` folds right-to-left, innermost axis first, and that order is observable the moment the kernel is not commutative.",
+      "fix": "Add `comm(...)` to the kernel if it really commutes, use a builtin fold body, or drop the `omp` and keep the sequential order.",
+      "examples": [
+        "tests/corpus/diagnostics/049_fold_omp_needs_license.blade"
+      ],
+      "docs": [
+        "docs/features.md"
+      ]
+    },
+    "BL5000": {
+      "title": "ml elaboration error",
+      "explanation": "The `ml` domain elaborator refused a construct: a non-static configuration where a compile-time spec is required, a gated block reached in the wrong order, a bad derivation order, or an op whose arguments do not fit its spec.",
+      "fix": "Read the elaborator's message -- it names the op and the specific argument rule. ML op configuration is compile-time data, so a runtime value in a spec slot is the most common cause.",
+      "examples": [
+        "tests/corpus/ml-ops/002_nonstatic_cfg.blade",
+        "tests/corpus/ml-ops/003_gated_first_block.blade",
+        "tests/corpus/ml-ops/017_derive_poly_bad_k.blade"
+      ],
+      "docs": [
+        "docs/features/equivariant-nn.md"
+      ]
+    },
+    "BL5100": {
+      "title": "ppl elaboration error",
+      "explanation": "The `ppl` (probabilistic / moment-algebra) elaborator refused a construct: distribution arguments that do not match the declared family, a jet/Dist order or shape guard, or a former applied at an order it does not support.",
+      "fix": "Check the distribution's argument list and the order/shape of the Dist you are feeding it against docs/features/ppl.md, which documents each former's admissible shapes.",
+      "examples": [
+        "tests/corpus/diagnostics/010_ppl_dist_args.blade",
+        "tests/corpus/ppl/037_dist_jet_order_guard.blade",
+        "tests/corpus/ppl/038_dist_jet_shape_guard.blade"
+      ],
+      "docs": [
+        "docs/features/ppl.md"
+      ]
+    },
+    "BL5200": {
+      "title": "math elaboration error",
+      "explanation": "The `math` elaborator refused a construct: an unknown op name, an op reached without importing it (selective-import gating), or an argument that does not fit the op's shape.",
+      "fix": "Check the op name and that it is imported. Selective imports gate which math ops are in scope, so `from math import eigh` does not bring the rest with it.",
+      "examples": [
+        "tests/corpus/diagnostics/008_math_elab_arg.blade",
+        "tests/corpus/math/002_gating_selective_import.blade",
+        "tests/corpus/math/003_unknown_op.blade"
+      ],
+      "docs": []
+    },
+    "BL5300": {
+      "title": "rand elaboration error",
+      "explanation": "The `rand` elaborator refused a construct: an unknown generator or distribution name, a missing import, or arguments that do not fit the generator's declared shape.",
+      "fix": "Check the generator name and its import, and that any seed or shape argument is of the type the generator declares.",
+      "examples": [],
+      "docs": []
+    },
+    "BL5400": {
+      "title": "spectra elaboration error",
+      "explanation": "The `spectra` elaborator refused a construct: an unknown op, an op used without its import, or a transform in a position it cannot occupy (an inline FFT where the pipeline needs a materialized stage, for instance).",
+      "fix": "Read the message for the op's placement rule; materializing the operand with `|> compute` resolves the inline cases.",
+      "examples": [
+        "tests/corpus/spectra/002_gating_selective_import.blade",
+        "tests/corpus/spectra/003_unknown_op.blade",
+        "tests/corpus/spectra/017_fft_inline_rejects.blade"
+      ],
+      "docs": []
+    },
+    "BL5500": {
+      "title": "grad elaboration error",
+      "explanation": "The automatic-differentiation elaborator refused a construct: a gradient of an unknown or non-differentiable function, an overwrite that would destroy a value the reverse pass needs, or an intrinsic with no derivative rule (`digamma` among them).",
+      "fix": "Differentiate a function the elaborator knows, avoid overwriting values that live across the tape, and replace non-differentiable intrinsics in the differentiated path.",
+      "examples": [
+        "tests/corpus/ad/007_overwrite_rejected.blade",
+        "tests/corpus/ad/008_grad_of_unknown_rejected.blade",
+        "tests/corpus/ad/014_digamma_not_differentiable_rejects.blade"
+      ],
+      "docs": [
+        "docs/features/ppl.md"
+      ]
+    },
+    "BL5600": {
+      "title": "sgs elaboration error",
+      "explanation": "The `sgs` elaborator refused a construct: a non-static window or block size, a window that does not divide the domain, or an unknown op.",
+      "fix": "Make the window/block parameters compile-time constants and check that they divide the extent they partition.",
+      "examples": [
+        "tests/corpus/sgs/010_nonstatic_w_rejected.blade",
+        "tests/corpus/sgs/011_indivisible_w_rejected.blade",
+        "tests/corpus/sgs/012_unknown_op_rejected.blade"
+      ],
+      "docs": []
+    },
+    "BL5700": {
+      "title": "display elaboration error",
+      "explanation": "The `display` elaborator refused a frame: a MIME type computed at runtime, or a MIME string that is not one the display-frame protocol admits. Frame metadata must be static so the emitted frame can be classified without running the program.",
+      "fix": "Write the MIME type as a literal from the supported set instead of computing it.",
+      "examples": [
+        "tests/corpus/display-errors/002_dynamic_mime.blade",
+        "tests/corpus/display-errors/003_bad_mime.blade"
+      ],
+      "docs": []
+    },
+    "BL6001": {
+      "title": "IR validation error",
+      "explanation": "The lowered IR failed its own validation pass, or a lowering stage reported a failure for a program that had already typechecked. In the editor lane this is how a \"typechecks but will not lower\" program surfaces -- for instance a provider store whose file is missing, which only the lowering stage tries to open.",
+      "fix": "Read the message: it names the lowering stage's complaint. Missing data files, unresolvable provider paths, and monomorphization failures are the common causes; a structural IR complaint with no such explanation is a compiler bug worth reporting.",
+      "examples": [],
+      "docs": []
+    },
+    "BL7001": {
+      "title": "feature not yet supported by this backend",
+      "explanation": "The C++ backend met a construct it has no emission for -- a genuine back-end GAP, not a refusal. Distinct from BL7004, where codegen understood the construct and declined on principle, and from BL4003, where both backends refuse in the front end.",
+      "fix": "Rewrite the expression in a form the backend covers (the message names the node), or report it -- this code marks work not yet done rather than a rule you broke.",
+      "examples": [
+        "tests/corpus/loops/154_row_map_literal_of_rows_rejects.blade"
+      ],
+      "docs": []
+    },
+    "BL7002": {
+      "title": "CUDA backend limit",
+      "explanation": "The CUDA device-code path met something it cannot emit: a device body naming a value that cannot cross into `__global__` scope, or a kernel shape outside what the device lane supports. Device-code emission is strictly opt-in (BLADE_CUBLAS / `--cuda` / `where cuda`), so this only appears on that lane.",
+      "fix": "Restrict the device kernel's body to values it may name, or drop the `cuda` licence and let the kernel run on the host lane.",
+      "examples": [],
+      "docs": []
+    },
+    "BL7003": {
+      "title": "MPI backend limit",
+      "explanation": "The MPI decomposition path met a construct it cannot distribute: a kernel whose shape has no rank decomposition, or a communication pattern outside the emitted collectives. Only reachable under `--mpi N` / `where mpi`.",
+      "fix": "Reshape the kernel so its leading axis is decomposable, or drop the `mpi` licence for that kernel and run it locally on every rank.",
+      "examples": [],
+      "docs": []
+    },
+    "BL7004": {
+      "title": "construct not supported by the C++ backend",
+      "explanation": "A DELIBERATE codegen refusal: the backend understood the construct and declined, with guidance carried in the message. These are the same messages the generated `#error` directives carry, delivered as a coded, spanned diagnostic instead of a g++ preprocessor error. BL7001 remains the unhandled-node (back-end gap) code.",
+      "fix": "Follow the what-to-write-instead guidance in the message -- unlike BL7001, this is a statement about the program's shape, not a request to report a compiler gap.",
+      "examples": [],
+      "docs": []
+    },
+    "BL8001": {
+      "title": "constraint violation",
+      "explanation": "A RUNTIME check stamped into the generated C++ failed: a `where` constraint on a struct or index type evaluated false for actual data, or `sparse(values, keys)` was given a values array whose length does not match the key count. Raised identically by the generated binary and by the interpreter.",
+      "fix": "Inspect the data that reached the constraint -- the panic carries the source position of the check. This is a true statement about the input, not a compiler problem.",
+      "examples": [],
+      "docs": [
+        "docs/features/sql.md"
+      ]
+    },
+    "BL8002": {
+      "title": "non-exhaustive match",
+      "explanation": "A `match` at runtime found no arm for the scrutinee. Blade does not require exhaustiveness at every match, so the gap is checked where the value actually arrives.",
+      "fix": "Add the missing arm, or a catch-all `_` arm. If the value should have been impossible, the bug is upstream of the match.",
+      "examples": [],
+      "docs": []
+    },
+    "BL8003": {
+      "title": "empty reduction",
+      "explanation": "`reduce` was applied to an array with zero elements along the folded axis. There is no identity to return: the fold kernel is arbitrary, so the runtime refuses rather than inventing a zero.",
+      "fix": "Guard the reduction on a non-zero extent, or supply an explicit initial value. Filtered arrays (`compound(data, mask)`) are the usual source -- check `extents(...)` before folding.",
+      "examples": [],
+      "docs": []
+    },
+    "BL8004": {
+      "title": "MPI runtime error",
+      "explanation": "A failure on the distributed lane: an element count that exceeds the int32 range MPI's collectives take, or an orbit-pool size disagreement between the runtime's cell count and the compiler's own fold. Aborts the whole communicator.",
+      "fix": "Reduce the per-rank message size (more ranks, or a decomposition along a longer axis) for the count case; a pool-size disagreement is a compiler bug worth reporting with the program that produced it.",
+      "examples": [],
+      "docs": []
+    },
+    "BL8005": {
+      "title": "unhandled runtime exception",
+      "explanation": "The generated `main` caught an exception that escaped every Blade-level handler -- most often an allocation failure, and in the interpreter a step-budget exhaustion or a duplicate SparseIdx key tuple.",
+      "fix": "Check the sizes being allocated (a wrong extent computes a huge buffer long before it is filled) and, for sparse arrays, that the key tuples really are distinct.",
+      "examples": [],
+      "docs": []
+    },
+    "BL8006": {
+      "title": "index out of bounds",
+      "explanation": "A subscript left its array's allocation at runtime. Index TYPES make most reads bounds-safe by construction, so this is reserved for what the types cannot see: array-literal extents disagreeing with a declared type, and the dynamic subscript paths.",
+      "fix": "Compare the literal's shape with its declared type, and check any extent that arrives at runtime (a group_by count, a provider dimension) against the type that consumes it.",
+      "examples": [],
+      "docs": []
+    },
+    "BL8007": {
+      "title": "singular matrix",
+      "explanation": "`solve(A, b)` hit an exactly-zero pivot. Raised identically by the emitted LU loop nest, by the LAPACK ?gesv arm's non-zero `info`, and by the interpreter's twin, so the verdict does not depend on which lane ran.",
+      "fix": "The system has no unique solution: check A for a dependent row or column. A near-singular matrix that happens to pivot cleanly will not raise here, so conditioning is worth checking too.",
+      "examples": [],
+      "docs": []
+    },
+    "BL8008": {
+      "title": "math intrinsic domain error",
+      "explanation": "A scalar math intrinsic was called outside its domain -- `lgamma` or `digamma` at x <= 0. These refuse rather than returning a silent NaN, identically in `blade_rt::lgamma` / `blade_rt::digamma` and in the interpreter's twins.",
+      "fix": "Clamp or guard the argument before the call. A negative input here usually means an upstream subtraction produced a value the model does not admit.",
+      "examples": [],
+      "docs": []
+    },
+    "BL8009": {
+      "title": "halo extent mismatch",
+      "explanation": "A halo window's declared inner extent disagrees with the RUNTIME extent of an array read through it -- typically a group_by count. The compile-time twin is BL3016; this guard covers the extents typecheck cannot see, and is emitted once before the nest.",
+      "fix": "Make the window's declared extent match the array that flows through it, or declare it symbolically so the runtime extent is read rather than pinned.",
+      "examples": [],
+      "docs": []
+    },
+    "BL9001": {
+      "title": "internal compiler error",
+      "explanation": "An invariant inside the compiler broke, or an unexpected exception escaped to the CLI boundary. This is a bug in Blade, not in the program being compiled.",
+      "fix": "Please report it with the source that triggered it. `--verbose` adds the .NET stack, which is the useful half of the report.",
+      "examples": [],
+      "docs": []
+    },
+    "BL9002": {
+      "title": "internal codegen invariant violated",
+      "explanation": "BL9001 raised from the C++ emitter: codegen reached a state its own guards said was unreachable -- a node shape that an earlier phase should have rejected or rewritten.",
+      "fix": "A compiler bug; report it with the program. There is no source-level workaround beyond avoiding the construct that reached the emitter.",
+      "examples": [],
+      "docs": []
+    },
+    "BL9003": {
+      "title": "internal lowering invariant violated",
+      "explanation": "BL9002's lowering-stage sibling: an invariant broke between the typed AST and the IR. Reserved on the same footing as the other BL9xxx codes.",
+      "fix": "A compiler bug; report it with the program that reached the stage.",
+      "examples": [],
+      "docs": []
+    },
+    "BL9004": {
+      "title": "internal deduction disagreement",
+      "explanation": "Two independent judgments of the same equivariance theorem -- the elaboration-seam checker and the typecheck-resident walker -- reached contradictory verdicts. The seam has already accepted the program, so this can never be the user's fault.",
+      "fix": "A compiler bug, and a valuable one: report it with the program, since it means the two walkers have drifted apart.",
+      "examples": [],
+      "docs": [
+        "docs/features/equivariant-nn.md"
+      ]
+    }
+  }
+}
