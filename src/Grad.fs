@@ -278,6 +278,54 @@ let private zeroFill (cnt: Expr) : Expr =
     let re k = inheritSpan cnt k
     re (ExprCompute (re (ExprReplicate (cnt, re (ExprPure (re (ExprLit (LitFloat 0.0))))))))
 
+/// The C1 LINEAR CLOSURE: combinator forms that only REINDEX or WRAP, so
+/// their tangent is the same form applied to the tangents of their
+/// differentiable operands, with non-differentiable operands (masks,
+/// grouping keys, counts, conditions, axis indices) reused verbatim. No
+/// derivative rules and no kernel synthesis are involved -- this is
+/// plumbing, and it is what lets a tangent travel through a pipeline of
+/// structural operations. Returns (differentiable operands, rebuild).
+///
+/// `guard` belongs here because zeroing is linear: d(c ? e : 0) = c ? ė : 0.
+/// `<|:>` belongs here because its selector is ALLOCATION, not value --
+/// storage branching is linear in both legs (unlike `<|>`, which branches
+/// on a VALUE test and is discontinuous, so it stays refused).
+let private (|LinearForm|_|) (e: Expr) : (Expr list * (Expr list -> Expr)) option =
+    let re k = inheritSpan e k
+    match e.Kind with
+    | ExprKind.ExprPure inner -> Some ([inner], fun ts -> re (ExprPure (List.head ts)))
+    | ExprKind.ExprCompute inner -> Some ([inner], fun ts -> re (ExprCompute (List.head ts)))
+    | ExprKind.ExprGuard (c, body) -> Some ([body], fun ts -> re (ExprGuard (c, List.head ts)))
+    | ExprKind.ExprStack es -> Some (es, fun ts -> re (ExprStack ts))
+    | ExprKind.ExprSequence es -> Some (es, fun ts -> re (ExprSequence ts))
+    | ExprKind.ExprJoin (es, d) -> Some (es, fun ts -> re (ExprJoin (ts, d)))
+    | ExprKind.ExprReplicate (cnt, body) -> Some ([body], fun ts -> re (ExprReplicate (cnt, List.head ts)))
+    | ExprKind.ExprTranspose (a, d1, d2) -> Some ([a], fun ts -> re (ExprTranspose (List.head ts, d1, d2)))
+    | ExprKind.ExprDecompact (a, d) -> Some ([a], fun ts -> re (ExprDecompact (List.head ts, d)))
+    | ExprKind.ExprCompound (dense, mask) -> Some ([dense], fun ts -> re (ExprCompound (List.head ts, mask)))
+    | ExprKind.ExprGroupBy (vals, gk) -> Some ([vals], fun ts -> re (ExprGroupBy (List.head ts, gk)))
+    | ExprKind.ExprBinOp (m, OpFallback, l, r) ->
+        Some ([l; r], fun ts -> re (ExprBinOp (m, OpFallback, ts.[0], ts.[1])))
+    | _ -> None
+
+/// Structural array-ness, used by the taint pass so a local bound to a
+/// linear combinator is tracked as an ARRAY. Under-reporting here is a
+/// silent-zero bug (an element read of an untracked array yields no
+/// tangent), so the forms are listed exhaustively rather than inferred.
+let rec private producesArray (arrays: Set<string>) (e: Expr) : bool =
+    match e.Kind with
+    | ExprKind.ExprArrayLit _ -> true
+    | ExprKind.ExprVar n -> Set.contains n arrays
+    | ExprKind.ExprStack _ | ExprKind.ExprSequence _ | ExprKind.ExprJoin _
+    | ExprKind.ExprReplicate _ | ExprKind.ExprTranspose _ | ExprKind.ExprDecompact _
+    | ExprKind.ExprCompound _ | ExprKind.ExprGroupBy _ | ExprKind.ExprMask _
+    | ExprKind.ExprSort _ | ExprKind.ExprUnique _
+    | ExprKind.ExprIntersect _ | ExprKind.ExprUnion _ -> true
+    | ExprKind.ExprPure inner | ExprKind.ExprCompute inner
+    | ExprKind.ExprGuard (_, inner) | ExprKind.ExprTyped (inner, _) -> producesArray arrays inner
+    | ExprKind.ExprBinOp (_, OpFallback, l, r) -> producesArray arrays l || producesArray arrays r
+    | _ -> false
+
 /// Walk an expression, validating it stays inside the differentiable
 /// fragment, and call `onVar` for every variable REFERENCE (not index
 /// positions, which are int-typed and non-differentiable, but we still
@@ -290,6 +338,11 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     | { Kind = ExprKind.ExprUnaryOp (OpNeg, inner) } -> walkExpr fname ctx onVar inner
     | { Kind = ExprKind.ExprUnaryOp (OpNot, inner) } -> walkExpr fname ctx onVar inner
     | { Kind = ExprKind.ExprUnaryOp _ } -> err fname "unsupported unary operator in differentiated code"
+    // C1: the linear closure, forward mode only. Placed before the
+    // combinator-operator and combinator-form refusals so `<|:>`, `pure`,
+    // and `compute` reach it in jvp mode and stay refused in grad mode.
+    | LinearForm (ops, _) when errMode.Value = "jvp" ->
+        ops |> List.fold (fun acc o -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar o)) (Ok ())
     // Combinator OPERATORS. The syntactic combinator forms (lambda /
     // method_for / ...) are rejected further down, but the operator spellings
     // are ordinary BinOps and would otherwise slip through this walk when both
@@ -683,6 +736,28 @@ let rec private hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, in
         |> Result.map (fun (ps, es) -> (ps, re (ExprArrayLit es)))
     | _ -> Ok ([], e)
 
+/// Leading-axis extent of an initializer, when it is statically knowable
+/// from the expression's own STRUCTURE rather than from an annotation.
+/// Feeds the reduce-lowering's extent env, so `reduce` over a local built
+/// by one of these forms recovers its loop bound (previously only inline
+/// array literals did, which is why a `replicate`d or `join`ed local could
+/// not be reduced in differentiated code).
+let rec private staticExtentOf (env: Map<string, int>) (e: Expr) : int option =
+    match e.Kind with
+    | ExprKind.ExprArrayLit elems -> Some elems.Length
+    | ExprKind.ExprVar n -> Map.tryFind n env
+    | ExprKind.ExprTyped (inner, _) | ExprKind.ExprCompute inner
+    | ExprKind.ExprGuard (_, inner) -> staticExtentOf env inner
+    // replicate(n, _) and its `pure`-filled sibling (grad's ConstFill)
+    | ExprKind.ExprReplicate ({ Kind = ExprKind.ExprLit (LitInt n) }, _) -> Some (int n)
+    | ExprKind.ExprSequence es | ExprKind.ExprStack es -> Some es.Length
+    // join concatenates along the leading axis only when d = 0
+    | ExprKind.ExprJoin (parts, 0) ->
+        parts |> List.fold (fun acc p ->
+            acc |> Option.bind (fun tot -> staticExtentOf env p |> Option.map (fun n -> tot + n)))
+            (Some 0)
+    | _ -> None
+
 /// The pre-pass proper: rewrite one function body's statements, expanding
 /// recursive-array lets and hoisting reduces, threading an extent env so
 /// reduce sources can recover their loop bound.
@@ -713,10 +788,7 @@ let private preNormalizeBody (fname: string) (ctx: Ctx) (fd: FunctionDecl) : Res
                                 match b.Type with
                                 | Some t -> (match arrayLiteralExtents t with Some (true, [n]) -> Some n | _ -> None)
                                 | None -> None
-                            let byLit =
-                                match value'.Kind with
-                                | ExprKind.ExprArrayLit elems -> Some elems.Length
-                                | _ -> None
+                            let byLit = staticExtentOf env value'
                             match (match byAnn with Some _ -> byAnn | None -> byLit) with
                             | Some cnt -> Map.add nm cnt env
                             | None -> env
@@ -979,6 +1051,10 @@ let private analyze (fname: string) (ctx: Ctx)
                      | { Kind = ExprKind.ExprArrayLit _ } | ConstFill _ -> arrays <- Set.add name arrays
                      | { Kind = ExprKind.ExprVar src } when Set.contains src arrays ->
                          arrays <- Set.add name arrays
+                     // C1: a local bound to a linear combinator is an array
+                     // if the form produces one -- without this its element
+                     // reads would silently yield no tangent.
+                     | _ when producesArray arrays value -> arrays <- Set.add name arrays
                      | _ -> ())
                     // FLOAT array literals are differentiable carriers even
                     // before any diff flow reaches them (their cotangents
@@ -1507,6 +1583,12 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         tangentOfExpr rc f |> Result.map (fun tf ->
             inheritSpan e (ExprIf (c, tt, tf))))
     | ConstFill (cnt, _) -> Ok (zeroFill cnt)
+    // C1: same form, tangent operands (see the LinearForm doc comment).
+    | LinearForm (ops, rebuild) ->
+        ops |> List.fold (fun acc o ->
+            acc |> Result.bind (fun ts -> tangentOfExpr rc o |> Result.map (fun t -> ts @ [t])))
+            (Ok [])
+        |> Result.map rebuild
     | { Kind = ExprKind.ExprArrayLit _ } ->
         err rc.Fname "array literals may only appear as let initializers in differentiated code"
     | _ -> err rc.Fname "unsupported expression form in differentiated code (tangent)"
@@ -1832,18 +1914,13 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
     // and accumulator reads all differentiate exactly and none of the
     // checks run here.
     analyze fname ctx diffParams arrayParams stmts finalSurrogate |> Result.bind (fun (diff, arrays) ->
-    // Parity with grad's array-local literal-init restriction.
-    let badArrayLocal =
-        stmts |> List.tryPick (fun s ->
-            match s with
-            | NLet (n, _, value) when Set.contains n diff && Set.contains n arrays ->
-                (match value with
-                 | { Kind = ExprKind.ExprArrayLit _ } | ConstFill _ -> None
-                 | _ -> Some n)
-            | _ -> None)
-    match badArrayLocal with
-    | Some n -> err fname (sprintf "differentiable array local '%s' must be initialized by an array literal (aliases are not differentiable)" n)
-    | None ->
+    // No array-local literal restriction here (C1): grad needs one because
+    // it must synthesize a ZERO COTANGENT BUFFER of the right shape and can
+    // only read a shape off a literal -- and an alias makes cotangent
+    // identity untrackable. Forward mode builds no buffers: the tangent of
+    // a local IS the tangent expression of its initializer, so aliases and
+    // linear combinators differentiate directly, and an initializer with no
+    // tangent rule is refused by the sweep itself.
     let known =
         Set.unionMany [
             fd.Params |> List.map (fun p -> p.Name) |> Set.ofList

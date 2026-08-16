@@ -18,6 +18,10 @@ let adTests = category "ad"
 /// in-program jvp-vs-grad residual pins are the differential gate
 let adJvpTests = category "ad-jvp"
 
+/// jvp through loop-object combinators (the C-track): the linear closure
+/// first -- reindexing and wrapper forms whose tangent is the same form
+let adJvpCombTests = category "ad-jvp-comb"
+
 /// End-to-end equivariant ML: forward + grad + SGD training, pinned to the
 /// ml/ F# oracle (TrainingOracle.fs)
 let mlE2eTests = category "ml-e2e"

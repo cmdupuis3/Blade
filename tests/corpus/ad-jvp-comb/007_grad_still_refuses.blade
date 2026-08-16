@@ -1,0 +1,17 @@
+// TEST: JVP C1 Is Forward-Only (rejects)
+// The linear closure is admitted in FORWARD mode only. Reverse mode would
+// need each form's transpose -- and several have no surface inverse at all
+// (join has no subset, group_by no ungroup) -- so grad keeps refusing the
+// whole family rather than half-supporting it. Same program as 001.
+// ERROR: BL5500
+// ERROR-CONTAINS: loop-object combinators
+import ad as ad
+
+function f(w: Array<Float like Idx<3>>) -> Float = {
+    let c = pure(w(0) * w(1)) |> compute
+    c + w(2)
+}
+
+let mut dw = [0.0, 0.0, 0.0]
+let gv = ad.grad(f)([2.0, 3.0, 4.0], dw)
+gv
