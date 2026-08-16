@@ -2868,6 +2868,7 @@ let private dispatchTest (rest: string list) : int =
             | "intrinsics" -> Some ("Intrinsics", intrinsicsTests)
             | "ad" -> Some ("AD", adTests)
             | "ad-jvp" | "adjvp" -> Some ("AD JVP", adJvpTests)
+            | "ad-jvp-comb" | "adjvpcomb" -> Some ("AD JVP Combinators", adJvpCombTests)
             | "loops" -> Some ("Loops", loopTests)
             | "symmetry" -> Some ("Symmetry", symmetryTests)
             | "reynolds" -> Some ("Reynolds", reynoldsTests)

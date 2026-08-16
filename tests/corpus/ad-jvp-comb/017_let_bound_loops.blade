@@ -1,0 +1,30 @@
+// TEST: JVP Let-Bound Loop Objects
+// The idiomatic style stores the loop as a value and applies it later. The
+// binding itself gets no tangent (a loop object is a deferred iteration,
+// not data); the OpApply rule resolves it at the application site, and the
+// var-bound loop side carries its binding's taint to the result. Both
+// spellings, including the symmetric fast path through the binding.
+import ad as ad
+
+type I = Idx<3>
+
+function f1(a: Array<Float like I>) -> Float = {
+    let Lp = method_for(a, a)
+    let m = Lp <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+    m(0, 2) + m(1, 1)
+}
+
+function sq(u: Float) -> Float = u * u
+function f2(a: Array<Float like I>) -> Float = {
+    let L = object_for(sq)
+    let m = L <@> a |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (v1, t1) = ad.jvp(f1)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+let (v2, t2) = ad.jvp(f2)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// EXPECT: v1 = 7
+// EXPECT: t1 = 3
+// EXPECT: v2 = 14
+// EXPECT: t2 = 12

@@ -1,0 +1,18 @@
+// TEST: JVP C2 Map Needs Named Array Operands (rejects)
+// The rule spells its tangent loop over each operand's declared index
+// type, so v1 requires every operand to be a named array parameter. An
+// inline literal operand has no index type to name -- refused rather than
+// guessed at.
+// ERROR: BL5501
+// ERROR-CONTAINS: named array PARAMETER with a declared index type
+import ad as ad
+
+type I = Idx<3>
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = method_for([1.0, 2.0, 3.0]) <@> lambda(x) -> x * a(0) |> compute
+    reduce(m, (+))
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+v

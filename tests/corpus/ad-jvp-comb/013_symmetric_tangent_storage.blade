@@ -1,0 +1,25 @@
+// TEST: JVP C5 Symmetric Tangent Storage
+// The payoff of the joint-pair license: a comm-licensed map over the same
+// array differentiates into a loop over range<SymIdx<2, N>> -- canonical
+// cells only, triangular allocation on BOTH legs (verified in the emitted
+// C++: two {1,1}-class symmetric allocations in f__jvp), the full r!
+// saving preserved. tangent_joint_swap (proofs/BladeJacobian.v) licenses
+// exactly this under a STRUCTURAL comm judgment; the kernel params of the
+// emitted loop are prefix offsets, so canonical indices are prefix sums.
+// Mirrored reads pin that the tangent is a genuine symmetric array.
+// m(i,j) = ai*aj + ai + aj at a = [1,2,3]:
+// m(0,2) = m(2,0) = 7, m(1,1) = 8 -> primal 22.
+// Seed e0: dm(0,2) = a2+1 = 4 twice, dm(1,1) = 0 -> tangent 8.
+import ad as ad
+
+type I = Idx<3>
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = method_for(a, a) <@> lambda(x, y) where comm(x, y) -> x * y + x + y |> compute
+    m(0, 2) + m(2, 0) + m(1, 1)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+// WARN: BL4003
+// EXPECT: v = 22
+// EXPECT: t = 8

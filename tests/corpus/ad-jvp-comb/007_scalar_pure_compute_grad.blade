@@ -1,0 +1,23 @@
+// TEST: C6 Scalar Pure/Compute Under Grad (accepted reverse)
+// THE SECOND BOUNDARY SHIFT, documented: this exact program was this
+// file's own reject until C6 -- grad refused the whole linear closure.
+// Scalar `pure`/`compute` are materialization barriers whose adjoint
+// passes straight through, so grad now differentiates them; forms with no
+// adjoint rule (e.g. a value-keyed `<|>`) still refuse at the adjoint with
+// a named message rather than at the walk.
+// f = w0*w1 + w2 at [2,3,4]: 10; dw = [3, 2, 1].
+import ad as ad
+
+function f(w: Array<Float like Idx<3>>) -> Float = {
+    let c = pure(w(0) * w(1)) |> compute
+    c + w(2)
+}
+
+let mut dw = [0.0, 0.0, 0.0]
+let gv = ad.grad(f)([2.0, 3.0, 4.0], dw)
+// EXPECT: gv = 10
+// EXPECT: dw = [3, 2, 1]
+let (jv, jt) = ad.jvp(f)([2.0, 3.0, 4.0], [1.0, 0.0, 0.0])
+let resid = jt - dw(0)
+// EXPECT: jv = 10
+// EXPECT: resid = 0

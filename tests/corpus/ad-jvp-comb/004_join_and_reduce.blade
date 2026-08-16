@@ -1,0 +1,17 @@
+// TEST: JVP C1 Join, Reduced
+// join concatenates along the leading axis; the tangent joins the tangents.
+// Also pins the extent-env extension: a reduce over a JOINED local recovers
+// its bound (4 = 2 + 2) from the join's structure. Before that, only inline
+// array literals and annotated locals had a statically-known extent, so this
+// program was refused outright.
+// j = [2,3,4,5]: j0*j3 + sum = 10 + 14 = 24. Seed a=[1,0]: 5 + 1 = 6.
+import ad as ad
+
+function f(a: Array<Float like Idx<2>>, b: Array<Float like Idx<2>>) -> Float = {
+    let j = join(a, b, 0)
+    j(0) * j(3) + reduce(j, (+))
+}
+
+let (v, t) = ad.jvp(f)([2.0, 3.0], [4.0, 5.0], [1.0, 0.0], [0.0, 0.0])
+// EXPECT: v = 24
+// EXPECT: t = 6

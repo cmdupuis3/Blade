@@ -1,0 +1,29 @@
+// TEST: JVP C2 Kernel Spellings
+// The dual spelling `object_for(k) <@> operands` and the two non-lambda
+// kernel forms: an expression-bodied named function (normalized to a
+// lambda over its own params) and a bare intrinsic (eta-expanded).
+// sq: sum a^2 = 14, seed 1s -> sum 2a = 12.
+// sqrt over [1,4,9]: sum = 6; seed 1s -> 1/2 + 1/4 + 1/6 = 11/12.
+import ad as ad
+
+type I = Idx<3>
+
+function sq(u: Float) -> Float = u * u
+
+function fnamed(a: Array<Float like I>) -> Float = {
+    let m = object_for(sq) <@> a |> compute
+    reduce(m, (+))
+}
+
+function fintr(a: Array<Float like I>) -> Float = {
+    let m = method_for(a) <@> sqrt |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (vn, tn) = ad.jvp(fnamed)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+let (vi, ti) = ad.jvp(fintr)([1.0, 4.0, 9.0], [1.0, 1.0, 1.0])
+// EXPECT: vn = 14
+// EXPECT: tn = 12
+// EXPECT: vi = 6
+// EXPECT: ti = 0.9166666666666666
