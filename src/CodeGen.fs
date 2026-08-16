@@ -14732,14 +14732,29 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genGuardBinding ctx binding builder body
     | IRSequence elems ->
         genSequenceBinding ctx binding builder elems
-    // `|> compute` on an ALREADY-EAGER whole-array form is the identity: negate
-    // and conjugate materialize a fresh pool by construction, so there is
-    // nothing deferred left to force. genComputeBinding's dispatch has no arm
-    // for either, so they fell through to the unsupported-node sentinel --
-    // `let n = -A` worked while `let n = -A |> compute` did not (and the same
-    // for conj, which has routed to IRArrayConjugate since before this change).
-    // Re-dispatch on the unwrapped form, which the arm above already handles.
-    | IRCompute ((IRArrayNegate _ | IRArrayConjugate _) as eager) ->
+    // `|> compute` on an ALREADY-EAGER whole-array form is the identity: each
+    // of these materializes a fresh pool by construction, so there is nothing
+    // deferred left to force. genComputeBinding's dispatch has no arm for any
+    // of them and its fall-through treats the value as a SCALAR, so they died
+    // on the unsupported-node sentinel -- `let n = -A` worked while
+    // `let n = -A |> compute` did not, and `decompact(S, 0) |> compute` was
+    // BL7001 at module scope even though the unwrapped spelling was fine.
+    // Re-dispatch on the unwrapped form, which the arms above already handle.
+    //
+    // The set is `isStatementShaped` MINUS the deferring family (whose whole
+    // point is that `|> compute` IS the forcing site -- peeling their wrapper
+    // would route them back to the emitter that defers, and the compute would
+    // become a no-op) and MINUS IRGroupKeys/IRGroupBy (a `|> compute` on a
+    // grouping is not a spelling the surface produces, and genComputeBinding
+    // has no arm to fall back on if this guess were wrong).
+    | IRCompute eager when
+        (match eager with
+         | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _
+         | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _
+         | IRGram _ | IRMatmul _ | IREigh _ | IRSolve _
+         | IRGroupBucket _ | IRGroupSizes _ | IRArrayLit _
+         | IRArrayNegate _ | IRArrayConjugate _ -> true
+         | _ -> false) ->
         genBinding ctx { binding with Value = eager } builder
     | IRCompute inner ->
         genComputeBinding ctx binding builder inner
