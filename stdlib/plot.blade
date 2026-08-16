@@ -27,9 +27,11 @@
 // 1 = Plasma, 2 = Cividis, 3 = Greys, 4 = RdBu). An EnumIdx<["Viridis",...]>
 // upgrade would make the selection nominal AND checked; deferred.
 //
-// LIMITS, v1: title/label strings are inserted into the figure JSON without
-// escaping (a title containing `"` produces invalid JSON); NaN/Inf data
-// serialize as JSON-invalid tokens (plotly wants null). Deferred.
+// VALID JSON IS AN INVARIANT, not an aspiration: every runtime value that
+// reaches a figure goes through a serializer that cannot emit invalid JSON.
+// Title/label strings travel via `d.json_string` (which supplies its OWN
+// quotes -- never wrap it in more), and NaN/Inf array elements serialize as
+// `null`, which is what plotly's own encoder writes.
 module plot
 
 import display as d
@@ -56,10 +58,13 @@ function __cmap_name(c: Int64<cmap>) -> String =
 
 /// The figure's layout object. Empty strings mean "no entry"; the constant
 /// `"autosize":true` tail keeps the object valid JSON whatever is omitted.
+/// `d.json_string` renders each label WITH its quotes, escaping whatever the
+/// user put in it -- a title reading `he said "hi"` or a Windows path is an
+/// ordinary label here, not a broken frame.
 function __layout(t: String<title>, xl: String<xlabel>, yl: String<ylabel>) -> String = {
-    let tt = if t == "" then "" else "\"title\":{\"text\":\"" + t + "\"},"
-    let xt = if xl == "" then "" else "\"xaxis\":{\"title\":{\"text\":\"" + xl + "\"}},"
-    let yt = if yl == "" then "" else "\"yaxis\":{\"title\":{\"text\":\"" + yl + "\"}},"
+    let tt = if t == "" then "" else "\"title\":{\"text\":" + d.json_string(t) + "},"
+    let xt = if xl == "" then "" else "\"xaxis\":{\"title\":{\"text\":" + d.json_string(xl) + "}},"
+    let yt = if yl == "" then "" else "\"yaxis\":{\"title\":{\"text\":" + d.json_string(yl) + "}},"
     "{" + tt + xt + yt + "\"autosize\":true}"
 }
 

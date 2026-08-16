@@ -752,6 +752,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
 
     | TExprDisplayNum data ->
         IRDisplayNum (lowerTypedExpr env data)
+
+    | TExprDisplayStr data ->
+        IRDisplayStr (lowerTypedExpr env data)
     
     | TExprGroupBy (values, grouping) ->
         IRGroupBy (lowerTypedExpr env values, lowerTypedExpr env grouping)

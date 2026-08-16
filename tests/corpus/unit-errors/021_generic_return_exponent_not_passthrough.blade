@@ -1,0 +1,19 @@
+// TEST: Generic Return Exponent Not Passthrough (rejects)
+// ERROR: BL3006
+// The pin that fences off the WRONG fix. The obvious repair for 019/020 is to
+// stamp the argument's element unit onto the deduced return -- and it is
+// wrong: `variance` is a squared quantity, so a meters row gives meters^2 and
+// this `Float<meters>` ascription must be refused. A pass-through stamp would
+// accept it here and, worse, would reject the CORRECT `Float<area>` spelling
+// that units/077 pins.
+//
+// What actually transfers is the exponent, probed once per declaration by
+// walking the body with each generic parameter seeded to its own synthetic base
+// dimension: mean comes out probe^1, variance probe^2, stddev probe^1. Change
+// `funcUnitTransform` to propagate the argument unit unchanged and this test
+// and units/077's `v` line fail in opposite directions, which is the point of
+// having both.
+from stats import variance
+Unit meters
+let xs: Array<Float<meters> like Idx<4>> = [1.0, 2.0, 3.0, 6.0]
+let bad: Float<meters> = variance(xs)

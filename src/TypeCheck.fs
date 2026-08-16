@@ -2978,6 +2978,141 @@ let firstArgTypeClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
             | Some pc, Some ac when pc <> ac -> Some (i, pTy, aTy)
             | _ -> None)
 
+/// The synthetic base dimension standing for parameter `i`'s unit while
+/// `funcUnitTransform` probes a function body. `Unit` declarations are ordinary
+/// identifiers and a `UnitSig`'s dims are keyed by plain strings, so a name no
+/// surface syntax can produce is a free variable of the unit algebra: whatever
+/// exponent it carries OUT of the body is the exponent the body applies to that
+/// argument. Nothing but the probe ever sees these -- `funcUnitTransform`
+/// removes them from the residual before recording it.
+let unitProbeBase (i: int) : string = sprintf "__unit_probe_%d" i
+
+/// A recorded transform, applied: `residual * PROD_i argUnits[i] ^ exponents[i]`.
+/// Shared by the two consumers -- the call site (`unitStampedReturn`) and the
+/// nested-call arm of `kernelBodyUnits`, which is how one generic calling
+/// another composes -- so the rule cannot drift between them.
+///
+/// ALL OR NOTHING: a BARE argument in a position with a non-zero exponent
+/// abandons the whole claim, returning None rather than reading the absence as
+/// dimensionless. Reading it as dimensionless would be a real claim, and would
+/// start rejecting the ordinary mixing of unit-free values that every
+/// unannotated program does.
+///
+/// A PURE PASS-THROUGH keeps its argument's signature VERBATIM, nominal layer
+/// included. Routing it through unitMul/unitPow yields the same dims and scale
+/// but drops the Nominal -- multiplicative composition drops a quantity on
+/// purpose (a quantity is an identity, not a factor) -- and a function that
+/// neither multiplies nor divides has composed nothing. `mean` of a `Speed` row
+/// is still a `Speed`.
+let applyUnitTransform (exponents: int list) (residual: UnitSig)
+                       (argUnits: UnitSig option list) : UnitSig option =
+    let contributing =
+        exponents |> List.mapi (fun i e -> (i, e)) |> List.filter (fun (_, e) -> e <> 0)
+    let argAt i = List.tryItem i argUnits |> Option.flatten
+    match contributing with
+    | [ (i, 1) ] when (unitNormalize residual).Dims.IsEmpty
+                      && unitSameScale residual unitDimensionless -> argAt i
+    | _ ->
+        contributing
+        |> List.fold (fun acc (i, e) ->
+            acc |> Option.bind (fun u ->
+                argAt i |> Option.map (fun au -> unitMul u (unitPow au e))))
+            (Some residual)
+
+/// A callee's recorded transform, by the name the call site writes. Tries the
+/// name as written, then its unqualified tail: `checkFunctionDecl` registers
+/// under the DECLARED name, so a module-qualified call (`stats.mean(x)`) has to
+/// drop the alias to find its own callee, or the qualified and unqualified
+/// spellings of one call stop agreeing.
+let lookupUnitTransform (env: TypeEnv) (n: string) : (int list * UnitSig) option =
+    let direct (k: string) =
+        match env.FuncUnitTransform.TryGetValue k with
+        | true, t -> Some t
+        | _ -> None
+    match direct n with
+    | Some t -> Some t
+    | None ->
+        match n.LastIndexOf '.' with
+        | i when i >= 0 -> direct (n.Substring(i + 1))
+        | _ -> None
+
+/// Carry a generic call's DEDUCED return unit, derived from its ARGUMENTS.
+///
+/// A `T^1 -> T^0` signature shares ONE inference variable between the
+/// parameter's ELEMENT and the return -- measured, both are the same `IRTInfer`
+/// id: `lowerTypeExpr` mints `T^1` and `T^0` under separate typeVarScope keys,
+/// and checking the BODY against the declared return is what ties them. Direct
+/// application then deliberately does NOT unify parameters against arguments --
+/// see the FuncElem arm below, and `firstArgTypeClash` above for why unifying
+/// here is not an option -- so the caller's element type never reaches that
+/// variable, and every unit rule (`unitRulesForOpWith`, `unitRulesForUnaryOp`,
+/// ascription) read `IR.getUnits` off a bare variable carrying no signature.
+/// Measured: over a `Float<meters>` row and a `Float<seconds>` scalar,
+/// `mean(x) + t` was ACCEPTED, while the same clash on a direct element read
+/// `x((0 : Idx<3>)) + t` correctly gave BL3006. The ascription and arithmetic
+/// seams were never the problem; the result type simply arrived bare.
+///
+/// PROPAGATING THE ARGUMENT'S UNIT UNCHANGED IS THE WRONG FIX, and measurably
+/// so: `mean` preserves its row's unit but `variance` SQUARES it, so a
+/// pass-through stamp turns `let v: Float<area> = variance(x)` -- correct, and
+/// documented as correct in `stdlib/stats.blade` -- into a BL3006. What
+/// transfers is the EXPONENT the body derives, recorded per declaration in
+/// `FuncUnitTransform` (see `funcUnitTransform`) and applied here.
+///
+/// Stamp the unit onto the RESULT NODE -- `IRTUnitAnnotated` over the still-open
+/// variable, exactly the shape a written `T<u>^0` already lowers to
+/// (lowerTypeExpr's `TyAbstractArray` arm) -- rather than BINDING the variable.
+/// Binding is what must not happen: a `function` declaration's type is created
+/// once with variables SHARED across every call site, so binding at the first
+/// caller would both collapse the function to that caller's unit and defeat the
+/// HM element polymorphism `requireArrayArgMinRank`'s polymorphic mark exists to
+/// protect. A node stamp is per-call-site by construction, so two callers at
+/// different units each get their own answer.
+///
+/// SILENT WHEN ANYTHING IS UNKNOWN. No recorded transform (the body used a
+/// construct the unit walk does not model), a BARE argument in a position whose
+/// exponent is non-zero, or an argument whose element type is still an
+/// inference variable because the CALLER is generic too: each leaves the result
+/// unstamped and the pre-existing behaviour intact. A bare argument
+/// deliberately does NOT read as dimensionless -- claiming dimensionless would
+/// start rejecting the ordinary mixing of unit-free values that every
+/// unannotated program does.
+///
+/// Rank-preserving: a `-> T^1` return stamps the result array's ELEMENT, the
+/// same place `stampElemUnits` writes for synthesized kernel pipelines. A return
+/// that already carries a signature (a written `-> Float<meters>`, or `T<u>^0`)
+/// is left alone, so an explicit annotation still wins.
+let private unitStampedReturn (env: TypeEnv) (callee: string option)
+                              (tArgs: TypedExpr list) (retTy: IRType) : IRType =
+    // The element UNIT of a type, at the depth the unit lives: the type itself
+    // for a scalar position, its `ElemType` for an array.
+    let elemUnits (t: IRType) : UnitSig option =
+        match env.Subst.Resolve t with
+        | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
+        | r -> IR.getUnits r
+    let resolvedRet = env.Subst.Resolve retTy
+    let deduced =
+        // Only a DEDUCED return is in scope: one whose element is still an open
+        // variable. A concrete return type either carries its own signature or
+        // legitimately has none.
+        match resolvedRet with
+        | ArrayElem at -> (match env.Subst.Resolve at.ElemType with IRTInfer _ -> true | _ -> false)
+        | IRTInfer _ -> true
+        | _ -> false
+    if not deduced || (elemUnits resolvedRet).IsSome then retTy
+    else
+        match callee |> Option.bind (lookupUnitTransform env) with
+        | None -> retTy
+        | Some (exponents, residual) ->
+            match applyUnitTransform exponents residual
+                      (tArgs |> List.map (fun a -> elemUnits a.Type)) with
+            | None -> retTy
+            | Some u ->
+                match resolvedRet with
+                | ArrayElem at ->
+                    mkArrayLike { at with ElemType = IRTUnitAnnotated (env.Subst.Resolve at.ElemType, u) }
+                | r -> IRTUnitAnnotated (r, u)
+
 let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.
     //
@@ -3557,6 +3692,14 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                      match env.Subst.Resolve arg.Type with
                      | IRTInfer aid -> env.Subst.AddRankLowerBound(aid, calleeRank)
                      | _ -> ()))
+            // The DEDUCED return's unit, built from the arguments'. See
+            // `unitStampedReturn`: the substitution never learns it, because
+            // this seam deliberately does not unify parameters against
+            // arguments.
+            let retTy =
+                unitStampedReturn env
+                    (match tFunc.Kind with TExprVar (n, _, _) -> Some n | _ -> None)
+                    tArgs retTy
             if isVariadic then
                 Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
             elif tArgs.Length > paramTys.Length then
@@ -3651,6 +3794,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprDisplayEmit (_, _, d, _) -> [d]
         | TExprDisplayJson (_, d) -> [d]
         | TExprDisplayNum d -> [d]
+        | TExprDisplayStr d -> [d]
         | TExprGroupKeys keys -> keys
         | TExprStruct (_, fields) -> fields |> List.map snd
         | TExprIndex (arr, idxs, _) -> arr :: idxs
@@ -4646,7 +4790,13 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                                         ppIRType (env.Subst.Resolve pTy),
                                         ppIRType (env.Subst.Resolve aTy)))
             | None ->
-            Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy))
+            // Same delete-if-rerouted note as the two checks above: a generic
+            // callee's DEDUCED return needs its unit built from the arguments
+            // here too, or `stats.mean(x)` and the imported `mean(x)` stop
+            // being the same call -- accepting a meters-vs-seconds addition in
+            // the qualified spelling that the unqualified one refuses.
+            Ok (mkTyped (TExprApp (tFunc, tArgs))
+                        (unitStampedReturn env (Some qualName) tArgs retTy)))
 
     // ---- Method call: obj.method(args) -> impl resolution ----
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField (obj, method) }, args) ->
@@ -5215,6 +5365,21 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 Ok (mkTyped (TExprDisplayNum tNum) (IRTScalar ETString))
             | other ->
                 Error (Other (sprintf "display.json_num: expected a numeric scalar, got %s" (ppIRType other))))
+
+    // ---- __display_json_string(s): display module String JSON rendering ----
+    // A String rendered as a QUOTED, escaped JSON string -- quotes included,
+    // so the caller writes `"\"text\":" + json_string(t)` and never has to
+    // supply the delimiters (supplying them by hand is precisely the bug this
+    // exists to retire). Quantity annotations are transparent, exactly as for
+    // json_num, so plot.blade's `String<title>` slot serializes directly.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__display_json_string" }, [strE])
+            when (lookupVar "__display_json_string" env).IsNone ->
+        inferExpr env strE |> Result.bind (fun tStr ->
+            match IR.stripUnits (env.Subst.Resolve tStr.Type) with
+            | IRTScalar ETString ->
+                Ok (mkTyped (TExprDisplayStr tStr) (IRTScalar ETString))
+            | other ->
+                Error (Other (sprintf "display.json_string: expected a String, got %s" (ppIRType other))))
 
     // ---- cumulant(d, k): dist component projection, order-guarded ----
     // The order guard as a TYPE error (ppl/NOTES.md typed-Dist arc): k must
@@ -9661,12 +9826,45 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
             match finalOpt with
             | Some f -> kernelBodyUnits env b f
             | None -> Ok None)
-    | TExprApp (_, args) ->
+    // A CALL composes: the callee's own recorded unit transform, applied to the
+    // signatures this walk computes for the arguments. Without it every call
+    // was a dead end ("no claim"), which is why `sqrt(variance(row))` could say
+    // nothing about its result even though both halves are known. Anything
+    // unrecorded still returns None, so this only ever replaces silence.
+    | TExprApp (f, args) ->
         args |> List.fold (fun acc a ->
             acc |> Result.bind (fun () -> errorsOnly a)) (Ok ())
-        |> Result.map (fun () -> None)
-    | TExprIndex (arr, _, _) -> Ok (elemOfType arr.Type)
-    | TExprReduce (arr, _, _) -> Ok (elemOfType arr.Type)
+        |> Result.bind (fun () ->
+            match f.Kind with
+            | TExprVar (n, _, _) ->
+                (match lookupUnitTransform env n with
+                 | None -> Ok None
+                 | Some (exponents, residual) ->
+                     // The argument signatures this walk computes, not the ones
+                     // their TYPES carry: inside a body an argument is very
+                     // often a parameter, whose unit lives in `bound`.
+                     args
+                     |> List.fold (fun acc a ->
+                         acc |> Result.bind (fun (us: UnitSig option list) ->
+                             kernelBodyUnits env bound a |> Result.map (fun u -> u :: us)))
+                         (Ok [])
+                     |> Result.map (fun rev ->
+                         applyUnitTransform exponents residual (List.rev rev)))
+            | _ -> Ok None)
+    // ELEMENT-aware like the TExprVar arm: an array PARAMETER carries its unit
+    // in `bound`, not on its type, so reading only the type reported "no claim"
+    // for `reduce(row, (+))` -- the whole body of `mean`. Falling back to the
+    // walk covers both that (a var head resolves through `bound`) and an
+    // operand that is itself an expression (`reduce(centered * centered, (+))`,
+    // the body of `variance`, whose element unit is the product's).
+    | TExprIndex (arr, _, _) ->
+        (match elemOfType arr.Type with
+         | Some u -> Ok (Some u)
+         | None -> kernelBodyUnits env bound arr)
+    | TExprReduce (arr, _, _) ->
+        (match elemOfType arr.Type with
+         | Some u -> Ok (Some u)
+         | None -> kernelBodyUnits env bound arr)
     | TExprField _ | TExprTupleIndex _ -> Ok (ofType e.Type)
     // NESTED ELEMENTWISE MAP inside a kernel body (`lambda(w) -> { let e =
     // exp <@> (i * w * ts); ... }`). Without an arm here this fell to the
@@ -9684,6 +9882,64 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
     // `compute` is unit-transparent: it forces a computation to a value.
     | TExprCompute inner -> kernelBodyUnits env bound inner
     | _ -> Ok None
+
+/// Derive, ONCE per declaration, how a function builds its return's unit out of
+/// its arguments' -- the record `unitStampedReturn` consumes at every call site.
+///
+/// PROBE, don't guess. The body is walked with each GENERIC parameter seeded to
+/// its own synthetic base dimension (`unitProbeBase`), so the exponent that
+/// dimension carries out of the body is exactly the power the body applies to
+/// that argument: `mean` returns `probe0^1`, `variance` returns `probe0^2`, and
+/// `covariance(a, b)` returns `probe0 * probe1`. Concrete parameters are seeded
+/// with the unit they actually declare instead, so they land in the RESIDUAL
+/// (`residual * PROD argUnit_i ^ e_i`) rather than being invented as free
+/// variables. This is the whole reason the fix is not "propagate the argument's
+/// unit": three of those four answers are not the argument's unit.
+///
+/// A DERIVATION, NEVER A CHECK. `Ok None` (a construct the walk does not model)
+/// and `Error` alike record nothing, leaving the call site silent. An `Error`
+/// here is very often the probe's own fault rather than the program's -- a body
+/// calling `exp` on a value that is dimensionless in every real call is
+/// dimensioned under the probe, and `unitRulesForUnaryOp` rightly rejects that
+/// -- so surfacing it would reject correct programs. The body's genuine unit
+/// errors belong to the ordinary inference pass, which has already run.
+///
+/// Only a DEDUCED return is probed: a concrete return type either carries its
+/// own signature or legitimately has none, and either way the call site leaves
+/// it alone.
+and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
+                      (retTy: IRType) (body: TypedExpr) : unit =
+    let openElem (t: IRType) =
+        match env.Subst.Resolve t with
+        | ArrayElem at -> (match env.Subst.Resolve at.ElemType with IRTInfer _ -> true | _ -> false)
+        | IRTInfer _ -> true
+        | _ -> false
+    let elemUnits (t: IRType) =
+        match env.Subst.Resolve t with
+        | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
+        | r -> IR.getUnits r
+    if openElem retTy && not parms.IsEmpty then
+        let bound =
+            parms
+            |> List.mapi (fun i p ->
+                (p.VarId,
+                 if openElem p.Type then Some (unitOfDims (Map.ofList [ (unitProbeBase i, 1) ]))
+                 else elemUnits p.Type))
+            |> Map.ofList
+        match kernelBodyUnits env bound body with
+        | Ok (Some u) ->
+            let n = unitNormalize u
+            let exponents =
+                parms |> List.mapi (fun i _ ->
+                    Map.tryFind (unitProbeBase i) n.Dims |> Option.defaultValue 0)
+            // Strip the probes back out; the SCALE stays (a body that divides by
+            // a `km` constant really does change the caller's magnitude).
+            let residual =
+                { n with
+                    Nominal = None
+                    Dims = n.Dims |> Map.filter (fun k _ -> not (k.StartsWith "__unit_probe_")) }
+            env.FuncUnitTransform.[name] <- (exponents, residual)
+        | Ok None | Error _ -> ()
 
 /// ELEMENT-level sibling of `kernelBodyUnits`, for the array operands of a
 /// nested map. The scalar walk answers about SCALAR positions and reads a
@@ -16545,6 +16801,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                            repResolve funcDecl.Name funcVarId repParams resolvedRet tBody with
                  | Some prop -> Blade.DeduceRep.TypedCertProposals.add prop tBody.Span
                  | None -> ())
+            funcUnitTransform env funcDecl.Name resolvedParams resolvedRet tBody
             let tf : TypedFunctionDecl = {
                 Name = funcDecl.Name; FuncId = funcVarId
                 TypeParams = funcDecl.TypeParams

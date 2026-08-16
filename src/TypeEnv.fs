@@ -231,6 +231,26 @@ type TypeEnv = {
     /// FuncConstraints/FuncDefaults, and shares their known shadowing
     /// weakness. Shared by reference.
     MutParamPositions: System.Collections.Generic.Dictionary<string, int list>
+    /// Callee name -> how its return's UNIT is built from its arguments':
+    /// `(exponents, residual)` means the result measures
+    /// `residual * PROD_i (unit of argument i) ^ exponents[i]`.
+    ///
+    /// A generic signature's return is DEDUCED, and a `T^1 -> T^0` pair shares
+    /// ONE inference variable between the parameter's element and the return --
+    /// but direct application never unifies parameters against arguments (that
+    /// variable has to stay open for per-call-site monomorphization), so the
+    /// substitution never learns the caller's unit and every unit rule read a
+    /// bare variable. Propagating the ARGUMENT's unit unchanged is not the fix:
+    /// `mean` preserves it, `variance` SQUARES it. What transfers is the
+    /// exponent the body derives, which is what this records.
+    ///
+    /// Computed once per declaration by probing the typed body with a synthetic
+    /// base dimension per generic parameter (checkFunctionDecl), consumed by
+    /// `unitStampedReturn` at the call site. Absent = no claim, which is the
+    /// pre-existing silence; a body the unit walk cannot read is never entered.
+    /// Name-keyed like MutParamPositions, and shares its shadowing weakness.
+    /// Shared by reference.
+    FuncUnitTransform: System.Collections.Generic.Dictionary<string, int list * UnitSig>
     /// Named functions' `where comm(...)` groups (by param index): funcName ->
     /// int list list. Populated by checkFunctionDecl; must survive
     /// eta-expansion (etaExpandFunctionKernel) onto the loop-kernel wrapper, or
@@ -360,6 +380,7 @@ let emptyEnv () = {
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
     MutParamPositions = System.Collections.Generic.Dictionary<string, int list>()
+    FuncUnitTransform = System.Collections.Generic.Dictionary<string, int list * UnitSig>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()

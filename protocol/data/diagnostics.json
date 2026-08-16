@@ -359,12 +359,14 @@
     },
     "BL4005": {
       "title": "immutable assignment",
-      "explanation": "A write hit something that cannot be written: a `let static` binding (compile-time and immutable everywhere), a `mut` parameter that is not an array, or a whole-array assignment to a `mut` parameter. `mut` parameters are ARRAY-only, and only ELEMENT writes alias the caller; for scalars, return the new value instead.",
-      "fix": "Return the value rather than assigning it, or -- for arrays -- write elements through the `mut` parameter instead of rebinding the whole array.",
+      "explanation": "The `mut` discipline's refusal, raised at two different places. At an ASSIGNMENT: a write hit something that cannot be written -- a `let static` binding (compile-time and immutable everywhere), a `mut` parameter that is not an array, or a whole-array assignment to a `mut` parameter. `mut` parameters are ARRAY-only, and only ELEMENT writes alias the caller; for scalars, return the new value instead. At a CALL SITE: an argument passed to a `mut` array parameter must itself carry write permission, because the callee writes back into the caller's array. Only a bare name that binds mut-passable qualifies -- a `let mut` binding, or another `mut` parameter being forwarded (`function outer(buf: mut A) = inner(buf)` is exactly the case that keeps working, and the chain is checked at every hop). Refused there: a plain `let` (module scope included, mutable in its own scope but not passable), a `let static`, a non-`mut` parameter, a computed expression such as `accum(a + b)` (a temporary has no storage the caller could observe the write through), and a partial application that leaves the `mut` position unsupplied -- `accum2(w)(g)` would fill it through a synthesized closure parameter and lose the permission at that seam, so currying a write-back parameter is refused while `accum2(w, g)` is checked normally.",
+      "fix": "At an assignment: return the value rather than assigning it, or -- for arrays -- write elements through the `mut` parameter instead of rebinding the whole array. At a call site: declare the argument `let mut` (or forward a `mut` parameter that already holds permission), pass it directly by name rather than as an expression or through a partial application, or drop `mut` from the parameter if the callee does not write to it.",
       "examples": [
         "tests/corpus/diagnostics/007_immutable_static_assign.blade",
         "tests/corpus/functions/020_mut_scalar_param_rejected.blade",
-        "tests/corpus/functions/086_mut_param_whole_array_assign_rejects.blade"
+        "tests/corpus/functions/086_mut_param_whole_array_assign_rejects.blade",
+        "tests/corpus/functions/089_mut_arg_plain_let_rejects.blade",
+        "tests/corpus/functions/093_mut_arg_partial_application_rejects.blade"
       ],
       "docs": []
     },
