@@ -1,0 +1,39 @@
+// TEST: Pipeline In Function Body
+// Regression: the three pipeline spellings that compiled at module scope and
+// died inside a FUNCTION BODY. Each had its own BL7004:
+//   let p = o1 >>@ o2; p <@> xs   -- "compose_obj in expression position",
+//                                    then "IRComposeApply: Composition did
+//                                    not resolve to IRComposeObj ...
+//                                    IR-builder bug"
+//   g <$> c                       -- "functor_map in expression position"
+//   (L <@> f) @>> (L <@> g)       -- "compose_meth in expression position"
+// Fusion rewrites all three into the ordinary map the body could always
+// emit, so all three now return (x+1)*2.
+type I = Idx<3>
+let A: Array<Float like I> = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+
+function letbound(xs: Array<Float like I>) = {
+    let o1 = object_for(f)
+    let o2 = object_for(g)
+    let p = o1 >>@ o2
+    p <@> xs |> compute
+}
+
+function fmap(xs: Array<Float like I>) = {
+    let c = method_for(xs) <@> f
+    g <$> c |> compute
+}
+
+function mcomp(xs: Array<Float like I>) = {
+    let L = method_for(xs)
+    (L <@> f) @>> (L <@> g) |> compute
+}
+
+let r_let = letbound(A)
+let r_fmap = fmap(A)
+let r_mcomp = mcomp(A)
+// EXPECT: r_let = [4.0, 6.0, 8.0]
+// EXPECT: r_fmap = [4.0, 6.0, 8.0]
+// EXPECT: r_mcomp = [4.0, 6.0, 8.0]

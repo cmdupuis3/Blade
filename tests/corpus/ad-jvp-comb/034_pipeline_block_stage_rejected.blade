@@ -1,0 +1,21 @@
+// TEST: JVP C7 Pipeline Block Stage (rejects)
+// Fusion inlines a stage's BODY into the next stage, so a block-bodied
+// named function has no expression to inline. Same v1 restriction the
+// direct map rule states, reached through the pipeline -- and stated with
+// the same words, since it is the same restriction.
+// ERROR: BL5501
+// ERROR-CONTAINS: has a block body
+import ad as ad
+
+type I = Idx<3>
+
+function s1(x: Float) -> Float = x + 1.0
+function blocky(y: Float) -> Float = { y * y }
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = (object_for(s1) >>@ object_for(blocky)) <@> a |> compute
+    reduce(m, (+))
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+v

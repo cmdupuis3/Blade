@@ -1,0 +1,20 @@
+// TEST: JVP C7 Pipeline Functor Map
+// `<$>` is the post-map: its LEFT operand is the SECOND stage, riding on an
+// existing computation without a second loop object. Same fused kernel as
+// 023, reached through the other spelling.
+import ad as ad
+
+type I = Idx<3>
+
+function s1(x: Float) -> Float = x + 1.0
+function s2(y: Float) -> Float = y * y
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = s2 <$> (method_for(a) <@> s1) |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// EXPECT: v = 29
+// EXPECT: t = 18

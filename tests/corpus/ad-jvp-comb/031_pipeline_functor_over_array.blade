@@ -1,0 +1,22 @@
+// TEST: JVP C7 Pipeline Functor Over Array
+// `<$>` over an already-materialized array is the TRIVIAL map, not a
+// post-map on a kernel -- so it fuses to `method_for(a) <@> neg2`. Telling
+// the two apart is the one place fusion needs to know array-ness: an array
+// PARAMETER is known from its declared type, and anything unrecognized
+// declines rather than building a loop over a loop.
+// neg2 is -2x, so at [1,2,4] the primal is -14 and the tangent is -6.
+import ad as ad
+
+type J = Idx<3>
+
+let neg2 = lambda(x) -> 0.0 - 2.0 * x
+
+function f(a: Array<Float like J>) -> Float = {
+    let m = neg2 <$> a |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (v, t) = ad.jvp(f)([1.0, 2.0, 4.0], [1.0, 1.0, 1.0])
+// EXPECT: v = -14
+// EXPECT: t = -6

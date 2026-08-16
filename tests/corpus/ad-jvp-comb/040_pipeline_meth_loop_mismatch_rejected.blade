@@ -1,0 +1,24 @@
+// TEST: JVP C7 Pipeline Meth Loop Mismatch (rejects)
+// `@>>` threads one computation's per-element result into the other's
+// kernel, which only means anything when both iterate the SAME loop. Over
+// two different arrays there is no shared index to thread, so fusion
+// refuses instead of silently adopting the left loop and reading the right
+// operand out from under it.
+// ERROR: BL5501
+// ERROR-CONTAINS: iterate the same loop object
+import ad as ad
+
+type I = Idx<3>
+
+function s1(x: Float) -> Float = x + 1.0
+function s2(y: Float) -> Float = y * y
+
+function f(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+    let La = method_for(a)
+    let Lb = method_for(b)
+    let m = (La <@> s1) @>> (Lb <@> s2) |> compute
+    reduce(m, (+))
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [0.0, 0.0, 0.0])
+v

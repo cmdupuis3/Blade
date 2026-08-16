@@ -1,0 +1,29 @@
+// TEST: JVP C7 Pipeline Equals Hand Fused
+// The identity fusion rests on, pinned rather than assumed: differentiating
+// `object_for(s1) >>@ object_for(s2)` and differentiating the hand-written
+// composite kernel must agree on BOTH legs. If fusion ever composed the
+// stages in the wrong order the primal would be x^2+1 = 15, not (x+1)^2.
+import ad as ad
+
+type I = Idx<3>
+
+function s1(x: Float) -> Float = x + 1.0
+function s2(y: Float) -> Float = y * y
+
+function piped(a: Array<Float like I>) -> Float = {
+    let m = (object_for(s1) >>@ object_for(s2)) <@> a |> compute
+    reduce(m, (+))
+}
+
+function handfused(a: Array<Float like I>) -> Float = {
+    let m = method_for(a) <@> lambda(x) -> (x + 1.0) * (x + 1.0) |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (vp, tp) = ad.jvp(piped)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+let (vh, th) = ad.jvp(handfused)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// EXPECT: vp = 29
+// EXPECT: tp = 18
+// EXPECT: vh = 29
+// EXPECT: th = 18
