@@ -1,0 +1,24 @@
+// TEST: JVP C7 Pipeline Compose Obj
+// C7's whole idea: a pipeline IS a map over the composed kernel
+// (formalism.md 10.3 Compose-Apply duality, whose mechanized proof is
+// literally map fusion), so fuse first and differentiate the fusion. The
+// tangent walker never learns a `>>@` rule.
+// `>>@` runs its LEFT stage first, so the fused kernel is (x+1)^2:
+// at [1,2,3] the primal is 4+9+16 = 29 and the tangent with an all-ones
+// seed is 2*2 + 2*3 + 2*4 = 18.
+import ad as ad
+
+type I = Idx<3>
+
+function s1(x: Float) -> Float = x + 1.0
+function s2(y: Float) -> Float = y * y
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = (object_for(s1) >>@ object_for(s2)) <@> a |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// EXPECT: v = 29
+// EXPECT: t = 18

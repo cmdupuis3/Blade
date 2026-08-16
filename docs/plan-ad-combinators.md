@@ -500,6 +500,16 @@ base case would inject a spurious 1. Pin it.
 
 ### 2.10 `>>@` / `@>>` — pipelines
 
+> **SHIPPED (2026-08-16, C7): fuse-then-differentiate, forward mode.**
+> The fallback in 2.10.2 is the implementation, and it turned out not to be a
+> fallback: `Grad.fs`'s `fusePipelines`/`fuseKernels` collapse `>>@`, `@>>` and
+> `<$>` into a single map over the composed kernel *before* the tangent walker
+> runs, so the walker never learns a pipeline rule and all three of its seams
+> (`staticExtentOf`, `walkExpr`, `tangentOfExpr`) close at once. Compiler ask #2
+> (`Tuple<N>` element typing) is **off** C7's critical path — see the C7 entry
+> in §4 for what shipped, what it refuses, and where the recompute cost lands.
+> Pinned in `tests/corpus/ad-jvp-comb/023`–`035`.
+
 1. **Semantics.** `>>@ : ObjectLoop × ObjectLoop → ObjectLoop` composes kernels
    then applies; `@>> : Computation × Computation → Computation` applies then
    composes over the same MethodLoop; both associative with `object_for(id)` as
@@ -532,20 +542,35 @@ base case would inject a spurious 1. Pin it.
    `object_for(f) >>@ object_for(g)` into a single kernel `lambda(x) -> g(f(x))`
    and apply §2.5. Same answer, no new machinery, loses only the staging. This
    should be the *shipped* behavior; the staged rule is an optimization, not a
-   capability.
+   capability. **This is what shipped** (2026-08-16), and it is more than a
+   fallback: it also carries `where comm(...)` through the fusion (with the
+   clause's parameter references renamed alongside the parameters), so C5's
+   triangular tangent storage survives a pipeline for free.
 3. **REV.** The adjoint reverses the composition, `adj(g∘f) = adj(f) ∘ adj(g)`,
    and each adjoint stage needs its own stage's **primal input**. Threading the
    primal forward as a pair and then running the reversed pipeline means
    materializing the intermediate array per stage — a tape by another name;
-   recomputing the prefix per stage is O(depth²). Meanwhile grad already inlines
-   same-module callees (`Grad.fs:46`) and would produce the correct straight-line
-   adjoint for free once the pipeline is fused. → **do not build a reverse
-   pipeline rule; fuse and inline.**
-4. **Machinery.** Tuple-state kernels; `Tuple<N>` element-type inference
-   (compiler ask #2); a stage-kernel differentiator.
+   recomputing the prefix per stage is O(depth²).
+   **CORRECTED (2026-08-16, measured).** This section used to say grad "would
+   produce the correct straight-line adjoint for free once the pipeline is
+   fused". That holds only for the **scalar straight-line fragment**. A pipeline
+   over a *map* fuses into a map, and grad refuses `<@>` outright — C2 is
+   forward-only — so `ad.grad` on a fused pipeline still stops at the blanket
+   combinator refusal (BL5500), exactly as it did before fusion. Fusing buys
+   reverse mode nothing until a C2-reverse rule exists, and no such rule is
+   planned (§4 C6). → **do not build a reverse pipeline rule**; the reverse
+   refusal on mapped pipelines is load-bearing, not an oversight.
+4. **Machinery.** *As shipped:* `asKernelLambda` (the four kernel spellings,
+   shared with §2.5's `normKern`), `fuseKernels` (alpha-rename + substitute +
+   carry the renamed `where`), `fusePipelinesEnv` (the bottom-up rewrite, with a
+   module/let environment so stages hidden behind names still resolve).
+   Tuple-state kernels and `Tuple<N>` element-type inference (compiler ask #2)
+   are what the *staged* rule would need — an optimization, not a capability.
    Note `<$>` inherits a pre-existing hole: CodeGen refuses `<$>` over a `<|:>`
-   fallback (`CodeGen.fs:15388-15393`).
-5. FWD **DESIGN** (blocked below `Float64`); REV **skip — inline**.
+   fallback (`CodeGen.fs:15388-15393`); that refusal is untouched.
+5. FWD **SHIPPED** (fused; the staged form remains DESIGN, blocked below
+   `Float64`); REV **skip — and see the correction in 3 above: fusing does not
+   hand reverse mode a rule.**
 6. **Storage.** Pipeline kernels are rank-0 (rank-0 convergence,
    `formalism.md:1059-1063`); no comm to inherit.
 
@@ -894,9 +919,18 @@ dense operands cannot co-iterate in one peel (BL7004) — two passes, harmless.
    lambda to differentiate the body — which is the same capability §2.5 needs.
    `<$>` is a post-map on a computation and needs pair threading, i.e. §2.10's
    `Tuple<N>` problem, or fusion into the producing kernel.
-3. **REV.** Skip — inline (§2.10.3).
-4. **Machinery.** Continuation-lambda body differentiation.
-5. `>>=` **MECHANICAL–DESIGN**; `<$>` **DESIGN**. Right-distribution **fails**
+   **SHIPPED (2026-08-16, C7): `<$>` takes the fusion route.** Its LEFT operand
+   is the SECOND stage, so `f <$> c` fuses into c's kernel; over an
+   already-materialized array `f <$> A` is the trivial map `method_for(A) <@> f`.
+   Telling those two apart is the one place fusion consults array-ness (declared
+   parameter types and structurally-array bindings), and anything it cannot
+   classify declines rather than guessing. `>>=` is unchanged: still refused,
+   still a separate item.
+3. **REV.** Skip — inline (§2.10.3), and note the correction there: a fused
+   mapped pipeline is still refused in reverse.
+4. **Machinery.** Continuation-lambda body differentiation (`>>=` only; `<$>`
+   needs nothing beyond §2.10's fusion).
+5. `>>=` **MECHANICAL–DESIGN**; `<$>` **SHIPPED (fused)**. Right-distribution **fails**
    for this monad (`formalism.md:1083-1087`) — any rewrite that reassociates a
    bind chain must not assume it.
 6. n/a.
@@ -1049,10 +1083,34 @@ Extend grad's front end to *lower* the C1 linear closure into lane statements
 (so grad stops refusing programs it could handle), add the four adjoints above,
 and stop.
 
-**C7 — pipelines** (`>>@`, `@>>`, `<$>`), forward only, dimensionless `Float64`
-rank-0, gated on ask #2. Until then ship the **fuse-then-differentiate** fallback
-(§2.10.2), which gives the identical answer with no new machinery. The staged
-rule is an optimization, not a capability — do not let it gate the tranche.
+**C7 — pipelines** (`>>@`, `@>>`, `<$>`), forward only. **SHIPPED 2026-08-16 via
+fuse-then-differentiate** (§2.10.2), and ask #2 turned out not to gate it at all:
+the staged `Tuple<N>` rule is an optimization, and the fusion needs none of it.
+
+*What it covers.* Both compose spellings and the functor map, at any chain
+length, with any first-stage arity, in module scope and in function bodies, with
+stages reached through `let`- and module-level bindings (including
+`let k = lambda(...)`, which is neither a `function` nor an intrinsic and so is
+invisible to `asKernelLambda` without the environment). `where comm(...)` on the
+first stage is carried through — with its parameter references renamed alongside
+the parameters — so C5's triangular tangent storage survives a pipeline.
+
+*What it refuses*, each with its own message rather than the misleading
+"reduce source has no statically-known extent" that used to mask all of them:
+a stage after the first whose arity is not 1; a block-bodied stage kernel; a
+`reynolds(...)` stage (symmetrization does not commute with composition, and
+fusion has no expansion to inline); a `>>@` operand that does not resolve to an
+`object_for`; `@>>` over two structurally different loops; a `<$>` right operand
+that resolves to neither a map application nor a named array; a second-stage
+`where` clause (its parameter does not survive the fusion, and an omp licence is
+never dropped silently); and any pipeline under `ad.grad` (§2.10.3).
+`>>=` and `<$>`-over-`<|:>` keep their pre-existing refusals.
+
+*The cost.* Fusion inlines, so a second stage that names its parameter k times
+evaluates the first stage k times (`g(y) = y*y` over `f` becomes `f(x)*f(x)`).
+Binding the intermediate instead would need block-bodied kernels, which
+`asKernelLambda` refuses — deferred, and cheap to revisit if a real pipeline
+ever pays for it.
 
 **Skipped, with justification recorded:**
 - **`<|>`** — discontinuous, and its pathological set is its design point

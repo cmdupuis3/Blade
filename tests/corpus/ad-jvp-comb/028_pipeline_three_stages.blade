@@ -1,0 +1,22 @@
+// TEST: JVP C7 Pipeline Three Stages
+// `>>@` is left-associative, so a three-stage chain fuses bottom-up: the
+// inner pair collapses first and the result composes with the third. The
+// fused kernel is ((x+1)^2)*10 - 2, which at [1,2,3] gives 38+88+158 = 284;
+// the tangent is 20(x+1) = 40+60+80 = 180.
+import ad as ad
+
+type I = Idx<3>
+
+function s1(x: Float) -> Float = x + 1.0
+function s2(y: Float) -> Float = y * y
+function s3(z: Float) -> Float = z * 10.0 - 2.0
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = (object_for(s1) >>@ object_for(s2) >>@ object_for(s3)) <@> a |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// EXPECT: v = 284
+// EXPECT: t = 180

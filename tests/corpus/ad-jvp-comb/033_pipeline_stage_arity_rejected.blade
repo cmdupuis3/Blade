@@ -1,0 +1,21 @@
+// TEST: JVP C7 Pipeline Stage Arity (rejects)
+// A stage after the first receives exactly one value -- the previous
+// stage's result -- so a two-parameter kernel there has nothing to bind its
+// second parameter to. Refused with the arity named, rather than fused into
+// a lambda with a dangling free variable.
+// ERROR: BL5501
+// ERROR-CONTAINS: exactly one argument
+import ad as ad
+
+type I = Idx<3>
+
+function s1(x: Float) -> Float = x + 1.0
+function two(p: Float, q: Float) -> Float = p * q
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = (object_for(s1) >>@ object_for(two)) <@> a |> compute
+    reduce(m, (+))
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+v

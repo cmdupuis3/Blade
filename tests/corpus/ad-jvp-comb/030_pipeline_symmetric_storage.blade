@@ -1,0 +1,24 @@
+// TEST: JVP C7 Pipeline Symmetric Storage
+// C5 survives fusion for free. The first stage carries a structural
+// `comm(x, y)` over the same array in both positions, so the fused kernel
+// inherits it (fusion RENAMES the clause's parameter references along with
+// the parameters) and both legs allocate triangular: the emitted C++ shows
+// {1,1} symmetry classes on the primal AND tangent buffers, with
+// prefix-offset kernel params.
+// m(i,j) = 10*ai*aj at a = [1,2,3]: m(0,2) = m(2,0) = 30, m(1,1) = 40, so
+// the primal is 100. Seed e0: dm = 10*(da_i*a_j + a_i*da_j) gives 30, 30, 0.
+import ad as ad
+
+type J = Idx<3>
+
+let post = lambda(p) -> p * 10.0
+
+function f(a: Array<Float like J>) -> Float = {
+    let m = (object_for(lambda(x, y) where comm(x, y) -> x * y) >>@ object_for(post)) <@> (a, a) |> compute
+    m(0, 2) + m(2, 0) + m(1, 1)
+}
+
+// WARN: BL4003
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+// EXPECT: v = 100
+// EXPECT: t = 60

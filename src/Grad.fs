@@ -200,6 +200,13 @@ type private Ctx = {
     /// Module-level value binding names (DeclLet / DeclStatic): reads of these
     /// inside a differentiated body are constant data, not unknown calls.
     ModuleVals: Set<string>
+    /// Module-level single-name binding VALUES, in declaration order. Pipeline
+    /// fusion resolves through these: `let dbl = object_for(...)` at module
+    /// level has to be visible when a function body writes `(dbl >>@ inc)`,
+    /// and a module-level `let calibrate = lambda(x) -> ...` has to be
+    /// visible as a stage KERNEL (it is neither a `function` nor an
+    /// intrinsic, so `asKernelLambda` cannot see it any other way).
+    ModuleLoopVals: Map<string, Expr>
     /// Fresh-suffix counter (shared across one expand run).
     mutable Fresh: int
 }
@@ -881,6 +888,18 @@ let rec private staticExtentOf (ctx: Ctx) (env: Map<string, int>) (e: Expr) : in
              | _ -> staticExtentOf ctx env args)
     // a bare loop binding's extent is its leading operand's
     | ExprKind.ExprMethodFor (first :: _) -> staticExtentOf ctx env first
+    // Pipelines (C7) are FUSED away before anything reaches here, so these
+    // arms only ever fire for a pipeline fusion DECLINED. They exist as
+    // defense in depth: without them a declined pipeline dies with
+    // "reduce source has no statically-known extent", which points at the
+    // wrong thing entirely. A pipeline never changes the index space it
+    // iterates, so the extent is the surviving stage's.
+    | ExprKind.ExprBinOp (_, OpComposeMeth, c1, _) -> staticExtentOf ctx env c1
+    | ExprKind.ExprBinOp (_, OpFunctor, _, c) -> staticExtentOf ctx env c
+    | ExprKind.ExprBinOp (_, OpApply, ({ Kind = ExprKind.ExprBinOp (_, OpComposeObj, _, _) }), args) ->
+        (match args.Kind with
+         | ExprKind.ExprTuple (first :: _) -> staticExtentOf ctx env first
+         | _ -> staticExtentOf ctx env args)
     | _ -> None
 
 /// Full static DIMS of an initializer (C6): every axis extent, structurally.
@@ -934,10 +953,472 @@ let private accumLoop (ctx: Ctx) (dims: int list)
     let body = [ NAssign (mkLhs idx, add (mkLhs idx) (mkRhs idx)) ]
     List.foldBack2 (fun nm n inner -> [ NFor (nm, iLit 0L, iLit (int64 n), inner) ]) idxNames dims body
 
+// ===========================================================================
+// C7: pipeline fusion -- `>>@`, `@>>`, `<$>`
+// ===========================================================================
+// `>>@` / `@>>` / `<$>` are the Compose-Apply duality of formalism.md 10.3,
+// whose mechanized proof "is literally map fusion". So a pipeline of stage
+// kernels IS a single map over the composed kernel, and the whole of C7 is
+// that rewrite: fuse first, differentiate the fusion. The tangent walker
+// never learns a pipeline rule -- one normalization upstream closes all
+// three seams (staticExtentOf, walkExpr, tangentOfExpr) at once.
+//
+// The rewrite is total in the sense that matters: when it cannot prove a
+// fusion sound it DECLINES, leaving the node exactly as it found it and
+// recording a reason. Differentiated code turns a decline into a refusal
+// (the tangent walker has no other rule); primal code lets the decline fall
+// through to the existing IRComposeApply path.
+
+/// Why a kernel expression could not be normalized to a lambda. The two
+/// reasons are distinguished because they get different diagnostics: a
+/// block body is a v1 restriction with a fix, anything else is "that is not
+/// a kernel".
+type private KernelShape =
+    | KernBlockBody of string
+    | KernUnsupported
+
+/// Normalize a kernel expression to (params, where-clause, body, reynolds
+/// sign). The four spellings the map rule accepts: a lambda, a
+/// `reynolds(lambda[, Antisymmetric])`, an expression-bodied same-module
+/// named function, and a scalar math intrinsic (eta-expanded).
+///
+/// Factored out of `tangentOfMap`'s `normKern`, which now calls it: the map
+/// rule and pipeline fusion must not drift apart on what counts as a kernel.
+let private asKernelLambda (ctx: Ctx) (k: Expr)
+    : Result<LambdaParam list * WhereClause option * Expr * bool option, KernelShape> =
+    match k.Kind with
+    | ExprKind.ExprLambda (ps, wc, body) -> Ok (ps, wc, body, None)
+    | ExprKind.ExprReynolds ({ Kind = ExprKind.ExprLambda (ps, wc, body) }, isAnti) ->
+        Ok (ps, wc, body, Some isAnti)
+    | ExprKind.ExprVar f when Map.containsKey f ctx.Decls ->
+        let fd = ctx.Decls.[f]
+        (match fd.Body.Kind with
+         | ExprKind.ExprBlock _ -> Error (KernBlockBody f)
+         | _ ->
+             Ok (fd.Params |> List.map (fun p ->
+                     { Name = p.Name; Type = None; Default = None; NameSpan = noSpan }),
+                 fd.WhereClause, fd.Body, None))
+    | ExprKind.ExprVar name when isMathIntrinsic name ->
+        let p = fresh ctx "__ck"
+        Ok ([ { Name = p; Type = None; Default = None; NameSpan = noSpan } ],
+            None,
+            inheritSpan k (ExprApp (inheritSpan k (ExprVar name), [inheritSpan k (ExprVar p)])),
+            None)
+    | _ -> Error KernUnsupported
+
+/// Capture-avoiding substitution for fusion ONLY: `name := repl` over a
+/// kernel body.
+///
+/// Unlike `substVar` (whose catch-all silently returns the node unchanged)
+/// this one's catch-all is `None` -- DECLINE. A form it does not know about
+/// might contain a live occurrence of `name`, and quietly leaving that
+/// occurrence behind is how a fusion turns into a wrong answer (or, more
+/// often, a baffling BL2001 far from here). Forms that BIND names
+/// (`ExprLambda` that does not shadow, `let`, blocks, matches, `for`,
+/// recursive arrays) also decline: `repl` is a whole kernel body carrying
+/// free captures, and proving those survive a binder is not worth it for
+/// shapes no kernel actually uses.
+let rec private substKern (name: string) (repl: Expr) (e: Expr) : Expr option =
+    let s = substKern name repl
+    let re k = Some (inheritSpan e k)
+    let s1 mk a = s a |> Option.bind (fun a' -> re (mk a'))
+    let s2 mk a b =
+        match s a, s b with
+        | Some a', Some b' -> re (mk a' b')
+        | _ -> None
+    let sList (xs: Expr list) =
+        xs |> List.fold (fun acc x ->
+            acc |> Option.bind (fun ys -> s x |> Option.map (fun y -> ys @ [y]))) (Some [])
+    let sOpt (x: Expr option) =
+        match x with
+        | None -> Some None
+        | Some a -> s a |> Option.map Some
+    match e.Kind with
+    | ExprKind.ExprVar n when n = name -> Some repl
+    // leaves: nothing to rewrite, nothing to miss
+    | ExprKind.ExprVar _ | ExprKind.ExprLit _ | ExprKind.ExprWildcard
+    | ExprKind.ExprQualified _ | ExprKind.ExprRange _ | ExprKind.ExprReverse _
+    | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _
+    | ExprKind.ExprArity _ -> Some e
+    | ExprKind.ExprBinOp (m, op, l, r) -> s2 (fun a b -> ExprBinOp (m, op, a, b)) l r
+    | ExprKind.ExprUnaryOp (op, i) -> s1 (fun a -> ExprUnaryOp (op, a)) i
+    | ExprKind.ExprApp (f, args) ->
+        match s f, sList args with
+        | Some f', Some args' -> re (ExprApp (f', args'))
+        | _ -> None
+    | ExprKind.ExprTupleIndex (t, i) -> s2 (fun a b -> ExprTupleIndex (a, b)) t i
+    | ExprKind.ExprField (x, f) -> s1 (fun a -> ExprField (a, f)) x
+    | ExprKind.ExprIf (c, t, f) ->
+        match s c, s t, s f with
+        | Some c', Some t', Some f' -> re (ExprIf (c', t', f'))
+        | _ -> None
+    | ExprKind.ExprTuple es -> sList es |> Option.bind (fun es' -> re (ExprTuple es'))
+    | ExprKind.ExprArrayLit es -> sList es |> Option.bind (fun es' -> re (ExprArrayLit es'))
+    | ExprKind.ExprMethodFor ops -> sList ops |> Option.bind (fun o -> re (ExprMethodFor o))
+    | ExprKind.ExprObjectFor k -> s1 (fun a -> ExprObjectFor a) k
+    | ExprKind.ExprDotDot (l, h) -> s2 (fun a b -> ExprDotDot (a, b)) l h
+    | ExprKind.ExprBlocked (t, x) -> s1 (fun a -> ExprBlocked (t, a)) x
+    | ExprKind.ExprHalo (t, offs) -> s1 (fun a -> ExprHalo (t, a)) offs
+    | ExprKind.ExprZip es -> sList es |> Option.bind (fun es' -> re (ExprZip es'))
+    | ExprKind.ExprAlign (es, spec) -> sList es |> Option.bind (fun es' -> re (ExprAlign (es', spec)))
+    | ExprKind.ExprStack es -> sList es |> Option.bind (fun es' -> re (ExprStack es'))
+    | ExprKind.ExprJoin (es, d) -> sList es |> Option.bind (fun es' -> re (ExprJoin (es', d)))
+    | ExprKind.ExprSequence es -> sList es |> Option.bind (fun es' -> re (ExprSequence es'))
+    | ExprKind.ExprGroupKeys es -> sList es |> Option.bind (fun es' -> re (ExprGroupKeys es'))
+    | ExprKind.ExprPure i -> s1 (fun a -> ExprPure a) i
+    | ExprKind.ExprCompute i -> s1 (fun a -> ExprCompute a) i
+    | ExprKind.ExprRead i -> s1 (fun a -> ExprRead a) i
+    | ExprKind.ExprGuard (c, b) -> s2 (fun a b2 -> ExprGuard (a, b2)) c b
+    | ExprKind.ExprReplicate (c, b) -> s2 (fun a b2 -> ExprReplicate (a, b2)) c b
+    | ExprKind.ExprReynolds (k, anti) -> s1 (fun a -> ExprReynolds (a, anti)) k
+    | ExprKind.ExprTyped (i, t) -> s1 (fun a -> ExprTyped (a, t)) i
+    | ExprKind.ExprRank i -> s1 (fun a -> ExprRank a) i
+    | ExprKind.ExprMask (a, p) -> s2 (fun x y -> ExprMask (x, y)) a p
+    | ExprKind.ExprCompound (d, m) -> s2 (fun x y -> ExprCompound (x, y)) d m
+    | ExprKind.ExprSparse (vs, ks) -> s2 (fun x y -> ExprSparse (x, y)) vs ks
+    | ExprKind.ExprIntersect (a, b) -> s2 (fun x y -> ExprIntersect (x, y)) a b
+    | ExprKind.ExprUnion (a, b) -> s2 (fun x y -> ExprUnion (x, y)) a b
+    | ExprKind.ExprUnique a -> s1 (fun x -> ExprUnique x) a
+    | ExprKind.ExprContains (a, x) -> s2 (fun p q -> ExprContains (p, q)) a x
+    | ExprKind.ExprGroupBy (vs, g) -> s2 (fun x y -> ExprGroupBy (x, y)) vs g
+    | ExprKind.ExprGroupBucket g -> s1 (fun x -> ExprGroupBucket x) g
+    | ExprKind.ExprSort (a, k) -> s2 (fun x y -> ExprSort (x, y)) a k
+    | ExprKind.ExprReduce (a, k, init, axes) ->
+        match s a, s k, sOpt init, sOpt axes with
+        | Some a', Some k', Some i', Some x' -> re (ExprReduce (a', k', i', x'))
+        | _ -> None
+    | ExprKind.ExprTranspose (a, d1, d2) -> s1 (fun x -> ExprTranspose (x, d1, d2)) a
+    | ExprKind.ExprDecompact (a, d) -> s1 (fun x -> ExprDecompact (x, d)) a
+    | ExprKind.ExprGram (l, r) -> s2 (fun x y -> ExprGram (x, y)) l r
+    | ExprKind.ExprExtents a -> s1 (fun x -> ExprExtents x) a
+    | ExprKind.ExprPartialApp (op, x, isLeft) -> s1 (fun a -> ExprPartialApp (op, a, isLeft)) x
+    | ExprKind.ExprAssign (l, r) -> s2 (fun x y -> ExprAssign (x, y)) l r
+    | ExprKind.ExprStatic i -> s1 (fun a -> ExprStatic a) i
+    | ExprKind.ExprStruct (n, fields, spread) ->
+        let fs =
+            fields |> List.fold (fun acc (fn, fv) ->
+                acc |> Option.bind (fun ys -> s fv |> Option.map (fun y -> ys @ [(fn, y)]))) (Some [])
+        match fs, sOpt spread with
+        | Some fs', Some sp' -> re (ExprStruct (n, fs', sp'))
+        | _ -> None
+    // a lambda that SHADOWS the name is already correct as written
+    | ExprKind.ExprLambda (ps, _, _) when ps |> List.exists (fun p -> p.Name = name) -> Some e
+    // everything else -- binders, blocks, matches, loop forms, and anything
+    // added to the grammar after this was written -- declines.
+    | _ -> None
+
+/// Rename every PARAMETER reference a where-clause carries. Fusion
+/// alpha-renames stage 1's params, so every clause that names them must
+/// follow: `comm`/`anticomm` groups, `omp(x: n)` variable lists, and the
+/// open `Custom` conjuncts. `TDims` names dimensions, not parameters (and
+/// the parser never populates it), so it rides through untouched.
+///
+/// Renaming rather than dropping is deliberate: a parallelism license is
+/// part of what the user declared, and the omp census invariant says a
+/// dropped `omp` is never silent.
+let private renameWhereVars (ren: string -> string) (w: WhereClause) : WhereClause =
+    { w with
+        Commutativity = w.Commutativity |> List.map (List.map ren)
+        Antisymmetry = w.Antisymmetry |> List.map (List.map ren)
+        Parallel =
+            w.Parallel |> List.map (function
+                | Omp s -> Omp { s with Vars = s.Vars |> List.map (fun (n, d) -> (ren n, d)) }
+                | other -> other)
+        Custom = w.Custom |> List.map (fun (n, args) -> (n, args |> List.map ren)) }
+
+/// Does this where-clause say anything? A second-stage kernel's clause
+/// cannot survive fusion (its parameter does not), so a non-inert one is a
+/// refusal rather than a silent drop.
+let private whereIsInert (w: WhereClause option) : bool =
+    match w with
+    | None -> true
+    | Some w ->
+        List.isEmpty w.Commutativity && List.isEmpty w.Antisymmetry
+        && List.isEmpty w.Parallel && List.isEmpty w.TDims && List.isEmpty w.Custom
+
+/// How a kernel names itself in a diagnostic.
+let private kernName (k: Expr) : string =
+    match k.Kind with
+    | ExprKind.ExprVar n -> sprintf "'%s'" n
+    | _ -> "<lambda>"
+
+/// Fuse two stage kernels into one. `k1` runs FIRST and may have any arity
+/// n (it is the one that meets the loop operands); `k2` runs SECOND on k1's
+/// single result, so its arity must be exactly 1. The fused kernel is a
+/// lambda over FRESH copies of k1's parameters -- alpha-renaming is not
+/// cosmetic, it is what stops k2's free captures from being captured by k1's
+/// parameter names.
+///
+/// `at` supplies the span of the pipeline node the fusion replaces.
+let private fuseKernels (ctx: Ctx) (at: Expr) (k1: Expr) (k2: Expr) : Result<Expr, string> =
+    let norm (ordinal: string) (k: Expr) =
+        match asKernelLambda ctx k with
+        | Ok (_, _, _, Some _) ->
+            Error (sprintf "fusing a pipeline does not support a `reynolds(...)` stage kernel (the %s stage kernel %s is one)"
+                       ordinal (kernName k))
+        | Ok (ps, wc, body, None) -> Ok (ps, wc, body)
+        | Error (KernBlockBody f) ->
+            Error (sprintf "kernel '%s' has a block body; only expression-bodied named functions are differentiable as kernels (v1)" f)
+        | Error KernUnsupported ->
+            Error "differentiating a pipeline supports lambda, named-function and intrinsic stage kernels (v1)"
+    norm "first" k1 |> Result.bind (fun (ps1, wc1, b1) ->
+    norm "second" k2 |> Result.bind (fun (ps2, wc2, b2) ->
+    match ps2 with
+    | [p2] when whereIsInert wc2 ->
+        let renames = ps1 |> List.map (fun p -> (p.Name, fresh ctx "__fs"))
+        let renMap = Map.ofList renames
+        let ren n = match Map.tryFind n renMap with Some x -> x | None -> n
+        let b1' =
+            renames |> List.fold (fun acc (oldN, newN) ->
+                acc |> Option.bind (substKern oldN (inheritSpan k1 (ExprVar newN)))) (Some b1)
+        match b1' |> Option.bind (fun b -> substKern p2.Name b b2) with
+        | None ->
+            Error (sprintf "fusing a pipeline cannot substitute through the stage kernels %s and %s (a binder or an unsupported form stands between the stages)"
+                       (kernName k1) (kernName k2))
+        | Some body ->
+            let ps =
+                renames |> List.map (fun (_, newN) ->
+                    { Name = newN; Type = None; Default = None; NameSpan = noSpan })
+            Ok (inheritSpan at (ExprLambda (ps, wc1 |> Option.map (renameWhereVars ren), body)))
+    | [_] ->
+        Error (sprintf "fusing a pipeline cannot carry the second stage's `where` clause: stage kernel %s declares one, but its parameter does not survive the fusion"
+                   (kernName k2))
+    | _ ->
+        Error (sprintf "differentiating a pipeline requires each stage after the first to take exactly one argument; stage kernel %s takes %d"
+                   (kernName k2) ps2.Length)))
+
+/// A map application, in either spelling, decomposed into (operands, kernel,
+/// rebuild-with-a-new-kernel). `method_for(ops) <@> k` and
+/// `object_for(k) <@> ops` are the same loop; the rebuilder puts the fused
+/// kernel back in the spelling it found, so the rewrite is minimal.
+let private (|MapApply|_|) (e: Expr) : (Expr list * Expr * (Expr -> Expr)) option =
+    match e.Kind with
+    | ExprKind.ExprBinOp (bm, OpApply, ({ Kind = ExprKind.ExprMethodFor ops } as lo), kern) ->
+        Some (ops, kern, fun k' -> inheritSpan e (ExprBinOp (bm, OpApply, lo, k')))
+    | ExprKind.ExprBinOp (bm, OpApply, { Kind = ExprKind.ExprObjectFor kern }, rhs) ->
+        let ops = match rhs.Kind with ExprKind.ExprTuple es -> es | _ -> [rhs]
+        Some (ops, kern,
+              fun k' -> inheritSpan e (ExprBinOp (bm, OpApply, inheritSpan e (ExprObjectFor k'), rhs)))
+    | _ -> None
+
+/// A span-insensitive key for a loop's operand list, so `@>>` can insist
+/// that both computations iterate the SAME loop before it merges them.
+/// `None` means "cannot tell" -- which is a refusal, not a match.
+let rec private loopKey (ops: Expr list) : string option =
+    let one (x: Expr) =
+        match x.Kind with
+        | ExprKind.ExprVar n -> Some ("v " + n)
+        | ExprKind.ExprRange tys -> Some (sprintf "r %d %A" tys.Length tys)
+        | ExprKind.ExprReverse t -> Some (sprintf "rev %A" t)
+        | ExprKind.ExprMethodFor inner -> loopKey inner |> Option.map (fun k -> "m " + k)
+        | _ -> None
+    ops |> List.fold (fun acc x ->
+        acc |> Option.bind (fun ks -> one x |> Option.map (fun k -> ks @ [k]))) (Some [])
+    |> Option.map (String.concat " | ")
+
+/// Structural array-ness, for the one `<$>` case that needs to tell an
+/// already-materialized array from a deferred computation: `f <$> A` over an
+/// array is the trivial map `method_for(A) <@> f`, while `f <$> c` over a
+/// computation is a post-map on c's kernel. Getting this wrong in the safe
+/// direction costs a fusion; getting it wrong in the other direction builds
+/// a loop over a loop, so anything unrecognized declines.
+let private isArrayish (known: Set<string>) (resolved: Expr) (original: Expr) : bool =
+    let rec go (x: Expr) =
+        match x.Kind with
+        | ExprKind.ExprArrayLit _ | ExprKind.ExprStack _ | ExprKind.ExprSequence _
+        | ExprKind.ExprJoin _ | ExprKind.ExprZip _ | ExprKind.ExprReplicate _
+        | ExprKind.ExprRange _ | ExprKind.ExprCompute _ | ExprKind.ExprRead _ -> true
+        | ExprKind.ExprTyped (i, _) -> go i
+        | _ -> false
+    (match original.Kind with
+     | ExprKind.ExprVar n -> Set.contains n known
+     | _ -> false)
+    || go resolved || go original
+
+/// Which bound values are worth remembering for pipeline resolution: loop
+/// objects, map applications, unfused pipeline nodes, and kernel lambdas.
+let rec private bindsPipelineValue (v: Expr) : bool =
+    match v.Kind with
+    | ExprKind.ExprObjectFor _ | ExprKind.ExprMethodFor _ | ExprKind.ExprLambda _
+    | ExprKind.ExprReynolds _ -> true
+    | ExprKind.ExprBinOp (_, (OpApply | OpComposeObj | OpComposeMeth | OpFunctor), _, _) -> true
+    | ExprKind.ExprTyped (i, _) -> bindsPipelineValue i
+    | _ -> false
+
+/// The rewrite. Bottom-up over one body, threading `env` (names bound to
+/// loop objects, computations, compose values and kernel lambdas -- whatever
+/// a pipeline operand might hide behind) and `arrays` (names known to hold
+/// materialized arrays). Returns the rewritten expression and the DECLINE
+/// reasons for pipeline nodes it left alone.
+let private fusePipelinesEnv (ctx: Ctx) (env0: Map<string, Expr>) (arrays0: Set<string>)
+                             (body: Expr) : Expr * string list =
+    let declines = ResizeArray<string>()
+    let decline (m: string) = if not (declines.Contains m) then declines.Add m
+    /// Chase a name to the value it was bound to (depth-capped: `let x = x`
+    /// is someone else's error, not a hang).
+    let rec resolve (env: Map<string, Expr>) (d: int) (x: Expr) : Expr =
+        if d > 8 then x
+        else
+        match x.Kind with
+        | ExprKind.ExprVar n ->
+            (match Map.tryFind n env with
+             | Some b -> resolve env (d + 1) b
+             | None -> x)
+        | ExprKind.ExprTyped (inner, _) -> resolve env (d + 1) inner
+        // a let-bound LOOP applied by name: `L <@> k` where `let L = method_for(A)`
+        | ExprKind.ExprBinOp (bm, OpApply, { Kind = ExprKind.ExprVar n }, rhs) ->
+            (match Map.tryFind n env with
+             | Some ({ Kind = ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _ } as b) ->
+                 inheritSpan x (ExprBinOp (bm, OpApply, b, rhs))
+             | _ -> x)
+        | _ -> x
+    /// A kernel operand may itself be a let-bound lambda (`let calibrate =
+    /// lambda(x) -> ...` then `object_for(calibrate)`), which is neither a
+    /// same-module `function` nor an intrinsic, so `asKernelLambda` needs it
+    /// resolved first.
+    let resolveKern (env: Map<string, Expr>) (k: Expr) : Expr =
+        match k.Kind with
+        | ExprKind.ExprVar n when not (Map.containsKey n ctx.Decls) ->
+            (match Map.tryFind n env with
+             | Some ({ Kind = ExprKind.ExprLambda _ | ExprKind.ExprReynolds _ } as b) -> b
+             | _ -> k)
+        | _ -> k
+    let rec go (env: Map<string, Expr>) (arrays: Set<string>) (e: Expr) : Expr =
+        let re k = inheritSpan e k
+        let g x = go env arrays x
+        let gl xs = xs |> List.map g
+        match e.Kind with
+        // ---- `>>@`: compose two kernel OBJECTS; the LEFT stage runs first
+        | ExprKind.ExprBinOp (m0, OpComposeObj, l, r) ->
+            let l' = g l
+            let r' = g r
+            (match (resolve env 0 l').Kind, (resolve env 0 r').Kind with
+             | ExprKind.ExprObjectFor k1, ExprKind.ExprObjectFor k2 ->
+                 (match fuseKernels ctx e (resolveKern env k1) (resolveKern env k2) with
+                  | Ok fk -> re (ExprObjectFor fk)
+                  | Error msg -> decline msg; re (ExprBinOp (m0, OpComposeObj, l', r')))
+             | _ ->
+                 decline "differentiating `>>@` needs both operands to resolve to `object_for(<kernel>)` (directly, or through a let- or module-level binding)"
+                 re (ExprBinOp (m0, OpComposeObj, l', r')))
+        // ---- `@>>`: compose two COMPUTATIONS over one loop; LEFT runs first
+        | ExprKind.ExprBinOp (m0, OpComposeMeth, c1, c2) ->
+            let c1' = g c1
+            let c2' = g c2
+            (match resolve env 0 c1', resolve env 0 c2' with
+             | MapApply (ops1, k1, rebuild), MapApply (ops2, k2, _) ->
+                 (match loopKey ops1, loopKey ops2 with
+                  | Some a, Some b when a = b ->
+                      (match fuseKernels ctx e (resolveKern env k1) (resolveKern env k2) with
+                       | Ok fk -> rebuild fk
+                       | Error msg -> decline msg; re (ExprBinOp (m0, OpComposeMeth, c1', c2')))
+                  | _ ->
+                      decline "differentiating `@>>` requires both computations to iterate the same loop object"
+                      re (ExprBinOp (m0, OpComposeMeth, c1', c2')))
+             | _ ->
+                 decline "differentiating `@>>` requires both operands to resolve to a map application over one loop object"
+                 re (ExprBinOp (m0, OpComposeMeth, c1', c2')))
+        // ---- `<$>`: post-map. The LEFT operand is the SECOND stage.
+        | ExprKind.ExprBinOp (m0, OpFunctor, kf, c) ->
+            let kf' = g kf
+            let c' = g c
+            let rc = resolve env 0 c'
+            (match rc with
+             | MapApply (_, k1, rebuild) ->
+                 (match fuseKernels ctx e (resolveKern env k1) (resolveKern env kf') with
+                  | Ok fk -> rebuild fk
+                  | Error msg -> decline msg; re (ExprBinOp (m0, OpFunctor, kf', c')))
+             | _ when isArrayish arrays rc c' ->
+                 // over an already-materialized array `<$>` IS the trivial map.
+                 // The kernel is resolved through the env for the same reason
+                 // the compose arms resolve theirs: a module-level
+                 // `let k = lambda(...)` is not a `function`, so nothing
+                 // downstream can see it as a kernel unless fusion inlines it.
+                 re (ExprBinOp (Elementwise, OpApply, re (ExprMethodFor [c']), resolveKern env kf'))
+             | _ ->
+                 decline "differentiating `<$>` requires its right operand to resolve to a map application or to a named array"
+                 re (ExprBinOp (m0, OpFunctor, kf', c')))
+        // ---- structural recursion ------------------------------------------
+        | ExprKind.ExprBinOp (m, op, l, r) -> re (ExprBinOp (m, op, g l, g r))
+        | ExprKind.ExprUnaryOp (op, i) -> re (ExprUnaryOp (op, g i))
+        | ExprKind.ExprTyped (i, t) -> re (ExprTyped (g i, t))
+        | ExprKind.ExprCompute i -> re (ExprCompute (g i))
+        | ExprKind.ExprPure i -> re (ExprPure (g i))
+        | ExprKind.ExprRead i -> re (ExprRead (g i))
+        | ExprKind.ExprGuard (c, b) -> re (ExprGuard (g c, g b))
+        | ExprKind.ExprApp (f, args) -> re (ExprApp (f, gl args))
+        | ExprKind.ExprIf (c, t, f) -> re (ExprIf (g c, g t, g f))
+        | ExprKind.ExprTuple es -> re (ExprTuple (gl es))
+        | ExprKind.ExprArrayLit es -> re (ExprArrayLit (gl es))
+        | ExprKind.ExprStack es -> re (ExprStack (gl es))
+        | ExprKind.ExprSequence es -> re (ExprSequence (gl es))
+        | ExprKind.ExprZip es -> re (ExprZip (gl es))
+        | ExprKind.ExprJoin (es, d) -> re (ExprJoin (gl es, d))
+        | ExprKind.ExprMethodFor ops -> re (ExprMethodFor (gl ops))
+        | ExprKind.ExprObjectFor k -> re (ExprObjectFor (g k))
+        | ExprKind.ExprReplicate (c, b) -> re (ExprReplicate (g c, g b))
+        | ExprKind.ExprReduce (a, k, i, ax) -> re (ExprReduce (g a, g k, Option.map g i, ax))
+        | ExprKind.ExprTupleIndex (t, i) -> re (ExprTupleIndex (g t, i))
+        | ExprKind.ExprLambda (ps, wc, b) ->
+            // the lambda's own parameters shadow anything the env knows
+            let names = ps |> List.map (fun p -> p.Name)
+            let env2 = names |> List.fold (fun (m: Map<string, Expr>) n -> Map.remove n m) env
+            let arr2 = names |> List.fold (fun s n -> Set.remove n s) arrays
+            re (ExprLambda (ps, wc, go env2 arr2 b))
+        | ExprKind.ExprBlock (ss, fe) ->
+            let env2, arr2, ss' =
+                ss |> List.fold (fun (en, ar, acc) s ->
+                    match unwrapStmt s with
+                    | StmtLet ({ Pattern = { Kind = PatternKind.PatVar nm } } as b) ->
+                        let v2 = go en ar b.Value
+                        let en2 = if bindsPipelineValue v2 then Map.add nm v2 en else Map.remove nm en
+                        let ar2 = if isArrayish ar (resolve en 0 v2) v2 then Set.add nm ar else Set.remove nm ar
+                        (en2, ar2, acc @ [StmtLet { b with Value = v2 }])
+                    | StmtLet b -> (en, ar, acc @ [StmtLet { b with Value = go en ar b.Value }])
+                    | StmtExpr ex -> (en, ar, acc @ [StmtExpr (go en ar ex)])
+                    | StmtAssign (l, o, r) -> (en, ar, acc @ [StmtAssign (l, o, go en ar r)])
+                    | other -> (en, ar, acc @ [other])) (env, arrays, [])
+            re (ExprBlock (ss', fe |> Option.map (go env2 arr2)))
+        | _ -> e
+    let out = go env0 arrays0 body
+    (out, List.ofSeq declines)
+
+/// Fuse the pipelines in one function's body, seeded from the module scope:
+/// module-level bindings are visible inside every body, except where a
+/// parameter shadows one. Array-typed parameters seed the `<$>`
+/// array-vs-computation decision.
+let private fuseFunctionBody (ctx: Ctx) (fd: FunctionDecl) : Expr * string list =
+    let paramNames = fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
+    let env =
+        ctx.ModuleLoopVals
+        |> Map.filter (fun n _ -> not (Set.contains n paramNames))
+    let moduleArrays =
+        ctx.ModuleLoopVals
+        |> Map.toSeq
+        |> Seq.filter (fun (_, v) -> isArrayish Set.empty v v)
+        |> Seq.map fst
+        |> Set.ofSeq
+    let paramArrays =
+        fd.Params
+        |> List.filter (fun p ->
+            match p.Type with
+            | Some t -> (match resolveArrayTy ctx t with TyArray _ -> true | _ -> false)
+            | None -> false)
+        |> List.map (fun p -> p.Name)
+        |> Set.ofList
+    fusePipelinesEnv ctx env (Set.union (Set.difference moduleArrays paramNames) paramArrays) fd.Body
+
 /// The pre-pass proper: rewrite one function body's statements, expanding
 /// recursive-array lets and hoisting reduces, threading an extent env so
 /// reduce sources can recover their loop bound.
-let private preNormalizeBody (fname: string) (ctx: Ctx) (fd: FunctionDecl) : Result<Expr, string> =
+let private preNormalizeBody (fname: string) (ctx: Ctx) (fd0: FunctionDecl) : Result<Expr, string> =
+    // C7: pipelines first. Everything downstream -- the extent env, the
+    // tangent walker, the reduce lowering -- then sees ordinary maps. A
+    // pipeline the rewrite DECLINED is a refusal here rather than a
+    // misleading BL5501 five seams later: the tangent walker has no other
+    // rule to reach for.
+    let fusedBody, fuseDeclines = fuseFunctionBody ctx fd0
+    let fd = { fd0 with Body = fusedBody }
+    if not (List.isEmpty fuseDeclines) then err fname (List.head fuseDeclines) else
     let paramExtents =
         fd.Params |> List.choose (fun p ->
             match p.Type with
@@ -1954,26 +2435,16 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
 and private tangentOfMap (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Expr list) (kern: Expr) : Result<Expr, string> =
     let reMap k = inheritSpan e k
     // -- kernel normalization ------------------------------------------------
+    // The four spellings live in `asKernelLambda` (shared with pipeline
+    // fusion, so the two cannot drift on what counts as a kernel); only the
+    // wording of the refusals is the map rule's own.
     let normKern =
-        match kern.Kind with
-        | ExprKind.ExprLambda (ps, wc, body) -> Ok (ps, wc, body, None)
-        | ExprKind.ExprReynolds ({ Kind = ExprKind.ExprLambda (ps, wc, body) }, isAnti) ->
-            Ok (ps, wc, body, Some isAnti)
-        | ExprKind.ExprVar f when Map.containsKey f rc.Ctx.Decls ->
-            let fd = rc.Ctx.Decls.[f]
-            (match fd.Body.Kind with
-             | ExprKind.ExprBlock _ ->
-                 err rc.Fname (sprintf "kernel '%s' has a block body; only expression-bodied named functions are differentiable as kernels (v1)" f)
-             | _ ->
-                 let ps =
-                     fd.Params |> List.map (fun p ->
-                         { Name = p.Name; Type = None; Default = None; NameSpan = noSpan })
-                 Ok (ps, fd.WhereClause, fd.Body, None))
-        | ExprKind.ExprVar name when isMathIntrinsic name ->
-            let p = fresh rc.Ctx "__ck"
-            Ok ([ { Name = p; Type = None; Default = None; NameSpan = noSpan } ],
-                None, call name [v p], None)
-        | _ -> err rc.Fname "differentiating `<@>` supports lambda, reynolds(lambda), named-function, and intrinsic kernels (v1)"
+        match asKernelLambda rc.Ctx kern with
+        | Ok r -> Ok r
+        | Error (KernBlockBody f) ->
+            err rc.Fname (sprintf "kernel '%s' has a block body; only expression-bodied named functions are differentiable as kernels (v1)" f)
+        | Error KernUnsupported ->
+            err rc.Fname "differentiating `<@>` supports lambda, reynolds(lambda), named-function, and intrinsic kernels (v1)"
     normKern |> Result.bind (fun (ps, wc, body, reynoldsSign) ->
     if ps.Length <> arrays.Length || arrays.IsEmpty then
         err rc.Fname (sprintf "kernel arity %d does not match %d loop operand(s) in differentiated code" ps.Length arrays.Length)
@@ -2701,6 +3172,16 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             | DeclLet b | DeclStatic b -> patNames b.Pattern
             | _ -> [])
         |> Set.ofList
+    // The same bindings, keeping their VALUES, for pipeline fusion to resolve
+    // through. Single-name patterns only -- a tuple destructure names no
+    // sub-expression fusion could chase.
+    let moduleLoopVals =
+        decls |> List.fold (fun acc d ->
+            match d.Value with
+            | DeclLet ({ Pattern = { Kind = PatternKind.PatVar nm } } as b)
+            | DeclStatic ({ Pattern = { Kind = PatternKind.PatVar nm } } as b) -> Map.add nm b.Value acc
+            | _ -> acc)
+            Map.empty
     // Source span per differentiable function, for stamping synthSpan so
     // syn-based derivative builders carry the differentiated decl's location.
     let funcSpans =
@@ -2733,7 +3214,8 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
     rewritten |> Result.bind (fun decls' ->
         if requestsOrdered.Count = 0 then Ok decls'
         else
-            let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = moduleVals; Fresh = 0 }
+            let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = moduleVals
+                        ModuleLoopVals = moduleLoopVals; Fresh = 0 }
             // Synthesize in DISCOVERY order against a GROWING decl map:
             // inner requests precede the outer requests that consume them,
             // so by the time `ad.jvp(ad.grad(f))` synthesizes the outer
@@ -2794,6 +3276,18 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                             |> Seq.filter (fun sn -> rootOf sn = fd.Name)
                             |> Seq.map (fun sn -> { d with Value = DeclFunction (fst madeMap.[sn]) })
                             |> List.ofSeq
+                        // An AD TARGET's OWN body is fused too, so the primal
+                        // leg agrees structurally with the tangent leg. Fusion
+                        // is the proved Compose-Apply identity, so this cannot
+                        // change an answer -- and it is what lets the primal
+                        // pipeline shapes the codegen cannot yet emit
+                        // (3+ stages, multi-operand, function-body `<$>`/`@>>`)
+                        // still be differentiated. A DECLINE here is silent:
+                        // the unfused body is legal exactly as the user wrote
+                        // it, and the derivative already succeeded.
+                        let d =
+                            if List.isEmpty mine then d
+                            else { d with Value = DeclFunction { fd with Body = fst (fuseFunctionBody ctx fd) } }
                         d :: mine
                     | _ -> [d]))))
 

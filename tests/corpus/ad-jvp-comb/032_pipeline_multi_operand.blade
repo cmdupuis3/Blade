@@ -1,0 +1,23 @@
+// TEST: JVP C7 Pipeline Multi Operand
+// A first stage of arity 2 keeps its arity through the fusion -- only the
+// stages AFTER the first are constrained to one argument, because only they
+// consume a single intermediate. The fused kernel is the rank-2 outer map
+// 10*ai*bj.
+// At a = [1,2,3], b = [1,1,1]: m(0,1) = 10, m(2,2) = 30, m(1,0) = 20 -> 60.
+// Seeding only da = 1s, dm = 10*da_i*b_j = 10 each -> 30.
+import ad as ad
+
+type I = Idx<3>
+
+function k2(x: Float, y: Float) -> Float = x * y
+function post(z: Float) -> Float = z * 10.0
+
+function f(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+    let m = (object_for(k2) >>@ object_for(post)) <@> (a, b) |> compute
+    m(0, 1) + m(2, 2) + m(1, 0)
+}
+
+// WARN: BL4003
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [0.0, 0.0, 0.0])
+// EXPECT: v = 60
+// EXPECT: t = 30

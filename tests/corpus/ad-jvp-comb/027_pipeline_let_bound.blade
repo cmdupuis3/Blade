@@ -1,0 +1,25 @@
+// TEST: JVP C7 Pipeline Let Bound
+// The idiomatic build-it-once shape: the stages are let-bound values and so
+// is the composition, applied only later. Fusion resolves through both hops
+// (the composition variable and the object variables underneath it), which
+// is what makes `let condition = object_for(a) >>@ object_for(b)` from
+// examples/03 differentiable rather than a name it cannot see behind.
+import ad as ad
+
+type I = Idx<3>
+
+function s1(x: Float) -> Float = x + 1.0
+function s2(y: Float) -> Float = y * y
+
+function f(a: Array<Float like I>) -> Float = {
+    let o1 = object_for(s1)
+    let o2 = object_for(s2)
+    let p = o1 >>@ o2
+    let m = p <@> a |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// EXPECT: v = 29
+// EXPECT: t = 18
