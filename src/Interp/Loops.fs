@@ -307,7 +307,7 @@ and private applyWrappersToValue (st: InterpState) (env: Env) (wrappers: IRExpr 
     let rec wrapperFn (w: IRExpr) : (Value -> Value) =
         match w with
         | IRCompose (k, f) -> let kf = wrapperFn k in let ff = wrapperFn f in (fun x -> ff (kf x))
-        | _ -> resolveUnaryKernel st w
+        | _ -> resolveUnaryKernel st env w
     let wrapAll = wrappers |> List.fold (fun acc w -> let wf = wrapperFn w in (fun x -> wf (acc x))) id
     match v with
     | VArray a ->
@@ -598,15 +598,15 @@ and private materializeComposeApply (st: InterpState) (env: Env) (cinfo: Compose
         let kernelOf (o: IRExpr) : IRExpr =
             let (ro, _) = resolveDef o cenv
             match ro with IRObjectFor lo -> lo.Kernel | _ -> ro
-        let call1 = resolveUnaryKernel st (kernelOf o1)
-        let call2 = resolveUnaryKernel st (kernelOf o2)
+        let call1 = resolveUnaryKernel st cenv (kernelOf o1)
+        let call2 = resolveUnaryKernel st cenv (kernelOf o2)
         // A wrapper is a unary transform; an extracted IRCompose(k,f) means
         // f.k (applyValue's compose convention). Fold all wrappers innermost-
         // first onto stage 2's result.
         let rec wrapperFn (w: IRExpr) : (Value -> Value) =
             match w with
             | IRCompose (k, f) -> let kf = wrapperFn k in let ff = wrapperFn f in (fun v -> ff (kf v))
-            | _ -> resolveUnaryKernel st w
+            | _ -> resolveUnaryKernel st cenv w
         let wrapAll = wrappers |> List.fold (fun acc w -> let wf = wrapperFn w in (fun v -> wf (acc v))) id
         let call2Wrapped v = wrapAll (call2 v)
         match cinfo.InputArrays with
@@ -644,9 +644,22 @@ and private forceInputArray (st: InterpState) (env: Env) (arrExpr: IRExpr) : Bla
 /// Value->Value closure via resolveKernel (peels Reynolds, resolves through the
 /// callables + synthetic table). Invoked with empty captures like
 /// resolveBinaryFold -- module-level kernels reach their captures via st.Global.
-and private resolveUnaryKernel (st: InterpState) (kernel: IRExpr) : (Value -> Value) =
+and private resolveUnaryKernel (st: InterpState) (env: Env) (kernel: IRExpr) : (Value -> Value) =
     match resolveKernel kernel with
-    | Some rk when rk.Callable.Params.Length = 1 -> (fun v -> callCallable st rk.Callable [ v ])
+    | Some rk when rk.Callable.Params.Length = 1 ->
+        // Bind the kernel's declared captures from the SITE env, for exactly
+        // the reason materializeObjectForApp does: `callCallable` passes no
+        // captures and `evalCall` chains to the module-global scope only, so
+        // a capture bound in an enclosing FUNCTION frame is invisible. A sort
+        // key that reads the array being keyed on -- `sort(idxs, lambda(i: I)
+        // -> a(i))`, the AD permutation route -- captures `a` that way, and
+        // without this the key throws mid-comparison and the failure surfaces
+        // as List.sortWith's opaque "failed to compare two elements".
+        let caps =
+            rk.Callable.Captures
+            |> List.choose (fun c -> envTryFind env c.Id |> Option.map (fun cell -> (c.Id, cell)))
+            |> Map.ofList
+        (fun v -> Core.evalCall st rk.Callable caps [ v ])
     | _ -> raise (InterpUnsupported "sort/mask kernel does not resolve to a unary callable")
 
 /// Inline object_for application: `A [op] B` (bracketed OUTER product) and its
@@ -2017,10 +2030,10 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     //              arity-1 axes into a fresh pool.
     | IRMask (arrExpr, predExpr) ->
         let a = forceInputArray st env arrExpr
-        VArray (A.maskPresence a (resolveUnaryKernel st predExpr))
+        VArray (A.maskPresence a (resolveUnaryKernel st env predExpr))
     | IRSort (arrExpr, keyExpr) ->
         let a = forceInputArray st env arrExpr
-        VArray (A.sortArray a (resolveUnaryKernel st keyExpr))
+        VArray (A.sortArray a (resolveUnaryKernel st env keyExpr))
     | IRUnique arrExpr ->
         VArray (A.uniqueArray (forceInputArray st env arrExpr))
     | IRIntersect (aExpr, bExpr) ->

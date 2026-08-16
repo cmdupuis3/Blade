@@ -188,7 +188,7 @@ Summary (difficulty: FREE / MECHANICAL / DESIGN / BLOCKED):
 | `reynolds` | MECHANICAL | DESIGN | joint permutation; recompute the plan |
 | `gram` | MECHANICAL | **MECHANICAL** | both adjoints are matmuls (BLAS) |
 | `group_by` / `group_keys` | MECHANICAL | **BLOCKED** (T2) | no ungroup surface |
-| `sort` | DESIGN | DESIGN | key-over-zip unverified |
+| `sort` | **SHIPPED** | **SHIPPED** | permutation as data (§2.17b) |
 | `>>@`, `@>>`, `<$>` | DESIGN | **skip — inline** | Tuple<N> element typing |
 | `>>=` | MECHANICAL–DESIGN | skip | it is a `let` in disguise |
 | `<\|>` (choice) | **BLOCKED** | **BLOCKED** | discontinuous; **SKIP** (§2.13) |
@@ -817,17 +817,18 @@ test on the data.
    the `gk` **binding by name**. `sql.md:256-261` documents exactly the property
    this needs (same-`gk` co-iteration), so primal and tangent grouped views
    co-iterate by construction. Linear gather.
-   `sort(A, key)`: the tangent must apply the *same* permutation. There is no
+   `sort(A, key)`: the tangent must apply the *same* permutation. ~~There is no
    "sort by another array's order" form; the plausible route is sorting
-   `zip(A, Ȧ)` under a key reading only the value half, which is **unverified**
-   (no corpus pin) → DESIGN.
+   `zip(A, Ȧ)` under a key reading only the value half, which is unverified
+   (no corpus pin) → DESIGN.~~ **SUPERSEDED; shipped 2026-08-16 by the
+   permutation-as-data route, not by key-over-zip — see 2.17b.**
 3. **REV.** ~~The adjoint is a scatter back through the grouping, and there is
    **no ungroup surface**~~ — **OVERSTATED; corrected 2026-08-16, probe-verified
    (see 2.17a).** An ungroup exists today as an ordinary gather.
 4. **Machinery.** `gk` hoisting to a named binding; see 2.17a for the rest.
 5. FWD `group_by` **MECHANICAL** (confirmed against finite differences),
-   `sort` **DESIGN**; REV **MECHANICAL for factorable kernels**, gated on one
-   small compiler addition; **BLOCKED** for non-factorable ones.
+   `sort` **SHIPPED** (§2.17b); REV **MECHANICAL for factorable kernels**, gated
+   on one small compiler addition; **BLOCKED** for non-factorable ones.
 6. **Storage.** RaggedIdx; no comm.
 
 ### 2.17a Reverse-mode `group_by`, corrected — carry the grouping, don't invert it
@@ -882,6 +883,89 @@ pass (`-1` for negative-key-dropped rows); (2) the AD transform has no
 combinator rules at all yet — `group_by` is not specially blocked, it is behind
 the whole C-track (a plain dense map hits the same refusal); (3) grouped and
 dense operands cannot co-iterate in one peel (BL7004) — two passes, harmless.
+
+### 2.17b `sort`, shipped — carry the permutation, don't invert it
+
+**Status: SHIPPED both modes, 2026-08-16** (`src/Grad.fs`, C7). This replaces
+§2.17's `sort` entry, which proposed sorting `zip(A, Ȧ)` under a key reading
+only the value half and rated it DESIGN. That route was never built: it needs a
+key that sees a tuple, and it only ever serves forward mode. The shipped route
+is the same move 2.17a makes for grouping — **carry the structure as data
+rather than inverting it** — and it serves both modes from one mechanism.
+
+**Why a sort is differentiable at all.** `sort` is *piecewise constant* in its
+input. Off the tie set, a small perturbation of `A` moves the VALUES but not
+which original slot lands where, so on each piece the sort is exactly the linear
+map "gather through a fixed permutation":
+
+```
+s(i) = A(perm(i))    ⇒   tangent  ṡ(i) = Ȧ(perm(i))
+                     ⇒   adjoint  Ā(j) += s̄(invperm(j))
+```
+
+The question "what is the derivative *of the key*" is **N/A**: the permutation
+is locally constant in `A`, and the set where it changes (exact ties) is measure
+zero. At a tie the primal is not differentiable either, and the subgradient
+convention is the standard one — take the permutation the primal actually took.
+
+**What the pre-pass emits.** `sort` does not hand back its permutation, so
+`preNormalizeBody` materializes one, by sorting the row indices under the same
+key instead of the values:
+
+```blade
+let s = sort(A, key)
+// becomes:
+let __sx_s = method_for(range<I>) <@> lambda(i: I) -> i |> compute
+let __sp_s = sort(__sx_s, lambda(i: I) -> A(i))
+let __si_s = sort(__sx_s, lambda(i: I) -> __sp_s(i))   // reverse mode only
+let s      = sort(A, key)                              // primal, UNCHANGED
+```
+
+The primal is kept verbatim rather than rewritten to a gather: it is already
+correct, and leaving it alone keeps the change off the codegen path entirely.
+
+- **FORWARD** — the tangent is the co-gather
+  `method_for(__sp_s) <@> lambda(i: I) -> __t_A(i) |> compute`.
+- **REVERSE** — the adjoint would be a *scatter*, which the language has no
+  primitive for. Inverting the permutation turns it back into a gather, and the
+  inverse comes from a **second sort** of the same index array keyed on the
+  permutation's own values. `adjointOfInit` then emits the ordinary
+  accumulation `__g_A(j) += __g_s(__si_s(j))`. **No scatter primitive, no new
+  runtime surface.**
+
+**The by-name discipline (2.17a's rule, again).** `__sp_s` is shared *by name*
+between the primal, the tangent leg, and the adjoint leg. This is what makes
+ties safe for free: the emitter uses `std::stable_sort`
+(`CodeGen.fs:materializeSortForm`), so ties keep input order, and because every
+leg gathers through the permutation the primal itself produced, no leg can
+re-derive — and re-break — that convention. Verified: for
+`A = [3, 1, 3, 1, 2, 3]` the permutation is `[1, 3, 4, 0, 2, 5]`, and the three
+tied `3.0`s at indices 0, 2, 5 collect *distinct* gradient weights
+(`tests/corpus/ad-jvp-comb/037`).
+
+Composition reuses the plumbing rather than re-emitting it, so
+`ad.jvp(ad.grad(f))` (HVP) works through a sort — pinned in `036`.
+
+**v1 limitations, each an explicit refusal (never a silent zero):**
+
+| Limitation | Why |
+|---|---|
+| The key reads **only the sorted element** | A key closing over a second differentiable array makes the permutation depend on it, and permutation-as-data drops that dependence. Matches the documented signature `sort : Array<T like I> × (T → K)`. |
+| The sort must be the **whole initializer of a `let`** | The permutation binding is emitted *beside* the sort; an expression-position sort has no statement to be expanded at. |
+| The operand must be a **named rank-1 array** | The expansion has to spell `range<I>` and annotate the gather lambdas, so it needs a declared index type. |
+| The index type must be a **named alias** | The expansion spells `I` three times, and every syntactic occurrence of an anonymous `Idx<n>` gets its own nominal identity by design. Only an alias gives them one. (The C2 map rule is unaffected — it spells the index type once.) |
+| A **sorted callee cannot be inlined** | `renameExpr` does not descend into `sort` or its key lambda, so splicing would leave the plumbing pointing at the callee's own renamed parameter. |
+| Second-order **forward-over-forward** through a sort | `ad.jvp(ad.jvp(f))` re-maps over `__sp_s`, a local, and `tangentOfMap` resolves index types for *parameters* only. Forward-over-reverse (HVP) is fine. |
+
+All lambda params in the expansion are **explicitly annotated**: an unannotated
+index-typed key param is miscompiled to `double` today.
+
+**Interpreter.** The differential lane needed one fix: `resolveUnaryKernel`
+(`src/Interp/Loops.fs`) called `callCallable`, which passes *no* captures, so a
+sort key reading the array being keyed on (`lambda(i: I) -> a(i)`) could not see
+`a` and threw mid-comparison — surfacing as `List.sortWith`'s opaque "failed to
+compare two elements". It now binds declared captures from the site env, exactly
+as `materializeObjectForApp` already documented needing to.
 
 ### 2.18 `>>=` and `<$>`
 
@@ -1059,7 +1143,9 @@ rule is an optimization, not a capability — do not let it gate the tranche.
   (§2.13). Keep the refusal; improve the message.
 - **`Poly<T^k>` / arity-polymorphic kernels** — the transform's pre-typecheck
   slot makes the tangent parameter list unconstructible (§2.19).
-- **`sort`** — key-over-zip is unverified (§2.17).
+- ~~**`sort`** — key-over-zip is unverified (§2.17).~~ **SHIPPED both modes**
+  2026-08-16 by a different route than the one skipped here: not key-over-zip,
+  but the permutation carried as data (§2.17b).
 - **`align` / `stencil`** — paper surface: AST + Lowering + TypeCheck arms, zero
   users (§2.9).
 - **Complex / Wirtinger** — inherits `plan-forward-mode-ad.md:249`.
@@ -1131,7 +1217,10 @@ rule is an optimization, not a capability — do not let it gate the tranche.
    ask #1.
 3. Is `!m` over a Bool mask array spellable and lowered (§2.14.3)? No corpus pin
    exists.
-4. Can `sort(zip(A,Ȧ), key)` take a key reading only the value half (§2.17)?
+4. ~~Can `sort(zip(A,Ȧ), key)` take a key reading only the value half (§2.17)?~~
+   **MOOT** — `sort` shipped in both modes without needing an answer: the
+   permutation is carried as data instead of being re-derived from a zipped
+   sort (§2.17b).
 5. Does the `omp` licence rewrite (`diagnostics/060:18-23`, `tuples/014`) survive
    onto a kernel whose parameter count **doubled**, or is it position-sensitive in
    a way the doubling breaks?
