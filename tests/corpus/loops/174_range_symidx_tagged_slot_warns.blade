@@ -13,11 +13,15 @@
 // (175). Nothing semantic separates the two spellings.
 //
 // The group here is deliberately anonymous on BOTH counts -- no alias AND a
-// literal extent. `range<SymIdx<2, I3>>`, naming only the COMPONENT, is a
-// third behaviour again: it typechecks with these same two warnings and then
-// fails to compile, emitting `S_extents[0] = __range0.extents[0];` for an
-// `__range0` that was never declared. That is a codegen defect, not a
-// refusal, so it has no honest pin here; see docs/formalism.md 7.3.
+// literal extent, which is why the params are untagged and this file warns.
+// `range<SymIdx<2, I3>>`, naming only the COMPONENT, is a third behaviour
+// again -- and it is now the one that WORKS: the base slot resolves to I3's
+// record and inherits its tag, so both params type as `Nat<I3>`, the same
+// values below are produced, and nothing warns at all. It is pinned as
+// index-types/239. (Until that resolution existed it failed codegen, emitting
+// `S_extents[0] = __range0.extents[0];` for an `__range0` that was never
+// declared -- a defect, not a refusal, so it had no honest pin here.)
+// See docs/formalism.md 7.3.
 type I3 = Idx<3>
 let v: Array<Float like I3> = [2.0, 3.0, 5.0]
 let sym = method_for(range<SymIdx<2, 3>>) <@> lambda(p0, p1) -> v(p0) * v(p0 + p1) |> compute

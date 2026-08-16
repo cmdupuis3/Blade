@@ -814,11 +814,27 @@ adjusting for rank > 1; the second is independent.
   matching" means for the values the slot actually produces; both spellings then
   check with no warning. Pinned as `tests/corpus/loops/174` (warns) and `175`
   (errors).
-- Naming only the component — `range<SymIdx<2, I3>>` — typechecks and then fails
+- Naming only the component — `range<SymIdx<2, I3>>` — is the spelling that
+  works, and it is the bullet above's "minimal fix" already realized for this
+  one form. The base slot resolves to `I3`'s record and inherits its `Tag`, so
+  both component params type as `Nat<I3>` — the space they actually range over
+  — and the program checks with NO warning, then runs to 174's values. Pinned
+  as `tests/corpus/index-types/239`.
+
+  Until that resolution existed the same text typechecked and then failed
   codegen outright, emitting `S_extents[0] = __range0.extents[0];` against an
-  `__range0` that is never declared (the same `__range0` failure mode IR.fs:3499
-  records for the multi-rank param binding). No corpus pin: a raw g++ error is
-  not a refusal.
+  `__range0` that is never declared: `Parser.parseSymIdxBase` admits only the
+  `Idx`/`IrrepsIdx` KEYWORDS as an index-type base, so the bare name `I3` was
+  read as an extent EXPRESSION, and a name that resolves to no value fell
+  through to a symbolic extent that a VIRTUAL range has no runtime object to
+  read. A bare name that resolves to neither a value nor an index type still
+  has no reading, and is now refused at the range seam rather than left to g++
+  (`tests/corpus/index-types/240`).
+
+  This does NOT settle the first bullet: `type S2 = SymIdx<2, I3>` names the
+  GROUP, and the group's own name still overwrites the component tag, so 175
+  stays a hard BL4003. Component-naming and group-naming remain different, and
+  only the former is fixed.
 
 ### 7.4 For-loop syntax
 
