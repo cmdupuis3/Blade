@@ -1407,7 +1407,13 @@ let rec private adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, strin
 // assignments are emitted BEFORE their primal assignment so they read the
 // pre-assignment primal values (d(x*x) needs the old x).
 
-let private tName (n: string) = "__t_" + n
+/// Tangent-name prefix for the CURRENT jvp synthesis. Defaults to `__t_`;
+/// composition bumps it (`__t1_`, `__t2_`, ...) because a trusted source's
+/// params already include the previous round's `__t_*` names -- `tName`
+/// must stay injective against them or the second round's tangent of `x`
+/// would collide with the first round's tangent parameter `__t_x`.
+let private tangentPrefix = ref "__t_"
+let private tName (n: string) = tangentPrefix.Value + n
 
 /// Zero-folding expression builders. Folding `0.0` operands away matters
 /// twice over: the emitted tangent stays readable, and -- decisively for the
@@ -1730,18 +1736,23 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
 
 let private jvpSuffix = "__jvp"
 
-let private synthesizeJvp (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, string> =
+let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result<FunctionDecl, string> =
     errMode.Value <- "jvp"
     let fname = fd.Name
+    let isFloatish (t: TypeExpr) =
+        isFloatTy t || (match t with TyNamed (("Float" | "Float64" | "Float32"), _ :: _) -> true | _ -> false)
     (if Map.containsKey (fname + jvpSuffix) ctx.Decls then
         err fname (sprintf "a function named '%s%s' already exists in this module; jvp would synthesize a colliding declaration -- rename it" fname jvpSuffix)
      else Ok ())
     |> Result.bind (fun () ->
     match fd.ReturnType |> Option.map (resolveTy ctx) with
-    | Some t when isFloatTy t -> Ok ()
-    | Some (TyNamed (("Float" | "Float64" | "Float32"), _ :: _)) ->
-        Ok ()   // unit-carrying loss: the tangent carries the same units
-    | Some _ -> err fname "jvp requires a function returning Float (scalar) (v1)"
+    | Some t when isFloatish t -> Ok ()   // units included: the tangent carries the same
+    // All-Float tuples: the shape of a synthesized source's return
+    // (f__grad's `(primal, dscalars...)`), differentiated for the
+    // composition routes. The jvp return interleaves flat:
+    // components, then their tangents.
+    | Some (TyTuple ts) when ts |> List.forall (fun t -> isFloatish (resolveTy ctx t)) -> Ok ()
+    | Some _ -> err fname "jvp requires a function returning Float (or an all-Float tuple) (v1)"
     | None -> err fname "jvp requires an explicit `-> Float` return annotation"
     |> Result.bind (fun () ->
     let classesR =
@@ -1763,13 +1774,34 @@ let private synthesizeJvp (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, s
     else
     normalizeBody fname ctx 0 fd |> Result.bind (fun (stmts, finalE) ->
     // Reserved-name gate (same rationale as grad's: synthesized names
-    // shadow same-named user bindings silently).
+    // shadow same-named user bindings silently). A TRUSTED source -- one
+    // this pass itself synthesized, in a composition chain -- binds
+    // reserved names by construction and skips the gate.
     let reservedName (n: string) =
         n = "__primal" || n.StartsWith "__g_" || n.StartsWith "__t_"
-    match (fd.Params |> List.map (fun p -> p.Name)) @ boundNames stmts |> List.tryFind reservedName with
+    let allNames = (fd.Params |> List.map (fun p -> p.Name)) @ boundNames stmts
+    let reservedHit =
+        if trusted then None
+        else allNames |> List.tryFind reservedName
+    // Pick the first depth-indexed tangent prefix no existing name uses
+    // (composition rounds each get their own; see tangentPrefix).
+    tangentPrefix.Value <-
+        (let rec pick k =
+            let cand = if k = 0 then "__t_" else sprintf "__t%d_" k
+            if allNames |> List.exists (fun n -> n.StartsWith cand) then pick (k + 1) else cand
+         pick 0)
+    match reservedHit with
     | Some n ->
         err fname (sprintf "binding or parameter '%s' collides with a reserved AD name (`__g_*`, `__t_*`, and `__primal` are synthesized by the transform and would shadow it); rename it" n)
     | None ->
+    // Tuple-returning sources (f__grad's `(primal, dscalars...)`) sweep
+    // per component; the surrogate keeps taint/validation walks off the
+    // tuple node itself.
+    let finalComps =
+        match finalE.Kind with
+        | ExprKind.ExprTuple es -> es
+        | _ -> [finalE]
+    let finalSurrogate = finalComps |> List.reduce add
     let validateAll =
         let rec valStmts ss =
             ss |> List.fold (fun acc s ->
@@ -1784,7 +1816,7 @@ let private synthesizeJvp (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, s
                         |> Result.bind (fun () -> walkExpr fname ctx ignore hi)
                         |> Result.bind (fun () -> valStmts body)))
                 (Ok ())
-        valStmts stmts |> Result.bind (fun () -> walkExpr fname ctx ignore finalE)
+        valStmts stmts |> Result.bind (fun () -> walkExpr fname ctx ignore finalSurrogate)
     validateAll |> Result.bind (fun () ->
     // F2: grad's three discipline checks (write-after-read, scalar
     // overwrite, loop discipline) exist ONLY to keep the reverse sweep's
@@ -1794,7 +1826,7 @@ let private synthesizeJvp (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, s
     // pre-assignment values -- so overwrites, loop-carried recurrences,
     // and accumulator reads all differentiate exactly and none of the
     // checks run here.
-    analyze fname ctx diffParams arrayParams stmts finalE |> Result.bind (fun (diff, arrays) ->
+    analyze fname ctx diffParams arrayParams stmts finalSurrogate |> Result.bind (fun (diff, arrays) ->
     // Parity with grad's array-local literal-init restriction.
     let badArrayLocal =
         stmts |> List.tryPick (fun s ->
@@ -1821,15 +1853,21 @@ let private synthesizeJvp (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, s
                 tangentOfStmt rc s |> Result.map (fun s2 -> ss @ s2)))
             (Ok [])
     sweptR |> Result.bind (fun swept ->
-    tangentOfExpr rc finalE |> Result.map (fun tFinal ->
-    let primalName = "__primal"
-    let tangentName = "__t_primal"
-    let body =
-        toStmts swept
-        @ [ StmtLet { Pattern = synPat (PatVar primalName); Type = None; Value = finalE; Mutability = BindLet }
-            StmtLet { Pattern = synPat (PatVar tangentName); Type = None; Value = tFinal; Mutability = BindLet } ]
-    let retExpr = syn (ExprTuple [v primalName; v tangentName])
-    let retScalarTy = Option.defaultValue TyFloat64 fd.ReturnType
+    finalComps
+    |> List.fold (fun acc c ->
+        acc |> Result.bind (fun ts ->
+            tangentOfExpr rc c |> Result.map (fun t -> ts @ [t])))
+        (Ok [])
+    |> Result.map (fun tangentComps ->
+    // Return: components then their tangents, flat -- `(p, t)` for the
+    // scalar case, `(p, ds..., tp, tds...)` for a tuple-returning source.
+    // Direct tuple of pure expressions; no intermediate lets (a trusted
+    // source already binds `__primal`, so a fresh let would shadow it).
+    let retExpr = syn (ExprTuple (finalComps @ tangentComps))
+    let retTys =
+        match fd.ReturnType |> Option.map (resolveTy ctx) with
+        | Some (TyTuple ts) -> ts @ ts
+        | rt -> let s = Option.defaultValue TyFloat64 rt in [s; s]
     let jvpParams =
         fd.Params
         @ (classes |> List.choose (fun (p, c) ->
@@ -1841,19 +1879,23 @@ let private synthesizeJvp (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, s
       TypeParams = fd.TypeParams
       Params = jvpParams
       WhereClause = None
-      ReturnType = Some (TyTuple [retScalarTy; retScalarTy])
-      Body = inheritSpan fd.Body (ExprBlock (body, Some retExpr))
+      ReturnType = Some (TyTuple retTys)
+      Body = inheritSpan fd.Body (ExprBlock (toStmts swept, Some retExpr))
       IsStatic = false
       NameSpan = noSpan }))))))))
 
 // Call-site rewriting + program expansion
 
-/// Rewrite alias.grad(f) / alias.jvp(f) call sites in an expression;
-/// collect requested names per mode.
-let rec private rewriteExpr (requested: System.Collections.Generic.HashSet<string>)
-                            (requestedJvp: System.Collections.Generic.HashSet<string>)
+/// Rewrite alias.grad(f) / alias.jvp(f) call sites in an expression.
+/// Requests are recorded in DISCOVERY order (post-order, so an inner
+/// ad.grad(f) precedes the outer ad.jvp(...) that consumes its result),
+/// and `anticipated` carries the names the pass itself will synthesize --
+/// which is what makes composition (`ad.jvp(ad.grad(f))`, the HVP route;
+/// `ad.jvp(ad.jvp(f))`, second-order forward) legal arguments.
+let rec private rewriteExpr (requestsOrdered: ResizeArray<string * string>)
+                            (anticipated: System.Collections.Generic.HashSet<string>)
                             (declNames: Set<string>) (aliases: Set<string>) (e: Expr) : Result<Expr, string> =
-    let r = rewriteExpr requested requestedJvp declNames aliases
+    let r = rewriteExpr requestsOrdered anticipated declNames aliases
     let rList es =
         es |> List.fold (fun acc x ->
             acc |> Result.bind (fun xs -> r x |> Result.map (fun x' -> xs @ [x'])))
@@ -1865,13 +1907,20 @@ let rec private rewriteExpr (requested: System.Collections.Generic.HashSet<strin
     // a module, not a language-wide name (same rule as the ml/ppl surfaces).
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, (("grad" | "jvp") as which)) }, args) when Set.contains alias aliases ->
         (match args with
-         | [{ Kind = ExprKind.ExprVar fname }] ->
-             if Set.contains fname declNames then
-                 (if which = "grad" then requested.Add fname else requestedJvp.Add fname) |> ignore
-                 Ok (re (ExprVar (fname + (if which = "grad" then gradSuffix else jvpSuffix))))
-             else
-                 Error (sprintf "%s: '%s' is not a top-level function in this module (%s differentiates same-module named functions)" which fname which)
-         | [_] -> Error (sprintf "%s: argument must be a named top-level function (e.g. ad.%s(loss))" which which)
+         | [arg0] ->
+             // Rewrite the argument FIRST so composition works: the inner
+             // form becomes a bare synthesized-name reference before this
+             // arm inspects it.
+             r arg0 |> Result.bind (fun arg0' ->
+                 match arg0'.Kind with
+                 | ExprKind.ExprVar fname when Set.contains fname declNames || anticipated.Contains fname ->
+                     let suffix = if which = "grad" then gradSuffix else jvpSuffix
+                     requestsOrdered.Add (which, fname)
+                     anticipated.Add (fname + suffix) |> ignore
+                     Ok (re (ExprVar (fname + suffix)))
+                 | ExprKind.ExprVar fname ->
+                     Error (sprintf "%s: '%s' is not a top-level function in this module (%s differentiates same-module named functions)" which fname which)
+                 | _ -> Error (sprintf "%s: argument must be a named top-level function (e.g. ad.%s(loss))" which which))
          | _ -> Error (sprintf "%s: expects exactly one argument, the function to differentiate" which))
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
     | ExprKind.ExprApp (f, args) ->
@@ -1987,8 +2036,8 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             | _ -> None)
         |> Map.ofList
     let declNames = funcDecls |> Map.toSeq |> Seq.map fst |> Set.ofSeq
-    let requested = System.Collections.Generic.HashSet<string>()
-    let requestedJvp = System.Collections.Generic.HashSet<string>()
+    let requestsOrdered = ResizeArray<string * string>()
+    let anticipated = System.Collections.Generic.HashSet<string>()
     // rewrite call sites everywhere
     let rewritten =
         decls |> List.fold (fun acc d ->
@@ -1996,57 +2045,83 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                 let mapped =
                     match d.Value with
                     | DeclFunction fd ->
-                        rewriteExpr requested requestedJvp declNames aliases fd.Body
+                        rewriteExpr requestsOrdered anticipated declNames aliases fd.Body
                         |> Result.map (fun b -> DeclFunction { fd with Body = b })
                     | DeclLet binding ->
-                        rewriteExpr requested requestedJvp declNames aliases binding.Value
+                        rewriteExpr requestsOrdered anticipated declNames aliases binding.Value
                         |> Result.map (fun v' -> DeclLet { binding with Value = v' })
                     | DeclStatic binding ->
-                        rewriteExpr requested requestedJvp declNames aliases binding.Value
+                        rewriteExpr requestsOrdered anticipated declNames aliases binding.Value
                         |> Result.map (fun v' -> DeclStatic { binding with Value = v' })
                     | other -> Ok other
                 mapped |> Result.map (fun value -> ds @ [{ d with Value = value }])))
             (Ok [])
     rewritten |> Result.bind (fun decls' ->
-        if requested.Count = 0 && requestedJvp.Count = 0 then Ok decls'
+        if requestsOrdered.Count = 0 then Ok decls'
         else
             let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = moduleVals; Fresh = 0 }
-            // synthesize each requested derivative once
-            let synthesized =
-                requested |> Seq.sort |> Seq.fold (fun acc fname ->
-                    acc |> Result.bind (fun (made: Map<string, FunctionDecl>) ->
-                        // Stamp the ambient synthesis span with this decl's
-                        // span before building its derivative (syn/syn-based
-                        // builders read it).
-                        Blade.Ast.synthSpan <- (Map.tryFind fname funcSpans |> Option.defaultValue noSpan)
-                        synthesize ctx funcDecls.[fname]
-                        |> Result.map (fun gd -> Map.add fname gd made)))
-                    (Ok Map.empty)
-            // On failure, LEAVE synthSpan stamped with the failing decl's
-            // span: the `expand` boundary reads it when building the
-            // diagnostic (resetting first was how synthesis errors lost
-            // their source location). Reset on success only.
-            synthesized |> Result.bind (fun made ->
-            let synthesizedJvp =
-                requestedJvp |> Seq.sort |> Seq.fold (fun acc fname ->
-                    acc |> Result.bind (fun (madeJ: Map<string, FunctionDecl>) ->
-                        Blade.Ast.synthSpan <- (Map.tryFind fname funcSpans |> Option.defaultValue noSpan)
-                        synthesizeJvp ctx funcDecls.[fname]
-                        |> Result.map (fun jd -> Map.add fname jd madeJ)))
-                    (Ok Map.empty)
-            match synthesizedJvp with
+            // Synthesize in DISCOVERY order against a GROWING decl map:
+            // inner requests precede the outer requests that consume them,
+            // so by the time `ad.jvp(ad.grad(f))` synthesizes the outer
+            // half, f__grad is an ordinary available declaration.
+            let mutable available = funcDecls
+            let madeOrder = ResizeArray<string>()
+            let madeMap = System.Collections.Generic.Dictionary<string, FunctionDecl * string>()
+            let synthResult =
+                requestsOrdered
+                |> Seq.distinct
+                |> Seq.fold (fun acc (mode, fname) ->
+                    acc |> Result.bind (fun () ->
+                        let suffix = if mode = "grad" then gradSuffix else jvpSuffix
+                        let synthName = fname + suffix
+                        if madeMap.ContainsKey synthName then Ok ()
+                        else
+                        match Map.tryFind fname available with
+                        | None ->
+                            Error (sprintf "%s: '%s' is not available to differentiate (compose ad.grad/ad.jvp within one expression)" mode fname)
+                        | Some fd ->
+                            // Stamp the ambient synthesis span with the
+                            // ROOT source decl's span (composition chains
+                            // inherit it) before building the derivative.
+                            Blade.Ast.synthSpan <- (Map.tryFind fname funcSpans |> Option.defaultValue Blade.Ast.synthSpan)
+                            let ctx2 = { ctx with Decls = available }
+                            // A synthesized source is trusted: it binds
+                            // reserved names by construction, and the
+                            // shadowing hazard the reserved gate guards
+                            // against is a user-code phenomenon.
+                            let trusted = not (Map.containsKey fname funcDecls)
+                            let result =
+                                if mode = "grad" then synthesize ctx2 fd
+                                else synthesizeJvp ctx2 trusted fd
+                            result |> Result.map (fun gd ->
+                                available <- Map.add synthName gd available
+                                madeOrder.Add synthName
+                                madeMap.[synthName] <- (gd, fname))))
+                    (Ok ())
+            // On failure, LEAVE synthSpan stamped (the `expand` boundary
+            // reads it for the diagnostic). Reset on success only.
+            match synthResult with
             | Error e -> Error e
-            | Ok madeJvp ->
+            | Ok () ->
                 Blade.Ast.synthSpan <- noSpan
-                // splice each synthesized decl immediately after its source
-                // (grad before jvp when a function requested both)
+                // Splice each synthesized decl after its ROOT source decl,
+                // in synthesis order (f, f__grad, f__grad__jvp, ...).
+                let rootOf (synthName: string) =
+                    let rec go n =
+                        match madeMap.TryGetValue n with
+                        | true, (_, src) -> if Map.containsKey src funcDecls then src else go src
+                        | _ -> n
+                    go synthName
                 Ok (decls' |> List.collect (fun d ->
                     match d.Value with
                     | DeclFunction fd ->
-                        let g = if Map.containsKey fd.Name made then [{ d with Value = DeclFunction made.[fd.Name] }] else []
-                        let j = if Map.containsKey fd.Name madeJvp then [{ d with Value = DeclFunction madeJvp.[fd.Name] }] else []
-                        d :: (g @ j)
-                    | _ -> [d])))))
+                        let mine =
+                            madeOrder
+                            |> Seq.filter (fun sn -> rootOf sn = fd.Name)
+                            |> Seq.map (fun sn -> { d with Value = DeclFunction (fst madeMap.[sn]) })
+                            |> List.ofSeq
+                        d :: mine
+                    | _ -> [d]))))
 
 /// Entry point: expand grad() across a program. Errors are compile errors.
 let private expandStr (program: Program) : Result<Program, string> =

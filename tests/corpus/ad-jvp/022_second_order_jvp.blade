@@ -1,0 +1,16 @@
+// TEST: JVP Of JVP Is A Second Directional Derivative
+// jvp differentiates its own output: f__jvp returns a (primal, tangent)
+// tuple, so f__jvp__jvp returns the flat interleave (components, then
+// their tangents) = (p, t, tp, tt). The second round's tangent prefix
+// bumps to __t1_ so it stays injective against the first round's __t_x
+// parameter. f = x^3 at x = 2, tx = dx = 1, dtx = 0:
+// p = 8, t = 3x^2 = 12, tp = 12, tt = 6x = 12 (the second derivative).
+import ad as ad
+
+function f(x: Float) -> Float = x * x * x
+
+let (p, t, tp, tt) = ad.jvp(ad.jvp(f))(2.0, 1.0, 1.0, 0.0)
+// EXPECT: p = 8
+// EXPECT: t = 12
+// EXPECT: tp = 12
+// EXPECT: tt = 12
