@@ -189,6 +189,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprDisplayEmit (h, q, d, m) -> TExprDisplayEmit (h, q, z d, m)
         | TExprDisplayJson (r, d) -> TExprDisplayJson (r, z d)
         | TExprDisplayNum d -> TExprDisplayNum (z d)
+        | TExprDisplayStr d -> TExprDisplayStr (z d)
         | TExprGroupBy (v, k) -> TExprGroupBy (z v, z k)
         | TExprGroupKeys ks -> TExprGroupKeys (List.map z ks)
         | TExprSort (a, k) -> TExprSort (z a, z k)

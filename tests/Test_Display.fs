@@ -68,6 +68,27 @@ add "escape covers quote, backslash and the sentinel's own SOH" (fun () ->
     // escaping scheme of its own.
     eq "a\\\"b\\\\c\\u0001d\\n" (F.escape "a\"b\\cd\n"))
 
+add "jsonString supplies its own quotes and escapes what is inside them" (fun () ->
+    // The caller writes `"\"text\":" + jsonString t` -- delimiters included is
+    // the whole point, because the bug this retires was a caller writing them
+    // by hand around unescaped text.
+    eq "\"he said \\\"hi\\\"\\\\\"" (F.jsonString "he said \"hi\"\\"))
+
+add "jsonString of the empty string is a pair of quotes" (fun () ->
+    eq "\"\"" (F.jsonString ""))
+
+add "jsonNumber passes a finite rendering through untouched" (fun () ->
+    eq "2.25" (F.jsonNumber "2.25" 2.25))
+
+add "jsonNumber turns NaN and both infinities into null" (fun () ->
+    // The guard reads the VALUE, not the rendering. The spelling of a
+    // non-finite is implementation-defined (`nan`, `-nan`, `NaN`, `1.#QNAN`),
+    // so a text test would pin the JSON rule to whichever formatter happened
+    // to be underneath; both lanes branch on the finite predicate instead.
+    let vals = [ nan; infinity; -infinity; -nan ]
+    let outs = vals |> List.map (fun x -> F.jsonNumber "SHOULD-NOT-APPEAR" x)
+    eq "null,null,null,null" (String.concat "," outs))
+
 add "head carries v, mime and the inferred encoding" (fun () ->
     eq "{\"v\":1,\"mime\":\"image/png\",\"encoding\":\"base64\",\"data\":" (F.headFor "image/png"))
 
@@ -309,6 +330,76 @@ add "plot.line + units.SI: unit_label auto-fills the axis titles" (fun () ->
         ((layout.GetProperty("xaxis").GetProperty("title").GetProperty "text").GetString() = "second"
          && (layout.GetProperty("yaxis").GetProperty("title").GetProperty "text").GetString() = "meter / second^2"),
         layout.ToString())
+
+add "plot: a title with quotes, a backslash and a tab still parses" (fun () ->
+    // plotFrame PARSES the payload, so an unescaped title fails this check at
+    // the parse, before the comparison -- which is exactly how the bug used to
+    // present: one apostrophe-shaped character and the panel got nothing.
+    let src =
+        "import plot\n\
+         let ok = plot.line([0.0, 1.0], [0.0, 1.0], \"he said \\\"hi\\\"\\tand\\\\left\": title)\n"
+    match plotFrame src with
+    | Error e -> false, e
+    | Ok doc ->
+        let layout = doc.RootElement.GetProperty("data").GetProperty "layout"
+        let text = (layout.GetProperty("title").GetProperty "text").GetString()
+        // Round trip: the reader hands back the ORIGINAL characters, not the
+        // escapes -- the escaping is transport, not content.
+        eq "he said \"hi\"\tand\\left" text)
+
+add "plot: an axis label with a quote does not leak out of its string" (fun () ->
+    let src =
+        "import plot\n\
+         let ok = plot.line([0.0, 1.0], [0.0, 1.0], \"x\\\" ,\\\"evil\\\":1\": xlabel)\n"
+    match plotFrame src with
+    | Error e -> false, e
+    | Ok doc ->
+        let layout = doc.RootElement.GetProperty("data").GetProperty "layout"
+        // The injected `"evil":1` has to arrive as LABEL TEXT, never as a
+        // sibling key of the layout object.
+        let mutable leaked = Unchecked.defaultof<System.Text.Json.JsonElement>
+        let escaped = layout.TryGetProperty("evil", &leaked)
+        let text = (layout.GetProperty("xaxis").GetProperty("title").GetProperty "text").GetString()
+        (not escaped && text = "x\" ,\"evil\":1"), sprintf "escaped=%b text=%s" escaped text)
+
+add "plot: NaN and both infinities serialize as JSON null" (fun () ->
+    let src =
+        "import plot\n\
+         let ok = plot.line([0.0, 1.0, 2.0, 3.0, 4.0], [2.5, 0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0, 0.5])\n"
+    match plotFrame src with
+    | Error e -> false, e
+    | Ok doc ->
+        let trace = (doc.RootElement.GetProperty("data").GetProperty "data").EnumerateArray() |> Seq.head
+        let kinds =
+            (trace.GetProperty "y").EnumerateArray()
+            |> Seq.map (fun e ->
+                match e.ValueKind with
+                | System.Text.Json.JsonValueKind.Null -> "null"
+                | System.Text.Json.JsonValueKind.Number -> string (e.GetDouble())
+                | k -> sprintf "%A" k)
+            |> String.concat ","
+        // The finite samples are untouched: `null` is a gap marker, not a
+        // blanket fallback.
+        eq "2.5,null,null,null,0.5" kinds)
+
+add "plot: json_num of a non-finite scalar slot is null too" (fun () ->
+    // `ncontours` is the json_num path -- an Int slot here, so this check
+    // drives the same serializer through a Float-typed figure field by way of
+    // a NaN z grid, which is the only way a scalar slot can go non-finite in
+    // v1. The z array covers json_array's rank-2 arm at the same time.
+    let src =
+        "import plot\n\
+         let ok = plot.contourf([0.0, 1.0], [0.0, 1.0], [[0.0, 0.0 / 0.0], [1.0 / 0.0, 1.5]], 5: levels)\n"
+    match plotFrame src with
+    | Error e -> false, e
+    | Ok doc ->
+        let trace = (doc.RootElement.GetProperty("data").GetProperty "data").EnumerateArray() |> Seq.head
+        let row (i: int) =
+            (trace.GetProperty "z").EnumerateArray() |> Seq.item i
+            |> fun r -> r.EnumerateArray() |> Seq.map (fun e -> e.ValueKind.ToString()) |> String.concat ","
+        ((trace.GetProperty "ncontours").GetInt32() = 5
+         && row 0 = "Number,Null" && row 1 = "Null,Number"),
+        sprintf "row0=%s row1=%s" (row 0) (row 1))
 
 // ---- Runner -----------------------------------------------------------------
 

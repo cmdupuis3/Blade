@@ -115,6 +115,8 @@ type IRExpr =
     | IRDisplayJson of rank: int * data: IRExpr
     /// display.json_num(x): numeric scalar -> JSON text (String). Pure.
     | IRDisplayNum of data: IRExpr
+    /// display.json_string(s): String -> a QUOTED, escaped JSON string. Pure.
+    | IRDisplayStr of data: IRExpr
     | IRGroupBy of values: IRExpr * grouping: IRExpr  // group_by(vals, gk) - apply grouping
     | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key => compound dispatch
     | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
@@ -3844,6 +3846,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRDisplayEmit (h, q, d, m) -> [d], (function [d'] -> IRDisplayEmit (h, q, d', m) | _ -> badChildren "IRDisplayEmit")
     | IRDisplayJson (r, d) -> [d], (function [d'] -> IRDisplayJson (r, d') | _ -> badChildren "IRDisplayJson")
     | IRDisplayNum d -> [d], (function [d'] -> IRDisplayNum d' | _ -> badChildren "IRDisplayNum")
+    | IRDisplayStr d -> [d], (function [d'] -> IRDisplayStr d' | _ -> badChildren "IRDisplayStr")
     | IRGroupBy (v, k) -> [v; k], (function [v'; k'] -> IRGroupBy (v', k') | _ -> badChildren "IRGroupBy")
     | IRSort (a, k) -> [a; k], (function [a'; k'] -> IRSort (a', k') | _ -> badChildren "IRSort")
     | IRReduce (a, k, None) -> [a; k], (function [a'; k'] -> IRReduce (a', k', None) | _ -> badChildren "IRReduce")
@@ -6083,7 +6086,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
          | t -> t)
     | IRContains _ -> IRTScalar ETBool  // Membership returns bool
     | IRDisplayEmit _ -> IRTScalar ETBool  // display.emit always answers true
-    | IRDisplayJson _ | IRDisplayNum _ -> IRTScalar ETString  // JSON text
+    | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ -> IRTScalar ETString  // JSON text
     | IRGroupBy (v, gk) ->
         // TypeCheck's `ExprGroupBy` rule constructs a rank-2 array type with
         // `__group_outer` + `__group_member` tagged index slots. For
@@ -6672,6 +6675,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, dataFinal) = liftChild builder data'
         wrapLets binds (IRDisplayJson (r, dataFinal))
     | IRDisplayNum data -> IRDisplayNum (liftExpr builder data)
+    | IRDisplayStr data -> IRDisplayStr (liftExpr builder data)
 
     // Single-child consumers where the array slot can hold an inline form.
     //

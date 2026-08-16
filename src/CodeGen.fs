@@ -2965,6 +2965,10 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         sprintf "blade_display::json%d(%s)" rank (exprToCppCore subst names dataExpr)
     | IRDisplayNum dataExpr ->
         sprintf "blade_display::jsonnum(%s)" (exprToCppCore subst names dataExpr)
+    | IRDisplayStr dataExpr ->
+        // A user string as a quoted, escaped JSON string. Shares the frame
+        // escape table with the quoted-payload path (Frame.jsonString).
+        sprintf "blade_display::jsonstr(%s)" (exprToCppCore subst names dataExpr)
     | IRContains (arrExpr, valueExpr) ->
         // Linear-scan membership test as an IIFE returning bool.
         let arrStr = exprToCppCore subst names arrExpr
@@ -14578,9 +14582,10 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     // the interpreter mirrors (Interp/Run.fs flushes its frame buffer before
     // printBindings), which is what keeps the differential gate happy.
     | IRPure _ | IRIndex _ | IRExtent _ | IRContains _ | IRDisplayEmit _
-    // json_array / json_num answer a String scalar; the same scalar-binding
-    // path serves them (their C++ is a single blade_display::json* call).
-    | IRDisplayJson _ | IRDisplayNum _ ->
+    // json_array / json_num / json_string answer a String scalar; the same
+    // scalar-binding path serves them (their C++ is a single
+    // blade_display::json* call).
+    | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ ->
         genScalarExprBinding ctx binding builder
     
     | IRCompose _ ->

@@ -1,0 +1,27 @@
+// TEST: Plot NaN Values
+// ============================================================================
+// JSON has no NaN or Infinity literal. Serialized as the stream's own
+// `nan`/`inf`/`-inf`, a single missing sample makes the whole frame
+// unparseable -- so display.json_array / json_num send every non-finite value
+// out as `null`, which is what plotly's encoder writes and what its renderer
+// reads as a gap in the line.
+//
+// A non-finite is NOT a Blade surface value: there is no `nan` literal, and
+// nothing here proposes one. These arise from ordinary arithmetic and are
+// handled at exactly one place -- the display serializer, on the way into a
+// figure -- so `z` stays BLOCK-LOCAL and no non-finite ever reaches printed
+// output. The scope of this feature is plotting, and the test is written to
+// keep it that way.
+//
+// The frame line is still compared byte-for-byte across both lanes by
+// `blade test interp` (it diffs whole normalized stdout), which is what pins
+// Frame.jsonNumber against its generated C++ mirror. Frame bytes -- that the
+// payload parses and the gaps arrive as JSON null -- are pinned in
+// Test_Display.fs.
+// ============================================================================
+import plot
+let ok = {
+    let z = [0.0, 0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0, 2.5]
+    plot.line([0.0, 1.0, 2.0, 3.0, 4.0], z)
+}
+// EXPECT: ok = true

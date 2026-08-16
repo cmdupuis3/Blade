@@ -3794,6 +3794,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprDisplayEmit (_, _, d, _) -> [d]
         | TExprDisplayJson (_, d) -> [d]
         | TExprDisplayNum d -> [d]
+        | TExprDisplayStr d -> [d]
         | TExprGroupKeys keys -> keys
         | TExprStruct (_, fields) -> fields |> List.map snd
         | TExprIndex (arr, idxs, _) -> arr :: idxs
@@ -5364,6 +5365,21 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 Ok (mkTyped (TExprDisplayNum tNum) (IRTScalar ETString))
             | other ->
                 Error (Other (sprintf "display.json_num: expected a numeric scalar, got %s" (ppIRType other))))
+
+    // ---- __display_json_string(s): display module String JSON rendering ----
+    // A String rendered as a QUOTED, escaped JSON string -- quotes included,
+    // so the caller writes `"\"text\":" + json_string(t)` and never has to
+    // supply the delimiters (supplying them by hand is precisely the bug this
+    // exists to retire). Quantity annotations are transparent, exactly as for
+    // json_num, so plot.blade's `String<title>` slot serializes directly.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__display_json_string" }, [strE])
+            when (lookupVar "__display_json_string" env).IsNone ->
+        inferExpr env strE |> Result.bind (fun tStr ->
+            match IR.stripUnits (env.Subst.Resolve tStr.Type) with
+            | IRTScalar ETString ->
+                Ok (mkTyped (TExprDisplayStr tStr) (IRTScalar ETString))
+            | other ->
+                Error (Other (sprintf "display.json_string: expected a String, got %s" (ppIRType other))))
 
     // ---- cumulant(d, k): dist component projection, order-guarded ----
     // The order guard as a TYPE error (ppl/NOTES.md typed-Dist arc): k must
