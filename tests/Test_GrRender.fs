@@ -247,6 +247,69 @@ let runGrRenderTests () : BlockResult =
         | GR.Available p -> pin "a resolvable helper plus a real GRDIR is Available" helperStub p
         | GR.Unavailable r -> record "a resolvable helper plus a real GRDIR is Available" Fail r)
 
+    // ---- 3b. Platform-stamped resolution -----------------------------------
+    //
+    // `resolveHelperFrom` is `resolveHelper` with `baseDir` factored out
+    // (GrRender.fs), so these drive the beside/walk-up search over a
+    // disposable directory tree instead of the real Blade.exe location --
+    // proof that a `gr-render-<platform>-<arch>[.exe]` prebuilt is found at
+    // all, and PREFERRED over a plain `gr-render.exe` at the same location,
+    // without needing to fake where Blade.exe itself runs from.
+    //
+    // BLADE_GR_RENDER is forced unset for all of them: resolveHelperFrom's
+    // first branch returns unconditionally once it's set, so leaving it on
+    // (from an earlier test, or the ambient dev environment) would silently
+    // skip every case below.
+
+    withEnv [ "BLADE_GR_RENDER", None ] (fun () ->
+        let resDir = Path.Combine(tmpDir, "resolve")
+        Directory.CreateDirectory resDir |> ignore
+
+        // (a) only the plain name beside baseDir -> that's what's found.
+        let besideOnlyPlain = Path.Combine(resDir, "beside-plain")
+        Directory.CreateDirectory besideOnlyPlain |> ignore
+        let plainHere = Path.Combine(besideOnlyPlain, "gr-render.exe")
+        File.WriteAllText(plainHere, "x")
+        match GR.resolveHelperFrom besideOnlyPlain with
+        | Ok p -> pin "beside baseDir: the plain name is found when no stamped build exists" plainHere p
+        | Error e -> record "beside baseDir: the plain name is found when no stamped build exists" Fail e
+
+        // (b) both names beside baseDir -> the platform-stamped one wins.
+        let besideBoth = Path.Combine(resDir, "beside-both")
+        Directory.CreateDirectory besideBoth |> ignore
+        File.WriteAllText(Path.Combine(besideBoth, "gr-render.exe"), "x")
+        let stampedHere = Path.Combine(besideBoth, GR.stampedHelperLeaf)
+        File.WriteAllText(stampedHere, "x")
+        match GR.resolveHelperFrom besideBoth with
+        | Ok p -> pin "beside baseDir: a platform-stamped build is preferred over the plain name" stampedHere p
+        | Error e -> record "beside baseDir: a platform-stamped build is preferred over the plain name" Fail e
+
+        // (c) walking up: nothing beside baseDir, but tools/gr-render two
+        // levels above it holds both names -- the same stamped-over-plain
+        // preference applies there too.
+        let walkRoot = Path.Combine(resDir, "walk-root")
+        let walkBase = Path.Combine(walkRoot, "a", "b")
+        Directory.CreateDirectory walkBase |> ignore
+        let toolsDir = Path.Combine(walkRoot, "tools", "gr-render")
+        Directory.CreateDirectory toolsDir |> ignore
+        File.WriteAllText(Path.Combine(toolsDir, "gr-render.exe"), "x")
+        let stampedUp = Path.Combine(toolsDir, GR.stampedHelperLeaf)
+        File.WriteAllText(stampedUp, "x")
+        match GR.resolveHelperFrom walkBase with
+        | Ok p -> pin "walking up: a platform-stamped build in tools/gr-render is preferred too" stampedUp p
+        | Error e -> record "walking up: a platform-stamped build in tools/gr-render is preferred too" Fail e
+
+        // (d) neither name anywhere -> the error names both, so a user reading
+        // it knows a stamped prebuilt would also have satisfied it.
+        let emptyBase = Path.Combine(resDir, "empty")
+        Directory.CreateDirectory emptyBase |> ignore
+        match GR.resolveHelperFrom emptyBase with
+        | Error e ->
+            ok "not found anywhere names both the stamped and plain leaf"
+               (e.Contains GR.stampedHelperLeaf && e.Contains "gr-render.exe" && e.Contains " or ")
+               e
+        | Ok p -> record "not found anywhere names both the stamped and plain leaf" Fail (sprintf "unexpectedly resolved: %s" p))
+
     // ---- 4. The worker protocol, against a fake helper ---------------------
 
     let logPath = Path.Combine(tmpDir, "request.log")

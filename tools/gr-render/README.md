@@ -8,7 +8,65 @@ JSON into a static raster on demand.
 Nothing here knows about Blade, display frames, or the serve protocol. Input is a figure
 object, output is image bytes.
 
-## Build
+## Getting a helper without a toolchain
+
+The whole point of this section: **most users never run `build.ps1`.** A release ships one
+precompiled, platform-stamped binary per platform —
+
+```
+gr-render-win32-x64.exe
+gr-render-linux-x64
+gr-render-darwin-x64
+gr-render-darwin-arm64
+```
+
+— named `gr-render-<platform>-<arch>[.exe]`, where `<platform>` and `<arch>` are spelled the
+way Node's `process.platform` / `process.arch` spell them (`win32`, not `windows`; `darwin`,
+not `macos`) rather than a second vocabulary invented for the .NET side. That's the same pair
+`deps.json`'s `gr` asset keys and the Blade-REPL extension's `fetch-vendor.js` use, so "which
+platform" means one thing across the whole toolchain, not three.
+
+`src/display/GrRender.fs`'s `resolveHelper` looks for one of these — see
+[Resolution order](#resolution-order) — at each of the same locations it always searched
+(`BLADE_GR_RENDER`, beside `Blade.exe`, walking up to `tools/gr-render/`), so dropping a
+`gr-render-win32-x64.exe` next to `Blade.exe` (or in this directory, in a dev checkout) is
+enough: no g++, no GR install, no `build.ps1`. `.github/workflows/gr-render.yml` is what
+produces these artifacts on GitHub's windows/linux/macOS runners (see
+[CI packaging](#ci-packaging)); until a release actually publishes them somewhere a user
+downloads from, this is the shape a manual copy needs to have.
+
+**The runtime dependency does NOT go away.** A prebuilt `gr-render` still needs GR itself at
+run time — see [Environment contract](#environment-contract): `GRDIR` pointing at a GR
+install, `$GRDIR/bin` on `PATH`, and `GKS_WSTYPE=100` (which the helper sets itself). Shipping
+the *helper* prebuilt removes the g++/MSYS2 dependency; it does not remove the GR dependency.
+That is a separate, not-yet-solved packaging problem (vendoring or fetching GR itself, the way
+`deps.json` + `fetch-vendor.js` do for the VS Code extension's plotly.js).
+
+## Resolution order
+
+`GrRender.fs`'s `resolveHelper` tries, in order:
+
+1. **`$env:BLADE_GR_RENDER`**, if set. Used exactly as given, whatever it's named — this is
+   the explicit override, so a wrong path here is an ERROR, never a silent fallthrough to the
+   next step.
+2. **Beside the running `Blade.exe`** (a deployed toolchain's own directory).
+3. **`tools/gr-render/`, walking up from `Blade.exe` up to 8 directory levels** (a dev
+   checkout, where `Blade.exe` runs out of `bin/Release/net7.0/` under the repo root).
+
+At steps 2 and 3, **each location is checked for the platform-stamped name FIRST, then the
+plain `gr-render[.exe]` SECOND** — a `gr-render-win32-x64.exe` sitting next to a leftover
+`gr-render.exe` wins, so a CI-produced or hand-copied stamped release binary is never shadowed
+by an older manual build under the plain name. If neither name is at a location, resolution
+continues to the next one; only once every location has been tried for both names does
+resolution fail (with an error naming both leaf names it looked for).
+
+This preference is a location-major, name-minor search: it prefers a *closer* plain binary
+over a *farther* stamped one, not the other way around. That was a deliberate call — closeness
+already encodes "this is what the developer/deployment actually put here for me," and a
+platform mismatch two directories further up wasn't going to run correctly anyway, so there's
+no scenario where preferring the far stamped copy over the near plain one would have helped.
+
+## Building from source (when you DO have a toolchain)
 
 ```powershell
 powershell -File build.ps1                 # resolves GR automatically
@@ -17,25 +75,73 @@ powershell -File build.ps1 -GrDir C:\gr    # or point it at an install
 
 The GR root is resolved in this order: `-GrDir`, `$env:GRDIR`, then the two vendored trees
 (`Blade-REPL/.claude/worktrees/.../vendor/gr`, then `Blade-REPL/vendor/gr`). The script is
-idempotent — it recompiles only when a source file or GR's import library is newer than the
-exe (`-Force` to compile anyway). It prints the path of the exe it produced.
+idempotent — it recompiles only when a source file or GR's link library is newer than the
+exe (`-Force` to compile anyway). It prints the path of the exe it produced (`gr-render.exe`
+on Windows, `gr-render` elsewhere).
 
-The compile it runs is:
+The compile it runs on Windows is:
 
 ```
 g++ main.cpp -I <GR>/include -L <GR>/lib -lGR -static-libgcc -static-libstdc++ -std=c++17 -O2 -o gr-render.exe
 ```
 
-**`-static-libgcc -static-libstdc++` are mandatory, not an optimisation.** The documented
-plain `-lGR` recipe crashes at load with `STATUS_ENTRYPOINT_NOT_FOUND` on this machine:
-MSYS2 UCRT64 g++ 15.2 is ABI-incompatible with the older MinGW runtime DLLs GR ships in its
-`bin/`. Static-linking the GCC runtime removes the conflict; the only non-system DLLs the
-exe then loads are GR's own `libGR.dll` and `libwinpthread-1.dll`, both of which live in
+**`-static-libgcc -static-libstdc++` are mandatory on Windows, not an optimisation.** The
+documented plain `-lGR` recipe crashes at load with `STATUS_ENTRYPOINT_NOT_FOUND` on this
+machine: MSYS2 UCRT64 g++ 15.2 is ABI-incompatible with the older MinGW runtime DLLs GR ships
+in its `bin/`. Static-linking the GCC runtime removes the conflict; the only non-system DLLs
+the exe then loads are GR's own `libGR.dll` and `libwinpthread-1.dll`, both of which live in
 `$GRDIR/bin`.
 
-Only the headless subset of GR is needed (`include/`, `lib/libGR.dll.a`, `bin/` with
-libGR/libGKS/cairoplugin/libwinpthread, `fonts/`); the exe in this directory is built and
-tested against exactly that pruned tree. Qt is never loaded.
+`build.ps1` also runs on linux/macOS (invoked by `package.ps1` and by the CI workflow) via
+`pwsh`, carrying the same static-link flags over to Linux as portability hardening and
+dropping them on macOS (clang/libc++ has no equivalent to `-static-libstdc++`). **Only the
+Windows path above has actually been compiled and run** — see `build.ps1`'s own doc comment
+and the CI workflow's header comment for exactly what's a verified recipe versus a best-effort
+guess on the other two platforms.
+
+Only the headless subset of GR is needed (`include/`, the platform's link library under
+`lib/`, `bin/` with libGR/libGKS/cairoplugin/libwinpthread, `fonts/`); the exe in this
+directory is built and tested against exactly that pruned tree on Windows. Qt is never loaded.
+
+## Packaging a stamped release artifact
+
+```powershell
+powershell -File package.ps1                 # builds (if needed) + stamps + hashes
+powershell -File package.ps1 -GrDir C:\gr -Force
+powershell -File package.ps1 -OutDir C:\out
+```
+
+A thin wrapper over `build.ps1` — it does not reimplement the compile step, so there is
+exactly one place (`build.ps1`) that knows the compiler flags for each platform. It builds the
+plain `gr-render[.exe]` via `build.ps1`, then copies it into `dist/` (default; `-OutDir` to
+change it) under the platform-stamped name from [Resolution order](#resolution-order) above,
+e.g. `dist/gr-render-win32-x64.exe`. Idempotent: if `dist/<stamped-name>` already has the same
+sha256 as the freshly built exe, nothing is re-copied. Prints the artifact's path and its
+sha256 as its last two output lines, in that order, so a script (CI included) can read them off
+without parsing prose:
+
+```powershell
+$lines = & pwsh -File package.ps1
+$artifactPath, $sha256 = $lines[-2], $lines[-1]
+```
+
+## CI packaging
+
+`.github/workflows/gr-render.yml` builds `gr-render` on GitHub-hosted windows/linux/macOS
+runners: fetch the pinned GR release tarball for the runner's platform (same version/URLs as
+the `gr` entry in the Blade-REPL repo's `deps.json`), extract it, run `package.ps1` against it,
+run `test.ps1` where the platform allows, and upload the stamped binary as a build artifact
+named `gr-render-<platform>-<arch>`.
+
+**This workflow has not been executed.** There is no CI runner access, no non-Windows machine,
+and no way to run a GitHub Actions job from this environment — only a YAML syntax check
+(`python -c "import yaml; yaml.safe_load(...)"`) was possible. The workflow file's header
+comment marks exactly which parts are verified (the Windows leg, built and tested against this
+same GR version on a real machine as part of this change) versus best-effort guesses (the
+linux/macOS compiler selection, the tarball layout assumption, whether static-linking
+libstdc++ is right on Linux). Read that comment before trusting a green run of this workflow
+completely — and especially before trusting a red one, since a failure might be an environment
+assumption instead of an actual bug.
 
 ## Environment contract
 
@@ -216,3 +322,6 @@ contourf, and one deliberately malformed JSON file.
 | `render.hpp` | sizing recipe, layout, and every GR drawing call |
 | `colormaps.hpp` | the five colorscales and the trace palette |
 | `base64.hpp` | base64 encoder for serve responses |
+| `build.ps1` | compiles `gr-render[.exe]` from source against a GR install |
+| `package.ps1` | wraps `build.ps1`; stamps the result into `dist/gr-render-<platform>-<arch>[.exe]` + sha256 |
+| `test.ps1` | hermetic self-test (builds if needed, asserts against `fixtures/`) |
