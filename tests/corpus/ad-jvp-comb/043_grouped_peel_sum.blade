@@ -1,0 +1,41 @@
+// TEST: Auto-Lowered Grouped Peel, Per-Group Sum (both modes)
+// The NATURAL spelling of a per-group loss -- group_keys / group_by / a peel
+// over the groups / one full reduce -- differentiates now. It used to die in
+// hoistReduces on the OUTER reduce ("reduce source has no statically-known
+// extent"), because the group axis has no compile-time extent for anything
+// to allocate over.
+//
+// It never needed one. `sum_g sum(group g)` is GROUP-LINEAR: it factors back
+// through the source index space as `sum_i v_i`, one loop over `v` with the
+// group axis appearing only as the subscript `group_bucket(gk)(i)`. The
+// rewrite emits exactly that, so the group axis is never materialized -- and
+// the emitted form is ordinary data-dependent-read code both AD lanes
+// already handle.
+//
+// Per-group sum with no weights is the degenerate case: every row's partial
+// is 1, so the gradient is all ones and the primal is the plain total.
+import ad as ad
+
+type R = Idx<6>
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    reduce(m, (+))
+}
+
+let v0: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 2, 1, 0]
+// WARN: BL4003
+let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(v0, kk, dv)
+// EXPECT: gv = 210
+// EXPECT: dv = [1, 1, 1, 1, 1, 1]
+
+let seed: Array<Float64 like R> = [1.0, 0.0, -2.0, 3.0, 0.5, 0.25]
+let (jp, jt) = ad.jvp(loss)(v0, kk, seed)
+let dot = reduce(dv * seed, (+))
+let resid = jt - dot
+// EXPECT: jp = 210
+// EXPECT: resid = 0

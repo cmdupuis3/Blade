@@ -1,0 +1,42 @@
+// TEST: HVP Through An Auto-Lowered Grouped Peel
+// Forward-over-reverse composes over the rewrite: `ad.jvp(ad.grad(loss))`
+// runs the pre-pass twice (once per synthesis), and the second run sees an
+// ALREADY-lowered body -- no peel left, so the rule simply does not fire the
+// second time. That is the composition property the rewrite needs.
+//
+// The weighted-mean loss is BILINEAR in (v, cw), so the Hessian's diagonal
+// blocks vanish and the off-diagonal block is the bucket/count map itself:
+// seeding the weight of group 0 gives back 1/n_0 on exactly that group's
+// rows, and nothing on the weights.
+import ad as ad
+
+type R = Idx<5>
+
+let k0 = [0, 1, 0, 0, 1]
+let mgk = group_keys(k0)
+
+function loss(v: Array<Float like R>, cw: Array<Float like Idx<2>>) -> Float = {
+    let g = group_by(v, mgk)
+    let m = method_for(g) <@> lambda(r: Array<Float like RaggedIdx<_>>) -> reduce(r, (+)) / extents(r) |> compute
+    reduce(m * cw, (+))
+}
+
+let v0 = [10.0, 20.0, 30.0, 40.0, 50.0]
+let c0 = [2.0, 5.0]
+// WARN: BL4003
+let mut gv = [0.0, 0.0, 0.0, 0.0, 0.0]
+let mut gc = [0.0, 0.0]
+let mut tgv = [0.0, 0.0, 0.0, 0.0, 0.0]
+let mut tgc = [0.0, 0.0]
+// seed the WEIGHT of group 0; group 0 holds rows 0, 2, 3 (n = 3)
+let (hp, ht) = ad.jvp(ad.grad(loss))(v0, c0, gv, gc, [0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 0.0], tgv, tgc)
+// the gradient legs are unchanged by the tangent seed
+// EXPECT: hp = 228.333333333333
+// EXPECT: gv = [0.666666666666667, 2.5, 0.666666666666667, 0.666666666666667, 2.5]
+// EXPECT: gc = [26.6666666666667, 35]
+// d2L/dc0 dv = 1/n_0 on group 0's rows, 0 elsewhere
+// EXPECT: tgv = [0.333333333333333, 0, 0.333333333333333, 0.333333333333333, 0]
+// L is linear in cw, so the weight-weight block is exactly zero
+// EXPECT: tgc = [0, 0]
+// and the tangent of the primal is <dL/dc, seed> = mean of group 0
+// EXPECT: ht = 26.6666666666667

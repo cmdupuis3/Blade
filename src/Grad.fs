@@ -207,6 +207,13 @@ type private Ctx = {
     /// visible as a stage KERNEL (it is neither a `function` nor an
     /// intrinsic, so `asKernelLambda` cannot see it any other way).
     ModuleLoopVals: Map<string, Expr>
+    /// The ANNOTATIONS of those same bindings, where they carry one. The
+    /// grouped-peel lowering needs a key array's ELEMENT type to decide
+    /// whether the key space is positional (empty groups possible) or
+    /// dynamically discovered (never empty), and guessing from an int
+    /// literal would misread an annotated `Array<Idx<N> like R>` table as
+    /// dynamic -- the one direction that silently NaNs an empty mean.
+    ModuleLetTys: Map<string, TypeExpr>
     /// Fresh-suffix counter (shared across one expand run).
     mutable Fresh: int
 }
@@ -1952,6 +1959,465 @@ let private fuseFunctionBody (ctx: Ctx) (fd: FunctionDecl) : Expr * string list 
         |> Set.ofList
     fusePipelinesEnv ctx env (Set.union (Set.difference moduleArrays paramNames) paramArrays) fd.Body
 
+// ---------------------------------------------------------------------------
+// Auto-lowered grouped peels
+//
+// A grouped peel -- `group_by(V, gk)` fed to `method_for(g) <@> lambda(r) -> K`
+// -- produces a value over the GROUP axis, and a group axis has no
+// compile-time extent. Nothing downstream can allocate over it, so the
+// natural spelling of a per-group loss dies in `hoistReduces` with the
+// generic "no statically-known extent" message.
+//
+// It does not have to be allocated. For the GROUP-LINEAR kernels the whole
+// loss factors back through the SOURCE index space:
+//
+//     L = sum_g w_g * A_g,  A_g = init + sum_{i in g} phi(v_i)
+//       = init * sum_g w_g  +  sum_i w_{b(i)} * phi(v_i)
+//
+// and the right-hand side is one loop over `V`, with the group axis appearing
+// only as the subscript `b(i) = group_bucket(gk)(i)` into arrays the user
+// already has. That form differentiates today in both modes (it is what
+// `ad-jvp-comb/018` hand-writes), so this rewrite only has to EMIT it.
+//
+// The rule is purely additive: it fires on the shapes below and leaves every
+// other body byte-identical, so its failure mode is "does not fire", never
+// "fires wrong". Deliberately NOT done: teaching `staticExtentOf` about
+// `ExprGroupBy`. The group axis must stay extent-unknown so a peel this
+// rewrite declined keeps refusing loudly instead of silently allocating.
+// ---------------------------------------------------------------------------
+
+/// The per-group kernel of a peel, restricted to the group-linear subset:
+/// the member partial depends on the group only through its SIZE, which is
+/// key-derived data and so carries no derivative.
+type private PeelKernel =
+    | PKSum of init: Expr option
+    | PKMean of init: Expr option
+    | PKCount
+
+/// Whether the key space has a static group count -- equivalently, and
+/// exactly invertedly, whether EMPTY groups are possible. Dynamic discovery
+/// only ever manufactures a group it saw a row for; a positional key space
+/// has slots nothing lands in.
+type private GroupRegime =
+    | GRDynamic
+    | GRStatic of ngroups: int
+    | GRUnknown
+
+let rec private stripTypedE (e: Expr) : Expr =
+    match e.Kind with
+    | ExprKind.ExprTyped (i, _) -> stripTypedE i
+    | _ -> e
+
+/// Strip the wrappers a peel initializer may carry: `|> compute` and any
+/// ascription. Both are transparent to the shape below them.
+let rec private stripPeelWrap (e: Expr) : Expr =
+    match e.Kind with
+    | ExprKind.ExprTyped (i, _) | ExprKind.ExprCompute i -> stripPeelWrap i
+    | _ -> e
+
+let private isVarNamed (nm: string) (e: Expr) : bool =
+    match (stripTypedE e).Kind with
+    | ExprKind.ExprVar n -> n = nm
+    | _ -> false
+
+/// `<peel> over a NAMED grouped value` -- both spellings, the method-side
+/// `method_for(g) <@> k` and the object-side `object_for(k) <@> g`.
+let private peelOverNamed (e: Expr) : (string * Expr) option =
+    match (stripPeelWrap e).Kind with
+    | ExprKind.ExprBinOp (_, OpApply, { Kind = ExprKind.ExprMethodFor [gv] }, kern) ->
+        (match (stripTypedE gv).Kind with ExprKind.ExprVar g -> Some (g, kern) | _ -> None)
+    | ExprKind.ExprBinOp (_, OpApply, { Kind = ExprKind.ExprObjectFor kern }, gv) ->
+        (match (stripTypedE gv).Kind with ExprKind.ExprVar g -> Some (g, kern) | _ -> None)
+    | _ -> None
+
+/// `reduce(<r>, (+)[, init])` on the peel's own parameter -> its init slot.
+/// `Some None` is "matched, no init"; `None` is "not this shape".
+let private peelSumOf (rp: string) (e: Expr) : Expr option option =
+    match (stripTypedE e).Kind with
+    | ExprKind.ExprReduce (src, { Kind = ExprKind.ExprSection OpAdd }, initOpt, None)
+        when isVarNamed rp src -> Some initOpt
+    | _ -> None
+
+/// `extents(<r>)` on the peel's own parameter -- the per-group count. Fully
+/// supported inside a peel kernel (sql.md 7b gather elision).
+let private peelCountOf (rp: string) (e: Expr) : bool =
+    match (stripTypedE e).Kind with
+    | ExprKind.ExprExtents src -> isVarNamed rp src
+    | _ -> false
+
+/// Read a peel kernel body. `Ok None` means "not a shape this rewrite knows"
+/// -- the body is left alone and whatever refused it before refuses it still.
+/// `Error` is reserved for a shape that IS a per-group aggregate but is not
+/// group-linear, where the generic extent message would misdescribe the wall.
+let private classifyPeelKernel (rp: string) (body: Expr) : Result<PeelKernel option, string> =
+    let b = stripTypedE body
+    match b.Kind with
+    | ExprKind.ExprBinOp (_, OpDiv, num, den) when peelCountOf rp den ->
+        (match peelSumOf rp num with
+         | Some initOpt -> Ok (Some (PKMean initOpt))
+         | None -> Ok None)
+    | _ ->
+        match peelSumOf rp b with
+        | Some initOpt -> Ok (Some (PKSum initOpt))
+        | None ->
+            if peelCountOf rp b then Ok (Some PKCount)
+            else
+                match b.Kind with
+                | ExprKind.ExprReduce (src, { Kind = ExprKind.ExprSection op }, _, _)
+                    when isVarNamed rp src && op <> OpAdd ->
+                    let opName = (match op with OpMul -> "(*)" | OpSub -> "(-)" | OpDiv -> "(/)" | _ -> "this")
+                    Error (sprintf "the per-group %s aggregate is not sum-decomposable, so differentiating it needs the group axis MATERIALIZED -- and a group-space accumulator needs a group count known at COMPILE time, which a grouping does not have (v1). The auto-lowered subset is the group-linear one: `reduce(r, (+))`, `reduce(r, (+)) / extents(r)`, `extents(r)`" opName)
+                | _ -> Ok None
+
+/// Is this init the additive identity, i.e. does it contribute nothing?
+let private isZeroInit (e: Expr) : bool =
+    match (stripTypedE e).Kind with
+    | ExprKind.ExprLit (LitFloat 0.0) | ExprKind.ExprLit (LitInt 0L) -> true
+    | _ -> false
+
+/// Rewrite the FULLY-REDUCED consumption of a grouped peel result `mName` to
+/// `repl`, recording the group-space weight each hit carried:
+///   C1  `reduce(m, (+))`      -> no weight
+///   C2  `reduce(m * W, (+))`  -> weight `W` (either operand order)
+/// The recursion mirrors `hoistReduces`: the arithmetic fragment a scalar
+/// loss is built out of. A use this walker does not reach stays put, and the
+/// caller's residual check then turns it into a named refusal.
+let rec private rewriteGroupConsumption (mName: string) (repl: Expr)
+                                        (found: ResizeArray<Expr option>) (e: Expr) : Expr =
+    let re k = inheritSpan e k
+    let rc = rewriteGroupConsumption mName repl found
+    match e.Kind with
+    | ExprKind.ExprReduce (src, ({ Kind = ExprKind.ExprSection OpAdd } as sec), None, None) ->
+        let hit =
+            if isVarNamed mName src then Some None
+            else
+                match (stripTypedE src).Kind with
+                | ExprKind.ExprBinOp (_, OpMul, a, b) when isVarNamed mName a ->
+                    (match (stripTypedE b).Kind with ExprKind.ExprVar _ -> Some (Some (stripTypedE b)) | _ -> None)
+                | ExprKind.ExprBinOp (_, OpMul, a, b) when isVarNamed mName b ->
+                    (match (stripTypedE a).Kind with ExprKind.ExprVar _ -> Some (Some (stripTypedE a)) | _ -> None)
+                | _ -> None
+        (match hit with
+         | Some w -> found.Add w; repl
+         | None -> re (ExprReduce (rc src, sec, None, None)))
+    | ExprKind.ExprBinOp (m, op, l, r) -> re (ExprBinOp (m, op, rc l, rc r))
+    | ExprKind.ExprUnaryOp (op, i) -> re (ExprUnaryOp (op, rc i))
+    | ExprKind.ExprTyped (i, t) -> re (ExprTyped (rc i, t))
+    | ExprKind.ExprApp (f, args) -> re (ExprApp (f, args |> List.map rc))
+    | ExprKind.ExprArrayLit es -> re (ExprArrayLit (es |> List.map rc))
+    | ExprKind.ExprReduce (src, sec, initOpt, ax) -> re (ExprReduce (rc src, sec, initOpt, ax))
+    | _ -> e
+
+/// Does any of `names` occur anywhere in `e`? EXHAUSTIVE over the grammar,
+/// on purpose: `mentionsAnyOf` answers TRUE for every node it has no arm for,
+/// which would make the residual check below refuse any body that so much as
+/// contains a `group_keys` call. Shadowing is ignored -- the names asked
+/// about are the peel's own bindings, so a false positive costs a refusal
+/// while a missed use would leave a name dangling, which typecheck says
+/// loudly. Anything genuinely leaf-shaped answers false, listed by name so a
+/// new grammar node shows up as an incomplete-match warning instead of
+/// silently defaulting either way.
+let rec private mentionsDeep (names: Set<string>) (e: Expr) : bool =
+    let m = mentionsDeep names
+    let any = List.exists m
+    let opt o = match o with Some x -> m x | None -> false
+    match e.Kind with
+    | ExprKind.ExprVar n -> Set.contains n names
+    | ExprKind.ExprBinOp (_, _, l, r) -> m l || m r
+    | ExprKind.ExprUnaryOp (_, i) -> m i
+    | ExprKind.ExprApp (f, args) -> m f || any args
+    | ExprKind.ExprTupleIndex (t, i) -> m t || m i
+    | ExprKind.ExprField (t, _) -> m t
+    | ExprKind.ExprLambda (ps, _, b) -> (ps |> List.exists (fun p -> opt p.Default)) || m b
+    | ExprKind.ExprLet (bnd, b) -> m bnd.Value || m b
+    | ExprKind.ExprMatch (s, cases) ->
+        m s || (cases |> List.exists (fun c -> opt c.Guard || m c.Body))
+    | ExprKind.ExprIf (c, t, f) -> m c || m t || m f
+    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprStack es
+    | ExprKind.ExprSequence es | ExprKind.ExprZip es | ExprKind.ExprMethodFor es
+    | ExprKind.ExprGroupKeys es -> any es
+    | ExprKind.ExprAlign (es, _) | ExprKind.ExprJoin (es, _) -> any es
+    | ExprKind.ExprBlock (ss, fe) -> (ss |> List.exists (stmtMentionsDeep names)) || opt fe
+    | ExprKind.ExprObjectFor k -> m k
+    | ExprKind.ExprDotDot (l, h) -> m l || m h
+    | ExprKind.ExprBlocked (_, b) -> m b
+    | ExprKind.ExprHalo (_, o) -> m o
+    | ExprKind.ExprPure i | ExprKind.ExprCompute i | ExprKind.ExprRead i
+    | ExprKind.ExprRank i | ExprKind.ExprUnique i | ExprKind.ExprGroupBucket i
+    | ExprKind.ExprExtents i | ExprKind.ExprStatic i | ExprKind.ExprTyped (i, _)
+    | ExprKind.ExprTranspose (i, _, _) | ExprKind.ExprDecompact (i, _)
+    | ExprKind.ExprPartialApp (_, i, _) | ExprKind.ExprReynolds (i, _) -> m i
+    | ExprKind.ExprGuard (l, r) | ExprKind.ExprReplicate (l, r) | ExprKind.ExprMask (l, r)
+    | ExprKind.ExprCompound (l, r) | ExprKind.ExprSparse (l, r)
+    | ExprKind.ExprIntersect (l, r) | ExprKind.ExprUnion (l, r)
+    | ExprKind.ExprContains (l, r) | ExprKind.ExprGroupBy (l, r)
+    | ExprKind.ExprSort (l, r) | ExprKind.ExprGram (l, r)
+    | ExprKind.ExprAssign (l, r) -> m l || m r
+    | ExprKind.ExprReduce (a, k, i, ax) -> m a || m k || opt i || opt ax
+    | ExprKind.ExprStruct (_, fields, spread) ->
+        (fields |> List.exists (fun (_, fe) -> m fe)) || opt spread
+    | ExprKind.ExprFor (src, _, k) ->
+        (match src with
+         | ForArrays (es, inc) -> any es || opt inc
+         | ForKernel k2 -> m k2)
+        || opt k
+    | ExprKind.ExprRecArray d ->
+        m d.SliceExpr || (match d.SeedArm with Some (_, se) -> m se | None -> false)
+    | ExprKind.ExprLit _ | ExprKind.ExprWildcard | ExprKind.ExprQualified _
+    | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprArity _
+    | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _ -> false
+
+and private stmtMentionsDeep (names: Set<string>) (s: Stmt) : bool =
+    match s with
+    | StmtSpanned (inner, _) -> stmtMentionsDeep names inner
+    | StmtLet b -> mentionsDeep names b.Value
+    | StmtExpr ex -> mentionsDeep names ex
+    | StmtAssign (l, _, r) -> mentionsDeep names l || mentionsDeep names r
+    | StmtForIn (_, r, body) ->
+        mentionsDeep names r || (body |> List.exists (stmtMentionsDeep names))
+
+/// Rewrite a statement's VALUE position, keeping its span wrapper: the
+/// statements this pass leaves alone still have to carry their locations into
+/// everyone else's diagnostics.
+let rec private mapStmtValue (f: Expr -> Expr) (s: Stmt) : Stmt =
+    match s with
+    | StmtSpanned (inner, sp) -> StmtSpanned (mapStmtValue f inner, sp)
+    | StmtLet b -> StmtLet { b with Value = f b.Value }
+    | StmtExpr ex -> StmtExpr (f ex)
+    | StmtAssign (l, op, r) -> StmtAssign (l, op, f r)
+    | other -> other
+
+/// The empty-group question, decided from the key array's ELEMENT type.
+/// `Int64` (annotated or an unannotated int-literal table) is dynamic
+/// discovery; an `Idx<N>` / `EnumIdx` element is a POSITIONAL key space with
+/// N slots, some of which may take no rows. Anything unresolved is
+/// `GRUnknown` and refuses, because guessing "dynamic" for a positional key
+/// space is exactly the direction that would silently NaN an empty mean.
+let private groupRegimeOf (ctx: Ctx) (fd: FunctionDecl) (letTys: Map<string, TypeExpr>)
+                          (keys: Expr list) : GroupRegime =
+    // Several keys hash to a compound key: discovered, never empty.
+    if List.length keys <> 1 then GRDynamic else
+    match (stripTypedE (List.head keys)).Kind with
+    | ExprKind.ExprVar kn ->
+        let annot =
+            match fd.Params |> List.tryPick (fun p -> if p.Name = kn then p.Type else None) with
+            | Some t -> Some t
+            | None -> Map.tryFind kn letTys
+        match annot |> Option.map (resolveArrayTy ctx) with
+        | Some (TyArray (elem, _)) ->
+            (match resolveTy ctx elem with
+             | TyInt64 | TyNamed (("Int" | "Int32" | "Int64"), []) -> GRDynamic
+             | TyIdx { Kind = ExprKind.ExprLit (LitInt n) } -> GRStatic (int n)
+             | TyEnumIdx { Kind = ExprKind.ExprArrayLit es } -> GRStatic es.Length
+             | _ -> GRUnknown)
+        | _ ->
+            // No annotation anywhere: an int-LITERAL key table is the
+            // unannotated-Int64 case, which is dynamic discovery.
+            let litInts (x: Expr) =
+                match x.Kind with
+                | ExprKind.ExprArrayLit es ->
+                    not es.IsEmpty
+                    && es |> List.forall (fun el ->
+                        match (stripTypedE el).Kind with
+                        | ExprKind.ExprLit (LitInt _) -> true
+                        | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt _) }) -> true
+                        | _ -> false)
+                | _ -> false
+            match Map.tryFind kn ctx.ModuleLoopVals with
+            | Some mv when litInts mv -> GRDynamic
+            | _ -> GRUnknown
+    | _ -> GRUnknown
+
+/// The rewrite itself. Returns the (possibly unchanged) body plus the
+/// refusals it wants the caller to raise -- routed through the caller's
+/// `err`, so the expand boundary stamps BL5500 / BL5501 by MODE rather than
+/// mislabelling a jvp refusal as a grad one.
+let private lowerGroupedPeels (ctx: Ctx) (fd: FunctionDecl) (body: Expr) : Expr * string list =
+    let stmts0, finalOpt =
+        match body.Kind with
+        | ExprKind.ExprBlock (ss, fe) -> ss, fe
+        | _ -> [], Some body
+    // Annotated locals, for the source extent and the key-regime read.
+    let letTys =
+        stmts0 |> List.fold (fun m s ->
+            match unwrapStmt s with
+            | StmtLet { Pattern = { Kind = PatternKind.PatVar nm }; Type = Some t } -> Map.add nm t m
+            | _ -> m) ctx.ModuleLetTys
+    // `let gk = group_keys(k...)`, body-local bindings shadowing module ones.
+    let groupings =
+        let mods =
+            ctx.ModuleLoopVals |> Map.toSeq
+            |> Seq.choose (fun (nm, mv) ->
+                match mv.Kind with ExprKind.ExprGroupKeys ks -> Some (nm, ks) | _ -> None)
+            |> Map.ofSeq
+        stmts0 |> List.fold (fun m s ->
+            match unwrapStmt s with
+            | StmtLet { Pattern = { Kind = PatternKind.PatVar nm }
+                        Value = { Kind = ExprKind.ExprGroupKeys ks } } -> Map.add nm ks m
+            | _ -> m) mods
+    // `let g = group_by(V, gk)` over one of them, V a plain array name.
+    let groupedOf =
+        stmts0 |> List.fold (fun m s ->
+            match unwrapStmt s with
+            | StmtLet { Pattern = { Kind = PatternKind.PatVar nm }
+                        Value = { Kind = ExprKind.ExprGroupBy (vals, gkE) } } ->
+                (match (stripTypedE vals).Kind, (stripTypedE gkE).Kind with
+                 | ExprKind.ExprVar vn, ExprKind.ExprVar gkn when Map.containsKey gkn groupings ->
+                     Map.add nm (vn, gkn) m
+                 | _ -> m)
+            | _ -> m) Map.empty
+    // The FIRST peel over one of those grouped values. v1 lowers one per body.
+    let peelHit =
+        stmts0 |> List.tryPick (fun s ->
+            match unwrapStmt s with
+            | StmtLet { Pattern = { Kind = PatternKind.PatVar mn }; Value = pv } ->
+                (match peelOverNamed pv with
+                 | Some (gn, kern) when Map.containsKey gn groupedOf -> Some (mn, gn, kern)
+                 | _ -> None)
+            | _ -> None)
+    match peelHit with
+    | None -> (body, [])
+    | Some (mName, gName, kernE) ->
+    let vName, gkName = Map.find gName groupedOf
+    let refuse msg = (body, [msg])
+    // -- the kernel ---------------------------------------------------------
+    let kernRead =
+        match (stripTypedE kernE).Kind with
+        | ExprKind.ExprLambda ([rp], _, kbody) -> classifyPeelKernel rp.Name kbody
+        | ExprKind.ExprLambda (ps, _, _) when List.length ps <> 1 -> Ok None
+        | ExprKind.ExprVar fn when Map.containsKey fn ctx.Decls ->
+            Error (sprintf "the peel kernel '%s' over grouped values must be spelled as a LAMBDA for the auto-lowering to read it -- a named function eta-expands WITHOUT its where-clause, so v1 does not accept one; inline it, e.g. `lambda(r) -> reduce(r, (+)) / extents(r)`" fn)
+        | _ -> Ok None
+    match kernRead with
+    | Error msg -> refuse msg
+    | Ok None -> (body, [])
+    | Ok (Some pk) ->
+    // -- the source extent: one loop over V needs V's bound -----------------
+    let srcExtent =
+        let byParam =
+            fd.Params |> List.tryPick (fun p ->
+                if p.Name <> vName then None
+                else p.Type |> Option.bind (fun t ->
+                    match arrayLiteralExtents (resolveArrayTy ctx t) with
+                    | Some (_, [n]) -> Some n
+                    | _ -> None))
+        match byParam with
+        | Some n -> Some n
+        | None ->
+            Map.tryFind vName letTys
+            |> Option.bind (fun t ->
+                match arrayLiteralExtents (resolveArrayTy ctx t) with
+                | Some (_, [n]) -> Some n
+                | _ -> None)
+    match srcExtent with
+    | None -> (body, [])
+    | Some n ->
+    // -- the consumption ----------------------------------------------------
+    let gbName = fresh ctx "__gb"
+    let gnName = fresh ctx "__gn"
+    let glName = fresh ctx "__gL"
+    let giName = fresh ctx "__gi"
+    let found = ResizeArray<Expr option>()
+    let rw = rewriteGroupConsumption mName (v glName) found
+    let stmts1 = stmts0 |> List.map (mapStmtValue rw)
+    let final1 = finalOpt |> Option.map rw
+    let notFullyReduced =
+        sprintf "the grouped peel '%s' is not reduced away: a differentiable per-group loss has to collapse the GROUP axis completely -- `reduce(%s, (+))` or `reduce(%s * <group-space weights>, (+))` -- because that axis has no compile-time extent for anything downstream to allocate over (v1)" mName mName mName
+    if found.Count <> 1 then refuse notFullyReduced else
+    // Every other mention of the peel or of the grouped value it came from
+    // would be left dangling by dropping their lets, so it refuses instead.
+    let leftovers = Set.ofList [mName; gName]
+    let residual =
+        (stmts1 |> List.exists (fun s ->
+            match unwrapStmt s with
+            // the two lets this rewrite DROPS are allowed to mention them
+            | StmtLet { Pattern = { Kind = PatternKind.PatVar nm } } when nm = mName || nm = gName -> false
+            | other -> stmtMentionsDeep leftovers other))
+        || (match final1 with Some fe -> mentionsDeep leftovers fe | None -> false)
+    if residual then refuse notFullyReduced else
+    let weight = found.[0]
+    // -- the empty-group policy (sql.md 10: the empty fold IS the init) -----
+    let regime = groupRegimeOf ctx fd letTys (Map.find gkName groupings)
+    let initOf = function PKSum i -> i | PKMean i -> i | PKCount -> None
+    let nonzeroInit = match initOf pk with Some ie -> not (isZeroInit ie) | None -> false
+    let policy =
+        match regime, pk with
+        | GRUnknown, _ ->
+            Error (sprintf "cannot tell whether the key space behind '%s' admits EMPTY groups, and the per-group fold of an empty group is only defined by an explicit init; annotate the key array -- `Array<Int64 like R>` for dynamic discovery (which never manufactures an empty group), `Array<Idx<N> like R>` / an `EnumIdx` element for a positional key space" gkName)
+        | _, PKMean _ when nonzeroInit ->
+            Error "a nonzero init in a per-group MEAN contributes `init * sum_g w_g / n_g`, which is a GROUP-space quantity and not recoverable from the source loop; v1 auto-lowers per-group means with an init of 0.0 (or none) only"
+        | GRDynamic, PKSum _ when nonzeroInit ->
+            Error "a nonzero init in a per-group sum contributes `init * <group count>`, and the group count of a dynamically-discovered key space is not known until run time; use `Idx<N>` / `EnumIdx` keys (whose group count is static) or an init of 0.0"
+        | GRStatic _, PKSum None ->
+            Error (sprintf "the key space behind '%s' is positional, so it can have EMPTY groups -- and the fold of an empty group is undefined without an init (BL8003). Add one to define it: `reduce(r, (+), 0.0)`. Plain `Int64` keys need no init, because dynamic discovery never manufactures an empty group" gkName)
+        | GRStatic _, PKMean _ ->
+            Error (sprintf "the key space behind '%s' is positional, so it can have EMPTY groups -- and the mean of an empty group is 0/0, which no init defines. Key the grouping by plain `Int64` (dynamic discovery never manufactures an empty group), or reformulate as a per-group sum with an explicit init" gkName)
+        | _ -> Ok ()
+    match policy with
+    | Error msg -> refuse msg
+    | Ok () ->
+    // -- emission -----------------------------------------------------------
+    // One loop over the SOURCE index space. `guard` is the drop mask: a
+    // negative key means `group_bucket` reports -1, and the guard zeroes that
+    // row's whole contribution. Zeroing is LINEAR, so the guard is already in
+    // `LinearForm` and rides through both AD modes untouched.
+    let bAt = syn (ExprApp (v gbName, [v giName]))
+    let inRange = syn (ExprBinOp (Elementwise, OpGe, bAt, iLit 0L))
+    // The bucket also has to be safe as a SUBSCRIPT, not just as a value. The
+    // outer guard zeroes a dropped row's contribution, but neither AD lane
+    // keeps the group-space reads inside it: reverse mode's quotient rule
+    // emits `cot / __gn(b(i))` with the divisor OUTSIDE the condition, and the
+    // weight leg's adjoint is a SCATTER `__g_W(b(i)) += ...`. At b(i) = -1
+    // those are an out-of-range read and an out-of-range WRITE. Clamping the
+    // subscript to 0 is exact precisely because the outer guard has already
+    // zeroed everything that flows through it -- `0 / n_0` and `+= 0` are the
+    // right answers -- and it costs a select, not a branch.
+    let bIx = syn (ExprGuard (inRange, bAt))
+    let nAt = syn (ExprApp (v gnName, [bIx]))
+    let vAt = syn (ExprApp (v vName, [v giName]))
+    let wAt = weight |> Option.map (fun we -> syn (ExprApp (we, [bIx])))
+    let phi =
+        match pk, wAt with
+        | PKSum _, None -> vAt
+        | PKSum _, Some wa -> mul wa vAt
+        | PKMean _, None -> div vAt nAt
+        | PKMean _, Some wa -> mul (div wa nAt) vAt
+        // count is sum_g n_g (weighted: sum_g w_g * n_g), so each surviving
+        // ROW contributes exactly its group's weight -- and no `v` at all,
+        // which is why the gradient wrt the values is identically zero.
+        | PKCount, None -> fLit 1.0
+        | PKCount, Some wa -> wa
+    let needsCounts = (match pk with PKMean _ -> true | _ -> false)
+    // The init contribution, folded in EXACTLY rather than approximated:
+    // sum_g w_g * init, with sum_g w_g = N (unweighted) or reduce(W, (+)).
+    let seed =
+        match pk, initOf pk, regime with
+        | PKSum _, Some ie, GRStatic ng when not (isZeroInit ie) ->
+            (match weight with
+             | None -> mul ie (fLit (float ng))
+             | Some we -> mul ie (syn (ExprReduce (we, syn (ExprSection OpAdd), None, None))))
+        | _ -> fLit 0.0
+    let emitted =
+        [ yield StmtLet { Mutability = BindLet; Pattern = synPat (PatVar gbName); Type = None
+                          Value = syn (ExprGroupBucket (v gkName)) }
+          if needsCounts then
+              yield StmtLet { Mutability = BindLet; Pattern = synPat (PatVar gnName); Type = None
+                              Value = syn (ExprExtents (v gkName)) }
+          yield StmtLet { Mutability = BindMut; Pattern = synPat (PatVar glName); Type = None
+                          Value = seed }
+          yield StmtForIn (giName,
+                           syn (ExprDotDot (iLit 0L, iLit (int64 n))),
+                           [ StmtExpr (syn (ExprAssign (v glName,
+                                add (v glName)
+                                    (syn (ExprGuard (inRange, phi)))))) ]) ]
+    let stmts2 =
+        stmts1 |> List.collect (fun s ->
+            match unwrapStmt s with
+            | StmtLet { Pattern = { Kind = PatternKind.PatVar nm } } when nm = gName -> []
+            | StmtLet { Pattern = { Kind = PatternKind.PatVar nm } } when nm = mName -> emitted
+            | _ -> [s])
+    (inheritSpan body (ExprBlock (stmts2, final1)), [])
+
 /// The pre-pass proper: rewrite one function body's statements, expanding
 /// recursive-array lets and hoisting reduces, threading an extent env so
 /// reduce sources can recover their loop bound.
@@ -1961,9 +2427,14 @@ let private preNormalizeBody (fname: string) (ctx: Ctx) (fd0: FunctionDecl) : Re
     // pipeline the rewrite DECLINED is a refusal here rather than a
     // misleading BL5501 five seams later: the tangent walker has no other
     // rule to reach for.
-    let fusedBody, fuseDeclines = fuseFunctionBody ctx fd0
+    let fusedBody0, fuseDeclines = fuseFunctionBody ctx fd0
+    // Then the grouped-peel lowering, which reads POST-fusion shapes and must
+    // land before `hoistReduces` -- hoistReduces is what refuses the group
+    // axis today, and it would refuse before ever seeing the peel.
+    let fusedBody, gpDeclines = lowerGroupedPeels ctx fd0 fusedBody0
     let fd = { fd0 with Body = fusedBody }
-    if not (List.isEmpty fuseDeclines) then err fname (List.head fuseDeclines) else
+    let declines = fuseDeclines @ gpDeclines
+    if not (List.isEmpty declines) then err fname (List.head declines) else
     let paramExtents =
         fd.Params |> List.choose (fun p ->
             match p.Type with
@@ -3855,6 +4326,13 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             | DeclStatic ({ Pattern = { Kind = PatternKind.PatVar nm } } as b) -> Map.add nm b.Value acc
             | _ -> acc)
             Map.empty
+    let moduleLetTys =
+        decls |> List.fold (fun acc d ->
+            match d.Value with
+            | DeclLet ({ Pattern = { Kind = PatternKind.PatVar nm }; Type = Some t })
+            | DeclStatic ({ Pattern = { Kind = PatternKind.PatVar nm }; Type = Some t }) -> Map.add nm t acc
+            | _ -> acc)
+            Map.empty
     // Source span per differentiable function, for stamping synthSpan so
     // syn-based derivative builders carry the differentiated decl's location.
     let funcSpans =
@@ -3888,7 +4366,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         if requestsOrdered.Count = 0 then Ok decls'
         else
             let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = moduleVals
-                        ModuleLoopVals = moduleLoopVals; Fresh = 0 }
+                        ModuleLoopVals = moduleLoopVals; ModuleLetTys = moduleLetTys; Fresh = 0 }
             // Synthesize in DISCOVERY order against a GROWING decl map:
             // inner requests precede the outer requests that consume them,
             // so by the time `ad.jvp(ad.grad(f))` synthesizes the outer
@@ -3998,7 +4476,7 @@ let fuseProgram (program: Program) : Program =
                 | _ -> [])
             |> Map.ofList
         let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = Set.empty
-                    ModuleLoopVals = Map.empty; Fresh = 0 }
+                    ModuleLoopVals = Map.empty; ModuleLetTys = Map.empty; Fresh = 0 }
         // Module bindings accumulate in DECLARATION ORDER: a body may only
         // resolve through names bound before it, which is the language's own
         // visibility rule. Resolving a later binding into an earlier body

@@ -1,0 +1,44 @@
+// TEST: Auto-Lowered Primal Agrees With The Natural Peel
+// The rewrite changes the SUMMATION ORDER: the peel accumulates group by
+// group, the lowered form row by row. For the weighted mean those two orders
+// differ in the last bits (measured 2.84e-14 here), which is exactly what a
+// reassociation is allowed to do -- so this pins a thresholded boolean, not
+// a zero residual. A pin of `gap = 0` would be pinning the float model, not
+// the rewrite.
+import ad as ad
+
+type R = Idx<6>
+type G = Idx<3>
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>, cw: Array<Float64 like G>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) / extents(r) |> compute
+    reduce(m * cw, (+))
+}
+
+let v0: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 2, 1, 0]
+let c0: Array<Float64 like G> = [2.0, 5.0, -1.0]
+
+// the reference: the very same peel, evaluated OUTSIDE differentiated code,
+// where it needs no lowering at all
+let rgk = group_keys(kk)
+let rg = group_by(v0, rgk)
+let rm = method_for(rg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) / extents(r) |> compute
+// re-read into a PLAIN group-space array before weighting: an elementwise map
+// straight over the peel's grouped output is a shape neither lane iterates
+// (the interpreter gates it, M2.7), and the weighting is not what this test
+// is about -- the summation ORDER is, and that is fixed by `rm` already
+// having been accumulated group by group.
+let rmd: Array<Float64 like G> = [rm(0), rm(1), rm(2)]
+let rL = reduce(rmd * c0, (+))
+// EXPECT: rm = [33.3333333333333, 35, 40]
+// EXPECT: rL = 201.666666666667
+
+// WARN: BL4003
+let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dc = [0.0, 0.0, 0.0]
+let aL = ad.grad(loss)(v0, kk, c0, dv, dc)
+let agree = abs(aL - rL) < 1.0e-12
+// EXPECT: agree = true

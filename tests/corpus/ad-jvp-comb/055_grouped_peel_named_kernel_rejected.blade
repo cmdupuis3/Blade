@@ -1,0 +1,24 @@
+// TEST: Named-Function Peel Kernel Rejected (rejects)
+// A named function used as a peel kernel eta-expands WITHOUT its where
+// clause, so the shape the rewrite would read is not the shape that runs.
+// v1 refuses it by name and points at the inline spelling instead of
+// guessing.
+import ad as ad
+
+type R = Idx<4>
+
+function rowsum(r: Array<Float64 like RaggedIdx<_>>) -> Float = reduce(r, (+))
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> rowsum |> compute
+    reduce(m, (+))
+}
+
+let vv: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 1]
+let mut dv = [0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(vv, kk, dv)
+// ERROR: BL5500
+// ERROR-CONTAINS: must be spelled as a LAMBDA

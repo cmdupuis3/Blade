@@ -1,0 +1,35 @@
+// TEST: Auto-Lowered Grouped Peel, Per-Group Mean (both modes)
+// `sum_g mean(group g) = sum_i v_i / n_{b(i)}`: still group-linear, because
+// the per-group count is KEY-derived data and so carries no derivative. The
+// rewrite reads it back as `extents(gk)(b(i))` -- the same array the peel
+// would have consulted, indexed from the source loop instead of from inside
+// a group.
+//
+// Spelled with the OBJECT-side former and no `|> compute`, to pin that both
+// peel spellings and the un-forced form reach the same lowering.
+import ad as ad
+
+type R = Idx<6>
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = object_for(lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) / extents(r)) <@> g
+    reduce(m, (+))
+}
+
+let v0: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 2, 1, 0]
+// groups: {0: rows 0,2,5}, {1: rows 1,4}, {2: row 3}
+// WARN: BL4003
+let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(v0, kk, dv)
+// EXPECT: gv = 108.333333333333
+// EXPECT: dv = [0.333333333333333, 0.5, 0.333333333333333, 1, 0.5, 0.333333333333333]
+
+let seed: Array<Float64 like R> = [1.0, 0.0, -2.0, 3.0, 0.5, 0.25]
+let (jp, jt) = ad.jvp(loss)(v0, kk, seed)
+let dot = reduce(dv * seed, (+))
+let resid = jt - dot
+// EXPECT: jp = 108.333333333333
+// EXPECT: resid = 0

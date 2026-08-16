@@ -1,0 +1,23 @@
+// TEST: Grouped Peel Read At An Index Rejected (rejects)
+// The rewrite can only delete the group axis when the loss reduces it away
+// COMPLETELY. Reading `m(0)` keeps a group-space value alive, and there is
+// no compile-time extent behind it to allocate -- so the peel is refused
+// with a message that says what the loss has to look like instead, rather
+// than the generic extent complaint the outer reduce used to produce.
+import ad as ad
+
+type R = Idx<4>
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    m(0) + m(1)
+}
+
+let vv: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 1]
+let mut dv = [0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(vv, kk, dv)
+// ERROR: BL5500
+// ERROR-CONTAINS: is not reduced away

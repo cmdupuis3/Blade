@@ -1,0 +1,40 @@
+// TEST: Auto-Lowered Peel Equals The Hand-Lowered Twin
+// THE differential gate for the rewrite. 018 hand-writes the lowered form as
+// a recursive array over the source axis; this writes the natural peel and
+// lets the pre-pass lower it. Same keys, same values, same weights -- and
+// the pinned numbers here are 018's, to the digit, in both modes.
+//
+// The grouping also arrives the way 018's first half supplies it: built at
+// MODULE scope from a constant key table, named from inside the body. The
+// rewrite reads the `gk` NAME off `group_by`'s second operand and re-emits
+// `group_bucket(gk)` / `extents(gk)` in function-body position, which is
+// what BL3017's bare-name rule wants.
+import ad as ad
+
+type R = Idx<5>
+
+let k0 = [0, 1, 0, 0, 1]
+let mgk = group_keys(k0)
+
+function loss(v: Array<Float like R>, cw: Array<Float like Idx<2>>) -> Float = {
+    let g = group_by(v, mgk)
+    let m = method_for(g) <@> lambda(r: Array<Float like RaggedIdx<_>>) -> reduce(r, (+)) / extents(r) |> compute
+    reduce(m * cw, (+))
+}
+
+let v0 = [10.0, 20.0, 30.0, 40.0, 50.0]
+let c0 = [2.0, 5.0]
+// WARN: BL4003
+let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dc = [0.0, 0.0]
+let gv = ad.grad(loss)(v0, c0, dv, dc)
+// 018's pins, unchanged:
+// EXPECT: gv = 228.333333333333
+// EXPECT: dv = [0.666666666666667, 2.5, 0.666666666666667, 0.666666666666667, 2.5]
+// EXPECT: dc = [26.6666666666667, 35]
+
+let (jp, jt) = ad.jvp(loss)(v0, c0, [1.0, 0.0, -2.0, 3.0, 0.5], [0.0, 0.0])
+let dot = reduce(dv * [1.0, 0.0, -2.0, 3.0, 0.5], (+))
+let resid = jt - dot
+// EXPECT: jp = 228.333333333333
+// EXPECT: resid = 0

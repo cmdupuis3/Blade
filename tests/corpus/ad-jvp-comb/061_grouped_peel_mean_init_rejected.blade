@@ -1,0 +1,23 @@
+// TEST: Nonzero Init Under A Per-Group Mean Rejected (rejects)
+// An init on a SUM contributes `init * sum_g w_g`, which the rewrite can add
+// as a scalar. An init on a MEAN contributes `init * sum_g w_g / n_g` -- a
+// sum over the GROUP axis of a per-group quantity, which is precisely the
+// thing the whole lowering exists to avoid materializing. So the mean's init
+// slot is restricted to 0.0 (or absent), where it contributes nothing.
+import ad as ad
+
+type R = Idx<4>
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+), 7.0) / extents(r) |> compute
+    reduce(m, (+))
+}
+
+let vv: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 1]
+let mut dv = [0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(vv, kk, dv)
+// ERROR: BL5500
+// ERROR-CONTAINS: a nonzero init in a per-group MEAN

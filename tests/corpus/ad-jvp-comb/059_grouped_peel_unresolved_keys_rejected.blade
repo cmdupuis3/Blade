@@ -1,0 +1,24 @@
+// TEST: Grouped Peel With An Unresolvable Key Space Rejected (rejects)
+// Whether empty groups exist is decided by the key array's ELEMENT type, and
+// the answer changes what the rewrite may emit. A body-local key table with
+// no annotation gives the pre-pass nothing to read, and the two guesses are
+// not symmetric: guessing "dynamic" for a positional key space would accept
+// a mean that NaNs on an empty group. So an unresolved key space refuses and
+// asks for the annotation.
+import ad as ad
+
+type R = Idx<4>
+
+function loss(v: Array<Float64 like R>) -> Float = {
+    let kloc = [0, 1, 0, 1]
+    let gk = group_keys(kloc)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    reduce(m, (+))
+}
+
+let vv: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0]
+let mut dv = [0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(vv, dv)
+// ERROR: BL5500
+// ERROR-CONTAINS: cannot tell whether the key space

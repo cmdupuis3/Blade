@@ -1,0 +1,38 @@
+// TEST: Auto-Lowered Grouped Peel, Negative Keys Drop Rows (both modes)
+// A negative key drops its row from every group, and `group_bucket` reports
+// -1 for it. The lowered loop is over the SOURCE axis, so it visits dropped
+// rows too -- and reading `extents(gk)(-1)` there would be an unchecked
+// out-of-range read, not a zero.
+//
+// `guard(b(i) >= 0, phi)` is the drop mask. It short-circuits in the emitted
+// C++, so the out-of-range count read in the dropped branch is never
+// evaluated (no clamp needed), and zeroing is LINEAR, so the same guard
+// rides through both AD lanes: the dropped row's gradient entry is an exact
+// 0, not a small number.
+import ad as ad
+
+type R = Idx<4>
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) / extents(r) |> compute
+    reduce(m, (+))
+}
+
+let vv: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0]
+// row 1 is dropped; groups are {0: rows 0,2} and {1: row 3}
+let dk: Array<Int64 like R> = [0, -1, 0, 1]
+// WARN: BL4003
+let mut dv = [0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(vv, dk, dv)
+// mean(10, 30) + mean(40) = 20 + 40
+// EXPECT: gv = 60
+// EXPECT: dv = [0.5, 0, 0.5, 1]
+
+let (jp, jt) = ad.jvp(loss)(vv, dk, [1.0, 1.0, 1.0, 1.0])
+let dot = reduce(dv * [1.0, 1.0, 1.0, 1.0], (+))
+let resid = jt - dot
+// EXPECT: jp = 60
+// EXPECT: jt = 2
+// EXPECT: resid = 0

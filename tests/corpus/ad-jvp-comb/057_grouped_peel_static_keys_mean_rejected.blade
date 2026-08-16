@@ -1,0 +1,24 @@
+// TEST: Positional Keys, Per-Group Mean Rejected (rejects)
+// The mean of an empty group is 0/0. No init defines it -- an init seeds the
+// numerator, and the denominator is still zero -- so unlike the sum case
+// there is no one-token fix, and the refusal says so and names the two real
+// reformulations. The peel itself would have produced a NaN here; refusing
+// is the difference between a wrong gradient and no gradient.
+import ad as ad
+
+type R = Idx<4>
+type GK = Idx<3>
+
+function loss(v: Array<Float64 like R>, pk: Array<GK like R>) -> Float = {
+    let gk = group_keys(pk)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) / extents(r) |> compute
+    reduce(m, (+))
+}
+
+let vv: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0]
+let sk: Array<GK like R> = [2, 0, 2, 0]
+let mut dv = [0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(vv, sk, dv)
+// ERROR: BL5500
+// ERROR-CONTAINS: the mean of an empty group is 0/0
