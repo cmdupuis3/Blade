@@ -348,24 +348,41 @@ region; hoist it to its own `let`), multi-leaf `<&!>` fused fold trees, and
 reduce over compact symmetric/antisymmetric/Hermitian storage (rejected at
 typecheck for all folds — `decompact` first).
 
-## 17. Equivariance and ML (near-term module)
+## 17. Equivariance and ML (shipped module)
 
-Spec draft: `blade_ml_spec_v10.md`; module doc: [features/equivariant-nn.md](features/equivariant-nn.md).
-The core-language hook (annotation syntax + inference framework, v10 §8) is
-Spec-only; domain rules live in libraries.
+Module doc: [features/equivariant-nn.md](features/equivariant-nn.md), canonical.
+Part II (the equivariant ML library) is landed; Part I's original core-language
+hook — a value-level `with equiv(G, ρ)` annotation checked per-expression by the
+unifier, with `EquivIdx<n, G, ρ>` carrying the rep data — was **superseded on
+2026-07-28** and is archival only (module doc status note + §1–4). The adopted
+factoring splits it in two: rep DATA lives in index types and unifies like any
+other type (`IrrepsIdx<spec>`, `PgIrrepsIdx<G, spec>`), while the rep CLAIM is a
+deduced-then-pinned *signature* attribute (`where ml.equiv(G)`), the same
+lattice-plus-pins shape `comm`/`anticomm` use. `ml-spec §N` citations below point
+into the retired ml-spec plan; its surviving material is in the module doc.
+
+The whole surface is import-gated — `import ml as ml`, then `ml.<name>(...)`;
+bare names are unbound and `from ml import ...` is rejected. Checking is
+compile-time only, zero runtime cost.
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
-| `with equiv(G, ρ)` / `with invariant(G)` annotations; inference through expressions; error detection (rep mismatch, equivariance breaking, wrong output rep, index/equiv incompatibility) | Near-term | v10 §8.2–8.4; zero runtime cost, type-checking only |
-| Representations and irreps (`Rep`, parity, `2*L1o + 3*L2e` specs) | Near-term | ml-spec §2 |
+| Representations and irreps (parity, multiplicity) | Partly Done | shipped spelling is a `let static` list of `(l, parity, mult)` triples plus the spec-computing statics, not the `2*L1o + 3*L2e` sugar of ml-spec §2 |
 | `IrrepsIdx<spec>` (block-structured primitive index type; flat-dense, spec-keyed nominal identity + nominative aliases; block-navigation statics `irreps_len/l/parity/mult/dim/offset`) | Core (v7) | ml-spec §3; module doc §6/§11b (the DepIdx equation is the semantic reading — DepIdx iteration codegen is NOT landed); corpus `index-types/111–119`, `ml-ops/005–008` |
-| Clebsch-Gordan paths, `CGIdx` (via SparseIdx/constrained records), CG lookup | Near-term | ml-spec §4 |
-| Tensor product operation (paths, weights, block indices) | Near-term | ml-spec §5 |
-| Spherical harmonics | Near-term | ml-spec §6 |
-| Equivariant tensor product / `Y_to` / linear / gated (compile-time elaboration, static specs, real-basis CG tables) | Core (v7) | module doc §11b; corpus `ml-ops/` + `ml-e2e/002`; norm activation + lmax>2 pending |
-| Norm activation | Near-term | ml-spec §8.2 |
+| Clebsch-Gordan machinery: real-basis coupling tables, path validation, CG lookup | Partly Done | tables are compiler-native (`WignerTables.fs`, pinned against the `ml/` oracle) and baked into elaborated ops; the ml-spec §4 user-facing `CGPath`/`CGIdx` dependent records are not built (module doc §11b F1 resolution) |
+| Equivariant ops: `tensor_product` (paths, weights, block indices) / `y_to` / `linear` / `gated` / `linear_rows` / `gated_rows` / `scalars` / `norms` (compile-time elaboration, static specs, real-basis CG tables) | Core (v7) | module doc §11b; corpus `ml-ops/` (24 files) + `ml-e2e/002`; elaborated ops stamp `IrrepsIdx` on their signatures and `grad()` differentiates through them |
+| Spherical harmonics (`ml.y_to`) | Partly Done | real solid harmonics, lmax ≤ 2 (explicit polynomials); ml-spec §6's recurrence for lmax > 2 pending |
+| Certificate disciplines: `where ml.equiv(G)` (O(3), SO(3), and the point groups), `where ml.galilean(u, …)`, `where ml.perm_equiv` | Core | signature attributes, not expression annotations; checked by `MLEquiv.fs` / `MLGalilean.fs` at the `MLElaborate` pass-1/pass-2 seam, with a typecheck-resident second opinion in `DeduceRep.fs`. A pin is a *polymorphism license*, the equivariance analogue of `comm`. Generator-based (Lie-algebra) discharge accepts hand-written bodies that composition-only checking rejected. Corpus `ml-equiv/` (106 files) |
+| Certificate deduction: speculative `where ml.equiv` / `ml.galilean` suggestions | Core | BL4011 / BL4014 warning channels plus structured `deduced[]` entries (`kind` "equiv" \| "galilean") in `ide check --json`; propose-don't-export — always warnings, and deliberately no `--strict-pins` arm, since a certificate owns no storage decision |
+| Diagnostics | Core | BL4007 no equivariant map exists (Schur-zero hom-space, and tensor-product outputs no CG path reaches); BL4008 / BL4009 / BL4012 equivariance / galilean / permutation-equivariance discipline violations; BL4011 / BL4014 certificate suggestions; BL9004 internal deduction disagreement (typed walker contradicts the seam checker — an ICE that stops the build, never the user's fault) |
+| Synthesis, O(3): `ml.derive_linear` (degree 1), `ml.derive_tp` (uncompacted bilinear, output spec = full CG decomposition), `ml.derive_sym_tp` / `ml.derive_alt_tp` (S₂-compacted self-products), `ml.derive_poly` (degree K ≤ 4 homogeneous, K = 1 degenerating to `derive_linear` bit for bit) | Core | each emits the COMPLETE Schur basis of the admissible hypothesis space as ordinary Blade source — the parameter count is a theorem, and the certificate holds by construction, so a pin needs no proof search. This is the primary user surface, in place of hand-derivation. Corpus `ml-equiv/` |
+| `ml.sym_lift` (degree-K monomial lift) and the conversions `tensor_to_irreps` / `sym_to_irreps` / `irreps_to_sym` | Core | rep-INTRODUCTION and rep-ESCAPE forms; deliberately left uncertified (a stamp would be a false axiom) — `sym_lift`'s output is a plain `Idx<cells>` monomial space whose O(3) action is `ml.sym_spec(SPEC, K)`, not an irreps space |
+| Synthesis, Sₙ index-action: `ml.derive_perm_linear` (complete basis of Hom_Sₙ(ℝ^{N^K}, ℝ^{N^L}) = orbit indicators = partitions of the K+L axis positions into ≤ N blocks), `ml.derive_perm_bias` (K = 0, the invariant-constant space), `ml.perm_matmul` | Core | the `ml.perm_equiv` discipline; flat row-major node-power buffers, L = 0 the invariant readout. `perm_matmul` is PPGN's engine — the one bilinear shipped by name rather than by synthesis, since the Sₙ bilinears at that arity have no orbit-indicator basis (`derive_perm_tp` deferred). Corpus `ml-equiv/` |
+| Synthesis, point groups: `ml.derive_pg_linear` + `PgIrrepsIdx<GROUP, spec>` (`C4`, `D4` shipped) | Core | the complete ℝ-Schur basis over a frozen character table, Frobenius–Schur aware (real irreps degenerate to `derive_linear`'s loop nest verbatim, for ulp agreement). Certificates do not transfer between groups. `ml.restrict` (O(3) ↓ point group) is deferred; corpus `ml-equiv/045–052`, `094`, `104` |
+| Static sizing builtins | Core | `sh_spec`, `total_dim`, `tp_spec`, `hom_dim`, `sym_spec`, `alt_spec`, `tp_weight_dim`, `tp_full_weight_dim`, `linear_weight_dim`, `sym_tp_weight_dim`, `alt_tp_weight_dim`, `poly_weight_dim`, `perm_weight_dim`, `perm_bias_dim`, `irreps_*`, and the point-group set `pg_total_dim` / `pg_hom_dim` / `pg_irreps_len` / `pg_irreps_dim` / `pg_irreps_mult` / `pg_irreps_fs` / `pg_irreps_offset` / `pg_restrict` (returns a spec, not an int). Value position only (`let static SOUT = ml.tp_spec(S1, S2)`); the annotation then names the static |
+| Norm activation | Near-term | ml-spec §8.2; `ml.norms` (invariant norm readout) is shipped and is a different op |
 | Message passing: `scatter` / `gather` | Near-term | ml-spec §9 (expressible today as loops — `ml-e2e/00*` do; dedicated ops pending) |
-| Reynolds applications: symmetric message passing, CG speedups, higher-order interactions, antisymmetric applications | Near-term | ml-spec §14 |
+| Reynolds applications: symmetric message passing, higher-order interactions, antisymmetric applications | Near-term | ml-spec §14; the CG exchange-symmetry compaction shipped as `derive_sym_tp` / `derive_alt_tp` (measured 30–42%, not the 2–4× originally claimed — module doc §9) |
 | Automatic differentiation (`grad`, reverse mode, v1 subset) | Core (v7) | AST-level source transform; module doc §11 has the ABI + subset; corpus `ad/` + `ml-e2e/`; remaining work listed in [features/equivariant-nn.md](features/equivariant-nn.md) §11 |
 
 ## 18. Graphs and trees (planned module)
