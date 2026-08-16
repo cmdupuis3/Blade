@@ -1,5 +1,10 @@
-/// grad() -- reverse-mode automatic differentiation as an AST-level source
-/// transform (pre-typecheck), surfaced through the `ad` module.
+/// grad() and jvp() -- reverse- and forward-mode automatic differentiation
+/// as AST-level source transforms (pre-typecheck), surfaced through the
+/// `ad` module. The header below documents grad; jvp's surface, ABI, and
+/// subset are documented at `synthesizeJvp` (its subset is a strict
+/// superset -- forward mode needs no reverse sweep, so the discipline
+/// checks below do not apply to it), and the composition driver
+/// (`ad.jvp(ad.grad(f))` = HVP) at `expandModule`.
 ///
 /// Surface form: `import ad as ad` then `ad.grad(f)` where `f` is a
 /// top-level function in the same module returning a Float scalar. The pass

@@ -1,7 +1,13 @@
 # Plan: forward-mode AD (`ad.jvp`)
 
-Status: design / plan. Date 2026-08-15. Every file:line cite verified against
-master at `db83e85` (probes run through `bin/Release/net7.0/Blade.exe`).
+Status: **EXECUTED through F3** on this branch (F0 shared fixes + the
+array-literal adjoint fix; F1 parity jvp + BL5501 + `ad-jvp/` corpus; F2
+forward-only extensions incl. units; F3 composition — HVP via
+`ad.jvp(ad.grad(f))` with depth-indexed tangent prefixes, and
+`ad.jvp(ad.jvp(f))`; the sqrt F0.7 unit fix cherry-picked). F4
+(combinators) remains future work — the per-combinator spec draft is the
+companion plan. Originally written 2026-08-15 against master `db83e85`;
+file:line cites below reflect that baseline, not the executed state.
 Prior art: the retired future plan §2.1 (forward mode as "DComp, tangent
 propagation") — never implemented; its vocabulary appears nowhere else in the
 tree. The Coq side is ahead of the implementation: `proofs/BladeJacobian.v:351`

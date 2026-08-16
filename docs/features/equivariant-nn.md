@@ -358,10 +358,34 @@ gradient snapshots, and final weights reproduce `ml/TrainingOracle.fs` to
 printed precision — including loss AND gradients invariant under rotated
 inputs.
 
-Remaining: combinator rules (`<@>`/`>>@`/…), triangular-tape exploitation
-for symmetric intermediates, forward mode, wrt-lists, if/match in
-differentiated code, taping for nonlinear loop recurrences,
-stencil/decomposition interactions, framework bindings.
+**Forward mode is implemented (`ad.jvp`)**, same pass and pipeline slot as
+`grad`: `ad.jvp(f)` rewrites to `f__jvp` — original params, then one
+tangent input per differentiable param (`__t_<p>`, typed with the primal
+annotation verbatim, units included), returning a `(primal, tangent)`
+tuple. No mut buffers; wrt-selection is a zero seed (which retires the
+wrt-lists item for forward mode). The jvp subset is a STRICT SUPERSET of
+grad's: forward tangents flow in program order, so non-additive
+overwrites, general immediate-predecessor recurrences (O(n), no
+triangular unroll), product folds, if/else (branch of tangents under the
+same condition, subgradient at the boundary), and unit-carrying
+params/returns all differentiate — the reverse-only refusals were
+reverse-sweep artifacts. The transforms compose in one expression:
+`ad.jvp(ad.grad(f))` is the blessed HVP route (tangent buffers pair the
+gradient buffers; corpus pins the Hessian columns, the symmetry residual,
+and FD-of-gradient), and `ad.jvp(ad.jvp(f))` is the second directional
+derivative. Rejects carry BL5501 (grad's stay BL5500). Corpus `ad-jvp/`
+(in the default suite and the interp slice); in-program jvp-vs-grad
+residual pins are the differential gate. Equivariance posture mirrors
+grad's: tangents are not re-judged (equivariance of the directional
+derivative is a theorem given the primal).
+
+Remaining: combinator rules (`<@>`/`>>@`/…) for BOTH modes (the C-track;
+`proofs/BladeJacobian.v`'s `tangent_joint_swap` already licenses
+joint-pair symmetric tangent storage for when kernels land),
+triangular-tape exploitation for symmetric intermediates, wrt-lists for
+reverse mode, if/match in REVERSE-differentiated code, taping for
+nonlinear loop recurrences in reverse mode, stencil/decomposition
+interactions, framework bindings.
 
 ### 11b. v7 implementation status (ops elaboration)
 
