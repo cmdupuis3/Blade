@@ -615,6 +615,9 @@ let rec private substVar (name: string) (repl: Expr) (e: Expr) : Expr =
     | ExprKind.ExprApp (f, args) -> re (ExprApp (substVar name repl f, args |> List.map (substVar name repl)))
     | ExprKind.ExprArrayLit elems -> re (ExprArrayLit (elems |> List.map (substVar name repl)))
     | ExprKind.ExprDotDot (l, h) -> re (ExprDotDot (substVar name repl l, substVar name repl h))
+    | ExprKind.ExprIf (c, t, f) ->
+        re (ExprIf (substVar name repl c, substVar name repl t, substVar name repl f))
+    | ExprKind.ExprTuple es -> re (ExprTuple (es |> List.map (substVar name repl)))
     | _ -> e
 
 /// Expand a rank-1 recursive-array `let` into the buffer + element-write /
