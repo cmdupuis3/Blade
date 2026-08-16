@@ -238,6 +238,30 @@ This is the same invariant the same-keys co-iteration check in §8 already
 relies on: that check decides "same grouping" by comparing binding **names**,
 which is only meaningful because a `group_keys` result always *is* its name.
 
+### A grouping is scope-independent
+
+The whole chain — `group_keys`, `group_by`, and both accessors — works inside a
+**function body** exactly as it does at module scope, which is the spelling a
+loss function whose keys are a *parameter* needs (the grouping is derived per
+call, so there is nothing to hoist):
+
+```blade
+function mean_by(k: Array<Int64 like Row>, v: Array<Float64 like Row>) = {
+    let gk = group_keys(k)
+    let n  = extents(gk)
+    let sums = method_for(group_by(v, gk)) <@> lambda(r) -> reduce(r, (+)) |> compute
+    method_for(zip(sums, n)) <@> lambda(s, c) -> s / c |> compute
+}
+```
+
+Identical source text answers identically on either side of the boundary,
+including the **bucketing regime**: a body `let` carries no binding record to
+read the `GroupKeys<I>` type off, so both back ends recover it from the body's
+typed uses of `gk` rather than assuming dynamic discovery. Getting that wrong
+would be silent — positional buckets number by key value over the declared
+`Idx<N>` (empty groups included), dynamic discovery numbers only the keys it
+observes, in first-occurrence order. Pinned by `sql-group-by/048`–`/049`.
+
 ### Negative keys select rows out
 
 A **negative key means the row belongs to no group**: it is dropped from the
