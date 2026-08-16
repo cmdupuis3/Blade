@@ -7629,15 +7629,27 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
                     Error (Other "gram(A, B): the contracted (trailing) dimensions of A and B must match.")
                 else
                     // Element type join: complex if either operand is complex.
+                    // Units ride an IRTUnitAnnotated wrapper, so complex is
+                    // detected on the STRIPPED type; the contraction
+                    // sum_k A[i][k]*conj(B[j][k]) is multiplicative, so the
+                    // result signature follows `*`'s rule (unitMul when both
+                    // sides carry one, nominal dropped one-sided; conj never
+                    // changes a unit) and is re-attached to the joined bare
+                    // type.
                     let isComplexElem (t: IRType) =
-                        match t with
+                        match stripUnits t with
                         | IRTScalar (ETComplex64 | ETComplex128) -> true
                         | _ -> false
+                    let outBare =
+                        if isComplexElem lTy.ElemType then stripUnits lTy.ElemType
+                        elif isComplexElem rTy.ElemType then stripUnits rTy.ElemType
+                        else stripUnits lTy.ElemType
+                    let isComplex = isComplexElem outBare
+                    unitRulesForOp OpMul (getUnits lTy.ElemType) (getUnits rTy.ElemType) |> Result.bind (fun outUnit ->
                     let outElem =
-                        if isComplexElem lTy.ElemType then lTy.ElemType
-                        elif isComplexElem rTy.ElemType then rTy.ElemType
-                        else lTy.ElemType
-                    let isComplex = isComplexElem outElem
+                        match outUnit with
+                        | Some u -> IRTUnitAnnotated (outBare, u)
+                        | None -> outBare
                     // Conservative same-array test: both bare vars, same name.
                     let sameArray =
                         match tL.Kind, tR.Kind with
@@ -7658,7 +7670,7 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
                             let s0 = freshSlot lOuter SymNone 1
                             let s1 = freshSlot rOuter SymNone 1
                             mkArrayArrow [s0; s1] outElem None
-                    Ok (mkTyped (TExprGram (tL, tR, sameArray)) resultType)))))
+                    Ok (mkTyped (TExprGram (tL, tR, sameArray)) resultType))))))
 
 
 and inferMatmul (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =

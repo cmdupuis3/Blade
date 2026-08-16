@@ -1,0 +1,10 @@
+// TEST: Gram Left Unit Passthrough Rejects (rejects)
+// ERROR: BL3006
+// ERROR-CONTAINS: meters vs meters^2
+// gram(A, A) over meters is a contraction of meters*meters products, i.e.
+// meters^2. The element-type join used to pass the LEFT operand's signature
+// through unchanged, so ascribing plain meters silently typechecked.
+Unit meters
+let A: Array<Float<meters> like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let G = gram(A, A)
+let bad: Float<meters> = G(0, 0)
