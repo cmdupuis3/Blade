@@ -1,0 +1,22 @@
+// TEST: GroupBy GroupKeys Tupled (rejects)
+// ERROR: BL3017
+// ERROR-CONTAINS: as a tuple element
+// The tuple round-trip is the alias of 035 wearing a disguise: bundling `gk`
+// with something else and destructuring it back out renames the grouping, and
+// the name is the whole binding (see 035 for the ABI). The emitted C++ named
+// `gk2__offsets` for a `gk2` that only ever held the sentinel.
+//
+// Refused at CONSTRUCTION, not at the destructure: the tuple is where the gk
+// leaves its binding, so that is where the caret belongs and where the fix
+// is. Nothing downstream needs a second rule.
+let region = [0, 1, 0, 0, 1]
+let v = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let sums = [1.0, 2.0]
+let bundle = (sums, gk)
+let (s2, gk2) = bundle
+let gv = group_by(v, gk2)
+let s = method_for(gv) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: BL3017 -- a group_keys result cannot be a tuple element (nor a
+// struct field, nor an array element). Bundle the grouped RESULTS instead:
+// `group_by` produces an ordinary array, and that travels anywhere.

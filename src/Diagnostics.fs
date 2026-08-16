@@ -178,6 +178,14 @@ module Codes =
             // C++ indexes past the argument's allocation. A symbolic extent
             // (`Idx<n>`) reads `.extents[d]` at runtime and stays permissive.
             "BL3016", "argument extent mismatch"
+            // BL3017: a `group_keys` result used anywhere but its own `let`
+            // RHS or a `group_by` grouping slot. The result is NAME-KEYED:
+            // codegen stores the CSR structure in locals suffixed off the
+            // binding name and gives the binding itself an opaque sentinel,
+            // so every indirection (alias, tuple, parameter, return) used to
+            // emit C++ naming symbols that were never declared. Refuse it
+            // where the source name is still in hand.
+            "BL3017", "group_keys result escapes its binding"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"

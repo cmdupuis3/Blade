@@ -199,6 +199,39 @@ array's annotation:
 Multi-key form requires rank-1 key arrays over the same outer extent; the
 compound key is always dynamic (tuple-keyed hash).
 
+### A `group_keys` result is name-keyed, not a value
+
+`group_keys` and `group_by` are joined by a **binding name**. Codegen stores the
+whole CSR structure in locals suffixed off that name — `gk__ngroups`,
+`gk__offsets`, `gk__perm` — and gives the binding itself only an opaque
+sentinel, so `group_by` recovers the grouping by re-deriving those symbols from
+the name its grouping argument resolves to. The result is therefore usable in
+exactly two places: as the value of the `let` that names it, and as a
+`group_by` grouping argument written as that name.
+
+Any indirection is `BL3017`:
+
+```blade
+let gk  = group_keys(region)
+let gk2 = gk                        // BL3017: aliased
+let b   = (sums, gk)                // BL3017: tuple element (struct/array too)
+let s   = per_group(v, gk)          // BL3017: function argument
+let gv  = group_by(v, group_keys(region))   // BL3017: inline, no name to bind
+function mk(k) = group_keys(k)      // BL3017: returned
+```
+
+Sharing one grouping is what a single binding is *for* — `group_by(a, gk)` and
+`group_by(b, gk)` co-iterate (see §8) — and a function that needs a grouping
+takes the **key array** and does both halves itself (`functions/068`). Every one
+of these used to typecheck, lower, emit, and then fail in g++ on undeclared
+`gk2__offsets`-style symbols; the aliased/tupled/parameter forms silently, the
+inline and returned forms as a `BL7001` backend-gap note that invited a bug
+report for a hole nobody intends to fill. Pinned by `sql-group-by/035`–`/039`.
+
+This is the same invariant the same-keys co-iteration check in §8 already
+relies on: that check decides "same grouping" by comparing binding **names**,
+which is only meaningful because a `group_keys` result always *is* its name.
+
 ### Negative keys select rows out
 
 A **negative key means the row belongs to no group**: it is dropped from the

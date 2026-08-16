@@ -17561,6 +17561,103 @@ let private declWriteRoots (decl: TypedDecl) : (bool * TypedExpr) list =
     | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
     | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
 
+/// Post-check sweep for GROUP-KEYS ESCAPES (BL3017).
+///
+/// A `group_keys` result is NAME-KEYED, not a value. `genGroupKeysBinding`
+/// (CodeGen.fs) puts the entire CSR structure into C++ locals suffixed off the
+/// BINDING name -- `<name>__ngroups`, `<name>__offsets`, `<name>__perm` -- and
+/// gives the binding itself a `void*` sentinel; `genGroupByBinding` recovers
+/// the state by re-deriving those suffixed symbols from whatever cpp name the
+/// grouping EXPRESSION resolves to. So the two ops are joined by a NAME, and
+/// every indirection breaks the joint silently: `let gk2 = gk` emitted
+/// `gk2__offsets`, a tuple round-trip emitted the same, and an untyped
+/// function parameter zonked to a scalar and emitted `double g` alongside
+/// `g__offsets`. All three died in g++, not in Blade.
+///
+/// The invariant is already ASSUMED elsewhere -- `sameGroupKeysBinding` in
+/// inferMethodFor decides grouped co-iteration by comparing gk operands'
+/// binding NAMES, which is only meaningful if a gk always IS its binding name.
+/// This sweep is what makes it enforced.
+///
+/// `pos` is `None` in the two blessed positions (the direct RHS of a `let`
+/// binding the call, and `group_by`'s grouping slot when it holds a plain
+/// variable) and `Some phrase` everywhere else, where `phrase` completes
+/// "... cannot be used <phrase>". Running on the ZONKED module makes this
+/// total: IRTGroupKeys is minted only by `inferGroupKeys` and survives
+/// zonking intact, so a resolved IRTGroupKeys anywhere else IS the escape.
+/// A node that fires does not descend -- a gk-typed block or function body is
+/// one mistake, not one per enclosing layer.
+///
+/// THE blessing for a `let` RHS, shared by the block walk and the declaration
+/// roots so module-level and function-local `let`s cannot drift apart. Blessed
+/// only when the RHS IS the call and the pattern is a bare name: `let gk2 = gk`
+/// is an alias, and the alias is exactly the bug.
+let private groupKeysLetRhs (b: TypedBinding) : string option * TypedExpr =
+    match b.Value.Kind with
+    | TExprGroupKeys _ when List.isEmpty b.SubBindings -> (None, b.Value)
+    | _ -> (Some "as another binding's value", b.Value)
+
+let rec private collectGroupKeysEscapes (subst: Subst) (pos: string option) (expr: TypedExpr) : CompileError list =
+    let isGk (e: TypedExpr) = match subst.Resolve e.Type with IRTGroupKeys _ -> true | _ -> false
+    let describe (e: TypedExpr) =
+        match e.Kind with
+        | TExprGroupKeys _ -> "a `group_keys(...)` call"
+        | TExprVar (n, _, _) -> sprintf "the group_keys binding '%s'" n
+        | _ -> "a group_keys result"
+    // A block is TRANSPARENT here: its type is its final expression's, and its
+    // span covers the whole body, so firing on the block would point the
+    // caret at the innocent first statement. Descend and let the final
+    // expression carry the enclosing position instead.
+    let isBlock = match expr.Kind with TExprBlock _ -> true | _ -> false
+    match pos with
+    | Some phrase when isGk expr && not isBlock ->
+        [ { Error = GroupKeysEscapes (describe expr, phrase); Span = expr.Span; Context = []; Code = None } ]
+    | _ ->
+    let elsewhere = "in this position"
+    let kids : (string option * TypedExpr) list =
+        match expr.Kind with
+        | TExprGroupBy (values, gk) ->
+            // The grouping slot takes the BINDING NAME only -- an inline
+            // `group_by(v, group_keys(k))` has no locals to suffix off.
+            let gkPos =
+                match gk.Kind with
+                | TExprVar _ -> None
+                | _ -> Some "inline as `group_by`'s grouping argument"
+            [ (Some elsewhere, values); (gkPos, gk) ]
+        | TExprTuple es -> es |> List.map (fun e -> (Some "as a tuple element", e))
+        | TExprArrayLit (elems, _) -> elems |> List.map (fun e -> (Some "as an array element", e))
+        | TExprStruct (_, fields) -> fields |> List.map (fun (_, e) -> (Some "as a struct field", e))
+        | TExprApp (f, args) ->
+            (Some elsewhere, f) :: (args |> List.map (fun a -> (Some "as a function argument", a)))
+        | TExprBlock (stmts, final) ->
+            let rec ofStmt (s: TypedStmt) : (string option * TypedExpr) list =
+                match s with
+                | TStmtLet b -> [groupKeysLetRhs b]
+                | TStmtAssign (l, r) -> [(Some elsewhere, l); (Some elsewhere, r)]
+                | TStmtExpr e -> [(Some elsewhere, e)]
+                | TStmtForIn (_, _, lo, hi, body) ->
+                    (Some elsewhere, lo) :: (Some elsewhere, hi) :: (body |> List.collect ofStmt)
+            // The final expression inherits the block's own position, so a
+            // gk returned out of a function body reads "as a function's
+            // return value" rather than the generic block phrasing.
+            let finalPos = pos |> Option.defaultValue "as a block's result value"
+            (stmts |> List.collect ofStmt)
+            @ (final |> Option.toList |> List.map (fun e -> (Some finalPos, e)))
+        | _ -> typedExprChildren expr |> List.map (fun e -> (Some elsewhere, e))
+    kids |> List.collect (fun (p, e) -> collectGroupKeysEscapes subst p e)
+
+/// Declaration entry points for the sweep above. Same blessing as the block
+/// case: a module-level `let` may hold the call itself and nothing else, and a
+/// function body is a returning position (BL7001's "no rule for IRGroupKeys in
+/// expression position" was the old, misleadingly backend-flavoured verdict).
+let private declGroupKeysRoots (decl: TypedDecl) : (string option * TypedExpr) list =
+    let ofFunc (f: TypedFunctionDecl) = [(Some "as a function's return value", f.Body)]
+    match decl with
+    | TDeclLet b | TDeclStatic b -> [groupKeysLetRhs b]
+    | TDeclFunction f -> ofFunc f
+    | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
+    | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
+
 /// Every expression a zonked declaration carries, for the sweep above.
 let private declExprs (decl: TypedDecl) : TypedExpr list =
     let ofFunc (f: TypedFunctionDecl) = [f.Body]
@@ -17712,7 +17809,13 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let writeErrors =
         zonked.Decls |> List.collect declWriteRoots
                      |> List.collect (fun (nested, e) -> collectMisplacedProviderWrites currentEnv.Subst nested e)
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ writeErrors)
+    // group_keys escapes: structural like the write sweep (IRTGroupKeys is
+    // minted in exactly one place and never inferred), so it runs even when
+    // the module already has errors.
+    let groupKeysErrors =
+        zonked.Decls |> List.collect declGroupKeysRoots
+                     |> List.collect (fun (pos, e) -> collectGroupKeysEscapes currentEnv.Subst pos e)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ writeErrors @ groupKeysErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()

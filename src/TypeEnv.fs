@@ -672,6 +672,7 @@ complex half)." where_
     | FoldOmpNeedsLicense kernelDesc -> sprintf "parallel reduction needs comm(...) or a builtin op: %s carries `omp` but nothing licenses the reorder. A parallel fold splits the axis into per-thread chunks and combines the partials, so the kernel must be COMMUTATIVE and ASSOCIATIVE -- write `where comm(a, b), omp` to declare it (the same word `<@>` uses for symmetric storage, cross-checked against the body's parity), or use a builtin fold body (a + b, a * b, a && b, a || b), which carries both properties outright. Drop `omp` to keep the serial fold." kernelDesc
     | PlaceholderNeedsAllBound (got, total) -> sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." got total
     | GroupKeysRank1 -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
+    | GroupKeysEscapes (what, pos) -> sprintf "%s cannot be used %s: a `group_keys` result is NAME-KEYED, not a value. It compiles to three locals named after the binding (`<name>__ngroups`, `<name>__offsets`, `<name>__perm`) and the binding itself carries only an opaque sentinel, so `group_by` can find the grouping only under the exact name the keys were bound to. Bind the keys once (`let gk = group_keys(...)`) and pass that same `gk` directly to each `group_by` -- a group_keys result cannot be aliased to a second name, put in a tuple or struct, passed as a function argument, or returned. (Grouping two arrays the same way is what one shared `gk` is FOR: `group_by(a, gk)` and `group_by(b, gk)` co-iterate; two separate `group_keys` calls do not.)" what pos
     | FallbackNeedsArrays (leftDesc, rightDesc) -> sprintf "<|:> (allocated-fallback) reads the LEFT array where its storage holds a cell and the right array elsewhere, so both operands must be arrays; got %s and %s. For value-level choice (first nonzero wins) over scalars or computations, use <|>." leftDesc rightDesc
     | FallbackSymmetricLeft -> "<|:> over a symmetric/antisymmetric/Hermitian left operand is not yet supported: symmetric A requires symmetric allocation (formalism 2.6), which the compiler cannot yet verify. decompact(A, d) to dense first."
     | FallbackRightNotDense what -> sprintf "<|:> right operand must be a plain dense array (it supplies the value for every cell the left side lacks); got %s." what
@@ -795,6 +796,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | FactoryDupQuantityDecl _ -> "BL3013"
             | FactoryDupFill _ | FactoryUnknownTag _ | FactoryAmbiguousMix _ -> "BL3014"
             | UnknownUnitName _ -> "BL3015"
+            | GroupKeysEscapes _ -> "BL3017"
             | IntrinsicBindArrayFailed _ | IntrinsicNeedsArray _
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
