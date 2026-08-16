@@ -1231,8 +1231,38 @@ let rec private adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, strin
     | NLet (x, _, value) ->
         if not (Set.contains x rc.Diff) then Ok []
         else
+            // Array-literal init: flow each ELEMENT's adjoint from the
+            // matching cotangent cell. Pure-literal elements contribute
+            // nothing; nested literals recurse through curried reads.
+            // (Treating the whole literal as a constant init -- the old
+            // behavior -- silently dropped the gradient terms of any
+            // ACTIVE element: `let a = [x, 2.0*x]` gave dx = 0.)
+            let rec flowLit (cotCell: Expr) (elem: Expr) : Result<NStmt list, string> =
+                let rec allLit (e: Expr) =
+                    match e.Kind with
+                    | ExprKind.ExprLit _ -> true
+                    | ExprKind.ExprArrayLit es -> es |> List.forall allLit
+                    | _ -> false
+                if allLit elem then Ok []
+                else
+                    match elem.Kind with
+                    | ExprKind.ExprArrayLit es ->
+                        es |> List.mapi (fun j ej -> (j, ej))
+                           |> List.fold (fun acc (j, ej) ->
+                                acc |> Result.bind (fun ss ->
+                                    flowLit (inheritSpan elem (ExprApp (cotCell, [iLit (int64 j)]))) ej
+                                    |> Result.map (fun s2 -> ss @ s2)))
+                                (Ok [])
+                    | _ -> adjointOf rc elem cotCell
             (match value with
-             | { Kind = ExprKind.ExprArrayLit _ } | ConstFill _ -> Ok []   // literal/fill init: nothing flows back
+             | { Kind = ExprKind.ExprArrayLit elems } ->
+                 elems |> List.mapi (fun i el -> (i, el))
+                       |> List.fold (fun acc (i, el) ->
+                            acc |> Result.bind (fun ss ->
+                                flowLit (inheritSpan value (ExprApp (v (dName x), [iLit (int64 i)]))) el
+                                |> Result.map (fun s2 -> ss @ s2)))
+                            (Ok [])
+             | ConstFill _ -> Ok []   // fill of a literal: nothing flows back
              | _ -> adjointOf rc value (v (dName x)))
     | NAssign (lhs, rhs) ->
         (match additiveSelf lhs rhs with
