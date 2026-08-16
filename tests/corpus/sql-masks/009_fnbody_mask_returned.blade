@@ -1,0 +1,22 @@
+// TEST: Fnbody Mask Returned
+// ----------------------------------------------------------------------------
+// Return-extent ABI (see index-types/242) for mask. The mask's own extents
+// table used to be a frame-local `size_t[1]`, so a mask BUILT in a helper and
+// consumed by the caller's compound() sized its presence vector off a garbage
+// length -- std::bad_alloc (BL8005) in the compound constructor, not a wrong
+// answer. Returning the Bool presence array across the boundary and compounding
+// on the other side is the whole point of the test.
+// ----------------------------------------------------------------------------
+type P = Idx<5>
+
+function big_ones(xs: Array<Int64 like P>) -> Array<Bool like P> = {
+    let m = mask(xs, lambda(v) -> v > 2)
+    m
+}
+
+let p: Array<Int64 like P> = [1, 2, 3, 4, 5]
+let m1 = big_ones(p)
+let kept = compound(p, m1)
+let keptsum = reduce(kept, (+))
+// EXPECT: m1 = [false, false, true, true, true]
+// EXPECT: keptsum = 12

@@ -1,0 +1,40 @@
+// TEST: Fnbody Gram Returned
+// ----------------------------------------------------------------------------
+// RETURN-EXTENT ABI for the materialized inline forms. `Array<T,R>` stores only
+// a POINTER to its extents table, so a form that declared that table as a
+// frame-local `size_t[R]` handed the caller a wrapper whose SHAPE dangled the
+// moment the function returned -- the pool (heap) was intact and the values
+// were right, but every `.extents[d]` read was heap garbage and no diagnostic
+// fired. Module-level bindings never saw it (main's frame outlives the
+// program) and neither did in-frame uses, which is why the corpus missed it.
+//
+// gram is the form most often written as a helper's whole answer, so it gets
+// both modes: distinct operands (dense m x p) and the same array twice (square,
+// symmetric upper-triangle storage). Values ALONE do not pin the bug -- the
+// printer reads the returned wrapper's `.extents`, so a dangling table shows up
+// as a flood of garbage doubles (or a bad_alloc) rather than a wrong number.
+// The EXPECT pins below are therefore shape assertions as much as value ones.
+// ----------------------------------------------------------------------------
+type I = Idx<2>
+type K = Idx<3>
+
+// Distinct operands: dense 2x2 out of two 2x3 sources.
+function make_g(a: Array<Float64 like I, K>, b: Array<Float64 like I, K>) -> Array<Float64 like I, I> = {
+    let g = gram(a, b)
+    g
+}
+
+// Same array twice: square symmetric storage (upper triangle only).
+function make_gg(a: Array<Float64 like I, K>) -> Array<Float64 like SymIdx<2, 2>> = {
+    let g = gram(a, a)
+    g
+}
+
+let a0: Array<Float64 like I, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let b0: Array<Float64 like I, K> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let gd = make_g(a0, b0)
+let gs = make_gg(a0)
+// gd[i][j] = sum_k a0[i][k] * b0[j][k]
+// EXPECT: gd = [4, 2, 10, 5]
+// gs is triangular: (0,0)=14 (0,1)=32 (1,1)=77
+// EXPECT: gs = [14, 32, 77]

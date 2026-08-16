@@ -1,0 +1,35 @@
+// TEST: Fnbody Matmul Solve Returned
+// ----------------------------------------------------------------------------
+// Return-extent ABI (see index-types/242) for the two linalg materialize forms
+// that stay inside the native path with the BLAS gate off. matmul's result is
+// shaped from BOTH operands (m from A, n from B), and solve's from A alone
+// through a runtime `.extents[0]` read -- so solve is on the heap arm of the
+// companion-extents rule unconditionally.
+//
+// Both are written as a helper's whole answer, which is the only position that
+// ever exposed the frame-local table: a module-level binding lives in main's
+// frame and an in-frame use never crosses a return.
+// ----------------------------------------------------------------------------
+import math as m
+type R = Idx<2>
+type K = Idx<3>
+
+function mm(a: Array<Float64 like R, K>, b: Array<Float64 like K, R>) -> Array<Float64 like R, R> = {
+    let c = m.matmul(a, b)
+    c
+}
+
+function sv(a: Array<Float64 like R, R>, b: Array<Float64 like R>) -> Array<Float64 like R> = {
+    let x = m.solve(a, b)
+    x
+}
+
+let A: Array<Float64 like R, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like K, R> = [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]
+let C = mm(A, B)
+// 2x + y = 5, x + 3y = 10  ->  x = 1, y = 3
+let M: Array<Float64 like R, R> = [[2.0, 1.0], [1.0, 3.0]]
+let rhs: Array<Float64 like R> = [5.0, 10.0]
+let x = sv(M, rhs)
+// EXPECT: C = [58, 64, 139, 154]
+// EXPECT: x = [1, 3]
