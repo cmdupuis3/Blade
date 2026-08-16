@@ -1,0 +1,42 @@
+// TEST: Group Pipeline In Function Body
+// The whole per-group pipeline inside ONE function body, with nothing at module
+// scope but the data: keys -> grouping -> sizes -> per-group fold. 048 pins the
+// accessors alone (and is peel-free so both lanes run it); this pins them beside
+// the `group_by` they are usually spelled with.
+//
+// `extents(gk)` is what turns the sums into means without a second traversal,
+// and here it does so without paying for the gather it does not use -- 046's
+// elision argument, now from inside a body.
+
+type Row = Idx<6>
+
+function mean_by(k: Array<Int64 like Row>, v: Array<Float64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let n = extents(gk)
+    let sums = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    let means = method_for(zip(sums, n)) <@> lambda(t, c) -> t / c |> compute
+    means
+}
+
+let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 7]
+let vals: Array<Float64 like Row> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let m = mean_by(keys, vals)
+// EXPECT: m = [33.3333333333333, 35, 40]
+
+// ---- The bucket map is the ungroup: reading the grouped array at
+// (bucket(i), rank(i)) returns row i (040's round trip), with BOTH halves of the
+// grouping built inside the function. `rank` has no surface accessor, so it is
+// passed in; `bucket` is the half that cannot be read off the source.
+function ungroup(k: Array<Int64 like Row>, v: Array<Float64 like Row>,
+                 ranks: Array<Int64 like Row>) -> Array<Float64 like Row> = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let b = group_bucket(gk)
+    let back = method_for(zip(b, ranks)) <@> lambda(bb, kk) -> g(bb, kk) |> compute
+    back
+}
+
+let ranks: Array<Int64 like Row> = [0, 0, 1, 0, 1, 2]
+let recon = ungroup(keys, vals, ranks)
+// EXPECT: recon = [10, 20, 30, 40, 50, 60]
