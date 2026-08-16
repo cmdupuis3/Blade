@@ -189,6 +189,12 @@ type TypeError =
     | ReduceEmptyArray of extent: int64
     | ProdsumExtentMismatch of a: int64 * b: int64
     | GramNeedsRank2 of leftRank: int * rightRank: int
+    /// A gram operand whose two dimensions arrive as ONE compact rank-2
+    /// group (SymIdx / AntisymIdx / HermitianIdx storage, e.g. a gram
+    /// result): the dims SUM is 2 but there is no second slot to read the
+    /// contracted extent from. `side` names the offender as a subject-verb
+    /// clause ("the left operand carries", "both operands carry").
+    | GramCompactOperand of side: string
     | ArrayLitLength of got: int * expected: int * axisTag: string option
     /// An array literal checked against a COMPACT index group (SymIdx /
     /// AntisymIdx / HermitianIdx, rank >= 2): ONE axis whose stored cells

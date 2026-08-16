@@ -647,6 +647,7 @@ class IS implemented, and the dense result folds like any other array." op level
     | ReduceEmptyArray extent -> sprintf "reduce() rejects statically empty arrays (extent = %d). Empty input has no defined reduction without an identity; supply one with the 3-arg form `reduce(arr, op, init)`." extent
     | ProdsumExtentMismatch (a, b) -> sprintf "prodsum() operands must share one extent: got %d and %d" a b
     | GramNeedsRank2 (leftRank, rightRank) -> sprintf "gram(A, B): both operands must be rank-2 (matrix) arrays; got rank-%d and rank-%d. gram contracts the trailing axis: A (m x n), B (p x n) -> m x p." leftRank rightRank
+    | GramCompactOperand side -> sprintf "gram(A, B): operands must be rank-2 with two PLAIN index axes; %s compact rank-2 group storage (SymIdx / AntisymIdx / HermitianIdx, e.g. a gram result), whose single packed axis cannot supply the outer and contracted dimensions separately. Expand to a dense matrix first: decompact(X, 0)." side
     | ArrayLitLength (got, expected, axisTag) ->
         let axis = match axisTag with Some t -> sprintf " for axis '%s'" t | None -> ""
         sprintf "Array literal%s has %d elements, but the annotation's extent is %d" axis got expected
@@ -803,6 +804,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
             | ReduceEmptyArray _ | ProdsumExtentMismatch _ | GramNeedsRank2 _
+            | GramCompactOperand _
             | ArrayLitLength _ | CompactLitShape _ | HermitianLitDiagComplex _
             | ObjectForKernel _ | ChainOpNeedsMethodFor _ | ChainOpBadKernel _
             | ChainOpUndecidable _

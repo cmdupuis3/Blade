@@ -1,0 +1,17 @@
+// TEST: Gram Unit Product
+// gram contracts sum_k A[i][k]*conj(B[j][k]) -- multiplicative, so the result
+// carries the PRODUCT signature: meters^2 for the same-array route and
+// meters*seconds for distinct operands, not the left operand's unit passed
+// through unchanged.
+Unit meters
+Unit seconds
+Unit m2 = meters * meters
+Unit msec = meters * seconds
+let A: Array<Float<meters> like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float<seconds> like Idx<2>, Idx<3>> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let G = gram(A, A)
+let sq: Float<m2> = G(0, 0)
+let D = gram(A, B)
+let cross: Float<msec> = D(0, 1)
+// EXPECT: sq = 14
+// EXPECT: cross = 2
