@@ -5652,6 +5652,22 @@ let genElementBindingPeel (rawRowPeel: bool) (level: LoopIndexBinding) (elem: El
         (code, elem.ParamName)
     | VirtualRange offset ->
         // range<I>: kernel param gets the loop index, plus offset if present.
+        //
+        // MULTI-RANK SLOTS LAND HERE TOO, and this arm is rank-1 shaped: it
+        // binds the RAW loop counter and never consults level.BoundDependencies
+        // / level.StrictOffset, which the RealArray arms below apply to reach
+        // the ABSOLUTE coordinate. So range<SymIdx<r,N>> hands the kernel the
+        // cell's left-justified PACKED STORAGE COORDINATES -- prefix offsets --
+        // where canonical[m] = p0 + ... + pm (+ m for AntisymIdx's strict step).
+        // The kernel spelling A(p0) * A(p0 + p1) is correct; A(p0) * A(p1) is
+        // the silent trap. Interp.Loops.peelElement mirrors this arm, so the
+        // differential gates see agreement, not the divergence from
+        // TypeCheck.expandedRows ("the index value at that slot") and
+        // docs/formalism.md 7.3 -- which now records this as observed behaviour
+        // pending a decision, with the convention pinned by
+        // tests/corpus/loops/170-173. Folding `deps + strict` in here (the
+        // expression the dense arm already builds) is the canonical-index fix.
+        //
         // The binding must be int64_t, NOT size_t: the param is Int64-typed in
         // Blade (and the standalone lambda signature), and a size_t binding
         // makes negative intermediates wrap unsigned before any Float64

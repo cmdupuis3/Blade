@@ -756,11 +756,69 @@ reverse<I>     // reversed
 blocked<I, K>  // K-sized cache blocks (spec level)
 ```
 
-`range<SymIdx<2,N>>` emits canonical pairs; `range<CompoundIdx<...>>` emits
-mask-true tuples. Virtual and real arrays compose in one loop:
+`range<CompoundIdx<...>>` emits mask-true tuples. Virtual and real arrays
+compose in one loop:
 `method_for(range<I>, A, B) <@> lambda(i.., a, b) -> ...` — this is how
 kernels receive indices without breaking index anonymity. Anonymous range
 forms (zero-based, offset, literal extents) are supported.
+
+**`range<SymIdx<r,N>>` / `range<AntisymIdx<r,N>>` hand the kernel PREFIX
+OFFSETS, not canonical indices.** A multi-rank slot contributes one param per
+rank component (§7.2's rank rule), and each param is bound to its own raw
+triangular loop counter — the cell's *packed storage coordinate*, left-justified
+into a shrinking row (`canon_left_justify`) — with the level's bound
+dependencies and strict offset left out. The canonical tuple is the running sum:
+
+```
+SymIdx<r,N>     (inclusive i₀ ≤ … ≤ i_{r-1}):   canonical[m] = p₀ + p₁ + … + p_m
+AntisymIdx<r,N> (strict   i₀ < … < i_{r-1}):    canonical[m] = p₀ + p₁ + … + p_m + m
+```
+
+So the natural reading `A(p₀) * A(p₁)` is silently WRONG — it agrees with the
+canonical one only where every earlier param is 0, i.e. on the first row, which
+is exactly enough to make a spot check look right. The symmetric outer product
+is spelled `A(p₀) * A(p₀ + p₁)`. Pinned at r = 2 and r = 3 in
+`tests/corpus/loops/170`–`173` (both the correct and the naive spelling), worked
+example in `172`.
+
+This is **observed behaviour, not endorsed semantics** — the intended reading is
+canonical, and this paragraph documents the divergence so nothing is built on
+the current convention by accident:
+
+- `TypeCheck.expandedRows` (the seam that widens a multi-rank slot into r params)
+  describes each param as "the index value at that slot".
+- The lowering (`CodeGen.genElementBindingNew`, `VirtualRange` arm) is written
+  for rank-1 `range<I>` — "kernel param gets the loop index" — and never consults
+  `level.BoundDependencies` / `level.StrictOffset`, which its sibling dense and
+  fused arms both apply explicitly to reach the absolute coordinate. The
+  interpreter (`Interp.Loops.peelElement`) mirrors it arm-for-arm, so the two
+  differential twins agree on the same omission and no diff gate fires.
+- The correction is the `deps + strict` expression already present two arms down;
+  the risk is not cost but that any pre-existing `range<Sym…>` kernel written
+  against the offsets flips meaning, hence the pins first.
+
+Two further defects sit at the same seam. The first is the tag analogue of the
+offset one — `elemTypeForIterationIndex` applied per rank component without
+adjusting for rank > 1; the second is independent.
+
+- The component params carry the *group's* tag, not the component space's. An
+  index record has ONE `Tag` field for the whole group (`IRIndexTypeG.Tag`,
+  "name (index space matching)"), so lowering a multi-rank slot keeps whichever
+  name the group was written under and drops the component's. With
+  `type S2 = SymIdx<2, I3>` both params type as `Nat<S2>` — a type no component
+  index of S2 can inhabit — so indexing an `I3`-tagged array is a hard BL4003;
+  spell the same group inline and `Tag` is `None`, the params are untagged
+  `Int64`, and the identical program merely warns. Whether the group happens to
+  be *named* is not a semantic distinction. The minimal fix is for a multi-rank
+  record's `Tag` to name the COMPONENT space (`I3`), which is what "index space
+  matching" means for the values the slot actually produces; both spellings then
+  check with no warning. Pinned as `tests/corpus/loops/174` (warns) and `175`
+  (errors).
+- Naming only the component — `range<SymIdx<2, I3>>` — typechecks and then fails
+  codegen outright, emitting `S_extents[0] = __range0.extents[0];` against an
+  `__range0` that is never declared (the same `__range0` failure mode IR.fs:3499
+  records for the multi-rank param binding). No corpus pin: a raw g++ error is
+  not a refusal.
 
 ### 7.4 For-loop syntax
 

@@ -12087,6 +12087,12 @@ and buildApplyInfo (env: TypeEnv)
                 // or a CompoundIdx of mask-rank R) contributes Rank coordinate params,
                 // per the rank rule (kernel index slots = iteration rank). For rank-1
                 // (dense) indices this is one param per index type, unchanged from 1b.
+                // CAVEAT for a TRIANGULAR slot: "the index value at that slot" is the
+                // intent, but the lowering delivers the PACKED STORAGE COORDINATE
+                // (prefix offset) -- and elemTypeForIterationIndex tags every component
+                // with the GROUP's tag rather than the component space's. Both
+                // divergences are assessed in docs/formalism.md 7.3 and pinned by
+                // tests/corpus/loops/170-175.
                 at.IndexTypes |> List.collect (fun idx -> List.replicate idx.Rank (elemTypeForIterationIndex idx))
             else
                 let kRank = if i < kernelInputRanks.Length then kernelInputRanks.[i] else 0

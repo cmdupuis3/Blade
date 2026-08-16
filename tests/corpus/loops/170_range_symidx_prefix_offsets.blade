@@ -1,0 +1,26 @@
+// TEST: Range SymIdx Prefix Offsets (r=2)
+// Pins the INDEX CONVENTION of `range<SymIdx<r, N>>`, which 067 promises
+// ("a single MULTI-RANK index type (SymIdx<2,N>) also yields two params") but
+// never pins the VALUES of.
+//
+// The kernel does NOT receive canonical indices (i <= j). It receives the
+// PACKED STORAGE COORDINATES of the cell -- the raw triangular loop counters,
+// where each level is left-justified into its own shrinking row
+// (canon_left_justify: p1 = p0 + c1). So the params are PREFIX OFFSETS and the
+// canonical tuple is their running sum:
+//
+//     canonical[m] = p0 + p1 + ... + pm
+//
+// Probe kernel 10*p0 + p1 makes each param readable as one decimal digit.
+// Storage cell (row c0, slot c1) therefore prints the pair the kernel saw:
+//
+//   row 0 (canonical i=0): c1 = 0,1,2  ->  0,  1,  2   (canonical j = 0,1,2)
+//   row 1 (canonical i=1): c1 = 0,1    -> 10, 11       (canonical j = 1,2)
+//   row 2 (canonical i=2): c1 = 0      -> 20           (canonical j = 2)
+//
+// Canonical indices would have printed 0, 1, 2, 11, 12, 22 instead. See
+// 172 for the worked computation that gets the values right under this
+// convention, and docs/formalism.md 7.3 for the assessment of whether the
+// convention is intended.
+let S = method_for(range<SymIdx<2, 3>>) <@> lambda(p0, p1) -> 10.0 * p0 + 1.0 * p1 |> compute
+// EXPECT: S = [[0, 1, 2], [10, 11], [20]]

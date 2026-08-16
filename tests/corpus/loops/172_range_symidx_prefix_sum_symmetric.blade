@@ -1,0 +1,39 @@
+// TEST: Range SymIdx Prefix Sum Symmetric Gram
+// The USE side of the convention pinned by 170/171: building the symmetric
+// outer product v(i) * v(j) over range<SymIdx<2, N>>.
+//
+// Because the kernel receives prefix OFFSETS, the canonical pair is
+// (p0, p0 + p1) -- so the correct spelling reads `v(p0) * v(p0 + p1)`.
+// The naive reading `v(p0) * v(p1)` is silently WRONG: it is right only on
+// the first row (where p0 = 0 makes offset == canonical) and quietly computes
+// v(i) * v(j - i) everywhere else. Both are computed here so the trap is
+// pinned, not just described.
+//
+// v = [2, 3, 5], so the canonical Gram triangle (i <= j) is
+//   (0,0)=4  (0,1)=6  (0,2)=10
+//            (1,1)=9  (1,2)=15
+//                     (2,2)=25
+let v = [2.0, 3.0, 5.0]
+let sym = method_for(range<SymIdx<2, 3>>) <@> lambda(p0, p1) -> v(p0) * v(p0 + p1) |> compute
+// EXPECT: sym = [[4, 6, 10], [9, 15], [25]]
+
+// The trap, for contrast: row 1 gets v(1)*v(0) = 6 where 9 belongs, and
+// row 2 gets v(2)*v(0) = 10 where 25 belongs.
+let naive = method_for(range<SymIdx<2, 3>>) <@> lambda(p0, p1) -> v(p0) * v(p1) |> compute
+// EXPECT: naive = [[4, 6, 10], [6, 9], [10]]
+
+// The result is a genuine SYMMETRIC array, not merely a triangle of numbers:
+// reads at mirrored coordinates agree, and the below-diagonal read (2, 0)
+// resolves through the packed skeleton to the same stored cell as (0, 2).
+let g02 = sym(0, 2)
+let g20 = sym(2, 0)
+// EXPECT: g02 = 10
+// EXPECT: g20 = 10
+let g12 = sym(1, 2)
+let g21 = sym(2, 1)
+// EXPECT: g12 = 15
+// EXPECT: g21 = 15
+// The diagonal is stored (SymIdx is the inclusive i <= j form, cf.
+// index-types/051), so it reads back directly.
+let g11 = sym(1, 1)
+// EXPECT: g11 = 9
