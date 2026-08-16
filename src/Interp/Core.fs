@@ -409,6 +409,28 @@ let private isDenseCopyableArray (ba: BladeArray) : bool =
         && ix.IxKind <> IxKCompoundDynamic
         && ix.IxKind <> IxKSparse)
 
+/// An EnumIdx admissible value -> the interpreter Value used to compare against a
+/// key array's element (Case-2 EnumIdx reverse lookup).
+let private enumValueToValue (ev: EnumValue) : Value =
+    match ev with
+    | EVInt n -> VInt n
+    | EVString s -> VString s
+
+/// The IRTGroupKeys type of a function-body `let gk = group_keys(...)`, read
+/// back off the body's typed references to the grouping. The value twin of
+/// CodeGen.groupKeysTypeInScope, and load-bearing for the same reason: that
+/// type picks the bucketing regime, and the regimes answer different questions
+/// (dynamic discovery buckets in first-occurrence order over the observed keys;
+/// positional bucketing uses the declared Idx<N>, empty groups included). Both
+/// lanes must read it from the same place or the diff gate is comparing two
+/// different groupings. `None` -> dynamic, matching the C++ fallback.
+let private groupKeysTypeInScope (id: IRId) (scope: IRExpr) : IRType option =
+    let rec scan (e: IRExpr) : IRType option =
+        match e with
+        | IRVar (vid, (IRTGroupKeys _ as ty)) when vid = id -> Some ty
+        | ExprShape (children, _) -> children |> List.tryPick scan
+    scan scope
+
 // The evaluator.
 
 /// Evaluate an IR expression to a runtime value. One step charged per entry;
@@ -475,7 +497,17 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRLet (id, value, body) ->
         // SSA ids are globally unique, so binding into the current frame (rather
         // than a child scope) is safe and matches the flat env model.
-        let v = evalExpr st env value
+        let v =
+            match value with
+            // `let gk = group_keys(k)` inside a function body: intercepted here
+            // for the same reason evalBinding intercepts the module-level form
+            // -- the bucketing regime lives in the IRTGroupKeys type, not in the
+            // node -- with the type recovered from this let's SCOPE rather than
+            // from a binding record it does not have.
+            | IRGroupKeys keys ->
+                let ty = groupKeysTypeInScope id body |> Option.defaultValue IRTUnit
+                buildGroupKeysValue st env keys ty
+            | _ -> evalExpr st env value
         // Copy semantics for assignable array lets initialized from an
         // existing array (`let mut a = Z` -- st.MutableArrayLets): deep-copy
         // the store so mutations through `a` never corrupt `Z`, mirroring
@@ -748,6 +780,15 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRGroupBy _ ->
         evalArrayNode st env expr
 
+    // ---- group_keys deliberately has NO arm here. Both of its legal positions
+    //      are intercepted one layer up -- evalBinding for a module binding, the
+    //      IRLet arm above for a function-body let -- because both need the
+    //      IRTGroupKeys type the bare node does not carry. A group_keys reaching
+    //      expression position is an indirection BL3017 should already have
+    //      refused, and the loud InterpUnsupported is the right answer for it:
+    //      guessing a regime here would answer a different question than the
+    //      compiled lane, silently.
+
     // ---- group_bucket(gk) -> a dense rank-1 Int64 array over the source index
     //      space. Same backend route as group_by: it reads the VGroupKeys.
     | IRGroupBucket _ ->
@@ -1010,6 +1051,37 @@ and evalAssign (st: InterpState) (env: Env) (target: IRExpr) (v: Value) : unit =
          | _ -> raise (InterpUnsupported "IRAssign to non-array index target"))
     | LVOther _ -> raise (InterpUnsupported "IRAssign to non-lvalue target")
 
+/// Build the CSR VGroupKeys for `group_keys(keys...)`. `ty` picks the bucketing
+/// regime -- Case 1 positional (Idx<N>: bucket = key value), Case 2 EnumIdx
+/// (bucket = enum-list position), Case 3 dynamic (first-appearance); multi-key:
+/// dynamic tuple-hash. Mirrors genGroupKeysBinding's dispatch.
+///
+/// Only a top-level BINDING carries that type in a record, so evalBinding reads
+/// it off `b.Type`; a function-body let has no record and its caller (evalExpr's
+/// IRLet arm) recovers the type from the scope instead -- groupKeysTypeInScope,
+/// the twin of what genFuncBodyScoped's group_keys arm does. Either way an
+/// IRTUnit (nothing found) lands on dynamic discovery, which is also what every
+/// un-annotated key array gets.
+and private buildGroupKeysValue (st: InterpState) (env: Env) (keys: IRExpr list) (ty: IRType) : Value =
+    let keyArrs =
+        keys |> List.map (fun k ->
+            match forceValue st env (evalExpr st env k) with
+            | VArray a -> a
+            | _ -> raise (InterpUnsupported "group_keys: key operand is not an array"))
+    let gkCase =
+        if List.length keys > 1 then ArrayOps.GKDynamic
+        else
+            match ty with
+            | IRTGroupKeys (outerIdx, _, enumValuesOpt) ->
+                let ngroupsOpt =
+                    match outerIdx.Extent with IRLit (IRLitInt n) -> Some (int n) | _ -> None
+                match ngroupsOpt, enumValuesOpt with
+                | None, _ -> ArrayOps.GKDynamic
+                | Some ng, None -> ArrayOps.GKPositional ng
+                | Some ng, Some values -> ArrayOps.GKEnum (values |> List.map enumValueToValue |> Array.ofList)
+            | _ -> ArrayOps.GKDynamic
+    VGroupKeys (ArrayOps.buildGroupKeys keyArrs gkCase)
+
 // Defer-aware top-level binding driver (formalism 4).
 
 /// Runtime guard for COMPUTED rows in an array-literal binding -- the value-space
@@ -1061,38 +1133,6 @@ let private checkArrayLitRowExtents (varName: string) (elements: IRExpr list) (a
              | _ -> ())
         | _ -> ()   // full-rank scalar leaf: no row to guard
     walk [] (IRArrayLit (elements, arrType))
-
-/// An EnumIdx admissible value -> the interpreter Value used to compare against a
-/// key array's element (Case-2 EnumIdx reverse lookup).
-let private enumValueToValue (ev: EnumValue) : Value =
-    match ev with
-    | EVInt n -> VInt n
-    | EVString s -> VString s
-
-/// Build the CSR VGroupKeys for a `let gk = group_keys(keys...)` binding. The
-/// binding's IRTGroupKeys type picks the bucketing regime -- Case 1 positional
-/// (Idx<N>: bucket = key value), Case 2 EnumIdx (bucket = enum-list position),
-/// Case 3 dynamic (first-appearance); multi-key: dynamic tuple-hash. Mirrors
-/// genGroupKeysBinding's dispatch (CodeGen.fs:7550-7692).
-let private buildGroupKeysValue (st: InterpState) (env: Env) (keys: IRExpr list) (ty: IRType) : Value =
-    let keyArrs =
-        keys |> List.map (fun k ->
-            match forceValue st env (evalExpr st env k) with
-            | VArray a -> a
-            | _ -> raise (InterpUnsupported "group_keys: key operand is not an array"))
-    let gkCase =
-        if List.length keys > 1 then ArrayOps.GKDynamic
-        else
-            match ty with
-            | IRTGroupKeys (outerIdx, _, enumValuesOpt) ->
-                let ngroupsOpt =
-                    match outerIdx.Extent with IRLit (IRLitInt n) -> Some (int n) | _ -> None
-                match ngroupsOpt, enumValuesOpt with
-                | None, _ -> ArrayOps.GKDynamic
-                | Some ng, None -> ArrayOps.GKPositional ng
-                | Some ng, Some values -> ArrayOps.GKEnum (values |> List.map enumValueToValue |> Array.ofList)
-            | _ -> ArrayOps.GKDynamic
-    VGroupKeys (ArrayOps.buildGroupKeys keyArrs gkCase)
 
 /// Evaluate one top-level binding into a runtime value, reproducing
 /// CodeGen.genBinding's defer-vs-materialize-vs-loop-object decision so the

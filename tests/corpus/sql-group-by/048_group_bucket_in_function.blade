@@ -1,0 +1,125 @@
+// TEST: Group Bucket In Function Body
+// The two grouping accessors -- `group_bucket(gk)` (040) and `extents(gk)`
+// (044) -- inside a FUNCTION body rather than at module scope.
+//
+// Both are statement-shaped: an extents table, an allocation, and one pass over
+// the CSR tables gk built. Module scope had the arm; a function body did not,
+// so the let fell through to inline expression rendering and reported BL7001
+// ("no rule for IRGroupBucket in expression position"). `|> compute` did not
+// route around it -- there is nothing deferred to force, the emitter simply had
+// no function-body seat.
+//
+// The in-function spelling is the one that matters for a loss whose KEYS are a
+// parameter: the grouping is derived per call, so it cannot be hoisted to
+// module scope (and a gk may not cross a call boundary in either direction --
+// 037, 039).
+//
+// Deliberately PEEL-FREE, so both lanes evaluate it (the interpreter's ragged
+// apply is M2.7); 049 carries the same accessors beside a group_by.
+
+type Row = Idx<6>
+
+// ---- group_bucket as a body let, over parameter keys.
+function bucket_of(k: Array<Int64 like Row>) -> Array<Int64 like Row> = {
+    let gk = group_keys(k)
+    let b = group_bucket(gk)
+    b
+}
+
+// ---- Both accessors in RETURN position, where the accessor IS the answer.
+function bucket_ret(k: Array<Int64 like Row>) -> Array<Int64 like Row> = {
+    let gk = group_keys(k)
+    group_bucket(gk)
+}
+
+function sizes_ret(k: Array<Int64 like Row>) = {
+    let gk = group_keys(k)
+    extents(gk)
+}
+
+let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 7]
+let b = bucket_of(keys)
+// Buckets in first-occurrence order (dynamic discovery): 7 -> 0, 3 -> 1, 9 -> 2.
+// EXPECT: b = [0, 1, 0, 2, 1, 0]
+let b2 = bucket_ret(keys)
+// EXPECT: b2 = [0, 1, 0, 2, 1, 0]
+let s = sizes_ret(keys)
+// EXPECT: s = [3, 2, 1]
+
+// A body-local grouping is per CALL: the same function over different keys
+// discovers different buckets, which is exactly what module scope cannot do.
+let other: Array<Int64 like Row> = [5, 5, 5, 4, 4, 5]
+let ob = bucket_of(other)
+// EXPECT: ob = [0, 0, 0, 1, 1, 0]
+let os = sizes_ret(other)
+// EXPECT: os = [4, 2]
+
+// ---- A negative key drops its row from the grouping, and the accessors say so
+// consistently from inside a body exactly as they do outside: -1 in the bucket
+// map, counted in no group's size.
+let dkeys: Array<Int64 like Row> = [0, -1, 0, 1, -1, 1]
+let db = bucket_of(dkeys)
+// EXPECT: db = [0, -1, 0, 1, -1, 1]
+let ds = sizes_ret(dkeys)
+// EXPECT: ds = [2, 2]
+let dtotal = reduce(ds, (+))
+// EXPECT: dtotal = 4
+
+// ---- Both accessors in ONE body, consumed there: sizes indexed through the
+// bucket map is the per-row group size, the broadcast an ungrouped per-group
+// aggregate needs (and the shape 2.17a differentiates through).
+function own_group_size(k: Array<Int64 like Row>) -> Array<Int64 like Row> = {
+    let gk = group_keys(k)
+    let b = group_bucket(gk)
+    let n = extents(gk)
+    let sz = method_for(b) <@> lambda(bb) -> n(bb) |> compute
+    sz
+}
+let per_row = own_group_size(keys)
+// EXPECT: per_row = [3, 2, 3, 1, 2, 3]
+
+// ---- SCOPE DOES NOT CHANGE THE ANSWER. The bucketing regime lives in the
+// grouping's type, and the three regimes ask different questions: positional
+// (Idx<N>) buckets BY KEY VALUE over the declared group axis, empty groups
+// included, where dynamic discovery numbers only the keys it observes, in
+// first-occurrence order. A function body has no binding record to read that
+// type off, so the emitters recover it from the body's typed uses of `gk`
+// instead of assuming dynamic -- otherwise identical source text would answer
+// differently on the two sides of a function boundary, silently.
+type RegionIdx = Idx<3>
+type StationIdx = Idx<4>
+let region: Array<RegionIdx like StationIdx> = [2, 0, 2, 0]
+
+let mgk = group_keys(region)
+let mod_b = group_bucket(mgk)
+let mod_s = extents(mgk)
+// EXPECT: mod_b = [2, 0, 2, 0]
+// EXPECT: mod_s = [2, 0, 2]
+
+function pos_bucket(k: Array<RegionIdx like StationIdx>) = {
+    let gk = group_keys(k)
+    group_bucket(gk)
+}
+function pos_sizes(k: Array<RegionIdx like StationIdx>) = {
+    let gk = group_keys(k)
+    extents(gk)
+}
+let fn_b = pos_bucket(region)
+let fn_s = pos_sizes(region)
+// EXPECT: fn_b = [2, 0, 2, 0]
+// EXPECT: fn_s = [2, 0, 2]
+
+// EnumIdx keys the same way: bucket is the value's POSITION in the declared
+// list, and a value that never appears keeps its empty bucket -- inside a
+// function body exactly as outside one.
+type Site = EnumIdx<["x", "y", "z"]>
+let sites: Array<Site like Idx<4>> = ["y", "x", "y", "y"]
+let egk = group_keys(sites)
+let mod_e = extents(egk)
+// EXPECT: mod_e = [1, 3, 0]
+function enum_sizes(k: Array<Site like Idx<4>>) = {
+    let gk = group_keys(k)
+    extents(gk)
+}
+let fn_e = enum_sizes(sites)
+// EXPECT: fn_e = [1, 3, 0]

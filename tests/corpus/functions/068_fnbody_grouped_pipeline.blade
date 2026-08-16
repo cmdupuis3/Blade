@@ -4,9 +4,10 @@
 // helpers / transpose -- all inside a NAMED function's body. Every stage
 // here was impossible before the kernel-body materialization work:
 //   * group_keys/group_by as function-body lets (they only had module-level
-//     binding emitters; the function-body arm reconstructs the dynamic
-//     group-keys form and threads GroupedArrays so the grouped-zip peel
-//     still recognizes the co-iteration),
+//     binding emitters; the function-body arm recovers the group-keys type
+//     from the body's typed uses -- these float keys land on dynamic
+//     discovery either way -- and threads GroupedArrays so the grouped-zip
+//     peel still recognizes the co-iteration),
 //   * the grid sized on its FIRST ROW at runtime (a length-agnostic generic
 //     callee's row length is not in the static type; the minted extent
 //     names carry the index id so shape monomorphization cannot bake two

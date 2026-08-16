@@ -18371,6 +18371,31 @@ let private nestedTupleReturn (retTy: IRType) (flatName: string) (children: Map<
         fst (build retTy leaves)
     | _ -> flatName
 
+/// The IRTGroupKeys type of a function-body `let gk = group_keys(...)`, which
+/// picks the bucketing regime (positional / EnumIdx / dynamic).
+///
+/// A module binding carries that type in its record; a body let is a bare
+/// (id, value) pair and the IRGroupKeys node itself carries nothing, so the
+/// regime has to come from somewhere else. It comes from the USES: every legal
+/// mention of a grouping is the bare `gk` name (BL3017 refuses every
+/// indirection), and Lowering stamps those IRVar references with the type the
+/// typechecker inferred from the key array's element type -- the same
+/// inference, in the same module env, that a module-scope spelling gets.
+///
+/// Reading it back matters for correctness, not speed: dynamic discovery
+/// answers a DIFFERENT question than positional bucketing (buckets in
+/// first-occurrence order over the observed keys, versus bucket = key value
+/// over the declared Idx<N>, empty groups included), so guessing dynamic would
+/// make `group_bucket`/`extents` inside a function disagree with the identical
+/// source text outside it. `None` (no typed use, or an unresolved extent) keeps
+/// the dynamic form, which is what every un-annotated key array gets anyway.
+let private groupKeysTypeInScope (id: IRId) (scope: IRExpr list) : IRType option =
+    let rec scan (e: IRExpr) : IRType option =
+        match e with
+        | IRVar (vid, (IRTGroupKeys _ as ty)) when vid = id -> Some ty
+        | ExprShape (children, _) -> children |> List.tryPick scan
+    scope |> List.tryPick scan
+
 /// Function-body emission proper: the per-let statement fold plus the return-arm
 /// dispatch, over an already-unrolled let chain. Split out of genFuncBody so the
 /// deterministic-deallocation frame can be pushed and popped around it inside a
@@ -18739,22 +18764,26 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             //    BINDING's IRTGroupKeys type, which only a typechecked module
             //    binding record carries (a body let is a bare (id, value)
             //    pair, and inferExprType says IRTUnit for the opaque node).
-            //    Synthesize the DYNAMIC-DISCOVERY form: semantically valid
-            //    for every key array, merely forgoing the positional-bucket
-            //    (`Idx<N>`) optimization inside function bodies.
+            //    groupKeysTypeInScope reads it back off this body's typed
+            //    references to the grouping, so an annotated key array picks
+            //    the SAME regime it would at module scope; only a grouping
+            //    with no typed use left falls back to dynamic discovery.
             //  - genGroupByBinding registers name -> gk in GroupedArrays via
             //    its returned ctx; capture it into currentGrouped so the
             //    grouped-zip peel sees it.
             let tempType =
                 match value with
                 | IRGroupKeys _ ->
-                    let dynIdx = {
-                        Id = 0; Rank = 1
-                        Extent = IRParam ("__fnbody_group_n", 0, IRTNat None)
-                        Symmetry = SymNone; Tag = None; IxKind = IxKPlain
-                        Kind = SDimension; Dependencies = []
-                    }
-                    IRTGroupKeys (dynIdx, dynIdx, None)
+                    match groupKeysTypeInScope id ((lets |> List.map snd) @ [retExpr]) with
+                    | Some ty -> ty
+                    | None ->
+                        let dynIdx = {
+                            Id = 0; Rank = 1
+                            Extent = IRParam ("__fnbody_group_n", 0, IRTNat None)
+                            Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                            Kind = SDimension; Dependencies = []
+                        }
+                        IRTGroupKeys (dynIdx, dynIdx, None)
                 | _ -> inferExprType value
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
@@ -18763,6 +18792,30 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             }
             let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
             currentGrouped <- ctxAfter.GroupedArrays
+            currentTupleChildren <- ctxAfter.TupleChildren
+            currentNames <- Map.add id varName currentNames
+            code
+        | IRGroupBucket _ | IRGroupSizes _ ->
+            // The two GROUPING ACCESSORS as function-body lets, the companions of
+            // the arm above: a body that builds its own `group_keys` should be
+            // able to read the grouping back out in the same scope. Both are
+            // statement-shaped (extents table + allocate + one pass over the CSR
+            // tables), so exprToCpp has only its unhandled-node sentinel for
+            // them -- the BL7001 an in-function `group_bucket(gk)` used to raise.
+            //
+            // Unlike group_keys, neither emitter consults the BINDING's type
+            // (they answer a plain rank-1 Int64 array whose length is a `<gk>__`
+            // local), so `inferExprType` suffices and no type has to be
+            // reconstructed. What they DO need is the gk name, and that resolves
+            // through currentNames exactly as at module level: the grouping's own
+            // let precedes this one and registered `__v<id>`, off which the
+            // `__ngroups`/`__offsets`/`__perm`/`__nsrc` suffixes hang.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = false; IsMutable = true
+            }
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
             currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
@@ -18970,6 +19023,23 @@ or return a scalar and materialize at the call site"
                 | _ -> []
             let retName = if heapWrap.IsEmpty then retVarName else retVarName + "_hw"
             stmts @ trCode @ heapWrap @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retName]
+        | IRGroupBucket _ | IRGroupSizes _ ->
+            // The same two accessors in RETURN position -- `let gk = group_keys(k)`
+            // then a bare `group_bucket(gk)` as the body's tail, which is the
+            // natural spelling when the accessor IS the function's answer. Bind
+            // to a __retN through genBinding (the statement form) and return the
+            // name; exprToCpp would emit its sentinel here just as it did for the
+            // let form. The allocated pool leaves with the value, so it is spared
+            // from the scope frees by name -- same shape as the transpose arm.
+            let retVarName = sprintf "__ret%d" (builder.FreshId())
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            let tempBinding = {
+                Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
+                Value = retExpr; IsConst = false; IsMutable = true
+            }
+            let (accCode, _) = genBinding bodyCtx tempBinding builder
+            suppressAllocName retVarName
+            stmts @ accCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
         | IRArrayLit (elements, arrType) ->
             // Array literal as return value: lift to a local binding, then
             // return. `genArrayLiteral` is the statement-form generator for
