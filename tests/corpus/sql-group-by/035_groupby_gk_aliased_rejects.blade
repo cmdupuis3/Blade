@@ -1,0 +1,27 @@
+// TEST: GroupBy GroupKeys Aliased (rejects)
+// ERROR: BL3017
+// ERROR-CONTAINS: as another binding's value
+// A `group_keys` result is NAME-KEYED, not a value. Codegen puts the whole
+// CSR structure in locals suffixed off the BINDING name -- `gk__ngroups`,
+// `gk__offsets`, `gk__perm` -- and hands the binding itself an opaque
+// sentinel, so `group_by` recovers the grouping only by re-deriving those
+// suffixed symbols from the name its grouping argument resolves to.
+//
+// `let gk2 = gk` therefore had nothing to bind: the alias carried the
+// sentinel but no state, and the emitted C++ named `gk2__ngroups` /
+// `gk2__offsets` / `gk2__perm`, none of which were ever declared. The program
+// typechecked, lowered, emitted, and died in g++.
+//
+// The invariant was already ASSUMED elsewhere -- the grouped co-iteration
+// check (026) decides "same keys" by comparing the gk operands' binding
+// NAMES, which is only meaningful if a gk always IS its binding name. This is
+// the same rule, enforced at its source instead.
+let region = [0, 1, 0, 0, 1]
+let v = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let gk2 = gk
+let gv = group_by(v, gk2)
+let s = method_for(gv) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: BL3017 -- the alias `gk2` cannot carry the grouping. Pass the
+// original `gk` to `group_by`; one binding may feed any number of group_by
+// calls, which is exactly how grouped co-iteration is spelled.

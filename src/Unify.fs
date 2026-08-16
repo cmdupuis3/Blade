@@ -223,6 +223,25 @@ type TypeError =
     | FoldOmpNeedsLicense of kernelDesc: string
     | PlaceholderNeedsAllBound of got: int * total: int
     | GroupKeysRank1
+    /// BL3017: a `group_keys` result reached a position other than its own
+    /// `let` RHS or a `group_by` grouping slot. The value is NAME-KEYED, not
+    /// a value: `genGroupKeysBinding` puts the whole CSR structure in C++
+    /// locals suffixed off the BINDING name (`<n>__ngroups`, `<n>__offsets`,
+    /// `<n>__perm`) and hands the binding itself a `void*` sentinel, so
+    /// `genGroupByBinding` can only find the state under the exact name the
+    /// keys were bound to. Any indirection -- an alias, a tuple, a parameter
+    /// -- used to emit C++ referencing suffixed symbols that were never
+    /// declared. `what` names the offending expression, `pos` the position.
+    /// TypeCheck's same-gk co-iteration check already ASSUMES this invariant
+    /// (it compares gk operands by binding NAME); this enforces it.
+    | GroupKeysEscapes of what: string * pos: string
+    // The grouping ACCESSORS (`group_bucket`, `extents`) take a gk by NAME, for
+    // the same reason BL3017 exists -- the state is reachable only through the
+    // binding. These two are the accessor-side argument checks, raised during
+    // inference (the accessor cannot even be TYPED without a resolved grouping);
+    // BL3017's post-zonk sweep is what catches a gk escaping anywhere else.
+    | GroupingNeedsName of intrinsic: string * got: string
+    | GroupBucketNotGrouping of got: string
     | CumulantOrderPositive of order: int
     | CumulantOrderExceeds of order: int * carried: int
     | CumulantNeedsDist of got: string

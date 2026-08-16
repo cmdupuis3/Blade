@@ -1,0 +1,19 @@
+// TEST: Group Bucket Inline Argument (rejects)
+// ERROR: BL3007
+// ERROR-CONTAINS: requires the BARE NAME of a `group_keys(...)` binding
+// `group_bucket` takes the NAME of a group_keys binding, never an expression
+// that produces one.
+//
+// A grouping is not a first-class value. Its entire runtime state lives in C++
+// locals named after the binding -- `<gk>__ngroups`, `<gk>__offsets`,
+// `<gk>__perm` (the ABI in genGroupKeysBinding) -- and same-gk co-iteration is
+// discharged on expression NAME IDENTITY, not on the type. An inline
+// `group_keys(...)` has no binding name for those suffixes to hang off.
+//
+// Refused at TYPECHECK with an explanation. Left to codegen this would emit C++
+// naming an undeclared symbol, i.e. a raw g++ error for what is a language
+// rule, or worse a silent miscompile.
+let keys = [0, 1, 0, 1]
+let b = group_bucket(group_keys(keys))
+// The diagnostic says what to write instead: bind the keys to a name first,
+// then pass that name to group_bucket.

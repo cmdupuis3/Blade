@@ -1,0 +1,14 @@
+// TEST: Range AntisymIdx Prefix Offsets
+// The antisymmetric half of the convention pinned by 170. AntisymIdx storage
+// is the STRICT simplex (i < j, no stored diagonal), so each level's row is
+// seeded one cell further in; the kernel still receives the raw left-justified
+// loop counters, and the strict step is NOT folded into them either:
+//
+//     canonical[m] = p0 + p1 + ... + pm + m
+//
+// n = 4, so the canonical strict pairs are the C(4,2) = 6 cells
+// (0,1) (0,2) (0,3) (1,2) (1,3) (2,3) -- but the kernel sees
+// (0,0) (0,1) (0,2) (1,0) (1,1) (2,0), printed here as 10*p0 + p1.
+// The last row is empty: at canonical i = 3 there is no j > i.
+let A2 = method_for(range<AntisymIdx<2, 4>>) <@> lambda(p0, p1) -> 10.0 * p0 + 1.0 * p1 |> compute
+// EXPECT: A2 = [[0, 1, 2], [10, 11], [20], []]

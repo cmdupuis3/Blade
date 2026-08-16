@@ -1,0 +1,18 @@
+// TEST: GroupBy GroupKeys Inline (rejects)
+// ERROR: BL3017
+// ERROR-CONTAINS: inline as `group_by`'s grouping argument
+// The other half of the same rule: `group_by` reads the grouping out of
+// locals suffixed off a BINDING name, so an inline `group_keys(...)` has no
+// name to suffix and nothing to read. Two ops, one binding between them.
+//
+// This used to surface as BL7001 ("code generation has no rule for
+// IRGroupKeys in expression position ... this is a gap in the C++ back end,
+// not an error in your program"), which was the wrong diagnosis twice over:
+// it is a rule about the program, and the note invited a bug report for a
+// hole nobody intends to fill.
+let region = [0, 1, 0, 0, 1]
+let v = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gv = group_by(v, group_keys(region))
+let s = method_for(gv) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: BL3017 -- bind the keys to a name first, then hand that name to
+// `group_by`. Every passing test in this directory is spelled that way.

@@ -279,6 +279,8 @@ and TypedExprKind =
     | TExprDisplayStr of data: TypedExpr
     | TExprGroupBy of values: TypedExpr * grouping: TypedExpr
     | TExprGroupKeys of keys: TypedExpr list
+    /// group_bucket(gk): row -> bucket over the grouping's source index space.
+    | TExprGroupBucket of grouping: TypedExpr
     | TExprSort of array: TypedExpr * key: TypedExpr
     | TExprReduce of array: TypedExpr * kernel: TypedExpr * init: TypedExpr option
     | TExprProdSum of args: TypedExpr list  // prodsum(x1..xk): fused sum_t prod_l x_l(t) over rank-1 arrays

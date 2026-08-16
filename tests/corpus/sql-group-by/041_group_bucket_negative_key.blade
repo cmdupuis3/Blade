@@ -1,0 +1,51 @@
+// TEST: Group Bucket Negative Key
+// A negative key drops its row from the grouping entirely (see 028 and
+// docs/features/sql.md, "Negative keys select rows out"). Such a row belongs to
+// no bucket, so `group_bucket` reads -1 there.
+//
+// This falls out of the inversion rather than being a special case: the emitter
+// prefills -1 and then walks the CSR members, and a dropped row is exactly a
+// row the permutation never names. No key rescan, and the same answer for
+// every bucketing regime.
+
+// Rows 1 and 4 key negative. Two groups remain: key 0 -> rows 0,2; key 1 -> rows 3,5.
+type Row = Idx<6>
+let keys: Array<Int64 like Row> = [0, -1, 0, 1, -1, 1]
+let vals: Array<Float64 like Row> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let gk = group_keys(keys)
+let gv = group_by(vals, gk)
+let b = group_bucket(gk)
+// EXPECT: b = [0, -1, 0, 1, -1, 1]
+let sums = method_for(gv) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [40, 100]
+
+// The dropped rows are dropped from the GROUPING, not from the bucket map's
+// index space: `b` still spans every source row, which is what lets it
+// co-iterate with the array that was grouped. Marking the survivors and
+// summing shows the -1 rows carrying no value into any bucket.
+let kept = (method_for(zip(b, vals)) <@> lambda(bb, v) -> if bb >= 0 then v else 0.0) |> compute
+// EXPECT: kept = [10, 0, 30, 40, 0, 60]
+
+// Positional buckets (Idx<N> keys) take the same rule.
+type RegionIdx = Idx<2>
+let pregion: Array<RegionIdx like Row> = [-1, 0, 1, 0, -1, 1]
+let pgk = group_keys(pregion)
+let pb = group_bucket(pgk)
+// EXPECT: pb = [-1, 0, 1, 0, -1, 1]
+
+// The float-key selection idiom: segment width 2.0, and t < 0 keys negative,
+// so those rows select themselves out. seg = [-2, 0, 0, 1, 2, -1].
+let t: Array<Float64 like Row> = [-3.0, 0.5, 1.5, 2.5, 4.5, -1.0]
+let seg = (t <@> lambda(x) -> floor(x / 2.0)) |> compute
+let sgk = group_keys(seg)
+let sb = group_bucket(sgk)
+// EXPECT: sb = [-1, 0, 0, 1, 2, -1]
+
+// EnumIdx keys are EXEMPT from the drop rule -- their admissible values are
+// declared up front, so a negative entry there is a value asked for, not a
+// sentinel. Every row buckets, and no -1 appears.
+type Level = EnumIdx<[-1, 3]>
+let levels: Array<Level like Idx<4>> = [-1, 3, -1, 3]
+let lgk = group_keys(levels)
+let lb = group_bucket(lgk)
+// EXPECT: lb = [0, 1, 0, 1]

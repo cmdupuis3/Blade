@@ -1,0 +1,72 @@
+// TEST: Group Bucket Roundtrip
+// `group_bucket(gk)` exposes the grouping's row -> bucket map as ordinary data:
+// for each row of the grouped SOURCE, which bucket it landed in. It is the
+// inverse of the CSR (perm, offsets) pair that group_keys builds and that was
+// previously reachable only from inside a ragged peel.
+//
+// That inverse is what turns a per-group aggregation back into a dense gather,
+// which is the shape reverse-mode AD needs through group_by
+// (docs/plan-ad-combinators.md 2.17a); this test pins the gather itself.
+
+// ---- The round trip: the grouped array read at (bucket(i), rank(i)) gives
+// back the original value at row i. This is 2.17a's ungroup -- an ordinary
+// gather, no new primitive.
+type Row = Idx<6>
+let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 7]
+let vals: Array<Float64 like Row> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let gk = group_keys(keys)
+let gv = group_by(vals, gk)
+let b = group_bucket(gk)
+// Keys 7/3/9 are sparse, so buckets are assigned in FIRST-OCCURRENCE order
+// (Case 3, dynamic discovery) -- 7 -> 0, 3 -> 1, 9 -> 2 -- not by key value.
+// EXPECT: b = [0, 1, 0, 2, 1, 0]
+//
+// `rank` is the within-group position. It has no surface accessor (bucket is
+// the one this change adds), so it is written out here; group_bucket supplies
+// the half that cannot be read off the source.
+let ranks: Array<Int64 like Row> = [0, 0, 1, 0, 1, 2]
+let recon = method_for(zip(b, ranks)) <@> lambda(bb, kk) -> gv(bb, kk) |> compute
+// EXPECT: recon = [10, 20, 30, 40, 50, 60]
+
+// Cross-check from the other side: grouping the ROW INDICES by the same gk
+// gives the permutation as data, and the per-group sums confirm which rows
+// each bucket claims. Group 0 = rows 0,2,5; group 1 = rows 1,4; group 2 = row 3.
+let rows: Array<Int64 like Row> = [0, 1, 2, 3, 4, 5]
+let gr = group_by(rows, gk)
+let rowsums = method_for(gr) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: rowsums = [7, 5, 3]
+let valsums = method_for(gv) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: valsums = [100, 70, 40]
+
+// ---- The bucket map answers for every bucketing regime, because it inverts
+// the CSR tables rather than re-reading the keys.
+
+// Case 1 -- positional buckets (Idx<N> keys): bucket IS the key value.
+type RegionIdx = Idx<3>
+type StationIdx = Idx<6>
+let region: Array<RegionIdx like StationIdx> = [0, 1, 0, 2, 1, 0]
+let pgk = group_keys(region)
+let pb = group_bucket(pgk)
+// EXPECT: pb = [0, 1, 0, 2, 1, 0]
+
+// Case 2 -- EnumIdx: bucket is the key's POSITION in the declared value list,
+// so "y" (position 1) buckets to 1 regardless of appearing first.
+type Site = EnumIdx<["x", "y"]>
+let sites: Array<Site like Idx<5>> = ["y", "x", "y", "y", "x"]
+let egk = group_keys(sites)
+let eb = group_bucket(egk)
+// EXPECT: eb = [1, 0, 1, 1, 0]
+
+// String keys: dynamic discovery, first-occurrence order.
+let names = ["a", "b", "a", "c", "b"]
+let ngk = group_keys(names)
+let nb = group_bucket(ngk)
+// EXPECT: nb = [0, 1, 0, 2, 1]
+
+// Compound (multi-key): each distinct TUPLE is its own bucket, first-occurrence
+// order. (0,5) -> 0; (1,5) -> 1; (0,6) -> 2; (1,5) repeats -> 1.
+let k1 = [0, 1, 0, 1]
+let k2 = [5, 5, 6, 5]
+let cgk = group_keys(k1, k2)
+let cb = group_bucket(cgk)
+// EXPECT: cb = [0, 1, 2, 1]

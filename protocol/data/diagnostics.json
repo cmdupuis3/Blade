@@ -292,6 +292,21 @@
         "docs/formalism.md"
       ]
     },
+    "BL3017": {
+      "title": "group_keys result escapes its binding",
+      "explanation": "A `group_keys` result is NAME-KEYED, not a value. Codegen stores the whole CSR grouping (offsets + permutation) in locals suffixed off the BINDING name -- `gk__ngroups`, `gk__offsets`, `gk__perm` -- and gives the binding itself only an opaque sentinel, so `group_by` recovers the grouping by re-deriving those symbols from the name its grouping argument resolves to. That makes exactly two positions legal: the `let` that names the call, and a `group_by` grouping slot written as that name. Aliasing it, putting it in a tuple or struct, passing it as an argument, returning it, or writing the call inline all leave the grouping behind, and used to reach g++ as undeclared `gk2__offsets`-style symbols.",
+      "fix": "Bind the keys once (`let gk = group_keys(...)`) and hand that same `gk` straight to each `group_by` -- one binding may feed any number of them, which is how grouped co-iteration is spelled. A function that needs a grouping should take the KEY ARRAY and do both halves itself; results travel freely once `group_by` has produced an ordinary array.",
+      "examples": [
+        "tests/corpus/sql-group-by/035_groupby_gk_aliased_rejects.blade",
+        "tests/corpus/sql-group-by/036_groupby_gk_tupled_rejects.blade",
+        "tests/corpus/sql-group-by/037_groupby_gk_as_parameter_rejects.blade",
+        "tests/corpus/sql-group-by/038_groupby_gk_inline_rejects.blade",
+        "tests/corpus/sql-group-by/039_groupby_gk_returned_rejects.blade"
+      ],
+      "docs": [
+        "docs/features/sql.md"
+      ]
+    },
     "BL3999": {
       "title": "type error",
       "explanation": "The type band's catch-all, carried by every checker error that has no more specific code of its own. A large and deliberately heterogeneous set: the message is the diagnosis, not the code.",
@@ -507,6 +522,17 @@
       ],
       "docs": [
         "docs/features.md"
+      ]
+    },
+    "BL4017": {
+      "title": "symmetry clause licenses nothing here",
+      "explanation": "A declared `comm`/`anticomm` group that is provably inert at this apply, because the commuting slots are filled by virtual `range<...>` operands. Compact storage and triangular iteration key on an IDENTITY GROUP -- the SAME array occupying those slots -- and a range operand never materializes, so no two of them can ever be the same array and no identity group exists to key on. The clause is dropped: storage stays dense and iteration stays rectangular, emitting C++ identical to the same kernel with no `where` clause. Neither BL4013 (nothing is disproved) nor BL4016 (nothing unsound is licensed) -- the program is correct, just not the one that was asked for, so this is a warning. Narrower than 'comm without an identity group': `comm` over two distinct REAL arrays stays silent, since a real array can be its own identity partner at another call site.",
+      "fix": "Declare the symmetry in the INDEX TYPE instead -- `method_for(range<SymIdx<r, N>>)` (or `AntisymIdx` for `anticomm`) allocates the triangular pool and visits only canonical cells. If the operands were meant to be a real array in both slots, pass that array twice. If dense really is what you want, drop the clause.",
+      "examples": [
+        "tests/corpus/symmetry/037_comm_over_range_operands_warns.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
       ]
     },
     "BL5000": {

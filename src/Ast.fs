@@ -476,6 +476,12 @@ and ExprKind =
     | ExprContains of array: Expr * value: Expr  // contains(A, x) - is x present in A
     | ExprGroupBy of values: Expr * grouping: Expr  // group_by(vals, gk) - apply grouping to values
     | ExprGroupKeys of keys: Expr list             // group_keys(keys1, keys2, ...) - build CSR grouping structure (compound if >1 key)
+    // group_bucket(gk): the grouping's row -> bucket map, over the SOURCE index
+    // space; -1 for rows a negative key dropped. The inverse of the CSR
+    // perm/offsets pair, which is otherwise reachable only from inside a peel.
+    // The argument must be a bare `gk` NAME (a grouping is not a first-class
+    // value -- see inferGroupBucket).
+    | ExprGroupBucket of grouping: Expr
     | ExprSort of array: Expr * key: Expr          // sort(A, key) - sort array by key function (stable)
     // reduce(A, op[, init][, axes = n]) - folds the innermost n axes RIGHT-TO-LEFT,
     // n = 1 by default: a rank-k operand yields a rank-(k-n) result, and n = rank

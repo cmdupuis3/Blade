@@ -1,0 +1,59 @@
+// TEST: Group Extents
+// `extents(gk)` gives the per-group SIZES as an array over the group axis.
+//
+// This is the answer `extents` on a grouped ARRAY cannot give. A grouping is
+// the ragged rank-2 shape (ngroups x ragged), and its inner extent is not a
+// scalar but a vector -- one length per group -- so `extents(grouped)` is
+// refused ("no scalar answer for the ... ragged dimensions") and points at the
+// lengths array. This is that lengths array.
+//
+// Taking it from the GROUPING is what makes it free: sizes are
+// offsets[g+1] - offsets[g], so no values are ever gathered. A count-only query
+// stops paying for a copy of the data it ignores.
+type Row = Idx<6>
+let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 7]
+let vals: Array<Float64 like Row> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let gk = group_keys(keys)
+let sizes = extents(gk)
+// Buckets in first-occurrence order: 7 -> 0 (rows 0,2,5), 3 -> 1 (rows 1,4),
+// 9 -> 2 (row 3).
+// EXPECT: sizes = [3, 2, 1]
+
+// It is the same number the peel spelling computes, because the peel builds
+// each row's length from the same offsets difference.
+let g = group_by(vals, gk)
+let peeled = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
+// EXPECT: peeled = [3, 2, 1]
+
+// Sizes live on the group axis, so they line up with any per-group aggregate
+// over the same grouping -- here turning a sum into a mean without a second
+// traversal.
+let sums = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [100, 70, 40]
+let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / n) |> compute
+// EXPECT: means = [33.3333333333333, 35, 40]
+
+// Rows a negative key dropped belong to no group, so they are counted nowhere:
+// the totals fall short of the source length by exactly the dropped rows.
+let dkeys: Array<Int64 like Row> = [0, -1, 0, 1, -1, 1]
+let dgk = group_keys(dkeys)
+let dsizes = extents(dgk)
+// EXPECT: dsizes = [2, 2]
+let dtotal = reduce(dsizes, (+))
+// EXPECT: dtotal = 4
+
+// Every bucketing regime answers, since this reads the CSR tables rather than
+// the keys. EnumIdx: one bucket per declared value, in list order, and an
+// unused value keeps its (empty) bucket.
+type Site = EnumIdx<["x", "y", "z"]>
+let sites: Array<Site like Idx<5>> = ["y", "x", "y", "y", "x"]
+let egk = group_keys(sites)
+let esizes = extents(egk)
+// EXPECT: esizes = [2, 3, 0]
+
+// Compound (multi-key): one bucket per distinct tuple.
+let k1 = [0, 1, 0, 1]
+let k2 = [5, 5, 6, 5]
+let cgk = group_keys(k1, k2)
+let csizes = extents(cgk)
+// EXPECT: csizes = [1, 2, 1]

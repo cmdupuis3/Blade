@@ -124,6 +124,7 @@ and Keyword =
     | KwContains
     | KwGroupBy
     | KwGroupKeys
+    | KwGroupBucket
     | KwSort
     | KwReduce
     | KwConj
@@ -241,6 +242,7 @@ let keywordEntries : (string * Keyword) list =
       "contains", KwContains
       "group_by", KwGroupBy
       "group_keys", KwGroupKeys
+      "group_bucket", KwGroupBucket
       "sort", KwSort
       "reduce", KwReduce
       "conj", KwConj

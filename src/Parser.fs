@@ -1142,11 +1142,17 @@ and buildTypeApp (name: string) (args: TypeArg list) (line: int) (col: int) (rem
 ///   - `Idx<n>`: the trivial base, lowering to exactly what legacy
 ///     `SymIdx<k, n>` produces.
 /// Anything else -- in particular a bare NAME -- stays on the legacy int
-/// reading permanently: `SymIdx<2, N>` always means "extent N", never "the
-/// index-type alias N", so existing programs cannot change meaning. A named
-/// alias base (`type S = IrrepsIdx<spec>` then `SymIdx<2, S>`) is therefore
-/// NOT supported -- write `IrrepsIdx<spec>` inline, or alias the whole thing
-/// (`type S = SymIdx<2, IrrepsIdx<spec>>`).
+/// reading permanently HERE: `SymIdx<2, N>` parses as "extent N", so existing
+/// programs cannot change meaning at the grammar.
+///
+/// A named alias base (`type S = Idx<n>` then `SymIdx<2, S>`) is resolved one
+/// layer down instead, by `TypeCheck.symPowerAliasBase`, and only as a
+/// FALLBACK once the extent reading has provably failed -- the name resolves
+/// to no value and does name an index type. Keeping that decision out of the
+/// parser is what makes the precedence unambiguous: a `let static n` base is
+/// a value and never reaches the alias path. Before it existed the alias
+/// spelling had no working reading at all, lowering to a symbolic extent that
+/// codegen turned into an undeclared `__range<i>` (corpus index-types/239).
 and parseSymIdxBase (tokens: Token list) : ParseResult<SymIdxBase> =
     match peek tokens with
     | Some (TokKeyword KwIrrepsIdx) | Some (TokKeyword KwIdx) ->
@@ -2417,6 +2423,15 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         sepBy parseExprImpl TokComma afterLParen >>= fun keys afterKeys ->
         expect TokRParen afterKeys >>= fun _ remaining ->
         success (mkE tokens remaining (ExprGroupKeys keys)) remaining
+
+    // group_bucket(gk): expose the grouping's row -> bucket map as data. One
+    // argument; the "must be a bare name" rule is a TYPECHECK refusal, not a
+    // parse one, so the diagnostic can explain why (gk is not a value).
+    | Some (TokKeyword KwGroupBucket) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun gk afterGk ->
+        expect TokRParen afterGk >>= fun _ remaining ->
+        success (mkE tokens remaining (ExprGroupBucket gk)) remaining
 
     | Some (TokKeyword KwSort) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->

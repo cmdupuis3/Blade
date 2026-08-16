@@ -34,7 +34,11 @@ let private countOccurrences (hay: string) (needle: string) : int =
 /// Source -> generated C++ (same lower+codegen path OmpTests pins pragmas
 /// through). The captured-diagnostics form so a stray warning cannot leak
 /// unattributed into the suite output.
-let private cppOf (name: string) (src: string) : Result<string, string> =
+///
+/// Shared (not private) so other emission-shape blocks compiled after this one
+/// -- Test_Sqlish's gather-elision pins -- reach the same path rather than
+/// re-deriving it.
+let cppOf (name: string) (src: string) : Result<string, string> =
     try
         match fst (Blade.Lowering.lowerCaptured src) with
         | Error e -> Error (sprintf "lower: %s" e)

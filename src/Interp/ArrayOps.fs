@@ -1637,16 +1637,45 @@ let private valueDedupKey (v: Value) : string =
     | VChar c -> "c" + string (int c)
     | _ -> "?"
 
+/// NEGATIVE KEY = "this row belongs to no group" (CodeGen.negativeKeyDrop,
+/// CodeGen.fs:14409): a key function is allowed to do selection, so a row whose
+/// key is negative is dropped from the grouping entirely rather than forming a
+/// group of its own. Only NUMERIC keys can be negative -- std::string has no
+/// `< 0`, so codegen emits no guard for string (or bool/char) keys and neither
+/// does this.
+let private isNegativeKey (v: Value) : bool =
+    match v with
+    | VInt n -> n < 0L
+    | VInt32 n -> n < 0
+    | VFloat f -> f < 0.0
+    | VFloat32 f -> f < 0.0f
+    | _ -> false
+
 /// Build the CSR grouping (offsets length ngroups+1, member perm in group-
 /// contiguous input order). Bucket order per the regime; counts/offsets/perm
 /// exactly mirror genGroupKeysBinding (CodeGen.fs:7595-7607).
 let buildGroupKeys (keyArrays: BladeArray list) (gkCase: GroupKeyCase) : GroupKeysValue =
     let n = if List.isEmpty keyArrays then 0 else int keyArrays.[0].Extents.[0]
     let buckets = Array.zeroCreate n
+    // Negative-key drop, mirroring the `continue` guard codegen puts at the top
+    // of EVERY pass that walks the key array (negativeKeyDrop, CodeGen.fs:14409):
+    // a dropped row is invisible to discovery (so it never opens a bucket of its
+    // own), to counts, and to the permutation. A multi-key row drops when ANY
+    // numeric component is negative. GKEnum is exempt -- its admissible values
+    // are declared up front, so a negative entry there is a value the user asked
+    // for, not a sentinel. `perm` still spans the full input length and is simply
+    // under-filled; reads are bounded by `offsets`, as in the emitted C++.
+    let dropped = Array.zeroCreate<bool> n
+    match gkCase with
+    | GKEnum _ -> ()
+    | GKPositional _ | GKDynamic ->
+        for i in 0 .. n - 1 do
+            dropped.[i] <- keyArrays |> List.exists (fun a -> isNegativeKey (readCell a [ int64 i ]))
     let ngroups =
         match gkCase with
         | GKPositional ng ->
-            for i in 0 .. n - 1 do buckets.[i] <- int (toI64v (readCell keyArrays.[0] [ int64 i ]))
+            for i in 0 .. n - 1 do
+                if not dropped.[i] then buckets.[i] <- int (toI64v (readCell keyArrays.[0] [ int64 i ]))
             ng
         | GKEnum values ->
             for i in 0 .. n - 1 do
@@ -1657,23 +1686,55 @@ let buildGroupKeys (keyArrays: BladeArray list) (gkCase: GroupKeyCase) : GroupKe
             let lookup = Dictionary<string, int>()
             let mutable ng = 0
             for i in 0 .. n - 1 do
-                let key =
-                    keyArrays |> List.map (fun a -> valueDedupKey (readCell a [ int64 i ])) |> String.concat ""
-                match lookup.TryGetValue key with
-                | true, b -> buckets.[i] <- b
-                | _ -> lookup.[key] <- ng; buckets.[i] <- ng; ng <- ng + 1
+                if not dropped.[i] then
+                    let key =
+                        keyArrays |> List.map (fun a -> valueDedupKey (readCell a [ int64 i ])) |> String.concat ""
+                    match lookup.TryGetValue key with
+                    | true, b -> buckets.[i] <- b
+                    | _ -> lookup.[key] <- ng; buckets.[i] <- ng; ng <- ng + 1
             ng
     let counts = Array.zeroCreate (max 1 ngroups)
-    for i in 0 .. n - 1 do counts.[buckets.[i]] <- counts.[buckets.[i]] + 1
+    for i in 0 .. n - 1 do
+        if not dropped.[i] then counts.[buckets.[i]] <- counts.[buckets.[i]] + 1
     let offsets = Array.zeroCreate (ngroups + 1)
     for g in 0 .. ngroups - 1 do offsets.[g + 1] <- offsets.[g] + int64 counts.[g]
     let fill = Array.zeroCreate (max 1 ngroups)
     let perm = Array.zeroCreate n
     for i in 0 .. n - 1 do
-        let g = buckets.[i]
-        perm.[int offsets.[g] + fill.[g]] <- int64 i
-        fill.[g] <- fill.[g] + 1
+        if not dropped.[i] then
+            let g = buckets.[i]
+            perm.[int offsets.[g] + fill.[g]] <- int64 i
+            fill.[g] <- fill.[g] + 1
     { Offsets = offsets; Members = perm }
+
+/// group_bucket(gk): invert the CSR pair into a dense row -> bucket map over the
+/// source index space (genGroupBucketBinding). Rows the permutation never names
+/// are exactly the rows a negative key dropped, so the -1 prefill IS the drop
+/// marker -- no key rescan, and no dependence on the bucketing regime.
+///
+/// The source length is `Members.Length`: buildGroupKeys sizes `perm` at the full
+/// input length and merely under-fills it when rows drop, which is the same
+/// invariant the emitted C++ carries in `<gk>__nsrc`.
+let buildGroupBucket (idxTys: IRIndexType list) (gk: GroupKeysValue) : BladeArray =
+    let n = gk.Members.Length
+    let bucket = Array.create n -1L
+    for g in 0 .. gk.Offsets.Length - 2 do
+        for p in int gk.Offsets.[g] .. int gk.Offsets.[g + 1] - 1 do
+            bucket.[int gk.Members.[p]] <- int64 g
+    { ElemType = IRTScalar ETInt64
+      IndexTypes = idxTys
+      Extents = [| int64 n |]
+      Data = SInt bucket }
+
+/// extents(gk): per-group sizes from the CSR row pointers, no gather
+/// (genGroupSizesBinding). The same arithmetic the ragged peel reads each row's
+/// length from, so this and an extents-only peel agree by construction.
+let buildGroupSizes (idxTys: IRIndexType list) (gk: GroupKeysValue) : BladeArray =
+    let ngroups = gk.Offsets.Length - 1
+    { ElemType = IRTScalar ETInt64
+      IndexTypes = idxTys
+      Extents = [| int64 ngroups |]
+      Data = SInt (Array.init ngroups (fun g -> gk.Offsets.[g + 1] - gk.Offsets.[g])) }
 
 /// group_by(vals, gk): gather each group's values (`vals[perm[offsets[g]+k]]`,
 /// input order) into a ragged rank-2 array (genGroupByBinding, CodeGen.fs:8767).

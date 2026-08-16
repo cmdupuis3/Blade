@@ -1,0 +1,19 @@
+// TEST: Range SymIdx Prefix Offsets (r=3)
+// The rank-3 twin of 170: the prefix-offset convention is not a rank-2
+// accident, it is how every level of the triangular nest binds its param.
+//
+//     canonical[m] = p0 + p1 + ... + pm
+//
+// Probe kernel 100*p0 + 10*p1 + p2 reads each param as one decimal digit, so
+// the printed cell IS the (p0, p1, p2) the kernel saw. Decoding the pins
+// through the prefix sum recovers exactly the 10 canonical triples of
+// SymIdx<3,3> (i <= j <= k), in storage order:
+//
+//   0   -> (0,0,0)      11  -> (0,1,2)      110 -> (1,2,2)
+//   1   -> (0,0,1)      20  -> (0,2,2)      200 -> (2,2,2)
+//   2   -> (0,0,2)      100 -> (1,1,1)
+//   10  -> (0,1,1)      101 -> (1,1,2)
+//
+// EXPECT is FLAT: a rank-3 packed result prints as one flat run.
+let S3 = method_for(range<SymIdx<3, 3>>) <@> lambda(p0, p1, p2) -> 100.0 * p0 + 10.0 * p1 + 1.0 * p2 |> compute
+// EXPECT: S3 = [0, 1, 2, 10, 11, 20, 100, 101, 110, 200]

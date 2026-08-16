@@ -1,0 +1,58 @@
+// TEST: Group Extents No Peel
+// The same `extents(gk)` answers as 044, but with NO grouped peel anywhere --
+// so this file runs in the INTERPRETER lane too.
+//
+// 044 pins extents(gk) beside the peel spelling it agrees with, which is the
+// point of that test but also what makes it skip under `test interp` (applying
+// a loop object over a grouped input is an interpreter gap, M2.7). Since
+// extents(gk) needs no grouped array at all, the accessor itself can be
+// differentially covered on its own, and this is that file: without it,
+// buildGroupSizes would have no interpreter twin under test.
+type Row = Idx<6>
+let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 7]
+let gk = group_keys(keys)
+let sizes = extents(gk)
+// EXPECT: sizes = [3, 2, 1]
+
+// The sizes are ordinary dense data: they reduce, and they total the number of
+// rows that reached a group.
+let total = reduce(sizes, (+))
+// EXPECT: total = 6
+let biggest = reduce(sizes, lambda(a, b) -> if a > b then a else b)
+// EXPECT: biggest = 3
+
+// Negative keys drop, so the total falls short of the 6 source rows by exactly
+// the two dropped ones.
+let dkeys: Array<Int64 like Row> = [0, -1, 0, 1, -1, 1]
+let dgk = group_keys(dkeys)
+let dsizes = extents(dgk)
+// EXPECT: dsizes = [2, 2]
+let dtotal = reduce(dsizes, (+))
+// EXPECT: dtotal = 4
+
+// Positional buckets (Idx<N> keys): one bucket per declared position, and an
+// unvisited bucket is present with size 0 rather than absent.
+type RegionIdx = Idx<4>
+let region: Array<RegionIdx like Row> = [0, 2, 0, 2, 0, 3]
+let pgk = group_keys(region)
+let psizes = extents(pgk)
+// EXPECT: psizes = [3, 0, 2, 1]
+
+// EnumIdx: buckets follow the declared value order, not first occurrence.
+type Site = EnumIdx<["x", "y", "z"]>
+let sites: Array<Site like Idx<5>> = ["y", "x", "y", "y", "x"]
+let egk = group_keys(sites)
+let esizes = extents(egk)
+// EXPECT: esizes = [2, 3, 0]
+
+// Compound (multi-key): one bucket per distinct tuple, first-occurrence order.
+let k1 = [0, 1, 0, 1]
+let k2 = [5, 5, 6, 5]
+let cgk = group_keys(k1, k2)
+let csizes = extents(cgk)
+// EXPECT: csizes = [1, 2, 1]
+
+// Sizes co-iterate with anything else on the group axis -- here the bucket
+// counts recovered from group_bucket's map agree with them.
+let b = group_bucket(gk)
+// EXPECT: b = [0, 1, 0, 2, 1, 0]

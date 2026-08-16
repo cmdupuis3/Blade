@@ -1,0 +1,24 @@
+// TEST: GroupBy GroupKeys As Parameter (rejects)
+// ERROR: BL3017
+// ERROR-CONTAINS: as a function argument
+// Passing a gk across a call boundary was the worst of the three escapes,
+// because it broke in two directions at once. There is no surface syntax for
+// a GroupKeys type, so `g` stayed unannotated, zonked to a scalar, and was
+// emitted as `double g` -- while the body, lowered from `group_by(vals, g)`,
+// still asked for `g__ngroups` / `g__offsets` / `g__perm`. g++ answered with
+// three undeclared symbols AND `cannot convert 'void*' to 'double'`.
+//
+// The caret goes on the ARGUMENT: the three locals live in the frame that
+// declared them, so the escape happens where the gk crosses out of that frame,
+// and the function is only wrong because of what it was handed.
+let region = [0, 1, 0, 0, 1]
+let v = [10.0, 20.0, 30.0, 40.0, 50.0]
+function per_group(vals: Array<Float64 like Idx<5>>, g) = {
+    let gv = group_by(vals, g)
+    method_for(gv) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+}
+let gk = group_keys(region)
+let s = per_group(v, gk)
+// EXPECT: BL3017 -- a group_keys result cannot cross a call boundary. Do the
+// `group_keys` + `group_by` pair inside the function (functions/068 pins that
+// shape) and pass the KEY ARRAY across instead.

@@ -1,0 +1,29 @@
+// TEST: Range SymIdx Tagged Slot Warns
+// The tag side of `range<SymIdx<...>>`, and the WARNING half of the pair whose
+// ERROR half is 175.
+//
+// `range<LatIdx>` flows LatIdx's tag onto the kernel's index param, which is
+// what makes `A(i)` typecheck with no annotation
+// (TypeCheck.elemTypeForIterationIndex). A multi-rank slot gets no such tag:
+// the params come out plain Int64, so every read of the I3-tagged array `v` is
+// an untagged-integer index -- BL4003 as a WARNING, twice (v(p0) and
+// v(p0 + p1)), and the program compiles and runs to 172's values.
+//
+// Name that same SymIdx group and the identical program HARD-ERRORS instead
+// (175). Nothing semantic separates the two spellings.
+//
+// The group here is deliberately anonymous on BOTH counts -- no alias AND a
+// literal extent, which is why the params are untagged and this file warns.
+// `range<SymIdx<2, I3>>`, naming only the COMPONENT, is a third behaviour
+// again -- and it is now the one that WORKS: the base slot resolves to I3's
+// record and inherits its tag, so both params type as `Nat<I3>`, the same
+// values below are produced, and nothing warns at all. It is pinned as
+// index-types/239. (Until that resolution existed it failed codegen, emitting
+// `S_extents[0] = __range0.extents[0];` for an `__range0` that was never
+// declared -- a defect, not a refusal, so it had no honest pin here.)
+// See docs/formalism.md 7.3.
+type I3 = Idx<3>
+let v: Array<Float like I3> = [2.0, 3.0, 5.0]
+let sym = method_for(range<SymIdx<2, 3>>) <@> lambda(p0, p1) -> v(p0) * v(p0 + p1) |> compute
+// WARN: BL4003  (untagged index into an I3-tagged slot)
+// EXPECT: sym = [[4, 6, 10], [9, 15], [25]]

@@ -199,6 +199,45 @@ array's annotation:
 Multi-key form requires rank-1 key arrays over the same outer extent; the
 compound key is always dynamic (tuple-keyed hash).
 
+### A `group_keys` result is name-keyed, not a value
+
+`group_keys` and `group_by` are joined by a **binding name**. Codegen stores the
+whole CSR structure in locals suffixed off that name — `gk__ngroups`,
+`gk__offsets`, `gk__perm` — and gives the binding itself only an opaque
+sentinel, so `group_by` recovers the grouping by re-deriving those symbols from
+the name its grouping argument resolves to. The result is therefore usable only
+where that name is written directly: as the value of the `let` that names it, as
+a `group_by` grouping argument, and as the argument of the two grouping
+accessors — `group_bucket(gk)` (§7a) and `extents(gk)` (§7b), which read the
+same CSR locals the same way.
+
+Any indirection is `BL3017`:
+
+```blade
+let gk  = group_keys(region)
+let gk2 = gk                        // BL3017: aliased
+let b   = (sums, gk)                // BL3017: tuple element (struct/array too)
+let s   = per_group(v, gk)          // BL3017: function argument
+let gv  = group_by(v, group_keys(region))   // BL3017: inline, no name to bind
+function mk(k) = group_keys(k)      // BL3017: returned
+```
+
+To move the **partition itself** around as ordinary data — past a function
+boundary, or into an AD transform — use `group_bucket(gk)` (§7a): the row →
+bucket map is a plain `Array<Int64>` with none of these restrictions.
+
+Sharing one grouping is what a single binding is *for* — `group_by(a, gk)` and
+`group_by(b, gk)` co-iterate (see §8) — and a function that needs a grouping
+takes the **key array** and does both halves itself (`functions/068`). Every one
+of these used to typecheck, lower, emit, and then fail in g++ on undeclared
+`gk2__offsets`-style symbols; the aliased/tupled/parameter forms silently, the
+inline and returned forms as a `BL7001` backend-gap note that invited a bug
+report for a hole nobody intends to fill. Pinned by `sql-group-by/035`–`/039`.
+
+This is the same invariant the same-keys co-iteration check in §8 already
+relies on: that check decides "same grouping" by comparing binding **names**,
+which is only meaningful because a `group_keys` result always *is* its name.
+
 ### Negative keys select rows out
 
 A **negative key means the row belongs to no group**: it is dropped from the
@@ -222,6 +261,79 @@ a sentinel. String keys have no negative.
 Tests: `sql-group-by` cases "Idx Annotated", "Enum First/String",
 "Sparse Keys Dynamic", "Compound Two Keys First/Reduce",
 "Negative Key Excluded".
+
+## 7a. `group_bucket(gk)` — the row → bucket map
+
+```blade
+group_bucket : GroupKeys<I> -> Array<Int64 like I>
+```
+
+For each row of the grouped source, which bucket it landed in; **-1** for a row
+a negative key dropped. It is the inverse of the CSR (perm, offsets) pair, which
+is otherwise reachable only from inside a ragged peel, and it spans the *source*
+index space — so it co-iterates with the array that was grouped:
+
+```blade
+let gk = group_keys(region)
+let b  = group_bucket(gk)                       // Array<Int64 like StationIdx>
+let kept = (method_for(zip(b, temps)) <@> lambda(bb, t) -> if bb >= 0 then t else 0.0) |> compute
+```
+
+The argument must be the bare `gk` name (§7, BL3017). The answer is the same for
+every bucketing regime — positional, `EnumIdx`, dynamic discovery, compound —
+because it inverts the tables rather than re-reading the keys; the -1 prefill is
+the drop marker, since a dropped row is exactly one the permutation never names.
+
+With the within-group rank, this is the **ungroup**: `gv(bucket(i), rank(i))`
+recovers the original value at row `i` by ordinary gather. That is what lets a
+per-group aggregation be re-expressed as a dense gather through `bucket`, the
+shape reverse-mode AD needs through `group_by`
+(`docs/plan-ad-combinators.md` §2.17a). A surface accessor for `rank` does not
+exist yet.
+
+Tests: `sql-group-by` cases "Group Bucket Roundtrip", "Group Bucket Negative
+Key", and the four refusals "Group Bucket Inline Argument", "Group Bucket Non
+Grouping Argument", "Group Keys Alias", "Group Keys In Tuple".
+
+## 7b. `extents(gk)` — per-group sizes, without materializing
+
+```blade
+extents : GroupKeys<I> -> Array<Int64 like GroupOuter>
+```
+
+`extents` on a grouped **array** is refused: a ragged dimension has no scalar
+extent. Asked of the **grouping**, the honest answer exists — one length per
+group — and that is what this returns:
+
+```blade
+let gk    = group_keys(region)
+let sizes = extents(gk)                      // Array<Int64 like GroupOuter>
+let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / n) |> compute
+```
+
+Sizes are `offsets[g+1] - offsets[g]`, so **nothing is gathered** — a count-only
+query never allocates or copies the values it would ignore. Rows dropped by a
+negative key are counted nowhere, so the totals fall short of the source length
+by exactly the dropped rows. Bare `gk` name required, as in §7a.
+
+### The gather elision
+
+`extents(row)` inside a peel gives the same numbers, and now costs the same. A
+`group_by` whose every consumer reads only `extents(row)` never has its values
+read, so codegen skips the per-group allocation and the `O(n)` copy, leaving the
+row pointers null:
+
+```blade
+let sizes = method_for(group_by(v, gk)) <@> lambda(r) -> extents(r) |> compute   // no gather
+```
+
+The analysis is fail-safe — any use it cannot classify as extents-only keeps the
+gather, so co-iteration (`zip`) and any values-reading consumer are untouched.
+Prefer `extents(gk)`: it says what you mean and needs no analysis to be fast.
+
+Tests: `sql-group-by` cases "Group Extents", "Group Gather Elision", "Group
+Extents Inline Argument"; the emission shape (which a value check cannot see) is
+pinned by the "Group Gather Elision" block in `tests/Test_Sqlish.fs`.
 
 ## 8. `group_by(values, gk)` — ragged grouped view
 

@@ -891,6 +891,35 @@ and lowerElemType env ty : IRType =
     | _ ->
         lowerTypeExpr env ty
 
+/// A `SymIdx`/`AntisymIdx` base written as a BARE NAME that turns out to name
+/// an index type: the base record to inherit, or None to keep reading the
+/// slot as an extent expression. See symPowerIndexRecord's SymBaseExtent arm
+/// for why this fallback exists and why it cannot change an existing
+/// program's meaning.
+///
+/// Admits exactly what the inline grammar admits -- a rank-1 dense
+/// (`Idx<n>`) or irreps (`IrrepsIdx<spec>`) record. Ragged/dep/compound/
+/// sparse/wreath aliases have no symmetric power this builder constructs, so
+/// they return None and fall through unchanged rather than inherit a record
+/// that would misdescribe their storage.
+and symPowerAliasBase (env: TypeEnv) (extent: Expr) : IRIndexType option =
+    match extent.Kind with
+    | ExprKind.ExprVar name
+            when (evalConstExpr env extent).IsNone
+                 && (evalStaticIntExpr env extent).IsNone ->
+        match lookupTypeDef name env with
+        | Some (TDIIndexType _) | Some (TDIEnumIdx _) ->
+            let rec' = lowerIndexType env 0 (TyNamed (name, []))
+            let admissible =
+                rec'.Rank = 1 && rec'.Symmetry = SymNone
+                && List.isEmpty rec'.Dependencies
+                && (match rec'.IxKind with
+                    | IxKPlain | IxKIrreps -> true
+                    | _ -> false)
+            if admissible then Some rec' else None
+        | _ -> None
+    | _ -> None
+
 /// The index record for `SymIdx<k, base>` / `AntisymIdx<k, base>`, shared by
 /// index-position and value-position lowering.
 ///
@@ -910,10 +939,39 @@ and lowerElemType env ty : IRType =
 and symPowerIndexRecord env (id: IRId) (rank: int) (symmetry: SymmetryClass)
                           (baseIdx: SymIdxBase) : IRIndexType =
     match baseIdx with
+    // A BARE NAME reaches here as SymBaseExtent, never SymBaseIndex:
+    // `Parser.parseSymIdxBase` admits only the `Idx`/`IrrepsIdx` KEYWORDS as
+    // an index-type base, so `SymIdx<2, n>` reads as "extent n" and stays
+    // readable that way forever (a `let static n = 3` base must not change
+    // meaning). But when the name resolves to NO value and DOES name a
+    // registered index type, the extent reading is not merely unintended --
+    // it is unrepresentable: `lowerExtentExpr` falls through to its symbolic
+    // `IRParam name` placeholder, and a symbolic extent on a VIRTUAL range
+    // operand reaches codegen with no runtime object to read it from, which
+    // emitted an undeclared `__range<i>.extents[0]` -- a g++ error naming a
+    // compiler-internal, for a type the user spelled correctly.
+    //
+    // So resolve it to the index type here, as a FALLBACK. Value and static
+    // resolution are still attempted first (and `lookupTypeDef` searches a
+    // different namespace than `evalConstExpr`), so this arm is reachable
+    // only where the old code was heading for that broken placeholder: no
+    // existing program can change meaning. Inheriting the base record also
+    // carries its nominal Tag onto the symmetric-power record, which is what
+    // makes `range<SymIdx<2, N3>>` flow `Nat<N3>` into the kernel instead of
+    // an untagged integer that then trips BL4003 against its own base.
+    //
+    // Admitted bases are exactly what the inline grammar admits -- a rank-1
+    // dense (`Idx<n>`) or irreps (`IrrepsIdx<spec>`) record. A ragged, dep,
+    // compound, sparse or wreath alias has no symmetric power this builder
+    // could construct, so it falls through to the extent path unchanged
+    // rather than inheriting a record that would misdescribe its storage.
     | SymBaseExtent extent ->
-        { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
-          Symmetry = symmetry; Tag = None; IxKind = IxKPlain
-          Kind = SDimension; Dependencies = [] }
+        match symPowerAliasBase env extent with
+        | Some baseRec -> { baseRec with Id = id; Rank = rank; Symmetry = symmetry }
+        | None ->
+            { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
+              Symmetry = symmetry; Tag = None; IxKind = IxKPlain
+              Kind = SDimension; Dependencies = [] }
     | SymBaseIndex baseTy ->
         let baseRec = lowerIndexType env 0 baseTy
         { baseRec with Id = id; Rank = rank; Symmetry = symmetry }
@@ -1608,6 +1666,7 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | ExprKind.ExprContains (a, v) -> Set.union (collectFreeVars bound a) (collectFreeVars bound v)
     | ExprKind.ExprGroupBy (v, k) -> Set.union (collectFreeVars bound v) (collectFreeVars bound k)
     | ExprKind.ExprGroupKeys ks -> ks |> List.map (collectFreeVars bound) |> Set.unionMany
+    | ExprKind.ExprGroupBucket gk -> collectFreeVars bound gk
     | ExprKind.ExprSort (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
     | ExprKind.ExprReduce (a, k, i, _) ->
         let baseVars = Set.union (collectFreeVars bound a) (collectFreeVars bound k)
@@ -3796,6 +3855,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprDisplayNum d -> [d]
         | TExprDisplayStr d -> [d]
         | TExprGroupKeys keys -> keys
+        | TExprGroupBucket gk -> [gk]
         | TExprStruct (_, fields) -> fields |> List.map snd
         | TExprIndex (arr, idxs, _) -> arr :: idxs
         | TExprBlock (stmts, final) ->
@@ -5609,6 +5669,9 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // ---- Tuple ----
     | ExprKind.ExprTuple exprs ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
+            // A grouping packed into a tuple is caught by the BL3017 sweep
+            // (collectGroupKeysEscapes' TExprTuple arm), together with every
+            // other escape position -- nothing to check here.
             Ok (mkTyped (TExprTuple tExprs) (IRTTuple (tExprs |> List.map (fun e -> e.Type)))))
 
     // ---- Array literal ----
@@ -5666,6 +5729,42 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         match idxs |> List.tryFind (fun ix -> ix.Symmetry = SymWreath) with
         | Some ix ->
             Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "range<> iteration slot"))
+        | None ->
+        // A range slot whose extent never resolved. `range<>` is VIRTUAL: it
+        // materializes no object, so codegen takes every bound and every
+        // output extent from the slot's own Extent expression -- and a
+        // symbolic `IRParam` placeholder has nothing to take. What reached
+        // the C++ instead was `__range<i>.extents[0]`, a reference to the
+        // operand variable a virtual range deliberately never declares, so
+        // the program died in g++ naming a compiler-internal. Same reasoning
+        // as the wreath door above: refuse at the seam that can still name
+        // the user's own text.
+        //
+        // Narrowly: a bare NAME that resolved to neither a value nor a type
+        // (`lowerExtentExpr`'s ExprVar arm, `lowerIndexType`'s unregistered-
+        // `TyNamed` fallback). Three placeholder families are deliberately
+        // NOT refused here, because each is resolved by machinery that runs
+        // after this seam or reports better elsewhere:
+        //   * `__`-prefixed internal sentinels (`__depidx_inner` and kin),
+        //     supplied by their own iteration machinery;
+        //   * the bad-spec error markers, which carry a spec-specific
+        //     diagnostic on the annotation path;
+        //   * `"?"`, `lowerExtentExpr`'s fallback for an extent that is an
+        //     EXPRESSION it cannot lower structurally rather than an unknown
+        //     name. `range<Idx<arity(args)>>` (arity/015) lands here and is
+        //     legitimate: the deferred-former unroll rewrites it into an
+        //     n-element array literal before codegen, precisely so no
+        //     symbolic extent ever reaches a bound (IR.fs, pack former).
+        //     Refusing it would reject a working program.
+        let unresolvedSlot =
+            idxs |> List.tryPick (fun ix ->
+                match ix.IxKind, ix.Extent with
+                | (IxKErrorIrrepsBadSpec | IxKErrorPgIrrepsBadSpec | IxKErrorRaggedNoPrior), _ -> None
+                | _, IRParam (n, _, _) when n <> "?" && not (n.StartsWith "__") -> Some n
+                | _ -> None)
+        match unresolvedSlot with
+        | Some n ->
+            Error (Other (sprintf "range<...>: the extent '%s' is not known at compile time, and a range has no runtime object to read one from -- it is a virtual iteration space, so its bounds must come from the type. '%s' names neither a value in scope nor a declared index type. Declare it as an index type (`type %s = Idx<N>`, then `range<%s>`), bind it with `let static %s = N`, or write the extent literally." n n n n n))
         | None ->
         if hasCompound && idxs.Length > 1 then
             Error (Other "range<CompoundIdx<m>, ...>: a compound range slot cannot be combined with other index types in one range<> (formalism 4.5)")
@@ -5884,6 +5983,8 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferGroupKeys env keys
     | ExprKind.ExprGroupBy (values, grouping) ->
         inferGroupBy env values grouping
+    | ExprKind.ExprGroupBucket grouping ->
+        inferGroupBucket env grouping
     | ExprKind.ExprSort (array, key) ->
         inferExpr env array |> Result.bind (fun tArr ->
         inferExpr env key |> Result.bind (fun tKey ->
@@ -8140,6 +8241,56 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
                 let tKeys = pairs |> List.map fst
                 Ok (mkTyped (TExprGroupKeys tKeys) gkType))
 
+
+// group_bucket(gk) -- the grouping's row -> bucket map, as ordinary data.
+//
+// Result: Array<Int64 like SourceIdx>, over the SAME index slot the key array
+// carried, so `bucket` co-iterates with the values that were grouped. A row a
+// negative key dropped (docs/features/sql.md, "Negative keys select rows out")
+// reads -1; it appears in no bucket, and the CSR permutation never names it.
+//
+// This is the inverse of the (perm, offsets) pair, which is otherwise reachable
+// only from inside a ragged peel. It is what lets a per-group aggregation be
+// re-expressed as a dense gather through `bucket` -- the shape reverse-mode AD
+// needs (docs/plan-ad-combinators.md 2.17a).
+//
+// The argument MUST be a bare name. A grouping is not a first-class value: the
+// whole runtime structure lives in C++ locals named after the binding
+// (`<gk>__ngroups`, `<gk>__offsets`, `<gk>__perm` -- see the ABI comment in
+// genGroupKeysBinding), and same-`gk` co-iteration is discharged on expression
+// name identity, not on the type. So `let gk2 = gk`, passing a gk as a
+// parameter, or an inline `group_bucket(group_keys(k))` have no emittable
+// name to suffix. Refuse them HERE, with an explanation, rather than emitting
+// C++ that names an undeclared symbol.
+/// Shared front half of every grouping accessor: require a BARE NAME, infer it,
+/// and hand back the grouping's index pair. `intrinsic` only names the caller in
+/// the diagnostic. Used by group_bucket and by extents(gk).
+and requireGroupingName (env: TypeEnv) (intrinsic: string) (grouping: Expr)
+        : TypeResult<TypedExpr * IRIndexType * IRIndexType> =
+    let describe (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprGroupKeys _ -> "an inline `group_keys(...)` call"
+        | ExprKind.ExprApp _ -> "a call/index expression"
+        | ExprKind.ExprTupleIndex _ -> "a tuple element"
+        | ExprKind.ExprTuple _ -> "a tuple"
+        | _ -> "a non-name expression"
+    match grouping.Kind with
+    | ExprKind.ExprVar name ->
+        inferExpr env grouping |> Result.bind (fun tGk ->
+            match env.Subst.Resolve(tGk.Type) with
+            | IRTGroupKeys (outerIdx, sourceIdx, _) -> Ok (tGk, outerIdx, sourceIdx)
+            | _ -> Error (GroupBucketNotGrouping name))
+    | _ -> Error (GroupingNeedsName (intrinsic, describe grouping))
+
+and inferGroupBucket (env: TypeEnv) (grouping: Expr) : TypeResult<TypedExpr> =
+    requireGroupingName env "group_bucket" grouping
+    |> Result.map (fun (tGk, _, sourceIdx) ->
+        // Reuse the source slot verbatim (same Id, tag and extent): the bucket
+        // map spans exactly the rows the keys did, so it is the SAME index
+        // space, not a fresh one -- which is what makes
+        // `zip(v, group_bucket(gk))` typecheck.
+        mkTyped (TExprGroupBucket tGk) (mkArrayArrow [sourceIdx] (IRTScalar ETInt64) None))
+
 // group_by(values, grouping) -- apply GroupKeys to a values array
 // Result: rank-2 array (groups x members), with GroupIdx
 // Tags ("__group_outer", "__group_member") signal to codegen to use ragged peel.
@@ -8438,7 +8589,31 @@ and inferZip (env: TypeEnv) exprs : TypeResult<TypedExpr> =
 
 
 and inferExtents (env: TypeEnv) array : TypeResult<TypedExpr> =
+    // extents(gk) -- the per-group SIZES, as an array over the group axis.
+    //
+    // This is the answer the rank-2 rejection below cannot give. A grouping is
+    // the ragged rank-2 shape (ngroups x ragged), and its inner extent is not a
+    // scalar but a vector, one entry per group -- exactly "the lengths array"
+    // that rejection points at. Answering it from the GROUPING rather than from
+    // a grouped array is what makes it free: sizes are offsets[g+1]-offsets[g],
+    // so no values ever have to be gathered.
+    //
+    // Dispatched before requireArrayArg, which would reject IRTGroupKeys as a
+    // non-array. Bare name required, same rule and same reason as group_bucket.
     inferExpr env array |> Result.bind (fun tArr ->
+        match env.Subst.Resolve tArr.Type with
+        | IRTGroupKeys (outerIdx, _, _) ->
+            (match array.Kind with
+             | ExprKind.ExprVar _ ->
+                 // The group axis verbatim, as group_by's outer slot spells it,
+                 // so `extents(gk)` lines up with anything a peel over the same
+                 // grouping produced.
+                 let outer = { outerIdx with Tag = Some "__group_outer"; IxKind = IxKGroupOuter }
+                 Ok (mkTyped (TExprExtents tArr) (mkArrayArrow [outer] (IRTScalar ETInt64) None))
+             | ExprKind.ExprGroupKeys _ ->
+                 Error (GroupingNeedsName ("extents", "an inline `group_keys(...)` call"))
+             | _ -> Error (GroupingNeedsName ("extents", "a non-name expression")))
+        | _ ->
         requireArrayArg env tArr "extents" |> Result.bind (fun arrTy ->
             if arrTy.IndexTypes.Length = 1 then
                 Ok (mkTyped (TExprExtents tArr) (IRTScalar ETInt64))
@@ -11577,6 +11752,71 @@ and buildApplyInfo (env: TypeEnv)
                 emitWarning env "BL4010" span msg
                 PinSuggestions.add msg span)
 
+    // The BL4010 suggestion's MIRROR: the user already wrote the clause, and it
+    // licenses nothing.
+    //
+    // Compaction -- triangular storage AND triangular iteration -- keys on an
+    // IDENTITY GROUP: the SAME array occupying the commuting operand slots
+    // (docs/formalism.md 11.2/12.4; `rawAxisGroups.mergesWith.acrossArray`
+    // requires `sameArrayIdentity`, and shared_units_insufficient refutes the
+    // weaker shared-index-space rule). A VIRTUAL `range<...>` operand never
+    // materializes, so `mkVirtualArrayArrow` forces `Identity = None` and the
+    // formers hand each one a fresh `AIDLiteral` -- no two range operands can
+    // ever be the same array. The comm group therefore merges no axes and is
+    // dropped on the floor: the emitted C++ is BYTE-IDENTICAL to the same
+    // kernel with no `where` clause at all (dense `Array<T, r>`, full
+    // rectangular bounds). The user asked for a storage and iteration change
+    // and silently got neither -- which is the bug this warning closes.
+    //
+    // WARNING, not an error, and deliberately NARROWER than "comm without an
+    // identity group":
+    //   * Nothing is disproved (BL4013's job) and nothing unsound is licensed
+    //     (BL4016's job). The program is correct, just not the one asked for --
+    //     the same shape as the dropped-`omp`-clause note below, which is also
+    //     a warning.
+    //   * symmetry/004 and /014 are the same inertness over two distinct REAL
+    //     arrays and stay silent on purpose: a real array CAN be its own
+    //     identity partner at a different call site (symmetry/003 is that call
+    //     site), so the clause on the kernel is not dead, merely unused here.
+    //     A range operand is incapable of it at EVERY call site. "Provably
+    //     inert, always" is what earns a diagnostic; "inert at this call site"
+    //     does not.
+    //
+    // Stands down under `reynolds` (the wrapper manufactures the symmetry and a
+    // clause there is an iteration licence, not a storage claim) and on a
+    // co-iterated apply (one axis feeds both slots -- no square exists to
+    // compact, sql-reduce/017). The `Params.Length = identities.Length` gate
+    // keeps this to the one-param-per-operand outer product, where a group's
+    // parameter indices ARE operand indices: a multi-rank operand
+    // (`range<SymIdx<2, N>>` -- the very fix suggested below) spends two
+    // parameters on one array, and its `comm(i, j)` is redundant, not inert.
+    (if not isReynolds && not isCoIterApply
+        && lambdaInfo.Params.Length = identities.Length then
+        let nameOf i =
+            if i >= 0 && i < lambdaInfo.Params.Length then lambdaInfo.Params.[i].Name
+            else sprintf "#%d" i
+        let inertGroup (g: int list) =
+            let slots = g |> List.filter (fun k -> k >= 0 && k < identities.Length)
+            if slots.Length < 2 then None
+            elif slots |> List.exists (fun k ->
+                     slots |> List.exists (fun q ->
+                         q <> k && sameIdentity identities.[k] identities.[q])) then None
+            elif slots |> List.exists (fun k ->
+                     k < arrayTypes.Length && arrayTypes.[k].IsVirtual) then Some slots
+            else None
+        let report (kw: string) (idxTy: string) (pool: string) (g: int list) =
+            match inertGroup g with
+            | None -> ()
+            | Some slots ->
+                let names = slots |> List.map nameOf |> String.concat ", "
+                let span = if tKernel.Span = noSpan then tLoop.Span else tKernel.Span
+                emitWarning env "BL4017" span (sprintf
+                    "`where %s(%s)` licenses nothing on this apply and is DROPPED: compact storage and triangular iteration key on an IDENTITY GROUP -- the same array occupying the commuting slots -- and a virtual `range<...>` operand never materializes, so there is no identity to key on. Storage stays dense and iteration stays rectangular; the emitted C++ is identical to this kernel with no `where` clause. Declare the symmetry in the INDEX TYPE instead: `method_for(range<%s<%d, N>>) <@> lambda(%s) -> ...` allocates the %s and visits only canonical cells."
+                    kw names idxTy slots.Length names pool)
+        commGroups |> List.iter (report "comm" "SymIdx" "triangular pool")
+        lambdaInfo.AntisymGroups
+        |> List.iter (report "anticomm" "AntisymIdx" "strict-triangular pool (no stored diagonal)"))
+
     // Dropped-parallel-clause guard. This is the apply seam -- the ONE place a
     // loop and a kernel meet -- so it is where "the kernel declared `omp(...)`"
     // and "the lambda reaching the loop carries it" can be compared at all.
@@ -12087,6 +12327,12 @@ and buildApplyInfo (env: TypeEnv)
                 // or a CompoundIdx of mask-rank R) contributes Rank coordinate params,
                 // per the rank rule (kernel index slots = iteration rank). For rank-1
                 // (dense) indices this is one param per index type, unchanged from 1b.
+                // CAVEAT for a TRIANGULAR slot: "the index value at that slot" is the
+                // intent, but the lowering delivers the PACKED STORAGE COORDINATE
+                // (prefix offset) -- and elemTypeForIterationIndex tags every component
+                // with the GROUP's tag rather than the component space's. Both
+                // divergences are assessed in docs/formalism.md 7.3 and pinned by
+                // tests/corpus/loops/170-175.
                 at.IndexTypes |> List.collect (fun idx -> List.replicate idx.Rank (elemTypeForIterationIndex idx))
             else
                 let kRank = if i < kernelInputRanks.Length then kernelInputRanks.[i] else 0
@@ -13610,6 +13856,8 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
             Error (Other
                 "wildcard `_` is not a value: it can only appear as a compound-index coordinate (e.g. B((a, _, c))), not bound in a let. A tuple carrying a hole like (a, _, c) has no meaning on its own.")
         else Ok tv
+    // (An aliased grouping -- `let gk2 = gk` -- is the BL3017 sweep's job:
+    // groupKeysLetRhs blesses a let RHS only when it IS the group_keys call.)
     match binding.Type with
     | Some annot ->
         let annotTy = lowerTypeExpr env annot
@@ -17555,6 +17803,123 @@ let private declWriteRoots (decl: TypedDecl) : (bool * TypedExpr) list =
     | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
     | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
 
+/// Post-check sweep for GROUP-KEYS ESCAPES (BL3017).
+///
+/// A `group_keys` result is NAME-KEYED, not a value. `genGroupKeysBinding`
+/// (CodeGen.fs) puts the entire CSR structure into C++ locals suffixed off the
+/// BINDING name -- `<name>__ngroups`, `<name>__offsets`, `<name>__perm` -- and
+/// gives the binding itself a `void*` sentinel; `genGroupByBinding` recovers
+/// the state by re-deriving those suffixed symbols from whatever cpp name the
+/// grouping EXPRESSION resolves to. So the two ops are joined by a NAME, and
+/// every indirection breaks the joint silently: `let gk2 = gk` emitted
+/// `gk2__offsets`, a tuple round-trip emitted the same, and an untyped
+/// function parameter zonked to a scalar and emitted `double g` alongside
+/// `g__offsets`. All three died in g++, not in Blade.
+///
+/// The invariant is already ASSUMED elsewhere -- `sameGroupKeysBinding` in
+/// inferMethodFor decides grouped co-iteration by comparing gk operands'
+/// binding NAMES, which is only meaningful if a gk always IS its binding name.
+/// This sweep is what makes it enforced.
+///
+/// `pos` is `None` in the two blessed positions (the direct RHS of a `let`
+/// binding the call, and `group_by`'s grouping slot when it holds a plain
+/// variable) and `Some phrase` everywhere else, where `phrase` completes
+/// "... cannot be used <phrase>". Running on the ZONKED module makes this
+/// total: IRTGroupKeys is minted only by `inferGroupKeys` and survives
+/// zonking intact, so a resolved IRTGroupKeys anywhere else IS the escape.
+/// A node that fires does not descend -- a gk-typed block or function body is
+/// one mistake, not one per enclosing layer.
+///
+/// THE blessing for a `let` RHS, shared by the block walk and the declaration
+/// roots so module-level and function-local `let`s cannot drift apart. Blessed
+/// only when the RHS IS the call and the pattern is a bare name: `let gk2 = gk`
+/// is an alias, and the alias is exactly the bug.
+let private groupKeysLetRhs (b: TypedBinding) : string option * TypedExpr =
+    match b.Value.Kind with
+    | TExprGroupKeys _ when List.isEmpty b.SubBindings -> (None, b.Value)
+    | _ -> (Some "as another binding's value", b.Value)
+
+let rec private collectGroupKeysEscapes (subst: Subst) (pos: string option) (expr: TypedExpr) : CompileError list =
+    let isGk (e: TypedExpr) = match subst.Resolve e.Type with IRTGroupKeys _ -> true | _ -> false
+    let describe (e: TypedExpr) =
+        match e.Kind with
+        | TExprGroupKeys _ -> "a `group_keys(...)` call"
+        | TExprVar (n, _, _) -> sprintf "the group_keys binding '%s'" n
+        | _ -> "a group_keys result"
+    // A block is TRANSPARENT here: its type is its final expression's, and its
+    // span covers the whole body, so firing on the block would point the
+    // caret at the innocent first statement. Descend and let the final
+    // expression carry the enclosing position instead.
+    let isBlock = match expr.Kind with TExprBlock _ -> true | _ -> false
+    match pos with
+    | Some phrase when isGk expr && not isBlock ->
+        [ { Error = GroupKeysEscapes (describe expr, phrase); Span = expr.Span; Context = []; Code = None } ]
+    | _ ->
+    let elsewhere = "in this position"
+    let kids : (string option * TypedExpr) list =
+        match expr.Kind with
+        | TExprGroupBy (values, gk) ->
+            // The grouping slot takes the BINDING NAME only -- an inline
+            // `group_by(v, group_keys(k))` has no locals to suffix off.
+            let gkPos =
+                match gk.Kind with
+                | TExprVar _ -> None
+                | _ -> Some "inline as `group_by`'s grouping argument"
+            [ (Some elsewhere, values); (gkPos, gk) ]
+        // The grouping ACCESSORS are blessed slots too, on the same terms as
+        // group_by's: they read the CSR tables through the binding name, so a
+        // bare name is fine and anything else has no locals to suffix off.
+        // Without these arms the default below would fire BL3017 on the very
+        // spellings these accessors exist to provide.
+        | TExprGroupBucket gk ->
+            let gkPos =
+                match gk.Kind with
+                | TExprVar _ -> None
+                | _ -> Some "inline as `group_bucket`'s argument"
+            [ (gkPos, gk) ]
+        // `extents` is only a grouping accessor when its operand IS a grouping;
+        // over an array it is the ordinary extent query, which must keep
+        // descending normally.
+        | TExprExtents a when isGk a ->
+            let gkPos =
+                match a.Kind with
+                | TExprVar _ -> None
+                | _ -> Some "inline as `extents`' argument"
+            [ (gkPos, a) ]
+        | TExprTuple es -> es |> List.map (fun e -> (Some "as a tuple element", e))
+        | TExprArrayLit (elems, _) -> elems |> List.map (fun e -> (Some "as an array element", e))
+        | TExprStruct (_, fields) -> fields |> List.map (fun (_, e) -> (Some "as a struct field", e))
+        | TExprApp (f, args) ->
+            (Some elsewhere, f) :: (args |> List.map (fun a -> (Some "as a function argument", a)))
+        | TExprBlock (stmts, final) ->
+            let rec ofStmt (s: TypedStmt) : (string option * TypedExpr) list =
+                match s with
+                | TStmtLet b -> [groupKeysLetRhs b]
+                | TStmtAssign (l, r) -> [(Some elsewhere, l); (Some elsewhere, r)]
+                | TStmtExpr e -> [(Some elsewhere, e)]
+                | TStmtForIn (_, _, lo, hi, body) ->
+                    (Some elsewhere, lo) :: (Some elsewhere, hi) :: (body |> List.collect ofStmt)
+            // The final expression inherits the block's own position, so a
+            // gk returned out of a function body reads "as a function's
+            // return value" rather than the generic block phrasing.
+            let finalPos = pos |> Option.defaultValue "as a block's result value"
+            (stmts |> List.collect ofStmt)
+            @ (final |> Option.toList |> List.map (fun e -> (Some finalPos, e)))
+        | _ -> typedExprChildren expr |> List.map (fun e -> (Some elsewhere, e))
+    kids |> List.collect (fun (p, e) -> collectGroupKeysEscapes subst p e)
+
+/// Declaration entry points for the sweep above. Same blessing as the block
+/// case: a module-level `let` may hold the call itself and nothing else, and a
+/// function body is a returning position (BL7001's "no rule for IRGroupKeys in
+/// expression position" was the old, misleadingly backend-flavoured verdict).
+let private declGroupKeysRoots (decl: TypedDecl) : (string option * TypedExpr) list =
+    let ofFunc (f: TypedFunctionDecl) = [(Some "as a function's return value", f.Body)]
+    match decl with
+    | TDeclLet b | TDeclStatic b -> [groupKeysLetRhs b]
+    | TDeclFunction f -> ofFunc f
+    | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
+    | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
+
 /// Every expression a zonked declaration carries, for the sweep above.
 let private declExprs (decl: TypedDecl) : TypedExpr list =
     let ofFunc (f: TypedFunctionDecl) = [f.Body]
@@ -17706,7 +18071,13 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let writeErrors =
         zonked.Decls |> List.collect declWriteRoots
                      |> List.collect (fun (nested, e) -> collectMisplacedProviderWrites currentEnv.Subst nested e)
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ writeErrors)
+    // group_keys escapes: structural like the write sweep (IRTGroupKeys is
+    // minted in exactly one place and never inferred), so it runs even when
+    // the module already has errors.
+    let groupKeysErrors =
+        zonked.Decls |> List.collect declGroupKeysRoots
+                     |> List.collect (fun (pos, e) -> collectGroupKeysEscapes currentEnv.Subst pos e)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ writeErrors @ groupKeysErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()

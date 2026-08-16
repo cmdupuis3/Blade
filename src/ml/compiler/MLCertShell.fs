@@ -120,6 +120,7 @@ let rec freeVars (bound: Set<string>) (e: Expr) : Set<string> =
     | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprZip es
     | ExprKind.ExprStack es | ExprKind.ExprSequence es | ExprKind.ExprGroupKeys es
     | ExprKind.ExprJoin (es, _) -> fvs es
+    | ExprKind.ExprGroupBucket g -> fv g
     | ExprKind.ExprApp (f, args) -> Set.union (fv f) (fvs args)
     | ExprKind.ExprIf (c, t, f) -> Set.unionMany [ fv c; fv t; fv f ]
     | ExprKind.ExprReduce (src, kern, init, _) -> Set.unionMany [ fv src; fv kern; fvOpt init ]
