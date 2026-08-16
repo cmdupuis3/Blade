@@ -472,17 +472,37 @@
     </None>
   </ItemGroup>
 
-  <!-- The Blade standard library, in Blade source. ModuleResolve.fs looks for
-       a `stdlib/` directory next to the running binary first (then walks up,
-       so a dev tree finds <repo>/stdlib from bin/<config>/net7.0 too), which
-       is why this copy exists: it makes `Blade.exe run` on a file that says
-       `import units.SI` work from any working directory, with no environment
-       variable set. The glob has no Link metadata, so each file keeps its
-       relative path and lands at bin/config/net7.0/stdlib/units/SI.blade, the
-       same arrangement tests/corpus/** already uses. BLADE_STDLIB overrides. -->
+  <!-- The Blade standard library, in Blade source. This copy is what makes
+       `Blade.exe run` on a file that says `import units.SI` work from any
+       working directory in a DEPLOYED tree, with no environment variable set.
+       The glob has no Link metadata, so each file keeps its relative path and
+       lands at bin/config/net7.0/stdlib/units/SI.blade, the same arrangement
+       tests/corpus/** already uses. BLADE_STDLIB overrides.
+
+       In a CHECKOUT this copy is redundant (ModuleResolve.fs's probe reaches
+       the repo's own stdlib from bin/<config>/net7.0 by itself) and it used to
+       WIN, because that probe is nearest-first. Fixed on the resolver side:
+       see upwardRepoStdlibCandidates, where a directory holding Blade.fsproj
+       now takes precedence, so source beats copy in a dev tree while a tree
+       with no checkout above it searches exactly as before.
+
+       Always, not PreserveNewest, and the difference is not stylistic.
+       PreserveNewest's staleness check is the TARGET's Inputs/Outputs
+       comparison, which is timestamps only and never even reaches the Copy
+       task that would have compared sizes. A source file OLDER than the copy
+       therefore counts as up to date, so restoring a previous revision of a
+       module (an older commit checked out, an editor revert, an archive
+       extracted with its timestamps) leaves the newer copy in place while the
+       build reports success. Verified: differing content AND differing size,
+       still skipped. Always runs the Copy task every build, where
+       SkipUnchangedFiles compares timestamp and size and copies when either
+       differs. Three files; the build cost is not worth reasoning about. The
+       corpus glob above deliberately keeps PreserveNewest, since it is 1744
+       files and tests/Corpus.fs already prefers ./tests/corpus over the
+       deployed copy, so it was never exposed to this. -->
   <ItemGroup>
     <None Include="stdlib/**/*.blade">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
   </ItemGroup>
 

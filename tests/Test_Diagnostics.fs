@@ -32,6 +32,29 @@ let runDiagnosticsCoreTests () : BlockResult =
     let span file sl sc el ec =
         { StartLine = sl; StartCol = sc; EndLine = el; EndCol = ec; File = file }
 
+    // -- build-output provenance -------------------------------------------
+    // A diagnostic landing in the stdlib copy deployed beside the binary is
+    // almost never a defect in the user's program: it means that copy and the
+    // compiler are out of step. The raw message gives no hint of that -- it
+    // names a path the user never wrote and cannot fix by editing -- so the
+    // renderer synthesizes a note from the span.
+    //
+    // The SCOPE is the delicate half, which is what the negative cases are for.
+    // "Anywhere under AppContext.BaseDirectory" is the obvious predicate and is
+    // wrong: tests/corpus is deployed there too, so a suite run from the output
+    // directory would decorate every golden diagnostic with an irrelevant note.
+    let deployed rel = Path.Combine(AppContext.BaseDirectory, rel)
+    check "buildOutputNote fires inside the deployed stdlib copy"
+        ((buildOutputNote (span (Some (deployed (Path.Combine("stdlib", "units", "SI.blade")))) 3 1 3 4)).IsSome)
+        "the case that produced a bogus error pointing into bin/"
+    check "buildOutputNote is silent on the deployed corpus"
+        ((buildOutputNote (span (Some (deployed (Path.Combine("tests", "corpus", "units", "077.blade")))) 3 1 3 4)).IsNone)
+        "goldens must not acquire a note when the suite runs from bin/"
+    check "buildOutputNote is silent on a user's own file"
+        ((buildOutputNote (span (Some (Path.Combine("C:", "work", "prog.blade"))) 1 1 1 2)).IsNone
+         && (buildOutputNote (span None 1 1 1 2)).IsNone)
+        "ordinary diagnostics are untouched, spanless ones too"
+
     // -- registry contract ------------------------------------------------
     // Read the source LIST, not the Map: Map.ofList keeps the last entry for a
     // repeated key, so a double-booked code is already invisible by the time

@@ -322,12 +322,71 @@ let private checkTool (key: string) (exe: string) (purpose: string) : CheckResul
     else
         { Key = key; Title = exe; Status = StatusMissing; Detail = sprintf "optional -- %s" purpose; Origin = "" }
 
+/// WHICH stdlib the compiler will actually read, and whether any other root on
+/// its search path disagrees with that one.
+///
+/// The second half is the point. Every other root here is a SHADOWED copy of
+/// the same modules -- in a checkout, the one Blade.fsproj deploys beside the
+/// binary -- and when a shadowed copy diverges, the compiler's behaviour
+/// depends on which binary and which working directory you happened to use.
+/// That is invisible from the outside and it does not announce itself: the
+/// failure it eventually produces is an ordinary-looking error inside the copy
+/// (Diagnostics.buildOutputNote annotates those), or no error at all, just an
+/// edit that seems not to have taken. Naming the divergence up front is
+/// cheaper than either.
+///
+/// A pure filesystem read, so unlike the probes below it needs no toolchain and
+/// never gates on gppOk.
+let private checkStdlib () : CheckResult =
+    let row status detail =
+        let origin =
+            match Environment.GetEnvironmentVariable "BLADE_STDLIB" with
+            | null | "" -> ""
+            | _ -> "BLADE_STDLIB [env]"
+        { Key = "stdlib"; Title = "stdlib"; Status = status; Detail = detail; Origin = origin }
+    match ModuleResolve.stdlibRoots () with
+    | [] ->
+        row StatusError "no stdlib root found -- `import units.SI` cannot resolve; set BLADE_STDLIB"
+    | winner :: shadowed ->
+        let relativeModules (root: string) =
+            try
+                Directory.GetFiles(root, "*.blade", SearchOption.AllDirectories)
+                |> Array.map (fun f ->
+                    f.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                |> Array.sort
+            with _ -> [||]
+        // Line endings normalized before comparing: the source can arrive CRLF
+        // through .gitattributes while a copy is byte-for-byte LF (or the
+        // reverse), and that difference is not a divergence anyone can act on.
+        let contentOf (p: string) =
+            try Some ((File.ReadAllText p).Replace("\r\n", "\n")) with _ -> None
+        let modules = relativeModules winner
+        let divergent =
+            [ for root in shadowed do
+                for m in modules do
+                    match contentOf (Path.Combine(winner, m)), contentOf (Path.Combine(root, m)) with
+                    | Some a, Some b when a <> b -> yield (root, m)
+                    | _ -> () ]
+        match divergent with
+        | [] ->
+            let tail =
+                match shadowed with
+                | [] -> ""
+                | _ -> sprintf ", %d shadowed root(s) in agreement" (List.length shadowed)
+            row StatusOk (sprintf "%s -- %d module(s)%s" winner modules.Length tail)
+        | (root, m) :: rest ->
+            let more = if List.isEmpty rest then "" else sprintf " and %d more" (List.length rest)
+            row StatusWarn
+                (sprintf "%s answers, but %s has a DIFFERENT %s%s -- rebuild to refresh the deployed copy"
+                    winner root m more)
+
 /// Run every check. Dependent probes gate on the g++ core so a broken
 /// toolchain is reported once, at its cause.
 let collectChecks () : CheckResult list =
     let dotnetRow = checkDotnet ()
     let (gppRow, gppOk) = checkGpp ()
     [ dotnetRow
+      checkStdlib ()
       gppRow
       checkBlas gppOk
       checkLapack gppOk

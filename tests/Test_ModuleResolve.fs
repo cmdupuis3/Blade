@@ -129,6 +129,26 @@ let runModuleResolveTests () : BlockResult =
          | Some p -> p
          | None -> sprintf "roots: %s" (String.concat " ; " roots))
 
+    // -- SOURCE beats the deployed copy, in a checkout ---------------------
+    // Blade.fsproj copies stdlib/ next to the binary and the probe is
+    // nearest-first, so that copy used to shadow <repo>/stdlib: edits did
+    // nothing until a rebuild, and a restored-OLDER file did nothing even
+    // then (PreserveNewest compares timestamps). Search ORDER is what fixes
+    // it, so search order is what gets pinned.
+    //
+    // The guard is conditional, the assertion is not: run from a DEPLOYED tree
+    // there is no checkout root to prefer and nothing here to say. The marker
+    // is Blade.fsproj beside the stdlib directory -- exactly the gate
+    // `upwardRepoStdlibCandidates` applies.
+    let isSourceRoot (r: string) =
+        match (try Path.GetDirectoryName r with _ -> null) with
+        | null -> false
+        | d -> File.Exists (Path.Combine(d, "Blade.fsproj"))
+    if roots |> List.exists isSourceRoot then
+        check "stdlib_source_root_precedes_the_deployed_copy"
+            (roots |> List.head |> isSourceRoot)
+            (sprintf "roots: %s" (String.concat " ; " roots))
+
     // -- nothing to resolve: the single-file path, unchanged ---------------
     let plainPath = scratch.Write "plain.blade" "let x = 1.0\nlet y = x + 2.0\n"
     let plainSrc = File.ReadAllText plainPath

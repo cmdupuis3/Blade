@@ -44,7 +44,13 @@ src/math, src/ml, src/ppl(MomentAlgebra), src/sgs, src/spectra (top level, not c
 tests/                     harness compiled into Blade.fsproj (no xunit). Corpus tests live
                            in tests/corpus/<category>/*.blade, one test per file.
 stdlib/                    Blade-source stdlib (units/SI.blade, plot.blade), deployed beside
-                           the binary; BLADE_STDLIB adds a search root.
+                           the binary; BLADE_STDLIB adds a search root. Read at RUN time, so
+                           edits need no rebuild: in a CHECKOUT the resolver prefers this
+                           directory over the deployed copy (ModuleResolve's Blade.fsproj
+                           gate) — it used to prefer the copy, which made edits look inert.
+                           An edit can still outrun the BINARY by using a compiler feature it
+                           predates; `blade doctor`'s stdlib row names the root that answered
+                           and flags a diverging copy.
 examples/                  9 numbered worked programs plus lsdft.blade / lswosa.blade —
                            the best source of idiomatic Blade.
 docs/                      formalism.md (canonical semantics), features.md (feature census),

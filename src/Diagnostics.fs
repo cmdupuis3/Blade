@@ -12,6 +12,7 @@
 //   BL9xxx internal compiler errors
 module Blade.Diagnostics
 
+open System
 open Blade.Ast
 
 // Core types.
@@ -99,6 +100,42 @@ let withNoteAt (span: Span) (note: string) (d: Diagnostic) : Diagnostic =
 
 let withContext (context: string list) (d: Diagnostic) : Diagnostic =
     { d with Context = context }
+
+// Build-output provenance.
+
+/// Does this path name a file inside the stdlib copy deployed BESIDE the
+/// running binary (bin/<config>/<tfm>/stdlib/...), rather than a stdlib the
+/// user can edit?
+///
+/// Deliberately narrower than "anywhere under AppContext.BaseDirectory": the
+/// corpus is deployed there too, and a suite run from the output directory
+/// would otherwise decorate every golden diagnostic with the note below.
+let private isDeployedStdlibPath (file: string) : bool =
+    try
+        let root =
+            System.IO.Path.GetFullPath (System.IO.Path.Combine(AppContext.BaseDirectory, "stdlib"))
+            + string System.IO.Path.DirectorySeparatorChar
+        (System.IO.Path.GetFullPath file).StartsWith(root, StringComparison.OrdinalIgnoreCase)
+    with _ -> false
+
+/// The note a diagnostic earns when its span lands in that copy. Derived from
+/// the span at render time rather than attached at construction, because it is
+/// a fact about WHERE the file came from, not about what the phase found.
+///
+/// Worth the special case because the raw message is actively misleading: the
+/// location is a path the user did not write and cannot fix by editing, and the
+/// message is usually a symptom of version skew rather than a real defect --
+/// either the copy is stale (the build did not refresh it) or the binary is
+/// (the stdlib now uses something this compiler does not have). The note names
+/// both possibilities, since the text of the error does not distinguish them.
+let buildOutputNote (span: Span) : string option =
+    match span.File with
+    | Some f when isDeployedStdlibPath f ->
+        Some ("this location is the stdlib copy deployed beside Blade.exe, not a file you wrote -- \
+               the compiler and the stdlib are probably out of step. Rebuild (`dotnet build Blade.fsproj -c Release`) \
+               and re-run; if it survives that, the binary predates the stdlib it is reading. \
+               `blade doctor` reports which stdlib root answered")
+    | _ -> None
 
 // Code registry: every code the compiler can emit, with a short title.
 // Test_Diagnostics asserts shape and uniqueness; emitting an unregistered
@@ -466,11 +503,17 @@ module Render =
                 | Some s when hasLocation s ->
                     noteLine :: (sprintf "    %s %s" (gutterColor useColor "-->") (location s)) :: []
                 | _ -> [ noteLine ])
+        // Synthesized last, so a phase's own notes still read first: this one
+        // is about the FILE, not the finding.
+        let provenanceLines =
+            match buildOutputNote d.Span with
+            | Some text -> [ sprintf "  %s %s" (gutterColor useColor "=") (sprintf "note: %s" text) ]
+            | None -> []
         let contextLines =
             d.Context
             |> List.rev
             |> List.map (fun c -> sprintf "  %s %s" (gutterColor useColor "=") c)
-        String.concat "\n" (header :: (locLines @ noteLines @ contextLines))
+        String.concat "\n" (header :: (locLines @ noteLines @ provenanceLines @ contextLines))
 
     let renderAll (useColor: bool) (sm: SourceMap option) (ds: Diagnostic list) : string =
         ds |> List.map (render useColor sm) |> String.concat "\n\n"
