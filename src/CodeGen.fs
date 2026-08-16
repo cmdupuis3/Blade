@@ -5036,9 +5036,11 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
     let rTy = inferExprType rExpr
     (match lTy, rTy with
      | ArrayElem la, ArrayElem ra ->
-        // element type of the result (complex iff either operand complex)
+        // element type of the result (complex iff either operand complex);
+        // units ride an IRTUnitAnnotated wrapper (erased by irTypeToCpp), so
+        // complex is detected on the stripped type
         let isComplexElem (t: IRType) =
-            match t with IRTScalar (ETComplex64 | ETComplex128) -> true | _ -> false
+            match stripUnits t with IRTScalar (ETComplex64 | ETComplex128) -> true | _ -> false
         let outElem =
             if isComplexElem la.ElemType then la.ElemType
             elif isComplexElem ra.ElemType then ra.ElemType

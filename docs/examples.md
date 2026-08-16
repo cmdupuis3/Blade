@@ -192,8 +192,8 @@ let r = guard(has_enough_samples, L <@> variance) <|> (L <@> fallback_est)
 let S: Array<Float like SymIdx<2, n>> = ...
 let D = decompact(S, 0) |> compute        // dense n × n for external tools
 
-let G  = gram(V)                          // Gram matrix; symmetric storage
-let Gh = gram(Z)                          // complex input: HermitianIdx storage
+let G  = gram(V, V)                       // Gram matrix; symmetric storage
+let Gh = gram(Z, Z)                       // complex input: HermitianIdx storage
 let Zh = hermitian(Z)                     // adjoint; conj(x) elementwise
 ```
 
