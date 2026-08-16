@@ -314,14 +314,31 @@ let rec substituteAndLowerExtent (env: TypeEnv) (paramName: Ident) (subst: IRExp
 
 // 4. AST TypeExpr -> IRType (with extent preservation)
 
-/// Names that can never be a type VARIABLE: the built-in scalar bases and the
-/// built-in constructors. Deliberately the same list `prescanTypeVarNames`
-/// tests, and used for the same decision from the other side -- the
-/// `T<u>^k` head (array-expression plan bug #8) is a variable exactly when
-/// the name is neither one of these nor a declared type. Kept next to
-/// `lowerTypeExpr` because that is where the head is classified; the
-/// `unitSlotBases` set further down answers a different question (which
-/// bases OWN a unit slot) and is not interchangeable.
+/// Built-in scalar bases and constructors: the names a bare `T` can never be
+/// an implicit type VARIABLE for. Module-level and public because the
+/// language-surface dump (`blade ide surface`, Ide.fs) reports them as data;
+/// this list used to be a `match` local to `prescanTypeVarNames`, which is
+/// still the only consumer of the predicate below.
+let builtinScalarNames : string list =
+    [ "Int"; "Int32"; "Int64"
+      "Float"; "Float32"; "Float64"; "Double"
+      "Complex64"; "Complex128"
+      "Bool"; "Void"; "Nat"; "String"; "Char"
+      "Poly"; "Array" ]
+
+let private builtinScalarSet : Set<string> = Set.ofList builtinScalarNames
+
+/// Membership in `builtinScalarNames`, derived rather than restated: a second
+/// copy of the list is exactly the drift the hoist exists to prevent.
+let isBuiltinScalar (name: string) : bool = Set.contains name builtinScalarSet
+
+/// Names that can never be a type VARIABLE: `builtinScalarNames` above PLUS
+/// `Dist`. Nearly the list `prescanTypeVarNames` tests, and used for the same
+/// decision from the other side -- the `T<u>^k` head (array-expression plan
+/// bug #8) is a variable exactly when the name is neither one of these nor a
+/// declared type. Kept next to `lowerTypeExpr` because that is where the head
+/// is classified; the `unitSlotBases` set further down answers a different
+/// question (which bases OWN a unit slot) and is not interchangeable.
 let isConcreteTypeBaseName (name: string) : bool =
     match name with
     | "Int" | "Int32" | "Int64"
@@ -12496,14 +12513,6 @@ and buildApplyInfo (env: TypeEnv)
 /// Recurses through all TypeExpr variants so names nested in
 /// `Array<T like Idx<n>>`, `(T, U)`, `T -> U`, etc. are collected too.
 and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
-    let isBuiltinScalar name =
-        match name with
-        | "Int" | "Int32" | "Int64"
-        | "Float" | "Float32" | "Float64" | "Double"
-        | "Complex64" | "Complex128"
-        | "Bool" | "Void" | "Nat" | "String" | "Char"
-        | "Poly" | "Array" -> true
-        | _ -> false
     let rec scan ty =
         match ty with
         | TyVar (name, _) ->

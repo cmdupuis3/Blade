@@ -25,6 +25,18 @@
 // the bytes they had before.
 //   -> {"id":N,"cmd":"resetSession","session":"<key>"}   <- {"id":N,"ok":true}
 //
+// ...and the LANGUAGE SURFACE, the one command that reads no program at all:
+//
+//   -> {"id":N,"cmd":"surface"}
+//   <- {"id":N,"version":1,"compilerVersion":"..","keywords":[{"word","token"}],
+//       "operators":[..],"mathIntrinsics":{"unary","binary","complex"},
+//       "builtins":[..],"scalarTypes":[..],"builtinCalls":[..],
+//       "diagnostics":[{"code","title","phase"}]}
+//
+// Byte-identical to `blade ide surface` apart from the leading `id`. A
+// compiler predating this arm answers `unknown cmd 'surface'`, and THAT is how
+// a client probes for it -- one more reason the unknown-cmd arm is contract.
+//
 // ...and the notebook's SQUIGGLE clock, which typechecks every cell at once:
 //
 //   -> {"id":N,"cmd":"checkCells","file":"<abs path>","cells":["<cell 0>",..],
@@ -348,6 +360,14 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                       | true, s -> s.Reset()
                       | _ -> ())
                      respond (sprintf "{\"id\":%d,\"ok\":true}" i))
+                true
+            | Some "surface" ->
+                // A pure read of tables compiled INTO this binary: no
+                // setCwdFor, no store resets, no session touched, so it may
+                // interleave with anything and needs none of `check`'s hygiene.
+                (match id with
+                 | Some i -> respond (Blade.Ide.renderSurfaceWith (Some i) version)
+                 | None -> errorResponse None "\"surface\" requires an integer \"id\"")
                 true
             | Some other ->
                 errorResponse id (sprintf "unknown cmd '%s'" other)

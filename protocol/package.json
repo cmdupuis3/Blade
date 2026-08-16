@@ -1,0 +1,19 @@
+{
+  "name": "@blade-lang/ide-protocol",
+  "version": "0.19.2",
+  "description": "Shared client, wire protocol, and language surface for the Blade compiler's IDE modes (ide serve / ide check / ide surface). Version tracks the compiler's.",
+  "license": "LGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cmdupuis3/Blade.git",
+    "directory": "protocol"
+  },
+  "main": "index.js",
+  "types": "types/index.d.ts",
+  "engines": {
+    "node": ">=16"
+  },
+  "scripts": {
+    "generate-surface": "node scripts/generate-surface.js"
+  }
+}

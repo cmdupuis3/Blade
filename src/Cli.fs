@@ -69,6 +69,10 @@ let printUsage () =
     printfn "  ide serve                         Persistent editor daemon: NDJSON check requests on"
     printfn "                                    stdin, one JSON response line each on stdout"
     printfn "                                    (tier fast = typecheck; full = + monomorphization)"
+    printfn "  ide surface                       Dump the language surface -- keywords, operators,"
+    printfn "                                    intrinsics, builtins, scalar types, builtin calls,"
+    printfn "                                    BLxxxx registry -- as one JSON line (the generator"
+    printfn "                                    for protocol/surface.json)"
     printfn "  repl                              Interactive session: each input recompiles and"
     printfn "                                    re-runs the accumulated program, printing new values"
     printfn "                                    with types; bare expressions evaluate and echo"
@@ -106,6 +110,8 @@ let printUsage () =
     printfn "  test timing                       Run the differential timing block standalone"
     printfn "  test strict-pins                  Run the --strict-pins CLI gate block standalone"
     printfn "  test surfacing                    Run the warning-surfacing block standalone"
+    printfn "  test surface                      Run the `ide surface` block standalone (renderer,"
+    printfn "                                    serve arm, committed protocol/ snapshots)"
     printfn "  test ide-serve                    Run the `ide serve` NDJSON protocol block standalone"
     printfn "  test ide-eval                     Run the notebook session-eval block standalone"
     printfn "  test ide-cells                    Run the notebook checkCells assembly block standalone"
@@ -1255,6 +1261,254 @@ let private runIdeServeTests () : TH.BlockResult =
       Skipped = skipped
       FailedNames = failedNames }
 
+/// `blade ide surface` and the artifacts it feeds: the renderer's shape, the
+/// serve lane's arm, and the checked-in protocol/ snapshots.
+///
+/// The FRESHNESS case is the point of the block. Everything else here is a
+/// shape assertion; that one catches the failure that actually hurts -- a
+/// compiler whose surface has moved without a regenerated surface.json, which
+/// ships a quietly lying package to every downstream consumer.
+///
+/// A missing snapshot FAILS rather than skips. Blade.fsproj deploys both files
+/// beside the binary precisely so this block cannot go vacuously green.
+let private runSurfaceTests () : TH.BlockResult =
+    let blockName = "Surface"
+    TH.printHeader "ide surface (language surface, serve arm, committed snapshots)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    /// Working tree first (a regenerated file takes effect without a rebuild),
+    /// else the copy deployed beside the binary -- tests/Corpus.fs's precedent,
+    /// for its reason. Returns the paths tried when nothing is found, because
+    /// "which roots did you look in" is the whole diagnosis.
+    let artifact (rel: string) : Result<string, string> =
+        let candidates = [ Path.Combine(".", rel); Path.Combine(AppContext.BaseDirectory, rel) ]
+        match candidates |> List.tryFind File.Exists with
+        | Some p -> Ok p
+        | None -> Error (candidates |> List.map Path.GetFullPath |> String.concat " ; ")
+    /// Feed a whole conversation and split on the framing newline -- the same
+    /// in-process seam runIdeServeTests drives.
+    let drive (requests: string list) : int * string list * string =
+        let input = new StringReader(String.concat "\n" requests + "\n")
+        let output = new StringWriter()
+        let code = Blade.IdeServe.serveLoop compilerVersion (input :> TextReader) (output :> TextWriter)
+        let raw = output.ToString()
+        let parts = raw.Split('\n') |> Array.toList
+        (code, (parts |> List.filter (fun p -> p <> "")), raw)
+    let surfaceJson = Blade.Ide.renderSurface compilerVersion
+    let parsed = try Some (System.Text.Json.JsonDocument.Parse surfaceJson) with _ -> None
+
+    // 1. It is JSON, and its envelope says which surface it is.
+    let name = "renderSurface emits parseable JSON carrying version 1 and the compiler version"
+    match parsed with
+    | None -> record name TH.Fail (surfaceJson.Substring(0, min 200 surfaceJson.Length))
+    | Some d ->
+        let root = d.RootElement
+        let ver = (try root.GetProperty("version").GetInt32() with _ -> -1)
+        let cv = (try root.GetProperty("compilerVersion").GetString() with _ -> "")
+        if ver = 1 && cv = compilerVersion then record name TH.Pass ""
+        else record name TH.Fail (sprintf "version %d, compilerVersion '%s'" ver cv)
+
+    // Accessors over the parsed document; every later case reads through these,
+    // so a missing field degrades to an empty list and a readable failure
+    // rather than an exception that takes the whole block down.
+    let rootOpt = parsed |> Option.map (fun d -> d.RootElement)
+    let strArrayIn (owner: System.Text.Json.JsonElement option) (field: string) : string list =
+        match owner with
+        | Some el ->
+            (match el.TryGetProperty field with
+             | true, a when a.ValueKind = System.Text.Json.JsonValueKind.Array ->
+                 [ for x in a.EnumerateArray() -> defaultArg (Option.ofObj (x.GetString())) "" ]
+             | _ -> [])
+        | None -> []
+    let strArray (field: string) = strArrayIn rootOpt field
+    let objArray (field: string) (keys: string list) : string list list =
+        match rootOpt with
+        | Some el ->
+            (match el.TryGetProperty field with
+             | true, a when a.ValueKind = System.Text.Json.JsonValueKind.Array ->
+                 [ for x in a.EnumerateArray() ->
+                     keys |> List.map (fun k ->
+                         match x.TryGetProperty k with
+                         | true, v -> defaultArg (Option.ofObj (v.GetString())) ""
+                         | _ -> "") ]
+             | _ -> [])
+        | None -> []
+    let mathIntrinsic (kind: string) : string list =
+        let owner =
+            rootOpt |> Option.bind (fun el ->
+                match el.TryGetProperty "mathIntrinsics" with
+                | true, m -> Some m
+                | _ -> None)
+        strArrayIn owner kind
+
+    // 2. Sentinels: one per list, chosen so a list going missing or arriving
+    // re-ordered is caught without pinning contents that legitimately grow.
+    let keywords = objArray "keywords" ["word"; "token"]
+    let operators = strArray "operators"
+    let builtins = strArray "builtins" |> Set.ofList
+    let scalarTypes = strArray "scalarTypes"
+    let builtinCalls = strArray "builtinCalls"
+    // StaticEval's core table (knownBuiltinNames's first union member): the
+    // names that are there no matter which registries have been installed.
+    let coreBuiltins =
+        [ "exp"; "log"; "log10"; "sqrt"; "sin"; "cos"; "tan"
+          "sinh"; "cosh"; "tanh"; "asin"; "acos"; "atan"
+          "floor"; "ceil"; "atan2"; "log_base"
+          "abs"; "min"; "max"; "length"; "prodsum" ]
+    let name = "every list is present, ordered from its source of truth, and complete"
+    let failures =
+        [ if keywords |> List.tryHead <> Some ["let"; "KwLet"] then
+            yield sprintf "keywords[0] = %A" (List.tryHead keywords)
+          if keywords.Length <> Blade.Lexer.keywordEntries.Length then
+            yield sprintf "%d keywords, %d entries" keywords.Length Blade.Lexer.keywordEntries.Length
+          if not (List.contains "<@>" operators) then yield "operators lacks <@>"
+          if operators.Length <> Blade.Lexer.operatorEntries.Length then
+            yield sprintf "%d operators, %d entries" operators.Length Blade.Lexer.operatorEntries.Length
+          if mathIntrinsic "binary" <> ["atan2"; "log_base"] then
+            yield sprintf "binary intrinsics = %A" (mathIntrinsic "binary")
+          if mathIntrinsic "unary" |> List.isEmpty then yield "unary intrinsics empty"
+          if mathIntrinsic "complex" |> List.isEmpty then yield "complex intrinsics empty"
+          if scalarTypes.Length <> 16 then yield sprintf "%d scalar types" scalarTypes.Length
+          if scalarTypes <> Blade.TypeCheck.builtinScalarNames then yield "scalarTypes != builtinScalarNames"
+          for b in coreBuiltins do
+            if not (Set.contains b builtins) then yield sprintf "builtins lacks %s" b
+          if not (List.contains "hermitian" builtinCalls) then yield "builtinCalls lacks hermitian"
+          if not (List.contains "display.emit" builtinCalls) then yield "builtinCalls lacks display.emit" ]
+    if List.isEmpty failures then record name TH.Pass ""
+    else record name TH.Fail (String.concat "; " failures)
+
+    // 3. The diagnostics registry travels whole and in order, each code carrying
+    // the phase its band implies -- what lets a client title a BLxxxx without
+    // shipping a copy of Diagnostics.fs.
+    let diagnostics = objArray "diagnostics" ["code"; "title"; "phase"]
+    let expected =
+        Blade.Diagnostics.Codes.registryEntries |> List.map (fun (c, t) -> [c; t])
+    let name = "diagnostics mirror registryEntries in order, with a non-empty phase each"
+    let codesMatch = (diagnostics |> List.map (List.truncate 2)) = expected
+    let phasesOk = diagnostics |> List.forall (fun e -> List.length e = 3 && e.[2] <> "")
+    if codesMatch && phasesOk then
+        record name TH.Pass (sprintf "%d codes" diagnostics.Length)
+    else
+        record name TH.Fail
+            (sprintf "%d emitted vs %d registered, phases ok: %b"
+                     diagnostics.Length expected.Length phasesOk)
+
+    // 4. The serve arm: same line plus the correlation id, an id-less request
+    // is an error rather than an unframed response, and the loop survives both.
+    let (code, responses, raw) =
+        drive [ "{\"id\":5,\"cmd\":\"surface\"}"; "{\"cmd\":\"surface\"}"
+                "{\"id\":6,\"cmd\":\"ping\"}"; "{\"cmd\":\"shutdown\"}" ]
+    let name = "serve answers cmd surface with one framed line, requires an id, keeps going"
+    match responses with
+    | [dump; noId; pong] when code = 0
+                              && dump.StartsWith "{\"id\":5,\"version\":1,\"compilerVersion\":"
+                              && dump.Contains "\"keywords\":[{\"word\":\"let\""
+                              && dump.Contains "\"diagnostics\":[{\"code\":\"BL0001\""
+                              && noId.Contains "\"id\":null" && noId.Contains "surface"
+                              && pong.Contains "\"id\":6" && raw.EndsWith "\n" ->
+        record name TH.Pass ""
+    | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+    // 5. FRESHNESS. The committed snapshot is what every consumer reads; this
+    // is the only thing that keeps it honest. TrimEnd because the file carries
+    // a trailing newline (and CRLF after a checkout on Windows) that the
+    // renderer's single line does not.
+    let name = "the committed protocol/surface.json matches this compiler's render"
+    match artifact "protocol/surface.json" with
+    | Error tried ->
+        record name TH.Fail (sprintf "snapshot not found; looked in %s" tried)
+    | Ok path ->
+        let onDisk = File.ReadAllText(path).TrimEnd('\r', '\n')
+        if onDisk = surfaceJson then record name TH.Pass ""
+        else
+            // Report the first divergence: a 10 KB diff is unreadable, the
+            // offset plus its neighbourhood names the field that moved.
+            let at =
+                Seq.zip onDisk surfaceJson
+                |> Seq.tryFindIndex (fun (a, b) -> a <> b)
+                |> Option.defaultValue (min onDisk.Length surfaceJson.Length)
+            let ctx (s: string) = s.Substring(max 0 (at - 30), min 80 (s.Length - max 0 (at - 30)))
+            record name TH.Fail
+                (sprintf "diverges at %d (regenerate with `blade ide surface`)\n      file: %s\n      live: %s"
+                         at (ctx onDisk) (ctx surfaceJson))
+
+    // 6. The hand-authored knowledge base: the half of the package no generator
+    // can produce, keyed by the SAME registry the surface carries so a new code
+    // cannot ship undocumented. Every example path must exist AND mention its
+    // code -- a stale path is worse than no example, because a client shows it.
+    let kbDocPaths = ResizeArray<string>()
+    let name = "protocol/data/diagnostics.json covers every registry code, with live examples"
+    match artifact "protocol/data/diagnostics.json" with
+    | Error tried ->
+        record name TH.Fail (sprintf "knowledge base not found; looked in %s" tried)
+    | Ok path ->
+        match (try Some (System.Text.Json.JsonDocument.Parse(File.ReadAllText path)) with _ -> None) with
+        | None -> record name TH.Fail (sprintf "%s is not JSON" path)
+        | Some kb ->
+            let entries =
+                match kb.RootElement.TryGetProperty "codes" with
+                | true, c when c.ValueKind = System.Text.Json.JsonValueKind.Object ->
+                    [ for p in c.EnumerateObject() -> (p.Name, p.Value) ]
+                | _ -> []
+            let byCode = dict entries
+            let strOf (el: System.Text.Json.JsonElement) (field: string) =
+                match el.TryGetProperty field with
+                | true, v when v.ValueKind = System.Text.Json.JsonValueKind.String ->
+                    defaultArg (Option.ofObj (v.GetString())) ""
+                | _ -> ""
+            let listOf (el: System.Text.Json.JsonElement) (field: string) =
+                match el.TryGetProperty field with
+                | true, a when a.ValueKind = System.Text.Json.JsonValueKind.Array ->
+                    [ for x in a.EnumerateArray() -> defaultArg (Option.ofObj (x.GetString())) "" ]
+                | _ -> []
+            for (_, e) in entries do kbDocPaths.AddRange(listOf e "docs")
+            let problems =
+                [ for (code, title) in Blade.Diagnostics.Codes.registryEntries do
+                    match byCode.TryGetValue code with
+                    | false, _ -> yield sprintf "%s absent" code
+                    | true, e ->
+                        if strOf e "title" <> title then
+                            yield sprintf "%s title '%s' <> registry '%s'" code (strOf e "title") title
+                        if strOf e "explanation" = "" then yield sprintf "%s has no explanation" code
+                        if strOf e "fix" = "" then yield sprintf "%s has no fix" code
+                        for ex in listOf e "examples" do
+                            match artifact ex with
+                            | Error _ -> yield sprintf "%s example missing: %s" code ex
+                            | Ok p ->
+                                if not ((File.ReadAllText p).Contains code) then
+                                    yield sprintf "%s example never mentions it: %s" code ex
+                  for (code, _) in entries do
+                    if not (Blade.Diagnostics.Codes.isRegistered code) then
+                        yield sprintf "'%s' is not a registered code" code ]
+            if List.isEmpty problems then record name TH.Pass (sprintf "%d codes" entries.Length)
+            else record name TH.Fail (problems |> List.truncate 6 |> String.concat "; ")
+
+    // ...and its docs[] half, which points into docs/ -- repo-only, so this leg
+    // alone skips when the suite runs from the deployed directory.
+    let name = "knowledge-base docs[] paths resolve in the repo tree"
+    if not (Directory.Exists "docs") then
+        record name TH.Skip "no ./docs (running beside the binary)"
+    else
+        let missing = kbDocPaths |> Seq.distinct |> Seq.filter (File.Exists >> not) |> List.ofSeq
+        if List.isEmpty missing then
+            record name TH.Pass (sprintf "%d paths" (kbDocPaths |> Seq.distinct |> Seq.length))
+        else record name TH.Fail (String.concat "; " missing)
+
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    let parts =
+        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+    TH.printFooter blockName parts
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = skipped
+      FailedNames = failedNames }
+
 /// The notebook lane: `ide serve`'s `eval` / `resetSession` commands, driven
 /// through the same in-process `serveLoop` seam the block above uses. Every
 /// case here rides the INTERPRETER, so the block needs no g++ and no spawn.
@@ -2252,7 +2506,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
 /// (which live in this file -- see runAllTestsFullWith's doc comment for why they're passed in).
 let private runFullSuite opts =
     runAllTestsFullWith
-        [runCliSmokeTests; runStrictPinTests; runSurfacingTests
+        [runCliSmokeTests; runStrictPinTests; runSurfacingTests; runSurfaceTests
          runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
@@ -2296,6 +2550,11 @@ let private dispatchTest (rest: string list) : int =
     | [ "surfacing" ] ->
         // Warning/suggestion surfacing: codes, streams, and survival of the checker's error path.
         let failed = (runSurfacingTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "surface" ] ->
+        // The language-surface dump: renderer shape, the serve arm, and the
+        // committed protocol/ snapshots (freshness + the diagnostics KB).
+        let failed = (runSurfaceTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "ide-serve" ] | [ "ideserve" ] ->
         // The NDJSON daemon protocol, driven in-process. No toolchain, no spawn.
@@ -2767,6 +3026,12 @@ let private dispatchInner (args: string[]) : int =
 
     // The same payload, served: one long-lived process, NDJSON both ways.
     | [| "ide"; "serve" |] -> Blade.IdeServe.serve compilerVersion
+
+    // The language surface as data -- what protocol/surface.json is generated
+    // from. Redirect it with a tool that writes LF and no BOM (PowerShell `>`
+    // writes both); `blade test surface` pins the committed copy against a
+    // live render.
+    | [| "ide"; "surface" |] -> printfn "%s" (Blade.Ide.renderSurface compilerVersion); 0
 
     | _ when args.Length >= 1 && args.[0] = "test" ->
         dispatchTest (args.[1..] |> Array.toList)

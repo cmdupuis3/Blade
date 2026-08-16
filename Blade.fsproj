@@ -439,6 +439,23 @@
     <None Include="deps.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- The generated language surface (`blade ide surface`), checked in as the
+         data half of the shared IDE-protocol package. Deployed beside the
+         binary for the reason tests/corpus is: `blade test surface` compares
+         this snapshot against a live render and must FAIL, not vacuously skip,
+         when the suite runs from the output directory. No Link metadata, so
+         the relative path is preserved (protocol/surface.json). -->
+    <None Include="protocol/surface.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Its hand-authored companion: per-BLxxxx explanation/fix prose and
+         example corpus paths, the half of the package no generator can
+         produce. Deployed for the same reason, and because its example paths
+         are corpus-relative: corpus ships beside the binary too, so they
+         resolve under both roots. -->
+    <None Include="protocol/data/diagnostics.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <!-- The Blade standard library, in Blade source. ModuleResolve.fs looks for

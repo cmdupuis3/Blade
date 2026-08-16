@@ -695,6 +695,20 @@ let rec private ppConcrete (names: Map<IRId, string>) (t: IRType) : string =
             (axes |> List.map (ppIndexTypeIn names) |> String.concat ", ")
     | other -> ppIRTypeIn names other
 
+/// Every name `builtinCallOf` below can return, in arm order -- the companion
+/// the language-surface dump reports, since a private `match` cannot be
+/// enumerated. KEEP IN SYNC with builtinCallOf: adding an arm means adding its
+/// name here. The `OpMath` arm is deliberately absent -- it returns whichever
+/// intrinsic the node names, and those are already reported as
+/// `mathIntrinsics`.
+let builtinCallNames : string list =
+    [ "hermitian"; "conj"; "method_for"; "object_for"; "pure"; "compute"; "read"
+      "guard"; "reynolds"; "zero"; "rank"; "arity"; "extents"; "reduce"; "mask"
+      "compound"; "sparse"; "zip"; "stack"; "sort"; "unique"; "intersect"; "union"
+      "contains"; "display.emit"; "group_by"; "group_keys"; "transpose"; "decompact"
+      "gram"; "matmul"; "eigh"; "solve"; "sequence"; "replicate"; "complex"
+      "prodsum"; "fill_random" ]
+
 /// The builtin a typed node is an application of, with its argument nodes
 /// in source order -- None for a non-builtin call (PPL/ML surfaces are
 /// collected separately by collectFormerCalls). `hermitian(A)` is rewritten
@@ -1997,3 +2011,114 @@ let ideCheck (filePath: string) : int =
             ideCheckSource filePath (File.ReadAllText filePath)
     printfn "%s" json
     exitCode
+
+// Language surface (`blade ide surface`)
+//
+// One JSON line naming everything this compiler recognizes: the keyword
+// vocabulary with its DU token names, the multi-character operators, the math
+// intrinsics, the static-evaluator builtins, the scalar type bases, the
+// builtin call names, and the BLxxxx registry with each code's phase band.
+// Generated into protocol/surface.json (checked in) so the shared IDE-protocol
+// package and its consumers stop hand-copying these lists out of the compiler
+// -- drift between such mirrors has already shipped bugs (a builtin with a
+// hover but no highlighting).
+//
+// The dump is a pure function of the binary plus the version string the CLI
+// owns: no program is read, no file is touched. Field order is fixed and every
+// array is order-stable, so diffing two dumps reads as a changelog.
+//
+// Deliberately NOT part of renderJson's payload: that one is pinned
+// byte-for-byte by the one-shot `ide check --json` test, and the surface has a
+// different lifetime (it changes when the compiler changes, not when the
+// program does).
+
+/// The `phase` string a diagnostics entry carries: the band `phaseOfCode`
+/// derives, rendered for clients that have no F# union to match on.
+let private phaseName (p: Blade.Diagnostics.Phase) : string =
+    match p with
+    | Blade.Diagnostics.PhLex -> "lex"
+    | Blade.Diagnostics.PhParse -> "parse"
+    | Blade.Diagnostics.PhResolve -> "resolve"
+    | Blade.Diagnostics.PhTypes -> "types"
+    | Blade.Diagnostics.PhConstraints -> "constraints"
+    | Blade.Diagnostics.PhElaborate stage -> "elaborate:" + stage
+    | Blade.Diagnostics.PhIRValidate -> "ir"
+    | Blade.Diagnostics.PhBackend -> "backend"
+    | Blade.Diagnostics.PhRuntime -> "runtime"
+    | Blade.Diagnostics.PhInternal -> "internal"
+
+/// `"<name>":["a","b"]` -- the one array shape this dump uses for plain names.
+let private appendNameArray (sb: StringBuilder) (name: string) (items: string seq) =
+    sb.Append('"').Append(name).Append("\":[") |> ignore
+    items
+    |> Seq.iteri (fun i s ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.Append('"').Append(jsonEscape s).Append('"') |> ignore)
+    sb.Append ']' |> ignore
+
+/// The surface line. `id` leads when present -- the serve lane's correlation
+/// field, in the position renderJson's envelope puts it -- and is omitted
+/// entirely by the one-shot verb. `compilerVersion` arrives as a PARAMETER for
+/// `IdeServe.serve`'s reason: Ide.fs must not grow a dependency on Cli.fs.
+let renderSurfaceWith (id: int option) (compilerVersion: string) : string =
+    // `knownBuiltinNames ()` unions two registries that are filled LAZILY on
+    // the check path: StructIdxSpec.install (run by typeCheck) and
+    // ML.Statics.install (run by MLElaborate.expand). A dump must not depend on
+    // whether this process happened to check a file first -- `blade test
+    // surface` compares a live render against the snapshot a ONE-SHOT dump
+    // produced, and in the full suite the live render runs after hundreds of
+    // corpus checks -- so force both here. Both are idempotent.
+    // ProviderStatics.install is deliberately NOT called: it registers a
+    // compile-time data READER, not a builtin name.
+    Blade.StructIdxSpec.install ()
+    Blade.ML.Statics.install ()
+    let sb = StringBuilder(16384)
+    sb.Append '{' |> ignore
+    (match id with
+     | Some i -> sb.Append("\"id\":").Append(i).Append(',') |> ignore
+     | None -> ())
+    sb.Append("\"version\":1,\"compilerVersion\":\"").Append(jsonEscape compilerVersion)
+      .Append("\",") |> ignore
+    // Keywords in DECLARATION order, each with the DU case name a client can
+    // key on. `true`/`True` are two entries sharing one token, deliberately:
+    // the surface reports spellings, not tokens.
+    sb.Append "\"keywords\":[" |> ignore
+    Blade.Lexer.keywordEntries
+    |> List.iteri (fun i (word, kw) ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.Append("{\"word\":\"").Append(jsonEscape word)
+          .Append("\",\"token\":\"").Append(sprintf "%A" kw).Append("\"}") |> ignore)
+    sb.Append "]," |> ignore
+    // Declaration order, not the length-sorted `operators`: that ordering
+    // exists for maximal munch and would read as churn in a snapshot diff.
+    appendNameArray sb "operators" Blade.Lexer.operatorEntries
+    sb.Append ",\"mathIntrinsics\":{" |> ignore
+    appendNameArray sb "unary" Blade.Grad.mathIntrinsics
+    sb.Append ',' |> ignore
+    appendNameArray sb "binary" Blade.Grad.binaryMathIntrinsics
+    sb.Append ',' |> ignore
+    appendNameArray sb "complex" Blade.Grad.complexMathIntrinsics
+    sb.Append "}," |> ignore
+    // Sorted (the sets iterate ascending). Includes the internal `__ml_stat_*`
+    // sizing names the ML layer registers: this is what the static evaluator
+    // will actually accept, and the `__` prefix is the repo's own marker for
+    // "internal, not API" -- clients filter it if they want the user surface.
+    appendNameArray sb "builtins" (Blade.StaticEval.knownBuiltinNames ())
+    sb.Append ',' |> ignore
+    appendNameArray sb "scalarTypes" Blade.TypeCheck.builtinScalarNames
+    sb.Append ',' |> ignore
+    appendNameArray sb "builtinCalls" builtinCallNames
+    sb.Append ",\"diagnostics\":[" |> ignore
+    Blade.Diagnostics.Codes.registryEntries
+    |> List.iteri (fun i (code, title) ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.Append("{\"code\":\"").Append(jsonEscape code)
+          .Append("\",\"title\":\"").Append(jsonEscape title)
+          .Append("\",\"phase\":\"").Append(phaseName (Blade.Diagnostics.Codes.phaseOfCode code))
+          .Append("\"}") |> ignore)
+    sb.Append "]}" |> ignore
+    sb.ToString()
+
+/// The one-shot form: no envelope, exactly what `blade ide surface` prints and
+/// what protocol/surface.json is generated from.
+let renderSurface (compilerVersion: string) : string = renderSurfaceWith None compilerVersion
