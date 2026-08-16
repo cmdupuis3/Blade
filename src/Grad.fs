@@ -48,10 +48,15 @@
 ///   - float array literals
 ///
 /// Deliberately rejected (clean errors): if/match in differentiated code,
-/// combinator computations, tuple-pattern lets, reads of an accumulator
-/// from expressions inside the loop that mutates it, writes to an
-/// accumulator after straight-line code has read it, array-alias lets,
-/// callees with mut params.
+/// combinator computations AND combinator operators, tuple-pattern lets,
+/// reads of an accumulator from expressions inside the loop that mutates it,
+/// writes to an accumulator after straight-line code has read it,
+/// array-alias lets, callees with mut params, unit-carrying and complex
+/// parameters/returns (a gradient's units are <loss>/<param>, which this ABI
+/// cannot express; complex needs a Wirtinger convention), calls to names
+/// with no derivative rule (`abs`, `min`, imports -- silence would drop
+/// their term), and user bindings spelled like the synthesized names
+/// (`__g_*`, `__t_*`, `__primal` -- shadowing corrupts the sweep).
 ///
 /// Loop-body `let`s are recomputed inside the adjoint loop (recompute-based
 /// tape); function-level `let`s stay in scope across the reverse sweep, so
@@ -183,6 +188,13 @@ type private NStmt =
 type private Ctx = {
     /// Same-module user function declarations by name.
     Decls: Map<string, FunctionDecl>
+    /// Same-module transparent type aliases (unparameterized `type X = T` and
+    /// mutual-group members), so `type Speed = Float<mps>` classifies as the
+    /// unit-carrying Float it is instead of silently falling to NonDiff.
+    TypeAliases: Map<string, TypeExpr>
+    /// Module-level value binding names (DeclLet / DeclStatic): reads of these
+    /// inside a differentiated body are constant data, not unknown calls.
+    ModuleVals: Set<string>
     /// Fresh-suffix counter (shared across one expand run).
     mutable Fresh: int
 }
@@ -268,6 +280,13 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     | { Kind = ExprKind.ExprUnaryOp (OpNeg, inner) } -> walkExpr fname ctx onVar inner
     | { Kind = ExprKind.ExprUnaryOp (OpNot, inner) } -> walkExpr fname ctx onVar inner
     | { Kind = ExprKind.ExprUnaryOp _ } -> err fname "unsupported unary operator in differentiated code"
+    // Combinator OPERATORS. The syntactic combinator forms (lambda /
+    // method_for / ...) are rejected further down, but the operator spellings
+    // are ordinary BinOps and would otherwise slip through this walk when both
+    // operands are plain names, dying much later in the adjoint with a generic
+    // "unsupported expression form" that never says the word combinator.
+    | { Kind = ExprKind.ExprBinOp (_, (OpApply | OpBind | OpParallel | OpFusion | OpArrayProd | OpFunctor | OpChoice | OpFallback | OpComposeObj | OpComposeMeth | OpCompose | OpCons), _, _) } ->
+        err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); loop-object combinator operators (`<@>`, `>>=`, `<&>`, `<&!>`, `<*>`, `<$>`, `<|>`, `<|:>`, `>>@`, `@>>`, `>>`, `::`) are not differentiable"
     | { Kind = ExprKind.ExprBinOp (_, _, l, r) } ->
         walkExpr fname ctx onVar l |> Result.bind (fun () -> walkExpr fname ctx onVar r)
     | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args) } ->
@@ -354,7 +373,9 @@ let rec private hoistCalls (fname: string) (ctx: Ctx) (e: Expr) : Result<NStmt l
                     recurse a |> Result.map (fun (s, a') -> (stmts @ s, args' @ [a']))))
                 (Ok ([], []))
         folded |> Result.map (fun (stmts, args') ->
-            let tmp = fresh ctx "__t"
+            // `__hc` = hoisted call. (Deliberately NOT `__t`: the `__t_` prefix
+            // is reserved for forward-mode tangent names, one underscore away.)
+            let tmp = fresh ctx "__hc"
             (stmts @ [NLet (tmp, false, re (ExprApp (re (ExprVar name), args')))], re (ExprVar tmp)))
     | ExprKind.ExprApp (f, args) ->
         let folded =
@@ -767,12 +788,47 @@ type private ParamClass =
     | DiffScalar
     | NonDiff
 
-let private classifyParam (fname: string) (p: ParamDecl) : Result<ParamClass, string> =
+/// Resolve same-module transparent type aliases, depth-capped (an alias
+/// cycle is a type error elsewhere; the cap just keeps this total).
+let private resolveTy (ctx: Ctx) (t: TypeExpr) : TypeExpr =
+    let rec go d t =
+        if d > 8 then t
+        else
+            match t with
+            | TyNamed (n, []) ->
+                (match Map.tryFind n ctx.TypeAliases with
+                 | Some body -> go (d + 1) body
+                 | None -> t)
+            | _ -> t
+    go 0 t
+
+/// Classify one parameter. Unit-carrying Floats and complex types get
+/// EXPLICIT refusals rather than the NonDiff fall-through: silently treating
+/// `y: Float<meters>` as non-differentiable drops its partial from the
+/// gradient with no diagnostic -- the same wrong-answer class as an
+/// unknown-derivative intrinsic, and worse than refusing.
+let private classifyParam (fname: string) (ctx: Ctx) (p: ParamDecl) : Result<ParamClass, string> =
     match p.Type with
     | None -> err fname (sprintf "parameter '%s' must have a type annotation" p.Name)
-    | Some t when isFloatTy t -> Ok DiffScalar
-    | Some (TyArray (elem, _)) when isFloatTy elem -> Ok DiffArray
-    | Some _ -> Ok NonDiff
+    | Some t0 ->
+        let refuseUnits (what: string) =
+            err fname (sprintf "parameter '%s' %s: unit-carrying parameters are not differentiable (v1) -- a gradient's units are <loss>/<parameter>, which the grad ABI (buffer type = parameter type) cannot express; strip the unit at the call boundary or compute the unit-carrying part outside the differentiated function" p.Name what)
+        let refuseComplex (what: string) =
+            err fname (sprintf "parameter '%s' %s: complex parameters are not differentiable (v1); complex derivatives need a holomorphic/Wirtinger convention the AD subset does not define" p.Name what)
+        let t = resolveTy ctx t0
+        match t with
+        | _ when isFloatTy t -> Ok DiffScalar
+        | TyNamed (("Float" | "Float64" | "Float32"), _ :: _) -> refuseUnits "carries units"
+        | TyComplex64 | TyComplex128 | TyNamed (("Complex64" | "Complex128"), _) -> refuseComplex "is complex"
+        | TyArray (elem, _) ->
+            let el = resolveTy ctx elem
+            if isFloatTy el then Ok DiffArray
+            else
+                (match el with
+                 | TyNamed (("Float" | "Float64" | "Float32"), _ :: _) -> refuseUnits "is an array of unit-carrying Floats"
+                 | TyComplex64 | TyComplex128 | TyNamed (("Complex64" | "Complex128"), _) -> refuseComplex "is a complex array"
+                 | _ -> Ok NonDiff)
+        | _ -> Ok NonDiff
 
 /// Zero value matching an array literal's (or constant fill's) shape.
 let rec private zerosLikeLiteral (e: Expr) : Expr option =
@@ -807,6 +863,25 @@ let private zerosOfType (fname: string) (t: TypeExpr) : Result<Expr, string> =
                     ns |> List.rev |> List.fold (fun inner n -> syn (ExprArrayLit (List.replicate n inner))) z))
         | _ -> err fname "cannot build a zero cotangent for this type"
     go t
+
+/// Partials of the two-argument intrinsics, per operand -- the binary sibling
+/// of `derivRule`, whose signature (name -> Expr -> Expr option) is
+/// structurally unary and has nowhere to put a second operand. Returns
+/// (d/dFirst, d/dSecond) as expressions of the FORWARD operands; both AD
+/// modes consume it the same way (reverse multiplies by the cotangent,
+/// forward by the operand tangents).
+///   atan2(y, x): d/dy =  x/(x^2+y^2),  d/dx = -y/(x^2+y^2)
+///   log_base(x, b) = log x / log b:
+///                    d/dx = 1/(x log b),  d/db = -log x/(b (log b)^2)
+let private binaryDerivRule (name: string) (a: Expr) (b: Expr) : Expr * Expr =
+    match name with
+    | "atan2" ->
+        let denom = add (mul a a) (mul b b)
+        (div b denom, neg (div a denom))
+    | _ ->  // log_base(x, b)
+        let lb = call "log" [b]
+        (div (fLit 1.0) (mul a lb),
+         neg (div (call "log" [a]) (mul b (mul lb lb))))
 
 // Taint analysis
 
@@ -1041,6 +1116,12 @@ type private RevCtx = {
     Ctx: Ctx
     Diff: Set<string>
     Arrays: Set<string>
+    /// Every name a bare `name(args)` may legitimately refer to WITHOUT a
+    /// derivative rule: params (incl. int arrays), function-local binders,
+    /// and module-level value bindings. A named application outside this set
+    /// (and outside the intrinsic/decl arms above) is an unknown call and is
+    /// refused rather than silently zero-differentiated.
+    Known: Set<string>
 }
 
 /// Emit `d += cot`-style accumulation onto a cotangent target.
@@ -1081,34 +1162,24 @@ let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list
          | Some d ->
              let pre, c = bindCot rc cot
              adjointOf rc u (mul c d) |> Result.map (fun ss -> pre @ ss))
-    // BINARY intrinsics. Their partials are handled here rather than in
-    // `derivRule`, whose signature (name -> Expr -> Expr option) is
-    // structurally unary: it returns ONE derivative of ONE forward operand, so
-    // a two-argument rule has nowhere to live in that table without changing
-    // every caller. The chain rule is applied per operand right here, which is
-    // what the table's consumer does anyway.
-    //   atan2(y, x): d/dy =  x/(x^2+y^2),  d/dx = -y/(x^2+y^2)
-    //   log_base(x, b) = log x / log b:
-    //                    d/dx = 1/(x log b),  d/db = -log x/(b (log b)^2)
-    // Without this arm both would fall to the `Ok []` catch-all below and
-    // silently contribute a ZERO gradient.
+    // BINARY intrinsics: chain rule per operand via the shared partial table.
+    // Without this arm both would fall to the unknown-call refusal below.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [a; b]) when isBinaryMathIntrinsic name
                                        && not (Map.containsKey name rc.Ctx.Decls) ->
         let pre, c = bindCot rc cot
-        let (dA, dB) =
-            match name with
-            | "atan2" ->
-                let denom = add (mul a a) (mul b b)
-                (div b denom, neg (div a denom))
-            | _ ->  // log_base(x, b)
-                let lb = call "log" [b]
-                (div (fLit 1.0) (mul a lb),
-                 neg (div (call "log" [a]) (mul b (mul lb lb))))
+        let (dA, dB) = binaryDerivRule name a b
         adjointOf rc a (mul c dA) |> Result.bind (fun sa ->
         adjointOf rc b (mul c dB) |> Result.map (fun sb -> pre @ sa @ sb))
-    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar _ }, _) ->
-        // array read of a non-diff array, or int-typed call -- no adjoint
-        Ok []
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, _) ->
+        // Array read of non-diff data (a param, local, or module binding):
+        // genuinely no adjoint. Anything ELSE named here is a call the
+        // transform has no rule for -- `abs`, `min`, an imported function --
+        // and REFUSING is the point: falling through to `Ok []` would hand
+        // back a gradient that silently drops this term (the same
+        // wrong-answer class as the digamma refusal above).
+        if Set.contains name rc.Known then Ok []
+        else
+            Error (sprintf "cannot differentiate through '%s': it is not a same-module function, a math intrinsic with a derivative rule, or an array in scope, so its contribution would silently vanish from the gradient. Compute it outside the function passed to ad.grad, or pass the value in as a parameter" name)
     | ExprKind.ExprUnaryOp (OpNeg, inner) -> adjointOf rc inner (neg cot)
     | ExprKind.ExprBinOp (_, OpAdd, l, r) ->
         adjointOf rc l cot |> Result.bind (fun sl ->
@@ -1248,10 +1319,20 @@ let private gradSuffix = "__grad"
 
 let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, string> =
     let fname = fd.Name
+    // The synthesized name must be free: splicing a second `f__grad` beside a
+    // user function of that name would silently shadow one of them.
+    (if Map.containsKey (fname + gradSuffix) ctx.Decls then
+        err fname (sprintf "a function named '%s%s' already exists in this module; grad would synthesize a colliding declaration -- rename it" fname gradSuffix)
+     else Ok ())
+    |> Result.bind (fun () ->
     // Return type must be a Float scalar (checked syntactically; the
-    // typechecker re-verifies the generated function anyway).
-    match fd.ReturnType with
+    // typechecker re-verifies the generated function anyway). Unit-carrying
+    // losses get their own message: the refusal is about gradient UNITS
+    // (<loss>/<param>), not about the return being a non-Float.
+    match fd.ReturnType |> Option.map (resolveTy ctx) with
     | Some t when isFloatTy t -> Ok ()
+    | Some (TyNamed (("Float" | "Float64" | "Float32"), _ :: _)) ->
+        err fname "grad requires a dimensionless Float return: the loss carries units, and gradient units <loss>/<parameter> are not expressible in the grad ABI (v1); divide the loss by a unit constant at the boundary"
     | Some _ -> err fname "grad requires a function returning Float (scalar loss)"
     | None -> err fname "grad requires an explicit `-> Float` return annotation"
     |> Result.bind (fun () ->
@@ -1259,7 +1340,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
     let classesR =
         fd.Params |> List.fold (fun acc p ->
             acc |> Result.bind (fun cs ->
-                classifyParam fname p |> Result.map (fun c -> cs @ [(p, c)])))
+                classifyParam fname ctx p |> Result.map (fun c -> cs @ [(p, c)])))
             (Ok [])
     classesR |> Result.bind (fun classes ->
     let diffParams =
@@ -1278,6 +1359,19 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
     else
     // normalize + inline
     normalizeBody fname ctx 0 fd |> Result.bind (fun (stmts, finalE) ->
+    // Reserved-name gate. The transform's deterministic synthesized names
+    // (`__g_<x>` cotangents, `__t_<x>` forward-mode tangents, `__primal`)
+    // would silently SHADOW a same-named user binding: the synthesized
+    // zero-initialized declaration wins, and every derivative expression that
+    // should read the user's value reads the zeroed cotangent instead --
+    // a wrong gradient with no diagnostic. (Inlined callee locals are
+    // exempt by construction: renaming gives them an `__in<N>_` prefix.)
+    let reservedName (n: string) =
+        n = "__primal" || n.StartsWith "__g_" || n.StartsWith "__t_"
+    match (fd.Params |> List.map (fun p -> p.Name)) @ boundNames stmts |> List.tryFind reservedName with
+    | Some n ->
+        err fname (sprintf "binding or parameter '%s' collides with a reserved AD name (`__g_*`, `__t_*`, and `__primal` are synthesized by the transform and would shadow it); rename it" n)
+    | None ->
     // validate every expression in the fragment
     let validateAll =
         let rec valStmts ss =
@@ -1299,7 +1393,12 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
     checkWriteAfterRead fname ctx stmts |> Result.bind (fun () ->
     analyze fname ctx diffParams arrayParams stmts finalE |> Result.bind (fun (diff, arrays) ->
     checkNoScalarOverwrite fname diff stmts |> Result.bind (fun () ->
-    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays }
+    let known =
+        Set.unionMany [
+            fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
+            boundNames stmts |> Set.ofList
+            ctx.ModuleVals ]
+    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known }
 
     // cotangent declarations for function-level diff LOCALS (params' array
     // cotangents are mut parameters; scalar-param cotangents are locals)
@@ -1370,7 +1469,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
       ReturnType = retTy
       Body = inheritSpan fd.Body (ExprBlock (fwd @ cotDecls @ revStmts, Some retExpr))
       IsStatic = false
-      NameSpan = noSpan }))))))))))
+      NameSpan = noSpan })))))))))))
 
 // Call-site rewriting + program expansion
 
@@ -1480,6 +1579,28 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             | DeclFunction fd -> Some (fd.Name, fd)
             | _ -> None)
         |> Map.ofList
+    // Transparent same-module type aliases, so parameter classification can
+    // see through `type Speed = Float<mps>`.
+    let typeAliases =
+        decls |> List.collect (fun d ->
+            match d.Value with
+            | DeclType (TyDeclAlias (n, [], body)) -> [(n, body)]
+            | DeclType (TyDeclMutualGroup (members, _)) -> members
+            | _ -> [])
+        |> Map.ofList
+    // Module-level value binding names: constant data for the adjoint's
+    // known-name check (tuple patterns contribute each bound name).
+    let rec patNames (p: Pattern) : string list =
+        match p.Kind with
+        | PatternKind.PatVar n -> [n]
+        | PatternKind.PatTuple ps -> ps |> List.collect patNames
+        | _ -> []
+    let moduleVals =
+        decls |> List.collect (fun d ->
+            match d.Value with
+            | DeclLet b | DeclStatic b -> patNames b.Pattern
+            | _ -> [])
+        |> Set.ofList
     // Source span per differentiable function, for stamping synthSpan so
     // syn-based derivative builders carry the differentiated decl's location.
     let funcSpans =
@@ -1511,7 +1632,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
     rewritten |> Result.bind (fun decls' ->
         if requested.Count = 0 then Ok decls'
         else
-            let ctx = { Decls = funcDecls; Fresh = 0 }
+            let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = moduleVals; Fresh = 0 }
             // synthesize each requested derivative once
             let synthesized =
                 requested |> Seq.sort |> Seq.fold (fun acc fname ->
@@ -1523,10 +1644,16 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                         synthesize ctx funcDecls.[fname]
                         |> Result.map (fun gd -> Map.add fname gd made)))
                     (Ok Map.empty)
-            Blade.Ast.synthSpan <- noSpan
-            synthesized |> Result.map (fun made ->
+            // On failure, LEAVE synthSpan stamped with the failing decl's
+            // span: the `expand` boundary reads it when building the BL5500
+            // diagnostic (resetting first was how synthesis errors lost
+            // their source location). Reset on success only.
+            match synthesized with
+            | Error e -> Error e
+            | Ok made ->
+                Blade.Ast.synthSpan <- noSpan
                 // splice each f__grad immediately after its source decl
-                decls' |> List.collect (fun d ->
+                Ok (decls' |> List.collect (fun d ->
                     match d.Value with
                     | DeclFunction fd when Map.containsKey fd.Name made ->
                         [d; { d with Value = DeclFunction made.[fd.Name] }]
@@ -1546,6 +1673,11 @@ let private expandStr (program: Program) : Result<Program, string> =
 /// failure points at the offending declaration.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
     Blade.Ast.synthSpan <- Blade.Ast.noSpan
-    expandStr program
-    |> Result.mapError (fun msg ->
-        [ Blade.Diagnostics.mkError "BL5500" (Blade.Diagnostics.Codes.phaseOfCode "BL5500") Blade.Ast.synthSpan msg ])
+    let result =
+        expandStr program
+        |> Result.mapError (fun msg ->
+            [ Blade.Diagnostics.mkError "BL5500" (Blade.Diagnostics.Codes.phaseOfCode "BL5500") Blade.Ast.synthSpan msg ])
+    // Reset AFTER the diagnostic is built (the span is the failing decl's),
+    // so no stamp leaks into later passes.
+    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    result
