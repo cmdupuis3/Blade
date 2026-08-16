@@ -216,6 +216,29 @@ let private errMode = ref "grad"
 let private err (fname: string) (msg: string) : Result<'a, string> =
     Error (sprintf "%s(%s): %s" errMode.Value fname msg)
 
+/// Resolve same-module transparent type aliases, depth-capped (an alias
+/// cycle is a type error elsewhere; the cap just keeps this total). Defined
+/// this early because extent reading, parameter classification, and the map
+/// rule all need to see through `type I = Idx<3>`.
+let private resolveTy (ctx: Ctx) (t: TypeExpr) : TypeExpr =
+    let rec go d t =
+        if d > 8 then t
+        else
+            match t with
+            | TyNamed (n, []) ->
+                (match Map.tryFind n ctx.TypeAliases with
+                 | Some body -> go (d + 1) body
+                 | None -> t)
+            | _ -> t
+    go 0 t
+
+/// `arrayLiteralExtents` after alias resolution on the element and index
+/// slots, so `Array<Float like I>` with `type I = Idx<3>` reads as extent 3.
+let private resolveArrayTy (ctx: Ctx) (t: TypeExpr) : TypeExpr =
+    match resolveTy ctx t with
+    | TyArray (elem, idxs) -> TyArray (resolveTy ctx elem, idxs |> List.map (resolveTy ctx))
+    | other -> other
+
 // Body -> NStmt conversion
 
 let rec private convertStmts (fname: string) (stmts: Stmt list) : Result<NStmt list, string> =
@@ -324,6 +347,8 @@ let rec private producesArray (arrays: Set<string>) (e: Expr) : bool =
     | ExprKind.ExprPure inner | ExprKind.ExprCompute inner
     | ExprKind.ExprGuard (_, inner) | ExprKind.ExprTyped (inner, _) -> producesArray arrays inner
     | ExprKind.ExprBinOp (_, OpFallback, l, r) -> producesArray arrays l || producesArray arrays r
+    // a map application (C2) always yields an array-shaped result
+    | ExprKind.ExprBinOp (_, OpApply, _, _) -> true
     | _ -> false
 
 /// Walk an expression, validating it stays inside the differentiable
@@ -343,6 +368,14 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     // and `compute` reach it in jvp mode and stay refused in grad mode.
     | LinearForm (ops, _) when errMode.Value = "jvp" ->
         ops |> List.fold (fun acc o -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar o)) (Ok ())
+    // C2: the rank-0 map. Visit the operand arrays (so taint sees them) and
+    // the kernel BODY; the kernel's own parameters are bound by the lambda,
+    // and the tangent rule substitutes indexed reads for them.
+    | { Kind = ExprKind.ExprBinOp (_, OpApply,
+                                   { Kind = ExprKind.ExprMethodFor arrays },
+                                   { Kind = ExprKind.ExprLambda (_, _, body) }) } when errMode.Value = "jvp" ->
+        arrays |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar a)) (Ok ())
+        |> Result.bind (fun () -> walkExpr fname ctx onVar body)
     // Combinator OPERATORS. The syntactic combinator forms (lambda /
     // method_for / ...) are rejected further down, but the operator spellings
     // are ordinary BinOps and would otherwise slip through this walk when both
@@ -549,7 +582,7 @@ let rec private substVar (name: string) (repl: Expr) (e: Expr) : Expr =
 let private expandRecArray (fname: string) (ctx: Ctx)
                            (name: string) (annot: TypeExpr) (def: RecArrayDef)
     : Result<Stmt list * int, string> =
-    match arrayLiteralExtents annot with
+    match arrayLiteralExtents (resolveArrayTy ctx annot) with
     | None ->
         err fname (sprintf "recursive array '%s': a differentiable recursive array needs an `Array<Float like Idx<n>>` annotation with a literal extent (v1)" name)
     | Some (false, _) ->
@@ -756,6 +789,11 @@ let rec private staticExtentOf (env: Map<string, int>) (e: Expr) : int option =
         parts |> List.fold (fun acc p ->
             acc |> Option.bind (fun tot -> staticExtentOf env p |> Option.map (fun n -> tot + n)))
             (Some 0)
+    // A map's leading extent is its FIRST operand's (C2): the loop iterates
+    // the operand index spaces in order, so a reduce over the result knows
+    // its bound whenever the operand does.
+    | ExprKind.ExprBinOp (_, OpApply, { Kind = ExprKind.ExprMethodFor (first :: _) }, _) ->
+        staticExtentOf env first
     | _ -> None
 
 /// The pre-pass proper: rewrite one function body's statements, expanding
@@ -765,7 +803,7 @@ let private preNormalizeBody (fname: string) (ctx: Ctx) (fd: FunctionDecl) : Res
     let paramExtents =
         fd.Params |> List.choose (fun p ->
             match p.Type with
-            | Some t -> (match arrayLiteralExtents t with Some (true, [n]) -> Some (p.Name, n) | _ -> None)
+            | Some t -> (match arrayLiteralExtents (resolveArrayTy ctx t) with Some (true, [n]) -> Some (p.Name, n) | _ -> None)
             | None -> None)
         |> Map.ofList
     let stmts0, finalOpt =
@@ -786,7 +824,7 @@ let private preNormalizeBody (fname: string) (ctx: Ctx) (fd: FunctionDecl) : Res
                         let env' =
                             let byAnn =
                                 match b.Type with
-                                | Some t -> (match arrayLiteralExtents t with Some (true, [n]) -> Some n | _ -> None)
+                                | Some t -> (match arrayLiteralExtents (resolveArrayTy ctx t) with Some (true, [n]) -> Some n | _ -> None)
                                 | None -> None
                             let byLit = staticExtentOf env value'
                             match (match byAnn with Some _ -> byAnn | None -> byLit) with
@@ -926,20 +964,6 @@ type private ParamClass =
     | DiffArray
     | DiffScalar
     | NonDiff
-
-/// Resolve same-module transparent type aliases, depth-capped (an alias
-/// cycle is a type error elsewhere; the cap just keeps this total).
-let private resolveTy (ctx: Ctx) (t: TypeExpr) : TypeExpr =
-    let rec go d t =
-        if d > 8 then t
-        else
-            match t with
-            | TyNamed (n, []) ->
-                (match Map.tryFind n ctx.TypeAliases with
-                 | Some body -> go (d + 1) body
-                 | None -> t)
-            | _ -> t
-    go 0 t
 
 /// Classify one parameter. Unit-carrying Floats and complex types get
 /// EXPLICIT refusals rather than the NonDiff fall-through: silently treating
@@ -1271,6 +1295,10 @@ type private RevCtx = {
     /// (and outside the intrinsic/decl arms above) is an unknown call and is
     /// refused rather than silently zero-differentiated.
     Known: Set<string>
+    /// Declared index types per array PARAMETER, so the C2 map rule can
+    /// spell `range<I>` over an operand's own index space (which also keeps
+    /// the emitted reads properly tagged, unlike a raw extent).
+    ArrayIdxTys: Map<string, TypeExpr list>
 }
 
 /// Emit `d += cot`-style accumulation onto a cotangent target.
@@ -1537,7 +1565,14 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         tangentOfExpr rc a |> Result.bind (fun ta ->
         tangentOfExpr rc b |> Result.map (fun tb -> addZ (mulZ dA ta) (mulZ dB tb)))
     | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, _) } ->
-        if Set.contains name rc.Known then Ok (fLit 0.0)   // non-diff data read
+        // A name that carries differentiable data but was never registered
+        // as an ARRAY cannot be read as a constant: that combination means
+        // the taint pass and the array tracker disagree, and returning zero
+        // here is the silent-wrong-gradient failure mode. Refuse instead --
+        // this fires on internal inconsistency, so it names the cause.
+        if Set.contains name rc.Diff && not (Set.contains name rc.Arrays) then
+            err rc.Fname (sprintf "internal: '%s' carries differentiable data but is not tracked as an array, so its element read has no tangent rule -- this is a gap in the transform's array tracking, please report it" name)
+        elif Set.contains name rc.Known then Ok (fLit 0.0)   // non-diff data read
         else
             err rc.Fname (sprintf "cannot differentiate through '%s': it is not a same-module function, a math intrinsic with a derivative rule, or an array in scope, so its contribution would silently vanish from the gradient. Compute it outside the function passed to ad.%s, or pass the value in as a parameter" name errMode.Value)
     | { Kind = ExprKind.ExprUnaryOp (OpNeg, inner) } ->
@@ -1583,6 +1618,55 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         tangentOfExpr rc f |> Result.map (fun tf ->
             inheritSpan e (ExprIf (c, tt, tf))))
     | ConstFill (cnt, _) -> Ok (zeroFill cnt)
+    // C2: the rank-0 MAP. `method_for(A1..An) <@> lambda(x1..xn) -> body`
+    // becomes the same iteration over a VIRTUAL range, with values AND
+    // tangents read by index from the enclosing scope:
+    //     method_for(range<I1>, .., range<In>) <@> lambda(i1..in) -> D(body)
+    // where each `xk` has been replaced by `Ak(ik)` first, so the ordinary
+    // expression rule turns those reads into `__t_Ak(ik)` for free.
+    // Capture-read (E2) rather than pairing (E1) because zip is refused as
+    // one operand of a multi-array loop, which blocks E1 for n >= 2
+    // outright. Spelling the loop over each operand's OWN index type keeps
+    // the generated reads tagged (no BL4003), and the tangent inherits the
+    // primal's iteration order and shape by construction.
+    | { Kind = ExprKind.ExprBinOp (bm, OpApply, lo, kern) } ->
+        (match lo.Kind, kern.Kind with
+         | ExprKind.ExprMethodFor arrays, ExprKind.ExprLambda (ps, _, body)
+                when ps.Length = arrays.Length && not arrays.IsEmpty ->
+             // every operand must be a named array whose index types we know
+             let named =
+                 arrays |> List.map (fun a ->
+                     match a.Kind with
+                     | ExprKind.ExprVar n ->
+                         (match Map.tryFind n rc.ArrayIdxTys with
+                          | Some idxTys when Set.contains n rc.Arrays -> Some (n, idxTys)
+                          | _ -> None)
+                     | _ -> None)
+             if named |> List.exists Option.isNone then
+                 err rc.Fname "differentiating a map needs each loop operand to be a named array PARAMETER with a declared index type (v1); bind the operand to a parameter, or compute it outside the differentiated function"
+             else
+             let named = named |> List.map Option.get
+             // one fresh index per operand axis
+             let idxNames =
+                 named |> List.map (fun (_, idxTys) ->
+                     idxTys |> List.map (fun _ -> fresh rc.Ctx "__ci"))
+             // body with each kernel parameter replaced by its indexed read
+             let substituted =
+                 List.zip3 ps named idxNames
+                 |> List.fold (fun acc (p, (aname, _), ixs) ->
+                     let readE = syn (ExprApp (v aname, ixs |> List.map v))
+                     substVar p.Name readE acc) body
+             tangentOfExpr rc substituted |> Result.map (fun tBody ->
+                 let rangeOperands =
+                     named |> List.map (fun (_, idxTys) -> syn (ExprRange idxTys))
+                 let lamParams =
+                     idxNames |> List.collect (fun ixs ->
+                         ixs |> List.map (fun n ->
+                             { Name = n; Type = None; Default = None; NameSpan = noSpan }))
+                 let tKern = syn (ExprLambda (lamParams, None, tBody))
+                 inheritSpan e (ExprBinOp (bm, OpApply, syn (ExprMethodFor rangeOperands), tKern)))
+         | _ ->
+             err rc.Fname "differentiating `<@>` supports `method_for(<named arrays>) <@> lambda(...) -> <scalar body>` (v1); object_for, pipelines, and section kernels are not yet differentiable")
     // C1: same form, tangent operands (see the LinearForm doc comment).
     | LinearForm (ops, rebuild) ->
         ops |> List.fold (fun acc o ->
@@ -1735,7 +1819,13 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
             fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
             boundNames stmts |> Set.ofList
             ctx.ModuleVals ]
-    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known }
+    let arrayIdxTys =
+        fd.Params |> List.choose (fun p ->
+            match p.Type |> Option.map (resolveTy ctx) with
+            | Some (TyArray (_, idxTys)) when not idxTys.IsEmpty -> Some (p.Name, idxTys)
+            | _ -> None)
+        |> Map.ofList
+    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known; ArrayIdxTys = arrayIdxTys }
 
     // cotangent declarations for function-level diff LOCALS (params' array
     // cotangents are mut parameters; scalar-param cotangents are locals)
@@ -1926,7 +2016,13 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
             fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
             boundNames stmts |> Set.ofList
             ctx.ModuleVals ]
-    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known }
+    let arrayIdxTys =
+        fd.Params |> List.choose (fun p ->
+            match p.Type |> Option.map (resolveTy ctx) with
+            | Some (TyArray (_, idxTys)) when not idxTys.IsEmpty -> Some (p.Name, idxTys)
+            | _ -> None)
+        |> Map.ofList
+    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known; ArrayIdxTys = arrayIdxTys }
 
     // tangent-interleaved body + (primal, tangent) return
     let sweptR =

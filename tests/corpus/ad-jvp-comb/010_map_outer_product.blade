@@ -1,0 +1,19 @@
+// TEST: JVP C2 Map Over Two Operands
+// The outer product: one virtual range per operand axis, so the tangent
+// loop has the primal's rank and iteration order. Each kernel parameter is
+// replaced by its indexed read before differentiation, which is what turns
+// the operand reads into tangent reads for free.
+// g = a0*b1 + 2*a1*b0 = 4 + 12 = 16; seed a=[1,0] -> b1 = 4.
+import ad as ad
+
+type J = Idx<2>
+
+function g(a: Array<Float like J>, b: Array<Float like J>) -> Float = {
+    let op = method_for(a, b) <@> lambda(x, y) -> x * y |> compute
+    op(0, 1) + op(1, 0) * 2.0
+}
+
+let (v, t) = ad.jvp(g)([1.0, 2.0], [3.0, 4.0], [1.0, 0.0], [0.0, 0.0])
+// WARN: BL4003
+// EXPECT: v = 16
+// EXPECT: t = 4
