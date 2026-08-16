@@ -94,6 +94,19 @@ let runGatherElisionTests () : BlockResult =
           "a values-only peel is untouched",
           header + sumsPeel,
           [perRowAlloc; copyStore], [nullRows]
+          // Nothing consumes it: the gather is dead for the same reason, just
+          // more obviously. Auto-print still reports it (reading extents only),
+          // so this is not dead-binding elimination -- only the copy goes.
+          "an unused group_by elides its gather",
+          header + "let n = extents(gk)\n",
+          [nullRows], [perRowAlloc; copyStore]
+          // ...but a bare top-level `g` is a REFERENCE (it desugars to a
+          // binding initialised from g), so it counts as a use and keeps the
+          // gather. Conservative rather than clever: pinned so the distinction
+          // is deliberate and cannot drift silently.
+          "a bare top-level mention of the grouped array keeps the gather",
+          header + "g\n",
+          [perRowAlloc; copyStore], [nullRows]
           // `extents(gk)` needs no grouped array at all -- the direct spelling
           // allocates nothing per group and copies nothing.
           "extents(gk) emits no group_by gather at all",

@@ -205,9 +205,11 @@ compound key is always dynamic (tuple-keyed hash).
 whole CSR structure in locals suffixed off that name — `gk__ngroups`,
 `gk__offsets`, `gk__perm` — and gives the binding itself only an opaque
 sentinel, so `group_by` recovers the grouping by re-deriving those symbols from
-the name its grouping argument resolves to. The result is therefore usable in
-exactly two places: as the value of the `let` that names it, and as a
-`group_by` grouping argument written as that name.
+the name its grouping argument resolves to. The result is therefore usable only
+where that name is written directly: as the value of the `let` that names it, as
+a `group_by` grouping argument, and as the argument of the two grouping
+accessors — `group_bucket(gk)` (§7a) and `extents(gk)` (§7b), which read the
+same CSR locals the same way.
 
 Any indirection is `BL3017`:
 
@@ -219,6 +221,10 @@ let s   = per_group(v, gk)          // BL3017: function argument
 let gv  = group_by(v, group_keys(region))   // BL3017: inline, no name to bind
 function mk(k) = group_keys(k)      // BL3017: returned
 ```
+
+To move the **partition itself** around as ordinary data — past a function
+boundary, or into an AD transform — use `group_bucket(gk)` (§7a): the row →
+bucket map is a plain `Array<Int64>` with none of these restrictions.
 
 Sharing one grouping is what a single binding is *for* — `group_by(a, gk)` and
 `group_by(b, gk)` co-iterate (see §8) — and a function that needs a grouping
@@ -256,17 +262,6 @@ Tests: `sql-group-by` cases "Idx Annotated", "Enum First/String",
 "Sparse Keys Dynamic", "Compound Two Keys First/Reduce",
 "Negative Key Excluded".
 
-### A grouping is not a value
-
-`gk` names a **binding**, not a value you can move around. The CSR structure
-lives in locals suffixed onto that name, and same-grouping co-iteration is
-discharged on the name rather than on the type, so re-binding it (`let gk2 =
-gk`), packing it into a tuple, or building one inline all fail — refused at
-typecheck with BL3007 rather than left to become a g++ error. Every consumer
-(`group_by`, `group_bucket`) takes the grouping by name.
-
-To move the **partition itself** around as data, use `group_bucket`.
-
 ## 7a. `group_bucket(gk)` — the row → bucket map
 
 ```blade
@@ -284,7 +279,7 @@ let b  = group_bucket(gk)                       // Array<Int64 like StationIdx>
 let kept = (method_for(zip(b, temps)) <@> lambda(bb, t) -> if bb >= 0 then t else 0.0) |> compute
 ```
 
-The argument must be the bare `gk` name (see above). The answer is the same for
+The argument must be the bare `gk` name (§7, BL3017). The answer is the same for
 every bucketing regime — positional, `EnumIdx`, dynamic discovery, compound —
 because it inverts the tables rather than re-reading the keys; the -1 prefill is
 the drop marker, since a dropped row is exactly one the permutation never names.
@@ -319,7 +314,7 @@ let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / n) |> compute
 Sizes are `offsets[g+1] - offsets[g]`, so **nothing is gathered** — a count-only
 query never allocates or copies the values it would ignore. Rows dropped by a
 negative key are counted nowhere, so the totals fall short of the source length
-by exactly the dropped rows. Bare `gk` name required, as above.
+by exactly the dropped rows. Bare `gk` name required, as in §7a.
 
 ### The gather elision
 

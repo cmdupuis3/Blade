@@ -2092,26 +2092,33 @@ let computeExtentsOnlyGroupBys (modul: IRModule) : Set<IRId> =
         | [IRVar (gid, _)] when groupByIds.Contains gid -> Some gid
         | _ -> None
 
-    let good = System.Collections.Generic.HashSet<IRId>()
-    let bad = System.Collections.Generic.HashSet<IRId>()
-    // Structural walk, not a count: an elidable peel mentions its operand in
+    // `bad` = the binding has at least one use that could read VALUES.
+    //
+    // Structural walk, not a count: an extents-only peel mentions its operand in
     // BOTH `Loop` and `Arrays`, so those subtrees are skipped wholesale rather
-    // than tallied. The kernel is still walked -- it is an IRVar naming a
-    // callable, and the callable's BODY is visited via modul.Functions.
+    // than tallied. Every other route to an `IRVar` naming a group_by marks it,
+    // which is what makes the default "gather". The kernel is still walked -- it
+    // is an IRVar naming a callable, and the callable's BODY is visited via
+    // modul.Functions.
+    let bad = System.Collections.Generic.HashSet<IRId>()
+    // ExprShape is TOTAL (a leaf yields an empty child list), so it is the last
+    // arm and needs no fallback after it.
     let rec scan (e: IRExpr) =
         match e with
         | IRApplyCombinator info ->
             (match soleGroupedOperand info with
-             | Some gid when kernelExtentsOnly info.Kernel ->
-                 good.Add gid |> ignore
-                 scan info.Kernel
-             | _ -> (match e with ExprShape (cs, _) -> cs |> List.iter scan | _ -> ()))
+             | Some gid when kernelExtentsOnly info.Kernel -> scan info.Kernel
+             | _ -> (match e with ExprShape (cs, _) -> cs |> List.iter scan))
         | IRVar (i, _) when groupByIds.Contains i -> bad.Add i |> ignore
         | ExprShape (cs, _) -> cs |> List.iter scan
-        | _ -> ()
     for bind in modul.Bindings do scan bind.Value
     for f in modul.Functions do scan f.Body
-    Set.ofSeq good - Set.ofSeq bad
+    // Elidable is exactly the COMPLEMENT of `bad`, which is why a group_by
+    // nothing consumes at all is elided too: its gather is dead for the same
+    // reason, just more obviously. (Tracking the extents-only peels positively
+    // and intersecting would exclude that case for no benefit -- an unused
+    // binding has no use to classify, not an unclassifiable one.)
+    Set.ofSeq groupByIds - Set.ofSeq bad
 
 let private extentsOnlyGroupBysStorage =
     System.Threading.AsyncLocal<Set<IRId> ref>()

@@ -40,6 +40,13 @@ let zb = group_by(other, gk)
 let zs = method_for(zip(za, zb)) <@> lambda(ra: T^1, rb: T^1) -> reduce(ra, (+)) + reduce(rb, (+)) |> compute
 // EXPECT: zs = [110, 77, 44]
 
+// ---- Nothing consumes `ug`, so its gather is dead too -- the same rule, just
+// a more obvious instance of it. This is NOT dead-binding elimination: the
+// binding survives and auto-prints exactly as a gathered one would, because
+// printing a grouped array reads its extents and no values.
+let ug = group_by(vals, gk)
+// EXPECT: ug = [[], [], []]
+
 // ---- A dropped row is gathered by nobody either way, so elision and the
 // negative-key rule compose without interacting.
 let dkeys: Array<Int64 like Row> = [0, -1, 0, 1, -1, 1]
