@@ -5,6 +5,10 @@
 // labels flowing in through display.unit_label ascribed onto the xlabel /
 // ylabel slots (the label collapses to a string literal at typecheck, so
 // both lanes see identical bytes -- `blade test interp` pins it).
+//
+// `maxdim` (e, f) is in the same list and routes the same way. These grids
+// are 2x2, well under any cap, so the slot's only job here is to ROUTE --
+// what it does when the grid is over the cap is 007_plot_decimation.blade.
 // ============================================================================
 import units.SI
 import display as d
@@ -14,6 +18,10 @@ let vs: Array<Float<meter/second> like Idx<3>> = [0.0, 9.81, 19.62]
 let a = plot.contourf([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]], 1: cmap, 5: levels)
 let b = plot.contourf([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]])(5: levels)(1: cmap)
 let c = plot.line(ts, vs, "fall": title, d.unit_label(ts): xlabel, d.unit_label(vs): ylabel)
+let e = plot.heatmap([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]], 256: maxdim, 2: cmap)
+let f = plot.contour([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]])(64: maxdim)(3: levels)
 // EXPECT: a = true
 // EXPECT: b = true
 // EXPECT: c = true
+// EXPECT: e = true
+// EXPECT: f = true
