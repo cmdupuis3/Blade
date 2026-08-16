@@ -1,0 +1,19 @@
+// TEST: JVP If/Else Branches (forward only)
+// The tangent of a branch is the branch of tangents under the SAME
+// condition: exact off the boundary, subgradient convention at it (the
+// primal is not differentiable there either). Reverse mode still refuses
+// if/else (the adjoint would need the taken branch recorded).
+// f = if x > 1 then x^2 else 3x: at x = 2 -> (4, 4); at x = 0.5 -> (1.5, 3).
+import ad as ad
+
+function f(x: Float) -> Float = {
+    let y = if x > 1.0 then x * x else 3.0 * x
+    y
+}
+
+let (hi, thi) = ad.jvp(f)(2.0, 1.0)
+let (lo, tlo) = ad.jvp(f)(0.5, 1.0)
+// EXPECT: hi = 4
+// EXPECT: thi = 4
+// EXPECT: lo = 1.5
+// EXPECT: tlo = 3

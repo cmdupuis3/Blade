@@ -1,0 +1,17 @@
+// TEST: JVP Central-Difference Agreement (thresholded boolean)
+// The independent-route check: central differences via two DIRECT calls to
+// the primal (no AD machinery on that side). Pinned as a thresholded
+// boolean, never as a raw residual -- the FD residual is a catastrophic-
+// cancellation quantity whose visible digits would flake the byte-exact
+// interp gate (the loops/143 idiom).
+import ad as ad
+
+function f(x: Float) -> Float = exp(sin(x)) * x
+
+let (jv, jt) = ad.jvp(f)(1.2, 1.0)
+let presid = jv - f(1.2)
+let h = 0.000001
+let fd = (f(1.2 + h) - f(1.2 - h)) / (2.0 * h)
+let agree = abs(fd - jt) < 0.000001 * (abs(jt) + 1.0)
+// EXPECT: presid = 0
+// EXPECT: agree = true

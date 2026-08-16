@@ -302,7 +302,17 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     | { Kind = ExprKind.ExprApp _ } -> err fname "only named calls and array reads are supported in differentiated code"
     | { Kind = ExprKind.ExprArrayLit elems } ->
         elems |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar a)) (Ok ())
-    | { Kind = ExprKind.ExprIf _ } -> err fname "if/else is not supported in differentiated code yet"
+    | { Kind = ExprKind.ExprIf (c, t, f) } ->
+        // Forward mode admits branches: the tangent is the branch of
+        // tangents under the SAME condition (exact off the boundary,
+        // subgradient convention at it -- the primal is not differentiable
+        // there either). Reverse mode still refuses: the adjoint would
+        // need the taken branch recorded.
+        if errMode.Value = "jvp" then
+            walkExpr fname ctx onVar c
+            |> Result.bind (fun () -> walkExpr fname ctx onVar t)
+            |> Result.bind (fun () -> walkExpr fname ctx onVar f)
+        else err fname "if/else is not supported in differentiated code yet"
     | { Kind = ExprKind.ExprMatch _ } -> err fname "match is not supported in differentiated code"
     | { Kind = ExprKind.ExprBlock _ } -> err fname "nested block expressions are not supported in differentiated code"
     | { Kind = ExprKind.ExprLet _ } -> err fname "expression-level let is not supported in differentiated code"
@@ -510,6 +520,42 @@ let private expandRecArray (fname: string) (ctx: Ctx)
             | ExprKind.ExprBinOp (_, OpAdd, a, b) when isPrevPrefixRead a && not (hasPrefix b) -> Some b
             | ExprKind.ExprBinOp (_, OpAdd, a, b) when isPrevPrefixRead b && not (hasPrefix a) -> Some a
             | _ -> None
+        if errMode.Value = "jvp" && hasPrefix def.SliceExpr then
+            // FORWARD lowering of a genuine recurrence: it differentiates in
+            // place (the tangent recurrence mirrors it), so ANY smooth slice
+            // lowers to the direct element-write loop -- no triangular
+            // unroll, no additive restriction, and O(n) where grad's unroll
+            // is O(n^2). Prefix reads become reads of the buffer being
+            // built; v1 admits the immediate predecessor only -- deeper lags
+            // rely on the implicit-zero reads a plain loop cannot supply.
+            let rec onlyPrevReads (x: Expr) : bool =
+                match x.Kind with
+                | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar p }, [idx]) when p = prefixVar ->
+                    (match idx.Kind with
+                     | ExprKind.ExprBinOp (_, OpSub, { Kind = ExprKind.ExprVar s }, { Kind = ExprKind.ExprLit (LitInt 1L) }) -> s = stepVar
+                     | _ -> false)
+                | ExprKind.ExprVar p -> p <> prefixVar
+                | ExprKind.ExprLit _ -> true
+                | ExprKind.ExprTyped (inner, _) | ExprKind.ExprUnaryOp (_, inner) -> onlyPrevReads inner
+                | ExprKind.ExprBinOp (_, _, l, r2) | ExprKind.ExprDotDot (l, r2) -> onlyPrevReads l && onlyPrevReads r2
+                | ExprKind.ExprApp (fh, args) -> onlyPrevReads fh && List.forall onlyPrevReads args
+                | ExprKind.ExprArrayLit es -> List.forall onlyPrevReads es
+                | ExprKind.ExprIf (c, t, f2) -> onlyPrevReads c && onlyPrevReads t && onlyPrevReads f2
+                | _ -> false
+            match def.SeedArm with
+            | None -> err fname (sprintf "recursive array '%s': a recurrence needs a `zero :: n` seed arm to be differentiable (v1)" name)
+            | Some (seedStep, seedExpr) ->
+                if not (onlyPrevReads def.SliceExpr) then
+                    err fname (sprintf "recursive array '%s': forward mode differentiates recurrences reading the immediate predecessor `prefix(n - 1)` only (deeper lags rely on implicit-zero reads a direct loop cannot supply, v1)" name)
+                else
+                    let sliceB = substVar prefixVar bufVar def.SliceExpr
+                    let seedWrite = [ StmtExpr (syn (ExprAssign (sAt (iLit 0L), substVar seedStep (iLit 0L) seedExpr))) ]
+                    let loop =
+                        StmtForIn (stepVar,
+                                   syn (ExprDotDot (iLit 1L, iLit (int64 n))),
+                                   [ StmtExpr (syn (ExprAssign (sAt (v stepVar), sliceB))) ])
+                    Ok (bufLet :: (seedWrite @ [loop]), n)
+        else
         match additiveRest, def.SeedArm with
         | Some rest, Some (seedStep, seedExpr) ->
             let seeded = substVar seedStep (iLit 0L) seedExpr
@@ -567,12 +613,23 @@ let rec private hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, in
          | None -> Ok ())
         |> Result.bind (fun () ->
         (match kernel.Kind with
-         | ExprKind.ExprSection OpAdd -> Ok ()
-         | ExprKind.ExprSection _ -> err fname "reduce in differentiated code supports only the additive kernel `(+)` (v1)"
-         | _ -> err fname "reduce in differentiated code supports only the additive kernel `(+)`; lambda and product kernels are not differentiable (v1)")
-        |> Result.bind (fun () ->
+         | ExprKind.ExprSection OpAdd -> Ok OpAdd
+         // Forward mode folds the product section too: the tangent is a
+         // paired fold updated in lockstep before the primal step -- the
+         // product rule is local, no tape. Reverse keeps additive-only.
+         | ExprKind.ExprSection OpMul when errMode.Value = "jvp" -> Ok OpMul
+         | ExprKind.ExprSection _ ->
+             err fname (if errMode.Value = "jvp"
+                        then "reduce in differentiated code supports the `(+)` and `(*)` section kernels"
+                        else "reduce in differentiated code supports only the additive kernel `(+)` (v1)")
+         | _ -> err fname "reduce in differentiated code supports only section kernels; lambda kernels are not differentiable (v1)")
+        |> Result.bind (fun secOp ->
         recurse src |> Result.bind (fun (srcPre, src') ->
-        let initE = match initOpt with Some ie -> ie | None -> fLit 0.0
+        let initE =
+            match initOpt with
+            | Some ie -> ie
+            | None -> if secOp = OpMul then fLit 1.0 else fLit 0.0
+        let combine acc el = syn (ExprBinOp (Elementwise, secOp, acc, el))
         let accName = fresh ctx "__red"
         let accLet = StmtLet { Mutability = BindMut; Pattern = synPat (PatVar accName); Type = None; Value = initE }
         match src'.Kind with
@@ -584,7 +641,7 @@ let rec private hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, in
             // scalar accumulation position, which grad differentiates exactly.
             let adds =
                 elems |> List.map (fun el ->
-                    StmtExpr (syn (ExprAssign (v accName, add (v accName) el))))
+                    StmtExpr (syn (ExprAssign (v accName, combine (v accName) el))))
             Ok (srcPre @ [accLet] @ adds, v accName)
         | ExprKind.ExprVar nm ->
             (match Map.tryFind nm extents with
@@ -594,7 +651,7 @@ let rec private hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, in
                  let loop =
                      StmtForIn (kVar,
                                 syn (ExprDotDot (iLit 0L, iLit (int64 cnt))),
-                                [ StmtExpr (syn (ExprAssign (v accName, add (v accName) readK))) ])
+                                [ StmtExpr (syn (ExprAssign (v accName, combine (v accName) readK))) ])
                  Ok (srcPre @ [accLet; loop], v accName)
              | None -> err fname (sprintf "reduce source '%s' has no statically-known extent in differentiated code; reduce over a param/let array with an `Idx<n>` extent or over an inline array literal (v1)" nm))
         | _ -> err fname "reduce in differentiated code requires an array-variable or inline-array-literal source; deferred/former reductions are not differentiable (v1)")))
@@ -823,14 +880,20 @@ let private classifyParam (fname: string) (ctx: Ctx) (p: ParamDecl) : Result<Par
         let t = resolveTy ctx t0
         match t with
         | _ when isFloatTy t -> Ok DiffScalar
-        | TyNamed (("Float" | "Float64" | "Float32"), _ :: _) -> refuseUnits "carries units"
+        | TyNamed (("Float" | "Float64" | "Float32"), _ :: _) ->
+            // FORWARD mode supports units correctly for free: a tangent has
+            // the primal's type verbatim, units included. Reverse cannot --
+            // a gradient's units are <loss>/<param>, which the grad ABI
+            // (buffer type = parameter type) cannot express.
+            if errMode.Value = "jvp" then Ok DiffScalar else refuseUnits "carries units"
         | TyComplex64 | TyComplex128 | TyNamed (("Complex64" | "Complex128"), _) -> refuseComplex "is complex"
         | TyArray (elem, _) ->
             let el = resolveTy ctx elem
             if isFloatTy el then Ok DiffArray
             else
                 (match el with
-                 | TyNamed (("Float" | "Float64" | "Float32"), _ :: _) -> refuseUnits "is an array of unit-carrying Floats"
+                 | TyNamed (("Float" | "Float64" | "Float32"), _ :: _) ->
+                     if errMode.Value = "jvp" then Ok DiffArray else refuseUnits "is an array of unit-carrying Floats"
                  | TyComplex64 | TyComplex128 | TyNamed (("Complex64" | "Complex128"), _) -> refuseComplex "is a complex array"
                  | _ -> Ok NonDiff)
         | _ -> Ok NonDiff
@@ -1427,6 +1490,11 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
     | { Kind = ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) } ->
         Ok (fLit 0.0)   // boolean-valued: no tangent
     | { Kind = ExprKind.ExprBinOp (_, OpMod, _, _) } -> Ok (fLit 0.0)  // int-valued
+    | { Kind = ExprKind.ExprIf (c, t, f) } ->
+        // Branch of tangents under the same condition (see walkExpr's arm).
+        tangentOfExpr rc t |> Result.bind (fun tt ->
+        tangentOfExpr rc f |> Result.map (fun tf ->
+            inheritSpan e (ExprIf (c, tt, tf))))
     | ConstFill (cnt, _) -> Ok (zeroFill cnt)
     | { Kind = ExprKind.ExprArrayLit _ } ->
         err rc.Fname "array literals may only appear as let initializers in differentiated code"
@@ -1672,7 +1740,7 @@ let private synthesizeJvp (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, s
     match fd.ReturnType |> Option.map (resolveTy ctx) with
     | Some t when isFloatTy t -> Ok ()
     | Some (TyNamed (("Float" | "Float64" | "Float32"), _ :: _)) ->
-        err fname "jvp requires a dimensionless Float return (v1); unit-carrying tangents are a planned extension"
+        Ok ()   // unit-carrying loss: the tangent carries the same units
     | Some _ -> err fname "jvp requires a function returning Float (scalar) (v1)"
     | None -> err fname "jvp requires an explicit `-> Float` return annotation"
     |> Result.bind (fun () ->
@@ -1718,12 +1786,15 @@ let private synthesizeJvp (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, s
                 (Ok ())
         valStmts stmts |> Result.bind (fun () -> walkExpr fname ctx ignore finalE)
     validateAll |> Result.bind (fun () ->
-    // v1 PARITY POLICY: run grad's reverse-only discipline checks even
-    // though forward mode is sound without them.
-    checkLoopDiscipline fname ctx stmts |> Result.bind (fun () ->
-    checkWriteAfterRead fname ctx stmts |> Result.bind (fun () ->
+    // F2: grad's three discipline checks (write-after-read, scalar
+    // overwrite, loop discipline) exist ONLY to keep the reverse sweep's
+    // final-value re-evaluation sound (their own doc comments say so).
+    // Forward tangents flow in program order beside the primal -- every
+    // tangent assignment is emitted before its primal and reads
+    // pre-assignment values -- so overwrites, loop-carried recurrences,
+    // and accumulator reads all differentiate exactly and none of the
+    // checks run here.
     analyze fname ctx diffParams arrayParams stmts finalE |> Result.bind (fun (diff, arrays) ->
-    checkNoScalarOverwrite fname diff stmts |> Result.bind (fun () ->
     // Parity with grad's array-local literal-init restriction.
     let badArrayLocal =
         stmts |> List.tryPick (fun s ->
@@ -1773,7 +1844,7 @@ let private synthesizeJvp (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, s
       ReturnType = Some (TyTuple [retScalarTy; retScalarTy])
       Body = inheritSpan fd.Body (ExprBlock (body, Some retExpr))
       IsStatic = false
-      NameSpan = noSpan })))))))))))
+      NameSpan = noSpan }))))))))
 
 // Call-site rewriting + program expansion
 
