@@ -368,14 +368,29 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     // and `compute` reach it in jvp mode and stay refused in grad mode.
     | LinearForm (ops, _) when errMode.Value = "jvp" ->
         ops |> List.fold (fun acc o -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar o)) (Ok ())
-    // C2: the rank-0 map. Visit the operand arrays (so taint sees them) and
-    // the kernel BODY; the kernel's own parameters are bound by the lambda,
-    // and the tangent rule substitutes indexed reads for them.
-    | { Kind = ExprKind.ExprBinOp (_, OpApply,
-                                   { Kind = ExprKind.ExprMethodFor arrays },
-                                   { Kind = ExprKind.ExprLambda (_, _, body) }) } when errMode.Value = "jvp" ->
-        arrays |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar a)) (Ok ())
-        |> Result.bind (fun () -> walkExpr fname ctx onVar body)
+    // C2-C5: the rank-0 map (both spellings). Visit the operand arrays (so
+    // taint sees them; virtual halo/range operands have nothing to visit)
+    // and the kernel BODY; kernel params are bound by the lambda, and the
+    // tangent rule substitutes indexed reads for them.
+    | { Kind = ExprKind.ExprBinOp (_, OpApply, lo2, kn) } when errMode.Value = "jvp"
+            && (match lo2.Kind with ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _ -> true | _ -> false) ->
+        let arrays, kernE =
+            match lo2.Kind with
+            | ExprKind.ExprObjectFor k2 ->
+                (match kn.Kind with ExprKind.ExprTuple es -> es | _ -> [kn]), k2
+            | ExprKind.ExprMethodFor arrs -> arrs, kn
+            | _ -> [], kn
+        let walkOperand (a: Expr) =
+            match a.Kind with
+            | ExprKind.ExprHalo _ | ExprKind.ExprRange _ -> Ok ()
+            | _ -> walkExpr fname ctx onVar a
+        arrays |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkOperand a)) (Ok ())
+        |> Result.bind (fun () ->
+            match kernE.Kind with
+            | ExprKind.ExprLambda (_, _, body) -> walkExpr fname ctx onVar body
+            | ExprKind.ExprReynolds ({ Kind = ExprKind.ExprLambda (_, _, body) }, _) -> walkExpr fname ctx onVar body
+            | ExprKind.ExprVar n -> onVar n; Ok ()
+            | _ -> err fname "differentiating `<@>` supports lambda, reynolds(lambda), named-function, and intrinsic kernels (v1)")
     // Combinator OPERATORS. The syntactic combinator forms (lambda /
     // method_for / ...) are rejected further down, but the operator spellings
     // are ordinary BinOps and would otherwise slip through this walk when both
@@ -775,25 +790,46 @@ let rec private hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, in
 /// by one of these forms recovers its loop bound (previously only inline
 /// array literals did, which is why a `replicate`d or `join`ed local could
 /// not be reduced in differentiated code).
-let rec private staticExtentOf (env: Map<string, int>) (e: Expr) : int option =
+let rec private staticExtentOf (ctx: Ctx) (env: Map<string, int>) (e: Expr) : int option =
     match e.Kind with
     | ExprKind.ExprArrayLit elems -> Some elems.Length
     | ExprKind.ExprVar n -> Map.tryFind n env
     | ExprKind.ExprTyped (inner, _) | ExprKind.ExprCompute inner
-    | ExprKind.ExprGuard (_, inner) -> staticExtentOf env inner
+    | ExprKind.ExprGuard (_, inner) -> staticExtentOf ctx env inner
     // replicate(n, _) and its `pure`-filled sibling (grad's ConstFill)
     | ExprKind.ExprReplicate ({ Kind = ExprKind.ExprLit (LitInt n) }, _) -> Some (int n)
     | ExprKind.ExprSequence es | ExprKind.ExprStack es -> Some es.Length
     // join concatenates along the leading axis only when d = 0
     | ExprKind.ExprJoin (parts, 0) ->
         parts |> List.fold (fun acc p ->
-            acc |> Option.bind (fun tot -> staticExtentOf env p |> Option.map (fun n -> tot + n)))
+            acc |> Option.bind (fun tot -> staticExtentOf ctx env p |> Option.map (fun n -> tot + n)))
             (Some 0)
+    // A halo traversal's extent is the SHRUNK interior: N - (max - min)
+    // over its literal offsets (shrink is the only boundary policy).
+    | ExprKind.ExprHalo (inner, { Kind = ExprKind.ExprArrayLit offs }) ->
+        (match resolveTy ctx inner with
+         | TyIdx { Kind = ExprKind.ExprLit (LitInt n) } ->
+             let lits =
+                 offs |> List.map (fun o ->
+                     match o.Kind with
+                     | ExprKind.ExprLit (LitInt k) -> Some (int k)
+                     | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt k) }) -> Some (-(int k))
+                     | _ -> None)
+             if not lits.IsEmpty && lits |> List.forall Option.isSome then
+                 let vs = lits |> List.map Option.get
+                 Some (int n - (List.max vs - List.min vs))
+             else None
+         | _ -> None)
     // A map's leading extent is its FIRST operand's (C2): the loop iterates
     // the operand index spaces in order, so a reduce over the result knows
     // its bound whenever the operand does.
     | ExprKind.ExprBinOp (_, OpApply, { Kind = ExprKind.ExprMethodFor (first :: _) }, _) ->
-        staticExtentOf env first
+        staticExtentOf ctx env first
+    // the `object_for(k) <@> operands` spelling carries operands on the right
+    | ExprKind.ExprBinOp (_, OpApply, { Kind = ExprKind.ExprObjectFor _ }, args) ->
+        (match args.Kind with
+         | ExprKind.ExprTuple (first :: _) -> staticExtentOf ctx env first
+         | _ -> staticExtentOf ctx env args)
     | _ -> None
 
 /// The pre-pass proper: rewrite one function body's statements, expanding
@@ -826,7 +862,7 @@ let private preNormalizeBody (fname: string) (ctx: Ctx) (fd: FunctionDecl) : Res
                                 match b.Type with
                                 | Some t -> (match arrayLiteralExtents (resolveArrayTy ctx t) with Some (true, [n]) -> Some n | _ -> None)
                                 | None -> None
-                            let byLit = staticExtentOf env value'
+                            let byLit = staticExtentOf ctx env value'
                             match (match byAnn with Some _ -> byAnn | None -> byLit) with
                             | Some cnt -> Map.add nm cnt env
                             | None -> env
@@ -1618,55 +1654,20 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         tangentOfExpr rc f |> Result.map (fun tf ->
             inheritSpan e (ExprIf (c, tt, tf))))
     | ConstFill (cnt, _) -> Ok (zeroFill cnt)
-    // C2: the rank-0 MAP. `method_for(A1..An) <@> lambda(x1..xn) -> body`
-    // becomes the same iteration over a VIRTUAL range, with values AND
-    // tangents read by index from the enclosing scope:
-    //     method_for(range<I1>, .., range<In>) <@> lambda(i1..in) -> D(body)
-    // where each `xk` has been replaced by `Ak(ik)` first, so the ordinary
-    // expression rule turns those reads into `__t_Ak(ik)` for free.
-    // Capture-read (E2) rather than pairing (E1) because zip is refused as
-    // one operand of a multi-array loop, which blocks E1 for n >= 2
-    // outright. Spelling the loop over each operand's OWN index type keeps
-    // the generated reads tagged (no BL4003), and the tangent inherits the
-    // primal's iteration order and shape by construction.
+    // C2-C5: the rank-0 MAP. See `tangentOfMap`.
     | { Kind = ExprKind.ExprBinOp (bm, OpApply, lo, kern) } ->
-        (match lo.Kind, kern.Kind with
-         | ExprKind.ExprMethodFor arrays, ExprKind.ExprLambda (ps, _, body)
-                when ps.Length = arrays.Length && not arrays.IsEmpty ->
-             // every operand must be a named array whose index types we know
-             let named =
-                 arrays |> List.map (fun a ->
-                     match a.Kind with
-                     | ExprKind.ExprVar n ->
-                         (match Map.tryFind n rc.ArrayIdxTys with
-                          | Some idxTys when Set.contains n rc.Arrays -> Some (n, idxTys)
-                          | _ -> None)
-                     | _ -> None)
-             if named |> List.exists Option.isNone then
-                 err rc.Fname "differentiating a map needs each loop operand to be a named array PARAMETER with a declared index type (v1); bind the operand to a parameter, or compute it outside the differentiated function"
-             else
-             let named = named |> List.map Option.get
-             // one fresh index per operand axis
-             let idxNames =
-                 named |> List.map (fun (_, idxTys) ->
-                     idxTys |> List.map (fun _ -> fresh rc.Ctx "__ci"))
-             // body with each kernel parameter replaced by its indexed read
-             let substituted =
-                 List.zip3 ps named idxNames
-                 |> List.fold (fun acc (p, (aname, _), ixs) ->
-                     let readE = syn (ExprApp (v aname, ixs |> List.map v))
-                     substVar p.Name readE acc) body
-             tangentOfExpr rc substituted |> Result.map (fun tBody ->
-                 let rangeOperands =
-                     named |> List.map (fun (_, idxTys) -> syn (ExprRange idxTys))
-                 let lamParams =
-                     idxNames |> List.collect (fun ixs ->
-                         ixs |> List.map (fun n ->
-                             { Name = n; Type = None; Default = None; NameSpan = noSpan }))
-                 let tKern = syn (ExprLambda (lamParams, None, tBody))
-                 inheritSpan e (ExprBinOp (bm, OpApply, syn (ExprMethodFor rangeOperands), tKern)))
+        (match lo.Kind with
+         | ExprKind.ExprMethodFor arrays -> tangentOfMap rc e bm arrays kern
+         | ExprKind.ExprObjectFor k2 ->
+             // `object_for(k) <@> (A, B)` is the same map with the operand
+             // list on the right; normalize and share the rule.
+             let arrays =
+                 match kern.Kind with
+                 | ExprKind.ExprTuple es -> es
+                 | _ -> [kern]
+             tangentOfMap rc e bm arrays k2
          | _ ->
-             err rc.Fname "differentiating `<@>` supports `method_for(<named arrays>) <@> lambda(...) -> <scalar body>` (v1); object_for, pipelines, and section kernels are not yet differentiable")
+             err rc.Fname "differentiating `<@>` supports `method_for(<operands>) <@> <kernel>` and `object_for(<kernel>) <@> <operands>` (v1); pipelines and section kernels are not yet differentiable")
     // C1: same form, tangent operands (see the LinearForm doc comment).
     | LinearForm (ops, rebuild) ->
         ops |> List.fold (fun acc o ->
@@ -1676,6 +1677,202 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
     | { Kind = ExprKind.ExprArrayLit _ } ->
         err rc.Fname "array literals may only appear as let initializers in differentiated code"
     | _ -> err rc.Fname "unsupported expression form in differentiated code (tangent)"
+
+/// The C2-C5 MAP rule, shared by both spellings
+/// (`method_for(ops) <@> kern` and `object_for(kern) <@> ops`).
+///
+/// The tangent is the SAME iteration over VIRTUAL operands, with values and
+/// tangents read by index from the enclosing scope (capture-read; zip is
+/// refused as one operand of a multi-array loop, so pairing is not
+/// available for n >= 2):
+///
+///   * a named array operand becomes `range<its index types>`, its kernel
+///     param becomes indexed reads `A(i...)` substituted into the body;
+///   * a `halo<...>` or `range<...>` operand is already virtual -- it stays,
+///     and its kernel param (window / index) is non-differentiable data;
+///   * `reynolds(g[, Antisymmetric])` kernels are EXPANDED first --
+///     sum_sigma sign * body[param_k := read_{sigma(k)}] -- so the ordinary
+///     expression rule differentiates the symmetrized sum (correct under
+///     the JOINT permutation: seeds travel with their values because the
+///     substitution moves reads and, through them, tangent reads together);
+///   * named-function and intrinsic kernels normalize to lambdas.
+///
+/// C5, the symmetric fast path: when the kernel carries a STRUCTURAL
+/// `where comm(...)` covering all params and every operand is the SAME
+/// rank-1 array, the tangent loop runs over `range<SymIdx<r, N>>` --
+/// canonical cells only, triangular storage, the full r! saving on the
+/// tangent leg. tangent_joint_swap (proofs/BladeJacobian.v) licenses
+/// exactly this: the tangent of a structurally symmetric primal is
+/// invariant under the joint pair swap. The declared-comm gate is
+/// load-bearing (semantic_hypothesis_insufficient refutes relaxing it),
+/// and `range<SymIdx>` hands the kernel PREFIX OFFSETS, so canonical
+/// indices are the prefix sums of the params.
+and private tangentOfMap (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Expr list) (kern: Expr) : Result<Expr, string> =
+    let reMap k = inheritSpan e k
+    // -- kernel normalization ------------------------------------------------
+    let normKern =
+        match kern.Kind with
+        | ExprKind.ExprLambda (ps, wc, body) -> Ok (ps, wc, body, None)
+        | ExprKind.ExprReynolds ({ Kind = ExprKind.ExprLambda (ps, wc, body) }, isAnti) ->
+            Ok (ps, wc, body, Some isAnti)
+        | ExprKind.ExprVar f when Map.containsKey f rc.Ctx.Decls ->
+            let fd = rc.Ctx.Decls.[f]
+            (match fd.Body.Kind with
+             | ExprKind.ExprBlock _ ->
+                 err rc.Fname (sprintf "kernel '%s' has a block body; only expression-bodied named functions are differentiable as kernels (v1)" f)
+             | _ ->
+                 let ps =
+                     fd.Params |> List.map (fun p ->
+                         { Name = p.Name; Type = None; Default = None; NameSpan = noSpan })
+                 Ok (ps, fd.WhereClause, fd.Body, None))
+        | ExprKind.ExprVar name when isMathIntrinsic name ->
+            let p = fresh rc.Ctx "__ck"
+            Ok ([ { Name = p; Type = None; Default = None; NameSpan = noSpan } ],
+                None, call name [v p], None)
+        | _ -> err rc.Fname "differentiating `<@>` supports lambda, reynolds(lambda), named-function, and intrinsic kernels (v1)"
+    normKern |> Result.bind (fun (ps, wc, body, reynoldsSign) ->
+    if ps.Length <> arrays.Length || arrays.IsEmpty then
+        err rc.Fname (sprintf "kernel arity %d does not match %d loop operand(s) in differentiated code" ps.Length arrays.Length)
+    else
+    // -- operand classification ---------------------------------------------
+    // Named n -> (name, index types); Passthrough -> virtual operand kept as-is
+    let classify (a: Expr) =
+        match a.Kind with
+        | ExprKind.ExprVar n ->
+            (match Map.tryFind n rc.ArrayIdxTys with
+             | Some idxTys when Set.contains n rc.Arrays -> Ok (Choice1Of2 (n, idxTys))
+             | _ -> err rc.Fname "differentiating a map needs each loop operand to be a named array PARAMETER with a declared index type (v1); bind the operand to a parameter, or compute it outside the differentiated function")
+        | ExprKind.ExprHalo _ | ExprKind.ExprRange _ -> Ok (Choice2Of2 a)
+        | _ -> err rc.Fname "differentiating a map needs each loop operand to be a named array PARAMETER with a declared index type (v1); bind the operand to a parameter, or compute it outside the differentiated function"
+    arrays |> List.fold (fun acc a ->
+        acc |> Result.bind (fun cs -> classify a |> Result.map (fun c -> cs @ [c])))
+        (Ok [])
+    |> Result.bind (fun classes ->
+    // -- C5: the symmetric fast path -----------------------------------------
+    let symCase =
+        if reynoldsSign.IsSome then None
+        else
+            let names = classes |> List.map (function Choice1Of2 (n, its) -> Some (n, its) | _ -> None)
+            if names |> List.exists Option.isNone then None
+            else
+                let names = names |> List.map Option.get
+                let r = names.Length
+                let allSame = r >= 2 && (names |> List.forall (fun (n, _) -> n = fst names.Head))
+                let rank1 =
+                    names |> List.forall (fun (_, its) ->
+                        match its with
+                        | [one] -> (match resolveTy rc.Ctx one with TyIdx { Kind = ExprKind.ExprLit (LitInt _) } -> true | _ -> false)
+                        | _ -> false)
+                let commAll =
+                    match wc with
+                    | Some w ->
+                        w.Commutativity |> List.exists (fun group ->
+                            Set.ofList group = Set.ofList (ps |> List.map (fun p -> p.Name)))
+                    | None -> false
+                if allSame && rank1 && commAll then
+                    let n =
+                        match resolveTy rc.Ctx (snd names.Head |> List.head) with
+                        | TyIdx { Kind = ExprKind.ExprLit (LitInt n) } -> int n
+                        | _ -> 0
+                    Some (fst names.Head, r, n)
+                else None
+    match symCase with
+    | Some (aname, r, n) ->
+        // canonical cells only: params are PREFIX OFFSETS, indices are their
+        // prefix sums; no `where comm` on the emitted kernel (silently
+        // discarded on range operands) and SymIdx spelled inline.
+        let offNames = List.init r (fun _ -> fresh rc.Ctx "__cp")
+        let canonical =
+            offNames
+            |> List.fold (fun (acc, prev) nm ->
+                let ix = match prev with None -> v nm | Some p -> add p (v nm)
+                (acc @ [ix], Some ix)) ([], None)
+            |> fst
+        let substituted =
+            List.zip ps canonical
+            |> List.fold (fun accE (p, ix) ->
+                substVar p.Name (syn (ExprApp (v aname, [ix]))) accE) body
+        tangentOfExpr rc substituted |> Result.map (fun tBody ->
+            let symTy = TySymIdx (r, SymBaseExtent (iLit (int64 n)))
+            let lamParams =
+                offNames |> List.map (fun nm ->
+                    { Name = nm; Type = None; Default = None; NameSpan = noSpan })
+            reMap (ExprBinOp (bm, OpApply,
+                              syn (ExprMethodFor [syn (ExprRange [symTy])]),
+                              syn (ExprLambda (lamParams, None, tBody)))))
+    | None ->
+    // -- the uniform dense path ----------------------------------------------
+    // reads per slot (Named) / kept params (Passthrough), then reynolds
+    // expansion if requested, then the ordinary expression rule.
+    let slots =
+        List.zip ps classes
+        |> List.map (fun (p, c) ->
+            match c with
+            | Choice1Of2 (nm, idxTys) ->
+                let ixs = idxTys |> List.map (fun _ -> fresh rc.Ctx "__ci")
+                Choice1Of2 (p, nm, idxTys, ixs)
+            | Choice2Of2 a -> Choice2Of2 (p, a))
+    let readOf slot =
+        match slot with
+        | Choice1Of2 (_, nm, _, ixs) -> Some (syn (ExprApp (v nm, ixs |> List.map v)))
+        | Choice2Of2 _ -> None
+    let expandedBody =
+        match reynoldsSign with
+        | None ->
+            slots |> List.fold (fun accE slot ->
+                match slot with
+                | Choice1Of2 (p, _, _, _) -> substVar p.Name (readOf slot |> Option.get) accE
+                | Choice2Of2 _ -> accE) body
+            |> Ok
+        | Some isAnti ->
+            // reynolds needs every slot readable (a window has no permuted read)
+            if slots |> List.exists (function Choice2Of2 _ -> true | _ -> false) then
+                err rc.Fname "reynolds kernels over halo/range operands are not differentiable (v1)"
+            else
+                let reads = slots |> List.map (readOf >> Option.get)
+                let rec perms xs =
+                    match xs with
+                    | [] -> [[]]
+                    | _ -> xs |> List.collect (fun x ->
+                            perms (List.filter ((<>) x) xs) |> List.map (fun p -> x :: p))
+                let parity (p: int list) =
+                    let arr = List.toArray p
+                    let mutable inv = 0
+                    for i in 0 .. arr.Length - 2 do
+                        for j in i + 1 .. arr.Length - 1 do
+                            if arr.[i] > arr.[j] then inv <- inv + 1
+                    inv % 2 = 0
+                let terms =
+                    perms [0 .. reads.Length - 1]
+                    |> List.map (fun perm ->
+                        let t =
+                            List.zip ps perm
+                            |> List.fold (fun accE (p, srcSlot) ->
+                                substVar p.Name reads.[srcSlot] accE) body
+                        (parity perm, t))
+                match terms with
+                | [] -> Ok (fLit 0.0)
+                | (firstEven, firstT) :: rest ->
+                    let init = if not isAnti || firstEven then firstT else neg firstT
+                    Ok (rest |> List.fold (fun accE (even, t) ->
+                            if not isAnti || even then add accE t else sub accE t) init)
+    expandedBody |> Result.bind (fun bodyExpanded ->
+    let passthroughNames =
+        slots |> List.choose (function Choice2Of2 (p, _) -> Some p.Name | _ -> None) |> Set.ofList
+    let rc' = { rc with Known = Set.union rc.Known passthroughNames }
+    tangentOfExpr rc' bodyExpanded |> Result.map (fun tBody ->
+        let operandsOut =
+            slots |> List.map (function
+                | Choice1Of2 (_, _, idxTys, _) -> syn (ExprRange idxTys)
+                | Choice2Of2 (_, a) -> a)
+        let lamParams =
+            slots |> List.collect (function
+                | Choice1Of2 (_, _, _, ixs) ->
+                    ixs |> List.map (fun nm -> { Name = nm; Type = None; Default = None; NameSpan = noSpan })
+                | Choice2Of2 (p, _) -> [p])
+        reMap (ExprBinOp (bm, OpApply,
+                          syn (ExprMethodFor operandsOut),
+                          syn (ExprLambda (lamParams, None, tBody))))))))
 
 /// Elementwise tangent of a (possibly nested) array-literal initializer.
 let rec private tangentOfLit (rc: RevCtx) (e: Expr) : Result<Expr, string> =

@@ -1,0 +1,21 @@
+// TEST: JVP C3 Halo Stencil
+// The easiest combinator case: a halo operand is already virtual, so the
+// tangent keeps the SAME traversal and window param and just differentiates
+// the body -- reads a(w(o)) become __t_a(w(o)) with the window untouched.
+// The shrunk interior extent (N - (max-min) = 3) feeds the reduce bound.
+// d = central difference over a = [0,1,2,3,4]: (a2-a0)+(a3-a1)+(a4-a2) = 6.
+// Seed with 1s at both ENDS: d(sum) = -da0 + da4 = 0 (interior seeds cancel
+// structurally; only the boundary contributions survive, and they cancel
+// each other here).
+import ad as ad
+
+type H = Idx<5>
+
+function f(a: Array<Float like H>) -> Float = {
+    let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) - a(w(-1)) |> compute
+    reduce(d, (+))
+}
+
+let (v, t) = ad.jvp(f)([0.0, 1.0, 2.0, 3.0, 4.0], [1.0, 0.0, 0.0, 0.0, 1.0])
+// EXPECT: v = 6
+// EXPECT: t = 0
