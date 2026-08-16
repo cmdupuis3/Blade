@@ -1,0 +1,38 @@
+// TEST: Gram Decompact Nested Operand
+// ----------------------------------------------------------------------------
+// gram and decompact as OPERANDS of an elementwise op -- the nested-position
+// companions of 245 and 246, and a different failure from theirs: not a
+// diagnostic but a g++ error, `'arr0' was not declared in this scope`, because
+// the loop nest names an operand that no statement ever emitted.
+//
+// The two got there by different routes, which is why both are pinned:
+//
+//   gram       was simply MISSING from `isNestedLoopComputeArg`, while IRMatmul
+//              and IRSolve sat right beside it. The stated premise for the
+//              omission -- that IRGram "enters only via the `gram` keyword's
+//              let-RHS" -- is false for a CONSUMED gram.
+//   decompact  was in `isInlineForm`, but the loop-form `Arrays`-slot lift
+//              never consulted that predicate; it checked only the nested-
+//              compute / field-access / array-literal / select families.
+//
+// Both are now covered by the statement-shaped lift, minus the four forms the
+// codegen-side auto-materialize genuinely does handle in that slot.
+// ----------------------------------------------------------------------------
+type I = Idx<2>
+type K = Idx<3>
+type C = Idx<3>
+
+let a0: Array<Float64 like I, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let b0: Array<Float64 like I, K> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let g2 = gram(a0, b0) * 2.0
+
+let v: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let L = method_for(v, v)
+let g = lambda(p, q) where comm(p, q) -> 2.0 * p + q
+let sym = L <@> reynolds(g) |> compute
+let d2 = decompact(sym, 0) * 2.0
+
+// gram(a0, b0) is [[4, 2], [10, 5]].
+// EXPECT: g2 = [8.0, 4.0, 20.0, 10.0]
+// reynolds(2p+q) = 3(p+q); dense 3x3 doubled.
+// EXPECT: d2 = [12.0, 18.0, 24.0, 18.0, 24.0, 30.0, 24.0, 30.0, 36.0]
