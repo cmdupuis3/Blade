@@ -1,0 +1,27 @@
+// TEST: AD Through In-Function Grouping (keys as a parameter)
+// The natural spelling of a differentiable per-group loss: the keys arrive
+// as a parameter, the grouping is built INSIDE the differentiated function
+// (group_keys / group_bucket / extents emit in function bodies now), and
+// the same 2.17a values pin as 018's module-scope twin.
+import ad as ad
+
+type R = Idx<5>
+
+function loss(v: Array<Float like R>, keys: Array<Int64 like R>, cw: Array<Float like Idx<2>>) -> Float = {
+    let gk = group_keys(keys)
+    let b = group_bucket(gk)
+    let ns = extents(gk)
+    let rec t: Array<Float like R> =
+        match t with
+        | zero -> zero
+        | prefix :: i -> prefix :: (cw(b(i)) / ns(b(i))) * v(i)
+    reduce(t, (+))
+}
+
+// WARN: BL4003
+let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dc = [0.0, 0.0]
+let gv = ad.grad(loss)([10.0, 20.0, 30.0, 40.0, 50.0], [0, 1, 0, 0, 1], [2.0, 5.0], dv, dc)
+// EXPECT: gv = 228.333333333333
+// EXPECT: dv = [0.666666666666667, 2.5, 0.666666666666667, 0.666666666666667, 2.5]
+// EXPECT: dc = [26.6666666666667, 35]
