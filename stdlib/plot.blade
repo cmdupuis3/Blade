@@ -30,6 +30,37 @@
 // 1 = Plasma, 2 = Cividis, 3 = Greys, 4 = RdBu). An EnumIdx<["Viridis",...]>
 // upgrade would make the selection nominal AND checked; deferred.
 //
+// PREFERRED BACKEND (the `backend` slot, all five factories). A program can
+// say which renderer it would LIKE the viewer to use -- `1: backend` for GR
+// -- without changing one byte of what it emits. This is a HINT and nothing
+// more:
+//
+//   * the frame is still a plotly figure, with the same mime, the same
+//     payload, and `meta.backend` still reading `"plotly"`. `meta.backend`
+//     names the backend that PRODUCED the render, and a viewer caches its
+//     per-plot renders under that key -- stamping `"gr"` on plotly JSON
+//     would file it as though it WERE the GR render and permanently
+//     suppress the real one. The preference is therefore a SEPARATE,
+//     ADDITIVE key:
+//
+//         {"id":"blade-1","backend":"plotly","preferredBackend":"gr"}
+//
+//   * a viewer with no GR renderer -- or no knowledge of the key at all --
+//     ignores it and paints the plotly figure, which is the whole reason
+//     the frame content does not move;
+//   * the key is emitted ONLY when the program asks for a non-default
+//     backend. Left at its default, the meta is BYTE-IDENTICAL to what this
+//     module emitted before the slot existed, which is what keeps the
+//     existing frame byte pins honest;
+//   * out-of-table values fall back to the default rather than erroring,
+//     exactly like `cmap`: a backend choice is presentation, not data.
+//
+// The two metas are separate string LITERALS chosen by a runtime `if` in
+// `__emit_fig`, because `display.emit`'s meta argument must be a literal
+// (BL5700, "the meta argument must be a string literal") -- the frame's head
+// and meta tail are computed once at elaboration time, so a meta built by
+// concatenation is refused even when both halves are literals.
+//
 // VALID JSON IS AN INVARIANT, not an aspiration: every runtime value that
 // reaches a figure goes through a serializer that cannot emit invalid JSON.
 // Title/label strings travel via `d.json_string` (which supplies its OWN
@@ -95,6 +126,12 @@ Unit ylabel: 1
 /// Longest grid axis, in samples, that reaches the panel undecimated
 /// (grid factories only -- see the DECIMATION note in the module header).
 Unit maxdim: 1
+/// Renderer the program would PREFER the viewer paint this figure with:
+/// 0 = plotly (the default), 1 = GR. Out-of-table indices fall back to the
+/// default rather than erroring, like `cmap`. This is a HINT carried in the
+/// frame's `meta.preferredBackend`, never a change to the frame's CONTENT --
+/// see the PREFERRED BACKEND note in the module header.
+Unit backend: 1
 
 // ---- Decimation budgets ----
 //
@@ -203,57 +240,78 @@ function __layout(t: String<title>, xl: String<xlabel>, yl: String<ylabel>) -> S
 /// Wrap one trace + layout into a figure and emit the frame. The meta is a
 /// string LITERAL (the display contract); everything runtime-varying --
 /// title included -- lives in the payload's layout.
-function __emit_fig(trace: String, layout: String) -> Bool =
-    d.emit("application/vnd.plotly.v1+json", "{\"data\":[" + trace + "],\"layout\":" + layout + "}", "{\"backend\":\"plotly\"}")
+///
+/// The `backend` PREFERENCE is the one thing that varies in the meta, and it
+/// varies by picking between two whole literals rather than by building one:
+/// `display.emit`'s meta argument must be a literal (BL5700) because the
+/// frame's head and meta tail are computed ONCE at elaboration time, so even
+/// `"{...\"" + "...}"` -- two literals and a `+` -- is refused. A runtime
+/// `if` over two complete calls is how a runtime choice reaches a static
+/// meta, the same shape the decimation ladder uses to reach a static extent.
+/// The PAYLOAD is built once and shared, so the two arms differ in the meta
+/// and in nothing else. Anything but 1 takes the default arm, whose meta is
+/// byte-for-byte what this module emitted before the slot existed.
+function __emit_fig(trace: String, layout: String, b: Int64<backend>) -> Bool = {
+    let fig = "{\"data\":[" + trace + "],\"layout\":" + layout + "}"
+    if b == 1 then
+        d.emit("application/vnd.plotly.v1+json", fig, "{\"backend\":\"plotly\",\"preferredBackend\":\"gr\"}")
+    else
+        d.emit("application/vnd.plotly.v1+json", fig, "{\"backend\":\"plotly\"}")
+}
 
 // ---- Factories ----
 
 /// Filled contour plot of z over the x/y grid.
 function contourf(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
                   n: Int64<levels> = 10, c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
-                  t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+                  t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                  b: Int64<backend> = 0) -> Bool = {
     let cx = extents(x)
     let cy = extents(y)
     let big = cx > m || cy > m
     let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
     let trace = "{\"type\":\"contour\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"fill\"},\"ncontours\":" + d.json_num(n) + "}"
-    __emit_fig(trace, __layout(t, xl, yl))
+    __emit_fig(trace, __layout(t, xl, yl), b)
 }
 
 /// Line contour plot of z over the x/y grid.
 function contour(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
                  n: Int64<levels> = 10, c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
-                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                 b: Int64<backend> = 0) -> Bool = {
     let cx = extents(x)
     let cy = extents(y)
     let big = cx > m || cy > m
     let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
     let trace = "{\"type\":\"contour\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"lines\"},\"ncontours\":" + d.json_num(n) + "}"
-    __emit_fig(trace, __layout(t, xl, yl))
+    __emit_fig(trace, __layout(t, xl, yl), b)
 }
 
 /// Heatmap of z over the x/y grid.
 function heatmap(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
                  c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
-                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                 b: Int64<backend> = 0) -> Bool = {
     let cx = extents(x)
     let cy = extents(y)
     let big = cx > m || cy > m
     let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
     let trace = "{\"type\":\"heatmap\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\"}"
-    __emit_fig(trace, __layout(t, xl, yl))
+    __emit_fig(trace, __layout(t, xl, yl), b)
 }
 
 /// Line plot of y against x.
 function line(x: X^1, y: Y^1,
-              t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+              t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+              b: Int64<backend> = 0) -> Bool = {
     let trace = "{\"type\":\"scatter\",\"mode\":\"lines\",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + "}"
-    __emit_fig(trace, __layout(t, xl, yl))
+    __emit_fig(trace, __layout(t, xl, yl), b)
 }
 
 /// Scatter plot of y against x.
 function scatter(x: X^1, y: Y^1,
-                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                 b: Int64<backend> = 0) -> Bool = {
     let trace = "{\"type\":\"scatter\",\"mode\":\"markers\",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + "}"
-    __emit_fig(trace, __layout(t, xl, yl))
+    __emit_fig(trace, __layout(t, xl, yl), b)
 }

@@ -545,6 +545,102 @@ add "plot: contour and heatmap carry the same maxdim slot" (fun () ->
             (shapeFor "let ok = plot.contour(gx, gy, gz, 16: maxdim)\n")
             (shapeFor "let ok = plot.heatmap(gx, gy, gz, 16: maxdim)\n")))
 
+// ---- 6. The `backend` slot: a PREFERENCE, not a change of content -----------
+//
+// `meta.backend` names the backend that PRODUCED a render, and the panel keys
+// its per-plot render cache on it -- a plotly payload stamped
+// `"backend":"gr"` would be filed AS the GR render and permanently suppress
+// the real one. A program's PREFERENCE is therefore a separate, ADDITIVE key,
+// `preferredBackend`, and everything else about the frame stays where it was.
+//
+// The default emits no key at all, which is the load-bearing half: an
+// untagged call's meta is byte-for-byte what this module emitted before the
+// slot existed, so every frame pin above (and the corpus differential) keeps
+// guarding exactly what it guarded.
+//
+// `display.emit`'s meta must be a string LITERAL -- the head and meta tail are
+// computed once at elaboration time, so even `"{\"a\":1" + "}"` is refused
+// with BL5700 "display.emit: the meta argument must be a string literal".
+// plot.blade therefore picks between two COMPLETE literals with a runtime
+// `if` instead of building one. Both arms are pinned here byte-for-byte.
+
+/// The one frame line of a one-frame program, sentinel stripped.
+let private frameLineOf (source: string) : string =
+    match interpStdout source with
+    | Error e -> "ERR:" + e
+    | Ok out ->
+        match out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith F.Sentinel) with
+        | None -> "ERR:no frame"
+        | Some l -> l.Substring F.Sentinel.Length
+
+/// That frame's `"meta":{...}` object as RAW BYTES -- the frame's own closing
+/// brace trimmed off, nothing else touched. Reading the text rather than a
+/// parse is the point: key ORDER and the absence of a key are both contract.
+let private metaBytesOf (source: string) : string =
+    let l = frameLineOf source
+    if l.StartsWith "ERR:" then l
+    else
+        let i = l.IndexOf "\"meta\":"
+        if i < 0 then "ERR:no meta in " + l
+        else
+            let m = l.Substring i
+            if m.EndsWith "}" then m.Substring(0, m.Length - 1) else m
+
+/// `plot.line` with the given extra slot text (`""` for none).
+let private lineSlots (slots: string) =
+    sprintf "import plot\nlet ok = plot.line([0.0, 1.0], [0.0, 1.0]%s)\n" slots
+
+add "plot: the default meta carries id + backend and NOTHING else" (fun () ->
+    // Byte-identical to what plot.blade emitted before the slot existed. Any
+    // key added here -- including a `preferredBackend` leaking onto the
+    // default path -- fails this line.
+    eq "\"meta\":{\"id\":\"blade-1\",\"backend\":\"plotly\"}" (metaBytesOf (lineSlots "")))
+
+add "plot: 1: backend ADDS preferredBackend and leaves backend on plotly" (fun () ->
+    // `backend` staying "plotly" is the whole contract: the payload IS plotly
+    // JSON, so the key that says who produced it must keep saying plotly.
+    eq "\"meta\":{\"id\":\"blade-1\",\"backend\":\"plotly\",\"preferredBackend\":\"gr\"}"
+       (metaBytesOf (lineSlots ", 1: backend")))
+
+add "plot: 0: backend is the default arm, byte-identical to omitting it" (fun () ->
+    eq (metaBytesOf (lineSlots "")) (metaBytesOf (lineSlots ", 0: backend")))
+
+add "plot: an out-of-table backend index falls back to the default" (fun () ->
+    // A backend choice is presentation, not data -- the same rule `cmap` uses
+    // for an unknown colormap. 9 is not a backend, and the frame it produces
+    // is the ordinary plotly one rather than a refusal or a broken meta.
+    eq (metaBytesOf (lineSlots "")) (metaBytesOf (lineSlots ", 9: backend")))
+
+add "plot: the backend slot moves the META and nothing else" (fun () ->
+    // The other half of "it is a hint": a viewer that ignores
+    // `preferredBackend` has to be handed the very same figure. Everything
+    // ahead of `"meta":` -- version, mime, encoding and the whole payload --
+    // is compared here.
+    let upToMeta (s: string) =
+        let i = s.IndexOf "\"meta\":"
+        if i < 0 then "ERR:no meta in " + s else s.Substring(0, i)
+    eq (upToMeta (frameLineOf (lineSlots ", \"waves\": title")))
+       (upToMeta (frameLineOf (lineSlots ", \"waves\": title, 1: backend"))))
+
+add "plot: all five factories carry the backend slot, flat and chained" (fun () ->
+    // Declaration order puts `backend` last, so every one of these hands it
+    // over out of order or in its own chained group -- routing by NOMINAL,
+    // exactly like tests/corpus/display/004_plot_factory_slots.blade drives
+    // the older slots.
+    let g = "[0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]]"
+    let calls =
+        [ sprintf "plot.contourf(%s, 1: backend, 5: levels)" g
+          sprintf "plot.contour(%s)(1: backend)(3: levels)" g
+          sprintf "plot.heatmap(%s, 1: backend, 2: cmap)" g
+          "plot.line([0.0, 1.0], [0.0, 1.0], 1: backend, \"t\": title)"
+          "plot.scatter([0.0, 1.0], [0.0, 1.0])(1: backend)" ]
+    let got =
+        calls |> List.mapi (fun i c ->
+            let m = metaBytesOf (sprintf "import plot\nlet ok = %s\n" c)
+            if m = "\"meta\":{\"id\":\"blade-1\",\"backend\":\"plotly\",\"preferredBackend\":\"gr\"}"
+            then "gr" else sprintf "[%d %s]" i m)
+    eq "gr,gr,gr,gr,gr" (String.concat "," got))
+
 // ---- Runner -----------------------------------------------------------------
 
 /// Run the in-process display block. No compiler toolchain: the REPL-channel
