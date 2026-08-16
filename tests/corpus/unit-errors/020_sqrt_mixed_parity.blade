@@ -1,0 +1,13 @@
+// TEST: Sqrt Mixed Parity Dimensions Rejects (rejects)
+// ERROR: BL3006
+// ERROR-CONTAINS: unit dimension exponents are integers
+// MIXED parity is the same refusal by a different route: meters is even but
+// seconds is odd, so the root is (meters^2 / seconds)^(1/2). Worth its own
+// test because the old rule tested all-even with a single `Map.forall` and
+// dropped the WHOLE signature on failure -- the even half of the dims went
+// with it, so nothing downstream even knew a length was involved.
+Unit meters
+Unit seconds
+Unit diffusivity = meters ^ 2 / seconds
+let k: Float<diffusivity> = 4.0
+let bad = sqrt(k)

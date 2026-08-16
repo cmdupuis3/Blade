@@ -1,0 +1,18 @@
+// TEST: JVP Non-Additive Overwrite (accepted forward)
+// THE BOUNDARY SHIFT, documented: this exact program is ad/007's reject --
+// grad refuses non-additive reassignment because its reverse sweep
+// re-evaluates forward expressions at final values. Forward mode has no
+// reverse sweep: the tangent assignment is emitted BEFORE its primal and
+// reads pre-assignment values, so overwrites differentiate exactly.
+// f: t = 2x, then t = t*t -> f = 4x^2; at x = 3: primal 36, d = 8x = 24.
+import ad as ad
+
+function f(x: Float) -> Float = {
+    let mut t = x * 2.0
+    t = t * t
+    t
+}
+
+let (fv, ft) = ad.jvp(f)(3.0, 1.0)
+// EXPECT: fv = 36
+// EXPECT: ft = 24

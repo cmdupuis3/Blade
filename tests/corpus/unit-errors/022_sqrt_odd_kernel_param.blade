@@ -1,0 +1,12 @@
+// TEST: Sqrt Odd Dimension Kernel Param Rejects (rejects)
+// ERROR: BL3006
+// ERROR-CONTAINS: unit dimension exponents are integers
+// The kernel-body route (kernelBodyUnits, run after param binding) shares
+// the same per-op table, so the refusal has to reach it too. Shaped exactly
+// like units/019, whose element unit is meters^2 and still compiles -- the
+// only change is an ODD element unit, which turns the accepting case into a
+// rejection at the apply site rather than a silently unconstrained element.
+Unit meters
+type SIdx = Idx<2>
+let S: Array<Float<meters> like SIdx> = [9.0, 16.0]
+let bad = method_for(S) <@> lambda(s) -> sqrt(s) |> compute

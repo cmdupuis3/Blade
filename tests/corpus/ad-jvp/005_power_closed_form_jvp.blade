@@ -1,0 +1,13 @@
+// TEST: JVP Power Closed Form (grad agreement)
+// Mirror of ad/009's territory: the constant-natural-exponent closed form.
+// f = x^4: at x = 2 primal 16, d = 4x^3 = 32.
+import ad as ad
+
+function f(x: Float) -> Float = x ^ 4
+
+let (gv, gd) = ad.grad(f)(2.0)
+let (jv, jt) = ad.jvp(f)(2.0, 1.0)
+let tresid = jt - gd
+// EXPECT: jv = 16
+// EXPECT: jt = 32
+// EXPECT: tresid = 0

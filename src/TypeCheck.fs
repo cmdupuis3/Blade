@@ -9689,8 +9689,14 @@ and stampElemUnits env (resUnits: UnitSig option) (t: TypedExpr) : TypedExpr =
 /// HOMOGENEITY, which decides whether a function of a dimensioned quantity
 /// has a signature at all:
 ///   - degree 1 (f(cx)=c*f(x)): negation, abs, complex projections PRESERVE.
-///   - degree 1/2: sqrt halves exponents when all even (sqrt(m^2)=m); odd
-///     exponents have no integer-signature representation, so dropped.
+///   - degree 1/2: sqrt halves the dimension exponents AND the magnitude
+///     together (sqrt(m^2) = m, sqrt(km^2) = km), and REFUSES when either
+///     halving is inexact. An odd exponent would need a half-integer
+///     dimension, and a non-square magnitude (`4047 * meters^2`) a rounded
+///     scale; neither is representable. Refusing is not pedantry: the arm
+///     used to answer "no signature" in the odd case, and an unconstrained
+///     result unifies with ANY unit downstream, so `sqrt(m) + Float<seconds>`
+///     typechecked.
 ///   - degree 0: arg, logical not are dimensionless-out for any operand.
 ///   - NOT homogeneous: floor/ceil and transcendentals REJECT a dimensioned
 ///     operand instead of inventing a result signature. floor is NOT lumped
@@ -9714,14 +9720,30 @@ and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : TypeResult<UnitSig o
     | OpMath "abs" -> Ok u
     | OpMath "sqrt" ->
         // sqrt DROPS the nominal layer like the other non-degree-1
-        // compositions (sqrt of a quantity is not that quantity).
+        // compositions (sqrt of a quantity is not that quantity), and is
+        // EXACT-OR-REFUSE. unitSqrt halves the MAGNITUDE alongside the dims,
+        // which is what makes sqrt the inverse of unitPow at n = 2: halving
+        // dims alone stamped `sqrt(x: Float<km2>)` as meters-magnitude and
+        // every later conversion was off by 1000.
         match u with
-        | Some s ->
-            let n = unitNormalize s
-            if n.Dims |> Map.forall (fun _ ex -> ex % 2 = 0)
-            then Ok (Some (unitOfDims (n.Dims |> Map.map (fun _ ex -> ex / 2))))
-            else Ok None
         | None -> Ok None
+        | Some s ->
+            match unitSqrt s with
+            | Some r -> Ok (Some r)
+            | None ->
+                // Two distinct refusals, both phrased as "what the argument
+                // would have to be" like the floor/transcendental arms below.
+                let n = unitNormalize s
+                let context, expected =
+                    if n.Dims |> Map.forall (fun _ ex -> ex % 2 = 0) then
+                        (sprintf "sqrt() argument (%s has magnitude %s, which has no exact square root in the unit scale grammar -- declare the unit as a square instead, e.g. `Unit hectare = (100 * meters) ^ 2`)"
+                            (ppUnitSig s) (ppUnitScale n.Scale)),
+                        "a unit whose magnitude is an exact square"
+                    else
+                        (sprintf "sqrt() argument (the square root of %s is (%s)^(1/2), and unit dimension exponents are integers, so that signature cannot be expressed -- square the argument, or divide by a reference quantity to get a dimensionless value first)"
+                            (ppUnitSig s) (ppUnitSig s)),
+                        "a unit whose dimension exponents are all even"
+                Error (UnitMismatch (context, expected, ppUnitSig s))
     | OpMath (("floor" | "ceil") as name) ->
         requireDimensionless
             (sprintf "%s() argument (rounding is not scale-invariant: floor(3.7 m) = 3 m, but the same length as 370 cm floors to 370 cm = 3.7 m; divide by a reference quantity to get a dimensionless count first)" name)

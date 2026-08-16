@@ -1,0 +1,18 @@
+// TEST: JVP Two Scalars With Intrinsics (grad agreement)
+// Transcendental partials: pin RESIDUALS against grad rather than
+// hand-derived decimals (both evaluators walk the same expression tree,
+// so the residual is interp-gate-safe; the pinned 0 rides the tolerant
+// absolute branch of the harness comparison).
+import ad as ad
+
+function f(x: Float, y: Float) -> Float = exp(x) * sin(y) + x * y
+
+let (gv, gdx, gdy) = ad.grad(f)(1.0, 0.5)
+let (jvx, jtx) = ad.jvp(f)(1.0, 0.5, 1.0, 0.0)
+let (jvy, jty) = ad.jvp(f)(1.0, 0.5, 0.0, 1.0)
+let presid = jvx - gv
+let xresid = jtx - gdx
+let yresid = jty - gdy
+// EXPECT: presid = 0
+// EXPECT: xresid = 0
+// EXPECT: yresid = 0

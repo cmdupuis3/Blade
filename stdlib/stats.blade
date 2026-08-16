@@ -65,4 +65,9 @@ function variance(row: T^1) -> T^0 = {
 /// UNITS: `sqrt` halves even exponents, so a `Float64<meters>` row gives
 /// `Float64<meters>` -- and that IS checked at the call site now (see the
 /// module note). An `Float64<meters^2>` annotation on this result is a BL3006.
+/// The composition is exact by construction: `variance` squares, so the
+/// exponents reaching `sqrt` are always even. An odd-exponent intermediate
+/// would be refused outright rather than silently unconstrained (`sqrt` no
+/// longer answers "no signature" on the way through -- see
+/// tests/corpus/unit-errors/019).
 function stddev(row: T^1) -> T^0 = sqrt(variance(row))

@@ -227,6 +227,10 @@ module Codes =
             "BL5300", "rand elaboration error"
             "BL5400", "spectra elaboration error"
             "BL5500", "grad elaboration error"
+            // BL5501: the forward-mode sibling. A distinct code (not BL5500)
+            // so a reject test can assert WHICH transform refused -- the two
+            // subsets deliberately diverge (overwrites, if/match) past v1.
+            "BL5501", "jvp elaboration error"
             "BL5600", "sgs elaboration error"
             "BL5700", "display elaboration error"
             // BL6xxx: IR validation
@@ -300,6 +304,7 @@ module Codes =
                 | "BL5300" -> PhElaborate "rand"
                 | "BL5400" -> PhElaborate "spectra"
                 | "BL5500" -> PhElaborate "grad"
+                | "BL5501" -> PhElaborate "grad"   // jvp runs inside the grad pass
                 | "BL5600" -> PhElaborate "sgs"
                 | "BL5700" -> PhElaborate "display"
                 | _ -> PhElaborate "ml"

@@ -1,0 +1,16 @@
+// TEST: AD Array Literal With Active Elements
+// `let a = [x, 2.0*x]` followed by element reads must flow gradient back
+// to x. Before the fix the array-literal let was treated as a constant
+// init: reads accumulated into the literal's cotangent buffer, nothing
+// flowed onward, and dfv printed 0 with no diagnostic.
+// f = x * 2x = 2x^2, so f(3) = 18 and df/dx = 4x = 12.
+import ad as ad
+
+function f(x: Float) -> Float = {
+    let a = [x, 2.0 * x]
+    a(0) * a(1)
+}
+
+let (fv, dfv) = ad.grad(f)(3.0)
+// EXPECT: fv = 18
+// EXPECT: dfv = 12

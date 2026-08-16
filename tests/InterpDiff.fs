@@ -170,7 +170,10 @@ let indexTypesSlice = [ "index-types" ]
 /// and 002 then blew it under the Debug build that `dotnet run` produces. See the
 /// interpTimeoutMs note.
 let m5Slice =
-    [ "ad"; "spectra"; "math"; "ml-ops"; "ml-equiv"; "ml-e2e"; "ppl" ]
+    [ "ad"; "ad-jvp"; "spectra"; "math"; "ml-ops"; "ml-equiv"; "ml-e2e"; "ppl" ]
+    // ad-jvp verified standalone at 14/0/0 with zero skips before joining
+    // the slice (jvp emits ordinary Blade source; the interpreter needs no
+    // new arms to twin it)
 
 /// The slice the default `test interp` arm runs. Later milestones extend it
 /// (index types once its ragged/complex fixes land, ...). Kept as its own name

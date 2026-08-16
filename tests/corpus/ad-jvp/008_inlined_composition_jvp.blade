@@ -1,0 +1,17 @@
+// TEST: JVP Inlined Layer Composition (grad agreement)
+// Mirror of ad/013's territory: calls to same-module functions are inlined
+// before the tangent sweep. f = (x^2)^2 + x^2 = x^4 + x^2; at x = 2:
+// primal 20, d = 4x^3 + 2x = 36.
+import ad as ad
+
+function sq(u: Float) -> Float = u * u
+function lay(u: Float) -> Float = sq(u) + u
+
+function f(x: Float) -> Float = lay(sq(x))
+
+let (gv, gd) = ad.grad(f)(2.0)
+let (jv, jt) = ad.jvp(f)(2.0, 1.0)
+let tresid = jt - gd
+// EXPECT: jv = 20
+// EXPECT: jt = 36
+// EXPECT: tresid = 0

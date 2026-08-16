@@ -1,0 +1,18 @@
+// TEST: JVP Power Variable Exponent (grad agreement)
+// Mirror of ad/010: the ACTIVE-exponent two-term rule
+// d(b^e) = e*b^(e-1)*db + b^e*log(b)*de. The de term is the one a forward
+// implementation drops silently, so it gets its own seed. f(2,3) = 8,
+// df/dx = y*x^(y-1) = 12, df/dy = 8*log 2 (pinned via residual).
+import ad as ad
+
+function f(x: Float, y: Float) -> Float = x ^ y
+
+let (gv, gdx, gdy) = ad.grad(f)(2.0, 3.0)
+let (jvx, jtx) = ad.jvp(f)(2.0, 3.0, 1.0, 0.0)
+let (jvy, jty) = ad.jvp(f)(2.0, 3.0, 0.0, 1.0)
+let xresid = jtx - gdx
+let yresid = jty - gdy
+// EXPECT: jvx = 8
+// EXPECT: jtx = 12
+// EXPECT: xresid = 0
+// EXPECT: yresid = 0

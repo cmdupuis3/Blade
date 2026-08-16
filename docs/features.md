@@ -383,7 +383,7 @@ compile-time only, zero runtime cost.
 | Norm activation | Near-term | ml-spec §8.2; `ml.norms` (invariant norm readout) is shipped and is a different op |
 | Message passing: `scatter` / `gather` | Near-term | ml-spec §9 (expressible today as loops — `ml-e2e/00*` do; dedicated ops pending) |
 | Reynolds applications: symmetric message passing, higher-order interactions, antisymmetric applications | Near-term | ml-spec §14; the CG exchange-symmetry compaction shipped as `derive_sym_tp` / `derive_alt_tp` (measured 30–42%, not the 2–4× originally claimed — module doc §9) |
-| Automatic differentiation (`grad`, reverse mode, v1 subset) | Core (v7) | AST-level source transform; module doc §11 has the ABI + subset; corpus `ad/` + `ml-e2e/`; remaining work listed in [features/equivariant-nn.md](features/equivariant-nn.md) §11 |
+| Automatic differentiation (`ad.grad` reverse mode, v1 subset; `ad.jvp` forward mode, strict superset incl. overwrites/recurrences/product folds/if-else/units) | Core | AST-level source transforms, one pass; module doc §11 has both ABIs + subsets; composition `ad.jvp(ad.grad(f))` = HVP, `ad.jvp(ad.jvp(f))` = second-order; corpus `ad/` + `ad-jvp/` + `ml-e2e/`; remaining work in [features/equivariant-nn.md](features/equivariant-nn.md) §11 |
 
 ## 18. Graphs and trees (planned module)
 

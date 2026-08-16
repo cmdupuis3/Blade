@@ -1,0 +1,16 @@
+// TEST: AD unknown-call silent-zero rejected (rejects)
+// `abs` is a builtin with no derivative rule in the AD table. Before this
+// refusal its application fell to the adjoint's catch-all and contributed a
+// ZERO gradient term silently -- the exact failure mode the digamma refusal
+// (014) guards against for intrinsics, now closed for every unknown name.
+// ERROR: BL5500
+// ERROR-CONTAINS: cannot differentiate through 'abs'
+import ad as ad
+
+function f(x: Float) -> Float = {
+    let y = abs(x) * x
+    y
+}
+
+let (fv, dfv) = ad.grad(f)(2.0)
+fv

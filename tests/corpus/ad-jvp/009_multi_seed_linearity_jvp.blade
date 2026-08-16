@@ -1,0 +1,22 @@
+// TEST: JVP Multi-Input Seeding And Linearity
+// The structural test reverse mode has no analogue for: seeds select
+// partials, and the tangent is LINEAR in the seed vector. f = x^2 * y at
+// (2, 3): primal 12, df/dx = 2xy = 12, df/dy = x^2 = 4; seed (1,1) -> 16.
+import ad as ad
+
+function f(x: Float, y: Float) -> Float = x * x * y
+
+let (v1, tx) = ad.jvp(f)(2.0, 3.0, 1.0, 0.0)
+let (v2, ty) = ad.jvp(f)(2.0, 3.0, 0.0, 1.0)
+let (v3, txy) = ad.jvp(f)(2.0, 3.0, 1.0, 1.0)
+let linresid = txy - (tx + ty)
+let (gv, gdx, gdy) = ad.grad(f)(2.0, 3.0)
+let xresid = tx - gdx
+let yresid = ty - gdy
+// EXPECT: v1 = 12
+// EXPECT: tx = 12
+// EXPECT: ty = 4
+// EXPECT: txy = 16
+// EXPECT: linresid = 0
+// EXPECT: xresid = 0
+// EXPECT: yresid = 0

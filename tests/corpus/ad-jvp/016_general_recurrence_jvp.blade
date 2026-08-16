@@ -1,0 +1,20 @@
+// TEST: JVP General Recurrence (non-additive, forward only)
+// A geometric recurrence grad cannot touch (its rec-array lowering is
+// additive-only, a reverse-sweep artifact). Forward differentiates any
+// smooth immediate-predecessor recurrence in place, O(n).
+// s0 = x; s(n) = 0.5*s(n-1) + x -> s = [x, 1.5x, 1.75x, 1.875x];
+// reduce = 6.125x. At x = 2: primal 12.25, d = 6.125 (exact binary).
+import ad as ad
+
+function f(x: Float) -> Float = {
+    let rec s: Array<Float like Idx<4>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + x
+    reduce(s, (+))
+}
+
+let (fv, ft) = ad.jvp(f)(2.0, 1.0)
+// EXPECT: fv = 12.25
+// EXPECT: ft = 6.125

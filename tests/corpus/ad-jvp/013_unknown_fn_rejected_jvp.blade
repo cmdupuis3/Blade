@@ -1,0 +1,12 @@
+// TEST: JVP Of Unknown Function (rejects)
+// Mirror of ad/008_grad_of_unknown_rejected: the argument must be a named
+// same-module top-level function. Pins that the refusal carries the jvp
+// code (BL5501), not grad's.
+// ERROR: BL5501
+// ERROR-CONTAINS: 'nonexistent' is not a top-level function
+import ad as ad
+
+function f(x: Float) -> Float = x * x
+
+let (fv, dfv) = ad.jvp(nonexistent)(2.0, 1.0)
+fv

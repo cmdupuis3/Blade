@@ -422,6 +422,45 @@ let scalePow (s: UnitScale) (n: int) : UnitScale =
                   (System.Numerics.BigInteger.Pow (s.Num, k))
                   (s.Consts |> Map.map (fun _ e -> e * n))
 
+/// Floor of the integer square root, but ONLY when it is exact -- None when
+/// `n` is not a perfect square (and for a negative `n`, which no declared
+/// magnitude produces but the type allows).
+///
+/// bigint has no Sqrt, and going through `float` would round: a magnitude is
+/// arbitrary-precision (`(10^9)^2` is a legal unit RHS) and a double cannot
+/// even represent every 64-bit square, so the answer has to be computed in
+/// integers. Newton's iteration on x <- (x + n/x)/2 DECREASES monotonically
+/// to floor(sqrt n) from any start above the true root, so the first
+/// non-decrease is the fixed point; seeding at 2^ceil(bits/2) (safely above
+/// the root, since n < 2^bits) keeps the step count logarithmic. The final
+/// `x * x = n` is what makes the result exact rather than floored.
+let private bigintSqrtExact (n: bigint) : bigint option =
+    if n.Sign < 0 then None
+    elif n.IsZero || n.IsOne then Some n
+    else
+        let mutable x = System.Numerics.BigInteger.Pow (bigint 2, int ((n.GetBitLength () + 1L) / 2L))
+        let mutable next = (x + n / x) / bigint 2
+        while next < x do
+            x <- next
+            next <- (x + n / x) / bigint 2
+        if x * x = n then Some x else None
+
+/// Exact square root of a MAGNITUDE, or None when there is not one. Both
+/// Num and Den must be perfect squares and every named-constant exponent
+/// must be even (`pi^2` halves to `pi`; a lone `pi` has no representable
+/// root, since the grammar carries integer exponents only).
+///
+/// Refusing is the point: this module's invariant is that nothing rounds
+/// during unit algebra, so `sqrt` of `4047 * meters^2` has no answer here --
+/// approximating it would put a wrong conversion factor in a TYPE, where no
+/// later check can catch it.
+let scaleSqrt (s: UnitScale) : UnitScale option =
+    if s.Consts |> Map.exists (fun _ e -> e % 2 <> 0) then None
+    else
+        match bigintSqrtExact s.Num, bigintSqrtExact s.Den with
+        | Some num, Some den -> Some (normScale num den (s.Consts |> Map.map (fun _ e -> e / 2)))
+        | _ -> None
+
 /// Render a scale for diagnostics: `86400`, `1/60`, `2 * pi`, `pi^2 / 4`.
 /// The rational numerator is elided when it is 1 and a constant carries the
 /// numerator instead, so `2 * pi` does not print as `2 * pi` with a stray 1.
@@ -528,6 +567,24 @@ let unitPow (u: UnitSig) (n: int) : UnitSig =
         unitNormalize { Nominal = None
                         Dims = u.Dims |> Map.map (fun _ exp -> exp * n)
                         Scale = scalePow u.Scale n }
+
+/// Unit square root: halve the dimension exponents AND the magnitude, or
+/// refuse. The inverse of unitPow at n = 2, so it has to halve the same two
+/// layers unitPow raises -- halving dims alone turned `km^2` into
+/// meters-magnitude `meters`, and the resulting conversion factor was wrong
+/// by 1000 wherever the value later met another length.
+///
+/// Total-or-nothing, and None is a REFUSAL rather than "no constraint": an
+/// odd exponent needs a half-integer dimension the grammar cannot carry, and
+/// a non-square magnitude (`4047 * meters^2`) needs a rounded scale this
+/// module never produces. Drops the nominal layer like unitMul/unitDiv/
+/// unitPow -- the square root of a quantity is not that quantity.
+let unitSqrt (u: UnitSig) : UnitSig option =
+    let n = unitNormalize u
+    if n.Dims |> Map.forall (fun _ exp -> exp % 2 = 0) then
+        scaleSqrt n.Scale
+        |> Option.map (fun sc -> unitOfDimsScaled (n.Dims |> Map.map (fun _ exp -> exp / 2)) sc)
+    else None
 
 /// Check if two unit signatures are CONVERTIBLE: dims must be equal, and the
 /// nominal layers must AGREE -- both the same quantity, or at least one side
