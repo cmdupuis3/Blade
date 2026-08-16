@@ -1,0 +1,41 @@
+// TEST: AD Through Real Grouping Data (both modes)
+// The 2.17a pattern with REAL keys instead of hand tables: group_keys /
+// group_bucket / extents(gk) are constant plumbing (keys are Int data, so
+// the bindings carry no derivative), and the per-group-mean loss
+// differentiates through the ordinary data-dependent-read machinery --
+// reverse (gather-adjoint-is-scatter) AND forward, agreeing exactly.
+// loss = sum_g c_g * mean(group g) = sum_i (c_{b(i)}/n_{b(i)}) * v_i.
+// The gradient wrt v is the broadcast of c_g/n_g through the bucket map;
+// the gradient wrt c is the per-group means.
+// (Module-scope grouping bindings: the in-function spelling waits on the
+// group_bucket emitter learning function-body expression positions.)
+import ad as ad
+
+type R = Idx<5>
+let k0 = [0, 1, 0, 0, 1]
+let gk = group_keys(k0)
+let b = group_bucket(gk)
+let ns = extents(gk)
+
+function loss(v: Array<Float like R>, cw: Array<Float like Idx<2>>) -> Float = {
+    let rec t: Array<Float like R> =
+        match t with
+        | zero -> zero
+        | prefix :: i -> prefix :: (cw(b(i)) / ns(b(i))) * v(i)
+    reduce(t, (+))
+}
+
+let v0 = [10.0, 20.0, 30.0, 40.0, 50.0]
+let c0 = [2.0, 5.0]
+// WARN: BL4003
+let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dc = [0.0, 0.0]
+let gv = ad.grad(loss)(v0, c0, dv, dc)
+// EXPECT: gv = 228.333333333333
+// EXPECT: dv = [0.666666666666667, 2.5, 0.666666666666667, 0.666666666666667, 2.5]
+// EXPECT: dc = [26.6666666666667, 35]
+let (jp, jt) = ad.jvp(loss)(v0, c0, [1.0, 0.0, -2.0, 3.0, 0.5], [0.0, 0.0])
+let dot = reduce(dv * [1.0, 0.0, -2.0, 3.0, 0.5], (+))
+let resid = jt - dot
+// EXPECT: jp = 228.333333333333
+// EXPECT: resid = 0

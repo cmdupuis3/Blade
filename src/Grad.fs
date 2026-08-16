@@ -349,6 +349,9 @@ let rec private producesArray (arrays: Set<string>) (e: Expr) : bool =
     | ExprKind.ExprBinOp (_, OpFallback, l, r) -> producesArray arrays l || producesArray arrays r
     // a map application (C2) always yields an array-shaped result
     | ExprKind.ExprBinOp (_, OpApply, _, _) -> true
+    // grouping-derived data arrays (2.17a): the row->bucket map and
+    // per-group sizes are Int arrays read by index
+    | ExprKind.ExprGroupBucket _ | ExprKind.ExprExtents _ -> true
     | _ -> false
 
 /// Walk an expression, validating it stays inside the differentiable
@@ -368,12 +371,34 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     // and `compute` reach it in jvp mode and stay refused in grad mode.
     | LinearForm (ops, _) when errMode.Value = "jvp" ->
         ops |> List.fold (fun acc o -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar o)) (Ok ())
+    // Grouping data is constant plumbing in BOTH modes: keys are Int/index
+    // data, so a `group_keys`/`group_bucket`/`extents` binding carries no
+    // derivative and the explicit-bucket gather pattern (2.17a) rides the
+    // ordinary data-dependent-read machinery.
+    | { Kind = ExprKind.ExprGroupKeys keys } ->
+        keys |> List.fold (fun acc k -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar k)) (Ok ())
+    | { Kind = ExprKind.ExprGroupBucket g } -> walkExpr fname ctx onVar g
+    | { Kind = ExprKind.ExprExtents a } -> walkExpr fname ctx onVar a
+    // ... and their `|> compute` materializations (the emitter needs the
+    // binding materialized inside a function body). Narrow on purpose: in
+    // grad mode `compute` stays refused everywhere else.
+    | { Kind = ExprKind.ExprCompute ({ Kind = ExprKind.ExprGroupBucket _ | ExprKind.ExprExtents _ | ExprKind.ExprGroupKeys _ } as inner) } ->
+        walkExpr fname ctx onVar inner
+    // Bare loop objects are LEGAL let initializers in jvp mode (the binding
+    // is resolved at its application site); operands are visited for taint.
+    | { Kind = ExprKind.ExprMethodFor arrs } when errMode.Value = "jvp" ->
+        arrs |> List.fold (fun acc a ->
+            acc |> Result.bind (fun () ->
+                match a.Kind with
+                | ExprKind.ExprHalo _ | ExprKind.ExprRange _ -> Ok ()
+                | _ -> walkExpr fname ctx onVar a)) (Ok ())
+    | { Kind = ExprKind.ExprObjectFor _ } when errMode.Value = "jvp" -> Ok ()
     // C2-C5: the rank-0 map (both spellings). Visit the operand arrays (so
     // taint sees them; virtual halo/range operands have nothing to visit)
     // and the kernel BODY; kernel params are bound by the lambda, and the
     // tangent rule substitutes indexed reads for them.
     | { Kind = ExprKind.ExprBinOp (_, OpApply, lo2, kn) } when errMode.Value = "jvp"
-            && (match lo2.Kind with ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _ -> true | _ -> false) ->
+            && (match lo2.Kind with ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _ | ExprKind.ExprVar _ -> true | _ -> false) ->
         let arrays, kernE =
             match lo2.Kind with
             | ExprKind.ExprObjectFor k2 ->
@@ -384,12 +409,18 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
             match a.Kind with
             | ExprKind.ExprHalo _ | ExprKind.ExprRange _ -> Ok ()
             | _ -> walkExpr fname ctx onVar a
+        // a var-bound loop side carries its binding's taint to the result
+        (match lo2.Kind with ExprKind.ExprVar n -> onVar n | _ -> ())
         arrays |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkOperand a)) (Ok ())
         |> Result.bind (fun () ->
             match kernE.Kind with
             | ExprKind.ExprLambda (_, _, body) -> walkExpr fname ctx onVar body
             | ExprKind.ExprReynolds ({ Kind = ExprKind.ExprLambda (_, _, body) }, _) -> walkExpr fname ctx onVar body
             | ExprKind.ExprVar n -> onVar n; Ok ()
+            // a var-bound object_for applied to a tuple: the right side is
+            // OPERANDS, not a kernel -- walk them for taint
+            | ExprKind.ExprTuple es ->
+                es |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkOperand a)) (Ok ())
             | _ -> err fname "differentiating `<@>` supports lambda, reynolds(lambda), named-function, and intrinsic kernels (v1)")
     // Combinator OPERATORS. The syntactic combinator forms (lambda /
     // method_for / ...) are rejected further down, but the operator spellings
@@ -830,6 +861,18 @@ let rec private staticExtentOf (ctx: Ctx) (env: Map<string, int>) (e: Expr) : in
         (match args.Kind with
          | ExprKind.ExprTuple (first :: _) -> staticExtentOf ctx env first
          | _ -> staticExtentOf ctx env args)
+    // a LET-BOUND loop applied by name: the binding's extent was recorded
+    // under the loop's name (method_for case); otherwise the right side is
+    // the operand list (object_for case)
+    | ExprKind.ExprBinOp (_, OpApply, { Kind = ExprKind.ExprVar n }, args) ->
+        (match Map.tryFind n env with
+         | Some e -> Some e
+         | None ->
+             match args.Kind with
+             | ExprKind.ExprTuple (first :: _) -> staticExtentOf ctx env first
+             | _ -> staticExtentOf ctx env args)
+    // a bare loop binding's extent is its leading operand's
+    | ExprKind.ExprMethodFor (first :: _) -> staticExtentOf ctx env first
     | _ -> None
 
 /// The pre-pass proper: rewrite one function body's statements, expanding
@@ -1335,6 +1378,12 @@ type private RevCtx = {
     /// spell `range<I>` over an operand's own index space (which also keeps
     /// the emitted reads properly tagged, unlike a raw extent).
     ArrayIdxTys: Map<string, TypeExpr list>
+    /// LET-BOUND LOOP OBJECTS (`let Lp = method_for(a, b)`): the idiomatic
+    /// style stores the loop as a value and applies it later. The tangent
+    /// walker resolves the binding at the application site; the binding
+    /// itself gets no tangent (a loop object is a deferred iteration, not
+    /// data).
+    LoopBindings: Map<string, Expr>
 }
 
 /// Emit `d += cot`-style accumulation onto a cotangent target.
@@ -1648,15 +1697,22 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
     | { Kind = ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) } ->
         Ok (fLit 0.0)   // boolean-valued: no tangent
     | { Kind = ExprKind.ExprBinOp (_, OpMod, _, _) } -> Ok (fLit 0.0)  // int-valued
+    | { Kind = ExprKind.ExprExtents _ } -> Ok (fLit 0.0)  // int-valued size
     | { Kind = ExprKind.ExprIf (c, t, f) } ->
         // Branch of tangents under the same condition (see walkExpr's arm).
         tangentOfExpr rc t |> Result.bind (fun tt ->
         tangentOfExpr rc f |> Result.map (fun tf ->
             inheritSpan e (ExprIf (c, tt, tf))))
     | ConstFill (cnt, _) -> Ok (zeroFill cnt)
-    // C2-C5: the rank-0 MAP. See `tangentOfMap`.
+    // C2-C5: the rank-0 MAP. See `tangentOfMap`. A bare-name loop side
+    // resolves through the let-bound loop objects first.
     | { Kind = ExprKind.ExprBinOp (bm, OpApply, lo, kern) } ->
-        (match lo.Kind with
+        let loResolved =
+            match lo.Kind with
+            | ExprKind.ExprVar n ->
+                (match Map.tryFind n rc.LoopBindings with Some b -> b | None -> lo)
+            | _ -> lo
+        (match loResolved.Kind with
          | ExprKind.ExprMethodFor arrays -> tangentOfMap rc e bm arrays kern
          | ExprKind.ExprObjectFor k2 ->
              // `object_for(k) <@> (A, B)` is the same map with the operand
@@ -1667,7 +1723,7 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
                  | _ -> [kern]
              tangentOfMap rc e bm arrays k2
          | _ ->
-             err rc.Fname "differentiating `<@>` supports `method_for(<operands>) <@> <kernel>` and `object_for(<kernel>) <@> <operands>` (v1); pipelines and section kernels are not yet differentiable")
+             err rc.Fname "differentiating `<@>` supports `method_for(<operands>) <@> <kernel>` and `object_for(<kernel>) <@> <operands>` (v1, directly or through a let-bound loop object); pipelines and section kernels are not yet differentiable")
     // C1: same form, tangent operands (see the LinearForm doc comment).
     | LinearForm (ops, rebuild) ->
         ops |> List.fold (fun acc o ->
@@ -1891,6 +1947,10 @@ let rec private tangentOfLit (rc: RevCtx) (e: Expr) : Result<Expr, string> =
 /// earlier, never the freshly-bound name).
 let rec private tangentOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, string> =
     match s with
+    // A let-bound loop object gets no tangent binding: it is a deferred
+    // iteration, not data. Its tangent materializes at the application
+    // site, where the OpApply rule resolves the binding.
+    | NLet (_, _, { Kind = ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _ }) -> Ok [s]
     | NLet (x, isMut, value) ->
         if not (Set.contains x rc.Diff) then Ok [s]
         else
@@ -2022,7 +2082,8 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
             | Some (TyArray (_, idxTys)) when not idxTys.IsEmpty -> Some (p.Name, idxTys)
             | _ -> None)
         |> Map.ofList
-    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known; ArrayIdxTys = arrayIdxTys }
+    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known
+               ArrayIdxTys = arrayIdxTys; LoopBindings = Map.empty }
 
     // cotangent declarations for function-level diff LOCALS (params' array
     // cotangents are mut parameters; scalar-param cotangents are locals)
@@ -2219,7 +2280,16 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
             | Some (TyArray (_, idxTys)) when not idxTys.IsEmpty -> Some (p.Name, idxTys)
             | _ -> None)
         |> Map.ofList
-    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known; ArrayIdxTys = arrayIdxTys }
+    // let-bound loop objects, resolved at their application sites
+    let rec collectLoopBindings (acc: Map<string, Expr>) (ss: NStmt list) =
+        ss |> List.fold (fun m st ->
+            match st with
+            | NLet (n, _, ({ Kind = ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _ } as value)) ->
+                if Map.containsKey n m then m else Map.add n value m
+            | NFor (_, _, _, body) -> collectLoopBindings m body
+            | _ -> m) acc
+    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known
+               ArrayIdxTys = arrayIdxTys; LoopBindings = collectLoopBindings Map.empty stmts }
 
     // tangent-interleaved body + (primal, tangent) return
     let sweptR =
