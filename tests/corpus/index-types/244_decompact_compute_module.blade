@@ -1,0 +1,25 @@
+// TEST: Decompact Compute Module
+// ----------------------------------------------------------------------------
+// `decompact(S, 0) |> compute` at MODULE scope, which died BL7001 even though
+// the unwrapped `decompact(S, 0)` on the same line compiled fine.
+//
+// The cause was genComputeBinding's fall-through: `|> compute` on an already-
+// EAGER whole-array form is the identity (decompact materializes a fresh dense
+// pool by construction, so there is nothing deferred left to force), but the
+// dispatch had no arm for it and its default treats the value as a SCALAR. Only
+// negate and conjugate had been given the eager-peel; the peel now names the
+// whole set of forms that have a genBinding arm, minus the deferring family
+// (for whom `|> compute` IS the forcing site, so peeling would make the compute
+// a no-op).
+// ----------------------------------------------------------------------------
+type C = Idx<3>
+
+let v: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let L = method_for(v, v)
+let g = lambda(p, q) where comm(p, q) -> 2.0 * p + q
+let sym = L <@> reynolds(g) |> compute
+// The compact source: triangular SymIdx<2,3> storage, 6 stored cells.
+let d = decompact(sym, 0) |> compute
+// reynolds(2p+q) = 3(p+q), so the dense 3x3 is [[6,9,12],[9,12,15],[12,15,18]].
+// EXPECT: sym = [6.0, 9.0, 12.0, 12.0, 15.0, 18.0]
+// EXPECT: d = [6.0, 9.0, 12.0, 9.0, 12.0, 15.0, 12.0, 15.0, 18.0]

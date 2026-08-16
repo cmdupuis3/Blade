@@ -1,0 +1,35 @@
+// TEST: Fallback Nested Operand
+// ----------------------------------------------------------------------------
+// A `<|:>` as the OPERAND of an elementwise op, rather than as a whole binding.
+// The operand slot of a loop form is an ordinary expression position, and
+// codegen's auto-materialize for that slot knows only the four blessed inline
+// forms (mask / intersect / union / unique), so anything else left there has
+// the nest peel an `arr<i>` that was never declared -- here, a g++ error
+// reading `'arr0' was not declared in this scope`, several hundred lines from
+// anything the program says.
+//
+// liftExpr now hoists the fallback to its own let-RHS, in its FORCED spelling.
+// The forcing is not cosmetic: a bare hoisted IRFallback would bind a name that
+// genFallbackBinding answers with a `// <deferred fallback>` comment, trading
+// the undeclared `arr0` for an undeclared `__v<n>`.
+//
+// Both scopes, because they reach the hoist through different paths -- module
+// level through the binding fold, the function body through genFuncBodyScoped.
+// ----------------------------------------------------------------------------
+type SIdx = Idx<4>
+
+let A: Array<Float64 like SIdx> = [1.0, 0.0, 3.0, 0.0]
+let B: Array<Float64 like SIdx> = [9.0, 8.0, 7.0, 6.0]
+
+// Module scope.
+let scaled = (A <|:> B) * 2.0
+
+// Function body.
+function pick_scaled(x: Array<Float64 like SIdx>, y: Array<Float64 like SIdx>) -> Array<Float64 like SIdx> = {
+    (x <|:> y) * 2.0
+}
+let scaled_fn = pick_scaled(A, B)
+
+// A is fully allocated, so A <|:> B = A verbatim and the doubling is of A.
+// EXPECT: scaled = [2.0, 0.0, 6.0, 0.0]
+// EXPECT: scaled_fn = [2.0, 0.0, 6.0, 0.0]

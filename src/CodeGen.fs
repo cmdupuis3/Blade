@@ -14732,14 +14732,29 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genGuardBinding ctx binding builder body
     | IRSequence elems ->
         genSequenceBinding ctx binding builder elems
-    // `|> compute` on an ALREADY-EAGER whole-array form is the identity: negate
-    // and conjugate materialize a fresh pool by construction, so there is
-    // nothing deferred left to force. genComputeBinding's dispatch has no arm
-    // for either, so they fell through to the unsupported-node sentinel --
-    // `let n = -A` worked while `let n = -A |> compute` did not (and the same
-    // for conj, which has routed to IRArrayConjugate since before this change).
-    // Re-dispatch on the unwrapped form, which the arm above already handles.
-    | IRCompute ((IRArrayNegate _ | IRArrayConjugate _) as eager) ->
+    // `|> compute` on an ALREADY-EAGER whole-array form is the identity: each
+    // of these materializes a fresh pool by construction, so there is nothing
+    // deferred left to force. genComputeBinding's dispatch has no arm for any
+    // of them and its fall-through treats the value as a SCALAR, so they died
+    // on the unsupported-node sentinel -- `let n = -A` worked while
+    // `let n = -A |> compute` did not, and `decompact(S, 0) |> compute` was
+    // BL7001 at module scope even though the unwrapped spelling was fine.
+    // Re-dispatch on the unwrapped form, which the arms above already handle.
+    //
+    // The set is `isStatementShaped` MINUS the deferring family (whose whole
+    // point is that `|> compute` IS the forcing site -- peeling their wrapper
+    // would route them back to the emitter that defers, and the compute would
+    // become a no-op) and MINUS IRGroupKeys/IRGroupBy (a `|> compute` on a
+    // grouping is not a spelling the surface produces, and genComputeBinding
+    // has no arm to fall back on if this guess were wrong).
+    | IRCompute eager when
+        (match eager with
+         | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _
+         | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _
+         | IRGram _ | IRMatmul _ | IREigh _ | IRSolve _
+         | IRGroupBucket _ | IRGroupSizes _ | IRArrayLit _
+         | IRArrayNegate _ | IRArrayConjugate _ -> true
+         | _ -> false) ->
         genBinding ctx { binding with Value = eager } builder
     | IRCompute inner ->
         genComputeBinding ctx binding builder inner
@@ -15766,11 +15781,30 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 (elemTypeToCpp (IRTScalar ETFloat64), 0,
                  codegenError ctx ind (sprintf "IRSequence: child has non-array, non-scalar type %A (likely a typechecker or IR bug)" t))
         let outerRank = childRank + 1
-        // Build extents array: [N, child_extents...]
-        let extentsEntries =
-            [sprintf "%d" n]
-            @ [for d in 0 .. childRank - 1 -> sprintf "%s.extents[%d]" (List.head childNames) d]
-        let extentsDecl = sprintf "%ssize_t %s_extents[%d] = {%s};" ind name outerRank (extentsEntries |> String.concat ", ")
+        // Build extents array: [N, child_extents...].
+        //
+        // Return-extent ABI (commit 7905b36). This was a frame-local
+        // `size_t <name>_extents[R]`, which is fine for a binding consumed in
+        // the frame that built it -- the only way an IRSequence could be
+        // reached until the unified statement-shaped return arm let one be
+        // RETURNED. `Array<T,R>` stores only a POINTER to its extents, so the
+        // returned wrapper's shape dangled the instant the frame died, and the
+        // auto-printer's first `.extents[0]` read segfaulted. `emitExtentsTable`
+        // is the same helper the materialize*Form builders were moved onto:
+        // `static constexpr` when every dim is literal (the SCALAR-child case,
+        // where the sole extent is the child count) and `new size_t[R]`
+        // otherwise -- both outlive the frame.
+        //
+        // The heap table is deliberately NOT registered for freeing, matching
+        // the pool on the line below, which this emitter has never registered
+        // either: an IRSequence's cells ALIAS its children's storage
+        // (`<name>[i] = <name>_i`, see the assign lines and isFreshPoolForm's
+        // note), so a free here would race the children's own frees.
+        let extentsName = name + "_extents"
+        let extentsDims =
+            (sprintf "%d" n, true)
+            :: [for d in 0 .. childRank - 1 -> (sprintf "%s.extents[%d]" (List.head childNames) d, false)]
+        let (extentsDeclLines, _ownedExtents) = emitExtentsTable ind extentsName outerRank extentsDims
         // Allocate pointer array (for array children) or value array (for scalar children),
         // wrapped in Array<T,N>. The `new` allocation produces the underlying data; the
         // wrapper ties it together with the freshly emitted name_extents.
@@ -15783,7 +15817,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             childNames |> List.mapi (fun i cn ->
                 sprintf "%s%s[%d] = %s;" ind name i cn)
         let ctx' = { ctx with VarNames = Map.add binding.Id name mergedVarNames }
-        (allCode @ childTypeErrCode @ [extentsDecl; allocDecl] @ assignLines, ctx')
+        (allCode @ childTypeErrCode @ extentsDeclLines @ [allocDecl] @ assignLines, ctx')
     
     | _ when not functorWrappers.IsEmpty && (match inferExprType resolved with ArrayElem _ -> true | _ -> false) ->
         // `f <$> A` where A is a CONCRETE array (not a computation): materialize as
@@ -18142,15 +18176,34 @@ and genFallbackMaterialize (ctx: CodeGenContext) (binding: IRBinding) (builder: 
         // the left array for dense-left (operands are type-unified), the
         // RIGHT array for compound-left (the left is compact storage).
         let extentsSrc = match leftCompound with Some _ -> nameR | None -> nameL
-        let extentsAlias = sprintf "%sconst size_t* %s_extents = %s.extents;" ind name extentsSrc
+        // Return-extent ABI (commit 7905b36, extended). This used to be a bare
+        // ALIAS -- `const size_t* name_extents = <operand>.extents;` -- which
+        // made the result's SHAPE a pointer into an operand's table. Fine while
+        // the result was consumed in the frame that built it, and dangling the
+        // moment it crossed a return: the frees run in reverse order, so the
+        // lender is deleted while the escaping wrapper still points at its
+        // table. That was invisible until the unified statement-shaped return
+        // arm made `function f(x, y) = { x <|:> y }` compile at all.
+        //
+        // `emitExtentsTable` is the same helper the 14 materialize*Form
+        // builders use. The dims are runtime `.extents[d]` reads, never
+        // literals, so it takes the `new size_t[R]` branch and hands back an
+        // owned name -- which rides on the array's own descriptor via
+        // registerPoolAlloc's `ownedExtents`, exactly as 7905b36 established.
+        // A separately tracked table would be freed out from under the very
+        // wrapper that just escaped, since the return suppression is a
+        // whole-token match on the rendered return text and can only ever see
+        // `<name>`, never `<name>_extents`.
+        let extentsName = name + "_extents"
+        let dims = [ for d in 0 .. rank - 1 -> (sprintf "%s.extents[%d]" extentsSrc d, false) ]
+        let (extentsDecl, ownedExtents) = emitExtentsTable ind extentsName rank dims
         let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
                             ind elemType rank name elemType rank name name
         // Deterministic deallocation, site 5d: `<|:>` result. Always a
-        // fully-allocated dense array with a borrowed extents pointer (from
-        // whichever operand spans the dense space), so nothing is owned and
-        // reverse order frees it before that operand.
+        // fully-allocated dense array, and now the owner of its own extents
+        // table rather than a borrower of an operand's.
         if isFreeableDenseArrayType resArr then
-            registerPoolAlloc AllocDense elemType rank "nullptr" (name + "_extents") name None
+            registerPoolAlloc AllocDense elemType rank "nullptr" extentsName name ownedExtents
         let indD d = String.replicate d "    "
         let idxVar i = sprintf "__fb%d" i
         let subscript n = [for i in 0 .. n - 1 -> sprintf "[%s]" (idxVar i)] |> String.concat ""
@@ -18215,7 +18268,7 @@ and genFallbackMaterialize (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                     lines <- lines @ [sprintf "%s}" (indD depth)]
                 lines
         let ctx' = addVarName binding.Id name ctxR
-        (codeL @ codeR @ [""; sprintf "%s// <|:> allocated-fallback: %s where allocated, else %s" ind nameL nameR; extentsAlias; allocDecl] @ bodyLines, ctx')
+        (codeL @ codeR @ [""; sprintf "%s// <|:> allocated-fallback: %s where allocated, else %s" ind nameL nameR] @ extentsDecl @ [allocDecl] @ bodyLines, ctx')
     | t ->
         let code = codegenError ctx ind (sprintf "<|:>: binding type is not an array (got %A) -- likely a typechecker or IR bug" t)
         (codeL @ codeR @ code, addVarName binding.Id name ctxR)
@@ -18955,6 +19008,47 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 let valStr = exprToCpp currentNames value
                 currentNames <- Map.add id varName currentNames
                 [sprintf "%sauto %s = %s;" indent varName valStr]
+        | v when isStatementShapedValue v ->
+            // UNIFIED statement-shaped routing. Every arm above this point
+            // names ONE form and does the same three things: build a temp
+            // IRBinding, call genBinding, thread the returned ctx. This arm is
+            // the general case, and it exists because the list of forms that
+            // needed it kept growing one BL7001 at a time.
+            //
+            // It is deliberately placed LAST among the shaped arms rather than
+            // replacing them: first-match-wins means every existing arm keeps
+            // its exact behavior (several do more than bind-and-emit -- the
+            // group_keys type reconstruction, the mut-alias suppression, the
+            // materializeInlineForm route just above), and this arm picks up
+            // only what fell through. What actually reaches it today is the
+            // DEFERRING family: `<|:>` (BL7004 in a body let) and sequence /
+            // choice / guard (BL7001).
+            //
+            // `forceDeferringForm` is what makes those four legal here. Bound
+            // BARE they would reach genFallbackBinding / genSequenceBinding /
+            // genChoiceBinding / genGuardBinding, each of which emits a
+            // `// <deferred ...>` comment and registers the id in
+            // DeferredComputations -- correct at MODULE level, where a later
+            // `|> compute` reaches genComputeBinding, and wrong here, because
+            // a function body has no forcing site and the name would be spelled
+            // by a downstream read that nothing ever declared. Wrapping in
+            // IRCompute routes straight to the materializing emitter, which is
+            // also the semantically right answer: the callee is the last scope
+            // that can force, since its caller receives a VALUE.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent
+                                     GroupedArrays = currentGrouped
+                                     DeferredComputations = currentDeferred
+                                     TupleChildren = currentTupleChildren }
+            let forced = forceDeferringForm v
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType v
+                Value = forced; IsConst = false; IsMutable = true
+            }
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentGrouped <- ctxAfter.GroupedArrays
+            currentTupleChildren <- ctxAfter.TupleChildren
+            currentNames <- Map.add id varName currentNames
+            code
         // Deterministic deallocation, site 3b: the FUNCTION-BODY twin of
         // site 3 (`let r = f(a)` where the CALLEE allocated the pool).
         // Same guard set, for the same reasons: FreshPool callees only (a
@@ -19080,67 +19174,65 @@ or return a scalar and materialize at the call site"
             // A reduce yields a SCALAR: nothing to spare from the frees, and the
             // value is already in a local, so the frees may close before return.
             stmts @ redCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retName]
-        | IRTranspose _ ->
-            // Transpose in RETURN position (lswosa's `family_spectra` tail:
-            // `transpose(grid, [0, 1])`). Statement-shaped -- swapped-extent
-            // alloc + axis-swapped copy -- so bind it to a __retN through
-            // genBinding's genTransposeBinding and return the name; exprToCpp
-            // has no expression form and would emit the unsupported-IR-node
-            // sentinel. The transposed pool leaves with the value, so it is
-            // spared from the scope frees by name.
-            let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
-            let tempBinding = {
-                Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
-                Value = retExpr; IsConst = false; IsMutable = true
-            }
-            let (trCode, _) = genBinding bodyCtx tempBinding builder
-            suppressAllocName retVarName
-            // The transpose emitter's own extents table now goes through
-            // `emitExtentsTable` (static constexpr or heap, both of which
-            // outlive this frame), so the wrapper is already self-describing
-            // and returns directly. This arm used to re-wrap it onto a
-            // hand-rolled `new size_t[R]` copy because the table underneath was
-            // a frame-local `size_t[R]` -- fine for a binding consumed in the
-            // same frame, and dangling the moment the wrapper crossed the call
-            // boundary (measured as an empty print and a bad_array_new_length
-            // in the next consumer). Fixing it at the source removes both the
-            // copy and the second wrapper.
-            stmts @ trCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
-        | IRGroupBucket _ | IRGroupSizes _ ->
-            // The same two accessors in RETURN position -- `let gk = group_keys(k)`
-            // then a bare `group_bucket(gk)` as the body's tail, which is the
-            // natural spelling when the accessor IS the function's answer. Bind
-            // to a __retN through genBinding (the statement form) and return the
-            // name; exprToCpp would emit its sentinel here just as it did for the
-            // let form. The allocated pool leaves with the value, so it is spared
-            // from the scope frees by name -- same shape as the transpose arm.
-            let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
-            let tempBinding = {
-                Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
-                Value = retExpr; IsConst = false; IsMutable = true
-            }
-            let (accCode, _) = genBinding bodyCtx tempBinding builder
-            suppressAllocName retVarName
-            stmts @ accCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
-        | IRArrayLit (elements, arrType) ->
-            // Array literal as return value: lift to a local binding, then
-            // return. `genArrayLiteral` is the statement-form generator for
-            // IRArrayLit (extents-table + allocate-call + per-element init);
-            // exprToCpp has no inline form for it, so without this lift the
-            // return falls through to the unsupported-IR-node sentinel.
+        | r when isStatementShapedValue r ->
+            // UNIFIED statement-shaped RETURN. This one arm replaces the four
+            // that used to sit here -- IRTranspose, IRGroupBucket/IRGroupSizes,
+            // and IRArrayLit -- each of which had been added the same way, one
+            // BL7001 report at a time, and each of which did character-for-
+            // character the same thing: mint a `__retN`, emit the form through
+            // its statement generator, spare the pool from the scope frees, and
+            // return the name. (The IRArrayLit arm called `genArrayLiteral`
+            // directly; `genBinding`'s own IRArrayLit arm is that same call, so
+            // folding it in changes nothing but the number of places to edit.)
             //
-            // The lifted binding gets a synthetic __retN name so it can't
-            // collide with user names. Return-by-value of the Array<T,N>
-            // wrapper copies the pointer; the underlying buffer (allocated
-            // via allocate<>) lives on the heap so the caller receives a
-            // valid array.
+            // What it newly ACCEPTS is the rest of the family, all of which
+            // were hard refusals in return position until now: gram, decompact,
+            // matmul, solve, eigh, stack, join, sort, mask, the set ops, negate
+            // and conjugate (BL7001), and `<|:>` (BL7004). Note that Phase 0's
+            // regression tests reach those forms only through a body LET that
+            // is then returned as a plain IRVar; the DIRECT return -- `function
+            // g(x) = { gram(x, x) }`, no let -- landed here and died.
+            //
+            // `forceDeferringForm` for the same reason as in the let fold: the
+            // <|:> / sequence / choice / guard emitters DEFER when bound bare,
+            // and a return is the one position where deferring is provably
+            // wrong, since the caller's type is an array or a scalar and
+            // laziness cannot cross the boundary.
+            //
+            // Extents outlive the frame by construction. Every one of these
+            // emitters now builds its table through `emitExtentsTable` (static
+            // constexpr where all dims are literal, `new size_t[R]` otherwise),
+            // which is what commit 7905b36 established for the materialize*Form
+            // builders and what this change extends to genFallbackMaterialize
+            // and the IRSequence arm -- the last two that were still handing
+            // back a shape their frame owned.
             let retVarName = sprintf "__ret%d" (builder.FreshId())
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
-            let arrayCode = genArrayLiteral bodyCtx retVarName elements arrType
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1
+                                     GroupedArrays = currentGrouped
+                                     DeferredComputations = currentDeferred
+                                     TupleChildren = currentTupleChildren }
+            let tempBinding = {
+                Id = builder.FreshId(); Name = retVarName; Type = inferExprType r
+                Value = forceDeferringForm r; IsConst = false; IsMutable = true
+            }
+            let (retCode, _) = genBinding bodyCtx tempBinding builder
+            // The materialized pool leaves with the value; free everything else.
             suppressAllocName retVarName
-            stmts @ arrayCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
+            // IRSequence is the one member of this family whose result ALIASES
+            // its inputs rather than copying them: the emitter assembles
+            // `<name>[i] = <name>_i`, so the returned array's cells ARE the
+            // per-child pools (isFreshPoolForm documents exactly this, which is
+            // why it refuses to call a sequence a fresh-pool barrier). Sparing
+            // only `__retN` would free those children out from under the value
+            // that just escaped -- a use-after-free the caller reads as garbage
+            // rows. The child names are the emitter's own `<name>_<i>`
+            // convention, so they are derivable here without threading anything
+            // back out of genBinding.
+            (match (match r with IRCompute inner -> inner | e -> e) with
+             | IRSequence elems ->
+                 elems |> List.iteri (fun i _ -> suppressAllocName (sprintf "%s_%d" retVarName i))
+             | _ -> ())
+            stmts @ retCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
         | _ ->
             // Return-extent ABI (supersedes the stage-2b guard): a
             // loop-materialized array CAN now be returned. The former guard

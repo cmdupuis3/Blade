@@ -1,0 +1,24 @@
+// TEST: Fnbody Sequence Let
+// ----------------------------------------------------------------------------
+// `sequence(...) |> compute` bound to a let INSIDE A FUNCTION BODY, which died
+// BL7001 ("no rule for IRSequence in expression position").
+//
+// Note the shape the routing has to recognise: the user's own `|> compute` makes
+// the let value `IRCompute(IRSequence ...)`, which matched neither the bare-node
+// arms nor `IRCompute(IRApplyCombinator)`. Peeling the wrapper in the routing
+// predicate -- not in the caller -- is what closes it, because genComputeBinding
+// is where the materializing IRSequence emitter actually lives.
+//
+// sequence stacks its children on a new LEADING axis, so the result is rank 2
+// and the bare `reduce` folds the innermost axis into one total per child.
+// ----------------------------------------------------------------------------
+function pair_totals(x: T^1) -> T^1 = {
+    let L = method_for(x)
+    let s = sequence(L <@> lambda(v) -> v + 10.0, L <@> lambda(v) -> v * 2.0) |> compute
+    reduce(s, (+))
+}
+
+let A = [1.0, 2.0, 3.0]
+let t = pair_totals(A)
+// children are [11, 12, 13] and [2, 4, 6]; innermost folds are 36 and 12.
+// EXPECT: t = [36.0, 12.0]

@@ -1,0 +1,29 @@
+// TEST: Fnbody Fallback Returned
+// ----------------------------------------------------------------------------
+// `<|:>` as a function's whole answer -- the RETURN-position twin of 009, and
+// the case that pins the extents fix.
+//
+// genFallbackMaterialize used to give its result a BORROWED shape:
+//   const size_t* c_extents = x.extents;
+// i.e. the fallback's `.extents` pointed into whichever operand spanned the
+// dense space. Invisible while the result was consumed in the frame that built
+// it -- the only thing that could happen before a fallback could be returned at
+// all -- and a dangling pointer the moment the wrapper crossed the return, since
+// the scope's frees run in reverse and delete the lender first. The table now
+// comes from `emitExtentsTable` (commit 7905b36's helper) and rides on the
+// array's own descriptor as OwnedExtents.
+//
+// The pin is therefore a SHAPE assertion as much as a value one: the printer
+// reads the returned wrapper's `.extents`, so a dangling table shows up as a
+// flood of garbage doubles or a bad_alloc, not as a wrong number.
+// ----------------------------------------------------------------------------
+type SIdx = Idx<4>
+
+function pick(x: Array<Float64 like SIdx>, y: Array<Float64 like SIdx>) -> Array<Float64 like SIdx> = {
+    x <|:> y
+}
+
+let A: Array<Float64 like SIdx> = [1.0, 0.0, 3.0, 0.0]
+let B: Array<Float64 like SIdx> = [9.0, 8.0, 7.0, 6.0]
+let fb = pick(A, B)
+// EXPECT: fb = [1.0, 0.0, 3.0, 0.0]

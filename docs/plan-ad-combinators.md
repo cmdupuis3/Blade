@@ -702,19 +702,26 @@ test on the data.
    nothing to state.
 6. n/a.
 
-### 2.14 `<|:>` — storage branching: **the retired quote's grouping is wrong; the AD rule is FREE (but codegen blocks the form inside a function)**
+### 2.14 `<|:>` — storage branching: **the retired quote's grouping is wrong; the AD rule is FREE**
 
 > **Measured 2026-08-16.** The AD rule below is right and is implemented in C1.
-> What the section missed: `<|:>` **in a function body** is refused by the C++
+> What the section missed: `<|:>` **in a function body** was refused by the C++
 > back end for the PRIMAL too — `BL7004: <|:> (allocated-fallback) in
 > expression position -- it combines whole arrays; bind it and materialize
 > with |> compute` — because `a <|:> b |> compute` parses as
 > `a <|:> (b |> compute)`, leaving the fallback in expression position. The
-> corpus only exercises it at module level (`fallback/001-003`), which takes a
-> different emission path. So the tangent rule is free and admitted, but the
-> form is not usable inside a differentiated function until that codegen hole
-> closes. Not an AD gap; recorded here so the "FREE" verdict is not read as
-> "usable today".
+> corpus only exercised it at module level (`fallback/001-003`), which takes a
+> different emission path.
+>
+> **Closed 2026-08-16** by the expression-position emitter unification. A
+> function-body `let`, a function RETURN, and an elementwise operand slot all
+> now route `<|:>` through `genFallbackMaterialize` (in its forced spelling —
+> a bare `IRFallback` binding DEFERS, which is right at module level and would
+> register an undeclared name in a body). The fallback's result also stopped
+> BORROWING an operand's extents table, which the return position would
+> otherwise have turned into a dangling shape. Pinned by `fallback/009` (body
+> let), `fallback/010` (return + nested arithmetic). The form is usable inside
+> a differentiated function today; the tangent rule stays free and admitted.
 
 1. **Semantics.** `A <|:> B` reads `A(i)` **if allocated**, else `B(i)`, checked
    per curry level; A's layout dominates iteration order; symmetric A requires

@@ -1,0 +1,23 @@
+// TEST: Gram Returned Direct
+// ----------------------------------------------------------------------------
+// The gram twin of 245, and the same distinction from 242: that test binds the
+// gram to a body let and returns the IRVar, which works; writing the gram
+// DIRECTLY in return position had no arm in the return dispatch and raised
+// BL7001 ("no rule for IRGram in expression position"). It now takes the
+// unified statement-shaped return arm.
+//
+// Distinct operands, which keeps the result DENSE 2x2: `gram(a, a)` would
+// answer compact symmetric storage (242 covers that mode through its let).
+// ----------------------------------------------------------------------------
+type I = Idx<2>
+type K = Idx<3>
+
+function make_g(a: Array<Float64 like I, K>, b: Array<Float64 like I, K>) -> Array<Float64 like I, I> = {
+    gram(a, b)
+}
+
+let a0: Array<Float64 like I, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let b0: Array<Float64 like I, K> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let gd = make_g(a0, b0)
+// gd[i][j] = sum_k a0[i][k] * b0[j][k]
+// EXPECT: gd = [4.0, 2.0, 10.0, 5.0]
