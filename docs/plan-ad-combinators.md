@@ -992,7 +992,7 @@ Composition reuses the plumbing rather than re-emitting it, so
 | The sort must be the **whole initializer of a `let`** | The permutation binding is emitted *beside* the sort; an expression-position sort has no statement to be expanded at. |
 | The operand must be a **named rank-1 array** | The expansion has to spell `range<I>` and annotate the gather lambdas, so it needs a declared index type. |
 | The index type must be a **named alias** | The expansion spells `I` three times, and every syntactic occurrence of an anonymous `Idx<n>` gets its own nominal identity by design. Only an alias gives them one. (The C2 map rule is unaffected — it spells the index type once.) |
-| A **sorted callee cannot be inlined** | `renameExpr` does not descend into `sort` or its key lambda, so splicing would leave the plumbing pointing at the callee's own renamed parameter. |
+| ~~A **sorted callee cannot be inlined**~~ **Lifted** | `renameExpr` is now exhaustive over the whole expression grammar (nested binders shadow; genuine capture refuses), so the permutation plumbing renames with everything else. Pinned by `ad-jvp-comb/041` (sort in an inlined callee, both modes) and `042` (callee lambda reusing the caller's name). |
 | Second-order **forward-over-forward** through a sort | `ad.jvp(ad.jvp(f))` re-maps over `__sp_s`, a local, and `tangentOfMap` resolves index types for *parameters* only. Forward-over-reverse (HVP) is fine. |
 
 All lambda params in the expansion are **explicitly annotated**: an unannotated

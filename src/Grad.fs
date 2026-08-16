@@ -727,39 +727,327 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
 
 // Renaming (for inlining)
 
-/// Rename variable references and binders per `ren` (total map application:
-/// names not in the map pass through). Only walks the AD-able fragment plus
-/// the statement forms; used on ALREADY-VALIDATED callee bodies.
-let rec private renameExpr (ren: Map<string, string>) (e: Expr) : Expr =
+/// Names BOUND by a pattern (binders only; struct field labels and variant
+/// constructor names are not value names).
+let rec private patternBoundNames (p: Pattern) : string list =
+    match p.Kind with
+    | PatternKind.PatWildcard | PatternKind.PatLit _ -> []
+    | PatternKind.PatVar n -> [n]
+    | PatternKind.PatTuple ps -> ps |> List.collect patternBoundNames
+    | PatternKind.PatCons (a, b) -> patternBoundNames a @ patternBoundNames b
+    | PatternKind.PatStruct (_, fields) -> fields |> List.collect (fun (_, sub) -> patternBoundNames sub)
+    | PatternKind.PatVariant (_, sub) -> sub |> Option.map patternBoundNames |> Option.defaultValue []
+    | PatternKind.PatGuarded (sub, _) -> patternBoundNames sub
+    | PatternKind.PatTyped (sub, _) -> patternBoundNames sub
+
+/// Drop `names` from the rename map: an inner binder shadows them.
+let private shadowNames (names: string list) (ren: Map<string, string>) : Map<string, string> =
+    names |> List.fold (fun m n -> Map.remove n m) ren
+
+/// Guard expressions embedded in a pattern (PatGuarded), in order.
+let rec private patGuardExprs (p: Pattern) : Expr list =
+    match p.Kind with
+    | PatternKind.PatWildcard | PatternKind.PatVar _ | PatternKind.PatLit _ -> []
+    | PatternKind.PatTuple ps -> ps |> List.collect patGuardExprs
+    | PatternKind.PatCons (a, b) -> patGuardExprs a @ patGuardExprs b
+    | PatternKind.PatStruct (_, fields) -> fields |> List.collect (fun (_, sub) -> patGuardExprs sub)
+    | PatternKind.PatVariant (_, sub) -> sub |> Option.map patGuardExprs |> Option.defaultValue []
+    | PatternKind.PatGuarded (sub, g) -> patGuardExprs sub @ [g]
+    | PatternKind.PatTyped (sub, _) -> patGuardExprs sub
+
+let private captureMsg (src: string) (tgt: string) : string =
+    sprintf "inlining would rename '%s' to '%s', which a nested binder of the same name would capture -- rename the local binder" src tgt
+
+/// Rename variable references per `ren` (total map application: names not in
+/// the map pass through). Exhaustive over ExprKind BY DESIGN: the previous
+/// version walked only a small fragment behind a wildcard, which silently
+/// skipped if/lambda/sort/stack bodies and left an inlined callee's
+/// references pointing at its pre-rename parameters. A new expression form
+/// now trips the compiler's exhaustiveness check instead. Nested binders
+/// SHADOW the map (top-level callee locals are renamed by renameNStmts,
+/// which is the inliner's collision mechanism); capture is refused via
+/// captureCheck. Type annotations and where-clauses are left untouched:
+/// their names are type names or kernel-param-local (shadowed scope) by
+/// construction.
+let rec private renameExpr (ren: Map<string, string>) (e: Expr) : Result<Expr, string> =
     let rn n = Map.tryFind n ren |> Option.defaultValue n
     let re k = inheritSpan e k
+    let r = renameExpr ren
+    let rlist es =
+        es |> List.fold (fun acc x ->
+            acc |> Result.bind (fun ys -> r x |> Result.map (fun y -> ys @ [y]))) (Ok [])
+    let ropt eo =
+        match eo with
+        | None -> Ok None
+        | Some x -> r x |> Result.map Some
     match e.Kind with
-    | ExprKind.ExprLit _ -> e
-    | ExprKind.ExprVar name -> re (ExprVar (rn name))
-    | ExprKind.ExprTyped (inner, t) -> re (ExprTyped (renameExpr ren inner, t))
-    | ExprKind.ExprUnaryOp (op, inner) -> re (ExprUnaryOp (op, renameExpr ren inner))
-    | ExprKind.ExprBinOp (m, op, l, r) -> re (ExprBinOp (m, op, renameExpr ren l, renameExpr ren r))
-    | ExprKind.ExprApp (f, args) -> re (ExprApp (renameExpr ren f, args |> List.map (renameExpr ren)))
-    | ExprKind.ExprArrayLit elems -> re (ExprArrayLit (elems |> List.map (renameExpr ren)))
-    | ExprKind.ExprAssign (l, r) -> re (ExprAssign (renameExpr ren l, renameExpr ren r))
-    | ExprKind.ExprDotDot (l, h) -> re (ExprDotDot (renameExpr ren l, renameExpr ren h))
-    // constant-fill constructors ride through inlined callee bodies; the
-    // count may reference renamed statics-in-scope, so rename inside
-    | ExprKind.ExprCompute inner -> re (ExprCompute (renameExpr ren inner))
-    | ExprKind.ExprReplicate (c, b) -> re (ExprReplicate (renameExpr ren c, renameExpr ren b))
-    | ExprKind.ExprPure inner -> re (ExprPure (renameExpr ren inner))
-    | _ -> e
+    // Leaves: no value names inside (ExprRange/ExprReverse carry only types).
+    | ExprKind.ExprLit _ | ExprKind.ExprWildcard | ExprKind.ExprQualified _
+    | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _
+    | ExprKind.ExprRange _ | ExprKind.ExprReverse _ -> Ok e
+    | ExprKind.ExprVar name -> Ok (re (ExprVar (rn name)))
+    | ExprKind.ExprArity p -> Ok (re (ExprArity (rn p)))
+    // Structural: rename every child.
+    | ExprKind.ExprTyped (inner, t) -> r inner |> Result.map (fun i -> re (ExprTyped (i, t)))
+    | ExprKind.ExprUnaryOp (op, inner) -> r inner |> Result.map (fun i -> re (ExprUnaryOp (op, i)))
+    | ExprKind.ExprBinOp (m, op, l, rhs) ->
+        r l |> Result.bind (fun l' -> r rhs |> Result.map (fun r' -> re (ExprBinOp (m, op, l', r'))))
+    | ExprKind.ExprApp (f, args) ->
+        r f |> Result.bind (fun f' -> rlist args |> Result.map (fun args' -> re (ExprApp (f', args'))))
+    | ExprKind.ExprTupleIndex (t, i) ->
+        r t |> Result.bind (fun t' -> r i |> Result.map (fun i' -> re (ExprTupleIndex (t', i'))))
+    | ExprKind.ExprField (inner, fld) -> r inner |> Result.map (fun i -> re (ExprField (i, fld)))
+    | ExprKind.ExprIf (c, t, f) ->
+        r c |> Result.bind (fun c' -> r t |> Result.bind (fun t' -> r f |> Result.map (fun f' -> re (ExprIf (c', t', f')))))
+    | ExprKind.ExprTuple es -> rlist es |> Result.map (fun es' -> re (ExprTuple es'))
+    | ExprKind.ExprArrayLit es -> rlist es |> Result.map (fun es' -> re (ExprArrayLit es'))
+    | ExprKind.ExprMethodFor es -> rlist es |> Result.map (fun es' -> re (ExprMethodFor es'))
+    | ExprKind.ExprObjectFor k -> r k |> Result.map (fun k' -> re (ExprObjectFor k'))
+    | ExprKind.ExprDotDot (l, h) ->
+        r l |> Result.bind (fun l' -> r h |> Result.map (fun h' -> re (ExprDotDot (l', h'))))
+    | ExprKind.ExprBlocked (t, inner) -> r inner |> Result.map (fun i -> re (ExprBlocked (t, i)))
+    | ExprKind.ExprHalo (t, offs) -> r offs |> Result.map (fun o -> re (ExprHalo (t, o)))
+    | ExprKind.ExprZip es -> rlist es |> Result.map (fun es' -> re (ExprZip es'))
+    | ExprKind.ExprAlign (es, spec) -> rlist es |> Result.map (fun es' -> re (ExprAlign (es', spec)))
+    | ExprKind.ExprStack es -> rlist es |> Result.map (fun es' -> re (ExprStack es'))
+    | ExprKind.ExprJoin (es, d) -> rlist es |> Result.map (fun es' -> re (ExprJoin (es', d)))
+    | ExprKind.ExprPure inner -> r inner |> Result.map (fun i -> re (ExprPure i))
+    | ExprKind.ExprCompute inner -> r inner |> Result.map (fun i -> re (ExprCompute i))
+    | ExprKind.ExprRead inner -> r inner |> Result.map (fun i -> re (ExprRead i))
+    | ExprKind.ExprGuard (c, b) ->
+        r c |> Result.bind (fun c' -> r b |> Result.map (fun b' -> re (ExprGuard (c', b'))))
+    | ExprKind.ExprSequence es -> rlist es |> Result.map (fun es' -> re (ExprSequence es'))
+    | ExprKind.ExprReplicate (c, b) ->
+        r c |> Result.bind (fun c' -> r b |> Result.map (fun b' -> re (ExprReplicate (c', b'))))
+    | ExprKind.ExprReynolds (k, anti) -> r k |> Result.map (fun k' -> re (ExprReynolds (k', anti)))
+    | ExprKind.ExprRank inner -> r inner |> Result.map (fun i -> re (ExprRank i))
+    | ExprKind.ExprMask (a, p) ->
+        r a |> Result.bind (fun a' -> r p |> Result.map (fun p' -> re (ExprMask (a', p'))))
+    | ExprKind.ExprCompound (d, m) ->
+        r d |> Result.bind (fun d' -> r m |> Result.map (fun m' -> re (ExprCompound (d', m'))))
+    | ExprKind.ExprSparse (v, k) ->
+        r v |> Result.bind (fun v' -> r k |> Result.map (fun k' -> re (ExprSparse (v', k'))))
+    | ExprKind.ExprIntersect (a, b) ->
+        r a |> Result.bind (fun a' -> r b |> Result.map (fun b' -> re (ExprIntersect (a', b'))))
+    | ExprKind.ExprUnion (a, b) ->
+        r a |> Result.bind (fun a' -> r b |> Result.map (fun b' -> re (ExprUnion (a', b'))))
+    | ExprKind.ExprUnique a -> r a |> Result.map (fun a' -> re (ExprUnique a'))
+    | ExprKind.ExprContains (a, v) ->
+        r a |> Result.bind (fun a' -> r v |> Result.map (fun v' -> re (ExprContains (a', v'))))
+    | ExprKind.ExprGroupBy (v, g) ->
+        r v |> Result.bind (fun v' -> r g |> Result.map (fun g' -> re (ExprGroupBy (v', g'))))
+    | ExprKind.ExprGroupKeys es -> rlist es |> Result.map (fun es' -> re (ExprGroupKeys es'))
+    | ExprKind.ExprGroupBucket g -> r g |> Result.map (fun g' -> re (ExprGroupBucket g'))
+    | ExprKind.ExprSort (a, k) ->
+        r a |> Result.bind (fun a' -> r k |> Result.map (fun k' -> re (ExprSort (a', k'))))
+    | ExprKind.ExprReduce (a, k, i, ax) ->
+        r a |> Result.bind (fun a' -> r k |> Result.bind (fun k' ->
+        ropt i |> Result.bind (fun i' -> ropt ax |> Result.map (fun ax' ->
+        re (ExprReduce (a', k', i', ax'))))))
+    | ExprKind.ExprTranspose (a, d1, d2) -> r a |> Result.map (fun a' -> re (ExprTranspose (a', d1, d2)))
+    | ExprKind.ExprDecompact (a, d) -> r a |> Result.map (fun a' -> re (ExprDecompact (a', d)))
+    | ExprKind.ExprGram (a, b) ->
+        r a |> Result.bind (fun a' -> r b |> Result.map (fun b' -> re (ExprGram (a', b'))))
+    | ExprKind.ExprExtents a -> r a |> Result.map (fun a' -> re (ExprExtents a'))
+    | ExprKind.ExprStruct (nm, fields, spread) ->
+        fields
+        |> List.fold (fun acc (fn, fe) ->
+            acc |> Result.bind (fun ys -> r fe |> Result.map (fun fe' -> ys @ [(fn, fe')]))) (Ok [])
+        |> Result.bind (fun fields' ->
+            ropt spread |> Result.map (fun sp' -> re (ExprStruct (nm, fields', sp'))))
+    | ExprKind.ExprPartialApp (op, inner, isLeft) ->
+        r inner |> Result.map (fun i -> re (ExprPartialApp (op, i, isLeft)))
+    | ExprKind.ExprAssign (l, rhs) ->
+        r l |> Result.bind (fun l' -> r rhs |> Result.map (fun r' -> re (ExprAssign (l', r'))))
+    | ExprKind.ExprStatic inner -> r inner |> Result.map (fun i -> re (ExprStatic i))
+    // Binders: shadow, check capture against the scope's actual contents,
+    // then rename the bodies.
+    | ExprKind.ExprLambda (ps, wc, body) ->
+        let names = ps |> List.map (fun p -> p.Name)
+        let ren' = shadowNames names ren
+        captureCheck ren' names (body :: (ps |> List.choose (fun p -> p.Default))) |> Result.bind (fun () ->
+        ps
+        |> List.fold (fun acc p ->
+            acc |> Result.bind (fun ys ->
+                match p.Default with
+                | None -> Ok (ys @ [p])
+                | Some d -> renameExpr ren' d |> Result.map (fun d' -> ys @ [{ p with Default = Some d' }])))
+            (Ok [])
+        |> Result.bind (fun ps' ->
+        renameExpr ren' body |> Result.map (fun b' -> re (ExprLambda (ps', wc, b')))))
+    | ExprKind.ExprLet (b, body) ->
+        r b.Value |> Result.bind (fun v' ->
+        let names = patternBoundNames b.Pattern
+        let ren' = shadowNames names ren
+        captureCheck ren' names (patGuardExprs b.Pattern @ [body]) |> Result.bind (fun () ->
+        renamePatGuards ren' b.Pattern |> Result.bind (fun pat' ->
+        renameExpr ren' body |> Result.map (fun body' ->
+            re (ExprLet ({ b with Pattern = pat'; Value = v' }, body'))))))
+    | ExprKind.ExprMatch (scrut, cases) ->
+        // Per-case: pattern names shadow both the (pattern-embedded and
+        // case-level) guards and the body. Pattern structure itself binds,
+        // it does not reference -- only PatGuarded carries an expression.
+        r scrut |> Result.bind (fun scrut' ->
+        cases
+        |> List.fold (fun acc (c: MatchCase) ->
+            acc |> Result.bind (fun ys ->
+                let names = patternBoundNames c.Pattern
+                let ren' = shadowNames names ren
+                let scope = patGuardExprs c.Pattern @ Option.toList c.Guard @ [c.Body]
+                captureCheck ren' names scope |> Result.bind (fun () ->
+                renamePatGuards ren' c.Pattern |> Result.bind (fun pat' ->
+                (match c.Guard with
+                 | None -> Ok None
+                 | Some g -> renameExpr ren' g |> Result.map Some)
+                |> Result.bind (fun g' ->
+                renameExpr ren' c.Body |> Result.map (fun b' ->
+                    ys @ [{ c with Pattern = pat'; Guard = g'; Body = b' }]))))))
+            (Ok [])
+        |> Result.map (fun cases' -> re (ExprMatch (scrut', cases'))))
+    | ExprKind.ExprBlock (stmts, lastOpt) ->
+        // Statement binders shadow the REST of the block, sequentially.
+        let rec goStmt renCur st : Result<Stmt * Map<string, string>, string> =
+            match st with
+            | StmtSpanned (inner, sp) ->
+                goStmt renCur inner |> Result.map (fun (s', renNext) -> (StmtSpanned (s', sp), renNext))
+            | StmtLet b ->
+                // Conservative capture policy for block binders: enumerating
+                // the binder's scope (the REST of the block) is not worth
+                // the machinery for so rare a collision -- refuse on the
+                // name clash alone.
+                renameExpr renCur b.Value |> Result.bind (fun v' ->
+                let names = patternBoundNames b.Pattern
+                let renNext = shadowNames names renCur
+                match renNext |> Map.tryPick (fun src tgt -> if List.contains tgt names then Some (src, tgt) else None) with
+                | Some (src, tgt) -> Error (captureMsg src tgt)
+                | None -> Ok (StmtLet { b with Value = v' }, renNext))
+            | StmtAssign (l, op, rhs) ->
+                renameExpr renCur l |> Result.bind (fun l' ->
+                renameExpr renCur rhs |> Result.map (fun r' -> (StmtAssign (l', op, r'), renCur)))
+            | StmtExpr inner ->
+                renameExpr renCur inner |> Result.map (fun i -> (StmtExpr i, renCur))
+            | StmtForIn (v, rng, body) ->
+                renameExpr renCur rng |> Result.bind (fun rng' ->
+                let renBody = shadowNames [v] renCur
+                (match renBody |> Map.tryPick (fun src tgt -> if tgt = v then Some (src, tgt) else None) with
+                 | Some (src, tgt) -> Error (captureMsg src tgt)
+                 | None ->
+                     body
+                     |> List.fold (fun acc s2 ->
+                         acc |> Result.bind (fun (ys, renB) ->
+                             goStmt renB s2 |> Result.map (fun (s', renB') -> (ys @ [s'], renB'))))
+                         (Ok ([], renBody))
+                     |> Result.map (fun (body', _) -> (StmtForIn (v, rng', body'), renCur))))
+        stmts
+        |> List.fold (fun acc st ->
+            acc |> Result.bind (fun (ys, renCur) ->
+                goStmt renCur st |> Result.map (fun (s', renNext) -> (ys @ [s'], renNext))))
+            (Ok ([], ren))
+        |> Result.bind (fun (stmts', renEnd) ->
+            (match lastOpt with
+             | None -> Ok None
+             | Some l -> renameExpr renEnd l |> Result.map Some)
+            |> Result.map (fun l' -> re (ExprBlock (stmts', l'))))
+    | ExprKind.ExprFor (src, constraints, kernOpt) ->
+        // Constraint names are kernel-param-local (shadowed scope) -- carried
+        // unchanged, same treatment as lambda where-clauses.
+        (match src with
+         | ForArrays (es, inOpt) ->
+             rlist es |> Result.bind (fun es' -> ropt inOpt |> Result.map (fun i' -> ForArrays (es', i')))
+         | ForKernel k -> r k |> Result.map ForKernel)
+        |> Result.bind (fun src' ->
+            ropt kernOpt |> Result.map (fun k' -> re (ExprFor (src', constraints, k'))))
+    | ExprKind.ExprRecArray def ->
+        // Name is the enclosing let's binder; the inliner renames that NLet
+        // with the same map, so rename it here consistently. Prefix/step
+        // vars are def-local binders and shadow (precise capture probe on
+        // the slice/seed scopes).
+        let sliceNames = [def.PrefixVar; def.StepVar]
+        let renSlice = shadowNames sliceNames ren
+        captureCheck renSlice sliceNames [def.SliceExpr] |> Result.bind (fun () ->
+        renameExpr renSlice def.SliceExpr |> Result.bind (fun slice' ->
+        (match def.SeedArm with
+         | None -> Ok None
+         | Some (sv, se) ->
+             let renSeed = shadowNames [sv] ren
+             captureCheck renSeed [sv] [se] |> Result.bind (fun () ->
+             renameExpr renSeed se |> Result.map (fun se' -> Some (sv, se'))))
+        |> Result.map (fun seed' ->
+            re (ExprRecArray { def with Name = rn def.Name; SeedArm = seed'; SliceExpr = slice' }))))
 
-let rec private renameNStmts (ren: Map<string, string>) (stmts: NStmt list) : NStmt list =
-    stmts |> List.map (fun s ->
-        match s with
-        | NLet (n, m, e) ->
-            let n' = Map.tryFind n ren |> Option.defaultValue n
-            NLet (n', m, renameExpr ren e)
-        | NAssign (l, r) -> NAssign (renameExpr ren l, renameExpr ren r)
-        | NFor (var, lo, hi, body) ->
-            let var' = Map.tryFind var ren |> Option.defaultValue var
-            NFor (var', renameExpr ren lo, renameExpr ren hi, renameNStmts ren body))
+/// A shadowed scope captures a renamed reference only when a SURVIVING
+/// mapping's target equals a binder name AND its source occurs FREE in the
+/// scope. Occurrence is tested by probe-renaming the scope's expressions:
+/// renameExpr itself implements free-occurrence-under-shadowing, so a
+/// changed tree is exactly a free occurrence (the probe suffix contains a
+/// space, so it cannot itself collide with any binder). Without the
+/// occurrence test the check would refuse every callee whose lambda params
+/// reuse a caller's short name (`x`, `i`, `k`) -- far too eager.
+and private captureCheck (ren': Map<string, string>) (names: string list) (scope: Expr list) : Result<unit, string> =
+    ren'
+    |> Map.toList
+    |> List.filter (fun (_, tgt) -> List.contains tgt names)
+    |> List.fold (fun acc (src, tgt) ->
+        acc |> Result.bind (fun () ->
+            let probe = Map.ofList [(src, src + " probe")]
+            let occurs =
+                scope |> List.exists (fun s ->
+                    match renameExpr probe s with
+                    | Ok s' -> s' <> s
+                    | Error _ -> true)
+            if occurs then Error (captureMsg src tgt) else Ok ()))
+        (Ok ())
+
+/// Rename the guard EXPRESSIONS embedded in a pattern (PatGuarded); the
+/// pattern's binder structure is untouched. `renInner` is the already-
+/// shadowed map for the pattern's own scope.
+and private renamePatGuards (renInner: Map<string, string>) (p: Pattern) : Result<Pattern, string> =
+    match p.Kind with
+    | PatternKind.PatWildcard | PatternKind.PatVar _ | PatternKind.PatLit _ -> Ok p
+    | PatternKind.PatTuple ps ->
+        ps
+        |> List.fold (fun acc sub ->
+            acc |> Result.bind (fun ys -> renamePatGuards renInner sub |> Result.map (fun s' -> ys @ [s'])))
+            (Ok [])
+        |> Result.map (fun ps' -> { p with Kind = PatternKind.PatTuple ps' })
+    | PatternKind.PatCons (a, b) ->
+        renamePatGuards renInner a |> Result.bind (fun a' ->
+        renamePatGuards renInner b |> Result.map (fun b' -> { p with Kind = PatternKind.PatCons (a', b') }))
+    | PatternKind.PatStruct (snm, sfields) ->
+        sfields
+        |> List.fold (fun acc (fn, sub) ->
+            acc |> Result.bind (fun ys -> renamePatGuards renInner sub |> Result.map (fun s' -> ys @ [(fn, s')])))
+            (Ok [])
+        |> Result.map (fun sfields' -> { p with Kind = PatternKind.PatStruct (snm, sfields') })
+    | PatternKind.PatVariant (vnm, sub) ->
+        (match sub with
+         | None -> Ok None
+         | Some s -> renamePatGuards renInner s |> Result.map Some)
+        |> Result.map (fun sub' -> { p with Kind = PatternKind.PatVariant (vnm, sub') })
+    | PatternKind.PatGuarded (sub, g) ->
+        renamePatGuards renInner sub |> Result.bind (fun sub' ->
+        renameExpr renInner g |> Result.map (fun g' -> { p with Kind = PatternKind.PatGuarded (sub', g') }))
+    | PatternKind.PatTyped (sub, t) ->
+        renamePatGuards renInner sub |> Result.map (fun sub' -> { p with Kind = PatternKind.PatTyped (sub', t) })
+
+let rec private renameNStmts (ren: Map<string, string>) (stmts: NStmt list) : Result<NStmt list, string> =
+    stmts
+    |> List.fold (fun acc s ->
+        acc |> Result.bind (fun ys ->
+            (match s with
+             | NLet (n, m, e) ->
+                 let n' = Map.tryFind n ren |> Option.defaultValue n
+                 renameExpr ren e |> Result.map (fun e' -> NLet (n', m, e'))
+             | NAssign (l, r) ->
+                 renameExpr ren l |> Result.bind (fun l' ->
+                 renameExpr ren r |> Result.map (fun r' -> NAssign (l', r')))
+             | NFor (var, lo, hi, body) ->
+                 let var' = Map.tryFind var ren |> Option.defaultValue var
+                 renameExpr ren lo |> Result.bind (fun lo' ->
+                 renameExpr ren hi |> Result.bind (fun hi' ->
+                 renameNStmts ren body |> Result.map (fun b' -> NFor (var', lo', hi', b')))))
+            |> Result.map (fun s' -> ys @ [s'])))
+        (Ok [])
 
 /// All names BOUND anywhere in a statement list (lets + loop vars).
 let rec private boundNames (stmts: NStmt list) : string list =
@@ -1861,18 +2149,6 @@ and private inlineCall (fname: string) (ctx: Ctx) (depth: int)
         err fname (sprintf "'%s' called with %d arguments, expects %d" callee args.Length fd.Params.Length)
     else
     normalizeBody fname ctx (depth + 1) fd |> Result.bind (fun (calleeStmts, calleeFinal) ->
-        // C7: `renameExpr` does not descend into `sort` (or its key lambda),
-        // so splicing a callee that sorts would leave the permutation
-        // plumbing pointing at the callee's own, now-renamed, parameter.
-        // Refuse rather than emit a dangling reference.
-        let calleeSorts =
-            calleeStmts |> List.exists (fun st ->
-                match st with
-                | NLet (_, _, { Kind = ExprKind.ExprSort _ }) -> true
-                | _ -> false)
-        if calleeSorts then
-            err fname (sprintf "cannot differentiate through '%s': it sorts, and inlining a sorted callee would not rename its permutation plumbing (v1) -- inline the call by hand, or sort in the differentiated function itself" callee)
-        else
         let tag = fresh ctx "__in"
         // Param binding: plain-var arguments bind by RENAMING the callee
         // param to the caller's variable (no let) -- this is what routes
@@ -1893,8 +2169,11 @@ and private inlineCall (fname: string) (ctx: Ctx) (depth: int)
             |> List.map (fun n -> (n, sprintf "%s_%s" tag n))
             |> Map.ofList
         let ren = Map.fold (fun acc k v -> Map.add k v acc) paramRen localRen
-        let renStmts = renameNStmts ren calleeStmts
-        let renFinal = renameExpr ren calleeFinal
+        // Rename refusals (binder capture) carry the mode prefix via `err`
+        // so the expand boundary codes them BL5500/BL5501 correctly.
+        let viaErr res = match res with Ok v -> Ok v | Error m -> err fname m
+        viaErr (renameNStmts ren calleeStmts) |> Result.bind (fun renStmts ->
+        viaErr (renameExpr ren calleeFinal) |> Result.bind (fun renFinal ->
         let paramLets =
             paramBinds |> List.choose (fun (_, target, argOpt) ->
                 argOpt |> Option.map (fun a -> NLet (target, false, a)))
@@ -1903,9 +2182,9 @@ and private inlineCall (fname: string) (ctx: Ctx) (depth: int)
             // Final expr is a callee-local: rename that local to the target
             // name instead of emitting `let target = local` (array-alias).
             let ren2 = Map.ofList [(localName, target)]
-            Ok (paramLets @ renameNStmts ren2 renStmts)
+            viaErr (renameNStmts ren2 renStmts) |> Result.map (fun renStmts2 -> paramLets @ renStmts2)
         | _ ->
-            Ok (paramLets @ renStmts @ [NLet (target, targetMut, renFinal)]))
+            Ok (paramLets @ renStmts @ [NLet (target, targetMut, renFinal)]))))
 
 // Classification: differentiable variables, array-ness
 
