@@ -609,13 +609,21 @@ let private expandSort (fname: string) (ctx: Ctx)
 /// fragment, and call `onVar` for every variable REFERENCE (not index
 /// positions, which are int-typed and non-differentiable, but we still
 /// visit them for taint bookkeeping of index vars; harmless).
-let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: Expr) : Result<unit, string> =
+///
+/// `inKernel` says the walk is under a map KERNEL body. It gates exactly one
+/// arm: `reduce`. In statement position a reduce has always been rewritten
+/// away by `hoistReduces` before this walk runs, so meeting one there means
+/// the rewrite declined and the refusal is right. A kernel body is an
+/// expression the pre-pass never descends into, so a reduce over a
+/// rank-carrying kernel parameter is UNLOWERED BY DESIGN and
+/// `tangentOfExpr`'s fold rule differentiates it in place.
+let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (inKernel: bool) (e: Expr) : Result<unit, string> =
     match e with
     | { Kind = ExprKind.ExprLit _ } -> Ok ()
     | { Kind = ExprKind.ExprVar name } -> onVar name; Ok ()
-    | { Kind = ExprKind.ExprTyped (inner, _) } -> walkExpr fname ctx onVar inner
-    | { Kind = ExprKind.ExprUnaryOp (OpNeg, inner) } -> walkExpr fname ctx onVar inner
-    | { Kind = ExprKind.ExprUnaryOp (OpNot, inner) } -> walkExpr fname ctx onVar inner
+    | { Kind = ExprKind.ExprTyped (inner, _) } -> walkExpr fname ctx onVar inKernel inner
+    | { Kind = ExprKind.ExprUnaryOp (OpNeg, inner) } -> walkExpr fname ctx onVar inKernel inner
+    | { Kind = ExprKind.ExprUnaryOp (OpNot, inner) } -> walkExpr fname ctx onVar inKernel inner
     | { Kind = ExprKind.ExprUnaryOp _ } -> err fname "unsupported unary operator in differentiated code"
     // C7 plumbing, admitted in BOTH modes (it must precede LinearForm, which
     // would otherwise walk into the `<@>` and hit grad's combinator refusal).
@@ -629,29 +637,29 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     // makes skipping it safe rather than silent. Visiting it would instead
     // MIS-taint the synthesized permutation arrays (whose keys read the
     // differentiable source) as differentiable index data.
-    | { Kind = ExprKind.ExprSort (arr, _) } -> walkExpr fname ctx onVar arr
+    | { Kind = ExprKind.ExprSort (arr, _) } -> walkExpr fname ctx onVar inKernel arr
     // C1/C6: the linear closure. Forward mode admits the whole family;
     // reverse mode admits it too, because every form either has an adjoint
     // arm (adjointOfInit) or is refused THERE with a named message -- so
     // widening this walk cannot produce a silent zero.
     | LinearForm (ops, _) ->
-        ops |> List.fold (fun acc o -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar o)) (Ok ())
+        ops |> List.fold (fun acc o -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel o)) (Ok ())
     // gram is bilinear, not linear -- its own arm (C6 reverse, jvp tangent)
     | { Kind = ExprKind.ExprGram (ga, gb) } ->
-        walkExpr fname ctx onVar ga |> Result.bind (fun () -> walkExpr fname ctx onVar gb)
+        walkExpr fname ctx onVar inKernel ga |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel gb)
     // Grouping data is constant plumbing in BOTH modes: keys are Int/index
     // data, so a `group_keys`/`group_bucket`/`extents` binding carries no
     // derivative and the explicit-bucket gather pattern (2.17a) rides the
     // ordinary data-dependent-read machinery.
     | { Kind = ExprKind.ExprGroupKeys keys } ->
-        keys |> List.fold (fun acc k -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar k)) (Ok ())
-    | { Kind = ExprKind.ExprGroupBucket g } -> walkExpr fname ctx onVar g
-    | { Kind = ExprKind.ExprExtents a } -> walkExpr fname ctx onVar a
+        keys |> List.fold (fun acc k -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel k)) (Ok ())
+    | { Kind = ExprKind.ExprGroupBucket g } -> walkExpr fname ctx onVar inKernel g
+    | { Kind = ExprKind.ExprExtents a } -> walkExpr fname ctx onVar inKernel a
     // ... and their `|> compute` materializations (the emitter needs the
     // binding materialized inside a function body). Narrow on purpose: in
     // grad mode `compute` stays refused everywhere else.
     | { Kind = ExprKind.ExprCompute ({ Kind = ExprKind.ExprGroupBucket _ | ExprKind.ExprExtents _ | ExprKind.ExprGroupKeys _ } as inner) } ->
-        walkExpr fname ctx onVar inner
+        walkExpr fname ctx onVar inKernel inner
     // Bare loop objects are LEGAL let initializers in jvp mode (the binding
     // is resolved at its application site); operands are visited for taint.
     | { Kind = ExprKind.ExprMethodFor arrs } when errMode.Value = "jvp" ->
@@ -659,7 +667,7 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
             acc |> Result.bind (fun () ->
                 match a.Kind with
                 | ExprKind.ExprHalo _ | ExprKind.ExprRange _ -> Ok ()
-                | _ -> walkExpr fname ctx onVar a)) (Ok ())
+                | _ -> walkExpr fname ctx onVar inKernel a)) (Ok ())
     | { Kind = ExprKind.ExprObjectFor _ } when errMode.Value = "jvp" -> Ok ()
     // C2-C5: the rank-0 map (both spellings). Visit the operand arrays (so
     // taint sees them; virtual halo/range operands have nothing to visit)
@@ -676,14 +684,14 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
         let walkOperand (a: Expr) =
             match a.Kind with
             | ExprKind.ExprHalo _ | ExprKind.ExprRange _ -> Ok ()
-            | _ -> walkExpr fname ctx onVar a
+            | _ -> walkExpr fname ctx onVar inKernel a
         // a var-bound loop side carries its binding's taint to the result
         (match lo2.Kind with ExprKind.ExprVar n -> onVar n | _ -> ())
         arrays |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkOperand a)) (Ok ())
         |> Result.bind (fun () ->
             match kernE.Kind with
-            | ExprKind.ExprLambda (_, _, body) -> walkExpr fname ctx onVar body
-            | ExprKind.ExprReynolds ({ Kind = ExprKind.ExprLambda (_, _, body) }, _) -> walkExpr fname ctx onVar body
+            | ExprKind.ExprLambda (_, _, body) -> walkExpr fname ctx onVar true body
+            | ExprKind.ExprReynolds ({ Kind = ExprKind.ExprLambda (_, _, body) }, _) -> walkExpr fname ctx onVar true body
             | ExprKind.ExprVar n -> onVar n; Ok ()
             // a var-bound object_for applied to a tuple: the right side is
             // OPERANDS, not a kernel -- walk them for taint
@@ -698,15 +706,15 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     | { Kind = ExprKind.ExprBinOp (_, (OpApply | OpBind | OpParallel | OpFusion | OpArrayProd | OpFunctor | OpChoice | OpFallback | OpComposeObj | OpComposeMeth | OpCompose | OpCons), _, _) } ->
         err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); loop-object combinator operators (`<@>`, `>>=`, `<&>`, `<&!>`, `<*>`, `<$>`, `<|>`, `<|:>`, `>>@`, `@>>`, `>>`, `::`) are not differentiable"
     | { Kind = ExprKind.ExprBinOp (_, _, l, r) } ->
-        walkExpr fname ctx onVar l |> Result.bind (fun () -> walkExpr fname ctx onVar r)
+        walkExpr fname ctx onVar inKernel l |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel r)
     | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args) } ->
         // intrinsic, user call (inlined earlier), or array read -- all
         // fine structurally; recurse into arguments.
-        args |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar a))
+        args |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel a))
                           (Ok (onVar name))
     | { Kind = ExprKind.ExprApp _ } -> err fname "only named calls and array reads are supported in differentiated code"
     | { Kind = ExprKind.ExprArrayLit elems } ->
-        elems |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar a)) (Ok ())
+        elems |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel a)) (Ok ())
     | { Kind = ExprKind.ExprIf (c, t, f) } ->
         // Forward mode admits branches: the tangent is the branch of
         // tangents under the SAME condition (exact off the boundary,
@@ -714,14 +722,23 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
         // there either). Reverse mode still refuses: the adjoint would
         // need the taken branch recorded.
         if errMode.Value = "jvp" then
-            walkExpr fname ctx onVar c
-            |> Result.bind (fun () -> walkExpr fname ctx onVar t)
-            |> Result.bind (fun () -> walkExpr fname ctx onVar f)
+            walkExpr fname ctx onVar inKernel c
+            |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel t)
+            |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel f)
         else err fname "if/else is not supported in differentiated code yet"
     | { Kind = ExprKind.ExprMatch _ } -> err fname "match is not supported in differentiated code"
     | { Kind = ExprKind.ExprBlock _ } -> err fname "nested block expressions are not supported in differentiated code"
     | { Kind = ExprKind.ExprLet _ } -> err fname "expression-level let is not supported in differentiated code"
     | ConstFill _ -> Ok ()   // literal fill: computes nothing, reads nothing
+    // C8: a fold inside a KERNEL body stays where it is (see the `inKernel`
+    // note on this function). Walk the source and the init for taint; the
+    // fold kernel is a section, which binds nothing and reads nothing.
+    | { Kind = ExprKind.ExprReduce (src, _, initOpt, _) } when inKernel && errMode.Value = "jvp" ->
+        walkExpr fname ctx onVar inKernel src
+        |> Result.bind (fun () ->
+            match initOpt with
+            | Some ie -> walkExpr fname ctx onVar inKernel ie
+            | None -> Ok ())
     | { Kind = ExprKind.ExprReduce _ } ->
         err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); this reduce could not be normalized (only `reduce(A, (+)[, init])` over an array variable or inline literal is differentiable)"
     | { Kind = ExprKind.ExprRecArray _ } ->
@@ -2189,6 +2206,12 @@ and private stmtMentionsDeep (names: Set<string>) (s: Stmt) : bool =
 /// that: a body that never mentions the parameter passes through untouched,
 /// so a kernel whose body merely CONTAINS an unrelated inner lambda is not
 /// refused for it.
+///
+/// The predecessor here was `substVar`, whose catch-all silently returns the
+/// node unchanged -- which meant a parameter used inside a `reduce`, an
+/// `extents`, or any other form it lacked an arm for was left dangling in
+/// the emitted tangent lambda, surfacing as an unbound-name type error far
+/// from the cause. Refusing by name is the whole improvement.
 let private substParam (fname: string) (pname: string) (repl: Expr) (body: Expr) : Result<Expr, string> =
     if not (mentionsDeep (Set.singleton pname) body) then Ok body
     else
@@ -2797,7 +2820,7 @@ let private analyze (fname: string) (ctx: Ctx)
     let mutable arrays = arrayParams
     let touches (e: Expr) : Result<bool, string> =
         let mutable hit = false
-        walkExpr fname ctx (fun n -> if Set.contains n diff then hit <- true) e
+        walkExpr fname ctx (fun n -> if Set.contains n diff then hit <- true) false e
         |> Result.map (fun () -> hit)
     let rec pass (ss: NStmt list) : Result<unit, string> =
         ss |> List.fold (fun acc s ->
@@ -2901,7 +2924,7 @@ let private checkWriteAfterRead (fname: string) (ctx: Ctx) (stmts: NStmt list) :
             if bad.IsNone then
                 match lastWrite.TryGetValue n with
                 | true, j when j > i -> bad <- Some n
-                | _ -> ()) e
+                | _ -> ()) false e
         |> Result.bind (fun () ->
             match bad with
             | Some n -> err fname (sprintf "'%s' is read here but written again later; the reverse sweep re-evaluates forward expressions at FINAL values, so read-then-rewrite of a mutable is not differentiable (bind a fresh let instead)" n)
@@ -2974,7 +2997,7 @@ let private checkLoopDiscipline (fname: string) (ctx: Ctx) (loops: NStmt list) :
                 match s with
                 | NLet (_, _, value) when inLoop ->
                     let mutable bad = None
-                    walkExpr fname ctx (fun n -> if Set.contains n loopAccums && bad.IsNone then bad <- Some n) value
+                    walkExpr fname ctx (fun n -> if Set.contains n loopAccums && bad.IsNone then bad <- Some n) false value
                     |> Result.bind (fun () ->
                         match bad with
                         | Some n -> err fname (sprintf "loop-body let reads accumulator '%s' mutated in the same loop (mid-iteration values are not recoverable; restructure)" n)
@@ -2984,7 +3007,7 @@ let private checkLoopDiscipline (fname: string) (ctx: Ctx) (loops: NStmt list) :
                     match additiveSelf lhs rhs with
                     | Some (_, e) ->
                         let mutable bad = None
-                        walkExpr fname ctx (fun n -> if Set.contains n loopAccums && bad.IsNone then bad <- Some n) e
+                        walkExpr fname ctx (fun n -> if Set.contains n loopAccums && bad.IsNone then bad <- Some n) false e
                         |> Result.bind (fun () ->
                             match bad with
                             | Some n -> err fname (sprintf "accumulation reads accumulator '%s' mutated in the same loop; restructure" n)
@@ -2998,7 +3021,7 @@ let private checkLoopDiscipline (fname: string) (ctx: Ctx) (loops: NStmt list) :
                             // construction, but the rhs may not read the
                             // array being written (array recurrence)
                             let mutable bad = false
-                            walkExpr fname ctx (fun n -> if n = a then bad <- true) rhs
+                            walkExpr fname ctx (fun n -> if n = a then bad <- true) false rhs
                             |> Result.bind (fun () ->
                                 if bad then err fname (sprintf "array recurrence on '%s' (element write whose rhs reads the same array) is not differentiable (v1)" a)
                                 else Ok ())
@@ -3050,8 +3073,10 @@ type private RevCtx = {
     /// kernel body, innermost first (see `kernelCallBody`). Statement-level
     /// calls are inlined before either sweep runs and are capped by
     /// `normalizeBody`'s depth counter; expression-level ones are capped by
-    /// this list's length, and a name already on it is a recursive callee --
-    /// refused by name rather than looped on.
+    /// this list's LENGTH. Membership is deliberately NOT a recursion test --
+    /// a helper nested inside itself through an argument (`mean(x - mean(x))`)
+    /// revisits the name and still terminates; self-recursion is read off the
+    /// declaration instead.
     Inlining: string list
 }
 
@@ -3079,8 +3104,16 @@ type private RevCtx = {
 let private kernelCallBody (rc: RevCtx) (f: string) (args: Expr list)
     : Result<Expr * RevCtx, string> =
     let fd = rc.Ctx.Decls.[f]
-    if List.contains f rc.Inlining then
-        err rc.Fname (sprintf "cannot differentiate the call to '%s' inside a kernel body: it is recursive (%s), and a kernel body is substituted rather than taped, so the substitution would not terminate. Restructure the helper without recursion, or move the recursion out of the kernel" f (String.concat " -> " (List.rev (f :: rc.Inlining))))
+    // Self-recursion is read off the DECLARATION, not off the substitution
+    // path. A path can revisit a name innocently -- `mean((x - mean(x)) * ...)`
+    // substitutes mean's body and then meets a mean call that came in through
+    // the ARGUMENT, which terminates -- so a path-membership test refuses the
+    // comoment shapes it exists to support. A body that names itself is the
+    // real non-terminating case. Mutual recursion cannot be seen this way, but
+    // it is rejected by the language (BL2001) and, since this pass runs BEFORE
+    // typecheck, by the depth cap below.
+    if mentionsDeep (Set.singleton f) fd.Body then
+        err rc.Fname (sprintf "cannot differentiate the call to '%s' inside a kernel body: '%s' is recursive (its own body names '%s'), and a kernel body is substituted rather than taped, so the substitution would not terminate. Restructure the helper without recursion, or move the recursion out of the kernel" f f f)
     elif List.length rc.Inlining >= maxInlineDepth then
         err rc.Fname (sprintf "kernel-body call substitution exceeded depth %d (recursive functions are not differentiable)" maxInlineDepth)
     elif fd.IsStatic then
@@ -3583,6 +3616,33 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         Ok (fLit 0.0)   // boolean-valued: no tangent
     | { Kind = ExprKind.ExprBinOp (_, OpMod, _, _) } -> Ok (fLit 0.0)  // int-valued
     | { Kind = ExprKind.ExprExtents _ } -> Ok (fLit 0.0)  // int-valued size
+    // C8: an additive fold INSIDE a kernel body. The statement-level route
+    // (`hoistReduces`) rewrites a reduce into an accumulator loop, but a
+    // kernel body is an expression the pre-pass never descends into, so a
+    // `reduce` over a rank-carrying kernel parameter arrives here whole.
+    // Summation is linear, so the tangent is the fold of the tangents:
+    // d reduce(S, (+), c) = reduce(dS, (+)) + dc. A syntactically zero
+    // source tangent collapses the whole fold (the sum of an all-zero row is
+    // zero WHATEVER the kernel, so this stays true if the kernel set widens).
+    | { Kind = ExprKind.ExprReduce (src, kern, initOpt, axesOpt) } ->
+        (match axesOpt with
+         | Some _ ->
+             err rc.Fname "reduce with an explicit `axes = n` is not differentiable inside a kernel body (v1): only the default fold `reduce(<operand>, (+)[, init])` is"
+         | None ->
+             match kern.Kind with
+             | ExprKind.ExprSection OpAdd -> Ok ()
+             | ExprKind.ExprSection _ ->
+                 err rc.Fname "reduce inside a kernel body is differentiable with the additive section kernel `(+)` only (v1); the paired-fold rule the statement-level route uses for `(*)` needs a statement to carry the running product"
+             | _ ->
+                 err rc.Fname "reduce inside a kernel body is differentiable with section kernels only (v1); a lambda fold kernel is not")
+        |> Result.bind (fun () ->
+        tangentOfExpr rc src |> Result.bind (fun tsrc ->
+        (match initOpt with
+         | None -> Ok (fLit 0.0)
+         | Some ie -> tangentOfExpr rc ie)
+        |> Result.map (fun tinit ->
+            if isZeroLit tsrc then tinit
+            else addZ (inheritSpan e (ExprReduce (tsrc, kern, None, None))) tinit)))
     // gram is bilinear: d gram(A, B) = gram(dA, B) + gram(A, dB), with
     // inactive-operand terms folded away (an inactive ARRAY operand's
     // tangent is the scalar zero placeholder, which must not reach gram).
@@ -3647,6 +3707,15 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
 ///     substitution moves reads and, through them, tangent reads together);
 ///   * named-function and intrinsic kernels normalize to lambdas.
 ///
+/// C8, rank-carrying kernel parameters: a parameter annotated `T^k` is bound
+/// to a rank-k FIBER, so the loop iterates the operand's LEADING axes only
+/// (its index types minus the trailing k) and the parameter's read is the
+/// partial application `A(i...)`. This is what lets the comoment shapes --
+/// `lambda(a: T^1, b: T^1) -> mean((a - mean(a)) * (b - mean(b)))` over the
+/// rows of a 2-D table -- differentiate: the fiber's tangent is the same
+/// partial application of `__t_A`, and the reductions inside the body
+/// differentiate by the (linear) fold rule in `tangentOfExpr`.
+///
 /// C5, the symmetric fast path: when the kernel carries a STRUCTURAL
 /// `where comm(...)` covering all params and every operand is the SAME
 /// rank-1 array, the tangent loop runs over `range<SymIdx<r, N>>` --
@@ -3674,6 +3743,42 @@ and private tangentOfMap (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Expr li
     if ps.Length <> arrays.Length || arrays.IsEmpty then
         err rc.Fname (sprintf "kernel arity %d does not match %d loop operand(s) in differentiated code" ps.Length arrays.Length)
     else
+    // -- C8: kernel parameter RANK -------------------------------------------
+    // A kernel parameter annotated `T^k` (or `Array<T like I, ...>`) is bound
+    // to a rank-k FIBER of its operand, not to an element: `lambda(row: T^1)`
+    // over an `Array<Float like R, C>` sees one row per iteration. The map
+    // rule then iterates only the LEADING axes -- the operand's index types
+    // minus the trailing k the parameter absorbs -- and the parameter's read
+    // is the partial application `A(i)`, whose tangent is the SAME partial
+    // application of `__t_A` (the existing element-read arm never counted
+    // indices, so a row read tangents for free).
+    //
+    // Unannotated is rank 0, which is what every pre-existing kernel is, so
+    // the dense path below is byte-identical for them.
+    //
+    // `asKernelLambda` ERASES a named function's parameter types (pipeline
+    // fusion rebuilds lambdas from those params and must not acquire
+    // annotations the source never wrote), so a named kernel's ranks are read
+    // back from its declaration rather than from `ps`.
+    // `T^1` with a LITERAL rank parses to `TyVar (name, Some r)` (Parser.fs's
+    // caret arm); `T<u>^1` and variable ranks (`T^r`) keep the
+    // `TyAbstractArray` spelling, whose rank is an expression -- only a
+    // literal one is readable here. A rank this cannot read stays 0, which is
+    // the pre-existing behaviour and fails as a shape mismatch downstream
+    // rather than as a wrong derivative.
+    let rankOfTy (t: TypeExpr option) =
+        match t |> Option.map (resolveTy rc.Ctx) with
+        | Some (TyVar (_, Some r)) -> r
+        | Some (TyAbstractArray (_, { Kind = ExprKind.ExprLit (LitInt r) }, _)) -> int r
+        | Some (TyArray (_, its)) -> its.Length
+        | _ -> 0
+    let paramRanks =
+        match kern.Kind with
+        | ExprKind.ExprVar f when Map.containsKey f rc.Ctx.Decls
+                                  && (rc.Ctx.Decls.[f].Params.Length = ps.Length) ->
+            rc.Ctx.Decls.[f].Params |> List.map (fun p -> rankOfTy p.Type)
+        | _ -> ps |> List.map (fun p -> rankOfTy p.Type)
+    let allRank0 = paramRanks |> List.forall (fun k -> k = 0)
     // -- operand classification ---------------------------------------------
     // Named n -> (name, index types); Passthrough -> virtual operand kept as-is
     let classify (a: Expr) =
@@ -3709,7 +3814,12 @@ and private tangentOfMap (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Expr li
                         w.Commutativity |> List.exists (fun group ->
                             Set.ofList group = Set.ofList (ps |> List.map (fun p -> p.Name)))
                     | None -> false
-                if allSame && rank1 && commAll then
+                // `rank1` already excludes every multi-axis operand, so a
+                // rank-carrying parameter cannot reach here anyway; the gate
+                // is written out so the exclusion is a statement rather than
+                // a consequence -- SymIdx prefix offsets index CELLS, and a
+                // fiber read is not a cell.
+                if allSame && rank1 && commAll && allRank0 then
                     let n =
                         match resolveTy rc.Ctx (snd names.Head |> List.head) with
                         | TyIdx { Kind = ExprKind.ExprLit (LitInt n) } -> int n
@@ -3728,10 +3838,11 @@ and private tangentOfMap (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Expr li
                 let ix = match prev with None -> v nm | Some p -> add p (v nm)
                 (acc @ [ix], Some ix)) ([], None)
             |> fst
-        let substituted =
-            List.zip ps canonical
-            |> List.fold (fun accE (p, ix) ->
-                substVar p.Name (syn (ExprApp (v aname, [ix]))) accE) body
+        List.zip ps canonical
+        |> List.fold (fun accE (p, ix) ->
+            accE |> Result.bind (substParam rc.Fname p.Name (syn (ExprApp (v aname, [ix])))))
+            (Ok body)
+        |> Result.bind (fun substituted ->
         tangentOfExpr rc substituted |> Result.map (fun tBody ->
             let symTy = TySymIdx (r, SymBaseExtent (iLit (int64 n)))
             let lamParams =
@@ -3739,19 +3850,33 @@ and private tangentOfMap (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Expr li
                     { Name = nm; Type = None; Default = None; NameSpan = noSpan })
             reMap (ExprBinOp (bm, OpApply,
                               syn (ExprMethodFor [syn (ExprRange [symTy])]),
-                              syn (ExprLambda (lamParams, None, tBody)))))
+                              syn (ExprLambda (lamParams, None, tBody))))))
     | None ->
     // -- the uniform dense path ----------------------------------------------
     // reads per slot (Named) / kept params (Passthrough), then reynolds
     // expansion if requested, then the ordinary expression rule.
-    let slots =
-        List.zip ps classes
-        |> List.map (fun (p, c) ->
-            match c with
-            | Choice1Of2 (nm, idxTys) ->
-                let ixs = idxTys |> List.map (fun _ -> fresh rc.Ctx "__ci")
-                Choice1Of2 (p, nm, idxTys, ixs)
-            | Choice2Of2 a -> Choice2Of2 (p, a))
+    // Each Named slot keeps the axes the LOOP iterates, which for a
+    // rank-k parameter is the operand's index types minus the trailing k it
+    // absorbs. `range<those>` is then the virtual operand and `A(i...)` the
+    // partial application the parameter stands for.
+    let slotsR =
+        List.zip3 ps classes paramRanks
+        |> List.fold (fun acc (p, c, k) ->
+            acc |> Result.bind (fun ss ->
+                match c with
+                | Choice1Of2 (nm, idxTys) ->
+                    if k >= idxTys.Length then
+                        err rc.Fname (sprintf "kernel parameter '%s' is declared rank %d but its operand '%s' has %d axis(es), so the map has no axis left to iterate; a kernel parameter's rank must be strictly less than its operand's" p.Name k nm idxTys.Length)
+                    else
+                        let loopTys = idxTys |> List.truncate (idxTys.Length - k)
+                        let ixs = loopTys |> List.map (fun _ -> fresh rc.Ctx "__ci")
+                        Ok (ss @ [Choice1Of2 (p, nm, loopTys, ixs)])
+                | Choice2Of2 a ->
+                    if k > 0 then
+                        err rc.Fname (sprintf "kernel parameter '%s' is declared rank %d, but its loop operand is a `halo`/`range` traversal, which hands the kernel a window or an index rather than an array fiber; rank-carrying kernel parameters are differentiable over NAMED array operands only (v1)" p.Name k)
+                    else Ok (ss @ [Choice2Of2 (p, a)])))
+            (Ok [])
+    slotsR |> Result.bind (fun slots ->
     let readOf slot =
         match slot with
         | Choice1Of2 (_, nm, _, ixs) -> Some (syn (ExprApp (v nm, ixs |> List.map v)))
@@ -3761,13 +3886,19 @@ and private tangentOfMap (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Expr li
         | None ->
             slots |> List.fold (fun accE slot ->
                 match slot with
-                | Choice1Of2 (p, _, _, _) -> substVar p.Name (readOf slot |> Option.get) accE
-                | Choice2Of2 _ -> accE) body
-            |> Ok
+                | Choice1Of2 (p, _, _, _) ->
+                    accE |> Result.bind (substParam rc.Fname p.Name (readOf slot |> Option.get))
+                | Choice2Of2 _ -> accE) (Ok body)
         | Some isAnti ->
             // reynolds needs every slot readable (a window has no permuted read)
             if slots |> List.exists (function Choice2Of2 _ -> true | _ -> false) then
                 err rc.Fname "reynolds kernels over halo/range operands are not differentiable (v1)"
+            // Symmetrization permutes READS across slots. With rank-carrying
+            // parameters the slots' reads are fibers, and nothing here proves
+            // the permuted fiber has the shape the receiving parameter
+            // declares -- so it is refused rather than guessed.
+            elif not allRank0 then
+                err rc.Fname "reynolds kernels whose parameters carry a rank (`T^k`) are not differentiable (v1): symmetrization permutes reads between slots, which is only shape-safe for rank-0 element reads"
             else
                 let reads = slots |> List.map (readOf >> Option.get)
                 let rec perms xs =
@@ -3782,19 +3913,22 @@ and private tangentOfMap (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Expr li
                         for j in i + 1 .. arr.Length - 1 do
                             if arr.[i] > arr.[j] then inv <- inv + 1
                     inv % 2 = 0
-                let terms =
+                let termsR =
                     perms [0 .. reads.Length - 1]
-                    |> List.map (fun perm ->
-                        let t =
+                    |> List.fold (fun acc perm ->
+                        acc |> Result.bind (fun ts ->
                             List.zip ps perm
                             |> List.fold (fun accE (p, srcSlot) ->
-                                substVar p.Name reads.[srcSlot] accE) body
-                        (parity perm, t))
-                match terms with
-                | [] -> Ok (fLit 0.0)
-                | (firstEven, firstT) :: rest ->
-                    let init = if not isAnti || firstEven then firstT else neg firstT
-                    Ok (rest |> List.fold (fun accE (even, t) ->
+                                accE |> Result.bind (substParam rc.Fname p.Name reads.[srcSlot]))
+                                (Ok body)
+                            |> Result.map (fun t -> ts @ [(parity perm, t)])))
+                        (Ok [])
+                termsR |> Result.map (fun terms ->
+                    match terms with
+                    | [] -> fLit 0.0
+                    | (firstEven, firstT) :: rest ->
+                        let init = if not isAnti || firstEven then firstT else neg firstT
+                        rest |> List.fold (fun accE (even, t) ->
                             if not isAnti || even then add accE t else sub accE t) init)
     expandedBody |> Result.bind (fun bodyExpanded ->
     let passthroughNames =
@@ -3812,7 +3946,7 @@ and private tangentOfMap (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Expr li
                 | Choice2Of2 (p, _) -> [p])
         reMap (ExprBinOp (bm, OpApply,
                           syn (ExprMethodFor operandsOut),
-                          syn (ExprLambda (lamParams, None, tBody))))))))
+                          syn (ExprLambda (lamParams, None, tBody)))))))))
 
 /// Elementwise tangent of a (possibly nested) array-literal initializer.
 let rec private tangentOfLit (rc: RevCtx) (e: Expr) : Result<Expr, string> =
@@ -3972,16 +4106,16 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
             ss |> List.fold (fun acc s ->
                 acc |> Result.bind (fun () ->
                     match s with
-                    | NLet (_, _, e) -> walkExpr fname ctx ignore e
+                    | NLet (_, _, e) -> walkExpr fname ctx ignore false e
                     | NAssign (l, r) ->
-                        walkExpr fname ctx ignore l
-                        |> Result.bind (fun () -> walkExpr fname ctx ignore r)
+                        walkExpr fname ctx ignore false l
+                        |> Result.bind (fun () -> walkExpr fname ctx ignore false r)
                     | NFor (_, lo, hi, body) ->
-                        walkExpr fname ctx ignore lo
-                        |> Result.bind (fun () -> walkExpr fname ctx ignore hi)
+                        walkExpr fname ctx ignore false lo
+                        |> Result.bind (fun () -> walkExpr fname ctx ignore false hi)
                         |> Result.bind (fun () -> valStmts body)))
                 (Ok ())
-        valStmts stmts |> Result.bind (fun () -> walkExpr fname ctx ignore finalE)
+        valStmts stmts |> Result.bind (fun () -> walkExpr fname ctx ignore false finalE)
     validateAll |> Result.bind (fun () ->
     checkLoopDiscipline fname ctx stmts |> Result.bind (fun () ->
     checkWriteAfterRead fname ctx stmts |> Result.bind (fun () ->
@@ -4181,16 +4315,16 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
             ss |> List.fold (fun acc s ->
                 acc |> Result.bind (fun () ->
                     match s with
-                    | NLet (_, _, e) -> walkExpr fname ctx ignore e
+                    | NLet (_, _, e) -> walkExpr fname ctx ignore false e
                     | NAssign (l, r) ->
-                        walkExpr fname ctx ignore l
-                        |> Result.bind (fun () -> walkExpr fname ctx ignore r)
+                        walkExpr fname ctx ignore false l
+                        |> Result.bind (fun () -> walkExpr fname ctx ignore false r)
                     | NFor (_, lo, hi, body) ->
-                        walkExpr fname ctx ignore lo
-                        |> Result.bind (fun () -> walkExpr fname ctx ignore hi)
+                        walkExpr fname ctx ignore false lo
+                        |> Result.bind (fun () -> walkExpr fname ctx ignore false hi)
                         |> Result.bind (fun () -> valStmts body)))
                 (Ok ())
-        valStmts stmts |> Result.bind (fun () -> walkExpr fname ctx ignore finalSurrogate)
+        valStmts stmts |> Result.bind (fun () -> walkExpr fname ctx ignore false finalSurrogate)
     validateAll |> Result.bind (fun () ->
     // F2: grad's three discipline checks (write-after-read, scalar
     // overwrite, loop discipline) exist ONLY to keep the reverse sweep's

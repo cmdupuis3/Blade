@@ -1,0 +1,20 @@
+// TEST: Product Fold Inside A Kernel Body Rejected (rejects)
+// The statement-level route differentiates `reduce(A, (*))` in forward mode
+// with a PAIRED fold -- tangent and primal stepped in lockstep -- which needs
+// a statement to carry the running product. A kernel body has no statements,
+// and dividing by the primal product to recover the rule would be wrong at a
+// zero element, so it refuses by name.
+import ad as ad
+
+type R = Idx<2>
+type C = Idx<3>
+
+function f(a: Array<Float like R, C>) -> Float = {
+    let s = method_for(a) <@> lambda(row: T^1) -> reduce(row, (*)) |> compute
+    s(0) + s(1)
+}
+
+let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                       [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+// ERROR: BL5501
+// ERROR-CONTAINS: reduce inside a kernel body is differentiable with the additive section kernel

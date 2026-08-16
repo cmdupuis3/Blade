@@ -1,0 +1,16 @@
+// TEST: Kernel Parameter Rank Not Below Its Operand's Rejected (rejects)
+// A rank-1 parameter over a rank-1 operand would absorb the only axis, so
+// there is nothing left for the map to iterate. Refused with both ranks
+// named rather than emitting a zero-axis `range<>`.
+import ad as ad
+
+type I = Idx<3>
+
+function f(a: Array<Float like I>) -> Float = {
+    let s = method_for(a) <@> lambda(row: T^1) -> reduce(row, (+)) |> compute
+    s(0)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// ERROR: BL5501
+// ERROR-CONTAINS: a kernel parameter's rank must be strictly less than its operand's

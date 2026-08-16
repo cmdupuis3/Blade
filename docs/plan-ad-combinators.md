@@ -1121,6 +1121,67 @@ the last bits (2.84e-14 measured).
    form).
 6. n/a.
 
+### 2.19a Shipped (2026-08-16): the two prerequisites the pack track sits on
+
+2.19's blockage is about *arity* — the pack's `n` is unknown before typecheck.
+Everything a pack kernel does *once its arity is fixed* was blocked
+independently, by two gaps that had nothing to do with arity. Both are now
+closed, so the unroller's output (an n-ary lambda over rank-1 parameters) is
+differentiable the moment it exists.
+
+**C8-i — user-function calls inside kernel bodies.** `hoistCalls` stops at a
+lambda, so a helper called from a kernel body never reached the statement-level
+inliner and both sweeps refused it as an unknown call. `Grad.kernelCallBody` is
+the expression-level twin of `inlineCall`: same admissibility gates
+(same-module, non-static, no mut parameters, matching arity), one shared
+`maxInlineDepth`, expression-bodied callees only. Substitution rides
+`substParam`/`substKern`, whose declining catch-all is the alpha-safety proof —
+it refuses to cross any binder it cannot prove safe. Only the derivative side
+substitutes; the primal keeps its call.
+
+Self-recursion is read off the *declaration* (a body that names itself), not off
+the substitution path: a path revisits a name innocently whenever a helper is
+nested inside itself through an argument, which `mean(x - mean(x))` does.
+Mutual recursion is BL2001 in the language, but this pass runs before typecheck,
+so the depth cap is what stops it here.
+
+The reverse lane has the same gap by a different route — `grad` refuses maps
+outright, but `hoistCalls` also walks past `pure`/`compute`/`guard`, which
+`adjointOf` does descend into — and got the same arm.
+
+**C8-ii — rank-carrying kernel parameters.** A parameter annotated `T^k` is
+bound to a rank-k FIBER, so the tangent loop iterates the operand's LEADING
+axes only (its index types minus the trailing k) and the parameter's read is
+the partial application `A(i...)`. The element-read arm never counted indices,
+so a fiber tangents to the same partial application of `__t_A` for free.
+`reduce` inside a kernel body stays where it is (the pre-pass never descends
+into a kernel) and differentiates by the linear fold rule; `walkExpr` carries an
+`inKernel` flag so a fold is admitted THERE and nowhere else.
+
+Refusals, all named: a parameter rank not strictly below its operand's rank; a
+rank-carrying parameter over a `halo`/`range` operand (a window is not a fiber);
+`reynolds` with rank-carrying parameters (symmetrization permutes reads between
+slots, shape-safe only for rank-0 elements); a non-additive or lambda fold
+kernel inside a kernel body; and `axes = n` inside a kernel body. The C5
+`range<SymIdx>` fast path is gated to all-rank-0 explicitly — its prefix offsets
+index cells, and a fiber is not a cell.
+
+**Reverse mode gets neither half of C8-ii, and cannot want it:** `grad` refuses
+`<@>` in `walkExpr` before any kernel body is reached, so there is no rank-1
+kernel-body path to build. No new refusal was added for it; the existing
+combinator-operator message is the wall.
+
+**Known wall, NOT an AD gap.** A tangent whose primal factors contain a
+same-module call *over a fiber* — `mean((x - mean(x)) * (y - mean(y)))`, i.e.
+`mean` nested inside array-arithmetic rather than wrapping the whole body —
+produces a correct AST that the EMITTER cannot render: an inline row view in an
+elementwise-map operand position emits an undeclared `arr0`. It reproduces with
+no `ad` in the program at all (`method_for(range<R>) <@> lambda(i) -> reduce((a(i)
+- mean(a(i))) * (a(i) - mean(a(i))), (+))`), so it belongs to the loop-form
+"blessed position" gap, not here. The workaround is the shape corpus test 071
+pins: fold the helper's internals into one expression-bodied helper over the
+fibers.
+
 ### 2.20 Recursive arrays and `let rec` (for completeness)
 
 Covered by the base plan, not the C-track: F1 uses the `StmtForIn` lane and F2
