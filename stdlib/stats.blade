@@ -52,11 +52,17 @@ function variance(row: T^1) -> T^0 = {
 
 /// Population standard deviation: the square root of `variance`.
 ///
-/// UNIT WARNING, measured: `sqrt` is a real-valued math intrinsic and does not
-/// track units, so unlike `mean` and `variance` this function's result carries
-/// NO unit guarantee -- annotating the result `Float64<meters>` and annotating
-/// it `Float64<meters^2>` are both accepted on the same `Float64<meters>` input.
-/// Do not read a passing annotation here as a check. On unit-carrying data,
-/// prefer writing `sqrt(variance(row))` at the call site, so the exponent
-/// halving is visible where it happens rather than hidden behind a name.
+/// UNITS: the COMPOSITION is exact -- `variance` squares, so its exponents
+/// are always even, and `sqrt` halves them back (it used to answer "no
+/// signature" on the way through, which is why this note used to warn about
+/// `sqrt` itself). An odd-exponent intermediate would be refused outright
+/// now; see tests/corpus/unit-errors/019.
+///
+/// UNIT WARNING, re-measured: what is still not a check is an annotation on
+/// the CALL. Like `mean` and `variance`, this generic's `T^0` result does not
+/// carry the caller's element unit back across the call boundary, so on a
+/// `Float64<meters>` row both `let s: Float64<meters> = stddev(row)` and
+/// `let s: Float64<meters^2> = stddev(row)` are accepted. That is the
+/// generic-return seam, not this function; do not read a passing annotation
+/// here as a check.
 function stddev(row: T^1) -> T^0 = sqrt(variance(row))
