@@ -1637,16 +1637,45 @@ let private valueDedupKey (v: Value) : string =
     | VChar c -> "c" + string (int c)
     | _ -> "?"
 
+/// NEGATIVE KEY = "this row belongs to no group" (CodeGen.negativeKeyDrop,
+/// CodeGen.fs:14409): a key function is allowed to do selection, so a row whose
+/// key is negative is dropped from the grouping entirely rather than forming a
+/// group of its own. Only NUMERIC keys can be negative -- std::string has no
+/// `< 0`, so codegen emits no guard for string (or bool/char) keys and neither
+/// does this.
+let private isNegativeKey (v: Value) : bool =
+    match v with
+    | VInt n -> n < 0L
+    | VInt32 n -> n < 0
+    | VFloat f -> f < 0.0
+    | VFloat32 f -> f < 0.0f
+    | _ -> false
+
 /// Build the CSR grouping (offsets length ngroups+1, member perm in group-
 /// contiguous input order). Bucket order per the regime; counts/offsets/perm
 /// exactly mirror genGroupKeysBinding (CodeGen.fs:7595-7607).
 let buildGroupKeys (keyArrays: BladeArray list) (gkCase: GroupKeyCase) : GroupKeysValue =
     let n = if List.isEmpty keyArrays then 0 else int keyArrays.[0].Extents.[0]
     let buckets = Array.zeroCreate n
+    // Negative-key drop, mirroring the `continue` guard codegen puts at the top
+    // of EVERY pass that walks the key array (negativeKeyDrop, CodeGen.fs:14409):
+    // a dropped row is invisible to discovery (so it never opens a bucket of its
+    // own), to counts, and to the permutation. A multi-key row drops when ANY
+    // numeric component is negative. GKEnum is exempt -- its admissible values
+    // are declared up front, so a negative entry there is a value the user asked
+    // for, not a sentinel. `perm` still spans the full input length and is simply
+    // under-filled; reads are bounded by `offsets`, as in the emitted C++.
+    let dropped = Array.zeroCreate<bool> n
+    match gkCase with
+    | GKEnum _ -> ()
+    | GKPositional _ | GKDynamic ->
+        for i in 0 .. n - 1 do
+            dropped.[i] <- keyArrays |> List.exists (fun a -> isNegativeKey (readCell a [ int64 i ]))
     let ngroups =
         match gkCase with
         | GKPositional ng ->
-            for i in 0 .. n - 1 do buckets.[i] <- int (toI64v (readCell keyArrays.[0] [ int64 i ]))
+            for i in 0 .. n - 1 do
+                if not dropped.[i] then buckets.[i] <- int (toI64v (readCell keyArrays.[0] [ int64 i ]))
             ng
         | GKEnum values ->
             for i in 0 .. n - 1 do
@@ -1657,22 +1686,25 @@ let buildGroupKeys (keyArrays: BladeArray list) (gkCase: GroupKeyCase) : GroupKe
             let lookup = Dictionary<string, int>()
             let mutable ng = 0
             for i in 0 .. n - 1 do
-                let key =
-                    keyArrays |> List.map (fun a -> valueDedupKey (readCell a [ int64 i ])) |> String.concat ""
-                match lookup.TryGetValue key with
-                | true, b -> buckets.[i] <- b
-                | _ -> lookup.[key] <- ng; buckets.[i] <- ng; ng <- ng + 1
+                if not dropped.[i] then
+                    let key =
+                        keyArrays |> List.map (fun a -> valueDedupKey (readCell a [ int64 i ])) |> String.concat ""
+                    match lookup.TryGetValue key with
+                    | true, b -> buckets.[i] <- b
+                    | _ -> lookup.[key] <- ng; buckets.[i] <- ng; ng <- ng + 1
             ng
     let counts = Array.zeroCreate (max 1 ngroups)
-    for i in 0 .. n - 1 do counts.[buckets.[i]] <- counts.[buckets.[i]] + 1
+    for i in 0 .. n - 1 do
+        if not dropped.[i] then counts.[buckets.[i]] <- counts.[buckets.[i]] + 1
     let offsets = Array.zeroCreate (ngroups + 1)
     for g in 0 .. ngroups - 1 do offsets.[g + 1] <- offsets.[g] + int64 counts.[g]
     let fill = Array.zeroCreate (max 1 ngroups)
     let perm = Array.zeroCreate n
     for i in 0 .. n - 1 do
-        let g = buckets.[i]
-        perm.[int offsets.[g] + fill.[g]] <- int64 i
-        fill.[g] <- fill.[g] + 1
+        if not dropped.[i] then
+            let g = buckets.[i]
+            perm.[int offsets.[g] + fill.[g]] <- int64 i
+            fill.[g] <- fill.[g] + 1
     { Offsets = offsets; Members = perm }
 
 /// group_by(vals, gk): gather each group's values (`vals[perm[offsets[g]+k]]`,
