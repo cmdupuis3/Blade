@@ -7614,6 +7614,18 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
             let rDims = rTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
             if lDims <> 2 || rDims <> 2 then
                 Error (GramNeedsRank2 (lDims, rDims))
+            // With the dims SUM pinned at 2, an operand is either two plain
+            // slots or ONE compact rank-2 group (SymIdx / Hermitian, e.g. a
+            // gram result). The extent reads below need a second slot, so the
+            // compact spelling must be refused here, not crash on `.[1]`
+            // (inferMatmul's two-PLAIN-axes rule, stated for gram).
+            elif lTy.IndexTypes.Length <> 2 || rTy.IndexTypes.Length <> 2 then
+                let side =
+                    match lTy.IndexTypes.Length <> 2, rTy.IndexTypes.Length <> 2 with
+                    | true, true -> "both operands carry"
+                    | true, false -> "the left operand carries"
+                    | _ -> "the right operand carries"
+                Error (GramCompactOperand side)
             else
                 // Extents: outer (m / p) and inner contracted (n) per operand.
                 let lOuter = lTy.IndexTypes.[0].Extent
