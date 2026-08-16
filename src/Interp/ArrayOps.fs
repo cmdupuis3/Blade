@@ -1707,6 +1707,35 @@ let buildGroupKeys (keyArrays: BladeArray list) (gkCase: GroupKeyCase) : GroupKe
             fill.[g] <- fill.[g] + 1
     { Offsets = offsets; Members = perm }
 
+/// group_bucket(gk): invert the CSR pair into a dense row -> bucket map over the
+/// source index space (genGroupBucketBinding). Rows the permutation never names
+/// are exactly the rows a negative key dropped, so the -1 prefill IS the drop
+/// marker -- no key rescan, and no dependence on the bucketing regime.
+///
+/// The source length is `Members.Length`: buildGroupKeys sizes `perm` at the full
+/// input length and merely under-fills it when rows drop, which is the same
+/// invariant the emitted C++ carries in `<gk>__nsrc`.
+let buildGroupBucket (idxTys: IRIndexType list) (gk: GroupKeysValue) : BladeArray =
+    let n = gk.Members.Length
+    let bucket = Array.create n -1L
+    for g in 0 .. gk.Offsets.Length - 2 do
+        for p in int gk.Offsets.[g] .. int gk.Offsets.[g + 1] - 1 do
+            bucket.[int gk.Members.[p]] <- int64 g
+    { ElemType = IRTScalar ETInt64
+      IndexTypes = idxTys
+      Extents = [| int64 n |]
+      Data = SInt bucket }
+
+/// extents(gk): per-group sizes from the CSR row pointers, no gather
+/// (genGroupSizesBinding). The same arithmetic the ragged peel reads each row's
+/// length from, so this and an extents-only peel agree by construction.
+let buildGroupSizes (idxTys: IRIndexType list) (gk: GroupKeysValue) : BladeArray =
+    let ngroups = gk.Offsets.Length - 1
+    { ElemType = IRTScalar ETInt64
+      IndexTypes = idxTys
+      Extents = [| int64 ngroups |]
+      Data = SInt (Array.init ngroups (fun g -> gk.Offsets.[g + 1] - gk.Offsets.[g])) }
+
 /// group_by(vals, gk): gather each group's values (`vals[perm[offsets[g]+k]]`,
 /// input order) into a ragged rank-2 array (genGroupByBinding, CodeGen.fs:8767).
 /// Extents = [ngroups; 0] -- the inner is ragged, print-bound 0 (auto-print -> []).

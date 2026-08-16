@@ -347,6 +347,12 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // std::function/partial-application residue. Pure codegen string checks
     // — no toolchain — so it runs unconditionally.
     let factoryFlat = Blade.Tests.Functions.runFactoryFlattenTests ()
+    // Gather elision: a group_by whose every consumer reads only extents(row)
+    // skips the per-group allocation and the O(n) copy. The corpus pins the
+    // values on both sides of that decision; only an emission-shape check can
+    // see the decision, since eliding and gathering print the same numbers.
+    // Pure codegen string checks — no toolchain — so it runs unconditionally.
+    let gatherElision = Blade.Tests.Sqlish.runGatherElisionTests ()
     // Eigensolver dispatch (Phase 6 / Round B2): verifies `math.eigh` reaches
     // `blade_lapack::blade_eigh_*` gate-on (right precision AND right symmetry
     // family), that a complex operand's tuple is Q-complex/LAM-REAL, that the
@@ -461,7 +467,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield lapackEmit; yield shapeSpec; yield moduleResolve
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield gatherElision; yield lapackEmit; yield shapeSpec; yield moduleResolve
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

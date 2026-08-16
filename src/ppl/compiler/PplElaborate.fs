@@ -4008,6 +4008,7 @@ let rec private stripQualified (aliases: Set<string>) (e: Expr) : Expr =
     | ExprKind.ExprStack es -> inheritSpan e (ExprStack (List.map r es))
     | ExprKind.ExprSequence es -> inheritSpan e (ExprSequence (List.map r es))
     | ExprKind.ExprGroupKeys es -> inheritSpan e (ExprGroupKeys (List.map r es))
+    | ExprKind.ExprGroupBucket g -> inheritSpan e (ExprGroupBucket (r g))
     | ExprKind.ExprAlign (es, spec) -> inheritSpan e (ExprAlign (List.map r es, spec))
     | ExprKind.ExprJoin (es, d) -> inheritSpan e (ExprJoin (List.map r es, d))
     | ExprKind.ExprTupleIndex (t, i) -> inheritSpan e (ExprTupleIndex (r t, r i))

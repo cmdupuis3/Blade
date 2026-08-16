@@ -1,0 +1,13 @@
+// TEST: Group Bucket Non Grouping Argument (rejects)
+// ERROR: BL3007
+// ERROR-CONTAINS: is not one
+// The argument is a bare name, which is the right SHAPE, but it names an
+// ordinary array rather than a group_keys binding. Passing the key array where
+// the grouping belongs is the natural slip -- the two read alike at the call
+// site -- so the refusal names the binding and says what to write instead.
+//
+// The companion refusal (a non-name argument) is 042; a grouping escaping its
+// binding in any other position is BL3017, pinned by 035-039.
+let keys = [0, 1, 0, 1]
+let b = group_bucket(keys)
+// `keys` is the key ARRAY; group_bucket wants the grouping built from it.

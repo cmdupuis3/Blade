@@ -761,6 +761,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprGroupKeys keys ->
         IRGroupKeys (keys |> List.map (lowerTypedExpr env))
+
+    | TExprGroupBucket grouping ->
+        IRGroupBucket (lowerTypedExpr env grouping)
     
     | TExprSort (array, key) ->
         IRSort (lowerTypedExpr env array, lowerTypedExpr env key)
@@ -812,6 +815,10 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // IRExtent (arr, i) for i in 0..N-1.
         let arr' = lowerTypedExpr env array
         match array.Type with
+        // extents(gk): the grouping's per-group sizes. Not an IRExtent at all --
+        // the answer is an ARRAY (one length per group), read straight off the
+        // CSR offsets with no values gathered.
+        | IRTGroupKeys _ -> IRGroupSizes arr'
         | ArrayElem arrTy when arrTy.IndexTypes.Length = 1 ->
             IRExtent (arr', 0)
         | ArrayElem arrTy ->

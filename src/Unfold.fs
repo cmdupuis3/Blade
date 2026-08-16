@@ -103,6 +103,7 @@ let rec mapExprPre (f: Expr -> Expr option) (e: Expr) : Expr =
         | ExprKind.ExprContains (a, v) -> re (ExprContains (g a, g v))
         | ExprKind.ExprGroupBy (v, gk) -> re (ExprGroupBy (g v, g gk))
         | ExprKind.ExprGroupKeys ks -> re (ExprGroupKeys (List.map g ks))
+        | ExprKind.ExprGroupBucket gk -> re (ExprGroupBucket (g gk))
         | ExprKind.ExprSort (a, k) -> re (ExprSort (g a, g k))
         | ExprKind.ExprReduce (a, k, init, ax) -> re (ExprReduce (g a, g k, Option.map g init, ax))
         | ExprKind.ExprTranspose (a, d1, d2) -> re (ExprTranspose (g a, d1, d2))
