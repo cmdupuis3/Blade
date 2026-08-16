@@ -821,12 +821,67 @@ test on the data.
    "sort by another array's order" form; the plausible route is sorting
    `zip(A, Ȧ)` under a key reading only the value half, which is **unverified**
    (no corpus pin) → DESIGN.
-3. **REV.** The adjoint is a scatter back through the grouping, and there is **no
-   ungroup surface** and no `<|:>`-analogue for `RaggedIdx`. → **BLOCKED at
-   Tier-2**; Tier-1, with ragged storage in the lane as the real difficulty.
-4. **Machinery.** `gk` hoisting to a named binding; ragged lane support.
-5. FWD `group_by` **MECHANICAL**, `sort` **DESIGN**; REV **BLOCKED at Tier-2**.
+3. **REV.** ~~The adjoint is a scatter back through the grouping, and there is
+   **no ungroup surface**~~ — **OVERSTATED; corrected 2026-08-16, probe-verified
+   (see 2.17a).** An ungroup exists today as an ordinary gather.
+4. **Machinery.** `gk` hoisting to a named binding; see 2.17a for the rest.
+5. FWD `group_by` **MECHANICAL** (confirmed against finite differences),
+   `sort` **DESIGN**; REV **MECHANICAL for factorable kernels**, gated on one
+   small compiler addition; **BLOCKED** for non-factorable ones.
 6. **Storage.** RaggedIdx; no comm.
+
+### 2.17a Reverse-mode `group_by`, corrected — carry the grouping, don't invert it
+
+The user's framing ("carry the grouping through as data rather than needing an
+inverse") is right, though not by the mechanism first proposed.
+
+**What does NOT work: `GroupKeys` as a value.** It is an opaque runtime CSR
+structure (`Types.fs:789`, `IR.fs:1139`) emitted as `void*` (`CodeGen.fs:1376`)
+whose entire state lives in *name-keyed C++ locals* — `<name>__ngroups`,
+`<name>__offsets`, `<name>__perm` (`CodeGen.fs:14710-14715`) — and same-`gk`
+co-iteration is discharged by NAME IDENTITY on the expression
+(`TypeCheck.fs:14797-14814`), not by type. So returning `gk` in a tuple, passing
+it as a parameter, or even `let gk2 = gk` all fail; the last three are **silent
+miscompiles** (raw g++ "undeclared symbol", not Blade diagnostics). Making this
+work means making `GroupKeys` a first-class runtime value — a language change.
+Corollary: the spec's "reuse the `gk` binding by name" is not a convenience, it
+is **mandatory**.
+
+**What DOES work: group the ROW INDICES by the same `gk`.** `group_by(rows, gk)`
+over an `Int64` index array gives the permutation as ordinary data, `zip(gv, gr)`
+co-iterates values with their source rows in one kernel, and a grouped array
+reads at a computed `(bucket, rank)`. Probe: `method_for(zip(bi, ki)) <@>
+lambda(b,k) -> gv(b,k)` reproduces `v` exactly. **That is the ungroup** — an
+ordinary gather, no new primitive.
+
+**The composite reverse rule** (never "adjoint of `group_by` alone" — grouped
+*outputs* have no consumers, `CodeGen.fs:11993`), for
+`out = method_for(group_by(v, gk)) <@> λr. K(r)`:
+
+```
+v̄(i) += ō(b(i)) · (∂K/∂r_k)(row b(i))   at k = rank(i);   0 when b(i) < 0
+```
+
+- **Factorable K** (sum, mean, count, product, max, logsumexp — any K whose
+  member partial is `φ(vᵢ, A_{b(i)})` for per-group aggregates `A` a forward
+  peel can produce): `v̄` is a **dense gather through `b`**, which is exactly
+  `ad/012`'s shape whose scatter adjoint already ships. **No ragged cotangent
+  storage, no new adjoint machinery** — the difficulty the old verdict named is
+  avoided rather than solved. Verified: a hand-written `Σ_g c_g·mean(group g)`
+  matches finite differences to 1.7e-9, and the same pipeline with the grouping
+  made explicit differentiates **today** through the existing lane, agreeing
+  with the rule to the last digit.
+- **Non-factorable K**: needs a row at a computed outer index, which emits a
+  bare `double*` with no length outside module-level literal rows. Honest
+  refusal.
+
+**What actually blocks it**, replacing "no ungroup surface": (1) no surface
+accessor for the CSR arrays — a `group_bucket(gk) : Array<Int64 like SourceIdx>`
+is one TypeCheck arm plus one CodeGen arm inverting perm/offsets in a single
+pass (`-1` for negative-key-dropped rows); (2) the AD transform has no
+combinator rules at all yet — `group_by` is not specially blocked, it is behind
+the whole C-track (a plain dense map hits the same refusal); (3) grouped and
+dense operands cannot co-iterate in one peel (BL7004) — two passes, harmless.
 
 ### 2.18 `>>=` and `<$>`
 
