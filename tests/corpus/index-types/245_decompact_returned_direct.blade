@@ -1,0 +1,33 @@
+// TEST: Decompact Returned Direct
+// ----------------------------------------------------------------------------
+// A decompact as a function's whole answer, with NO intervening let -- the one
+// decompact position 243 does not reach. 243 binds the decompact to a body let
+// and returns the resulting IRVar, which the ordinary return path already
+// handled once the form's extents table outlived the frame (commit 7905b36).
+// Written DIRECTLY in return position, the same node had no arm in the return
+// dispatch, fell to the inline renderer, and raised BL7001 ("no rule for
+// IRDecompact in expression position").
+//
+// It now takes the unified statement-shaped return arm, which mints a __retN,
+// emits the form through genDecompactBinding, and spares the pool from the
+// scope's frees by name -- character for character what the four hand-written
+// arms it replaced were doing.
+//
+// The shape is discriminating on purpose: triangular SymIdx<2,3> storage (6
+// stored cells) expands to a dense 3x3 (9 cells), so the result's extents
+// describe a LARGER array than the source's and a dangling table cannot read
+// as the right shape by accident.
+// ----------------------------------------------------------------------------
+type C = Idx<3>
+
+function make_d(x: Array<Float64 like C>) -> Array<Float64 like C, C> = {
+    let L = method_for(x, x)
+    let g = lambda(p, q) where comm(p, q) -> 2.0 * p + q
+    let sym = L <@> reynolds(g) |> compute
+    decompact(sym, 0)
+}
+
+let v: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let d1 = make_d(v)
+// reynolds(2p+q) = 3(p+q); the dense 3x3 is [[6,9,12],[9,12,15],[12,15,18]].
+// EXPECT: d1 = [6.0, 9.0, 12.0, 9.0, 12.0, 15.0, 12.0, 15.0, 18.0]

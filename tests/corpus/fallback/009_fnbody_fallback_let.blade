@@ -1,0 +1,31 @@
+// TEST: Fnbody Fallback Let
+// ----------------------------------------------------------------------------
+// `<|:>` bound to a let INSIDE A FUNCTION BODY. This raised BL7004 ("<|:> in
+// expression position -- it combines whole arrays; bind it and materialize with
+// |> compute"), which was advice the program had already taken: the fallback WAS
+// bound to a let. The refusal came from exprToCppCore because the body-let fold
+// had no arm for IRFallback and dropped it into the inline renderer.
+//
+// The routing is now the unified statement-shaped arm, and the FORCED spelling
+// is what makes it legal: genFallbackBinding DEFERS when a bare IRFallback is
+// bound (comment + DeferredComputations entry), which is right at module level
+// where a later `|> compute` reaches genComputeBinding, and wrong in a body,
+// where nothing would ever declare the name. Wrapping in IRCompute routes
+// straight to genFallbackMaterialize.
+//
+// Values are the storage-keyed semantics of fallback/001: A is a
+// compiler-built dense array, so every cell is ALLOCATED and A <|:> B is A
+// verbatim -- the zeros survive rather than falling through to B.
+// ----------------------------------------------------------------------------
+type SIdx = Idx<4>
+
+function fb_sum(x: Array<Float64 like SIdx>, y: Array<Float64 like SIdx>) -> Float64 = {
+    let c = x <|:> y
+    reduce(c, (+))
+}
+
+let A: Array<Float64 like SIdx> = [1.0, 0.0, 3.0, 0.0]
+let B: Array<Float64 like SIdx> = [9.0, 8.0, 7.0, 6.0]
+let s = fb_sum(A, B)
+// A <|:> B = [1, 0, 3, 0] (all of A's cells are allocated), so the fold is 4.
+// EXPECT: s = 4.0
