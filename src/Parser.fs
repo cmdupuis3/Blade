@@ -2424,6 +2424,15 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokRParen afterKeys >>= fun _ remaining ->
         success (mkE tokens remaining (ExprGroupKeys keys)) remaining
 
+    // group_bucket(gk): expose the grouping's row -> bucket map as data. One
+    // argument; the "must be a bare name" rule is a TYPECHECK refusal, not a
+    // parse one, so the diagnostic can explain why (gk is not a value).
+    | Some (TokKeyword KwGroupBucket) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun gk afterGk ->
+        expect TokRParen afterGk >>= fun _ remaining ->
+        success (mkE tokens remaining (ExprGroupBucket gk)) remaining
+
     | Some (TokKeyword KwSort) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         parseExprImpl afterLParen >>= fun array afterArr ->

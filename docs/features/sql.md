@@ -256,6 +256,50 @@ Tests: `sql-group-by` cases "Idx Annotated", "Enum First/String",
 "Sparse Keys Dynamic", "Compound Two Keys First/Reduce",
 "Negative Key Excluded".
 
+### A grouping is not a value
+
+`gk` names a **binding**, not a value you can move around. The CSR structure
+lives in locals suffixed onto that name, and same-grouping co-iteration is
+discharged on the name rather than on the type, so re-binding it (`let gk2 =
+gk`), packing it into a tuple, or building one inline all fail — refused at
+typecheck with BL3007 rather than left to become a g++ error. Every consumer
+(`group_by`, `group_bucket`) takes the grouping by name.
+
+To move the **partition itself** around as data, use `group_bucket`.
+
+## 7a. `group_bucket(gk)` — the row → bucket map
+
+```blade
+group_bucket : GroupKeys<I> -> Array<Int64 like I>
+```
+
+For each row of the grouped source, which bucket it landed in; **-1** for a row
+a negative key dropped. It is the inverse of the CSR (perm, offsets) pair, which
+is otherwise reachable only from inside a ragged peel, and it spans the *source*
+index space — so it co-iterates with the array that was grouped:
+
+```blade
+let gk = group_keys(region)
+let b  = group_bucket(gk)                       // Array<Int64 like StationIdx>
+let kept = (method_for(zip(b, temps)) <@> lambda(bb, t) -> if bb >= 0 then t else 0.0) |> compute
+```
+
+The argument must be the bare `gk` name (see above). The answer is the same for
+every bucketing regime — positional, `EnumIdx`, dynamic discovery, compound —
+because it inverts the tables rather than re-reading the keys; the -1 prefill is
+the drop marker, since a dropped row is exactly one the permutation never names.
+
+With the within-group rank, this is the **ungroup**: `gv(bucket(i), rank(i))`
+recovers the original value at row `i` by ordinary gather. That is what lets a
+per-group aggregation be re-expressed as a dense gather through `bucket`, the
+shape reverse-mode AD needs through `group_by`
+(`docs/plan-ad-combinators.md` §2.17a). A surface accessor for `rank` does not
+exist yet.
+
+Tests: `sql-group-by` cases "Group Bucket Roundtrip", "Group Bucket Negative
+Key", and the four refusals "Group Bucket Inline Argument", "Group Bucket Non
+Grouping Argument", "Group Keys Alias", "Group Keys In Tuple".
+
 ## 8. `group_by(values, gk)` — ragged grouped view
 
 ```blade

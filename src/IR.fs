@@ -119,6 +119,7 @@ type IRExpr =
     | IRDisplayStr of data: IRExpr
     | IRGroupBy of values: IRExpr * grouping: IRExpr  // group_by(vals, gk) - apply grouping
     | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key => compound dispatch
+    | IRGroupBucket of grouping: IRExpr              // group_bucket(gk) - row -> bucket over the source index space, -1 for dropped rows
     | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
     | IRReduce of array: IRExpr * kernel: IRExpr * init: IRExpr option  // reduce(arr, op[, init]) - fold innermost dim; init seeds the fold and defines the empty result
     // reduce(deferred, op[, init]): the FUSED reduction terminal -- folds a
@@ -3848,6 +3849,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRDisplayNum d -> [d], (function [d'] -> IRDisplayNum d' | _ -> badChildren "IRDisplayNum")
     | IRDisplayStr d -> [d], (function [d'] -> IRDisplayStr d' | _ -> badChildren "IRDisplayStr")
     | IRGroupBy (v, k) -> [v; k], (function [v'; k'] -> IRGroupBy (v', k') | _ -> badChildren "IRGroupBy")
+    | IRGroupBucket gk -> [gk], (function [gk'] -> IRGroupBucket gk' | _ -> badChildren "IRGroupBucket")
     | IRSort (a, k) -> [a; k], (function [a'; k'] -> IRSort (a', k') | _ -> badChildren "IRSort")
     | IRReduce (a, k, None) -> [a; k], (function [a'; k'] -> IRReduce (a', k', None) | _ -> badChildren "IRReduce")
     | IRReduce (a, k, Some i) -> [a; k; i], (function [a'; k'; i'] -> IRReduce (a', k', Some i') | _ -> badChildren "IRReduce")
@@ -6119,6 +6121,14 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
              // that was previously satisfied stays satisfied.
              valsTy)
     | IRGroupKeys _ -> IRTUnit  // GroupKeys is an opaque structure, not a runtime value with a simple type
+    | IRGroupBucket gk ->
+        // Rank-1 Int64 over the grouping's SOURCE index space -- the same slot
+        // the key array was indexed by, so `bucket` co-iterates with the values
+        // it partitions. Reconstructed here for the same reason IRGroupBy is:
+        // a lifted node consulted without its binding's Type field.
+        (match typeOf gk with
+         | IRTGroupKeys (_, sourceIdx, _) -> mkArrayArrow [sourceIdx] (IRTScalar ETInt64) None
+         | _ -> IRTScalar ETInt64)
     | IRTranspose (arr, d1, d2) ->
         // Swap the two index slots. (TypeCheck has already verified both axes
         // are arity-1 SymNone, so dim index == slot index here.)
@@ -6357,7 +6367,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
 let isInlineForm (e: IRExpr) : bool =
     match e with
     | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
-    | IRGroupBy _ | IRGroupKeys _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
+    | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
     | IRReduceCompute _ | IRMatmul _ | IREigh _ | IRSolve _ -> true
     | IRCompute (IRApplyCombinator _) -> true
     | _ -> false
@@ -6654,6 +6664,9 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         wrapLets binds (IRUnique aFinal)
     | IRGroupBy (v, k) -> IRGroupBy (liftExpr builder v, liftExpr builder k)
     | IRGroupKeys ks -> IRGroupKeys (List.map (liftExpr builder) ks)
+    // The gk operand is a bare name by construction (inferGroupBucket refuses
+    // anything else), so there is nothing to lift out of it.
+    | IRGroupBucket gk -> IRGroupBucket (liftExpr builder gk)
 
     // Contains returns a scalar Bool -- its array argument may be an inline
     // form that needs lifting (so codegen can read .extents off a named binding).

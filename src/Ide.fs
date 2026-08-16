@@ -746,6 +746,7 @@ let private builtinCallOf (te: TypedExpr) : (string * TypedExpr list) option =
     | TExprDisplayEmit (_, _, d, _) -> Some ("display.emit", [d])
     | TExprGroupBy (v, g) -> Some ("group_by", [v; g])
     | TExprGroupKeys ks -> Some ("group_keys", ks)
+    | TExprGroupBucket gk -> Some ("group_bucket", [gk])
     | TExprTranspose (a, _, _) -> Some ("transpose", [a])
     | TExprDecompact (a, _) -> Some ("decompact", [a])
     | TExprGram (l, r, _) -> Some ("gram", [l; r])

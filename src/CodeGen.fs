@@ -12532,7 +12532,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 preCode <- preCode @ code
                 tempCtx <- addVarName tmpId tmpName tempCtx
                 (tmpName, IRVar (tmpId, tmpType))
-            | IRSort _ | IRGroupKeys _ | IRGroupBy _ ->
+            | IRSort _ | IRGroupKeys _ | IRGroupBy _ | IRGroupBucket _ ->
                 // Per design decision: these operations require let-binding.
                 // Auto-materializing them inline would require duplicating their
                 // codegen here (mask/intersect/union do it because they predate
@@ -12543,6 +12543,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     | IRSort _ -> "sort"
                     | IRGroupKeys _ -> "group_keys"
                     | IRGroupBy _ -> "group_by"
+                    | IRGroupBucket _ -> "group_bucket"
                     | _ -> "?"
                 let errCode = codegenError ctx ind (sprintf "'%s' must be let-bound before use in method_for; e.g. let s = %s(...) then method_for(s)" opName opName)
                 preCode <- preCode @ errCode
@@ -14462,6 +14463,8 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genGroupKeysBinding ctx binding builder keys
     | IRGroupBy (vals, gk) ->
         genGroupByBinding ctx binding builder vals gk
+    | IRGroupBucket gk ->
+        genGroupBucketBinding ctx binding builder gk
     | IRSort (arrExpr, keyExpr) ->
         genSortBinding ctx binding builder arrExpr keyExpr
     | IRTranspose (arrExpr, d1, d2) ->
@@ -14726,9 +14729,16 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     // C++ ABI, all three cases (consumed by IRGroupBy codegen and method_for
     // ragged-peel paths below): `<name>__ngroups` (size_t, group count),
     // `<name>__offsets` (CSR, length ngroups+1), `<name>__perm` (permutation,
-    // length input), plus case-specific transients not consumed elsewhere.
+    // length input), `<name>__nsrc` (source row count = the allocated length of
+    // __perm), plus case-specific transients not consumed elsewhere.
     // `<name>` itself is a void* sentinel -- state lives in these suffixed
     // symbols, read by name downstream.
+    //
+    // __perm is allocated at __nsrc but only FILLED to offsets[ngroups]: a row
+    // whose key was negative is dropped (negativeKeyDrop) and never named. So
+    // __nsrc is not recoverable from the CSR pair, and genGroupBucketBinding --
+    // which must answer for every source row, dropped ones included -- needs it
+    // carried explicitly.
     //
     // Compound (multi-key) mode (`keys` length >1): dispatch becomes an
     // unordered_map<std::tuple<...>, size_t> keyed by component tuple, each
@@ -14796,6 +14806,7 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                     [ sprintf "%s    size_t __g = %s__lookup[__k];" ind name
                       sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
                       sprintf "%s}" ind
+                      sprintf "%ssize_t %s__nsrc = %s; // source rows (>= offsets[ngroups]; negative keys drop)" ind name keysBound
                       sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
                       sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm" ind name name name name ]
                 ]
@@ -14823,6 +14834,7 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                     [ sprintf "%s    size_t __g = (size_t)__k;" ind
                       sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
                       sprintf "%s}" ind
+                      sprintf "%ssize_t %s__nsrc = %s; // source rows (>= offsets[ngroups]; negative keys drop)" ind name keysBound
                       sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
                       sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm" ind name name name name ]
                 ]
@@ -14876,6 +14888,7 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                     sprintf "%s    size_t __g = %s__bucket(%s);" ind name (keysAt "__ki")
                     sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
                     sprintf "%s}" ind
+                    sprintf "%ssize_t %s__nsrc = %s; // source rows (EnumIdx keys never drop, so == offsets[ngroups])" ind name keysBound
                     sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
                     sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm" ind name name name name
                 ]
@@ -14958,6 +14971,7 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
             [ sprintf "%s    size_t __g = %s__lookup[%s];" ind name (makeTupleAt "__ki")
               sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
               sprintf "%s}" ind
+              sprintf "%ssize_t %s__nsrc = %s; // source rows (>= offsets[ngroups]; negative components drop)" ind name outerExtent
               sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
               sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm (compound)" ind name name name name ]
         ]
@@ -16333,6 +16347,44 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     let ctx' = addVarName binding.Id name ctx
     let ctx' = { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays }
     (forceCode @ code, ctx')
+
+
+
+and genGroupBucketBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (gk: IRExpr) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let gkName = exprToCppCtx ctx gk
+    // group_bucket(gk): invert the CSR (perm, offsets) pair into a dense
+    // row -> bucket map over the SOURCE index space. One pass over the members:
+    //
+    //   for g in [0, ngroups): for p in [offsets[g], offsets[g+1]): b[perm[p]] = g
+    //
+    // Rows the permutation never names are exactly the rows a negative key
+    // dropped (docs/features/sql.md), so the -1 prefill IS the drop marker --
+    // no separate key rescan, and no dependence on which of the three bucketing
+    // regimes built the table.
+    //
+    // Total work is offsets[ngroups] + nsrc, and the writes are a permutation
+    // (each row written at most once), so no scatter conflict to serialize.
+    //
+    // gk is a bare name by construction (inferGroupBucket refuses anything
+    // else), which is what makes the `<gk>__` suffixed reads below resolvable.
+    let elemStr = "int64_t"
+    let (extentsDecl, ownedExtents) =
+        emitExtentsTable ind (name + "_extents") 1 [(sprintf "%s__nsrc" gkName, false)]
+    let code =
+        [ sprintf "%s// group_bucket: invert gk's perm/offsets into row -> bucket (-1 = dropped row)" ind ]
+        @ extentsDecl
+        @ [ sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemStr name elemStr name name
+            sprintf "%sfor (size_t __i = 0; __i < %s__nsrc; __i++) %s[__i] = -1;" ind gkName name
+            sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
+            sprintf "%s    for (size_t __p = %s__offsets[__g]; __p < %s__offsets[__g + 1]; __p++) {" ind gkName gkName
+            sprintf "%s        %s[%s__perm[__p]] = (%s)__g;" ind name gkName elemStr
+            sprintf "%s    }" ind
+            sprintf "%s}" ind ]
+    registerPoolAlloc AllocDense elemStr 1 "nullptr" (name + "_extents") name ownedExtents
+    let ctx' = addVarName binding.Id name ctx
+    (code, ctx')
 
 
 

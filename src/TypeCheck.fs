@@ -1666,6 +1666,7 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | ExprKind.ExprContains (a, v) -> Set.union (collectFreeVars bound a) (collectFreeVars bound v)
     | ExprKind.ExprGroupBy (v, k) -> Set.union (collectFreeVars bound v) (collectFreeVars bound k)
     | ExprKind.ExprGroupKeys ks -> ks |> List.map (collectFreeVars bound) |> Set.unionMany
+    | ExprKind.ExprGroupBucket gk -> collectFreeVars bound gk
     | ExprKind.ExprSort (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
     | ExprKind.ExprReduce (a, k, i, _) ->
         let baseVars = Set.union (collectFreeVars bound a) (collectFreeVars bound k)
@@ -3854,6 +3855,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprDisplayNum d -> [d]
         | TExprDisplayStr d -> [d]
         | TExprGroupKeys keys -> keys
+        | TExprGroupBucket gk -> [gk]
         | TExprStruct (_, fields) -> fields |> List.map snd
         | TExprIndex (arr, idxs, _) -> arr :: idxs
         | TExprBlock (stmts, final) ->
@@ -5667,6 +5669,9 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // ---- Tuple ----
     | ExprKind.ExprTuple exprs ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
+            // A grouping packed into a tuple is caught by the BL3017 sweep
+            // (collectGroupKeysEscapes' TExprTuple arm), together with every
+            // other escape position -- nothing to check here.
             Ok (mkTyped (TExprTuple tExprs) (IRTTuple (tExprs |> List.map (fun e -> e.Type)))))
 
     // ---- Array literal ----
@@ -5978,6 +5983,8 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferGroupKeys env keys
     | ExprKind.ExprGroupBy (values, grouping) ->
         inferGroupBy env values grouping
+    | ExprKind.ExprGroupBucket grouping ->
+        inferGroupBucket env grouping
     | ExprKind.ExprSort (array, key) ->
         inferExpr env array |> Result.bind (fun tArr ->
         inferExpr env key |> Result.bind (fun tKey ->
@@ -8233,6 +8240,51 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
                 let gkType = IRTGroupKeys (outerIdx, firstSource, None)
                 let tKeys = pairs |> List.map fst
                 Ok (mkTyped (TExprGroupKeys tKeys) gkType))
+
+
+// group_bucket(gk) -- the grouping's row -> bucket map, as ordinary data.
+//
+// Result: Array<Int64 like SourceIdx>, over the SAME index slot the key array
+// carried, so `bucket` co-iterates with the values that were grouped. A row a
+// negative key dropped (docs/features/sql.md, "Negative keys select rows out")
+// reads -1; it appears in no bucket, and the CSR permutation never names it.
+//
+// This is the inverse of the (perm, offsets) pair, which is otherwise reachable
+// only from inside a ragged peel. It is what lets a per-group aggregation be
+// re-expressed as a dense gather through `bucket` -- the shape reverse-mode AD
+// needs (docs/plan-ad-combinators.md 2.17a).
+//
+// The argument MUST be a bare name. A grouping is not a first-class value: the
+// whole runtime structure lives in C++ locals named after the binding
+// (`<gk>__ngroups`, `<gk>__offsets`, `<gk>__perm` -- see the ABI comment in
+// genGroupKeysBinding), and same-`gk` co-iteration is discharged on expression
+// name identity, not on the type. So `let gk2 = gk`, passing a gk as a
+// parameter, or an inline `group_bucket(group_keys(k))` have no emittable
+// name to suffix. Refuse them HERE, with an explanation, rather than emitting
+// C++ that names an undeclared symbol.
+and inferGroupBucket (env: TypeEnv) (grouping: Expr) : TypeResult<TypedExpr> =
+    let describe (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprGroupKeys _ -> "an inline `group_keys(...)` call"
+        | ExprKind.ExprApp _ -> "a call/index expression"
+        | ExprKind.ExprTupleIndex _ -> "a tuple element"
+        | ExprKind.ExprTuple _ -> "a tuple"
+        | _ -> "a non-name expression"
+    match grouping.Kind with
+    | ExprKind.ExprVar _ ->
+        inferExpr env grouping |> Result.bind (fun tGk ->
+            match env.Subst.Resolve(tGk.Type) with
+            | IRTGroupKeys (_, sourceIdx, _) ->
+                // Reuse the source slot verbatim (same Id, tag and extent):
+                // the bucket map spans exactly the rows the keys did, so it is
+                // the SAME index space, not a fresh one -- which is what makes
+                // `zip(v, group_bucket(gk))` typecheck.
+                let resultType = mkArrayArrow [sourceIdx] (IRTScalar ETInt64) None
+                Ok (mkTyped (TExprGroupBucket tGk) resultType)
+            | _ ->
+                let name = match grouping.Kind with ExprKind.ExprVar n -> n | _ -> "?"
+                Error (GroupBucketNotGrouping name))
+    | _ -> Error (GroupBucketNeedsName (describe grouping))
 
 // group_by(values, grouping) -- apply GroupKeys to a values array
 // Result: rank-2 array (groups x members), with GroupIdx
@@ -13775,6 +13827,8 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
             Error (Other
                 "wildcard `_` is not a value: it can only appear as a compound-index coordinate (e.g. B((a, _, c))), not bound in a let. A tuple carrying a hole like (a, _, c) has no meaning on its own.")
         else Ok tv
+    // (An aliased grouping -- `let gk2 = gk` -- is the BL3017 sweep's job:
+    // groupKeysLetRhs blesses a let RHS only when it IS the group_keys call.)
     match binding.Type with
     | Some annot ->
         let annotTy = lowerTypeExpr env annot
@@ -17783,6 +17837,17 @@ let rec private collectGroupKeysEscapes (subst: Subst) (pos: string option) (exp
                 | TExprVar _ -> None
                 | _ -> Some "inline as `group_by`'s grouping argument"
             [ (Some elsewhere, values); (gkPos, gk) ]
+        // The grouping ACCESSORS are blessed slots too, on the same terms as
+        // group_by's: they read the CSR tables through the binding name, so a
+        // bare name is fine and anything else has no locals to suffix off.
+        // Without these arms the default below would fire BL3017 on the very
+        // spellings these accessors exist to provide.
+        | TExprGroupBucket gk ->
+            let gkPos =
+                match gk.Kind with
+                | TExprVar _ -> None
+                | _ -> Some "inline as `group_bucket`'s argument"
+            [ (gkPos, gk) ]
         | TExprTuple es -> es |> List.map (fun e -> (Some "as a tuple element", e))
         | TExprArrayLit (elems, _) -> elems |> List.map (fun e -> (Some "as an array element", e))
         | TExprStruct (_, fields) -> fields |> List.map (fun (_, e) -> (Some "as a struct field", e))

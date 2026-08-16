@@ -748,6 +748,11 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRGroupBy _ ->
         evalArrayNode st env expr
 
+    // ---- group_bucket(gk) -> a dense rank-1 Int64 array over the source index
+    //      space. Same backend route as group_by: it reads the VGroupKeys.
+    | IRGroupBucket _ ->
+        evalArrayNode st env expr
+
     // ---- M2 dense array literal: materialize eagerly via ArrayOps (no nest, no
     //      backend needed). Elements evaluate left-to-right, then pack/nest.
     | IRArrayLit (elements, arrType) ->

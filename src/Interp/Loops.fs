@@ -1935,6 +1935,17 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let idxTys = match typeOf expr with ArrayElem at -> at.IndexTypes | _ -> []
         VArray (A.buildGroupBy idxTys gk vals)
 
+    // -- group_bucket(gk): the CSR pair inverted into a dense row -> bucket map
+    //    (genGroupBucketBinding). Same VGroupKeys operand as group_by; typecheck
+    //    has already refused anything but a bare gk name.
+    | IRGroupBucket gkExpr ->
+        let gk =
+            match Core.evalExpr st env gkExpr with
+            | VGroupKeys g -> g
+            | _ -> raise (InterpUnsupported "group_bucket: operand is not a group_keys value")
+        let idxTys = match typeOf expr with ArrayElem at -> at.IndexTypes | _ -> []
+        VArray (A.buildGroupBucket idxTys gk)
+
     // -- Virtual arrays (standalone materialization; usually consumed as inputs).
     | IRRange (idxTys, offset) -> materializeVirtual st env idxTys (VirtualRange offset)
     | IRVirtualReverse ix -> materializeVirtual st env [ ix ] VirtualReverse
