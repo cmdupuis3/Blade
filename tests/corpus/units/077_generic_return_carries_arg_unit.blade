@@ -1,0 +1,65 @@
+// TEST: Generic Return Carries Arg Unit
+// ============================================================================
+// A generic function's DEDUCED return used to reach the caller with no unit at
+// all. `T^1 -> T^0` shares ONE inference variable between the parameter's
+// element and the return, and direct application deliberately never unifies
+// parameters against arguments (that variable stays open so IR-phase
+// monomorphization can specialize per call site), so the substitution never
+// learned the caller's unit and every unit rule read a bare variable. The
+// unit-errors twins (019, 020, 021) pin the silent acceptances that closed.
+//
+// This is the ACCEPTING side, and it pins the part that makes the fix nontrivial:
+// the return unit is NOT the argument's unit. It is the argument's unit raised
+// to the exponent the BODY derives, probed once per declaration --
+//
+//     mean      sum / count            -> meters      (preserved)
+//     variance  centered^2, averaged   -> meters^2    (SQUARED)
+//     stddev    sqrt(variance)         -> meters      (halved back)
+//
+// A pass-through stamp would have turned the `area` ascription below into a
+// BL3006 on correct code, which is exactly why `mean` alone is not enough of a
+// test. `stddev` is pinned here too: its stdlib doc block carried a measured
+// UNIT WARNING saying it had no unit guarantee, and that warning described this
+// hole rather than anything about sqrt.
+//
+// The `Speed` line pins the NOMINAL layer surviving a pure pass-through. A
+// quantity is an identity, not a factor, so multiplicative composition drops it
+// -- but `mean` composes nothing, and mean-of-Speed is still a Speed.
+// ============================================================================
+from stats import mean
+from stats import variance
+from stats import stddev
+
+Unit meters
+Unit seconds
+Unit area = meters * meters
+Unit mps = meters / seconds
+
+let xs: Array<Float<meters> like Idx<4>> = [1.0, 2.0, 3.0, 6.0]
+let offset: Float<meters> = 1.0
+
+// Preserved: mean of a meters row is meters, and adds to a meters scalar.
+let m: Float<meters> = mean(xs)
+let shifted = m + offset
+
+// Squared: variance is meters^2, and only `area` accepts it.
+let v: Float<area> = variance(xs)
+
+// Halved back: sqrt of meters^2 is meters.
+let sd: Float<meters> = stddev(xs)
+
+// A locally declared generic, to show this is not a module-boundary effect.
+function total(row: T^1) -> T^0 = reduce(row, (+))
+let t: Float<meters> = total(xs)
+
+// The nominal quantity rides through a pure pass-through unchanged.
+type Speed = Float<mps>
+let vs: Array<Speed like Idx<3>> = [2.0, 4.0, 6.0]
+let vbar: Speed = mean(vs)
+
+// EXPECT: m = 3
+// EXPECT: shifted = 4
+// EXPECT: v = 3.5
+// EXPECT: sd = 1.87082869338697
+// EXPECT: t = 12
+// EXPECT: vbar = 4

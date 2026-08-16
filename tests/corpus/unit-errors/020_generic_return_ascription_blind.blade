@@ -1,0 +1,21 @@
+// TEST: Generic Return Ascription Blind (rejects)
+// ERROR: BL3006
+// The ascription twin of 019, and the one that proved WHERE the unit was lost.
+// `stddev` over a meters row measures meters, so an `area` ascription must
+// fail -- and it was accepted, while the SAME ascription on a direct element
+// read (`let bad: Float<area> = xs((0 : Idx<4>))`) correctly gave BL3006. The
+// ascription seam was therefore never at fault: it judged exactly what it was
+// handed, and what it was handed was an unannotated type.
+//
+// `stddev` specifically, because its stdlib doc block documented this as a
+// measured UNIT WARNING about `sqrt` -- annotating the result `meters` and
+// annotating it `meters^2` were both accepted on the same input. Neither is
+// about sqrt. `sqrt` halves even exponents perfectly well; the input to that
+// rule was simply blank, and with the body probed once per declaration the
+// halving now happens and `Float<meters>` is the one annotation that fits
+// (units/077 pins it).
+from stats import stddev
+Unit meters
+Unit area = meters * meters
+let xs: Array<Float<meters> like Idx<4>> = [1.0, 2.0, 3.0, 6.0]
+let bad: Float<area> = stddev(xs)
