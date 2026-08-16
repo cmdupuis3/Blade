@@ -1,0 +1,35 @@
+// TEST: Fnbody Stack Join Returned
+// ----------------------------------------------------------------------------
+// Return-extent ABI (see index-types/242) for the two assembly forms. Both
+// change the shape in a direction the operands cannot supply on their own:
+//   stack  adds a FRESH LEADING axis (rank r -> r+1), so the caller's shape read
+//          has an axis no source array has.
+//   join   sums the concatenated axis (3 + 3 -> 6), the one extents entry that
+//          is a runtime SUM rather than any single operand's extent -- which
+//          puts this form on the heap arm of the companion-extents rule where
+//          stack, with its literal leading count, can reach the static one.
+// A frame-local extents table made both wrappers describe garbage the moment
+// they crossed the return.
+// ----------------------------------------------------------------------------
+type C = Idx<3>
+type R = Idx<2>
+type J = Idx<6>
+
+function make_s(a: Array<Float64 like C>, b: Array<Float64 like C>) -> Array<Float64 like R, C> = {
+    let s = stack(a, b)
+    s
+}
+
+function make_j(a: Array<Float64 like C>, b: Array<Float64 like C>) -> Array<Float64 like J> = {
+    let j = join(a, b, 0)
+    j
+}
+
+let u: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let w: Array<Float64 like C> = [7.0, 8.0, 9.0]
+let s1 = make_s(u, w)
+let j1 = make_j(u, w)
+let j1n = extents(j1)
+// EXPECT: s1 = [1, 2, 3, 7, 8, 9]
+// EXPECT: j1 = [1, 2, 3, 7, 8, 9]
+// EXPECT: j1n = 6

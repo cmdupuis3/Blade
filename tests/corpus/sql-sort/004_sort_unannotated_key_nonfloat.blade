@@ -1,0 +1,23 @@
+// TEST: Sort Unannotated Key Over Non-Float Elements
+// Regression: the key extractor's UNANNOTATED param used to be typed in
+// isolation, so its fresh inference var reached zonking unbound and took the
+// Float64 default. The lifted key emitted as `double __lambda_N(double)` and
+// any body that used the element as an integer or an index died in g++ under
+// -Werror=float-conversion. sort() now unifies the key lambda's param with the
+// sorted array's element type, exactly as mask() does for its predicate.
+
+// Index-typed elements: the key body INDEXES another array with the element,
+// which needs a size_t-shaped param (`double` is a hard g++ error here).
+type N5 = Idx<5>
+let A = [30.0, 10.0, 50.0, 20.0, 40.0]
+let idxs = method_for(range<N5>) <@> lambda(i) -> i |> compute
+let perm = sort(idxs, lambda(i) -> A(i))
+// A ascending is 10@1, 20@3, 30@0, 40@4, 50@2
+// EXPECT: perm = [1, 3, 0, 4, 2]
+
+// Int64 elements: the key body uses integer arithmetic on the element, which
+// does not typecheck at all once the param has defaulted to Float64.
+let ns: Array<Int64 like Idx<5>> = [7, 2, 9, 4, 5]
+let by_mod = sort(ns, lambda(n) -> n % 4)
+// Keys are [3, 2, 1, 0, 1]; stable_sort keeps 9 ahead of 5 on the tied key 1.
+// EXPECT: by_mod = [4, 9, 5, 2, 7]

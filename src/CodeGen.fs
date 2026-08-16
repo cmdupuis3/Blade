@@ -342,21 +342,32 @@ let orbLevelArgs (levels: (int * bool) list) : string =
 /// builders live in the `exprToCppCore` rec group far above the allocation
 /// registry; `registerMaterializedAllocs` (below the registry) converts these
 /// into `TrackedAlloc`s.
+/// EVERY array-shaped case carries `OwnedExtents`, the name of a heap extents
+/// table this form allocated (`emitExtentsTable`'s second result), or `None`
+/// for the static-constexpr table that owns nothing. It rides ON the array's
+/// own descriptor rather than arriving as a separate raw-buffer entry because
+/// the two must be spared TOGETHER: `genFuncBodyScoped`'s return suppression is
+/// a whole-token match against the returned text, which sees `return g;` and
+/// therefore `g` -- never `g_extents`. A separately tracked table would be
+/// deleted out from under exactly the wrapper that just escaped, which is the
+/// dangling-shape bug in a new spelling.
 type MaterializedAlloc =
     /// `Array<Elem, Rank> Name = { allocate[_strict]<promote<Elem,Rank>::type,
-    /// Symm[, Strict]>(ext), ext }` -- freed by the mirrored deallocate routine.
-    /// Every such form declares its extents table as a STACK `size_t N_ext[R]`
-    /// (or a static constexpr), so no owned-extents `delete[]` accompanies it.
-    | MatPool of Name: string * Elem: string * Rank: int * Symm: string * Strict: string option
+    /// Symm[, Strict]>(ext), ext }` -- freed by the mirrored deallocate routine,
+    /// then the owned extents table (in that order: the deallocate READS
+    /// `Name.extents` to walk the skeleton).
+    | MatPool of
+        Name: string * Elem: string * Rank: int * Symm: string *
+        Strict: string option * OwnedExtents: string option
     /// A form that built its allocation through `emitAllocRhs` from a data-dependent
     /// AllocSpec (negate / conjugate / array-copy: same storage class as the SOURCE).
     /// Freed via `deallocArgsFor` with the identical spec/elem/rank/SYMM/extents-name.
     | MatPoolSpec of
         Name: string * Spec: AllocSpec * Elem: string * Rank: int *
-        Symm: string * ExtentsName: string
+        Symm: string * ExtentsName: string * OwnedExtents: string option
     /// `Array<Elem, 1> Name = { new Elem[n], ext }` -- the mask / sort / unique /
     /// union / intersect family's raw backing. Freed with `delete[] Name.data`.
-    | MatRawData of Name: string
+    | MatRawData of Name: string * OwnedExtents: string option
     /// A bare `T* Name = new T[n]` scratch buffer (sort's permutation table).
     /// Freed with `delete[] Name`.
     | MatRawBuf of Name: string
@@ -2455,6 +2466,67 @@ let private literalOrRuntimeExtentOfArray (arr: IRArrayType) (name: string) (dim
     | Some n -> sprintf "%d" n
     | None -> sprintf "%s.extents[%d]" name dim
 
+/// The same answer as `literalOrRuntimeExtentOfArray`, PAIRED with whether the
+/// rendered text is a literal -- the `(value, isLiteral)` shape
+/// `emitExtentsTable` consumes. The pairing has to come from the match that
+/// chose the text (see emitExtentsTable's note), so it lives here rather than
+/// at the extents sites, and `literalOrRuntimeExtentOfArray` above stays the
+/// value-only spelling for loop bounds.
+let private extentDimOfArray (arr: IRArrayType) (name: string) (dim: int) : string * bool =
+    match literalExtentOfArray arr dim with
+    | Some n -> (sprintf "%d" n, true)
+    | None -> (sprintf "%s.extents[%d]" name dim, false)
+
+/// THE shared companion-extents rule. Every emitter that materializes an
+/// `Array<T,R>` needs a table for its shape; this decides which of the two
+/// forms that table takes, and reports back whether the caller now OWNS it.
+///
+/// Default (any entry is a runtime read): a HEAP table. `Array<T,R>` stores
+/// only a POINTER to its extents, so a stack `size_t[R]` would make the
+/// wrapper non-returnable -- the pool outlives the frame but the extents
+/// pointer dangles, and a caller reading `c.extents[d]` gets garbage. Heap
+/// extents make the wrapper self-describing across a call boundary, at the
+/// cost of a `delete[]` the scope has to remember (`Some name`).
+///
+/// WHEN EVERY ENTRY IS LITERAL none of that management is needed: a
+/// `static constexpr const size_t[R]` table has STATIC storage duration, which
+/// satisfies the same constraint strictly more safely -- it outlives every
+/// wrapper naming it and every copy of that wrapper unconditionally, there is
+/// nothing to free, and nothing to get wrong if a frame is torn down early.
+/// It is the form the rectangular array-literal path already hands back across
+/// a function return, chosen there for exactly this reason. `allocate<>` and
+/// `deallocate<>` both take `const size_t extents[]` and `Array<T,R>::extents`
+/// is a `const size_t*`, so the array-to-pointer decay leaves the stored
+/// pointer identical in type and in every read (`NAME[d]` indexes an array the
+/// same way it indexed a pointer). Being constexpr, the static also costs no
+/// `__cxa_guard` even when the declaration sits inside a loop body.
+/// `None` is returned as the owned name, which is what suppresses the free.
+///
+/// A MIXED table keeps the heap: a constexpr initializer cannot name a runtime
+/// `.extents[]` read, and half-baking it would need two tables. RANK 0 keeps
+/// the heap too -- `new size_t[0]` is legal where `const size_t t[0]` is not.
+///
+/// `dims` pairs each entry's RENDERED value with whether it is a literal. That
+/// pairing is the caller's job precisely because the answer is structural: it
+/// must fall out of the same match that chose the text (an `IRLit` arm vs an
+/// `.extents[]` arm), never out of re-inspecting the rendered string.
+///
+/// DEFINED HERE, far above the allocation registry it used to sit beside,
+/// because `materializeInlineForm`'s builders are in the `exprToCppCore` rec
+/// group and every one of them needs this rule: their results are returned
+/// out of function bodies, which is exactly the case a frame-local table
+/// cannot survive.
+let emitExtentsTable (ind: string) (extentsName: string) (rank: int)
+                     (dims: (string * bool) list) : string list * string option =
+    if rank > 0 && dims |> List.forall snd then
+        ([ sprintf "%sstatic constexpr const size_t %s[%d] = { %s };"
+               ind extentsName rank (dims |> List.map fst |> String.concat ", ") ],
+         None)
+    else
+        ((sprintf "%ssize_t* %s = new size_t[%d];" ind extentsName rank)
+         :: (dims |> List.mapi (fun d (e, _) -> sprintf "%s%s[%d] = %s;" ind extentsName d e)),
+         Some extentsName)
+
 /// The word a dispatch marker comment leads with, for a route resolved by
 /// `LinAlgPatterns.resolveNodeRoute`. Names the BACKEND because that's the only
 /// place the choice is observable (host cblas / device cuBLAS / Blade's own
@@ -4163,11 +4235,18 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         | _ -> 1
     // A RaggedRow-typed source (mask over a peeled row param) carries its
     // length inline as .len; everything else reads .extents[0].
-    let srcBound =
+    let srcBoundDim =
         match inferExprType arrExpr with
-        | ArrayElem a when isRaggedRowType a -> sprintf "%s.len" arrName
-        | ArrayElem a -> literalOrRuntimeExtentOfArray a arrName 0
-        | _ -> sprintf "%s.extents[0]" arrName
+        | ArrayElem a when isRaggedRowType a -> (sprintf "%s.len" arrName, false)
+        | ArrayElem a -> extentDimOfArray a arrName 0
+        | _ -> (sprintf "%s.extents[0]" arrName, false)
+    let srcBound = fst srcBoundDim
+    // Companion extents table under the shared rule (emitExtentsTable): heap
+    // when the bound is a runtime read, static constexpr when the source's
+    // index record pinned it. NOT a frame-local `size_t[1]` -- this mask can be
+    // returned out of the function body that built it.
+    let (extentsDecl, ownedExtents) =
+        emitExtentsTable "" (sprintf "%s_extents" varName) 1 [srcBoundDim]
     if maskRank <> 1 then
         Some ([refusalErrorLine "" (sprintf "Blade codegen: mask over a rank-%d array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)" maskRank)], [])
     else
@@ -4184,28 +4263,26 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             | ArrayElem a -> elemTypeToCpp a.ElemType
             | _ -> "double"
         Some (
-            wrapperCode @ [
-                sprintf "size_t %s_extents[1] = {%s};" varName srcBound
+            wrapperCode @ extentsDecl @ [
                 sprintf "Array<bool, 1> %s = { new bool[%s], %s_extents };" varName srcBound varName
                 sprintf "for (size_t __mi = 0; __mi < %s; __mi++) {" srcBound
                 sprintf "    %s %s = %s[__mi];" srcElemStr predParamName arrName
                 sprintf "    %s[__mi] = %s(%s);" varName wname predParamName
                 "}"
             ],
-            // Raw `new bool[n]` backing; `<varName>_extents` is a stack table.
-            // A downstream compound() copies the bits into a std::vector<bool>
-            // at construction (genCompoundIndexFromMask), so nothing outlives
-            // this scope by pointing INTO the mask.
-            [MatRawData varName]
+            // Raw `new bool[n]` backing plus whatever `<varName>_extents` turned
+            // out to own. A downstream compound() copies the bits into a
+            // std::vector<bool> at construction (genCompoundIndexFromMask), so
+            // nothing outlives this scope by pointing INTO the mask.
+            [MatRawData (varName, ownedExtents)]
         )
     | _ ->
         // Degenerate (unresolved predicate): all-true mask; #error would be
         // kinder but this mirrors the prior fallback's shape.
-        Some ([
-            sprintf "size_t %s_extents[1] = {%s};" varName srcBound
+        Some (extentsDecl @ [
             sprintf "Array<bool, 1> %s = { new bool[%s], %s_extents };" varName srcBound varName
             sprintf "for (size_t __mi = 0; __mi < %s; __mi++) %s[__mi] = true;" srcBound varName
-        ], [MatRawData varName])
+        ], [MatRawData (varName, ownedExtents)])
 
 
 
@@ -4221,6 +4298,11 @@ and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
     // (regardless of how often it repeats in A).
     let aName = exprToCppCore subst names aExpr
     let bName = exprToCppCore subst names bExpr
+    // The cardinality is data-dependent, so this is always the heap arm of the
+    // shared companion-extents rule -- which is what lets the result be
+    // returned out of the function body that computed it.
+    let (extentsDecl, ownedExtents) =
+        emitExtentsTable "" (sprintf "%s_extents" varName) 1 [(sprintf "%s__count" varName, false)]
     Some ([
         sprintf "std::unordered_set<%s> %s__b_set;" elemTypeStr varName
         sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s__b_set.insert(%s[__si]);" bName varName bName
@@ -4230,7 +4312,7 @@ and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         sprintf "    %s __x = %s[__si];" elemTypeStr aName
         sprintf "    if (%s__b_set.count(__x) && %s__seen.insert(__x).second) %s__count++;" varName varName varName
         "}"
-        sprintf "size_t %s_extents[1] = {%s__count};" varName varName
+    ] @ extentsDecl @ [
         sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
         sprintf "%s__seen.clear();" varName
         sprintf "size_t %s__fill = 0;" varName
@@ -4238,7 +4320,7 @@ and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         sprintf "    %s __x = %s[__si];" elemTypeStr aName
         sprintf "    if (%s__b_set.count(__x) && %s__seen.insert(__x).second) %s[%s__fill++] = __x;" varName varName varName varName
         "}"
-    ], [MatRawData varName])
+    ], [MatRawData (varName, ownedExtents)])
 
 
 and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (aExpr: IRExpr) (bExpr: IRExpr) : (string list * MaterializedAlloc list) option =
@@ -4249,6 +4331,9 @@ and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
     // first occurrences survive.
     let aName = exprToCppCore subst names aExpr
     let bName = exprToCppCore subst names bExpr
+    // Data-dependent cardinality: always the heap arm (see the intersect form).
+    let (extentsDecl, ownedExtents) =
+        emitExtentsTable "" (sprintf "%s_extents" varName) 1 [(sprintf "%s__count" varName, false)]
     Some ([
         sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
         sprintf "size_t %s__count = 0;" varName
@@ -4258,7 +4343,7 @@ and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
         sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" bName
         sprintf "    if (%s__seen.insert(%s[__si]).second) %s__count++;" varName bName varName
         "}"
-        sprintf "size_t %s_extents[1] = {%s__count};" varName varName
+    ] @ extentsDecl @ [
         sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
         sprintf "%s__seen.clear();" varName
         sprintf "size_t %s__fill = 0;" varName
@@ -4268,7 +4353,7 @@ and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
         sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" bName
         sprintf "    if (%s__seen.insert(%s[__si]).second) %s[%s__fill++] = %s[__si];" varName bName varName varName bName
         "}"
-    ], [MatRawData varName])
+    ], [MatRawData (varName, ownedExtents)])
 
 
 and materializeUniqueForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (aExpr: IRExpr) : (string list * MaterializedAlloc list) option =
@@ -4277,20 +4362,23 @@ and materializeUniqueForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     // first occurrence. Two passes keep allocation exact (no
     // intermediate vector) while preserving first-occurrence order.
     let aName = exprToCppCore subst names aExpr
+    // Data-dependent cardinality: always the heap arm (see the intersect form).
+    let (extentsDecl, ownedExtents) =
+        emitExtentsTable "" (sprintf "%s_extents" varName) 1 [(sprintf "%s__count" varName, false)]
     Some ([
         sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
         sprintf "size_t %s__count = 0;" varName
         sprintf "for (size_t __ui = 0; __ui < %s.extents[0]; __ui++) {" aName
         sprintf "    if (%s__seen.insert(%s[__ui]).second) %s__count++;" varName aName varName
         "}"
-        sprintf "size_t %s_extents[1] = {%s__count};" varName varName
+    ] @ extentsDecl @ [
         sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
         sprintf "%s__seen.clear();" varName
         sprintf "size_t %s__fill = 0;" varName
         sprintf "for (size_t __ui = 0; __ui < %s.extents[0]; __ui++) {" aName
         sprintf "    if (%s__seen.insert(%s[__ui]).second) %s[%s__fill++] = %s[__ui];" varName aName varName varName aName
         "}"
-    ], [MatRawData varName])
+    ], [MatRawData (varName, ownedExtents)])
 
 
 and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (keyExpr: IRExpr) : (string list * MaterializedAlloc list) option =
@@ -4316,12 +4404,17 @@ and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         match inferExprType arrExpr with
         | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
         | _ -> false
-    let srcBound =
-        if isR1Compound then sprintf "%s.idx->cardinality" arrName
+    let srcBoundDim =
+        if isR1Compound then (sprintf "%s.idx->cardinality" arrName, false)
         else
             match inferExprType arrExpr with
-            | ArrayElem at -> literalOrRuntimeExtentOfArray at arrName 0
-            | _ -> sprintf "%s.extents[0]" arrName
+            | ArrayElem at -> extentDimOfArray at arrName 0
+            | _ -> (sprintf "%s.extents[0]" arrName, false)
+    let srcBound = fst srcBoundDim
+    // Shared companion-extents rule: a sorted result is a value like any other
+    // and may be returned, so the table must outlive this frame.
+    let (extentsDecl, ownedExtents) =
+        emitExtentsTable "" (sprintf "%s_extents" varName) 1 [srcBoundDim]
     let srcAt (i: string) = if isR1Compound then sprintf "%s.data[%s]" arrName i else sprintf "%s[%s]" arrName i
     let (wrapperCode, keyCall) =
         match resolveCallable keyExpr with
@@ -4336,13 +4429,14 @@ and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             sprintf "std::stable_sort(%s__perm, %s__perm + %s, [&](size_t __a, size_t __b) {" varName varName srcBound
             sprintf "    return %s(%s) < %s(%s);" keyCall (srcAt "__a") keyCall (srcAt "__b")
             "});"
-            sprintf "size_t %s_extents[1] = {%s};" varName srcBound
+        ] @ extentsDecl @ [
             sprintf "Array<%s, 1> %s = { new %s[%s], %s_extents };" elemTypeStr varName elemTypeStr srcBound varName
             sprintf "for (size_t __si = 0; __si < %s; __si++) %s[__si] = %s;" srcBound varName (srcAt (sprintf "%s__perm[__si]" varName))
         ],
         // Two raw buffers: the permutation scratch (`size_t*`, dead after the
-        // gather) and the output backing behind the Array<T,1> wrapper.
-        [MatRawBuf (varName + "__perm"); MatRawData varName]
+        // gather) and the output backing behind the Array<T,1> wrapper, the
+        // latter carrying the extents table it owns.
+        [MatRawBuf (varName + "__perm"); MatRawData (varName, ownedExtents)]
     )
 
 
@@ -4364,10 +4458,12 @@ and materializeTransposeForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let srcVar d = sprintf "__t%s_%d" varName d
         // Destination extents = source extents with d1/d2 swapped.
         let swapDim d = if d = d1 then d2 elif d = d2 then d1 else d
-        let extentDecl =
-            [ sprintf "size_t %s[%d];" extentsName rank ]
-            @ [ for d in 0 .. rank - 1 ->
-                    sprintf "%s[%d] = %s.extents[%d];" extentsName d arrName (swapDim d) ]
+        // Shared companion-extents rule (emitExtentsTable): the transposed
+        // wrapper is returnable, so the table is static-constexpr when every
+        // swapped axis is pinned and heap otherwise -- never frame-local.
+        let (extentDecl, ownedExtents) =
+            emitExtentsTable "" extentsName rank
+                [ for d in 0 .. rank - 1 -> extentDimOfArray arrTy arrName (swapDim d) ]
         let allocDecl =
             arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = rank; Name = varName
                          Symm = "nullptr"; Strict = None; Extents = extentsName }
@@ -4387,7 +4483,7 @@ and materializeTransposeForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let body = [ sprintf "%s%s%s = %s%s;" bodyInd varName dstIdx arrName srcIdx ]
         let closeLoops = [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
         Some (extentDecl @ [allocDecl] @ openLoops @ body @ closeLoops,
-              [MatPool (varName, elemTypeStr, rank, "nullptr", None)])
+              [MatPool (varName, elemTypeStr, rank, "nullptr", None, ownedExtents)])
      | _ -> None)
 
 
@@ -4414,11 +4510,13 @@ and materializeStackForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
             let srcRank = at.IndexTypes.Length
             let outRank = srcRank + 1
             let extentsName = sprintf "%s_extents" varName
-            let extentDecl =
-                [ sprintf "size_t %s[%d];" extentsName outRank
-                  sprintf "%s[0] = %d;" extentsName arrs.Length ]
-                @ [ for d in 0 .. srcRank - 1 ->
-                        sprintf "%s[%d] = %s.extents[%d];" extentsName (d + 1) firstName d ]
+            // Shared companion-extents rule: the fresh leading axis is always a
+            // literal (the operand COUNT), so the table goes static-constexpr
+            // exactly when the sources' own axes are pinned too.
+            let (extentDecl, ownedExtents) =
+                emitExtentsTable "" extentsName outRank
+                    ((sprintf "%d" arrs.Length, true)
+                     :: [ for d in 0 .. srcRank - 1 -> extentDimOfArray at firstName d ])
             let allocDecl =
                 arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = outRank; Name = varName
                              Symm = "nullptr"; Strict = None; Extents = extentsName }
@@ -4448,7 +4546,7 @@ and materializeStackForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
                 let closes = [ for d in srcRank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
                 opens @ body @ closes
             Some (extentDecl @ [allocDecl] @ (srcNames |> List.mapi copyNest |> List.concat),
-                  [MatPool (varName, elemTypeStr, outRank, "nullptr", None)])
+                  [MatPool (varName, elemTypeStr, outRank, "nullptr", None, ownedExtents)])
          | _ -> None)
 
 
@@ -4470,11 +4568,14 @@ and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             let rank = at.IndexTypes.Length
             let extentsName = sprintf "%s_extents" varName
             let joinedExtent = srcNames |> List.map (fun s -> sprintf "%s.extents[%d]" s dim) |> String.concat " + "
-            let extentDecl =
-                [ sprintf "size_t %s[%d];" extentsName rank ]
-                @ [ for d in 0 .. rank - 1 ->
-                        if d = dim then sprintf "%s[%d] = %s;" extentsName d joinedExtent
-                        else sprintf "%s[%d] = %s.extents[%d];" extentsName d firstName d ]
+            // Shared companion-extents rule. The CONCATENATED axis is a sum of
+            // runtime reads, so a join always lands on the heap arm -- which is
+            // the arm that survives being returned.
+            let (extentDecl, ownedExtents) =
+                emitExtentsTable "" extentsName rank
+                    [ for d in 0 .. rank - 1 ->
+                        if d = dim then (joinedExtent, false)
+                        else extentDimOfArray at firstName d ]
             let allocDecl =
                 arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = rank; Name = varName
                              Symm = "nullptr"; Strict = None; Extents = extentsName }
@@ -4505,7 +4606,7 @@ and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                 opens @ body @ closes @ [ sprintf "%s += %s.extents[%d];" offName srcName dim ]
             Some (extentDecl @ [allocDecl; sprintf "size_t %s = 0;" offName]
                   @ (srcNames |> List.mapi copyNest |> List.concat),
-                  [MatPool (varName, elemTypeStr, rank, "nullptr", None)])
+                  [MatPool (varName, elemTypeStr, rank, "nullptr", None, ownedExtents)])
          | _ -> None)
 
 
@@ -4565,9 +4666,12 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let extentsName = sprintf "%s_extents" varName
         let lv k = sprintf "__odc%s_%d" varName k
         let coordBuf = sprintf "__odc%s_c" varName
-        let extentDecl =
-            [ sprintf "size_t %s[%d];" extentsName axes ]
-            @ [ for i in 0 .. axes - 1 -> sprintf "%s[%d] = (size_t)(%s);" extentsName i nStr ]
+        // Shared companion-extents rule. The orbit base extent is rendered
+        // through a cast expression rather than a bare literal, so this is the
+        // heap arm unconditionally -- correct, and returnable.
+        let (extentDecl, ownedExtents) =
+            emitExtentsTable "" extentsName axes
+                [ for _ in 0 .. axes - 1 -> (sprintf "(size_t)(%s)" nStr, false) ]
         let allocDecl =
             arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = axes; Name = varName
                          Symm = "nullptr"; Strict = None; Extents = extentsName }
@@ -4584,7 +4688,7 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                       bodyInd varName dstSubs elemTypeStr levelArgs arrName coordBuf nStr ]
         let closes = [ for k in axes - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate k "    ") ]
         Some (extentDecl @ [ allocDecl ] @ opens @ body @ closes,
-              [ MatPool (varName, elemTypeStr, axes, "nullptr", None) ])
+              [ MatPool (varName, elemTypeStr, axes, "nullptr", None, ownedExtents) ])
      | ArrayElem arrTy ->
         // The compact group being decompacted is the LAST index slot
         // (TypeCheck enforces: any preceding slots are plain free Idx
@@ -4612,7 +4716,8 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         // makes that legible. Decompaction is precisely the case where the
         // literal pays: the freed axes re-range over the full [0, n) and the
         // inner ones are short.
-        let nExpr = literalOrRuntimeExtentOfArray arrTy arrName 0
+        let nDim = extentDimOfArray arrTy arrName 0
+        let nExpr = fst nDim
         (match sym with
          | SymSymmetric when r >= 2 ->
             // ----- General symmetric fission (gather) -----
@@ -4652,9 +4757,11 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             // Total output rank = leading free dims + the fission group's
             // r expanded axes. All axes share extent n (== arrName.extents[0]).
             let totalRank = leadingN + r
-            let extentDecl =
-                [ sprintf "size_t %s[%d];" extentsName totalRank ]
-                @ [ for i in 0 .. totalRank - 1 -> sprintf "%s[%d] = %s;" extentsName i nExpr ]
+            // Shared companion-extents rule -- every fission axis re-ranges over
+            // the same `n`, so the table is static-constexpr exactly when that
+            // one extent is pinned.
+            let (extentDecl, ownedExtents) =
+                emitExtentsTable "" extentsName totalRank [ for _ in 1 .. totalRank -> nDim ]
             let allocDecl =
                 arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = totalRank; Name = varName
                              Symm = symmArg; Strict = None; Extents = extentsName }
@@ -4717,13 +4824,13 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                   sprintf "%s%s%s = %s%s;" bodyInd varName outSub arrName srcSubFull ]
             let closes = [ for dd in depth - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate dd "    ") ]
             Some (extentDecl @ [allocDecl] @ leadLines @ lLines @ [fLine] @ rLines @ body @ closes,
-                  [MatPool (varName, elemTypeStr, totalRank, symmArg, None)])
+                  [MatPool (varName, elemTypeStr, totalRank, symmArg, None, ownedExtents)])
          | SymAntisymmetric when r = 2 ->
             // ----- Antisym rank-2: fully dissolves to dense nxn -----
             // Zero-fill (diagonal stays 0). Walk a in [0,n), b in [0,n-a-1);
             // strict: i=a, j=a+b+1. Write +A to (i,j), -A to (j,i).
-            let extentDecl =
-                [ sprintf "size_t %s[2] = { %s, %s };" extentsName nExpr nExpr ]
+            let (extentDecl, ownedExtents) =
+                emitExtentsTable "" extentsName 2 [nDim; nDim]
             let allocDecl =
                 sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
                     elemTypeStr varName elemTypeStr extentsName extentsName
@@ -4742,7 +4849,7 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                   "    }"
                   "}" ]
             Some (extentDecl @ [allocDecl] @ zeroFill @ loops,
-                  [MatPool (varName, elemTypeStr, 2, "nullptr", None)])
+                  [MatPool (varName, elemTypeStr, 2, "nullptr", None, ownedExtents)])
          | SymHermitian when r = 2 ->
             // ----- Hermitian rank-2: dissolves to dense nxn -----
             // Source is upper-triangle Hermitian storage (from gram). Walk the
@@ -4751,8 +4858,8 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             // stored value to [i][j] and its CONJUGATE to the mirror [j][i].
             // conj_scalar is std::conj on complex / identity on real, so this
             // also handles a (degenerate) real Hermitian = symmetric input.
-            let extentDecl =
-                [ sprintf "size_t %s[2] = { %s, %s };" extentsName nExpr nExpr ]
+            let (extentDecl, ownedExtents) =
+                emitExtentsTable "" extentsName 2 [nDim; nDim]
             let allocDecl =
                 sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
                     elemTypeStr varName elemTypeStr extentsName extentsName
@@ -4767,7 +4874,7 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                   "    }"
                   "}" ]
             Some (extentDecl @ [allocDecl] @ loops,
-                  [MatPool (varName, elemTypeStr, 2, "nullptr", None)])
+                  [MatPool (varName, elemTypeStr, 2, "nullptr", None, ownedExtents)])
          | SymAntisymmetric when r >= 3 ->
             // ----- Antisym rank>=3: COMPACT-RESIDUAL fission (general) -----
             // decompact(anti<r>, dPos) severs the group into a chain:
@@ -4822,9 +4929,8 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                 (symm, strict)
             let symmArg = hoistSymmDecl (sprintf "%s_symm" varName) symmMaskVec
             let strictArg = hoistSymmDecl (sprintf "%s_strict" varName) strictMaskVec
-            let extentDecl =
-                [ sprintf "size_t %s[%d];" extentsName r ]
-                @ [ for i in 0 .. r - 1 -> sprintf "%s[%d] = %s;" extentsName i nExpr ]
+            let (extentDecl, ownedExtents) =
+                emitExtentsTable "" extentsName r [ for _ in 1 .. r -> nDim ]
             let allocDecl =
                 arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = r; Name = varName
                              Symm = symmArg; Strict = Some strictArg; Extents = extentsName }
@@ -4892,7 +4998,7 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                       bodyInd varName storeSubs varName elemTypeStr elemTypeStr arrName srcSub varName ]
             let closes = [ for dd in depth - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate dd "    ") ]
             Some (extentDecl @ [allocDecl] @ loopLines @ body @ closes,
-                  [MatPool (varName, elemTypeStr, r, symmArg, Some strictArg)])
+                  [MatPool (varName, elemTypeStr, r, symmArg, Some strictArg, ownedExtents)])
          | _ -> None)
      | _ -> None)
 
@@ -4911,10 +5017,11 @@ and materializeNegateConjugateForm (subst: SubstMap) (names: Map<IRId, string>) 
      | ArrayElem arrTy ->
         let rank = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
         let extentsName = sprintf "%s_extents" varName
-        // Same-shape extents: copy the source's logical extents.
-        let extentDecl =
-            [ sprintf "size_t %s[%d];" extentsName rank ]
-            @ [ for d in 0 .. rank - 1 -> sprintf "%s[%d] = %s.extents[%d];" extentsName d arrName d ]
+        // Same-shape extents: copy the source's logical extents, through the
+        // shared companion-extents rule so the result survives a return.
+        let (extentDecl, ownedExtents) =
+            emitExtentsTable "" extentsName rank
+                [ for d in 0 .. rank - 1 -> extentDimOfArray arrTy arrName d ]
         // Allocate the destination with the SOURCE's storage class so the
         // result type is identical (antisym stays antisym, etc.).
         let spec = classifyOutputStorage srcType
@@ -4962,7 +5069,7 @@ and materializeNegateConjugateForm (subst: SubstMap) (names: Map<IRId, string>) 
         // deallocArgsFor with the same spec that emitAllocRhs consumed above
         // (antisym's `mask, false` triple included).
         Some (extentDecl @ [allocDecl] @ call,
-              [MatPoolSpec (varName, spec, elemTypeStr, rank, symmArg, extentsName)])
+              [MatPoolSpec (varName, spec, elemTypeStr, rank, symmArg, extentsName, ownedExtents)])
      | _ -> None)
 
 
@@ -4981,9 +5088,10 @@ and materializeArrayCopyForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
      | ArrayElem arrTy ->
         let rank = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
         let extentsName = sprintf "%s_extents" varName
-        let extentDecl =
-            [ sprintf "size_t %s[%d];" extentsName rank ]
-            @ [ for d in 0 .. rank - 1 -> sprintf "%s[%d] = %s.extents[%d];" extentsName d arrName d ]
+        // Shared companion-extents rule, as in the negate/conjugate twin above.
+        let (extentDecl, ownedExtents) =
+            emitExtentsTable "" extentsName rank
+                [ for d in 0 .. rank - 1 -> extentDimOfArray arrTy arrName d ]
         let spec = classifyOutputStorage srcType
         let symmArg =
             match spec with
@@ -5016,7 +5124,7 @@ and materializeArrayCopyForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             [ sprintf "size_t %s = %s;" countName countExpr
               sprintf "std::copy_n(pool_base(%s.data), %s, pool_base(%s.data));" arrName countName varName ]
         Some (extentDecl @ [allocDecl] @ call,
-              [MatPoolSpec (varName, spec, elemTypeStr, rank, symmArg, extentsName)])
+              [MatPoolSpec (varName, spec, elemTypeStr, rank, symmArg, extentsName, ownedExtents)])
      | _ -> None)
 
 
@@ -5054,8 +5162,10 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // `A.extents[0]` here. Same VALUE either way; a literal is what lets GCC
         // see the trip count.
         let nExtent = literalOrRuntimeExtentOfArray la lName 1
-        let mExtent = literalOrRuntimeExtentOfArray la lName 0
-        let pExtent = literalOrRuntimeExtentOfArray ra rName 0
+        let mDim = extentDimOfArray la lName 0
+        let pDim = extentDimOfArray ra rName 0
+        let mExtent = fst mDim
+        let pExtent = fst pDim
         let extentsName = sprintf "%s_extents" varName
         // Row-pointer hoists for the contraction loop. `&X[i][0]` (not `X[i]`)
         // is the one spelling that works for every operand wrapper the arms
@@ -5125,11 +5235,12 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // agree to within rounding.
         let dispatchTag = dispatchMarkerTag resolved
         if sameArray then
-            // square m x m, symmetric/Hermitian upper-triangle storage
-            let extentDecl =
-                [ sprintf "size_t %s[2];" extentsName
-                  sprintf "%s[0] = %s;" extentsName mExtent
-                  sprintf "%s[1] = %s;" extentsName mExtent ]
+            // square m x m, symmetric/Hermitian upper-triangle storage.
+            // Extents through the shared companion rule: `gram` is the form most
+            // often written as a helper's whole answer (`let g = gram(a, b); g`),
+            // and a frame-local table would hand the caller a dangling shape.
+            let (extentDecl, ownedExtents) =
+                emitExtentsTable "" extentsName 2 [mDim; mDim]
             let symmVec = [1; 1]
             let symmArg = hoistSymmDecl (sprintf "%s_symm" varName) symmVec
             let allocDecl =
@@ -5189,13 +5300,11 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             // the allocation actually used. (The BLAS staging buffers above are
             // deleted inline, so they are not tracked.)
             Some (extentDecl @ [allocDecl] @ loop,
-                  [MatPool (varName, outElemStr, 2, symmArg, None)])
+                  [MatPool (varName, outElemStr, 2, symmArg, None, ownedExtents)])
         else
             // dense m x p
-            let extentDecl =
-                [ sprintf "size_t %s[2];" extentsName
-                  sprintf "%s[0] = %s;" extentsName mExtent
-                  sprintf "%s[1] = %s;" extentsName pExtent ]
+            let (extentDecl, ownedExtents) =
+                emitExtentsTable "" extentsName 2 [mDim; pDim]
             let allocDecl =
                 sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
                     outElemStr varName outElemStr extentsName extentsName
@@ -5228,7 +5337,7 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                       sprintf "    }"
                       sprintf "}" ]
             Some (extentDecl @ [allocDecl] @ loop,
-                  [MatPool (varName, outElemStr, 2, "nullptr", None)])
+                  [MatPool (varName, outElemStr, 2, "nullptr", None, ownedExtents)])
      | _ -> None)
 
 
@@ -5305,9 +5414,11 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         let outElemStr = irTypeToCpp la.ElemType
         // Literal extents when the operands' own index records carry them --
         // see `literalOrRuntimeExtent`; same value as the runtime read.
-        let mExtent = literalOrRuntimeExtentOfArray la lName 0
+        let mDim = extentDimOfArray la lName 0
+        let nDim = extentDimOfArray ra rName 1
+        let mExtent = fst mDim
         let kExtent = literalOrRuntimeExtentOfArray la lName 1
-        let nExtent = literalOrRuntimeExtentOfArray ra rName 1
+        let nExtent = fst nDim
         let extentsName = sprintf "%s_extents" varName
         // Pool capacities for the shim's contiguity probe -- see
         // `denseCellCountExpr` and the note in materializeGramForm.
@@ -5323,10 +5434,9 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         | Some (Blade.LinAlgPatterns.CudaBlas, _) -> (cudaLinalgUsedCell ()).Value <- true
         | Some (Blade.LinAlgPatterns.HostBlas, _) -> (linalgUsedCell ()).Value <- true
         | None -> ()
-        let extentDecl =
-            [ sprintf "size_t %s[2];" extentsName
-              sprintf "%s[0] = %s;" extentsName mExtent
-              sprintf "%s[1] = %s;" extentsName nExtent ]
+        // Shared companion-extents rule -- see the note in materializeGramForm.
+        let (extentDecl, ownedExtents) =
+            emitExtentsTable "" extentsName 2 [mDim; nDim]
         let allocDecl =
             sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
                 outElemStr varName outElemStr extentsName extentsName
@@ -5383,7 +5493,7 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                   sprintf "    }"
                   sprintf "}" ]
         Some (extentDecl @ [allocDecl] @ loop,
-              [MatPool (varName, outElemStr, 2, "nullptr", None)])
+              [MatPool (varName, outElemStr, 2, "nullptr", None, ownedExtents)])
      | _ -> None)
 
 
@@ -5462,16 +5572,21 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                      "packed upper-triangular operand, zero conversion")
                 | _ ->
                     (sprintf "%s.data" srcName, "dense operand, symmetry asserted")
+            // Both tables go through the shared companion-extents rule. `n` is
+            // the runtime `.extents[0]` read argued for above, so both land on
+            // the heap arm -- which is also what lets a destructured `Q` or
+            // `LAM` be returned out of the body that computed the pair.
+            let (qExtentsDecl, qOwnedExtents) =
+                emitExtentsTable "" qExtents 2 [(nExtent, false); (nExtent, false)]
+            let (lamExtentsDecl, lamOwnedExtents) =
+                emitExtentsTable "" lamExtents 1 [(nExtent, false)]
             let decls =
-                [ sprintf "size_t %s[2];" qExtents
-                  sprintf "%s[0] = %s;" qExtents nExtent
-                  sprintf "%s[1] = %s;" qExtents nExtent
-                  arrayAlloc { Ind = ""; Elem = qElemStr; Rank = 2; Name = qName
-                               Symm = "nullptr"; Strict = None; Extents = qExtents }
-                  sprintf "size_t %s[1];" lamExtents
-                  sprintf "%s[0] = %s;" lamExtents nExtent
-                  arrayAlloc { Ind = ""; Elem = lamElemStr; Rank = 1; Name = lamName
-                               Symm = "nullptr"; Strict = None; Extents = lamExtents } ]
+                qExtentsDecl
+                @ [ arrayAlloc { Ind = ""; Elem = qElemStr; Rank = 2; Name = qName
+                                 Symm = "nullptr"; Strict = None; Extents = qExtents } ]
+                @ lamExtentsDecl
+                @ [ arrayAlloc { Ind = ""; Elem = lamElemStr; Rank = 1; Name = lamName
+                                 Symm = "nullptr"; Strict = None; Extents = lamExtents } ]
             // BLOCK comment, not `//`: these lines are SPACE-JOINED into a
             // single-line IIFE at expression positions, where a line comment
             // would swallow the rest of the statement (the lesson math/057
@@ -5507,8 +5622,8 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             // At module level there is no live frame, so registration no-ops
             // and the pools live to program exit like any other module binding.
             Some (decls @ [dispatch; tupleLine],
-                  [ MatPool (qName, qElemStr, 2, "nullptr", None)
-                    MatPool (lamName, lamElemStr, 1, "nullptr", None) ])
+                  [ MatPool (qName, qElemStr, 2, "nullptr", None, qOwnedExtents)
+                    MatPool (lamName, lamElemStr, 1, "nullptr", None, lamOwnedExtents) ])
         | _ ->
             // UNREACHABLE from the surface: `TypeCheck.inferEigh` accepts an
             // operand only when `classifyEigh` gave it a route, and the node
@@ -5585,9 +5700,10 @@ and materializeSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
         match shimEntry with
         | Some _ -> (lapackUsedCell ()).Value <- true
         | None -> ()
-        let extentDecl =
-            [ sprintf "size_t %s[1];" extentsName
-              sprintf "%s[0] = %s;" extentsName nExtent ]
+        // Shared companion-extents rule: `n` is a runtime read, so this is the
+        // heap arm, and `solve`'s answer survives leaving the frame.
+        let (extentDecl, ownedExtents) =
+            emitExtentsTable "" extentsName 1 [(nExtent, false)]
         let allocDecl =
             sprintf "Array<%s, 1> %s = { allocate<typename promote<%s, 1>::type, nullptr>(%s), %s };"
                 outElemStr varName outElemStr extentsName extentsName
@@ -5672,7 +5788,7 @@ and materializeSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
         // one block so a second solve in the same scope re-declares nothing.
         // `varName` and its extents table stay OUTSIDE it -- they are the value.
         Some (extentDecl @ [allocDecl; "{"] @ body @ ["}"],
-              [MatPool (varName, outElemStr, 1, "nullptr", None)])
+              [MatPool (varName, outElemStr, 1, "nullptr", None, ownedExtents)])
      | _ -> None)
 
 /// Convert IRExpr to C++ using context
@@ -8985,8 +9101,11 @@ type TrackedAlloc =
     /// rather than an allocate<> pool (the mask / sort / unique / union /
     /// intersect family): `delete[] N.data;`. The tracked NAME is the wrapper
     /// `N`, not `N.data`, so the return-suppression token test in genFuncBody
-    /// still recognises `return N;`.
-    | RawArrayData of Name: string * OwnerBindingId: IRId option
+    /// still recognises `return N;`. OwnedExtentsName mirrors PoolAlloc's --
+    /// Some where the site did its own `new size_t[R]` -- and is deleted under
+    /// the SAME spare/free decision as the backing, which is the whole reason
+    /// it is a field here instead of a separate RawAlloc registration.
+    | RawArrayData of Name: string * OwnedExtentsName: string option * OwnerBindingId: IRId option
     /// Ragged / compound teardown. Unlike PoolAlloc there is no template-argument
     /// mirror to preserve: the ragged and compound layouts have no per-level span
     /// formula, so the free is a fixed runtime call whose arguments are all NAMES
@@ -9005,14 +9124,14 @@ let private trackedAllocName (t: TrackedAlloc) : string =
     match t with
     | PoolAlloc (n, _, _, _, _) -> n
     | RawAlloc (n, _) -> n
-    | RawArrayData (n, _) -> n
+    | RawArrayData (n, _, _) -> n
     | ShapedAlloc (n, _, _, _) -> n
 
 let private trackedAllocOwner (t: TrackedAlloc) : IRId option =
     match t with
     | PoolAlloc (_, _, _, _, o) -> o
     | RawAlloc (_, o) -> o
-    | RawArrayData (_, o) -> o
+    | RawArrayData (_, _, o) -> o
     | ShapedAlloc (_, _, _, o) -> o
 
 type AllocScopeKind = SFunc | SLoop
@@ -9086,50 +9205,6 @@ let popAllocScope () : AllocScope option =
     | top :: rest -> cell.Value <- rest; Some top
     | [] -> None
 
-/// THE shared companion-extents rule. Every emitter that materializes an
-/// `Array<T,R>` needs a table for its shape; this decides which of the two
-/// forms that table takes, and reports back whether the caller now OWNS it.
-///
-/// Default (any entry is a runtime read): a HEAP table. `Array<T,R>` stores
-/// only a POINTER to its extents, so a stack `size_t[R]` would make the
-/// wrapper non-returnable -- the pool outlives the frame but the extents
-/// pointer dangles, and a caller reading `c.extents[d]` gets garbage. Heap
-/// extents make the wrapper self-describing across a call boundary, at the
-/// cost of a `delete[]` the scope has to remember (`Some name`).
-///
-/// WHEN EVERY ENTRY IS LITERAL none of that management is needed: a
-/// `static constexpr const size_t[R]` table has STATIC storage duration, which
-/// satisfies the same constraint strictly more safely -- it outlives every
-/// wrapper naming it and every copy of that wrapper unconditionally, there is
-/// nothing to free, and nothing to get wrong if a frame is torn down early.
-/// It is the form the rectangular array-literal path already hands back across
-/// a function return, chosen there for exactly this reason. `allocate<>` and
-/// `deallocate<>` both take `const size_t extents[]` and `Array<T,R>::extents`
-/// is a `const size_t*`, so the array-to-pointer decay leaves the stored
-/// pointer identical in type and in every read (`NAME[d]` indexes an array the
-/// same way it indexed a pointer). Being constexpr, the static also costs no
-/// `__cxa_guard` even when the declaration sits inside a loop body.
-/// `None` is returned as the owned name, which is what suppresses the free.
-///
-/// A MIXED table keeps the heap: a constexpr initializer cannot name a runtime
-/// `.extents[]` read, and half-baking it would need two tables. RANK 0 keeps
-/// the heap too -- `new size_t[0]` is legal where `const size_t t[0]` is not.
-///
-/// `dims` pairs each entry's RENDERED value with whether it is a literal. That
-/// pairing is the caller's job precisely because the answer is structural: it
-/// must fall out of the same match that chose the text (an `IRLit` arm vs an
-/// `.extents[]` arm), never out of re-inspecting the rendered string.
-let emitExtentsTable (ind: string) (extentsName: string) (rank: int)
-                     (dims: (string * bool) list) : string list * string option =
-    if rank > 0 && dims |> List.forall snd then
-        ([ sprintf "%sstatic constexpr const size_t %s[%d] = { %s };"
-               ind extentsName rank (dims |> List.map fst |> String.concat ", ") ],
-         None)
-    else
-        ((sprintf "%ssize_t* %s = new size_t[%d];" ind extentsName rank)
-         :: (dims |> List.mapi (fun d (e, _) -> sprintf "%s%s[%d] = %s;" ind extentsName d e)),
-         Some extentsName)
-
 /// The free-side mirror of emitAllocRhs (217-247), case for case, reusing
 /// hoistSymmDecl with the identical `%s_anti` / `%s_strict` names keyed off
 /// extentsName (the hoist collector is idempotent per distinct decl, so
@@ -9171,7 +9246,7 @@ let registerAlloc (t: TrackedAlloc) : unit =
             match t with
             | PoolAlloc (n, r, a, ex, _) -> PoolAlloc (n, r, a, ex, frame.CurrentOwner)
             | RawAlloc (n, _) -> RawAlloc (n, frame.CurrentOwner)
-            | RawArrayData (n, _) -> RawArrayData (n, frame.CurrentOwner)
+            | RawArrayData (n, ex, _) -> RawArrayData (n, ex, frame.CurrentOwner)
             | ShapedAlloc (n, r, a, _) -> ShapedAlloc (n, r, a, frame.CurrentOwner)
         frame.Allocs <- stamped :: frame.Allocs
 
@@ -9201,7 +9276,7 @@ let registerMaterializedAllocs (ms: MaterializedAlloc list) : unit =
     | Some _ ->
         for m in ms do
             match m with
-            | MatPool (n, elem, rank, symm, strict) ->
+            | MatPool (n, elem, rank, symm, strict, ownedExtents) ->
                 let (routine, args) =
                     match strict with
                     | Some strictArg ->
@@ -9209,12 +9284,18 @@ let registerMaterializedAllocs (ms: MaterializedAlloc list) : unit =
                          sprintf "typename promote<%s, %d>::type, %s, %s" elem rank symm strictArg)
                     | None ->
                         ("deallocate", sprintf "typename promote<%s, %d>::type, %s" elem rank symm)
-                registerAlloc (PoolAlloc (n, routine, args, None, None))
-            | MatPoolSpec (n, spec, elem, rank, symm, extentsName) ->
+                registerAlloc (PoolAlloc (n, routine, args, ownedExtents, None))
+            | MatPoolSpec (n, spec, elem, rank, symm, extentsName, ownedExtents) ->
                 match deallocArgsFor spec elem rank symm extentsName with
-                | Ok (routine, args) -> registerAlloc (PoolAlloc (n, routine, args, None, None))
-                | Error _ -> ()   // the site emitted `#error`; nothing valid to free
-            | MatRawData n -> registerAlloc (RawArrayData (n, None))
+                | Ok (routine, args) -> registerAlloc (PoolAlloc (n, routine, args, ownedExtents, None))
+                // The site emitted `#error`; there is no valid free for the pool.
+                // The extents table IS valid (it was built before the refusal),
+                // but a translation unit carrying `#error` never links, so
+                // dropping it too keeps the two halves of a refused site
+                // together rather than emitting a lone delete for a shape
+                // nothing will read.
+                | Error _ -> ()
+            | MatRawData (n, ownedExtents) -> registerAlloc (RawArrayData (n, ownedExtents, None))
             | MatRawBuf n -> registerAlloc (RawAlloc (n, None))
 
 /// Register a ragged/compound teardown (the W2 runtime routines). No
@@ -9324,7 +9405,11 @@ let popAllocScopeFrees (ind: string) : string list =
                        | Some ex -> [sprintf "%sdelete[] %s;" ind ex]
                        | None -> [])
                 | RawAlloc (n, _) -> [sprintf "%sdelete[] %s;" ind n]
-                | RawArrayData (n, _) -> [sprintf "%sdelete[] %s.data;" ind n]
+                | RawArrayData (n, ownedExtents, _) ->
+                    [ sprintf "%sdelete[] %s.data;" ind n ]
+                    @ (match ownedExtents with
+                       | Some ex -> [sprintf "%sdelete[] %s;" ind ex]
+                       | None -> [])
                 | ShapedAlloc (_, routine, args, _) ->
                     [ sprintf "%snested_array_utilities::%s(%s);" ind routine args ])
 
@@ -12275,14 +12360,17 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             @ subDeclLines
                             @ [ sprintf "%s    %s[__g] = %s;" ind name bodyStr
                                 sprintf "%s}" ind ]
-                        // Raw `new T[n]` backing (not allocate<>), stack extents.
-                        // Scalar rank-1 outputs only: the array-valued arm
-                        // allocates its pool through `allocate<>` instead, and
-                        // an array-valued kernel body otherwise makes the row
-                        // entries ALIASES of storage owned elsewhere.
+                        // Raw `new T[n]` backing (not allocate<>). The extents
+                        // table is deliberately unowned here (`None`) for the
+                        // reason spelled out beside its emission above -- it
+                        // leaves with the value. Scalar rank-1 outputs only: the
+                        // array-valued arm allocates its pool through
+                        // `allocate<>` instead, and an array-valued kernel body
+                        // otherwise makes the row entries ALIASES of storage
+                        // owned elsewhere.
                         (match outElem with
                          | IRTScalar _ when not (outputHasDenseTrailing && outRank >= 2) ->
-                             registerAlloc (RawArrayData (name, None))
+                             registerAlloc (RawArrayData (name, None, None))
                          | _ -> ())
                         Some code
                     | _ -> None
@@ -12430,10 +12518,11 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         @ (rowDecls |> List.collect (fun (_, _, lines) -> lines))
                         @ [ sprintf "%s    %s[__g] = %s;" ind name bodyStr
                             sprintf "%s}" ind ]
-                // Raw `new T[n]` backing with stack extents, as the
-                // single-operand peel registers for its scalar-output form.
+                // Raw `new T[n]` backing with an unowned extents table, exactly
+                // as the single-operand peel registers for its scalar-output
+                // form (and for the same recorded reason).
                 (match outElem with
-                 | IRTScalar _ when outRank < 2 -> registerAlloc (RawArrayData (name, None))
+                 | IRTScalar _ when outRank < 2 -> registerAlloc (RawArrayData (name, None, None))
                  | _ -> ())
                 Some code
             | _ -> None
@@ -19007,24 +19096,17 @@ or return a scalar and materialize at the call site"
             }
             let (trCode, _) = genBinding bodyCtx tempBinding builder
             suppressAllocName retVarName
-            // Return-extent ABI: genTransposeBinding declares its extents
-            // table as a frame-local `size_t[R]`, which is fine for a binding
-            // consumed in the same frame and DANGLING the moment the wrapper
-            // crosses the call boundary (the caller then reads garbage shape
-            // -- measured as an empty print and a bad_array_new_length in the
-            // next consumer). Re-wrap on a heap table before returning, the
-            // same self-describing form genObjectForApplication adopted.
-            let heapWrap =
-                match inferExprType retExpr with
-                | ArrayElem a ->
-                    let rank = arrayRank a
-                    let elemStr = elemTypeToCpp a.ElemType
-                    [ sprintf "%ssize_t* %s_hx = new size_t[%d];" indent retVarName rank
-                      sprintf "%sfor (size_t __hx = 0; __hx < %d; __hx++) %s_hx[__hx] = %s.extents[__hx];" indent rank retVarName retVarName
-                      sprintf "%sArray<%s, %d> %s_hw = { %s.data, %s_hx };" indent elemStr rank retVarName retVarName retVarName ]
-                | _ -> []
-            let retName = if heapWrap.IsEmpty then retVarName else retVarName + "_hw"
-            stmts @ trCode @ heapWrap @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retName]
+            // The transpose emitter's own extents table now goes through
+            // `emitExtentsTable` (static constexpr or heap, both of which
+            // outlive this frame), so the wrapper is already self-describing
+            // and returns directly. This arm used to re-wrap it onto a
+            // hand-rolled `new size_t[R]` copy because the table underneath was
+            // a frame-local `size_t[R]` -- fine for a binding consumed in the
+            // same frame, and dangling the moment the wrapper crossed the call
+            // boundary (measured as an empty print and a bad_array_new_length
+            // in the next consumer). Fixing it at the source removes both the
+            // copy and the second wrapper.
+            stmts @ trCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
         | IRGroupBucket _ | IRGroupSizes _ ->
             // The same two accessors in RETURN position -- `let gk = group_keys(k)`
             // then a bare `group_bucket(gk)` as the body's tail, which is the

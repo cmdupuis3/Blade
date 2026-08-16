@@ -1,0 +1,16 @@
+// TEST: Recursive Multi Pack Passthrough
+// A poly kernel with TWO packs that recurses over the first while the second
+// merely rides along unchanged. Exercises the tuple-as-pack call shape at the
+// rewritten recursive call site: the spread of `t` and the pass-through of `b`
+// must re-enter computePolyArity as one tuple per Poly slot (g_arity_2_2
+// demands g_arity_1_2), not as a flat variadic arg list — the flat spread left
+// the call referencing the removed poly function (dangling VarId, BL6001).
+function g(a: Poly<T^0>, b: Poly<T^0>) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let h :: t = a
+             h + b[0] }
+    | _ -> { let h :: t = a
+             h * g(t, b) }
+}
+let result = g((1.0, 2.0), (5.0, 6.0))
+// EXPECT: result = 7.0

@@ -1,0 +1,33 @@
+// TEST: Fnbody Transpose Decompact Returned
+// ----------------------------------------------------------------------------
+// Return-extent ABI (see 242) for the two shape-CHANGING materialize forms.
+// Both are discriminating in a way a square/same-shape test would not be:
+//   transpose  2x3 -> 3x2, so a dangling extents table cannot accidentally
+//              read as the right shape.
+//   decompact  triangular SymIdx<2,3> storage -> dense 3x3, so the result's
+//              extents describe a LARGER array than the source's.
+// ----------------------------------------------------------------------------
+type R = Idx<2>
+type C = Idx<3>
+
+function make_t(a: Array<Float64 like R, C>) -> Array<Float64 like C, R> = {
+    let t = transpose(a, [0, 1])
+    t
+}
+
+function make_d(x: Array<Float64 like C>) -> Array<Float64 like C, C> = {
+    let L = method_for(x, x)
+    let g = lambda(p, q) where comm(p, q) -> 2.0 * p + q
+    let sym = L <@> reynolds(g) |> compute
+    let d = decompact(sym, 0)
+    d
+}
+
+let A: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let v: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let t1 = make_t(A)
+let d1 = make_d(v)
+// A row-major 1 2 3 4 5 6; the 3x2 transpose reads column-first.
+// EXPECT: t1 = [1, 4, 2, 5, 3, 6]
+// reynolds(2p+q) = 3(p+q); dense 3x3 is [[6,9,12],[9,12,15],[12,15,18]]
+// EXPECT: d1 = [6, 9, 12, 9, 12, 15, 12, 15, 18]

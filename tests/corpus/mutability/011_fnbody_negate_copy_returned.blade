@@ -1,0 +1,36 @@
+// TEST: Fnbody Negate Copy Returned
+// ----------------------------------------------------------------------------
+// Return-extent ABI (see index-types/242) for the two SAME-SHAPE materialize
+// forms, the pair that allocates through emitAllocRhs with the SOURCE's storage
+// class rather than a fresh dense one:
+//   -a          whole-array negation (also what an antisym intra-group
+//               transpose lowers to)
+//   let mut b   the deep copy that gives `let mut b = a` its value semantics
+// Same shape as the source is exactly what makes the failure quiet here: the
+// dangling table often read as a plausible-looking rank, so these two needed a
+// returned-from-a-helper pin as much as the shape-changing forms did.
+//
+// The copy's write also pins the value semantics across the return: `a` itself
+// must be untouched by `b`'s mutation.
+// ----------------------------------------------------------------------------
+type R = Idx<2>
+type C = Idx<3>
+
+function neg(a: Array<Float64 like R, C>) -> Array<Float64 like R, C> = {
+    let n = -a
+    n
+}
+
+function bumped(a: Array<Float64 like R, C>) -> Array<Float64 like R, C> = {
+    let mut b = a
+    b((0 : R), (0 : C)) = 99.0
+    b
+}
+
+let A: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let n1 = neg(A)
+let c1 = bumped(A)
+// EXPECT: n1 = [-1, -2, -3, -4, -5, -6]
+// EXPECT: c1 = [99, 2, 3, 4, 5, 6]
+// The source is a value, not a view: the helper's write cannot reach it.
+// EXPECT: A = [1, 2, 3, 4, 5, 6]

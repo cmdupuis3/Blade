@@ -282,6 +282,13 @@
          precede IdeServe.fs (its second front end). The g++ fallback lane is
          INJECTED by Cli.fs, which owns compileToExe. -->
     <Compile Include="src/ReplSession.fs" />
+    <!-- The GR render worker: helper/GRDIR resolution plus the persistent
+         `gr-render` child process that `ide serve`'s renderPlot arm drives.
+         Depends on nothing but the BCL (a GR render is a post-hoc transform of
+         an already-emitted spec, outside every program lane), so its only
+         placement constraint is that it precede IdeServe.fs, its one
+         consumer. -->
+    <Compile Include="src/display/GrRender.fs" />
     <!-- `blade ide serve`: the NDJSON daemon wrapping Ide.fs's payload. Must
          follow Lowering.fs (the full tier monomorphizes) as well as Ide.fs,
          which is why it cannot live inside Ide.fs; must precede Cli.fs, which
@@ -385,6 +392,13 @@
          response encoder). Must follow IdeServe.fs, which is compiled with the
          src/ files far above. -->
     <Compile Include="tests/Test_Display.fs" />
+    <!-- The GR render lane: renderPlot's frame bytes and argument rules, plus
+         the worker protocol driven against a fake helper the test writes
+         itself. Must follow IdeServe.fs (the response encoder) and
+         display/GrRender.fs (the worker). Needs no GR and no g++; the one case
+         that needs a real helper skips like the toolchain-gated blocks.
+         (Also `blade test gr-render`.) -->
+    <Compile Include="tests/Test_GrRender.fs" />
     <Compile Include="tests/Test_Spectra.fs" />
     <Compile Include="tests/Test_Fallback.fs" />
     <Compile Include="tests/Test_Sgs.fs" />
@@ -458,17 +472,37 @@
     </None>
   </ItemGroup>
 
-  <!-- The Blade standard library, in Blade source. ModuleResolve.fs looks for
-       a `stdlib/` directory next to the running binary first (then walks up,
-       so a dev tree finds <repo>/stdlib from bin/<config>/net7.0 too), which
-       is why this copy exists: it makes `Blade.exe run` on a file that says
-       `import units.SI` work from any working directory, with no environment
-       variable set. The glob has no Link metadata, so each file keeps its
-       relative path and lands at bin/config/net7.0/stdlib/units/SI.blade, the
-       same arrangement tests/corpus/** already uses. BLADE_STDLIB overrides. -->
+  <!-- The Blade standard library, in Blade source. This copy is what makes
+       `Blade.exe run` on a file that says `import units.SI` work from any
+       working directory in a DEPLOYED tree, with no environment variable set.
+       The glob has no Link metadata, so each file keeps its relative path and
+       lands at bin/config/net7.0/stdlib/units/SI.blade, the same arrangement
+       tests/corpus/** already uses. BLADE_STDLIB overrides.
+
+       In a CHECKOUT this copy is redundant (ModuleResolve.fs's probe reaches
+       the repo's own stdlib from bin/<config>/net7.0 by itself) and it used to
+       WIN, because that probe is nearest-first. Fixed on the resolver side:
+       see upwardRepoStdlibCandidates, where a directory holding Blade.fsproj
+       now takes precedence, so source beats copy in a dev tree while a tree
+       with no checkout above it searches exactly as before.
+
+       Always, not PreserveNewest, and the difference is not stylistic.
+       PreserveNewest's staleness check is the TARGET's Inputs/Outputs
+       comparison, which is timestamps only and never even reaches the Copy
+       task that would have compared sizes. A source file OLDER than the copy
+       therefore counts as up to date, so restoring a previous revision of a
+       module (an older commit checked out, an editor revert, an archive
+       extracted with its timestamps) leaves the newer copy in place while the
+       build reports success. Verified: differing content AND differing size,
+       still skipped. Always runs the Copy task every build, where
+       SkipUnchangedFiles compares timestamp and size and copies when either
+       differs. Three files; the build cost is not worth reasoning about. The
+       corpus glob above deliberately keeps PreserveNewest, since it is 1744
+       files and tests/Corpus.fs already prefers ./tests/corpus over the
+       deployed copy, so it was never exposed to this. -->
   <ItemGroup>
     <None Include="stdlib/**/*.blade">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
   </ItemGroup>
 

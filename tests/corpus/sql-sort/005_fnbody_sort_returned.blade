@@ -1,0 +1,19 @@
+// TEST: Fnbody Sort Returned
+// ----------------------------------------------------------------------------
+// Return-extent ABI (see index-types/242) for sort. Sort preserves cardinality,
+// so its failure mode was the quiet one: the values were all present in the
+// pool and the caller simply read an extent of zero and printed `[]`. A pinned
+// EXPECT on the returned array is what makes that visible.
+// ----------------------------------------------------------------------------
+type F = Idx<5>
+
+function srt(xs: Array<Int64 like F>) -> Array<Int64 like F> = {
+    let s = sort(xs, lambda(v) -> v)
+    s
+}
+
+let raw: Array<Int64 like F> = [4, 1, 3, 5, 2]
+let s1 = srt(raw)
+let s1sum = reduce(s1, (+))
+// EXPECT: s1 = [1, 2, 3, 4, 5]
+// EXPECT: s1sum = 15

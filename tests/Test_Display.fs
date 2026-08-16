@@ -401,6 +401,246 @@ add "plot: json_num of a non-finite scalar slot is null too" (fun () ->
          && row 0 = "Number,Null" && row 1 = "Null,Number"),
         sprintf "row0=%s row1=%s" (row 0) (row 1))
 
+// ---- 5. Grid decimation: the `maxdim` slot ----------------------------------
+//
+// A plotly figure costs ~20 bytes per sample, so a raw 2000x2000 z grid is
+// ~80 MB -- over the display frame's 32 MB hard cap and far past what the
+// panel can paint. The grid factories resample instead. What is pinned here
+// is the OBSERVABLE contract: the emitted axis lengths, the sample positions
+// (they are strided ORIGINALS, not interpolants), the byte-identity of the
+// untouched path, and that the slot routes by nominal like every other one.
+//
+// The budget is a power of two <= maxdim rather than maxdim itself: a Blade
+// array's extent lives in its TYPE, so a decimated axis needs a length the
+// compiler knows, and plot.blade picks between per-budget helpers with a
+// runtime `if`. The ladder rungs are pinned below because they ARE the
+// surface -- `16: maxdim` giving 16 samples is what a caller sees.
+
+/// A 40-wide by 24-tall grid, built in the language rather than written out:
+/// 960 samples is past what a source literal should carry, and the factories
+/// only ever read extents off it.
+let private gridPrelude =
+    "import plot\n\
+     let gx = method_for(range<Idx<40>>) <@> lambda(i) -> 1.0 * i |> compute\n\
+     let gy = method_for(range<Idx<24>>) <@> lambda(i) -> 1.0 * i |> compute\n\
+     let gz = method_for(range<Idx<24>, Idx<40>>) <@> lambda(i, j) -> 1.0 * (i * 40 + j) |> compute\n"
+
+/// The one trace of a one-trace figure.
+let private traceOf (doc: System.Text.Json.JsonDocument) =
+    (doc.RootElement.GetProperty("data").GetProperty "data").EnumerateArray() |> Seq.head
+
+/// "<x len>,<y len>,<z rows>,<distinct z row lens>" -- one string so a
+/// failure prints the whole shape rather than the first disagreement.
+let private shapeOf (doc: System.Text.Json.JsonDocument) =
+    let t = traceOf doc
+    let z = t.GetProperty "z"
+    let rowLens =
+        z.EnumerateArray() |> Seq.map (fun r -> string (r.GetArrayLength()))
+        |> Seq.distinct |> String.concat "/"
+    sprintf "%d,%d,%d,%s"
+        ((t.GetProperty "x").GetArrayLength()) ((t.GetProperty "y").GetArrayLength())
+        (z.GetArrayLength()) rowLens
+
+let private numbersOf (e: System.Text.Json.JsonElement) =
+    e.EnumerateArray() |> Seq.map (fun v -> string (v.GetDouble())) |> String.concat ","
+
+add "plot.contourf: an over-cap grid decimates x, y and z to one budget" (fun () ->
+    // 40 and 24 both exceed a cap of 16, so every axis comes back at 16 --
+    // one decision, one budget, and the trace stays rectangular.
+    match plotFrame (gridPrelude + "let ok = plot.contourf(gx, gy, gz, 16: maxdim)\n") with
+    | Error e -> false, e
+    | Ok doc -> eq "16,16,16,16" (shapeOf doc))
+
+add "plot.contourf: decimated samples are strided ORIGINALS, not interpolants" (fun () ->
+    // Sample k reads source index (k * n) / B, so the picked values are
+    // exactly the data at those positions -- and the LAST one falls short of
+    // the data edge (37 of 39, 22 of 23), which is the documented v1 edge
+    // behavior rather than an off-by-one.
+    match plotFrame (gridPrelude + "let ok = plot.contourf(gx, gy, gz, 16: maxdim)\n") with
+    | Error e -> false, e
+    | Ok doc ->
+        let t = traceOf doc
+        let xs = numbersOf (t.GetProperty "x")
+        let ys = numbersOf (t.GetProperty "y")
+        // The z cell (i, j) has to agree with the axes it was sampled with:
+        // row 1 of the decimated grid is source row 1 (= (1*24)/16), whose
+        // first cell is 1*40 + 0 = 40.
+        let z10 = ((t.GetProperty "z").EnumerateArray() |> Seq.item 1).EnumerateArray() |> Seq.head
+        eq "0,2,5,7,10,12,15,17,20,22,25,27,30,32,35,37|0,1,3,4,6,7,9,10,12,13,15,16,18,19,21,22|40"
+           (sprintf "%s|%s|%s" xs ys (string (z10.GetDouble()))))
+
+add "plot.contourf: a grid inside the cap is serialized BYTE-FOR-BYTE unchanged" (fun () ->
+    // The whole no-op path in one assertion: with both axes under the
+    // default cap of 512 the arrays reach the payload exactly as written,
+    // through d.json_array and nothing else. The other guards on this path
+    // are the three `contourSource` checks above (which read the same frame
+    // for its trace/coloring/z and its tagged slots) and the compiled-lane
+    // byte diff of tests/corpus/display/003_plot_contourf.blade.
+    match interpStdout contourSource with
+    | Error e -> false, e
+    | Ok out ->
+        let line =
+            out.Replace("\r\n", "\n").Split('\n')
+            |> Array.tryFind (fun l -> l.StartsWith F.Sentinel)
+        match line with
+        | None -> false, "no frame"
+        | Some l ->
+            (l.Contains "\"x\":[0,1,2],\"y\":[0,1],\"z\":[[0,1,2.25],[3,4,5.5]]"), l)
+
+add "plot: the maxdim budget snaps DOWN to a supported power of two" (fun () ->
+    // 20 is not a budget; 16 is the largest one at or below it. 32 is a
+    // budget and is used as-is. Anything under the smallest rung floors at
+    // 16 rather than degenerating.
+    let shapeAt (cap: string) =
+        match plotFrame (gridPrelude + sprintf "let ok = plot.contourf(gx, gy, gz, %s: maxdim)\n" cap) with
+        | Error e -> "ERR:" + e
+        | Ok doc -> shapeOf doc
+    eq "16,16,16,16|32,32,32,32|16,16,16,16"
+       (sprintf "%s|%s|%s" (shapeAt "20") (shapeAt "32") (shapeAt "2")))
+
+add "plot: a grid with BOTH axes at or under maxdim is left alone" (fun () ->
+    // The trigger is `>`, not `>=`: a cap of 40 leaves the 40-wide axis
+    // exactly where it is, and the 24-tall one with it.
+    match plotFrame (gridPrelude + "let ok = plot.contourf(gx, gy, gz, 40: maxdim)\n") with
+    | Error e -> false, e
+    | Ok doc -> eq "40,24,24,40" (shapeOf doc))
+
+add "plot: EITHER axis over the cap decimates BOTH" (fun () ->
+    // 40 > 32 while 24 < 32, and the short axis is resampled too -- the
+    // documented v1 rule, and what bounds a frame at budget^2 samples
+    // whatever the input aspect ratio.
+    match plotFrame (gridPrelude + "let ok = plot.contourf(gx, gy, gz, 32: maxdim)\n") with
+    | Error e -> false, e
+    | Ok doc -> eq "32,32,32,32" (shapeOf doc))
+
+add "plot: the maxdim slot routes by NOMINAL, flat and chained" (fun () ->
+    // The factory-slot contract through the real module, exactly as
+    // tests/corpus/display/004_plot_factory_slots.blade exercises the older
+    // slots: declaration order is levels, cmap, maxdim, so both of these
+    // hand them over out of order, and the chained spelling splits them
+    // across three groups. All three have to land in the same figure.
+    let flat =
+        gridPrelude + "let ok = plot.contourf(gx, gy, gz, 16: maxdim, 1: cmap, 7: levels)\n"
+    let chained =
+        gridPrelude + "let ok = plot.contourf(gx, gy, gz)(7: levels)(16: maxdim)(1: cmap)\n"
+    let readBack (src: string) =
+        match plotFrame src with
+        | Error e -> "ERR:" + e
+        | Ok doc ->
+            let t = traceOf doc
+            sprintf "%s|%s|%d" (shapeOf doc) ((t.GetProperty "colorscale").GetString())
+                    ((t.GetProperty "ncontours").GetInt32())
+    eq "16,16,16,16|Plasma|7|16,16,16,16|Plasma|7"
+       (sprintf "%s|%s" (readBack flat) (readBack chained)))
+
+add "plot: contour and heatmap carry the same maxdim slot" (fun () ->
+    // All three GRID factories decimate; line/scatter have no grid to
+    // decimate and deliberately do not take the slot.
+    let shapeFor (call: string) =
+        match plotFrame (gridPrelude + call) with
+        | Error e -> "ERR:" + e
+        | Ok doc -> shapeOf doc
+    eq "16,16,16,16|16,16,16,16"
+       (sprintf "%s|%s"
+            (shapeFor "let ok = plot.contour(gx, gy, gz, 16: maxdim)\n")
+            (shapeFor "let ok = plot.heatmap(gx, gy, gz, 16: maxdim)\n")))
+
+// ---- 6. The `backend` slot: a PREFERENCE, not a change of content -----------
+//
+// `meta.backend` names the backend that PRODUCED a render, and the panel keys
+// its per-plot render cache on it -- a plotly payload stamped
+// `"backend":"gr"` would be filed AS the GR render and permanently suppress
+// the real one. A program's PREFERENCE is therefore a separate, ADDITIVE key,
+// `preferredBackend`, and everything else about the frame stays where it was.
+//
+// The default emits no key at all, which is the load-bearing half: an
+// untagged call's meta is byte-for-byte what this module emitted before the
+// slot existed, so every frame pin above (and the corpus differential) keeps
+// guarding exactly what it guarded.
+//
+// `display.emit`'s meta must be a string LITERAL -- the head and meta tail are
+// computed once at elaboration time, so even `"{\"a\":1" + "}"` is refused
+// with BL5700 "display.emit: the meta argument must be a string literal".
+// plot.blade therefore picks between two COMPLETE literals with a runtime
+// `if` instead of building one. Both arms are pinned here byte-for-byte.
+
+/// The one frame line of a one-frame program, sentinel stripped.
+let private frameLineOf (source: string) : string =
+    match interpStdout source with
+    | Error e -> "ERR:" + e
+    | Ok out ->
+        match out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith F.Sentinel) with
+        | None -> "ERR:no frame"
+        | Some l -> l.Substring F.Sentinel.Length
+
+/// That frame's `"meta":{...}` object as RAW BYTES -- the frame's own closing
+/// brace trimmed off, nothing else touched. Reading the text rather than a
+/// parse is the point: key ORDER and the absence of a key are both contract.
+let private metaBytesOf (source: string) : string =
+    let l = frameLineOf source
+    if l.StartsWith "ERR:" then l
+    else
+        let i = l.IndexOf "\"meta\":"
+        if i < 0 then "ERR:no meta in " + l
+        else
+            let m = l.Substring i
+            if m.EndsWith "}" then m.Substring(0, m.Length - 1) else m
+
+/// `plot.line` with the given extra slot text (`""` for none).
+let private lineSlots (slots: string) =
+    sprintf "import plot\nlet ok = plot.line([0.0, 1.0], [0.0, 1.0]%s)\n" slots
+
+add "plot: the default meta carries id + backend and NOTHING else" (fun () ->
+    // Byte-identical to what plot.blade emitted before the slot existed. Any
+    // key added here -- including a `preferredBackend` leaking onto the
+    // default path -- fails this line.
+    eq "\"meta\":{\"id\":\"blade-1\",\"backend\":\"plotly\"}" (metaBytesOf (lineSlots "")))
+
+add "plot: 1: backend ADDS preferredBackend and leaves backend on plotly" (fun () ->
+    // `backend` staying "plotly" is the whole contract: the payload IS plotly
+    // JSON, so the key that says who produced it must keep saying plotly.
+    eq "\"meta\":{\"id\":\"blade-1\",\"backend\":\"plotly\",\"preferredBackend\":\"gr\"}"
+       (metaBytesOf (lineSlots ", 1: backend")))
+
+add "plot: 0: backend is the default arm, byte-identical to omitting it" (fun () ->
+    eq (metaBytesOf (lineSlots "")) (metaBytesOf (lineSlots ", 0: backend")))
+
+add "plot: an out-of-table backend index falls back to the default" (fun () ->
+    // A backend choice is presentation, not data -- the same rule `cmap` uses
+    // for an unknown colormap. 9 is not a backend, and the frame it produces
+    // is the ordinary plotly one rather than a refusal or a broken meta.
+    eq (metaBytesOf (lineSlots "")) (metaBytesOf (lineSlots ", 9: backend")))
+
+add "plot: the backend slot moves the META and nothing else" (fun () ->
+    // The other half of "it is a hint": a viewer that ignores
+    // `preferredBackend` has to be handed the very same figure. Everything
+    // ahead of `"meta":` -- version, mime, encoding and the whole payload --
+    // is compared here.
+    let upToMeta (s: string) =
+        let i = s.IndexOf "\"meta\":"
+        if i < 0 then "ERR:no meta in " + s else s.Substring(0, i)
+    eq (upToMeta (frameLineOf (lineSlots ", \"waves\": title")))
+       (upToMeta (frameLineOf (lineSlots ", \"waves\": title, 1: backend"))))
+
+add "plot: all five factories carry the backend slot, flat and chained" (fun () ->
+    // Declaration order puts `backend` last, so every one of these hands it
+    // over out of order or in its own chained group -- routing by NOMINAL,
+    // exactly like tests/corpus/display/004_plot_factory_slots.blade drives
+    // the older slots.
+    let g = "[0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]]"
+    let calls =
+        [ sprintf "plot.contourf(%s, 1: backend, 5: levels)" g
+          sprintf "plot.contour(%s)(1: backend)(3: levels)" g
+          sprintf "plot.heatmap(%s, 1: backend, 2: cmap)" g
+          "plot.line([0.0, 1.0], [0.0, 1.0], 1: backend, \"t\": title)"
+          "plot.scatter([0.0, 1.0], [0.0, 1.0])(1: backend)" ]
+    let got =
+        calls |> List.mapi (fun i c ->
+            let m = metaBytesOf (sprintf "import plot\nlet ok = %s\n" c)
+            if m = "\"meta\":{\"id\":\"blade-1\",\"backend\":\"plotly\",\"preferredBackend\":\"gr\"}"
+            then "gr" else sprintf "[%d %s]" i m)
+    eq "gr,gr,gr,gr,gr" (String.concat "," got))
+
 // ---- Runner -----------------------------------------------------------------
 
 /// Run the in-process display block. No compiler toolchain: the REPL-channel

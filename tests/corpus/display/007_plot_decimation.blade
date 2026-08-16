@@ -1,0 +1,36 @@
+// TEST: Plot Grid Decimation
+// ============================================================================
+// The `maxdim` slot: a grid whose axes are longer than the cap is RESAMPLED
+// before it is serialized, so a big z grid cannot blow past the display
+// frame's 32 MB hard limit (~20 bytes per sample means a raw 2000x2000 grid
+// is ~80 MB). Both axes take the same decision and the same budget, so the
+// trace stays rectangular.
+//
+// `a` is over the cap on both axes (40 and 24, cap 16) and comes back at the
+// 16-sample budget on each. `b` is the same grid under the default cap of
+// 512 -- untouched, and byte-for-byte what this module emitted before
+// decimation existed (the frame BYTES of the small-grid path are pinned in
+// Test_Display.fs; 003_plot_contourf.blade pins the un-decimated surface).
+//
+// The grids are built with `method_for(range<...>)` and kept BLOCK-LOCAL:
+// a top-level binding would print 960 numbers per lane, and this file exists
+// to be diffed by `blade test interp`, not to be read. The decimation is
+// ordinary Blade -- an index-strided kernel over a compile-time budget --
+// so the interpreter and the compiled binary have to agree on every sample
+// they picked, which is exactly what the differential compares.
+// ============================================================================
+import plot
+let a = {
+    let gx = method_for(range<Idx<40>>) <@> lambda(i) -> 1.0 * i |> compute
+    let gy = method_for(range<Idx<24>>) <@> lambda(i) -> 1.0 * i |> compute
+    let gz = method_for(range<Idx<24>, Idx<40>>) <@> lambda(i, j) -> 1.0 * (i * 40 + j) |> compute
+    plot.contourf(gx, gy, gz, 16: maxdim)
+}
+let b = {
+    let gx = method_for(range<Idx<40>>) <@> lambda(i) -> 1.0 * i |> compute
+    let gy = method_for(range<Idx<24>>) <@> lambda(i) -> 1.0 * i |> compute
+    let gz = method_for(range<Idx<24>, Idx<40>>) <@> lambda(i, j) -> 1.0 * (i * 40 + j) |> compute
+    plot.heatmap(gx, gy, gz)
+}
+// EXPECT: a = true
+// EXPECT: b = true

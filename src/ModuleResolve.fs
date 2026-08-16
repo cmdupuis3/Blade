@@ -102,6 +102,35 @@ let private upwardStdlibCandidates (start: string) : string list =
             if isNull parent || parent = d then List.rev acc else go parent (n - 1) acc
     go start probeDepth []
 
+/// The same probe, narrowed to candidates whose PARENT is a Blade CHECKOUT --
+/// a directory holding Blade.fsproj. This is the SOURCE stdlib, as opposed to
+/// the build-output copy the .fsproj drops beside the binary.
+///
+/// It exists because those two are not interchangeable and the copy used to
+/// win. `upwardStdlibCandidates` is nearest-first, so from
+/// bin/Release/net7.0/Blade.exe the copy at bin/Release/net7.0/stdlib shadowed
+/// <repo>/stdlib three levels up -- which meant a stdlib edit did nothing until
+/// a rebuild, and (because MSBuild's PreserveNewest compares timestamps) a
+/// RESTORED-OLDER file did nothing even then, surfacing later as a type error
+/// pointing into bin/ at a file the user never wrote.
+///
+/// tests/Corpus.fs and Cli.fs's `artifact` helper had already settled this the
+/// other way for the corpus and protocol/*.json -- source first, deployed copy
+/// as the fallback -- and this brings the stdlib into line.
+///
+/// The Blade.fsproj gate is what keeps that safe. A plain source-first order
+/// would have to trust an unqualified upward walk, and five levels up from an
+/// arbitrary working directory is enough to collide with an unrelated project's
+/// `stdlib/` folder. Requiring the marker means these candidates cannot appear
+/// outside a checkout, so a DEPLOYED tree produces none of them and its search
+/// order is exactly what it was.
+let private upwardRepoStdlibCandidates (start: string) : string list =
+    upwardStdlibCandidates start
+    |> List.filter (fun p ->
+        match (try Path.GetDirectoryName p with _ -> null) with
+        | null -> false
+        | d -> try File.Exists (Path.Combine(d, "Blade.fsproj")) with _ -> false)
+
 /// Memo for `stdlibRoots`, keyed by the two inputs that can move under a
 /// running process: $BLADE_STDLIB and the working directory. Keyed rather than
 /// `Lazy` precisely so a caller (the test block, an embedder) can point
@@ -120,8 +149,18 @@ let stdlibRoots () : string list =
     | Some (e, c, roots) when e = envVal && c = cwd -> roots
     | _ ->
         let envRoot = if envVal = "" then [] else [ envVal ]
+        // Checkout-gated probes FIRST (working directory, then the binary's own
+        // tree), so a dev build reads <repo>/stdlib rather than the copy sitting
+        // beside it. Both are needed and neither subsumes the other: the IDE
+        // spawns the compiler with the USER'S project as the working directory,
+        // so only the binary-rooted probe rescues that case; a `dotnet run` from
+        // the checkout with a stale binary elsewhere is rescued only by the
+        // cwd-rooted one. In a deployed tree both are empty (no Blade.fsproj)
+        // and the two ungated probes below are the whole search, unchanged.
         let roots =
             (envRoot
+             @ upwardRepoStdlibCandidates cwd
+             @ upwardRepoStdlibCandidates AppContext.BaseDirectory
              @ upwardStdlibCandidates AppContext.BaseDirectory
              @ upwardStdlibCandidates cwd)
             |> List.map (fun p -> try Path.GetFullPath p with _ -> p)

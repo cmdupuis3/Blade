@@ -46,7 +46,7 @@ let runDoctorTests () : BlockResult =
     use _d = pinEnv "BLADE_TOOLCHAIN_FILE" (Path.Combine(Path.GetTempPath(), "blade_no_such_toolchain.json"))
 
     let checks = Doctor.collectChecks ()
-    let expectedKeys = ["dotnet"; "gpp"; "blas"; "lapack"; "netcdf"; "mpi"; "cuda"; "make"; "gfortran"; "git"; "coq"]
+    let expectedKeys = ["dotnet"; "stdlib"; "gpp"; "blas"; "lapack"; "netcdf"; "mpi"; "cuda"; "make"; "gfortran"; "git"; "coq"]
     check "row set and order stable"
         ((checks |> List.map (fun c -> c.Key)) = expectedKeys)
         (sprintf "%d rows" checks.Length)
@@ -56,6 +56,15 @@ let runDoctorTests () : BlockResult =
     check "dotnet row is ok"
         ((checks |> List.find (fun c -> c.Key = "dotnet")).Status = Doctor.StatusOk)
         "we are running on it"
+    // Structure only. Whether the deployed copy currently DIVERGES from source
+    // is a machine fact (it depends on when this tree was last built), so the
+    // row's status is not asserted -- but it must always name the root that
+    // answered, and that root must exist, or the row cannot be acted on.
+    let stdlibRow = checks |> List.find (fun c -> c.Key = "stdlib")
+    let namedRoot = stdlibRow.Detail.Split([| " -- "; " answers," |], StringSplitOptions.None).[0]
+    check "stdlib row leads with a root that exists on disk"
+        (stdlibRow.Status <> Doctor.StatusError && Directory.Exists namedRoot)
+        (sprintf "%A: %s" stdlibRow.Status stdlibRow.Detail)
     let blasRow = checks |> List.find (fun c -> c.Key = "blas")
     check "BLADE_BLAS=0 -> blas row off"
         (blasRow.Status = Doctor.StatusOff)

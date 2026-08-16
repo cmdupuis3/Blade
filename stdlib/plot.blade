@@ -18,20 +18,95 @@
 // (BL3010). Omitted slots take the defaults declared here.
 //
 // STRUCTURE NOTE. The array serialization (d.json_array / d.json_num) is
-// written INLINE in each factory rather than in a shared generic helper:
-// a module-exported generic function whose body calls ANOTHER generic
-// function does not yet monomorphize across the module boundary (see the
-// plot-module report), so only String-typed helpers are shared.
+// written INLINE in each factory rather than in a shared generic helper for
+// the RANK-1 factories (line/scatter), which take abstract-rank parameters.
+// The GRID factories go through the shared `__axis_json` / `__grid_json`
+// helpers below: a module-exported generic function whose body calls ANOTHER
+// generic function does monomorphize today (pinned by
+// tests/corpus/multifile/014_cross_module_generic_function), which is what
+// makes the decimation ladder shareable across the three of them.
 //
 // COLORMAPS, v1: an Int index into a fixed table (0 = Viridis default,
 // 1 = Plasma, 2 = Cividis, 3 = Greys, 4 = RdBu). An EnumIdx<["Viridis",...]>
 // upgrade would make the selection nominal AND checked; deferred.
+//
+// PREFERRED BACKEND (the `backend` slot, all five factories). A program can
+// say which renderer it would LIKE the viewer to use -- `1: backend` for GR
+// -- without changing one byte of what it emits. This is a HINT and nothing
+// more:
+//
+//   * the frame is still a plotly figure, with the same mime, the same
+//     payload, and `meta.backend` still reading `"plotly"`. `meta.backend`
+//     names the backend that PRODUCED the render, and a viewer caches its
+//     per-plot renders under that key -- stamping `"gr"` on plotly JSON
+//     would file it as though it WERE the GR render and permanently
+//     suppress the real one. The preference is therefore a SEPARATE,
+//     ADDITIVE key:
+//
+//         {"id":"blade-1","backend":"plotly","preferredBackend":"gr"}
+//
+//   * a viewer with no GR renderer -- or no knowledge of the key at all --
+//     ignores it and paints the plotly figure, which is the whole reason
+//     the frame content does not move;
+//   * the key is emitted ONLY when the program asks for a non-default
+//     backend. Left at its default, the meta is BYTE-IDENTICAL to what this
+//     module emitted before the slot existed, which is what keeps the
+//     existing frame byte pins honest;
+//   * out-of-table values fall back to the default rather than erroring,
+//     exactly like `cmap`: a backend choice is presentation, not data.
+//
+// The two metas are separate string LITERALS chosen by a runtime `if` in
+// `__emit_fig`, because `display.emit`'s meta argument must be a literal
+// (BL5700, "the meta argument must be a string literal") -- the frame's head
+// and meta tail are computed once at elaboration time, so a meta built by
+// concatenation is refused even when both halves are literals.
 //
 // VALID JSON IS AN INVARIANT, not an aspiration: every runtime value that
 // reaches a figure goes through a serializer that cannot emit invalid JSON.
 // Title/label strings travel via `d.json_string` (which supplies its OWN
 // quotes -- never wrap it in more), and NaN/Inf array elements serialize as
 // `null`, which is what plotly's own encoder writes.
+//
+// DECIMATION (grid factories only: contourf / contour / heatmap). A plotly
+// figure costs roughly 20 bytes per sample, so a raw 2000x2000 z grid is
+// ~80 MB of JSON -- over the display frame's 32 MB hard cap, and far past
+// what a panel that paints at most ~1600 px can use. The `maxdim` slot caps
+// the axis length that reaches the panel:
+//
+//     BOTH axes within the cap  ->  x, y and z are serialized UNCHANGED.
+//                                   Byte-for-byte the frame this module
+//                                   emitted before decimation existed; the
+//                                   existing frame pins are the guard.
+//     EITHER axis over the cap  ->  both axes are resampled to a BUDGET of
+//                                   B points, index k reading source index
+//                                   (k * n) / B. x, y and z are resampled
+//                                   together, so the trace stays rectangular.
+//
+// LIMITS of the v1 rule, all deliberate and all visible in the output:
+//
+//   * THE BUDGET IS A POWER OF TWO, not `maxdim` itself. `maxdim` is the
+//     TRIGGER exactly as written -- an axis is left alone until it exceeds
+//     it -- but the length it is resampled TO is B, the largest of
+//     16/32/64/128/256/512 that is <= `maxdim` (16 when `maxdim` is under
+//     16, and never more than 512 however large `maxdim` is). An array's
+//     extent is part of its TYPE in Blade, so a decimated axis has to have a
+//     length the compiler knows, and a length computed from a runtime
+//     `maxdim` is not a type. One helper per budget, picked by a runtime
+//     `if`, is how a runtime cap reaches a static extent.
+//   * THE LAST SAMPLE FALLS SHORT OF THE DATA EDGE. Index k reads
+//     (k * n) / B, so the last one is ((B-1) * n) / B, not n - 1: a
+//     decimated axis stops up to one stride before the true maximum. This is
+//     accepted v1 behavior -- it keeps every sample an ORIGINAL datum at an
+//     evenly strided position (no interpolation, no duplicated endpoint),
+//     which is what makes the decimated frame honest about what was
+//     measured.
+//   * BOTH AXES SHARE ONE DECISION. A grid over the cap on one axis only
+//     (say 4000 x 12) is resampled on BOTH, so the short axis repeats
+//     samples. The frame is then bounded by B*B samples whatever the input
+//     shape, which is the property that keeps the cap a cap.
+//   * A DECIMATED SAMPLE IS A FLOAT. The resampling kernel multiplies by
+//     1.0, so an integer grid comes back as floating-point JSON on the
+//     decimated path and as integer JSON on the untouched path.
 module plot
 
 import display as d
@@ -48,6 +123,31 @@ Unit title: 1
 Unit xlabel: 1
 /// Y-axis label (tags Strings).
 Unit ylabel: 1
+/// Longest grid axis, in samples, that reaches the panel undecimated
+/// (grid factories only -- see the DECIMATION note in the module header).
+Unit maxdim: 1
+/// Renderer the program would PREFER the viewer paint this figure with:
+/// 0 = plotly (the default), 1 = GR. Out-of-table indices fall back to the
+/// default rather than erroring, like `cmap`. This is a HINT carried in the
+/// frame's `meta.preferredBackend`, never a change to the frame's CONTENT --
+/// see the PREFERRED BACKEND note in the module header.
+Unit backend: 1
+
+// ---- Decimation budgets ----
+//
+// One index type per supported budget. These are the only lengths a
+// decimated axis can have, because a Blade array's extent lives in its TYPE:
+// `range<__B512>` iterates a compile-time 512, while the STRIDE it reads
+// with -- `(k * n) / 512` -- is an ordinary runtime expression. That split is
+// the whole trick, and it is why the ladder exists instead of a single
+// helper parameterized by the cap.
+
+type __B16 = Idx<16>
+type __B32 = Idx<32>
+type __B64 = Idx<64>
+type __B128 = Idx<128>
+type __B256 = Idx<256>
+type __B512 = Idx<512>
 
 // ---- Internal helpers (exported like everything else; the __ prefix says "not API") ----
 
@@ -55,6 +155,75 @@ Unit ylabel: 1
 /// to Viridis rather than erroring: a colormap is presentation, not data.
 function __cmap_name(c: Int64<cmap>) -> String =
     if c == 1 then "Plasma" else if c == 2 then "Cividis" else if c == 3 then "Greys" else if c == 4 then "RdBu" else "Viridis"
+
+// Rank-1 axis resamplers, one per budget. `na` is the SOURCE length; sample
+// k reads source index (k * na) / B. The `* 1.0` is load-bearing: without it
+// the kernel body types as the loop index (Nat<__B*>) rather than the array
+// read, and json_array refuses it.
+
+/// Resample a rank-1 axis to 16 samples.
+function __ax16(a: Array<T like Idx<n>>, na: Int64) -> String =
+    d.json_array((method_for(range<__B16>) <@> lambda(k) -> a((k * na) / 16) * 1.0) |> compute)
+/// Resample a rank-1 axis to 32 samples.
+function __ax32(a: Array<T like Idx<n>>, na: Int64) -> String =
+    d.json_array((method_for(range<__B32>) <@> lambda(k) -> a((k * na) / 32) * 1.0) |> compute)
+/// Resample a rank-1 axis to 64 samples.
+function __ax64(a: Array<T like Idx<n>>, na: Int64) -> String =
+    d.json_array((method_for(range<__B64>) <@> lambda(k) -> a((k * na) / 64) * 1.0) |> compute)
+/// Resample a rank-1 axis to 128 samples.
+function __ax128(a: Array<T like Idx<n>>, na: Int64) -> String =
+    d.json_array((method_for(range<__B128>) <@> lambda(k) -> a((k * na) / 128) * 1.0) |> compute)
+/// Resample a rank-1 axis to 256 samples.
+function __ax256(a: Array<T like Idx<n>>, na: Int64) -> String =
+    d.json_array((method_for(range<__B256>) <@> lambda(k) -> a((k * na) / 256) * 1.0) |> compute)
+/// Resample a rank-1 axis to 512 samples.
+function __ax512(a: Array<T like Idx<n>>, na: Int64) -> String =
+    d.json_array((method_for(range<__B512>) <@> lambda(k) -> a((k * na) / 512) * 1.0) |> compute)
+
+// Rank-2 grid resamplers. `hr` / `hc` are the SOURCE row / column counts;
+// cell (i, j) reads z((i * hr) / B, (j * hc) / B) -- the same map the axis
+// resamplers use, applied per axis, so x, y and z stay aligned.
+
+/// Resample a rank-2 grid to 16x16 samples.
+function __gr16(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
+    d.json_array((method_for(range<__B16, __B16>) <@> lambda(i, j) -> z((i * hr) / 16, (j * hc) / 16) * 1.0) |> compute)
+/// Resample a rank-2 grid to 32x32 samples.
+function __gr32(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
+    d.json_array((method_for(range<__B32, __B32>) <@> lambda(i, j) -> z((i * hr) / 32, (j * hc) / 32) * 1.0) |> compute)
+/// Resample a rank-2 grid to 64x64 samples.
+function __gr64(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
+    d.json_array((method_for(range<__B64, __B64>) <@> lambda(i, j) -> z((i * hr) / 64, (j * hc) / 64) * 1.0) |> compute)
+/// Resample a rank-2 grid to 128x128 samples.
+function __gr128(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
+    d.json_array((method_for(range<__B128, __B128>) <@> lambda(i, j) -> z((i * hr) / 128, (j * hc) / 128) * 1.0) |> compute)
+/// Resample a rank-2 grid to 256x256 samples.
+function __gr256(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
+    d.json_array((method_for(range<__B256, __B256>) <@> lambda(i, j) -> z((i * hr) / 256, (j * hc) / 256) * 1.0) |> compute)
+/// Resample a rank-2 grid to 512x512 samples.
+function __gr512(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
+    d.json_array((method_for(range<__B512, __B512>) <@> lambda(i, j) -> z((i * hr) / 512, (j * hc) / 512) * 1.0) |> compute)
+
+/// Serialize one axis, decimated when `big` says the figure is over the cap.
+/// The budget ladder is a chain of CALLS, not of inline formers: a kernel
+/// former sitting directly in an `if` branch is refused by codegen (BL7004),
+/// and one former per function is what sidesteps it.
+function __axis_json(a: Array<T like Idx<n>>, na: Int64, big: Bool, m: Int64) -> String =
+    if big then (
+    if m >= 512 then __ax512(a, na) else (
+    if m >= 256 then __ax256(a, na) else (
+    if m >= 128 then __ax128(a, na) else (
+    if m >= 64 then __ax64(a, na) else (
+    if m >= 32 then __ax32(a, na) else __ax16(a, na)))))) else d.json_array(a)
+
+/// Serialize the z grid, decimated on the same decision `__axis_json` takes,
+/// with the same budget -- which is what keeps the trace rectangular.
+function __grid_json(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64, big: Bool, m: Int64) -> String =
+    if big then (
+    if m >= 512 then __gr512(z, hr, hc) else (
+    if m >= 256 then __gr256(z, hr, hc) else (
+    if m >= 128 then __gr128(z, hr, hc) else (
+    if m >= 64 then __gr64(z, hr, hc) else (
+    if m >= 32 then __gr32(z, hr, hc) else __gr16(z, hr, hc)))))) else d.json_array(z)
 
 /// The figure's layout object. Empty strings mean "no entry"; the constant
 /// `"autosize":true` tail keeps the object valid JSON whatever is omitted.
@@ -71,48 +240,78 @@ function __layout(t: String<title>, xl: String<xlabel>, yl: String<ylabel>) -> S
 /// Wrap one trace + layout into a figure and emit the frame. The meta is a
 /// string LITERAL (the display contract); everything runtime-varying --
 /// title included -- lives in the payload's layout.
-function __emit_fig(trace: String, layout: String) -> Bool =
-    d.emit("application/vnd.plotly.v1+json", "{\"data\":[" + trace + "],\"layout\":" + layout + "}", "{\"backend\":\"plotly\"}")
+///
+/// The `backend` PREFERENCE is the one thing that varies in the meta, and it
+/// varies by picking between two whole literals rather than by building one:
+/// `display.emit`'s meta argument must be a literal (BL5700) because the
+/// frame's head and meta tail are computed ONCE at elaboration time, so even
+/// `"{...\"" + "...}"` -- two literals and a `+` -- is refused. A runtime
+/// `if` over two complete calls is how a runtime choice reaches a static
+/// meta, the same shape the decimation ladder uses to reach a static extent.
+/// The PAYLOAD is built once and shared, so the two arms differ in the meta
+/// and in nothing else. Anything but 1 takes the default arm, whose meta is
+/// byte-for-byte what this module emitted before the slot existed.
+function __emit_fig(trace: String, layout: String, b: Int64<backend>) -> Bool = {
+    let fig = "{\"data\":[" + trace + "],\"layout\":" + layout + "}"
+    if b == 1 then
+        d.emit("application/vnd.plotly.v1+json", fig, "{\"backend\":\"plotly\",\"preferredBackend\":\"gr\"}")
+    else
+        d.emit("application/vnd.plotly.v1+json", fig, "{\"backend\":\"plotly\"}")
+}
 
 // ---- Factories ----
 
 /// Filled contour plot of z over the x/y grid.
-function contourf(x: X^1, y: Y^1, z: Z^2,
-                  n: Int64<levels> = 10, c: Int64<cmap> = 0,
-                  t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
-    let xy = "\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + ",\"z\":" + d.json_array(z)
+function contourf(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
+                  n: Int64<levels> = 10, c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
+                  t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                  b: Int64<backend> = 0) -> Bool = {
+    let cx = extents(x)
+    let cy = extents(y)
+    let big = cx > m || cy > m
+    let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
     let trace = "{\"type\":\"contour\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"fill\"},\"ncontours\":" + d.json_num(n) + "}"
-    __emit_fig(trace, __layout(t, xl, yl))
+    __emit_fig(trace, __layout(t, xl, yl), b)
 }
 
 /// Line contour plot of z over the x/y grid.
-function contour(x: X^1, y: Y^1, z: Z^2,
-                 n: Int64<levels> = 10, c: Int64<cmap> = 0,
-                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
-    let xy = "\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + ",\"z\":" + d.json_array(z)
+function contour(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
+                 n: Int64<levels> = 10, c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
+                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                 b: Int64<backend> = 0) -> Bool = {
+    let cx = extents(x)
+    let cy = extents(y)
+    let big = cx > m || cy > m
+    let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
     let trace = "{\"type\":\"contour\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"lines\"},\"ncontours\":" + d.json_num(n) + "}"
-    __emit_fig(trace, __layout(t, xl, yl))
+    __emit_fig(trace, __layout(t, xl, yl), b)
 }
 
 /// Heatmap of z over the x/y grid.
-function heatmap(x: X^1, y: Y^1, z: Z^2,
-                 c: Int64<cmap> = 0,
-                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
-    let xy = "\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + ",\"z\":" + d.json_array(z)
+function heatmap(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
+                 c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
+                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                 b: Int64<backend> = 0) -> Bool = {
+    let cx = extents(x)
+    let cy = extents(y)
+    let big = cx > m || cy > m
+    let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
     let trace = "{\"type\":\"heatmap\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\"}"
-    __emit_fig(trace, __layout(t, xl, yl))
+    __emit_fig(trace, __layout(t, xl, yl), b)
 }
 
 /// Line plot of y against x.
 function line(x: X^1, y: Y^1,
-              t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+              t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+              b: Int64<backend> = 0) -> Bool = {
     let trace = "{\"type\":\"scatter\",\"mode\":\"lines\",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + "}"
-    __emit_fig(trace, __layout(t, xl, yl))
+    __emit_fig(trace, __layout(t, xl, yl), b)
 }
 
 /// Scatter plot of y against x.
 function scatter(x: X^1, y: Y^1,
-                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "") -> Bool = {
+                 t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                 b: Int64<backend> = 0) -> Bool = {
     let trace = "{\"type\":\"scatter\",\"mode\":\"markers\",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + "}"
-    __emit_fig(trace, __layout(t, xl, yl))
+    __emit_fig(trace, __layout(t, xl, yl), b)
 }

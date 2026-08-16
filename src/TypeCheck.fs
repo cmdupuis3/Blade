@@ -6001,8 +6001,25 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         Symmetry = SymNone; Tag = None; IxKind = IxKPlain
                         Kind = SDimension; Dependencies = []
                     }
-                    let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
-                    Ok (mkTyped (TExprSort (tArr, tKey)) resultType))))
+                    // The key extractor is `Element -> Orderable`. inferExpr
+                    // typed it without knowing the element type, so an
+                    // unannotated param starts as a fresh IRTInfer and, with
+                    // nothing to bind it, zonkType's Float64 default takes
+                    // over -- the lifted key function then emits as
+                    // `double __lambda_N(double)` and any body that USES the
+                    // element as an integer/index (`A(i)` on an index-typed
+                    // array) dies in g++ under -Werror=float-conversion.
+                    // Same unification, same reason, as inferMask's predicate
+                    // param; a named-function key already carries declared
+                    // params, so only the lambda arm needs it.
+                    let unifyKeyParam =
+                        match tKey.Kind with
+                        | TExprLambda info when info.Params.Length = 1 ->
+                            unify env.Subst info.Params.[0].Type arrTy.ElemType
+                        | _ -> Ok ()
+                    unifyKeyParam |> Result.bind (fun () ->
+                        let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
+                        Ok (mkTyped (TExprSort (tArr, tKey)) resultType)))))
 
     | ExprKind.ExprTranspose (array, d1, d2) ->
         inferTranspose env array d1 d2
