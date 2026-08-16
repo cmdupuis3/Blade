@@ -891,6 +891,35 @@ and lowerElemType env ty : IRType =
     | _ ->
         lowerTypeExpr env ty
 
+/// A `SymIdx`/`AntisymIdx` base written as a BARE NAME that turns out to name
+/// an index type: the base record to inherit, or None to keep reading the
+/// slot as an extent expression. See symPowerIndexRecord's SymBaseExtent arm
+/// for why this fallback exists and why it cannot change an existing
+/// program's meaning.
+///
+/// Admits exactly what the inline grammar admits -- a rank-1 dense
+/// (`Idx<n>`) or irreps (`IrrepsIdx<spec>`) record. Ragged/dep/compound/
+/// sparse/wreath aliases have no symmetric power this builder constructs, so
+/// they return None and fall through unchanged rather than inherit a record
+/// that would misdescribe their storage.
+and symPowerAliasBase (env: TypeEnv) (extent: Expr) : IRIndexType option =
+    match extent.Kind with
+    | ExprKind.ExprVar name
+            when (evalConstExpr env extent).IsNone
+                 && (evalStaticIntExpr env extent).IsNone ->
+        match lookupTypeDef name env with
+        | Some (TDIIndexType _) | Some (TDIEnumIdx _) ->
+            let rec' = lowerIndexType env 0 (TyNamed (name, []))
+            let admissible =
+                rec'.Rank = 1 && rec'.Symmetry = SymNone
+                && List.isEmpty rec'.Dependencies
+                && (match rec'.IxKind with
+                    | IxKPlain | IxKIrreps -> true
+                    | _ -> false)
+            if admissible then Some rec' else None
+        | _ -> None
+    | _ -> None
+
 /// The index record for `SymIdx<k, base>` / `AntisymIdx<k, base>`, shared by
 /// index-position and value-position lowering.
 ///
@@ -910,10 +939,39 @@ and lowerElemType env ty : IRType =
 and symPowerIndexRecord env (id: IRId) (rank: int) (symmetry: SymmetryClass)
                           (baseIdx: SymIdxBase) : IRIndexType =
     match baseIdx with
+    // A BARE NAME reaches here as SymBaseExtent, never SymBaseIndex:
+    // `Parser.parseSymIdxBase` admits only the `Idx`/`IrrepsIdx` KEYWORDS as
+    // an index-type base, so `SymIdx<2, n>` reads as "extent n" and stays
+    // readable that way forever (a `let static n = 3` base must not change
+    // meaning). But when the name resolves to NO value and DOES name a
+    // registered index type, the extent reading is not merely unintended --
+    // it is unrepresentable: `lowerExtentExpr` falls through to its symbolic
+    // `IRParam name` placeholder, and a symbolic extent on a VIRTUAL range
+    // operand reaches codegen with no runtime object to read it from, which
+    // emitted an undeclared `__range<i>.extents[0]` -- a g++ error naming a
+    // compiler-internal, for a type the user spelled correctly.
+    //
+    // So resolve it to the index type here, as a FALLBACK. Value and static
+    // resolution are still attempted first (and `lookupTypeDef` searches a
+    // different namespace than `evalConstExpr`), so this arm is reachable
+    // only where the old code was heading for that broken placeholder: no
+    // existing program can change meaning. Inheriting the base record also
+    // carries its nominal Tag onto the symmetric-power record, which is what
+    // makes `range<SymIdx<2, N3>>` flow `Nat<N3>` into the kernel instead of
+    // an untagged integer that then trips BL4003 against its own base.
+    //
+    // Admitted bases are exactly what the inline grammar admits -- a rank-1
+    // dense (`Idx<n>`) or irreps (`IrrepsIdx<spec>`) record. A ragged, dep,
+    // compound, sparse or wreath alias has no symmetric power this builder
+    // could construct, so it falls through to the extent path unchanged
+    // rather than inheriting a record that would misdescribe its storage.
     | SymBaseExtent extent ->
-        { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
-          Symmetry = symmetry; Tag = None; IxKind = IxKPlain
-          Kind = SDimension; Dependencies = [] }
+        match symPowerAliasBase env extent with
+        | Some baseRec -> { baseRec with Id = id; Rank = rank; Symmetry = symmetry }
+        | None ->
+            { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
+              Symmetry = symmetry; Tag = None; IxKind = IxKPlain
+              Kind = SDimension; Dependencies = [] }
     | SymBaseIndex baseTy ->
         let baseRec = lowerIndexType env 0 baseTy
         { baseRec with Id = id; Rank = rank; Symmetry = symmetry }
@@ -5666,6 +5724,42 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         match idxs |> List.tryFind (fun ix -> ix.Symmetry = SymWreath) with
         | Some ix ->
             Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "range<> iteration slot"))
+        | None ->
+        // A range slot whose extent never resolved. `range<>` is VIRTUAL: it
+        // materializes no object, so codegen takes every bound and every
+        // output extent from the slot's own Extent expression -- and a
+        // symbolic `IRParam` placeholder has nothing to take. What reached
+        // the C++ instead was `__range<i>.extents[0]`, a reference to the
+        // operand variable a virtual range deliberately never declares, so
+        // the program died in g++ naming a compiler-internal. Same reasoning
+        // as the wreath door above: refuse at the seam that can still name
+        // the user's own text.
+        //
+        // Narrowly: a bare NAME that resolved to neither a value nor a type
+        // (`lowerExtentExpr`'s ExprVar arm, `lowerIndexType`'s unregistered-
+        // `TyNamed` fallback). Three placeholder families are deliberately
+        // NOT refused here, because each is resolved by machinery that runs
+        // after this seam or reports better elsewhere:
+        //   * `__`-prefixed internal sentinels (`__depidx_inner` and kin),
+        //     supplied by their own iteration machinery;
+        //   * the bad-spec error markers, which carry a spec-specific
+        //     diagnostic on the annotation path;
+        //   * `"?"`, `lowerExtentExpr`'s fallback for an extent that is an
+        //     EXPRESSION it cannot lower structurally rather than an unknown
+        //     name. `range<Idx<arity(args)>>` (arity/015) lands here and is
+        //     legitimate: the deferred-former unroll rewrites it into an
+        //     n-element array literal before codegen, precisely so no
+        //     symbolic extent ever reaches a bound (IR.fs, pack former).
+        //     Refusing it would reject a working program.
+        let unresolvedSlot =
+            idxs |> List.tryPick (fun ix ->
+                match ix.IxKind, ix.Extent with
+                | (IxKErrorIrrepsBadSpec | IxKErrorPgIrrepsBadSpec | IxKErrorRaggedNoPrior), _ -> None
+                | _, IRParam (n, _, _) when n <> "?" && not (n.StartsWith "__") -> Some n
+                | _ -> None)
+        match unresolvedSlot with
+        | Some n ->
+            Error (Other (sprintf "range<...>: the extent '%s' is not known at compile time, and a range has no runtime object to read one from -- it is a virtual iteration space, so its bounds must come from the type. '%s' names neither a value in scope nor a declared index type. Declare it as an index type (`type %s = Idx<N>`, then `range<%s>`), bind it with `let static %s = N`, or write the extent literally." n n n n n))
         | None ->
         if hasCompound && idxs.Length > 1 then
             Error (Other "range<CompoundIdx<m>, ...>: a compound range slot cannot be combined with other index types in one range<> (formalism 4.5)")

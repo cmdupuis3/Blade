@@ -1,0 +1,44 @@
+// TEST: SymIdx Over A Named Index Alias
+// `Parser.parseSymIdxBase` admits only the `Idx`/`IrrepsIdx` KEYWORDS as an
+// index-type base, so a bare name reaches lowering as an EXTENT expression --
+// `SymIdx<2, n>` means "extent n" and must keep meaning that (the `byExtent`
+// binding below is that guard). A name that resolves to no value but DOES name
+// an index type had no working reading at all: lowerExtentExpr fell through to
+// its symbolic `IRParam` placeholder, and a symbolic extent on a VIRTUAL range
+// operand reaches codegen with no runtime object to read it from -- the emitted
+// C++ said `__range0.extents[0]`, naming the operand variable a virtual range
+// deliberately never declares, so g++ refused a correctly spelled program.
+//
+// The alias now resolves as a FALLBACK, after value/static resolution has been
+// tried, so no existing program can change meaning. The assertion below is
+// EQUIVALENCE: the alias form must be the literal form, cell for cell, for both
+// compact classes. Raw values are whatever the compact printer emits (see 037's
+// twin pin); what this test owns is that the two spellings agree.
+//
+// WARN: BL4003
+type N3 = Idx<3>
+let A: Array<Float64 like N3> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+
+// Symmetric: triangular pool, canonical cells only.
+let symAlias = method_for(range<SymIdx<2, N3>>) <@> lambda(i, j) -> A(i) * A(j) |> compute
+let symLiteral = method_for(range<SymIdx<2, 3>>) <@> lambda(i, j) -> B(i) * B(j) |> compute
+// EXPECT: symAlias = [[1.0, 2.0, 3.0], [2.0, 4.0], [3.0]]
+// EXPECT: symLiteral = [[1.0, 2.0, 3.0], [2.0, 4.0], [3.0]]
+
+// Antisymmetric twin: same arm, strict simplex with no stored diagonal.
+let antiAlias = method_for(range<AntisymIdx<2, N3>>) <@> lambda(i, j) -> A(i) - A(j) |> compute
+let antiLiteral = method_for(range<AntisymIdx<2, 3>>) <@> lambda(i, j) -> B(i) - B(j) |> compute
+// EXPECT: antiAlias = [[0.0, -1.0], [1.0], []]
+// EXPECT: antiLiteral = [[0.0, -1.0], [1.0], []]
+
+// BACKWARD COMPATIBILITY: a `let static` name in the same slot is a VALUE, it
+// resolves first, and it still means "extent 3" -- an anonymous dense base.
+// The single pinned BL4003 belongs to THIS line and is the observable proof
+// that the two readings stayed distinct: an anonymous base carries no tag, so
+// its iteration values reach A's N3 slots untagged. The alias lines above
+// inherit N3's tag instead and are silent -- which is why the pin is one
+// warning and not three.
+let static n = 3
+let byExtent = method_for(range<SymIdx<2, n>>) <@> lambda(i, j) -> A(i) + A(j) |> compute
+// EXPECT: byExtent = [[2.0, 3.0, 4.0], [3.0, 4.0], [4.0]]

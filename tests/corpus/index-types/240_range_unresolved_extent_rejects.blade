@@ -1,0 +1,21 @@
+// TEST: Range Over An Unresolved Extent Name (rejects)
+// ERROR: BL3999
+// ERROR-CONTAINS: is not known at compile time
+// The other half of 239. A bare name in a `SymIdx` base slot reads as an extent
+// EXPRESSION; when it resolves to neither a value nor an index type, there is
+// nothing to iterate. `range<>` is virtual -- it materializes no object -- so
+// codegen takes every bound and output extent from the slot's own Extent, and a
+// symbolic placeholder has nothing to give: what reached the C++ was
+// `__range0.extents[0]`, a reference to the operand variable a virtual range
+// deliberately never declares. The program died in g++, naming a
+// compiler-internal, for a mistake the front end could see.
+//
+// Refused at the range seam instead -- the same door that already refuses a
+// wreath slot for the same reason ("accurate about the failure, wrong about
+// whose fault it is"). Deliberately NOT refused there: `__`-prefixed internal
+// sentinels, the bad-spec error markers, and `"?"` (lowerExtentExpr's fallback
+// for an extent that is an EXPRESSION rather than an unknown name --
+// `range<Idx<arity(args)>>` in arity/015 lands there and is unrolled into an
+// array literal before codegen, so refusing it would reject a working program).
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let bad = method_for(range<SymIdx<2, Bogus>>) <@> lambda(i, j) -> A(i) * A(j) |> compute
