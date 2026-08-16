@@ -315,6 +315,13 @@ shape reverse-mode AD needs through `group_by`
 (`docs/plan-ad-combinators.md` §2.17a). A surface accessor for `rank` does not
 exist yet.
 
+Under `ad.grad` / `ad.jvp` you no longer write that gather yourself: a fully
+reduced per-group loss over a group-linear peel kernel (`reduce(r, (+))`,
+`reduce(r, (+)) / extents(r)`, `extents(r)`) is **auto-lowered** to exactly this
+form — one loop over the source index space subscripted by `group_bucket(gk)`
+and `extents(gk)`, with the group axis never materialized
+(`docs/plan-ad-combinators.md` §2.17c).
+
 Tests: `sql-group-by` cases "Group Bucket Roundtrip", "Group Bucket Negative
 Key", and the four refusals "Group Bucket Inline Argument", "Group Bucket Non
 Grouping Argument", "Group Keys Alias", "Group Keys In Tuple".

@@ -1012,6 +1012,69 @@ sort key reading the array being keyed on (`lambda(i: I) -> a(i)`) could not see
 compare two elements". It now binds declared captures from the site env, exactly
 as `materializeObjectForApp` already documented needing to.
 
+### 2.17c Grouped peels, shipped — auto-lower the peel, never allocate the group axis
+
+**Status: SHIPPED both modes, 2026-08-16** (`lowerGroupedPeels`, `src/Grad.fs`).
+2.17a proved the composite reverse rule by hand-writing its result; this makes
+the pre-pass write it, so the NATURAL spelling differentiates:
+
+```blade
+let gk = group_keys(k)
+let g  = group_by(v, gk)
+let m  = method_for(g) <@> lambda(r) -> reduce(r, (+)) / extents(r) |> compute
+reduce(m * w, (+))
+```
+
+**The dichotomy is GROUP-LINEAR, not "factorable".** 2.17a's factorable list
+(sum, mean, count, product, max, logsumexp) conflates two regimes, and only the
+first of them needs no group axis at all:
+
+- **Class L, group-linear.** `L = Σ_g w_g·A_g` with `A_g = init + Σ_{i∈g} φ(vᵢ)`
+  sum-decomposable and `w_g` a group-space value not derived from the peel. Then
+  `L = init·Σ_g w_g + Σ_i w_{b(i)}·φ(vᵢ)` — **one loop over the SOURCE index
+  space**, the group axis surviving only as the subscript `b(i)`. Nothing is
+  allocated, so nothing needs a compile-time group count. Kernels: `reduce(r,
+  (+))`, `reduce(r, (+)) / extents(r)`, `extents(r)`.
+- **Class A.** Product, max, logsumexp, variance, anything nonlinear in the
+  aggregate, and any broadcast-back `Σ_i f(vᵢ − m_{b(i)})`: these need `A_g`
+  materialized, i.e. a group-space accumulator, i.e. `replicate` at a
+  **compile-time** count (BL3999). A grouping does not have one. Named refusal,
+  not the generic extent message.
+
+**Empty groups are exactly the static-count regimes** — inverted, which makes
+the gate sharp. Dynamic discovery only manufactures a group it saw a row for;
+`Idx<N>` / `EnumIdx` element keys are POSITIONAL and have slots nothing lands
+in. The language already decides the empty fold (sql.md §10: `reduce(A, op,
+init)` returns `init`), so: positional keys accept a SUM carrying an explicit
+init (the rewrite folds `init·N`, or `init·reduce(W, (+))`, in exactly) and
+refuse one without; positional keys refuse a MEAN outright, because an empty
+group's mean is 0/0 and no init defines it. Discovered keys accept everything
+with a zero/absent init. An unresolvable key element type refuses rather than
+guessing — guessing "discovered" for a positional space is the direction that
+silently NaNs.
+
+**`guard` is the drop mask, and it must wrap the SUBSCRIPT too.** A negative key
+drops its row and `group_bucket` reports −1. `guard(b(i) ≥ 0, φ)` zeroes the
+contribution in both lanes (zeroing is linear, so it is already in `LinearForm`)
+— but neither lane keeps the group-space READS inside it: reverse mode's
+quotient rule emits `cot / __gn(b(i))` with the divisor hoisted out, and the
+weight leg's adjoint is a scatter `__g_W(b(i)) += …`. At `b(i) = −1` those are
+an out-of-range read and an out-of-range **write**. Clamping the subscript with
+an inner `guard(b(i) ≥ 0, b(i))` is exact — the outer guard has already zeroed
+whatever flows through — and it is what closed the interpreter/compiled
+divergence (the compiled lane had been reading OOB and getting away with it).
+
+**Deliberately NOT done:** teaching `staticExtentOf` about `ExprGroupBy`. The
+group axis must stay extent-unknown so a peel this rewrite declined keeps
+refusing loudly. The rewrite is additive: it fires on the shapes above and
+leaves every other body byte-identical.
+
+Corpus: `tests/corpus/ad-jvp-comb/043`–`061`. `046` is the differential gate —
+the auto-lowered peel pins 018's hand-lowered numbers to the digit. `047` pins
+the primal against the natural peel as a THRESHOLDED boolean: the rewrite
+reassociates the summation (rows, not groups), which for a weighted mean moves
+the last bits (2.84e-14 measured).
+
 ### 2.18 `>>=` and `<$>`
 
 1. **Semantics.** `>>= : Computation α × (α → Computation β) → Computation β`,
