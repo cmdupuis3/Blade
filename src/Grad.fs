@@ -355,6 +355,242 @@ let rec private producesArray (arrays: Set<string>) (e: Expr) : bool =
     | ExprKind.ExprGram _ -> true
     | _ -> false
 
+// ---------------------------------------------------------------------------
+// C7: sort, differentiated by carrying the PERMUTATION AS DATA
+//
+// `sort` is piecewise constant in its input: off the tie set (measure zero)
+// a small perturbation of A moves the VALUES but not which original slot
+// lands where. So the derivative of `s = sort(A, key)` is not a derivative of
+// the sort at all -- it is the derivative of a GATHER through a permutation
+// that the transform may treat as constant index data:
+//
+//     s(i) = A(perm(i))       =>  tangent  ds(i) = dA(perm(i))
+//                             =>  adjoint  dA(j) += ds(invperm(j))
+//
+// Both legs need `perm` as a first-class array, which `sort` does not hand
+// back -- so the pre-pass MATERIALIZES it, by sorting the row indices under
+// the same key instead of the values:
+//
+//     let __sx_s = method_for(range<I>) <@> lambda(i: I) -> i |> compute
+//     let __sp_s = sort(__sx_s, lambda(i: I) -> A(i))
+//     let s      = sort(A, key)                       // primal, unchanged
+//
+// The reverse leg needs the INVERSE permutation, and gets it from a SECOND
+// sort rather than a scatter primitive (the same "carry data, don't invert
+// structurally" move the 2.17a grouping route makes):
+//
+//     let __si_s = sort(__sx_s, lambda(i: I) -> __sp_s(i))
+//
+// `__sp_s` is shared BY NAME between the primal and the tangent/adjoint legs,
+// so the two can never disagree about which permutation was taken -- including
+// at ties, where `std::stable_sort` fixes input order and the two legs inherit
+// the same convention for free.
+//
+// The lambda params are ALWAYS annotated: an unannotated index-typed key
+// param is miscompiled to double today.
+// ---------------------------------------------------------------------------
+
+/// Synthesized-binding prefixes for the sort expansion. Double-underscore
+/// (internal, per the style guide) and NOT added to the reserved-name gate:
+/// the gate runs on the post-pre-pass statement list, which is exactly where
+/// these live. Collisions are caught in `expandSort` against the SURFACE body
+/// instead, where a user binding and a re-entered synthesized one can still
+/// be told apart.
+let private sortPermName (n: string) = "__sp_" + n
+let private sortInvName (n: string) = "__si_" + n
+let private sortIotaName (n: string) = "__sx_" + n
+
+/// What the sort expansion left behind for the differentiation sweeps.
+type private SortPlan = {
+    /// The ORIGINAL index landing at each sorted slot.
+    Perm: string
+    /// The inverse permutation. Emitted in reverse mode only ("" in jvp,
+    /// where nothing reads it).
+    InvPerm: string
+    /// The sorted array's index type, as WRITTEN (alias identity preserved):
+    /// the gather lambdas annotate their params with it.
+    IdxTy: TypeExpr
+    /// The sorted array's name.
+    Src: string
+}
+
+let private lamP (nm: string) (t: TypeExpr) : LambdaParam =
+    { Name = nm; Type = Some t; Default = None; NameSpan = noSpan }
+
+/// `method_for(<operand>) <@> lambda(<pv>: <ity>) -> <body> |> compute`.
+let private gatherForm (operand: Expr) (pv: string) (ity: TypeExpr) (body: Expr) : Expr =
+    syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply,
+                                      syn (ExprMethodFor [operand]),
+                                      syn (ExprLambda ([lamP pv ity], None, body))))))
+
+/// The gather of `src` through permutation `perm`, over index type `ity`.
+let private permGather (perm: string) (ity: TypeExpr) (src: string) : Expr =
+    let pv = "__spi"
+    gatherForm (v perm) pv ity (syn (ExprApp (v src, [v pv])))
+
+/// `method_for(range<I>) <@> lambda(i: I) -> i |> compute`: the materialized
+/// identity index array the expansion sorts in place of the values. Admitted
+/// in BOTH modes as constant index plumbing -- it computes no float and reads
+/// no array, so admitting it cannot hide a derivative.
+let private (|IndexIota|_|) (e: Expr) =
+    match e.Kind with
+    | ExprKind.ExprCompute { Kind = ExprKind.ExprBinOp (_, OpApply,
+                                        { Kind = ExprKind.ExprMethodFor [{ Kind = ExprKind.ExprRange _ }] },
+                                        { Kind = ExprKind.ExprLambda ([p], _, { Kind = ExprKind.ExprVar b }) }) }
+            when p.Name = b -> Some ()
+    | _ -> None
+
+/// `sort(<iota>, lambda(<p>: I) -> <A>(<p>))`: the shape both synthesized
+/// permutation sorts have. Recognizes an ALREADY-EXPANDED body on a
+/// composition round (`ad.jvp(ad.grad(f))` re-runs the pre-pass over a body
+/// this pass itself wrote) so the plumbing is reused instead of re-emitted.
+///
+/// The `iotas` gate is load-bearing: without it a PRIMAL sort under a
+/// one-call key (`sort(A, lambda(x: Float) -> abs(x))`) has the same shape
+/// and would be misread as plumbing, losing its plan and its derivative.
+/// Only a sort whose operand is a materialized index array is plumbing.
+let private (|SortPermForm|_|) (iotas: Set<string>) (e: Expr) =
+    match e.Kind with
+    | ExprKind.ExprSort ({ Kind = ExprKind.ExprVar srcIdx },
+                         { Kind = ExprKind.ExprLambda ([p], _,
+                             { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar keyed }, [{ Kind = ExprKind.ExprVar b }]) }) })
+            when p.Name = b && Set.contains srcIdx iotas -> Some (keyed, p.Type)
+    | _ -> None
+
+/// Does `e` mention any name in `names`? Unhandled forms answer TRUE. This
+/// gates the sort-KEY refusal, where a missed reference is a wrong derivative
+/// (the key would close over differentiable data whose contribution the
+/// permutation-as-data rule silently drops), while a spurious hit costs only
+/// a refusal the user can work around by hoisting the value out of the key.
+let rec private mentionsAnyOf (names: Set<string>) (e: Expr) : bool =
+    let any = List.exists (mentionsAnyOf names)
+    match e.Kind with
+    | ExprKind.ExprVar n -> Set.contains n names
+    | ExprKind.ExprLit _ -> false
+    | ExprKind.ExprTyped (inner, _) | ExprKind.ExprUnaryOp (_, inner)
+    | ExprKind.ExprPure inner | ExprKind.ExprCompute inner -> mentionsAnyOf names inner
+    | ExprKind.ExprBinOp (_, _, l, r) | ExprKind.ExprDotDot (l, r) ->
+        mentionsAnyOf names l || mentionsAnyOf names r
+    | ExprKind.ExprApp (f, args) -> mentionsAnyOf names f || any args
+    | ExprKind.ExprArrayLit es | ExprKind.ExprTuple es | ExprKind.ExprStack es -> any es
+    | ExprKind.ExprIf (c, t, f) ->
+        mentionsAnyOf names c || mentionsAnyOf names t || mentionsAnyOf names f
+    | _ -> true
+
+/// Any `sort(...)` nested inside `e`. Coverage mirrors `hoistReduces` -- the
+/// same fragment the pre-pass rewrites -- and shares its structural catch-all:
+/// a form this misses is not a silent zero, it just reaches the sweeps'
+/// generic refusal instead of the specific message below.
+let rec private containsSort (e: Expr) : bool =
+    let any = List.exists containsSort
+    match e.Kind with
+    | ExprKind.ExprSort _ -> true
+    | ExprKind.ExprTyped (inner, _) | ExprKind.ExprUnaryOp (_, inner)
+    | ExprKind.ExprPure inner | ExprKind.ExprCompute inner
+    | ExprKind.ExprGuard (_, inner) | ExprKind.ExprReplicate (_, inner)
+    | ExprKind.ExprTranspose (inner, _, _) -> containsSort inner
+    | ExprKind.ExprBinOp (_, _, l, r) | ExprKind.ExprDotDot (l, r)
+    | ExprKind.ExprAssign (l, r) -> containsSort l || containsSort r
+    | ExprKind.ExprApp (f, args) -> containsSort f || any args
+    | ExprKind.ExprArrayLit es | ExprKind.ExprTuple es | ExprKind.ExprStack es
+    | ExprKind.ExprSequence es | ExprKind.ExprJoin (es, _) -> any es
+    | ExprKind.ExprIf (c, t, f) -> containsSort c || containsSort t || containsSort f
+    | ExprKind.ExprReduce (src, _, initOpt, _) ->
+        containsSort src || (match initOpt with Some i -> containsSort i | None -> false)
+    | ExprKind.ExprMethodFor es -> any es
+    | _ -> false
+
+/// Every name a surface statement list binds with a plain `let <name>`,
+/// nested loops included. The sort expansion checks its synthesized names
+/// against this (plus the parameters) BEFORE emitting them.
+let rec private surfaceBoundNames (ss: Stmt list) : Set<string> =
+    ss |> List.fold (fun acc s ->
+        match unwrapStmt s with
+        | StmtLet { Pattern = { Kind = PatternKind.PatVar n } } -> Set.add n acc
+        | StmtForIn (_, _, body) -> Set.union acc (surfaceBoundNames body)
+        | _ -> acc) Set.empty
+
+/// Expand a `let <name> = sort(<A>, <key>)` into the permutation plumbing
+/// described above, returning the statements to emit BEFORE the (unchanged)
+/// primal sort and the plan the sweeps read.
+///
+/// `preBound` is every name the SURFACE body binds, so a re-entered body
+/// (composition) is told from a genuine user collision.
+let private expandSort (fname: string) (ctx: Ctx)
+                       (idxTys: Map<string, TypeExpr>) (preBound: Set<string>)
+                       (name: string) (operand: Expr) (key: Expr)
+    : Result<Stmt list * SortPlan, string> =
+    // C2's operand discipline: the sorted side must be a NAMED array whose
+    // index type is declared, because the expansion has to spell `range<I>`
+    // and annotate the gather lambdas with it.
+    match operand.Kind with
+    | ExprKind.ExprVar src ->
+        (match Map.tryFind src idxTys with
+         | None ->
+             err fname (sprintf "differentiating `sort` needs a named array operand with a declared rank-1 index type; '%s' has none (annotate the parameter or local as `Array<Float like I>`, or sort a parameter directly)" src)
+         // The expansion SPELLS the index type three times (`range<I>` plus
+         // the key and gather lambda annotations), and every syntactic
+         // occurrence of an ANONYMOUS `Idx<n>` gets its own nominal identity
+         // -- by design, since index provenance is part of the type. Only a
+         // named alias gives the occurrences one identity, so require one
+         // here rather than let the mismatch surface as a BL3001 pointing at
+         // the whole function. (The C2 map rule is unaffected: it spells the
+         // index type ONCE.)
+         | Some ity when (match ity with TyNamed (_, []) -> false | _ -> true) ->
+             err fname (sprintf "differentiating `sort` needs the sorted array's index type to be a NAMED alias (v1): '%s' is declared over an anonymous index type, whose occurrences do not share an identity, so the synthesized permutation would not unify with it. Add `type I = Idx<n>` and declare the array as `Array<Float like I>`" src)
+         | Some ity ->
+        // The key must be a lambda of one parameter reading only THAT
+        // element. A key closing over a second differentiable array would
+        // make the permutation depend on it, and the permutation-as-data
+        // rule drops that dependence -- so refuse rather than answer wrong.
+        match key.Kind with
+        | ExprKind.ExprLambda ([kp], _, kbody) ->
+            let closedOver = Set.remove kp.Name (Set.union (Map.keys idxTys |> Set.ofSeq) (Set.singleton src))
+            if mentionsAnyOf closedOver kbody then
+                err fname (sprintf "differentiating `sort` requires a key that reads ONLY the sorted element: the key of '%s' closes over another array in scope, so the permutation would depend on data whose contribution the derivative drops (v1). Precompute the key into the sorted array, or sort outside the differentiated function" name)
+            else
+            let iotaN = sortIotaName name
+            let permN = sortPermName name
+            let invN = sortInvName name
+            let wantInv = (errMode.Value <> "jvp")
+            // Already expanded? A composition round (`ad.jvp(ad.grad(f))`)
+            // re-runs this pre-pass over a body this pass itself wrote, so
+            // the plumbing is REUSED by name -- which is also what keeps the
+            // primal and tangent legs on one permutation.
+            let alreadyPerm = Set.contains permN preBound
+            let alreadyInv = Set.contains invN preBound
+            let collided =
+                [iotaN; permN; invN]
+                |> List.filter (fun n -> Set.contains n preBound)
+            if not (List.isEmpty collided) && not alreadyPerm then
+                err fname (sprintf "binding '%s' collides with a name the sort expansion synthesizes for '%s'; rename it" (List.head collided) name)
+            else
+            let pv = "__spk"
+            let iotaLet =
+                if alreadyPerm then []
+                else [ StmtLet { Mutability = BindLet; Pattern = synPat (PatVar iotaN); Type = None
+                                 Value = gatherForm (syn (ExprRange [ity])) pv ity (v pv) } ]
+            let permLet =
+                if alreadyPerm then []
+                else [ StmtLet { Mutability = BindLet; Pattern = synPat (PatVar permN); Type = None
+                                 Value = syn (ExprSort (v iotaN,
+                                                        syn (ExprLambda ([lamP pv ity], None,
+                                                                         syn (ExprApp (v src, [v pv])))))) } ]
+            let invLet =
+                if not wantInv || alreadyInv then []
+                else [ StmtLet { Mutability = BindLet; Pattern = synPat (PatVar invN); Type = None
+                                 Value = syn (ExprSort (v iotaN,
+                                                        syn (ExprLambda ([lamP pv ity], None,
+                                                                         syn (ExprApp (v permN, [v pv])))))) } ]
+            Ok (iotaLet @ permLet @ invLet,
+                { Perm = permN; InvPerm = (if wantInv then invN else ""); IdxTy = ity; Src = src })
+        | ExprKind.ExprLambda _ ->
+            err fname (sprintf "differentiating `sort` requires a single-parameter key lambda (the sorted element); the key of '%s' takes a different arity" name)
+        | _ ->
+            err fname (sprintf "differentiating `sort` requires an explicit key lambda `lambda(x: T) -> ...`; the key of '%s' is not a lambda (v1)" name))
+    | _ ->
+        err fname (sprintf "differentiating `sort` requires a named array operand (v1); bind the sorted array to a `let` first (in '%s')" name)
+
 /// Walk an expression, validating it stays inside the differentiable
 /// fragment, and call `onVar` for every variable REFERENCE (not index
 /// positions, which are int-typed and non-differentiable, but we still
@@ -367,6 +603,19 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     | { Kind = ExprKind.ExprUnaryOp (OpNeg, inner) } -> walkExpr fname ctx onVar inner
     | { Kind = ExprKind.ExprUnaryOp (OpNot, inner) } -> walkExpr fname ctx onVar inner
     | { Kind = ExprKind.ExprUnaryOp _ } -> err fname "unsupported unary operator in differentiated code"
+    // C7 plumbing, admitted in BOTH modes (it must precede LinearForm, which
+    // would otherwise walk into the `<@>` and hit grad's combinator refusal).
+    // The materialized identity index array computes no float and reads no
+    // array: nothing to taint, nothing to differentiate.
+    | IndexIota -> Ok ()
+    // C7: `sort`. The OPERAND is visited (its taint is the sorted result's);
+    // the KEY deliberately is NOT. The permutation is piecewise constant in
+    // the data, so it carries no derivative -- and a key that closed over
+    // differentiable data was already refused by the pre-pass, which is what
+    // makes skipping it safe rather than silent. Visiting it would instead
+    // MIS-taint the synthesized permutation arrays (whose keys read the
+    // differentiable source) as differentiable index data.
+    | { Kind = ExprKind.ExprSort (arr, _) } -> walkExpr fname ctx onVar arr
     // C1/C6: the linear closure. Forward mode admits the whole family;
     // reverse mode admits it too, because every form either has an adjoint
     // arm (adjointOfInit) or is refused THERE with a named message -- so
@@ -881,6 +1130,8 @@ let rec private staticExtentOf (ctx: Ctx) (env: Map<string, int>) (e: Expr) : in
              | _ -> staticExtentOf ctx env args)
     // a bare loop binding's extent is its leading operand's
     | ExprKind.ExprMethodFor (first :: _) -> staticExtentOf ctx env first
+    // C7: sorting permutes a rank-1 array, so the extent is the operand's
+    | ExprKind.ExprSort (a, _) -> staticExtentOf ctx env a
     | _ -> None
 
 /// Full static DIMS of an initializer (C6): every axis extent, structurally.
@@ -918,6 +1169,8 @@ let rec private staticDimsOf (ctx: Ctx) (denv: Map<string, int list>) (e: Expr) 
         (match staticDimsOf ctx denv a, staticDimsOf ctx denv b with
          | Some (i :: _), Some (j :: _) -> Some [i; j]
          | _ -> None)
+    // C7: a sort is a permutation -- same shape as its (rank-1) operand
+    | ExprKind.ExprSort (a, _) -> staticDimsOf ctx denv a
     | _ -> None
 
 /// Zero array literal for a dims list (rank-general).
@@ -948,16 +1201,79 @@ let private preNormalizeBody (fname: string) (ctx: Ctx) (fd: FunctionDecl) : Res
         match fd.Body.Kind with
         | ExprKind.ExprBlock (ss, fe) -> ss, fe
         | _ -> [], Some fd.Body
+    // C7: rank-1 index types per named array, for the sort expansion's
+    // `range<I>` and gather-lambda annotations. Seeded from the parameters
+    // and extended by ANNOTATED locals -- the index type has to be declared
+    // somewhere, since a sort's own result type does not carry it back.
+    let paramIdxTys =
+        fd.Params |> List.choose (fun p ->
+            match p.Type |> Option.map (resolveTy ctx) with
+            | Some (TyArray (_, [ity])) -> Some (p.Name, ity)
+            | _ -> None)
+        |> Map.ofList
+    // Every name the SURFACE body binds: the sort expansion checks its
+    // synthesized names against this before emitting them.
+    let preBound = Set.union (surfaceBoundNames stmts0) (fd.Params |> List.map (fun p -> p.Name) |> Set.ofList)
+    // A sort ANYWHERE other than directly as a `let` initializer has no
+    // expansion site, so it is refused here where the message can say why
+    // (rather than reaching the sweeps' generic "unsupported form").
+    let noNestedSort (what: string) (e: Expr) : Result<unit, string> =
+        if containsSort e then
+            err fname (sprintf "differentiating `sort` requires it to be the whole initializer of a `let` (v1); %s contains a nested sort -- bind it with `let s = sort(...)` first" what)
+        else Ok ()
+    // ANNOTATED rank-1 array locals, collected in one pass over the surface
+    // body rather than threaded through the fold: order does not matter here
+    // (a sort can only name a binding already in scope), and over-collecting
+    // only widens the key-closure refusal set, which is the safe direction.
+    let idxTys =
+        let rec collect (acc: Map<string, TypeExpr>) (ss: Stmt list) =
+            ss |> List.fold (fun m s ->
+                match unwrapStmt s with
+                | StmtLet { Pattern = { Kind = PatternKind.PatVar nm }; Type = Some t } ->
+                    (match resolveTy ctx t with
+                     | TyArray (_, [ity]) -> Map.add nm ity m
+                     | _ -> m)
+                | StmtForIn (_, _, body) -> collect m body
+                | _ -> m) acc
+        collect paramIdxTys stmts0
+    // Materialized index arrays already in the body -- see `SortPermForm`.
+    let surfaceIotas =
+        let rec collect (acc: Set<string>) (ss: Stmt list) =
+            ss |> List.fold (fun m s ->
+                match unwrapStmt s with
+                | StmtLet { Pattern = { Kind = PatternKind.PatVar nm }; Value = IndexIota } -> Set.add nm m
+                | StmtForIn (_, _, body) -> collect m body
+                | _ -> m) acc
+        collect Set.empty stmts0
     let rec goStmts (env: Map<string, int>) (ss: Stmt list) : Result<Map<string, int> * Stmt list, string> =
         ss |> List.fold (fun acc s ->
             acc |> Result.bind (fun (env, outp) ->
                 match unwrapStmt s with
+                // C7: the plumbing this pass itself emitted (recognized by
+                // shape) rides through untouched -- a composition round
+                // re-runs the pre-pass over an already-expanded body.
+                | StmtLet { Value = SortPermForm surfaceIotas _ } -> Ok (env, outp @ [s])
+                // C7: `let s = sort(A, key)` -- materialize the permutation
+                // (and, in reverse mode, its inverse) BEFORE the unchanged
+                // primal sort.
+                | StmtLet ({ Value = { Kind = ExprKind.ExprSort (operand, key) }
+                             Pattern = { Kind = PatternKind.PatVar nm } } as b) ->
+                    expandSort fname ctx idxTys preBound nm operand key
+                    |> Result.map (fun (plumbing, plan) ->
+                        let env' =
+                            match Map.tryFind plan.Src env with
+                            | Some cnt -> Map.add nm cnt env
+                            | None -> env
+                        (env', outp @ plumbing @ [StmtLet b]))
+                | StmtLet { Value = { Kind = ExprKind.ExprSort _ } } ->
+                    err fname "differentiating `sort` requires it to bind a single name (v1)"
                 | StmtLet { Value = { Kind = ExprKind.ExprRecArray def }; Type = Some annot; Pattern = { Kind = PatternKind.PatVar nm } } ->
                     expandRecArray fname ctx nm annot def
                     |> Result.map (fun (emitted, ext) -> (Map.add nm ext env, outp @ emitted))
                 | StmtLet { Value = { Kind = ExprKind.ExprRecArray _ } } ->
                     err fname "recursive array must bind a single annotated name to be differentiable (v1)"
                 | StmtLet ({ Pattern = { Kind = PatternKind.PatVar nm } } as b) ->
+                    noNestedSort (sprintf "the initializer of '%s'" nm) b.Value |> Result.bind (fun () ->
                     hoistReduces fname ctx env b.Value |> Result.map (fun (pre, value') ->
                         let env' =
                             let byAnn =
@@ -968,16 +1284,19 @@ let private preNormalizeBody (fname: string) (ctx: Ctx) (fd: FunctionDecl) : Res
                             match (match byAnn with Some _ -> byAnn | None -> byLit) with
                             | Some cnt -> Map.add nm cnt env
                             | None -> env
-                        (env', outp @ pre @ [StmtLet { b with Value = value' }]))
+                        (env', outp @ pre @ [StmtLet { b with Value = value' }])))
                 | StmtLet b ->
+                    noNestedSort "a let initializer" b.Value |> Result.bind (fun () ->
                     hoistReduces fname ctx env b.Value |> Result.map (fun (pre, value') ->
-                        (env, outp @ pre @ [StmtLet { b with Value = value' }]))
+                        (env, outp @ pre @ [StmtLet { b with Value = value' }])))
                 | StmtExpr ex ->
+                    noNestedSort "this statement" ex |> Result.bind (fun () ->
                     hoistReduces fname ctx env ex |> Result.map (fun (pre, ex') ->
-                        (env, outp @ pre @ [StmtExpr ex']))
+                        (env, outp @ pre @ [StmtExpr ex'])))
                 | StmtAssign (lhs, op, rhs) ->
+                    noNestedSort "this assignment" rhs |> Result.bind (fun () ->
                     hoistReduces fname ctx env rhs |> Result.map (fun (pre, rhs') ->
-                        (env, outp @ pre @ [StmtAssign (lhs, op, rhs')]))
+                        (env, outp @ pre @ [StmtAssign (lhs, op, rhs')])))
                 | StmtForIn (var, range, body) ->
                     goStmts env body |> Result.map (fun (_, body') ->
                         (env, outp @ [StmtForIn (var, range, body')]))
@@ -986,8 +1305,9 @@ let private preNormalizeBody (fname: string) (ctx: Ctx) (fd: FunctionDecl) : Res
     goStmts paramExtents stmts0 |> Result.bind (fun (env, stmts') ->
         match finalOpt with
         | Some fe ->
+            noNestedSort "the returned expression" fe |> Result.bind (fun () ->
             hoistReduces fname ctx env fe |> Result.map (fun (pre, fe') ->
-                inheritSpan fd.Body (ExprBlock (stmts' @ pre, Some fe')))
+                inheritSpan fd.Body (ExprBlock (stmts' @ pre, Some fe'))))
         | None ->
             Ok (inheritSpan fd.Body (ExprBlock (stmts', None))))
 
@@ -1056,6 +1376,18 @@ and private inlineCall (fname: string) (ctx: Ctx) (depth: int)
         err fname (sprintf "'%s' called with %d arguments, expects %d" callee args.Length fd.Params.Length)
     else
     normalizeBody fname ctx (depth + 1) fd |> Result.bind (fun (calleeStmts, calleeFinal) ->
+        // C7: `renameExpr` does not descend into `sort` (or its key lambda),
+        // so splicing a callee that sorts would leave the permutation
+        // plumbing pointing at the callee's own, now-renamed, parameter.
+        // Refuse rather than emit a dangling reference.
+        let calleeSorts =
+            calleeStmts |> List.exists (fun st ->
+                match st with
+                | NLet (_, _, { Kind = ExprKind.ExprSort _ }) -> true
+                | _ -> false)
+        if calleeSorts then
+            err fname (sprintf "cannot differentiate through '%s': it sorts, and inlining a sorted callee would not rename its permutation plumbing (v1) -- inline the call by hand, or sort in the differentiated function itself" callee)
+        else
         let tag = fresh ctx "__in"
         // Param binding: plain-var arguments bind by RENAMING the callee
         // param to the caller's variable (no let) -- this is what routes
@@ -1447,7 +1779,35 @@ type private RevCtx = {
     /// reverse rules: cotangent buffers for combinator-built locals and
     /// bounds for the reindexing accumulation loops.
     Dims: Map<string, int list>
+    /// C7: per sorted local, the permutation plumbing the pre-pass emitted
+    /// beside it. Both sweeps read the SAME entry, which is what keeps the
+    /// primal, the tangent gather, and the adjoint gather on one permutation.
+    SortPlans: Map<string, SortPlan>
 }
+
+/// Recover the sort plumbing by SHAPE rather than by name: inlining renames
+/// callee locals, so name arithmetic would not survive a differentiated call.
+/// For each primal `let s = sort(A, key)` the permutation is the nearest
+/// PRECEDING `sort(iota, lambda(i: I) -> A(i))`, and the inverse permutation
+/// the nearest preceding sort keyed on that permutation.
+let private collectSortPlans (ss: NStmt list) : Map<string, SortPlan> =
+    // (bound name, keyed array, index type), most recent first
+    let rec go (iotas: Set<string>) (perms: (string * string * TypeExpr) list)
+               (acc: Map<string, SortPlan>) (ss: NStmt list) =
+        ss |> List.fold (fun (iotas, perms, acc) st ->
+            match st with
+            | NLet (n, _, IndexIota) -> (Set.add n iotas, perms, acc)
+            | NLet (p, _, SortPermForm iotas (keyed, Some ity)) -> (iotas, (p, keyed, ity) :: perms, acc)
+            | NLet (s, _, { Kind = ExprKind.ExprSort ({ Kind = ExprKind.ExprVar src }, _) }) ->
+                (match perms |> List.tryFind (fun (_, keyed, _) -> keyed = src) with
+                 | Some (pn, _, ity) when not (Map.containsKey s acc) ->
+                     let inv = perms |> List.tryPick (fun (q, k2, _) -> if k2 = pn then Some q else None)
+                     (iotas, perms, Map.add s { Perm = pn; InvPerm = (defaultArg inv ""); IdxTy = ity; Src = src } acc)
+                 | _ -> (iotas, perms, acc))
+            | NFor (_, _, _, body) -> go iotas perms acc body
+            | _ -> (iotas, perms, acc)) (iotas, perms, acc)
+    let (_, _, plans) = go Set.empty [] Map.empty ss
+    plans
 
 /// Emit `d += cot`-style accumulation onto a cotangent target.
 let private accum (target: Expr) (cot: Expr) : NStmt =
@@ -1636,6 +1996,21 @@ let private adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: str
                       Ok (List.ofSeq flows)
                   | _ -> err rc.Fname "gram operands need statically-known dims to differentiate (v1)")
              | _ -> err rc.Fname "differentiating gram needs named array operands (v1); bind the operands first")
+        // C7: the adjoint of a sort is the cotangent GATHERED through the
+        // INVERSE permutation -- dA(j) += ds(invperm(j)). No scatter
+        // primitive is needed: the inverse is a second sort the pre-pass
+        // already materialized, so this is an ordinary data-dependent read,
+        // and it reuses the SAME permutation the primal took (ties included).
+        | ExprKind.ExprSort _ ->
+            (match Map.tryFind xname rc.SortPlans with
+             | Some plan when plan.InvPerm <> "" ->
+                 if Set.contains plan.Src rc.Diff then
+                     Ok (accumLoop ctx dims
+                            (fun idx -> syn (ExprApp (v (dName plan.Src), idx)))
+                            (fun idx -> cotAt [ syn (ExprApp (v plan.InvPerm, idx)) ]))
+                 else Ok []
+             | _ ->
+                 err rc.Fname "internal: a differentiated `sort` reached the reverse sweep without its permutation plumbing -- this is a gap in the transform's sort expansion, please report it")
         | _ -> err rc.Fname "this combinator initializer has no reverse rule (v1); forward mode (ad.jvp) supports the wider set"
     // dispatch: only takes over for the combinator forms; literals and
     // scalar expressions keep their existing arms
@@ -1647,7 +2022,7 @@ let private adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: str
          | Some dims -> Some (flow (fun idx -> syn (ExprApp (v (dName xname), idx))) dims value)
          | None -> None)
     | ExprKind.ExprTranspose _ | ExprKind.ExprStack _ | ExprKind.ExprJoin _
-    | ExprKind.ExprGram _ ->
+    | ExprKind.ExprGram _ | ExprKind.ExprSort _ ->
         (match Map.tryFind xname denv with
          | Some dims -> Some (flow (fun idx -> syn (ExprApp (v (dName xname), idx))) dims value)
          | None -> Some (err rc.Fname "this combinator initializer needs statically-known dims to differentiate (v1)"))
@@ -2139,6 +2514,19 @@ let rec private tangentOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, strin
     // iteration, not data. Its tangent materializes at the application
     // site, where the OpApply rule resolves the binding.
     | NLet (_, _, { Kind = ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _ }) -> Ok [s]
+    // C7: the tangent of a sort is the CO-GATHER of the source's tangent
+    // through the SAME permutation -- ds(i) = dA(perm(i)). Sharing `perm` by
+    // name with the primal is what makes the two legs agree at ties (both
+    // inherit std::stable_sort's input-order convention). Built here rather
+    // than in `tangentOfExpr` because the permutation is per-BINDING data:
+    // the plan is keyed on the bound name.
+    | NLet (x, isMut, { Kind = ExprKind.ExprSort _ }) when Set.contains x rc.Diff ->
+        (match Map.tryFind x rc.SortPlans with
+         | Some plan when Set.contains plan.Src rc.Diff ->
+             Ok [s; NLet (tName x, isMut, permGather plan.Perm plan.IdxTy (tName plan.Src))]
+         | Some _ -> Ok [s]   // sorted array carries no tangent
+         | None ->
+             err rc.Fname "internal: a differentiated `sort` reached the tangent sweep without its permutation plumbing -- this is a gap in the transform's sort expansion, please report it")
     | NLet (x, isMut, value) ->
         if not (Set.contains x rc.Diff) then Ok [s]
         else
@@ -2305,7 +2693,8 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
                 (match staticDimsOf ctx m value with Some ds -> Map.add n ds m | None -> m)
             | _ -> m) paramDims
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known
-               ArrayIdxTys = arrayIdxTys; LoopBindings = Map.empty; Dims = dimsEnv }
+               ArrayIdxTys = arrayIdxTys; LoopBindings = Map.empty; Dims = dimsEnv
+               SortPlans = collectSortPlans stmts }
 
     // cotangent declarations for function-level diff LOCALS (params' array
     // cotangents are mut parameters; scalar-param cotangents are locals)
@@ -2333,7 +2722,8 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
                  | { Kind = ExprKind.ExprArrayLit _ } | ConstFill _ -> None
                  | { Kind = ExprKind.ExprVar _ | ExprKind.ExprTranspose _ | ExprKind.ExprStack _
                           | ExprKind.ExprJoin _ | ExprKind.ExprGram _ | ExprKind.ExprGuard _
-                          | ExprKind.ExprPure _ | ExprKind.ExprCompute _ } when Map.containsKey n dimsEnv -> None
+                          | ExprKind.ExprPure _ | ExprKind.ExprCompute _
+                          | ExprKind.ExprSort _ } when Map.containsKey n dimsEnv -> None
                  | _ -> Some n)
             | _ -> None)
     match badArrayLocal with
@@ -2518,7 +2908,7 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
             | _ -> m) acc
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known
                ArrayIdxTys = arrayIdxTys; LoopBindings = collectLoopBindings Map.empty stmts
-               Dims = Map.empty }
+               Dims = Map.empty; SortPlans = collectSortPlans stmts }
 
     // tangent-interleaved body + (primal, tangent) return
     let sweptR =

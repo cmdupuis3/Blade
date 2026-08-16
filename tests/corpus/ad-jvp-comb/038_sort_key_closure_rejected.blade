@@ -1,0 +1,20 @@
+// TEST: C7 Sort Key May Not Close Over Another Array (rejects)
+// The v1 rule reads the key as a function of the sorted element alone --
+// the documented `sort : Array<T like I> x (T -> K)` signature. A key that
+// also reads a SECOND differentiable array makes the permutation depend on
+// that array too, and the permutation-as-data rule treats the permutation
+// as constant: b's contribution would vanish from the derivative with no
+// diagnostic. Refuse instead.
+// ERROR: BL5501
+// ERROR-CONTAINS: key that reads ONLY the sorted element
+import ad as ad
+
+type I = Idx<3>
+
+function f(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+    let s = sort(a, lambda(x: Float) -> x + b(0))
+    s(0) * 2.0
+}
+
+let (v, t) = ad.jvp(f)([3.0, 1.0, 2.0], [1.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.0, 0.0])
+v
