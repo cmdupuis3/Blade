@@ -524,6 +524,17 @@
         "docs/features.md"
       ]
     },
+    "BL4017": {
+      "title": "symmetry clause licenses nothing here",
+      "explanation": "A declared `comm`/`anticomm` group that is provably inert at this apply, because the commuting slots are filled by virtual `range<...>` operands. Compact storage and triangular iteration key on an IDENTITY GROUP -- the SAME array occupying those slots -- and a range operand never materializes, so no two of them can ever be the same array and no identity group exists to key on. The clause is dropped: storage stays dense and iteration stays rectangular, emitting C++ identical to the same kernel with no `where` clause. Neither BL4013 (nothing is disproved) nor BL4016 (nothing unsound is licensed) -- the program is correct, just not the one that was asked for, so this is a warning. Narrower than 'comm without an identity group': `comm` over two distinct REAL arrays stays silent, since a real array can be its own identity partner at another call site.",
+      "fix": "Declare the symmetry in the INDEX TYPE instead -- `method_for(range<SymIdx<r, N>>)` (or `AntisymIdx` for `anticomm`) allocates the triangular pool and visits only canonical cells. If the operands were meant to be a real array in both slots, pass that array twice. If dense really is what you want, drop the clause.",
+      "examples": [
+        "tests/corpus/symmetry/037_comm_over_range_operands_warns.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
     "BL5000": {
       "title": "ml elaboration error",
       "explanation": "The `ml` domain elaborator refused a construct: a non-static configuration where a compile-time spec is required, a gated block reached in the wrong order, a bad derivation order, or an op whose arguments do not fit its spec.",

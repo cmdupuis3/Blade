@@ -228,6 +228,15 @@ module Codes =
             // disproved, there is simply no commutativity/associativity claim
             // to stand on. See docs/plan-cpp-perf-exploitation.md.
             "BL4016", "parallel fold needs a reorder licence"
+            // BL4017: a declared `comm`/`anticomm` group that is provably INERT
+            // at its apply -- the commuting slots are filled by virtual
+            // `range<...>` operands, which never materialize and so can never
+            // form the identity group compaction keys on. Neither BL4013
+            // (nothing is disproved) nor BL4016 (nothing unsound is licensed):
+            // the clause is simply dropped, and the emitted C++ is identical to
+            // one that never carried it. Warning, on BL4001's dropped-`omp`
+            // precedent -- the program is correct, just not the one asked for.
+            "BL4017", "symmetry clause licenses nothing here"
             // BL5xxx: elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"

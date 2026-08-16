@@ -11577,6 +11577,71 @@ and buildApplyInfo (env: TypeEnv)
                 emitWarning env "BL4010" span msg
                 PinSuggestions.add msg span)
 
+    // The BL4010 suggestion's MIRROR: the user already wrote the clause, and it
+    // licenses nothing.
+    //
+    // Compaction -- triangular storage AND triangular iteration -- keys on an
+    // IDENTITY GROUP: the SAME array occupying the commuting operand slots
+    // (docs/formalism.md 11.2/12.4; `rawAxisGroups.mergesWith.acrossArray`
+    // requires `sameArrayIdentity`, and shared_units_insufficient refutes the
+    // weaker shared-index-space rule). A VIRTUAL `range<...>` operand never
+    // materializes, so `mkVirtualArrayArrow` forces `Identity = None` and the
+    // formers hand each one a fresh `AIDLiteral` -- no two range operands can
+    // ever be the same array. The comm group therefore merges no axes and is
+    // dropped on the floor: the emitted C++ is BYTE-IDENTICAL to the same
+    // kernel with no `where` clause at all (dense `Array<T, r>`, full
+    // rectangular bounds). The user asked for a storage and iteration change
+    // and silently got neither -- which is the bug this warning closes.
+    //
+    // WARNING, not an error, and deliberately NARROWER than "comm without an
+    // identity group":
+    //   * Nothing is disproved (BL4013's job) and nothing unsound is licensed
+    //     (BL4016's job). The program is correct, just not the one asked for --
+    //     the same shape as the dropped-`omp`-clause note below, which is also
+    //     a warning.
+    //   * symmetry/004 and /014 are the same inertness over two distinct REAL
+    //     arrays and stay silent on purpose: a real array CAN be its own
+    //     identity partner at a different call site (symmetry/003 is that call
+    //     site), so the clause on the kernel is not dead, merely unused here.
+    //     A range operand is incapable of it at EVERY call site. "Provably
+    //     inert, always" is what earns a diagnostic; "inert at this call site"
+    //     does not.
+    //
+    // Stands down under `reynolds` (the wrapper manufactures the symmetry and a
+    // clause there is an iteration licence, not a storage claim) and on a
+    // co-iterated apply (one axis feeds both slots -- no square exists to
+    // compact, sql-reduce/017). The `Params.Length = identities.Length` gate
+    // keeps this to the one-param-per-operand outer product, where a group's
+    // parameter indices ARE operand indices: a multi-rank operand
+    // (`range<SymIdx<2, N>>` -- the very fix suggested below) spends two
+    // parameters on one array, and its `comm(i, j)` is redundant, not inert.
+    (if not isReynolds && not isCoIterApply
+        && lambdaInfo.Params.Length = identities.Length then
+        let nameOf i =
+            if i >= 0 && i < lambdaInfo.Params.Length then lambdaInfo.Params.[i].Name
+            else sprintf "#%d" i
+        let inertGroup (g: int list) =
+            let slots = g |> List.filter (fun k -> k >= 0 && k < identities.Length)
+            if slots.Length < 2 then None
+            elif slots |> List.exists (fun k ->
+                     slots |> List.exists (fun q ->
+                         q <> k && sameIdentity identities.[k] identities.[q])) then None
+            elif slots |> List.exists (fun k ->
+                     k < arrayTypes.Length && arrayTypes.[k].IsVirtual) then Some slots
+            else None
+        let report (kw: string) (idxTy: string) (pool: string) (g: int list) =
+            match inertGroup g with
+            | None -> ()
+            | Some slots ->
+                let names = slots |> List.map nameOf |> String.concat ", "
+                let span = if tKernel.Span = noSpan then tLoop.Span else tKernel.Span
+                emitWarning env "BL4017" span (sprintf
+                    "`where %s(%s)` licenses nothing on this apply and is DROPPED: compact storage and triangular iteration key on an IDENTITY GROUP -- the same array occupying the commuting slots -- and a virtual `range<...>` operand never materializes, so there is no identity to key on. Storage stays dense and iteration stays rectangular; the emitted C++ is identical to this kernel with no `where` clause. Declare the symmetry in the INDEX TYPE instead: `method_for(range<%s<%d, N>>) <@> lambda(%s) -> ...` allocates the %s and visits only canonical cells."
+                    kw names idxTy slots.Length names pool)
+        commGroups |> List.iter (report "comm" "SymIdx" "triangular pool")
+        lambdaInfo.AntisymGroups
+        |> List.iter (report "anticomm" "AntisymIdx" "strict-triangular pool (no stored diagonal)"))
+
     // Dropped-parallel-clause guard. This is the apply seam -- the ONE place a
     // loop and a kernel meet -- so it is where "the kernel declared `omp(...)`"
     // and "the lambda reaching the loop carries it" can be compared at all.

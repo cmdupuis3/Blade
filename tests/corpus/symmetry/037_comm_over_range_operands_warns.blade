@@ -1,0 +1,30 @@
+// TEST: Comm Over Virtual Range Operands Licenses Nothing
+// Compaction keys on an IDENTITY GROUP -- the SAME array occupying the commuting
+// operand slots (formalism.md 11.2/12.4; rawAxisGroups.mergesWith.acrossArray
+// demands sameArrayIdentity). A virtual `range<...>` operand never materializes,
+// so every one gets a fresh AIDLiteral and no identity group can EVER form: the
+// comm group merges no axes and the clause is dropped. `dense` below emits C++
+// byte-identical to the same kernel with no `where` clause -- dense
+// Array<double, 2> over {3,3}, inner bound `__i1 < 3`, all nine cells written.
+//
+// This is symmetry/004 and /014's class (comm without array identity gets
+// nothing), but those stay SILENT on purpose: a real array can be its own
+// identity partner at another call site (symmetry/003 is that call site), so the
+// clause there is unused, not dead. A range operand is incapable of it at EVERY
+// call site, so here the refusal is stated rather than taken silently -- BL4017.
+// Warning, not error: the program is correct, just not the one that was asked
+// for. Nothing is disproved (cf. BL4013) and nothing unsound is licensed (cf.
+// BL4016); the clause is simply inert.
+// WARN: BL4017
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let dense = method_for(range<Idx<3>>, range<Idx<3>>) <@> lambda(i, j) where comm(i, j) -> A(i) * A(j) |> compute
+// EXPECT: dense = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+
+// The alternative the diagnostic points at: symmetry declared in the INDEX TYPE.
+// This one really does allocate the triangular pool (`r_symm`) and iterate only
+// canonical cells (`__i1 < 3 - __i0`) -- six stored cells against `dense`'s nine,
+// which is what the dropped clause was asking for. It carries no `where` clause
+// at all, so it doubles as the negative control: BL4017 keys on an inert CLAUSE,
+// not on `range<...>` operands.
+let compact = method_for(range<SymIdx<2, 3>>) <@> lambda(i, j) -> A(i) * A(j) |> compute
+// EXPECT: compact = [[1.0, 2.0, 3.0], [2.0, 4.0], [3.0]]
