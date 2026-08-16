@@ -1,0 +1,27 @@
+// TEST: JVP Basis Sweep Reconstructs The Gradient
+// n basis seeds rebuild the full gradient buffer -- the strongest F1
+// agreement test (pins the whole Jacobian row, not one contraction).
+// f = w0*w1 + w2^2 at [1, 2, 3]: primal 11, dw = [2, 1, 6].
+import ad as ad
+
+function f(w: Array<Float like Idx<3>>) -> Float = {
+    let a = w(0) * w(1)
+    let b = w(2) * w(2)
+    a + b
+}
+
+let mut dw = [0.0, 0.0, 0.0]
+let gv = ad.grad(f)([1.0, 2.0, 3.0], dw)
+let (j0, t0) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+let (j1, t1) = ad.jvp(f)([1.0, 2.0, 3.0], [0.0, 1.0, 0.0])
+let (j2, t2) = ad.jvp(f)([1.0, 2.0, 3.0], [0.0, 0.0, 1.0])
+let r0 = t0 - dw(0)
+let r1 = t1 - dw(1)
+let r2 = t2 - dw(2)
+// EXPECT: gv = 11
+// EXPECT: t0 = 2
+// EXPECT: t1 = 1
+// EXPECT: t2 = 6
+// EXPECT: r0 = 0
+// EXPECT: r1 = 0
+// EXPECT: r2 = 0

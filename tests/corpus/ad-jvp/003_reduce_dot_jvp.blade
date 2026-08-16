@@ -1,0 +1,21 @@
+// TEST: JVP Array Dot Via Additive Reduce (grad agreement)
+// Mirror of ad/007_reduce_grad's shape: an additive reduce over a param
+// array. The jvp tangent under seed v must equal <grad buffer, v>.
+import ad as ad
+
+function h(w: Array<Float like Idx<3>>, s: Float) -> Float = {
+    let t = reduce(w, (+))
+    t * s
+}
+
+let mut dw = [0.0, 0.0, 0.0]
+let (gv, gds) = ad.grad(h)([1.0, 2.0, 3.0], 0.5, dw)
+let (jv, jt) = ad.jvp(h)([1.0, 2.0, 3.0], 0.5, [1.0, -2.0, 0.5], 0.0)
+let dot = reduce(dw * [1.0, -2.0, 0.5], (+))
+let tresid = jt - dot
+let (jv2, jt2) = ad.jvp(h)([1.0, 2.0, 3.0], 0.5, [0.0, 0.0, 0.0], 1.0)
+let sresid = jt2 - gds
+// EXPECT: gv = 3
+// EXPECT: jv = 3
+// EXPECT: tresid = 0
+// EXPECT: sresid = 0

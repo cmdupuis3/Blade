@@ -203,8 +203,13 @@ let private fresh (ctx: Ctx) (prefix: string) : string =
     ctx.Fresh <- ctx.Fresh + 1
     sprintf "%s%d" prefix ctx.Fresh
 
+/// Which transform is currently synthesizing ("grad" | "jvp") -- prefixes
+/// every internal error and selects the diagnostic code at the `expand`
+/// boundary. A module-level ref (like `synthSpan`): the pass is sequential.
+let private errMode = ref "grad"
+
 let private err (fname: string) (msg: string) : Result<'a, string> =
-    Error (sprintf "grad(%s): %s" fname msg)
+    Error (sprintf "%s(%s): %s" errMode.Value fname msg)
 
 // Body -> NStmt conversion
 
@@ -1330,6 +1335,146 @@ let rec private adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, strin
         folded |> Result.map (fun bodyAdjoints ->
             [NFor (var, lo, hi, replay @ localCots @ bodyAdjoints)])
 
+// The forward (tangent) sweep -- ad.jvp
+//
+// Forward mode propagates tangents IN PROGRAM ORDER beside the primal:
+// every differentiable binding/assignment gets a `__t_<name>` twin computed
+// from the operands' tangents via the same derivative tables the adjoint
+// uses. No reverse sweep, no cotangent buffers, no replay. Tangent
+// assignments are emitted BEFORE their primal assignment so they read the
+// pre-assignment primal values (d(x*x) needs the old x).
+
+let private tName (n: string) = "__t_" + n
+
+/// Zero-folding expression builders. Folding `0.0` operands away matters
+/// twice over: the emitted tangent stays readable, and -- decisively for the
+/// general power rule -- a syntactically-zero tangent SUPPRESSES the term
+/// entirely, so `log(b)` is never emitted for an inactive exponent (the same
+/// reachability guarantee the adjoint's inactive-path routing provides).
+let private isZeroLit (e: Expr) =
+    match e.Kind with
+    | ExprKind.ExprLit (LitFloat 0.0) -> true
+    | _ -> false
+let private addZ a b = if isZeroLit a then b elif isZeroLit b then a else add a b
+let private subZ a b = if isZeroLit b then a elif isZeroLit a then neg b else sub a b
+let private mulZ a b = if isZeroLit a || isZeroLit b then fLit 0.0 else mul a b
+let private divZ a b = if isZeroLit a then fLit 0.0 else div a b
+
+/// Tangent of an expression, as an expression over primal names and
+/// `__t_*` tangent names. Mirrors `adjointOf` case-for-case; refusals
+/// match the adjoint's so both modes accept identical fragments (v1).
+let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
+    match e with
+    | { Kind = ExprKind.ExprLit _ } -> Ok (fLit 0.0)
+    | { Kind = ExprKind.ExprVar x } ->
+        if Set.contains x rc.Diff then Ok (v (tName x)) else Ok (fLit 0.0)
+    | { Kind = ExprKind.ExprTyped (inner, _) } -> tangentOfExpr rc inner
+    | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, idxs) } when Set.contains a rc.Arrays ->
+        if Set.contains a rc.Diff then Ok (inheritSpan e (ExprApp (v (tName a), idxs)))
+        else Ok (fLit 0.0)
+    | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [u]) } when isMathIntrinsic name
+                                       && not (Map.containsKey name rc.Ctx.Decls) ->
+        (match derivRule name u with
+         | None when Set.contains name zeroDerivIntrinsics -> Ok (fLit 0.0)   // floor/ceil
+         | None ->
+             // Through `err` (unlike the adjoint's raw Error) so the message
+             // carries the jvp prefix the diagnostic boundary keys on.
+             err rc.Fname (sprintf "'%s' has no derivative rule, so it cannot appear in a differentiated function (its derivative is not expressible in the AD-able subset). Compute it outside the function passed to ad.%s, or pass the value in as a parameter" name errMode.Value)
+         | Some d -> tangentOfExpr rc u |> Result.map (fun tu -> mulZ d tu))
+    | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [a; b]) } when isBinaryMathIntrinsic name
+                                       && not (Map.containsKey name rc.Ctx.Decls) ->
+        let (dA, dB) = binaryDerivRule name a b
+        tangentOfExpr rc a |> Result.bind (fun ta ->
+        tangentOfExpr rc b |> Result.map (fun tb -> addZ (mulZ dA ta) (mulZ dB tb)))
+    | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, _) } ->
+        if Set.contains name rc.Known then Ok (fLit 0.0)   // non-diff data read
+        else
+            err rc.Fname (sprintf "cannot differentiate through '%s': it is not a same-module function, a math intrinsic with a derivative rule, or an array in scope, so its contribution would silently vanish from the gradient. Compute it outside the function passed to ad.%s, or pass the value in as a parameter" name errMode.Value)
+    | { Kind = ExprKind.ExprUnaryOp (OpNeg, inner) } ->
+        tangentOfExpr rc inner |> Result.map (fun t -> if isZeroLit t then t else neg t)
+    | { Kind = ExprKind.ExprUnaryOp (OpNot, _) } -> Ok (fLit 0.0)
+    | { Kind = ExprKind.ExprBinOp (_, OpAdd, l, r) } ->
+        tangentOfExpr rc l |> Result.bind (fun tl ->
+        tangentOfExpr rc r |> Result.map (fun tr -> addZ tl tr))
+    | { Kind = ExprKind.ExprBinOp (_, OpSub, l, r) } ->
+        tangentOfExpr rc l |> Result.bind (fun tl ->
+        tangentOfExpr rc r |> Result.map (fun tr -> subZ tl tr))
+    | { Kind = ExprKind.ExprBinOp (_, OpMul, l, r) } ->
+        tangentOfExpr rc l |> Result.bind (fun tl ->
+        tangentOfExpr rc r |> Result.map (fun tr -> addZ (mulZ tl r) (mulZ l tr)))
+    | { Kind = ExprKind.ExprBinOp (_, OpDiv, l, r) } ->
+        tangentOfExpr rc l |> Result.bind (fun tl ->
+        tangentOfExpr rc r |> Result.map (fun tr ->
+            subZ (divZ tl r) (divZ (mulZ l tr) (mul r r))))
+    | { Kind = ExprKind.ExprBinOp (_, OpCaret, b, { Kind = ExprKind.ExprLit (LitInt n) }) } when int n >= 0 ->
+        // Constant natural exponent: closed form (mirrors the adjoint arm).
+        let n' = int n
+        if n' = 0 then Ok (fLit 0.0)
+        else
+            tangentOfExpr rc b |> Result.map (fun tb ->
+                let dterm =
+                    if n' = 1 then fLit 1.0
+                    elif n' = 2 then mul (fLit 2.0) b
+                    else mul (fLit (float n')) (pow b (iLit (int64 (n' - 1))))
+                mulZ dterm tb)
+    | { Kind = ExprKind.ExprBinOp (_, OpCaret, bb, ee) } ->
+        // d(b^e) = e*b^(e-1) db + b^e*log(b) de; mulZ suppresses the log
+        // term when the exponent is inactive (see the builder note above).
+        tangentOfExpr rc bb |> Result.bind (fun tb ->
+        tangentOfExpr rc ee |> Result.map (fun te ->
+            addZ (mulZ (mul ee (pow bb (sub ee (fLit 1.0)))) tb)
+                 (mulZ (mul (pow bb ee) (call "log" [bb])) te)))
+    | { Kind = ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) } ->
+        Ok (fLit 0.0)   // boolean-valued: no tangent
+    | { Kind = ExprKind.ExprBinOp (_, OpMod, _, _) } -> Ok (fLit 0.0)  // int-valued
+    | ConstFill (cnt, _) -> Ok (zeroFill cnt)
+    | { Kind = ExprKind.ExprArrayLit _ } ->
+        err rc.Fname "array literals may only appear as let initializers in differentiated code"
+    | _ -> err rc.Fname "unsupported expression form in differentiated code (tangent)"
+
+/// Elementwise tangent of a (possibly nested) array-literal initializer.
+let rec private tangentOfLit (rc: RevCtx) (e: Expr) : Result<Expr, string> =
+    match e.Kind with
+    | ExprKind.ExprArrayLit elems ->
+        elems |> List.fold (fun acc el ->
+            acc |> Result.bind (fun ts ->
+                tangentOfLit rc el |> Result.map (fun t -> ts @ [t])))
+            (Ok [])
+        |> Result.map (fun ts -> inheritSpan e (ExprArrayLit ts))
+    | _ -> tangentOfExpr rc e
+
+/// Tangent-interleaved form of one forward statement. The tangent
+/// ASSIGNMENT precedes its primal so it reads pre-assignment values;
+/// tangent LETS follow their primal (the tangent reads operands bound
+/// earlier, never the freshly-bound name).
+let rec private tangentOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, string> =
+    match s with
+    | NLet (x, isMut, value) ->
+        if not (Set.contains x rc.Diff) then Ok [s]
+        else
+            (match value with
+             | { Kind = ExprKind.ExprArrayLit _ } ->
+                 tangentOfLit rc value |> Result.map (fun t -> [s; NLet (tName x, isMut, t)])
+             | ConstFill (cnt, _) -> Ok [s; NLet (tName x, isMut, zeroFill cnt)]
+             | _ -> tangentOfExpr rc value |> Result.map (fun t -> [s; NLet (tName x, isMut, t)]))
+    | NAssign (lhs, rhs) ->
+        let tangentLhs =
+            match lhs.Kind with
+            | ExprKind.ExprVar x when Set.contains x rc.Diff -> Some (v (tName x))
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, idxs) when Set.contains a rc.Diff ->
+                Some (inheritSpan lhs (ExprApp (v (tName a), idxs)))
+            | _ -> None
+        (match tangentLhs with
+         | None -> Ok [s]   // non-diff target: rhs is inactive by taint
+         | Some tl ->
+             tangentOfExpr rc rhs |> Result.map (fun tr -> [NAssign (tl, tr); s]))
+    | NFor (var, lo, hi, body) ->
+        body |> List.fold (fun acc st ->
+            acc |> Result.bind (fun ss ->
+                tangentOfStmt rc st |> Result.map (fun s2 -> ss @ s2)))
+            (Ok [])
+        |> Result.map (fun body' -> [NFor (var, lo, hi, body')])
+
 // NStmt -> Stmt conversion
 
 let rec private toStmts (ns: NStmt list) : Stmt list =
@@ -1348,6 +1493,7 @@ let rec private toStmts (ns: NStmt list) : Stmt list =
 let private gradSuffix = "__grad"
 
 let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, string> =
+    errMode.Value <- "grad"
     let fname = fd.Name
     // The synthesized name must be free: splicing a second `f__grad` beside a
     // user function of that name would silently shadow one of them.
@@ -1501,31 +1647,161 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
       IsStatic = false
       NameSpan = noSpan })))))))))))
 
+// Synthesize f__jvp -- forward mode at grad parity (v1)
+//
+// Same admissible subset, enforced by running the SAME discipline checks,
+// so the jvp-vs-grad differential gate covers every accepted program (F2
+// widens by deleting check calls, not rewriting the transform). The ABI
+// differs where the mode does: tangent INPUTS -- one per differentiable
+// param, appended in original param order, each typed with the primal
+// param's annotation VERBATIM (tangents live in the same space, units
+// included; bare Float is unit-polymorphic so substitution would defeat
+// unit checking) -- and a `(primal, tangent)` tuple return. No mut
+// buffers: forward mode does not accumulate, and `wrt` selection is just
+// a zero seed.
+
+let private jvpSuffix = "__jvp"
+
+let private synthesizeJvp (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, string> =
+    errMode.Value <- "jvp"
+    let fname = fd.Name
+    (if Map.containsKey (fname + jvpSuffix) ctx.Decls then
+        err fname (sprintf "a function named '%s%s' already exists in this module; jvp would synthesize a colliding declaration -- rename it" fname jvpSuffix)
+     else Ok ())
+    |> Result.bind (fun () ->
+    match fd.ReturnType |> Option.map (resolveTy ctx) with
+    | Some t when isFloatTy t -> Ok ()
+    | Some (TyNamed (("Float" | "Float64" | "Float32"), _ :: _)) ->
+        err fname "jvp requires a dimensionless Float return (v1); unit-carrying tangents are a planned extension"
+    | Some _ -> err fname "jvp requires a function returning Float (scalar) (v1)"
+    | None -> err fname "jvp requires an explicit `-> Float` return annotation"
+    |> Result.bind (fun () ->
+    let classesR =
+        fd.Params |> List.fold (fun acc p ->
+            acc |> Result.bind (fun cs ->
+                classifyParam fname ctx p |> Result.map (fun c -> cs @ [(p, c)])))
+            (Ok [])
+    classesR |> Result.bind (fun classes ->
+    let diffParams =
+        classes |> List.choose (fun (p, c) ->
+            match c with DiffArray | DiffScalar -> Some p.Name | NonDiff -> None)
+        |> Set.ofList
+    let arrayParams =
+        classes |> List.choose (fun (p, c) ->
+            match c with DiffArray -> Some p.Name | _ -> None)
+        |> Set.ofList
+    if Set.isEmpty diffParams then
+        err fname "no differentiable (Float or Float-array) parameters"
+    else
+    normalizeBody fname ctx 0 fd |> Result.bind (fun (stmts, finalE) ->
+    // Reserved-name gate (same rationale as grad's: synthesized names
+    // shadow same-named user bindings silently).
+    let reservedName (n: string) =
+        n = "__primal" || n.StartsWith "__g_" || n.StartsWith "__t_"
+    match (fd.Params |> List.map (fun p -> p.Name)) @ boundNames stmts |> List.tryFind reservedName with
+    | Some n ->
+        err fname (sprintf "binding or parameter '%s' collides with a reserved AD name (`__g_*`, `__t_*`, and `__primal` are synthesized by the transform and would shadow it); rename it" n)
+    | None ->
+    let validateAll =
+        let rec valStmts ss =
+            ss |> List.fold (fun acc s ->
+                acc |> Result.bind (fun () ->
+                    match s with
+                    | NLet (_, _, e) -> walkExpr fname ctx ignore e
+                    | NAssign (l, r) ->
+                        walkExpr fname ctx ignore l
+                        |> Result.bind (fun () -> walkExpr fname ctx ignore r)
+                    | NFor (_, lo, hi, body) ->
+                        walkExpr fname ctx ignore lo
+                        |> Result.bind (fun () -> walkExpr fname ctx ignore hi)
+                        |> Result.bind (fun () -> valStmts body)))
+                (Ok ())
+        valStmts stmts |> Result.bind (fun () -> walkExpr fname ctx ignore finalE)
+    validateAll |> Result.bind (fun () ->
+    // v1 PARITY POLICY: run grad's reverse-only discipline checks even
+    // though forward mode is sound without them.
+    checkLoopDiscipline fname ctx stmts |> Result.bind (fun () ->
+    checkWriteAfterRead fname ctx stmts |> Result.bind (fun () ->
+    analyze fname ctx diffParams arrayParams stmts finalE |> Result.bind (fun (diff, arrays) ->
+    checkNoScalarOverwrite fname diff stmts |> Result.bind (fun () ->
+    // Parity with grad's array-local literal-init restriction.
+    let badArrayLocal =
+        stmts |> List.tryPick (fun s ->
+            match s with
+            | NLet (n, _, value) when Set.contains n diff && Set.contains n arrays ->
+                (match value with
+                 | { Kind = ExprKind.ExprArrayLit _ } | ConstFill _ -> None
+                 | _ -> Some n)
+            | _ -> None)
+    match badArrayLocal with
+    | Some n -> err fname (sprintf "differentiable array local '%s' must be initialized by an array literal (aliases are not differentiable)" n)
+    | None ->
+    let known =
+        Set.unionMany [
+            fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
+            boundNames stmts |> Set.ofList
+            ctx.ModuleVals ]
+    let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known }
+
+    // tangent-interleaved body + (primal, tangent) return
+    let sweptR =
+        stmts |> List.fold (fun acc s ->
+            acc |> Result.bind (fun ss ->
+                tangentOfStmt rc s |> Result.map (fun s2 -> ss @ s2)))
+            (Ok [])
+    sweptR |> Result.bind (fun swept ->
+    tangentOfExpr rc finalE |> Result.map (fun tFinal ->
+    let primalName = "__primal"
+    let tangentName = "__t_primal"
+    let body =
+        toStmts swept
+        @ [ StmtLet { Pattern = synPat (PatVar primalName); Type = None; Value = finalE; Mutability = BindLet }
+            StmtLet { Pattern = synPat (PatVar tangentName); Type = None; Value = tFinal; Mutability = BindLet } ]
+    let retExpr = syn (ExprTuple [v primalName; v tangentName])
+    let retScalarTy = Option.defaultValue TyFloat64 fd.ReturnType
+    let jvpParams =
+        fd.Params
+        @ (classes |> List.choose (fun (p, c) ->
+             match c with
+             | DiffArray | DiffScalar ->
+                 Some { Name = tName p.Name; Type = p.Type; Mutability = p.Mutability; Default = None; NameSpan = noSpan }
+             | NonDiff -> None))
+    { Name = fname + jvpSuffix
+      TypeParams = fd.TypeParams
+      Params = jvpParams
+      WhereClause = None
+      ReturnType = Some (TyTuple [retScalarTy; retScalarTy])
+      Body = inheritSpan fd.Body (ExprBlock (body, Some retExpr))
+      IsStatic = false
+      NameSpan = noSpan })))))))))))
+
 // Call-site rewriting + program expansion
 
-/// Rewrite alias.grad(f) call sites in an expression; collect requested names.
+/// Rewrite alias.grad(f) / alias.jvp(f) call sites in an expression;
+/// collect requested names per mode.
 let rec private rewriteExpr (requested: System.Collections.Generic.HashSet<string>)
+                            (requestedJvp: System.Collections.Generic.HashSet<string>)
                             (declNames: Set<string>) (aliases: Set<string>) (e: Expr) : Result<Expr, string> =
-    let r = rewriteExpr requested declNames aliases
+    let r = rewriteExpr requested requestedJvp declNames aliases
     let rList es =
         es |> List.fold (fun acc x ->
             acc |> Result.bind (fun xs -> r x |> Result.map (fun x' -> xs @ [x'])))
             (Ok [])
     let re k = inheritSpan e k
     match e.Kind with
-    // Qualified: `alias.grad(f)` with alias bound by `import ad`. Bare
-    // `grad(...)` is not recognized -- the AD surface is a module, not a
-    // language-wide name (same rule as the ml/ppl surfaces).
-    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "grad") }, args) when Set.contains alias aliases ->
+    // Qualified: `alias.grad(f)` / `alias.jvp(f)` with alias bound by
+    // `import ad`. Bare `grad(...)` is not recognized -- the AD surface is
+    // a module, not a language-wide name (same rule as the ml/ppl surfaces).
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, (("grad" | "jvp") as which)) }, args) when Set.contains alias aliases ->
         (match args with
          | [{ Kind = ExprKind.ExprVar fname }] ->
              if Set.contains fname declNames then
-                 requested.Add fname |> ignore
-                 Ok (re (ExprVar (fname + gradSuffix)))
+                 (if which = "grad" then requested.Add fname else requestedJvp.Add fname) |> ignore
+                 Ok (re (ExprVar (fname + (if which = "grad" then gradSuffix else jvpSuffix))))
              else
-                 Error (sprintf "grad: '%s' is not a top-level function in this module (grad differentiates same-module named functions)" fname)
-         | [_] -> Error "grad: argument must be a named top-level function (e.g. ad.grad(loss))"
-         | _ -> Error "grad: expects exactly one argument, the function to differentiate")
+                 Error (sprintf "%s: '%s' is not a top-level function in this module (%s differentiates same-module named functions)" which fname which)
+         | [_] -> Error (sprintf "%s: argument must be a named top-level function (e.g. ad.%s(loss))" which which)
+         | _ -> Error (sprintf "%s: expects exactly one argument, the function to differentiate" which))
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
     | ExprKind.ExprApp (f, args) ->
         r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> re (ExprApp (f', args'))))
@@ -1641,6 +1917,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         |> Map.ofList
     let declNames = funcDecls |> Map.toSeq |> Seq.map fst |> Set.ofSeq
     let requested = System.Collections.Generic.HashSet<string>()
+    let requestedJvp = System.Collections.Generic.HashSet<string>()
     // rewrite call sites everywhere
     let rewritten =
         decls |> List.fold (fun acc d ->
@@ -1648,19 +1925,19 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                 let mapped =
                     match d.Value with
                     | DeclFunction fd ->
-                        rewriteExpr requested declNames aliases fd.Body
+                        rewriteExpr requested requestedJvp declNames aliases fd.Body
                         |> Result.map (fun b -> DeclFunction { fd with Body = b })
                     | DeclLet binding ->
-                        rewriteExpr requested declNames aliases binding.Value
+                        rewriteExpr requested requestedJvp declNames aliases binding.Value
                         |> Result.map (fun v' -> DeclLet { binding with Value = v' })
                     | DeclStatic binding ->
-                        rewriteExpr requested declNames aliases binding.Value
+                        rewriteExpr requested requestedJvp declNames aliases binding.Value
                         |> Result.map (fun v' -> DeclStatic { binding with Value = v' })
                     | other -> Ok other
                 mapped |> Result.map (fun value -> ds @ [{ d with Value = value }])))
             (Ok [])
     rewritten |> Result.bind (fun decls' ->
-        if requested.Count = 0 then Ok decls'
+        if requested.Count = 0 && requestedJvp.Count = 0 then Ok decls'
         else
             let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = moduleVals; Fresh = 0 }
             // synthesize each requested derivative once
@@ -1675,19 +1952,30 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                         |> Result.map (fun gd -> Map.add fname gd made)))
                     (Ok Map.empty)
             // On failure, LEAVE synthSpan stamped with the failing decl's
-            // span: the `expand` boundary reads it when building the BL5500
+            // span: the `expand` boundary reads it when building the
             // diagnostic (resetting first was how synthesis errors lost
             // their source location). Reset on success only.
-            match synthesized with
+            synthesized |> Result.bind (fun made ->
+            let synthesizedJvp =
+                requestedJvp |> Seq.sort |> Seq.fold (fun acc fname ->
+                    acc |> Result.bind (fun (madeJ: Map<string, FunctionDecl>) ->
+                        Blade.Ast.synthSpan <- (Map.tryFind fname funcSpans |> Option.defaultValue noSpan)
+                        synthesizeJvp ctx funcDecls.[fname]
+                        |> Result.map (fun jd -> Map.add fname jd madeJ)))
+                    (Ok Map.empty)
+            match synthesizedJvp with
             | Error e -> Error e
-            | Ok made ->
+            | Ok madeJvp ->
                 Blade.Ast.synthSpan <- noSpan
-                // splice each f__grad immediately after its source decl
+                // splice each synthesized decl immediately after its source
+                // (grad before jvp when a function requested both)
                 Ok (decls' |> List.collect (fun d ->
                     match d.Value with
-                    | DeclFunction fd when Map.containsKey fd.Name made ->
-                        [d; { d with Value = DeclFunction made.[fd.Name] }]
-                    | _ -> [d]))))
+                    | DeclFunction fd ->
+                        let g = if Map.containsKey fd.Name made then [{ d with Value = DeclFunction made.[fd.Name] }] else []
+                        let j = if Map.containsKey fd.Name madeJvp then [{ d with Value = DeclFunction madeJvp.[fd.Name] }] else []
+                        d :: (g @ j)
+                    | _ -> [d])))))
 
 /// Entry point: expand grad() across a program. Errors are compile errors.
 let private expandStr (program: Program) : Result<Program, string> =
@@ -1706,7 +1994,10 @@ let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic lis
     let result =
         expandStr program
         |> Result.mapError (fun msg ->
-            [ Blade.Diagnostics.mkError "BL5500" (Blade.Diagnostics.Codes.phaseOfCode "BL5500") Blade.Ast.synthSpan msg ])
+            // jvp-phase messages carry the "jvp(" prefix (errMode) or the
+            // "jvp:" rewrite prefix; everything else is grad's.
+            let code = if msg.StartsWith "jvp" then "BL5501" else "BL5500"
+            [ Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) Blade.Ast.synthSpan msg ])
     // Reset AFTER the diagnostic is built (the span is the failing decl's),
     // so no stamp leaks into later passes.
     Blade.Ast.synthSpan <- Blade.Ast.noSpan

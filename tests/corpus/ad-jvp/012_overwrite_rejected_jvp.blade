@@ -1,0 +1,18 @@
+// TEST: JVP Non-Additive Overwrite (rejects)
+// v1 PARITY POLICY: jvp runs grad's discipline checks even though forward
+// mode is sound for overwrites (no reverse sweep to corrupt), so jvp
+// accepts exactly the programs grad accepts and the differential gate
+// covers everything. F2 lifts this deliberately -- when it does, this test
+// flips to a positive twin, documenting the boundary shift.
+// ERROR: BL5501
+// ERROR-CONTAINS: non-additive reassignment
+import ad as ad
+
+function bad(x: Float) -> Float = {
+    let mut t = x * 2.0
+    t = t * t
+    t
+}
+
+let (fv, dfv) = ad.jvp(bad)(3.0, 1.0)
+fv

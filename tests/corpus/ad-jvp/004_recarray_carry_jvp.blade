@@ -1,0 +1,20 @@
+// TEST: JVP Recursive Array Additive Carry (grad agreement)
+// Mirror of ad/008_recarray_grad's shape: an additive prefix recurrence.
+// s = [0, x^2, 2x^2, 3x^2], reduce = 6x^2; at x = 2: primal 24, d = 12x = 24.
+import ad as ad
+
+function f(x: Float) -> Float = {
+    let rec s: Array<Float like Idx<4>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: 0.0
+        | prefix :: n -> prefix :: prefix(n - 1) + x * x
+    reduce(s, (+))
+}
+
+let (gv, gd) = ad.grad(f)(2.0)
+let (jv, jt) = ad.jvp(f)(2.0, 1.0)
+let tresid = jt - gd
+// EXPECT: jv = 24
+// EXPECT: jt = 24
+// EXPECT: tresid = 0

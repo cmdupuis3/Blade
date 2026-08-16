@@ -575,6 +575,19 @@
         "docs/features/ppl.md"
       ]
     },
+    "BL5501": {
+      "title": "jvp elaboration error",
+      "explanation": "The forward-mode AD elaborator (`ad.jvp`) refused a construct. In v1 the jvp subset deliberately matches grad's, so the same refusals apply (unknown functions, intrinsics with no derivative rule, non-additive overwrites) -- a distinct code so a test or client can tell WHICH transform refused; the two subsets diverge past v1.",
+      "fix": "Differentiate a named same-module function inside the AD-able subset; compute non-differentiable pieces outside the function passed to ad.jvp, or pass their values in as parameters.",
+      "examples": [
+        "tests/corpus/ad-jvp/012_overwrite_rejected_jvp.blade",
+        "tests/corpus/ad-jvp/013_unknown_fn_rejected_jvp.blade",
+        "tests/corpus/ad-jvp/014_digamma_rejected_jvp.blade"
+      ],
+      "docs": [
+        "docs/plan-forward-mode-ad.md"
+      ]
+    },
     "BL5600": {
       "title": "sgs elaboration error",
       "explanation": "The `sgs` elaborator refused a construct: a non-static window or block size, a window that does not divide the domain, or an unknown op.",

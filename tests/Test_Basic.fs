@@ -14,6 +14,10 @@ let intrinsicsTests = category "intrinsics"
 /// grad() — reverse-mode AD source transform (Grad.fs)
 let adTests = category "ad"
 
+/// jvp() — forward-mode AD source transform (Grad.fs, same pass); the
+/// in-program jvp-vs-grad residual pins are the differential gate
+let adJvpTests = category "ad-jvp"
+
 /// End-to-end equivariant ML: forward + grad + SGD training, pinned to the
 /// ml/ F# oracle (TrainingOracle.fs)
 let mlE2eTests = category "ml-e2e"

@@ -1,0 +1,13 @@
+// TEST: JVP Digamma Has No Derivative Rule (rejects)
+// Mirror of ad/014: the zero-vs-unknown split must be preserved verbatim
+// in forward mode -- a jvp that silently zeroes digamma's tangent is the
+// same wrong-answer-no-diagnostic failure the adjoint refusal guards
+// against. (Its derivative is trigamma, which the language does not have.)
+// ERROR: BL5501
+// ERROR-CONTAINS: has no derivative rule
+import ad as ad
+
+function f(x: Float) -> Float = digamma(x) * x
+
+let (fv, dfv) = ad.jvp(f)(2.0, 1.0)
+fv

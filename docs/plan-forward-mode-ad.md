@@ -137,6 +137,21 @@ let j = ad.jvp(f)                                          // binding form, free
    `mapError` reads it (:1551), so synthesis-phase BL5500s land at `noSpan`.
 6. **Hoist binary-intrinsic partials** (atan2/log_base, Grad.fs:1095-1108)
    into a shared `binaryDerivRule` table.
+7. **`sqrt` unit hole — two defects, both wrong answers today, fixed here,
+   not inherited** (analysis memo, probe-verified). (i) Odd dims: the arm
+   returns `Ok None`, so `sqrt(Float<meters>)` unifies with any unit.
+   (ii) Even dims, scaled unit: the arm builds its result with
+   `unitOfDims`, which hardcodes `Scale = scaleOne`, so
+   `sqrt(1 acre) + 1 m` evaluates to 2 instead of 64.6 — a regression from
+   90d3642 (raised the scale in `unitPow` but not the sibling sqrt arm).
+   Fix: `unitSqrt` in Types.fs — a signature iff all Dims exponents are
+   even AND the Scale has an exact square root; otherwise BL3006 (matching
+   the shipped `x ^ 0.5` refusal). Census: zero corpus/example sites rely
+   on either branch. AD consequence: `d(√u) = u̇/(2√u)` then unit-checks by
+   construction; without the fix, OpDiv's one-sided arm hands the tangent
+   the PRIMAL's unit while the primal stays unconstrained — contradictory
+   judgments on one value. (Also stale: features.md's "carries dimensions,
+   not scale factors" line predates 90d3642.)
 
 ### F1 — jvp at grad parity
 
@@ -240,7 +255,7 @@ and the C-track cross product — scope it only after F3 ships.
 | `import ad` stripped by grad pass | Single driver strips once (§3) |
 | ML-elaborated Int path tables misclassified | Share `analyze`/`isFloatLit`, never copy |
 | Units: silent derivative drop (live grad bug) | F0.2 widens the shared classifier |
-| `sqrt` odd-dimension unit hole | Pre-existing primal hole; jvp inherits, does not fix |
+| `sqrt` odd-dimension unit hole | Promoted to F0.7 (two defects incl. a numeric wrong answer); fixed, not inherited |
 | `pow` derivative emits `e - 1.0` which `staticPowExponent` can't read (dimensioned base rejected) | Emit `iLit (n-1)` for static exponents |
 | Name collisions (`__g_`/`__t_`/`__primal`) | F0.1 collision gate (fixes live grad bug) |
 | digamma-style unknown-derivative silent zero | Preserve the zero-vs-unknown `None` split; jvp twin of `ad/014` |
