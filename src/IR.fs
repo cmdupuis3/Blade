@@ -6217,15 +6217,23 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
         (match typeOf l, typeOf r with
          | ArrayElem la, ArrayElem ra when la.IndexTypes.Length >= 1 && ra.IndexTypes.Length >= 1 ->
             let isComplexElem (t: IRType) =
-                match t with IRTScalar (ETComplex64 | ETComplex128) -> true | _ -> false
+                match stripUnits t with IRTScalar (ETComplex64 | ETComplex128) -> true | _ -> false
+            let outBare =
+                if isComplexElem la.ElemType then stripUnits la.ElemType
+                elif isComplexElem ra.ElemType then stripUnits ra.ElemType
+                else stripUnits la.ElemType
+            // Twin of inferGram's join: the contraction is multiplicative, so
+            // units multiply (nominal dropped one-sided) and complex is
+            // detected under the unit wrapper.
             let outElem =
-                if isComplexElem la.ElemType then la.ElemType
-                elif isComplexElem ra.ElemType then ra.ElemType
-                else la.ElemType
+                match getUnits la.ElemType, getUnits ra.ElemType with
+                | Some lu, Some ru -> IRTUnitAnnotated (outBare, unitMul lu ru)
+                | Some u, None | None, Some u -> IRTUnitAnnotated (outBare, { u with Nominal = None })
+                | None, None -> outBare
             let mOuter = la.IndexTypes.[0]
             let pOuter = ra.IndexTypes.[0]
             if sameArray then
-                let sym = if isComplexElem outElem then SymHermitian else SymSymmetric
+                let sym = if isComplexElem outBare then SymHermitian else SymSymmetric
                 let grp = { mOuter with Rank = 2; Symmetry = sym }
                 mkArrayLike { la with ElemType = outElem; IndexTypes = [grp] }
             else
