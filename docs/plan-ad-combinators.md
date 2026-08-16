@@ -104,17 +104,66 @@ where the only available spelling of the license is two independent groups
 the extra elements are exactly the per-dimension swaps `per_dim_swap_not_symmetry`
 refutes. **Do not take the escape.**
 
-**Tranche-1 disposition: tangent outputs are DENSE.** The primal loop is
-untouched and keeps its triangular storage and r! iteration saving; only the
-derived tangent leg goes dense. That is a bounded, ≤ r! cost on one leg, and it
-is correct. Symmetry inheritance becomes its own rung (C5), gated on ask #1.
+### 1a. RESOLVED (2026-08-16, probe-verified): E1 is blocked, and the
+### symmetry is exploitable anyway — via `range<SymIdx>`, with no compiler ask
 
-One unverified extrapolation to probe before building: `tuples/011:22` pins one
-zip against one `Tuple<2>` parameter; two zips against two `Tuple<2>` parameters
-(the shape above) is the natural extension but is **not** pinned anywhere.
-Note also that nested tuple *operands* are not co-iteration — `object_for(
-lambda(p: Tuple<2>, q: Tuple<2>)) <@> ((A,B),(C,D))` iterates **all four**
-arrays as a rank-4 outer product (`tuples/012:47-56`). Only `zip` pairs.
+Everything above this heading is superseded on two counts. The measurements:
+
+**E1 multi-slot does not exist.** `method_for(zip(A,Ȧ), zip(B,Ḃ))` is refused at
+`src/TypeCheck.fs:4013-4021` — *"zip cannot appear as one operand of a
+multi-array loop"*. So §2.5's central forward rule is blocked for **n ≥ 2
+regardless of symmetry**, and the "tranche-1 DENSE disposition" above does not
+work either: there was never a dense E1 fallback to retreat to. Consequently
+**compiler ask #1 (BL3999 on `Tuple<N>`) is not the binding constraint** — the
+zip-operand gate fails first, at `TypeCheck.fs:11306`, before BL3999 is ever
+reached. Relaxing BL3999 alone buys nothing; drop it from the critical path.
+
+**The symmetry IS exploitable, with zero compiler changes.** Use E2 (capture-
+read) with a *virtual* loop over the canonical index space:
+
+```blade
+// primal:  method_for(A, A) <@> lambda(x, y) where comm(x, y) -> k(x, y)
+// tangent: one operand, canonical cells only, values and tangents captured
+method_for(range<SymIdx<2, N>>) <@> lambda(p0, p1) -> <tangent body>
+```
+
+Verified end to end: `SymIdx<2,3>` allocates **6 cells, not 9**
+(`static constexpr size_t ..._symm[2] = {1,1}`, `allocate<...>`, inner bound
+`__i1 < 3 - __i0`, mirrored reads through `canon_fold`), the readback is a
+genuine symmetric array (`sym(0,2) = sym(2,0)`), and every cell — mirrors
+included — matches the dense computation to the printed digit, in both the
+compiled and interpreted lanes. The full r! saving survives on the tangent leg.
+
+**Three conventions the recipe rests on** (none pinned by any existing corpus
+test — pin them before building):
+
+1. **`range<SymIdx<r,N>>` hands the kernel PREFIX OFFSETS, not canonical
+   indices**: `canonical[m] = p₀ + p₁ + … + p_m`. Verified at r = 2 and r = 3.
+   A naive `A(p0) * A(p1)` therefore computes the *wrong values silently*;
+   the emitter must prefix-sum.
+2. **Write `SymIdx<r, N>` INLINE.** A named alias hard-errors (BL4003, *"slot
+   expects 'I' but argument has type 'S2'"*). Inline, the params are untagged
+   `Int64` and merely warn — so generated code needs `// WARN: BL4003` pins,
+   and an `(i : I)` cast does not help (BL3001).
+3. **Emit no `where comm`** on the range kernel: it is accepted and silently
+   discarded (virtual operands erase, so no identity group exists to key on).
+
+**Soundness gate, load-bearing.** `range<SymIdx>` allocates symmetric storage
+*unconditionally* — the compiler does not check that the body is symmetric. The
+emitter may use it **only** when the primal carries a STRUCTURAL `comm`
+judgment, which is exactly `tangent_joint_swap`'s hypothesis and exactly what
+`semantic_hypothesis_insufficient` forbids relaxing.
+
+**Bonus: one code path covers both cases.** Non-symmetric primal ⇒
+`method_for(range<I>, range<I>)` with the identical capture-by-index body. So
+the range route also routes around the E1 blockage for the dense case, which is
+what makes C2 buildable at all. C5 therefore folds INTO C2 rather than
+deferring behind an ask.
+
+Note for reference: nested tuple *operands* are not co-iteration —
+`object_for(lambda(p: Tuple<2>, q: Tuple<2>)) <@> ((A,B),(C,D))` iterates all
+four arrays as a rank-4 outer product (`tuples/012:47-56`). Only `zip` pairs,
+and only in a single-operand loop.
 
 ---
 
@@ -615,7 +664,19 @@ test on the data.
    nothing to state.
 6. n/a.
 
-### 2.14 `<|:>` — storage branching: **the retired quote's grouping is wrong; this one is FREE**
+### 2.14 `<|:>` — storage branching: **the retired quote's grouping is wrong; the AD rule is FREE (but codegen blocks the form inside a function)**
+
+> **Measured 2026-08-16.** The AD rule below is right and is implemented in C1.
+> What the section missed: `<|:>` **in a function body** is refused by the C++
+> back end for the PRIMAL too — `BL7004: <|:> (allocated-fallback) in
+> expression position -- it combines whole arrays; bind it and materialize
+> with |> compute` — because `a <|:> b |> compute` parses as
+> `a <|:> (b |> compute)`, leaving the fallback in expression position. The
+> corpus only exercises it at module level (`fallback/001-003`), which takes a
+> different emission path. So the tangent rule is free and admitted, but the
+> form is not usable inside a differentiated function until that codegen hole
+> closes. Not an AD gap; recorded here so the "FREE" verdict is not read as
+> "usable today".
 
 1. **Semantics.** `A <|:> B` reads `A(i)` **if allocated**, else `B(i)`, checked
    per curry level; A's layout dominates iteration order; symmetric A requires
@@ -760,12 +821,67 @@ test on the data.
    "sort by another array's order" form; the plausible route is sorting
    `zip(A, Ȧ)` under a key reading only the value half, which is **unverified**
    (no corpus pin) → DESIGN.
-3. **REV.** The adjoint is a scatter back through the grouping, and there is **no
-   ungroup surface** and no `<|:>`-analogue for `RaggedIdx`. → **BLOCKED at
-   Tier-2**; Tier-1, with ragged storage in the lane as the real difficulty.
-4. **Machinery.** `gk` hoisting to a named binding; ragged lane support.
-5. FWD `group_by` **MECHANICAL**, `sort` **DESIGN**; REV **BLOCKED at Tier-2**.
+3. **REV.** ~~The adjoint is a scatter back through the grouping, and there is
+   **no ungroup surface**~~ — **OVERSTATED; corrected 2026-08-16, probe-verified
+   (see 2.17a).** An ungroup exists today as an ordinary gather.
+4. **Machinery.** `gk` hoisting to a named binding; see 2.17a for the rest.
+5. FWD `group_by` **MECHANICAL** (confirmed against finite differences),
+   `sort` **DESIGN**; REV **MECHANICAL for factorable kernels**, gated on one
+   small compiler addition; **BLOCKED** for non-factorable ones.
 6. **Storage.** RaggedIdx; no comm.
+
+### 2.17a Reverse-mode `group_by`, corrected — carry the grouping, don't invert it
+
+The user's framing ("carry the grouping through as data rather than needing an
+inverse") is right, though not by the mechanism first proposed.
+
+**What does NOT work: `GroupKeys` as a value.** It is an opaque runtime CSR
+structure (`Types.fs:789`, `IR.fs:1139`) emitted as `void*` (`CodeGen.fs:1376`)
+whose entire state lives in *name-keyed C++ locals* — `<name>__ngroups`,
+`<name>__offsets`, `<name>__perm` (`CodeGen.fs:14710-14715`) — and same-`gk`
+co-iteration is discharged by NAME IDENTITY on the expression
+(`TypeCheck.fs:14797-14814`), not by type. So returning `gk` in a tuple, passing
+it as a parameter, or even `let gk2 = gk` all fail; the last three are **silent
+miscompiles** (raw g++ "undeclared symbol", not Blade diagnostics). Making this
+work means making `GroupKeys` a first-class runtime value — a language change.
+Corollary: the spec's "reuse the `gk` binding by name" is not a convenience, it
+is **mandatory**.
+
+**What DOES work: group the ROW INDICES by the same `gk`.** `group_by(rows, gk)`
+over an `Int64` index array gives the permutation as ordinary data, `zip(gv, gr)`
+co-iterates values with their source rows in one kernel, and a grouped array
+reads at a computed `(bucket, rank)`. Probe: `method_for(zip(bi, ki)) <@>
+lambda(b,k) -> gv(b,k)` reproduces `v` exactly. **That is the ungroup** — an
+ordinary gather, no new primitive.
+
+**The composite reverse rule** (never "adjoint of `group_by` alone" — grouped
+*outputs* have no consumers, `CodeGen.fs:11993`), for
+`out = method_for(group_by(v, gk)) <@> λr. K(r)`:
+
+```
+v̄(i) += ō(b(i)) · (∂K/∂r_k)(row b(i))   at k = rank(i);   0 when b(i) < 0
+```
+
+- **Factorable K** (sum, mean, count, product, max, logsumexp — any K whose
+  member partial is `φ(vᵢ, A_{b(i)})` for per-group aggregates `A` a forward
+  peel can produce): `v̄` is a **dense gather through `b`**, which is exactly
+  `ad/012`'s shape whose scatter adjoint already ships. **No ragged cotangent
+  storage, no new adjoint machinery** — the difficulty the old verdict named is
+  avoided rather than solved. Verified: a hand-written `Σ_g c_g·mean(group g)`
+  matches finite differences to 1.7e-9, and the same pipeline with the grouping
+  made explicit differentiates **today** through the existing lane, agreeing
+  with the rule to the last digit.
+- **Non-factorable K**: needs a row at a computed outer index, which emits a
+  bare `double*` with no length outside module-level literal rows. Honest
+  refusal.
+
+**What actually blocks it**, replacing "no ungroup surface": (1) no surface
+accessor for the CSR arrays — a `group_bucket(gk) : Array<Int64 like SourceIdx>`
+is one TypeCheck arm plus one CodeGen arm inverting perm/offsets in a single
+pass (`-1` for negative-key-dropped rows); (2) the AD transform has no
+combinator rules at all yet — `group_by` is not specially blocked, it is behind
+the whole C-track (a plain dense map hits the same refusal); (3) grouped and
+dense operands cannot co-iterate in one peel (BL7004) — two passes, harmless.
 
 ### 2.18 `>>=` and `<$>`
 

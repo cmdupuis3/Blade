@@ -1,0 +1,18 @@
+// TEST: JVP C1 Alias, Pure And Compute
+// The linear closure's simplest members. An ALIAS local is the case grad
+// must refuse (a cotangent's identity becomes untrackable when two names
+// share a buffer); forward mode has no buffers, so `__t_b = __t_w` is just
+// a binding. `pure`/`|> compute` are a materialization barrier the tangent
+// mirrors verbatim.
+// f = w0*w1 + w2 at [2,3,4]: 10; seed [1,0,0] -> df/dw0 = w1 = 3.
+import ad as ad
+
+function f(w: Array<Float like Idx<3>>) -> Float = {
+    let b = w
+    let c = pure(b(0) * b(1)) |> compute
+    c + b(2)
+}
+
+let (v, t) = ad.jvp(f)([2.0, 3.0, 4.0], [1.0, 0.0, 0.0])
+// EXPECT: v = 10
+// EXPECT: t = 3

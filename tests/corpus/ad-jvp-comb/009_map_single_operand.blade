@@ -1,0 +1,25 @@
+// TEST: JVP C2 Map Over One Operand
+// The central combinator rule. `method_for(a) <@> k` differentiates into
+// the SAME iteration over a virtual range, with values and tangents read
+// by index from the enclosing scope:
+//     method_for(range<I>) <@> lambda(i) -> D(body)[x := a(i)]
+// Capture-read rather than zip-pairing because zip is refused as one
+// operand of a multi-array loop, which rules out pairing for n >= 2.
+// Spelling the loop over the operand's OWN index type keeps the generated
+// reads tagged, and the tangent inherits the primal's shape by construction.
+// f = sum a^2 = 14 at [1,2,3]; seed [1,1,1] -> sum 2a = 12.
+import ad as ad
+
+type I = Idx<3>
+
+function f(a: Array<Float like I>) -> Float = {
+    let sq = method_for(a) <@> lambda(x) -> x * x |> compute
+    reduce(sq, (+))
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// The reduce lowering reads the mapped array with a plain loop counter,
+// which is untagged against the operand's index type.
+// WARN: BL4003
+// EXPECT: v = 14
+// EXPECT: t = 12

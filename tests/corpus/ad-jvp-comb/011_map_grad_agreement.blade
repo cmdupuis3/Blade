@@ -1,0 +1,31 @@
+// TEST: JVP C2 Map Agrees With A Hand-Written Loop
+// The differential gate for the map rule: the same mathematics written
+// WITHOUT combinators (a recursive-array accumulation, which grad and jvp
+// both already handled) must produce the same tangent as the combinator
+// form. f = sum(a_k * a_k * 3) over 3 cells.
+import ad as ad
+
+type I = Idx<3>
+
+function viaMap(a: Array<Float like I>) -> Float = {
+    let m = method_for(a) <@> lambda(x) -> x * x * 3.0 |> compute
+    reduce(m, (+))
+}
+
+function viaLoop(a: Array<Float like I>) -> Float = {
+    let rec s: Array<Float like I> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: a(0) * a(0) * 3.0
+        | prefix :: n -> prefix :: prefix(n - 1) + a(n) * a(n) * 3.0
+    s(2)
+}
+
+let (vm, tm) = ad.jvp(viaMap)([1.0, 2.0, 3.0], [1.0, 0.5, 0.25])
+let (vl, tl) = ad.jvp(viaLoop)([1.0, 2.0, 3.0], [1.0, 0.5, 0.25])
+let vresid = vm - vl
+let tresid = tm - tl
+// WARN: BL4003
+// EXPECT: vm = 42
+// EXPECT: vresid = 0
+// EXPECT: tresid = 0

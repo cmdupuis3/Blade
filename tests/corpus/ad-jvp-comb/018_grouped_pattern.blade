@@ -1,0 +1,88 @@
+// TEST: AD Through Real Grouping Data (both modes)
+// The 2.17a pattern with REAL keys instead of hand tables: group_keys /
+// group_bucket / extents(gk) are constant plumbing (keys are Int data, so
+// the bindings carry no derivative), and the per-group-mean loss
+// differentiates through the ordinary data-dependent-read machinery --
+// reverse (gather-adjoint-is-scatter) AND forward, agreeing exactly.
+// loss = sum_g c_g * mean(group g) = sum_i (c_{b(i)}/n_{b(i)}) * v_i.
+// The gradient wrt v is the broadcast of c_g/n_g through the bucket map;
+// the gradient wrt c is the per-group means.
+//
+// Pinned in BOTH scopes. The grouping starts at module scope, then the second
+// half derives the identical grouping INSIDE the differentiated function from a
+// keys PARAMETER -- the spelling this pattern actually wants, since a loss
+// keyed per call has nothing to hoist. Same gradients to the digit: the keys
+// are Int data either way, so the whole group_keys / group_bucket / extents
+// chain is constant plumbing and where it is built cannot move a derivative.
+import ad as ad
+
+type R = Idx<5>
+let k0 = [0, 1, 0, 0, 1]
+let gk = group_keys(k0)
+let b = group_bucket(gk)
+let ns = extents(gk)
+
+function loss(v: Array<Float like R>, cw: Array<Float like Idx<2>>) -> Float = {
+    let rec t: Array<Float like R> =
+        match t with
+        | zero -> zero
+        | prefix :: i -> prefix :: (cw(b(i)) / ns(b(i))) * v(i)
+    reduce(t, (+))
+}
+
+let v0 = [10.0, 20.0, 30.0, 40.0, 50.0]
+let c0 = [2.0, 5.0]
+// WARN: BL4003
+let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dc = [0.0, 0.0]
+let gv = ad.grad(loss)(v0, c0, dv, dc)
+// EXPECT: gv = 228.333333333333
+// EXPECT: dv = [0.666666666666667, 2.5, 0.666666666666667, 0.666666666666667, 2.5]
+// EXPECT: dc = [26.6666666666667, 35]
+let (jp, jt) = ad.jvp(loss)(v0, c0, [1.0, 0.0, -2.0, 3.0, 0.5], [0.0, 0.0])
+let dot = reduce(dv * [1.0, 0.0, -2.0, 3.0, 0.5], (+))
+let resid = jt - dot
+// EXPECT: jp = 228.333333333333
+// EXPECT: resid = 0
+
+// ---- The same loss with the grouping derived INSIDE it, from a keys
+// parameter. `group_keys` may not cross a call boundary (BL3017), so a
+// per-call grouping has to be built where it is used -- which needs the
+// accessors to emit in function-body position (sql-group-by/048).
+//
+// `k` carries no derivative (Int keys), so ad.grad seeds only the Float
+// arguments and the transform walks the grouping as constant plumbing.
+function loss_k(v: Array<Float like R>, cw: Array<Float like Idx<2>>,
+                k: Array<Int64 like R>) -> Float = {
+    let gk2 = group_keys(k)
+    let b2 = group_bucket(gk2)
+    let ns2 = extents(gk2)
+    let rec t: Array<Float like R> =
+        match t with
+        | zero -> zero
+        | prefix :: i -> prefix :: (cw(b2(i)) / ns2(b2(i))) * v(i)
+    reduce(t, (+))
+}
+
+let kk: Array<Int64 like R> = [0, 1, 0, 0, 1]
+let mut dv2 = [0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dc2 = [0.0, 0.0]
+let gv2 = ad.grad(loss_k)(v0, c0, kk, dv2, dc2)
+// EXPECT: gv2 = 228.333333333333
+// EXPECT: dv2 = [0.666666666666667, 2.5, 0.666666666666667, 0.666666666666667, 2.5]
+// EXPECT: dc2 = [26.6666666666667, 35]
+let (jp2, jt2) = ad.jvp(loss_k)(v0, c0, kk, [1.0, 0.0, -2.0, 3.0, 0.5], [0.0, 0.0])
+let dot2 = reduce(dv2 * [1.0, 0.0, -2.0, 3.0, 0.5], (+))
+let resid2 = jt2 - dot2
+// EXPECT: jp2 = 228.333333333333
+// EXPECT: resid2 = 0
+
+// Regrouping per call is the point: different keys, different partition,
+// different gradient -- from the same compiled loss.
+let kk2: Array<Int64 like R> = [0, 0, 0, 1, 1]
+let mut dv3 = [0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dc3 = [0.0, 0.0]
+let gv3 = ad.grad(loss_k)(v0, c0, kk2, dv3, dc3)
+// EXPECT: gv3 = 265
+// EXPECT: dv3 = [0.666666666666667, 0.666666666666667, 0.666666666666667, 2.5, 2.5]
+// EXPECT: dc3 = [20, 45]

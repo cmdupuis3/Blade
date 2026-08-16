@@ -1,0 +1,19 @@
+// TEST: JVP Through An If-Else Map Kernel
+// Regression pin for the substVar hole: the kernel-parameter substitution
+// used by the map rule did not descend into if/else branches (or tuples),
+// so an if-bodied lambda kernel died with BL2001 "Unbound variable" even
+// though jvp admits if/else. Tangent is 2x on the positive entries and 0
+// on the clamped ones: p = 1 + 0 + 9 + 0 = 10, t = 2*1 + 0 + 2*3 + 0 = 8.
+import ad as ad
+
+type I = Idx<4>
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = method_for(a) <@> lambda(x) -> if x > 0.0 then x * x else 0.0 |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (p, t) = ad.jvp(f)([1.0, -2.0, 3.0, -4.0], [1.0, 1.0, 1.0, 1.0])
+// EXPECT: p = 10
+// EXPECT: t = 8
