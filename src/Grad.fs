@@ -1165,20 +1165,24 @@ let private fuseKernels (ctx: Ctx) (at: Expr) (k1: Expr) (k2: Expr) : Result<Exp
     norm "second" k2 |> Result.bind (fun (ps2, wc2, b2) ->
     match ps2 with
     | [p2] when whereIsInert wc2 ->
-        let renames = ps1 |> List.map (fun p -> (p.Name, fresh ctx "__fs"))
-        let renMap = Map.ofList renames
+        let renames = ps1 |> List.map (fun p -> (p, fresh ctx "__fs"))
+        let renMap = renames |> List.map (fun (p, n) -> (p.Name, n)) |> Map.ofList
         let ren n = match Map.tryFind n renMap with Some x -> x | None -> n
         let b1' =
-            renames |> List.fold (fun acc (oldN, newN) ->
-                acc |> Option.bind (substKern oldN (inheritSpan k1 (ExprVar newN)))) (Some b1)
+            renames |> List.fold (fun acc (p, newN) ->
+                acc |> Option.bind (substKern p.Name (inheritSpan k1 (ExprVar newN)))) (Some b1)
         match b1' |> Option.bind (fun b -> substKern p2.Name b b2) with
         | None ->
             Error (sprintf "fusing a pipeline cannot substitute through the stage kernels %s and %s (a binder or an unsupported form stands between the stages)"
                        (kernName k1) (kernName k2))
         | Some body ->
+            // Carry the first stage's DECLARED parameter types onto the fused
+            // lambda. An annotation is a constraint as much as a hint --
+            // `lambda(x: Float<mps>)` refuses things `lambda(x)` accepts --
+            // and a rename is no reason to lose one.
             let ps =
-                renames |> List.map (fun (_, newN) ->
-                    { Name = newN; Type = None; Default = None; NameSpan = noSpan })
+                renames |> List.map (fun (p, newN) ->
+                    { Name = newN; Type = p.Type; Default = None; NameSpan = noSpan })
             Ok (inheritSpan at (ExprLambda (ps, wc1 |> Option.map (renameWhereVars ren), body)))
     | [_] ->
         Error (sprintf "fusing a pipeline cannot carry the second stage's `where` clause: stage kernel %s declares one, but its parameter does not survive the fusion"
@@ -3290,6 +3294,84 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                             else { d with Value = DeclFunction { fd with Body = fst (fuseFunctionBody ctx fd) } }
                         d :: mine
                     | _ -> [d]))))
+
+/// C7 generalized: the SAME pipeline fusion the AD path runs, applied to
+/// EVERY program.
+///
+/// Why here and not in Lowering: fusion is a statement about SURFACE terms
+/// (`>>@`, `@>>`, `<$>` and the kernels behind their names), and by the time
+/// an IR pass could see it the pipeline has already been split into the
+/// staged buffers this rewrite exists to avoid. Running it as a surface
+/// normalization -- in Grad.fs's own phase slot, immediately before
+/// `Grad.expand` and therefore before typecheck -- also means AD and the
+/// primal see exactly one rewrite, not two implementations of it.
+///
+/// It is not an optimization pass, it is a repair: without it, three-stage
+/// pipelines emit `r__s1[__i0] = ((void)0);`, multi-operand pipelines emit
+/// reads of an undeclared `arr0`, and `let p = o1 >>@ o2`, `f <$> c` and
+/// `c1 @>> c2` inside a function body all die BL7004 "in expression
+/// position". Fusion is the proved Compose-Apply identity
+/// (formalism.md 10.3), so none of those repairs can change an answer.
+///
+/// Declines are SILENT here, unlike in differentiated code: a shape fusion
+/// will not touch is one the existing IRComposeApply path still handles.
+let fuseProgram (program: Program) : Program =
+    let fuseModule (m: ModuleDecl) : ModuleDecl =
+        let funcDecls =
+            m.Decls |> List.choose (fun d ->
+                match d.Value with DeclFunction fd -> Some (fd.Name, fd) | _ -> None)
+            |> Map.ofList
+        let typeAliases =
+            m.Decls |> List.collect (fun d ->
+                match d.Value with
+                | DeclType (TyDeclAlias (n, [], body)) -> [(n, body)]
+                | DeclType (TyDeclMutualGroup (members, _)) -> members
+                | _ -> [])
+            |> Map.ofList
+        let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = Set.empty
+                    ModuleLoopVals = Map.empty; Fresh = 0 }
+        // Module bindings accumulate in DECLARATION ORDER: a body may only
+        // resolve through names bound before it, which is the language's own
+        // visibility rule. Resolving a later binding into an earlier body
+        // would turn programs the checker rejects into programs it accepts.
+        let mutable env : Map<string, Expr> = Map.empty
+        let mutable arrays : Set<string> = Set.empty
+        let noteBinding (pat: Pattern) (v: Expr) =
+            match pat.Kind with
+            | PatternKind.PatVar nm ->
+                env <- (if bindsPipelineValue v then Map.add nm v env else Map.remove nm env)
+                arrays <- (if isArrayish arrays v v then Set.add nm arrays else Set.remove nm arrays)
+            | _ -> ()
+        let decls =
+            m.Decls |> List.map (fun d ->
+                match d.Value with
+                | DeclFunction fd ->
+                    let ps = fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
+                    let paramArrays =
+                        fd.Params
+                        |> List.filter (fun p ->
+                            match p.Type with
+                            | Some t -> (match resolveArrayTy ctx t with TyArray _ -> true | _ -> false)
+                            | None -> false)
+                        |> List.map (fun p -> p.Name)
+                        |> Set.ofList
+                    let body, _ =
+                        fusePipelinesEnv ctx
+                            (env |> Map.filter (fun n _ -> not (Set.contains n ps)))
+                            (Set.union (Set.difference arrays ps) paramArrays)
+                            fd.Body
+                    { d with Value = DeclFunction { fd with Body = body } }
+                | DeclLet b ->
+                    let v, _ = fusePipelinesEnv ctx env arrays b.Value
+                    noteBinding b.Pattern v
+                    { d with Value = DeclLet { b with Value = v } }
+                | DeclStatic b ->
+                    let v, _ = fusePipelinesEnv ctx env arrays b.Value
+                    noteBinding b.Pattern v
+                    { d with Value = DeclStatic { b with Value = v } }
+                | _ -> d)
+        { m with Decls = decls }
+    { program with Modules = program.Modules |> List.map fuseModule }
 
 /// Entry point: expand grad() across a program. Errors are compile errors.
 let private expandStr (program: Program) : Result<Program, string> =

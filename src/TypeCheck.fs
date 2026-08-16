@@ -18253,6 +18253,14 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     match Blade.Display.Elaborate.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["display elaboration"]))
     | Ok program ->
+    // C7: fuse `>>@` / `@>>` / `<$>` pipelines into ordinary maps for EVERY
+    // program, not just differentiated ones. The proved Compose-Apply
+    // identity (formalism.md 10.3), so it cannot change an answer -- and it
+    // is what makes three-stage chains, multi-operand pipelines, and
+    // function-body `let p = o1 >>@ o2` / `f <$> c` / `c1 @>> c2` emit at
+    // all. Shapes it declines fall through to the IRComposeApply path
+    // unchanged. Runs BEFORE grad expansion so AD inherits fused bodies.
+    let program = Blade.Grad.fuseProgram program
     match Blade.Grad.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["grad expansion"]))
     | Ok program ->

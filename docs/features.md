@@ -148,12 +148,12 @@ the computation monad.
 |-----------|--|------|
 | Apply | `<@>` | Apply kernel to loop / arrays to object-loop |
 | Pipe | `\|>` | Apply the preceding arg as the last argument of the subsequent arg; `f(a) == a \|> f` |
-| Monadic | `>>=`, `pure`, `<$>` | Monadic bind, pure, functor. Computation monad (bind = loop-nest flat_map at the value level) |
+| Monadic | `>>=`, `pure`, `<$>` | Monadic bind, pure, functor. Computation monad (bind = loop-nest flat_map at the value level). `<$>` is FUSED into the producing kernel before typecheck (see Compose-apply); `>>=` is not |
 | Loop join |`<&>` | Parallel composition with automatic prefix fusion |
 | Force join | `<&!>` | Mandatory fusion; same-MethodLoop restriction |
 | Reduction join | `object_for(<&!>) <@> (r₁, …, r_k)`<br>`reduce([r₁, …, r_k], (<&!>))` | k REDUCTIONS (`prodsum`, `reduce`) in one traversal → `Tuple<k>`; per-leg fold and seed, so the legs may differ in both. Legs naming the same **deferred** map (`let ct = cos <@> ph`, no `compute`) evaluate it once per cell — sharing declared by the NAME. 1 leg = identity, 0 refused. `docs/plan-reduction-joins.md` |
 | Product | `<*>` | Array product = MethodLoop concatenation; identity `method_for()` |
-| Compose-apply | `>>@` | ObjectLoop (kernel) composition |
+| Compose-apply | `>>@` | ObjectLoop (kernel) composition. **Pipelines are FUSED** — `>>@`, `@>>` and `<$>` collapse into one map over the composed kernel before typecheck (`Grad.fuseProgram`), which is the proved duality below, so chains of any length, multi-operand first stages, and all three spellings inside a function body all emit. A fused kernel carries the first stage's `where` clause with its parameter references renamed, so `comm`-licensed triangular storage and `omp` licences survive. Stages fusion cannot prove (`reynolds(...)`, block bodies, unresolvable operands, a second-stage `where`) fall through to the staged compose path unchanged; in DIFFERENTIATED code the same declines become refusals |
 | Apply-compose | `@>>` | Within-MethodLoop sequential composition <br>Compose-apply duality `(o_f >>@ o_g) <@> A ≡ (m <@> f) @>> (m <@> g)` |
 | Guard | `guard(p, c)` | Conditional computation; false → zeros of c's shape |
 | Choice | `<\|>` | Choice; MonadPlus with `zero` |
@@ -383,7 +383,7 @@ compile-time only, zero runtime cost.
 | Norm activation | Near-term | ml-spec §8.2; `ml.norms` (invariant norm readout) is shipped and is a different op |
 | Message passing: `scatter` / `gather` | Near-term | ml-spec §9 (expressible today as loops — `ml-e2e/00*` do; dedicated ops pending) |
 | Reynolds applications: symmetric message passing, higher-order interactions, antisymmetric applications | Near-term | ml-spec §14; the CG exchange-symmetry compaction shipped as `derive_sym_tp` / `derive_alt_tp` (measured 30–42%, not the 2–4× originally claimed — module doc §9) |
-| Automatic differentiation (`ad.grad` reverse mode, v1 subset; `ad.jvp` forward mode, strict superset incl. overwrites/recurrences/product folds/if-else/units) | Core | AST-level source transforms, one pass; module doc §11 has both ABIs + subsets; composition `ad.jvp(ad.grad(f))` = HVP, `ad.jvp(ad.jvp(f))` = second-order; corpus `ad/` + `ad-jvp/` + `ml-e2e/`; remaining work in [features/equivariant-nn.md](features/equivariant-nn.md) §11 |
+| Automatic differentiation (`ad.grad` reverse mode, v1 subset; `ad.jvp` forward mode, strict superset incl. overwrites/recurrences/product folds/if-else/units/combinators through C7 pipelines) | Core | AST-level source transforms, one pass; module doc §11 has both ABIs + subsets; composition `ad.jvp(ad.grad(f))` = HVP, `ad.jvp(ad.jvp(f))` = second-order; corpus `ad/` + `ad-jvp/` + `ad-jvp-comb/` + `ml-e2e/`; remaining work in [features/equivariant-nn.md](features/equivariant-nn.md) §11 |
 
 ## 18. Graphs and trees (planned module)
 

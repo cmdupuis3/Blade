@@ -1,0 +1,49 @@
+// TEST: Pipeline Fusion Declines
+// The other half of the fusion contract, and the replacement coverage for
+// what fusion darkened.
+//
+// A shape fusion will NOT touch keeps working through the pre-existing
+// IRComposeApply / IRComposeMeth paths, silently -- only DIFFERENTIATED code
+// turns a decline into a refusal, because the tangent walker has no other
+// rule. Here the un-fusable ingredient is a BLOCK-bodied stage kernel:
+// fusion inlines a stage's body, and a block is not an expression to inline.
+//
+// 043-048 and 096-097 were written to exercise those paths and now fuse
+// instead, so this file re-covers them shape for shape: a plain compose
+// apply, a compose-apply leaf inside `<&>` (genParallelTree) and `<&!>`
+// (genFusionTree), a compose-apply on the LEFT of `@>>`, and a plain `@>>`
+// whose right kernel is the block-bodied one. Values are the same as the
+// originals pinned, since a decline is not a semantic change.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let h = lambda(x) -> x - 1.0
+let hm5 = lambda(x) -> x - 5.0
+let L = method_for(A)
+function dbl_blocky(x: Float) -> Float = { x * 2.0 }
+function sq_blocky(y: Float) -> Float = { y * y }
+
+// plain compose-apply, unfused: (x+1)*2
+let blk = (object_for(f) >>@ object_for(dbl_blocky)) <@> A |> compute
+// EXPECT: blk = [4.0, 6.0, 8.0]
+
+// compose-apply leaf under <&> and <&!>
+let p = (object_for(f) >>@ object_for(dbl_blocky)) <@> A
+let q = L <@> h
+let (par1, par2) = p <&> q |> compute
+// EXPECT: par1 = [4.0, 6.0, 8.0]
+// EXPECT: par2 = [0.0, 1.0, 2.0]
+let p2 = (object_for(f) >>@ object_for(dbl_blocky)) <@> A
+let q2 = L <@> h
+let (fus1, fus2) = p2 <&!> q2 |> compute
+// EXPECT: fus1 = [4.0, 6.0, 8.0]
+// EXPECT: fus2 = [0.0, 1.0, 2.0]
+
+// compose-apply on the LEFT of @>>: h5(p3[i]) = ((x+1)*2) - 5
+let p3 = (object_for(f) >>@ object_for(dbl_blocky)) <@> A
+let q3 = L <@> hm5
+let meth = p3 @>> q3 |> compute
+// EXPECT: meth = [-1.0, 1.0, 3.0]
+
+// plain @>> whose SECOND kernel is the un-fusable one: (x+1)^2
+let mc = (L <@> f) @>> (L <@> sq_blocky) |> compute
+// EXPECT: mc = [4.0, 9.0, 16.0]

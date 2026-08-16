@@ -509,6 +509,19 @@ base case would inject a spurious 1. Pin it.
 > (`Tuple<N>` element typing) is **off** C7's critical path — see the C7 entry
 > in §4 for what shipped, what it refuses, and where the recompute cost lands.
 > Pinned in `tests/corpus/ad-jvp-comb/023`–`035`.
+>
+> **And then generalized past AD.** The same rewrite now runs for EVERY program
+> (`Grad.fuseProgram`, called from `TypeCheck.fs` immediately before
+> `Grad.expand`), because it is not only an AD enabler — it repairs five
+> verified primal codegen holes: three-stage chains emitting
+> `three__s1[__i0] = ((void)0);`, multi-operand pipelines reading an undeclared
+> `arr0`, and `let p = o1 >>@ o2`, `f <$> c` and `c1 @>> c2` each dying BL7004
+> "in expression position" inside a function body (the first of those also
+> reporting `IRComposeApply: Composition did not resolve to IRComposeObj …
+> IR-builder bug`). Pinned in `tests/corpus/loops/176`–`180`. Every value in
+> the pre-existing pipeline corpus and in `examples/03` is byte-identical
+> across the change; what moved is the emitted C++, which loses the per-stage
+> staged buffer in favour of one loop.
 
 1. **Semantics.** `>>@ : ObjectLoop × ObjectLoop → ObjectLoop` composes kernels
    then applies; `@>> : Computation × Computation → Computation` applies then
@@ -1108,9 +1121,15 @@ never dropped silently); and any pipeline under `ad.grad` (§2.10.3).
 
 *The cost.* Fusion inlines, so a second stage that names its parameter k times
 evaluates the first stage k times (`g(y) = y*y` over `f` becomes `f(x)*f(x)`).
-Binding the intermediate instead would need block-bodied kernels, which
+Against that it deletes the per-stage staged buffer the old path allocated, so
+for the common shapes it is a net win in both allocations and passes. Binding
+the intermediate instead would need block-bodied kernels, which
 `asKernelLambda` refuses — deferred, and cheap to revisit if a real pipeline
 ever pays for it.
+
+*Not only AD.* The rewrite is a whole-program surface normalization
+(`Grad.fuseProgram`), so the primal gets it too — see the note at the head of
+§2.10 for the five codegen holes that closes.
 
 **Skipped, with justification recorded:**
 - **`<|>`** — discontinuous, and its pathological set is its design point

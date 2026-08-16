@@ -1,0 +1,18 @@
+// TEST: Pipeline Three Stages
+// Regression: a chain of THREE `object_for` stages used to emit
+// `three__s1[__i0] = ((void)0);` plus a zero-extent second buffer, which g++
+// rejected outright -- at module scope as well as in a function body, and in
+// both associativity spellings. Pipeline fusion (C7, generalized to the
+// primal) collapses the chain into one kernel bottom-up, so there is one
+// loop and no staged buffer at all.
+// `>>@` runs its LEFT stage first: h(g(f(x))) = ((x+1)*2) - 3.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x - 3.0
+let three = (object_for(f) >>@ object_for(g) >>@ object_for(h)) <@> A |> compute
+// the other association must agree -- fusion is associative because
+// composition is
+let three_r = (object_for(f) >>@ (object_for(g) >>@ object_for(h))) <@> A |> compute
+// EXPECT: three = [1.0, 3.0, 5.0]
+// EXPECT: three_r = [1.0, 3.0, 5.0]
