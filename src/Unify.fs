@@ -240,7 +240,7 @@ type TypeError =
     // binding. These two are the accessor-side argument checks, raised during
     // inference (the accessor cannot even be TYPED without a resolved grouping);
     // BL3017's post-zonk sweep is what catches a gk escaping anywhere else.
-    | GroupBucketNeedsName of got: string
+    | GroupingNeedsName of intrinsic: string * got: string
     | GroupBucketNotGrouping of got: string
     | CumulantOrderPositive of order: int
     | CumulantOrderExceeds of order: int * carried: int

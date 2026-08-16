@@ -2035,6 +2035,95 @@ let computeGroupedCaptureFacts (modul: IRModule) : Map<IRId, IRId> =
         walkBody f.Body
     acc |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
 
+/// EXTENTS-ONLY GROUP_BY: which group_by bindings never have their VALUES read.
+///
+/// A grouped array's only legal consumers are ragged peels, and a peel whose
+/// kernel touches its row solely through `extents(row)` reads the row's LENGTH
+/// -- which the emitter computes from the gk offsets, not from the gathered
+/// buffer. So if EVERY use of a group_by result is such a peel, the gather is
+/// dead: `genGroupByBinding` still emits the row-pointer table (the peel indexes
+/// it to build each RaggedRow, and auto-print reads its extents) but skips the
+/// per-group `new[]` and the O(n) copy, leaving the rows null. That is legal --
+/// the pointer is read, never dereferenced -- and `delete[] nullptr` is a no-op,
+/// so teardown is unchanged.
+///
+/// The user-facing point: `extents(gk)` is the direct spelling for per-group
+/// sizes, and this makes the older `method_for(group_by(v, gk)) <@> lambda(r) ->
+/// extents(r)` cost the same, so nobody has to know which one is fast.
+///
+/// FAIL-SAFE. The walk marks a binding BAD on any occurrence it cannot classify,
+/// and only the classified-good set survives; an unrecognised use therefore
+/// keeps the gather. Both directions are pinned (sql-group-by/043).
+let computeExtentsOnlyGroupBys (modul: IRModule) : Set<IRId> =
+    let strip e = match e with IRCompute inner -> inner | e -> e
+    // Every id bound to a group_by, module-level or inside a body.
+    let groupByIds = System.Collections.Generic.HashSet<IRId>()
+    let noteBind (id: IRId) (v: IRExpr) =
+        match strip v with IRGroupBy _ -> groupByIds.Add id |> ignore | _ -> ()
+    for bind in modul.Bindings do
+        noteBind bind.Id bind.Value
+        iterIRExpr (fun e -> match e with IRLet (id, v, _) -> noteBind id v | _ -> ()) bind.Value
+    for f in modul.Functions do
+        iterIRExpr (fun e -> match e with IRLet (id, v, _) -> noteBind id v | _ -> ()) f.Body
+    if groupByIds.Count = 0 then Set.empty else
+
+    // A kernel is extents-only when its SOLE parameter is reached exclusively
+    // through IRExtent. Counting works because iterIRExpr visits the IRExtent
+    // node and its IRVar child both, so a row read any other way lifts `total`
+    // without lifting `underExtent`.
+    let kernelExtentsOnly (kernel: IRExpr) : bool =
+        match resolveCallable kernel with
+        | Some c when c.Params.Length = 1 ->
+            let pid = c.Params.[0].VarId
+            let mutable total = 0
+            let mutable underExtent = 0
+            iterIRExpr (fun e ->
+                match e with
+                | IRVar (i, _) when i = pid -> total <- total + 1
+                | IRExtent (IRVar (i, _), _) when i = pid -> underExtent <- underExtent + 1
+                | _ -> ()) c.Body
+            total > 0 && total = underExtent
+        | _ -> false
+
+    // Sole grouped operand of a peel: co-iteration (Arrays > 1) binds rows from
+    // several tables and is never elided.
+    let soleGroupedOperand (info: ApplyInfo) : IRId option =
+        match info.Arrays |> List.map strip with
+        | [IRVar (gid, _)] when groupByIds.Contains gid -> Some gid
+        | _ -> None
+
+    let good = System.Collections.Generic.HashSet<IRId>()
+    let bad = System.Collections.Generic.HashSet<IRId>()
+    // Structural walk, not a count: an elidable peel mentions its operand in
+    // BOTH `Loop` and `Arrays`, so those subtrees are skipped wholesale rather
+    // than tallied. The kernel is still walked -- it is an IRVar naming a
+    // callable, and the callable's BODY is visited via modul.Functions.
+    let rec scan (e: IRExpr) =
+        match e with
+        | IRApplyCombinator info ->
+            (match soleGroupedOperand info with
+             | Some gid when kernelExtentsOnly info.Kernel ->
+                 good.Add gid |> ignore
+                 scan info.Kernel
+             | _ -> (match e with ExprShape (cs, _) -> cs |> List.iter scan | _ -> ()))
+        | IRVar (i, _) when groupByIds.Contains i -> bad.Add i |> ignore
+        | ExprShape (cs, _) -> cs |> List.iter scan
+        | _ -> ()
+    for bind in modul.Bindings do scan bind.Value
+    for f in modul.Functions do scan f.Body
+    Set.ofSeq good - Set.ofSeq bad
+
+let private extentsOnlyGroupBysStorage =
+    System.Threading.AsyncLocal<Set<IRId> ref>()
+
+let extentsOnlyGroupBysCell () : Set<IRId> ref =
+    let v = extentsOnlyGroupBysStorage.Value
+    if isNull (box v) then
+        let fresh = ref Set.empty
+        extentsOnlyGroupBysStorage.Value <- fresh
+        fresh
+    else v
+
 /// Wrapper-emission helper: a local C++ closure mediating between a lifted
 /// function's signature (regular + capture params) and a consumer's expected
 /// shape (regular params only), so `IRVar(callable.Id, funcType)` can stand in
@@ -12532,7 +12621,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 preCode <- preCode @ code
                 tempCtx <- addVarName tmpId tmpName tempCtx
                 (tmpName, IRVar (tmpId, tmpType))
-            | IRSort _ | IRGroupKeys _ | IRGroupBy _ | IRGroupBucket _ ->
+            | IRSort _ | IRGroupKeys _ | IRGroupBy _ | IRGroupBucket _ | IRGroupSizes _ ->
                 // Per design decision: these operations require let-binding.
                 // Auto-materializing them inline would require duplicating their
                 // codegen here (mask/intersect/union do it because they predate
@@ -12544,6 +12633,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     | IRGroupKeys _ -> "group_keys"
                     | IRGroupBy _ -> "group_by"
                     | IRGroupBucket _ -> "group_bucket"
+                    | IRGroupSizes _ -> "extents"
                     | _ -> "?"
                 let errCode = codegenError ctx ind (sprintf "'%s' must be let-bound before use in method_for; e.g. let s = %s(...) then method_for(s)" opName opName)
                 preCode <- preCode @ errCode
@@ -14465,6 +14555,8 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genGroupByBinding ctx binding builder vals gk
     | IRGroupBucket gk ->
         genGroupBucketBinding ctx binding builder gk
+    | IRGroupSizes gk ->
+        genGroupSizesBinding ctx binding builder gk
     | IRSort (arrExpr, keyExpr) ->
         genSortBinding ctx binding builder arrExpr keyExpr
     | IRTranspose (arrExpr, d1, d2) ->
@@ -16325,18 +16417,30 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     let extentsDecl =
         fst (emitExtentsTable ind (name + "_extents") 2
                  [(sprintf "%s__ngroups" gkName, false); ("0 /* inner extent is ragged */", false)])
+    // GATHER ELISION: every consumer of this binding reads only row LENGTHS
+    // (computeExtentsOnlyGroupBys), which come from the gk offsets. The row
+    // TABLE is still emitted -- the peel indexes it, and print reads its extents
+    // -- but the per-group buffers and the O(n) copy are dead, so the rows stay
+    // null. Legal because the peel reads the pointer without dereferencing it,
+    // and deallocate_ragged_rows_owned's `delete[] rows[i]` no-ops on null.
+    let elideGather = Set.contains binding.Id (extentsOnlyGroupBysCell ()).Value
     let code =
         elemErrCode
-        @ [ sprintf "%s// group_by: per-group nested allocation, group-contiguous via gk__perm" ind ]
+        @ [ if elideGather
+            then sprintf "%s// group_by: rows NOT gathered -- every consumer reads only extents(row)" ind
+            else sprintf "%s// group_by: per-group nested allocation, group-contiguous via gk__perm" ind ]
         @ extentsDecl
-        @ [ sprintf "%sArray<%s*, 1> %s = { new %s*[%s__ngroups], %s_extents };" ind elemStr name elemStr gkName name
-            sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
-            sprintf "%s    size_t __sz = %s__offsets[__g + 1] - %s__offsets[__g];" ind gkName gkName
-            sprintf "%s    %s[__g] = new %s[__sz];" ind name elemStr
-            sprintf "%s    for (size_t __k = 0; __k < __sz; __k++) {" ind
-            sprintf "%s        %s[__g][__k] = %s;" ind name (valsAt (sprintf "%s__perm[%s__offsets[__g] + __k]" gkName gkName))
-            sprintf "%s    }" ind
-            sprintf "%s}" ind ]
+        @ [ sprintf "%sArray<%s*, 1> %s = { new %s*[%s__ngroups], %s_extents };" ind elemStr name elemStr gkName name ]
+        @ (if elideGather then
+             [ sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) %s[__g] = nullptr;" ind gkName name ]
+           else
+             [ sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
+               sprintf "%s    size_t __sz = %s__offsets[__g + 1] - %s__offsets[__g];" ind gkName gkName
+               sprintf "%s    %s[__g] = new %s[__sz];" ind name elemStr
+               sprintf "%s    for (size_t __k = 0; __k < __sz; __k++) {" ind
+               sprintf "%s        %s[__g][__k] = %s;" ind name (valsAt (sprintf "%s__perm[%s__offsets[__g] + __k]" gkName gkName))
+               sprintf "%s    }" ind
+               sprintf "%s}" ind ])
     // Owns the row table AND every per-group row (each a separate new[]).
     // The wrapper is Array<T*,1> whose .extents[1] is the ragged placeholder
     // 0, so the row count comes from the gk__ngroups local -- a plain size_t
@@ -16381,6 +16485,36 @@ and genGroupBucketBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: I
             sprintf "%s    for (size_t __p = %s__offsets[__g]; __p < %s__offsets[__g + 1]; __p++) {" ind gkName gkName
             sprintf "%s        %s[%s__perm[__p]] = (%s)__g;" ind name gkName elemStr
             sprintf "%s    }" ind
+            sprintf "%s}" ind ]
+    registerPoolAlloc AllocDense elemStr 1 "nullptr" (name + "_extents") name ownedExtents
+    let ctx' = addVarName binding.Id name ctx
+    (code, ctx')
+
+
+
+and genGroupSizesBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (gk: IRExpr) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let gkName = exprToCppCtx ctx gk
+    // extents(gk): per-group sizes straight off the CSR row pointers,
+    // sizes[g] = offsets[g+1] - offsets[g]. O(ngroups), and -- the point of the
+    // spelling -- NO group_by: the values are never gathered, so a count-only
+    // query stops paying for a copy of the data it ignores.
+    //
+    // This is the same arithmetic the ragged peel builds each row's `.len` from
+    // (genGroupByBinding's RaggedRow), which is what makes `extents(gk)` and
+    // `method_for(group_by(v, gk)) <@> lambda(r) -> extents(r)` the same answer.
+    // Rows dropped by a negative key are absent from every group's span, so they
+    // are counted nowhere -- consistent with group_bucket reading -1 for them.
+    let elemStr = "int64_t"
+    let (extentsDecl, ownedExtents) =
+        emitExtentsTable ind (name + "_extents") 1 [(sprintf "%s__ngroups" gkName, false)]
+    let code =
+        [ sprintf "%s// extents(gk): per-group sizes from the CSR offsets (no gather)" ind ]
+        @ extentsDecl
+        @ [ sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemStr name elemStr name name
+            sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
+            sprintf "%s    %s[__g] = (%s)(%s__offsets[__g + 1] - %s__offsets[__g]);" ind name elemStr gkName gkName
             sprintf "%s}" ind ]
     registerPoolAlloc AllocDense elemStr 1 "nullptr" (name + "_extents") name ownedExtents
     let ctx' = addVarName binding.Id name ctx
@@ -19724,6 +19858,8 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     (freshReturnFactsCell ()).Value <- computeFreshReturnFacts modul
     (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
     (groupedCaptureFactsCell ()).Value <- computeGroupedCaptureFacts modul
+    // Also after the callables table: kernel bodies are resolved through it.
+    (extentsOnlyGroupBysCell ()).Value <- computeExtentsOnlyGroupBys modul
     resetAllocScopeStack ()
 
     let ctx0 = emptyContext ()
@@ -19845,6 +19981,8 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     (freshReturnFactsCell ()).Value <- computeFreshReturnFacts modul
     (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
     (groupedCaptureFactsCell ()).Value <- computeGroupedCaptureFacts modul
+    // Also after the callables table: kernel bodies are resolved through it.
+    (extentsOnlyGroupBysCell ()).Value <- computeExtentsOnlyGroupBys modul
     resetAllocScopeStack ()
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }

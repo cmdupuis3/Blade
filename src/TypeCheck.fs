@@ -8262,7 +8262,11 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
 // parameter, or an inline `group_bucket(group_keys(k))` have no emittable
 // name to suffix. Refuse them HERE, with an explanation, rather than emitting
 // C++ that names an undeclared symbol.
-and inferGroupBucket (env: TypeEnv) (grouping: Expr) : TypeResult<TypedExpr> =
+/// Shared front half of every grouping accessor: require a BARE NAME, infer it,
+/// and hand back the grouping's index pair. `intrinsic` only names the caller in
+/// the diagnostic. Used by group_bucket and by extents(gk).
+and requireGroupingName (env: TypeEnv) (intrinsic: string) (grouping: Expr)
+        : TypeResult<TypedExpr * IRIndexType * IRIndexType> =
     let describe (e: Expr) =
         match e.Kind with
         | ExprKind.ExprGroupKeys _ -> "an inline `group_keys(...)` call"
@@ -8271,20 +8275,21 @@ and inferGroupBucket (env: TypeEnv) (grouping: Expr) : TypeResult<TypedExpr> =
         | ExprKind.ExprTuple _ -> "a tuple"
         | _ -> "a non-name expression"
     match grouping.Kind with
-    | ExprKind.ExprVar _ ->
+    | ExprKind.ExprVar name ->
         inferExpr env grouping |> Result.bind (fun tGk ->
             match env.Subst.Resolve(tGk.Type) with
-            | IRTGroupKeys (_, sourceIdx, _) ->
-                // Reuse the source slot verbatim (same Id, tag and extent):
-                // the bucket map spans exactly the rows the keys did, so it is
-                // the SAME index space, not a fresh one -- which is what makes
-                // `zip(v, group_bucket(gk))` typecheck.
-                let resultType = mkArrayArrow [sourceIdx] (IRTScalar ETInt64) None
-                Ok (mkTyped (TExprGroupBucket tGk) resultType)
-            | _ ->
-                let name = match grouping.Kind with ExprKind.ExprVar n -> n | _ -> "?"
-                Error (GroupBucketNotGrouping name))
-    | _ -> Error (GroupBucketNeedsName (describe grouping))
+            | IRTGroupKeys (outerIdx, sourceIdx, _) -> Ok (tGk, outerIdx, sourceIdx)
+            | _ -> Error (GroupBucketNotGrouping name))
+    | _ -> Error (GroupingNeedsName (intrinsic, describe grouping))
+
+and inferGroupBucket (env: TypeEnv) (grouping: Expr) : TypeResult<TypedExpr> =
+    requireGroupingName env "group_bucket" grouping
+    |> Result.map (fun (tGk, _, sourceIdx) ->
+        // Reuse the source slot verbatim (same Id, tag and extent): the bucket
+        // map spans exactly the rows the keys did, so it is the SAME index
+        // space, not a fresh one -- which is what makes
+        // `zip(v, group_bucket(gk))` typecheck.
+        mkTyped (TExprGroupBucket tGk) (mkArrayArrow [sourceIdx] (IRTScalar ETInt64) None))
 
 // group_by(values, grouping) -- apply GroupKeys to a values array
 // Result: rank-2 array (groups x members), with GroupIdx
@@ -8584,7 +8589,31 @@ and inferZip (env: TypeEnv) exprs : TypeResult<TypedExpr> =
 
 
 and inferExtents (env: TypeEnv) array : TypeResult<TypedExpr> =
+    // extents(gk) -- the per-group SIZES, as an array over the group axis.
+    //
+    // This is the answer the rank-2 rejection below cannot give. A grouping is
+    // the ragged rank-2 shape (ngroups x ragged), and its inner extent is not a
+    // scalar but a vector, one entry per group -- exactly "the lengths array"
+    // that rejection points at. Answering it from the GROUPING rather than from
+    // a grouped array is what makes it free: sizes are offsets[g+1]-offsets[g],
+    // so no values ever have to be gathered.
+    //
+    // Dispatched before requireArrayArg, which would reject IRTGroupKeys as a
+    // non-array. Bare name required, same rule and same reason as group_bucket.
     inferExpr env array |> Result.bind (fun tArr ->
+        match env.Subst.Resolve tArr.Type with
+        | IRTGroupKeys (outerIdx, _, _) ->
+            (match array.Kind with
+             | ExprKind.ExprVar _ ->
+                 // The group axis verbatim, as group_by's outer slot spells it,
+                 // so `extents(gk)` lines up with anything a peel over the same
+                 // grouping produced.
+                 let outer = { outerIdx with Tag = Some "__group_outer"; IxKind = IxKGroupOuter }
+                 Ok (mkTyped (TExprExtents tArr) (mkArrayArrow [outer] (IRTScalar ETInt64) None))
+             | ExprKind.ExprGroupKeys _ ->
+                 Error (GroupingNeedsName ("extents", "an inline `group_keys(...)` call"))
+             | _ -> Error (GroupingNeedsName ("extents", "a non-name expression")))
+        | _ ->
         requireArrayArg env tArr "extents" |> Result.bind (fun arrTy ->
             if arrTy.IndexTypes.Length = 1 then
                 Ok (mkTyped (TExprExtents tArr) (IRTScalar ETInt64))
@@ -17848,6 +17877,15 @@ let rec private collectGroupKeysEscapes (subst: Subst) (pos: string option) (exp
                 | TExprVar _ -> None
                 | _ -> Some "inline as `group_bucket`'s argument"
             [ (gkPos, gk) ]
+        // `extents` is only a grouping accessor when its operand IS a grouping;
+        // over an array it is the ordinary extent query, which must keep
+        // descending normally.
+        | TExprExtents a when isGk a ->
+            let gkPos =
+                match a.Kind with
+                | TExprVar _ -> None
+                | _ -> Some "inline as `extents`' argument"
+            [ (gkPos, a) ]
         | TExprTuple es -> es |> List.map (fun e -> (Some "as a tuple element", e))
         | TExprArrayLit (elems, _) -> elems |> List.map (fun e -> (Some "as an array element", e))
         | TExprStruct (_, fields) -> fields |> List.map (fun (_, e) -> (Some "as a struct field", e))

@@ -300,6 +300,46 @@ Tests: `sql-group-by` cases "Group Bucket Roundtrip", "Group Bucket Negative
 Key", and the four refusals "Group Bucket Inline Argument", "Group Bucket Non
 Grouping Argument", "Group Keys Alias", "Group Keys In Tuple".
 
+## 7b. `extents(gk)` — per-group sizes, without materializing
+
+```blade
+extents : GroupKeys<I> -> Array<Int64 like GroupOuter>
+```
+
+`extents` on a grouped **array** is refused: a ragged dimension has no scalar
+extent. Asked of the **grouping**, the honest answer exists — one length per
+group — and that is what this returns:
+
+```blade
+let gk    = group_keys(region)
+let sizes = extents(gk)                      // Array<Int64 like GroupOuter>
+let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / n) |> compute
+```
+
+Sizes are `offsets[g+1] - offsets[g]`, so **nothing is gathered** — a count-only
+query never allocates or copies the values it would ignore. Rows dropped by a
+negative key are counted nowhere, so the totals fall short of the source length
+by exactly the dropped rows. Bare `gk` name required, as above.
+
+### The gather elision
+
+`extents(row)` inside a peel gives the same numbers, and now costs the same. A
+`group_by` whose every consumer reads only `extents(row)` never has its values
+read, so codegen skips the per-group allocation and the `O(n)` copy, leaving the
+row pointers null:
+
+```blade
+let sizes = method_for(group_by(v, gk)) <@> lambda(r) -> extents(r) |> compute   // no gather
+```
+
+The analysis is fail-safe — any use it cannot classify as extents-only keeps the
+gather, so co-iteration (`zip`) and any values-reading consumer are untouched.
+Prefer `extents(gk)`: it says what you mean and needs no analysis to be fast.
+
+Tests: `sql-group-by` cases "Group Extents", "Group Gather Elision", "Group
+Extents Inline Argument"; the emission shape (which a value check cannot see) is
+pinned by the "Group Gather Elision" block in `tests/Test_Sqlish.fs`.
+
 ## 8. `group_by(values, gk)` — ragged grouped view
 
 ```blade

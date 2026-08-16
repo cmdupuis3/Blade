@@ -1,0 +1,49 @@
+// TEST: Group Gather Elision
+// A `group_by` whose every consumer reads only `extents(row)` never has its
+// values read: a row's length comes from the gk offsets, not from the gathered
+// buffer. So the emitter skips the per-group allocation and the O(n) copy and
+// leaves the rows null (computeExtentsOnlyGroupBys) -- which is why the older
+// peel spelling now costs the same as `extents(gk)`, and nobody has to know
+// which one is fast.
+//
+// This file pins the VALUES on both sides of that decision. The decision itself
+// is invisible to a value check -- an elided and a gathered program print the
+// same numbers, which is the whole point -- so the emission shape is pinned
+// separately, in the "Group Gather Elision" block (tests/Test_Sqlish.fs).
+type Row = Idx<6>
+let keys: Array<Int64 like Row> = [0, 1, 0, 2, 1, 0]
+let vals: Array<Float64 like Row> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let gk = group_keys(keys)
+
+// ---- ELIDED: the only consumer of `eg` reads extents.
+let eg = group_by(vals, gk)
+let esizes = method_for(eg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
+// EXPECT: esizes = [3, 2, 1]
+
+// ---- NOT ELIDED: `mg` has a consumer that reads values, so the gather stays.
+// This is the load-bearing direction -- eliding here would dereference null.
+let mg = group_by(vals, gk)
+let msizes = method_for(mg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
+let msums = method_for(mg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: msizes = [3, 2, 1]
+// EXPECT: msums = [100, 70, 40]
+
+// Both spellings and the direct one agree, elided or not.
+let direct = extents(gk)
+// EXPECT: direct = [3, 2, 1]
+
+// ---- Co-iteration is never elided: two grouped operands bind rows from two
+// tables, and the kernel here reads values from both.
+let other: Array<Float64 like Row> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let za = group_by(vals, gk)
+let zb = group_by(other, gk)
+let zs = method_for(zip(za, zb)) <@> lambda(ra: T^1, rb: T^1) -> reduce(ra, (+)) + reduce(rb, (+)) |> compute
+// EXPECT: zs = [110, 77, 44]
+
+// ---- A dropped row is gathered by nobody either way, so elision and the
+// negative-key rule compose without interacting.
+let dkeys: Array<Int64 like Row> = [0, -1, 0, 1, -1, 1]
+let dgk = group_keys(dkeys)
+let dg = group_by(vals, dgk)
+let dsizes = method_for(dg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
+// EXPECT: dsizes = [2, 2]

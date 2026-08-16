@@ -1726,6 +1726,16 @@ let buildGroupBucket (idxTys: IRIndexType list) (gk: GroupKeysValue) : BladeArra
       Extents = [| int64 n |]
       Data = SInt bucket }
 
+/// extents(gk): per-group sizes from the CSR row pointers, no gather
+/// (genGroupSizesBinding). The same arithmetic the ragged peel reads each row's
+/// length from, so this and an extents-only peel agree by construction.
+let buildGroupSizes (idxTys: IRIndexType list) (gk: GroupKeysValue) : BladeArray =
+    let ngroups = gk.Offsets.Length - 1
+    { ElemType = IRTScalar ETInt64
+      IndexTypes = idxTys
+      Extents = [| int64 ngroups |]
+      Data = SInt (Array.init ngroups (fun g -> gk.Offsets.[g + 1] - gk.Offsets.[g])) }
+
 /// group_by(vals, gk): gather each group's values (`vals[perm[offsets[g]+k]]`,
 /// input order) into a ragged rank-2 array (genGroupByBinding, CodeGen.fs:8767).
 /// Extents = [ngroups; 0] -- the inner is ragged, print-bound 0 (auto-print -> []).

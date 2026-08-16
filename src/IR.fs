@@ -120,6 +120,7 @@ type IRExpr =
     | IRGroupBy of values: IRExpr * grouping: IRExpr  // group_by(vals, gk) - apply grouping
     | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key => compound dispatch
     | IRGroupBucket of grouping: IRExpr              // group_bucket(gk) - row -> bucket over the source index space, -1 for dropped rows
+    | IRGroupSizes of grouping: IRExpr               // extents(gk) - per-group sizes over the group axis; no gather
     | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
     | IRReduce of array: IRExpr * kernel: IRExpr * init: IRExpr option  // reduce(arr, op[, init]) - fold innermost dim; init seeds the fold and defines the empty result
     // reduce(deferred, op[, init]): the FUSED reduction terminal -- folds a
@@ -3850,6 +3851,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRDisplayStr d -> [d], (function [d'] -> IRDisplayStr d' | _ -> badChildren "IRDisplayStr")
     | IRGroupBy (v, k) -> [v; k], (function [v'; k'] -> IRGroupBy (v', k') | _ -> badChildren "IRGroupBy")
     | IRGroupBucket gk -> [gk], (function [gk'] -> IRGroupBucket gk' | _ -> badChildren "IRGroupBucket")
+    | IRGroupSizes gk -> [gk], (function [gk'] -> IRGroupSizes gk' | _ -> badChildren "IRGroupSizes")
     | IRSort (a, k) -> [a; k], (function [a'; k'] -> IRSort (a', k') | _ -> badChildren "IRSort")
     | IRReduce (a, k, None) -> [a; k], (function [a'; k'] -> IRReduce (a', k', None) | _ -> badChildren "IRReduce")
     | IRReduce (a, k, Some i) -> [a; k; i], (function [a'; k'; i'] -> IRReduce (a', k', Some i') | _ -> badChildren "IRReduce")
@@ -6129,6 +6131,14 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
         (match typeOf gk with
          | IRTGroupKeys (_, sourceIdx, _) -> mkArrayArrow [sourceIdx] (IRTScalar ETInt64) None
          | _ -> IRTScalar ETInt64)
+    | IRGroupSizes gk ->
+        // Rank-1 Int64 over the GROUP axis -- the same slot group_by's outer
+        // dimension carries, so sizes line up with any per-group aggregate.
+        (match typeOf gk with
+         | IRTGroupKeys (outerIdx, _, _) ->
+             let outer = { outerIdx with Tag = Some "__group_outer"; IxKind = IxKGroupOuter }
+             mkArrayArrow [outer] (IRTScalar ETInt64) None
+         | _ -> IRTScalar ETInt64)
     | IRTranspose (arr, d1, d2) ->
         // Swap the two index slots. (TypeCheck has already verified both axes
         // are arity-1 SymNone, so dim index == slot index here.)
@@ -6367,7 +6377,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
 let isInlineForm (e: IRExpr) : bool =
     match e with
     | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
-    | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
+    | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRGroupSizes _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
     | IRReduceCompute _ | IRMatmul _ | IREigh _ | IRSolve _ -> true
     | IRCompute (IRApplyCombinator _) -> true
     | _ -> false
@@ -6667,6 +6677,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     // The gk operand is a bare name by construction (inferGroupBucket refuses
     // anything else), so there is nothing to lift out of it.
     | IRGroupBucket gk -> IRGroupBucket (liftExpr builder gk)
+    | IRGroupSizes gk -> IRGroupSizes (liftExpr builder gk)
 
     // Contains returns a scalar Bool -- its array argument may be an inline
     // form that needs lifting (so codegen can read .extents off a named binding).

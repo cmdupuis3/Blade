@@ -1,0 +1,12 @@
+// TEST: Group Extents Inline Argument (rejects)
+// ERROR: BL3007
+// ERROR-CONTAINS: requires the BARE NAME of a `group_keys(...)` binding
+// `extents(gk)` reads the grouping's CSR offsets, which live in locals suffixed
+// onto the BINDING name -- so like `group_bucket`, and for the same reason, it
+// takes the name and not an expression that produces a grouping.
+//
+// The companion refusal is 042 (group_bucket, inline); a grouping escaping its
+// binding in any other position is BL3017, pinned by 035-039.
+let keys = [0, 1, 0, 1]
+let sizes = extents(group_keys(keys))
+// Bind the keys to a name first, then ask that name for its extents.

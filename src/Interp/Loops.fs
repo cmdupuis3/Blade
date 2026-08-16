@@ -1946,6 +1946,16 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let idxTys = match typeOf expr with ArrayElem at -> at.IndexTypes | _ -> []
         VArray (A.buildGroupBucket idxTys gk)
 
+    // -- extents(gk): per-group sizes off the CSR offsets, no gather
+    //    (genGroupSizesBinding).
+    | IRGroupSizes gkExpr ->
+        let gk =
+            match Core.evalExpr st env gkExpr with
+            | VGroupKeys g -> g
+            | _ -> raise (InterpUnsupported "extents(gk): operand is not a group_keys value")
+        let idxTys = match typeOf expr with ArrayElem at -> at.IndexTypes | _ -> []
+        VArray (A.buildGroupSizes idxTys gk)
+
     // -- Virtual arrays (standalone materialization; usually consumed as inputs).
     | IRRange (idxTys, offset) -> materializeVirtual st env idxTys (VirtualRange offset)
     | IRVirtualReverse ix -> materializeVirtual st env [ ix ] VirtualReverse
