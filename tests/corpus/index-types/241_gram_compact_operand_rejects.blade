@@ -1,0 +1,11 @@
+// TEST: Gram Compact Operand Rejects (rejects)
+// ERROR: BL3007
+// ERROR-CONTAINS: decompact
+// A gram result is ONE compact rank-2 group (SymIdx / Hermitian storage).
+// The dims-sum rank check accepted it (sum = 2), and the contracted-extent
+// read then indexed a second slot that does not exist -- an internal
+// compiler error (BL9001), not a diagnostic. gram wants two PLAIN axes;
+// compact operands must be expanded with decompact first.
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let G = gram(A, A)
+let H = gram(G, G)
