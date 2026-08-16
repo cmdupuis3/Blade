@@ -168,6 +168,12 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // so it runs unconditionally beside the other in-process blocks.
     // (Also reachable standalone as `blade test display-frames`.)
     let displayFrames = runDisplayTests ()
+    // The GR render lane (Blade-REPL/docs/gr-graphics-plan.md 4.2): the
+    // renderPlot frame bytes, the request's argument rules, and the worker
+    // protocol against a fake helper this block writes itself. No GR, no g++,
+    // no editor -- the single case that needs a real gr-render + GR install
+    // reports Skip until both exist. (Also `blade test gr-render`.)
+    let grRender = Blade.Tests.GrRender.runGrRenderTests ()
     // TypeCheck-level F# unit tests for the unify §5.3 fast path: flat-vs-split
     // arrows, inference-var binding, dist-type ordering/axis-tag rejection.
     // Same shape as the normalize block — pure IRType construction plus a call
@@ -459,7 +465,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Grand-total roll-up (#4): one line per block, a total, and failed names.
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
-          yield normalize; yield unify; yield validateArrow; yield displayFrames
+          yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
           yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield gatherElision; yield lapackEmit; yield shapeSpec; yield moduleResolve
           match omp with Some b -> yield b | None -> ()

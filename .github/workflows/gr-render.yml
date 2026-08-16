@@ -1,0 +1,216 @@
+# Builds the gr-render native helper (tools/gr-render/) on each of the three
+# platforms it ships prebuilt for, and uploads the platform-stamped artifacts
+# (see src/display/GrRender.fs's stampedHelperLeaf / tools/gr-render/README.md)
+# so a release can attach one gr-render-<platform>-<arch>[.exe] per OS without
+# every user needing a g++/GR toolchain locally.
+#
+# *** THIS WORKFLOW HAS NOT BEEN RUN. *** It was written and YAML-syntax-
+# checked (`python -c "import yaml; yaml.safe_load(...)"`) on a machine with
+# no CI runner access, no non-Windows box, and no way to execute a GitHub
+# Actions job locally. Every step below that isn't windows-latest is a
+# best-effort guess, not a verified recipe -- see the inline comments on each
+# guess, and tools/gr-render/build.ps1's own doc comment for the compile-flag
+# side of the same disclaimer. Treat the first real run of this workflow as
+# the actual test of everything in it; fix forward from whatever it reports,
+# don't assume the guesses below were right just because they're checked in.
+#
+# Modeled on .github/workflows/dotnet.yml's trigger shape (push to the default
+# branch, or a PR explicitly labeled `buildMe` -- native-toolchain CI is
+# exactly the kind of job you don't want running on every WIP push), plus
+# workflow_dispatch so this can be run by hand while its non-Windows legs are
+# still unverified.
+#
+# NOTE on branch names: this repository's default branch is `master`, but
+# dotnet.yml only lists `main` -- so its push trigger currently never fires.
+# Both names are listed here so this workflow actually runs; dotnet.yml is
+# left alone (fixing it is a separate call, not this change's business).
+
+name: gr-render native helper
+
+on:
+  push:
+    branches: [ "master", "main" ]
+    paths:
+      - "tools/gr-render/**"
+      - ".github/workflows/gr-render.yml"
+  pull_request:
+    types: [ labeled ]
+    branches:
+      - "master"
+      - "main"
+    paths:
+      - "tools/gr-render/**"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'buildMe')
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- Windows: the ONLY leg exercised on a real machine for this
+          # task (tools/gr-render/build.ps1 and package.ps1 both ran locally
+          # against exactly this GR version+asset via the vendored tree at
+          # Blade-REPL/.claude/worktrees/gr-graphics-plan-67007c/vendor/gr).
+          # The MSYS2 UCRT64 g++ + -static-libgcc/-static-libstdc++ recipe is
+          # the one build.ps1's doc comment calls mandatory.
+          - name: windows-x64
+            os: windows-latest
+            platform: win32
+            arch: x64
+            asset: gr-0.73.26-Windows-x86_64.tar.gz
+            sha256: 8aa6fba98712f0824530e5ead7acb59e5c6fac3f10ea05a4df4be465f3f3bc68
+
+          # ---- Linux: UNVERIFIED. deps.json (Blade-REPL repo) picks the
+          # Debian build over Ubuntu's (bundles Qt, +42MB) and over the
+          # Redhat/CentOS builds (older glibc); ubuntu-latest's glibc should
+          # be new enough. No sha256 is pinned upstream (deps.json's own
+          # comment: "nobody has pinned that asset yet") -- the download step
+          # below warns instead of verifying when sha256 is blank.
+          - name: linux-x64
+            os: ubuntu-latest
+            platform: linux
+            arch: x64
+            asset: gr-0.73.26-Debian-x86_64.tar.gz
+            sha256: ""
+
+          # ---- macOS Intel: UNVERIFIED. macos-13 is GitHub's last x86_64
+          # image; later macos-* images are arm64-only, which is why arm64
+          # gets its own matrix entry below instead of relying on Rosetta.
+          - name: macos-x64
+            os: macos-13
+            platform: darwin
+            arch: x64
+            asset: gr-0.73.26-Darwin-x86_64.tar.gz
+            sha256: ""
+
+          # ---- macOS Apple Silicon: UNVERIFIED.
+          - name: macos-arm64
+            os: macos-14
+            platform: darwin
+            arch: arm64
+            asset: gr-0.73.26-Darwin-aarch64.tar.gz
+            sha256: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ---- toolchain --------------------------------------------------------
+
+      # UNVERIFIED: msys2/setup-msys2's default install location is C:\msys64
+      # as of this writing; if a future version of the action moves it, this
+      # PATH entry goes stale and g++ won't be found by build.ps1's
+      # `Get-Command g++`. `msystem: UCRT64` matches the toolchain
+      # tools/gr-render/README.md documents (MSYS2 UCRT64 g++ 15.2) and the
+      # ABI the -static-libgcc/-static-libstdc++ workaround was verified
+      # against.
+      - name: Set up MSYS2 UCRT64 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Add MSYS2 UCRT64 to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: 'Add-Content -Path $env:GITHUB_PATH -Value "C:\msys64\ucrt64\bin"'
+
+      # ubuntu-latest images ship build-essential (and therefore g++) by
+      # default; this is a defensive no-op in the common case, not a load-
+      # bearing install.
+      - name: Ensure g++ is available (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v g++ >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y g++
+          fi
+          g++ --version
+
+      # macOS runner images ship Xcode Command Line Tools, which provide a
+      # `g++` that is actually clang under the hood -- this is what
+      # build.ps1's compiler-selection comment means by "Xcode's command line
+      # tools alias g++ to clang". No install step should be needed; this
+      # just proves it before the build step depends on it.
+      - name: Verify a C++ compiler is available (macOS)
+        if: runner.os == 'macOS'
+        run: g++ --version || clang++ --version
+
+      # ---- fetch GR ----------------------------------------------------------
+
+      - name: Download and extract GR ${{ matrix.asset }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = Join-Path $env:RUNNER_TEMP 'gr'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $tarball = Join-Path $env:RUNNER_TEMP '${{ matrix.asset }}'
+          $url = 'https://github.com/sciapp/gr/releases/download/v0.73.26/${{ matrix.asset }}'
+          Write-Host "downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $tarball
+
+          $pinned = '${{ matrix.sha256 }}'
+          if ($pinned) {
+            $actual = (Get-FileHash -Algorithm SHA256 -Path $tarball).Hash
+            if ($actual.ToLowerInvariant() -ne $pinned.ToLowerInvariant()) {
+              throw "sha256 mismatch for ${{ matrix.asset }}: expected $pinned, got $actual"
+            }
+            Write-Host "sha256 verified: $actual"
+          } else {
+            Write-Warning "no sha256 pinned for ${{ matrix.asset }} upstream (see Blade-REPL/deps.json) -- integrity NOT verified, only downloaded over HTTPS from the sciapp/gr GitHub release"
+          }
+
+          # UNVERIFIED beyond the win32 asset: assumes one top-level directory
+          # in the tarball (deps.json's `stripTopLevel: true`, confirmed only
+          # for the win32 asset via the already-extracted, already-pruned
+          # vendor/gr tree in the sibling Blade-REPL worktree -- the raw
+          # linux/darwin tarballs have not been inspected on this machine).
+          tar -xzf $tarball -C $dest --strip-components=1
+          Write-Host "GRDIR contents:"
+          Get-ChildItem $dest | ForEach-Object { Write-Host "  $($_.Name)" }
+          foreach ($expected in @('bin', 'include', 'lib')) {
+            if (-not (Test-Path (Join-Path $dest $expected))) {
+              throw "extracted GR tree is missing '$expected/' -- --strip-components assumption was probably wrong for this asset"
+            }
+          }
+          "GRDIR=$dest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # ---- build + package ----------------------------------------------------
+
+      - name: Build and package gr-render
+        shell: pwsh
+        run: ./tools/gr-render/package.ps1 -GrDir $env:GRDIR -Force
+
+      # ---- test ----------------------------------------------------------------
+      #
+      # Windows is the verified leg: a failure here is real and should fail
+      # the build. Off Windows, tools/gr-render/test.ps1 is unverified (it
+      # was adapted to not hardcode `powershell` and to resolve GR's runtime
+      # library by platform, but nothing beyond that has been exercised on a
+      # real linux/macOS box) -- continue-on-error keeps one untested-platform
+      # quirk from blocking the artifact upload other legs need, per this
+      # task's instruction to skip/adapt rather than fail the build. The step
+      # still prints its full pass/FAIL output either way.
+      - name: Run gr-render's hermetic test suite
+        shell: pwsh
+        continue-on-error: ${{ matrix.platform != 'win32' }}
+        run: ./tools/gr-render/test.ps1 -GrDir $env:GRDIR
+
+      # ---- publish ---------------------------------------------------------
+
+      - name: Upload gr-render-${{ matrix.platform }}-${{ matrix.arch }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gr-render-${{ matrix.platform }}-${{ matrix.arch }}
+          path: tools/gr-render/dist/*
+          if-no-files-found: error

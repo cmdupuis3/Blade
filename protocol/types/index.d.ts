@@ -21,6 +21,8 @@ import {
   ErrorResponse,
   EvalResponse,
   OkResponse,
+  RenderPlotRequest,
+  RenderPlotResponse,
   ServeResponse,
   Tier,
 } from "./serve";
@@ -36,6 +38,10 @@ export interface Decoder {
   push(chunk: string): ServeResponse[];
 }
 
+/** The `renderPlot` request minus its envelope — everything the caller
+ *  chooses, in one object (see ./serve.d.ts for the field rules). */
+export type RenderPlotArgs = Omit<RenderPlotRequest, "id" | "cmd">;
+
 /** Encoders return one complete request LINE, newline included. */
 export interface ServeProto {
   encodeCheck(id: number, tier: Tier, file: string, source: string): string;
@@ -43,6 +49,9 @@ export interface ServeProto {
   encodePing(id: number): string;
   encodeEval(id: number, session: string, source: string, cwd?: string): string;
   encodeResetSession(id: number, session: string): string;
+  /** Takes its arguments as one object rather than positionally: four of the
+   *  five request fields are optional. */
+  encodeRenderPlot(id: number, args: RenderPlotArgs): string;
   /** No id, no response. */
   encodeShutdown(): string;
   /** Parse one already-newline-stripped line. A line that isn't valid JSON, or
@@ -189,6 +198,17 @@ export interface ClientDeps {
   /** Spawn argv. Defaults to ["ide", "serve"]; override to point at a fake
    *  server in tests. */
   args?: string[];
+  /** The child's environment, as an object or a function re-read per spawn.
+   *  Undefined inherits this process's, which is what every caller got before
+   *  this hook existed.
+   *
+   *  It REPLACES rather than extends (Node's spawn semantics), so add to the
+   *  parent's rather than passing a bare object:
+   *  `env: () => ({ ...process.env, GRDIR: grRoot, PATH: grBin + path.delimiter + process.env.PATH })`.
+   *  That is exactly what a host must supply for `renderPlot` to work — the
+   *  compiler's GR worker resolves its DLLs off GRDIR/PATH, and both failure
+   *  modes are silent crashes. */
+  env?: Record<string, string | undefined> | (() => Record<string, string | undefined> | undefined);
 }
 
 /** Tri-state capability latch. "unknown" until the first ping resolves or
@@ -214,6 +234,13 @@ export interface BladeClient {
    *  override for anything real. */
   eval(session: string, source: string, cwd?: string, timeoutMs?: number): Promise<EvalResponse>;
   resetSession(session: string, timeoutMs?: number): Promise<OkResponse>;
+  /** Re-render a retained figure spec as a static image through the
+   *  compiler's GR worker. Resolves with a complete display frame, ready for
+   *  `display.decodeFrame`/`display.publish`. A ProtocolError means either a
+   *  compiler predating the verb or a live compiler that cannot reach GR — the
+   *  message says which. Default timeout 30s (the worker's FIRST render pays
+   *  GR's ~2.6s cold start; later ones are tens of ms). */
+  renderPlot(args: RenderPlotArgs, opts?: { timeoutMs?: number }): Promise<RenderPlotResponse>;
   /** Best-effort clean shutdown, then kill; resets ALL state so the next call
    *  re-probes from scratch. Safe when nothing is running, and doubles as the
    *  "kill a stuck eval" primitive. */

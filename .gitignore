@@ -73,5 +73,12 @@ Thumbs.db
 .DS_Store
 *.exe
 
+# ---- gr-render build/packaging output ----
+# `*.exe` above already covers the Windows build (tools/gr-render/gr-render.exe
+# and dist/gr-render-win32-*.exe); linux/macOS artifacts have no extension, so
+# they need their own rules.
+/tools/gr-render/gr-render
+/tools/gr-render/dist/
+
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 graft/
