@@ -1,0 +1,24 @@
+// TEST: JVP Kernel Body Calls A Same-Module Helper
+// Statement-position calls are inlined before either sweep runs, but
+// `hoistCalls` stops at a lambda, so a helper called from inside a KERNEL
+// body reached the tangent walker intact and was refused as an unknown
+// call. `kernelCallBody` substitutes the callee's body (parameters :=
+// arguments, capture-refused rather than capture-risked) and differentiates
+// the result; the PRIMAL keeps the ordinary call it was written with.
+// f = sum (a_k - 1)^2 over [1,2,3] = 0 + 1 + 4 = 5.
+// seed [1,1,1] -> sum 2(a_k - 1) = 0 + 2 + 4 = 6.
+import ad as ad
+
+type I = Idx<3>
+
+function center(x: Float) -> Float = x - 1.0
+
+function f(a: Array<Float like I>) -> Float = {
+    let sq = method_for(a) <@> lambda(x) -> center(x) * center(x) |> compute
+    reduce(sq, (+))
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// WARN: BL4003
+// EXPECT: v = 5
+// EXPECT: t = 6

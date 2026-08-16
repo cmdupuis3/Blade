@@ -2176,6 +2176,27 @@ and private stmtMentionsDeep (names: Set<string>) (s: Stmt) : bool =
     | StmtForIn (_, r, body) ->
         mentionsDeep names r || (body |> List.exists (stmtMentionsDeep names))
 
+/// Substitute `pname := repl` into a KERNEL-SHAPED body -- either a kernel
+/// parameter meeting its indexed read (the map rule) or a callee parameter
+/// meeting its argument (the kernel-body call rule) -- refusing rather than
+/// half-substituting.
+///
+/// `substKern` is the substitution: its catch-all DECLINES, so it never
+/// leaves a live occurrence behind and never crosses a binder it cannot
+/// prove safe, which is exactly the alpha-safety both callers need. A
+/// decline is only interesting when the name actually occurs, though, and
+/// `mentionsDeep` (exhaustive over the grammar, shadowing ignored) decides
+/// that: a body that never mentions the parameter passes through untouched,
+/// so a kernel whose body merely CONTAINS an unrelated inner lambda is not
+/// refused for it.
+let private substParam (fname: string) (pname: string) (repl: Expr) (body: Expr) : Result<Expr, string> =
+    if not (mentionsDeep (Set.singleton pname) body) then Ok body
+    else
+        match substKern pname repl body with
+        | Some b -> Ok b
+        | None ->
+            err fname (sprintf "cannot substitute '%s' into the kernel body: a binder or an unsupported form stands between the parameter and its use, so the substitution cannot be proved capture-free" pname)
+
 /// Rewrite a statement's VALUE position, keeping its span wrapper: the
 /// statements this pass leaves alone still have to carry their locations into
 /// everyone else's diagnostics.
@@ -2555,12 +2576,19 @@ let private preNormalizeBody (fname: string) (ctx: Ctx) (fd0: FunctionDecl) : Re
         | None ->
             Ok (inheritSpan fd.Body (ExprBlock (stmts', None))))
 
+/// How deep call substitution may nest before the transform gives up. One
+/// constant for BOTH inliners -- `normalizeBody`'s statement-level one and
+/// `kernelCallBody`'s expression-level one -- because they cap the same
+/// thing: a self-recursive callee has no finite substitution, and the cap is
+/// the backstop for the chains the by-name recursion check cannot see.
+let private maxInlineDepth = 32
+
 /// Normalize + inline a function body to the flat NStmt fragment:
 /// all user calls inlined, all statements validated.
 let rec private normalizeBody (fname: string) (ctx: Ctx) (depth: int) (fd: FunctionDecl)
     : Result<NStmt list * Expr, string> =
-    if depth > 32 then
-        err fname "call inlining exceeded depth 32 (recursive functions are not differentiable)"
+    if depth > maxInlineDepth then
+        err fname (sprintf "call inlining exceeded depth %d (recursive functions are not differentiable)" maxInlineDepth)
     else
     // Lower the imperative-free surface constructs (recursive arrays, reduce)
     // into accumulation/construction statements before the NFor pipeline runs.
@@ -3018,7 +3046,59 @@ type private RevCtx = {
     /// beside it. Both sweeps read the SAME entry, which is what keeps the
     /// primal, the tangent gather, and the adjoint gather on one permutation.
     SortPlans: Map<string, SortPlan>
+    /// The chain of same-module functions currently being substituted INTO a
+    /// kernel body, innermost first (see `kernelCallBody`). Statement-level
+    /// calls are inlined before either sweep runs and are capped by
+    /// `normalizeBody`'s depth counter; expression-level ones are capped by
+    /// this list's length, and a name already on it is a recursive callee --
+    /// refused by name rather than looped on.
+    Inlining: string list
 }
+
+/// A call to a same-module user function from inside a KERNEL BODY, resolved
+/// to the callee's body with its parameters substituted by the arguments.
+///
+/// Statement-position calls never get here: `hoistCalls` lifts them into
+/// `let x = f(args)` and `inlineCall` splices them before either sweep runs.
+/// But `hoistCalls` stops at a lambda (its catch-all), so a helper called
+/// from a KERNEL -- `lambda(x) -> center(x) * w` -- arrives at the sweeps
+/// intact, and both sweeps' generic named-application arms then refuse it as
+/// an unknown call. Substitution is the expression-level twin of
+/// `inlineCall`: the same admissibility gates (same-module, non-static, no
+/// mut parameters, matching arity) and the same depth cap, with
+/// expression-bodied callees only -- a block body has statements, which is
+/// exactly what an expression position cannot hold.
+///
+/// Alpha-safety comes from `substParam`/`substKern`, which decline to cross
+/// any binder they cannot prove safe, so no argument can be captured by a
+/// binder in the callee's body.
+///
+/// Only the DERIVATIVE side substitutes. The primal keeps the call it was
+/// written with -- it type-checks and code-generates as the ordinary
+/// function it is -- so this rewrite cannot change what the primal computes.
+let private kernelCallBody (rc: RevCtx) (f: string) (args: Expr list)
+    : Result<Expr * RevCtx, string> =
+    let fd = rc.Ctx.Decls.[f]
+    if List.contains f rc.Inlining then
+        err rc.Fname (sprintf "cannot differentiate the call to '%s' inside a kernel body: it is recursive (%s), and a kernel body is substituted rather than taped, so the substitution would not terminate. Restructure the helper without recursion, or move the recursion out of the kernel" f (String.concat " -> " (List.rev (f :: rc.Inlining))))
+    elif List.length rc.Inlining >= maxInlineDepth then
+        err rc.Fname (sprintf "kernel-body call substitution exceeded depth %d (recursive functions are not differentiable)" maxInlineDepth)
+    elif fd.IsStatic then
+        err rc.Fname (sprintf "cannot differentiate through static function '%s'" f)
+    elif fd.Params |> List.exists (fun p -> p.Mutability = Mutable) then
+        err rc.Fname (sprintf "cannot differentiate through '%s': mut-parameter functions are not inlinable (v1)" f)
+    elif args.Length <> fd.Params.Length then
+        err rc.Fname (sprintf "'%s' called with %d arguments, expects %d" f args.Length fd.Params.Length)
+    else
+        match fd.Body.Kind with
+        | ExprKind.ExprBlock _ ->
+            err rc.Fname (sprintf "cannot differentiate the call to '%s' inside a kernel body: only EXPRESSION-bodied same-module functions can be substituted into a kernel (v1), and '%s' has a block body. Rewrite it as a single expression, or call it outside the kernel" f f)
+        | _ ->
+            List.zip fd.Params args
+            |> List.fold (fun acc (p, a) ->
+                acc |> Result.bind (fun b -> substParam rc.Fname p.Name a b))
+                (Ok fd.Body)
+            |> Result.map (fun b -> (b, { rc with Inlining = f :: rc.Inlining }))
 
 /// Recover the sort plumbing by SHAPE rather than by name: inlining renames
 /// callee locals, so name arithmetic would not survive a differentiated call.
@@ -3090,6 +3170,16 @@ let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list
         let (dA, dB) = binaryDerivRule name a b
         adjointOf rc a (mul c dA) |> Result.bind (fun sa ->
         adjointOf rc b (mul c dB) |> Result.map (fun sb -> pre @ sa @ sb))
+    // A same-module user call the statement-level inliner did not reach.
+    // `hoistCalls` walks only the arithmetic fragment, so a call wrapped in
+    // `pure`/`compute`/`guard` (all of which the adjoint DOES walk through)
+    // arrives here whole; substituting the callee's body and taking the
+    // adjoint of THAT accumulates into the caller's own cotangent buffers by
+    // the chain rule, exactly as the statement-level inline would have.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args) when Map.containsKey name rc.Ctx.Decls ->
+        (match kernelCallBody rc name args with
+         | Error m -> Error m
+         | Ok (body, rc') -> adjointOf rc' body cot)
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, _) ->
         // Array read of non-diff data (a param, local, or module binding):
         // genuinely no adjoint. Anything ELSE named here is a call the
@@ -3438,6 +3528,12 @@ let rec private tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         let (dA, dB) = binaryDerivRule name a b
         tangentOfExpr rc a |> Result.bind (fun ta ->
         tangentOfExpr rc b |> Result.map (fun tb -> addZ (mulZ dA ta) (mulZ dB tb)))
+    // A same-module user call the statement-level inliner did not reach --
+    // the shape a KERNEL BODY produces, since `hoistCalls` stops at a lambda.
+    // See `kernelCallBody`: substitute, then differentiate the result.
+    | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args) } when Map.containsKey name rc.Ctx.Decls ->
+        kernelCallBody rc name args
+        |> Result.bind (fun (body, rc') -> tangentOfExpr rc' body)
     | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, _) } ->
         // A name that carries differentiable data but was never registered
         // as an ARRAY cannot be read as a constant: that combination means
@@ -3919,7 +4015,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
             | _ -> m) paramDims
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known
                ArrayIdxTys = arrayIdxTys; LoopBindings = Map.empty; Dims = dimsEnv
-               SortPlans = collectSortPlans stmts }
+               SortPlans = collectSortPlans stmts; Inlining = [] }
 
     // cotangent declarations for function-level diff LOCALS (params' array
     // cotangents are mut parameters; scalar-param cotangents are locals)
@@ -4133,7 +4229,7 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
             | _ -> m) acc
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known
                ArrayIdxTys = arrayIdxTys; LoopBindings = collectLoopBindings Map.empty stmts
-               Dims = Map.empty; SortPlans = collectSortPlans stmts }
+               Dims = Map.empty; SortPlans = collectSortPlans stmts; Inlining = [] }
 
     // tangent-interleaved body + (primal, tangent) return
     let sweptR =

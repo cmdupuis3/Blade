@@ -1,0 +1,19 @@
+// TEST: Recursive Kernel-Body Helper Rejected (rejects)
+// A kernel body is SUBSTITUTED, not taped, so a self-recursive callee has no
+// finite expansion. The chain is tracked by name and refused on the second
+// visit, naming the cycle -- the depth cap alone would report a much less
+// useful "exceeded depth 32".
+import ad as ad
+
+type I = Idx<3>
+
+function loopy(x: Float) -> Float = x * loopy(x)
+
+function f(a: Array<Float like I>) -> Float = {
+    let sq = method_for(a) <@> lambda(x) -> loopy(x) |> compute
+    sq(0)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// ERROR: BL5501
+// ERROR-CONTAINS: it is recursive (loopy -> loopy)

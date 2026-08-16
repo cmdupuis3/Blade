@@ -1,0 +1,20 @@
+// TEST: Reverse Sweep Reaches The Same Un-Hoisted Helper Call
+// The reverse lane has the identical gap, reached by a different route:
+// `grad` refuses maps outright, but `hoistCalls` also walks past `guard`
+// (and `pure`/`compute`), all of which the ADJOINT does walk into -- so the
+// call arrives at `adjointOf` whole. The same substitution accumulates into
+// the caller's own cotangents by the chain rule.
+// f = (x-1)^2 gated on y > 0; at x = 3: p = 4, df/dx = 2(x-1) = 4, df/dy = 0.
+import ad as ad
+
+function center(x: Float) -> Float = x - 1.0
+
+function f(x: Float, y: Float) -> Float = {
+    let a = guard(y > 0.0, center(x) * center(x))
+    a
+}
+
+let (p, gx, gy) = ad.grad(f)(3.0, 1.0)
+// EXPECT: p = 4
+// EXPECT: gx = 4
+// EXPECT: gy = 0
