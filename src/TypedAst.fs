@@ -273,6 +273,10 @@ and TypedExprKind =
     /// `display.json_num(x)`: render a numeric scalar as JSON text (String),
     /// same formatting rule as TExprDisplayJson.
     | TExprDisplayNum of data: TypedExpr
+    /// `display.json_string(s)`: render a String as a QUOTED, escaped JSON
+    /// string. The escape table is Blade.Display.Frame.escape's, shared with
+    /// the quoted-payload path.
+    | TExprDisplayStr of data: TypedExpr
     | TExprGroupBy of values: TypedExpr * grouping: TypedExpr
     | TExprGroupKeys of keys: TypedExpr list
     | TExprSort of array: TypedExpr * key: TypedExpr

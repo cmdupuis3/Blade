@@ -891,6 +891,35 @@ and lowerElemType env ty : IRType =
     | _ ->
         lowerTypeExpr env ty
 
+/// A `SymIdx`/`AntisymIdx` base written as a BARE NAME that turns out to name
+/// an index type: the base record to inherit, or None to keep reading the
+/// slot as an extent expression. See symPowerIndexRecord's SymBaseExtent arm
+/// for why this fallback exists and why it cannot change an existing
+/// program's meaning.
+///
+/// Admits exactly what the inline grammar admits -- a rank-1 dense
+/// (`Idx<n>`) or irreps (`IrrepsIdx<spec>`) record. Ragged/dep/compound/
+/// sparse/wreath aliases have no symmetric power this builder constructs, so
+/// they return None and fall through unchanged rather than inherit a record
+/// that would misdescribe their storage.
+and symPowerAliasBase (env: TypeEnv) (extent: Expr) : IRIndexType option =
+    match extent.Kind with
+    | ExprKind.ExprVar name
+            when (evalConstExpr env extent).IsNone
+                 && (evalStaticIntExpr env extent).IsNone ->
+        match lookupTypeDef name env with
+        | Some (TDIIndexType _) | Some (TDIEnumIdx _) ->
+            let rec' = lowerIndexType env 0 (TyNamed (name, []))
+            let admissible =
+                rec'.Rank = 1 && rec'.Symmetry = SymNone
+                && List.isEmpty rec'.Dependencies
+                && (match rec'.IxKind with
+                    | IxKPlain | IxKIrreps -> true
+                    | _ -> false)
+            if admissible then Some rec' else None
+        | _ -> None
+    | _ -> None
+
 /// The index record for `SymIdx<k, base>` / `AntisymIdx<k, base>`, shared by
 /// index-position and value-position lowering.
 ///
@@ -910,10 +939,39 @@ and lowerElemType env ty : IRType =
 and symPowerIndexRecord env (id: IRId) (rank: int) (symmetry: SymmetryClass)
                           (baseIdx: SymIdxBase) : IRIndexType =
     match baseIdx with
+    // A BARE NAME reaches here as SymBaseExtent, never SymBaseIndex:
+    // `Parser.parseSymIdxBase` admits only the `Idx`/`IrrepsIdx` KEYWORDS as
+    // an index-type base, so `SymIdx<2, n>` reads as "extent n" and stays
+    // readable that way forever (a `let static n = 3` base must not change
+    // meaning). But when the name resolves to NO value and DOES name a
+    // registered index type, the extent reading is not merely unintended --
+    // it is unrepresentable: `lowerExtentExpr` falls through to its symbolic
+    // `IRParam name` placeholder, and a symbolic extent on a VIRTUAL range
+    // operand reaches codegen with no runtime object to read it from, which
+    // emitted an undeclared `__range<i>.extents[0]` -- a g++ error naming a
+    // compiler-internal, for a type the user spelled correctly.
+    //
+    // So resolve it to the index type here, as a FALLBACK. Value and static
+    // resolution are still attempted first (and `lookupTypeDef` searches a
+    // different namespace than `evalConstExpr`), so this arm is reachable
+    // only where the old code was heading for that broken placeholder: no
+    // existing program can change meaning. Inheriting the base record also
+    // carries its nominal Tag onto the symmetric-power record, which is what
+    // makes `range<SymIdx<2, N3>>` flow `Nat<N3>` into the kernel instead of
+    // an untagged integer that then trips BL4003 against its own base.
+    //
+    // Admitted bases are exactly what the inline grammar admits -- a rank-1
+    // dense (`Idx<n>`) or irreps (`IrrepsIdx<spec>`) record. A ragged, dep,
+    // compound, sparse or wreath alias has no symmetric power this builder
+    // could construct, so it falls through to the extent path unchanged
+    // rather than inheriting a record that would misdescribe its storage.
     | SymBaseExtent extent ->
-        { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
-          Symmetry = symmetry; Tag = None; IxKind = IxKPlain
-          Kind = SDimension; Dependencies = [] }
+        match symPowerAliasBase env extent with
+        | Some baseRec -> { baseRec with Id = id; Rank = rank; Symmetry = symmetry }
+        | None ->
+            { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
+              Symmetry = symmetry; Tag = None; IxKind = IxKPlain
+              Kind = SDimension; Dependencies = [] }
     | SymBaseIndex baseTy ->
         let baseRec = lowerIndexType env 0 baseTy
         { baseRec with Id = id; Rank = rank; Symmetry = symmetry }
@@ -2978,6 +3036,141 @@ let firstArgTypeClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
             | Some pc, Some ac when pc <> ac -> Some (i, pTy, aTy)
             | _ -> None)
 
+/// The synthetic base dimension standing for parameter `i`'s unit while
+/// `funcUnitTransform` probes a function body. `Unit` declarations are ordinary
+/// identifiers and a `UnitSig`'s dims are keyed by plain strings, so a name no
+/// surface syntax can produce is a free variable of the unit algebra: whatever
+/// exponent it carries OUT of the body is the exponent the body applies to that
+/// argument. Nothing but the probe ever sees these -- `funcUnitTransform`
+/// removes them from the residual before recording it.
+let unitProbeBase (i: int) : string = sprintf "__unit_probe_%d" i
+
+/// A recorded transform, applied: `residual * PROD_i argUnits[i] ^ exponents[i]`.
+/// Shared by the two consumers -- the call site (`unitStampedReturn`) and the
+/// nested-call arm of `kernelBodyUnits`, which is how one generic calling
+/// another composes -- so the rule cannot drift between them.
+///
+/// ALL OR NOTHING: a BARE argument in a position with a non-zero exponent
+/// abandons the whole claim, returning None rather than reading the absence as
+/// dimensionless. Reading it as dimensionless would be a real claim, and would
+/// start rejecting the ordinary mixing of unit-free values that every
+/// unannotated program does.
+///
+/// A PURE PASS-THROUGH keeps its argument's signature VERBATIM, nominal layer
+/// included. Routing it through unitMul/unitPow yields the same dims and scale
+/// but drops the Nominal -- multiplicative composition drops a quantity on
+/// purpose (a quantity is an identity, not a factor) -- and a function that
+/// neither multiplies nor divides has composed nothing. `mean` of a `Speed` row
+/// is still a `Speed`.
+let applyUnitTransform (exponents: int list) (residual: UnitSig)
+                       (argUnits: UnitSig option list) : UnitSig option =
+    let contributing =
+        exponents |> List.mapi (fun i e -> (i, e)) |> List.filter (fun (_, e) -> e <> 0)
+    let argAt i = List.tryItem i argUnits |> Option.flatten
+    match contributing with
+    | [ (i, 1) ] when (unitNormalize residual).Dims.IsEmpty
+                      && unitSameScale residual unitDimensionless -> argAt i
+    | _ ->
+        contributing
+        |> List.fold (fun acc (i, e) ->
+            acc |> Option.bind (fun u ->
+                argAt i |> Option.map (fun au -> unitMul u (unitPow au e))))
+            (Some residual)
+
+/// A callee's recorded transform, by the name the call site writes. Tries the
+/// name as written, then its unqualified tail: `checkFunctionDecl` registers
+/// under the DECLARED name, so a module-qualified call (`stats.mean(x)`) has to
+/// drop the alias to find its own callee, or the qualified and unqualified
+/// spellings of one call stop agreeing.
+let lookupUnitTransform (env: TypeEnv) (n: string) : (int list * UnitSig) option =
+    let direct (k: string) =
+        match env.FuncUnitTransform.TryGetValue k with
+        | true, t -> Some t
+        | _ -> None
+    match direct n with
+    | Some t -> Some t
+    | None ->
+        match n.LastIndexOf '.' with
+        | i when i >= 0 -> direct (n.Substring(i + 1))
+        | _ -> None
+
+/// Carry a generic call's DEDUCED return unit, derived from its ARGUMENTS.
+///
+/// A `T^1 -> T^0` signature shares ONE inference variable between the
+/// parameter's ELEMENT and the return -- measured, both are the same `IRTInfer`
+/// id: `lowerTypeExpr` mints `T^1` and `T^0` under separate typeVarScope keys,
+/// and checking the BODY against the declared return is what ties them. Direct
+/// application then deliberately does NOT unify parameters against arguments --
+/// see the FuncElem arm below, and `firstArgTypeClash` above for why unifying
+/// here is not an option -- so the caller's element type never reaches that
+/// variable, and every unit rule (`unitRulesForOpWith`, `unitRulesForUnaryOp`,
+/// ascription) read `IR.getUnits` off a bare variable carrying no signature.
+/// Measured: over a `Float<meters>` row and a `Float<seconds>` scalar,
+/// `mean(x) + t` was ACCEPTED, while the same clash on a direct element read
+/// `x((0 : Idx<3>)) + t` correctly gave BL3006. The ascription and arithmetic
+/// seams were never the problem; the result type simply arrived bare.
+///
+/// PROPAGATING THE ARGUMENT'S UNIT UNCHANGED IS THE WRONG FIX, and measurably
+/// so: `mean` preserves its row's unit but `variance` SQUARES it, so a
+/// pass-through stamp turns `let v: Float<area> = variance(x)` -- correct, and
+/// documented as correct in `stdlib/stats.blade` -- into a BL3006. What
+/// transfers is the EXPONENT the body derives, recorded per declaration in
+/// `FuncUnitTransform` (see `funcUnitTransform`) and applied here.
+///
+/// Stamp the unit onto the RESULT NODE -- `IRTUnitAnnotated` over the still-open
+/// variable, exactly the shape a written `T<u>^0` already lowers to
+/// (lowerTypeExpr's `TyAbstractArray` arm) -- rather than BINDING the variable.
+/// Binding is what must not happen: a `function` declaration's type is created
+/// once with variables SHARED across every call site, so binding at the first
+/// caller would both collapse the function to that caller's unit and defeat the
+/// HM element polymorphism `requireArrayArgMinRank`'s polymorphic mark exists to
+/// protect. A node stamp is per-call-site by construction, so two callers at
+/// different units each get their own answer.
+///
+/// SILENT WHEN ANYTHING IS UNKNOWN. No recorded transform (the body used a
+/// construct the unit walk does not model), a BARE argument in a position whose
+/// exponent is non-zero, or an argument whose element type is still an
+/// inference variable because the CALLER is generic too: each leaves the result
+/// unstamped and the pre-existing behaviour intact. A bare argument
+/// deliberately does NOT read as dimensionless -- claiming dimensionless would
+/// start rejecting the ordinary mixing of unit-free values that every
+/// unannotated program does.
+///
+/// Rank-preserving: a `-> T^1` return stamps the result array's ELEMENT, the
+/// same place `stampElemUnits` writes for synthesized kernel pipelines. A return
+/// that already carries a signature (a written `-> Float<meters>`, or `T<u>^0`)
+/// is left alone, so an explicit annotation still wins.
+let private unitStampedReturn (env: TypeEnv) (callee: string option)
+                              (tArgs: TypedExpr list) (retTy: IRType) : IRType =
+    // The element UNIT of a type, at the depth the unit lives: the type itself
+    // for a scalar position, its `ElemType` for an array.
+    let elemUnits (t: IRType) : UnitSig option =
+        match env.Subst.Resolve t with
+        | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
+        | r -> IR.getUnits r
+    let resolvedRet = env.Subst.Resolve retTy
+    let deduced =
+        // Only a DEDUCED return is in scope: one whose element is still an open
+        // variable. A concrete return type either carries its own signature or
+        // legitimately has none.
+        match resolvedRet with
+        | ArrayElem at -> (match env.Subst.Resolve at.ElemType with IRTInfer _ -> true | _ -> false)
+        | IRTInfer _ -> true
+        | _ -> false
+    if not deduced || (elemUnits resolvedRet).IsSome then retTy
+    else
+        match callee |> Option.bind (lookupUnitTransform env) with
+        | None -> retTy
+        | Some (exponents, residual) ->
+            match applyUnitTransform exponents residual
+                      (tArgs |> List.map (fun a -> elemUnits a.Type)) with
+            | None -> retTy
+            | Some u ->
+                match resolvedRet with
+                | ArrayElem at ->
+                    mkArrayLike { at with ElemType = IRTUnitAnnotated (env.Subst.Resolve at.ElemType, u) }
+                | r -> IRTUnitAnnotated (r, u)
+
 let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.
     //
@@ -3557,6 +3750,14 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                      match env.Subst.Resolve arg.Type with
                      | IRTInfer aid -> env.Subst.AddRankLowerBound(aid, calleeRank)
                      | _ -> ()))
+            // The DEDUCED return's unit, built from the arguments'. See
+            // `unitStampedReturn`: the substitution never learns it, because
+            // this seam deliberately does not unify parameters against
+            // arguments.
+            let retTy =
+                unitStampedReturn env
+                    (match tFunc.Kind with TExprVar (n, _, _) -> Some n | _ -> None)
+                    tArgs retTy
             if isVariadic then
                 Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
             elif tArgs.Length > paramTys.Length then
@@ -3651,6 +3852,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprDisplayEmit (_, _, d, _) -> [d]
         | TExprDisplayJson (_, d) -> [d]
         | TExprDisplayNum d -> [d]
+        | TExprDisplayStr d -> [d]
         | TExprGroupKeys keys -> keys
         | TExprStruct (_, fields) -> fields |> List.map snd
         | TExprIndex (arr, idxs, _) -> arr :: idxs
@@ -4646,7 +4848,13 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                                         ppIRType (env.Subst.Resolve pTy),
                                         ppIRType (env.Subst.Resolve aTy)))
             | None ->
-            Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy))
+            // Same delete-if-rerouted note as the two checks above: a generic
+            // callee's DEDUCED return needs its unit built from the arguments
+            // here too, or `stats.mean(x)` and the imported `mean(x)` stop
+            // being the same call -- accepting a meters-vs-seconds addition in
+            // the qualified spelling that the unqualified one refuses.
+            Ok (mkTyped (TExprApp (tFunc, tArgs))
+                        (unitStampedReturn env (Some qualName) tArgs retTy)))
 
     // ---- Method call: obj.method(args) -> impl resolution ----
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField (obj, method) }, args) ->
@@ -5216,6 +5424,21 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | other ->
                 Error (Other (sprintf "display.json_num: expected a numeric scalar, got %s" (ppIRType other))))
 
+    // ---- __display_json_string(s): display module String JSON rendering ----
+    // A String rendered as a QUOTED, escaped JSON string -- quotes included,
+    // so the caller writes `"\"text\":" + json_string(t)` and never has to
+    // supply the delimiters (supplying them by hand is precisely the bug this
+    // exists to retire). Quantity annotations are transparent, exactly as for
+    // json_num, so plot.blade's `String<title>` slot serializes directly.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__display_json_string" }, [strE])
+            when (lookupVar "__display_json_string" env).IsNone ->
+        inferExpr env strE |> Result.bind (fun tStr ->
+            match IR.stripUnits (env.Subst.Resolve tStr.Type) with
+            | IRTScalar ETString ->
+                Ok (mkTyped (TExprDisplayStr tStr) (IRTScalar ETString))
+            | other ->
+                Error (Other (sprintf "display.json_string: expected a String, got %s" (ppIRType other))))
+
     // ---- cumulant(d, k): dist component projection, order-guarded ----
     // The order guard as a TYPE error (ppl/NOTES.md typed-Dist arc): k must
     // be a static int in 1..r where r is the dist's carried order. Works in
@@ -5501,6 +5724,42 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         match idxs |> List.tryFind (fun ix -> ix.Symmetry = SymWreath) with
         | Some ix ->
             Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "range<> iteration slot"))
+        | None ->
+        // A range slot whose extent never resolved. `range<>` is VIRTUAL: it
+        // materializes no object, so codegen takes every bound and every
+        // output extent from the slot's own Extent expression -- and a
+        // symbolic `IRParam` placeholder has nothing to take. What reached
+        // the C++ instead was `__range<i>.extents[0]`, a reference to the
+        // operand variable a virtual range deliberately never declares, so
+        // the program died in g++ naming a compiler-internal. Same reasoning
+        // as the wreath door above: refuse at the seam that can still name
+        // the user's own text.
+        //
+        // Narrowly: a bare NAME that resolved to neither a value nor a type
+        // (`lowerExtentExpr`'s ExprVar arm, `lowerIndexType`'s unregistered-
+        // `TyNamed` fallback). Three placeholder families are deliberately
+        // NOT refused here, because each is resolved by machinery that runs
+        // after this seam or reports better elsewhere:
+        //   * `__`-prefixed internal sentinels (`__depidx_inner` and kin),
+        //     supplied by their own iteration machinery;
+        //   * the bad-spec error markers, which carry a spec-specific
+        //     diagnostic on the annotation path;
+        //   * `"?"`, `lowerExtentExpr`'s fallback for an extent that is an
+        //     EXPRESSION it cannot lower structurally rather than an unknown
+        //     name. `range<Idx<arity(args)>>` (arity/015) lands here and is
+        //     legitimate: the deferred-former unroll rewrites it into an
+        //     n-element array literal before codegen, precisely so no
+        //     symbolic extent ever reaches a bound (IR.fs, pack former).
+        //     Refusing it would reject a working program.
+        let unresolvedSlot =
+            idxs |> List.tryPick (fun ix ->
+                match ix.IxKind, ix.Extent with
+                | (IxKErrorIrrepsBadSpec | IxKErrorPgIrrepsBadSpec | IxKErrorRaggedNoPrior), _ -> None
+                | _, IRParam (n, _, _) when n <> "?" && not (n.StartsWith "__") -> Some n
+                | _ -> None)
+        match unresolvedSlot with
+        | Some n ->
+            Error (Other (sprintf "range<...>: the extent '%s' is not known at compile time, and a range has no runtime object to read one from -- it is a virtual iteration space, so its bounds must come from the type. '%s' names neither a value in scope nor a declared index type. Declare it as an index type (`type %s = Idx<N>`, then `range<%s>`), bind it with `let static %s = N`, or write the extent literally." n n n n n))
         | None ->
         if hasCompound && idxs.Length > 1 then
             Error (Other "range<CompoundIdx<m>, ...>: a compound range slot cannot be combined with other index types in one range<> (formalism 4.5)")
@@ -9524,8 +9783,14 @@ and stampElemUnits env (resUnits: UnitSig option) (t: TypedExpr) : TypedExpr =
 /// HOMOGENEITY, which decides whether a function of a dimensioned quantity
 /// has a signature at all:
 ///   - degree 1 (f(cx)=c*f(x)): negation, abs, complex projections PRESERVE.
-///   - degree 1/2: sqrt halves exponents when all even (sqrt(m^2)=m); odd
-///     exponents have no integer-signature representation, so dropped.
+///   - degree 1/2: sqrt halves the dimension exponents AND the magnitude
+///     together (sqrt(m^2) = m, sqrt(km^2) = km), and REFUSES when either
+///     halving is inexact. An odd exponent would need a half-integer
+///     dimension, and a non-square magnitude (`4047 * meters^2`) a rounded
+///     scale; neither is representable. Refusing is not pedantry: the arm
+///     used to answer "no signature" in the odd case, and an unconstrained
+///     result unifies with ANY unit downstream, so `sqrt(m) + Float<seconds>`
+///     typechecked.
 ///   - degree 0: arg, logical not are dimensionless-out for any operand.
 ///   - NOT homogeneous: floor/ceil and transcendentals REJECT a dimensioned
 ///     operand instead of inventing a result signature. floor is NOT lumped
@@ -9549,14 +9814,30 @@ and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : TypeResult<UnitSig o
     | OpMath "abs" -> Ok u
     | OpMath "sqrt" ->
         // sqrt DROPS the nominal layer like the other non-degree-1
-        // compositions (sqrt of a quantity is not that quantity).
+        // compositions (sqrt of a quantity is not that quantity), and is
+        // EXACT-OR-REFUSE. unitSqrt halves the MAGNITUDE alongside the dims,
+        // which is what makes sqrt the inverse of unitPow at n = 2: halving
+        // dims alone stamped `sqrt(x: Float<km2>)` as meters-magnitude and
+        // every later conversion was off by 1000.
         match u with
-        | Some s ->
-            let n = unitNormalize s
-            if n.Dims |> Map.forall (fun _ ex -> ex % 2 = 0)
-            then Ok (Some (unitOfDims (n.Dims |> Map.map (fun _ ex -> ex / 2))))
-            else Ok None
         | None -> Ok None
+        | Some s ->
+            match unitSqrt s with
+            | Some r -> Ok (Some r)
+            | None ->
+                // Two distinct refusals, both phrased as "what the argument
+                // would have to be" like the floor/transcendental arms below.
+                let n = unitNormalize s
+                let context, expected =
+                    if n.Dims |> Map.forall (fun _ ex -> ex % 2 = 0) then
+                        (sprintf "sqrt() argument (%s has magnitude %s, which has no exact square root in the unit scale grammar -- declare the unit as a square instead, e.g. `Unit hectare = (100 * meters) ^ 2`)"
+                            (ppUnitSig s) (ppUnitScale n.Scale)),
+                        "a unit whose magnitude is an exact square"
+                    else
+                        (sprintf "sqrt() argument (the square root of %s is (%s)^(1/2), and unit dimension exponents are integers, so that signature cannot be expressed -- square the argument, or divide by a reference quantity to get a dimensionless value first)"
+                            (ppUnitSig s) (ppUnitSig s)),
+                        "a unit whose dimension exponents are all even"
+                Error (UnitMismatch (context, expected, ppUnitSig s))
     | OpMath (("floor" | "ceil") as name) ->
         requireDimensionless
             (sprintf "%s() argument (rounding is not scale-invariant: floor(3.7 m) = 3 m, but the same length as 370 cm floors to 370 cm = 3.7 m; divide by a reference quantity to get a dimensionless count first)" name)
@@ -9639,12 +9920,45 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
             match finalOpt with
             | Some f -> kernelBodyUnits env b f
             | None -> Ok None)
-    | TExprApp (_, args) ->
+    // A CALL composes: the callee's own recorded unit transform, applied to the
+    // signatures this walk computes for the arguments. Without it every call
+    // was a dead end ("no claim"), which is why `sqrt(variance(row))` could say
+    // nothing about its result even though both halves are known. Anything
+    // unrecorded still returns None, so this only ever replaces silence.
+    | TExprApp (f, args) ->
         args |> List.fold (fun acc a ->
             acc |> Result.bind (fun () -> errorsOnly a)) (Ok ())
-        |> Result.map (fun () -> None)
-    | TExprIndex (arr, _, _) -> Ok (elemOfType arr.Type)
-    | TExprReduce (arr, _, _) -> Ok (elemOfType arr.Type)
+        |> Result.bind (fun () ->
+            match f.Kind with
+            | TExprVar (n, _, _) ->
+                (match lookupUnitTransform env n with
+                 | None -> Ok None
+                 | Some (exponents, residual) ->
+                     // The argument signatures this walk computes, not the ones
+                     // their TYPES carry: inside a body an argument is very
+                     // often a parameter, whose unit lives in `bound`.
+                     args
+                     |> List.fold (fun acc a ->
+                         acc |> Result.bind (fun (us: UnitSig option list) ->
+                             kernelBodyUnits env bound a |> Result.map (fun u -> u :: us)))
+                         (Ok [])
+                     |> Result.map (fun rev ->
+                         applyUnitTransform exponents residual (List.rev rev)))
+            | _ -> Ok None)
+    // ELEMENT-aware like the TExprVar arm: an array PARAMETER carries its unit
+    // in `bound`, not on its type, so reading only the type reported "no claim"
+    // for `reduce(row, (+))` -- the whole body of `mean`. Falling back to the
+    // walk covers both that (a var head resolves through `bound`) and an
+    // operand that is itself an expression (`reduce(centered * centered, (+))`,
+    // the body of `variance`, whose element unit is the product's).
+    | TExprIndex (arr, _, _) ->
+        (match elemOfType arr.Type with
+         | Some u -> Ok (Some u)
+         | None -> kernelBodyUnits env bound arr)
+    | TExprReduce (arr, _, _) ->
+        (match elemOfType arr.Type with
+         | Some u -> Ok (Some u)
+         | None -> kernelBodyUnits env bound arr)
     | TExprField _ | TExprTupleIndex _ -> Ok (ofType e.Type)
     // NESTED ELEMENTWISE MAP inside a kernel body (`lambda(w) -> { let e =
     // exp <@> (i * w * ts); ... }`). Without an arm here this fell to the
@@ -9662,6 +9976,64 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
     // `compute` is unit-transparent: it forces a computation to a value.
     | TExprCompute inner -> kernelBodyUnits env bound inner
     | _ -> Ok None
+
+/// Derive, ONCE per declaration, how a function builds its return's unit out of
+/// its arguments' -- the record `unitStampedReturn` consumes at every call site.
+///
+/// PROBE, don't guess. The body is walked with each GENERIC parameter seeded to
+/// its own synthetic base dimension (`unitProbeBase`), so the exponent that
+/// dimension carries out of the body is exactly the power the body applies to
+/// that argument: `mean` returns `probe0^1`, `variance` returns `probe0^2`, and
+/// `covariance(a, b)` returns `probe0 * probe1`. Concrete parameters are seeded
+/// with the unit they actually declare instead, so they land in the RESIDUAL
+/// (`residual * PROD argUnit_i ^ e_i`) rather than being invented as free
+/// variables. This is the whole reason the fix is not "propagate the argument's
+/// unit": three of those four answers are not the argument's unit.
+///
+/// A DERIVATION, NEVER A CHECK. `Ok None` (a construct the walk does not model)
+/// and `Error` alike record nothing, leaving the call site silent. An `Error`
+/// here is very often the probe's own fault rather than the program's -- a body
+/// calling `exp` on a value that is dimensionless in every real call is
+/// dimensioned under the probe, and `unitRulesForUnaryOp` rightly rejects that
+/// -- so surfacing it would reject correct programs. The body's genuine unit
+/// errors belong to the ordinary inference pass, which has already run.
+///
+/// Only a DEDUCED return is probed: a concrete return type either carries its
+/// own signature or legitimately has none, and either way the call site leaves
+/// it alone.
+and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
+                      (retTy: IRType) (body: TypedExpr) : unit =
+    let openElem (t: IRType) =
+        match env.Subst.Resolve t with
+        | ArrayElem at -> (match env.Subst.Resolve at.ElemType with IRTInfer _ -> true | _ -> false)
+        | IRTInfer _ -> true
+        | _ -> false
+    let elemUnits (t: IRType) =
+        match env.Subst.Resolve t with
+        | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
+        | r -> IR.getUnits r
+    if openElem retTy && not parms.IsEmpty then
+        let bound =
+            parms
+            |> List.mapi (fun i p ->
+                (p.VarId,
+                 if openElem p.Type then Some (unitOfDims (Map.ofList [ (unitProbeBase i, 1) ]))
+                 else elemUnits p.Type))
+            |> Map.ofList
+        match kernelBodyUnits env bound body with
+        | Ok (Some u) ->
+            let n = unitNormalize u
+            let exponents =
+                parms |> List.mapi (fun i _ ->
+                    Map.tryFind (unitProbeBase i) n.Dims |> Option.defaultValue 0)
+            // Strip the probes back out; the SCALE stays (a body that divides by
+            // a `km` constant really does change the caller's magnitude).
+            let residual =
+                { n with
+                    Nominal = None
+                    Dims = n.Dims |> Map.filter (fun k _ -> not (k.StartsWith "__unit_probe_")) }
+            env.FuncUnitTransform.[name] <- (exponents, residual)
+        | Ok None | Error _ -> ()
 
 /// ELEMENT-level sibling of `kernelBodyUnits`, for the array operands of a
 /// nested map. The scalar walk answers about SCALAR positions and reads a
@@ -11299,6 +11671,71 @@ and buildApplyInfo (env: TypeEnv)
                 emitWarning env "BL4010" span msg
                 PinSuggestions.add msg span)
 
+    // The BL4010 suggestion's MIRROR: the user already wrote the clause, and it
+    // licenses nothing.
+    //
+    // Compaction -- triangular storage AND triangular iteration -- keys on an
+    // IDENTITY GROUP: the SAME array occupying the commuting operand slots
+    // (docs/formalism.md 11.2/12.4; `rawAxisGroups.mergesWith.acrossArray`
+    // requires `sameArrayIdentity`, and shared_units_insufficient refutes the
+    // weaker shared-index-space rule). A VIRTUAL `range<...>` operand never
+    // materializes, so `mkVirtualArrayArrow` forces `Identity = None` and the
+    // formers hand each one a fresh `AIDLiteral` -- no two range operands can
+    // ever be the same array. The comm group therefore merges no axes and is
+    // dropped on the floor: the emitted C++ is BYTE-IDENTICAL to the same
+    // kernel with no `where` clause at all (dense `Array<T, r>`, full
+    // rectangular bounds). The user asked for a storage and iteration change
+    // and silently got neither -- which is the bug this warning closes.
+    //
+    // WARNING, not an error, and deliberately NARROWER than "comm without an
+    // identity group":
+    //   * Nothing is disproved (BL4013's job) and nothing unsound is licensed
+    //     (BL4016's job). The program is correct, just not the one asked for --
+    //     the same shape as the dropped-`omp`-clause note below, which is also
+    //     a warning.
+    //   * symmetry/004 and /014 are the same inertness over two distinct REAL
+    //     arrays and stay silent on purpose: a real array CAN be its own
+    //     identity partner at a different call site (symmetry/003 is that call
+    //     site), so the clause on the kernel is not dead, merely unused here.
+    //     A range operand is incapable of it at EVERY call site. "Provably
+    //     inert, always" is what earns a diagnostic; "inert at this call site"
+    //     does not.
+    //
+    // Stands down under `reynolds` (the wrapper manufactures the symmetry and a
+    // clause there is an iteration licence, not a storage claim) and on a
+    // co-iterated apply (one axis feeds both slots -- no square exists to
+    // compact, sql-reduce/017). The `Params.Length = identities.Length` gate
+    // keeps this to the one-param-per-operand outer product, where a group's
+    // parameter indices ARE operand indices: a multi-rank operand
+    // (`range<SymIdx<2, N>>` -- the very fix suggested below) spends two
+    // parameters on one array, and its `comm(i, j)` is redundant, not inert.
+    (if not isReynolds && not isCoIterApply
+        && lambdaInfo.Params.Length = identities.Length then
+        let nameOf i =
+            if i >= 0 && i < lambdaInfo.Params.Length then lambdaInfo.Params.[i].Name
+            else sprintf "#%d" i
+        let inertGroup (g: int list) =
+            let slots = g |> List.filter (fun k -> k >= 0 && k < identities.Length)
+            if slots.Length < 2 then None
+            elif slots |> List.exists (fun k ->
+                     slots |> List.exists (fun q ->
+                         q <> k && sameIdentity identities.[k] identities.[q])) then None
+            elif slots |> List.exists (fun k ->
+                     k < arrayTypes.Length && arrayTypes.[k].IsVirtual) then Some slots
+            else None
+        let report (kw: string) (idxTy: string) (pool: string) (g: int list) =
+            match inertGroup g with
+            | None -> ()
+            | Some slots ->
+                let names = slots |> List.map nameOf |> String.concat ", "
+                let span = if tKernel.Span = noSpan then tLoop.Span else tKernel.Span
+                emitWarning env "BL4017" span (sprintf
+                    "`where %s(%s)` licenses nothing on this apply and is DROPPED: compact storage and triangular iteration key on an IDENTITY GROUP -- the same array occupying the commuting slots -- and a virtual `range<...>` operand never materializes, so there is no identity to key on. Storage stays dense and iteration stays rectangular; the emitted C++ is identical to this kernel with no `where` clause. Declare the symmetry in the INDEX TYPE instead: `method_for(range<%s<%d, N>>) <@> lambda(%s) -> ...` allocates the %s and visits only canonical cells."
+                    kw names idxTy slots.Length names pool)
+        commGroups |> List.iter (report "comm" "SymIdx" "triangular pool")
+        lambdaInfo.AntisymGroups
+        |> List.iter (report "anticomm" "AntisymIdx" "strict-triangular pool (no stored diagonal)"))
+
     // Dropped-parallel-clause guard. This is the apply seam -- the ONE place a
     // loop and a kernel meet -- so it is where "the kernel declared `omp(...)`"
     // and "the lambda reaching the loop carries it" can be compared at all.
@@ -11809,6 +12246,12 @@ and buildApplyInfo (env: TypeEnv)
                 // or a CompoundIdx of mask-rank R) contributes Rank coordinate params,
                 // per the rank rule (kernel index slots = iteration rank). For rank-1
                 // (dense) indices this is one param per index type, unchanged from 1b.
+                // CAVEAT for a TRIANGULAR slot: "the index value at that slot" is the
+                // intent, but the lowering delivers the PACKED STORAGE COORDINATE
+                // (prefix offset) -- and elemTypeForIterationIndex tags every component
+                // with the GROUP's tag rather than the component space's. Both
+                // divergences are assessed in docs/formalism.md 7.3 and pinned by
+                // tests/corpus/loops/170-175.
                 at.IndexTypes |> List.collect (fun idx -> List.replicate idx.Rank (elemTypeForIterationIndex idx))
             else
                 let kRank = if i < kernelInputRanks.Length then kernelInputRanks.[i] else 0
@@ -16523,6 +16966,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                            repResolve funcDecl.Name funcVarId repParams resolvedRet tBody with
                  | Some prop -> Blade.DeduceRep.TypedCertProposals.add prop tBody.Span
                  | None -> ())
+            funcUnitTransform env funcDecl.Name resolvedParams resolvedRet tBody
             let tf : TypedFunctionDecl = {
                 Name = funcDecl.Name; FuncId = funcVarId
                 TypeParams = funcDecl.TypeParams
@@ -17276,6 +17720,103 @@ let private declWriteRoots (decl: TypedDecl) : (bool * TypedExpr) list =
     | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
     | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
 
+/// Post-check sweep for GROUP-KEYS ESCAPES (BL3017).
+///
+/// A `group_keys` result is NAME-KEYED, not a value. `genGroupKeysBinding`
+/// (CodeGen.fs) puts the entire CSR structure into C++ locals suffixed off the
+/// BINDING name -- `<name>__ngroups`, `<name>__offsets`, `<name>__perm` -- and
+/// gives the binding itself a `void*` sentinel; `genGroupByBinding` recovers
+/// the state by re-deriving those suffixed symbols from whatever cpp name the
+/// grouping EXPRESSION resolves to. So the two ops are joined by a NAME, and
+/// every indirection breaks the joint silently: `let gk2 = gk` emitted
+/// `gk2__offsets`, a tuple round-trip emitted the same, and an untyped
+/// function parameter zonked to a scalar and emitted `double g` alongside
+/// `g__offsets`. All three died in g++, not in Blade.
+///
+/// The invariant is already ASSUMED elsewhere -- `sameGroupKeysBinding` in
+/// inferMethodFor decides grouped co-iteration by comparing gk operands'
+/// binding NAMES, which is only meaningful if a gk always IS its binding name.
+/// This sweep is what makes it enforced.
+///
+/// `pos` is `None` in the two blessed positions (the direct RHS of a `let`
+/// binding the call, and `group_by`'s grouping slot when it holds a plain
+/// variable) and `Some phrase` everywhere else, where `phrase` completes
+/// "... cannot be used <phrase>". Running on the ZONKED module makes this
+/// total: IRTGroupKeys is minted only by `inferGroupKeys` and survives
+/// zonking intact, so a resolved IRTGroupKeys anywhere else IS the escape.
+/// A node that fires does not descend -- a gk-typed block or function body is
+/// one mistake, not one per enclosing layer.
+///
+/// THE blessing for a `let` RHS, shared by the block walk and the declaration
+/// roots so module-level and function-local `let`s cannot drift apart. Blessed
+/// only when the RHS IS the call and the pattern is a bare name: `let gk2 = gk`
+/// is an alias, and the alias is exactly the bug.
+let private groupKeysLetRhs (b: TypedBinding) : string option * TypedExpr =
+    match b.Value.Kind with
+    | TExprGroupKeys _ when List.isEmpty b.SubBindings -> (None, b.Value)
+    | _ -> (Some "as another binding's value", b.Value)
+
+let rec private collectGroupKeysEscapes (subst: Subst) (pos: string option) (expr: TypedExpr) : CompileError list =
+    let isGk (e: TypedExpr) = match subst.Resolve e.Type with IRTGroupKeys _ -> true | _ -> false
+    let describe (e: TypedExpr) =
+        match e.Kind with
+        | TExprGroupKeys _ -> "a `group_keys(...)` call"
+        | TExprVar (n, _, _) -> sprintf "the group_keys binding '%s'" n
+        | _ -> "a group_keys result"
+    // A block is TRANSPARENT here: its type is its final expression's, and its
+    // span covers the whole body, so firing on the block would point the
+    // caret at the innocent first statement. Descend and let the final
+    // expression carry the enclosing position instead.
+    let isBlock = match expr.Kind with TExprBlock _ -> true | _ -> false
+    match pos with
+    | Some phrase when isGk expr && not isBlock ->
+        [ { Error = GroupKeysEscapes (describe expr, phrase); Span = expr.Span; Context = []; Code = None } ]
+    | _ ->
+    let elsewhere = "in this position"
+    let kids : (string option * TypedExpr) list =
+        match expr.Kind with
+        | TExprGroupBy (values, gk) ->
+            // The grouping slot takes the BINDING NAME only -- an inline
+            // `group_by(v, group_keys(k))` has no locals to suffix off.
+            let gkPos =
+                match gk.Kind with
+                | TExprVar _ -> None
+                | _ -> Some "inline as `group_by`'s grouping argument"
+            [ (Some elsewhere, values); (gkPos, gk) ]
+        | TExprTuple es -> es |> List.map (fun e -> (Some "as a tuple element", e))
+        | TExprArrayLit (elems, _) -> elems |> List.map (fun e -> (Some "as an array element", e))
+        | TExprStruct (_, fields) -> fields |> List.map (fun (_, e) -> (Some "as a struct field", e))
+        | TExprApp (f, args) ->
+            (Some elsewhere, f) :: (args |> List.map (fun a -> (Some "as a function argument", a)))
+        | TExprBlock (stmts, final) ->
+            let rec ofStmt (s: TypedStmt) : (string option * TypedExpr) list =
+                match s with
+                | TStmtLet b -> [groupKeysLetRhs b]
+                | TStmtAssign (l, r) -> [(Some elsewhere, l); (Some elsewhere, r)]
+                | TStmtExpr e -> [(Some elsewhere, e)]
+                | TStmtForIn (_, _, lo, hi, body) ->
+                    (Some elsewhere, lo) :: (Some elsewhere, hi) :: (body |> List.collect ofStmt)
+            // The final expression inherits the block's own position, so a
+            // gk returned out of a function body reads "as a function's
+            // return value" rather than the generic block phrasing.
+            let finalPos = pos |> Option.defaultValue "as a block's result value"
+            (stmts |> List.collect ofStmt)
+            @ (final |> Option.toList |> List.map (fun e -> (Some finalPos, e)))
+        | _ -> typedExprChildren expr |> List.map (fun e -> (Some elsewhere, e))
+    kids |> List.collect (fun (p, e) -> collectGroupKeysEscapes subst p e)
+
+/// Declaration entry points for the sweep above. Same blessing as the block
+/// case: a module-level `let` may hold the call itself and nothing else, and a
+/// function body is a returning position (BL7001's "no rule for IRGroupKeys in
+/// expression position" was the old, misleadingly backend-flavoured verdict).
+let private declGroupKeysRoots (decl: TypedDecl) : (string option * TypedExpr) list =
+    let ofFunc (f: TypedFunctionDecl) = [(Some "as a function's return value", f.Body)]
+    match decl with
+    | TDeclLet b | TDeclStatic b -> [groupKeysLetRhs b]
+    | TDeclFunction f -> ofFunc f
+    | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
+    | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
+
 /// Every expression a zonked declaration carries, for the sweep above.
 let private declExprs (decl: TypedDecl) : TypedExpr list =
     let ofFunc (f: TypedFunctionDecl) = [f.Body]
@@ -17427,7 +17968,13 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let writeErrors =
         zonked.Decls |> List.collect declWriteRoots
                      |> List.collect (fun (nested, e) -> collectMisplacedProviderWrites currentEnv.Subst nested e)
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ writeErrors)
+    // group_keys escapes: structural like the write sweep (IRTGroupKeys is
+    // minted in exactly one place and never inferred), so it runs even when
+    // the module already has errors.
+    let groupKeysErrors =
+        zonked.Decls |> List.collect declGroupKeysRoots
+                     |> List.collect (fun (pos, e) -> collectGroupKeysEscapes currentEnv.Subst pos e)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ writeErrors @ groupKeysErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()

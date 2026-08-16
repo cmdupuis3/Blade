@@ -668,14 +668,21 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRDisplayJson (rank, dataExpr) ->
         (match forceValue st env (evalExpr st env dataExpr) with
          | VArray ba ->
+             // Frame.jsonNumber is the non-finite guard -- NaN/+-Inf go out as
+             // `null`, everything else as the 15-significant-digit rendering.
+             // Its C++ mirror is blade_display::jsonval.
+             let jsonF (x: float) =
+                 Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloat15 x) x
+             let jsonF32 (x: float32) =
+                 Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloat32 x) (float x)
              let elemStr (store: Store) (i: int) : string =
                  match store with
-                 | SFloat a -> Blade.Interp.CppFormat.formatFloat15 a.[i]
+                 | SFloat a -> jsonF a.[i]
                  | SInt a -> string a.[i]
                  | SObj vs ->
                      (match vs.[i] with
-                      | VFloat f -> Blade.Interp.CppFormat.formatFloat15 f
-                      | VFloat32 f -> Blade.Interp.CppFormat.formatFloat32 f
+                      | VFloat f -> jsonF f
+                      | VFloat32 f -> jsonF32 f
                       | VInt n -> string n
                       | VInt32 n -> string n
                       | _ -> raise (InterpUnsupported "display.json_array: non-numeric element"))
@@ -720,11 +727,19 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
 
     | IRDisplayNum dataExpr ->
         (match forceValue st env (evalExpr st env dataExpr) with
-         | VFloat f -> VString (Blade.Interp.CppFormat.formatFloat15 f)
-         | VFloat32 f -> VString (Blade.Interp.CppFormat.formatFloat32 f)
+         | VFloat f -> VString (Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloat15 f) f)
+         | VFloat32 f -> VString (Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloat32 f) (float f))
          | VInt n -> VString (string n)
          | VInt32 n -> VString (string n)
          | _ -> raise (InterpUnsupported "display.json_num: operand did not evaluate to a numeric scalar"))
+
+    // ---- display.json_string: a String as a quoted, escaped JSON string.
+    //      Frame.jsonString is the shared implementation; the compiled lane
+    //      calls blade_display::jsonstr, its generated mirror.
+    | IRDisplayStr dataExpr ->
+        (match forceValue st env (evalExpr st env dataExpr) with
+         | VString s -> VString (Blade.Display.Frame.jsonString s)
+         | _ -> raise (InterpUnsupported "display.json_string: operand did not evaluate to a String"))
 
     // ---- group_by(vals, gk) -> a ragged (CSR) array. Materializes via the Loops
     //      backend (it reads the VGroupKeys from `gk` + gathers the values).

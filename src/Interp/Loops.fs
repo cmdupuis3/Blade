@@ -1572,6 +1572,14 @@ and private interpretNest
                     (curArrays: Map<int, BladeArray>) (sliced: Set<int>) : Map<int, BladeArray> * Set<int> =
         let i = idxVals.[b.Level]
         match elem.Virtual with
+        // range<I>: the param is the raw loop counter (plus a literal offset).
+        // As in CodeGen's VirtualRange arm, b.BoundDependencies / b.StrictOffset
+        // are NOT folded in, so a multi-rank slot (range<SymIdx<r,N>>) delivers
+        // packed storage coordinates -- prefix offsets, canonical[m] = p0+...+pm
+        // (+ m for antisym). Mirroring that arm is what keeps the differential
+        // gates quiet; see docs/formalism.md 7.3 for the assessment and
+        // tests/corpus/loops/170-173 for the pins. Any change to the convention
+        // must land in BOTH arms.
         | VirtualRange (Some off) ->
             let offV = toI64 (Core.evalExpr st kenv off)
             paramCells.[elem.ParamVarId].V <- VInt (i + offV)

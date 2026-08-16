@@ -123,6 +123,23 @@ let escape (s: string) : string =
         | c -> sb.Append c |> ignore
     sb.ToString()
 
+/// `s` as a QUOTED, escaped JSON string -- the value of `display.json_string`,
+/// and what stdlib/plot.blade wraps every user title/axis label in. Same escape
+/// table as a quoted frame payload, because it is the same problem one level
+/// down: a title containing `"` or `\` concatenated raw into a figure object
+/// produces JSON no reader accepts. Mirrored by `blade_display::jsonstr`.
+let jsonString (s: string) : string = "\"" + escape s + "\""
+
+/// One JSON number: `rendered` when `x` is finite, `"null"` otherwise. JSON has
+/// no NaN/Infinity literal -- plotly's own encoder writes `null` for both -- so
+/// every element the numeric serializers emit goes through this guard rather
+/// than straight out as `nan`/`inf`/`-inf`, which are bare identifiers to a
+/// parser. `rendered` is the caller's 15-significant-digit rendering: this
+/// module compiles before Interp.CppFormat and cannot name it. Mirrored by the
+/// `std::isfinite` branch in `blade_display::jsonval`.
+let jsonNumber (rendered: string) (x: float) : string =
+    if Double.IsFinite x then rendered else "null"
+
 /// The static leading half of a frame, everything up to and including
 /// `"data":`. Built at ELABORATION time (the mime is a literal, see
 /// DisplayElaborate) so neither runtime lane has to know the encoding rule.
@@ -188,6 +205,7 @@ let extract (stdout: string) : string * string list =
 /// test failure by construction.
 let cppRuntime () : string list =
     [ "#include <sstream>  // blade_display::json1/json2/jsonnum"
+      "#include <cmath>    // blade_display::jsonval (non-finite -> null)"
       "namespace blade_display {"
       "// Display frames (docs/display-frames.md). Mirrors Blade.Display.Frame."
       "static int __blade_display_ord = 0;"
@@ -211,14 +229,32 @@ let cppRuntime () : string list =
       "    }"
       "    return o;"
       "}"
+      "// A user string as a quoted, escaped JSON string (display.json_string)."
+      "// Mirrors Blade.Display.Frame.jsonString."
+      "static inline std::string jsonstr(const std::string& s) {"
+      "    return \"\\\"\" + __blade_display_esc(s) + \"\\\"\";"
+      "}"
       "// JSON serialization of numeric arrays / scalars (display.json_array /"
       "// display.json_num). setprecision(15) is the print block's own float"
       "// rule; Blade.Interp.CppFormat.formatFloat15 is its byte-exact mirror,"
       "// so the differential gate pins the two lanes together."
+      "//"
+      "// jsonval is the per-element guard: JSON has no NaN/Infinity literal, so"
+      "// a non-finite value goes out as `null` (what plotly's own encoder"
+      "// writes) instead of the stream's bare `nan`/`inf`/`-inf`. Integral T"
+      "// always takes the finite branch. Mirrors Frame.jsonNumber -- and the"
+      "// test is on the VALUE, not on the rendered text, because the spelling"
+      "// of a non-finite is implementation-defined (`nan`, `-nan`, `NaN`,"
+      "// `1.#QNAN` across the standard libraries). isfinite is the portable"
+      "// predicate; matching the formatter's output would not be."
+      "template <typename T>"
+      "static inline void jsonval(std::ostringstream& o, const T& x) {"
+      "    if (std::isfinite((double)x)) o << x; else o << \"null\";"
+      "}"
       "template <typename A>"
       "static inline std::string json1(const A& a) {"
       "    std::ostringstream o; o << std::setprecision(15) << '[';"
-      "    for (size_t i = 0; i < a.extents[0]; ++i) { if (i) o << ','; o << a[i]; }"
+      "    for (size_t i = 0; i < a.extents[0]; ++i) { if (i) o << ','; jsonval(o, a[i]); }"
       "    o << ']'; return o.str();"
       "}"
       "template <typename A>"
@@ -226,14 +262,14 @@ let cppRuntime () : string list =
       "    std::ostringstream o; o << std::setprecision(15) << '[';"
       "    for (size_t i = 0; i < a.extents[0]; ++i) {"
       "        if (i) o << ','; o << '[';"
-      "        for (size_t j = 0; j < a.extents[1]; ++j) { if (j) o << ','; o << a[i][j]; }"
+      "        for (size_t j = 0; j < a.extents[1]; ++j) { if (j) o << ','; jsonval(o, a[i][j]); }"
       "        o << ']';"
       "    }"
       "    o << ']'; return o.str();"
       "}"
       "template <typename T>"
       "static inline std::string jsonnum(T x) {"
-      "    std::ostringstream o; o << std::setprecision(15) << x; return o.str();"
+      "    std::ostringstream o; o << std::setprecision(15); jsonval(o, x); return o.str();"
       "}"
       "static inline bool emit(const char* head, bool quoted, const std::string& data,"
       "                        const char* metaTail, const char* tag) {"

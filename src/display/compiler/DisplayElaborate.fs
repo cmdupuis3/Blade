@@ -73,6 +73,16 @@ let private elabOp (op: string) (args: Expr list) : Result<Expr, string> =
         Ok (syn (ExprApp (v "__display_json_num", [numE])))
     | "json_num", _ ->
         Error "display.json_num: expected display.json_num(x) with a numeric scalar"
+    // `json_string(s)`: a runtime String as a QUOTED, escaped JSON string --
+    // the one safe way to put a user-supplied title or axis label inside a
+    // figure object. Concatenating the quotes by hand is what plot.blade used
+    // to do, and a title containing `"` or `\` made the whole frame
+    // unparseable. Same escape table as a quoted frame payload
+    // (Blade.Display.Frame.escape), so the differential gate covers it.
+    | "json_string", [strE] ->
+        Ok (syn (ExprApp (v "__display_json_string", [strE])))
+    | "json_string", _ ->
+        Error "display.json_string: expected display.json_string(s) with a String"
     // The unit-label probe: `display.unit_label(x)` becomes a STRING LITERAL
     // at typecheck time naming x's unit or quantity ("meter / second^2",
     // "speed", "" when bare) -- the typechecker is the one place the type is
@@ -83,7 +93,7 @@ let private elabOp (op: string) (args: Expr list) : Result<Expr, string> =
         Ok (syn (ExprApp (v "__display_unit_label", [e])))
     | "unit_label", _ ->
         Error "display.unit_label: expected display.unit_label(x)"
-    | _ -> Error (sprintf "display: unknown op '%s' (available: emit, json_array, json_num, unit_label)" op)
+    | _ -> Error (sprintf "display: unknown op '%s' (available: emit, json_array, json_num, json_string, unit_label)" op)
 
 // Rewrite walker (same shape as RandElaborate.rewriteExpr; the catch-all wildcard is deliberately absent so an
 // unhandled constructor is an FS0025 build warning rather than a qualified call surviving unrewritten).

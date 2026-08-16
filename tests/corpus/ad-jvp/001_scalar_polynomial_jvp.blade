@@ -1,0 +1,16 @@
+// TEST: JVP Scalar Polynomial (grad agreement)
+// Mirror of ad/001. f = x^3 + 2x, so at x = 2: primal 12, df/dx = 3x^2+2 = 14.
+// The resid pin is the jvp-vs-grad differential gate: both transforms emit
+// ordinary Blade source, so their agreement is checked in-program.
+import ad as ad
+
+function f(x: Float) -> Float = x ^ 3 + 2.0 * x
+
+let (gv, gd) = ad.grad(f)(2.0)
+let (jv, jt) = ad.jvp(f)(2.0, 1.0)
+let vresid = jv - gv
+let tresid = jt - gd
+// EXPECT: jv = 12
+// EXPECT: jt = 14
+// EXPECT: vresid = 0
+// EXPECT: tresid = 0

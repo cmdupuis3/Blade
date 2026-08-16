@@ -1,0 +1,19 @@
+// TEST: JVP Unit-Carrying Parameters (forward only)
+// Forward mode supports units correctly for free: a tangent has the
+// primal's type VERBATIM, units included, so the whole pipeline's unit
+// checking applies to the synthesized code unchanged. (Reverse mode
+// refuses units -- ad/017 -- because a gradient's units are
+// <loss>/<param>, which its buffer ABI cannot express.)
+// f = x^2 : meters -> meters^2; at x = 3 m: primal 9 m^2, tangent 6 m^2.
+import ad as ad
+
+Unit meters
+Unit m2 = meters * meters
+
+function f(x: Float<meters>) -> Float<m2> = x * x
+
+let (fv, ft) = ad.jvp(f)(3.0, 1.0)
+let chk: Float<m2> = ft
+// EXPECT: fv = 9
+// EXPECT: ft = 6
+// EXPECT: chk = 6

@@ -1,0 +1,14 @@
+// TEST: Sqrt Odd Dimension Rejects (rejects)
+// ERROR: BL3006
+// ERROR-CONTAINS: unit dimension exponents are integers
+// sqrt of an ODD-exponent unit has no representable signature: the answer is
+// meters^(1/2) and the grammar carries integer exponents only. The arm used
+// to answer "no signature", which is not the same as "dimensionless" -- an
+// unconstrained result unifies with ANY unit, so `sqrt(m) + Float<seconds>`
+// typechecked and silently produced a length-plus-time. Refusing here is the
+// only answer that cannot be wrong.
+Unit meters
+Unit seconds
+let d: Float<meters> = 4.0
+let t: Float<seconds> = 1.0
+let bad = sqrt(d) + t

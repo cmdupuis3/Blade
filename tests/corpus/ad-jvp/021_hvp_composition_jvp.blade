@@ -1,0 +1,43 @@
+// TEST: JVP Of Grad Is An HVP (three oracles)
+// Forward-over-reverse: ad.jvp(ad.grad(f)) synthesizes f__grad__jvp, whose
+// tangent-of-gradient-buffer accumulation IS the Hessian-vector product.
+// Signature: (w, __g_w mut, __t_w, __t___g_w mut) -> (primal, tangent).
+// f = a^2 b + b^3: grad = [2ab, a^2+3b^2], H = [[2b,2a],[2a,6b]];
+// at [1,2]: grad = [4,13], H = [[4,2],[2,12]].
+// Three independent oracles: (1) analytic rows pinned exactly;
+// (2) Hessian symmetry <u,Hv> = <v,Hu>, exact to roundoff, pinned as a
+// zero residual with NO reference value; (3) central differences of the
+// gradient, pinned as thresholded booleans (never raw FD residuals).
+import ad as ad
+
+function f(w: Array<Float like Idx<2>>) -> Float = {
+    let a = w(0)
+    let b = w(1)
+    a * a * b + b * b * b
+}
+
+let mut g1 = [0.0, 0.0]
+let mut tg1 = [0.0, 0.0]
+let (p1, tp1) = ad.jvp(ad.grad(f))([1.0, 2.0], g1, [1.0, 0.0], tg1)
+let mut g2 = [0.0, 0.0]
+let mut tg2 = [0.0, 0.0]
+let (p2, tp2) = ad.jvp(ad.grad(f))([1.0, 2.0], g2, [0.0, 1.0], tg2)
+// (1) analytic: H columns and <grad, seed>
+// EXPECT: tg1 = [4, 2]
+// EXPECT: tg2 = [2, 12]
+// EXPECT: tp1 = 4
+// EXPECT: tp2 = 13
+// (2) symmetry, no reference value needed
+let symresid = tg2(0) - tg1(1)
+// EXPECT: symresid = 0
+// (3) FD of the gradient along v = [1, 0]
+let mut ga = [0.0, 0.0]
+let pa = ad.grad(f)([1.000001, 2.0], ga)
+let mut gb = [0.0, 0.0]
+let pb = ad.grad(f)([0.999999, 2.0], gb)
+let fd0 = (ga(0) - gb(0)) / 0.000002
+let fd1 = (ga(1) - gb(1)) / 0.000002
+let ok0 = abs(fd0 - tg1(0)) < 0.000001 * (abs(tg1(0)) + 1.0)
+let ok1 = abs(fd1 - tg1(1)) < 0.000001 * (abs(tg1(1)) + 1.0)
+// EXPECT: ok0 = true
+// EXPECT: ok1 = true

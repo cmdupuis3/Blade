@@ -178,6 +178,14 @@ module Codes =
             // C++ indexes past the argument's allocation. A symbolic extent
             // (`Idx<n>`) reads `.extents[d]` at runtime and stays permissive.
             "BL3016", "argument extent mismatch"
+            // BL3017: a `group_keys` result used anywhere but its own `let`
+            // RHS or a `group_by` grouping slot. The result is NAME-KEYED:
+            // codegen stores the CSR structure in locals suffixed off the
+            // binding name and gives the binding itself an opaque sentinel,
+            // so every indirection (alias, tuple, parameter, return) used to
+            // emit C++ naming symbols that were never declared. Refuse it
+            // where the source name is still in hand.
+            "BL3017", "group_keys result escapes its binding"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"
@@ -220,6 +228,15 @@ module Codes =
             // disproved, there is simply no commutativity/associativity claim
             // to stand on. See docs/plan-cpp-perf-exploitation.md.
             "BL4016", "parallel fold needs a reorder licence"
+            // BL4017: a declared `comm`/`anticomm` group that is provably INERT
+            // at its apply -- the commuting slots are filled by virtual
+            // `range<...>` operands, which never materialize and so can never
+            // form the identity group compaction keys on. Neither BL4013
+            // (nothing is disproved) nor BL4016 (nothing unsound is licensed):
+            // the clause is simply dropped, and the emitted C++ is identical to
+            // one that never carried it. Warning, on BL4001's dropped-`omp`
+            // precedent -- the program is correct, just not the one asked for.
+            "BL4017", "symmetry clause licenses nothing here"
             // BL5xxx: elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"
@@ -227,6 +244,10 @@ module Codes =
             "BL5300", "rand elaboration error"
             "BL5400", "spectra elaboration error"
             "BL5500", "grad elaboration error"
+            // BL5501: the forward-mode sibling. A distinct code (not BL5500)
+            // so a reject test can assert WHICH transform refused -- the two
+            // subsets deliberately diverge (overwrites, if/match) past v1.
+            "BL5501", "jvp elaboration error"
             "BL5600", "sgs elaboration error"
             "BL5700", "display elaboration error"
             // BL6xxx: IR validation
@@ -300,6 +321,7 @@ module Codes =
                 | "BL5300" -> PhElaborate "rand"
                 | "BL5400" -> PhElaborate "spectra"
                 | "BL5500" -> PhElaborate "grad"
+                | "BL5501" -> PhElaborate "grad"   // jvp runs inside the grad pass
                 | "BL5600" -> PhElaborate "sgs"
                 | "BL5700" -> PhElaborate "display"
                 | _ -> PhElaborate "ml"

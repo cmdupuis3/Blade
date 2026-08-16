@@ -231,6 +231,26 @@ type TypeEnv = {
     /// FuncConstraints/FuncDefaults, and shares their known shadowing
     /// weakness. Shared by reference.
     MutParamPositions: System.Collections.Generic.Dictionary<string, int list>
+    /// Callee name -> how its return's UNIT is built from its arguments':
+    /// `(exponents, residual)` means the result measures
+    /// `residual * PROD_i (unit of argument i) ^ exponents[i]`.
+    ///
+    /// A generic signature's return is DEDUCED, and a `T^1 -> T^0` pair shares
+    /// ONE inference variable between the parameter's element and the return --
+    /// but direct application never unifies parameters against arguments (that
+    /// variable has to stay open for per-call-site monomorphization), so the
+    /// substitution never learns the caller's unit and every unit rule read a
+    /// bare variable. Propagating the ARGUMENT's unit unchanged is not the fix:
+    /// `mean` preserves it, `variance` SQUARES it. What transfers is the
+    /// exponent the body derives, which is what this records.
+    ///
+    /// Computed once per declaration by probing the typed body with a synthetic
+    /// base dimension per generic parameter (checkFunctionDecl), consumed by
+    /// `unitStampedReturn` at the call site. Absent = no claim, which is the
+    /// pre-existing silence; a body the unit walk cannot read is never entered.
+    /// Name-keyed like MutParamPositions, and shares its shadowing weakness.
+    /// Shared by reference.
+    FuncUnitTransform: System.Collections.Generic.Dictionary<string, int list * UnitSig>
     /// Named functions' `where comm(...)` groups (by param index): funcName ->
     /// int list list. Populated by checkFunctionDecl; must survive
     /// eta-expansion (etaExpandFunctionKernel) onto the loop-kernel wrapper, or
@@ -360,6 +380,7 @@ let emptyEnv () = {
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
     MutParamPositions = System.Collections.Generic.Dictionary<string, int list>()
+    FuncUnitTransform = System.Collections.Generic.Dictionary<string, int list * UnitSig>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
@@ -651,6 +672,7 @@ complex half)." where_
     | FoldOmpNeedsLicense kernelDesc -> sprintf "parallel reduction needs comm(...) or a builtin op: %s carries `omp` but nothing licenses the reorder. A parallel fold splits the axis into per-thread chunks and combines the partials, so the kernel must be COMMUTATIVE and ASSOCIATIVE -- write `where comm(a, b), omp` to declare it (the same word `<@>` uses for symmetric storage, cross-checked against the body's parity), or use a builtin fold body (a + b, a * b, a && b, a || b), which carries both properties outright. Drop `omp` to keep the serial fold." kernelDesc
     | PlaceholderNeedsAllBound (got, total) -> sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." got total
     | GroupKeysRank1 -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
+    | GroupKeysEscapes (what, pos) -> sprintf "%s cannot be used %s: a `group_keys` result is NAME-KEYED, not a value. It compiles to three locals named after the binding (`<name>__ngroups`, `<name>__offsets`, `<name>__perm`) and the binding itself carries only an opaque sentinel, so `group_by` can find the grouping only under the exact name the keys were bound to. Bind the keys once (`let gk = group_keys(...)`) and pass that same `gk` directly to each `group_by` -- a group_keys result cannot be aliased to a second name, put in a tuple or struct, passed as a function argument, or returned. (Grouping two arrays the same way is what one shared `gk` is FOR: `group_by(a, gk)` and `group_by(b, gk)` co-iterate; two separate `group_keys` calls do not.)" what pos
     | FallbackNeedsArrays (leftDesc, rightDesc) -> sprintf "<|:> (allocated-fallback) reads the LEFT array where its storage holds a cell and the right array elsewhere, so both operands must be arrays; got %s and %s. For value-level choice (first nonzero wins) over scalars or computations, use <|>." leftDesc rightDesc
     | FallbackSymmetricLeft -> "<|:> over a symmetric/antisymmetric/Hermitian left operand is not yet supported: symmetric A requires symmetric allocation (formalism 2.6), which the compiler cannot yet verify. decompact(A, d) to dense first."
     | FallbackRightNotDense what -> sprintf "<|:> right operand must be a plain dense array (it supplies the value for every cell the left side lacks); got %s." what
@@ -774,6 +796,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | FactoryDupQuantityDecl _ -> "BL3013"
             | FactoryDupFill _ | FactoryUnknownTag _ | FactoryAmbiguousMix _ -> "BL3014"
             | UnknownUnitName _ -> "BL3015"
+            | GroupKeysEscapes _ -> "BL3017"
             | IntrinsicBindArrayFailed _ | IntrinsicNeedsArray _
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _

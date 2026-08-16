@@ -1,0 +1,19 @@
+// TEST: Generic Return Unit Addition (rejects)
+// ERROR: BL3006
+// The headline silent acceptance. `mean(xs)` measures meters and `t` measures
+// seconds, and `+` has no rule that relates them -- but the addition was
+// ACCEPTED, because a generic function's deduced `T^0` return arrived carrying
+// no unit signature at all. `unitRulesForOpWith` reads `IR.getUnits` off the
+// resolved node type, and that type was a bare inference variable: direct
+// application never unifies parameters against arguments (the variable must
+// stay open for per-call-site monomorphization), so nothing ever wrote the
+// caller's unit into it. The identical clash one level down --
+// `xs((0 : Idx<4>)) + t`, a direct element read -- always rejected, which is
+// what localized the hole to the call's result type rather than to `+`.
+// units/077 is the accepting side; 020 and 021 are the ascription twins.
+from stats import mean
+Unit meters
+Unit seconds
+let xs: Array<Float<meters> like Idx<4>> = [1.0, 2.0, 3.0, 6.0]
+let t: Float<seconds> = 1.0
+let bad = mean(xs) + t

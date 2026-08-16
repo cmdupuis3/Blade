@@ -1,0 +1,20 @@
+// TEST: Plot Title Escape
+// ============================================================================
+// Titles and axis labels are USER TEXT dropped into the middle of a figure
+// object, so they get the frame's JSON escape (display.json_string) rather
+// than hand-written quotes. The three characters that used to break the frame
+// are all here: a double quote, a backslash, and a control character (tab).
+// Concatenated raw, this title closes the `"text"` string early and every
+// reader rejects the whole frame; escaped, it is an ordinary label.
+//
+// The FRAME BYTES -- that the payload still parses, and that the title round
+// trips through a JSON reader unchanged -- are pinned in Test_Display.fs. This
+// file pins the surface and, through `blade test interp`, that
+// Blade.Display.Frame.jsonString and its generated C++ mirror
+// (blade_display::jsonstr) escape identically.
+// ============================================================================
+import plot
+let x = [0.0, 1.0, 2.0]
+let y = [0.0, 0.5, 1.5]
+let ok = plot.line(x, y, "he said \"hi\"\tand\\left": title, "a \"quoted\" axis": xlabel)
+// EXPECT: ok = true

@@ -1,0 +1,16 @@
+// TEST: JVP Binding Form
+// `let j = ad.jvp(f)` must work identically to the direct-call form -- the
+// rewrite produces a bare function reference, so both are the same case.
+import ad as ad
+
+function f(x: Float) -> Float = x * x * x
+
+let j = ad.jvp(f)
+let (v1, t1) = j(2.0, 1.0)
+let (v2, t2) = ad.jvp(f)(2.0, 1.0)
+let vresid = v1 - v2
+let tresid = t1 - t2
+// EXPECT: v1 = 8
+// EXPECT: t1 = 12
+// EXPECT: vresid = 0
+// EXPECT: tresid = 0

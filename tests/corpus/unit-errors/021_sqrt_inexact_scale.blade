@@ -1,0 +1,12 @@
+// TEST: Sqrt Inexact Magnitude Rejects (rejects)
+// ERROR: BL3006
+// ERROR-CONTAINS: no exact square root in the unit scale grammar
+// Even dims are not enough: the MAGNITUDE has to have an exact square root
+// too. 4047 is not a perfect square, so sqrt(acre) is 63.6... * meters -- a
+// factor no exact rational-times-constants scale can hold. Unit algebra
+// never rounds (a rounded factor lands in a TYPE, where no later check can
+// catch it), so this refuses and names the fix: declare the unit as a square.
+Unit meters
+Unit acre = 4047 * meters ^ 2
+let plot: Float<acre> = 4.0
+let bad = sqrt(plot)

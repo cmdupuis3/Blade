@@ -279,6 +279,14 @@ central finite differences, the gather/scatter adjoint duality, the
 backward), and rotation invariance of loss AND gradients. `OracleDump.fs`
 prints everything (`-- dump-oracle`).
 
+Forward mode (`ad.jvp`, same compiler pass as `grad`) is verified by
+in-program jvp-vs-grad residual pins and FD booleans in `tests/corpus/ad-jvp/`
+rather than by this oracle: jvp differentiates the elaborated ops through
+grad's inliner exactly as grad does, and no jvp-specific op semantics exist
+to pin. Hand-written `jvpOp` twins here (with the adjointness gate
+`<u, Jv> = <J^T u, v>`) become worthwhile when an ml-e2e-scale jvp consumer
+lands (an HVP-based sampler, say) -- recorded as future work.
+
 ## 6. The equiv certificate (implemented 2026-07-18)
 
 The Part I deferral is over: `where <alias>.equiv(O3)` / `equiv(SO3)` on a

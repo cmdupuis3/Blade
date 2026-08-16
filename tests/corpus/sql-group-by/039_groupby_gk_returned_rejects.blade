@@ -1,0 +1,22 @@
+// TEST: GroupBy GroupKeys Returned (rejects)
+// ERROR: BL3017
+// ERROR-CONTAINS: as a function's return value
+// A gk cannot leave the frame that built it, for the reason 035-038 share:
+// the three locals are named after the binding, and a return value has no
+// binding until the CALLER names it -- a different name, in a different
+// frame, with no state behind it.
+//
+// This case was already refused, as BL7001 ("no rule for IRGroupKeys in
+// expression position"), which stopped the miscompile but described a backend
+// gap rather than the rule. Same verdict now, from the checker, in the same
+// words as its four siblings -- and the caret lands on the returned
+// expression rather than on the whole body.
+let region = [0, 1, 0, 0, 1]
+function mk(k: Array<Int64 like Idx<5>>) = {
+    let gk = group_keys(k)
+    gk
+}
+let g = mk(region)
+// EXPECT: BL3017 -- keep `group_keys` and every `group_by` that consumes it
+// in one scope. A function may return the GROUPED ARRAYS (functions/068), or
+// take the key array and do both halves inside.

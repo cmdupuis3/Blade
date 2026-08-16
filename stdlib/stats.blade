@@ -21,12 +21,22 @@
 // centering step of a covariance. A whole-array fold is `reduce(A, (+),
 // axes = k)`, not one of these.
 //
-// UNITS ride through `mean` and `variance` untouched, and this is checked, not
-// hoped for: `mean` is a sum divided by a COUNT, so its result carries the row's
-// unit (`Float64<meters>` row -> `Float64<meters>`), and `variance` squares it
-// (-> `Float64<meters^2>`). Neither needs a unit annotation to say so; the unit
-// algebra derives it from the body. `stddev` is the exception -- see its own
-// warning below.
+// UNITS ride through all three, and this is checked, not hoped for: `mean` is a
+// sum divided by a COUNT, so its result carries the row's unit
+// (`Float64<meters>` row -> `Float64<meters>`), `variance` squares it
+// (-> `Float64<meters^2>`), and `stddev` halves that back to
+// `Float64<meters>`. None of them needs a unit annotation to say so; the unit
+// algebra derives the exponent from the body once per declaration and applies
+// it to whatever the caller passes.
+//
+// Until 2026-08-15 none of that was enforced at a CALL. A generic signature's
+// deduced `T^0` return reached the caller with no signature at all -- direct
+// application never unifies parameters against arguments, so the caller's unit
+// never entered the substitution -- and `mean(x) + Float<seconds>` was accepted
+// over a `Float<meters>` row. `stddev` carried a UNIT WARNING here blaming
+// `sqrt`; the blame was misplaced (its input was blank, not its rule) and the
+// warning is gone. Pins: tests/corpus/units/077 and
+// tests/corpus/unit-errors/019-021.
 //
 // NO SAMPLE (n-1) VARIANTS, on purpose. `variance` and `stddev` below are the
 // POPULATION forms, dividing by n. A `sample_variance` dividing by n-1 would
@@ -52,11 +62,12 @@ function variance(row: T^1) -> T^0 = {
 
 /// Population standard deviation: the square root of `variance`.
 ///
-/// UNIT WARNING, measured: `sqrt` is a real-valued math intrinsic and does not
-/// track units, so unlike `mean` and `variance` this function's result carries
-/// NO unit guarantee -- annotating the result `Float64<meters>` and annotating
-/// it `Float64<meters^2>` are both accepted on the same `Float64<meters>` input.
-/// Do not read a passing annotation here as a check. On unit-carrying data,
-/// prefer writing `sqrt(variance(row))` at the call site, so the exponent
-/// halving is visible where it happens rather than hidden behind a name.
+/// UNITS: `sqrt` halves even exponents, so a `Float64<meters>` row gives
+/// `Float64<meters>` -- and that IS checked at the call site now (see the
+/// module note). An `Float64<meters^2>` annotation on this result is a BL3006.
+/// The composition is exact by construction: `variance` squares, so the
+/// exponents reaching `sqrt` are always even. An odd-exponent intermediate
+/// would be refused outright rather than silently unconstrained (`sqrt` no
+/// longer answers "no signature" on the way through -- see
+/// tests/corpus/unit-errors/019).
 function stddev(row: T^1) -> T^0 = sqrt(variance(row))

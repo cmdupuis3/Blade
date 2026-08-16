@@ -1,0 +1,16 @@
+// TEST: AD complex parameter rejected (rejects)
+// Complex parameters used to fall through to non-differentiable silently
+// (same wrong-answer class as the unit case: the parameter's contribution
+// vanished from the gradient with no diagnostic). Complex derivatives need
+// a holomorphic/Wirtinger convention the AD subset does not define, so the
+// parameter refuses explicitly.
+// ERROR: BL5500
+// ERROR-CONTAINS: complex parameters are not differentiable
+import ad as ad
+
+function f(x: Float, z: Complex128) -> Float = {
+    x * x
+}
+
+let (fv, dfx) = ad.grad(f)(2.0, 0.0)
+fv

@@ -1,0 +1,31 @@
+// TEST: Sqrt Halves The Magnitude Too
+// sqrt is the inverse of `^ 2`, so it has to halve BOTH layers unitPow
+// raises: km2 is {meters: 2} at magnitude 10^6, and its root is {meters: 1}
+// at magnitude 1000 -- km, not meters. Halving only the dims (the old rule)
+// stamped the result meters-magnitude while the VALUE stayed a number of
+// kilometres, so every later meeting of two lengths applied a factor wrong
+// by 1000: `sqrt(4.0 km2) + 1 m` printed 3 instead of 2.001.
+Unit meters
+Unit km = 1000 * meters
+Unit km2 = km ^ 2
+
+let area: Float<km2> = 4.0
+let side = sqrt(area)
+
+// Same magnitude on both sides: no conversion, plain addition in km.
+let one_km: Float<km> = 1.0
+let plus_km = side + one_km
+
+// Cross-magnitude: the LEFT operand's magnitude wins (units/045), so the
+// metre converts INTO km -- 1 m is 0.001 km, not 1.
+let one_m: Float<meters> = 1.0
+let plus_m = side + one_m
+
+// The ascription is the third witness: 2 km is 2000 m.
+let side_m: Float<meters> = side
+
+// EXPECT: area = 4
+// EXPECT: side = 2
+// EXPECT: plus_km = 3
+// EXPECT: plus_m = 2.001
+// EXPECT: side_m = 2000

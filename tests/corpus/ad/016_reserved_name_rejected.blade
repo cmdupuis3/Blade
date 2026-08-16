@@ -1,0 +1,17 @@
+// TEST: AD reserved-name shadowing rejected (rejects)
+// A user binding named like a synthesized cotangent (`__g_x`) used to be
+// SHADOWED by the transform's zero-initialized declaration: for f = x^4 the
+// emitted derivative read the zeroed cotangent instead of the user's value
+// and printed df = 0 instead of 32, with no diagnostic. Refusal is the fix.
+// ERROR: BL5500
+// ERROR-CONTAINS: reserved AD name
+import ad as ad
+
+function f(x: Float) -> Float = {
+    let __g_x = x * x
+    let z = __g_x * __g_x
+    z
+}
+
+let (fv, dfv) = ad.grad(f)(2.0)
+fv

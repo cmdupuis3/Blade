@@ -1,0 +1,20 @@
+// TEST: AD unit-carrying parameter rejected (rejects)
+// Before this refusal, a unit-carrying parameter classified as
+// non-differentiable SILENTLY: the function compiled and the parameter's
+// partial was simply missing from the gradient. A gradient's units are
+// <loss>/<param>, which the grad ABI (buffer type = parameter type) cannot
+// express, so the parameter refuses instead. The `Speed` alias also pins
+// that classification sees through same-module transparent type aliases.
+// ERROR: BL5500
+// ERROR-CONTAINS: unit-carrying
+import ad as ad
+
+Unit mps
+type Speed = Float<mps>
+
+function f(x: Float, v: Speed) -> Float = {
+    x * x
+}
+
+let (fv, dfx) = ad.grad(f)(2.0, 3.0)
+fv
