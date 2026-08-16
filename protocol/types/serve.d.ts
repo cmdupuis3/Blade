@@ -84,6 +84,32 @@ export interface SurfaceRequest {
   cmd: "surface";
 }
 
+/** Re-render an already-emitted figure as a static image through the
+ *  compiler's GR worker. POST-HOC: `spec` is the figure JSON the client
+ *  retained (the same `{data, layout}` its plotly frame carried), so nothing
+ *  re-runs and the program that produced it need not still exist.
+ *
+ *  NOTE: newer than the rest of the protocol, like `surface`. A compiler
+ *  predating it answers `{"id":N,"error":"unknown cmd 'renderPlot'"}` — the
+ *  capability probe. A compiler that HAS it but cannot find the `gr-render`
+ *  helper, or has no `GRDIR`, answers with an ordinary error naming that. */
+export interface RenderPlotRequest {
+  id: number;
+  cmd: "renderPlot";
+  /** The backend-neutral figure object: `{data: [...], layout: {...}}`. */
+  spec: object;
+  /** The original frame's `meta.id`, echoed into the response frame's meta.
+   *  Supplying it is what makes a panel MERGE the render into that plot rather
+   *  than appending a second entry. */
+  plotId?: string;
+  /** Pixels. Default 800x600, clamped to [64..4096]. A present-but-
+   *  non-integer value is an error, not a silent default. */
+  width?: number;
+  height?: number;
+  /** Default "png". */
+  format?: "png" | "svg" | "pdf";
+}
+
 /** Stop the loop. No id, and NO RESPONSE — the process just exits, so a
  *  client's only confirmation is the child's exit. Closing stdin (EOF) is an
  *  equally clean shutdown. */
@@ -98,6 +124,7 @@ export type ServeRequest =
   | EvalRequest
   | ResetSessionRequest
   | SurfaceRequest
+  | RenderPlotRequest
   | ShutdownRequest;
 
 /** `serve` is the protocol revision (1 today); `version` is the compiler's own
@@ -165,6 +192,16 @@ export interface OkResponse {
 /** The `surface` response: the surface document with an `id` added. */
 export type SurfaceResponse = { id: number } & import("./surface").SurfaceJson;
 
+/** The `renderPlot` response: one complete display frame, so a client feeds it
+ *  to the SAME decode/publish path an eval's frames take. `meta.backend` is
+ *  always "gr"; `meta.id` is present exactly when the request carried a
+ *  `plotId`. `data` is base64 for all three formats (`image/svg+xml` is
+ *  neither `text/*` nor `+json`, so the frame format calls it binary). */
+export interface RenderPlotResponse {
+  id: number;
+  frame: DisplayFrame;
+}
+
 /** Any command can fail this way. `id` is null when the request could not be
  *  parsed, or carried no id of its own to echo — which is exactly why a client
  *  cannot rely on id correlation alone. */
@@ -180,6 +217,7 @@ export type ServeResponse =
   | EvalResponse
   | OkResponse
   | SurfaceResponse
+  | RenderPlotResponse
   | ErrorResponse;
 
 /** An UNSOLICITED line: streamed display frames from an eval still in flight.

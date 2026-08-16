@@ -67,11 +67,44 @@ interpreter directly.
 route it to **stderr**: the MCP transport owns stdout, and one stray line on it
 corrupts the stream.
 
+`deps.env` (an object, or a function re-read per spawn like `findCompiler`) is
+the child's environment; omitted, the child inherits this process's. It
+**replaces** rather than extends — Node's spawn semantics — so spread the
+parent's:
+
+```js
+env: () => ({ ...process.env, GRDIR: grRoot,
+              PATH: path.join(grRoot, "bin") + path.delimiter + process.env.PATH }),
+```
+
+That is what `renderPlot` needs: the compiler spawns a native GR worker whose
+DLLs resolve off `GRDIR` and `PATH`, and both failure modes are *silent*
+crashes rather than error messages.
+
+## Rendering a plot with GR
+
+```js
+const { frame } = await client.renderPlot({
+  spec: entry.spec,          // the retained {data, layout} figure JSON
+  plotId: entry.id,          // the original frame's meta.id
+  width: 800, height: 600,   // optional; clamped to [64..4096]
+});
+display.publish(display.decodeFrame(frame).frame, "gr");
+```
+
+Post-hoc by construction: nothing re-runs, and the program that produced the
+figure need not still exist. The response is a complete display frame
+(`image/png`, base64), so it takes the same decode/publish path an eval's
+frames take — and echoing `plotId` back in `frame.meta.id` is what makes a
+panel **merge** the render into the existing plot instead of appending a second
+entry. A compiler without the verb — or one that cannot reach GR — rejects with
+`err.protocolError === true` and a message naming which.
+
 ## Consumer notes
 
 **There is no banner.** The compiler says nothing until asked, so the
 capability probe is a `ping`: `{"id":N,"cmd":"ping"}` answers
-`{"id":N,"ok":true,"serve":1,"version":"0.19.2"}`. `createClient` does this for
+`{"id":N,"ok":true,"serve":1,"version":"0.20.0"}`. `createClient` does this for
 you on first use and latches `available()` to `"yes"` or `"no"`.
 
 **An unknown command is answered, not rejected** —
@@ -131,9 +164,9 @@ a repo checkout and an installed toolchain.
 ## Versioning
 
 The package version is in **lockstep with the compiler version**
-(`src/Cli.fs`'s `compilerVersion`, `0.19.2` today). Bump both in the same
+(`src/Cli.fs`'s `compilerVersion`, `0.20.0` today). Bump both in the same
 change; a vendored tarball's name follows it
-(`blade-lang-ide-protocol-0.19.2.tgz`).
+(`blade-lang-ide-protocol-0.20.0.tgz`).
 
 The lockstep is a claim about the *protocol*, not a guarantee about the binary
 a consumer happens to run — a checked-in `surface.json` can fall behind its

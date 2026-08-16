@@ -40,7 +40,7 @@ open Blade.Lowering
 
 module TH = Blade.Tests.TestHarness
 
-let compilerVersion = "0.19.2"
+let compilerVersion = "0.20.0"
 
 let printUsage () =
     printfn "Blade Compiler v%s" compilerVersion
@@ -116,6 +116,8 @@ let printUsage () =
     printfn "  test ide-eval                     Run the notebook session-eval block standalone"
     printfn "  test ide-cells                    Run the notebook checkCells assembly block standalone"
     printfn "  test ide-references               Run the `references[]` navigation payload block standalone"
+    printfn "  test gr-render                    Run the GR renderPlot block standalone (frame bytes,"
+    printfn "                                    worker protocol; the live-GR case skips without one)"
     printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
     printfn "  test interp [category]            Diff the tree-walking interpreter against the compiled binary"
     printfn ""
@@ -2627,6 +2629,12 @@ let private dispatchTest (rest: string list) : int =
         // display array). Drives the interpreter and the session engine
         // directly -- no g++, no editor.
         let failed = (Blade.Tests.Display.runDisplayTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "gr-render" ] ->
+        // The GR render lane: renderPlot's frame bytes and argument rules, and
+        // the worker protocol against a fake helper the block writes itself.
+        // No GR needed -- the one case that wants a real gr-render skips.
+        let failed = (Blade.Tests.GrRender.runGrRenderTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "unify" ] ->
         // TypeCheck-level F# unit tests for the unify fast path: constructs

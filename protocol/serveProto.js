@@ -17,6 +17,8 @@
 //   request  {"id": N, "cmd": "checkCells", "file": "...", "cells": ["...", ...], "tier": "fast"|"full"}
 //   request  {"id": N, "cmd": "eval", "session": "...", "source": "...", "cwd": "..."}  (cwd optional)
 //   request  {"id": N, "cmd": "resetSession", "session": "..."}
+//   request  {"id": N, "cmd": "renderPlot", "spec": {...}, "plotId": "...",
+//             "width": W, "height": H, "format": "png"}  (all but spec optional)
 //   request  {"cmd": "shutdown"}
 //   response {"id": N, "ok": true, "serve": 1, "version": "..."}          (ping)
 //   response {"id": N, "tier": "fast"|"full", "diagnostics": [...], ...}  (check)
@@ -27,6 +29,8 @@
 //             "elapsedMs": M, "stdout": "...", "stderr": "...",
 //             "bindings": [...], "diagnostics": [...]}                    (eval)
 //   response {"id": N, "ok": true}                                        (resetSession)
+//   response {"id": N, "frame": {"v":1,"mime":"image/png","encoding":"base64",
+//             "data":"...","meta":{"id":"...","backend":"gr"}}}           (renderPlot)
 //   response {"id": N|null, "error": "..."}                                (error)
 //   event    {"event": "display", "id": N, "frame": {...}}                 (unsolicited)
 //
@@ -90,6 +94,39 @@ function encodeResetSession(id, session) {
   return JSON.stringify({ id, cmd: "resetSession", session }) + "\n";
 }
 
+/**
+ * One "renderPlot" request line:
+ * {"id","cmd":"renderPlot","spec"[,"plotId"][,"width","height"][,"format"]}\n
+ *
+ * Re-render a figure the panel ALREADY HAS through the compiler's GR worker.
+ * `spec` is the backend-neutral figure JSON retained per plot (`{data,
+ * layout}` — the same thing the plotly frame carried), so this is a post-hoc
+ * transformation and never involves re-running the program.
+ *
+ * `plotId` is the original frame's `meta.id`. The compiler echoes it into the
+ * response frame's meta, which is what makes the panel MERGE the render into
+ * that plot instead of appending a second entry — the request pins the
+ * identity, so per-emit frame ordinals never enter into it.
+ *
+ * Compiler-side defaults: 800x600, clamped to [64..4096]; `format` "png"
+ * (also "svg", "pdf"). A compiler predating this verb answers
+ * `{"error":"unknown cmd 'renderPlot'"}` — the usual capability probe.
+ *
+ * Unlike the encoders above this takes its arguments as ONE object: the
+ * request has four optional fields, and a five-deep positional call is a
+ * transposition waiting to happen. `args` is `{spec, plotId, width, height,
+ * format}`; anything absent is simply omitted from the line.
+ */
+function encodeRenderPlot(id, args) {
+  const a = args || {};
+  const req = { id, cmd: "renderPlot", spec: a.spec };
+  if (a.plotId) req.plotId = a.plotId;
+  if (a.width) req.width = a.width;
+  if (a.height) req.height = a.height;
+  if (a.format) req.format = a.format;
+  return JSON.stringify(req) + "\n";
+}
+
 /** The "shutdown" request line: {"cmd":"shutdown"}\n — no id, no response. */
 function encodeShutdown() {
   return JSON.stringify({ cmd: "shutdown" }) + "\n";
@@ -147,6 +184,7 @@ module.exports = {
   encodePing,
   encodeEval,
   encodeResetSession,
+  encodeRenderPlot,
   encodeShutdown,
   decodeLine,
   createDecoder,

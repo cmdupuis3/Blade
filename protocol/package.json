@@ -1,6 +1,6 @@
 {
   "name": "@blade-lang/ide-protocol",
-  "version": "0.19.2",
+  "version": "0.20.0",
   "description": "Shared client, wire protocol, and language surface for the Blade compiler's IDE modes (ide serve / ide check / ide surface). Version tracks the compiler's.",
   "license": "LGPL-3.0-only",
   "repository": {

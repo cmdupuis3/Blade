@@ -54,7 +54,7 @@ const DEFAULT_ARGS = ["ide", "serve"];
 
 /**
  * Build one `ide serve` client. `dependencies` is
- * `{ findCompiler, output?, cwd?, args? }`:
+ * `{ findCompiler, output?, cwd?, args?, env? }`:
  *
  *   - `findCompiler()` (REQUIRED) returns the compiler path to spawn. Called
  *     at EVERY spawn, not once — so a client re-resolves after a rebuild
@@ -68,15 +68,26 @@ const DEFAULT_ARGS = ["ide", "serve"];
  *     (to the checked file's directory, or an eval's `cwd`), so this is only
  *     the initial value.
  *   - `args` (optional) replaces `["ide","serve"]` as the spawn arguments.
+ *   - `env` (optional) is the child's environment, as an object or a function
+ *     returning one (a function is called at EVERY spawn, the same rule
+ *     `findCompiler` follows, so a host can pick up a settings change without
+ *     re-creating the client). Undefined — the default, and what every caller
+ *     got before this hook existed — inherits this process's environment
+ *     wholesale. NOTE that an object REPLACES the environment rather than
+ *     extending it (that is Node's spawn semantics, not ours): a caller adding
+ *     one variable must spread the parent's, e.g.
+ *     `env: () => ({ ...process.env, GRDIR: grRoot })`. The compiler needs
+ *     exactly that for GR renders — `renderPlot` spawns a native worker that
+ *     resolves its DLLs off `GRDIR`/`PATH`.
  *
  * `label` (optional, default "blade serve") tags this client's lines in the
  * output channel, so a second client (e.g. a notebook's dedicated process)
  * doesn't read as the same process in the log.
  *
- * Returns `{ available, check, checkCells, eval, resetSession, dispose }` —
- * see the matching functions below for behavior. All mutable state (proc,
- * pending requests, availability latch, backoff bookkeeping) is private to
- * the returned client.
+ * Returns `{ available, check, checkCells, eval, resetSession, renderPlot,
+ * dispose }` — see the matching functions below for behavior. All mutable
+ * state (proc, pending requests, availability latch, backoff bookkeeping) is
+ * private to the returned client.
  */
 function createClient(dependencies, label) {
   const deps = dependencies;
@@ -117,6 +128,17 @@ function createClient(dependencies, label) {
   /** The child's argv. `deps.args` wins when it is an array. */
   function spawnArgs() {
     return deps && Array.isArray(deps.args) ? deps.args : DEFAULT_ARGS;
+  }
+
+  /** The child's environment: `deps.env` as an object, or the result of
+   *  calling it when it's a function (re-read per spawn, exactly like
+   *  `findCompiler` and `cwd`). Undefined hands cp.spawn no `env` at all,
+   *  which is inheritance — the pre-existing behavior, unchanged for every
+   *  caller that doesn't set this. */
+  function spawnEnv() {
+    const e = deps && deps.env;
+    if (typeof e === "function") return e() || undefined;
+    return e || undefined;
   }
 
   // --- Failure / backoff bookkeeping ------------------------------------------
@@ -230,7 +252,11 @@ function createClient(dependencies, label) {
    *  one. */
   function spawnProcess() {
     const exe = deps.findCompiler();
-    const child = cp.spawn(exe, spawnArgs(), { cwd: spawnCwd(), windowsHide: true });
+    const child = cp.spawn(exe, spawnArgs(), {
+      cwd: spawnCwd(),
+      env: spawnEnv(),
+      windowsHide: true,
+    });
     const decoder = proto.createDecoder();
     proc = child;
     child.stdout.setEncoding("utf8");
@@ -456,6 +482,36 @@ function createClient(dependencies, label) {
     });
   }
 
+  /**
+   * Re-render a figure the caller already has as a static image, through the
+   * compiler's GR worker. Post-hoc: `args.spec` is the retained figure JSON
+   * (`{data, layout}`), nothing re-runs, and the program need not still exist.
+   *
+   * Resolves with `{id, frame}` — a complete display frame (`image/png` by
+   * default, base64) that can go straight through this package's
+   * `display.decodeFrame` / `display.publish`. `args.plotId` is echoed into
+   * `frame.meta.id`, which is what makes a panel merge the render into the
+   * plot it came from rather than appending a new one.
+   *
+   * Rejects like eval(): `err.protocolError === true` means the process
+   * answered LIVE but doesn't know "renderPlot" (a compiler predating GR
+   * support — keep the toggle disabled), and that is also how a caller learns
+   * GR itself is missing, since an unavailable helper or unset GRDIR comes
+   * back as a live `{"error": ...}` naming the reason.
+   *
+   * @param {{spec: object, plotId?: string, width?: number, height?: number,
+   *          format?: "png"|"svg"|"pdf"}} args
+   * @param {{timeoutMs?: number}} [opts] default 30s — the worker's first
+   *   render pays GR's ~2.6s cold start, later ones are tens of ms
+   */
+  function renderPlot(args, opts) {
+    const ms = (opts && opts.timeoutMs) || DEFAULT_TIMEOUT_MS.full;
+    return ensureReady().then(() => {
+      if (!proc) throw new Error("blade ide serve unavailable");
+      return sendRequest((id) => proto.encodeRenderPlot(id, args), ms);
+    });
+  }
+
   /** Tear down the current process (best-effort clean `shutdown` first) and
    *  reset ALL state so the next check()/eval() re-probes from scratch. Safe
    *  to call when nothing is running. Also doubles as this client's "kill and
@@ -479,7 +535,7 @@ function createClient(dependencies, label) {
     handshake = null;
   }
 
-  return { available, check, checkCells, eval: evalCode, resetSession, dispose };
+  return { available, check, checkCells, eval: evalCode, resetSession, renderPlot, dispose };
 }
 
 module.exports = { createClient };

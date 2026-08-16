@@ -37,6 +37,22 @@
 // compiler predating this arm answers `unknown cmd 'surface'`, and THAT is how
 // a client probes for it -- one more reason the unknown-cmd arm is contract.
 //
+// ...and the GR RENDER lane, which reads no program either -- it re-renders a
+// spec the panel already holds (Blade-REPL/docs/gr-graphics-plan.md section 4.2):
+//
+//   -> {"id":N,"cmd":"renderPlot","spec":{<figure>},"plotId":"<meta.id>"?,
+//       "width":W?,"height":H?,"format":"png"|"svg"|"pdf"?}
+//   <- {"id":N,"frame":{"v":1,"mime":"image/png","encoding":"base64",
+//                       "data":"<base64>","meta":{"id":"<plotId>","backend":"gr"}}}
+//
+// The response is a complete DISPLAY FRAME, so the client reuses its existing
+// decode/publish path and the panel's merge-by-`meta.id` attaches the render to
+// the plot the spec came from -- with the id PINNED FROM THE REQUEST, which is
+// what sidesteps the per-emit ordinal entirely. Failures answer with the
+// ordinary error shape, and a compiler predating this arm answers
+// `unknown cmd 'renderPlot'` (the capability probe again), so a client that
+// cannot render simply keeps its GR toggle disabled.
+//
 // ...and the notebook's SQUIGGLE clock, which typechecks every cell at once:
 //
 //   -> {"id":N,"cmd":"checkCells","file":"<abs path>","cells":["<cell 0>",..],
@@ -142,6 +158,17 @@ let private tryStrList (root: JsonElement) (name: string) : string list option =
             then Some (items |> List.map (fun e -> e.GetString()))
             else None)
 
+/// The RAW JSON TEXT of an object-valued property; None when it is absent or
+/// is not an object. `GetRawText` hands back the input's own bytes for that
+/// element, which is the whole point for a render `spec`: it travels through
+/// serve to the worker untouched, exactly as `evalResponse` below splices
+/// display frames rather than re-serializing them. A parse-and-reprint round
+/// trip is licensed to move the last digit of every coordinate in the plot.
+let private tryRawObject (root: JsonElement) (name: string) : string option =
+    tryProp root name
+    |> Option.bind (fun v ->
+        if v.ValueKind = JsonValueKind.Object then Some (v.GetRawText()) else None)
+
 // The notebook lane's response encoder. Hand-rolled like the error response
 // above: one line, no pretty printing, `Ide.jsonEscape` on every string that
 // came from user source or a diagnostic.
@@ -195,6 +222,68 @@ let evalResponse (id: int) (r: Blade.ReplSession.EvalResult) : string =
         sb.Append ']' |> ignore
     sb.Append '}' |> ignore
     sb.ToString()
+
+// The GR render lane's response encoder (see the header). Same hand-rolled
+// shape as the eval encoder above, and public for the same reason.
+
+/// Default render size when the client names none. The panel reports its own
+/// pixel size in the request; these are for callers that don't care.
+[<Literal>]
+let DefaultWidth = 800
+[<Literal>]
+let DefaultHeight = 600
+
+/// Sizes outside this are refused-by-clamping rather than passed to GR: the
+/// cairo device is hardwired to 600 dpi and a nonsense extent is a slow way to
+/// find that out.
+[<Literal>]
+let MinDim = 64
+[<Literal>]
+let MaxDim = 4096
+
+let clampDim (n: int) : int = max MinDim (min MaxDim n)
+
+/// An optional pixel dimension: absent takes the default, present is clamped.
+/// PRESENT-BUT-NOT-AN-INTEGER is an error rather than a silent fallback --
+/// a client sending `"width":"800"` has a bug, and rendering at 800 anyway
+/// would hide it.
+let private tryDim (root: JsonElement) (name: string) (dflt: int) : Result<int, string> =
+    match tryProp root name with
+    | None -> Ok dflt
+    | Some v ->
+        if v.ValueKind <> JsonValueKind.Number then Error (sprintf "\"%s\" must be an integer" name)
+        else
+            match v.TryGetInt32() with
+            | true, n -> Ok (clampDim n)
+            | _ -> Error (sprintf "\"%s\" must be an integer" name)
+
+/// The three formats the worker can print, and the mime each frame carries.
+/// All three are binary as far as the frame format is concerned -- `svg+xml`
+/// is neither `text/*` nor `+json` -- so all three travel base64, which is
+/// what `Frame.headFor` derives for us rather than us restating it.
+let mimeForFormat (format: string) : string =
+    match format with
+    | "svg" -> "image/svg+xml"
+    | "pdf" -> "application/pdf"
+    | _ -> "image/png"
+
+/// One `renderPlot` response line. Public (not private like its siblings) so
+/// tests/Test_GrRender.fs can pin the WIRE BYTES rather than re-derive them --
+/// the same reason `evalResponse` is public, and the same hazard: `data` is
+/// spliced in as one already-base64 string and the frame's leading half comes
+/// from `Blade.Display.Frame.headFor`, so a paraphrase here would be free to
+/// disagree with the format module about `v` or `encoding`.
+///
+/// `plotId` is echoed from the request and is what makes the panel MERGE this
+/// render into an existing plot instead of appending a new one; when the client
+/// sends none, `meta` carries only the backend.
+let renderPlotResponse (id: int) (format: string) (plotId: string option) (data: string) : string =
+    let head = Blade.Display.Frame.headFor (mimeForFormat format)
+    let idEntry =
+        match plotId with
+        | Some p -> sprintf "\"id\":\"%s\"," (Blade.Display.Frame.escape p)
+        | None -> ""
+    sprintf "{\"id\":%d,\"frame\":%s\"%s\",\"meta\":{%s\"backend\":\"gr\"}}}" id head data idEntry
 
 // The loop
 
@@ -369,6 +458,41 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                  | Some i -> respond (Blade.Ide.renderSurfaceWith (Some i) version)
                  | None -> errorResponse None "\"surface\" requires an integer \"id\"")
                 true
+            | Some "renderPlot" ->
+                // Reads no program and touches no session, so -- like `surface`
+                // -- it needs none of `check`'s per-request hygiene and no
+                // chdir. The spec is handed to the GR worker VERBATIM
+                // (Blade.Display.GrRender owns the worker's whole lifecycle,
+                // including the env that keeps GR from crashing silently) and
+                // the bytes that come back are wrapped in a display frame.
+                //
+                // A failure here is an ordinary error response: no helper, no
+                // GR, a worker that refused the spec, a render that timed out.
+                // The panel keeps showing its plotly render either way.
+                (match id with
+                 | None -> errorResponse None "\"renderPlot\" requires an integer \"id\""
+                 | Some i ->
+                     match tryRawObject root "spec" with
+                     | None -> errorResponse (Some i) "\"renderPlot\" requires a \"spec\" object"
+                     | Some spec ->
+                         let fmt =
+                             match tryProp root "format" with
+                             | None -> Ok "png"
+                             | Some v ->
+                                 if v.ValueKind <> JsonValueKind.String then
+                                     Error "\"format\" must be a string"
+                                 else
+                                     match v.GetString() with
+                                     | ("png" | "svg" | "pdf") as f -> Ok f
+                                     | other ->
+                                         Error (sprintf "unknown format '%s' (expected \"png\", \"svg\" or \"pdf\")" other)
+                         match fmt, tryDim root "width" DefaultWidth, tryDim root "height" DefaultHeight with
+                         | Error e, _, _ | _, Error e, _ | _, _, Error e -> errorResponse (Some i) e
+                         | Ok format, Ok width, Ok height ->
+                             match Blade.Display.GrRender.render spec width height format with
+                             | Error reason -> errorResponse (Some i) reason
+                             | Ok data -> respond (renderPlotResponse i format (tryStr root "plotId") data))
+                true
             | Some other ->
                 errorResponse id (sprintf "unknown cmd '%s'" other)
                 true
@@ -408,6 +532,10 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
         // the only chance to remove it.
         for kv in sessions do kv.Value.Cleanup()
         sessions.Clear()
+        // The GR worker is a CHILD PROCESS of this one and would otherwise
+        // outlive it: nothing else ever kills it, and it is holding a GR
+        // installation open. No-op when no render was ever asked for.
+        (try Blade.Display.GrRender.shutdown () with _ -> ())
         match entryDir with
         | Some d -> (try Directory.SetCurrentDirectory d with _ -> ())
         | None -> ()
