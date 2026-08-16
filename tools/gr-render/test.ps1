@@ -42,6 +42,19 @@ function Check {
     }
 }
 
+# ---- platform ----------------------------------------------------------
+#
+# This script is Windows-tested (build.ps1's doc comment has the full
+# rationale). It also runs -- unverified -- on linux/macOS via pwsh, which is
+# what .github/workflows/gr-render.yml invokes it through; the platform
+# checks below exist so a non-Windows run degrades (adjusted paths, skipped
+# hygiene checks that only make sense on Windows) rather than failing on an
+# assumption that was never true off Windows in the first place.
+
+$isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+$exeExt = if ($isWindows) { '.exe' } else { '' }
+$grRuntimeLibCandidates = if ($isWindows) { @('bin/libGR.dll') } else { @('lib/libGR.so', 'lib/libGR.dylib', 'bin/libGR.so', 'bin/libGR.dylib') }
+
 # ---- environment -----------------------------------------------------------
 
 function Resolve-GrDir {
@@ -52,22 +65,29 @@ function Resolve-GrDir {
     $candidates += 'C:\Users\cdupu\Documents\GitHub\Blade-REPL\.claude\worktrees\gr-graphics-plan-67007c\vendor\gr'
     $candidates += 'C:\Users\cdupu\Documents\GitHub\Blade-REPL\vendor\gr'
     foreach ($c in $candidates) {
-        if ($c -and (Test-Path (Join-Path $c 'bin\libGR.dll'))) { return (Resolve-Path $c).Path }
+        if (-not $c) { continue }
+        $found = $grRuntimeLibCandidates | Where-Object { Test-Path (Join-Path $c $_) } | Select-Object -First 1
+        if ($found) { return (Resolve-Path $c).Path }
     }
     throw "No usable GR install found. Pass -GrDir or set GRDIR."
 }
 
 $gr = Resolve-GrDir -Explicit $GrDir
 $env:GRDIR = $gr
-$env:PATH = (Join-Path $gr 'bin') + ';' + $env:PATH
+$env:PATH = (Join-Path $gr 'bin') + [System.IO.Path]::PathSeparator + $env:PATH
 $env:GKS_WSTYPE = '100'
 if (Test-Path Env:\GR_DISPLAY) { Remove-Item Env:\GR_DISPLAY }
 
 # ---- build -----------------------------------------------------------------
 
-$buildOut = & powershell -NoProfile -File (Join-Path $here 'build.ps1') -GrDir $gr 2>&1
+# Re-invoke build.ps1 through WHATEVER shell executable is currently running
+# this script (Windows PowerShell 5.1's powershell.exe, or pwsh on
+# linux/macOS/newer Windows) -- a hardcoded `powershell` does not exist on
+# linux/macOS, where only `pwsh` is installed.
+$shellExe = (Get-Process -Id $PID).Path
+$buildOut = & $shellExe -NoProfile -File (Join-Path $here 'build.ps1') -GrDir $gr 2>&1
 $buildOk = $LASTEXITCODE -eq 0
-$exe = Join-Path $here 'gr-render.exe'
+$exe = Join-Path $here "gr-render$exeExt"
 Check 'build' ($buildOk -and (Test-Path $exe)) ($buildOut -join ' | ')
 if (-not (Test-Path $exe)) {
     Write-Host "cannot continue without $exe"

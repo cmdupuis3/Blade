@@ -49,6 +49,7 @@ module Blade.Display.GrRender
 open System
 open System.Diagnostics
 open System.IO
+open System.Runtime.InteropServices
 open System.Text
 open System.Text.Json
 open System.Threading.Tasks
@@ -59,6 +60,44 @@ open System.Threading.Tasks
 
 /// The helper's file name. A native exe both places it can be found.
 let private helperLeaf = if OperatingSystem.IsWindows() then "gr-render.exe" else "gr-render"
+
+/// Platform-arch stamp for the PREBUILT artifact naming convention, e.g.
+/// `win32-x64`, `linux-x64`, `darwin-arm64`. Deliberately spelled the way
+/// Node's `process.platform`/`process.arch` spell them (`win32`, not
+/// `windows`; `darwin`, not `macos`) because tools/gr-render/package.ps1,
+/// deps.json's `gr` asset keys, and the Blade-REPL extension's fetch-vendor
+/// script (a sibling npm/Node project) all key off the same pair -- one
+/// vocabulary for "which platform" across the whole toolchain, not a second
+/// one invented on the .NET side.
+let private platformTag () : string =
+    let os =
+        if OperatingSystem.IsWindows() then "win32"
+        elif OperatingSystem.IsMacOS() then "darwin"
+        elif OperatingSystem.IsLinux() then "linux"
+        else "unknown"
+    let arch =
+        match RuntimeInformation.OSArchitecture with
+        | Architecture.X64 -> "x64"
+        | Architecture.Arm64 -> "arm64"
+        | other -> (string other).ToLowerInvariant()
+    sprintf "%s-%s" os arch
+
+/// The platform-stamped artifact name gr-render/package.ps1 emits, e.g.
+/// `gr-render-win32-x64.exe`. Checked BEFORE the plain `helperLeaf` at every
+/// search location below: a release/CI build drops one of these per platform
+/// next to (or walking up from) Blade.exe, and it should win over a plain
+/// `gr-render.exe` that might be a leftover from a different platform's copy
+/// or an older manual build.
+let stampedHelperLeaf =
+    let ext = if OperatingSystem.IsWindows() then ".exe" else ""
+    sprintf "gr-render-%s%s" (platformTag ()) ext
+
+/// Names tried at each search location, in preference order: the
+/// platform-stamped prebuilt first, the plain name second. `distinct` just
+/// guards the degenerate case where `platformTag` returns "unknown-unknown"
+/// and somehow collides with the plain name; in practice the two are always
+/// different strings.
+let private candidateLeaves = [ stampedHelperLeaf; helperLeaf ] |> List.distinct
 
 /// How many directory levels above the running binary are searched for
 /// `tools/gr-render/`. A dev checkout runs Blade.exe out of
@@ -79,30 +118,49 @@ let mutable pingTimeoutMs = 10000
 
 /// Where the helper is, or why it isn't. The order is: an explicit
 /// BLADE_GR_RENDER (a wrong explicit setting is an ERROR, never a silent
-/// fallthrough), then beside the running Blade.exe (a deployed toolchain),
-/// then `tools/gr-render/` above it (a dev checkout, where Blade.exe runs from
-/// a bin directory under the repo root).
-let resolveHelper () : Result<string, string> =
+/// fallthrough; unchanged by the platform-stamped naming below -- an explicit
+/// path is used exactly as given, whatever it's named), then beside the
+/// running Blade.exe (a deployed toolchain), then `tools/gr-render/` above it
+/// (a dev checkout, where Blade.exe runs from a bin directory under the repo
+/// root). AT EACH of those last two locations, a platform-stamped prebuilt
+/// (`gr-render-<platform>-<arch>[.exe]`) is preferred over the plain
+/// `gr-render[.exe]` if both are present -- see `candidateLeaves`. Factored
+/// out of `resolveHelper` (which fixes `baseDir` to `AppContext.BaseDirectory`)
+/// so tests can drive the walk-up logic against a scratch directory tree
+/// without needing to relocate the running process.
+let resolveHelperFrom (baseDir: string) : Result<string, string> =
     let explicitPath = Environment.GetEnvironmentVariable "BLADE_GR_RENDER"
     if not (String.IsNullOrWhiteSpace explicitPath) then
         let p = explicitPath.Trim()
         if File.Exists p then Ok (Path.GetFullPath p)
         else Error (sprintf "gr-render helper not found: BLADE_GR_RENDER points at '%s', which does not exist" p)
     else
-        let baseDir = AppContext.BaseDirectory
-        let beside = Path.Combine(baseDir, helperLeaf)
-        if File.Exists beside then Ok beside
-        else
+        let besideMatch =
+            candidateLeaves
+            |> List.map (fun leaf -> Path.Combine(baseDir, leaf))
+            |> List.tryFind File.Exists
+        match besideMatch with
+        | Some p -> Ok p
+        | None ->
             let rec walk (dir: DirectoryInfo) (depth: int) =
                 if isNull dir || depth > MaxWalkUp then None
                 else
-                    let cand = Path.Combine(dir.FullName, "tools", "gr-render", helperLeaf)
-                    if File.Exists cand then Some cand else walk dir.Parent (depth + 1)
+                    let hereMatch =
+                        candidateLeaves
+                        |> List.tryPick (fun leaf ->
+                            let cand = Path.Combine(dir.FullName, "tools", "gr-render", leaf)
+                            if File.Exists cand then Some cand else None)
+                    match hereMatch with
+                    | Some p -> Some p
+                    | None -> walk dir.Parent (depth + 1)
             match walk (DirectoryInfo baseDir) 0 with
             | Some p -> Ok p
             | None ->
+                let names = String.concat " or " candidateLeaves
                 Error (sprintf "gr-render helper not found (looked for %s beside %s and in tools/gr-render up to %d levels above it; set BLADE_GR_RENDER to override)"
-                               helperLeaf (baseDir.TrimEnd(Path.DirectorySeparatorChar)) MaxWalkUp)
+                               names (baseDir.TrimEnd(Path.DirectorySeparatorChar)) MaxWalkUp)
+
+let resolveHelper () : Result<string, string> = resolveHelperFrom AppContext.BaseDirectory
 
 /// A validated GR installation: the root and its `bin` (which is what has to
 /// be on the child's PATH, and what holds libGR.dll).
