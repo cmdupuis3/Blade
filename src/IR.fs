@@ -5403,12 +5403,33 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             | IRApp (callee, args, rty)
                 when args |> List.exists (fun a ->
                         match a with IRVar (id, _) -> Map.containsKey id aliasInfo | _ -> false) ->
+                // How a pack view spreads depends on the CALLEE's call shape
+                // (mirroring computePolyArity): a variadic callee (single Poly
+                // param, no free params) takes the elements flat; a
+                // tuple-as-pack callee (multi-Poly, or Poly plus free params)
+                // takes ONE TUPLE per Poly slot, which computePolyArity
+                // re-reads as a concrete per-slot arity. Spreading flat into a
+                // tuple-as-pack callee makes the call unrecognizable -- no
+                // specialization is minted and the call keeps referencing the
+                // original poly function after it is removed (dangling VarId).
+                let calleeIsVariadic =
+                    match callee with
+                    | IRVar (fid, _) ->
+                        (match Map.tryFind fid funcMap with
+                         | Some f when f.IsArityPoly ->
+                             (match findPolyParamIndices f with
+                              | [_] when f.Params.Length = 1 -> true
+                              | _ -> false)
+                         | _ -> true)  // non-poly callee: keep the flat spread
+                    | _ -> true
                 let expandedArgs =
                     args |> List.collect (fun a ->
                         match a with
                         | IRVar (id, _) when Map.containsKey id aliasInfo ->
                             let (slot, off) = aliasInfo.[id]
-                            [ for j in off .. aritiesArr.[slot] - 1 -> slotParamVar slot j ]
+                            let elems =
+                                [ for j in off .. aritiesArr.[slot] - 1 -> slotParamVar slot j ]
+                            if calleeIsVariadic then elems else [IRTuple elems]
                         | _ -> [a])
                 IRApp (callee, expandedArgs, rty)
             | _ -> e

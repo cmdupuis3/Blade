@@ -1,0 +1,16 @@
+// TEST: Recursive Dual Pack Descent
+// Pairwise-combine two packs of equal arity by recursing over BOTH packs
+// simultaneously: each step peels the head of each pack and the recursive
+// call shrinks both slots (dotpack_arity_3_3 -> 2_2 -> 1_1), with the
+// `match arity` base arm selected at 1_1.
+function dotpack(a: Poly<T^0>, b: Poly<T^0>) -> T^0 = {
+    match arity(a) with
+    | 1 -> a[0] * b[0]
+    | _ -> {
+        let ha :: ta = a
+        let hb :: tb = b
+        ha * hb + dotpack(ta, tb)
+      }
+}
+let result = dotpack((1.0, 2.0, 3.0), (4.0, 5.0, 6.0))
+// EXPECT: result = 32.0
