@@ -13900,6 +13900,11 @@ let genComposeApply
             match stageLiteral with
             | Some n -> sprintf "%d" n
             | None -> srcName + ".extents[0]"
+        // A stage is EMITTABLE when it is either a NAMED C++ lambda (the
+        // direct-call arm below) or a callable `genApplyCombinator` can resolve
+        // (the per-stage fallback arm). Anything else has no kernel to call.
+        let stageEmittable (kn: string option) (k: IRExpr) : bool =
+            kn.IsSome || (resolveCallable k).IsSome
         match kernelName1, kernelName2 with
         | Some k1, Some k2 ->
             // Both kernels are named C++ lambdas - direct call loops
@@ -13932,6 +13937,33 @@ let genComposeApply
             if singleArray then
                 registerPoolAlloc AllocDense elemType arrRank "nullptr" (name + "_extents") name None
             (elemTypeErrCode @ s1Code @ [""] @ s2Code, ctx)
+        | _ when not (stageEmittable kernelName1 kernel1 && stageEmittable kernelName2 kernel2) ->
+            // STAGED EMISSION IS TWO-STAGE (v1), and `IRComposeObj` NESTS. A
+            // three-stage `o1 >>@ o2 >>@ o3` therefore arrives with a whole
+            // COMPOSITION sitting in a stage slot: `kernel1` is the inner
+            // `IRComposeObj`, which is neither a named C++ lambda nor a
+            // resolvable callable.
+            //
+            // The shape only gets this far when SURFACE FUSION DECLINED --
+            // fusion normally collapses the chain into one kernel before the
+            // emitter sees it (loops/176), and it declines on, e.g., a stage
+            // whose kernel is a BLOCK-BODIED named function, since a block is
+            // not an expression to inline (loops/179).
+            //
+            // Left alone, the arm below handed `genApplyCombinator` a kernel it
+            // could not resolve and the nest emitted `r__s1[__i0] = ((void)0);`
+            // -- delivered as a raw g++ "void value not ignored as it ought to
+            // be", with no BL code, no Blade line, and nothing naming the actual
+            // limitation. Refuse here instead, on the BL7004 channel, so the
+            // message says which ceiling was hit and what to write instead.
+            let errCode =
+                codegenError ctx ind
+                    "a pipeline stage with a block-bodied kernel cannot fuse, and staged emission supports \
+two stages (v1) -- this `>>@` chain has more than two, so one stage reaches the emitter as a composition \
+rather than a kernel. Split the chain and force the halves \
+(`let s = (o1 >>@ o2) <@> A |> compute` then `object_for(k3) <@> s |> compute`), or give every stage an \
+expression-bodied kernel so the whole pipeline fuses into one loop"
+            (errCode, ctx)
         | _ ->
             // Fallback: inline lambdas - use ApplyInfo per stage.
             // We materialize via direct `genApplyCombinator` calls

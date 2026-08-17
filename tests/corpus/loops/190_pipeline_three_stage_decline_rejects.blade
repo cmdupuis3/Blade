@@ -1,0 +1,33 @@
+// TEST: Pipeline Three Stage Decline (rejects)
+// REJECT-AT: codegen
+// ERROR-CONTAINS: staged emission supports two stages
+// WARN-CODEGEN: staged emission supports two stages
+// (No `// ERROR: BL7004` pin: the harness emits and compiles directly rather
+// than through the driver, and BL7004 is minted by the driver's
+// takeCodegenRefusalDiagnostics drain -- so on this path the `#error` TEXT is
+// the only checkable pin. Same reason fallback/009 and 178 name the code in
+// prose only.)
+// ============================================================================
+// The INTERSECTION of 176 and 179, which neither covers on its own.
+//
+// 176 is a three-stage `>>@` chain that FUSES: every stage kernel is an
+// expression, so the chain collapses into one loop and staged emission is
+// never asked for. 179 is a two-stage chain that DECLINES (a block-bodied
+// named function has no expression to inline) and falls back to the two-stage
+// staged emitter, which handles it.
+//
+// Put both properties in one program -- three stages, one of them block-bodied
+// -- and the chain reaches `genComposeApply` with a whole COMPOSITION sitting
+// in a stage slot. That slot holds a kernel; a composition is neither a named
+// C++ lambda nor a resolvable callable, so the per-stage fallback emitted
+// `r__s1[__i0] = ((void)0);` and g++ delivered "void value not ignored as it
+// ought to be" -- no BL code, no Blade line, nothing naming the limitation.
+//
+// Pinned here as the refusal it should always have been: a v1 ceiling with a
+// sentence saying what to write instead.
+// ============================================================================
+let A = [1.0, 2.0, 3.0]
+function blocky(x: Float) -> Float = { x * 2.0 }
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x - 1.0
+let r = (object_for(f) >>@ object_for(blocky) >>@ object_for(g)) <@> A |> compute
